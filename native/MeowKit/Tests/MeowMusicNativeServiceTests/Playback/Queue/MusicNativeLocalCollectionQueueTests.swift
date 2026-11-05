@@ -217,7 +217,7 @@ final class MusicNativeLocalCollectionQueueTests: XCTestCase {
         let (store, service, collection, tracks) = try await setup(accounts: NativeMusicAccountFixture())
         let original = try await service.changeQueue(.collection(id: collection.id, revision: collection.revision, index: 0),
                                                      expectedRevision: 0)
-        let id = try XCTUnwrap(original.currentId), options = try await service.playbackOptions(for: tracks[0].ref)
+        let id = try XCTUnwrap(original.currentId), options = (try await service.sourceAvailability(for: tracks[0].ref)).options
         let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: id,
                                                  selection: options[0].selection(quality: "128k"))
         let fact = MusicPlaybackFact(attemptId: candidate.attemptId, occurrenceId: id,

@@ -17,9 +17,9 @@ extension NativeMusicService: MusicSimilarModeServing {
             return .init(id: active.id, active: true, status: active.status,
                 seed: MusicNativeSimilarData.display(active.seed), seedEntryID: active.seedEntryID,
                 continueEnabled: active.continueEnabled, candidates: [],
-                batches: active.batches.map { MusicNativeSimilarData.batchDTO($0, fallback: active.provider) },
+                batches: try active.batches.map(MusicNativeSimilarData.batchDTO),
                 sourceIDs: active.sourceIDs, fromHome: active.fromHome, provider: active.provider,
-                error: active.error, canRetry: retry, legacy: active.legacy)
+                error: active.error, canRetry: retry)
         }
         guard let item = similarMode.preview else { return nil }
         if let lease = item.lease, !lease.authorization.isActive { try cancelSimilarModeState(); return nil }
@@ -132,7 +132,6 @@ extension NativeMusicService: MusicSimilarModeServing {
         try check()
         guard let session = similarMode.active, session.id == snapshotID else { throw MusicServiceError.targetChanged }
         try session.lease.authorization.check()
-        if enabled && session.legacy { throw MusicServiceError.unsupported }
         if session.continueEnabled == enabled { return }
         var saved = session.saved; saved["continue"] = .bool(enabled)
         if !enabled, let tail = session.pendingTail {

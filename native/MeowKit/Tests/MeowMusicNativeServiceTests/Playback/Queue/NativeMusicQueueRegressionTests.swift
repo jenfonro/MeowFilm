@@ -60,6 +60,24 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
         }
     }
 
+    func testRemovingCurrentConsumesItsPrioritySuccessorBeforeColdRead() async throws {
+        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let page = try await service.search(platform: "tx", query: "Queue priority", page: 1, limit: 30)
+        let ref = try XCTUnwrap(page.items.first).ref
+        var state = try await service.changeQueue(.replace([ref, ref], index: 0), expectedRevision: 0)
+        state = try await service.changeQueue(.append([ref], next: true), expectedRevision: state.revision)
+        let before = try await service.queue()
+        XCTAssertEqual(before.entries.map(\.id), ["entry-1", "entry-3", "entry-2"])
+        state = try await service.changeQueue(.remove("entry-1"), expectedRevision: state.revision)
+        XCTAssertEqual(state.currentId, "entry-3"); XCTAssertEqual(state.nextPreviewID, "entry-2")
+        await service.close()
+        let reopened = try await NativeMusicFixture.service(store)
+        let restored = try await reopened.state(), queue = try await reopened.queue()
+        XCTAssertEqual(restored.currentId, "entry-3"); XCTAssertEqual(restored.nextPreviewID, "entry-2")
+        XCTAssertEqual(queue.entries.map(\.id), ["entry-3", "entry-2"])
+        await reopened.close()
+    }
+
     func testReplaceAppendAndColdReadKeepMoreThanFormerTwoThousandOccurrences() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
         let page = try await service.search(platform: "tx", query: "Large queue", page: 1, limit: 30)
@@ -119,7 +137,7 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let queued = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
-        let occurrence = try XCTUnwrap(queued.currentId), option = try await service.playbackOptions(for: page.items[0].ref)[0]
+        let occurrence = try XCTUnwrap(queued.currentId), option = (try await service.sourceAvailability(for: page.items[0].ref)).options[0]
         let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(),
             occurrenceId: occurrence, selection: option.selection(quality: "128k"))
         for kind in [MusicPlaybackFact.Kind.playing, .paused] {
@@ -146,7 +164,7 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, scripts: NativeMusicScriptFixture())
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
-        let id = try XCTUnwrap(state.currentId), options = try await service.playbackOptions(for: page.items[0].ref)
+        let id = try XCTUnwrap(state.currentId), options = (try await service.sourceAvailability(for: page.items[0].ref)).options
         let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: id,
                                                  selection: options[0].selection(quality: "128k"))
         let fact = MusicPlaybackFact(attemptId: candidate.attemptId, occurrenceId: id, resourceId: candidate.resourceId, kind: .playing, position: 17)
@@ -167,7 +185,7 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
         let service = try await NativeMusicFixture.service(scripts: scripts)
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
-        let id = try XCTUnwrap(state.currentId), options = try await service.playbackOptions(for: page.items[0].ref)
+        let id = try XCTUnwrap(state.currentId), options = (try await service.sourceAvailability(for: page.items[0].ref)).options
         await scripts.configure(gate: gate)
         let request = Task { try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: id,
                                                        selection: options[0].selection(quality: "128k")) }
@@ -185,7 +203,7 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
         _ = try await service.updateSettings(.init(ifRevision: 0, mode: .order))
-        let id = try XCTUnwrap(state.currentId), options = try await service.playbackOptions(for: page.items[0].ref)
+        let id = try XCTUnwrap(state.currentId), options = (try await service.sourceAvailability(for: page.items[0].ref)).options
         let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: id,
                                                  selection: options[0].selection(quality: "128k"))
         _ = try await service.record(.init(attemptId: candidate.attemptId, occurrenceId: id, resourceId: candidate.resourceId, kind: .playing, position: 11))

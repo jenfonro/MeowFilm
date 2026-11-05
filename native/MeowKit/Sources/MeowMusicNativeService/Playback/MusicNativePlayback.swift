@@ -113,15 +113,6 @@ extension NativeMusicService {
         try musicRequire(current.playback["revision"] == d.playback["revision"], .staleRevision)
         return .init(options: result, scriptState: scriptState)
     }
-    func options(_ ref: MusicReference) async throws -> [MusicPlaybackOption] {
-        let value = try await sourceAvailability(for: ref)
-        // The compatibility port cannot carry diagnostics. Never report a
-        // failed host as a successful empty list. Updated callers can present
-        // native options and the explicit script state together.
-        if value.options.isEmpty, case .unavailable(let error) = value.scriptState { throw error }
-        return value.options
-    }
-    public func playbackOptions(for ref: MusicReference) async throws -> [MusicPlaybackOption] { try await options(ref) }
     func media(_ value: MusicNativeAudio) throws -> MusicNativeAudio {
         try value.playbackAuthorization?.check()
         let url = value.url

@@ -20,10 +20,8 @@ public static class MusicPlatformClientContextTests
         yield return Case("single-local-initialization-without-account-or-network", Local);
         yield return Case("stable-identities-across-owner-reopen", Reopen);
         yield return Case("cancelled-initialization-waiter-does-not-cancel-shared-load", CancelLoad);
-        yield return Case("first-missing-client-imports-published-fields-once-without-account-write", Import);
-        yield return Case("partial-WY-client-fields-retained-missing-identity-generated-normally", PartialImport);
-        yield return Case("existing-client-does-not-read-or-reimport-corrupt-account-source", NoReimport);
-        yield return Case("invalid-account-import-fails-with-finite-storage-code", ImportFailure);
+        yield return Case("client-creation-and-reopen-do-not-read-account-cookie-fields", () => AccountIndependent(false));
+        yield return Case("client-creation-and-reopen-do-not-read-invalid-account-document", () => AccountIndependent(true));
         yield return Case("unexpected-storage-read-failure-is-finite-and-redacted", UnexpectedRead);
         foreach (string fault in new[] { "json", "duplicate", "version", "field", "array", "size", "fingerprint",
             "missing-fingerprint", "kg-seed", "qq-imei", "generation", "device-text", "session-binding" })
@@ -32,7 +30,7 @@ public static class MusicPlatformClientContextTests
             (DocumentStoreError.Unavailable, "STORAGE_UNAVAILABLE"), (DocumentStoreError.Storage, "STORAGE"),
             (DocumentStoreError.Corrupt, "CORRUPT_STORAGE"), (DocumentStoreError.Protection, "CORRUPT_STORAGE"),
             (DocumentStoreError.UnsupportedVersion, "CORRUPT_STORAGE"), (DocumentStoreError.Closed, "CLOSED") })
-        { var value = pair; yield return Case("unreadable-" + value.Item1 + "-no-import-or-write", () => Unreadable(value.Item1, value.Item2)); }
+        { var value = pair; yield return Case("unreadable-" + value.Item1 + "-no-account-read-or-write", () => Unreadable(value.Item1, value.Item2)); }
         yield return Case("independent-platform-updates-retain-unaffected-snapshot-references", Independent);
         yield return Case("real-client-CAS-conflict-preserves-competitor-no-write-replay", Conflict);
         foreach (string fault in new[] { "lost-after", "lost-before", "wrong-receipt" })
@@ -105,8 +103,8 @@ public static class MusicPlatformClientContextTests
 
     private static async Task NoConstructorIo()
     {
-        await using var f = new Fixture(importAccounts: true);
-        Check(f.Store.ClientReads == 0 && f.Store.ClientWrites == 0 && f.Imports == 0);
+        await using var f = new Fixture();
+        Check(f.Store.ClientReads == 0 && f.Store.ClientWrites == 0);
         await Error(async () => await f.Owner.AcquireAsync("kw"), "INVALID_PLATFORM");
         Check(f.Store.ClientReads == 0 && f.Store.AccountReads == 0 && f.Store.ClientWrites == 0);
     }
@@ -147,73 +145,39 @@ public static class MusicPlatformClientContextTests
         f.Store.Release.TrySetResult();
         Check(f.Owner.IsCurrent(await live) && f.Store.ClientReads == 1 && f.Store.ClientWrites == 1);
     }
-    private static JsonObject PublishedAccount(string cookie) => new()
+    private static async Task AccountIndependent(bool corrupt)
     {
-        ["version"] = 1, ["entries"] = new JsonArray(new JsonObject {
-            ["key"] = AccountDocument.Key("wy"), ["value"] = new JsonObject {
-                ["version"] = 1, ["generation"] = 7, ["cookie"] = cookie, ["scope"] = "synthetic-import-scope",
-                ["validatedAt"] = 1000, ["profile"] = new JsonObject {
-                    ["platform"] = "wy", ["userId"] = "42", ["displayName"] = "Synthetic" }
-            } })
-    };
-    private static async Task Import()
-    {
-        await using var f = new Fixture(importAccounts: true);
-        var account = PublishedAccount("MUSIC_U=SYNTHETIC_AUTH; deviceId=SYNTHETIC_IMPORTED_ID; _ntes_nuid=SYNTHETIC_NUID; WNMCID=SYNTHETIC_WNMCID");
-        byte[] clientBytes = MusicClientContextDocument.Create(new()).Encode();
-        JsonObject legacy;
-        try { legacy = JsonNode.Parse(clientBytes)!["tx"]!.DeepClone().AsObject(); }
-        finally { CryptographicOperations.ZeroMemory(clientBytes); }
-        legacy["version"] = 1; legacy["profile"] = "vivo-v1";
-        account["entries"]!.AsArray().Add(new JsonObject { ["key"] = AccountDocument.QqFeedbackDeviceKey, ["value"] = legacy });
-        account["entries"]!.AsArray().Add(new JsonObject { ["key"] = AccountDocument.KgDeviceKey, ["value"] = new JsonObject {
-            ["version"] = 1, ["generation"] = 9, ["seed"] = "0123456789abcdef0123456789abcdef", ["dfid"] = "SYNTHETIC_IMPORTED_DFID" } });
-        await f.Seed(MusicAccountOwner.DocumentNamespace, Encoding.UTF8.GetBytes(account.ToJsonString()));
-        var before = await f.Store.Inner.ReadAsync(MusicAccountOwner.DocumentNamespace);
+        await using var f = new Fixture();
+        byte[] original = corrupt ? "not-json"u8.ToArray() : Encoding.UTF8.GetBytes(new JsonObject
+        {
+            ["version"] = 1, ["entries"] = new JsonArray(new JsonObject {
+                ["key"] = AccountDocument.Key("wy"), ["value"] = new JsonObject {
+                    ["version"] = 1, ["generation"] = 7,
+                    ["cookie"] = "MUSIC_U=SYNTHETIC_AUTH; deviceId=SYNTHETIC_ACCOUNT_ID; _ntes_nuid=SYNTHETIC_NUID; WNMCID=SYNTHETIC_WNMCID",
+                    ["scope"] = "synthetic-account-scope", ["validatedAt"] = 1000,
+                    ["profile"] = new JsonObject { ["platform"] = "wy", ["userId"] = "42", ["displayName"] = "Synthetic" }
+                } })
+        }.ToJsonString());
+        await f.Seed(MusicAccountOwner.DocumentNamespace, original.ToArray());
         try
         {
-            var wy = await f.Owner.AcquireWyAsync(); var kg = await f.Owner.AcquireKgAsync(); var qq = await f.Owner.AcquireQqAsync();
-            Check(wy.DeviceId == "SYNTHETIC_IMPORTED_ID" && wy.Nuid == "SYNTHETIC_NUID" && wy.Nnid.StartsWith(wy.Nuid + ",", StringComparison.Ordinal));
-            Check(kg.Generation == 9 && kg.Dfid == "SYNTHETIC_IMPORTED_DFID" &&
-                qq.InstallationId == legacy["installationId"]!.GetValue<string>());
+            var first = await f.Owner.AcquireWyAsync();
+            Check(first.DeviceId.Length == 52 && first.Nuid.Length == 64 &&
+                first.Nnid.StartsWith(first.Nuid + ",", StringComparison.Ordinal) && first.Wnmcid.Split('.')[0].Length == 6);
+            await f.Owner.DisposeAsync();
+            await using var next = f.CreateOwner();
+            Check(SameWyValues(await next.AcquireWyAsync(), first));
+            Check(f.Store.AccountReads == 0 && f.Store.AccountWrites == 0 && f.Store.ClientWrites == 1);
             var after = await f.Store.Inner.ReadAsync(MusicAccountOwner.DocumentNamespace);
-            try { Check(before.Fingerprint == after.Fingerprint && before.Data!.SequenceEqual(after.Data!)); }
+            try { Check(after.Data!.SequenceEqual(original)); }
             finally { CryptographicOperations.ZeroMemory(after.Data!); }
-            Check(f.Imports == 1 && f.Store.AccountWrites == 0 && f.Store.ClientWrites == 1);
         }
-        finally { CryptographicOperations.ZeroMemory(before.Data!); }
-    }
-    private static async Task PartialImport()
-    {
-        await using var f = new Fixture(importAccounts: true);
-        var account = PublishedAccount("MUSIC_U=SYNTHETIC_AUTH; _ntes_nuid=SYNTHETIC_NUID; WNMCID=SYNTHETIC_WNMCID; NMTID=");
-        await f.Seed(MusicAccountOwner.DocumentNamespace, Encoding.UTF8.GetBytes(account.ToJsonString()));
-        var wy = await f.Owner.AcquireWyAsync();
-        Check(wy.DeviceId.Length == 52 && wy.Nuid == "SYNTHETIC_NUID" && wy.Wnmcid == "SYNTHETIC_WNMCID" &&
-            wy.Nnid.StartsWith(wy.Nuid + ",", StringComparison.Ordinal) && wy.Nmtid is null);
-        Check(f.Store.AccountWrites == 0);
-    }
-    private static async Task NoReimport()
-    {
-        await using var f = new Fixture(importAccounts: true);
-        var first = await f.Owner.AcquireWyAsync();
-        await f.Owner.DisposeAsync();
-        await f.Seed(MusicAccountOwner.DocumentNamespace, "not-json"u8.ToArray());
-        await using var next = f.CreateOwner(importAccounts: true);
-        Check((await next.AcquireWyAsync()).DeviceId == first.DeviceId && f.Imports == 1 && f.Store.AccountReads == 1);
-        Check(f.Store.ClientWrites == 1);
-    }
-    private static async Task ImportFailure()
-    {
-        await using var f = new Fixture(importAccounts: true);
-        await f.Seed(MusicAccountOwner.DocumentNamespace, "not-json"u8.ToArray());
-        await Error(() => f.Owner.InitializeAsync(), "CORRUPT_STORAGE");
-        Check(f.Store.ClientWrites == 0 && f.Store.AccountWrites == 0 && f.Imports == 1);
+        finally { CryptographicOperations.ZeroMemory(original); }
     }
     private static async Task Corrupt(string fault)
     {
-        await using var f = new Fixture(importAccounts: true);
-        byte[] bytes = MusicClientContextDocument.Create(new()).Encode();
+        await using var f = new Fixture();
+        byte[] bytes = MusicClientContextDocument.Create().Encode();
         var json = JsonNode.Parse(bytes)!.AsObject();
         switch (fault)
         {
@@ -235,15 +199,15 @@ public static class MusicPlatformClientContextTests
         else if (fault == "missing-fingerprint") f.Store.ReadOverride = new(null, DocumentFingerprint.FromBytes(bytes));
         else await f.Seed(MusicPlatformClientContextOwner.DocumentNamespace, bytes);
         await Error(() => f.Owner.InitializeAsync(), "CORRUPT_STORAGE");
-        Check(f.Store.ClientWrites == 0 && f.Imports == 0 && f.Store.AccountReads == 0);
+        Check(f.Store.ClientWrites == 0 && f.Store.AccountReads == 0);
         await Error(() => f.Owner.ReloadAsync(), "CORRUPT_STORAGE");
-        Check(f.Store.ClientWrites == 0 && f.Imports == 0);
+        Check(f.Store.ClientWrites == 0);
     }
     private static async Task Unreadable(DocumentStoreError error, string code)
     {
-        await using var f = new Fixture(importAccounts: true); f.Store.ReadError = error;
+        await using var f = new Fixture(); f.Store.ReadError = error;
         await Error(() => f.Owner.InitializeAsync(), code);
-        Check(f.Store.ClientWrites == 0 && f.Store.AccountReads == 0 && f.Imports == 0);
+        Check(f.Store.ClientWrites == 0 && f.Store.AccountReads == 0);
     }
     private static async Task Independent()
     {
@@ -260,9 +224,9 @@ public static class MusicPlatformClientContextTests
     }
     private static async Task UnexpectedRead()
     {
-        await using var f = new Fixture(importAccounts: true); f.Store.UnexpectedRead = true;
+        await using var f = new Fixture(); f.Store.UnexpectedRead = true;
         await Error(() => f.Owner.InitializeAsync(), "STORAGE");
-        Check(f.Store.ClientWrites == 0 && f.Store.AccountReads == 0 && f.Imports == 0);
+        Check(f.Store.ClientWrites == 0 && f.Store.AccountReads == 0);
     }
     private static async Task Conflict()
     {
@@ -274,26 +238,26 @@ public static class MusicPlatformClientContextTests
     }
     private static async Task Unknown(string fault)
     {
-        await using var f = new Fixture(importAccounts: true);
+        await using var f = new Fixture();
         if (fault == "lost-after") f.Store.DropReceiptAt = 1;
         else if (fault == "lost-before") f.Store.FailWriteAt = 1;
         else f.Store.WrongReceiptAt = 1;
         await Error(() => f.Owner.InitializeAsync(), "COMMIT_UNKNOWN");
         int reads = f.Store.ClientReads;
         await Error(async () => await f.Owner.AcquireWyAsync(), "COMMIT_UNKNOWN");
-        Check(f.Owner.NeedsReconciliation && f.Store.ClientWrites == 1 && f.Store.ClientReads == reads && f.Imports == 1);
+        Check(f.Owner.NeedsReconciliation && f.Store.ClientWrites == 1 && f.Store.ClientReads == reads);
         if (fault == "lost-before")
         {
             await Error(() => f.Owner.ReloadAsync(), "DEVICE_CONTEXT_REQUIRED");
-            Check(!f.Owner.NeedsReconciliation && f.Store.ClientWrites == 1 && f.Imports == 1);
+            Check(!f.Owner.NeedsReconciliation && f.Store.ClientWrites == 1);
             await Error(() => f.Owner.InitializeAsync(), "DEVICE_CONTEXT_REQUIRED");
-            Check(f.Store.ClientWrites == 1 && f.Imports == 1);
+            Check(f.Store.ClientWrites == 1);
         }
         else
         {
             await f.Owner.ReloadAsync();
             var value = await f.Owner.AcquireWyAsync();
-            Check(f.Owner.IsCurrent(value) && !f.Owner.NeedsReconciliation && f.Store.ClientWrites == 1 && f.Imports == 1);
+            Check(f.Owner.IsCurrent(value) && !f.Owner.NeedsReconciliation && f.Store.ClientWrites == 1);
         }
     }
     private static async Task Reload()
@@ -594,10 +558,8 @@ public static class MusicPlatformClientContextTests
     {
         internal readonly FaultStore Store = new();
         internal readonly MusicPlatformClientContextOwner Owner;
-        internal int Imports;
-        internal Fixture(bool importAccounts = false) => Owner = CreateOwner(importAccounts);
-        internal MusicPlatformClientContextOwner CreateOwner(bool importAccounts = false) =>
-            new(Store, importAccounts ? async token => { Imports++; return await AccountClientContextImport.ReadAsync(Store, token); } : null);
+        internal Fixture() => Owner = CreateOwner();
+        internal MusicPlatformClientContextOwner CreateOwner() => new(Store);
         internal async Task Seed(string ns, byte[] bytes)
         {
             var before = await Store.Inner.ReadAsync(ns);

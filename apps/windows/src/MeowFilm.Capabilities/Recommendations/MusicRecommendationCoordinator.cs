@@ -56,7 +56,11 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         this.queue = queue ?? throw new ArgumentNullException(nameof(queue));
         this.selectAsync = selectAsync ?? throw new ArgumentNullException(nameof(selectAsync));
         clock = timeProvider ?? TimeProvider.System;
-        this.readAsync = readAsync ?? ((request, ct) => request.ReadAsync(catalog, ct));
+        this.readAsync = readAsync ?? ((request, ct) =>
+        {
+            ct.ThrowIfCancellationRequested();
+            return request.ReadAsync(catalog);
+        });
         queue.Changing += QueueChanging;
         queue.Changed += QueueChanged;
     }

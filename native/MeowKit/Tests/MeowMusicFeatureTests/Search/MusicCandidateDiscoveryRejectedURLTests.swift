@@ -101,7 +101,7 @@ final class MusicCandidateDiscoveryRejectedURLTests: XCTestCase {
         XCTAssertEqual(facts.commits, 1); XCTAssertEqual(facts.cancellations.count, 1)
     }
 
-    func testRepeatedRejectedURLsAndSnapshotsRemainWithinFifteenAttemptBudget() async throws {
+    func testRepeatedRejectedURLsExhaustAllCandidatesOnceAndReleaseEveryAttempt() async throws {
         let options = (0..<32).map { MusicCandidateDiscoveryFixture.option("source-\($0)", qualities: ["flac"]) }
         let urls = Dictionary(uniqueKeysWithValues: options.map { ($0.playback.installationId, rejected) })
         let session = RejectedURLDiscoverySession(options: options, urls: urls)
@@ -112,13 +112,16 @@ final class MusicCandidateDiscoveryRejectedURLTests: XCTestCase {
             XCTFail("all candidates returned a rejected URL")
         } catch {
             let failure = try XCTUnwrap(error as? MusicCandidateDiscoveryFailure)
-            XCTAssertEqual(failure.attempts, 15)
-            XCTAssertEqual(failure.issues.count, 15)
+            XCTAssertEqual(failure.attempts, options.count)
+            XCTAssertEqual(failure.issues.count, options.count)
             XCTAssertTrue(failure.issues.allSatisfy { $0.stage == .resolution && $0.failure == .invalidMediaCandidate })
         }
         let facts = await session.facts()
-        XCTAssertEqual(facts.targets.count, 15); XCTAssertEqual(facts.cancellations.count, 15)
-        XCTAssertEqual(Set(facts.targets.map(\.selection.installationId)).count, 15)
+        XCTAssertEqual(facts.targets.count, options.count)
+        XCTAssertEqual(facts.cancellations.count, options.count)
+        XCTAssertEqual(Set(facts.targets.map(\.selection.installationId)),
+                       Set(options.map(\.playback.installationId)))
+        XCTAssertEqual(Set(facts.cancellations).count, options.count)
         XCTAssertNil(facts.retained)
     }
 

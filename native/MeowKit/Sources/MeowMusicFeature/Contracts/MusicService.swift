@@ -478,7 +478,7 @@ public struct MusicImportPreview: Sendable {
 
 /// A single injected business port. No runtime connection, storage authority,
 /// player, credential lookup or periodic polling is created by this protocol.
-public protocol MusicServing: Sendable {
+public protocol MusicServing: MusicSourceAvailabilityProviding, MusicMetadataPreferencesServing {
     func state() async throws -> MusicPlaybackState
     func platforms() async throws -> [MusicPlatform]
     func search(platform: String, query: String, page: Int, limit: Int) async throws -> MusicSearchPage
@@ -491,7 +491,6 @@ public protocol MusicServing: Sendable {
     func changeQueue(_ change: MusicQueueChange, expectedRevision: Int) async throws -> MusicPlaybackState
     func advance(_ direction: MusicDirection, reason: MusicAdvanceReason, expectedRevision: Int) async throws -> MusicAdvanceResult
     func updateSettings(_ change: MusicSettingsChange) async throws -> MusicPlaybackState
-    func playbackOptions(for ref: MusicReference) async throws -> [MusicPlaybackOption]
     func resolve(attemptId: String, occurrenceId: String, selection: MusicPlaybackSelection) async throws -> MusicPlaybackCandidate
     func cancel(attemptId: String?) async throws
     func record(_ fact: MusicPlaybackFact) async throws -> Bool

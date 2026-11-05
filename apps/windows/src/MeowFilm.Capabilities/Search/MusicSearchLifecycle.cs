@@ -70,7 +70,12 @@ public sealed partial class MusicSearchCoordinator
     {
         Query[] retiring; Task? start;
         lock (gate) { retiring = queries.Values.ToArray(); start = replacement?.Work; }
-        foreach (var query in retiring) Cancel(query.Lifetime);
+        foreach (var query in retiring)
+        {
+            Cancel(query.Lifetime);
+            foreach (var state in query.States)
+                if (state.Cancellation is { } physical) Cancel(physical);
+        }
         foreach (var query in retiring) await DrainAsync(query).ConfigureAwait(false);
         if (start is not null) await start.ConfigureAwait(false);
     }

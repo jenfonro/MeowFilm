@@ -140,10 +140,9 @@ public sealed partial class MusicCapability
         async Task Retire()
         {
             await Task.Yield();
-            // Also serialize retirement against the next read. Otherwise a
-            // finishing Unloaded callback could cancel a newly opened page.
+            // Retire only the page subscription. The service owns its in-flight
+            // snapshot and the next page may join it without another request.
             await previous;
-            await application.CancelDiscoveryAndDrainAsync();
         }
     }
     public async Task CancelDiscoveryAsync()

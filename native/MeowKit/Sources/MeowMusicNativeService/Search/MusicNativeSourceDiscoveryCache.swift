@@ -93,8 +93,8 @@ private struct SourceDiscoveryRecord: Codable {
     var duration: Double
     var updatedAt: Double
     var platforms: [String: SourceDiscoveryPlatform]
-    /// Sorted, unique. Absent in documents written before exclusions existed.
-    var excluded: [String]?
+    /// Sorted, unique; current writers include the empty array.
+    var excluded: [String]
 
     func matches(fingerprint: String, duration: Double) -> Bool {
         self.fingerprint == fingerprint &&
@@ -139,7 +139,7 @@ private struct SourceDiscoveryEnvelope: Codable {
         let key = MusicRecordingIdentity.hash(fingerprint)
         if let record = records[key], record.fingerprint == fingerprint,
            MusicSourceDiscoveryLimits.durationCompatible(record.duration, duration) { return record }
-        return .init(fingerprint: fingerprint, duration: duration, updatedAt: at, platforms: [:])
+        return .init(fingerprint: fingerprint, duration: duration, updatedAt: at, platforms: [:], excluded: [])
     }
 
     mutating func record(fingerprint: String, duration: Double, platform: String, checkedAt: Double,
@@ -162,7 +162,7 @@ private struct SourceDiscoveryEnvelope: Codable {
         guard MusicSourceDiscoveryLimits.valid(fingerprint: fingerprint, duration: duration),
               MusicSourceDiscoveryLimits.validKey(sourceKey), at.isFinite, at > 0 else { return false }
         var record = current(fingerprint: fingerprint, duration: duration, at: at)
-        var keys = Set(record.excluded ?? [])
+        var keys = Set(record.excluded)
         guard keys.insert(sourceKey).inserted else { return false }
         if record.duration <= 0 { record.duration = duration }
         record.excluded = keys.sorted()
@@ -178,15 +178,15 @@ private struct SourceDiscoveryEnvelope: Codable {
         for (key, disk) in stored.records {
             guard MusicSourceDiscoveryLimits.valid(fingerprint: disk.fingerprint, duration: disk.duration) else { continue }
             var clean = disk
-            clean.excluded = disk.excluded.map(MusicSourceDiscoveryLimits.keys)
+            clean.excluded = MusicSourceDiscoveryLimits.keys(disk.excluded)
             guard var memory = records[key] else { records[key] = clean; continue }
             guard memory.fingerprint == clean.fingerprint,
                   MusicSourceDiscoveryLimits.durationCompatible(memory.duration, clean.duration) else { continue }
             for (platform, value) in clean.platforms where value.checkedAt > (memory.platforms[platform]?.checkedAt ?? 0) {
                 memory.platforms[platform] = value
             }
-            let keys = Set(memory.excluded ?? []).union(clean.excluded ?? [])
-            memory.excluded = keys.isEmpty ? nil : keys.sorted()
+            let keys = Set(memory.excluded).union(clean.excluded)
+            memory.excluded = keys.sorted()
             if memory.duration <= 0 { memory.duration = clean.duration }
             memory.updatedAt = max(memory.updatedAt, clean.updatedAt)
             records[key] = memory
@@ -563,9 +563,7 @@ extension NativeMusicService {
         var recordings = Set<MusicSourceDiscoveryRecording>(), next: [String: MusicSourceDiscoveryRecording] = [:]
         for (id, song) in library["songs"].fields where members.contains(Data(id.utf8)) {
             // Exactly the inputs MusicModel.descriptor reads.
-            let data = MusicModel.sourceData(song)
-            let key = MJ.array([song["title"], song["name"], data["name"], song["artist"], song["singer"],
-                                data["singer"], song["duration"], data["duration"]]).json
+            let key = MJ.array([song["title"], song["artist"], song["duration"]]).json
             let recording: MusicSourceDiscoveryRecording
             if let known = memo[key] ?? next[key] { recording = known }
             else {

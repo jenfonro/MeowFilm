@@ -165,7 +165,15 @@ public sealed partial class MusicNativeApplication
         // The coordinator owns its cached drain and observer-safe notification
         // barrier. The facade adds ONLY its own not-yet-registered startup reads.
         // WhenAll must settle every side even when one preparation fails.
-        return Task.WhenAll(cancel, prelude, recommendations.PrepareCloseAsync());
+        return Task.WhenAll(cancel, DrainStartupAsync(), recommendations.PrepareCloseAsync());
+
+        async Task DrainStartupAsync()
+        {
+            await prelude.ConfigureAwait(false);
+            // A retired startup subscriber may already have returned while its
+            // shared account observation still owns physical storage work.
+            await accounts.DrainInitialObservationAsync().ConfigureAwait(false);
+        }
     }
 
     private static async Task CancelRecommendationLifetimeAsync(CancellationTokenSource cancellation)
@@ -289,15 +297,11 @@ public sealed partial class MusicNativeApplication
             if (closed || stopping || recommendationPreparing) throw new MusicPlatformException("CLOSED", request.Platform, request.Method);
             if (accountReceiptUnknown) throw new MusicPlatformException("COMMIT_UNKNOWN", request.Platform, request.Method);
         }
-        // Each real batch captures only the lease actually acquired by this catalog
-        // call. The ordinary CatalogSessions consumers keep their prior semantics.
+        // A session cancellation fences queue/media commits, not admitted reads.
+        // Retain the service result so narrow preparation includes physical settle.
+        token.ThrowIfCancellationRequested();
         using var frame = sessions.Begin(awaitPhysical: true);
-        try { return await request.ReadAsync(catalog, token).ConfigureAwait(false); }
-        catch (MusicPlatformException error) when (error.Code is "AUTH_REQUIRED" or "AUTH_EXPIRED")
-        {
-            if (frame.Session is { } failed) accounts.Revoke(failed);
-            throw;
-        }
+        return await request.ReadAsync(catalog).ConfigureAwait(false);
     }
 
     private void RecommendationAccountChanged(string platform) => recommendations.Invalidate(platform);

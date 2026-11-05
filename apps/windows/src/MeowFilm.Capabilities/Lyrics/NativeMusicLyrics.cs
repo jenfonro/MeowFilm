@@ -14,15 +14,18 @@ public sealed partial class NativeMusicLyrics : INativeMusicLyrics
     private readonly IMusicPlatformSessionSource sessions;
     private readonly MusicPlatformHttp http;
     private readonly MusicPlatformClientContextOwner clients;
+    private readonly Action<MusicPlatformSession>? authenticationFailed;
     private readonly object gate = new();
     private readonly HashSet<Call> active = [];
 
     // Borrowed dependencies: no constructor IO, credential store, subscription or Dispose.
-    internal NativeMusicLyrics(IMusicPlatformSessionSource sessions, MusicPlatformHttp http, MusicPlatformClientContextOwner clients)
+    internal NativeMusicLyrics(IMusicPlatformSessionSource sessions, MusicPlatformHttp http, MusicPlatformClientContextOwner clients,
+        Action<MusicPlatformSession>? authenticationFailed = null)
     {
         ArgumentNullException.ThrowIfNull(sessions); ArgumentNullException.ThrowIfNull(http);
         this.sessions = sessions; this.http = http;
         this.clients = clients ?? throw new ArgumentNullException(nameof(clients));
+        this.authenticationFailed = authenticationFailed;
     }
 
     private sealed class Call(NativeMusicLyrics owner, NativeLyricRequest request, CancellationToken caller) : IDisposable
@@ -150,6 +153,9 @@ public sealed partial class NativeMusicLyrics : INativeMusicLyrics
         {
             var code = error is MusicPlatformException known ? known.Code : error is OperationCanceledException ? "CANCELLED" : "INVALID_RESPONSE";
             try { call.Guard(); } catch (MusicPlatformException reason) { code = reason.Code; }
+            if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED" && call.Session is { } failed)
+                try { authenticationFailed?.Invoke(failed); }
+                catch { /* Read settlement must not depend on observer behavior. */ }
             throw new MusicPlatformException(code, request.Platform, "lyrics");
         }
     }

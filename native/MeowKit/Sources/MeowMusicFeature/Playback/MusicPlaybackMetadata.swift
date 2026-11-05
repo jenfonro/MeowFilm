@@ -23,7 +23,6 @@ import Combine
     private var entry: MusicQueueEntry?
     private var enabled = true
     private var restoreOnly = false
-    private var fallbackSourceKey: String?
     private var request: MusicPlaybackLyricCache.Request?
     private var task: Task<Void, Never>?
     private var revocations: Task<Void, Never>?
@@ -71,50 +70,37 @@ import Combine
 
     /// Safe to call before audio preparation; it never resolves or plays media.
     func select(_ entry: MusicQueueEntry, lyricsEnabled: Bool, restoreOnly: Bool = false,
-                fallbackSourceKey: String? = nil, force: Bool = false) {
+                force: Bool = false) {
         guard available, !closed else { return }
         if !force, self.entry == entry, enabled == lyricsEnabled, authorization?.isActive != false,
-           service is any MusicMetadataPreferencesServing || self.fallbackSourceKey == fallbackSourceKey,
            self.restoreOnly == restoreOnly || !self.restoreOnly { return }
         if force { lyrics.removeAll() }
         invalidate()
         self.entry = entry; enabled = lyricsEnabled; self.restoreOnly = restoreOnly
-        self.fallbackSourceKey = fallbackSourceKey
         state = lyricsEnabled ? "loading" : "disabled"; publish()
         let id = session, access = generation
         task = Task { [weak self] in
             guard let self else { return }
-            await self.load(entry, session: id, access: access, fallbackSourceKey: fallbackSourceKey)
+            await self.load(entry, session: id, access: access)
             if self.session == id { self.task = nil }
         }
     }
     func flush() async { await task?.value }
 
-    private func load(_ entry: MusicQueueEntry, session id: UUID, access: UUID,
-                      fallbackSourceKey: String?) async {
+    private func load(_ entry: MusicQueueEntry, session id: UUID, access: UUID) async {
         do {
             guard let service else { throw MusicServiceError.unavailable }
-            let metadata: MusicMetadataCandidates?
-            if let source = service as? any MusicMetadataPreferencesServing {
-                metadata = try await source.metadataCandidates(occurrenceID: entry.id)
-            } else { metadata = nil }
+            let metadata = try await service.metadataCandidates(occurrenceID: entry.id)
             try check(id, access: access)
-            if let metadata {
-                guard metadata.occurrenceID == entry.id, metadata.track == entry.track else {
-                    throw MusicServiceError.targetChanged
-                }
-                candidates = metadata.candidates
-                if let old = contentFingerprints[entry.track.songId], old != metadata.contentFingerprint {
-                    lyrics.removeAll()
-                }
-                if contentFingerprints.count >= 100 { contentFingerprints.removeAll() }
-                contentFingerprints[entry.track.songId] = metadata.contentFingerprint
-            } else {
-                // Compatibility services retain their exact requested source;
-                // they do not gain an implicit metadata search policy.
-                candidates = entry.track.sources.filter { $0.sourceKey == fallbackSourceKey }
-                    .map { .init(source: $0, artwork: entry.track.artwork) }
+            guard metadata.occurrenceID == entry.id, metadata.track == entry.track else {
+                throw MusicServiceError.targetChanged
             }
+            candidates = metadata.candidates
+            if let old = contentFingerprints[entry.track.songId], old != metadata.contentFingerprint {
+                lyrics.removeAll()
+            }
+            if contentFingerprints.count >= 100 { contentFingerprints.removeAll() }
+            contentFingerprints[entry.track.songId] = metadata.contentFingerprint
             let scope = try await accounts?.nativeCacheScope()
             try check(id, access: access)
             let fence = scope.map { MusicQueueAuthorization(parent: $0.authorization) } ?? MusicQueueAuthorization()
@@ -127,9 +113,8 @@ import Combine
                     return
                 }
             }
-            // No persistent guest namespace is fabricated for a compatibility
-            // service without a local account-scope provider.
-            if let scope, let metadata {
+            // Persistent display storage requires an admitted local account scope.
+            if let scope {
                 identity = .init(scope: scope.scope, occurrenceID: entry.id, songID: entry.track.songId,
                                  contentFingerprint: metadata.contentFingerprint)
             }
@@ -160,7 +145,7 @@ import Combine
                     lines = saved.lines; state = "ready"; publish(); return
                 }
                 let key = try MusicPlaybackLyricCache.Key(track: entry.track, source: candidate.source,
-                                                          contentRevision: metadata?.contentRevision)
+                                                          contentRevision: metadata.contentRevision)
                 let next = try lyrics.request(for: key, occurrenceID: entry.id, generation: access) {
                     try await service.lyrics(occurrenceId: entry.id, sourceKey: candidate.source.sourceKey)
                 }

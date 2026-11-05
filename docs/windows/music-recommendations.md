@@ -109,8 +109,8 @@ Task PrepareRecommendationsAsync(CancellationToken ct = default);
 ## 关闭
 
 1. `MusicCapability` 同步封闭页面和播放器推荐入口。
-2. 取消当前 generation，排空读取、队列事务、通知和媒体 callback。
-3. application 排空其他音乐业务。
+2. 取消当前 generation 的提交／媒体资格，排空已准入读取、队列事务、通知和媒体 callback。窄推荐准备不取消已准入的 Catalog 读取或共享账号初始观察，必须等待它们真实结算；退出的启动订阅者不再继续派发。
+3. application 全局关闭先围住推荐 callback，再失效 Catalog／账号读取并排空其他音乐业务，不能以调用者退订当作底层排空。
 4. 最后准备唯一 `MusicLibraryOwner`。
 
 取消关闭创建新的推荐生命周期，不恢复旧 session、旧 callback 或旧播放意图。最终释放时先 dispose 协调器，再释放它借用的 catalog 和 library。

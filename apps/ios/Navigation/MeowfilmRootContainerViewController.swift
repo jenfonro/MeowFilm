@@ -7,6 +7,8 @@ final class MeowfilmRootContainerViewController: PageViewController {
     /// The window root only hosts the navigation stack; the visible header
     /// belongs to the top page inside it.
     override var usesPageHeader: Bool { false }
+    /// Pages inside the stack decide the status bar style.
+    override var childForStatusBarStyle: UIViewController? { navigation }
 
     let navigation: PageNavigationController
     private(set) var dock: MeowfilmDockView?

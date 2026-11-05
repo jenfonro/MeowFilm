@@ -88,7 +88,7 @@ lx.on(lx.EVENT_NAMES.request, async (payload, context) => {
 
 - `context.storage.get/set/delete` 绑定创建它的调用 ID、site、installation 和 generation，并核对显式 `permissions.storage` 的 read/write 权限。
 - 绑定在 guest `await` 后仍指向同一个调用；请求结束、取消或代次退休后，保存的引用不能借用后来调用的身份。
-- 全局 `meow.storage` 没有权限；startup、background 不会自动获得或继承请求存储权限，即使另一个请求正在执行。
+- 全局 `meow` 只提供 `config`，不提供存储接口；startup、background 不会自动获得或继承请求存储权限，即使另一个请求正在执行。
 - Node `AsyncLocalStorage` 不能推断 guest Promise 的特权；派生引擎的任务身份也不授予 LX ambient 存储权限。显式 `context.storage` 是 v2 公开行为变化，不提供全局存储的兼容回退。
 
 存储实例与业务作用域仍必须隔离。音乐宿主的原生存储回调与安装会话绑定见 [音乐脚本契约](music-script-runtime.md)；这里的存储 token 不是域名授权或网络隔离机制。

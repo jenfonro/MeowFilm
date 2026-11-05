@@ -101,7 +101,7 @@ LX 请求数据保留 `{source,action,info}`：
 
 ## 请求绑定的存储
 
-请求处理器第二参数 `context.storage` 的 get/set/delete 是 v2 的特权入口；它绑定调用 ID、site、installation 和 generation，不通过 `AsyncLocalStorage` 推断 guest 异步身份。全局 `meow.storage` 无权限，startup 和 background 不获得隐式权限，保存的旧 context 不能借用新调用。完整边界见 [共用核心](script-runtime.md#v2-特权存储)。
+请求处理器第二参数 `context.storage` 的 get/set/delete 是 v2 的唯一存储入口；它绑定调用 ID、site、installation 和 generation，不通过 `AsyncLocalStorage` 推断 guest 异步身份。全局 `meow` 只提供 `config`，startup 和 background 不获得隐式存储权限，保存的旧 context 不能借用新调用。完整边界见 [共用核心](script-runtime.md#v2-特权存储)。
 
 宿主对原生只发出：
 

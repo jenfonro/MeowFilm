@@ -73,15 +73,60 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertFalse(app.otherElements["app.page.channels"].exists)
         attach("03-library")
 
+        app.buttons["app.primary.film"].tap()
+        XCTAssertTrue(app.otherElements["film.home"].waitForExistence(timeout: 5))
+        let source = app.buttons["film.source"]
+        XCTAssertTrue(source.waitForExistence(timeout: 5))
+        assertInsideHeader(source)
+        assertPageOwnsHeader("film", controls: ["app.menu", "film.source"])
+        XCTAssertFalse(app.otherElements["app.page.library"].exists)
+        attach("03-film")
+
         app.buttons["app.primary.recommend"].tap()
         XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
         assertPageOwnsHeader("recommend", controls: ["app.menu", "search.open", "app.feature"])
         XCTAssertFalse(app.otherElements["app.page.library"].exists)
+        XCTAssertFalse(app.otherElements["app.page.film"].exists)
         app.collectionViews.firstMatch.swipeUp()
         attach("04-home-scrolled")
         assertInsideHeader(app.buttons["search.open"])
         app.collectionViews.firstMatch.swipeDown()
         attach("05-home-restored")
+    }
+
+    func testFilmHomeOpensDetailAndKeepsItsSnapshot() {
+        XCTAssertTrue(app.buttons["app.primary.film"].waitForExistence(timeout: 30))
+        app.buttons["app.primary.film"].tap()
+        XCTAssertTrue(app.buttons["film.source"].waitForExistence(timeout: 5))
+        let poster = app.cells.matching(NSPredicate(format: "identifier BEGINSWITH %@", "film.poster.douban.")).firstMatch
+        XCTAssertTrue(poster.waitForExistence(timeout: 30))
+        let identifier = poster.identifier
+        let title = poster.label
+        attach("40-film-home")
+        poster.tap()
+        XCTAssertTrue(app.otherElements["film.detail"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["film.detail.title"].label, title)
+        XCTAssertFalse(app.buttons["film.detail.play"].isEnabled)
+        let favorite = app.buttons["film.detail.favorite"]
+        XCTAssertTrue(favorite.isHittable)
+        let wasSelected = favorite.isSelected
+        favorite.tap()
+        XCTAssertEqual(favorite.isSelected, !wasSelected)
+        favorite.tap()
+        XCTAssertEqual(favorite.isSelected, wasSelected)
+        attach("41-film-detail")
+        let detailTitle = app.staticTexts["film.detail.title"]
+        let restingTitleY = detailTitle.frame.minY
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+            .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)),
+                   withVelocity: .slow, thenHoldForDuration: 0.3)
+        XCTAssertLessThan(detailTitle.frame.minY, restingTitleY - 100, "The mid-scroll shot must show a moved hero")
+        attach("41-film-detail-mid-scroll")
+        app.scrollViews["film.detail.scroll"].swipeUp()
+        attach("42-film-detail-scrolled")
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(app.cells[identifier].waitForExistence(timeout: 5))
+        attach("43-film-home-returned")
     }
 
     func testHeaderPageSwitchingAndChannelSearchPreserveSelection() {

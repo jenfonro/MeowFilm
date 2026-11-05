@@ -20,16 +20,6 @@ struct MusicDocument {
         queue = records.contains(MusicModel.key("queue")) ? records[MusicModel.key("queue")] : MusicModel.queue
         playback = records.contains(MusicModel.key("playback")) ? records[MusicModel.key("playback")] : MusicModel.playback
         history = records.contains(MusicModel.key("history")) ? records[MusicModel.key("history")] : MusicModel.history
-        // Match the old restore semantics: occurrence IDs are authoritative;
-        // repair a stale serial/current pointer without renumbering entries.
-        if queue["entries"].isArray && queue["serial"].isInteger {
-            let ids = queue["entries"].array.map { $0["id"].string }
-            queue["serial"] = .n(max(queue["serial"].int, ids.compactMap { Int($0.dropFirst(6)) }.max() ?? 0))
-            if !ids.contains(queue["currentId"].string) { queue["currentId"] = queue["entries"].array.first?["id"] ?? .null }
-            for key in ["priority", "history", "failed"] {
-                queue[key] = .strings(queue[key].strings.filter { ids.contains($0) && (key != "priority" || $0 != queue["currentId"].string) })
-            }
-        }
         try validate()
         if queue["runId"].string != runID { queue["history"] = .array([]); queue["failed"] = .array([]) }
         queue["runId"] = .string(runID)
@@ -42,6 +32,7 @@ struct MusicDocument {
         } catch { throw MusicServiceError.corruptDocument }
         try musicRequire(library["schema"] == .n(1) && library["scope"].string == "device" && library["revision"].isInteger, .corruptDocument)
         try MusicLibraryValidation.validate(library["library"], owner: "device")
+        if library["receipt"] != .null { try MusicLibraryValidation.validateReceipt(library["receipt"]) }
         _ = try MusicNativeSyncLedger.load(library)
         try musicRequire(queue["schema"] == .n(1) && queue["revision"].isInteger && queue["serial"].isInteger &&
                          queue["entries"].isArray, .corruptDocument)
@@ -62,6 +53,14 @@ struct MusicDocument {
         }
         try musicRequire(serial <= 9_007_199_254_740_991 && queue["serial"].int >= serial &&
             (queue["currentId"] == .null || seen.contains(queue["currentId"].string)), .corruptDocument)
+        for key in ["priority", "history", "failed"] {
+            try musicRequire(queue[key].isArray && queue[key].array.allSatisfy {
+                $0.isString && seen.contains($0.string) && (key != "priority" || $0 != queue["currentId"])
+            }, .corruptDocument)
+        }
+        if queue["similar"] != .null {
+            try MusicNativeSimilarData.validateSession(queue["similar"], serial: queue["serial"].int)
+        }
         try musicRequire(playback["schema"] == .n(1) && playback["revision"].isInteger &&
             playback["mode"].isInteger && (0...3).contains(playback["mode"].int) &&
             playback["lyricsEnabled"].isBool && playback["showTranslation"].isBool &&
@@ -72,11 +71,9 @@ struct MusicDocument {
             if value != .null { try musicRequire(value.isArray && Set(value.strings).count == value.array.count && value.strings.allSatisfy(allowed.contains), .corruptDocument) }
         }
         let official = playback["officialSources"]
-        if playback.contains("officialSources") {
-            try musicRequire(official.isArray && official.array.allSatisfy(\.isString) &&
-                Set(official.strings).count == official.array.count &&
-                official.strings.allSatisfy { MusicAccountPlatform(rawValue: $0) != nil }, .corruptDocument)
-        }
+        try musicRequire(official.isArray && official.array.allSatisfy(\.isString) &&
+            Set(official.strings).count == official.array.count &&
+            official.strings.allSatisfy { MusicAccountPlatform(rawValue: $0) != nil }, .corruptDocument)
         try musicRequire(history["schema"] == .n(1) && history["playlists"].isArray && history["playlists"].array.count <= 5 &&
                          history["days"].isArray && history["days"].array.count <= 7, .corruptDocument)
     }
@@ -117,7 +114,7 @@ struct MusicDocument {
 
 /// Product-lifetime business owner. It is passive and locked at construction.
 /// There is no Node connection or music.* RPC in this implementation.
-public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSourceAvailabilityProviding {
+public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     nonisolated let access = MusicNativeAccess()
     /// Product-scoped request policy, not an identity or persistence schema.
     /// Omission preserves the existing five-platform behavior. Disabling a

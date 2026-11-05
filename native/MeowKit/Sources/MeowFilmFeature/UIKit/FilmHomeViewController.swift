@@ -1,0 +1,235 @@
+#if os(iOS)
+import UIKit
+import Combine
+import MeowUI
+
+@MainActor
+public final class FilmHomeViewController: PageViewController, UICollectionViewDelegate {
+    public var onSelectItem: ((FilmItem) -> Void)?
+    public var sourceSwitcherView: UIView { sourceButton }
+    private let model: FilmHomeModel
+    private let images: ArtworkImages
+    private let sourceButton = UIButton(type: .system)
+    private let activity = UIActivityIndicatorView(style: .medium)
+    private let status = UILabel(), retry = UIButton(type: .system)
+    private let stateView = UIStackView()
+    private var sections: [FilmHomeSection] = []
+    private var items: [Row: FilmItem] = [:]
+    private var shownError: FilmHomeError?
+    private var renderedSourceID: String?
+    private struct Row: Hashable {
+        let section: String
+        let item: FilmItemIdentity?
+    }
+    private var dataSource: UICollectionViewDiffableDataSource<String, Row>!
+    private lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: makeLayout())
+
+    public init(model: FilmHomeModel, images: ArtworkImages, themeProvider: any PageThemeProviding) {
+        self.model = model
+        self.images = images
+        super.init(themeProvider: themeProvider)
+        pageTitle = "影视"
+    }
+
+    public override func viewDidLoad() {
+        super.viewDidLoad()
+        view.accessibilityIdentifier = "film.home"
+        configureSourceButton()
+        if hasOwnPageHeader { pageHeader.setTitleView(sourceButton) }
+        collection.backgroundColor = .clear
+        collection.accessibilityIdentifier = "film.home.sections"
+        collection.delegate = self
+        collection.alwaysBounceVertical = true
+        collection.delaysContentTouches = false
+        collection.register(FilmPosterCell.self, forCellWithReuseIdentifier: FilmPosterCell.reuseIdentifier)
+        collection.register(FilmEmptyCell.self, forCellWithReuseIdentifier: FilmEmptyCell.reuseIdentifier)
+        collection.register(FilmSectionHeader.self,
+                            forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
+                            withReuseIdentifier: FilmSectionHeader.reuseIdentifier)
+        dataSource = UICollectionViewDiffableDataSource(collectionView: collection) { [weak self] view, path, row in
+            guard let self else { return nil }
+            guard let item = self.items[row] else {
+                let cell = view.dequeueReusableCell(withReuseIdentifier: FilmEmptyCell.reuseIdentifier, for: path)
+                if let cell = cell as? FilmEmptyCell {
+                    cell.label.text = "暂无影片"
+                    cell.label.textColor = UIColor(self.theme.muted)
+                }
+                return cell
+            }
+            let cell = view.dequeueReusableCell(withReuseIdentifier: FilmPosterCell.reuseIdentifier, for: path)
+            (cell as? FilmPosterCell)?.configure(item: item, images: self.images, theme: self.theme)
+            return cell
+        }
+        dataSource.supplementaryViewProvider = { [weak self] view, kind, path in
+            guard let self, self.sections.indices.contains(path.section) else { return nil }
+            let header = view.dequeueReusableSupplementaryView(ofKind: kind,
+                withReuseIdentifier: FilmSectionHeader.reuseIdentifier, for: path)
+            (header as? FilmSectionHeader)?.configure(title: self.sections[path.section].title, theme: self.theme)
+            return header
+        }
+        collection.refreshControl = UIRefreshControl()
+        collection.refreshControl?.addAction(UIAction { [weak self] _ in self?.model.refresh() },
+                                            for: .valueChanged)
+        view.addSubview(collection)
+        collection.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            collection.topAnchor.constraint(equalTo: contentTopAnchor),
+            collection.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            collection.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
+            collection.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        stateView.axis = .vertical
+        stateView.alignment = .center
+        stateView.spacing = 12
+        status.font = .systemFont(ofSize: 15)
+        retry.setTitle("重试", for: .normal)
+        retry.addAction(UIAction { [weak self] _ in self?.model.refresh() }, for: .touchUpInside)
+        for item in [activity, status, retry] { stateView.addArrangedSubview(item) }
+        view.addSubview(stateView)
+        stateView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stateView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            stateView.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerYAnchor),
+            retry.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+        ])
+        observe(model) { [weak self] in self?.render() }
+        render()
+    }
+
+    public override func pageDidBecomeActive() {
+        model.loadIfNeeded()
+        render()
+    }
+
+    public override func pageDidBecomeInactive() { model.close() }
+    public override func pageDidBecomeHidden() { resetPressFeedback() }
+    public override func pageDidFinishAppearing() { presentError() }
+
+    public override func applyTheme() {
+        super.applyTheme()
+        guard isViewLoaded else { return }
+        sourceButton.tintColor = UIColor(theme.ink)
+        status.textColor = UIColor(theme.muted)
+        activity.color = UIColor(theme.muted)
+        retry.tintColor = UIColor(theme.accent)
+        guard dataSource != nil else { return }
+        var snapshot = dataSource.snapshot()
+        snapshot.reconfigureItems(snapshot.itemIdentifiers)
+        dataSource.apply(snapshot, animatingDifferences: false)
+        for header in collection.visibleSupplementaryViews(ofKind: UICollectionView.elementKindSectionHeader) {
+            guard let index = collection.indexPathsForVisibleSupplementaryElements(
+                ofKind: UICollectionView.elementKindSectionHeader).first(where: {
+                    collection.supplementaryView(forElementKind: UICollectionView.elementKindSectionHeader, at: $0) === header
+                }), sections.indices.contains(index.section) else { continue }
+            (header as? FilmSectionHeader)?.configure(title: sections[index.section].title, theme: theme)
+        }
+    }
+
+    private func configureSourceButton() {
+        var configuration = UIButton.Configuration.plain()
+        configuration.image = UIImage(systemName: "chevron.down",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
+        configuration.imagePlacement = .trailing
+        configuration.imagePadding = 8
+        configuration.contentInsets = .zero
+        configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
+            var attributes = $0
+            attributes.font = .systemFont(ofSize: 19, weight: .semibold)
+            return attributes
+        }
+        sourceButton.configuration = configuration
+        sourceButton.contentHorizontalAlignment = .leading
+        sourceButton.showsMenuAsPrimaryAction = true
+        sourceButton.accessibilityIdentifier = "film.source"
+    }
+
+    private func render() {
+        guard isViewLoaded, dataSource != nil else { return }
+        let selected = model.sources.first { $0.id == model.selectedSourceID }
+        sourceButton.configuration?.title = selected.map { "影视 · \($0.title)" } ?? "影视"
+        sourceButton.accessibilityLabel = selected.map { "影视数据源，\($0.title)" } ?? "影视数据源"
+        sourceButton.menu = UIMenu(title: "数据源", children: model.sources.map { source in
+            UIAction(title: source.title, state: source.id == model.selectedSourceID ? .on : .off) { [weak self] _ in
+                self?.model.selectSource(id: source.id)
+            }
+        })
+        if sections != model.sections || renderedSourceID != model.selectedSourceID {
+            let switchedSource = renderedSourceID != model.selectedSourceID
+            renderedSourceID = model.selectedSourceID
+            sections = model.sections
+            items.removeAll(keepingCapacity: true)
+            var snapshot = NSDiffableDataSourceSnapshot<String, Row>()
+            for section in sections {
+                snapshot.appendSections([section.id])
+                let rows = section.items.map { item -> Row in
+                    let row = Row(section: section.id, item: item.identity)
+                    items[row] = item
+                    return row
+                }
+                snapshot.appendItems(rows.isEmpty ? [Row(section: section.id, item: nil)] : rows, toSection: section.id)
+            }
+            snapshot.reconfigureItems(snapshot.itemIdentifiers.filter {
+                dataSource.snapshot().indexOfItem($0) != nil
+            })
+            dataSource.apply(snapshot, animatingDifferences: false)
+            collection.collectionViewLayout.invalidateLayout()
+            if switchedSource { collection.setContentOffset(.zero, animated: false) }
+        }
+        stateView.isHidden = !sections.isEmpty
+        status.text = model.isLoading ? nil : model.error == nil ? "暂无影片" : "加载失败"
+        status.isHidden = model.isLoading
+        retry.isHidden = model.isLoading || model.error == nil
+        if model.isLoading { activity.startAnimating() }
+        else {
+            activity.stopAnimating()
+            collection.refreshControl?.endRefreshing()
+        }
+        if model.error == nil { shownError = nil }
+        presentError()
+    }
+
+    private func presentError() {
+        guard let error = model.error, shownError != error else { return }
+        if showError(error.localizedDescription) { shownError = error }
+    }
+
+    private func makeLayout() -> UICollectionViewLayout {
+        UICollectionViewCompositionalLayout { [weak self] index, environment in
+            let empty = self?.sections.indices.contains(index) != true || self?.sections[index].items.isEmpty == true
+            let metrics = FilmPosterMetrics(viewportWidth: environment.container.effectiveContentSize.width)
+            let item = NSCollectionLayoutItem(layoutSize: .init(widthDimension: .fractionalWidth(1),
+                                                               heightDimension: .fractionalHeight(1)))
+            let group = NSCollectionLayoutGroup.horizontal(layoutSize: .init(
+                widthDimension: empty ? .fractionalWidth(1) : .absolute(metrics.width),
+                heightDimension: .absolute(empty ? 42 : metrics.height)), subitems: [item])
+            let section = NSCollectionLayoutSection(group: group)
+            section.orthogonalScrollingBehavior = empty ? .none : .continuous
+            section.interGroupSpacing = FilmPosterMetrics.spacing
+            section.contentInsets = .init(top: 2, leading: FilmPosterMetrics.inset, bottom: 20,
+                                          trailing: FilmPosterMetrics.inset)
+            let heading = NSCollectionLayoutBoundarySupplementaryItem(layoutSize: .init(
+                widthDimension: .fractionalWidth(1), heightDimension: .absolute(44)),
+                elementKind: UICollectionView.elementKindSectionHeader, alignment: .top)
+            section.boundarySupplementaryItems = [heading]
+            return section
+        }
+    }
+
+    public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        collectionView.deselectItem(at: indexPath, animated: false)
+        guard let row = dataSource.itemIdentifier(for: indexPath), let item = items[row] else { return }
+        onSelectItem?(item)
+    }
+
+    public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
+                               forItemAt indexPath: IndexPath) {
+        (cell as? FilmPosterCell)?.resetPressFeedback()
+    }
+
+    public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { resetPressFeedback() }
+
+    private func resetPressFeedback() {
+        for cell in collection.visibleCells.compactMap({ $0 as? FilmPosterCell }) { cell.resetPressFeedback() }
+    }
+}
+#endif

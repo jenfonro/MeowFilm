@@ -47,7 +47,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     private var appearanceNeedsUpdate = false
     private let statusView = UILabel()
     private let loadingSkeleton = MusicLoadingSkeletonView()
-    private lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: makeLayout())
+    private lazy var collection = MusicBrowseCollectionView(frame: .zero, collectionViewLayout: makeLayout())
 
     private struct BrowseActionsKey: Equatable {
         let pageID: UUID
@@ -80,6 +80,8 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         super.viewDidLoad()
         collection.backgroundColor = .clear
         collection.delegate = self
+        collection.delaysContentTouches = false
+        collection.canCancelContentTouches = true
         collection.alwaysBounceVertical = true
         collection.register(MusicBrowseCell.self, forCellWithReuseIdentifier: MusicBrowseCell.reuseIdentifier)
         collection.register(MusicBrowseHeader.self,
@@ -171,6 +173,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         loadingSkeleton.setDisplayVisible(false)
         automaticPaginationHeld = true
         tags.collapse()
+        for cell in collection.visibleCells.compactMap({ $0 as? MusicBrowseCell }) { cell.resetPressFeedback() }
         page?.setDisplayVisible(false)
         for cell in collection.visibleCells.compactMap({ $0 as? MusicBannerCarouselCell }) { cell.setActive(false) }
     }
@@ -292,10 +295,14 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
                                forItemAt indexPath: IndexPath) {
+        (cell as? MusicBrowseCell)?.resetPressFeedback()
         (cell as? MusicBannerCarouselCell)?.setActive(false)
     }
 
-    public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { automaticPaginationHeld = false }
+    public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        automaticPaginationHeld = false
+        for cell in collection.visibleCells.compactMap({ $0 as? MusicBrowseCell }) { cell.resetPressFeedback() }
+    }
 
     public func collectionView(_ collectionView: UICollectionView,
                                contextMenuConfigurationForItemAt indexPath: IndexPath,
@@ -998,6 +1005,13 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             observation?.cancel()
             for task in previewTasks.values { task.cancel() }
         }
+    }
+}
+
+@MainActor
+final class MusicBrowseCollectionView: UICollectionView {
+    override func touchesShouldCancel(in view: UIView) -> Bool {
+        view is UIButton || super.touchesShouldCancel(in: view)
     }
 }
 #endif

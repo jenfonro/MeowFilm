@@ -20,7 +20,7 @@ public static class MusicDiscoveryAccountDrainTests
         yield return Case("restore-anonymous-one-read-no-login-or-write", Anonymous);
         yield return Case("saved-restore-and-native-session-same-owner-no-verification", Saved);
         yield return Case("initial-observation-waiters-share-and-cancel-independently", InitialObservationWaiters);
-        yield return Case("initial-observation-last-cancel-signals-and-settles-physical-read", InitialObservationLastCancel);
+        yield return Case("initial-observation-last-unsubscribe-retains-shared-read", InitialObservationLastCancel);
         yield return Case("initial-observation-close-drains-before-physical-admission", InitialObservationCloseBeforeAdmission);
         yield return Case("initial-observation-close-cancels-and-drains-physical-read", InitialObservationClose);
         foreach (bool hydration in new[] { true, false })
@@ -247,8 +247,8 @@ public static class MusicDiscoveryAccountDrainTests
         await Wait(hold.Entered.Task);
         var survivor = f.Owner.EnsureInitialObservationAsync();
         cancellation.Cancel();
-        await Task.Delay(35);
-        Check(!cancelled.IsCompleted && !survivor.IsCompleted && !hold.Cancelled.Task.IsCompleted &&
+        await cancelled.WaitAsync(TimeSpan.FromSeconds(2));
+        Check(cancelled.IsCompleted && !survivor.IsCompleted && !hold.Cancelled.Task.IsCompleted &&
             f.Store.Reads == 1 && f.Store.Active == 1, "One cancelled subscriber retired shared observation");
         hold.Release.TrySetResult();
         var cancelledResult = await cancelled;
@@ -263,14 +263,14 @@ public static class MusicDiscoveryAccountDrainTests
         using var cancellation = new CancellationTokenSource();
         var pending = f.Owner.EnsureInitialObservationAsync(cancellation.Token);
         await Wait(hold.Entered.Task); cancellation.Cancel();
-        await Wait(hold.Cancelled.Task); await Task.Delay(35);
-        Check(!pending.IsCompleted && !hold.Settled.Task.IsCompleted,
-            "Cancelled last subscriber returned before physical observation settled");
+        await pending.WaitAsync(TimeSpan.FromSeconds(2));
+        Check(!hold.Cancelled.Task.IsCompleted && !hold.Settled.Task.IsCompleted,
+            "Unsubscribe aborted shared initial observation");
         hold.Release.TrySetResult();
         var result = await pending;
         Check(!result.GetProperty("ok").GetBoolean() && result.GetProperty("code").GetString() == "CANCELLED");
         Success(new(List: await f.Owner.EnsureInitialObservationAsync()), true);
-        Check(f.Store.Reads == 2 && f.Store.Maximum == 1 && f.Store.Active == 0);
+        Check(f.Store.Reads == 1 && f.Store.Maximum == 1 && f.Store.Active == 0);
     }
     private static async Task InitialObservationCloseBeforeAdmission()
     {

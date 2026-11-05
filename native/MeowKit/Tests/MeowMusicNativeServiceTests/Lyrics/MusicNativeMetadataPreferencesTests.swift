@@ -283,7 +283,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
             XCTAssertEqual($0 as? MusicServiceError, .nativeIDConflict)
         }
 
-        // normalizeSong rejects a seventeenth source row before candidate
+        // cleanSong rejects a seventeenth source row before candidate
         // enumeration.
         let overflow = rows + [try MetadataNativeFixture.row(.qq, "05")]
         XCTAssertEqual(overflow.count, 17)

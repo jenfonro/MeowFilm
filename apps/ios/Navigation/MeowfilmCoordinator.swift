@@ -2,6 +2,8 @@ import UIKit
 import Combine
 import MeowUI
 import MeowMusicFeature
+import MeowFilmFeature
+import AVKit
 
 @MainActor
 final class MeowfilmCoordinator: NSObject, MusicUIRouting {
@@ -148,6 +150,20 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         main?.selectChannel(channel)
     }
 
+    private func showFilm(_ item: FilmItem) {
+        let page = FilmDetailViewController(detail: FilmDetail(item: item), library: assembly.filmLibrary,
+            images: assembly.filmImages, themeProvider: assembly.appearance)
+        page.onSelectItem = { [weak self] in self?.showFilm($0) }
+        page.onPlay = { [weak self, weak page] url in
+            guard let self, let page, self.navigation.topViewController === page else { return }
+            self.assembly.playback.pause()
+            let player = AVPlayerViewController()
+            player.player = AVPlayer(url: url)
+            page.present(player, animated: true) { player.player?.play() }
+        }
+        navigation.pushViewController(page, animated: true)
+    }
+
     private func install(_ model: MusicViewModel) {
         guard main == nil else { return }
         let appearance = assembly.appearance
@@ -161,6 +177,14 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 guard let self else { return UIViewController() }
                 return MusicChannelsViewController(model: model, browser: model.publicBrowser,
                     appearance: appearance, router: self)
+            },
+            { [weak self] in
+                guard let self else { return UIViewController() }
+                let page = FilmHomeViewController(model: FilmHomeModel(sources: self.assembly.filmSources),
+                                                  images: self.assembly.filmImages,
+                                                  themeProvider: appearance)
+                page.onSelectItem = { [weak self] in self?.showFilm($0) }
+                return page
             },
             { [weak self] in
                 guard let self else { return UIViewController() }

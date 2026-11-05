@@ -26,6 +26,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
     private readonly Dictionary<MusicSearchKind, Query> queries = [];
     private readonly Dictionary<MusicSearchKind, Notice> notices = [];
     private readonly Dictionary<CacheKey, CacheEntry> cache = [];
+    private readonly Dictionary<string, long> identityEpochs = [];
     private readonly AsyncLocal<ObserverFrame?> observerFrame = new();
     private long cacheBytes, cacheUse;
     private Replacement? replacement;
@@ -290,7 +291,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
             {
                 while (!halted && next - committed < concurrency)
                 {
-                    if (ChunkAt(next, start, pages, per) is not { } chunk) break;
+                    if (linked.IsCancellationRequested || ChunkAt(next, start, pages, per) is not { } chunk) break;
                     chunks[next] = chunk;
                     pending.Add(FetchChunkAsync(query, state, chunk, next++, linked.Token));
                 }
@@ -317,7 +318,6 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
                             halted = true; break;
                         }
                         if (chunk.Page != state.NextPage) { halted = true; break; }
-                        if (!result.Cached) Store(query, state.Platform, chunk, result);
                         state.CheckedAt = result.CheckedAt;
                         halted = !CommitLocked(query, state, chunk, result.Page);
                         committed++;
@@ -357,6 +357,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
                     { entry.Used = ++cacheUse; return new(index, new(entry.Page, "", entry.Bytes, true, entry.CheckedAt), Task.CompletedTask); }
                     EraseLocked(key);
                 }
+        long identity; lock (gate) identity = identityEpochs.GetValueOrDefault(state.Platform);
         bool admitted = false, requested = false;
         Task<JsonElement>? physical = null;
         CancellationTokenSource? deadline = null, linked = null;
@@ -366,7 +367,10 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
             await state.Slots.WaitAsync(token).ConfigureAwait(false); admitted = true;
             // The request deadline starts when the request is admitted, not while it waits for a slot.
             deadline = new CancellationTokenSource(RequestTimeout, clock);
-            linked = CancellationTokenSource.CreateLinkedTokenSource(token, deadline.Token);
+            token.ThrowIfCancellationRequested();
+            // Query retirement stops scheduling, not already dispatched pages. Only
+            // account invalidation, shutdown and the deadline own physical cancellation.
+            linked = CancellationTokenSource.CreateLinkedTokenSource(state.Cancellation!.Token, deadline.Token);
             if (!Supports(state.Platform, query.Kind)) throw new MusicLibraryException("UNSUPPORTED");
             requested = true;
             physical = searchAsync(new(state.Platform, query.Keyword, query.Kind, chunk.Page, state.Paging.PageSize,
@@ -375,6 +379,9 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
             linked.Token.ThrowIfCancellationRequested();
             var parsed = MusicSearchPage.Read(response, state.Platform, query.Kind, chunk.Page);
             result = new(parsed, "", response.GetRawText().Length * 2L, false, clock.GetUtcNow().ToUnixTimeMilliseconds());
+            lock (gate)
+                if (!closed && !stopping && identity == identityEpochs.GetValueOrDefault(state.Platform))
+                    Store(query, state.Platform, chunk, result);
         }
         catch (Exception error)
         {
@@ -495,6 +502,8 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         lock (gate)
         {
             if (closed) return;
+            foreach (var provider in platform is null ? Platforms : [platform])
+                identityEpochs[provider] = identityEpochs.GetValueOrDefault(provider) + 1;
             foreach (var key in cache.Keys.Where(k => platform is null || k.Platform == platform).ToArray()) EraseLocked(key);
             if (stopping) return;
             foreach (var query in queries.Values.Where(q => !q.Stopped))

@@ -64,6 +64,47 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         await service.close()
     }
 
+    func testOldOrIncompleteSimilarSessionIsRejectedWithoutAccountLeaseOrDocumentWrites() async throws {
+        var document = try MusicDocument(fixtureDocument(), runID: "fixture")
+        let entries = document.queue["entries"].array
+        let current = MJ.obj([
+            ("schema", .n(2)), ("seed", entries[0]["song"]), ("seedEntryId", entries[0]["id"]),
+            ("returnQueue", MusicNativeSimilarData.queueSnapshot(document.queue)),
+            ("sourceIds", .strings(["100"])), ("fromHome", .bool(false)), ("provider", .string("heartbeat")),
+            ("providerContext", .null), ("continue", .bool(true)), ("scope", .string("synthetic-scope")),
+            ("status", .string("ready")), ("batches", .array([
+                MusicNativeSimilarData.batch("batch", basedOn: entries[0]["song"], provider: .heartbeat, rows: entries)
+            ])), ("attempted", .array([]))
+        ])
+        for invalid in ["schema1", "provider", "sourceIds", "batchProvider", "returnSerial", "returnCurrent"] {
+            var saved = current
+            switch invalid {
+            case "schema1": saved["schema"] = .n(1)
+            case "provider", "sourceIds": saved.remove(invalid)
+            case "batchProvider":
+                var batches = saved["batches"].array; batches[0].remove("provider")
+                saved["batches"] = .array(batches)
+            case "returnSerial":
+                var returning = saved["returnQueue"]["entries"].array
+                returning[1]["id"] = .string("entry-100")
+                saved["returnQueue"]["entries"] = .array(returning)
+            default: saved["returnQueue"]["currentId"] = .string("entry-999")
+            }
+            document.queue["similar"] = saved
+            let bytes = try document.encode(changed: ["queue", "history", "playback"])
+            let store = NativeMusicMemoryDocument(bytes), owner = SimilarModeAccountFixture([])
+            let service = try await NativeMusicFixture.service(store, accounts: owner)
+            do { _ = try await service.similarModeSnapshot(); XCTFail("Must reject \(invalid)") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+            do { _ = try await service.queue(); XCTFail("Invalid state must not be hidden") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+            XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
+            let openings = await owner.openings, requests = await owner.count()
+            XCTAssertEqual(openings, 0); XCTAssertEqual(requests, 0)
+            await service.close()
+        }
+    }
+
     func testPreviewEnterAndSeedExitPreserveMediaOwnerAndReturnQueue() async throws {
         let owner = SimilarModeAccountFixture([["100", "201", "201", "202"]])
         let store = NativeMusicMemoryDocument(try fixtureDocument())
@@ -237,7 +278,7 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         return try d.encode(changed: ["queue", "history", "playback"])
     }
     private func resolve(_ service: NativeMusicService, id: String) async throws -> MusicPlaybackCandidate {
-        let options = try await service.playbackOptions(for: .init(kind: .queue, id: id))
+        let options = (try await service.sourceAvailability(for: .init(kind: .queue, id: id))).options
         return try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: id,
             selection: XCTUnwrap(options.first).selection(quality: "128k"))
     }
@@ -252,6 +293,7 @@ private actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativ
     var batches: [[String]]
     var nextGate: NativeMusicGate?
     var leases: [UUID: MusicAccountQueueLease] = [:]
+    var openings = 0
     init(_ batches: [[String]]) { self.batches = batches }
     nonisolated static func track(_ id: String) -> MusicNativeTrackData {
         .init(platform: "wy", data: MJ.obj([("songmid", .string(id)),
@@ -263,6 +305,7 @@ private actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativ
     func suspendNext(_ gate: NativeMusicGate) { nextGate = gate }
     func revoke() { for lease in leases.values { lease.revoke() } }
     func beginAccountQueue(platform: MusicAccountPlatform) -> MusicAccountQueueLease {
+        openings += 1
         let lease = MusicAccountQueueLease(platform: platform); leases[lease.id] = lease; return lease
     }
     func checkAccountQueue(_ lease: MusicAccountQueueLease) throws {

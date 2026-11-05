@@ -43,16 +43,11 @@ extension MusicViewModel {
         let token = selectionID
         do {
             let service = try requireService()
-            let result: [MusicPlaybackOption]
+            let availability = try await service.sourceAvailability(for: current.track.ref)
+            let result = availability.options
             var scriptError: String?
-            if let provider = service as? any MusicSourceAvailabilityProviding {
-                let availability = try await provider.sourceAvailability(for: current.track.ref)
-                result = availability.options
-                if case .unavailable(let failure) = availability.scriptState {
-                    scriptError = failure.localizedDescription
-                }
-            } else {
-                result = try await service.playbackOptions(for: current.track.ref)
+            if case .unavailable(let failure) = availability.scriptState {
+                scriptError = failure.localizedDescription
             }
             try check(epoch); try admission?.check()
             guard token == selectionID, self.current?.id == current.id else { return }
@@ -159,7 +154,7 @@ extension MusicViewModel {
             accepted = try acceptResolvedCandidate(result.candidate, selection: result.target.selection,
                 attemptID: result.candidate.attemptId, occurrenceID: current.id, epoch: epoch, token: token,
                 admission: admission, replacement: replacement)
-            if accepted { beginPlaybackMetadata(fallbackSourceKey: result.target.selection.sourceKey) }
+            if accepted { beginPlaybackMetadata() }
         } catch {
             if selectionID == token {
                 if !accepted { clearUnacceptedCandidate(returnedAttempt) }
@@ -318,7 +313,7 @@ extension MusicViewModel {
         feedbackAutomatic = automatic
         let token = selectionID, attemptId = UUID().uuidString.lowercased()
         let settingsRevision = state.settingsRevision
-        beginPlaybackMetadata(fallbackSourceKey: selection.sourceKey)
+        beginPlaybackMetadata()
         var accepted = false
         playbackState.isResolving = true; resolvingAttempt = attemptId
         defer { if selectionID == token { playbackState.isResolving = false; resolutionTask = nil; resolvingAttempt = nil } }
@@ -336,7 +331,7 @@ extension MusicViewModel {
             accepted = try acceptResolvedCandidate(value, selection: selection, attemptID: attemptId,
                 occurrenceID: current.id, epoch: epoch, token: token, admission: admission,
                 replacement: replacement)
-            if accepted { beginPlaybackMetadata(fallbackSourceKey: selection.sourceKey) }
+            if accepted { beginPlaybackMetadata() }
         } catch {
             if selectionID == token {
                 if !accepted { clearUnacceptedCandidate(attemptId) }
@@ -374,7 +369,7 @@ extension MusicViewModel {
             accepted = try acceptResolvedCandidate(hit.candidate, selection: hit.selection,
                 attemptID: attemptID, occurrenceID: occurrenceID, epoch: epoch, token: token,
                 admission: admission, replacement: replacement)
-            if accepted { beginPlaybackMetadata(fallbackSourceKey: hit.selection.sourceKey) }
+            if accepted { beginPlaybackMetadata() }
             else { await releaseUnacceptedAttempt(attemptID, service: service) }
             if selectionID == token { cachedAudioLookup = nil }
             return true
@@ -446,7 +441,7 @@ extension MusicViewModel {
                 accepted = try self.acceptResolvedCandidate(result.candidate, selection: result.selection,
                     attemptID: result.candidate.attemptId, occurrenceID: fact.occurrenceId,
                     epoch: epoch, token: token, admission: recovery.admission)
-                if accepted { self.beginPlaybackMetadata(fallbackSourceKey: result.selection.sourceKey) }
+                if accepted { self.beginPlaybackMetadata() }
             } catch {
                 if self.lifecycle == epoch, self.selectionID == token, !Task.isCancelled {
                     if !accepted { self.stopOwned(); playbackState.phase = .failed }
@@ -495,7 +490,7 @@ extension MusicViewModel {
                 accepted = try self.acceptResolvedCandidate(result.candidate, selection: result.selection,
                     attemptID: attemptID, occurrenceID: fact.occurrenceId, epoch: epoch, token: token, admission: admission)
                 if accepted {
-                    self.beginPlaybackMetadata(fallbackSourceKey: result.selection.sourceKey)
+                    self.beginPlaybackMetadata()
                 } else { await self.releaseUnacceptedAttempt(attemptID, service: service) }
             } catch {
                 if result != nil, !accepted { await self.releaseUnacceptedAttempt(attemptID, service: service) }

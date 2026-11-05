@@ -1,6 +1,7 @@
 #if os(iOS)
 import XCTest
 import UIKit
+import MeowUI
 @testable import MeowMusicFeature
 
 private final class ArtworkImageFixture: @unchecked Sendable {
@@ -109,6 +110,33 @@ final class MusicArtworkImagesTests: XCTestCase {
         let warm = try await images.read(fixture.url)
         XCTAssertTrue(warm.0 === a.0); XCTAssertNil(warm.1)
         XCTAssertEqual(fixture.requestCount, 1)
+    }
+
+    func testMusicAndFilmArtworkOwnersKeepFlightsAndCachesSeparate() async throws {
+        let started = expectation(description: "each artwork owner starts its own read")
+        started.expectedFulfillmentCount = 2
+        let fixture = ArtworkImageFixture([.init(status: 200, data: png(), held: true)],
+            started: { _ in started.fulfill() })
+        defer { fixture.close() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ArtworkImageProtocol.self]
+        let http = MusicArtworkHTTP(configuration: configuration)
+        let music = images()
+        let film = ArtworkImages(maximumBytes: MusicArtworkHTTP.maximumBytes) { try await http.read($0) }
+        let musicRead = Task { try await music.read(fixture.url) }
+        let filmRead = Task { try await film.read(fixture.url) }
+        await fulfillment(of: [started], timeout: 3)
+        fixture.finish()
+        let musicImage = try await musicRead.value, filmImage = try await filmRead.value
+        XCTAssertEqual(fixture.requestCount, 2, "Different domain owners must not share a flight")
+        XCTAssertFalse(musicImage.0 === filmImage.0, "Each domain owns its decoded cache")
+        XCTAssertTrue(music.cached(fixture.url) === musicImage.0)
+        XCTAssertTrue(film.cached(fixture.url) === filmImage.0)
+        let warmMusic = try await music.read(fixture.url), warmFilm = try await film.read(fixture.url)
+        XCTAssertTrue(warmMusic.0 === musicImage.0)
+        XCTAssertTrue(warmFilm.0 === filmImage.0)
+        XCTAssertNil(warmMusic.1); XCTAssertNil(warmFilm.1)
+        XCTAssertEqual(fixture.requestCount, 2)
     }
 
     func testCancellingOneConsumerDoesNotStopTheRemainingConsumer() async throws {

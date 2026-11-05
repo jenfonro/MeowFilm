@@ -305,7 +305,7 @@ final class MusicNativePlaybackRecoveryTests: XCTestCase {
     func testScriptsAndOwnersWithoutOptionalRefreshPortDoNotUseRecoveryAsFallback() async throws {
         let scripts = NativeMusicScriptFixture(), store = try MusicNativeCandidateDiscoveryFixture.store()
         let scriptService = try await NativeMusicFixture.service(store, scripts: scripts)
-        let options = try await scriptService.playbackOptions(for: .init(kind: .queue, id: "entry-1"))
+        let options = (try await scriptService.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))).options
         let script = try XCTUnwrap(options.first)
         let candidate = try await scriptService.resolve(attemptId: UUID().uuidString.lowercased(),
             occurrenceId: "entry-1", selection: script.selection(quality: "flac"))
@@ -319,7 +319,7 @@ final class MusicNativePlaybackRecoveryTests: XCTestCase {
 
         let peer = NativeMusicAccountFixture()
         let service = try await NativeMusicFixture.service(try MusicNativeCandidateDiscoveryFixture.store(), accounts: peer)
-        let official = try await service.playbackOptions(for: .init(kind: .queue, id: "entry-1"))
+        let official = (try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))).options
         let selected = try XCTUnwrap(official.first).selection(quality: "128k")
         let original = try await service.resolve(attemptId: UUID().uuidString.lowercased(),
             occurrenceId: "entry-1", selection: selected)

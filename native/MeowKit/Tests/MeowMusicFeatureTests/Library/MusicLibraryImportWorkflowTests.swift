@@ -475,7 +475,10 @@ private actor LibraryImportWorkflowService: MusicServing {
     func changeQueue(_ change: MusicQueueChange, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
     func advance(_ direction: MusicDirection, reason: MusicAdvanceReason, expectedRevision: Int) throws -> MusicAdvanceResult { throw MusicServiceError.unsupported }
     func updateSettings(_ change: MusicSettingsChange) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
-    func playbackOptions(for ref: MusicReference) throws -> [MusicPlaybackOption] { throw MusicServiceError.unsupported }
+    func sourceAvailability(for ref: MusicReference) throws -> MusicSourceAvailability { throw MusicServiceError.unsupported }
+    func metadataPreferences() throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
+    func updateMetadataPreferences(_ change: MusicMetadataPreferencesChange) throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
+    func metadataCandidates(occurrenceID: String) throws -> MusicMetadataCandidates { throw MusicServiceError.unsupported }
     func resolve(attemptId: String, occurrenceId: String, selection: MusicPlaybackSelection) throws -> MusicPlaybackCandidate { throw MusicServiceError.unsupported }
     func cancel(attemptId: String?) {}
     func record(_ fact: MusicPlaybackFact) throws -> Bool { throw MusicServiceError.unsupported }

@@ -15,7 +15,8 @@ let package = Package(
         .library(name: "MeowRuntime", targets: ["MeowRuntime"]),
         .library(name: "MeowMusicFeature", targets: ["MeowMusicFeature"]),
         .library(name: "MeowMusicPlatform", targets: ["MeowMusicPlatform"]),
-        .library(name: "MeowMusicNativeService", targets: ["MeowMusicNativeService"])
+        .library(name: "MeowMusicNativeService", targets: ["MeowMusicNativeService"]),
+        .library(name: "MeowFilmFeature", targets: ["MeowFilmFeature"])
     ],
     targets: [
         .target(name: "MeowContracts", dependencies: []),
@@ -28,6 +29,7 @@ let package = Package(
         .target(name: "MeowMusicFeature", dependencies: ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowUI"]),
         .target(name: "MeowMusicPlatform", dependencies: ["MeowMusicFeature", "MeowContracts", "MeowJSON", "MeowAccounts", "MeowStorage"], linkerSettings: [.linkedLibrary("z")]),
         .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowRuntime", "MeowStorage"], linkerSettings: [.linkedLibrary("z")]),
+        .target(name: "MeowFilmFeature", dependencies: ["MeowUI"]),
         .testTarget(name: "MeowJSONTests", dependencies: ["MeowJSON"]),
         .testTarget(name: "MeowAccountTests", dependencies: ["MeowAccounts", "MeowContracts"]),
         .testTarget(name: "MeowCoreTests", dependencies: ["MeowContracts", "MeowStorage"]),
@@ -36,7 +38,8 @@ let package = Package(
         .testTarget(name: "MeowMusicPlatformTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowStorage"]),
         .testTarget(name: "MeowPlaybackTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback"]),
         .testTarget(name: "MeowRuntimeTests", dependencies: ["MeowJSON", "MeowRuntime"]),
-        .testTarget(name: "MeowUITests", dependencies: ["MeowUI"])
+        .testTarget(name: "MeowUITests", dependencies: ["MeowUI"]),
+        .testTarget(name: "MeowFilmFeatureTests", dependencies: ["MeowFilmFeature"])
     ],
     swiftLanguageVersions: [.v5]
 )

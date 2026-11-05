@@ -3,6 +3,13 @@ import UIKit
 import MeowUI
 
 @MainActor
+final class MusicSearchResultsTableView: UITableView {
+    override func touchesShouldCancel(in view: UIView) -> Bool {
+        view is UIButton || super.touchesShouldCancel(in: view)
+    }
+}
+
+@MainActor
 final class MusicSearchResultTabsView: UIView {
     var onSelect: ((Int) -> Void)?
     private let indicator = UIView()

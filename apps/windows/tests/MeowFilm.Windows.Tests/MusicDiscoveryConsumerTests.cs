@@ -91,12 +91,13 @@ public static partial class MusicUiTests
             f.Http.FailHot = false; f.Http.FailTop = false; await f.Module.RefreshDiscoveryAsync();
             True(f.Module.CanUseDiscovery && f.Module.DiscoveryCharts.Count == 1, "explicit refresh recovers");
         });
-        yield return Case("native discovery cancellation and leave wait for actual HTTP then ignore late content", async () =>
+        yield return Case("native discovery leave unsubscribes without waiting for HTTP and ignores late content", async () =>
         {
             await using var f = await DiscoveryScene.Create(); f.Http.HoldHot = true;
             var read = f.Open(); await f.Http.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             var leave = f.Module.NavigateAsync("favorites", default);
-            await Drain(); True(!leave.IsCompleted && !read.IsCompleted, "physical HTTP still owned");
+            await Task.WhenAll(read, leave).WaitAsync(TimeSpan.FromSeconds(2));
+            True(f.Module.IsCollectionPage, "navigation must not await retired HTTP");
             f.Http.Release.TrySetResult(); await Task.WhenAll(read, leave);
             True(f.Module.IsCollectionPage && !f.Module.CanUseDiscovery, "late response cannot republish");
             Equal(0, f.Module.DiscoveryCharts.Count); Equal(0, f.Runtime.Calls.Count);
@@ -106,7 +107,8 @@ public static partial class MusicUiTests
             await using var f = await DiscoveryScene.Create(); f.Http.HoldDisposal = true;
             var read = f.Open(); await f.Http.Disposing.Task.WaitAsync(TimeSpan.FromSeconds(5));
             var cancel = f.Module.CancelDiscoveryAsync(); var close = f.Module.PrepareShutdownAsync();
-            await Drain(); True(!cancel.IsCompleted && !close.IsCompleted, "response stream has not acknowledged disposal");
+            await cancel.WaitAsync(TimeSpan.FromSeconds(2));
+            await Drain(); True(!close.IsCompleted, "service shutdown must await response disposal");
             f.Http.DisposeRelease.TrySetResult(); await Task.WhenAll(read, cancel, close);
             True(!f.Module.CanUseDiscovery, "sealed after full drain");
             int count = f.Http.Requests.Count;
@@ -164,7 +166,7 @@ public static partial class MusicUiTests
             await Drain(); True(!show.IsCompleted, "reactivation intent waits for actual retired work");
             f.Http.Release.TrySetResult(); await Task.WhenAll(read, hide, show);
             True(f.Module.CanUseDiscovery, "same visible page automatically restored after real drain");
-            Equal(2, f.Http.Requests.Count(p => p.Contains("hotsearchlist", StringComparison.Ordinal)));
+            Equal(1, f.Http.Requests.Count(p => p.Contains("hotsearchlist", StringComparison.Ordinal)));
         });
         yield return Case("native discovery second unload cancels pending reactivation without background refetch", async () =>
         {
@@ -247,10 +249,13 @@ public static partial class MusicUiTests
             var read = f.Open(); await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             var cancel = f.Module.CancelDiscoveryAsync();
             await Drain();
-            True(!read.IsCompleted && !cancel.IsCompleted && store.Active == 1, "native account read has not physically returned");
+            if (readNumber == 1)
+                True(!read.IsCompleted && !cancel.IsCompleted, "pre-admission account observation still owns its disk read");
+            else await Task.WhenAll(read, cancel).WaitAsync(TimeSpan.FromSeconds(2));
+            True(store.Active == 1, "service still owns the admitted account read");
             Equal(0, f.Http.Requests.Count);
             store.Release.TrySetResult(); await Task.WhenAll(read, cancel);
-            Equal(0, store.Active); True(!f.Module.CanUseDiscovery, "late disk completion cannot publish");
+            True(!f.Module.CanUseDiscovery, "late disk completion cannot publish");
             await f.Open(); True(f.Module.CanUseDiscovery, "same account owner remains open and subsequent read succeeds");
         });
     }

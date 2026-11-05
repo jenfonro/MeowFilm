@@ -42,7 +42,7 @@ extension NativeMusicService {
                         let c = collections[$0]
                         return !c["deleted"].bool && c["kind"].string == "playlist" &&
                             MusicModel.norm(c["name"].string) == MusicModel.norm(remote.name) &&
-                            c["creating"].fields.isEmpty && !round.ledger.fences.contains { $0.localID == c["id"].string }
+                            !round.ledger.fences.contains { $0.localID == c["id"].string }
                     }
                     if matches.count == 1 { index = matches[0] }
                 }
@@ -69,7 +69,7 @@ extension NativeMusicService {
                 guard let selection = round.request.selections.first(where: { $0.platform.rawValue == b["platform"].string }),
                       selection.kinds.contains(MusicLibrarySyncKind(rawValue: c["kind"].string)!),
                       let remote = round.snapshots[b["platform"].string]?.collections.first(where: { $0.id == b["id"].string }) else { continue }
-                let oldMap = try MusicNativeSyncLogic.map(b, songs: lib["songs"])
+                let oldMap = b["map"]
                 var mapping = oldMap, sequence: [String] = [], actualSongs = Set<String>()
                 for member in remote.members {
                     let normalized = try MusicModel.normalize(.init(platform: selection.platform.rawValue, data: member.track))

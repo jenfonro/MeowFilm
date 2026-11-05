@@ -27,7 +27,10 @@ public sealed partial class MusicNativeApplication
         using var frame = sessions.Begin();
         try
         {
-            var result = await catalog.SearchAsync(request, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            // Stable search/matching owners retain the real operation through their
+            // slot drain; catalog owns its deadline and account/shutdown invalidation.
+            var result = await catalog.SearchAsync(request).ConfigureAwait(false);
             // Remembers the search authority for observed recording evidence; a retired session
             // leaves no context, so its late page cannot suppress a later matching request.
             if (frame.Session is not { } current || accounts.IsCurrent(current))

@@ -11,7 +11,6 @@ public interface IMusicDiscoverySource
     Task<MusicSearchDiscoverySnapshot> ReadDiscoveryAsync(bool refresh, CancellationToken token = default);
     Task<MusicSearchDiscoverySnapshot> RotateDiscoveryAsync(long generation, CancellationToken token = default);
     bool IsDiscoveryCurrent(long generation);
-    Task CancelDiscoveryAndDrainAsync();
 }
 
 public sealed partial class MusicNativeApplication
@@ -50,7 +49,6 @@ public sealed partial class MusicNativeApplication
         DiscoveryCall("music.discovery.read", new { refresh }, token);
     public Task<MusicSearchDiscoverySnapshot> RotateDiscoveryAsync(long generation, CancellationToken token = default) =>
         DiscoveryCall("music.discovery.rotate", new { generation }, token);
-    public Task CancelDiscoveryAndDrainAsync() => discovery.CancelAndDrainAsync();
 
     private async Task<MusicSearchDiscoverySnapshot> DiscoveryCall(string method, object input, CancellationToken token)
     {
@@ -127,7 +125,7 @@ public sealed partial class MusicNativeApplication
     private sealed class DiscoverySessions(Accounts.MusicAccountOwner owner) : IMusicPlatformSessionSource
     {
         // The ordinary account API permits abandoning a read wait while its
-        // owner retains physical work. Discovery's page-level drain is stricter.
+        // owner retains physical work. Discovery's service-level drain is stricter.
         public ValueTask<MusicPlatformSession?> AcquireAsync(string platform, CancellationToken cancellationToken) =>
             owner.AcquireSettledAsync(platform, cancellationToken);
         public bool IsCurrent(MusicPlatformSession session) => owner.IsCurrent(session);
