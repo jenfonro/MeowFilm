@@ -38,7 +38,6 @@ internal abstract class MusicApplicationTestDouble : IMusicApplication
         return Task.FromResult(EmptyDiscovery);
     }
     public virtual bool IsDiscoveryCurrent(long generation) => generation == EmptyDiscovery.Generation;
-    public virtual Task CancelDiscoveryAndDrainAsync() => Task.CompletedTask;
 
     public virtual event Action<string>? AccountDetailsInvalidated { add { } remove { } }
     public virtual Task<MusicAccountDetails> ReadDetailsAsync(string platform, CancellationToken token = default)
@@ -151,7 +150,6 @@ internal abstract class MusicApplicationForwarder(IMusicApplication inner) : Mus
     public override Task<MusicSearchDiscoverySnapshot> RotateDiscoveryAsync(long generation,
         CancellationToken token = default) => Inner.RotateDiscoveryAsync(generation, token);
     public override bool IsDiscoveryCurrent(long generation) => Inner.IsDiscoveryCurrent(generation);
-    public override Task CancelDiscoveryAndDrainAsync() => Inner.CancelDiscoveryAndDrainAsync();
 
     public override event Action<string>? AccountDetailsInvalidated
     {

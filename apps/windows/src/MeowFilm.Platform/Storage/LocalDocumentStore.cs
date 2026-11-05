@@ -26,10 +26,8 @@ public sealed class LocalDocumentStore : IDocumentStore
     private readonly HashSet<string> namespaces;
     private readonly HashSet<string> collections;
     private readonly HashSet<string> protectedNamespaces;
-    private readonly SemaphoreSlim serial = new(1, 1);
+    private readonly SerialOperationQueue queue = new();
     private readonly object gate = new();
-    private int pending;
-    private TaskCompletionSource? drained;
     private Task? disposal;
     private readonly CancellationTokenSource lifetime = new();
     private int closed;
@@ -65,52 +63,49 @@ public sealed class LocalDocumentStore : IDocumentStore
         if (expected is null || !expected.IsValidFor(location.MaximumBytes))
             throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         // Take an immediate owned snapshot before waiting for the serial writer.
-        return RunAsync(location, data, token => WriteLocked(location, expected, token), cancellationToken);
+        return RunAsync(location, data, operation => WriteLocked(location, expected, operation.Data!), cancellationToken);
     }
 
     private sealed record DocumentLocation(string Namespace, string Directory, string FileName,
         bool Protected, int MaximumBytes);
     private sealed record Operation(CancellationToken Cancellation, byte[]? Data);
 
-    private async Task<T> RunAsync<T>(DocumentLocation location, ReadOnlyMemory<byte>? data, Func<Operation, T> operation,
+    private Task<T> RunAsync<T>(DocumentLocation location, ReadOnlyMemory<byte>? data, Func<Operation, T> operation,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
             if (closed != 0) throw new DocumentStoreException(DocumentStoreError.Closed);
-            if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        }
-        byte[]? owned = null;
-        bool entered = false;
-        CancellationTokenSource? linked = null;
-        try
-        {
-            linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
-            owned = data?.ToArray();
-            await serial.WaitAsync(linked.Token).ConfigureAwait(false);
-            entered = true;
-            if (Volatile.Read(ref closed) != 0) throw new DocumentStoreException(DocumentStoreError.Closed);
-            return await Task.Run(() =>
+            // Accepted writes own their bytes and receipt, including while queued.
+            // Reads remain cancellable; shutdown drains writes before releasing root.
+            var owned = data?.ToArray();
+            return queue.Enqueue(async () =>
             {
-                linked.Token.ThrowIfCancellationRequested();
-                root.Check();
-                using var lease = AcquireRootLock(linked.Token);
-                root.Check();
-                return operation(new Operation(linked.Token, owned));
-            }, CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (Volatile.Read(ref closed) != 0)
-        { throw new DocumentStoreException(DocumentStoreError.Closed); }
-        catch (OperationCanceledException) { throw new OperationCanceledException(cancellationToken); }
-        catch (DocumentStoreException) { throw; }
-        catch { throw new DocumentStoreException(DocumentStoreError.Storage); }
-        finally
-        {
-            if (location.Protected && owned is not null) CryptographicOperations.ZeroMemory(owned);
-            if (entered) serial.Release();
-            linked?.Dispose();
-            lock (gate) if (--pending == 0) drained!.TrySetResult();
+                using var linked = owned is null
+                    ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token) : null;
+                var token = linked?.Token ?? CancellationToken.None;
+                try
+                {
+                    return await Task.Run(() =>
+                    {
+                        token.ThrowIfCancellationRequested();
+                        root.Check();
+                        using var lease = AcquireRootLock(token);
+                        root.Check();
+                        return operation(new Operation(token, owned));
+                    }, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (Volatile.Read(ref closed) != 0)
+                { throw new DocumentStoreException(DocumentStoreError.Closed); }
+                catch (OperationCanceledException) { throw new OperationCanceledException(cancellationToken); }
+                catch (DocumentStoreException) { throw; }
+                catch { throw new DocumentStoreException(DocumentStoreError.Storage); }
+                finally
+                {
+                    if (location.Protected && owned is not null) CryptographicOperations.ZeroMemory(owned);
+                }
+            }, owned is null ? cancellationToken : CancellationToken.None);
         }
     }
 
@@ -244,24 +239,20 @@ public sealed class LocalDocumentStore : IDocumentStore
         finally { CryptographicOperations.ZeroMemory(plain); }
     }
 
-    private DocumentFingerprint WriteLocked(DocumentLocation location, DocumentFingerprint expected, Operation operation)
+    private DocumentFingerprint WriteLocked(DocumentLocation location, DocumentFingerprint expected, byte[] data)
     {
-        byte[] data = operation.Data!;
-        var cancellation = operation.Cancellation;
         var next = DocumentFingerprint.FromBytes(data);
         string directory = location.Directory;
         using var folder = WindowsDocumentFiles.OpenDirectory(directory, true) ?? WindowsDocumentFiles.CreateDirectory(directory);
         if (location.Protected) CheckInventory(directory);
         string destination = Path.Combine(directory, location.FileName);
-        DocumentSnapshot previous = ReadDocument(destination, location, cancellation);
+        DocumentSnapshot previous = ReadDocument(destination, location, CancellationToken.None);
         try
         {
             if (previous.Fingerprint != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
         }
         finally { if (location.Protected && previous.Data is not null) CryptographicOperations.ZeroMemory(previous.Data); }
-        cancellation.ThrowIfCancellationRequested();
         byte[] contents = location.Protected ? Protect(data, location.Namespace) : data;
-        cancellation.ThrowIfCancellationRequested();
         string staging = Path.Combine(directory, "stage-" + Guid.NewGuid().ToString("N") + Path.GetExtension(location.FileName));
         using var stage = WindowsDocumentFiles.OpenFile(staging,
             WindowsDocumentFiles.Read | WindowsDocumentFiles.Write | WindowsDocumentFiles.Delete,
@@ -281,7 +272,6 @@ public sealed class LocalDocumentStore : IDocumentStore
             file.Write(contents);
             file.Flush(flushToDisk: true);
             root.Check();
-            cancellation.ThrowIfCancellationRequested();
             // Commit point. No cancellation check or fallible verification after this
             // rename: a lost/cancelled ACK must not be presented as guaranteed rollback.
             WindowsDocumentFiles.Replace(stage, destination);
@@ -311,7 +301,7 @@ public sealed class LocalDocumentStore : IDocumentStore
         {
             if (disposal is not null) return new(disposal);
             Volatile.Write(ref closed, 1);
-            return new(disposal = CloseAsync(pending == 0 ? Task.CompletedTask : drained!.Task));
+            return new(disposal = CloseAsync(queue.DrainAsync()));
         }
     }
     private async Task CloseAsync(Task work)
@@ -320,7 +310,6 @@ public sealed class LocalDocumentStore : IDocumentStore
         try { lifetime.Cancel(); } catch (AggregateException) { /* Cancellation callbacks cannot skip physical drain. */ }
         await work.ConfigureAwait(false);
         root.Dispose();
-        serial.Dispose();
         lifetime.Dispose();
     }
 }

@@ -26,7 +26,7 @@ public static class MusicEntryCardPresentationTests
         yield return Case("official decoration drives the title palette and failed decoration falls back to the cover", DecorationPalette);
         yield return Case("decorative fades preserve open and explicit play hit regions", HitAndPlayIntent);
         yield return Case("daily calendar days render valid single and double digit dates", CalendarDays);
-        yield return Case("daily captions switch between collapsed and expanded text with only three embedded songs", DailyPreview);
+        yield return Case("daily captions and covers stay stable with only three embedded songs", DailyPreview);
         yield return Case("entry presentations do not add artwork reads or implicit business requests", ReadOnlyPresentation);
     }
 
@@ -64,7 +64,7 @@ public static class MusicEntryCardPresentationTests
                 Check(Contrast(lastCover, firstFooter) > 1.2,
                     "the cover and footer retain a clear boundary instead of a permanent fade");
             }
-            Check(f.Loader.Addresses.Count == 1 && f.Previews == 0 && f.Opens == 0 && f.Plays == 0,
+            Check(f.Loader.Addresses.Count == 1 && f.Opens == 0 && f.Plays == 0,
                 "rendering all DPI variants uses one acquired cover and no business intent");
             if (saveVisuals && width == 152)
             {
@@ -80,19 +80,17 @@ public static class MusicEntryCardPresentationTests
     {
         var oneLine = DailyCard() with
         {
-            Subtitle = "符合你口味的新鲜好歌",
-            PreviewSubtitle = "从今天的推荐听起"
+            Subtitle = "符合你口味的新鲜好歌"
         };
         using var f = new Fixture(oneLine, 168);
         await f.Load();
         var caption = f.CaptionText;
-        Check(caption.ActualHeight <= 18.5 && caption.DesiredSize.Height <= 18.5,
+        Check(caption.ActualHeight <= 18.5 && caption.DesiredSize.Height - caption.Margin.Top - caption.Margin.Bottom <= 18.5,
             "a short caption does not reserve an empty second line");
 
         var twoLines = oneLine with
         {
-            Subtitle = "根据最近常听与收藏，为你推荐今天值得听的歌曲",
-            PreviewSubtitle = "每日推荐，从最近喜欢的旋律与歌手开始播放"
+            Subtitle = "根据最近常听与收藏，为你推荐今天值得听的歌曲"
         };
         await f.Bind(twoLines);
         caption = f.CaptionText;
@@ -101,7 +99,7 @@ public static class MusicEntryCardPresentationTests
         await f.Expand(true);
         Check(caption.ActualHeight > 18.5 && caption.ActualHeight <= 36.5,
             "the expanded caption follows the same two-line bound");
-        Check(f.Previews == 0 && f.Opens == 0 && f.Plays == 0 && f.Loader.Addresses.Count == 1,
+        Check(f.Opens == 0 && f.Plays == 0 && f.Loader.Addresses.Count == 1,
             "caption measurement does not trigger a business or artwork reread");
     }
 
@@ -116,17 +114,16 @@ public static class MusicEntryCardPresentationTests
                 decorated.Loader.Addresses.OrderBy(value => value, StringComparer.Ordinal)
                     .SequenceEqual(new[] { CoverAddress, DecorationAddress }.OrderBy(value => value, StringComparer.Ordinal)),
                 "the declared cover and official decoration are each acquired once");
-            var foreground = (SolidColorBrush)decorated.TitleShade.Tag;
-            Check(foreground.Color == Color.FromRgb(35, 39, 48),
-                "a visible light decoration selects a dark title foreground");
+            var foreground = (SolidColorBrush)decorated.Text(model.Title).Foreground;
+            Check(foreground.Color == Colors.White, "all entries retain white titles, including bright artwork");
             var shade = (LinearGradientBrush)decorated.TitleShade.Background;
-            Check(shade.GradientStops[0].Color.R == 255 && shade.GradientStops[0].Color.A <= 60,
-                "the official decoration remains visible beneath only a light contrast guard");
+            Check(shade.GradientStops[0].Color.R < 100 && shade.GradientStops[0].Color.A >= 200,
+                "the bright decoration receives a permanent tinted contrast guard");
             var frame = Capture(decorated.Entry, 1);
             var cover = decorated.Bounds(decorated.Cover);
             Check(Luminance(frame.At(new Point(cover.Left + cover.Width / 2, cover.Top + cover.Height * .7))) < .08,
                 "an opaque decoration is clipped to the title region instead of replacing the real cover");
-            Check(decorated.Previews == 0 && decorated.Opens == 0 && decorated.Plays == 0,
+            Check(decorated.Opens == 0 && decorated.Plays == 0,
                 "decoration presentation emits no business intent");
         }
         using (var fallback = new Fixture(model, coverColor: dark, failDecoration: true))
@@ -135,10 +132,10 @@ public static class MusicEntryCardPresentationTests
             Check(!fallback.Decoration.HasTopPalette &&
                 ((Button)fallback.Decoration.Children[1]).Visibility == Visibility.Collapsed,
                 "failed decoration remains non-interactive and exposes no duplicate retry");
-            Check(((SolidColorBrush)fallback.TitleShade.Tag).Color == Colors.White,
+            Check(((SolidColorBrush)fallback.Text(model.Title).Foreground).Color == Colors.White,
                 "failed decoration falls back to the dark cover palette");
             var shade = (LinearGradientBrush)fallback.TitleShade.Background;
-            Check(shade.GradientStops[0].Color.R == 0 && shade.GradientStops[0].Color.A == 154,
+            Check(shade.GradientStops[0].Color.R == dark.R && shade.GradientStops[0].Color.A >= 200,
                 "the cover fallback receives the ordinary dark-title protection");
         }
     }
@@ -180,11 +177,13 @@ public static class MusicEntryCardPresentationTests
                     "a playable expanded entry exposes its explicit play control");
                 var play = f.HitButton(Center(f.Bounds(f.Play)));
                 Check(ReferenceEquals(play, f.Play), "the expanded play control owns its hit region above the fades");
+                Check(PaintContrast(Capture(f.Entry), f.Bounds(f.Play), f.ContrastProbeX) > 3,
+                    "the white play glyph remains legible on bright artwork for every playable entry kind");
                 Click(play);
                 Check(f.Plays == 1 && f.Opens == 1 && f.LastIntent == model,
                     "play is one separate intent and never also opens the card");
             }
-            Check(f.UnhandledClicks == 0 && f.Previews == 0 && f.Loader.Addresses.Count == 1,
+            Check(f.UnhandledClicks == 0 && f.Loader.Addresses.Count == 1,
                 "card clicks are handled without parent click leakage or extra preview/artwork requests");
         }
         using var unavailable = new Fixture(DailyCard() with { Available = false, ErrorCode = "AUTH_REQUIRED" });
@@ -225,7 +224,7 @@ public static class MusicEntryCardPresentationTests
             catch (MusicOperationException error) when (error.Code == "INVALID_RESPONSE") { rejected = true; }
             Check(rejected, "malformed or out-of-range provider dates are rejected before presentation");
         }
-        Check(f.Loader.Addresses.Count == 1 && f.Previews == 0, "date rebinding does not reacquire the cover or request songs");
+        Check(f.Loader.Addresses.Count == 1, "date rebinding does not reacquire the cover or request songs");
     }
 
     private static async Task DailyPreview()
@@ -233,18 +232,18 @@ public static class MusicEntryCardPresentationTests
         var model = DailyCard();
         using var f = new Fixture(model, 152);
         await f.Load();
-        Check(f.Surface.ActualWidth == 152 && f.Entry.ActualHeight == 200,
-            "daily preview is exercised in the standard 152 by 200 card viewport");
+        Check(f.Surface.ActualWidth == 152 && Math.Abs(f.Entry.ActualHeight - (152 + f.CaptionText.ActualHeight + 16)) < 1,
+            "the card reserves only the square artwork and measured caption, without a fixed empty footer");
         string[] expected = ["1 第一首", "2 第二首", "3 Waking Up"];
-        Check(f.Entry.PreviewTitles.SequenceEqual(expected), "the bound preview provides exactly the first three songs");
-        Check(PaintedTexts(f.Entry).Contains(model.Subtitle) && !PaintedTexts(f.Entry).Contains(model.ExpandedSubtitle),
-            "the collapsed card displays Subtitle rather than the expanded caption");
+        Check(((MusicCatalogCard)f.Entry.DataContext).PreviewTitles.SequenceEqual(expected), "the bound preview provides exactly the first three songs");
+        Check(PaintedTexts(f.Entry).Contains(model.Subtitle),
+            "the full business caption is visible at rest");
         Check(!PaintedTexts(f.Entry).Any(expected.Contains), "embedded song titles are not painted on a collapsed card");
 
         Hover(f.Entry, true);
         await f.Expand(true);
-        Check(PaintedTexts(f.Entry).Contains(model.ExpandedSubtitle) && !PaintedTexts(f.Entry).Contains(model.Subtitle),
-            "the expanded card replaces Subtitle with ExpandedSubtitle");
+        Check(PaintedTexts(f.Entry).Contains(model.Subtitle) && f.Cover.Address == model.Cover,
+            "hover preserves the same business caption and artwork");
         foreach (double scale in new[] { 1d, 1.5d, 2d })
         {
             var expanded = Capture(f.Entry, scale);
@@ -264,20 +263,15 @@ public static class MusicEntryCardPresentationTests
         Check(PaintedTexts(f.Entry).Contains(model.Subtitle) && !PaintedTexts(f.Entry).Any(expected.Contains),
             "collapse restores the ordinary caption and hides song rows");
 
-        var fallback = model with { PreviewSubtitle = "" };
-        Check(fallback.ExpandedSubtitle == fallback.Subtitle, "missing expanded text falls back to the business subtitle");
-        await f.Bind(fallback);
-        await f.Expand(true);
-        Check(PaintedTexts(f.Entry).Contains(fallback.Subtitle), "expanded fallback captions are not blank");
         var replacement = model with { Preview = [new("替换歌曲", "歌手", "", 1, 0)] };
         await f.Bind(replacement);
         await f.Expand(true);
-        Check(f.Entry.PreviewTitles.SequenceEqual(new[] { "1 替换歌曲" }) &&
+        Check(((MusicCatalogCard)f.Entry.DataContext).PreviewTitles.SequenceEqual(new[] { "1 替换歌曲" }) &&
             !PaintedTexts(f.Entry).Any(expected.Contains), "rebinding replaces rather than appends embedded preview rows");
         await f.Bind(model with { Preview = null });
-        Check(f.Entry.PreviewTitles.Count == 0 && !PaintedTexts(f.Entry).Contains("1 替换歌曲"),
+        Check(((MusicCatalogCard)f.Entry.DataContext).PreviewTitles.Count == 0 && !PaintedTexts(f.Entry).Contains("1 替换歌曲"),
             "rebinding without a preview clears the previous card's song titles");
-        Check(f.Previews == 0 && f.Opens == 0 && f.Plays == 0 && f.Loader.Addresses.Count == 1,
+        Check(f.Opens == 0 && f.Plays == 0 && f.Loader.Addresses.Count == 1,
             "embedded preview expansion, fallback and rebinding make no extra requests or playback intent");
     }
 
@@ -302,7 +296,7 @@ public static class MusicEntryCardPresentationTests
             Check(f.Root.Focus(), "keyboard focus can leave the card");
             await Until(() => CardMotion.GetProgress(f.Surface) <= .001, "leaving keyboard focus collapses the card");
             Check(f.Loader.Addresses.Count == reads && reads == 1 &&
-                f.Previews == 0 && f.Opens == 0 && f.Plays == 0,
+                f.Opens == 0 && f.Plays == 0,
                 $"{model.Presentation}: repeated render, hover and focus use only the acquired cover and embedded data");
             var artwork = f.Cover;
             var image = Visuals(artwork).OfType<Image>().Single();
@@ -326,17 +320,16 @@ public static class MusicEntryCardPresentationTests
 
         using var lazy = new Fixture(DailyCard() with { Preview = null });
         await lazy.Load();
-        Check(lazy.Previews == 0, "a preview-capable card does not read songs merely because it is rendered");
-        Hover(lazy.Entry, true);
-        var token = lazy.Entry.PreviewCancellation;
-        Check(lazy.Previews == 1 && !token.IsCancellationRequested, "missing embedded data retains the existing on-demand preview intent");
         Hover(lazy.Entry, true);
         await lazy.Expand(true);
-        Capture(lazy.Entry);
-        Check(lazy.Previews == 1 && lazy.Opens == 0 && lazy.Plays == 0 && lazy.Loader.Addresses.Count == 1,
-            "the same active preview is not requested again by shading or animation");
+        var initialized = (MusicCatalogCard)lazy.Entry.DataContext;
+        Check(!initialized.HasPreview && lazy.Opens == 0 && lazy.Plays == 0,
+            "hover presents existing data and cannot emit a read or playback action");
+        initialized.InitializePreview([new("初始化曲目", "艺人", "", 1, null)]);
+        await Drain(); lazy.Window.UpdateLayout();
+        Check(PaintedTexts(lazy.Entry).Contains("1 初始化曲目"), "page-owned data publishes through binding");
         Hover(lazy.Entry, false);
-        Check(token.IsCancellationRequested, "leaving the card cancels the current on-demand preview");
+        Check(initialized.PreviewTitles.SequenceEqual(["1 初始化曲目"]), "leaving does not retire initialized data");
     }
 
     private static MusicCatalogCard DailyCard() =>
@@ -344,7 +337,7 @@ public static class MusicEntryCardPresentationTests
             Preview: new[] { "第一首", "第二首", "Waking Up", "第四首" }
                 .Select((title, i) => new MusicRankPreview(title, "歌手", "", i + 1, 0)).ToArray(),
             Presentation: MusicCatalogEntryPresentation.Preview,
-            PreviewSubtitle: "每日推荐 | 从「第一首」听起", DayOfMonth: 29);
+            DayOfMonth: 29);
 
     private static IEnumerable<MusicCatalogCard> Cards()
     {
@@ -587,7 +580,7 @@ public static class MusicEntryCardPresentationTests
         internal readonly EntryCard Entry;
         internal readonly Window Window;
         internal readonly ArtworkLoader Loader;
-        internal int Previews, Opens, Plays, UnhandledClicks;
+        internal int Opens, Plays, UnhandledClicks;
         internal MusicCatalogCard? LastIntent;
         internal Grid Surface => (Grid)Entry.FindName("Surface");
         internal Button Open => (Button)Entry.FindName("OpenButton");
@@ -595,7 +588,7 @@ public static class MusicEntryCardPresentationTests
         internal ArtworkImage Cover => (ArtworkImage)Entry.FindName("Cover");
         internal ArtworkImage Decoration => (ArtworkImage)Entry.FindName("DecorationLayer");
         internal Border TitleShade => (Border)Entry.FindName("TitleShade");
-        internal TextBlock CaptionText => Visuals((StackPanel)Entry.FindName("Caption")).OfType<TextBlock>().First();
+        internal TextBlock CaptionText => (TextBlock)Entry.FindName("Caption");
         internal double ContrastProbeX => Entry.ActualWidth - ((RectangleGeometry)Surface.Clip).RadiusX - 1;
 
         internal Fixture(MusicCatalogCard model, double width = 168, Color? coverColor = null,
@@ -605,7 +598,6 @@ public static class MusicEntryCardPresentationTests
             ArtworkScope.SetLoader(Root, Loader);
             Entry = new EntryCard { Width = width, VerticalAlignment = VerticalAlignment.Top,
                 HorizontalAlignment = HorizontalAlignment.Left, DataContext = model };
-            Entry.PreviewRequested += (_, _) => Previews++;
             Entry.OpenRequested += (_, args) => { Check(ReferenceEquals(args.OriginalSource, Entry), "open intent belongs to the card"); Opens++; LastIntent = (MusicCatalogCard)Entry.DataContext; };
             Entry.PlayRequested += (_, args) => { Check(ReferenceEquals(args.OriginalSource, Entry), "play intent belongs to the card"); Plays++; LastIntent = (MusicCatalogCard)Entry.DataContext; };
             Root.AddHandler(Button.ClickEvent, new RoutedEventHandler((_, _) => UnhandledClicks++));

@@ -31,8 +31,7 @@ public sealed partial class MusicScriptOwner
         {
             LJ.Require(!preparing && !closed, "CLOSED");
             onlineOperations.Add(operation);
-            if (isLyrics) { lyrics?.Cancel(); lyrics = operation; }
-            else { resolution?.Cancel(); resolution = operation; }
+            if (!isLyrics) { resolution?.Cancel(); resolution = operation; }
         }
         var token = timed.Token;
         try
@@ -111,7 +110,6 @@ public sealed partial class MusicScriptOwner
             lock (activityGate)
             {
                 if (ReferenceEquals(resolution, operation)) resolution = null;
-                if (ReferenceEquals(lyrics, operation)) lyrics = null;
                 onlineOperations.Remove(operation);
             }
         }

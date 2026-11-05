@@ -24,6 +24,10 @@ public sealed class ArtworkImage : Grid
         typeof(ArtworkImage), new PropertyMetadata(Stretch.UniformToFill, (value, args) => ((ArtworkImage)value).image.Stretch = (Stretch)args.NewValue));
     public static readonly DependencyProperty ShowRetryProperty = DependencyProperty.Register(nameof(ShowRetry), typeof(bool),
         typeof(ArtworkImage), new PropertyMetadata(true, (value, _) => ((ArtworkImage)value).UpdateRetryVisibility()));
+    private static readonly DependencyPropertyKey AspectRatioPropertyKey = DependencyProperty.RegisterReadOnly(nameof(AspectRatio),
+        typeof(double), typeof(ArtworkImage), new PropertyMetadata(0d));
+    public static readonly DependencyProperty AspectRatioProperty = AspectRatioPropertyKey.DependencyProperty;
+    public double AspectRatio => (double)GetValue(AspectRatioProperty);
     private static readonly DependencyPropertyKey RawPaletteBrushPropertyKey = DependencyProperty.RegisterReadOnly(nameof(RawPaletteBrush),
         typeof(Brush), typeof(ArtworkImage), new PropertyMetadata(Brushes.DimGray));
     public static readonly DependencyProperty RawPaletteBrushProperty = RawPaletteBrushPropertyKey.DependencyProperty;
@@ -122,7 +126,7 @@ public sealed class ArtworkImage : Grid
         epoch++;
         var priorRequest = request; request = null; requestTask = null; attempted = failed = false;
         var priorLease = lease; lease = null;
-        image.Source = null; SetValue(RawPaletteBrushPropertyKey, Brushes.DimGray);
+        image.Source = null; SetValue(AspectRatioPropertyKey, 0d); SetValue(RawPaletteBrushPropertyKey, Brushes.DimGray);
         SetValue(PaletteBrushPropertyKey, Brushes.DimGray);
         SetValue(TopPaletteBrushPropertyKey, Brushes.DimGray);
         SetValue(HasTopPalettePropertyKey, false);
@@ -224,6 +228,7 @@ public sealed class ArtworkImage : Grid
                 acquired = await loader.AcquireAsync(address, current.Token);
                 if (stamp != epoch || current.IsCancellationRequested || !HasDemand()) return;
                 lease = acquired; acquired = null; image.Source = lease.Image;
+                SetValue(AspectRatioPropertyKey, (double)lease.Image.PixelWidth / lease.Image.PixelHeight);
                 var palettes = SamplePalettes(lease.Image);
                 SetValue(RawPaletteBrushPropertyKey, palettes.Raw);
                 SetValue(PaletteBrushPropertyKey, palettes.Palette);

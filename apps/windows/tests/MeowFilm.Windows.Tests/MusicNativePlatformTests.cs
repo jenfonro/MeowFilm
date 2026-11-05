@@ -13,12 +13,13 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Windows.Tests;
 
 // Production C# services/codecs/parsers with trusted synthetic HTTP, no Node, real accounts or upstream.
-public static class MusicNativePlatformTests
+public static partial class MusicNativePlatformTests
 {
     private const string Huge = "9007199254740993123";
     private const string KgHash = "ABCDEF0123456789ABCDEF0123456789";
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in ChartCases()) yield return test;
         yield return Case("platform response uses the last JSON field at every object without stripping provider metadata", async () =>
         {
             using var http = MusicPlatformHttp.CreateWithHandler(new Handler((_, _) => Task.FromResult(
@@ -244,7 +245,7 @@ public static class MusicNativePlatformTests
             }
             finally { release.TrySetResult(); }
             Equal(1, (await playlists.WaitAsync(TimeSpan.FromSeconds(5))).GetProperty("items").GetArrayLength());
-            Equal(3, f.Calls);
+            await f.Catalog.DrainAsync(); Equal(4, f.Calls);
         });
         yield return Case("qq search account authorization remains distinct from the anonymous device session", async () =>
         {
@@ -745,7 +746,7 @@ public static class MusicNativePlatformTests
             Song(result.GetProperty("items")[0], "wy", "9901"); Song(result.GetProperty("items")[99], "wy", "10000");
             True(!result.GetProperty("more").GetBoolean()); Equal(2, f.Calls);
         });
-        yield return Case("wy playlist cancellation drains the physical read without extra member requests", async () =>
+        yield return Case("wy playlist unsubscribe completes only the admitted page and reuses it", async () =>
         {
             foreach (var holdDetail in new[] { false, true })
             {
@@ -759,7 +760,11 @@ public static class MusicNativePlatformTests
                         var (path, _) = Eapi(req); Equal("/api/v6/playlist/detail", path);
                         if (holdDetail) return WyList(["1", "2"], [Wy("1")]);
                     }
-                    else Weapi(req, "/weapi/v3/song/detail");
+                    else
+                    {
+                        Weapi(req, "/weapi/v3/song/detail");
+                        if (!holdDetail) return Json(J(new { code = 200, songs = new[] { Wy("2") } }));
+                    }
                     using var registration = token.Register(() => cancelled.TrySetResult());
                     entered.TrySetResult(); return await delayed.Task;
                 });
@@ -768,11 +773,14 @@ public static class MusicNativePlatformTests
                 await entered.Task.WaitAsync(TimeSpan.FromSeconds(2)); cancel.Cancel();
                 try
                 {
-                    await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(2)); True(!task.IsCompleted);
+                    await Error("CANCELLED", () => task.WaitAsync(TimeSpan.FromSeconds(2)));
+                    True(!cancelled.Task.IsCompleted);
                     Equal(holdDetail ? 2 : 1, f.Calls);
                 }
                 finally { delayed.TrySetResult(holdDetail ? Json(J(new { code = 200, songs = new[] { Wy("2") } })) : WyList(["1", "2"], [Wy("1")])); }
-                await Error("CANCELLED", () => task); Equal(holdDetail ? 2 : 1, f.Calls);
+                await f.Catalog.DrainAsync();
+                var page = await f.Catalog.PlaylistAsync(new("wy", "500", Limit: 2));
+                Equal(2, page.GetProperty("items").GetArrayLength()); Equal(2, f.Calls);
             }
         });
         yield return Case("wy incomplete playlist never succeeds with partial tracks", async () =>
@@ -883,7 +891,7 @@ public static class MusicNativePlatformTests
                 signedEntry.GetProperty("display").GetBoolean());
             Equal(1, signed.Calls);
         });
-        yield return Case("home daily preserves provider calendar and expanded caption without inventing songs", async () =>
+        yield return Case("home daily preserves provider calendar and permanent full caption without inventing songs", async () =>
         {
             foreach (var day in new[] { "29", "0", "32", "" })
             {
@@ -895,8 +903,7 @@ public static class MusicNativePlatformTests
                 var reply = await f.Catalog.HomeAsync(new("wy"));
                 var entry = reply.GetProperty("entries")[0];
                 Equal("每日推荐", entry.GetProperty("name").GetString());
-                Equal("符合你口味的新鲜好歌", entry.GetProperty("subtitle").GetString());
-                Equal("每日推荐 | 从「合成歌曲」听起", entry.GetProperty("previewSubtitle").GetString());
+                Equal("从「合成歌曲」听起", entry.GetProperty("subtitle").GetString());
                 var card = MusicCatalogDto.Read(reply, "wy", "home", "").Single().Items.Single();
                 Equal(day == "29" ? 29 : (int?)null, card.DayOfMonth);
                 True(!card.HasPreview && !card.CanOpen);
@@ -1920,7 +1927,7 @@ public static class MusicNativePlatformTests
                 Equal(1, f.Calls);
             }
         });
-        yield return Case("cancel old callback while physical handler ignores cancellation", async () =>
+        yield return Case("cancel subscription while the service retains and coalesces the physical read", async () =>
         {
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1933,9 +1940,14 @@ public static class MusicNativePlatformTests
             using var cancel = new CancellationTokenSource();
             var task = f.Catalog.SearchAsync(new("wy", "x"), cancel.Token);
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(2)); cancel.Cancel();
-            try { await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(2)); True(!task.IsCompleted); }
+            var joined = f.Catalog.SearchAsync(new("wy", "x"));
+            try
+            {
+                await Error("CANCELLED", () => task.WaitAsync(TimeSpan.FromSeconds(2)));
+                True(!cancelled.Task.IsCompleted && !joined.IsCompleted); Equal(1, f.Calls);
+            }
             finally { delayed.TrySetResult(WySearch([Wy("1")], 1)); }
-            await Error("CANCELLED", () => task);
+            Equal(1, (await joined).GetProperty("items").GetArrayLength()); Equal(1, f.Calls);
         });
         yield return Case("invalidation old callback and close are distinct typed results", async () =>
         {
@@ -2236,6 +2248,22 @@ public static class MusicNativePlatformTests
             await protocol.SignAsync(session, default, () => { });
             Equal(3, calls);
         });
+        yield return Case("VIP page unsubscribe retains a shared read without cancelling or signing", async () =>
+        {
+            await using var fixture = await VipApplicationFixture.CreateAsync();
+            var hold = fixture.Transport.HoldNextSignRead();
+            using var cancellation = new CancellationTokenSource();
+            var reading = fixture.Application.ReadVipPageAsync(cancellation.Token);
+            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancellation.Cancel();
+            try { await reading.WaitAsync(TimeSpan.FromSeconds(2)); throw new InvalidOperationException("Expected unsubscribe"); }
+            catch (OperationCanceledException) { }
+            True(!hold.Cancelled.Task.IsCompleted);
+            var joined = fixture.Application.ReadVipPageAsync();
+            hold.Release.TrySetResult();
+            True((await joined).Generation > 0);
+            Equal(1, fixture.Transport.SignReads); Equal(0, fixture.Transport.SignWrites);
+        });
         yield return Case("VIP owner keeps an accepted sign receipt across a stale unsigned reread", async () =>
         {
             await using var fixture = await VipApplicationFixture.CreateAsync();
@@ -2344,10 +2372,15 @@ public static class MusicNativePlatformTests
             await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
             var preparing = fixture.Application.PrepareShutdownAsync();
-            await OperationError("CLOSED", () => fixture.Application.ReadVipPageAsync());
-            await hold.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            True(!reading.IsCompleted && !preparing.IsCompleted);
-            hold.Release.TrySetResult();
+            try
+            {
+                await OperationError("CLOSED", () => fixture.Application.ReadVipPageAsync());
+                await hold.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                True(!preparing.IsCompleted);
+                try { await reading.WaitAsync(TimeSpan.FromSeconds(5)); }
+                catch (OperationCanceledException) { }
+            }
+            finally { hold.Release.TrySetResult(); }
             try { await reading; }
             catch (Exception error) when (error is OperationCanceledException or
                 MusicOperationException { Code: "CLOSED" }) { }

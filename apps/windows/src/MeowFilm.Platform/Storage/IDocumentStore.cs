@@ -38,7 +38,11 @@ public interface IDocumentStore : IAsyncDisposable
 {
     Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default);
 
-    /// <summary>Atomically compare plaintext existence/length/hash and replace. No blind write.</summary>
+    /// <summary>
+    /// Atomically compare plaintext existence/length/hash and replace. No blind write.
+    /// LocalDocumentStore checks cancellation before admission; accepted writes own
+    /// their bytes and settle with a real receipt even if the caller leaves or the store closes.
+    /// </summary>
     Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
         DocumentFingerprint expected, CancellationToken cancellationToken = default);
 }

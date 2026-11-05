@@ -586,17 +586,16 @@ import MeowMusicFeature
         XCTAssertEqual(counts.0, 0); XCTAssertEqual(counts.1, 0); XCTAssertTrue(calls.isEmpty)
     }
 
-    func testOldCollectionCreatingStateIsRejectedWithoutRemoteCallsOrDocumentWrites() async throws {
+    func testUnknownCollectionFieldIsRejectedWithoutRemoteCallsOrDocumentWrites() async throws {
         let valid = try NativeSyncFixture.store()
-        let creation = MJ.obj([("before", .strings(["500"])), ("name", .string("Uncertain"))])
-        for creating in [MJ.obj(), .obj([("[\"wy\",\"42\"]", creation)])] {
+        for extra in [MJ.obj(), .obj([("value", .string("extra"))])] {
             var document = try NativeSyncFixture.document(valid)
             var collections = document.library["library"]["collections"].array
-            collections[0]["creating"] = creating
+            collections[0]["extra"] = extra
             document.library["library"]["collections"] = .array(collections)
             let bytes = try document.encode(changed: ["library"]), store = NativeMusicMemoryDocument(bytes)
             let peer = NativeSyncPeer(), service = try await NativeMusicFixture.service(store, accounts: peer)
-            do { _ = try await service.synchronizeLibrary(NativeSyncFixture.request()); XCTFail("Old creation state") }
+            do { _ = try await service.synchronizeLibrary(NativeSyncFixture.request()); XCTFail("Unknown collection field was accepted") }
             catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
             XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
             let counts = await peer.counts(), calls = await peer.calls()

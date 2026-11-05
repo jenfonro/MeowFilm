@@ -46,7 +46,7 @@ public partial class MusicRecordView : UserControl
     public MusicRecordView()
     {
         InitializeComponent();
-        Grooves.Fill = MusicPlayerArtwork.Grooves;
+        UpdateGrooves();
         SetBinding(PaletteBrushProperty, new Binding(nameof(ArtworkImage.PaletteBrush)) { Source = Cover, Mode = BindingMode.OneWay });
         Focusable = true;
         IsManipulationEnabled = true;
@@ -72,6 +72,7 @@ public partial class MusicRecordView : UserControl
         };
         SizeChanged += (_, e) =>
         {
+            UpdateGrooves();
             if (e.PreviousSize.Width > 0 && e.WidthChanged &&
                 (pointerPending || IsSwiping || pendingIdentity is not null || Math.Abs(SwipeTranslation.X) > .5))
                 CancelSwipe();
@@ -80,6 +81,8 @@ public partial class MusicRecordView : UserControl
     internal Task<IDisposable> PrepareArtworkAsync(CancellationToken cancellationToken) =>
         Cover.PrepareForPresentationAsync(cancellationToken);
 
+    private void UpdateGrooves() => Grooves.Fill = Math.Min(ActualWidth, ActualHeight) < 160
+        ? MusicPlayerArtwork.CompactGrooves : MusicPlayerArtwork.Grooves;
     private static void Changed(DependencyObject value, DependencyPropertyChangedEventArgs args)
     {
         var record = (MusicRecordView)value;

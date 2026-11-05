@@ -5,7 +5,7 @@ namespace MeowFilm.Capabilities;
 public sealed class FilmPlaybackPage : INotifyPropertyChanged
 {
     private FilmEpisodeItem selectedEpisode;
-    private bool isListLayout, overviewExpanded;
+    private bool isListLayout, overviewExpanded, isFavorite;
 
     internal FilmPlaybackPage(
         FilmCardItem item,
@@ -51,6 +51,17 @@ public sealed class FilmPlaybackPage : INotifyPropertyChanged
     public bool IsListLayout => isListLayout;
     public bool IsHorizontalLayout => !IsListLayout;
     public bool OverviewExpanded => overviewExpanded;
+    // Preview-only state, retained with this film's page for the current session.
+    public bool IsFavorite
+    {
+        get => isFavorite;
+        set
+        {
+            if (isFavorite == value) return;
+            isFavorite = value;
+            Changed(nameof(IsFavorite));
+        }
+    }
     public string SeasonLabel { get; }
     public string EpisodeCountLabel => $"共{Episodes.Count}集";
 

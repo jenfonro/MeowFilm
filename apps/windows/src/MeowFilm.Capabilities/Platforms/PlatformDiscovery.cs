@@ -144,6 +144,8 @@ internal static class PlatformDiscovery
             if (A(ext, "songData") is null && A(ext, "song") is null) songRaw["id"] = S(click, "id").Length > 0 ? S(click, "id") : id;
             if (Id(Pick(songRaw, "id", "songId", "resourceId")).Length == 0) return null;
             var song = NativeSong(songRaw, Cover(r)); var nativeId = NativeMusicSong.NativeId(song);
+            var source = Action(A(play, "detailUrl"));
+            if (S(source, "type") == "playlist") result["playbackSource"] = source!.DeepClone();
             result["song"] = song; result["id"] = nativeId;
             return Finish("song", PJ.Obj(("type", "song"), ("id", nativeId)));
         }
@@ -151,8 +153,9 @@ internal static class PlatformDiscovery
         {
             var day = Rank(A(r, "dayOfMonth"), 1);
             result["dayOfMonth"] = day is <= 31 ? PJ.Node(day) : null;
-            var expandedTitle = Title(r);
-            result["previewSubtitle"] = modern && expandedTitle != S(result, "name") ? expandedTitle : "";
+            var caption = Title(r);
+            if (modern && caption != S(result, "name"))
+                result["subtitle"] = Regex.Replace(caption, "^" + Regex.Escape(S(result, "name")) + @"\s*\|\s*", "");
             return Finish("collection", PJ.Obj(("type", "daily"), ("branch", S(click, "branch") == "style" ? "style" : "default")));
         }
         if (kind == "star" || S(r, "lunaItemType") == "heartRcmd") return Finish("collection", PJ.Obj(("type", "heartbeat")));
@@ -335,7 +338,7 @@ internal static class PlatformDiscovery
                             ("action", Action(PJ.First(A(r, "action"), A(r, "header", "action")))), ("items", new JsonArray()));
                         sections.Add(run);
                     }
-                    ((JsonArray)run["items"]!).Add((type == "songs" ? x["song"]! : x).DeepClone());
+                    ((JsonArray)run["items"]!).Add((type == "songs" && x["playbackSource"] is null ? x["song"]! : x).DeepClone());
                 }
             }
         }
@@ -408,8 +411,43 @@ internal static class PlatformDiscovery
         var sections = new JsonArray();
         foreach (var g in groups)
         {
-            var items = PJ.Array(g["list"]).OfType<JsonObject>().Where(r => S(r, "targetType") == "PLAYLIST" && (r["canPlay"] is null || PJ.Bool(r["canPlay"])))
-                .Select(r => { var copy = (JsonObject)r.DeepClone(); copy["resourceType"] = "playlist"; return Resource(copy); }).Where(r => r is not null).ToArray();
+            var items = PJ.Array(g["list"]).OfType<JsonObject>().Select(r =>
+            {
+                JsonObject? card;
+                if (S(r, "targetType") == "PLAYLIST")
+                {
+                    var copy = (JsonObject)r.DeepClone(); copy["resourceType"] = "playlist";
+                    card = Resource(copy);
+                }
+                else
+                {
+                    var code = S(r, "toplistCode");
+                    var chart = code switch
+                    {
+                        "DIGITAL_ALBUM" => "albums", "USER_RCMD_SONG" => "user-recommendations", _ => ""
+                    };
+                    // Only the known official sales-page destination may select its song-index tab.
+                    if (Uri.TryCreate(S(r, "frontTargetUrl"), UriKind.Absolute, out var url) &&
+                        url.Scheme == "https" && url.Host == "music.163.com" &&
+                        url.AbsolutePath == "/st/album/m/album/rank" && url.UserInfo.Length == 0 && url.IsDefaultPort)
+                    {
+                        var query = Query(url);
+                        chart = query.TryGetValue("type", out var types) && types.Length == 1
+                            ? types[0] switch { "1" => "singles", "2" => "song-sales", _ => "albums" } : "albums";
+                    }
+                    card = PJ.Obj(("id", code), ("name", Title(r)), ("cover", Cover(r)),
+                        ("kind", chart.Length > 0 ? "chart" : "unsupported"),
+                        ("action", PJ.Obj(("type", chart.Length > 0 ? "chart" : "unsupported"), ("id", chart.Length > 0 ? chart : code))),
+                        ("preview", PJ.Arr(PJ.Array(r["trackRankList"]).Take(3).Select(row => PJ.Obj(
+                            ("title", PJ.Text(Pick(row, "songName", "itemName", "title"))),
+                            ("artist", S(row, "artistName")), ("cover", Cover(row)),
+                            ("rank", Rank(A(row, "rank"), 1)), ("lastRank", Rank(A(row, "lastRank"), 0)))))),
+                        ("updateFrequency", S(r, "updateFrequency")));
+                }
+                if (card is not null) card["canPlay"] = S(r, "targetType") == "PLAYLIST" &&
+                    (r["canPlay"] is null || PJ.Bool(r["canPlay"]));
+                return card;
+            }).Where(r => r is not null).ToArray();
             if (items.Length == 0) continue;
             sections.Add(PJ.Obj(("id", target + ":" + (S(g, "categoryCode").Length > 0 ? S(g, "categoryCode") : sections.Count.ToString())),
                 ("title", S(g, "name")), ("type", "rankings"), ("layout", PJ.Text(Pick(g, "frontDisplayType", "displayType")) is { Length: > 0 } l ? l : "ONLY_COVER"),

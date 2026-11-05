@@ -50,9 +50,9 @@ import MeowMusicFeature
         let peer = NativeSyncPeer(), service = try await NativeMusicFixture.service(store, accounts: peer)
         do { _ = try await service.automaticLibrarySyncPreferences(); XCTFail("Missing current settings") }
         catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
-        do { _ = try await run(service, .foreground); XCTFail("Old ledger must not authorize a round") }
+        do { _ = try await run(service, .foreground); XCTFail("Ledger missing automatic must not authorize a round") }
         catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
-        do { _ = try await service.synchronizeLibrary(NativeSyncFixture.request()); XCTFail("Old manual ledger") }
+        do { _ = try await service.synchronizeLibrary(NativeSyncFixture.request()); XCTFail("Ledger missing automatic must not authorize manual sync") }
         catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
         XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
         let counts = await peer.counts(), writes = await peer.calls()

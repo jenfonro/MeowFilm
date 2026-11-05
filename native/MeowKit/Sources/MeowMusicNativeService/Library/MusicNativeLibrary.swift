@@ -60,8 +60,8 @@ enum MusicLibraryValidation {
         for (platform, id) in lib["accounts"].fields { try musicRequire(MusicModel.sites.contains(platform), .corruptDocument); _ = try id.text() }
     }
     static func validateReceipt(_ receipt: MJ) throws {
-        try receipt.requireFields(["batchId", "sourceId", "sourceOwnerId", "appliedAt", "appliedRevision", "afterHash"],
-                                  required: ["batchId", "sourceId", "sourceOwnerId", "appliedAt", "appliedRevision", "afterHash"])
+        try musicRequire(receipt.isObject &&
+            ["batchId", "sourceId", "sourceOwnerId", "appliedAt", "appliedRevision", "afterHash"].allSatisfy(receipt.contains), .corruptDocument)
         try musicRequire(musicHex(receipt["batchId"].string) && musicHex(receipt["afterHash"].string) &&
             receipt["appliedRevision"].isInteger && receipt["appliedRevision"].int > 0 &&
             receipt["appliedAt"].isNumber && receipt["appliedAt"].number.isFinite &&

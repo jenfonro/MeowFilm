@@ -9,6 +9,26 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
 {
     private readonly HashSet<DetailsFlight> detailsFlights = [];
     private readonly HashSet<string> detailsUncertain = new(StringComparer.Ordinal);
+    private bool readsStopping;
+
+    internal async Task PrepareReadShutdownAsync()
+    {
+        DetailsFlight[] details;
+        InitialObservationFlight[] observations;
+        lock (gate)
+        {
+            readsStopping = true;
+            details = detailsFlights.ToArray();
+            observations = initialObservationFlights.ToArray();
+            foreach (var flight in details) flight.Abort("CANCELLED");
+        }
+        foreach (var flight in observations) flight.Cancel();
+        foreach (var task in details.Select(f => (Task)f.Completion.Task)
+            .Concat(observations.Select(f => f.Work ?? Task.CompletedTask)))
+            try { await task.ConfigureAwait(false); } catch { /* Outcome remains with the owner. */ }
+        lock (gate) AccountRules.Require(detailsUncertain.Count == 0, "COMMIT_UNKNOWN");
+    }
+    internal void ResumeReads() { lock (gate) { AccountRules.Require(!closed, "CLOSED"); readsStopping = false; } }
     private sealed class DetailsFlight(StoredAccount before, StoredAccountDetails? cache,
         MusicPlatformSession session, long epoch, TimeSpan remaining) : IDisposable
     {
@@ -18,7 +38,6 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         internal long Epoch { get; } = epoch;
         internal CancellationTokenSource Deadline { get; } = new(remaining);
         internal TaskCompletionSource<MusicAccountDetails> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal int Waiters;
         internal bool Admitted;
         internal string? Revocation;
         internal void Abort(string reason)
@@ -95,7 +114,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
             token.ThrowIfCancellationRequested();
             lock (gate)
             {
-                AccountRules.Require(!closed && states[platform].Epoch == baseline.Epoch, "SESSION_CHANGED");
+                AccountRules.Require(!closed && !readsStopping && states[platform].Epoch == baseline.Epoch, "SESSION_CHANGED");
                 return DetailsView(platform, baseline.Account, baseline.Cache, baseline.Hidden);
             }
         }
@@ -121,7 +140,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
             lock (gate)
             {
                 caller.ThrowIfCancellationRequested();
-                AccountRules.Require(!closed && states[platform].Epoch == baseline.Epoch, "SESSION_CHANGED");
+                AccountRules.Require(!closed && !readsStopping && states[platform].Epoch == baseline.Epoch, "SESSION_CHANGED");
                 AccountRules.Require(baseline.Account.Generation == expectedGeneration, "SESSION_CHANGED");
                 AccountRules.Require(!detailsUncertain.Contains(platform), "COMMIT_UNKNOWN");
                 AccountRules.Require(!baseline.Hidden && baseline.Account.Cookie is not null, "AUTH_REQUIRED");
@@ -137,8 +156,9 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
                     AccountRules.Require(left > TimeSpan.Zero, "TIMEOUT");
                     flight = new(account, baseline.Cache, session, baseline.Epoch, left);
                     detailsFlights.Add(flight); Enter(isPhysical: true); start = true;
+                    _ = flight.Completion.Task.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                 }
-                flight.Waiters++;
             }
             if (start) _ = RunDetailsFlight(flight);
             return await flight.Completion.Task.WaitAsync(caller).ConfigureAwait(false);
@@ -149,31 +169,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
             if (timeout.IsCancellationRequested) throw new MusicAccountException("TIMEOUT");
             throw;
         }
-        finally
-        {
-            try
-            {
-                if (flight is not null)
-                {
-                    bool drain;
-                    lock (gate)
-                    {
-                        flight.Waiters--;
-                        drain = flight.Waiters == 0 && !flight.Completion.Task.IsCompleted;
-                        if (drain) flight.Abort(timeout.IsCancellationRequested && !token.IsCancellationRequested ? "TIMEOUT" : "CANCELLED");
-                    }
-                    // One cancelled subscriber does not abort other subscribers.
-                    // The last one must await actual HTTP/CAS/cleanup before leaving.
-                    if (drain)
-                    {
-                        try { await flight.Completion.Task.ConfigureAwait(false); }
-                        catch (MusicAccountException e) when (e.Code == "COMMIT_UNKNOWN") { throw; }
-                        catch { }
-                    }
-                }
-            }
-            finally { Leave(); }
-        }
+        finally { Leave(); }
     }
     private MusicAccountDetailsObservation ValidateDetailsObservation(
         MusicAccountDetailsObservation observed, string platform, string cookie)
@@ -269,7 +265,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
             }
             try
             {
-                var receipt = await store.WriteAsync(DocumentNamespace, bytes, document.Fingerprint, flight.Deadline.Token).ConfigureAwait(false);
+                var receipt = await store.WriteAsync(DocumentNamespace, bytes, document.Fingerprint, CancellationToken.None).ConfigureAwait(false);
                 AccountRules.Require(receipt == DocumentFingerprint.FromBytes(bytes), "COMMIT_UNKNOWN");
             }
             catch (DocumentStoreException e) when (e.Error == DocumentStoreError.Conflict)
@@ -280,8 +276,9 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
             catch { throw new MusicAccountException("COMMIT_UNKNOWN"); }
             lock (gate)
             {
-                DetailsGuard(flight);
+                // A real receipt settles persistence even if display authority expired.
                 detailsUncertain.Remove(flight.Session.Platform); flight.Admitted = false;
+                DetailsGuard(flight);
             }
             return true;
         }

@@ -14,7 +14,7 @@ public static class SharedPresentationLifecycleTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("hidden cards stop motion and retire hover preview without unloading", async () =>
+        yield return Case("hidden cards stop motion and retain initialized songs without unloading", async () =>
         {
             var entry = new EntryCard
             {
@@ -24,23 +24,21 @@ public static class SharedPresentationLifecycleTests
             };
             using var scene = new Scene(entry);
             await Drain();
-            int previews = 0;
-            CancellationToken preview = default;
-            entry.PreviewRequested += (_, _) => { previews++; preview = entry.PreviewCancellation; };
+            var card = (MusicCatalogCard)entry.DataContext;
+            card.InitializePreview([new("初始化曲目", "艺人", "", 1, null)]);
             entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
-            Check(previews == 1 && !preview.IsCancellationRequested, "visible hover owns one preview request");
             var surface = (Grid)entry.FindName("Surface");
             CardMotion.Transition(surface, true, animate: true);
             entry.Visibility = Visibility.Collapsed;
             Check(entry.IsLoaded, "hiding retains the loaded card");
-            Check(preview.IsCancellationRequested, "hiding retires the preview request");
+            Check(card.HasPreview, "hiding retains page-owned songs");
             Check(CardMotion.GetProgress(surface) == 0 && !surface.HasAnimatedProperties,
                 "hidden card owns no hover animation clock");
             entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
-            Check(previews == 1, "hidden synthetic input cannot start a preview");
+            Check(card.PreviewTitles.SequenceEqual(["1 初始化曲目"]), "hidden input cannot change initialized songs");
             entry.Visibility = Visibility.Visible;
             scene.Layout(); await Drain();
-            Check(previews == 1, "showing the retained card does not synthesize a hover request");
+            Check(card.PreviewTitles.SequenceEqual(["1 初始化曲目"]), "returning reuses initialized songs");
         });
         yield return Case("hidden shelf retains rows and settled position but stops paging motion", async () =>
         {

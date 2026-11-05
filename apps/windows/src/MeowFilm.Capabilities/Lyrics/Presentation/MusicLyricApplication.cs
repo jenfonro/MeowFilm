@@ -24,6 +24,7 @@ public sealed class MusicLyricApplication(
     private readonly Dictionary<string, long> epochs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Cached> cache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Pending> pending = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ScriptRead> scriptReads = new(StringComparer.Ordinal);
     private readonly HashSet<Task> operations = [];
     private readonly CancellationTokenSource lifetime = new();
     private int cacheBytes;
@@ -36,12 +37,20 @@ public sealed class MusicLyricApplication(
         internal string Key = key;
         internal NativeLyricRequest Request = request;
         internal long Epoch = epoch;
-        internal int Subscribers;
         internal CancellationTokenSource Cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
         internal TaskCompletionSource<JsonElement?> Result = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal Task Work = Task.CompletedTask;
         internal Task? Cancelling;
         internal void Cancel() => Cancelling ??= Cancellation.CancelAsync();
+    }
+    private sealed class ScriptRead(string platform, CancellationToken lifetime) : IDisposable
+    {
+        internal readonly string Platform = platform;
+        internal readonly CancellationTokenSource Cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+        internal Task<JsonElement> Work = null!;
+        internal Task? Cancelling;
+        internal void Cancel() => Cancelling ??= Cancellation.CancelAsync();
+        public void Dispose() => Cancellation.Dispose();
     }
 
     public async Task<JsonElement> ExecuteAsync(object? parameters, CancellationToken cancellationToken = default)
@@ -141,10 +150,10 @@ public sealed class MusicLyricApplication(
                             capability.GetProperty("platform").GetString() == platform &&
                             capability.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "lyric")))
                         continue;
-                    var result = await script("music.online.lyrics", new {
+                    var result = await ReadScriptAsync(platform, new {
                         installationId = id, platform, sourceKey, song,
                         generation = item.GetProperty("generation").GetInt64()
-                    }, cancellationToken).ConfigureAwait(false);
+                    }, policy, epoch, cancellationToken).ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
                     CheckEpoch(policy, platform, epoch);
                     if (!result.GetProperty("ok").GetBoolean())
@@ -182,6 +191,51 @@ public sealed class MusicLyricApplication(
         }
     }
 
+    private Task<JsonElement> ReadScriptAsync(string platform, object input, long policy, long epoch, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var parameters = JsonSerializer.SerializeToElement(input);
+        var key = Convert.ToHexStringLower(SHA256.HashData(
+            JsonSerializer.SerializeToUtf8Bytes(new { parameters, policy, epoch })));
+        ScriptRead entry;
+        lock (gate)
+        {
+            CheckEpoch(policy, platform, epoch);
+            if (!scriptReads.TryGetValue(key, out entry!))
+            {
+                entry = new(platform, lifetime.Token);
+                scriptReads.Add(key, entry);
+                entry.Work = CompleteScriptAsync(entry);
+                operations.Add(entry.Work); _ = Observe(entry.Work);
+            }
+        }
+        return entry.Work.WaitAsync(token);
+
+        async Task<JsonElement> CompleteScriptAsync(ScriptRead read)
+        {
+            await Task.Yield();
+            try
+            {
+                var reply = await script("music.online.lyrics", parameters, read.Cancellation.Token).ConfigureAwait(false);
+                CheckEpoch(policy, platform, epoch);
+                read.Cancellation.Token.ThrowIfCancellationRequested();
+                return reply;
+            }
+            catch (OperationCanceledException) { CheckEpoch(policy, platform, epoch); throw; }
+            finally
+            {
+                Task? cancelling;
+                lock (gate)
+                {
+                    if (scriptReads.GetValueOrDefault(key) == read) scriptReads.Remove(key);
+                    cancelling = read.Cancelling;
+                }
+                try { if (cancelling is not null) await cancelling.ConfigureAwait(false); }
+                finally { read.Dispose(); }
+            }
+        }
+    }
+
     private async Task<JsonElement?> ReadOfficial(NativeLyricRequest request, CancellationToken token)
     {
         Pending entry;
@@ -200,37 +254,19 @@ public sealed class MusicLyricApplication(
                 // Cancelled work stays owned until its real provider exits.
                 // Removing a dedup key is not physical cancellation.
                 entry = new(key, request, epoch, lifetime.Token);
-                pending.Add(key, entry); entry.Subscribers = 1;
+                pending.Add(key, entry);
+                _ = entry.Result.Task.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                 entry.Work = Complete(entry);
                 operations.Add(entry.Work); _ = Observe(entry.Work);
             }
-            else entry.Subscribers++;
         }
-        try { return (await entry.Result.Task.WaitAsync(token).ConfigureAwait(false))?.Clone(); }
-        finally
-        {
-            bool drain = false;
-            lock (gate)
-            {
-                entry.Subscribers--;
-                if (entry.Subscribers == 0 && pending.TryGetValue(entry.Key, out var current) && ReferenceEquals(current, entry))
-                {
-                    // Cancellation callbacks must not be synchronously invoked
-                    // while holding the cache gate.
-                    entry.Cancel();
-                    drain = true;
-                }
-            }
-            if (drain)
-            {
-                try { await entry.Work.ConfigureAwait(false); }
-                catch { /* The cancelled subscriber keeps only physical-drain ownership. */ }
-            }
-        }
+        return (await entry.Result.Task.WaitAsync(token).ConfigureAwait(false))?.Clone();
     }
     private async Task Observe(Task task)
     {
         try { await task.ConfigureAwait(false); }
+        catch { /* The subscribed caller observes failure; abandoned reads remain owned. */ }
         finally { lock (gate) operations.Remove(task); }
     }
     private async Task Complete(Pending entry)
@@ -263,7 +299,7 @@ public sealed class MusicLyricApplication(
             {
                 token.ThrowIfCancellationRequested();
                 LJ.Require(!closed && entry.Epoch == epochs.GetValueOrDefault(entry.Request.Platform), "STALE_SESSION");
-                if (result is { } value && entry.Subscribers > 0 &&
+                if (result is { } value &&
                     pending.TryGetValue(entry.Key, out var current) && ReferenceEquals(current, entry))
                 {
                     int bytes = Encoding.UTF8.GetByteCount(value.GetRawText());
@@ -307,6 +343,8 @@ public sealed class MusicLyricApplication(
             { cache.Remove(item.Key); cacheBytes -= item.Value.Bytes; }
             foreach (var item in pending.Where(pair => platform is null || pair.Value.Request.Platform == platform).ToArray())
             { pending.Remove(item.Key); item.Value.Cancel(); }
+            foreach (var item in scriptReads.Where(pair => platform is null || pair.Value.Platform == platform).ToArray())
+            { scriptReads.Remove(item.Key); item.Value.Cancel(); }
         }
         if (platform is null or "wy" or "tx" or "kg") official.Invalidate(platform);
     }
@@ -319,13 +357,18 @@ public sealed class MusicLyricApplication(
             return new(disposal = Close());
         }
     }
+    internal async Task DrainAsync()
+    {
+        Task[] active; lock (gate) active = operations.ToArray();
+        try { await Task.WhenAll(active).ConfigureAwait(false); }
+        catch { /* Individual reads retain their errors after physical settlement. */ }
+    }
     private async Task Close()
     {
         await Task.Yield();
         await lifetime.CancelAsync().ConfigureAwait(false);
-        Task[] active; lock (gate) active = operations.ToArray();
-        await Task.WhenAll(active).ConfigureAwait(false);
-        lifetime.Dispose();
+        try { await DrainAsync().ConfigureAwait(false); }
+        finally { lifetime.Dispose(); }
     }
     private static JsonElement WithTarget(JsonElement value, string sourceKey)
     {

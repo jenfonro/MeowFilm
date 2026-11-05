@@ -29,6 +29,8 @@ public static class StorageTests
         yield return new("storage.local.failed-rename-preserves-old-cleans-own-stage", LocalRenameFailure);
         yield return new("storage.local.concurrent-store-instances-cas", LocalConcurrent);
         yield return new("storage.local.cancel-close-lock-contention", LocalCancellation);
+        yield return new("storage.local.accepted-writes-FIFO-survive-cancel-and-close", () => QueuedWrites(false));
+        yield return new("storage.dpapi.accepted-writes-FIFO-survive-cancel-and-close", () => QueuedWrites(true));
         yield return new("storage.local.document-eight-mib-limit-on-read-and-write", LocalMaximum);
         yield return new("storage.local.unknown-files-and-stages-preserved", LocalUnknownFiles);
         yield return new("storage.local.complete-source-sixteen-mib-edit-and-cas", LocalSource);
@@ -231,6 +233,36 @@ public static class StorageTests
             await StoreError(() => store.ReadAsync(Ns), DocumentStoreError.Closed);
         }
         finally { await store.DisposeAsync(); }
+    }
+    private static async Task QueuedWrites(bool protect)
+    {
+        using var fixture = new Temp();
+        await using var store = new LocalDocumentStore(fixture.Root, [Ns], protectedNamespaces: protect ? [Ns] : []);
+        var initial = await store.WriteAsync(Ns, "old"u8.ToArray(), DocumentFingerprint.Missing);
+        using var cancellation = new CancellationTokenSource();
+        Task<DocumentFingerprint> first, second, conflict, final;
+        Task close;
+        using (var held = new FileStream(Path.Combine(fixture.Root, ".documents.lock"),
+            FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var bytes = "first"u8.ToArray();
+            first = store.WriteAsync(Ns, bytes, initial, cancellation.Token);
+            bytes.AsSpan().Fill(0); // Queued operation must own the input at admission.
+            second = store.WriteAsync(Ns, "second"u8.ToArray(), DocumentFingerprint.FromBytes("first"u8), cancellation.Token);
+            conflict = store.WriteAsync(Ns, "wrong"u8.ToArray(), initial, cancellation.Token);
+            final = store.WriteAsync(Ns, "final"u8.ToArray(), DocumentFingerprint.FromBytes("second"u8), cancellation.Token);
+            cancellation.Cancel();
+            close = store.DisposeAsync().AsTask();
+            Assert(!close.IsCompleted && !first.IsCompleted && !final.IsCompleted);
+            await StoreError(() => store.WriteAsync(Ns, "denied"u8.ToArray(), initial), DocumentStoreError.Closed);
+        }
+        Assert(await first == DocumentFingerprint.FromBytes("first"u8));
+        Assert(await second == DocumentFingerprint.FromBytes("second"u8));
+        await StoreError(() => conflict, DocumentStoreError.Conflict);
+        Assert(await final == DocumentFingerprint.FromBytes("final"u8));
+        await close;
+        await using var reopened = new LocalDocumentStore(fixture.Root, [Ns], protectedNamespaces: protect ? [Ns] : []);
+        Equal("final"u8.ToArray(), (await reopened.ReadAsync(Ns)).Data!);
     }
     private static async Task LocalMaximum()
     {

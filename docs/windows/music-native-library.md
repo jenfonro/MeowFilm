@@ -59,7 +59,7 @@ ValueTask DisposeAsync();
 - UTF-8 字节必须等于当前 canonical JSON 编码；重复属性、非规范持久整数、额外根字段和未知 entry 均拒绝。
 - entry key 必须属于当前 owner 的明确 area，或属于当前已安装脚本实例的精确私有 storage key。
 - 缺少可选 area 表示该 area 尚未创建；entry 已存在但值为 `null`、错误类型或错误 schema 时不是空状态。
-- 仅接受当前格式；不兼容文档保持原字节不变并明确失败，不转换或回退读取。
+- 按各 area 当前字段、schema 及引用约束校验；不符合契约的文档保持原字节不变并明确失败，读取不执行格式转换或回退。
 
 当前普通 area：
 
@@ -104,7 +104,7 @@ playback-settings
 - 曲库、设置和 LX 脚本 KV 随普通 `music.library.v1` JSON 明文存储；脚本自行保存的 Cookie 等值不由运行器特殊加密。文件和会话隔离、整文档 CAS 与未知提交恢复继续生效。未被 metadata 引用的源码不会被静默删除或当作安装实例。
 - 开发阶段不迁移旧加密文档或 `music.script-sources.v1` 分片，不提供读取回退，也不自动删除旧数据。
 - 安装启停或删除不修改在线设置及其 revision；删除安装实例仍在同一 CAS 中移除该实例的私有 storage。
-- 安装元数据本身不因读取而写入；安装 schema 3、内联源码和其他不符合当前安装格式的记录明确失败，不迁移、转换、删除或回退。在线设置同样只接受下述当前格式。
+- 安装元数据只按 schema 4 及上述字段、引用约束读取，读取不写入。在线设置按下述 schema 3 及字段集合校验。
 
 ## 在线设置当前格式
 
@@ -120,7 +120,7 @@ playback-settings
 
 - 缺少该 area 时，`music.settings.get` 返回上述缺省 `settings`，不制造 area 或文档。
 - `music.settings.save` 必须且只能携带 `ifRevision` 和 `lyrics`；成功保存推进一次 revision，旧 revision 返回 `REVISION_CONFLICT`。当前读写格式均不包含全局音源选择。
-- 已存在该 area 时必须完整符合 schema 3；非当前 schema、旧 `target` 字段、缺字段、多余字段或损坏数据均明确失败，原文档不覆写。
+- 已存在该 area 时按封闭协议校验：必须为 schema 3，完整且仅包含 `schema`、`revision`、`lyrics`，各字段类型和值须合法；不符合契约即失败，原文档不覆写。
 - 读取和重启不写入；保存通过 owner gate 和完整文档 CAS 持久化。未知提交由显式 reconcile 核对实际结果，不重放写入。
 - 在线设置保存未知提交后，后续命令封闭，使用显式 `ReconcileAsync` 读回 before/after 指纹。结算不重放写入，也不替换 pending；第三状态保持冲突。
 - 相关公开行为用例位于 `MusicNativeLibraryTests.cs` 和 `MusicOnlineSettingsTests.cs`；执行结果由集中验证记录。

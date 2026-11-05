@@ -150,6 +150,12 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                     Fields(input, ["platform", "id", "refresh"], ["platform", "id"]);
                     result = await catalog.AlbumAsync(new(Platform(input), Text(input, "id"),
                         Flag(input, "refresh")), signal).ConfigureAwait(false); break;
+                case "music.catalog.chart":
+                    Fields(input, ["platform", "kind", "period", "year", "refresh"], ["platform", "kind"]);
+                    if (catalog is not IMusicChartCatalog charts) throw new CatalogFailure("UNSUPPORTED");
+                    result = await charts.ChartAsync(new(Platform(input), Text(input, "kind"),
+                        Text(input, "period", "daily"), input.TryGetProperty("year", out _) ? Number(input, "year") : null,
+                        Flag(input, "refresh")), signal).ConfigureAwait(false); break;
                 case "music.catalog.artist":
                     Fields(input, ["platform", "id", "refresh"], ["platform", "id"]);
                     if (catalog is not IMusicArtistCatalog artists) throw new CatalogFailure("UNSUPPORTED");
@@ -323,7 +329,10 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
             if (action == "play")
             {
                 if (memberId is not null) index = Array.IndexOf(item.Members, memberId);
-                Check(index >= 0 && index < item.Songs.Length, memberId is null ? "INVALID_REQUEST" : "SNAPSHOT_CHANGED");
+                else if (!input.TryGetProperty("index", out _) && input.TryGetProperty("expectedSongId", out _))
+                    index = Array.FindIndex(item.Songs, song => Text(song, "songId") == Text(input, "expectedSongId"));
+                Check(index >= 0 && index < item.Songs.Length,
+                    memberId is null && !input.TryGetProperty("expectedSongId", out _) ? "INVALID_REQUEST" : "SNAPSHOT_CHANGED");
                 Check(!input.TryGetProperty("expectedSongId", out _) ||
                     Text(input, "expectedSongId") == Text(item.Songs[index], "songId"), "SNAPSHOT_CHANGED");
             }

@@ -17,6 +17,7 @@ public static class MusicCatalogLayoutTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("first-load templates match real two-banner and card geometry without artwork", SkeletonGeometry);
+        yield return Case("banner artwork dimensions drive full-image aspect ratio after asynchronous arrival", BannerAspect);
         yield return Case("two-banner paging retains final resources resize and indicator position", BannerPaging);
         yield return Case("indicator keeps the active anchor while neighboring dots slide and scale", IndicatorDrawing);
     }
@@ -76,6 +77,42 @@ public static class MusicCatalogLayoutTests
             Check(shapes.All(s => !s.IsSweeping), "hidden placeholders stop their sweep");
         }
     }
+
+    private static async Task BannerAspect()
+    {
+        var template = new MusicCatalogView();
+        foreach (var (width, height) in new[] { (1029, 399), (800, 200) })
+        {
+            var card = (FrameworkElement)((DataTemplate)template.FindResource("Catalog.Banner")).LoadContent();
+            card.DataContext = new MusicCatalogCard("banner", "横幅", "", "https://art.example.test/banner", "playlist", "wy", ActionId: "1");
+            var loader = new BannerLoader(); ArtworkScope.SetLoader(card, loader);
+            using var scene = new Scene(card, 826);
+            await Until(() => loader.Reads == 1);
+            var pixels = new byte[width * height * 4];
+            for (int i = 0; i < pixels.Length; i += 4) { pixels[i + 2] = 180; pixels[i + 3] = 255; }
+            var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, pixels, width * 4); bitmap.Freeze();
+            loader.Result.SetResult(new BannerLease(bitmap));
+            var artwork = Descendants<ArtworkImage>(card).Single();
+            await Until(() => artwork.AspectRatio > 0);
+            foreach (double viewport in new[] { 826d, 560d })
+            {
+                scene.Layout(viewport); await Drain(); scene.Layout(viewport);
+                Check(Math.Abs(artwork.AspectRatio - (double)width / height) < .0001, "decoded dimensions retain the real source ratio");
+                Check(artwork.Stretch == Stretch.Uniform && Math.Abs(artwork.ActualHeight - artwork.ActualWidth * height / width) < 1,
+                    "the full source fits the dynamically measured frame without cropping or stretching");
+            }
+            Check(loader.Reads == 1, "resizing does not reacquire artwork");
+        }
+    }
+    private sealed class BannerLoader : IArtworkLoader
+    {
+        internal int Reads;
+        internal readonly TaskCompletionSource<IArtworkLease> Result = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
+        { Reads++; return Result.Task; }
+    }
+    private sealed class BannerLease(BitmapSource image) : IArtworkLease
+    { public BitmapSource Image => image; public void Dispose() { } }
 
     private static async Task BannerPaging()
     {

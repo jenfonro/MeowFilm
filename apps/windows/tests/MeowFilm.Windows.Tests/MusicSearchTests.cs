@@ -26,6 +26,7 @@ public static partial class MusicSearchTests
         yield return new("Search platform priority picks representative metadata and breaks ties", Priority);
         yield return new("Search later rounds never show a conflicting recording twice", RoundConflict);
         yield return new("Search pages are cached per kind and expire after the configured time", Cache);
+        yield return new("Search stopping keeps dispatched page for cache but never dispatches remaining pages", RetiredPageCache);
         foreach (string kind in new[] { "songs", "playlists" })
         {
             string selected = kind;
@@ -642,9 +643,31 @@ public static partial class MusicSearchTests
             Check(S(joined[1], "id") == id, "same replacement must share one admitted session");
             var result = await f.Idle(id);
             Code(await f.Call("get", oldSongs), "SEARCH_NOT_FOUND"); Code(await f.Call("get", oldLists), "SEARCH_NOT_FOUND");
-            Check(S(result, "keyword") == "replacement" && f.Catalog.Calls.Count == 3 && held.Calls.All(c => c.Token.IsCancellationRequested));
+            Check(S(result, "keyword") == "replacement" && f.Catalog.Calls.Count == 3 && held.Calls.All(c => !c.Token.IsCancellationRequested));
         }
         finally { held.Release(); }
+    }
+    private static async Task RetiredPageCache()
+    {
+        await using var f = new Fixture();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        CancellationToken physical = default;
+        f.Catalog.Handler = async (request, token) =>
+        {
+            physical = token; entered.TrySetResult(); await release.Task;
+            return Page(request, [Song(request.Platform, "1", "Retired")], true);
+        };
+        string id = S(await f.Start(["tx"], pages: 3, concurrency: 1), "id");
+        await entered.Task;
+        var stop = f.Call("cancel", id);
+        try { Check(!physical.IsCancellationRequested && !stop.IsCompleted); }
+        finally { release.TrySetResult(); }
+        await stop;
+        Check(f.Catalog.Calls.Count == 1, "Retired query dispatched another page");
+        f.Catalog.Handler = (_, _) => throw new InvalidOperationException("Completed retired page must be cached");
+        var result = await f.Idle(S(await f.Start(["tx"], pages: 1), "id"));
+        Check(result.GetProperty("items").GetArrayLength() == 1 && f.Catalog.Calls.Count == 1);
     }
     private static async Task CancelReplacement()
     {

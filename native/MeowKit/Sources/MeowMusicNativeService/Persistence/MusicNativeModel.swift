@@ -124,8 +124,9 @@ enum MusicModel {
     }
     static func cleanSong(_ raw: MJ) throws -> MJ {
         let fields = ["songId", "title", "artist", "album", "duration", "cover_url", "sources"]
-        var song = durable(raw)
-        try song.requireFields(fields, required: ["songId", "title", "artist", "album", "duration", "sources"])
+        try musicRequire(raw.isObject &&
+            ["songId", "title", "artist", "album", "duration", "sources"].allSatisfy(raw.contains), .corruptDocument)
+        var song = durable(.obj(fields.filter(raw.contains).map { ($0, raw[$0]) }))
         _ = try song["songId"].text()
         _ = try song["title"].text(1024)
         for field in ["artist", "album"] {

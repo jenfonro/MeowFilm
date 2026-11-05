@@ -496,8 +496,10 @@ public static class CardClip
     private static void Clip(FrameworkElement e) =>
         e.Clip = new RectangleGeometry(new Rect(0, 0, e.ActualWidth, e.ActualHeight), GetRadius(e), GetRadius(e));
 }
-public sealed class BannerHeightConverter : System.Windows.Data.IValueConverter
+public sealed class BannerHeightConverter : System.Windows.Data.IMultiValueConverter
 {
-    public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture) => value is double width ? width * .56 : 180d;
-    public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture) => throw new NotSupportedException();
+    public object Convert(object[] values, Type targetType, object parameter, System.Globalization.CultureInfo culture) =>
+        values.Length == 2 && values[0] is double width && width > 0 && values[1] is double ratio && ratio > 0
+            ? width / ratio : 160d; // An unloaded placeholder only; decoded dimensions own the final geometry.
+    public object[] ConvertBack(object value, Type[] targetTypes, object parameter, System.Globalization.CultureInfo culture) => throw new NotSupportedException();
 }
