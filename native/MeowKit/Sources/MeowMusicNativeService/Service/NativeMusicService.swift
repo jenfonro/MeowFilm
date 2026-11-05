@@ -194,7 +194,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
         ownedTransport = owned
         publicPlatforms = MusicNativePlatforms(transport: transport ?? owned!, qq: qq, clock: clock, clients: clientContexts)
         // The existing nonisolated protection fence must also revoke feedback
-        // before the service actor can acknowledge a lock-screen transition.
+        // before the service actor can acknowledge an access transition.
         let feedback = playbackFeedback
         access.register(UUID()) { feedback.invalidate() }
     }

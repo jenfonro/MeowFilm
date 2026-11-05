@@ -252,7 +252,7 @@ public static class MusicNativeKgAccountTests
         f.Transport.HoldAt = "profile";
         var pending = Poll(f.Owner, Id(b)); await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
         using var http = MusicPlatformHttp.CreateWithHandler(new KgAccountHandler());
-        await using var otherStore = new DpapiDocumentStore(f.Path, ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace]);
+        await using var otherStore = new LocalDocumentStore(f.Path, ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace]);
         await using var clientContext1 = new MusicClientContextFixture(http);
         await using var other = clientContext1.CreateAccountOwner(otherStore);
         Check(Ok(await other.CallAsync("music.accounts.logout", new { platform = "kg" })));
@@ -403,7 +403,7 @@ internal sealed class KgAccountFixture : IAsyncDisposable
     internal KgAccountFixture(string? path = null)
     {
         Path = path ?? MusicNativeKgAccountTests.DataPath();
-        Store = new(new DpapiDocumentStore(Path, ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace]));
+        Store = new(new LocalDocumentStore(Path, ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace]));
         Http = MusicPlatformHttp.CreateWithHandler(Transport);
         Clients = new(Http, Store, importAccounts: true, clock: Clock, registrationEntropy: () => "test01");
         Protocol = Clients.CreateAccountProtocol(); Owner = Clients.CreateAccountOwner(Store, Protocol);
@@ -414,16 +414,16 @@ internal sealed class KgAccountFixture : IAsyncDisposable
             Transport.DurableSeed = device["seed"]!.GetValue<string>();
         };
     }
-    internal static async Task<JsonObject> ReadRoot(IProtectedDocumentStore store)
+    internal static async Task<JsonObject> ReadRoot(IDocumentStore store)
     {
         var doc = await store.ReadAsync("music.accounts.v1");
         try { return doc.Data is null ? new JsonObject { ["version"] = 1, ["entries"] = new JsonArray() } :
             JsonNode.Parse(doc.Data)!.AsObject(); }
         finally { if (doc.Data is not null) CryptographicOperations.ZeroMemory(doc.Data); }
     }
-    internal static async Task<JsonObject> ReadDevice(IProtectedDocumentStore store) =>
+    internal static async Task<JsonObject> ReadDevice(IDocumentStore store) =>
         (await MusicClientContextFixture.ReadDocument(store))["kg"]!.AsObject();
-    internal static async Task Edit(IProtectedDocumentStore store, Action<JsonObject> action)
+    internal static async Task Edit(IDocumentStore store, Action<JsonObject> action)
     {
         var doc = await store.ReadAsync("music.accounts.v1");
         try
@@ -436,10 +436,10 @@ internal sealed class KgAccountFixture : IAsyncDisposable
         }
         finally { if (doc.Data is not null) CryptographicOperations.ZeroMemory(doc.Data); }
     }
-    internal static Task SeedDevice(IProtectedDocumentStore store, string? dfid = KgAccountHandler.Dfid) =>
+    internal static Task SeedDevice(IDocumentStore store, string? dfid = KgAccountHandler.Dfid) =>
         Edit(store, root => root["entries"]!.AsArray().Add(new JsonObject { ["key"] = DeviceKey,
             ["value"] = new JsonObject { ["version"] = 1, ["generation"] = 1, ["seed"] = Seed, ["dfid"] = dfid } }));
-    internal static Task MutateDevice(IProtectedDocumentStore store) => MusicClientContextFixture.MutateDocument(store, root =>
+    internal static Task MutateDevice(IDocumentStore store) => MusicClientContextFixture.MutateDocument(store, root =>
     {
         var value = root["kg"]!;
         value["generation"] = value["generation"]!.GetValue<long>() + 1; value["dfid"] = "SYNTHETIC_NEW_DFID";
@@ -452,13 +452,13 @@ internal sealed class KgAccountFixture : IAsyncDisposable
     }
 }
 
-internal sealed class KgAccountStore(DpapiDocumentStore inner) : IProtectedDocumentStore
+internal sealed class KgAccountStore(LocalDocumentStore inner) : IDocumentStore
 {
-    internal DpapiDocumentStore Inner => inner;
+    internal LocalDocumentStore Inner => inner;
     internal int Writes, AccountWrites, Disposals, LoseReceiptAt, ConflictAt, HoldAt;
     internal TaskCompletionSource Arrived = new(TaskCreationOptions.RunContinuationsAsynchronously),
         Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
+    public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
     public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
         DocumentFingerprint expected, CancellationToken token = default)
     {
@@ -478,7 +478,7 @@ internal sealed class KgAccountStore(DpapiDocumentStore inner) : IProtectedDocum
                         ["scope"] = null, ["validatedAt"] = null } }));
             }
             var result = await inner.WriteAsync(ns, data, expected, token);
-            if (write == LoseReceiptAt) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+            if (write == LoseReceiptAt) throw new DocumentStoreException(DocumentStoreError.Storage);
             return result;
         }
         return await inner.WriteAsync(ns, data, expected, token);

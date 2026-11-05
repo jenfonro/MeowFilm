@@ -33,6 +33,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     }
     private let channelTabs = MusicChannelTabsView()
     private let cataloguePlaceholder = UILabel()
+    private let loadingSkeleton = MusicLoadingSkeletonView()
 
     public init(model: MusicViewModel, browser: (any MusicPublicBrowsing)?,
                 appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting) {
@@ -56,8 +57,10 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         cataloguePlaceholder.textColor = UIColor(theme.muted)
         cataloguePlaceholder.isHidden = true
         view.addSubview(cataloguePlaceholder)
+        view.addSubview(loadingSkeleton)
         pager.view.translatesAutoresizingMaskIntoConstraints = false
         cataloguePlaceholder.translatesAutoresizingMaskIntoConstraints = false
+        loadingSkeleton.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             pager.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             pager.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -66,6 +69,10 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
             cataloguePlaceholder.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             cataloguePlaceholder.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
             cataloguePlaceholder.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            loadingSkeleton.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            loadingSkeleton.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            loadingSkeleton.topAnchor.constraint(equalTo: contentTopAnchor),
+            loadingSkeleton.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         pager.didMove(toParent: self)
         if let catalogue {
@@ -80,12 +87,17 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     public override func pageDidBecomeActive() { activateCatalogue() }
     public override func pageDidBecomeInactive() {
+        loadingSkeleton.setDisplayVisible(false)
         observation?.cancel(); observation = nil; observationAccess = nil
         catalogue?.disappear()
         for page in pages.values { PageViewController.invalidatePages(in: page) }
         pages.removeAll()
     }
-    public override func pageDidBecomeVisible() { renderCatalogueState() }
+    public override func pageDidBecomeVisible() { activateCatalogue(); renderCatalogueState() }
+    public override func pageDidBecomeHidden() {
+        catalogue?.setDisplayVisible(false)
+        loadingSkeleton.setDisplayVisible(false)
+    }
     public override func pageDidFinishAppearing() {
         if catalogue?.error != nil { renderCatalogueState() }
     }
@@ -158,17 +170,21 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         catalogue.setAccess(available: model.isAvailable && !model.isClosed,
                             generation: model.accountAccessGeneration)
         catalogue.appear()
+        catalogue.setDisplayVisible(isPageVisible)
         if observationAccess != model.accountAccessGeneration {
             observation?.cancel(); observationAccess = model.accountAccessGeneration
             observation = Task { await catalogue.observeHomeChanges() }
         }
-        if !catalogue.loaded, !catalogue.isLoading, catalogue.error == nil {
-            runPageTask { await catalogue.loadIfNeeded() }
+        if isPageVisible, !catalogue.loaded, !catalogue.isLoading, catalogue.error == nil {
+            runPageTask { [weak self] in
+                if self?.isPageVisible == true { await catalogue.loadIfNeeded() }
+            }
         }
         renderCatalogue()
     }
 
     private func renderCatalogue() {
+        guard isPageVisible || catalogue?.sections.isEmpty != false else { return }
         let items = catalogue?.sections.flatMap(\.items).compactMap { item -> MusicPublicBrowseChannel? in
             if case .channel(let value) = item.content { return value }; return nil
         } ?? []
@@ -194,8 +210,10 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     }
 
     private func renderCatalogueState() {
-        guard isViewLoaded else { return }
-        let text = channels.isEmpty ? catalogue?.isLoading == true ? "加载中" :
+        guard isViewLoaded, isPageVisible else { return }
+        let loading = channels.isEmpty && catalogue?.isLoading == true && catalogue?.loaded == false
+        loadingSkeleton.configure(loading: loading, visible: isPageVisible, theme: theme)
+        let text = channels.isEmpty ? catalogue?.isLoading == true ? nil :
             catalogue?.loaded == true ? "暂无频道" : nil : nil
         cataloguePlaceholder.text = text
         cataloguePlaceholder.isHidden = text == nil

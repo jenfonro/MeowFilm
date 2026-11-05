@@ -58,7 +58,10 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         reconcileAccess()
     }
     public override func pageDidBecomeInactive() { request = UUID() }
-    public override func pageDidBecomeVisible() { renderState() }
+    public override func pageDidBecomeVisible() {
+        renderState()
+        MusicArtworkView.retryFailedLoads(in: view)
+    }
     public override func pageDidFinishAppearing() {
         if loadError != nil { renderState() }
     }
@@ -71,6 +74,10 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         guard let id = dataSource.itemIdentifier(for: indexPath), let item = items[id] else { return }
         router?.showLocalCollection(item)
+    }
+    public func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
+                               forItemAt indexPath: IndexPath) {
+        if isPageVisible { MusicArtworkView.retryFailedLoads(in: cell) }
     }
     public func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,
                                sizeForItemAt indexPath: IndexPath) -> CGSize {
@@ -118,6 +125,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             collection.refreshControl?.endRefreshing()
             return
         }
+        if refresh { MusicArtworkView.retryFailedLoads(in: view) }
         let own = UUID(), access = model.accountAccessGeneration
         request = own; loading = true; loadError = nil; shownLoadError = nil
         renderState()

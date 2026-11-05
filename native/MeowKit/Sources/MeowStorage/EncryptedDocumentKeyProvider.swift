@@ -130,18 +130,22 @@ struct SystemEncryptedDocumentKeychainDriver: EncryptedDocumentKeychainDriver {
               let data = attributes[kSecValueData as String] as? Data else {
             return .init(status: .failure(.invalidKeyMaterial), data: nil)
         }
-        // Do not silently accept or "repair" an item created with weaker protection.
-        guard let protection = attributes[kSecAttrAccessible as String] as? String,
-              protection == (kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String),
-              (attributes[kSecAttrSynchronizable as String] as? Bool) != true else {
+        guard (attributes[kSecAttrSynchronizable as String] as? Bool) != true else {
+            return .init(status: .failure(.policyMismatch), data: nil)
+        }
+        guard Self.matchesAccessibility(attributes[kSecAttrAccessible as String] as? String) else {
             return .init(status: .failure(.policyMismatch), data: nil)
         }
         return .init(status: .success, data: data)
     }
 
+    static func matchesAccessibility(_ stored: String?) -> Bool {
+        stored == (kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
+    }
+
     func add(service: String, account: String, data: Data) -> EncryptedDocumentKeychainStatus {
         var query = baseQuery(service: service, account: account)
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         query[kSecValueData as String] = data
         return mapped(SecItemAdd(query as CFDictionary, nil))
     }

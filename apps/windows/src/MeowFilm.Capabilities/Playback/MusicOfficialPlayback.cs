@@ -111,8 +111,8 @@ public sealed partial class MusicCapability
         if (state?.Media?.Target is not { Official: true } target || target.Platform != platform) return;
         // Fence at notification time, before dispatching UI cleanup.
         try { state.Access.Cancel(); } catch (ObjectDisposedException) { }
-        if (!page.Dispatcher.HasShutdownStarted)
-            _ = page.Dispatcher.InvokeAsync(() =>
+        if (!Presentation.Dispatcher.HasShutdownStarted)
+            _ = Presentation.Dispatcher.InvokeAsync(() =>
             {
                 if (!ReferenceEquals(musicRecovery, state)) return;
                 TrackMusicRecovery(StopRevoked());

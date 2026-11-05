@@ -52,7 +52,7 @@ public sealed partial class MusicNativeApplication
         catch (MusicPlaybackCacheDataException) { }
         catch (MusicPlaybackCacheCommitException) { }
         catch (MusicLibraryException) { }
-        catch (ProtectedDocumentException) { }
+        catch (DocumentStoreException) { }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
     }
 }

@@ -31,11 +31,19 @@ public sealed partial class MusicCapability
     private long feedbackRevision;
     private bool feedbackSettingsLoaded, feedbackSettingsBusy;
     private string feedbackStatus = "";
+    private string publishedFeedbackStatus = "";
     public ObservableCollection<MusicFeedbackPlatformRow> FeedbackPlatforms { get; } =
         [new("wy"), new("tx"), new("kg")];
     public bool CanEditFeedback => CanEdit && feedbackSettingsLoaded && !feedbackSettingsBusy;
     public string FeedbackStatus => feedbackStatus.Length > 0 ? feedbackStatus :
         PlaybackFeedback.LastError is { } ? "播放记录上报失败" : "";
+    private void PublishFeedbackStatus()
+    {
+        var value = FeedbackStatus;
+        if (value == publishedFeedbackStatus) return;
+        publishedFeedbackStatus = value;
+        Changed(nameof(FeedbackStatus));
+    }
 
     private async Task ReadFeedbackSettings(CancellationToken token, bool refresh = false)
     {
@@ -47,7 +55,7 @@ public sealed partial class MusicCapability
         catch
         {
             feedbackSettingsLoaded = false; feedbackStatus = "上报设置读取失败";
-            Changed(nameof(CanEditFeedback)); Changed(nameof(FeedbackStatus)); throw;
+            Changed(nameof(CanEditFeedback)); PublishFeedbackStatus(); throw;
         }
     }
     private void PublishFeedbackSettings(MusicFeedbackSettings settings)
@@ -59,7 +67,7 @@ public sealed partial class MusicCapability
             RefreshPlatformSetting(row.Platform);
         }
         feedbackSettingsLoaded = true; feedbackStatus = "";
-        Changed(nameof(CanEditFeedback)); Changed(nameof(FeedbackStatus));
+        Changed(nameof(CanEditFeedback)); PublishFeedbackStatus();
     }
 
     public Task SetFeedbackEnabledAsync(MusicFeedbackPlatformRow row, bool enabled)
@@ -100,7 +108,7 @@ public sealed partial class MusicCapability
             {
                 feedbackSettingsBusy = false;
                 Changed(nameof(CanEditFeedback));
-                Changed(nameof(FeedbackStatus));
+                PublishFeedbackStatus();
                 RefreshPlatformSetting(row.Platform);
             }
         });
@@ -164,7 +172,7 @@ public sealed partial class MusicCapability
         { PlaybackFeedback.Finish("interrupt"); return; }
         PlaybackFeedback.Observe(openedEntry, playback.PositionSeconds, playback.DurationSeconds,
             running ?? playback.IsPlaying, AcceptedPlaybackRate ?? 1, mode);
-        Changed(nameof(FeedbackStatus));
+        PublishFeedbackStatus();
     }
     private void StartFeedback()
     {

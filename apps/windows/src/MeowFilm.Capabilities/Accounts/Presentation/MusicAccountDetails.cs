@@ -122,8 +122,8 @@ public sealed partial class MusicCapability
 
     private void AccountDetailsInvalidated(string platform)
     {
-        if (page.Dispatcher.HasShutdownStarted || page.Dispatcher.HasShutdownFinished) return;
-        _ = page.Dispatcher.InvokeAsync(() =>
+        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
+        _ = Presentation.Dispatcher.InvokeAsync(() =>
         {
             if (!stopping && !disposed)
                 PlatformSettings.FirstOrDefault(row => row.Platform == platform)?.InvalidateDetails();

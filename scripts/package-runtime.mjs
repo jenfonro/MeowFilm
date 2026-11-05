@@ -8,14 +8,26 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
 const PRODUCTS = Object.freeze({
-  aggregate: ['music', 'cat'],
+  aggregate: ['music', 'cat', 'source'],
 });
 const MANIFEST = 'runtime-manifest.json';
 const SHARED_SOURCE = 'apps/runtime';
-const SHARED_FILES = ['bootstrap.mjs', 'modules/music-script.mjs', 'modules/cat-script.mjs'];
-const SHARED_IMPORTS = new Set(['node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host']);
+const SHARED_FILES = [
+  'bootstrap.mjs', 'modules/music-script.mjs', 'modules/cat-script.mjs', 'modules/source-runtime.mjs',
+];
+const SHARED_IMPORTS = new Set([
+  'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
+]);
 const ENGINE_POLICY = 'scripts/quickjs-runtime.json';
 const ENGINE_VERSION = '0.32.0';
+const ENGINE_SOURCE = 'https://github.com/justjake/quickjs-emscripten';
+const ENGINE_GIT_HEAD = 'df4efb9ef2cb25c417ecb57986da462d11b244ed';
+const ENGINE_ARCHIVE_SHA256 = 'b6f342ad8e18bcff29ab4e78467d6e33c53c9e1a47986e58b91a1462beb31a8e';
+const ENGINE_PATCH = 'scripts/quickjs/task-context.patch';
+const ENGINE_BUILD = 'scripts/quickjs/build.py';
+const ENGINE_LOCAL_LOADER = 'packages/script-host/src/quickjs/emscripten-module.mjs';
+const ENGINE_LOCAL_WASM = 'packages/script-host/src/quickjs/emscripten-module.wasm';
+const WASM_MAGIC = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
 const ENGINE_WASM_PACKAGE = '@jitl/quickjs-wasmfile-release-sync';
 const ENGINE_PACKAGES = new Set([
   ENGINE_WASM_PACKAGE, 'quickjs-emscripten-core', '@jitl/quickjs-ffi-types',
@@ -321,7 +333,7 @@ function buildGraph(root, product, profile = 'windows-native') {
     if (value.link) safeRelative(value.resolved);
   }
   const modules = PRODUCTS[product];
-  const selected = ['runtime-bridge', 'script-host'];
+  const selected = ['runtime-bridge', 'source-runtime', 'script-host'];
   const workspacePaths = new Map(selected.map(name => [`packages/${name}`, `node_modules/@meowfilm/${name}`]));
   const nodes = new Map(), edges = [], omitted = [];
   const inputs = [{ path: 'package.json', sha256: rootJSON.hash }, { path: 'package-lock.json', sha256: lockJSON.hash }];
@@ -332,7 +344,11 @@ function buildGraph(root, product, profile = 'windows-native') {
     if (!enginePolicy) {
       const { value, hash } = readJSON(root, ENGINE_POLICY);
       const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+      const fields = (value, names) => isObject(value) && Object.keys(value).length === names.length
+        && names.every(name => Object.hasOwn(value, name));
+      const task = value.taskContext;
       check(value.schemaVersion === 1 && value.version === ENGINE_VERSION && value.variant === 'release-sync'
+        && value.source === ENGINE_SOURCE && value.gitHead === ENGINE_GIT_HEAD
         && Array.isArray(value.packages) && value.packages.length === ENGINE_PACKAGES.size
         && new Set(value.packages.map(pkg => pkg?.name)).size === ENGINE_PACKAGES.size
         && value.packages.every(pkg => isObject(pkg) && ENGINE_PACKAGES.has(pkg.name)
@@ -343,13 +359,36 @@ function buildGraph(root, product, profile = 'windows-native') {
               && Number.isSafeInteger(pkg.wasm.bytes) && pkg.wasm.bytes > 0 && digest(pkg.wasm.sha256)
             : pkg.wasm === undefined))
         && isObject(value.license) && value.license.path === 'LICENSES/quickjs-emscripten-LICENSE.txt'
-        && digest(value.license.sha256),
+        && digest(value.license.sha256)
+        && fields(task, ['revision', 'gitHead', 'upstreamArchiveSha256', 'toolchainVersion', 'patch', 'build', 'artifacts'])
+        && task.revision === 1 && task.gitHead === ENGINE_GIT_HEAD
+        && task.upstreamArchiveSha256 === ENGINE_ARCHIVE_SHA256 && task.toolchainVersion === '5.0.1'
+        && fields(task.patch, ['path', 'sha256']) && task.patch.path === ENGINE_PATCH && digest(task.patch.sha256)
+        && fields(task.build, ['path', 'sha256']) && task.build.path === ENGINE_BUILD && digest(task.build.sha256)
+        && Array.isArray(task.artifacts) && task.artifacts.length === 2
+        && new Set(task.artifacts.map(artifact => artifact?.path)).size === 2
+        && task.artifacts.every(artifact => fields(artifact, ['path', 'bytes', 'sha256'])
+          && [ENGINE_LOCAL_LOADER, ENGINE_LOCAL_WASM].includes(artifact.path)
+          && Number.isSafeInteger(artifact.bytes) && artifact.bytes > 0 && digest(artifact.sha256)),
       'INVALID_ENGINE_POLICY', 'QuickJS policy must pin only the reviewed release-sync engine');
       for (const pkg of value.packages) registryMetadata(pkg, ENGINE_POLICY);
       const license = sourcePath(root, value.license.path);
       check(lstatSync(license).isFile() && sha256(readFileSync(license)) === value.license.sha256,
         'ENGINE_LICENSE_MISMATCH', 'Reviewed QuickJS license does not match the engine policy');
       inputs.push({ path: ENGINE_POLICY, sha256: hash }, { ...value.license });
+      // Validate the derived pair and reproduction inputs before any payload copy.
+      // Paths above are pinned in code; the policy cannot grant other binaries.
+      for (const input of [task.patch, task.build, ...task.artifacts]) {
+        const file = sourcePath(root, input.path);
+        check(lstatSync(file).isFile(), 'INVALID_SOURCE', `Not a regular source file: ${input.path}`);
+        const bytes = readFileSync(file);
+        check(sha256(bytes) === input.sha256 && (input.bytes === undefined || bytes.length === input.bytes),
+          'ENGINE_HASH_MISMATCH', `QuickJS task-context input differs from the reviewed revision: ${input.path}`);
+        if (input.path === ENGINE_LOCAL_WASM) check(bytes.subarray(0, 8).equals(WASM_MAGIC),
+          'ENGINE_WASM_MAGIC', 'QuickJS task-context artifact is not a WASM v1 binary');
+        // Artifacts enter inputs when copied, once at their original source path.
+        if (input === task.patch || input === task.build) inputs.push({ path: input.path, sha256: input.sha256 });
+      }
       enginePolicy = value;
     }
     const trusted = enginePolicy.packages.find(expected => expected.name === pkg.name);
@@ -475,6 +514,15 @@ function buildGraph(root, product, profile = 'windows-native') {
     check(destinations.get(resolved) === edge.to, 'RESOLUTION_CHANGED',
       `${edge.from.path}: relocation changes resolution of ${edge.name}`);
   }
+  if (enginePolicy) {
+    const host = nodes.get('packages/script-host');
+    check(host && [...ENGINE_PACKAGES].every(name => [...nodes.values()].some(node => node.name === name)),
+      'ENGINE_LOCK_MISMATCH', 'The task-context engine requires the reviewed upstream package closure');
+    host.taskContext = enginePolicy.taskContext;
+    for (const artifact of host.taskContext.artifacts) {
+      host.required.add(artifact.path.slice(`${host.location}/`.length));
+    }
+  }
   return { nodes: [...nodes.values()].sort((a, b) => compare(a.path, b.path)),
     omitted: omitted.sort((a, b) => compare(`${a.from}/${a.name}/${a.kind}`, `${b.from}/${b.name}/${b.kind}`)),
     inputs };
@@ -573,9 +621,10 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
     reserve(rel, false);
     return join(output, rel);
   }
-  function copy(location, rel, expectedHash, wasm) {
+  function copy(location, rel, expectedHash, engineArtifact) {
     const file = sourcePath(root, location);
-    check(!NATIVE_FILE.test(posix.basename(location)) || wasm?.sourcePath === location,
+    check(!NATIVE_FILE.test(posix.basename(location))
+      || (location.endsWith('.wasm') && engineArtifact?.sourcePath === location),
       'NATIVE_PAYLOAD', `Native payload is not allowed: ${location}`);
     const stat = lstatSync(file);
     check(stat.isFile(), 'INVALID_SOURCE', `Not a regular source file: ${location}`);
@@ -591,6 +640,10 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       const hash = createHash('sha256'), buffer = Buffer.alloc(64 * 1024);
       let bytes = 0, count;
       while ((count = readSync(inputFD, buffer, 0, buffer.length, null)) !== 0) {
+        if (bytes === 0 && engineArtifact && location.endsWith('.wasm')) {
+          check(buffer.subarray(0, Math.min(count, 8)).equals(WASM_MAGIC),
+            'ENGINE_WASM_MAGIC', `QuickJS artifact is not a WASM v1 binary: ${location}`);
+        }
         hash.update(buffer.subarray(0, count));
         for (let offset = 0; offset < count;) offset += writeSync(outputFD, buffer, offset, count - offset);
         bytes += count;
@@ -599,8 +652,8 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       check(before.size === after.size && before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs
         && bytes === before.size && (!expectedHash || expectedHash === digest),
       'SOURCE_CHANGED', `Source changed during packaging: ${location}`);
-      check(!wasm || (bytes === wasm.bytes && digest === wasm.sha256),
-        'ENGINE_HASH_MISMATCH', `QuickJS WASM differs from the reviewed release: ${location}`);
+      check(!engineArtifact || (bytes === engineArtifact.bytes && digest === engineArtifact.sha256),
+        'ENGINE_HASH_MISMATCH', `QuickJS artifact differs from the reviewed revision: ${location}`);
       files.push({ path: rel, bytes, sha256: digest });
       manifest.inputs.push({ path: location, sha256: digest });
       delete manifest.incompleteFile;
@@ -617,16 +670,19 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       const child = posix.join(rel, item.name);
       if (item.name === 'node_modules') continue; // Only the resolved graph can add dependencies.
       check(!item.isSymbolicLink(), 'UNSAFE_SYMLINK', `Package symlink is not allowed: ${location}/${item.name}`);
-      const wasm = item.isFile() && node.engine?.wasm?.path === child
-        ? { ...node.engine.wasm, sourcePath: posix.join(node.location, child) } : undefined;
-      check(!NATIVE_FILE.test(item.name) || wasm, 'NATIVE_PAYLOAD', `Native payload is not allowed: ${location}/${item.name}`);
+      const artifact = item.isFile() && (node.engine?.wasm?.path === child ? node.engine.wasm
+        : node.taskContext?.artifacts.find(artifact => artifact.path === posix.join(node.location, child)));
+      const engineArtifact = artifact ? { ...artifact, sourcePath: posix.join(node.location, child) } : undefined;
+      check(!NATIVE_FILE.test(item.name) || (child.endsWith('.wasm') && engineArtifact),
+        'NATIVE_PAYLOAD', `Native payload is not allowed: ${location}/${item.name}`);
       if (item.isDirectory()) {
         if (OMIT_DIRECTORIES.has(item.name.toLowerCase())
           || (item.name.startsWith('.') && !LEGAL_FILE.test(item.name))) continue;
         copyPackage(node, child);
       } else if (includedFile(child, node)) {
         copy(posix.join(node.location, child), posix.join(node.path, child),
-          child === 'package.json' ? node.manifestHash : child === 'LICENSE' ? node.engine?.licenseSha256 : undefined, wasm);
+          child === 'package.json' ? node.manifestHash : child === 'LICENSE' ? node.engine?.licenseSha256 : undefined,
+          engineArtifact);
       }
     }
   }
@@ -674,6 +730,18 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       ...node.engine.wasm, path: `${node.path}/${node.engine.wasm.path}`,
       licensePath: `${node.path}/LICENSE`, licenseSha256: node.engine.licenseSha256,
     }));
+    for (const node of graph.nodes.filter(node => node.taskContext)) {
+      const upstream = graph.nodes.find(node => node.name === ENGINE_WASM_PACKAGE);
+      const artifact = node.taskContext.artifacts.find(artifact => artifact.path === ENGINE_LOCAL_WASM);
+      manifest.trustedWasm.push({
+        package: node.name, version: node.version,
+        bytes: artifact.bytes, sha256: artifact.sha256,
+        path: `${node.path}/${artifact.path.slice(`${node.location}/`.length)}`,
+        taskContext: { revision: node.taskContext.revision, source: ENGINE_SOURCE, gitHead: node.taskContext.gitHead },
+        licensePath: `${upstream.path}/LICENSE`, licenseSha256: upstream.engine.licenseSha256,
+      });
+    }
+    manifest.trustedWasm.sort((a, b) => compare(a.path, b.path));
     copySharedRuntime();
     for (const node of graph.nodes) {
       copyPackage(node);

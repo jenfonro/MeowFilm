@@ -611,7 +611,7 @@ public static class MusicPlatformClientContextTests
         public async ValueTask DisposeAsync()
         { Store.Release.TrySetResult(); await Owner.DisposeAsync(); await Store.DisposeAsync(); }
     }
-    private sealed class FaultStore : IProtectedDocumentStore
+    private sealed class FaultStore : IDocumentStore
     {
         internal readonly MusicClientContextFixture.MemoryStore Inner = new();
         internal readonly TaskCompletionSource Arrived = Signal(), Release = Signal();
@@ -619,15 +619,15 @@ public static class MusicPlatformClientContextTests
         internal int HoldWriteAt, ConflictAt, DropReceiptAt, FailWriteAt, WrongReceiptAt;
         internal bool HoldRead, UnexpectedRead;
         internal DocumentStoreError? ReadError;
-        internal ProtectedDocument? ReadOverride;
-        public async Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default)
+        internal DocumentSnapshot? ReadOverride;
+        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
             if (ns != MusicPlatformClientContextOwner.DocumentNamespace)
             { AccountReads++; return await Inner.ReadAsync(ns, token); }
             Interlocked.Increment(ref ClientReads);
             if (HoldRead) { Arrived.TrySetResult(); await Release.Task; token = default; }
             if (UnexpectedRead) throw new InvalidOperationException("SYNTHETIC_READ_SECRET");
-            if (ReadError is { } error) throw new ProtectedDocumentException(error);
+            if (ReadError is { } error) throw new DocumentStoreException(error);
             if (ReadOverride is { } value) return new(value.Data?.ToArray(), value.Fingerprint);
             return await Inner.ReadAsync(ns, token);
         }
@@ -639,9 +639,9 @@ public static class MusicPlatformClientContextTests
             int write = Interlocked.Increment(ref ClientWrites);
             if (write == HoldWriteAt) { Arrived.TrySetResult(); await Release.Task; token = default; }
             if (write == ConflictAt) await MusicClientContextFixture.ConcurrentClientWrite(Inner);
-            if (write == FailWriteAt) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+            if (write == FailWriteAt) throw new DocumentStoreException(DocumentStoreError.Storage);
             var receipt = await Inner.WriteAsync(ns, bytes, expected, token);
-            if (write == DropReceiptAt) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+            if (write == DropReceiptAt) throw new DocumentStoreException(DocumentStoreError.Storage);
             return write == WrongReceiptAt ? DocumentFingerprint.Missing : receipt;
         }
         public async ValueTask DisposeAsync()

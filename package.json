@@ -5,7 +5,8 @@
   "type": "module",
   "workspaces": [
     "packages/runtime-bridge",
-    "packages/script-host"
+    "packages/script-host",
+    "packages/source-runtime"
   ],
   "engines": {
     "node": "^24.0.0"

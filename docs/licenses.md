@@ -25,6 +25,8 @@
 
 runtime-bridge／script-host、三个 `0.32.0` QuickJS 包和 Cat 有限 Node 兼容依赖的原始声明由脚本载荷打包器保留。引擎的根锁、包 manifest／LICENSE、唯一 release-sync WASM 和中央许可按 `scripts/quickjs-runtime.json` 复核；该中央文件原样来自 release-sync 包，包含 Jake Teton-Landis 与 Fabrice Bellard／Charlie Gordon 的声明。普通 npm 依赖按根 lock 解析并保留各包许可，中央归属及 catpawrunner 改编范围见 `NOTICE.md`。
 
+公共来源运行时的 npm 依赖 `acorn@8.19.0`、`fontoxpath@3.34.0`、`linkedom@0.18.14`、`iconv-lite@0.6.3` 及其锁定的传递依赖随 runtime 闭包打包；打包器保留每个包的 `package.json` 与原始许可文件。完整包名、版本和许可类型见 `NOTICE.md`，实际发布闭包以 `runtime-manifest.json` 为准。
+
 libVLC、.NET 及其他传递组件的发行义务需单独核对。清单中的 `redistributionPermissionVerified` 始终为 false，文件哈希或许可清单不等于分发授权。
 
 新增或删除许可文件时，同步修改 `package-licenses.mjs` 的清单与 `tests/windows-licenses.test.mjs`。

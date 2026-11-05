@@ -4,7 +4,6 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
@@ -19,6 +18,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     private async void UpdateVisibilityActivity()
     {
         bool active = IsLoaded && IsVisible;
+        if (active) module.Presentation.PageLoaded();
         if (!active)
         {
             CloseCreatePlaylistDialog(restoreFocus: false);
@@ -28,7 +28,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         try
         {
             await Task.WhenAll(active ? module.ActivateDiscoveryViewAsync() : module.DeactivateDiscoveryViewAsync(),
-                module.UpdateVipPageAsync(active));
+                module.UpdateVipPageAsync(active), active ? module.ActivateCatalogLandingAsync() : Task.CompletedTask);
         }
         catch { /* Navigation and shutdown retain final drain ownership. */ }
     }
@@ -46,16 +46,14 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     private bool songInsertAfter;
     private readonly UserScrollIntent songScrollIntent;
     private bool loadingMoreSongs;
-    private Brush playerSample = Brushes.DimGray;
-    public Brush PlayerBackground { get; private set; } = MusicPlayerArtwork.Backdrop(Brushes.DimGray);
-    public Brush PlayerProgress { get; private set; } = MusicPlayerArtwork.Progress(Brushes.DimGray);
+    private readonly MusicPagePresenter content;
+    internal bool IsPlaylistDialogOpen => playlistDialogOpen;
     internal MeowFilm.Desktop.DesktopNavigationGroupAction CreatePlaylistAction { get; }
     public MusicView(MusicCapability module)
     {
         this.module = module;
         songScrollIntent = new(Dispatcher);
-        CreatePlaylistAction = new("创建歌单", OpenCreatePlaylistDialog,
-            () => module.CanEdit && !playlistDialogOpen);
+        CreatePlaylistAction = module.Presentation.CreatePlaylistAction;
         refreshAction = new("music.refresh", "刷新", async token =>
         {
             token.ThrowIfCancellationRequested();
@@ -68,6 +66,19 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
             token => { token.ThrowIfCancellationRequested(); return module.DeletePlaylistAsync(); },
             () => module.CanEdit && module.CanDeleteCollection);
         InitializeComponent(); DataContext = module;
+        // Retained pages keep their binding owner when they leave the visual tree.
+        foreach (FrameworkElement page in BodyPages.Children) page.DataContext = module;
+        BodyPages.Children.Clear();
+        content = new(new()
+        {
+            [MusicContentPage.Catalog] = CatalogView,
+            [MusicContentPage.Discovery] = DiscoveryView,
+            [MusicContentPage.Archives] = ArchiveScroll,
+            [MusicContentPage.Songs] = SongsGrid,
+            [MusicContentPage.SearchSongs] = SearchSongsPage
+        });
+        BodyPages.Children.Add(content);
+        content.Show(module.ContentPage);
         AddHandler(ScrollBar.ScrollEvent, new ScrollEventHandler((_, args) =>
         {
             if (IsVisible && Descendant<ScrollViewer>(ActiveSongsGrid) is { } scroll) songScrollIntent.ObserveScroll(scroll, args);
@@ -78,6 +89,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         IsVisibleChanged += (_, _) => UpdateVisibilityActivity();
         module.PropertyChanged += async (_, e) =>
         {
+            if (e.PropertyName == nameof(MusicCapability.ContentPage)) content.Show(module.ContentPage);
             if (e.PropertyName == nameof(MusicCapability.CanReorderPlaylist) && !module.CanReorderPlaylist)
                 EndSongDrag();
             if (e.PropertyName is nameof(MusicCapability.HistoryDate) or nameof(MusicCapability.CanEdit))
@@ -147,7 +159,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         dialog.SetResourceReference(BackgroundProperty, "MeowFilm.Brush.Surface");
         dialog.SetResourceReference(FontFamilyProperty, SystemFonts.MessageFontFamilyKey);
         TextOptions.SetTextFormattingMode(dialog, TextFormattingMode.Display);
-        TextOptions.SetTextRenderingMode(dialog, TextRenderingMode.Grayscale);
+        TextOptions.SetTextRenderingMode(dialog, TextRenderingMode.Auto);
         confirm.IsEnabled = input.Text.Trim().Length > 0;
         input.TextChanged += (_, _) => confirm.IsEnabled = input.Text.Trim().Length > 0;
         confirm.Click += (_, _) => dialog.DialogResult = true;
@@ -159,7 +171,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         token.ThrowIfCancellationRequested();
         await module.RenamePlaylistAsync(input.Text);
     }
-    private void OpenCreatePlaylistDialog()
+    internal void OpenCreatePlaylistDialog()
     {
         if (playlistDialogOpen || !module.CanEdit) return;
         playlistDialogOpen = true;
@@ -242,28 +254,6 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         PlaylistNameInput.Focus();
         PlaylistNameInput.SelectAll();
     }
-    internal void RefreshAppearance(Brush sampled, bool animate = true)
-    {
-        playerSample = sampled;
-        var palette = module.PlayerPalette(sampled);
-        var next = (GradientBrush)MusicPlayerArtwork.Backdrop(palette);
-        var prior = PlayerBackground as GradientBrush;
-        // Each replacement samples the presentation colors once. WPF owns the
-        // animation clocks; a retarget never queues per-frame business work.
-        if (animate && IsVisible && SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast &&
-            prior is not null && prior.GradientStops.Count == next.GradientStops.Count)
-        {
-            next = next.Clone();
-            for (int i = 0; i < next.GradientStops.Count; i++)
-                next.GradientStops[i].BeginAnimation(GradientStop.ColorProperty,
-                    new ColorAnimation(prior.GradientStops[i].Color, next.GradientStops[i].Color,
-                        TimeSpan.FromMilliseconds(300)) { FillBehavior = FillBehavior.Stop });
-        }
-        PlayerBackground = next;
-        PlayerProgress = MusicPlayerArtwork.Progress(palette);
-        module.RefreshPlayerBackground();
-    }
-    internal void ReapplyAppearance() => RefreshAppearance(playerSample);
     private void SyncDate()
     {
         syncingDate = true;
@@ -276,10 +266,14 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         if (IsVisible) UpdateLayout();
         ActiveScroll()?.ScrollToVerticalOffset(offset);
     }
-    private ScrollViewer? ActiveScroll() => module.IsArchives ? ArchiveScroll :
-        module.IsDiscovery ? Descendant<ScrollViewer>(DiscoveryView) :
-        module.IsContentDetailPage || module.IsSearchSongs ? Descendant<ScrollViewer>(ActiveSongsGrid) :
-        module.IsCatalogPage ? CatalogView.ActiveScroll : Descendant<ScrollViewer>(ActiveSongsGrid);
+    private ScrollViewer? ActiveScroll() => module.ContentPage switch
+    {
+        MusicContentPage.Archives => ArchiveScroll,
+        MusicContentPage.Discovery => Descendant<ScrollViewer>(DiscoveryView),
+        MusicContentPage.Catalog => CatalogView.ActiveScroll,
+        MusicContentPage.SearchSongs => Descendant<ScrollViewer>(SearchSongsGrid),
+        _ => Descendant<ScrollViewer>(SongsGrid)
+    };
     private static T? Descendant<T>(DependencyObject parent) where T : DependencyObject
     {
         for (var i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)

@@ -1,15 +1,24 @@
-# 外部 LX/Cat 脚本动态验收
+# 外部 LX/Cat/Reader 来源动态验收
 
-`scripts/accept-sources.mjs` 是仓库验收工具，不是产品运行入口。它通过公共 music/Cat 模块在 QuickJS 中执行原始外部脚本，不复制到源码／发布目录，不回退到 Node VM。
+`scripts/accept-sources.mjs` 是仓库验收工具，不是产品运行入口。它通过公共模块在 QuickJS 中执行原始外部来源，不复制到源码／发布目录，不回退到 Node VM。
+
+| 入口 | 公共契约 | 运行路径 |
+| --- | --- | --- |
+| `--kind lx`（默认） | `music.script.v2`／`music@0.7.0` | main LX 运行器 |
+| `--kind cat` | `cat.script.v1`／`cat@0.1.0` | main Cat Node、私有卷及服务能力 |
+| `--kind source` | `source.runtime.v1`／`source@0.1.0` | `scripts/accept-reader-sources.mjs`，Reader 规则与 portable CatVod Spider adapter |
+
+`--kind cat` 与 `--kind source --protocol cat` 是不同输入契约。前者使用真实 Cat Node 路径；后者使用 portable Spider 的 `homeContent/searchContent/detailContent/playerContent` 等接口，不接收 Node `require`／服务脚本，也不自动回退到 LX。
 
 ## 输入
 
 ```powershell
 node scripts/accept-sources.mjs --kind lx --scripts <JS 文件或目录的绝对路径>
 node scripts/accept-sources.mjs --kind cat --scripts <绝对路径> --records <JSON 绝对路径> --live --probe-media
+node scripts/accept-sources.mjs --kind source --scripts <文件或目录绝对路径> --protocol auto --live --records <JSON 绝对路径>
 ```
 
-- `--kind` 为 `lx` 或 `cat`，默认 `lx`。
+- `--kind` 为 `lx`、`cat` 或 `source`，默认 `lx`；`--protocol` 仅用于 `--kind source`。
 - LX 默认只初始化，并注入明确拒绝全部外部请求的阻断 adapter；`--live` 不注入该 adapter，使用产品相同的受控网络路径。offline 与 live 分别记录，不能用合成响应冒充 live。
 - Cat 验收必须显式使用 `--live`。Cat 的受限 Node HTTP(S)、DNS 和 socket 能力是产品原生网络路径，不经过 LX 注入式 adapter；工具拒绝无法完整阻断这些能力的 offline 模式，不能把部分阻断报告成离线验收。
 - LX `--live` 调用每个 source 声明的 action；`search`／`musicSearch` 分别使用关键字、分页输入，不互相重写为别名。
@@ -22,17 +31,67 @@ node scripts/accept-sources.mjs --kind cat --scripts <绝对路径> --records <J
 - `--output` 必须是仓库 `tmp/` 内的绝对路径；默认报告为 `tmp/test-results/script-sources/acceptance.json`，运行中滚动替换。
 - Cat 每份脚本使用独立临时 dataRoot；关闭运行器后递归清理。源码通过 64 KiB 分片安装，声明长度超过 16 MiB 时在暂存入口拒绝；大结果通过 `blob.read` 校验长度/SHA-256 后释放，不把整份源码或结果塞进单个 bridge 帧。
 
+## Reader 与 portable CatVod
+
+Reader 也可直接运行，参数和 `--kind source` 路由一致：
+
+```powershell
+node scripts/accept-reader-sources.mjs --scripts <文件或目录绝对路径> --protocol legado --live --records <JSON 绝对路径>
+```
+
+- `--protocol auto|legado|yiciyuan|qysg|cat` 保留协议检测／显式覆盖。该入口没有 `music`／`lx` 协议，LX 使用主入口。
+- 目录递归读取 `.js`、`.json`、`.html`／`.htm`，拒绝目录内的符号链接；单文件也可直接输入。`.js` 的 Spider 标记或 `export default` 识别为 portable CatVod，无法识别的 JS 必须明确协议，不猜成 LX 或 Cat Node。
+- `.json` 支持 Legado、异次元旧格式、轻悦时光对象／HTML 字符串和 portable Cat 对象；数组按独立来源拆分为 `<file>#<index>`。轻悦时光对象的 `html` 可以是带 `bookSourceName/bookSourceUrl` 的一个或多个空白分隔 HTTP(S) 候选 URL；live 模式按实际响应重试候选，并使用最终 URL 解析相对脚本。
+- 默认只进行读取、识别、初始化、卸载和清理，注入阻断网络 adapter；远程 HTML 在离线模式可能初始化失败。`--live` 执行全部声明动作。
+- `--scripts`、`--records`、`--payload` 及显式 `--output` 使用绝对路径。Reader 从来源清单排除 records、报告及其 `.tmp` 文件，不把自己的输出重新识别为来源。
+- Reader 使用原 `records.source` 形状，按拆分来源身份优先、原文件相对名次之查找动作输入：
+
+```json
+{
+  "source": {
+    "books.json": {
+      "actions": { "image": { "url": "https://example.invalid/cover.jpg", "body": "" } }
+    },
+    "books.json#2": {
+      "actions": {
+        "content": { "chapterUrl": "https://example.invalid/chapter/1" },
+        "image": { "body": "" }
+      }
+    },
+    "spider.js": {
+      "actions": { "action": { "action": "login", "value": null } }
+    }
+  }
+}
+```
+
+记录按整个来源条目选择，拆分条目存在时不合并原文件的 actions。Reader 从真实搜索／发现结果派生详情，再从详情派生目录、目录派生正文；`exploreKinds/explore/loginStatus/login/image` 等声明动作同样记录。portable CatVod 按 `init/home/homeVideo/category/search/detail/play/proxy/action/destroy` 排序，从真实返回派生播放和虚拟 proxy 输入。无法推导且没有显式输入的动作标记 `not_exercised`，live 模式返回非零，不制造 ID、账号或平台数据。
+
+Reader 的 `--probe-media` 同样要求 `--live`，只对 portable CatVod `play` 返回的 HTTP(S) URL 作有界探测；虚拟 proxy 由声明的 `proxy` 动作验收。
+
 ## 发布闭包
 
 ```powershell
 & .\build\windows\runtime\node.exe scripts/accept-sources.mjs `
-  --kind <lx|cat> --scripts <绝对路径> --records <JSON 绝对路径> `
+  --kind <lx|cat|source> --scripts <绝对路径> --records <JSON 绝对路径> `
   --payload <build/windows/runtime 的绝对路径> --live --probe-media
 ```
 
 `--payload` 从 complete manifest 中定位公共模块，并拒绝该模块解析到 payload 外的文件依赖。验收工具仍由仓库提供，不随应用发布。Windows 管道／原生回调另由真实管道集成测试覆盖，不能用本工具的进程内调用替代。
 
+Reader 的 manifest 要求以下条目，不要求同时加载 music/Cat Node 模块：
+
+```text
+app/modules/source-runtime.mjs
+node_modules/@meowfilm/script-host/src/index.js
+node_modules/@meowfilm/source-runtime/src/index.js
+```
+
+LX 沿用 `music@0.7.0` 的透明分片：大控制参数与结果按 64 KiB 字节块传输，原生桥接 1 MiB 物理帧边界不变，见 [LX 传输契约](music-script-runtime.md#控制数据传输)。
+
 ## 报告与退出条件
+
+LX/Cat Node 保持 main 报告和以下分类：
 
 | 状态 | 含义 |
 | --- | --- |
@@ -59,3 +118,22 @@ Cat 已声明路由的 HTTP 404 不属于 `host_failure`；HTTP 500 也不自动
 初始化、卸载、关闭、源文件字节未变分别记录；统计同时区分声明动作和实际调用。初始化失败、卸载／清理失败、源文件变化、脚本被宿主拒绝、宿主失败、资源超限或尚未归因时，工具返回非零退出码。已明确的输入／配置／上游失败仍记录，不冒称全功能成功。
 
 报告不保存源码、配置、密钥、Cookie、完整媒体／接口 URL、任意异常正文或堆栈；只保留文件身份与哈希、声明能力、状态码、固定分类、受限符号／成员及数字位置。仅通过初始化、语法或合成夹具不能满足真实脚本业务验收。
+
+Reader 保留原 schema 2、`runtime`、`protocolOverride`、`rows` 和汇总字段，另以 `kind: "source"` 标明入口。它的动作和失败分类保持如下命名：
+
+| 状态 | 含义 |
+| --- | --- |
+| `returned` | 处理器返回，仅保留结果类型和数量 |
+| `upstream_failure` | 网络、HTTP、供应方业务错误或明确上游失败 |
+| `account_region_configuration_required` | 账号、地区、API key、登录或 Web 交互配置不足 |
+| `host_capability_missing` | 必需宿主能力／权限缺失，优先于同时出现的上游错误 |
+| `engine_incompatible` | 来源语法、规则、guest SDK 不兼容或尚不能归因的错误；必须继续定位 |
+| `runtime_limit` | 实际超时、内存或其他资源边界 |
+| `cleanup_failure` | 卸载、关闭、profile、虚拟路由或物理任务回收失败 |
+| `not_exercised` | 无真实动作输入且无法从前序结果推导 |
+
+Reader 分别记录初始化、unload、close、文件字节是否变化、声明动作数和实际调用数。初始化失败、任一宿主／引擎／资源／清理失败、文件变化或 live 中有 `not_exercised` 均返回非零；初始化成功后的抛错仍计入失败，后续 close 成功不能抹去 unload 失败。live 中没有业务动作（空动作或只有 `init/destroy`）标记 `NO_BUSINESS_ACTIONS`／`engine_incompatible` 并返回非零；离线初始化不增加此门禁。
+
+网络证据只用于已明确的 HTTP／网络失败归因；同一动作曾收到失败响应，不能把随后未知函数、任意脚本抛错或非法 guest 结果改判为上游失败。已归因的动作级上游或账号／地区配置失败会保留，但不算 `returned`。`NETWORK_ERROR/HTTP_ERROR/INVALID_RESPONSE` 的远程 HTML 初始化失败保留原始码并归为上游失败，仍返回非零。
+
+Reader 与 LX/Cat Node 采用相同的隐私要求：报告和标准输出只保留结构及固定分类，不保留正文、配置或完整 URL。离线初始化、合成夹具和真实联网业务动作是不同证据。

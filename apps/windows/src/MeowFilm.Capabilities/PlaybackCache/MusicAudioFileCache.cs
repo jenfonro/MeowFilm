@@ -26,7 +26,7 @@ internal sealed class MusicAudioFileCache
         "qualityEvidence", "codec", "sampleRate", "bitDepth", "channels", "bitrate"
     ];
     private readonly string root;
-    private readonly IProtectedDocumentStore store;
+    private readonly IDocumentStore store;
     private readonly SemaphoreSlim metadataGate = new(1, 1), transferGate = new(1, 1);
     private readonly Func<string, double, CancellationToken, Task<double>> validate;
     private readonly TimeProvider clock;
@@ -96,7 +96,7 @@ internal sealed class MusicAudioFileCache
         prepared.Work = StoreAsync(scope, song, signature, receipt, isCurrent, prepared.Cancellation.Token, prepared);
         return prepared;
     }
-    internal MusicAudioFileCache(string root, IProtectedDocumentStore store,
+    internal MusicAudioFileCache(string root, IDocumentStore store,
         Func<string, double, CancellationToken, Task<double>>? validate = null,
         TimeProvider? clock = null, NativeHttpMediaOptions? httpOptions = null)
     {
@@ -135,15 +135,11 @@ internal sealed class MusicAudioFileCache
     }
     private async Task<(Index Index, DocumentFingerprint Fingerprint)> Read(CancellationToken token)
     {
-        ProtectedDocument saved;
+        DocumentSnapshot saved;
         try { saved = await store.ReadAsync(Namespace, token).ConfigureAwait(false); }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
         { throw MusicPlaybackCacheDataException.FromStore(error); }
-        try
-        {
-            return (Decode(saved.Data, saved.Fingerprint), saved.Fingerprint);
-        }
-        finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
+        return (Decode(saved.Data, saved.Fingerprint), saved.Fingerprint);
     }
     private static Index Decode(byte[]? data, DocumentFingerprint fingerprint)
     {
@@ -152,7 +148,7 @@ internal sealed class MusicAudioFileCache
             if (fingerprint != DocumentFingerprint.Missing) throw MusicPlaybackCacheDataException.Corrupt();
             return new();
         }
-        if (data.Length == 0 || DocumentFingerprint.FromBytes(data) != fingerprint)
+        if (data.Length == 0)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (data.Length > MaximumIndexBytes) throw MusicPlaybackCacheDataException.Limit();
         try
@@ -338,20 +334,16 @@ internal sealed class MusicAudioFileCache
     private async Task Write(Index index, DocumentFingerprint before, CancellationToken token)
     {
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(Encode(index));
+        if (bytes.Length > MaximumIndexBytes) throw MusicPlaybackCacheDataException.Limit();
+        var expected = DocumentFingerprint.FromBytes(bytes);
+        _ = Decode(bytes, expected);
         try
         {
-            if (bytes.Length > MaximumIndexBytes) throw MusicPlaybackCacheDataException.Limit();
-            _ = Decode(bytes, DocumentFingerprint.FromBytes(bytes));
-            try
-            {
-                var expected = DocumentFingerprint.FromBytes(bytes);
-                var receipt = await store.WriteAsync(Namespace, bytes, before, token).ConfigureAwait(false);
-                if (receipt != expected) throw new MusicPlaybackCacheCommitException();
-            }
-            catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
-            { throw MusicPlaybackCacheDataException.FromStore(error); }
+            var receipt = await store.WriteAsync(Namespace, bytes, before, token).ConfigureAwait(false);
+            if (receipt != expected) throw new MusicPlaybackCacheCommitException();
         }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
+        { throw MusicPlaybackCacheDataException.FromStore(error); }
     }
     internal async Task<INativeMediaReadLease?> OpenAsync(string scope, string song, string signature, CancellationToken token)
     {
@@ -371,7 +363,7 @@ internal sealed class MusicAudioFileCache
             var lease = new ReadLease(file, token); file = null; return lease;
         }
         catch (OperationCanceledException) { throw; }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { return null; }
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { return null; }
         catch (Exception e) when (OptionalFileFailure(e)) { return null; }
         finally { if (file is not null) await file.DisposeAsync(); metadataGate.Release(); }
     }
@@ -387,7 +379,7 @@ internal sealed class MusicAudioFileCache
             return entry.Info.DeepClone().AsObject();
         }
         catch (OperationCanceledException) { throw; }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { return null; }
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { return null; }
         catch (Exception e) when (OptionalFileFailure(e)) { return null; }
         finally { metadataGate.Release(); }
     }
@@ -402,7 +394,7 @@ internal sealed class MusicAudioFileCache
             entry.ConfirmedAt = Now; await Write(index, before, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { }
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { }
         finally { metadataGate.Release(); }
     }
     internal async Task EraseAsync(string scope, string song, CancellationToken token)
@@ -418,7 +410,7 @@ internal sealed class MusicAudioFileCache
             TryDelete(entry.File);
         }
         catch (OperationCanceledException) { throw; }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { }
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { }
         finally { metadataGate.Release(); }
     }
     // Called only after the actual player's Started event. Probe callbacks never call this method.
@@ -541,7 +533,7 @@ internal sealed class MusicAudioFileCache
             finally { metadataGate.Release(); }
         }
         catch (OperationCanceledException) { }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { }
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { }
         catch (Exception e) when (OptionalFileFailure(e) || e is PlaybackException or
             JsonException or InvalidOperationException or FormatException or OverflowException or KeyNotFoundException) { }
         finally
@@ -563,18 +555,13 @@ internal sealed class MusicAudioFileCache
             await metadataGate.WaitAsync(token).ConfigureAwait(false);
             try
             {
-                ProtectedDocument saved;
+                DocumentSnapshot saved;
                 try { saved = await store.ReadAsync(Namespace, token).ConfigureAwait(false); }
-                catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
+                catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
                 { throw MusicPlaybackCacheDataException.FromStore(error); }
-                try
-                {
-                    if (saved.Data is null && saved.Fingerprint != DocumentFingerprint.Missing ||
-                        saved.Data is not null && DocumentFingerprint.FromBytes(saved.Data) != saved.Fingerprint)
-                        throw MusicPlaybackCacheDataException.Corrupt();
-                    await Write(new(), saved.Fingerprint, token).ConfigureAwait(false);
-                }
-                finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
+                if (saved.Data is null && saved.Fingerprint != DocumentFingerprint.Missing)
+                    throw MusicPlaybackCacheDataException.Corrupt();
+                await Write(new(), saved.Fingerprint, token).ConfigureAwait(false);
                 CheckRoot();
                 foreach (var path in Directory.EnumerateFiles(root, "*.audio")) TryDelete(Path.GetFileName(path));
             }

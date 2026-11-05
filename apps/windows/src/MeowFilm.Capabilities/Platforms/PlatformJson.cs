@@ -101,14 +101,27 @@ internal static class PJ
         try
         {
             var text = new UTF8Encoding(false, true).GetString(bytes);
-            // The transport bounds buffered bytes; the JSON parser owns nesting and
-            // duplicate-key validation. Unused provider fields have no extra quotas.
-            return JsonNode.Parse(text, documentOptions: new JsonDocumentOptions { AllowDuplicateProperties = false })
-                as JsonObject ?? throw new MusicPlatformException("INVALID_RESPONSE");
+            using var document = JsonDocument.Parse(text);
+            return Read(document.RootElement) as JsonObject ?? throw new MusicPlatformException("INVALID_RESPONSE");
         }
         catch (MusicPlatformException) { throw; }
         catch (Exception e) when (e is JsonException or ArgumentException or DecoderFallbackException)
         { throw new MusicPlatformException("INVALID_RESPONSE"); }
+    }
+    internal static JsonNode? Read(JsonElement value)
+    {
+        // JsonObject's lazy materialization rejects duplicate names. Materialize
+        // provider data with normal last-property-wins semantics instead.
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            var result = new JsonObject();
+            foreach (var property in value.EnumerateObject())
+                result[property.Name] = Read(property.Value);
+            return result;
+        }
+        if (value.ValueKind == JsonValueKind.Array)
+            return new JsonArray(value.EnumerateArray().Select(Read).ToArray());
+        return value.ValueKind == JsonValueKind.Null ? null : JsonValue.Create(value.Clone());
     }
     internal static JsonElement Element(JsonNode node) => JsonSerializer.SerializeToElement(node, Options);
     internal static string Image(JsonNode? value)
@@ -137,6 +150,8 @@ internal static class PJ
                     "type" => content is "webp" or "jpg" or "jpeg" or "png",
                     "thumbnail" => Regex.IsMatch(content,
                         @"^[1-9][0-9]{0,3}y[1-9][0-9]{0,3}$", RegexOptions.CultureInvariant),
+                    "param" => Regex.IsMatch(content,
+                        @"^[1-9][0-9]{0,3}y[1-9][0-9]{0,3}$", RegexOptions.CultureInvariant),
                     _ => false
                 }))
                 {
@@ -144,7 +159,7 @@ internal static class PJ
                     break;
                 }
             }
-            if (recognized && keys.Contains("imageView"))
+            if (recognized && (keys.Contains("imageView") || keys.SetEquals(["param"])))
                 u = new Uri(u.GetLeftPart(UriPartial.Path), UriKind.Absolute);
         }
         return u.AbsoluteUri;

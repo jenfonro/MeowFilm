@@ -414,7 +414,7 @@ internal sealed class MusicSongMatcher
         try { await PersistAsync(token).ConfigureAwait(false); }
         catch (MusicLibraryException) { /* Pending user state does not invalidate accepted match evidence. */ }
         catch (MusicPlaybackCacheCommitException) { }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { }
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { }
     }
     internal async Task DrainAsync()
     {

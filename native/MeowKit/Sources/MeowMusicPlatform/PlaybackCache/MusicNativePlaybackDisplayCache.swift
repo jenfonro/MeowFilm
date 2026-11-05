@@ -3,21 +3,21 @@ import ImageIO
 import MeowMusicFeature
 import MeowStorage
 
-/// Passive, single-record encrypted presentation cache. No credentials, audio
+/// Passive, single-record ordinary presentation cache. No credentials, audio
 /// URLs or playback position are stored. Failure is an optional cache miss.
 public actor MusicNativePlaybackDisplayCache: MusicPlaybackDisplayCaching {
     public static let namespace = "music.playback-display.v1"
     private static let key = "current"
-    private let factory: @Sendable () throws -> EncryptedDocumentStore
-    private var document: EncryptedDocumentStore?
+    private let factory: @Sendable () throws -> DocumentStore
+    private var document: DocumentStore?
     private struct Envelope: Codable {
         let version: Int
         let value: MusicPlaybackDisplaySnapshot
     }
-    public init(storeFactory: @escaping @Sendable () throws -> EncryptedDocumentStore) {
+    public init(storeFactory: @escaping @Sendable () throws -> DocumentStore) {
         factory = storeFactory
     }
-    private func store() throws -> EncryptedDocumentStore {
+    private func store() throws -> DocumentStore {
         if let document { return document }
         let value = try factory(); document = value; return value
     }

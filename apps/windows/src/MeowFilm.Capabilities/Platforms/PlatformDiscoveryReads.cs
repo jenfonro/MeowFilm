@@ -46,14 +46,14 @@ public sealed partial class MusicPlatformCatalog
         Walk(page);
         if (page["continuation"] is JsonObject next)
         {
-            var cursor = PJ.Scalar(PJ.First(next["cursor"], next["before"], next["offset"]));
-            var old = PJ.Scalar(PJ.First(PJ.At(previous, "cursor"), PJ.At(previous, "before"), PJ.At(previous, "offset")));
+            var cursor = PJ.Scalar(PJ.First(next["cursor"], next["before"], next["offset"], next["page"]));
+            var old = PJ.Scalar(PJ.First(PJ.At(previous, "cursor"), PJ.At(previous, "before"), PJ.At(previous, "offset"), PJ.At(previous, "page")));
             if (cursor.Length > 0) PJ.Require(cursor != old, "PAGINATION_STALLED");
             var count = PJ.Array(page["entries"]).Count() + PJ.Array(page["sections"]).Sum(s => PJ.Array(PJ.At(s, "items")).Count());
             PJ.Require(count > 0, "PAGINATION_STALLED");
             next["scope"] = c.Scope; next["target"] = target;
         }
-        page["platform"] = "wy";
+        page["platform"] = c.Platform;
         return page;
     }
     private static Task<JsonObject> Content(Call c, JsonElement? continuation, string kind, string target)
@@ -104,6 +104,7 @@ public sealed partial class MusicPlatformCatalog
         PJ.Require(request is not null); var p = request! with { Continuation = CloneContinuation(request!.Continuation) };
         return RunAsync(p.Platform, "home", p, p.Refresh, c =>
         {
+            if (c.Platform == "kg") return KgHome(c, p);
             PJ.Require(c.Platform == "wy", c.Session is null ? "AUTH_REQUIRED" : "UNSUPPORTED");
             return Content(c, p.Continuation, "home", "wy:home");
         }, cancellationToken);
@@ -111,7 +112,12 @@ public sealed partial class MusicPlatformCatalog
     public Task<JsonElement> ChannelsAsync(MusicChannelsRequest request, CancellationToken cancellationToken = default)
     {
         PJ.Require(request is not null); var p = request!;
-        return RunAsync(p.Platform, "channels", p, p.Refresh, c => { PJ.Require(c.Platform == "wy", "UNSUPPORTED"); return Directory(c); }, cancellationToken);
+        return RunAsync(p.Platform, "channels", p, p.Refresh, async c =>
+        {
+            if (c.Platform == "kg") return PlatformKgDiscovery.Directory(await KgTags(c));
+            PJ.Require(c.Platform == "wy", "UNSUPPORTED");
+            return PlatformDiscovery.ChannelDirectory(await Directory(c));
+        }, cancellationToken);
     }
     public Task<JsonElement> ChannelAsync(MusicChannelRequest request, CancellationToken cancellationToken = default)
     {
@@ -119,6 +125,7 @@ public sealed partial class MusicPlatformCatalog
         PJ.Input(p.Id); if (p.PageCode is not null) PJ.Input(p.PageCode, 100); if (p.Tag is { Length: > 0 }) PJ.Input(p.Tag);
         return RunAsync(p.Platform, "channel", p, p.Refresh, async c =>
         {
+            if (c.Platform == "kg") return await KgChannel(c, p);
             PJ.Require(c.Platform == "wy", c.Session is null ? "AUTH_REQUIRED" : "UNSUPPORTED");
             var descriptor = PJ.Array((await Directory(c))["items"]).OfType<JsonObject>().FirstOrDefault(d => PJ.S(d, "id") == p.Id);
             PJ.Require(descriptor is not null, "NOT_FOUND");
@@ -198,9 +205,45 @@ public sealed partial class MusicPlatformCatalog
                 case "artist-activity": throw new MusicPlatformException(c.Session is null ? "AUTH_REQUIRED" : "UNSUPPORTED");
                 default: throw new MusicPlatformException("UNSUPPORTED");
             }
-            page["channel"] = descriptor!.DeepClone(); page["title"] = descriptor["name"]?.DeepClone();
+            page["channel"] = PlatformDiscovery.ChannelDescriptor(descriptor!);
+            page["title"] = descriptor!["name"]?.DeepClone();
             return page;
         }, cancellationToken);
+    }
+    private static async Task CompleteCubePlaylists(Call c, JsonObject page)
+    {
+        var sections = PJ.Array(page["sections"]).ToArray();
+        var visible = sections.SelectMany(section => PJ.Array(PJ.At(section, "items")))
+            .OfType<JsonObject>().Where(card => PJ.S(card, "action", "type") == "playlist").ToArray();
+        var cards = visible.Concat(sections.SelectMany(section => PJ.Array(PJ.At(section, "tabs"))
+                .SelectMany(tab => PJ.Array(PJ.At(tab, "items")))).OfType<JsonObject>())
+            .Where(card => PJ.S(card, "action", "type") == "playlist").ToArray();
+        var ids = visible.Where(card => PJ.S(card, "name").Length == 0 || PJ.S(card, "cover").Length == 0)
+            .Select(card => PJ.S(card, "action", "id")).Distinct(StringComparer.Ordinal).ToArray();
+        foreach (var batch in ids.Chunk(100))
+        {
+            var summaries = await c.Wy("/api/tag/tab/playlists", PJ.Obj(("ids", string.Join(",", batch))), raw =>
+            {
+                var rows = PJ.Rows(raw["data"], batch.Length);
+                PJ.Require(rows.Count == batch.Length, "NOT_FOUND");
+                var result = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+                foreach (var row in rows)
+                {
+                    var summary = PlatformSongs.Playlist("wy", row);
+                    var id = PJ.S(summary, "id");
+                    PJ.Require(batch.Contains(id, StringComparer.Ordinal) && result.TryAdd(id, summary), "IDENTITY_MISMATCH");
+                    if (PJ.S(summary, "creator").Length == 0) summary["creator"] = PJ.Metadata(row["userName"]);
+                }
+                return result;
+            });
+            foreach (var card in cards)
+            {
+                if (!summaries.TryGetValue(PJ.S(card, "action", "id"), out var summary)) continue;
+                foreach (var field in new[] { "name", "cover", "creator" })
+                    if (PJ.S(card, field).Length == 0) card[field] = summary[field]?.DeepClone();
+                if (card["count"] is null) card["count"] = summary["count"]?.DeepClone();
+            }
+        }
     }
     private static async Task<JsonObject> Cube(Call c, MusicChannelRequest p, JsonObject descriptor, string target)
     {
@@ -228,6 +271,7 @@ public sealed partial class MusicPlatformCatalog
             return (Page: cubePage, LayoutTag: isLayoutTag);
         }, true);
         var page = layout.Page; var layoutTag = layout.LayoutTag;
+        await CompleteCubePlaylists(c, page);
         if (PJ.At(page, "feed", "request") is JsonObject req)
         {
             var offset = prev["offset"] is null ? 0 : PJ.Count(prev["offset"]); PJ.Require(offset <= 3000);

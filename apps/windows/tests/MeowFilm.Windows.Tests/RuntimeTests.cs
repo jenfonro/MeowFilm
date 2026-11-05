@@ -24,7 +24,7 @@ public static class RuntimeTests
         return path;
     }
     private const string Identity = "aggregate";
-    private static RuntimeModule[] Modules => [new("music", "0.7.0"), new("cat", "0.1.0")];
+    private static RuntimeModule[] Modules => [new("music", "0.7.0"), new("cat", "0.1.0"), new("source", "0.1.0")];
     private static string[] Namespaces => ["music.library.v1", "music.accounts.v1"];
     private static string ScriptData() => Path.Combine(NewData(), "script-runtime");
 
@@ -34,7 +34,7 @@ public static class RuntimeTests
         {
             var modules = Modules;
             var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
-            await using var store = new DpapiDocumentStore(NewData(), Namespaces);
+            await using var store = new LocalDocumentStore(NewData(), Namespaces, protectedNamespaces: ["music.accounts.v1"]);
             await using var documents = new ProtectedDocumentBridge(store, []);
             var scriptData = ScriptData();
             int pid;
@@ -51,6 +51,10 @@ public static class RuntimeTests
                 using var catStatus = JsonDocument.Parse(cat.GetProperty("data").GetString()!);
                 BridgeTests.Equal(Path.GetFullPath(Path.Combine(scriptData, "settings.json")),
                     catStatus.RootElement.GetProperty("settingsPath").GetString());
+                var sourceStatus = await runtime.CallAsync("source.runtime.status", new { });
+                BridgeTests.Equal(true, sourceStatus.GetProperty("ok").GetBoolean());
+                BridgeTests.Equal("source.runtime.v1", sourceStatus.GetProperty("contract").GetString());
+                BridgeTests.Equal(0, sourceStatus.GetProperty("instances").GetArrayLength());
                 foreach (var method in new[] { "music.library.list", "music.queue.get", "music.accounts.list",
                     "music.catalog.search", "film.script.status", "film.sources.list", "reader.rules.reset",
                     "reader.sources.list", "reader.content.chapter", "missing.operation" })
@@ -64,7 +68,7 @@ public static class RuntimeTests
             var modules = Modules;
             var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
             string collectionId;
-            await using (var store = new DpapiDocumentStore(root, Namespaces))
+            await using (var store = new LocalDocumentStore(root, Namespaces, protectedNamespaces: ["music.accounts.v1"]))
             await using (var documents = new ProtectedDocumentBridge(store, []))
             await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, documents.Methods, ScriptData()))
             await using (var library = new MusicLibraryOwner(store))
@@ -82,7 +86,7 @@ public static class RuntimeTests
                 BridgeTests.Equal(true, queue.GetProperty("ok").GetBoolean());
                 await BridgeTests.Expect("METHOD_UNAVAILABLE", () => runtime.CallAsync("music.library.list", new { }));
             }
-            await using (var store = new DpapiDocumentStore(root, Namespaces))
+            await using (var store = new LocalDocumentStore(root, Namespaces, protectedNamespaces: ["music.accounts.v1"]))
             await using (var documents = new ProtectedDocumentBridge(store, []))
             await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, documents.Methods, ScriptData()))
             await using (var library = new MusicLibraryOwner(store))
@@ -146,7 +150,7 @@ public static class RuntimeTests
             var root = NewData();
             var media = Path.Combine(root, "测试.wav");
             await File.WriteAllBytesAsync(media, Encoding.ASCII.GetBytes("test-only-grant-not-playback"));
-            await using var store = new DpapiDocumentStore(root, ["music.files.v1"]);
+            await using var store = new LocalDocumentStore(root, ["music.files.v1"]);
             var files = new GrantedMediaFiles(store, "music.files.v1", [".wav"]);
             var grants = await files.GrantAsync([media, media]);
             BridgeTests.Equal(1, grants.Count);

@@ -45,7 +45,7 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
             Guid.NewGuid().ToString("N"));
         TestWorkspace.ValidatePath(TestWorkspace.DataRoot, Root);
         Directory.CreateDirectory(Root);
-        Store = new(new DpapiDocumentStore(Root, AppIdentity.NativeNamespaces));
+        Store = new(new LocalDocumentStore(Root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
         Handler = new(Store);
         // The DEFAULT protocol factory must consume this application's real AccountOwner.
         App = new(Store, Runtime, Handler);
@@ -146,13 +146,13 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
         public ValueTask DisposeAsync() { Interlocked.Increment(ref Disposals); return ValueTask.CompletedTask; }
     }
 
-    internal sealed class StoreProbe(DpapiDocumentStore inner) : IProtectedDocumentStore
+    internal sealed class StoreProbe(LocalDocumentStore inner) : IDocumentStore
     {
         private readonly ConcurrentDictionary<string, int> reads = new(), writes = new();
         internal int Disposals;
         internal int Reads(string ns) => reads.GetValueOrDefault(ns);
         internal int Writes(string ns) => writes.GetValueOrDefault(ns);
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         { reads.AddOrUpdate(ns, 1, (_, count) => count + 1); return inner.ReadAsync(ns, token); }
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
             DocumentFingerprint expected, CancellationToken token = default)

@@ -564,15 +564,15 @@ public static class MusicKwMgCatalogTests
         await Error(reason switch { "cancel" => "CANCELLED", "close" => "CLOSED", "invalidate" or "generation" => "STALE_SESSION", _ => "TIMEOUT" }, () => pending);
         Check(handler.Calls == 0);
     }
-    private sealed class Store : IProtectedDocumentStore
+    private sealed class Store : IDocumentStore
     {
         internal byte[]? Bytes;
         internal int Writes;
         internal bool Disposed;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
             Check(ns == MusicLibraryOwner.DocumentNamespace); token.ThrowIfCancellationRequested();
-            return Task.FromResult(new ProtectedDocument(Bytes?.ToArray(), Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes)));
+            return Task.FromResult(new DocumentSnapshot(Bytes?.ToArray(), Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes)));
         }
         public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
         {

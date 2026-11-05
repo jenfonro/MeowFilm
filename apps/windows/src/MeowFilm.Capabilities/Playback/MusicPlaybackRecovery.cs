@@ -50,11 +50,11 @@ public sealed partial class MusicCapability
         PlaybackError.HttpRangeRejected;
 
     private static bool CanChangeFailedSource(MusicRecovery state, string? code) =>
-        !state.RecoveryDisabled && state.Media?.Target is { Official: true, Automatic: true } &&
+        !state.RecoveryDisabled && state.Media?.Target is not null &&
         state.SourceFallbacks < 4 &&
         (RefreshableMusicError(code) || code is PlaybackError.HttpFormatUnsupported or
             PlaybackError.OpenFailed or PlaybackError.PlaybackFailed or "PLAYBACK_UNAVAILABLE" ||
-            code is not null && UnavailableOfficialCandidate(code));
+            code is not null && UnavailableSourceCandidate(code));
 
     private static bool RecoverableMusicError(MusicRecovery state, string? code) =>
         !state.RecoveryDisabled &&
@@ -124,6 +124,9 @@ public sealed partial class MusicCapability
         if (!CurrentPendingMedia(state, pending)) return false;
         alreadyStarted = pending.SourceStarted;
         state.Media = pending.Media;
+        playbackInstallation = pending.Media.Target?.Installation;
+        if (pending.Media.Target?.Official == true)
+            state.AccountEpoch = Interlocked.Read(ref officialAccountEpoch);
         state.Cached = false;
         state.PendingFailure = null;
         state.Pending = null;
@@ -171,7 +174,17 @@ public sealed partial class MusicCapability
         onlineCancellation = access;
         try
         {
-            state.Media = await ResolveOnline(song, state.Token);
+            try { state.Media = await ResolveOnline(song, state.Token); }
+            finally
+            {
+                // A prepared official file is speculative, not a playback choice.
+                // If another source wins (or resolution fails), retire its producer
+                // rather than waiting for a Started event that can never arrive.
+                if (preparedAudio is { } prepared && (preparedEntry != song.EntryId ||
+                    state.Media?.Target is not { Official: true, AccountScope: not null, QualityCacheSignature: not null } accepted ||
+                    !prepared.Matches(accepted.AccountScope, song.Id, accepted.QualityCacheSignature)))
+                    CancelPreparedAudio();
+            }
             // Initial account hydration may notify while resolving; the native issued authority,
             // not an assumption about UI initialization order, decides whether this receipt is current.
             if (state.Media.Target?.Official == true) state.AccountEpoch = Interlocked.Read(ref officialAccountEpoch);
@@ -334,20 +347,21 @@ public sealed partial class MusicCapability
                     {
                         if (!CanChangeFailedSource(state, PlaybackError.HttpExpired))
                             throw new MusicOperationException("PLAYBACK_UNAVAILABLE");
-                        if (state.Media!.Target!.SourceKey is { } rejected) state.RejectedSources.Add(rejected);
+                        state.RejectedSources.Add(SourceIdentity(state.Media!.Target!));
                         if (state.Media.Uri is { } rejectedUri) state.RejectedUrls.Add(rejectedUri.AbsoluteUri);
                         state.SourceFallbacks++;
-                        refreshed = await ResolveAutomaticOfficial(state.Song,
+                        refreshed = await ResolveAutomaticSources(state.Song,
                             target.PolicyRequest, target.QualityPolicySignature!, request.Token,
-                            state.RejectedSources, state.RejectedUrls, requireNetwork: true);
+                            state.RejectedSources, state.RejectedUrls, requireNetwork: true,
+                            recordingPlatform: target.Automatic ? null : target.Platform,
+                            recordingKey: target.Automatic ? null : target.SourceKey);
                     }
                     request.Token.ThrowIfCancellationRequested();
                     if (!CurrentRecovery(state)) throw new OperationCanceledException(request.Token);
                     if (state.RecoveryDisabled ||
                         refreshed.Target?.QualityPolicySignature is { } policy && policy != savedQualitySignature)
                         throw new MusicOperationException("QUALITY_POLICY_CHANGED");
-                    bool changedSource = state.Media!.Target!.Platform != refreshed.Target!.Platform ||
-                        state.Media.Target.SourceKey != refreshed.Target.SourceKey;
+                    bool changedSource = SourceIdentity(state.Media!.Target!) != SourceIdentity(refreshed.Target!);
                     var pending = BeginPendingMedia(state, refreshed, changedSource, request.Token);
                     EnsurePendingMedia(state, pending);
                     await ReopenPendingMedia(port, continuation, state, pending);
@@ -363,7 +377,7 @@ public sealed partial class MusicCapability
                     AcceptOfficialSong(state.Song, refreshed.Target);
                     if (changedSource) SelectFeedback(state.Song, currentFeedbackAutomatic, currentRecommendationFeedback);
                     UpdateFeedbackSelection(); UpdateRecordingCandidates(); UpdateLyricSources();
-                    Changed(nameof(CurrentSource)); Changed(nameof(CurrentQualityLabel));
+                    PlaybackSourceBindings();
                     if (IsLyrics) _ = RestoreLyricsAsync();
                     ScheduleMusicExpiry(state);
                     if (alreadyStarted) ConfirmRecoveredSourceStarted(state);
@@ -375,7 +389,7 @@ public sealed partial class MusicCapability
                 {
                     if (state.Pending?.Media is { } failed)
                     {
-                        if (failed.Target?.SourceKey is { } rejected) state.RejectedSources.Add(rejected);
+                        if (failed.Target is { } rejected) state.RejectedSources.Add(SourceIdentity(rejected));
                         if (failed.Uri is { } rejectedUri) state.RejectedUrls.Add(rejectedUri.AbsoluteUri);
                     }
                     DiscardPendingMedia(state);
@@ -446,6 +460,8 @@ public sealed partial class MusicCapability
 
     private async Task RevokeChangedMusicSource(string? installation)
     {
+        if (installation is not null && musicRecovery?.Pending?.Media.Target?.Installation == installation)
+            CancelPendingMedia(musicRecovery, "SOURCES_CHANGED");
         if (musicRecovery?.Media?.Target?.Installation != installation || installation is null) return;
         var epoch = playbackEpoch; var identity = openedEntry;
         await RetireMusicRecovery();

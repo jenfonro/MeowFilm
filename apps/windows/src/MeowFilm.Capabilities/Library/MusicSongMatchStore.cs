@@ -8,7 +8,7 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities.Library;
 
 /// <summary>Disposable matching observations, separate from canonical library and playback data.</summary>
-internal sealed class MusicSongMatchStore(IProtectedDocumentStore store)
+internal sealed class MusicSongMatchStore(IDocumentStore store)
 {
     internal const string Namespace = "music.song-matches.v1";
     private const int MaximumBytes = 4 * 1024 * 1024;
@@ -24,9 +24,9 @@ internal sealed class MusicSongMatchStore(IProtectedDocumentStore store)
             cancellationToken.ThrowIfCancellationRequested();
             return saved.Entries;
         }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
         { throw MusicPlaybackCacheDataException.FromStore(error); }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
         { return []; }
         finally { gate.Release(); }
     }
@@ -52,7 +52,7 @@ internal sealed class MusicSongMatchStore(IProtectedDocumentStore store)
                     // After CAS admission, cancellation cannot imply that the write was rolled back.
                     receipt = await store.WriteAsync(Namespace, encoded, before.Fingerprint, CancellationToken.None).ConfigureAwait(false);
                 }
-                catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
+                catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
                 {
                     // Validate the durable outcome, then abandon this snapshot rather than replaying it
                     // over a competing write. A future caller supplies a fresh eligibility snapshot.
@@ -65,9 +65,9 @@ internal sealed class MusicSongMatchStore(IProtectedDocumentStore store)
                     if (actual.Fingerprint != expected) throw new MusicPlaybackCacheCommitException();
                 }
             }
-            catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
+            catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
             { throw MusicPlaybackCacheDataException.FromStore(error); }
-            catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
+            catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
             { }
             finally { gate.Release(); }
         }

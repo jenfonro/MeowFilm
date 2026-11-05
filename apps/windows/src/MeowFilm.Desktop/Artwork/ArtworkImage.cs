@@ -132,7 +132,7 @@ public sealed class ArtworkImage : Grid
         priorRequest?.Cancel();
     }
     // Small raster sample of the already acquired cover: no second fetch or full-image copy.
-    internal static (Brush Raw, Brush Palette) SamplePalette(BitmapSource source)
+    public static (Brush Raw, Brush Palette) SamplePalette(BitmapSource source)
     {
         var palettes = SamplePalettes(source);
         return (palettes.Raw, palettes.Palette);

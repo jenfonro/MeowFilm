@@ -19,6 +19,7 @@ public static partial class MusicUiTests
         yield return Case("native KW and MG search preserves grouped versions through WPF and the next round", async () =>
         {
             await using var f = await PublicSearchScene.Create();
+            await f.Module.SetCatalogSourceAsync("kg");
             await f.Search();
             // Provider completion precedes the asynchronous rank-fusion publication.
             await SearchUntil(() => f.Module.Songs.Count == 32 && f.Module.CanSearchMore);
@@ -35,6 +36,8 @@ public static partial class MusicUiTests
             Equal(33, mg.GetProperty("count").GetInt32()); Equal(2, mg.GetProperty("page").GetInt32());
             True(!mg.GetProperty("more").GetBoolean(), "expanded count is not the group cursor");
             Equal(2, f.Http.MgPages.Count); Equal(0, f.Runtime.Calls.Count);
+            Equal("kg", f.Module.CatalogSourcePlatform);
+            Equal("kg", (await f.Call("music.catalogSource.settings.get")).GetProperty("settings").GetProperty("platform").GetString());
         });
         yield return Case("native public search retries failed KW in the next round and keeps MG recording metadata in queue", async () =>
         {
@@ -66,7 +69,7 @@ public static partial class MusicUiTests
         snapshot.GetProperty("platforms").EnumerateArray().Single(p => p.GetProperty("platform").GetString() == platform);
     private sealed class PublicSearchScene : IAsyncDisposable
     {
-        private readonly DpapiDocumentStore store = ServiceStore();
+        private readonly LocalDocumentStore store = ServiceStore();
         internal readonly NativeMusicScriptTestRuntime Runtime = new();
         internal readonly PublicSearchHttp Http = new();
         internal readonly MusicNativeApplication App;
@@ -88,6 +91,9 @@ public static partial class MusicUiTests
             try
             {
                 await scene.Module.InitializeAsync(default); await Drain();
+                Equal("wy", scene.Module.CatalogSourcePlatform);
+                True(scene.Module.CanEditCatalogSource && !scene.Module.HasCatalogSourceError,
+                    "five-platform fixture consumes native source settings without a script fallback");
                 foreach (var row in scene.Module.SongSearch.Platforms.ToArray())
                     await scene.Module.SetSearchPlatformEnabledAsync("songs", row, row.Platform is "kw" or "mg");
                 foreach (var row in scene.Module.PlaylistSearch.Platforms.ToArray())

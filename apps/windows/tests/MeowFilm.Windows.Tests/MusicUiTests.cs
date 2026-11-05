@@ -25,13 +25,85 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Windows.Tests;
 
 // Native application runs ordinary business. Only authored LX scripts use the
-// on-demand script-only process. DPAPI restart and synthetic-store UI races are
+// on-demand script-only process. Local-store restart and synthetic-store UI races are
 // separate evidence; no production storage fallback exists.
 public static partial class MusicUiTests
 {
     public static IEnumerable<TestCase> Cases()
     {
         foreach (var test in PlayerChromeCases()) yield return test;
+        yield return Case("test document stores authorize exact native namespaces and complete script sources", async () =>
+        {
+            const string hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            byte[] payload = [1, 2, 3];
+            foreach (bool persistent in new[] { false, true })
+            {
+                await using IDocumentStore store = persistent ? ServiceStore() : new DocumentProbe();
+                var names = AppIdentity.NativeNamespaces.Concat(AppIdentity.NativeCollections.Select(collection =>
+                    $"{collection}.{hash}"));
+                foreach (string ns in names)
+                {
+                    Equal(DocumentFingerprint.Missing, (await store.ReadAsync(ns)).Fingerprint);
+                    var fingerprint = await store.WriteAsync(ns, payload, DocumentFingerprint.Missing);
+                    Equal(DocumentFingerprint.FromBytes(payload), fingerprint);
+                    var saved = await store.ReadAsync(ns);
+                    Equal(fingerprint, saved.Fingerprint);
+                    True(saved.Data is not null && saved.Data.SequenceEqual(payload), "authorized namespace roundtrip: " + ns);
+                }
+            }
+        });
+        yield return Case("test document stores reject unknown namespaces and malformed script source names", async () =>
+        {
+            const string hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            foreach (bool persistent in new[] { false, true })
+            {
+                await using IDocumentStore store = persistent ? ServiceStore() : new DocumentProbe();
+                foreach (string collection in AppIdentity.NativeCollections)
+                {
+                    (string Namespace, DocumentStoreError Error)[] denied =
+                    [
+                        ("music.unregistered.v1", DocumentStoreError.Unavailable),
+                        ($"unknown.collection.v1.{hash}", DocumentStoreError.Unavailable),
+                        (collection, DocumentStoreError.Unavailable),
+                        ($"{collection}.", DocumentStoreError.Unavailable),
+                        ($"{collection}x.{hash}", DocumentStoreError.Unavailable),
+                        ($"{collection.ToUpperInvariant()}.{hash}", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash.ToUpperInvariant()}", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash[..^1]}", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}0", DocumentStoreError.Unavailable),
+                        ($"{collection}.{new string('g', 64)}", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.0", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.1", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.2147483647", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.0.extra", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.-1", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.01", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.2147483648", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.+1", DocumentStoreError.InvalidRequest),
+                        ($"{collection}.{hash}.1 ", DocumentStoreError.InvalidRequest),
+                        ($"{collection}..0", DocumentStoreError.InvalidRequest)
+                    ];
+                    foreach (var item in denied)
+                    foreach (var operation in new Func<Task>[]
+                    {
+                        () => store.ReadAsync(item.Namespace),
+                        () => store.WriteAsync(item.Namespace, new byte[] { 1 }, DocumentFingerprint.Missing)
+                    })
+                    {
+                        try
+                        {
+                            await operation();
+                            throw new InvalidOperationException("Expected namespace rejection: " + item.Namespace);
+                        }
+                        catch (DocumentStoreException error)
+                        {
+                            Equal(persistent ? item.Error : DocumentStoreError.InvalidRequest, error.Error);
+                        }
+                    }
+                }
+            }
+        });
         yield return Case("music settings expose current native groups and lyrics use the same playback", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection();
@@ -697,7 +769,7 @@ public static partial class MusicUiTests
                 await f.Module.RefreshAsync(); Equal(1, f.Module.Songs.Count); Equal("操作失败，请重试", f.Module.Status);
                 Equal(0, f.Playback.Opens.Count);
             }
-            var root = NewRoot(); await using var store = new DpapiDocumentStore(root, ["music.files.v1"]);
+            var root = NewRoot(); await using var store = new LocalDocumentStore(root, ["music.files.v1"]);
             await using var native = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
             var runtime = new FailedApplication(); var module = new MusicCapability(runtime, store, native);
             await Failure(() => module.InitializeAsync(default), "STORAGE_UNAVAILABLE");
@@ -813,7 +885,7 @@ public static partial class MusicUiTests
             await f.Module.ChangeModeAsync(3); Equal(3, f.Module.Mode);
             await f.Module.PrepareShutdownAsync(); Equal(2, f.Calls.Count("application.prepare"));
         });
-        yield return Case("DPAPI restart restores library/mode/current without starting media", async () =>
+        yield return Case("local document restart restores library/mode/current without starting media", async () =>
         {
             var root = NewRoot(); string id, title;
             await using (var first = await Fixture.Create(root, persistent: true))
@@ -1100,11 +1172,13 @@ public static partial class MusicUiTests
         public Task ResumeAsync() { Resumes++; IsPlaying = true; Changed(); return Task.CompletedTask; }
         public Task StopAsync() { Stops++; HasMedia = false; IsPlaying = false; Changed(); return Task.CompletedTask; }
         public Task SeekAsync(double seconds) { Seek = seconds; Changed(); return Task.CompletedTask; }
+        public void Tick(double seconds)
+        { Seek = seconds; PropertyChanged?.Invoke(this, new(nameof(PositionSeconds))); }
     }
     private sealed class Fixture : IAsyncDisposable
     {
         public required string Root;
-        public required IProtectedDocumentStore Store;
+        public required IDocumentStore Store;
         public required NativeMusicScriptTestRuntime Runtime;
         public required MusicNativeApplication Application;
         public required ObservedApplication Calls;
@@ -1116,8 +1190,8 @@ public static partial class MusicUiTests
             IMusicPlayback? output = null, MusicSourceNetworkDownload? sourceNetworkDownload = null)
         {
             root ??= NewRoot();
-            IProtectedDocumentStore store = persistent
-                ? new DpapiDocumentStore(root, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections) : new DocumentProbe();
+            IDocumentStore store = persistent
+                ? new LocalDocumentStore(root, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces) : new DocumentProbe();
             var runtime = new NativeMusicScriptTestRuntime(); MusicCapability? module = null;
             var application = new MusicNativeApplication(store, runtime, new NoUpstream());
             try
@@ -1128,6 +1202,10 @@ public static partial class MusicUiTests
                     ? new MusicCapability(calls, store, output ?? playback, null, dialogs, sourceNetworkDownload)
                     : new MusicCapability(calls, store, native, dialogs);
                 await module.InitializeAsync(default);
+                Equal("wy", module.CatalogSourcePlatform);
+                True(module.CanEditCatalogSource && !module.HasCatalogSourceError, "shared UI fixture restores the native catalog source");
+                Equal(1, calls.Count("music.catalogSource.settings.get"));
+                Equal(0, calls.Count("music.catalogSource.settings.save"));
                 await module.NavigateAsync("favorites", default);
                 True(!runtime.HasStarted, "native initialization never starts Node");
                 return new(playback, dialogs) { Root = root, Store = store, Runtime = runtime, Application = application, Calls = calls, Module = module };
@@ -1187,18 +1265,18 @@ public static partial class MusicUiTests
         protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, CancellationToken cancellationToken)
             => throw new InvalidOperationException("No upstream request allowed in local UI fixture");
     }
-    private sealed class DocumentProbe : IProtectedDocumentStore
+    private sealed class DocumentProbe : IDocumentStore
     {
         private readonly Dictionary<string, byte[]> values = [];
         private readonly object gate = new();
         private bool closed;
-        public Task<ProtectedDocument> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
+        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
         {
             lock (gate)
             {
                 Check(documentNamespace, cancellationToken);
                 var bytes = values.GetValueOrDefault(documentNamespace)?.ToArray();
-                return Task.FromResult(new ProtectedDocument(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
+                return Task.FromResult(new DocumentSnapshot(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
             }
         }
         public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken cancellationToken = default)
@@ -1208,7 +1286,7 @@ public static partial class MusicUiTests
                 Check(documentNamespace, cancellationToken);
                 var old = values.GetValueOrDefault(documentNamespace);
                 var actual = old is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(old);
-                if (actual != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                if (actual != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 values[documentNamespace] = data.ToArray();
                 return Task.FromResult(DocumentFingerprint.FromBytes(data.Span));
             }
@@ -1216,19 +1294,15 @@ public static partial class MusicUiTests
         private void Check(string ns, CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
-            if (closed) throw new ProtectedDocumentException(DocumentStoreError.Closed);
+            if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
             bool content = AppIdentity.NativeCollections.Any(collection =>
             {
                 if (!ns.StartsWith(collection + ".", StringComparison.Ordinal)) return false;
-                string[] suffix = ns[(collection.Length + 1)..].Split('.');
-                return suffix.Length == 2 && suffix[0].Length == 64 &&
-                    suffix[0].All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') &&
-                    int.TryParse(suffix[1], System.Globalization.NumberStyles.None,
-                        System.Globalization.CultureInfo.InvariantCulture, out int index) && index >= 0 &&
-                    suffix[1] == index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                string hash = ns[(collection.Length + 1)..];
+                return hash.Length == 64 && hash.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
             });
             if (!AppIdentity.NativeNamespaces.Contains(ns, StringComparer.Ordinal) && !content)
-                throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
+                throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         }
         public ValueTask DisposeAsync() { lock (gate) { closed = true; values.Clear(); } return ValueTask.CompletedTask; }
     }

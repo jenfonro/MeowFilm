@@ -560,11 +560,11 @@ public static class MusicSongMatchStoreTests
         await using var unavailableOwner = new MusicLibraryOwner(unavailable);
         bool surfaced = false;
         try { await unavailableOwner.ReadMatchingSongsAsync(default); }
-        catch (ProtectedDocumentException error) { surfaced = error.Error == DocumentStoreError.Unavailable; }
+        catch (DocumentStoreException error) { surfaced = error.Error == DocumentStoreError.Unavailable; }
         Check(surfaced && unavailable.WriteCalls == 0);
     }
 
-    private sealed class Store : IProtectedDocumentStore
+    private sealed class Store : IDocumentStore
     {
         private readonly Dictionary<string, byte[]> documents = new(StringComparer.Ordinal);
         internal readonly List<string> ReadNamespaces = [], WrittenNamespaces = [];
@@ -578,14 +578,14 @@ public static class MusicSongMatchStoreTests
         internal byte[]? Bytes(string documentNamespace) =>
             documents.TryGetValue(documentNamespace, out var bytes) ? bytes.ToArray() : null;
 
-        public Task<ProtectedDocument> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
+        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             ReadCalls++; ReadNamespaces.Add(documentNamespace);
             if ((WriteCalls > 0 ? ReadErrorAfterWrite ?? ReadError : ReadError) is { } failure)
-                throw new ProtectedDocumentException(failure);
+                throw new DocumentStoreException(failure);
             byte[]? bytes = Bytes(documentNamespace);
-            return Task.FromResult(new ProtectedDocument(bytes, ReadFingerprint ??
+            return Task.FromResult(new DocumentSnapshot(bytes, ReadFingerprint ??
                 (bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes))));
         }
 
@@ -598,11 +598,11 @@ public static class MusicSongMatchStoreTests
             if (CompetingWrite is { } competing) { Seed(documentNamespace, competing); CompetingWrite = null; }
             byte[]? previous = Bytes(documentNamespace);
             var actual = previous is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(previous);
-            if (actual != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
-            if (WriteError is { } beforeFailure && !CommitBeforeFailure) throw new ProtectedDocumentException(beforeFailure);
+            if (actual != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
+            if (WriteError is { } beforeFailure && !CommitBeforeFailure) throw new DocumentStoreException(beforeFailure);
             if (!SkipCommit) documents[documentNamespace] = data.ToArray();
             if (ReplacementAfterCommit is { } replacement) Seed(documentNamespace, replacement);
-            if (WriteError is { } afterFailure) throw new ProtectedDocumentException(afterFailure);
+            if (WriteError is { } afterFailure) throw new DocumentStoreException(afterFailure);
             return WrongReceipt ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data.Span);
         }
 

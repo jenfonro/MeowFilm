@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { Duplex } from 'node:stream';
 import { attachConnectedStream } from '@meowfilm/runtime-bridge/descriptor';
 import { createAppRuntime } from '../apps/runtime/bootstrap.mjs';
+import { createCatScriptModule } from '../apps/runtime/modules/cat-script.mjs';
+import { createMusicScriptModule } from '../apps/runtime/modules/music-script.mjs';
+import { createSourceRuntimeModule } from '../apps/runtime/modules/source-runtime.mjs';
 
 function connect(t, product, modules, options = {}) {
   let left, right;
@@ -45,6 +48,134 @@ test('failed module cleanup is explicit without leaking provider diagnostics', a
   });
   await assert.rejects(runtime.close(), { code: 'INTERNAL', message: 'INTERNAL' });
 });
+
+for (const hostFailure of ['throw', 'incomplete']) {
+  test(`App disposal reports a real source ${hostFailure} cleanup envelope and waits for every module`, async t => {
+    let sourceCloses = 0, beforeCloses = 0, afterCloses = 0;
+    let onClose, resolveAfter, afterStarted;
+    let afterComplete = false, closeComplete = false;
+    const afterGate = new Promise(resolve => { resolveAfter = resolve; });
+    const started = new Promise(resolve => { afterStarted = resolve; });
+    const source = createSourceRuntimeModule({
+      call: async () => assert.fail('disposal must not make outbound RPC calls'),
+      network: async () => assert.fail('disposal must not use the network'),
+      hostFactory: () => ({
+        list: () => [],
+        async close() {
+          sourceCloses++;
+          if (hostFailure === 'throw') throw new Error('private host cleanup diagnostics');
+          return { cleanupComplete: false };
+        },
+      }),
+    });
+    const runtime = createAppRuntime({
+      product: 'aggregate',
+      modules: [
+        { id: 'before', version: '1.0.0', methods: {}, close() { beforeCloses++; } },
+        source,
+        {
+          id: 'after', version: '1.0.0', methods: {},
+          async close() {
+            afterCloses++;
+            afterStarted();
+            await afterGate;
+            afterComplete = true;
+          },
+        },
+      ],
+      connect: options => {
+        onClose = options.onClose;
+        return { close: () => onClose() };
+      },
+    });
+    t.after(async () => {
+      resolveAfter();
+      await runtime.close().catch(() => {});
+    });
+    if (hostFailure === 'incomplete') onClose();
+    const closing = runtime.close();
+    void closing.then(() => { closeComplete = true; }, () => { closeComplete = true; });
+    const failed = assert.rejects(closing, { code: 'INTERNAL', message: 'INTERNAL' });
+    await started;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sourceCloses, 1);
+    assert.equal(beforeCloses, 1);
+    assert.equal(afterCloses, 1);
+    assert.equal(afterComplete, false);
+    assert.equal(closeComplete, false);
+    resolveAfter();
+    await failed;
+    assert.equal(afterComplete, true);
+    await assert.rejects(runtime.close(), { code: 'INTERNAL', message: 'INTERNAL' });
+    assert.deepEqual([sourceCloses, beforeCloses, afterCloses], [1, 1, 1]);
+    assert.deepEqual(await source.close(), {
+      ok: false, contract: 'source.runtime.v1', code: 'SOURCE_CLEANUP',
+    });
+    assert.equal(sourceCloses, 1);
+  });
+}
+
+for (const failedModule of [undefined, 'music', 'cat']) {
+  test(`App disposal consumes the existing music, Cat and source close contracts (${failedModule ?? 'success'})`, async t => {
+    const closes = { music: 0, cat: 0, source: 0 };
+    const noNetwork = async () => assert.fail('passive modules must not use the network');
+    const noCall = async () => assert.fail('disposal must not make outbound RPC calls');
+    const music = createMusicScriptModule({
+      call: noCall,
+      network: noNetwork,
+      hostFactory: () => ({
+        async close() {
+          closes.music++;
+          return { cleanupComplete: failedModule !== 'music' };
+        },
+      }),
+    });
+    const cat = createCatScriptModule({
+      dataRoot: 'unused-assembly-fixture',
+      runtimeFactory: () => ({
+        async status() { return { state: 'ready' }; },
+        async close() {
+          closes.cat++;
+          if (failedModule === 'cat') throw new Error('private Cat cleanup diagnostics');
+        },
+      }),
+    });
+    const source = createSourceRuntimeModule({
+      call: noCall,
+      network: noNetwork,
+      hostFactory: () => ({
+        list: () => [],
+        async close() { closes.source++; return { cleanupComplete: true }; },
+      }),
+    });
+    let onClose;
+    const runtime = createAppRuntime({
+      product: 'aggregate',
+      modules: [music, cat, source],
+      connect: options => {
+        onClose = options.onClose;
+        return { close: () => onClose() };
+      },
+    });
+    t.after(() => runtime.close().catch(() => {}));
+    assert.equal((await cat.methods['cat.script.status']({})).ok, true);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (failedModule) {
+        await assert.rejects(runtime.close(), { code: 'INTERNAL', message: 'INTERNAL' });
+      } else {
+        assert.equal(await runtime.close(), undefined);
+      }
+    }
+    assert.deepEqual(closes, { music: 1, cat: 1, source: 1 });
+    assert.equal((await music.close()).ok, failedModule !== 'music');
+    if (failedModule === 'cat') await assert.rejects(cat.close(), /private Cat cleanup diagnostics/);
+    else assert.equal(await cat.close(), undefined);
+    assert.deepEqual(await source.close(), {
+      ok: true, contract: 'source.runtime.v1', closed: true, cleanupComplete: true,
+    });
+    assert.deepEqual(closes, { music: 1, cat: 1, source: 1 });
+  });
+}
 
 test('invalid assembly cannot connect or silently override another module', () => {
   const good = { id: 'fixture', version: '0.1.0', methods: {}, close() {} };

@@ -62,6 +62,24 @@ public static class MusicCatalogPersonalTests
         yield return Case("cached navigation detaches a retired noncooperative catalog read", CachedNavigationRetiresRead);
         yield return Case("ordinary channel cursor cache refresh and cancellation remain intact", LegacyPaging);
         yield return Case("closing while personal read is delayed cannot revive content", CloseRead);
+        yield return Case("catalog source default reads without writes and saved source restores before browsing", CatalogSourceRestore);
+        yield return Case("catalog source restore is shared before the first channel request", CatalogSourceFirstRequest);
+        yield return Case("catalog source failed restore blocks browsing until authoritative retry", CatalogSourceReadFailure);
+        yield return Case("catalog source changes only after the saved receipt and reconciles unknown CAS", CatalogSourceSaveReceipts);
+        yield return Case("catalog source failed save retains authority and failed reconciliation blocks new browsing", CatalogSourceSaveFailure);
+        yield return Case("catalog source switch retains explicit detail queue and handed-off media", CatalogSourceDetail);
+        yield return Case("generic channel placement preserves provider order tags and opaque page identity", GenericChannels);
+        yield return Case("generic channel descriptors require current kind placement and availability", GenericChannelContract);
+        foreach (var operation in new[] { "home", "channel" })
+            foreach (var failure in new[] { false, true })
+                yield return Case("catalog source retires delayed " + operation + (failure ? " failure" : " success"),
+                    () => CatalogSourceLateReply(operation, failure));
+        yield return Case("catalog source retirement cancels the old read and close publishes no retired receipt", CatalogSourceDrain);
+        yield return Case("catalog source change reloads a retired landing only when the music page is shown again", CatalogSourceVisibleReload);
+        yield return Case("catalog source startup read cancels and drains without an activated settings view", CatalogSourceRestoreDrain);
+        foreach (string platform in new[] { "wy", "tx", "kg", "kw", "mg" })
+            yield return Case("catalog source remains independent of explicit " + platform + " resource navigation",
+                () => CatalogSourceResource(platform));
     }
 
     private static TestCase Case(string name, Func<Task> run) => new("Music personal UI " + name, () => OnSta(run));
@@ -85,6 +103,345 @@ public static class MusicCatalogPersonalTests
     private static void Layout(FrameworkElement view)
     { view.Measure(new(860, 720)); view.Arrange(new(0, 0, 860, 720)); view.UpdateLayout(); }
     private static MusicCatalogCard FirstSong(Fixture f) => f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.Song is not null);
+    private static async Task CatalogSourceRestore()
+    {
+        Store store;
+        await using (var f = await Fixture.Create())
+        {
+            store = f.Store;
+            Equal("wy", f.Module.CatalogSourcePlatform);
+            Equal(0, f.Store.LibraryWrites);
+            await f.Module.NavigateAsync("catalog-home", default);
+            Equal("wy", f.Platform.Last<MusicHomeRequest>().Platform);
+            await f.Module.SetCatalogSourceAsync("kg");
+            Equal("kg", f.Module.CatalogSourcePlatform);
+            Equal(1, f.Store.LibraryWrites);
+        }
+        int writes = store.LibraryWrites;
+        await using var restored = await Fixture.Create(store: store);
+        Equal("kg", restored.Module.CatalogSourcePlatform);
+        Equal(0, restored.Platform.Requests.Count);
+        await restored.Module.NavigateAsync("catalog-home", default);
+        Equal("kg", restored.Platform.Last<MusicHomeRequest>().Platform);
+        Equal(writes, store.LibraryWrites);
+    }
+
+    private static async Task CatalogSourceFirstRequest()
+    {
+        await using var f = await Fixture.Create(initialize: false);
+        var saved = await f.App.Library.ExecuteAsync("music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" });
+        Check(saved.GetProperty("ok").GetBoolean());
+        var hold = f.App.HoldNext("music.catalogSource.settings.get");
+        var first = f.Module.NavigateAsync("catalog-channels", default);
+        await hold.Arrived.Task;
+        var second = f.Module.NavigateAsync("catalog-channels", default);
+        await Drain();
+        Equal(0, f.Platform.Requests.Count);
+        Equal(1, f.App.Log.Count(call => call.Method == "music.catalogSource.settings.get"));
+        hold.Release();
+        await Task.WhenAll(first, second);
+        Equal(1, f.App.Log.Count(call => call.Method == "music.catalogSource.settings.get"));
+        Equal(1, f.Platform.Requests.OfType<MusicChannelsRequest>().Count());
+        Equal("kg", f.Platform.Last<MusicChannelsRequest>().Platform);
+        Equal("kg", f.Platform.Last<MusicChannelRequest>().Platform);
+    }
+
+    private static async Task CatalogSourceReadFailure()
+    {
+        await using var f = await Fixture.Create(initialize: false);
+        f.App.FailNext("music.catalogSource.settings.get", "STORAGE_UNAVAILABLE");
+        await f.Module.InitializeAsync(default);
+        Check(!f.Module.CanEditCatalogSource && f.Module.HasCatalogSourceError);
+        await f.Module.NavigateAsync("favorites", default);
+        f.App.FailNext("music.catalogSource.settings.get", "STORAGE_UNAVAILABLE");
+        await f.Module.NavigateAsync("catalog-home", default);
+        Equal(0, f.Platform.Requests.Count);
+        Equal("数据源设置读取失败", f.Module.Status);
+        Equal("catalog-home", f.Module.CaptureNavigationLocation());
+        Equal(0, f.Module.HomeSections.Count);
+        await f.Module.ReadCatalogSourceSettingsAsync();
+        Check(f.Module.CanEditCatalogSource && !f.Module.HasCatalogSourceError);
+        Equal(0, f.Platform.Requests.Count);
+        await f.Module.ActivateCatalogLandingAsync();
+        Equal(1, f.Platform.Requests.Count);
+        Equal("wy", f.Platform.Last<MusicHomeRequest>().Platform);
+        Check(f.Module.HomeSections.Count > 0, "showing the unavailable landing reads once after the source is restored");
+        await f.Module.ActivateCatalogLandingAsync();
+        Equal(1, f.Platform.Requests.Count);
+        Equal(0, f.Store.LibraryWrites);
+    }
+
+    private static async Task CatalogSourceSaveReceipts()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.NavigateAsync("catalog-home", default);
+        var prior = f.Module.HomeSections.ToArray();
+        var hold = f.App.HoldNext("music.catalogSource.settings.save");
+        var save = f.Module.SetCatalogSourceAsync("kg");
+        await hold.Arrived.Task;
+        Equal("wy", f.Module.CatalogSourcePlatform);
+        Check(prior.SequenceEqual(f.Module.HomeSections), "an unreceived save cannot change the source surface");
+        hold.Release(); await save;
+        Equal("kg", f.Module.CatalogSourcePlatform);
+        Equal(0, f.Module.HomeSections.Count);
+        int requests = f.Platform.Requests.Count;
+        await f.Module.ActivateCatalogLandingAsync();
+        Equal(requests + 1, f.Platform.Requests.Count);
+        Equal("kg", f.Platform.Last<MusicHomeRequest>().Platform);
+        Check(f.Module.HomeSections.Count > 0 && !f.Module.HomeSections.Intersect(prior, ReferenceEqualityComparer.Instance).Any(),
+            "the retired landing reads the saved source when shown again");
+        f.App.TransformNext("music.catalogSource.settings.save", _ => E(new { ok = false, code = "COMMIT_UNKNOWN" }));
+        int gets = f.App.Log.Count(call => call.Method == "music.catalogSource.settings.get");
+        await f.Module.SetCatalogSourceAsync("wy");
+        Equal("wy", f.Module.CatalogSourcePlatform);
+        Equal(gets + 1, f.App.Log.Count(call => call.Method == "music.catalogSource.settings.get"));
+        Check(!f.Module.HasCatalogSourceError, "a matching authoritative read settles the unknown receipt");
+
+        var settings = (await f.App.Library.ExecuteAsync("music.catalogSource.settings.get")).GetProperty("settings");
+        await f.App.Library.ExecuteAsync("music.catalogSource.settings.save",
+            new { ifRevision = N(settings, "revision"), platform = "kg" });
+        gets = f.App.Log.Count(call => call.Method == "music.catalogSource.settings.get");
+        await f.Module.SetCatalogSourceAsync("kg");
+        Equal("kg", f.Module.CatalogSourcePlatform);
+        Equal(gets + 1, f.App.Log.Count(call => call.Method == "music.catalogSource.settings.get"));
+    }
+
+    private static async Task CatalogSourceSaveFailure()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.NavigateAsync("catalog-home", default);
+        var prior = f.Module.HomeSections.ToArray();
+        f.App.FailNext("music.catalogSource.settings.save", "STORAGE_UNAVAILABLE");
+        await f.Module.SetCatalogSourceAsync("kg");
+        Equal("wy", f.Module.CatalogSourcePlatform);
+        Check(f.Module.CanEditCatalogSource && f.Module.HasCatalogSourceError);
+        Check(prior.SequenceEqual(f.Module.HomeSections), "a rejected save retains the known surface");
+        Equal(0, f.Store.LibraryWrites);
+
+        f.App.TransformNext("music.catalogSource.settings.save", _ => E(new { ok = false, code = "COMMIT_UNKNOWN" }));
+        f.App.FailNext("music.catalogSource.settings.get", "STORAGE_UNAVAILABLE");
+        await f.Module.SetCatalogSourceAsync("kg");
+        Equal("wy", f.Module.CatalogSourcePlatform);
+        Check(!f.Module.CanEditCatalogSource && f.Module.HasCatalogSourceError);
+        int requests = f.Platform.Requests.Count;
+        f.App.FailNext("music.catalogSource.settings.get", "STORAGE_UNAVAILABLE");
+        await f.Module.NavigateAsync("catalog-channels", default);
+        Equal(requests, f.Platform.Requests.Count);
+        Equal("catalog-channels", f.Module.CaptureNavigationLocation());
+        Equal("数据源设置读取失败", f.Module.Status);
+        await f.Module.ReadCatalogSourceSettingsAsync();
+        Equal("kg", f.Module.CatalogSourcePlatform);
+        await f.Module.ActivateCatalogLandingAsync();
+        Equal("kg", f.Platform.Last<MusicChannelsRequest>().Platform);
+        Equal("kg", f.Platform.Last<MusicChannelRequest>().Platform);
+        await f.Module.NavigateAsync("catalog-home", default);
+        Equal("kg", f.Platform.Last<MusicHomeRequest>().Platform);
+    }
+
+    private static async Task CatalogSourceDetail()
+    {
+        await using var f = await Fixture.Create();
+        f.Select("tx");
+        await f.Module.NavigateAsync("catalog-playlist/tx/500", default);
+        var cards = f.Module.CatalogSections.ToArray();
+        await f.Module.PlayCatalogPlaylistAsync();
+        var before = await f.Queue();
+        var identity = f.Output.Identity;
+        Equal(1, f.Output.Opens);
+        await f.Module.SetCatalogSourceAsync("kg");
+        Equal("kg", f.Module.CatalogSourcePlatform);
+        Equal("tx", f.Module.SelectedCatalogPlatform.Key);
+        Equal("catalog-playlist/tx/500", f.Module.CaptureNavigationLocation());
+        Check(cards.SequenceEqual(f.Module.CatalogSections), "source changes preserve an explicit detail snapshot");
+        var after = await f.Queue();
+        Equal(N(before, "version"), N(after, "version"));
+        Equal(before.GetProperty("entries").GetRawText(), after.GetProperty("entries").GetRawText());
+        Equal(identity, f.Output.Identity);
+        Equal(1, f.Output.Opens); Check(f.Output.HasMedia);
+        await f.Module.NavigateAsync("catalog-home", default);
+        Equal("kg", f.Platform.Last<MusicHomeRequest>().Platform);
+        await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
+        Equal("wy", f.Platform.Last<MusicPlaylistRequest>().Platform);
+        Equal("kg", f.Module.CatalogSourcePlatform);
+        await f.Module.NavigateAsync("catalog-channels", default);
+        Equal("kg", f.Platform.Last<MusicChannelsRequest>().Platform);
+    }
+
+    private static async Task GenericChannels()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.SetCatalogSourceAsync("kg");
+        f.Platform.ChannelDescriptors =
+        [
+            new { id = "extra-b", kind = "channel", placement = "more", available = true, name = "更多二" },
+            new { id = "disabled", kind = "channel", placement = "primary", available = false, name = "不可用" },
+            new { id = "分类/二", kind = "channel", placement = "primary", available = true, name = "分类二", pageCode = "opaque:page/2" },
+            new { id = "分类/一", kind = "channel", placement = "primary", available = true, name = "分类一" },
+            new { id = "extra-a", kind = "channel", placement = "more", available = true, name = "更多一" }
+        ];
+        f.Platform.ChannelTags = true;
+        await f.Module.NavigateAsync("catalog-channels", default);
+        Equal("disabled,分类/二,分类/一", string.Join(",", f.Module.VisibleChannelTabs.Select(card => card.ActionId)));
+        Equal("extra-b,extra-a", string.Join(",", f.Module.MoreChannelTabs.Select(card => card.ActionId)));
+        Check(!f.Module.VisibleChannelTabs.First().CanOpen);
+        Equal("kg/" + Uri.EscapeDataString("分类/二"), f.Module.CurrentChannelKey);
+        Equal("opaque:page/2", f.Platform.Last<MusicChannelRequest>().PageCode);
+        await f.Module.CatalogPageAsync(1);
+        await f.Module.CatalogTagAsync(f.Module.CatalogTags.Single(tag => tag.Id == "genre:two"));
+        var first = f.Platform.Last<MusicChannelRequest>();
+        Equal("genre:two", first.Tag); Check(first.Continuation is null);
+        await f.Module.CatalogPageAsync(1);
+        var next = f.Platform.Last<MusicChannelRequest>();
+        Equal("kg", next.Platform); Equal("genre:two", next.Tag); Equal(first.PageCode, next.PageCode);
+        Equal("retained", S(next.Continuation!.Value.GetProperty("provider"), "opaque"));
+        Equal("kg:分类/二", S(next.Continuation.Value, "target"));
+        Equal("genre:two", S(next.Continuation.Value, "tag"));
+        Equal(1, f.Module.CatalogTagGroups.Count); Equal("genre", f.Module.CatalogTagGroups[0].Id);
+        await f.Module.SetCatalogSourceAsync("wy");
+        Equal(0, f.Module.ChannelTabs.Count); Equal(0, f.Module.CatalogTags.Count); Equal(0, f.Module.CatalogTagGroups.Count);
+        f.Platform.ChannelDescriptors = null; f.Platform.ChannelTags = false;
+        await f.Module.NavigateAsync("catalog-channels", default);
+        var switched = f.Platform.Last<MusicChannelRequest>();
+        Equal("wy", switched.Platform); Equal("rock", switched.Id);
+        Check(switched.Continuation is null && switched.PageCode is null && switched.Tag == "");
+        Equal(0, f.Output.Opens);
+        Check(!f.App.Log.Any(call => call.Method is "music.online.resolve" or "music.search.start" or "music.catalog.playlist.prepare"),
+            "directory reads do not resolve audio, match recordings or expand playlists");
+    }
+
+    private static Task GenericChannelContract()
+    {
+        var valid = E(new { platform = "kg", items = new[] {
+            new { id = "provider-category", name = "频道", kind = "channel", placement = "primary", available = true } } });
+        var card = MusicCatalogDto.Read(valid, "kg", "channels", "").Single().Items.Single();
+        Check(card.CanOpen && card.Kind == "channel" && card.Placement == "primary");
+        foreach (var invalid in new Action<JsonObject>[]
+        {
+            item => item["kind"] = "cube",
+            item => item.Remove("placement"),
+            item => item["placement"] = "unknown",
+            item => item.Remove("available"),
+            item => item["available"] = "true"
+        })
+        {
+            var reply = Edit(valid, root => invalid(root["items"]![0]!.AsObject()));
+            bool rejected = false;
+            try { _ = MusicCatalogDto.Read(reply, "kg", "channels", ""); }
+            catch (MusicOperationException) { rejected = true; }
+            Check(rejected, "only the current channel descriptor contract is accepted");
+        }
+        return Task.CompletedTask;
+    }
+
+    private static async Task CatalogSourceLateReply(string operation, bool failure)
+    {
+        await using var f = await Fixture.Create();
+        var route = operation == "home" ? "catalog-home" : "catalog-channels";
+        await f.Module.NavigateAsync(route, default);
+        var hold = f.App.HoldNext("music.catalog." + operation);
+        if (failure) f.App.TransformNext("music.catalog." + operation, _ => E(new { ok = false, code = "NETWORK_ERROR" }));
+        var old = f.Module.RefreshCatalogAsync();
+        await hold.Arrived.Task;
+        Check(f.Module.CanEditCatalogSource, "browsing does not lock the source preference");
+        await f.Module.SetCatalogSourceAsync("kg");
+        await hold.Cancelled.Task;
+        await f.Module.NavigateAsync(route, default);
+        var sections = f.Module.CatalogSections.ToArray();
+        var status = f.Module.Status;
+        hold.Release(); await old;
+        Equal("kg", f.Module.CatalogSourcePlatform);
+        Equal("kg", f.Module.SelectedCatalogPlatform.Key);
+        Check(sections.SequenceEqual(f.Module.CatalogSections), "retired receipts cannot replace the new source");
+        Equal(status, f.Module.Status);
+        if (operation == "channel") Check(f.Module.CurrentChannelKey.StartsWith("kg/", StringComparison.Ordinal));
+    }
+
+    private static async Task CatalogSourceDrain()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.NavigateAsync("catalog-home", default);
+        var hold = f.App.HoldNext("music.catalog.home");
+        var old = f.Module.RefreshCatalogAsync(); await hold.Arrived.Task;
+        await f.Module.SetCatalogSourceAsync("kg");
+        await hold.Cancelled.Task;
+        await f.Module.NavigateAsync("catalog-home", default);
+        var sections = f.Module.HomeSections.ToArray();
+        Check(sections.Length > 0 && sections.SelectMany(section => section.Items).All(card => card.Platform == "kg"),
+            "the new source publishes its own landing");
+        var closing = f.Module.PrepareShutdownAsync(); await Drain();
+        hold.Release();
+        await Task.WhenAll(old, closing);
+        Check(sections.SequenceEqual(f.Module.HomeSections, ReferenceEqualityComparer.Instance),
+            "a retired receipt released during close cannot publish");
+    }
+
+    private static async Task CatalogSourceVisibleReload()
+    {
+        await using var f = await Fixture.Create();
+        var window = new Window
+        {
+            Content = f.Module.View, Width = 1080, Height = 720, Left = -10000, Top = -10000,
+            ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None
+        };
+        try
+        {
+            window.Show(); window.UpdateLayout(); await Drain();
+            await f.Module.NavigateAsync("catalog-home", default);
+            Equal("wy", f.Platform.Last<MusicHomeRequest>().Platform);
+            int requests = f.Platform.Requests.Count;
+            f.Module.View.Visibility = Visibility.Collapsed; await Drain();
+            await f.Module.SetCatalogSourceAsync("kg");
+            await Drain();
+            Equal(requests, f.Platform.Requests.Count);
+            Equal(0, f.Module.HomeSections.Count);
+            f.Module.View.Visibility = Visibility.Visible;
+            await Until(() => f.Platform.Requests.Count == requests + 1 && f.Module.HomeSections.Count > 0);
+            Equal("kg", f.Platform.Last<MusicHomeRequest>().Platform);
+            f.Module.View.Visibility = Visibility.Collapsed; await Drain();
+            f.Module.View.Visibility = Visibility.Visible; await Drain();
+            Equal(requests + 1, f.Platform.Requests.Count);
+        }
+        finally { window.Content = null; window.Close(); }
+    }
+
+    private static async Task CatalogSourceRestoreDrain()
+    {
+        await using var f = await Fixture.Create(initialize: false);
+        Check((await f.App.Library.ExecuteAsync("music.catalogSource.settings.save",
+            new { ifRevision = 0, platform = "kg" })).GetProperty("ok").GetBoolean());
+        var hold = f.App.HoldNext("music.catalogSource.settings.get");
+        var initializing = f.Module.InitializeAsync(default); await hold.Arrived.Task;
+        var closing = f.Module.PrepareShutdownAsync(); await hold.Cancelled.Task; await Drain();
+        Check(!closing.IsCompleted, "closing retains the cancelled physical startup source read");
+        Equal(0, f.Platform.Requests.Count);
+        hold.Release();
+        try { await initializing; throw new InvalidOperationException("Startup must observe close cancellation"); }
+        catch (OperationCanceledException) { }
+        await closing;
+        Equal("wy", f.Module.CatalogSourcePlatform);
+        Check(!f.Module.HasCatalogSourceError && f.Module.HomeSections.Count == 0,
+            "a retired startup receipt publishes neither saved source nor a spurious restore error");
+    }
+
+    private static async Task CatalogSourceResource(string platform)
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.SetCatalogSourceAsync("kg");
+        f.Select(platform);
+        await f.Module.NavigateAsync("catalog-playlist/" + platform + "/500", default);
+        Equal(platform, f.Platform.Last<MusicPlaylistRequest>().Platform);
+        Equal(platform, f.Module.SelectedCatalogPlatform.Key);
+        Equal("kg", f.Module.CatalogSourcePlatform);
+        await f.Module.NavigateAsync("catalog-home", default);
+        Equal("kg", f.Platform.Last<MusicHomeRequest>().Platform);
+        Equal("kg", f.Module.SelectedCatalogPlatform.Key);
+        await f.Module.NavigateAsync("catalog-channels", default);
+        Equal("kg", f.Platform.Last<MusicChannelsRequest>().Platform);
+        Equal("kg", f.Platform.Last<MusicChannelRequest>().Platform);
+        Equal(1, f.App.Log.Count(call => call.Method == "music.catalogSource.settings.save"));
+        Check(!f.Module.HasCatalogSourceError);
+    }
+
     private static async Task Entries()
     {
         await using var f = await Fixture.Create();
@@ -684,6 +1041,8 @@ public static class MusicCatalogPersonalTests
         public string LocatorVersion = "7";
         public object[]? HomeActions;
         public object[]? HomeEntries, ChannelEntries;
+        public object[]? ChannelDescriptors;
+        public bool ChannelTags;
         public Func<MusicPlaylistRequest, JsonElement>? PlaylistChange;
         public T Last<T>() => Requests.OfType<T>().Last();
         private Task<JsonElement> Result(object request, JsonElement result, CancellationToken token)
@@ -731,11 +1090,22 @@ public static class MusicCatalogPersonalTests
                 E(new { platform = r.Platform, items = HomeActions ?? [new { id = r.Continuation is null ? "500" : "501", name = "歌单", kind = "playlist" }],
                 more = r.Continuation is null && HomeActions is null, continuation = r.Continuation is null && HomeActions is null ? Cursor(2) : null }), t);
         public Task<JsonElement> ChannelsAsync(MusicChannelsRequest r, CancellationToken t = default) =>
-            Result(r, E(new { platform = r.Platform, items = new[] { new { id = "rock", kind = "cube", name = "摇滚" } } }), t);
-        public Task<JsonElement> ChannelAsync(MusicChannelRequest r, CancellationToken t = default) =>
-            Result(r, ChannelEntries is { } entries ? E(new { platform = r.Platform, channel = new { id = r.Id }, entries, more = false }) :
-                E(new { platform = r.Platform, channel = new { id = r.Id }, items = new[] { Song(r.Platform, r.Continuation is null ? 0 : 1) },
-                more = r.Continuation is null, continuation = r.Continuation is null ? Cursor(2) : null }), t);
+            Result(r, E(new { platform = r.Platform, items = ChannelDescriptors ??
+                [new { id = "rock", kind = "channel", placement = "primary", available = true, name = "摇滚" }] }), t);
+        public Task<JsonElement> ChannelAsync(MusicChannelRequest r, CancellationToken t = default)
+        {
+            if (ChannelEntries is { } entries)
+                return Result(r, E(new { platform = r.Platform, channel = new { id = r.Id }, entries, more = false }), t);
+            var selectedTag = ChannelTags ? r.Tag is { Length: > 0 } tag ? tag : "genre/one" : "";
+            object? next = r.Continuation is not null ? null : ChannelTags
+                ? new { page = 2, provider = new { opaque = "retained", cursor = 42 }, scope = new string('b', 64),
+                    target = r.Platform + ":" + r.Id, tag = selectedTag } : Cursor(2);
+            return Result(r, E(new { platform = r.Platform, channel = new { id = r.Id },
+                items = new[] { Song(r.Platform, r.Continuation is null ? 0 : 1) },
+                tags = ChannelTags ? new[] { "genre/one", "genre:two" }.Select(id =>
+                    new { id, name = id, group = "genre", selected = id == selectedTag }).ToArray() : [],
+                selectedTag, more = r.Continuation is null, continuation = next }), t);
+        }
         public Task<JsonElement> SearchAsync(MusicSearchRequest r, CancellationToken t = default) =>
             Result(r, E(new { platform = r.Platform, items = new[] { Song(r.Platform, 0) }, page = r.Page, limit = r.Limit, total = 1, more = false }), t);
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken t = default) =>
@@ -748,8 +1118,13 @@ public static class MusicCatalogPersonalTests
     private sealed class Held
     {
         public TaskCompletionSource Arrived { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public async Task Wait() { Arrived.TrySetResult(); await released.Task; }
+        public async Task Wait(CancellationToken token = default)
+        {
+            using var registration = token.Register(() => Cancelled.TrySetResult());
+            Arrived.TrySetResult(); await released.Task;
+        }
         public void Release() => released.TrySetResult();
     }
     private sealed class Application : MusicApplicationTestDouble
@@ -764,7 +1139,6 @@ public static class MusicCatalogPersonalTests
         public ConcurrentQueue<Invocation> Log { get; } = new();
         public bool Authenticated = true;
         public long AccountGeneration = 1;
-        public string TargetPlatform = "wy";
         public Func<Task>? BeforeCommit;
         private readonly Dictionary<string, (Held Hold, bool Before)> holds = [];
         private readonly List<Held> allHolds = [];
@@ -838,27 +1212,33 @@ public static class MusicCatalogPersonalTests
             var reply = await Library.ExecuteAsync("music.quality.settings.get", cancellationToken: token);
             if (!reply.GetProperty("ok").GetBoolean()) return reply;
             var result = JsonNode.Parse(reply.GetRawText())!.AsObject();
-            // Preserve the original write-count assertions: the fixture target
-            // is a read-only port view, not a new persistent settings mutation.
+            // Keep lyrics disabled in this port fixture without adding a library write.
+            // The real owner's quality policy and signature remain authoritative.
             result["onlineSettings"] = JsonSerializer.SerializeToNode(new {
-                schema = 2, revision = 1, lyrics = false,
-                target = new { installationId = "fixture-script", platform = TargetPlatform } });
-            result["signature"] = LJ.Digest(LJ.Obj(("contract", "music.quality.v1"), ("scope", "local"),
-                ("policy", result["settings"]), ("online", result["onlineSettings"])));
+                schema = 3, revision = 0, lyrics = false });
             return E(result);
         }
+        private static JsonElement ScriptSource() => E(new {
+            installationId = "fixture-script", name = "Catalog fixture", version = "1",
+            contentHash = new string('c', 64), executionHash = new string('d', 64), sourceRevision = 1,
+            generation = 1, enabled = true, state = "ready", rollbackAvailable = false, lastFailure = (string?)null,
+            capabilities = new[] { "wy", "tx", "kg" }.Select(platform => new {
+                platform, actions = new[] { "musicUrl" }, qualitys = new[] { "320k" } }) });
         private async Task<JsonElement> Resolve(JsonElement p, CancellationToken token)
         {
             var quality = await ReadQualitySettings(token);
             if (!quality.GetProperty("ok").GetBoolean()) return quality;
             if (S(p, "quality") != "320k") return E(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
             string policy = S(quality, "signature");
+            string platform = S(p, "platform");
+            Check(S(p, "installationId") == "fixture-script" && N(p, "generation") == 1,
+                "resolution uses the enabled fixture installation and its live generation");
             var song = p.GetProperty("song");
-            var source = song.GetProperty("sources").EnumerateArray().Single(s => S(s, "source") == TargetPlatform);
+            var source = song.GetProperty("sources").EnumerateArray().Single(s => S(s, "source") == platform);
             var songNode = JsonNode.Parse(song.GetRawText())!.AsObject();
             string sourceKey = S(source, "sourceKey");
             string cache = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v1"), ("policy", policy),
-                ("installation", "fixture-script"), ("platform", TargetPlatform), ("revision", 1), ("generation", 1),
+                ("installation", "fixture-script"), ("platform", platform), ("revision", 1), ("generation", 1),
                 ("sourceKey", sourceKey), ("recording", source.GetProperty("musicInfo")),
                 ("songId", songNode["songId"]),
                 ("duration", songNode["duration"]), ("quality", S(p, "quality"))));
@@ -866,7 +1246,7 @@ public static class MusicCatalogPersonalTests
                 return E(new { ok = false, code = "QUALITY_POLICY_CHANGED" });
             if (p.TryGetProperty("qualityCacheSignature", out var expectedCache) && expectedCache.GetString() != cache)
                 return E(new { ok = false, code = "QUALITY_CACHE_CHANGED" });
-            return E(new { ok = true, installationId = "fixture-script", platform = TargetPlatform,
+            return E(new { ok = true, installationId = "fixture-script", platform,
                 songId = S(song, "songId"), generation = 1, quality = S(p, "quality"), sourceKey,
                 qualityPolicySignature = policy, qualityCacheSignature = cache, qualityVerified = false,
                 url = "https://media.invalid/synthetic", headers = new { }, playbackVerified = false });
@@ -875,7 +1255,7 @@ public static class MusicCatalogPersonalTests
         {
             var p = E(parameters ?? new { }); Log.Enqueue(new(method, p));
             holds.Remove(method, out var held); transforms.Remove(method, out var transform);
-            if (held.Hold is not null && held.Before) await held.Hold.Wait();
+            if (held.Hold is not null && held.Before) await held.Hold.Wait(cancellationToken);
             if (failures.Remove(method, out var code)) return E(new { ok = false, code });
             JsonElement result;
             if (method == "music.catalog.playlist.commit" && BeforeCommit is { } before)
@@ -900,11 +1280,17 @@ public static class MusicCatalogPersonalTests
                     result = await Catalog.ExecuteAsync(method, p, cancellationToken);
             }
             else if (method == "music.quality.settings.get") result = await ReadQualitySettings(cancellationToken);
-            else if (method == "music.sources.detail") result = E(new { ok = true, item = new {
-                enabled = true, generation = 1, executionHash = new string('d', 64) } });
+            else if (method.StartsWith("music.official.", StringComparison.Ordinal))
+                result = E(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
+            else if (method == "music.sources.list")
+                result = E(new { ok = true, revision = 1, items = new[] { ScriptSource() } });
+            else if (method == "music.sources.detail")
+                result = S(p, "installationId") == "fixture-script"
+                    ? E(new { ok = true, item = ScriptSource(), permissions = new { storage = Array.Empty<string>() } })
+                    : E(new { ok = false, code = "NOT_FOUND" });
             else if (method == "music.online.resolve") result = await Resolve(p, cancellationToken);
             else result = await recommendationQueue.ExecuteAsync(method, p, cancellationToken);
-            if (held.Hold is not null && !held.Before) await held.Hold.Wait();
+            if (held.Hold is not null && !held.Before) await held.Hold.Wait(cancellationToken);
             return transform is null ? result : transform(result);
         }
         public override async Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
@@ -931,17 +1317,17 @@ public static class MusicCatalogPersonalTests
             await Library.DisposeAsync();
         }
     }
-    private sealed class Store : IProtectedDocumentStore
+    private sealed class Store : IDocumentStore
     {
         private readonly object gate = new();
         private readonly Dictionary<string, byte[]> data = [];
         public int LibraryWrites;
         public bool UnknownAfterNextLibraryWrite;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken cancellationToken = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (gate) return Task.FromResult(data.TryGetValue(ns, out var value)
-                ? new ProtectedDocument(value.ToArray(), DocumentFingerprint.FromBytes(value)) : new(null, DocumentFingerprint.Missing));
+                ? new DocumentSnapshot(value.ToArray(), DocumentFingerprint.FromBytes(value)) : new(null, DocumentFingerprint.Missing));
         }
         public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> value, DocumentFingerprint expected,
             CancellationToken cancellationToken = default)
@@ -950,12 +1336,12 @@ public static class MusicCatalogPersonalTests
             lock (gate)
             {
                 var previous = data.TryGetValue(ns, out var bytes) ? DocumentFingerprint.FromBytes(bytes) : DocumentFingerprint.Missing;
-                if (previous != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                if (previous != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 data[ns] = value.ToArray();
                 if (ns == MusicLibraryOwner.DocumentNamespace)
                 {
                     LibraryWrites++;
-                    if (UnknownAfterNextLibraryWrite) { UnknownAfterNextLibraryWrite = false; throw new ProtectedDocumentException(DocumentStoreError.Storage); }
+                    if (UnknownAfterNextLibraryWrite) { UnknownAfterNextLibraryWrite = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
                 }
                 return Task.FromResult(DocumentFingerprint.FromBytes(value.Span));
             }
@@ -990,19 +1376,20 @@ public static class MusicCatalogPersonalTests
     }
     private sealed class Fixture : IAsyncDisposable
     {
-        public Store Store { get; } = new();
+        public Store Store { get; }
         public Platform Platform { get; } = new();
         public Output Output { get; } = new();
         public Dialogs Dialogs { get; } = new();
         public Application App { get; }
         public MusicCapability Module { get; }
-        private Fixture() { App = new(Store, Platform); Module = new(App, Store, Output, Dialogs); }
-        public static async Task<Fixture> Create()
+        private Fixture(Store? store = null) { Store = store ?? new(); App = new(Store, Platform); Module = new(App, Store, Output, Dialogs); }
+        public static async Task<Fixture> Create(bool initialize = true, Store? store = null)
         {
-            var f = new Fixture(); try { await f.Module.InitializeAsync(default); return f; } catch { await f.DisposeAsync(); throw; }
+            var f = new Fixture(store);
+            try { if (initialize) await f.Module.InitializeAsync(default); return f; } catch { await f.DisposeAsync(); throw; }
         }
         public void Select(string platform)
-        { Module.SelectedCatalogPlatform = Module.CatalogPlatforms.Single(p => p.Key == platform); App.TargetPlatform = platform; }
+        { Module.SelectedCatalogPlatform = Module.CatalogPlatforms.Single(p => p.Key == platform); }
         public async Task OpenPersonalPlaylist()
         {
             await Module.NavigateAsync("catalog-personal", default);

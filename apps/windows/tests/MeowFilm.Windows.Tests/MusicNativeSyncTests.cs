@@ -106,20 +106,20 @@ public static partial class MusicNativeSyncTests
         { cancellationToken.ThrowIfCancellationRequested(); return ValueTask.FromResult(Values.GetValueOrDefault(platform)); }
         public bool IsCurrent(MusicPlatformSession session) => Values.GetValueOrDefault(session.Platform) == session;
     }
-    private sealed class Store : IProtectedDocumentStore
+    private sealed class Store : IDocumentStore
     {
         internal byte[]? Data; internal int Writes; internal bool FailMarker, FailAfter;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken cancellationToken = default) => Task.FromResult(new ProtectedDocument(Data?.ToArray(), Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default) => Task.FromResult(new DocumentSnapshot(Data?.ToArray(), Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
         public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken cancellationToken = default)
         {
             Check(ns == MusicLibraryOwner.DocumentNamespace, "SECOND_NAMESPACE"); cancellationToken.ThrowIfCancellationRequested();
             var current = Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data);
-            if (current != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+            if (current != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
             var obj = JsonNode.Parse(data.Span)!.AsObject(); bool marker = obj["entries"]!.AsArray().Any(e => e!["key"]!.GetValue<string>().Contains("library-sync", StringComparison.Ordinal) && e["value"]?["pending"] is JsonObject);
             bool fail = FailMarker && marker; if (fail) FailMarker = false;
-            if (fail && !FailAfter) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+            if (fail && !FailAfter) throw new DocumentStoreException(DocumentStoreError.Storage);
             Data = data.ToArray(); Writes++;
-            if (fail) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+            if (fail) throw new DocumentStoreException(DocumentStoreError.Storage);
             return Task.FromResult(DocumentFingerprint.FromBytes(Data));
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -765,7 +765,7 @@ public static partial class MusicNativeSyncTests
     {
         string path = Path.GetFullPath(TestWorkspace.DataPath("music-library-sync-20261023", "dpapi-" + Guid.NewGuid().ToString("N"))); Directory.CreateDirectory(path);
         var sessions = new Sessions(); var server = new Server("tx"); using var http = MusicPlatformHttp.CreateWithHandler(server);
-        await using var store = new DpapiDocumentStore(path, [MusicLibraryOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace]);
+        await using var store = new LocalDocumentStore(path, [MusicLibraryOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: [MusicPlatformClientContextOwner.DocumentNamespace]);
         await using var clients = new MusicClientContextFixture(http, store);
         var owner = new MusicLibraryOwner(store); await using (var sync = new MusicLibrarySyncService(owner, sessions, http, clients.Owner))
         {

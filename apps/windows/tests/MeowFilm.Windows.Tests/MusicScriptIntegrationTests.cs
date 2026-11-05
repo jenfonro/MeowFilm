@@ -16,9 +16,10 @@ public static class MusicScriptIntegrationTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("Native LX real pipe: two instances use explicit source and native protected storage", TwoInstances);
+        yield return new("Native LX real pipe: two instances use explicit source and isolated storage", TwoInstances);
         yield return new("Native LX real pipe: failed trial retains prior generation and durable source state", Update);
         yield return new("Native LX real pipe: restart reads native state without Node then resumes isolated source data", Restart);
+        yield return new("Native LX real pipe: edited saved source runs after reenable and errors stay with its instance", EditedSource);
         yield return new("Native LX real pipe: original local lyric protocol is parsed in native code", Lyrics);
         yield return new("Native LX real pipe: explicit crashed-process recovery preserves native data and rehydrates only selected source", Recover);
         yield return new("Native LX real pipe: concurrent request contexts preserve site and installation storage across awaits", ConcurrentStorage);
@@ -51,7 +52,7 @@ public static class MusicScriptIntegrationTests
     }
     private sealed class Fixture : IAsyncDisposable
     {
-        internal readonly DpapiDocumentStore Store;
+        internal readonly LocalDocumentStore Store;
         internal readonly MusicLibraryOwner Library;
         internal readonly OnDemandRuntimeClient Runtime;
         internal readonly MusicScriptOwner Owner;
@@ -68,7 +69,7 @@ public static class MusicScriptIntegrationTests
                     ?? throw new InvalidOperationException("Packaged runtime root required.");
                 string node = Environment.GetEnvironmentVariable("MEOWFILM_TEST_NODE")
                     ?? throw new InvalidOperationException("Verified Node required.");
-                RuntimeModule[] modules = [new("music", "0.7.0"), new("cat", "0.1.0")];
+                RuntimeModule[] modules = [new("music", "0.7.0"), new("cat", "0.1.0"), new("source", "0.1.0")];
                 var capabilities = owner!.ScriptCapabilities.ToDictionary(pair => pair.Key,
                     pair => new Func<JsonElement, CancellationToken, Task<object?>>(async (input, cancellationToken) =>
                     {
@@ -186,6 +187,33 @@ public static class MusicScriptIntegrationTests
         await Ok(next, "music.sources.list");
         Check(!next.Runtime.HasStarted);
         Check((await Resolve(next, id)).EndsWith("/restart/2.mp3", StringComparison.Ordinal));
+    }
+    private static async Task EditedSource()
+    {
+        string root = Data(), id, sourceHash;
+        await using (var first = new Fixture(root))
+        {
+            id = await Install(first, "original");
+            sourceHash = (await first.Library.ReadSourceMetadataAsync()).State.GetProperty("installations")[0]
+                .GetProperty("current").GetProperty("sourceHash").GetString()!;
+            await Ok(first, "music.sources.enable", new { installationId = id });
+            Check((await Resolve(first, id)).EndsWith("/original/1.mp3", StringComparison.Ordinal));
+            await Ok(first, "music.sources.disable", new { installationId = id });
+            string file = Directory.EnumerateFiles(root, sourceHash + ".js", SearchOption.AllDirectories).Single();
+            await File.WriteAllTextAsync(file, Source("manually-edited-longer-label"), new UTF8Encoding(false));
+            await Ok(first, "music.sources.enable", new { installationId = id });
+            Check((await Resolve(first, id)).EndsWith("/manually-edited-longer-label/2.mp3", StringComparison.Ordinal));
+        }
+        await using var reopened = new Fixture(root);
+        Check((await Resolve(reopened, id)).EndsWith("/manually-edited-longer-label/3.mp3", StringComparison.Ordinal));
+        await Ok(reopened, "music.sources.disable", new { installationId = id });
+        string sourceFile = Directory.EnumerateFiles(root, sourceHash + ".js", SearchOption.AllDirectories).Single();
+        await File.WriteAllTextAsync(sourceFile, "const broken = ;", new UTF8Encoding(false));
+        var failed = await reopened.Owner.ExecuteAsync("music.sources.enable", new { installationId = id });
+        Check(!failed.GetProperty("ok").GetBoolean() && failed.GetProperty("code").GetString() != "CORRUPT_STORAGE");
+        string other = await Install(reopened, "unaffected");
+        await Ok(reopened, "music.sources.enable", new { installationId = other });
+        Check((await Resolve(reopened, other)).EndsWith("/unaffected/1.mp3", StringComparison.Ordinal));
     }
     private static async Task Lyrics()
     {

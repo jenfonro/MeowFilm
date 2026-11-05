@@ -40,7 +40,7 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
         Root = root ?? TestWorkspace.DataPath("account-details", Guid.NewGuid().ToString("N"));
         TestWorkspace.ValidatePath(TestWorkspace.DataRoot, Root);
         Directory.CreateDirectory(Root);
-        Wrapper = new(new DpapiDocumentStore(Root, [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace]));
+        Wrapper = new(new LocalDocumentStore(Root, [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace]));
         Http = MusicPlatformHttp.CreateWithHandler(new Handler(this));
         Clients = new(Http, Wrapper.Inner, importAccounts: true);
         Owner = Clients.CreateAccountOwner(Wrapper, timeout: timeout);
@@ -143,14 +143,14 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
         public override async ValueTask DisposeAsync()
         { f.Entered.TrySetResult(); await f.Release.Task; await base.DisposeAsync(); }
     }
-    internal sealed class Store(DpapiDocumentStore inner) : IProtectedDocumentStore
+    internal sealed class Store(LocalDocumentStore inner) : IDocumentStore
     {
-        internal DpapiDocumentStore Inner => inner;
+        internal LocalDocumentStore Inner => inner;
         internal int Reads, Writes, Disposals;
         internal bool Hold, HoldRead, LoseReceipt, Conflict;
         internal TaskCompletionSource Entered { get; } = Signal();
         internal TaskCompletionSource Release { get; } = Signal();
-        public async Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default)
+        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
             Interlocked.Increment(ref Reads);
             if (HoldRead) { Entered.TrySetResult(); await Release.Task; token = default; }
@@ -160,9 +160,9 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
         {
             Interlocked.Increment(ref Writes);
             if (Hold) { Entered.TrySetResult(); await Release.Task; token = default; }
-            if (Conflict) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+            if (Conflict) throw new DocumentStoreException(DocumentStoreError.Conflict);
             var result = await inner.WriteAsync(ns, data, expected, token);
-            if (LoseReceipt) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+            if (LoseReceipt) throw new DocumentStoreException(DocumentStoreError.Storage);
             return result;
         }
         public async ValueTask DisposeAsync() { Disposals++; await inner.DisposeAsync(); }

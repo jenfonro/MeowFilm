@@ -45,6 +45,31 @@ test('workspace dependency cycles are reported', t => {
   assert.throws(() => verifyBoundaries(f.root), /Dependency cycle/);
 });
 
+for (const [source, error] of [
+  ["import 'node:fs';", /portable runtime imports Node builtin/],
+  ['Buffer.alloc(1);', /portable runtime uses host global Buffer/],
+  ['globalThis.process.exit(1);', /portable runtime uses host global process/],
+  ['Packages.java.lang.String;', /portable runtime uses host global Packages/],
+]) {
+  test(`portable source runtime rejects host dependency: ${source}`, t => {
+    const f = fixture(t);
+    f.write('packages/source-runtime/package.json', {
+      name: '@meowfilm/source-runtime',
+      dependencies: { acorn: '8.19.0' },
+    });
+    f.write('packages/source-runtime/src/index.js', source);
+    assert.throws(() => verifyBoundaries(f.root), error);
+  });
+}
+
+test('portable source runtime may inspect guest source strings without using host globals', t => {
+  const f = fixture(t);
+  f.write('packages/source-runtime/package.json', { name: '@meowfilm/source-runtime' });
+  f.write('packages/source-runtime/src/index.js',
+    "export const rejected = /\\b(?:process|Deno|Bun)\\s*\\./.test('guest');");
+  assert.deepEqual(verifyBoundaries(f.root), { packages: 3 });
+});
+
 test('shared runtime may use its own modules and data-only builtins', t => {
   const f = fixture(t);
   f.write('apps/runtime/bootstrap.mjs', "import './modules/music-script.mjs';");

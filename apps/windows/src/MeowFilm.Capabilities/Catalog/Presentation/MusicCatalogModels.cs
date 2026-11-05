@@ -6,9 +6,10 @@ public sealed record MusicCatalogPlatform(string Key, string Name);
 public sealed record MusicCatalogTag(string Id, string Name, string Group = "", bool Selected = false);
 public sealed record MusicCatalogTagGroup(string Id, IReadOnlyList<MusicCatalogTag> Items);
 public sealed record MusicCatalogChoice(string Key, string Name);
-public sealed record MusicRankPreview(string Title, string Artist, string Cover, int Rank, int LastRank)
+public sealed record MusicRankPreview(string Title, string Artist, string Cover, int Rank, int? LastRank)
 {
-    public string Movement => LastRank == 0 ? "新" : LastRank > Rank ? "↑" : LastRank < Rank ? "↓" : "−";
+    // A provider without previous-rank data publishes no movement; it is not a new entry.
+    public string Movement => LastRank is not { } last ? "" : last == 0 ? "新" : last > Rank ? "↑" : last < Rank ? "↓" : "−";
 }
 public enum MusicCatalogEntryPresentation
 {
@@ -23,7 +24,7 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     JsonElement? Locator = null, string MemberId = "", IReadOnlyList<MusicRankPreview>? Preview = null,
     string UpdateFrequency = "", MusicCatalogEntryPresentation Presentation = MusicCatalogEntryPresentation.Static,
     string PreviewSubtitle = "", int? DayOfMonth = null, string Decoration = "",
-    bool RequiresAccount = false, bool Display = true)
+    bool RequiresAccount = false, bool Display = true, string Placement = "")
 {
     public IReadOnlyList<MusicRankPreview> PreviewSongs => Preview ?? [];
     public bool HasPreview => PreviewSongs.Count > 0;
@@ -96,8 +97,6 @@ public sealed record MusicCatalogSection(string Title, IReadOnlyList<MusicCatalo
 // remain distinct, including on nested carousel / entry song cards.
 public static class MusicCatalogDto
 {
-    private static readonly HashSet<string> ChannelKinds =
-        ["featured", "cube", "playlists", "rankings", "new-songs", "artists", "vip"];
     public static bool SupportsAction(string platform, string kind)
     {
         if (platform is not ("wy" or "tx" or "kg" or "kw" or "mg")) return false;
@@ -139,8 +138,10 @@ public static class MusicCatalogDto
                 MusicCatalogCard? action = null;
                 if (group.TryGetProperty("action", out var a) && a.ValueKind == JsonValueKind.Object)
                     action = Card(SectionActionItem(group, heading, a), platform, "resource");
-                sections.Add(new(heading, Cards(group.GetProperty("items"), platform, "resource"),
-                    MusicDto.Text(group, "id"), Text(group, "type"), action, Text(group, "layout")));
+                var type = Text(group, "type");
+                sections.Add(new(heading, Cards(group.GetProperty("items"), platform, "resource",
+                    requirePresentation: type == "entries"),
+                    MusicDto.Text(group, "id"), type, action, Text(group, "layout")));
             }
         }
         if (reply.TryGetProperty("entries", out var entries))
@@ -223,8 +224,11 @@ public static class MusicCatalogDto
         var requiresAccount = Boolean(item, "requiresAccount", false);
         var display = Boolean(item, "display", true);
         SongRow? song = null;
-        if (item.TryGetProperty("songId", out _)) song = SongRow.Read(item);
-        else if (item.TryGetProperty("song", out var nested) && nested.ValueKind == JsonValueKind.Object) song = SongRow.Read(nested);
+        if (fallback != "descriptor")
+        {
+            if (item.TryGetProperty("songId", out _)) song = SongRow.Read(item);
+            else if (item.TryGetProperty("song", out var nested) && nested.ValueKind == JsonValueKind.Object) song = SongRow.Read(nested);
+        }
         if (song is not null)
         {
             MusicDto.Require(SongJson.Platform(song.Raw) == platform);
@@ -236,11 +240,14 @@ public static class MusicCatalogDto
         var id = Text(item, "id");
         var kind = Text(item, "kind");
         var actionId = id; var pageCode = Text(item, "pageCode");
+        var placement = "";
         JsonElement? actionValue = null, locator = null;
         if (fallback == "descriptor")
         {
-            available &= ChannelKinds.Contains(kind);
-            kind = "channel";
+            placement = Text(item, "placement");
+            MusicDto.Require(kind == "channel" && (placement is "primary" or "more") &&
+                item.TryGetProperty("available", out var declaredAvailable) &&
+                declaredAvailable.ValueKind is JsonValueKind.True or JsonValueKind.False);
         }
         else if (item.TryGetProperty("action", out var action) && action.ValueKind == JsonValueKind.Object)
         {
@@ -250,8 +257,6 @@ public static class MusicCatalogDto
             if (kind == "channel" && action.TryGetProperty("channel", out var channel))
             {
                 actionId = Text(channel, "id"); pageCode = Text(channel, "pageCode");
-                var channelKind = Text(channel, "kind");
-                available &= channelKind.Length == 0 || ChannelKinds.Contains(channelKind);
             }
             available &= SupportsAction(platform, kind);
             if (kind is "daily" or "fm" or "similar") actionId = kind;
@@ -275,7 +280,7 @@ public static class MusicCatalogDto
             Available: available, ErrorCode: available ? "" : error.Length == 0 ? "UNSUPPORTED" : error, StableKey: Text(item, "key"),
             Action: actionValue, Locator: locator, Preview: Preview(item), UpdateFrequency: Text(item, "updateFrequency"),
             Presentation: presentation, PreviewSubtitle: Text(item, "previewSubtitle"), DayOfMonth: CalendarDay(item),
-            Decoration: Text(item, "decoration"), RequiresAccount: requiresAccount, Display: display);
+            Decoration: Text(item, "decoration"), RequiresAccount: requiresAccount, Display: display, Placement: placement);
     }
     private static bool Boolean(JsonElement item, string name, bool fallback)
     {
@@ -309,7 +314,7 @@ public static class MusicCatalogDto
         if (!item.TryGetProperty("preview", out var rows) || rows.ValueKind != JsonValueKind.Array) return [];
         int Rank(JsonElement row, string key) => row.TryGetProperty(key, out var n) && n.ValueKind == JsonValueKind.Number && n.TryGetInt32(out var value) ? Math.Max(0, value) : 0;
         return rows.EnumerateArray().Take(3).Select(row => new MusicRankPreview(Text(row, "title"), Text(row, "artist"),
-            Text(row, "cover"), Rank(row, "rank"), Rank(row, "lastRank"))).ToArray();
+            Text(row, "cover"), Rank(row, "rank"), row.TryGetProperty("lastRank", out _) ? Rank(row, "lastRank") : null)).ToArray();
     }
     public static string CursorKey(JsonElement? value)
     {

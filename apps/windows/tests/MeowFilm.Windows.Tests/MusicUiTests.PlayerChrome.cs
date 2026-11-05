@@ -473,6 +473,10 @@ public static partial class MusicUiTests
                     var title = Visuals(detail).OfType<TextBlock>()
                         .First(block => block.Text == f.Module.CurrentTitle);
                     var lyrics = (ListBox)detail.FindName("LyricList");
+                    Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(title));
+                    Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(title));
+                    Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(lyrics));
+                    Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(lyrics));
                     var viewport = Visuals(lyrics).OfType<ScrollViewer>().First();
                     True(Math.Abs(viewport.ViewportHeight - lyrics.ActualHeight) < 1,
                         "lyric edge spacing belongs to scrolling rows, not the visible viewport");
@@ -574,6 +578,93 @@ public static partial class MusicUiTests
                 Equal(opens, f.Playback.Opens.Count);
             }
             finally { shell.Close(); await shell.ShutdownCompletion; }
+        });
+        yield return Case("lyric centering settles under continuous 200ms positions and keyboard preview keeps its hold", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
+            var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+            using var source = new HwndSource(new HwndSourceParameters("lyric-follow-tick-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                PositionX = -32000, PositionY = -32000, Width = 860, Height = 600
+            });
+            try
+            {
+                source.RootVisual = detail;
+                f.Module.Lyrics.Clear();
+                for (var i = 0; i < 80; i++)
+                    f.Module.Lyrics.Add(new(i * 2, "连续进度与长行排版 " + i,
+                        i == 40 ? "A translated line that wraps with the lyric viewport width." : ""));
+                detail.Measure(new(860, 600)); detail.Arrange(new(0, 0, 860, 600)); detail.UpdateLayout();
+                await Drain();
+                var list = (MusicLyricList)detail.FindName("LyricList");
+                var scroll = Visuals(list).OfType<ScrollViewer>().First();
+                Equal(f.Module.AcceptedPlaybackRate, list.PlaybackRate);
+                Equal(f.Module.PlaybackPresentationKey, list.PresentationKey);
+                double Error(int index)
+                {
+                    var row = list.ItemContainerGenerator.ContainerFromIndex(index) as FrameworkElement;
+                    return row is null ? double.PositiveInfinity : Math.Abs(
+                        row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y -
+                        scroll.ViewportHeight * (f.Module.IsPlaying ? .24 : .35));
+                }
+                await f.Playback.SeekAsync(80);
+                for (var i = 1; i <= 3; i++)
+                {
+                    await Task.Delay(200);
+                    await f.Playback.SeekAsync(80 + i * .2);
+                    await Drain();
+                }
+                True(Error(40) < 2, "same target finishes its 420ms motion while real positions continue every 200ms");
+                var settled = scroll.VerticalOffset;
+                await Task.Delay(200); await f.Playback.SeekAsync(80.8); await Drain();
+                True(Math.Abs(scroll.VerticalOffset - settled) < .5, "another position on the same line leaves centering settled");
+                await f.Playback.SeekAsync(82);
+                for (var i = 1; i <= 3; i++)
+                {
+                    await Task.Delay(200); await f.Playback.SeekAsync(82 + i * .2); await Drain();
+                }
+                True(Error(41) < 2, "a different line receives its own completed motion");
+                var activeRow = (FrameworkElement)list.ItemContainerGenerator.ContainerFromIndex(41);
+                Visuals(activeRow).OfType<TextBlock>().Single(text => text.Text == f.Module.Lyrics[41].Text).FontSize = 28;
+                await Task.Delay(550); await Drain();
+                True(Error(41) < 2, "changed row text metrics recenter without a new playback position");
+
+                var hold = System.Diagnostics.Stopwatch.StartNew();
+                list.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.PageDown)
+                    { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+                list.ScrollIntoView(f.Module.Lyrics[20]); detail.UpdateLayout(); await Drain();
+                var previewRow = (FrameworkElement)list.ItemContainerGenerator.ContainerFromIndex(20);
+                var preview = Visuals(previewRow).OfType<Button>()
+                    .Single(button => ReferenceEquals(button.Tag, f.Module.Lyrics[20]) && button.Content is StackPanel);
+                SimulateFocus(preview, UIElement.IsKeyboardFocusWithinProperty, true);
+                preview.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
+                var held = scroll.VerticalOffset;
+                await f.Playback.SeekAsync(20); await Task.Delay(650); await Drain();
+                True(f.Module.HasLyricPreview && f.Module.LyricDisplayIndex == 20, "keyboard preview survives real ticks");
+                True(Math.Abs(scroll.VerticalOffset - held) < 2, "preview and focus do not restart automatic centering");
+                await Task.Delay(2450); await Drain();
+                True(f.Module.HasLyricPreview, "the manual hold lasts four seconds");
+                await Until(() => !f.Module.HasLyricPreview && Error(10) < 2);
+                True(hold.Elapsed >= TimeSpan.FromSeconds(4) && hold.Elapsed < TimeSpan.FromSeconds(6),
+                    "four-second hold plus centering settles within the interaction deadline");
+                True(Error(10) < 2, "four-second recovery follows the actual line without another media tick");
+
+                await f.Module.StepAsync(true);
+                await Drain();
+                Equal(f.Module.PlaybackPresentationKey, list.PresentationKey);
+                f.Module.Lyrics.Clear();
+                for (var i = 0; i < 20; i++) f.Module.Lyrics.Add(new(i * 2, "替换身份 " + i, ""));
+                await f.Playback.SeekAsync(6); await Task.Delay(550); await Drain();
+                True(Error(3) < 2, "track replacement retires the previous target and hold");
+            }
+            finally
+            {
+                source.RootVisual = null;
+                f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+                await Drain();
+            }
         });
         yield return Case("lyric edges follow actual items through recycling snapshot changes and playback", async () =>
         {

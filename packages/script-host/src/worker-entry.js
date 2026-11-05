@@ -5,6 +5,8 @@ import { ownedExtension } from './cat-output.js';
 import { cancel, event, failure, request, response, validateMessage } from './worker-protocol.js';
 import { clone, fault, safeError } from './errors.js';
 
+const PortableSourceSession = workerData.protocol === 'source'
+  ? (await import('./portable-source-session.js')).PortableSourceSession : null;
 const sessions = new Map();
 let nextAdapterId = 1;
 const adapterPending = new Map();
@@ -69,6 +71,12 @@ function storageAdapter(operation, input) {
   }, input.signal);
 }
 
+function sourceCapability(name, input, context = {}) {
+  const { signal, ...details } = context;
+  if (!signal) throw fault('PERMISSION_DENIED');
+  return adapterCall('capability', { name, input: clone(input), context: clone(details) }, signal);
+}
+
 function makeCancellable(message, start) {
   const controller = new AbortController();
   const entry = { controller, detach: () => cancellableRequests.delete(message.id) };
@@ -105,9 +113,11 @@ function applySettingsSnapshot(value) {
 }
 
 function createSession(spec) {
-  const Session = spec.protocol === 'cat' ? CatSession : LXSession;
+  const Session = PortableSourceSession
+    ? PortableSourceSession
+    : spec.protocol === 'cat' ? CatSession : LXSession;
   const { dataRoot, settings, aggregate, protocol, network, storage,
-    observeScriptErrors, ...input } = spec;
+    observeScriptErrors, sourceMetadata, ...input } = spec;
   const constructor = Session === CatSession
     ? { ...input, dataRoot, settings, aggregate }
     : input;
@@ -115,6 +125,10 @@ function createSession(spec) {
   session = new Session({
     ...constructor,
     wasmModule: workerData.wasmModule,
+    ...(Session === PortableSourceSession ? {
+      capabilities: { version: 1, call: sourceCapability },
+      metadata: sourceMetadata,
+    } : {}),
     network: spec.network ? networkAdapter : undefined,
     storage: spec.storage ? {
       get: input => storageAdapter('get', input),
@@ -150,12 +164,14 @@ function createSession(spec) {
     if (latestAggregate !== undefined) session.applyAggregate?.(clone(latestAggregate));
   }
   sessions.set(spec.installationId, session);
-  const originalSend = session.send.bind(session);
-  session.send = (name, data) => {
-    const value = originalSend(name, data);
-    if (name === 'updateAlert') emit('alert', sessionEvent(session, { alert: clone(session.alert) }));
-    return value;
-  };
+  if (typeof session.send === 'function') {
+    const originalSend = session.send.bind(session);
+    session.send = (name, data) => {
+      const value = originalSend(name, data);
+      if (name === 'updateAlert') emit('alert', sessionEvent(session, { alert: clone(session.alert) }));
+      return value;
+    };
+  }
   return session;
 }
 

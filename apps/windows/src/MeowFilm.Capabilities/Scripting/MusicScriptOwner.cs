@@ -86,7 +86,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
         MusicPlaybackCacheDataException => "CACHE_DATA_INCOMPATIBLE",
         MusicPlaybackCacheCommitException => "CACHE_COMMIT_UNKNOWN",
         BridgeException e => e.Code,
-        ProtectedDocumentException e => e.Error == DocumentStoreError.Unavailable
+        DocumentStoreException e => e.Error == DocumentStoreError.Unavailable
             ? "STORAGE_UNAVAILABLE" : "STORAGE",
         OperationCanceledException => "CANCELLED",
         JsonException or FormatException => "INVALID_REQUEST",
@@ -286,11 +286,12 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
             {
                 LJ.Fields(p, "installationId token version permissions", "installationId token version permissions");
                 string version = LJ.Text(p["version"], 128);
+                var permissions = Permissions(p["permissions"]);
                 using var snapshot = transfers.Take(LJ.Text(p["token"]), "script");
                 var content = await library.StoreScriptContentAsync(snapshot.Bytes, token).ConfigureAwait(false);
                 selected["current"]!["sourceHash"] = content.Sha256;
                 selected["current"]!["sourceBytes"] = content.Length; selected["current"]!["version"] = version;
-                selected["current"]!["permissions"] = Permissions(p["permissions"]);
+                selected["current"]!["permissions"] = permissions;
             }
             selected["previous"] = previous;
             if (LJ.B(selected["enabled"])) await ActivateAsync(selected, token).ConfigureAwait(false);

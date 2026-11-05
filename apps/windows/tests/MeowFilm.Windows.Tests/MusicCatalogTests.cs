@@ -314,24 +314,20 @@ public static class MusicCatalogTests
         yield return Case("catalog card types derive distinct colors from one artwork sample", () =>
         {
             var raw = new SolidColorBrush(Color.FromRgb(83, 74, 85));
-            var entry = new MusicCatalogPaletteConverter { Role = MusicCatalogPaletteRole.Entry };
-            var footer = new MusicCatalogPaletteConverter { Role = MusicCatalogPaletteRole.CoverFooter };
+            var entry = new MusicCatalogPaletteConverter();
             SolidColorBrush Entry(MusicCatalogEntryPresentation presentation) =>
                 (SolidColorBrush)entry.Convert([raw, presentation], typeof(Brush), null!,
                     System.Globalization.CultureInfo.InvariantCulture);
             var preview = Entry(MusicCatalogEntryPresentation.Preview);
             var overlay = Entry(MusicCatalogEntryPresentation.Overlay);
             var animated = Entry(MusicCatalogEntryPresentation.Animated);
-            var cover = (SolidColorBrush)footer.Convert([raw], typeof(Brush), null!,
-                System.Globalization.CultureInfo.InvariantCulture);
             Equal(Color.FromRgb(83, 74, 85), preview.Color);
             Equal(Color.FromRgb(78, 62, 62), overlay.Color);
             Equal(overlay.Color, animated.Color);
-            Equal(Color.FromRgb(65, 58, 66), cover.Color);
-            True(preview.IsFrozen && overlay.IsFrozen && animated.IsFrozen && cover.IsFrozen,
+            True(preview.IsFrozen && overlay.IsFrozen && animated.IsFrozen,
                 "catalog palette results are immutable");
-            True(preview.Color != overlay.Color && preview.Color != cover.Color && overlay.Color != cover.Color,
-                "preview, overlay entry and ordinary cover own separate palette policies");
+            True(preview.Color != overlay.Color,
+                "preview and overlay entries own separate palette policies");
 
             var daily = new SolidColorBrush(Color.FromRgb(169, 149, 142));
             Equal(daily.Color, ((SolidColorBrush)entry.Convert(
@@ -382,23 +378,39 @@ public static class MusicCatalogTests
                 Equal(FontWeights.Normal, playlist.FontWeight); Equal(20d, playlist.LineHeight);
                 Equal(Color.FromRgb(75,79,88), ((SolidColorBrush)playlist.Foreground).Color);
                 var catalogText = Descendants<TextBlock>(view).ToArray();
-                AssertGrayscaleText(catalogText, "actual catalog headings and captions");
+                AssertDisplayAutoText(catalogText, "actual catalog headings and captions");
                 foreach (var text in new[] { title, playlist })
-                foreach (var mode in new[] { TextRenderingMode.ClearType, TextRenderingMode.Aliased })
+                foreach (var mode in new[] { TextRenderingMode.Grayscale, TextRenderingMode.ClearType, TextRenderingMode.Aliased })
                 {
                     var originalMode = TextOptions.GetTextRenderingMode(text);
                     text.SetCurrentValue(TextOptions.TextRenderingModeProperty, mode);
                     try
                     {
                         Equal(mode, TextOptions.GetTextRenderingMode(text));
-                        Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(view));
+                        Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(view));
                         var rejected = false;
-                        try { AssertGrayscaleText(catalogText, "actual catalog headings and captions"); }
+                        try { AssertDisplayAutoText(catalogText, "actual catalog headings and captions"); }
                         catch (InvalidOperationException) { rejected = true; }
-                        True(rejected, $"the text-node contract must reject {mode} on '{text.Text}' even with a grayscale parent");
+                        True(rejected, $"the text-node contract must reject {mode} on '{text.Text}' even with an Auto parent");
                     }
                     finally { text.SetCurrentValue(TextOptions.TextRenderingModeProperty, originalMode); }
-                    AssertGrayscaleText(catalogText, "actual catalog headings and captions");
+                    AssertDisplayAutoText(catalogText, "actual catalog headings and captions");
+                }
+                foreach (var text in new[] { title, playlist })
+                {
+                    var originalMode = TextOptions.GetTextFormattingMode(text);
+                    text.SetCurrentValue(TextOptions.TextFormattingModeProperty, TextFormattingMode.Ideal);
+                    try
+                    {
+                        Equal(TextFormattingMode.Ideal, TextOptions.GetTextFormattingMode(text));
+                        Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(view));
+                        var rejected = false;
+                        try { AssertDisplayAutoText(catalogText, "actual catalog headings and captions"); }
+                        catch (InvalidOperationException) { rejected = true; }
+                        True(rejected, $"the text-node contract must reject Ideal on '{text.Text}' even with a Display parent");
+                    }
+                    finally { text.SetCurrentValue(TextOptions.TextFormattingModeProperty, originalMode); }
+                    AssertDisplayAutoText(catalogText, "actual catalog headings and captions");
                 }
             }
             finally { source.RootVisual = null; await Drain(); }
@@ -421,7 +433,9 @@ public static class MusicCatalogTests
             {
                 source.RootVisual = view; Layout(); await Drain();
                 Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(view));
-                Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(entry));
+                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(view));
+                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(entry));
+                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(entry));
                 Equal(SystemFonts.MessageFontFamily, view.FontFamily);
                 Equal(SystemFonts.MessageFontFamily, entry.FontFamily);
                 True(view.UseLayoutRounding && entry.UseLayoutRounding && entry.SnapsToDevicePixels,
@@ -446,7 +460,7 @@ public static class MusicCatalogTests
                     Layout(); await Drain();
                     CardMotion.Transition(surface, false, false);
                     await Drain();
-                    AssertGrayscaleText(Descendants<TextBlock>(entry), "resting entry title caption and preview");
+                    AssertDisplayAutoText(Descendants<TextBlock>(entry), "resting entry title caption and preview");
                     Equal(0d, ((TranslateTransform)caption.RenderTransform).Y);
                     var y = caption.TranslatePoint(new Point(), surface).Y;
                     var pixelY = y * VisualTreeHelper.GetDpi(surface).DpiScaleY;
@@ -459,7 +473,7 @@ public static class MusicCatalogTests
                     Equal(surface.RenderSize, clip.Rect.Size);
                     CardMotion.Transition(surface, true, false);
                     await Drain();
-                    AssertGrayscaleText(Descendants<TextBlock>(entry), "raised entry title caption and preview");
+                    AssertDisplayAutoText(Descendants<TextBlock>(entry), "raised entry title caption and preview");
                     True(((TranslateTransform)caption.RenderTransform).Y < 0, "preview rises over its artwork");
                     var raisedY = caption.TranslatePoint(new Point(), surface).Y * VisualTreeHelper.GetDpi(surface).DpiScaleY;
                     True(Math.Abs(raisedY - Math.Round(raisedY)) < .01, "settled preview also starts on a display pixel");
@@ -470,7 +484,7 @@ public static class MusicCatalogTests
             }
             finally { source.RootVisual = null; await Drain(); }
         });
-        yield return Case("catalog system typography uses effective grayscale text and paints neutral glyphs at bitmap DPI", () =>
+        yield return Case("catalog system typography uses Display Auto text and paints neutral glyphs at bitmap DPI", () =>
         {
             var view = new MusicCatalogView();
             var host = new Grid { Background = Brushes.White };
@@ -479,13 +493,19 @@ public static class MusicCatalogTests
                 Margin = new Thickness(12, 0, 0, 0) };
             host.Children.Add(text); view.Content = host;
             Equal(SystemFonts.MessageFontFamily, view.FontFamily);
-            Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(view));
+            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(view));
+            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(view));
+            var preview = new ToolTip { Style = (Style)view.FindResource("Capability.SeekPreview") };
+            Equal(SystemFonts.MessageFontFamily, preview.FontFamily);
+            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(preview));
+            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(preview));
+            True(preview.UseLayoutRounding && preview.SnapsToDevicePixels, "detached seek previews retain pixel-aligned text");
             foreach (var role in new[] { "Catalog.SectionTitle", "Catalog.SongTitle", "Catalog.PlaylistTitle" })
             {
                 text.Style = (Style)view.FindResource(role);
                 view.Measure(new(200, 52)); view.Arrange(new Rect(0, 0, 200, 52)); view.UpdateLayout();
                 Equal(SystemFonts.MessageFontFamily, text.FontFamily);
-                AssertGrayscaleText([text], role);
+                AssertDisplayAutoText([text], role);
                 // RenderTargetBitmap has no HWND: scaled neutral pixels prove glyph drawing,
                 // not OS subpixel rendering at a monitor's DPI.
                 foreach (var scale in new[] { 1d, 1.25, 1.5, 2 })
@@ -547,14 +567,18 @@ public static class MusicCatalogTests
                 Equal(SystemFonts.MessageFontFamily, shell.FontFamily);
                 Equal(SystemFonts.MessageFontFamily, ((Control)f.Module.SettingsView).FontFamily);
                 Equal(SystemFonts.MessageFontFamily, ((Control)f.Module.PlayerView).FontFamily);
-                Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(f.Module.SettingsView));
-                Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(f.Module.PlayerView));
+                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(f.Module.SettingsView));
+                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(f.Module.PlayerView));
+                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(f.Module.SettingsView));
+                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(f.Module.PlayerView));
                 var detail = f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
                 var queue = f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayQueue);
                 Equal(SystemFonts.MessageFontFamily, ((Control)detail).FontFamily);
                 Equal(SystemFonts.MessageFontFamily, ((Control)queue).FontFamily);
-                Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(detail));
-                Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(queue));
+                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(detail));
+                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(queue));
+                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(detail));
+                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(queue));
                 shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
                 await Until(() => f.Module.IsCatalogHome && f.Client.Count("music.catalog.home") == 1 &&
                     !f.Module.Busy && ((ListBox)shell.FindName("NavigationList")).SelectedItem is
@@ -592,7 +616,7 @@ public static class MusicCatalogTests
                 Layout(); await Drain();
                 var playingTitle = Descendants<TextBlock>(player).Single(text => text.Text == f.Module.CurrentTitle);
                 var playingArtist = Descendants<TextBlock>(player).Single(text => text.Text == f.Module.CurrentArtist);
-                AssertGrayscaleText([playingTitle, playingArtist], "actual playing title and artist");
+                AssertDisplayAutoText([playingTitle, playingArtist], "actual playing title and artist");
                 Equal(1, f.Client.Count("music.catalog.playlist.prepare"));
                 Equal(1, f.Client.Count("music.catalog.playlist.commit"));
                 True(f.Module.IsCatalogHome, "the entry play action does not navigate");
@@ -1548,14 +1572,79 @@ public static class MusicCatalogTests
             await WithMountedShelf(shelf, 1000, () =>
                 True(shelf.CardWidth is >= 140 and <= 146, "ordinary covers use seven columns at 1000 pixels"));
             var view = new MusicCatalogView();
-            var card = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.CoverCard")).LoadContent();
+            var card = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.PlaylistCard")).LoadContent();
             card.DataContext = section.Items[0];
             card.Measure(new Size(168, 300)); card.Arrange(new Rect(0, 0, 168, 300)); card.UpdateLayout();
+            Equal(1, Descendants<TextBlock>(card).Count(text => text.Text == section.Items[0].Title));
             True(!Descendants<TextBlock>(card).Any(t =>
                 t.GetBindingExpression(TextBlock.TextProperty)?.ParentBinding.Path?.Path == "ErrorText"),
                 "business errors must not be inserted in card layout");
             Equal("ErrorText", card.GetBindingExpression(FrameworkElement.ToolTipProperty)?.ParentBinding.Path?.Path);
 
+        });
+        yield return Case("channel entry shelves reuse shared cards and supplied song previews", async () =>
+        {
+            await using var f = await Fixture.Create();
+            f.Client.Transform("music.catalog.channel", reply => Edit(reply, node =>
+                node["sections"] = JsonSerializer.SerializeToNode(new[] {
+                    new { id = "electronic", title = "电音旗舰", type = "entries", layout = "rail", items = new object[] {
+                        new { id = "800", name = "电音歌单", subtitle = "精选电子音乐",
+                            cover = "https://art.example.test/channel-playlist.jpg", presentation = "preview",
+                            action = new { type = "playlist", id = "800" },
+                            preview = new[] {
+                                new { title = "第一首电音", artist = "歌手一", cover = "", rank = 1, lastRank = 0 },
+                                new { title = "第二首电音", artist = "歌手二", cover = "", rank = 2, lastRank = 0 } } },
+                        new { id = "801", name = "无副标题歌单", subtitle = "",
+                            cover = "https://art.example.test/channel-empty-subtitle.jpg", presentation = "preview",
+                            action = new { type = "playlist", id = "801" } },
+                        new { id = "radio", name = "电音电台", subtitle = "连续播放",
+                            cover = "https://art.example.test/channel-radio.jpg", presentation = "static",
+                            action = new { type = "unsupported", id = "radio" } }
+                    } }
+                })));
+            await f.Module.NavigateAsync("catalog-channel/wy/rock", default);
+            var section = f.Module.ChannelSections.Single();
+            True(section.IsEntrySection, "channel resource groups use the existing entry presentation");
+            var card = section.Items[0];
+            True(card.CanRequestPreview && card.CanPlay && card.ActionId == "800",
+                "the supplied playlist identity owns preview and playback");
+            var loader = new CatalogArtworkLoader();
+            ArtworkScope.SetLoader(f.Module.View, loader);
+            var window = new Window { Content = f.Module.View, Width = 1108, Height = 760,
+                Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain(); window.UpdateLayout();
+                var view = (MusicCatalogView)f.Module.View.FindName("CatalogView");
+                var scroll = (ScrollViewer)view.FindName("CatalogScroll");
+                var entries = Descendants<EntryCard>(scroll).ToArray();
+                Equal(3, entries.Length);
+                foreach (var entry in entries)
+                {
+                    var item = (MusicCatalogCard)entry.DataContext;
+                    Equal(1, Descendants<TextBlock>(entry).Count(text => text.IsVisible && text.Text == item.Title));
+                    Equal(item.Cover, ((ArtworkImage)entry.FindName("Cover")).Address);
+                }
+                await Until(() => loader.Addresses.Count == 3, "channel cover addresses reach the shared artwork loader");
+                var preview = entries.Single(entry => ReferenceEquals(entry.DataContext, card));
+                True(preview.PreviewTitles.SequenceEqual(new[] { "1 第一首电音", "2 第二首电音" }),
+                    "the response's ordered song summaries reach the shared card");
+                int reads = f.Client.Log.Count;
+                preview.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = Mouse.MouseEnterEvent });
+                True(preview.PreviewTitles.SequenceEqual(await f.Module.ReadCatalogCardPreviewAsync(card, default)),
+                    "preloaded previews keep the supplied titles");
+                Equal(reads, f.Client.Log.Count);
+                var surface = (Grid)preview.FindName("Surface");
+                CardMotion.Transition(surface, true, false); await Drain();
+                True(((TranslateTransform)((StackPanel)preview.FindName("Caption")).RenderTransform).Y < 0,
+                    "channel hover uses the shared rising preview");
+                Equal(Visibility.Visible, ((Button)preview.FindName("PlayButton")).Visibility);
+                var passive = entries.Single(entry => ((MusicCatalogCard)entry.DataContext).Id == "radio");
+                Equal(Visibility.Collapsed, ((Button)passive.FindName("PlayButton")).Visibility);
+                Equal(0, f.Client.Count("music.catalog.playlist"));
+                Equal(0, f.Client.Count("music.queue.replace")); Equal(0, f.Playback.Opens.Count);
+            }
+            finally { window.Content = null; window.Close(); }
         });
         yield return Case("entry presentation DTO is strict while ordinary cards remain static", async () =>
         {
@@ -1582,6 +1671,13 @@ public static class MusicCatalogTests
                 new { id = "1", name = "缺失展示类型", action = new { type = "playlist", id = "1" } } } }));
             Rejected(JsonSerializer.SerializeToElement(new { platform = "wy", entries = new[] {
                 new { song, presentation = "Preview" } } }));
+            Rejected(JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
+                new { id = "entries", type = "entries", items = new[] {
+                    new { id = "1", name = "分组缺失展示类型", action = new { type = "playlist", id = "1" } } } } } }));
+            Rejected(JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
+                new { id = "entries", type = "entries", items = new[] {
+                    new { id = "1", name = "分组展示类型错误", presentation = "Preview",
+                        action = new { type = "playlist", id = "1" } } } } } }));
             var valid = JsonSerializer.SerializeToElement(new { platform = "wy", entries = new[] {
                 new { song, presentation = "static" } } });
             Equal(MusicCatalogEntryPresentation.Static,
@@ -1602,13 +1698,15 @@ public static class MusicCatalogTests
             Equal(count, f.Client.Log.Count);
             Equal("playlist", cards.Single(c => c.Kind == "playlist").Kind);
         });
-        yield return Case("channel descriptors expose implemented featured cube artists and VIP pages", async () =>
+        yield return Case("channel descriptors expose generic placement and preserve native artists and VIP pages", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-channels", default);
             var cards = f.Module.ChannelTabs;
-            True(cards.Single(c => c.Id == "feature").CanOpen, "featured is channel descriptor kind");
-            True(cards.Single(c => c.Id == "rock").CanOpen, "cube is channel descriptor kind");
+            True(cards.All(c => c.Kind == "channel" && c.Placement is "primary" or "more"),
+                "native channel descriptors publish only neutral kinds and placements");
+            True(cards.Single(c => c.Id == "feature").CanOpen, "featured channel remains available");
+            True(cards.Single(c => c.Id == "rock").CanOpen, "rock channel remains available");
             True(cards.Single(c => c.Id == "artist").CanOpen, "artist directory has a native owner");
             True(cards.Single(c => c.Id == "vip").CanOpen, "VIP page has a native owner");
             Equal("feature,playlist,chart,artist,vip,euro,djR,huayu,qingge,acg",
@@ -1872,7 +1970,8 @@ public static class MusicCatalogTests
                 window.Show(); window.UpdateLayout(); await Drain();
                 var grid = (DataGrid)page.FindName("SongsGrid");
                 Equal(Visibility.Visible, grid.Visibility);
-                Equal(Visibility.Collapsed, ((MusicCatalogView)page.FindName("CatalogView")).Visibility);
+                True(!Descendants<MusicCatalogView>(page).Any(),
+                    "inactive catalog is unmounted, not a second hidden content surface");
                 True(((MeowFilm.Desktop.IDesktopHeaderSource)page).Header.Slot is null,
                     "playlist detail does not publish the home-only create control");
                 var visibleLabels = Descendants<Button>(page).Where(button => button.IsVisible)
@@ -1947,6 +2046,7 @@ public static class MusicCatalogTests
             yield return Case("actual " + platform + " provider song DTO and full cloud save", async () =>
             {
                 await using var f = await Fixture.Create();
+                Equal("wy", f.Module.CatalogSourcePlatform);
                 await f.Module.NavigateAsync("catalog-home", default);
                 await f.SearchPolicy(platform, playlists: false);
                 f.Module.SelectedCatalogPlatform = f.Module.CatalogPlatforms.Single(p => p.Key == platform);
@@ -1957,8 +2057,13 @@ public static class MusicCatalogTests
                 Equal(platform, MusicSongFixture.Info(card.Song!.Raw).GetProperty("source").GetString());
                 var id = platform == "kg" ? "global-test" : "500";
                 await f.Module.NavigateAsync("catalog-playlist/" + platform + "/" + id, default);
+                Equal(platform, f.Module.SelectedCatalogPlatform.Key);
+                Equal("wy", f.Module.CatalogSourcePlatform);
                 await f.Module.SaveCatalogPlaylistAsync();
                 Equal(205, f.Module.Playlists.Single(p => p.Kind == "playlist").Count);
+                await f.Module.NavigateAsync("catalog-home", default);
+                Equal("wy", f.Module.CatalogSourcePlatform);
+                Equal("wy", f.Module.SelectedCatalogPlatform.Key);
             });
         }
         yield return Case("back restores successful merged view without new requests", async () =>
@@ -2123,7 +2228,7 @@ public static class MusicCatalogTests
                 True(Descendants<Image>(image).Single().Source is not null, "real artwork control displays acquired pixels");
                 var title = Descendants<TextBlock>(view).Single(t => t.Text == row.Title);
                 var artist = Descendants<TextBlock>(view).Single(t => t.Text == row.Subtitle);
-                AssertGrayscaleText([title, artist], "actual catalog song title and artist");
+                AssertDisplayAutoText([title, artist], "actual catalog song title and artist");
                 Equal(SystemFonts.MessageFontFamily, title.FontFamily);
                 Equal(14d, title.FontSize); Equal(20d, title.LineHeight);
                 Equal(12d, artist.FontSize); Equal(18d, artist.LineHeight); Equal(2d, artist.Margin.Top);
@@ -2144,7 +2249,7 @@ public static class MusicCatalogTests
                 card.Arrange(new Rect(0, 0, width, card.DesiredSize.Height)); card.UpdateLayout();
                 True(Math.Abs(card.ActualHeight - height) <= 1, type + " reference height " + card.ActualHeight);
             }
-            foreach (var (type, expected) in new[] { ("entries", 168.4), ("playlists", 140.333333), ("banner", 282d) })
+            foreach (var (type, expected) in new[] { ("entries", 168.4), ("playlists", 140.333333), ("banner", 423d) })
             {
                 var shelf = new Shelf { MinimumCardWidth = 124, DataContext = new MusicCatalogSection("", [row], Type: type) };
                 await WithMountedShelf(shelf, 826, () =>
@@ -2218,15 +2323,18 @@ public static class MusicCatalogTests
     private static void Equal<T>(T expected, T actual, [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
     { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Catalog assertion line {line}: expected {expected}, actual {actual}"); }
     private static void True(bool condition, string label) { if (!condition) throw new InvalidOperationException(label); }
-    private static void AssertGrayscaleText(IEnumerable<TextBlock> nodes, string label)
+    private static void AssertDisplayAutoText(IEnumerable<TextBlock> nodes, string label)
     {
         var text = nodes.Where(node => !string.IsNullOrWhiteSpace(node.Text)).ToArray();
         True(text.Length > 0, label + " must include actual text nodes");
         foreach (var node in text)
         {
             var mode = TextOptions.GetTextRenderingMode(node);
-            True(mode == TextRenderingMode.Grayscale,
-                $"{label}: '{node.Text}' must have effective Grayscale TextRenderingMode, actual {mode}");
+            True(mode == TextRenderingMode.Auto,
+                $"{label}: '{node.Text}' must have effective Auto TextRenderingMode, actual {mode}");
+            var formatting = TextOptions.GetTextFormattingMode(node);
+            True(formatting == TextFormattingMode.Display,
+                $"{label}: '{node.Text}' must have effective Display TextFormattingMode, actual {formatting}");
         }
     }
     private static async Task Until(Func<bool> predicate, string failure = "Catalog UI condition did not settle")
@@ -2395,14 +2503,14 @@ public static class MusicCatalogTests
     }
     private sealed class Fixture : IAsyncDisposable
     {
-        private readonly DpapiDocumentStore store;
+        private readonly LocalDocumentStore store;
         private readonly NativeMusicScriptTestRuntime runtime = new();
         private readonly CatalogTransport transport = new();
         public Client Client { get; }
         public Output Playback { get; } = new();
         public MusicCapability Module { get; }
         public VipApplication? Vip { get; }
-        private Fixture(DpapiDocumentStore store, bool vipAccount)
+        private Fixture(LocalDocumentStore store, bool vipAccount)
         {
             this.store = store;
             var native = new MusicNativeApplication(store, runtime, transport);
@@ -2415,12 +2523,16 @@ public static class MusicCatalogTests
         {
             var data = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT") ?? throw new InvalidOperationException("Isolated test data required");
             var dir = Path.Combine(data, "catalog-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
-            var store = new DpapiDocumentStore(dir, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
+            var store = new LocalDocumentStore(dir, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
             await MusicClientContextFixture.SeedQqAsync(store);
             var f = new Fixture(store, vipAccount);
             try
             {
                 await f.Module.InitializeAsync(default);
+                Equal("wy", f.Module.CatalogSourcePlatform);
+                True(f.Module.CanEditCatalogSource && !f.Module.HasCatalogSourceError, "catalog fixture consumes the source restore contract");
+                Equal(1, f.Client.Count("music.catalogSource.settings.get"));
+                Equal(0, f.Client.Count("music.catalogSource.settings.save"));
                 True(!f.runtime.HasStarted, "ordinary native initialization is script-free");
                 return f;
             }
@@ -2459,10 +2571,10 @@ public static class MusicCatalogTests
             var result = await Rpc("music.sources.install", new { token, name = "合成源", version = "1",
                 permissions = new { storage = Array.Empty<string>() } });
             var installationId = result.GetProperty("item").GetProperty("installationId").GetString();
-            await Rpc("music.sources.enable", new { installationId });
+            var enabled = await Rpc("music.sources.enable", new { installationId });
+            True(enabled.GetProperty("item").GetProperty("enabled").GetBoolean(), "enabled script participates in catalog playback");
             await Module.RefreshOnlineAsync();
             Module.SelectedSource = Module.Sources.Single(); await Module.LoadSourceAsync(Module.SelectedSource);
-            await Module.UseSourcePlatformAsync("wy");
         }
         public async ValueTask DisposeAsync()
         {

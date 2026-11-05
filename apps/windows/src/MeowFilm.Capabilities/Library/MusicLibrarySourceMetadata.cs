@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -17,7 +16,7 @@ public sealed partial class MusicLibraryOwner
     private JsonObject SourceState(JsonObject doc) => Value(doc, "lx-installations") as JsonObject ??
         LJ.Obj(("schema", 4), ("revision", 0), ("installations", new JsonArray()));
     private JsonObject Settings(JsonObject doc) => Value(doc, "online-settings") as JsonObject ??
-        LJ.Obj(("schema", 2), ("revision", 0), ("lyrics", true), ("target", null));
+        LJ.Obj(("schema", 3), ("revision", 0), ("lyrics", true));
     private static string InstallationId(string id)
     {
         LJ.Require(id.Length <= 128 && Regex.IsMatch(id, "^[a-zA-Z0-9][a-zA-Z0-9._:-]*$", RegexOptions.CultureInvariant, NativeMusicSong.RegexTimeout));
@@ -53,6 +52,12 @@ public sealed partial class MusicLibraryOwner
     }
     private static void ValidateSettings(JsonObject settings)
     {
+        LJ.Fields(settings, "schema revision lyrics", "schema revision lyrics");
+        LJ.Require(LJ.I(settings["schema"]) == 3 && LJ.IsBool(settings["lyrics"]), "CORRUPT_STORAGE");
+        _ = Revision(settings);
+    }
+    private static void ValidateLegacyOnlineSettings(JsonObject settings, HashSet<string> installations)
+    {
         LJ.Fields(settings, "schema revision lyrics target", "schema revision lyrics target");
         LJ.Require(LJ.I(settings["schema"]) == 2 && LJ.IsBool(settings["lyrics"]), "CORRUPT_STORAGE");
         _ = Revision(settings);
@@ -60,7 +65,21 @@ public sealed partial class MusicLibraryOwner
         {
             var t = LJ.Object(target); LJ.Fields(t, "installationId platform", "installationId platform");
             _ = InstallationId(LJ.Text(t["installationId"])); LJ.Require(NativeMusicSong.Platforms.Append("local").Contains(LJ.S(t["platform"])));
+            LJ.Require(installations.Contains(LJ.S(t["installationId"])), "CORRUPT_STORAGE");
         }
+    }
+    private async Task ConvertLegacyOnlineSettingsAsync(CancellationToken token)
+    {
+        if (pending is not null || recommendationUnknown is not null ||
+            Value(document!, "online-settings") is not JsonObject settings || LJ.I(settings["schema"]) != 2) return;
+        // Load validated the entire legacy envelope, including the old target reference.
+        // A representation change preserves the settings revision and every other area.
+        var converted = (JsonObject)settings.DeepClone();
+        converted["schema"] = 3;
+        converted.Remove("target");
+        var candidate = (JsonObject)document!.DeepClone();
+        Set(candidate, "online-settings", converted);
+        await CommitAsync(candidate, PendingOwner.OnlineSettings, token).ConfigureAwait(false);
     }
     /// <summary>Trusted native scripting manager only. Does not execute/activate any source.</summary>
     public async Task<MusicSourceMetadataSnapshot> ReadSourceMetadataAsync(CancellationToken cancellationToken = default)
@@ -135,19 +154,6 @@ public sealed partial class MusicLibraryOwner
             var removed = LJ.Array(previous["installations"]).Select(i => LJ.S(i?["id"]))
                 .Except(LJ.Array(next["installations"]).Select(i => LJ.S(i?["id"]))).ToHashSet();
             var candidate = (JsonObject)document!.DeepClone(); Set(candidate, "lx-installations", next);
-            if (HasValue(candidate, "online-settings") && Settings(candidate)["target"] is JsonObject target)
-            {
-                string targetId = LJ.S(target["installationId"]);
-                var targetSource = LJ.Array(next["installations"]).OfType<JsonObject>()
-                    .FirstOrDefault(item => LJ.S(item["id"]) == targetId);
-                if (removed.Contains(targetId) || targetSource is null || !LJ.B(targetSource["enabled"]))
-                {
-                    var settings = (JsonObject)Settings(candidate).DeepClone();
-                    settings["revision"] = checked(Revision(settings) + 1);
-                    settings["target"] = null;
-                    Set(candidate, "online-settings", settings);
-                }
-            }
             var entries = LJ.Array(candidate["entries"]);
             foreach (var entry in entries.OfType<JsonObject>().ToArray())
                 if (TryScriptAreaKey(LJ.S(entry["key"]), out string installation) &&
@@ -253,19 +259,16 @@ public sealed partial class MusicLibraryOwner
             await CommitAsync(doc, PendingOwner.ScriptData, token).ConfigureAwait(false);
             return JsonSerializer.SerializeToElement<object?>(null);
         }
-        finally { CryptographicOperations.ZeroMemory(supplied); if (entered) gate.Release(); }
+        finally { if (entered) gate.Release(); }
     }
     private (JsonObject Result, bool Mutate) SettingsCommand(string method, JsonObject p, JsonObject doc)
     {
         if (method == "music.settings.get") { LJ.Fields(p, ""); return (LJ.Obj(("settings", Settings(doc))), false); }
-        LJ.Fields(p, "ifRevision lyrics target", "ifRevision lyrics target");
+        LJ.Fields(p, "ifRevision lyrics", "ifRevision lyrics");
         LJ.Require(pending is null, "PENDING_WRITE"); var settings = Settings(doc);
         LJ.Require(Revision(settings) == LJ.I(p["ifRevision"]), "REVISION_CONFLICT");
-        var next = LJ.Obj(("schema", 2), ("revision", Revision(settings) + 1),
-            ("lyrics", p["lyrics"]), ("target", p["target"]));
+        var next = LJ.Obj(("schema", 3), ("revision", Revision(settings) + 1), ("lyrics", p["lyrics"]));
         ValidateSettings(next);
-        if (next["target"] is JsonObject t)
-            LJ.Require(LJ.Array(SourceState(doc)["installations"]).Any(s => LJ.S(s?["id"]) == LJ.S(t["installationId"])), "NOT_FOUND");
         Set(doc, "online-settings", next); return (LJ.Obj(("settings", next)), true);
     }
 }

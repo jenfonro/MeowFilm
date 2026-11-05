@@ -191,7 +191,7 @@ internal static class WindowsDocumentFiles
         try
         {
             Marshal.WriteInt32(buffer, 1);
-            // A failed cleanup leaves only a ciphertext orphan. Never delete a path
+            // A failed cleanup leaves an uncommitted stage. Never delete a path
             // that may now name another file and never mask the original failure.
             _ = SetFileInformationByHandle(source, 4 /* FileDispositionInfo */, buffer, sizeof(int));
         }
@@ -204,7 +204,7 @@ internal static class WindowsDocumentFiles
         return info;
     }
 
-    internal static void Fail(DocumentStoreError error) => throw new ProtectedDocumentException(error);
+    internal static void Fail(DocumentStoreError error) => throw new DocumentStoreException(error);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct FileInformation

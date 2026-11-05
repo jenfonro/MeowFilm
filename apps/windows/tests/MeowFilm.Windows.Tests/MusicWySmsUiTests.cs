@@ -254,7 +254,7 @@ public static class MusicWySmsUiTests
         internal readonly MusicCapability Module;
         private Fixture()
         {
-            Store = new(new DpapiDocumentStore(MusicNativeWySmsTests.Root(), AppIdentity.NativeNamespaces));
+            Store = new(new LocalDocumentStore(MusicNativeWySmsTests.Root(), AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             Transport = new(Store.Inner);
             Module = new(new MusicNativeApplication(Store, Runtime, Transport), Store, new Output(), new Dialogs());
         }

@@ -29,7 +29,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     }()
     private let route = AVRoutePickerView()
     private let sourceLabel = UILabel()
-    private let recordScroll = UIScrollView()
+    private let recordScroll = MusicRecordScrollView()
     private let discs = (0..<3).map { _ in MusicRecordDiscView() }
     private let tonearm = MusicTonearmView()
     private let lyricPreview = UIButton(type: .custom)
@@ -98,6 +98,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         sourceLabel.lineBreakMode = .byTruncatingTail
 
         recordScroll.isPagingEnabled = true
+        recordScroll.clipsToBounds = false
         recordScroll.showsHorizontalScrollIndicator = false
         recordScroll.showsVerticalScrollIndicator = false
         recordScroll.delegate = self
@@ -639,6 +640,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         records.synchronize(current: content.model.current, previous: content.model.recordPreview(.previous),
                             next: content.model.recordPreview(.next))
         let theme = PageTheme(palette: content.appearance.effectivePalette, dark: false)
+        tonearm.configure(theme: theme)
         for slot in records.slots {
             discs[slot.id].configure(theme: theme, image: content.artwork(for: slot.entry))
         }

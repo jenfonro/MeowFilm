@@ -117,7 +117,7 @@ public static class MusicNativeRecommendationTests
         { Interlocked.Increment(ref Calls); throw new InvalidOperationException("Node must not execute native recommendation business"); }
         public ValueTask DisposeAsync() { Disposals++; return ValueTask.CompletedTask; }
     }
-    private sealed class Store(DpapiDocumentStore inner) : IProtectedDocumentStore
+    private sealed class Store(LocalDocumentStore inner) : IDocumentStore
     {
         internal readonly ConcurrentDictionary<(string Namespace, int Number), Barrier> Holds = new();
         internal readonly ConcurrentDictionary<string, int> Reads = new(), Writes = new();
@@ -132,7 +132,7 @@ public static class MusicNativeRecommendationTests
             var point = new Barrier(); Check(Holds.TryAdd(("write:" + ns, Writes.GetValueOrDefault(ns) + 1), point));
             Barriers.Add(point); return point;
         }
-        public async Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default)
+        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
             int count = Reads.AddOrUpdate(ns, 1, (_, n) => n + 1);
             var document = await inner.ReadAsync(ns, token).ConfigureAwait(false);
@@ -276,7 +276,7 @@ public static class MusicNativeRecommendationTests
             string parent = Environment.GetEnvironmentVariable("MEOWFILM_NATIVE_RECOMMENDATIONS_DATA") ??
                 throw new InvalidOperationException("Explicit isolated fixture directory required");
             Root = root ?? Path.Combine(parent, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(Root);
-            Store = new(new DpapiDocumentStore(Root, AppIdentity.NativeNamespaces));
+            Store = new(new LocalDocumentStore(Root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             App = new(Store, Runtime, Handler);
             Source.Changed += value => Notices.Enqueue(value.Clone());
         }

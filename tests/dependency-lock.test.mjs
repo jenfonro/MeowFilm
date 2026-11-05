@@ -13,7 +13,6 @@ import { temporaryRoot } from '../scripts/windows/working-paths.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const checker = join(root, 'scripts/verify-dependency-lock.mjs');
 const read = path => JSON.parse(readFileSync(path, 'utf8'));
-// No production registry dependency is needed by the remaining workspaces.
 // Keep non-vacuous integrity/nested/alias tests using an inert, synthetic lock.
 // These are format fixtures, not downloaded artifacts or claimed npm digests.
 const hostPath = 'packages/fixture-host';
@@ -76,10 +75,14 @@ test('the repository lock can be audited offline without any installed modules',
   const project = fixture(t, () => {}, { lock, manifest: read(join(root, 'package.json')), workspaces });
   const report = verifyDependencyLock(project.directory);
   assert.deepEqual(report, verifyDependencyLock(root));
-  assert.deepEqual(Object.keys(workspaces).sort(), ['packages/runtime-bridge', 'packages/script-host']);
+  assert.deepEqual(Object.keys(workspaces).sort(), [
+    'packages/runtime-bridge',
+    'packages/script-host',
+    'packages/source-runtime',
+  ]);
   assert.equal(report.registry.length, Object.values(lock.packages)
     .filter(entry => !entry.link && typeof entry.resolved === 'string' && entry.resolved.startsWith('https://registry.npmjs.org/')).length);
-  assert.equal(report.workspaceLinks, 2);
+  assert.equal(report.workspaceLinks, 3);
   assert.equal(report.bundled.length, 0);
   assert.ok(!existsSync(join(project.directory, 'node_modules')));
 });

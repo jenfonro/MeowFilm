@@ -24,8 +24,9 @@ public sealed partial class MusicScriptOwner
         if (policy is not null && p.ContainsKey("qualityPolicySignature"))
             LJ.Require(LJ.Text(p["qualityPolicySignature"], 64) == policy.Signature, "QUALITY_POLICY_CHANGED");
         LJ.Require(!p.ContainsKey("qualityCacheSignature") || p.ContainsKey("qualityPolicySignature") && quality != "auto");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
         using var operation = CancellationTokenSource.CreateLinkedTokenSource(external, lifetime.Token, policy?.Token ?? default);
-        operation.CancelAfter(TimeSpan.FromSeconds(25));
+        using var timed = CancellationTokenSource.CreateLinkedTokenSource(operation.Token, deadline.Token);
         lock (activityGate)
         {
             LJ.Require(!preparing && !closed, "CLOSED");
@@ -33,7 +34,7 @@ public sealed partial class MusicScriptOwner
             if (isLyrics) { lyrics?.Cancel(); lyrics = operation; }
             else { resolution?.Cancel(); resolution = operation; }
         }
-        var token = operation.Token;
+        var token = timed.Token;
         try
         {
             Live active;
@@ -102,6 +103,9 @@ public sealed partial class MusicScriptOwner
             var lines = MusicLyricTiming.Parse(text, translation, LJ.N(song["duration"]));
             return LJ.Obj(("state", lines.GetArrayLength() > 0 ? "ready" : "none"), ("generation", active.Generation), ("lines", lines));
         }
+        catch (Exception error) when (deadline.IsCancellationRequested && !operation.IsCancellationRequested &&
+            Code(error) == "CANCELLED")
+        { throw new MusicLibraryException("TIMEOUT"); }
         finally
         {
             lock (activityGate)

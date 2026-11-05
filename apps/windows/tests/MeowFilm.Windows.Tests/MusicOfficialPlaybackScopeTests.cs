@@ -24,6 +24,7 @@ public static class MusicOfficialPlaybackScopeTests
         yield return Case("complete file on another known recording wins before any URL resolution or discovery", async () =>
         {
             await using var f = await Scene.Create(files: true);
+            f.App.EnabledScript = true;
             var song = Song("first", alternate: true);
             await f.SeedFile(song, "tx");
             int transfers = f.Files.Requests;
@@ -40,6 +41,7 @@ public static class MusicOfficialPlaybackScopeTests
         yield return Case("valid URL cache starts playback without catalog discovery or another media lookup", async () =>
         {
             await using var f = await Scene.Create();
+            f.App.EnabledScript = true;
             var song = Song("first");
             var receipt = await f.App.Receipt(song, "wy");
             await f.App.Urls.PutAsync("fixture", LJ.S(song["songId"]), Signature("wy"), receipt, default);
@@ -52,6 +54,7 @@ public static class MusicOfficialPlaybackScopeTests
         yield return Case("auto plays an enabled known quality without searching unknown higher qualities", async () =>
         {
             await using var f = await Scene.Create();
+            f.App.EnabledScript = true;
             f.App.MediaQuality = "320k"; // Master remains enabled and preferred in the actual policy.
             await f.Play(Song("first"));
             Check(f.Output.NetworkOpens == 1 && f.Module.CurrentSource == "网易云音乐", f.Module.Status);
@@ -243,7 +246,7 @@ public static class MusicOfficialPlaybackScopeTests
             var scene = new Scene(files);
             await scene.Module.InitializeAsync(default);
             await scene.SetQuality("auto");
-            await scene.App.Ok("music.settings.save", new { ifRevision = 0, lyrics = false, target = (object?)null });
+            await scene.App.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
             await Until(() => !scene.Module.Busy);
             return scene;
         }
@@ -299,7 +302,7 @@ public static class MusicOfficialPlaybackScopeTests
         internal readonly TaskCompletionSource DiscoveryRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource ResolutionEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource ResolutionRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal bool HoldDiscovery, HoldResolution, HideKnown;
+        internal bool HoldDiscovery, HoldResolution, HideKnown, EnabledScript;
         internal string MediaQuality = "flac";
         internal int MediaLookups, Authorizations;
         internal CancellationToken DiscoveryToken, ResolutionToken;
@@ -345,6 +348,12 @@ public static class MusicOfficialPlaybackScopeTests
             CancellationToken cancellationToken = default)
         {
             var input = Element(parameters ?? new { });
+            if (EnabledScript && method == "music.sources.list")
+                return Element(new { ok = true, revision = 1, items = new[] {
+                    new { installationId = "higher-quality-script", enabled = true, executionHash = new string('a', 64) }
+                } });
+            if (EnabledScript && method is "music.sources.detail" or "music.online.resolve")
+                throw new InvalidOperationException("playable cache or known mapping must not probe scripts");
             if (method == "music.official.candidates")
             {
                 Plans.Add(input);
@@ -376,14 +385,16 @@ public static class MusicOfficialPlaybackScopeTests
                     qualityCacheSignature = Signature(input.GetProperty("platform").GetString()!) });
             if (method == "music.official.resolve")
             {
-                Resolutions.Add(input);
                 string platform = input.GetProperty("platform").GetString()!;
                 var song = JsonNode.Parse(input.GetProperty("song").GetRawText())!.AsObject();
+                var cached = await Urls.ReadAsync("fixture", LJ.S(song["songId"]), Signature(platform), cancellationToken);
+                if (input.TryGetProperty("cacheOnly", out var cacheOnly) && cacheOnly.GetBoolean() && cached is null)
+                    return Element(new { ok = false, code = "CACHE_MISS" });
+                Resolutions.Add(input);
                 var info = await Receipt(song, platform);
                 ResolutionToken = cancellationToken; ResolutionEntered.TrySetResult();
                 if (HoldResolution) await ResolutionRelease.Task; // Exercise post-await account/policy/cancel checks.
                 if (Failures.TryGetValue(platform, out var code)) return Element(new { ok = false, code });
-                var cached = await Urls.ReadAsync("fixture", LJ.S(song["songId"]), Signature(platform), cancellationToken);
                 if (cached is not null) return Element(cached);
                 MediaLookups++;
                 return Element(info);

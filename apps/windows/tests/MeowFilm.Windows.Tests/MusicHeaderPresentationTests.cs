@@ -25,7 +25,7 @@ public static partial class MusicUiTests
             try
             {
                 window.Show(); window.UpdateLayout(); await Drain();
-                // Both templates may load while their table is initially hidden on recommendation.
+                // Preparing a retained template must not mount an inactive body.
                 foreach (string name in new[] { "SongsGrid", "SearchSongsGrid" })
                     ((DataGrid)f.Module.View.FindName(name)).ApplyTemplate();
                 await f.Search("滚动条"); await f.Module.OpenSearchTabAsync("songs");
@@ -42,6 +42,8 @@ public static partial class MusicUiTests
             void AssertChrome(string name)
             {
                 var grid = (DataGrid)f.Module.View.FindName(name);
+                True(ReferenceEquals(grid, Visuals(f.Module.View).OfType<DataGrid>().Single()),
+                    name + " is the only mounted song table");
                 var scroll = Visuals(grid).OfType<ScrollViewer>().First(value => ReferenceEquals(value.TemplatedParent, grid));
                 var bar = (ScrollBar)scroll.Template.FindName("PART_VerticalScrollBar", scroll);
                 var content = (FrameworkElement)scroll.Template.FindName("PART_ScrollContentPresenter", scroll);
@@ -68,6 +70,11 @@ public static partial class MusicUiTests
             {
                 for (var i = 0; i < 3; i++) refreshBindings.Invoke(f.Module, null);
                 True(Equals(0, count), "repeated unchanged bindings publish no header change");
+                await f.Module.SetCatalogSourceAsync("kg");
+                Equal("kg", f.Module.CatalogSourcePlatform);
+                Equal(0, count);
+                True(source.Header.Slot is null && source.Header.HeaderActions.Count == 0,
+                    "source preference never adds a discovery platform picker to the library header");
 
                 await f.Module.NavigateAsync("history", default);
                 await Drain();

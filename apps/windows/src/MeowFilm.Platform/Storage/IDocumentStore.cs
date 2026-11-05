@@ -13,12 +13,13 @@ public sealed record DocumentFingerprint(bool Exists, int Length, string? Sha256
     public static DocumentFingerprint FromBytes(ReadOnlySpan<byte> bytes) =>
         new(true, bytes.Length, Convert.ToHexStringLower(SHA256.HashData(bytes)));
 
-    internal bool IsValid => Length >= 0 && Length <= DocumentRules.MaximumDocumentBytes &&
+    internal bool IsValid => IsValidFor(DocumentRules.MaximumDocumentBytes);
+    internal bool IsValidFor(int maximumBytes) => Length >= 0 && Length <= maximumBytes &&
         (Exists ? DocumentRules.ValidHash(Sha256) : Length == 0 && Sha256 is null);
 }
 
 /// <summary>Caller owns Data. Null means absent; an existing empty byte array does not.</summary>
-public sealed record ProtectedDocument(byte[]? Data, DocumentFingerprint Fingerprint);
+public sealed record DocumentSnapshot(byte[]? Data, DocumentFingerprint Fingerprint);
 
 public enum DocumentStoreError
 {
@@ -27,15 +28,15 @@ public enum DocumentStoreError
 }
 
 /// <summary>Fixed diagnostics only: never contains paths, payloads or an inner exception.</summary>
-public sealed class ProtectedDocumentException : Exception
+public sealed class DocumentStoreException : Exception
 {
     public DocumentStoreError Error { get; }
-    public ProtectedDocumentException(DocumentStoreError error) : base(error.ToString()) => Error = error;
+    public DocumentStoreException(DocumentStoreError error) : base(error.ToString()) => Error = error;
 }
 
-public interface IProtectedDocumentStore : IAsyncDisposable
+public interface IDocumentStore : IAsyncDisposable
 {
-    Task<ProtectedDocument> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default);
+    Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default);
 
     /// <summary>Atomically compare plaintext existence/length/hash and replace. No blind write.</summary>
     Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
@@ -45,6 +46,7 @@ public interface IProtectedDocumentStore : IAsyncDisposable
 internal static class DocumentRules
 {
     internal const int MaximumDocumentBytes = 8 * 1024 * 1024;
+    internal const int MaximumSourceBytes = 16 * 1024 * 1024;
     internal static bool ValidNamespace(string? value)
     {
         if (value is null || value.Length is < 1 or > 128 || !AlphaNumeric(value[0]) ||
@@ -64,11 +66,11 @@ internal static class DocumentRules
 
     internal static HashSet<string> Namespaces(IEnumerable<string> values)
     {
-        if (values is null) throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
+        if (values is null) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         var result = new HashSet<string>(StringComparer.Ordinal);
         foreach (string value in values)
             if (!ValidNamespace(value) || !result.Add(value) || result.Count > 64)
-                throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
+                throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         return result;
     }
 }

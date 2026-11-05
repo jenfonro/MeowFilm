@@ -10,15 +10,15 @@ internal sealed class MusicPlaybackCacheDataException(DocumentStoreError error) 
 {
     internal DocumentStoreError Error { get; } = error;
 
-    internal static bool IsStoredFormatFailure(ProtectedDocumentException error) =>
+    internal static bool IsStoredFormatFailure(DocumentStoreException error) =>
         error.Error is DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion or
             DocumentStoreError.Limit or DocumentStoreError.Protection;
 
-    internal static bool IsOptionalStoreFailure(ProtectedDocumentException error) =>
+    internal static bool IsOptionalStoreFailure(DocumentStoreException error) =>
         error.Error is DocumentStoreError.Unavailable or DocumentStoreError.Conflict or
             DocumentStoreError.Storage or DocumentStoreError.Closed;
 
-    internal static MusicPlaybackCacheDataException FromStore(ProtectedDocumentException error) =>
+    internal static MusicPlaybackCacheDataException FromStore(DocumentStoreException error) =>
         new(error.Error);
 
     internal static MusicPlaybackCacheDataException Corrupt() => new(DocumentStoreError.Corrupt);

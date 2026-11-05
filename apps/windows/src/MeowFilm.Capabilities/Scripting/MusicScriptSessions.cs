@@ -1,9 +1,7 @@
-using System.Security.Cryptography;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
-using MeowFilm.Platform.Files;
 
 namespace MeowFilm.Capabilities.Scripting;
 
@@ -32,11 +30,9 @@ public sealed partial class MusicScriptOwner
         finally { storageGate.Release(); }
         string? transfer = null;
         bool loadAttempted = false, committed = false;
-        byte[] bytes = [];
         try
         {
-            bytes = await library.ReadScriptContentAsync(LJ.S(selected["current"]!["sourceHash"]),
-                (int)LJ.I(selected["current"]!["sourceBytes"], 1, SelectedScriptSnapshot.MaximumBytes), token)
+            byte[] bytes = await library.ReadScriptContentAsync(LJ.S(selected["current"]!["sourceHash"]), token)
                 .ConfigureAwait(false);
             string hash = LJ.Hash(bytes);
             var stage = await ScriptAsync("stage.begin", new { basename = "source.js", length = bytes.Length, sha256 = hash }, token).ConfigureAwait(false);
@@ -120,7 +116,6 @@ public sealed partial class MusicScriptOwner
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(bytes);
             if (transfer is not null)
             {
                 try

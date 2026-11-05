@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
@@ -10,7 +9,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
 {
     public const string ContractVersion = "0.6.0";
     public const string DocumentNamespace = "music.library.v1";
-    private readonly IProtectedDocumentStore store;
+    private readonly IDocumentStore store;
     private readonly string scope;
     private readonly SemaphoreSlim gate = new(1, 1);
     private JsonObject? document;
@@ -22,6 +21,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     private enum PendingOwner
     {
         Appearance,
+        CatalogSource,
         DeviceSettings,
         History,
         Library,
@@ -42,8 +42,8 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     private sealed record Pending(JsonObject Candidate, DocumentFingerprint Before, DocumentFingerprint After, string Code,
         PendingOwner Owner, RecommendationCommit? Recommendation = null);
 
-    public MusicLibraryOwner(IProtectedDocumentStore store) : this(store, "local") { }
-    public MusicLibraryOwner(IProtectedDocumentStore store, string scope)
+    public MusicLibraryOwner(IDocumentStore store) : this(store, "local") { }
+    public MusicLibraryOwner(IDocumentStore store, string scope)
     { ArgumentNullException.ThrowIfNull(store); LJ.Require(LJ.Id(scope)); this.store = store; this.scope = scope; }
 
     public Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
@@ -69,24 +69,21 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         LJ.Require(await gate.WaitAsync(TimeSpan.FromSeconds(10), token).ConfigureAwait(false), "TIMEOUT");
     private async Task LoadAsync(CancellationToken token, bool force = false)
     {
-        if (document is not null && !force) return;
-        var saved = await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false);
-        try
+        if (document is null || force)
         {
+            var saved = await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false);
             JsonObject candidate;
             if (saved.Data is null) { LJ.Require(saved.Fingerprint == DocumentFingerprint.Missing, "CORRUPT_STORAGE"); candidate = LJ.Obj(("version", 1), ("entries", new JsonArray())); }
-            else
-            {
-                LJ.Require(DocumentFingerprint.FromBytes(saved.Data) == saved.Fingerprint, "CORRUPT_STORAGE");
-                candidate = LJ.PersistedDocument(saved.Data);
-            }
-            ValidateDocument(candidate);
+            else candidate = LJ.PersistedDocument(saved.Data);
+            ValidateDocument(candidate, allowLegacyOnlineSettings: true);
             if (Value(candidate, "queue") is JsonObject q) RestoreRuntime(q, false);
             else if (force) RestoreRuntime(Queue(candidate), false);
             document = candidate; fingerprint = saved.Fingerprint;
             if (pending is null && recommendationUnknown is null) RefreshOfficialSources(candidate);
         }
-        finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
+        // Reconciliation observes the attempted CAS before/after bytes without issuing
+        // another write. A new admitted call may retry a conversion that did not commit.
+        if (!force) await ConvertLegacyOnlineSettingsAsync(token).ConfigureAwait(false);
     }
     private static PendingOwner CommandOwner(string method)
     {
@@ -95,6 +92,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         if (method.StartsWith("music.queue.", StringComparison.Ordinal)) return PendingOwner.Queue;
         if (method.StartsWith("music.history.", StringComparison.Ordinal)) return PendingOwner.History;
         if (method is "music.settings.save") return PendingOwner.OnlineSettings;
+        if (method is "music.catalogSource.settings.save") return PendingOwner.CatalogSource;
         if (method is "music.officialSources.settings.save") return PendingOwner.OfficialSources;
         if (method is "music.quality.settings.save") return PendingOwner.Quality;
         if (method is "music.metadata.settings.save") return PendingOwner.Metadata;
@@ -109,6 +107,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     private static bool IsAuthoritativeRead(string method, PendingOwner owner) => owner switch
     {
         PendingOwner.Appearance => method == "music.appearance.get",
+        PendingOwner.CatalogSource => method == "music.catalogSource.settings.get",
         PendingOwner.Metadata => method == "music.metadata.settings.get",
         PendingOwner.Quality => method == "music.quality.settings.get",
         PendingOwner.OfficialSources => method == "music.officialSources.settings.get",
@@ -147,13 +146,12 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         }
         catch (Exception error)
         {
-            string code = error is ProtectedDocumentException { Error: DocumentStoreError.Conflict } ? "STORAGE_CONFLICT" : "COMMIT_UNKNOWN";
+            string code = error is DocumentStoreException { Error: DocumentStoreError.Conflict } ? "STORAGE_CONFLICT" : "COMMIT_UNKNOWN";
             pending = new(candidate, fingerprint, expected, code, owner, recommendationStage);
             if (recommendationStage is not null) recommendationUnknown = pending;
             InvalidateOfficialSources();
             throw new MusicLibraryException(code);
         }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
     }
     private async Task ReconcileLockedAsync(CancellationToken token)
     {
@@ -191,7 +189,8 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             JsonObject p;
             try { p = LJ.Parameters(parameters, full ? 16 * 1024 * 1024 : 512 * 1024); }
             catch (MusicLibraryException error) when (error.Code == "CORRUPT_STORAGE" &&
-                (method is "music.officialSources.settings.get" or "music.officialSources.settings.save"))
+                (method is "music.officialSources.settings.get" or "music.officialSources.settings.save" or
+                    "music.catalogSource.settings.get" or "music.catalogSource.settings.save"))
             { throw new MusicLibraryException("INVALID_REQUEST"); }
             await EnterAsync(token).ConfigureAwait(false); entered = true;
             recommendationStage = null;
@@ -219,7 +218,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         }
         catch (OperationCanceledException) { return LJ.Element(LJ.Obj(("ok", false), ("code", "CANCELLED"))); }
         catch (MusicLibraryException error) { return LJ.Element(LJ.Obj(("ok", false), ("code", error.Code))); }
-        catch (ProtectedDocumentException error) { return LJ.Element(LJ.Obj(("ok", false), ("code", error.Error == DocumentStoreError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE"))); }
+        catch (DocumentStoreException error) { return LJ.Element(LJ.Obj(("ok", false), ("code", error.Error == DocumentStoreError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE"))); }
         catch { return LJ.Element(LJ.Obj(("ok", false), ("code", "INVALID_REQUEST"))); }
         finally
         {

@@ -21,14 +21,14 @@ contract: cat.script.v1
 | `stage.begin/chunk/abort` | 分片暂存 `source` 或大型 JSON 请求 |
 | `blob.read/release` | 分片读取大型 JSON 结果 |
 | `start/status` | 启动运行器并读取当前设置，或返回当前状态；`start` 不等待各脚本实例就绪 |
-| `refresh` | 重新读取同一设置文件并完整校验后应用 |
+| `refresh` | 重新读取同一设置文件，校验设置结构后按目标实例应用 |
 | `install/enable/uninstall` | 保存源码、更新设置并管理一个 installation |
 | `invoke` | 定向调用 installation/generation/site/action |
 | `management.describe/sync` | 探测脚本原生管理协议并同步一个明确 provider |
 
 源码和 JSON 分片均为 64 KiB、连续 offset、规范 Base64 与完整 SHA-256。源码声明长度最多 16 MiB，在 `stage.begin` 提前拒绝；脚本结果不设 8 MiB 上限。未完成 transfer 按活动 token 保留并在超时、显式释放或运行器关闭时回收，不设置并发 token 数量门槛，也不把分片帧大小当作整份源码大小上限。小结果返回 `data` JSON 字符串，大结果返回 `blob` 描述符；调用方校验长度和 SHA-256 后必须释放 token。
 
-源码严格按无 BOM UTF-8 解码。`install` 将字节以 SHA-256 命名为不可变 `sources/<hash>.js`，设置只引用 hash；不存在旧格式迁移或内联源码回退。
+源码严格按无 BOM UTF-8 解码。`install` 将实际给定源码原子写入普通文件 `sources/<importhash>.js`，设置的 `sourceHash` 只作为导入时的文件引用和内容标识；不加密源码，不保护其字节不可变，读取时不比较历史 hash 或导入长度。显式重新导入会原子替换该文件，即使设置和导入内容标识未变也重新应用目标实例。不存在旧格式迁移或内联源码回退。
 
 ## 设置文件
 
@@ -60,9 +60,11 @@ contract: cat.script.v1
 }
 ```
 
-`port=0` 由系统选择聚合端口。缺省 provider 表示未启用对应拦截。客户端可原子改写该文件后调用 `refresh`；刷新先校验全部设置和引用源码，失败不发布部分状态、不覆盖文件，也不替换当前有效运行快照。冷启动文件损坏明确返回存储错误。
+`port=0` 由系统选择聚合端口。缺省 provider 表示未启用对应拦截。客户端可原子改写该文件后调用 `refresh`；刷新先校验设置结构，设置损坏时不发布部分状态、不覆盖文件，也不替换当前有效运行快照。有效设置只对配置变更、新增、移除或失败的目标实例应用，未变的正常实例不重读源码、不重新启动。provider、映射和聚合端口变更通过设置快照发布，不要求全量重读源码。冷启动设置损坏明确返回存储错误。
 
-`start` 完成数据根、设置读取、全部引用源码校验和聚合 server 监听后返回与 `status` 相同的快照，各已启用脚本随后按 `settings.scripts` 顺序在后台逐个启动，不并发、不增加并发设置项。每个 enabled installation 使用独立 worker thread 运行 CatSession、QuickJS、私有卷访问和 listener；主线程保留 ScriptHost 记录、CatRuntime 网关、设置文件与平台适配器。实例就绪即可调用；尚未启动或正在启动的实例在 `status` 中报告 `starting`，对它的 `invoke`、管理和会话访问立即返回 `STARTING`，不隐藏等待；聚合 HTTP 入口对 `STARTING` 返回 503。安装、启用、刷新和卸载与后台启动共用同一串行队列，可在两个实例启动之间插入；与目标一致的实例不重复启动。更新仍先停旧 generation 再启动新 generation，避免同一实例两代并写私有卷。
+`start` 完成数据根、设置读取和聚合 server 监听后返回与 `status` 相同的快照，各已启用脚本随后按 `settings.scripts` 顺序在后台逐个启动，不并发、不增加并发设置项。每个目标实例启动时读取一次当前源码，按实际字节检查 16 MiB 上限并解码，不做全量源码预检；禁用实例不读取源码，也无需创建 host revision。源码缺失、非法编码、超限或引擎语法/执行错误只使对应实例失败并列入 `failures`，不阻止聚合入口或其他实例就绪。合法手工编辑即使改变长度，也可在停用后重新启用或进程重启时运行；运行中不监视文件变化。
+
+每个 enabled installation 使用独立 worker thread 运行 CatSession、QuickJS、私有卷访问和 listener；主线程保留 ScriptHost 记录、CatRuntime 网关、设置文件与平台适配器。实例就绪即可调用；尚未启动或正在启动的实例在 `status` 中报告 `starting`，对它的 `invoke`、管理和会话访问立即返回 `STARTING`，不隐藏等待；聚合 HTTP 入口对 `STARTING` 返回 503。禁用实例的调用和管理访问返回 `DISABLED`。安装、启用、刷新和卸载与后台启动共用同一串行队列，可在两个实例启动之间插入；与目标一致的实例不重复启动。更新仍先停旧 generation 再启动新 generation，避免同一实例两代并写私有卷。
 
 ## QuickJS 与有限 Node 风格能力
 
@@ -177,7 +179,7 @@ HTTP 请求和 `url.format` 的字段投影由同一份规则驱动，guest 编�
 
 更新先停止该 installation 的旧 generation，再装载并启动新 generation，避免两个 generation 并发写同一私有卷。若脚本 stop 返回 Promise，运行器在有界清理时限内等待其完成，以便关闭服务并落盘；超时或失败后仍强制回收实例自有资源。停用、卸载和关闭回收 listener、socket、timer、流、fd、代理身份和 guest 内存。
 
-卸载或刷新时脚本从配置移除，实例停止、资源回收后在同一次调用内递归删除 `volumes/<installationId>`，并删除不再被任何 installation 引用的 `sources/<hash>.js`；返回时删除已完成。同一 installationId 重新安装从空卷开始；若上次删除失败留有残卷，安装时先删除，仍失败则安装失败、不启动。停止、停用、更新、端口变化、进程重启和内存超限重启均保留私有卷。删除失败如实进入 `failures`，实例仍算已卸载，不影响其他实例；删除只作用于已校验的卷目录，不跟随符号链接。运行器启动和冷启动不扫描或清理 `volumes`。
+卸载或刷新时脚本从配置移除，实例停止、资源回收后在同一次调用内递归删除 `volumes/<installationId>`，并删除不再被任何 installation 引用的 `sources/<importhash>.js`；更新成功后也清理不再引用的旧源码文件，返回时删除已完成。删除依据设置中的原始文件引用，不使用 host 的实际执行内容摘要；状态中的 `sourceHash` 在已有 host revision 时报告该实际摘要，手工编辑后可与设置引用不同。共享引用仍保留，未知文件不扫描删除。目录身份、普通文件、符号链接和硬链接隔离检查继续保留。同一 installationId 重新安装从空卷开始；若上次删除失败留有残卷，安装时先删除，仍失败则安装失败、不启动。停止、停用、更新、端口变化、进程重启和内存超限重启均保留私有卷。删除失败如实进入 `failures`，实例仍算已卸载，不影响其他实例；删除只作用于已校验的卷目录，不跟随符号链接。运行器启动和冷启动不扫描或清理 `volumes`。
 
 `refresh`／`uninstall` 在各自变更全部处理完后返回 `applied`／`failures`，`install`／`enable` 在目标实例处理完后返回其状态。关闭时停止尚未开始的启动队列，先向已有及正在初始化的实例发停止，再等待在途事务、真实线程退出和 server 回收，不先等完整初始化截止时间；后台启动失败记入 `failures`，不产生未处理 rejection。
 

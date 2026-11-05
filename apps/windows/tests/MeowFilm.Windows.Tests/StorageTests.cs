@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using MeowFilm.AppHost;
 using MeowFilm.Platform.Storage;
 using Microsoft.Win32.SafeHandles;
 
@@ -20,6 +21,18 @@ public static class StorageTests
     private const int Maximum = ProtectedDocumentBridge.MaximumDocumentBytes, Chunk = ProtectedDocumentBridge.ChunkBytes;
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("storage.local.raw-json-edit-length-and-reopen", LocalRoundTrip);
+        yield return new("storage.local.exact-sensitive-list-mixed-with-plain", LocalMixedProtection);
+        yield return new("storage.local.protected-list-must-be-exact-and-registered", LocalProtectionConfiguration);
+        yield return new("storage.local.case-and-device-name-namespaces", LocalNames);
+        yield return new("storage.local.cas-atomic-reader-caller-snapshot", LocalAtomic);
+        yield return new("storage.local.failed-rename-preserves-old-cleans-own-stage", LocalRenameFailure);
+        yield return new("storage.local.concurrent-store-instances-cas", LocalConcurrent);
+        yield return new("storage.local.cancel-close-lock-contention", LocalCancellation);
+        yield return new("storage.local.document-eight-mib-limit-on-read-and-write", LocalMaximum);
+        yield return new("storage.local.unknown-files-and-stages-preserved", LocalUnknownFiles);
+        yield return new("storage.local.complete-source-sixteen-mib-edit-and-cas", LocalSource);
+        yield return new("storage.local.plain-junction-and-hardlink-rejected", LocalPathIsolation);
         yield return new("storage.dpapi.absent-empty-binary-reopen", DpapiRoundTrip);
         yield return new("storage.dpapi.product-and-namespace-binding", DpapiBinding);
         yield return new("storage.dpapi.case-and-device-name-namespaces", DpapiNames);
@@ -74,6 +87,260 @@ public static class StorageTests
         yield return new("storage.bridge.fixed-errors-no-provider-details", FixedErrors);
     }
 
+    private static async Task LocalRoundTrip()
+    {
+        using var fixture = new Temp();
+        byte[] edited = "{\"edited\":true,\"differentLength\":12345}"u8.ToArray();
+        DocumentFingerprint original;
+        await using (var store = new LocalDocumentStore(fixture.Root, [Ns]))
+        {
+            var missing = await store.ReadAsync(Ns);
+            Assert(missing.Data is null && missing.Fingerprint == DocumentFingerprint.Missing);
+            var empty = await store.WriteAsync(Ns, Array.Empty<byte>(), missing.Fingerprint);
+            var readEmpty = await store.ReadAsync(Ns);
+            Assert(empty.Exists && empty.Length == 0 && readEmpty.Data is { Length: 0 } && readEmpty.Fingerprint == empty);
+            Assert(new FileInfo(fixture.PlainDocument(Ns)).Length == 0);
+            byte[] json = "{\"value\":1}"u8.ToArray();
+            original = await store.WriteAsync(Ns, json, empty);
+            Equal(json, File.ReadAllBytes(fixture.PlainDocument(Ns)));
+            File.WriteAllBytes(fixture.PlainDocument(Ns), edited);
+            var read = await store.ReadAsync(Ns);
+            Equal(edited, read.Data!);
+            Assert(read.Fingerprint == DocumentFingerprint.FromBytes(edited) && read.Fingerprint.Length != original.Length);
+        }
+        await using var reopened = new LocalDocumentStore(fixture.Root, [Ns]);
+        var restored = await reopened.ReadAsync(Ns);
+        Equal(edited, restored.Data!);
+        await StoreError(() => reopened.WriteAsync(Ns, "stale"u8.ToArray(), original), DocumentStoreError.Conflict);
+        // Raw documents do not interpret a magic-looking prefix as an envelope.
+        byte[] raw = "MEOWDPAP plain user-edited bytes"u8.ToArray();
+        var next = await reopened.WriteAsync(Ns, raw, restored.Fingerprint);
+        Equal(raw, File.ReadAllBytes(fixture.PlainDocument(Ns)));
+        Assert((await reopened.ReadAsync(Ns)).Fingerprint == next);
+    }
+    private static async Task LocalMixedProtection()
+    {
+        using var fixture = new Temp();
+        const string account = "music.accounts.v1", device = "music.platform-context.v1", ordinary = account + ".notes";
+        Assert(AppIdentity.ProtectedNamespaces.SequenceEqual(new[] { account, device }));
+        string[] names = [Ns, account, device, ordinary];
+        byte[] plain = "{\"generated\":\"fixture-value\"}"u8.ToArray();
+        await using (var store = new LocalDocumentStore(fixture.Root, names, protectedNamespaces: AppIdentity.ProtectedNamespaces))
+        {
+            foreach (string ns in names) await store.WriteAsync(ns, plain, DocumentFingerprint.Missing);
+            foreach (string ns in new[] { account, device })
+            {
+                byte[] disk = File.ReadAllBytes(fixture.Document(ns));
+                Assert(disk.AsSpan(0, 8).SequenceEqual("MEOWDPAP"u8) && disk[8] == 1 && disk.AsSpan().IndexOf(plain) < 0);
+                Equal(plain, (await store.ReadAsync(ns)).Data!);
+            }
+            foreach (string ns in new[] { Ns, ordinary })
+                Equal(plain, File.ReadAllBytes(fixture.PlainDocument(ns)));
+            string unknown = Path.Combine(fixture.Namespace(account), "unknown.json");
+            File.WriteAllBytes(unknown, [42]);
+            await StoreError(() => store.ReadAsync(account), DocumentStoreError.Corrupt);
+            Equal(plain, (await store.ReadAsync(Ns)).Data!);
+            Equal(plain, (await store.ReadAsync(device)).Data!);
+            Equal([42], File.ReadAllBytes(unknown));
+        }
+        await using var reopened = new LocalDocumentStore(fixture.Root, names, protectedNamespaces: AppIdentity.ProtectedNamespaces);
+        Equal(plain, (await reopened.ReadAsync(device)).Data!);
+        Equal(plain, (await reopened.ReadAsync(ordinary)).Data!);
+    }
+    private static async Task LocalProtectionConfiguration()
+    {
+        using var fixture = new Temp();
+        await StoreError(() => Task.FromResult(new LocalDocumentStore(fixture.Root, [Ns],
+            protectedNamespaces: [Other])), DocumentStoreError.InvalidRequest);
+        await StoreError(() => Task.FromResult(new LocalDocumentStore(fixture.Root, [Ns],
+            protectedNamespaces: [Ns, Ns])), DocumentStoreError.InvalidRequest);
+        await StoreError(() => Task.FromResult(new LocalDocumentStore(fixture.Root, [Ns],
+            protectedNamespaces: ["../escape"])), DocumentStoreError.InvalidRequest);
+        Assert(!Directory.EnumerateFileSystemEntries(fixture.Root).Any());
+    }
+    private static async Task LocalNames()
+    {
+        using var fixture = new Temp();
+        string[] names = ["Alpha", "alpha", "CON", "a.", new string('a', 128)];
+        await using var store = new LocalDocumentStore(fixture.Root, names);
+        for (int i = 0; i < names.Length; i++) await store.WriteAsync(names[i], new byte[] { (byte)i }, DocumentFingerprint.Missing);
+        for (int i = 0; i < names.Length; i++)
+        {
+            Equal([(byte)i], (await store.ReadAsync(names[i])).Data!);
+            Equal([(byte)i], File.ReadAllBytes(fixture.PlainDocument(names[i])));
+        }
+        Assert(Directory.GetDirectories(fixture.Root).Length == names.Length);
+        await StoreError(() => store.ReadAsync(Other), DocumentStoreError.Unavailable);
+    }
+    private static async Task LocalAtomic()
+    {
+        using var fixture = new Temp(); await using var store = new LocalDocumentStore(fixture.Root, [Ns]);
+        var old = await store.WriteAsync(Ns, "old"u8.ToArray(), DocumentFingerprint.Missing);
+        using var reader = new FileStream(fixture.PlainDocument(Ns), FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+        byte[] next = "new"u8.ToArray();
+        var write = store.WriteAsync(Ns, next, old); next.AsSpan().Fill(99);
+        var fingerprint = await write;
+        Equal("new"u8.ToArray(), (await store.ReadAsync(Ns)).Data!);
+        byte[] held = new byte[reader.Length]; reader.ReadExactly(held); Equal("old"u8.ToArray(), held);
+        await StoreError(() => store.WriteAsync(Ns, "stale"u8.ToArray(), old), DocumentStoreError.Conflict);
+        Assert((await store.ReadAsync(Ns)).Fingerprint == fingerprint);
+        Equal("new"u8.ToArray(), File.ReadAllBytes(fixture.PlainDocument(Ns)));
+    }
+    private static async Task LocalRenameFailure()
+    {
+        using var fixture = new Temp(); await using var store = new LocalDocumentStore(fixture.Root, [Ns]);
+        var old = await store.WriteAsync(Ns, "old"u8.ToArray(), DocumentFingerprint.Missing);
+        string directory = Path.GetDirectoryName(fixture.PlainDocument(Ns))!;
+        using (var block = new FileStream(fixture.PlainDocument(Ns), FileMode.Open, FileAccess.Read, FileShare.Read))
+            await StoreError(() => store.WriteAsync(Ns, "next"u8.ToArray(), old), DocumentStoreError.Storage);
+        Equal("old"u8.ToArray(), File.ReadAllBytes(fixture.PlainDocument(Ns)));
+        Assert((await store.ReadAsync(Ns)).Fingerprint == old && Directory.GetFiles(directory).Length == 1);
+        var next = await store.WriteAsync(Ns, "next"u8.ToArray(), old);
+        Assert((await store.ReadAsync(Ns)).Fingerprint == next && Directory.GetFiles(directory).Length == 1);
+        Equal("next"u8.ToArray(), File.ReadAllBytes(fixture.PlainDocument(Ns)));
+    }
+    private static async Task LocalConcurrent()
+    {
+        using var fixture = new Temp();
+        await using var one = new LocalDocumentStore(fixture.Root, [Ns]);
+        await using var two = new LocalDocumentStore(fixture.Root, [Ns]);
+        async Task<bool> Write(IDocumentStore store, byte value)
+        {
+            try { await store.WriteAsync(Ns, new byte[] { value }, DocumentFingerprint.Missing); return true; }
+            catch (DocumentStoreException e) when (e.Error == DocumentStoreError.Conflict) { return false; }
+        }
+        bool[] results = await Task.WhenAll(Write(one, 1), Write(two, 2));
+        Assert(results.Count(result => result) == 1);
+        Equal([results[0] ? (byte)1 : (byte)2], (await one.ReadAsync(Ns)).Data!);
+    }
+    private static async Task LocalCancellation()
+    {
+        using var fixture = new Temp(); var store = new LocalDocumentStore(fixture.Root, [Ns]);
+        try
+        {
+            var old = await store.WriteAsync(Ns, "old"u8.ToArray(), DocumentFingerprint.Missing);
+            using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+            await Cancelled(() => store.WriteAsync(Ns, "next"u8.ToArray(), old, cancelled.Token));
+            using (var held = new FileStream(Path.Combine(fixture.Root, ".documents.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+                await Cancelled(() => store.ReadAsync(Ns, timeout.Token));
+            }
+            Assert((await store.ReadAsync(Ns)).Fingerprint == old);
+            await store.DisposeAsync();
+            await StoreError(() => store.ReadAsync(Ns), DocumentStoreError.Closed);
+        }
+        finally { await store.DisposeAsync(); }
+    }
+    private static async Task LocalMaximum()
+    {
+        using var fixture = new Temp(); await using var store = new LocalDocumentStore(fixture.Root, [Ns]);
+        byte[] data = new byte[Maximum]; data.AsSpan().Fill((byte)' ');
+        var next = await store.WriteAsync(Ns, data, DocumentFingerprint.Missing);
+        Equal(data, File.ReadAllBytes(fixture.PlainDocument(Ns)));
+        Equal(data, (await store.ReadAsync(Ns)).Data!);
+        await StoreError(() => store.WriteAsync(Ns, new byte[Maximum + 1], next), DocumentStoreError.Limit);
+        Assert((await store.ReadAsync(Ns)).Fingerprint == next);
+        using (var file = new FileStream(fixture.PlainDocument(Ns), FileMode.Open, FileAccess.Write))
+            file.SetLength(Maximum + 1);
+        await StoreError(() => store.ReadAsync(Ns), DocumentStoreError.Limit);
+        await StoreError(() => store.WriteAsync(Ns, "x"u8.ToArray(), next), DocumentStoreError.Limit);
+        Assert(new FileInfo(fixture.PlainDocument(Ns)).Length == Maximum + 1);
+    }
+    private static async Task LocalUnknownFiles()
+    {
+        using var fixture = new Temp();
+        await using (var store = new LocalDocumentStore(fixture.Root, [Ns, Other]))
+        {
+            var old = await store.WriteAsync(Ns, "old"u8.ToArray(), DocumentFingerprint.Missing);
+            string directory = Path.GetDirectoryName(fixture.PlainDocument(Ns))!;
+            string stage = Path.Combine(directory, "stage-generated.json"), unknown = Path.Combine(directory, "notes.txt");
+            File.WriteAllBytes(stage, [10, 20]); File.WriteAllBytes(unknown, [30]);
+            Directory.CreateDirectory(Path.Combine(directory, "unknown-directory"));
+            Assert((await store.ReadAsync(Ns)).Fingerprint == old);
+            await store.WriteAsync(Ns, "new"u8.ToArray(), old);
+            Equal([10, 20], File.ReadAllBytes(stage)); Equal([30], File.ReadAllBytes(unknown));
+            string otherDirectory = fixture.PlainNamespace(Other); Directory.CreateDirectory(otherDirectory);
+            File.WriteAllBytes(Path.Combine(otherDirectory, "stage-existing.json"), [40]);
+            Assert((await store.ReadAsync(Other)).Fingerprint == DocumentFingerprint.Missing);
+            await store.WriteAsync(Other, "other"u8.ToArray(), DocumentFingerprint.Missing);
+            Equal([40], File.ReadAllBytes(Path.Combine(otherDirectory, "stage-existing.json")));
+        }
+        await using var reopened = new LocalDocumentStore(fixture.Root, [Ns, Other]);
+        Equal("new"u8.ToArray(), (await reopened.ReadAsync(Ns)).Data!);
+        Equal("other"u8.ToArray(), (await reopened.ReadAsync(Other)).Data!);
+    }
+    private static async Task LocalSource()
+    {
+        using var fixture = new Temp();
+        const string collection = "music.script-sources.v2";
+        byte[] original = "globalThis.value = 1;"u8.ToArray(), edited = "globalThis.value = 23456789;"u8.ToArray();
+        string importHash = Hash(original), ns = collection + "." + importHash;
+        string path;
+        await using (var store = new LocalDocumentStore(fixture.Root, [Ns], [collection]))
+        {
+            var first = await store.WriteAsync(ns, original, DocumentFingerprint.Missing);
+            path = Directory.GetFiles(fixture.Root, "*.js", SearchOption.AllDirectories).Single();
+            Assert(Path.GetFileName(path) == importHash + ".js" && Path.GetFileName(Path.GetDirectoryName(path)!).Contains(collection, StringComparison.Ordinal));
+            Equal(original, File.ReadAllBytes(path));
+            byte[] maximum = new byte[LocalDocumentStore.MaximumSourceBytes]; maximum.AsSpan().Fill((byte)' ');
+            original.CopyTo(maximum, 0);
+            var maximumWrite = await store.WriteAsync(ns, maximum, first);
+            Assert(maximumWrite.Length == 16 * 1024 * 1024 && Directory.GetFiles(Path.GetDirectoryName(path)!, "*.js").Length == 1);
+            Equal(maximum, File.ReadAllBytes(path));
+            maximum[^1] = (byte)'\n';
+            File.WriteAllBytes(path, maximum);
+            var read = await store.ReadAsync(ns);
+            Assert(read.Fingerprint.Length == 16 * 1024 * 1024 && read.Fingerprint != maximumWrite && read.Fingerprint.Sha256 != importHash);
+            Equal(maximum, read.Data!);
+            // A CAS base over 8 MiB is valid for a source, but never for an ordinary document.
+            await StoreError(() => store.WriteAsync(Ns, edited, read.Fingerprint), DocumentStoreError.InvalidRequest);
+            using (var block = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                await StoreError(() => store.WriteAsync(ns, edited, read.Fingerprint), DocumentStoreError.Storage);
+            Assert((await store.ReadAsync(ns)).Fingerprint == read.Fingerprint &&
+                Directory.GetFiles(Path.GetDirectoryName(path)!, "*.js").Length == 1);
+            Equal(maximum, File.ReadAllBytes(path));
+            var next = await store.WriteAsync(ns, edited, read.Fingerprint);
+            Equal(edited, File.ReadAllBytes(path));
+            await StoreError(() => store.WriteAsync(ns, original, first), DocumentStoreError.Conflict);
+            await StoreError(() => store.WriteAsync(ns, new byte[LocalDocumentStore.MaximumSourceBytes + 1], next), DocumentStoreError.Limit);
+            File.WriteAllBytes(path, new byte[LocalDocumentStore.MaximumSourceBytes + 1]);
+            await StoreError(() => store.ReadAsync(ns), DocumentStoreError.Limit);
+            File.WriteAllBytes(path, edited);
+            string sibling = collection + "." + Hash("another source"u8.ToArray());
+            await store.WriteAsync(sibling, "another source"u8.ToArray(), DocumentFingerprint.Missing);
+            string stage = Path.Combine(Path.GetDirectoryName(path)!, "stage-interrupted.js"); File.WriteAllBytes(stage, [99]);
+            Equal(edited, (await store.ReadAsync(ns)).Data!);
+            Equal("another source"u8.ToArray(), (await store.ReadAsync(sibling)).Data!);
+            Equal([99], File.ReadAllBytes(stage));
+            await StoreError(() => store.ReadAsync(ns + ".0"), DocumentStoreError.Unavailable);
+            await StoreError(() => store.ReadAsync(collection + "." + new string('g', 64)), DocumentStoreError.Unavailable);
+            await StoreError(() => store.ReadAsync("unregistered.sources." + importHash), DocumentStoreError.Unavailable);
+            Assert(!Directory.GetFiles(fixture.Root, "*.mfdp", SearchOption.AllDirectories).Any());
+        }
+        byte[] reopenedEdit = "globalThis.value = 9876543210; // edited before reopen"u8.ToArray();
+        File.WriteAllBytes(path, reopenedEdit);
+        await using var reopened = new LocalDocumentStore(fixture.Root, [Ns], [collection]);
+        var restored = await reopened.ReadAsync(ns);
+        Equal(reopenedEdit, restored.Data!);
+        Assert(restored.Fingerprint.Length == reopenedEdit.Length && restored.Fingerprint.Sha256 != importHash);
+    }
+    private static async Task LocalPathIsolation()
+    {
+        using var fixture = new Temp(); await using var store = new LocalDocumentStore(fixture.Root, [Ns, Other]);
+        var old = await store.WriteAsync(Ns, "x"u8.ToArray(), DocumentFingerprint.Missing);
+        string alias = Path.Combine(fixture.Base, "alias.json");
+        Assert(CreateHardLinkW(alias, fixture.PlainDocument(Ns), IntPtr.Zero), "Hardlink fixture creation failed.");
+        await StoreError(() => store.ReadAsync(Ns), DocumentStoreError.UnsafePath);
+        await StoreError(() => store.WriteAsync(Ns, "y"u8.ToArray(), old), DocumentStoreError.UnsafePath);
+        Equal("x"u8.ToArray(), File.ReadAllBytes(alias));
+        string target = Path.Combine(fixture.Base, "target"); Directory.CreateDirectory(target);
+        CreateJunction(fixture.PlainNamespace(Other), target);
+        await StoreError(() => store.ReadAsync(Other), DocumentStoreError.UnsafePath);
+        await StoreError(() => store.WriteAsync(Other, "z"u8.ToArray(), DocumentFingerprint.Missing), DocumentStoreError.UnsafePath);
+        Assert(!Directory.EnumerateFileSystemEntries(target).Any());
+    }
+
     private static async Task DpapiRoundTrip()
     {
         using var fixture = new Temp();
@@ -108,7 +375,7 @@ public static class StorageTests
     {
         using var fixture = new Temp();
         string[] names = ["Alpha", "alpha", "CON", "a.", new string('a', 128)];
-        await using var store = new DpapiDocumentStore(fixture.Root, names);
+        await using var store = new LocalDocumentStore(fixture.Root, names, protectedNamespaces: names);
         for (int i = 0; i < names.Length; i++) await store.WriteAsync(names[i], new byte[] { (byte)i }, DocumentFingerprint.Missing);
         for (int i = 0; i < names.Length; i++) Equal([(byte)i], (await store.ReadAsync(names[i])).Data!);
         Assert(Directory.GetDirectories(fixture.Root).Length == names.Length);
@@ -220,7 +487,7 @@ public static class StorageTests
         {
             string root = Path.Combine(fixture.Root, "文档-" + new string('p', round + 1));
             Directory.CreateDirectory(root);
-            await using var store = new DpapiDocumentStore(root, [Ns]);
+            await using var store = new LocalDocumentStore(root, [Ns], protectedNamespaces: [Ns]);
             string folder = Path.Combine(root, "n-" + Hash(Encoding.UTF8.GetBytes(Ns)));
             string destination = Path.Combine(folder, "document.mfdp");
             var fingerprint = DocumentFingerprint.Missing;
@@ -241,10 +508,10 @@ public static class StorageTests
     private static async Task DpapiConcurrent()
     {
         using var fixture = new Temp(); await using var one = fixture.Store(); await using var two = fixture.Store();
-        async Task<bool> Write(IProtectedDocumentStore store, byte value)
+        async Task<bool> Write(IDocumentStore store, byte value)
         {
             try { await store.WriteAsync(Ns, new byte[] { value }, DocumentFingerprint.Missing); return true; }
-            catch (ProtectedDocumentException e) when (e.Error == DocumentStoreError.Conflict) { return false; }
+            catch (DocumentStoreException e) when (e.Error == DocumentStoreError.Conflict) { return false; }
         }
         bool[] results = await Task.WhenAll(Write(one, 1), Write(two, 2));
         Assert(results.Count(result => result) == 1);
@@ -263,7 +530,7 @@ public static class StorageTests
         Assert(Path.Combine(folder, "stage-" + new string('a', 32) + ".mfdp").Length == rootLength + 111);
         byte[] nextData = [0, 255, 128, 42];
         DocumentFingerprint next;
-        await using (var store = new DpapiDocumentStore(root, [Ns]))
+        await using (var store = new LocalDocumentStore(root, [Ns], protectedNamespaces: [Ns]))
         {
             var missing = await store.ReadAsync(Ns);
             Assert(missing.Data is null && missing.Fingerprint == DocumentFingerprint.Missing);
@@ -281,12 +548,12 @@ public static class StorageTests
             int error = Marshal.GetLastPInvokeError();
             Assert(deletion.IsInvalid && error == 32, "Long-path root lost its no-delete pin.");
         }
-        await using var reopened = new DpapiDocumentStore(root, [Ns]);
+        await using var reopened = new LocalDocumentStore(root, [Ns], protectedNamespaces: [Ns]);
         var afterReopen = await reopened.ReadAsync(Ns);
         Assert(afterReopen.Fingerprint == next);
         Equal(nextData, afterReopen.Data!);
         if (rootLength == 1024)
-            await StoreError(() => Task.FromResult(new DpapiDocumentStore(root + "x", [Ns])), DocumentStoreError.UnsafePath);
+            await StoreError(() => Task.FromResult(new LocalDocumentStore(root + "x", [Ns])), DocumentStoreError.UnsafePath);
     }
     private static async Task DpapiLongPathUnsafe()
     {
@@ -300,7 +567,7 @@ public static class StorageTests
             root + "\\COM\u00b9", root + "\\LPT\u00b2", root + "\\control\u0001"
         ];
         foreach (string path in invalid)
-            await StoreError(() => Task.FromResult(new DpapiDocumentStore(path, [Ns])), DocumentStoreError.UnsafePath);
+            await StoreError(() => Task.FromResult(new LocalDocumentStore(path, [Ns])), DocumentStoreError.UnsafePath);
         Assert(!Directory.EnumerateFileSystemEntries(root).Any(), "Unsafe root request created entries.");
     }
     private static async Task DpapiLongPathJunction()
@@ -310,9 +577,9 @@ public static class StorageTests
         string target = Path.Combine(root, "target"), link = Path.Combine(root, "junction");
         Directory.CreateDirectory(Path.Combine(target, "child"));
         CreateJunction(link, target);
-        await StoreError(() => Task.FromResult(new DpapiDocumentStore(link, [Ns])), DocumentStoreError.UnsafePath);
-        await StoreError(() => Task.FromResult(new DpapiDocumentStore(Path.Combine(link, "child"), [Ns])), DocumentStoreError.UnsafePath);
-        await using var store = new DpapiDocumentStore(root, [Ns]);
+        await StoreError(() => Task.FromResult(new LocalDocumentStore(link, [Ns])), DocumentStoreError.UnsafePath);
+        await StoreError(() => Task.FromResult(new LocalDocumentStore(Path.Combine(link, "child"), [Ns])), DocumentStoreError.UnsafePath);
+        await using var store = new LocalDocumentStore(root, [Ns], protectedNamespaces: [Ns]);
         CreateJunction(Path.Combine(root, "n-" + Hash(Encoding.UTF8.GetBytes(Ns))), target);
         await StoreError(() => store.ReadAsync(Ns), DocumentStoreError.UnsafePath);
         await StoreError(() => store.WriteAsync(Ns, new byte[] { 1 }, DocumentFingerprint.Missing), DocumentStoreError.UnsafePath);
@@ -322,7 +589,7 @@ public static class StorageTests
     {
         using var fixture = new Temp();
         string root = fixture.RootAtLength(280);
-        await using var store = new DpapiDocumentStore(root, [Ns]);
+        await using var store = new LocalDocumentStore(root, [Ns], protectedNamespaces: [Ns]);
         var old = await store.WriteAsync(Ns, new byte[] { 1 }, DocumentFingerprint.Missing);
         string document = Path.Combine(root, "n-" + Hash(Encoding.UTF8.GetBytes(Ns)), "document.mfdp");
         string alias = Path.Combine(root, "alias.mfdp");
@@ -396,9 +663,9 @@ public static class StorageTests
         bool blocked = false;
         try { Directory.Move(fixture.Root, fixture.Root + "-moved"); } catch (IOException) { blocked = true; }
         Assert(blocked, "Product root could be renamed while its store was open.");
-        await StoreError(() => Task.FromResult(new DpapiDocumentStore(Path.Combine(fixture.Root, "missing"), [Ns])), DocumentStoreError.UnsafePath);
-        await StoreError(() => Task.FromResult(new DpapiDocumentStore(fixture.Root + "\\..\\escape", [Ns])), DocumentStoreError.UnsafePath);
-        await StoreError(() => Task.FromResult(new DpapiDocumentStore("relative", [Ns])), DocumentStoreError.UnsafePath);
+        await StoreError(() => Task.FromResult(new LocalDocumentStore(Path.Combine(fixture.Root, "missing"), [Ns])), DocumentStoreError.UnsafePath);
+        await StoreError(() => Task.FromResult(new LocalDocumentStore(fixture.Root + "\\..\\escape", [Ns])), DocumentStoreError.UnsafePath);
+        await StoreError(() => Task.FromResult(new LocalDocumentStore("relative", [Ns])), DocumentStoreError.UnsafePath);
     }
     private static async Task DpapiDirectorySharing()
     {
@@ -442,8 +709,8 @@ public static class StorageTests
         using var fixture = new Temp();
         string target = Path.Combine(fixture.Base, "target"); Directory.CreateDirectory(Path.Combine(target, "child"));
         string link = Path.Combine(fixture.Base, "junction"); CreateJunction(link, target);
-        await StoreError(() => Task.FromResult(new DpapiDocumentStore(link, [Ns])), DocumentStoreError.UnsafePath);
-        await StoreError(() => Task.FromResult(new DpapiDocumentStore(Path.Combine(link, "child"), [Ns])), DocumentStoreError.UnsafePath);
+        await StoreError(() => Task.FromResult(new LocalDocumentStore(link, [Ns])), DocumentStoreError.UnsafePath);
+        await StoreError(() => Task.FromResult(new LocalDocumentStore(Path.Combine(link, "child"), [Ns])), DocumentStoreError.UnsafePath);
         Assert(!Directory.EnumerateFiles(target, "*", SearchOption.AllDirectories).Any());
     }
     private static async Task DpapiJunctionNamespace()
@@ -474,7 +741,7 @@ public static class StorageTests
         using var fixture = new Temp(); await using var store = fixture.Store();
         await StoreError(() => store.ReadAsync(ns), DocumentStoreError.InvalidRequest);
         await StoreError(() => store.WriteAsync(ns, new byte[] { 1 }, DocumentFingerprint.Missing), DocumentStoreError.InvalidRequest);
-        await StoreError(() => Task.FromResult(new DpapiDocumentStore(fixture.Root, [ns])), DocumentStoreError.InvalidRequest);
+        await StoreError(() => Task.FromResult(new LocalDocumentStore(fixture.Root, [ns])), DocumentStoreError.InvalidRequest);
         Assert(!Directory.EnumerateFileSystemEntries(fixture.Root).Any());
     }
     private static async Task Configuration()
@@ -490,8 +757,8 @@ public static class StorageTests
             new ProtectedDocumentBridgeOptions { MaximumRecentTokens = 3 }, new ProtectedDocumentBridgeOptions { MaximumRecentTokens = 4097 },
             new ProtectedDocumentBridgeOptions { TransferTimeout = TimeSpan.Zero }, new ProtectedDocumentBridgeOptions { TransferTimeout = TimeSpan.FromSeconds(121) },
         }) Throws<ArgumentException>(() => new ProtectedDocumentBridge(store, [Ns], options));
-        Throws<ProtectedDocumentException>(() => new ProtectedDocumentBridge(store, ["../x"]));
-        Throws<ProtectedDocumentException>(() => new ProtectedDocumentBridge(store, [Ns, Ns]));
+        Throws<DocumentStoreException>(() => new ProtectedDocumentBridge(store, ["../x"]));
+        Throws<DocumentStoreException>(() => new ProtectedDocumentBridge(store, [Ns, Ns]));
     }
     private static async Task BridgeMaximum()
     {
@@ -716,7 +983,7 @@ public static class StorageTests
         var store = new MemoryStore { ReadHook = async (_, ct) =>
         {
             int current = Interlocked.Increment(ref active); maximum = Math.Max(maximum, current); started.TrySetResult();
-            await release.Task.WaitAsync(ct); Interlocked.Decrement(ref active); return new ProtectedDocument(null, DocumentFingerprint.Missing);
+            await release.Task.WaitAsync(ct); Interlocked.Decrement(ref active); return new DocumentSnapshot(null, DocumentFingerprint.Missing);
         } };
         await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
         string one = NewToken(), two = NewToken(); var first = Call(bridge, "read.begin", one); await started.Task;
@@ -735,7 +1002,7 @@ public static class StorageTests
         var store = new MemoryStore { ReadHook = (_, _) => throw new IOException("private-provider-details") };
         await using var bridge = new ProtectedDocumentBridge(store, [Ns]); var reply = await Call(bridge, "read.begin", NewToken());
         Error(reply, "STORAGE"); Assert(!reply.GetRawText().Contains("private-provider-details", StringComparison.Ordinal) && !reply.GetRawText().Contains(Ns, StringComparison.Ordinal));
-        await Empty(bridge); store.ReadHook = (_, _) => Task.FromResult(new ProtectedDocument([1], DocumentFingerprint.Missing));
+        await Empty(bridge); store.ReadHook = (_, _) => Task.FromResult(new DocumentSnapshot([1], DocumentFingerprint.Missing));
         Error(await Call(bridge, "read.begin", NewToken()), "STORAGE"); await Empty(bridge);
     }
     private static ProtectedDocumentBridgeOptions ShortOptions() => new() { TransferTimeout = TimeSpan.FromSeconds(1) };
@@ -788,7 +1055,7 @@ public static class StorageTests
     private static async Task StoreError(Func<Task> operation, DocumentStoreError error)
     {
         try { await operation(); }
-        catch (ProtectedDocumentException e) { Assert(e.Error == error && e.InnerException is null, "Unexpected store error."); return; }
+        catch (DocumentStoreException e) { Assert(e.Error == error && e.InnerException is null, "Unexpected store error."); return; }
         throw new InvalidOperationException("Expected store rejection.");
     }
     private static async Task Cancelled(Func<Task> operation)
@@ -805,14 +1072,14 @@ public static class StorageTests
     private static void Assert(bool condition, string message = "Storage assertion failed.")
     { if (!condition) throw new InvalidOperationException(message); }
 
-    private sealed class MemoryStore : IProtectedDocumentStore
+    private sealed class MemoryStore : IDocumentStore
     {
         private readonly Dictionary<string, byte[]> documents = new(StringComparer.Ordinal);
-        internal Func<string, CancellationToken, Task<ProtectedDocument>>? ReadHook;
+        internal Func<string, CancellationToken, Task<DocumentSnapshot>>? ReadHook;
         internal Func<Task>? AfterWrite;
         internal int Reads, Writes;
         internal bool Disposed;
-        public async Task<ProtectedDocument> ReadAsync(string ns, CancellationToken cancellationToken = default)
+        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
         {
             Reads++; if (ReadHook is not null) return await ReadHook(ns, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
@@ -829,7 +1096,7 @@ public static class StorageTests
             lock (documents)
             {
                 var old = documents.TryGetValue(ns, out var current) ? DocumentFingerprint.FromBytes(current) : DocumentFingerprint.Missing;
-                if (old != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                if (old != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 documents[ns] = data.ToArray(); Writes++;
             }
             if (AfterWrite is not null) await AfterWrite(); // Cannot undo an already-won commit.
@@ -850,9 +1117,11 @@ public static class StorageTests
             Base = Path.Combine(parent, Guid.NewGuid().ToString("N"));
             Root = Path.Combine(Base, compact ? "p" : "product"); Directory.CreateDirectory(Root);
         }
-        internal DpapiDocumentStore Store() => new(Root, [Ns, Other]);
+        internal LocalDocumentStore Store() => new(Root, [Ns, Other], protectedNamespaces: [Ns, Other]);
         internal string Namespace(string ns) => Path.Combine(Root, "n-" + Hash(Encoding.UTF8.GetBytes(ns)));
         internal string Document(string ns) => Path.Combine(Namespace(ns), "document.mfdp");
+        internal string PlainNamespace(string ns) => Path.Combine(Root, "n-" + ns + "-" + Hash(Encoding.UTF8.GetBytes(ns)));
+        internal string PlainDocument(string ns) => Path.Combine(PlainNamespace(ns), "document.json");
         internal string RootAtLength(int length)
         {
             string path = Root;

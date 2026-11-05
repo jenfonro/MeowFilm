@@ -55,7 +55,9 @@ export function createAppRuntime({ product, modules, assemble, connect }) {
   const dispose = () => disposal ??= (async () => {
     disposed = true;
     const results = await Promise.allSettled(modules.map(module => Promise.resolve().then(() => module.close())));
-    if (results.some(result => result.status === 'rejected')) throw new BridgeError('INTERNAL');
+    if (results.some(result => result.status === 'rejected' || result.value?.ok === false)) {
+      throw new BridgeError('INTERNAL');
+    }
   })();
   for (const [name, handler] of Object.entries(methods)) {
     methods[name] = (params, context) => {

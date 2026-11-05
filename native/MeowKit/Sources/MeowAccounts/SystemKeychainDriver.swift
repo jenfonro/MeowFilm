@@ -21,11 +21,15 @@ struct SystemKeychainDriver: KeychainDriver {
               let data = attributes[kSecValueData as String] as? Data else {
             return KeychainReadResult(status: .failure(.corruptItem), data: nil)
         }
-        guard let protection = attributes[kSecAttrAccessible as String] as? String,
-              protection == (accessibleValue(accessibility) as String) else {
+        guard Self.matchesAccessibility(attributes[kSecAttrAccessible as String] as? String,
+                                         configured: accessibleValue(accessibility)) else {
             return KeychainReadResult(status: .failure(.accessibilityMismatch), data: nil)
         }
         return KeychainReadResult(status: .success, data: data)
+    }
+
+    static func matchesAccessibility(_ stored: String?, configured: CFString) -> Bool {
+        stored == (configured as String)
     }
 
     func update(key: KeychainItemKey, data: Data, accessibility: CredentialAccessibility) -> KeychainDriverStatus {

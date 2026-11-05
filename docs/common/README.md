@@ -9,6 +9,7 @@
 | 业务页面 | [页面数据请求](pages/data-requests.md) | 展示数据复用、资源完整性、用户动作及请求生命周期 |
 | 音乐平台 | [平台客户端上下文](music/platform-client-context.md) | 本地初始化、状态作用域、账号交接、协议消费与受控更新 |
 | 音乐验证 | [逐端自查](music/self-check.md) | 调用链核对、请求分类、合成场景及证据报告格式，不另定义业务规则 |
+| 来源宿主能力 | [capability ABI](../runtime/source-capability-abi.md) | HTTP、Cookie、存储、编码、加解密、Web 交互和虚拟路由的跨平台语义 |
 
 每项共同规则在对应职责文件中维护；端侧文档引用该文件，保留具体 API、协议字段、系统生命周期、存储格式、预算数值、测试入口和实现缺口。
 
@@ -16,7 +17,7 @@
 
 | 端 | 装配与能力 | 页面与平台 | 存储 |
 | --- | --- | --- | --- |
-| iOS | [架构与职责](../ios/architecture.md) | [音乐能力](../ios/music.md) | [加密文档存储](../ios/storage.md) |
+| iOS | [架构与职责](../ios/architecture.md) | [音乐能力](../ios/music.md) | [本地文档存储](../ios/storage.md) |
 | Windows | [架构与职责](../windows/app-structure.md) | [客户端上下文](../windows/music-platform-client-context.md)、[平台目录](../windows/music-native-platforms.md)、[目录与频道](../windows/music-catalog.md)、[个人目录页面](../windows/music-catalog-personal-ui.md)、[账号](../windows/music-native-accounts.md) | [账号存储](../windows/music-account-storage.md)、[客户端文档](../windows/music-platform-client-context.md#文档与首次导入) |
 
 ## 契约与验证状态
