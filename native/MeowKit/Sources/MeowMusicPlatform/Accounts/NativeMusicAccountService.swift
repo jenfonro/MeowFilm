@@ -90,6 +90,19 @@ extension NativeMusicAccountService: MusicNativeAccountProviding {
         return try authorizedAudio(value, platform: platform)
     }
 }
+// Local facts only: no restore, validation or request. A platform not yet
+// inspected may still restore a token, so it stays eligible (at most one search).
+extension NativeMusicAccountService: MusicNativeCandidateScopeProviding {
+    public func candidatePlatforms() -> Set<MusicAccountPlatform> {
+        guard !closed, available, accessTransitions == 0 else { return [] }
+        return Set(MusicAccountPlatform.allCases.filter { platform in
+            guard (try? configured(platform)) != nil, !requiresExplicitRestore.contains(platform),
+                  !transitions.contains(platform) else { return false }
+            if platform == .netease, providers[platform] is any MusicNeteasePublicAudioProvider { return true }
+            return tokens[platform] != nil || !inspected.contains(platform)
+        })
+    }
+}
 public struct MusicAccountCloseReport: Sendable, Equatable {
     public let cleanupComplete: Bool
     public let inFlight: Int

@@ -10,9 +10,13 @@ struct MusicNativeCandidateDiscoveryObservation: Sendable {
 }
 
 enum MusicNativeCandidateDiscoveryMerge {
+    /// Only a durable recording identity can be matched across platforms.
+    static func searchable(_ song: MJ) -> Bool {
+        song["songId"].string.hasPrefix("song:") && !MusicModel.fingerprint(song).isEmpty
+    }
     static func needsDiscovery(_ song: MJ, force: Bool,
                                cache: [String: MusicSourceDiscoveryEntry] = [:]) -> Bool {
-        guard song["songId"].string.hasPrefix("song:"), !MusicModel.fingerprint(song).isEmpty else { return false }
+        guard searchable(song) else { return false }
         return MusicNativeSearchProtocol.platforms.contains {
             needsPlatform($0, song: song, force: force, cache: cache[$0])
         }
@@ -34,7 +38,9 @@ enum MusicNativeCandidateDiscoveryMerge {
         let duration = MusicModel.nativeNumber(info["duration"])
         return known(info["name"]) && known(info["singer"]) && duration.isFinite && duration > 0
     }
-    static func merge(_ seed: MJ, observations: [MusicNativeCandidateDiscoveryObservation])
+    /// `excluded` source keys were confirmed as another recording and are never proposed.
+    static func merge(_ seed: MJ, observations: [MusicNativeCandidateDiscoveryObservation],
+                      excluded: Set<String> = [])
         throws -> (song: MJ, issues: [MusicCandidateDiscoveryIssue]) {
         var song = try MusicModel.cleanSong(seed)
         var issues: [MusicCandidateDiscoveryIssue] = []
@@ -65,6 +71,7 @@ enum MusicNativeCandidateDiscoveryMerge {
                     issues.append(.init(stage: .identity, platform: platform, failure: .upstreamInvalid)); continue
                 }
                 let key = proposed["sourceKey"]
+                if excluded.contains(key.string) { continue }
                 var sources = song["sources"].array
                 let existing = sources.firstIndex(where: { $0["sourceKey"] == key })
                 let matches = MusicModel.compatible(seed, proposed) &&
@@ -99,6 +106,14 @@ enum MusicNativeCandidateDiscoveryMerge {
                     } else if error as? MusicServiceError != .limit { throw error }
                 }
             }
+        }
+        // Each merge above prefers the incoming row; keep the seed's primary
+        // recording first (`sources[0]` defines the song).
+        if let primary = seed["sources"].array.first?["sourceKey"],
+           let index = song["sources"].array.firstIndex(where: { $0["sourceKey"] == primary }), index > 0 {
+            var rows = song["sources"].array
+            rows.insert(rows.remove(at: index), at: 0)
+            song["sources"] = .array(rows)
         }
         return (try MusicModel.cleanSong(song), Array(issues.prefix(100)))
     }

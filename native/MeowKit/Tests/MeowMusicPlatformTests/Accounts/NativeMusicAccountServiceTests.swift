@@ -45,6 +45,36 @@ final class NativeMusicAccountServiceTests: XCTestCase {
         _ = await service.close()
     }
 
+    func testCandidateScopeUsesOnlyLocalAccountFacts() async throws {
+        let missing = try MusicNativeFixture(restored: false)
+        let closed = await missing.service.candidatePlatforms()
+        XCTAssertTrue(closed.isEmpty, "no scope before access")
+        try await missing.enable()
+        let unknown = await missing.service.candidatePlatforms()
+        XCTAssertEqual(unknown, [.qq], "an account not yet checked may still restore")
+        do { _ = try await missing.service.validate(platform: .qq); XCTFail("no credential") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
+        let signedOut = await missing.service.candidatePlatforms()
+        XCTAssertTrue(signedOut.isEmpty, "a checked account without a session cannot answer playback options")
+        let requests = await missing.http.recorded()
+        XCTAssertTrue(requests.isEmpty, "computing the scope never requests the platform")
+        _ = await missing.service.close()
+        let restored = try MusicNativeFixture()
+        try await restored.enable()
+        _ = try await restored.service.validate(platform: .qq)
+        let signedIn = await restored.service.candidatePlatforms()
+        XCTAssertEqual(signedIn, [.qq])
+        _ = await restored.service.close()
+        let store = MusicAccountTestStore(), clock = MusicAccountTestClock()
+        let guest = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: store),
+            scopes: [.netease: try MusicAccountFixture.identity("wy")], transport: MusicAccountTestHTTP(clock: clock),
+            clock: { clock.now() })
+        _ = try await guest.setAccess(available: true, generation: 1)
+        let guestScope = await guest.candidatePlatforms()
+        XCTAssertEqual(guestScope, [.netease], "Netease guest playback needs no session")
+        _ = await guest.close()
+    }
+
     func testAccessAcknowledgementRejectsOldAndConflictingGenerationsWithoutIO() async throws {
         let f = try MusicNativeFixture(restored: false); try await f.enable(3)
         _ = try await f.service.setAccess(available: true, generation: 3)

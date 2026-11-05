@@ -70,7 +70,10 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         try musicRequire(UUID(uuidString: attemptID)?.uuidString.lowercased() == attemptID &&
             !spent.contains(attemptID), .staleResult)
         let song = try self.song(.init(kind: .queue, id: occurrenceID), d)
-        let sources = try MusicModel.sources(song).filter { platformEnabled($0.platform) }
+        // A file of a source confirmed as another recording is not this song.
+        let excluded = await sourceDiscoveryExcluded(song)
+        try check(own)
+        let sources = try MusicModel.sources(song).filter { platformEnabled($0.platform) && !excluded.contains($0.sourceKey) }
         let signature = Self.audioCacheSignature(song: song, playback: d.playback)
         let scope: MusicNativeCacheScope
         do { scope = try await cacheScope(provider) }
