@@ -46,7 +46,7 @@ extension NativeMusicService {
             mode: MusicPlaybackMode(rawValue: d.playback["mode"].int) ?? .loop, qualityEnabled: policy.enabled,
             qualityOrder: policy.order, spatialEnabled: policy.spatial, spatialOrder: policy.spatialOrder,
             lyricsEnabled: d.playback["lyricsEnabled"].bool, showTranslation: d.playback["showTranslation"].bool,
-            currentId: id.isEmpty ? nil : id, total: d.queue["entries"].array.count,
+            officialSources: MusicModel.officialSources(d.playback), currentId: id.isEmpty ? nil : id, total: d.queue["entries"].array.count,
             position: d.playback["position"]["seconds"].number,
             canNext: next != nil, canPrevious: previous != nil,
             nextPreviewID: randomNext ? nil : next, previousPreviewID: previous,
@@ -254,6 +254,10 @@ extension NativeMusicService {
             let spatial = settings.contains("spatialEnabled") ? settings["spatialEnabled"].strings : MusicModel.spatialOrder
             try musicRequire(enabled.contains { $0 != "spatial" || !spatial.isEmpty }, .qualityDisabled)
             d.playback["qualitySettings"] = settings
+            if let value = change.officialSources {
+                try musicRequire(Set(value).count == value.count)
+                d.playback["officialSources"] = .strings(MusicAccountPlatform.allCases.filter(value.contains).map(\.rawValue))
+            }
             if let value = change.lyricsEnabled { d.playback["lyricsEnabled"] = .bool(value) }
             if let value = change.showTranslation { d.playback["showTranslation"] = .bool(value) }
             d.playback["revision"] = .n(change.ifRevision + 1); return stateDTO(d)

@@ -195,12 +195,23 @@ Adapted portions:
 
 The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
 
+## Node Mobile — iOS only
+
+- Source: `https://github.com/nodejs-mobile/nodejs-mobile`, release `v18.20.4`.
+- The iOS App embeds the upstream `NodeMobile.xcframework` as a platform runtime,
+  not as a standalone executable. No Node core source fork is included.
+- License and bundled third-party declarations: `nodejs-mobile-LICENSE.txt`,
+  copied from that tag's `LICENSE`; archive and license SHA-256 are pinned in
+  `scripts/ios-node-mobile.json` and checked during build preparation.
+- This component and its license are not distributed by the Windows packager.
+
 ## QuickJS / quickjs-emscripten — MIT
 
 - Source: `https://github.com/justjake/quickjs-emscripten`, npm release `0.32.0`;
   registry release gitHead `df4efb9ef2cb25c417ecb57986da462d11b244ed`.
-- Bundled packages: `quickjs-emscripten-core`, `@jitl/quickjs-wasmfile-release-sync`
-  and its/core's shared transitive dependency `@jitl/quickjs-ffi-types`, all `0.32.0`.
+- Bundled packages: `quickjs-emscripten-core`, `@jitl/quickjs-ffi-types` and the
+  platform-selected `@jitl/quickjs-wasmfile-release-sync` (Windows) or
+  `@jitl/quickjs-asmjs-mjs-release-sync` (iOS), all `0.32.0`.
 - quickjs-emscripten Copyright (c) 2019-2024 Jake Teton-Landis.
 - QuickJS Copyright (c) 2017-2021 Fabrice Bellard and Charlie Gordon.
 - License: `quickjs-emscripten-LICENSE.txt`, copied byte-for-byte from the
@@ -210,7 +221,10 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
 The unmodified release-sync `dist/emscripten-module.wasm` is the only permitted
 script-engine binary. Its exact package manifest, registry URL/integrity, license,
 length and SHA-256 are pinned in `scripts/quickjs-runtime.json`; no debug/asyncify
-engine variant or upstream reference script is bundled.
+engine variant or upstream reference script is bundled. The iOS pure-JavaScript
+asmjs variant comes from the same upstream release and gitHead; its manifest,
+registry URL/integrity, license and executable JavaScript hashes are also pinned
+there. It does not provide all of WebAssembly's fault/trap guarantees.
 
 ### Task-context derivation — revision 1
 

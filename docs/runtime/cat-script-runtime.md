@@ -68,7 +68,7 @@ contract: cat.script.v1
 
 ## QuickJS 与有限 Node 风格能力
 
-用户源码仍在独立 QuickJS WASM 线性内存中执行。`require` 只解析运行器明确实现的内置模块子集；不存在任意 npm 包、宿主模块搜索、`NODE_PATH` 穿透、原生 addon、`child_process`、宿主 `worker_threads`、`node:vm` 或真实 `process` 对象回退。
+用户源码仍在独立 QuickJS guest 堆中执行；桌面 WASM 与 iOS asmjs 的故障隔离差异见 [公共运行器](script-runtime.md#quickjs-执行边界)。`require` 只解析运行器明确实现的内置模块子集；不存在任意 npm 包、宿主模块搜索、`NODE_PATH` 穿透、原生 addon、`child_process`、宿主 `worker_threads`、`node:vm` 或真实 `process` 对象回退。
 
 兼容层提供脚本样本需要的 Buffer、URL、`Event`／`EventTarget`／`CustomEvent`、Abort、流、HTTP(S)、DNS、net/tls、crypto、zlib、path、util、有限 console/timer/Web API 和 CommonJS 启动语义。Web 事件对象和监听器完全位于 guest，不桥接宿主 EventTarget。传给 guest 的原生对象由角色表限制可见成员，宿主回调、句柄和接收者身份均经桥接核对。
 
@@ -90,7 +90,7 @@ Fastify 通过标准 `fastify.initialization` 诊断频道和 `onRoute` hook 收
 
 标准 Cat HTTP `category` 输入为 `{id,page,filter,filters}`，`search` 为 `{wd,quick,page}`，`detail` 为 `{id}`，`play` 为 `{flag,id,flags}`。HTTP 服务保留这些字段；direct spider 在调用边界转为其位置参数，亦接受直接调用习惯的 `tid/pg/extend`。同一路由优先使用 POST，否则使用其实际注册方法；GET／HEAD 将字段编码为查询参数，对象与数组使用 JSON，不丢弃输入。
 
-启动期经有限 `vm` 兼容层动态执行的源码及其框架注册也参与发现，不离开 guest、不保留第二份完整源码，不按动作数量截断。整份源码入口在 ScriptHost install／update 与暂存 `begin` 按 16 MiB 上限校验。运行期动态代码不会扩大已发布能力。实例关闭时回收该 runtime 登记的全部 QuickJS context，再释放 WASM runtime。
+启动期经有限 `vm` 兼容层动态执行的源码及其框架注册也参与发现，不离开 guest、不保留第二份完整源码，不按动作数量截断。整份源码入口在 ScriptHost install／update 与暂存 `begin` 按 16 MiB 上限校验。运行期动态代码不会扩大已发布能力。实例关闭时回收该 runtime 登记的全部 QuickJS context，再释放 QuickJS runtime。
 
 `process` 保留 Node 的 `[object process]` 类型标识，供依赖正确选择 HTTP adapter；这不增加宿主信息或进程能力。旧式 `url.parse` 对象、TLS 证书链、`crypto.X509Certificate` 及 ECDH 密钥交换按有限数据角色传递，支持证书链自引用、证书公钥加密及共享密钥计算，但不开放宿主原型访问。可导出的 `crypto.KeyObject` 以受控 DER／raw 数据保存在 guest，传给加解密 API 时在所属调用内重建；`export`／`equals` 经有限操作执行，宿主持有临时 Buffer 后清零。这样脚本跨请求缓存密钥不依赖已结束请求的 opaque handle，也不会让临时密钥永久挂到 session。不可导出语义的 `CryptoKey` 仍是不透明角色，不按 KeyObject 泛化。
 

@@ -119,9 +119,12 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
         try candidateCheck(seed)
         var result = Set<String>()
         if let accounts {
+            let platforms: Set<MusicAccountPlatform>
             if let provider = accounts as? any MusicNativeCandidateScopeProviding {
-                result.formUnion(await provider.candidatePlatforms().map(\.rawValue))
-            } else { result.formUnion(MusicAccountPlatform.allCases.map(\.rawValue)) }
+                platforms = await provider.candidatePlatforms()
+            } else { platforms = Set(MusicAccountPlatform.allCases) }
+            let playback = try candidateCheck(seed).playback
+            result.formUnion(platforms.map(\.rawValue).filter { Self.officialEnabled($0, playback) })
         }
         if let scripts {
             do {

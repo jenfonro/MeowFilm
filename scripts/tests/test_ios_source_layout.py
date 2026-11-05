@@ -52,6 +52,7 @@ class IOSSourceLayoutTests(unittest.TestCase):
         for directory in generator.APPLICATION_DIRECTORIES:
             self.write(directory + "/Fixture.swift")
         self.write("UITests/Fixture.swift")
+        self.write("RuntimeTests/Fixture.swift")
         self.write("Resources/Unexpected.swift")
         with patch.object(generator, "ROOT", self.root):
             with self.assertRaisesRegex(ValueError, "responsibility"):

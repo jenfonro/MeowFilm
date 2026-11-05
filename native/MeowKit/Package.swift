@@ -12,6 +12,7 @@ let package = Package(
         .library(name: "MeowAccounts", targets: ["MeowAccounts"]),
         .library(name: "MeowPlayback", targets: ["MeowPlayback"]),
         .library(name: "MeowUI", targets: ["MeowUI"]),
+        .library(name: "MeowRuntime", targets: ["MeowRuntime"]),
         .library(name: "MeowMusicFeature", targets: ["MeowMusicFeature"]),
         .library(name: "MeowMusicPlatform", targets: ["MeowMusicPlatform"]),
         .library(name: "MeowMusicNativeService", targets: ["MeowMusicNativeService"])
@@ -23,16 +24,18 @@ let package = Package(
         .target(name: "MeowAccounts", dependencies: ["MeowContracts"]),
         .target(name: "MeowPlayback", dependencies: ["MeowContracts"]),
         .target(name: "MeowUI", dependencies: []),
+        .target(name: "MeowRuntime", dependencies: ["MeowJSON"]),
         .target(name: "MeowMusicFeature", dependencies: ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowUI"]),
         .target(name: "MeowMusicPlatform", dependencies: ["MeowMusicFeature", "MeowContracts", "MeowJSON", "MeowAccounts", "MeowStorage"], linkerSettings: [.linkedLibrary("z")]),
-        .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowStorage"], linkerSettings: [.linkedLibrary("z")]),
+        .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowRuntime", "MeowStorage"], linkerSettings: [.linkedLibrary("z")]),
         .testTarget(name: "MeowJSONTests", dependencies: ["MeowJSON"]),
         .testTarget(name: "MeowAccountTests", dependencies: ["MeowAccounts", "MeowContracts"]),
         .testTarget(name: "MeowCoreTests", dependencies: ["MeowContracts", "MeowStorage"]),
         .testTarget(name: "MeowMusicFeatureTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback", "MeowStorage", "MeowUI"]),
-        .testTarget(name: "MeowMusicNativeServiceTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowMusicFeature", "MeowMusicNativeService", "MeowMusicPlatform", "MeowStorage"]),
+        .testTarget(name: "MeowMusicNativeServiceTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicNativeService", "MeowMusicPlatform", "MeowRuntime", "MeowStorage"]),
         .testTarget(name: "MeowMusicPlatformTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowStorage"]),
         .testTarget(name: "MeowPlaybackTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback"]),
+        .testTarget(name: "MeowRuntimeTests", dependencies: ["MeowJSON", "MeowRuntime"]),
         .testTarget(name: "MeowUITests", dependencies: ["MeowUI"])
     ],
     swiftLanguageVersions: [.v5]

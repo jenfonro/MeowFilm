@@ -82,7 +82,8 @@ final class MeowfilmAssembly: ObservableObject {
         let publicQQ = resources.musicPublicQQ
         self.publicQQ = publicQQ
         let service = NativeMusicService(
-            document: resources.musicDocument, accounts: resources.musicAccounts, qq: publicQQ,
+            document: resources.musicDocument, scripts: resources.musicScripts,
+            accounts: resources.musicAccounts, qq: publicQQ,
             sourceDiscovery: resources.musicSourceDiscoveryCache,
             enabledPlatforms: [.netease, .qq, .kugou, .kuwo, .migu],
             homeSnapshot: resources.musicHomeSnapshot,
@@ -90,7 +91,8 @@ final class MeowfilmAssembly: ObservableObject {
             clientContexts: resources.musicClients
         )
         self.service = service
-        let model = MusicViewModel(service: service, playback: playback, accounts: resources.musicAccounts)
+        let model = MusicViewModel(service: service, playback: playback, accounts: resources.musicAccounts,
+                                   scriptSources: resources.musicScripts)
         model.setPlaybackDisplayCache(resources.musicDisplayCache)
         music = model
         systemMetadata = MusicSystemMetadataCoordinator(model: model, playback: playback, appearance: appearance)
@@ -196,6 +198,7 @@ final class MeowfilmAssembly: ObservableObject {
             await model?.close()
             await service?.close()
             await publicQQ?.close()
+            await resources?.musicScripts.close()
             lease?.cancel()
             await resources?.musicAccountGate?.close()
         }
@@ -212,6 +215,7 @@ final class MeowfilmAssembly: ObservableObject {
             await pendingAccess?.value
             await service?.close()
             await publicQQ?.close()
+            await resources?.musicScripts.close()
             await resources?.musicAccountGate?.close()
         }
     }

@@ -12,9 +12,14 @@ const session = 'review';
 const request = (id, method, params = null) => ({
   version: 1, session, id, kind: 'request', method, params
 });
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
 
 function heldStreams(t, holdWrite = 1) {
-  const held = Promise.withResolvers();
+  const held = deferred();
   let left, right, writeCount = 0, release;
   left = new Duplex({
     read() {},
@@ -90,8 +95,8 @@ test('review: an unsent cancelled request must not start its business handler af
 test('review: cancellation of running work cannot disappear when the outbound byte budget is full',
   { timeout: 2000 }, async t => {
     const wire = heldStreams(t, 2);
-    const started = Promise.withResolvers();
-    const finish = Promise.withResolvers();
+    const started = deferred();
+    const finish = deferred();
     const maximumBytes = 256;
     const a = attachConnectedStream(wire.left, { session, maximumBytes, timeout: 1000 });
     const b = attachConnectedStream(wire.right, {
@@ -136,7 +141,7 @@ test('review: cancellation of running work cannot disappear when the outbound by
 
 test('review: unknown-method responses must not be silently dropped on recoverable send backpressure',
   { timeout: 2000 }, async t => {
-    const release = Promise.withResolvers();
+    const release = deferred();
     const replies = [];
     const decoder = new FrameDecoder();
     const peer = new BridgePeer({

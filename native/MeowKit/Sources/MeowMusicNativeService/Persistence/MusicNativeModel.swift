@@ -252,6 +252,12 @@ enum MusicModel {
         if !enabled.contains(where: { $0 != "spatial" || !spatial.isEmpty }) { enabled = qualityOrder; spatial = spatialOrder }
         return (order.filter(enabled.contains), order, spOrder.filter(spatial.contains), spOrder)
     }
+    /// Built-in audio-source admission. A missing field is the default (all on).
+    static func officialSources(_ prefs: MJ) -> [MusicAccountPlatform] {
+        guard prefs.contains("officialSources") else { return MusicAccountPlatform.allCases }
+        let enabled = Set(prefs["officialSources"].strings)
+        return MusicAccountPlatform.allCases.filter { enabled.contains($0.rawValue) }
+    }
     static func qualities(_ qualities: [String], _ prefs: MJ) -> [String] {
         let p = policy(prefs), map = ["128k": "standard", "320k": "high", "flac": "lossless", "flac24bit": "hires", "master": "master"]
         return qualities.filter { p.enabled.contains(map[$0] ?? $0) }.sorted {

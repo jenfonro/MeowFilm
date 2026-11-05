@@ -71,6 +71,12 @@ struct MusicDocument {
             let value = playback["qualitySettings"][key]
             if value != .null { try musicRequire(value.isArray && Set(value.strings).count == value.array.count && value.strings.allSatisfy(allowed.contains), .corruptDocument) }
         }
+        let official = playback["officialSources"]
+        if playback.contains("officialSources") {
+            try musicRequire(official.isArray && official.array.allSatisfy(\.isString) &&
+                Set(official.strings).count == official.array.count &&
+                official.strings.allSatisfy { MusicAccountPlatform(rawValue: $0) != nil }, .corruptDocument)
+        }
         try musicRequire(history["schema"] == .n(1) && history["playlists"].isArray && history["playlists"].array.count <= 5 &&
                          history["days"].isArray && history["days"].array.count <= 7, .corruptDocument)
     }
@@ -279,6 +285,10 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
     }
     nonisolated func requirePlatform(_ id: String) throws {
         try musicRequire(platformEnabled(id), .unsupported)
+    }
+    /// Official audio admission is checked by the owner, never by hiding UI rows.
+    nonisolated static func officialEnabled(_ platform: String, _ playback: MJ) -> Bool {
+        MusicModel.officialSources(playback).contains { $0.rawValue == platform }
     }
     func read() throws -> MusicDocument {
         try check()

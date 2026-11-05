@@ -35,6 +35,27 @@ test('size, UTF-8, schema, unsafe integers and incomplete streams reject', () =>
   const badUTF8 = new FrameDecoder();
   assert.throws(() => badUTF8.push(Buffer.from([0, 0, 0, 1, 0xff]), () => {}), { code: 'INVALID_MESSAGE' });
 });
+test('wire UTF-8 preserves scalar identity and rejects malformed bytes before JSON replacement', () => {
+  function frame(body) {
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(body.length);
+    return Buffer.concat([header, body]);
+  }
+  const input = { ...message, params: '中文🎵\uFEFF\uFFFD' };
+  const body = Buffer.from(JSON.stringify(input));
+  for (const bytes of [body, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body])]) {
+    const received = [];
+    new FrameDecoder().push(frame(bytes), value => received.push(value));
+    assert.deepEqual(received, [input]);
+  }
+  const template = JSON.stringify({ ...message, params: '@' }).split('@');
+  for (const bytes of [[0xff], [0xc0, 0xaf], [0xed, 0xa0, 0x80],
+    [0xe2, 0x82], [0xf4, 0x90, 0x80, 0x80]]) {
+    const malformed = Buffer.concat([Buffer.from(template[0]), Buffer.from(bytes), Buffer.from(template[1])]);
+    assert.throws(() => new FrameDecoder().push(frame(malformed), () => assert.fail('dispatched')),
+      { code: 'INVALID_MESSAGE' });
+  }
+});
 test('duplex explicitly registered methods and null results round trip', async t => {
   const [a, b] = pair(t, { 'native.echo': value => value }, {
     'business.echo': value => value, 'business.null': () => null

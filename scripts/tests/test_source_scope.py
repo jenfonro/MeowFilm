@@ -31,6 +31,7 @@ class SourceScopeTests(unittest.TestCase):
             ("Meowfilm", [directory + "/Fixture.swift"
                           for directory in sorted(scope.APPLICATION_DIRECTORIES)]),
             ("MeowfilmAcceptanceUITests", ["UITests/Fixture.swift"]),
+            ("MeowfilmRuntimeTests", ["RuntimeTests/Fixture.swift"]),
         ]
         for target, paths in target_sources:
             builds = []

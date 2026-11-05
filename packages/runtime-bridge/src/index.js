@@ -1,4 +1,4 @@
-import { Buffer } from 'node:buffer';
+import { Buffer, isUtf8 } from 'node:buffer';
 
 export const BRIDGE_VERSION = 1;
 export const MAX_FRAME_BYTES = 1024 * 1024;
@@ -96,7 +96,10 @@ export function encodeJSONValue(value) {
 export function decodeJSONValue(bytes) {
   try {
     if (!(bytes instanceof Uint8Array)) invalid();
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    // Same ICU-independent strict UTF-8 decoding as FrameDecoder.
+    if (!isUtf8(bytes)) invalid();
+    const text = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('utf8')
+      .replace(/^\uFEFF/, '');
     checkWire(text);
     const value = JSON.parse(text);
     checkJSON(value);
@@ -167,8 +170,9 @@ export class FrameDecoder {
         offset += count;
         this.#bodyCount += count;
         if (this.#bodyCount !== this.#body.length) continue;
-        // Fatal UTF-8 decoding prevents replacement characters changing identity.
-        const text = new TextDecoder('utf-8', { fatal: true }).decode(this.#body);
+        // Strict decoding must also work in embedded Node builds without ICU.
+        if (!isUtf8(this.#body)) invalid();
+        const text = this.#body.toString('utf8').replace(/^\uFEFF/, '');
         checkWire(text);
         const message = validate(JSON.parse(text));
         this.#body = undefined;
