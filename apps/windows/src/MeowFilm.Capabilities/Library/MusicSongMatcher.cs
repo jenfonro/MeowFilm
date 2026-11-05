@@ -42,7 +42,11 @@ internal sealed class MusicSongMatcher
         internal readonly CancellationTokenSource Cancellation = new();
         internal required string Platform;
         internal Task<MatchResult> Work = null!;
-        internal int Waiters;
+        internal void Cancel()
+        {
+            try { Cancellation.Cancel(); }
+            catch (Exception error) when (error is ObjectDisposedException or AggregateException) { }
+        }
     }
     internal sealed record MatchResult(JsonObject Song, bool More = false, string? Error = null);
 
@@ -233,31 +237,18 @@ internal sealed class MusicSongMatcher
                 var current = flight;
                 flight.Work = Task.Run(() => SearchAsync(song, platform, context, page, refresh,
                     generation, current.Cancellation.Token));
-            }
-            flight.Waiters++;
-        }
-        try
-        {
-            var result = await flight.Work.WaitAsync(token).ConfigureAwait(false);
-            token.ThrowIfCancellationRequested();
-            await SaveAsync(token).ConfigureAwait(false);
-            return result with { Song = Reuse(song, result.Song, platform) };
-        }
-        finally
-        {
-            bool last;
-            lock (gate)
-            {
-                last = --flight.Waiters == 0;
-                if (last) flights.Remove(flightKey);
-            }
-            if (last)
-            {
-                flight.Cancellation.Cancel();
-                try { await flight.Work.ConfigureAwait(false); } catch { /* The cancelling caller still drains physical work. */ }
-                // Not disposed: Invalidate/Drain may still cancel a retired flight concurrently.
+                _ = flight.Work.ContinueWith(done =>
+                {
+                    _ = done.Exception;
+                    lock (gate) if (flights.GetValueOrDefault(flightKey) == current) flights.Remove(flightKey);
+                    current.Cancellation.Dispose();
+                }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
         }
+        var result = await flight.Work.WaitAsync(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        await SaveAsync(token).ConfigureAwait(false);
+        return result with { Song = Reuse(song, result.Song, platform) };
     }
     private async Task<MatchResult> SearchAsync(JsonObject song, string platform, string context,
         int page, bool refresh, int generation, CancellationToken token)
@@ -376,7 +367,7 @@ internal sealed class MusicSongMatcher
             revision++;
             retired = flights.Values.Where(flight => flight.Platform == platform).ToArray();
         }
-        foreach (var flight in retired) flight.Cancellation.Cancel();
+        foreach (var flight in retired) flight.Cancel();
     }
     internal async Task PersistAsync(CancellationToken token)
     {
@@ -423,7 +414,7 @@ internal sealed class MusicSongMatcher
         {
             pending = flights.Values.ToArray();
         }
-        foreach (var flight in pending) flight.Cancellation.Cancel();
+        foreach (var flight in pending) flight.Cancel();
         foreach (var flight in pending)
             try { await flight.Work.ConfigureAwait(false); } catch { }
     }

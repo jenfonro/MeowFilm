@@ -23,7 +23,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     private readonly MusicPlatformClientProtocol clientProtocol;
     private readonly TimeProvider clock;
     private readonly object gate = new();
-    private readonly SemaphoreSlim disk = new(1, 1);
+    private readonly SerialOperationQueue disk = new();
     private readonly Dictionary<string, State> states = AccountRules.Platforms.ToDictionary(p => p, _ => new State());
     private readonly ConditionalWeakTable<MusicPlatformSession, Lease> leases = new();
     private int calls, physical;
@@ -166,10 +166,8 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         Enter(isPhysical: true);
         async Task<T> Physical()
         {
-            bool entered = false;
             try
             {
-                await disk.WaitAsync(token).ConfigureAwait(false); entered = true;
                 token.ThrowIfCancellationRequested();
                 return await action().ConfigureAwait(false);
             }
@@ -177,13 +175,19 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             catch (DocumentStoreException error) { throw new MusicAccountException(AccountRules.Error(error)); }
             catch (OperationCanceledException) { throw new MusicAccountException("CANCELLED"); }
             catch { throw new MusicAccountException("STORAGE"); }
-            finally { if (entered) disk.Release(); Leave(isPhysical: true); }
         }
-        // A cancelled caller never releases this gate while an injected store still runs.
-        var task = Physical();
-        _ = task.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+        // Cancellation can skip a queued operation, never release a running writer.
+        var task = disk.Enqueue(Physical, token);
+        var settled = SettleAsync();
+        _ = settled.ContinueWith(done => { _ = done.Exception; }, CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-        return task;
+        return settled;
+        async Task<T> SettleAsync()
+        {
+            try { return await task.ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw new MusicAccountException("CANCELLED"); }
+            finally { Leave(isPhysical: true); }
+        }
     }
     private async Task<AccountDocument> ReadDocument(CancellationToken token) =>
         AccountDocument.Decode(await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false));

@@ -14,7 +14,6 @@ public sealed partial class MusicAccountOwner
     {
         internal CancellationTokenSource Cancellation { get; } = new();
         internal Task<JsonElement>? Work { get; set; }
-        internal int Waiters;
         internal void Cancel()
         {
             try { Cancellation.Cancel(); }
@@ -27,8 +26,7 @@ public sealed partial class MusicAccountOwner
     // Search, recommendations and other native consumers may need the account
     // owner's first durable observation before registering their own sessions.
     // That first observation is owner state: concurrent callers share it. A
-    // cancelled waiter leaves the active subscriber count immediately, but does
-    // not return until the shared physical storage read has actually settled.
+    // cancelled waiter stops waiting; the owner retains and drains the physical read.
     internal async Task<JsonElement> EnsureInitialObservationAsync(
         CancellationToken cancellationToken = default)
     {
@@ -36,7 +34,7 @@ public sealed partial class MusicAccountOwner
         InitialObservationFlight flight;
         lock (gate)
         {
-            if (closed) return Failure("CLOSED");
+            if (closed || readsStopping) return Failure("CLOSED");
             if (initialObservationSucceeded && states.Values.Any(state => state.Uncertain))
             {
                 // A lost account CAS acknowledgement requires a new explicit
@@ -59,38 +57,11 @@ public sealed partial class MusicAccountOwner
                     }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                 }
                 else flight = current;
-                flight.Waiters++;
             }
         }
-        bool released = false;
         try { return await flight.Work!.WaitAsync(cancellationToken).ConfigureAwait(false); }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            ReleaseInitialObservationWaiter(flight);
-            released = true;
-            await flight.Work!.ConfigureAwait(false);
-            return Failure("CANCELLED");
-        }
-        finally
-        {
-            if (!released) ReleaseInitialObservationWaiter(flight);
-        }
-    }
-
-    private void ReleaseInitialObservationWaiter(InitialObservationFlight flight)
-    {
-        bool cancel = false;
-        lock (gate)
-        {
-            flight.Waiters--;
-            if (flight.Waiters == 0 && !flight.Work!.IsCompleted &&
-                ReferenceEquals(initialObservation, flight))
-            {
-                initialObservation = null;
-                cancel = true;
-            }
-        }
-        if (cancel) flight.Cancel();
+        { return Failure("CANCELLED"); }
     }
 
     private async Task<JsonElement> ObserveInitialAsync(InitialObservationFlight flight)
@@ -126,6 +97,14 @@ public sealed partial class MusicAccountOwner
             initialObservationSucceeded = true;
             initialObservationReceipt = result.Clone();
         }
+    }
+
+    internal async Task DrainInitialObservationAsync()
+    {
+        Task[] pending;
+        lock (gate) pending = initialObservationFlights.Select(f => (Task)f.Work!).ToArray();
+        try { await Task.WhenAll(pending).ConfigureAwait(false); }
+        catch { /* The observation owns its result; this is only a physical barrier. */ }
     }
 
     // Native discovery hydration, not another JSON/Node command or credential owner.

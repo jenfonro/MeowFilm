@@ -78,7 +78,7 @@ public static class MusicSearchDiscoveryTests
         foreach (var stage in new[] { "handler", "read", "dispose" })
         {
             var value = stage;
-            yield return Case("last-cancel-physical-" + value, () => Physical(value, "cancel"));
+            yield return Case("last-unsubscribe-owned-" + value, () => Physical(value, "cancel"));
         }
         yield return Case("single-deadline-25s-awaits-physical", () => Physical("handler", "timeout"));
         yield return Case("invalidate-rejects-result-awaits-physical", () => Physical("handler", "invalidate"));
@@ -86,11 +86,11 @@ public static class MusicSearchDiscoveryTests
         yield return Case("dispose-drains-physical-and-borrows-inputs", () => Physical("dispose", "close"));
         yield return Case("invalidation-then-read-drains-old-before-replacement", () => Replacement(false));
         yield return Case("refresh-drains-old-before-replacement", () => Replacement(true));
-        yield return Case("cancelled-last-reader-replacement-cannot-join-retiring", LastReaderReplacement);
+        yield return Case("cancelled-last-reader-replacement-joins-owned-flight", LastReaderReplacement);
         yield return Case("anonymous-to-account-final-acquire-fenced", AnonymousChanged);
         yield return Case("final-acquire-same-generation-cookie-change-fenced", CookieChanged);
         yield return Case("account-revoked-during-http-without-event-fenced", Revoked);
-        yield return Case("account-acquire-cancellation-drains-before-return", AcquireDrain);
+        yield return Case("account-acquire-unsubscribe-retains-owned-read", AcquireDrain);
         yield return Case("cached-session-current-check-and-nonwy-invalidation", CacheSession);
         yield return Case("acquire-error-redacted-no-http", AcquireError);
         yield return Case("initial-acquire-wrong-platform-and-stale-refused", InvalidSession);
@@ -721,12 +721,21 @@ public static class MusicSearchDiscoveryTests
                 case "prepare": cleanup = f.Service.CancelAndDrainAsync(); break;
                 case "close": cleanup = f.Service.DisposeAsync().AsTask(); break;
             }
-            await Wait(stall.Cancelled.Task); await Task.Delay(35);
-            Check(!read.IsCompleted && (cleanup is null || !cleanup.IsCompleted), "Returned before physical settle");
+            if (action == "cancel")
+            {
+                await Wait(Failure("CANCELLED", () => read));
+                Check(!stall.Cancelled.Task.IsCompleted);
+            }
+            else
+            {
+                await Wait(stall.Cancelled.Task); await Task.Delay(35);
+                Check(!read.IsCompleted && (cleanup is null || !cleanup.IsCompleted), "Returned before physical settle");
+            }
         }
         finally { stall.Released.TrySetResult(); }
         await Failure(action switch { "timeout" => "TIMEOUT", "invalidate" => "STALE_SESSION", "close" => "CLOSED", _ => "CANCELLED" }, () => read);
         if (cleanup is not null) await cleanup;
+        if (action == "cancel") Check((await f.Service.ReadAsync()).Charts.Length == 3);
         Check(f.Peer.Active == 0 && (stage == "handler" || stall.Disposed == 1));
         Check(f.Peer.Disposed == 0 && f.Sessions.Disposed == 0, "Borrowed resource disposed");
     }
@@ -740,11 +749,14 @@ public static class MusicSearchDiscoveryTests
         var second = f.Service.ReadAsync(refresh);
         try
         {
-            await Wait(stall.Cancelled.Task); await Task.Delay(35);
-            Check(!second.IsCompleted && hot == 1, "Replacement started before drain");
+            if (!refresh) await Wait(stall.Cancelled.Task);
+            else Check(!stall.Cancelled.Task.IsCompleted);
+            Check(!second.IsCompleted && hot == 1, "Replacement duplicated physical work");
         }
         finally { stall.Released.TrySetResult(); }
-        await Failure("STALE_SESSION", () => first); Check((await second).Charts.Length == 3 && hot == 2);
+        if (!refresh) await Failure("STALE_SESSION", () => first);
+        else Check((await first).Charts.Length == 3);
+        Check((await second).Charts.Length == 3 && hot == (refresh ? 1 : 2));
     }
     private static async Task LastReaderReplacement()
     {
@@ -752,10 +764,12 @@ public static class MusicSearchDiscoveryTests
         f.Peer.Reply = (w, t) => Stage(w) == "hot" && Interlocked.Increment(ref hot) == 1
             ? stall.ResponseAsync(w, t) : Task.FromResult(Response(Default(w)));
         var first = f.Service.ReadAsync(cancellationToken: cancel.Token); await Wait(stall.Entered.Task);
-        cancel.Cancel(); await Wait(stall.Cancelled.Task); var second = f.Service.ReadAsync();
+        cancel.Cancel(); await Wait(Failure("CANCELLED", () => first));
+        Check(!stall.Cancelled.Task.IsCompleted); var second = f.Service.ReadAsync();
         try { await Task.Delay(35); Check(hot == 1 && !second.IsCompleted); }
         finally { stall.Released.TrySetResult(); }
-        await Failure("CANCELLED", () => first); Check((await second).Charts.Length == 3 && hot == 2);
+        await Failure("CANCELLED", () => first); Check((await second).Charts.Length == 3 && hot == 1);
+        Check((await f.Service.ReadAsync()).Charts.Length == 3 && hot == 1);
     }
     private static async Task AnonymousChanged()
     {
@@ -787,9 +801,10 @@ public static class MusicSearchDiscoveryTests
         await using var f = new Fixture(); var entered = Signal(); var released = Signal(); var cancelled = Signal(); using var cancel = new CancellationTokenSource();
         f.Sessions.Acquire = async (_, token) => { token.Register(() => cancelled.TrySetResult()); entered.TrySetResult(); await released.Task; return null; };
         var read = f.Service.ReadAsync(cancellationToken: cancel.Token); await Wait(entered.Task); cancel.Cancel();
-        try { await Wait(cancelled.Task); await Task.Delay(35); Check(!read.IsCompleted && f.Peer.Calls.Count == 0); }
+        try { await Wait(Failure("CANCELLED", () => read)); Check(!cancelled.Task.IsCompleted && f.Peer.Calls.Count == 0); }
         finally { released.TrySetResult(); }
         await Failure("CANCELLED", () => read);
+        Check((await f.Service.ReadAsync()).Charts.Length == 3);
     }
     private static async Task CacheSession()
     {

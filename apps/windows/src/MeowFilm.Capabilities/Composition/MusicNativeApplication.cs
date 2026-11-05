@@ -104,7 +104,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         officialAudio = new(http, clients);
         sourceCache = new(store);
         sessions = new(accounts);
-        catalog = new(sessions, http, clients, clientProtocol: clientProtocol);
+        catalog = new(sessions, http, clients, clientProtocol: clientProtocol, authenticationFailed: failed => accounts.Revoke(failed));
         songMatcher = new(library, new(store), SearchCatalogAsync, searchClock);
         nativeCatalog = new(catalog, library);
         recommendationQueue = new(library);
@@ -114,7 +114,8 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         var discoverySessions = new DiscoverySessions(accounts);
         discovery = discoveryFactory?.Invoke(discoverySessions, http) ?? new NativeMusicSearchDiscovery(discoverySessions, http, clients);
         scripts = new(library, scriptRuntime, null, MatchScriptSongAsync);
-        lyrics = new(library, new NativeMusicLyrics(sessions, http, clients), scripts.ExecuteAsync);
+        lyrics = new(library, new NativeMusicLyrics(sessions, http, clients,
+            authenticationFailed: failed => accounts.Revoke(failed)), scripts.ExecuteAsync);
         librarySync = new(library, accounts, http, clients, http.SendMusicLibrarySyncCloudAsync);
         Feedback = new(new MusicFeedbackSettingsOwner(store),
             feedbackFactory?.Invoke(accounts, http) ?? new NativeMusicFeedbackProtocol(accounts, http, clients), accounts);
@@ -228,13 +229,6 @@ public sealed partial class MusicNativeApplication : IMusicApplication
                 // independent frames; an old auth failure cannot revoke a replacement.
                 using var frame = sessions.Begin();
                 var result = await ExecuteCatalogWithRecommendationLaneAsync(method, parameters, token).ConfigureAwait(false);
-                if (result.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.False &&
-                    result.TryGetProperty("code", out var code) &&
-                    code.GetString() is "AUTH_EXPIRED" or "AUTH_REQUIRED")
-                {
-                    if (frame.Session is { } failed) accounts.Revoke(failed);
-                    nativeCatalog.Invalidate(frame.Platform);
-                }
                 if (method == "music.catalog.playlist.commit" && Okay(result))
                     await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
                 return result;
@@ -300,15 +294,23 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         }
         // Internal preparation must not wait a concurrent resumption which is
         // itself waiting for this preparation to finish.
-        await Attempt(PrepareRecommendationCoreAsync).ConfigureAwait(false);
-        await Attempt(vipPage.PrepareShutdownAsync).ConfigureAwait(false);
+        // Fence recommendation callbacks first, then abort service-owned reads.
+        // Waiting for narrow preparation before invalidation would leave an
+        // already admitted HTTP/account read running until its normal deadline.
+        var recommendationDrain = PrepareRecommendationCoreAsync();
+        var accountReadDrain = accounts.PrepareReadShutdownAsync();
         try { nativeCatalog.Invalidate(); } catch (Exception e) { failure ??= e; }
+        await Attempt(() => recommendationDrain).ConfigureAwait(false);
+        await Attempt(vipPage.PrepareShutdownAsync).ConfigureAwait(false);
+        await Attempt(() => accountReadDrain).ConfigureAwait(false);
         try { lyrics.Invalidate(); } catch (Exception e) { failure ??= e; }
+        await Attempt(lyrics.DrainAsync).ConfigureAwait(false);
         lock (gate) issuedDiscoveryGeneration = 0;
         try { discovery.Invalidate(); } catch (Exception e) { failure ??= e; }
         await Attempt(discovery.CancelAndDrainAsync).ConfigureAwait(false);
         await Attempt(() => searchCoordinator.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(songMatcher.DrainAsync).ConfigureAwait(false);
+        await Attempt(catalog.DrainAsync).ConfigureAwait(false);
         await Attempt(() => librarySync.PrepareShutdownAsync()).ConfigureAwait(false);
         // Native mutations ignore cancellation after CAS admission. Their receipts
         // must settle before the final library preparation, even on earlier failure.
@@ -342,6 +344,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         await Task.Yield();
         if (prepare is not null) { try { await prepare.ConfigureAwait(false); } catch { /* Unknown state is not reconciled here. */ } }
         lock (gate) if (closed) throw new InvalidOperationException("CLOSED");
+        accounts.ResumeReads();
         // The Module may have sealed only recommendations before it ever reached
         // whole-app preparation. Cancel and settle that startup/read/callback scope
         // before restoring any recommendation admission.
@@ -463,6 +466,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         // it neither retries a commit nor declares an unknown receipt rolled back.
         await Attempt(() => library.AbortAsync()).ConfigureAwait(false);
         try { catalog.Dispose(); } catch (Exception e) { failure ??= e; }
+        await Attempt(catalog.DrainAsync).ConfigureAwait(false);
         await Attempt(() => clients.DisposeAsync().AsTask()).ConfigureAwait(false);
         try { http.Dispose(); } catch (Exception e) { failure ??= e; }
         try { recommendationLifetime.Dispose(); } catch (Exception e) { failure ??= e; }
@@ -519,7 +523,8 @@ public sealed partial class MusicNativeApplication : IMusicApplication
                 if (captured) return;
                 Platform = platform; Session = session; captured = true;
             }
-            public void Dispose() { source.current.Value = previous; Session = null; }
+            // Retiring a subscription must not clear the lease of a still-running child read.
+            public void Dispose() { source.current.Value = previous; }
             public override string ToString() => "Catalog session context (redacted)";
         }
     }

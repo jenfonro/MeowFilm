@@ -254,7 +254,7 @@ public sealed partial class MusicScriptOwner
         catch (Exception error)
         {
             if (Code(error) is "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE")
-            { blocked = true; CancelPlayback(); }
+            { blocked = true; CancelOnlineOperations(); }
             return new { ok = false, code = Code(error) };
         }
         finally { if (entered) storageGate.Release(); if (admitted) Finish(); }

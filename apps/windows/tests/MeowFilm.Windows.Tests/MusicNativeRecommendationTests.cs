@@ -35,7 +35,7 @@ public static class MusicNativeRecommendationTests
             string route = method;
             yield return Case("queue-" + route + "-uses-shared-lane-and-fences-old-selection", () => QueueMutation(route));
         }
-        yield return Case("queue-replacement-cancels-inflight-recommendation-before-final-commit", ReplaceDuringRead);
+        yield return Case("queue-replacement-fences-inflight-recommendation-before-final-commit", ReplaceDuringRead);
         yield return Case("queue-clear-and-history-restore-retire-recommendation", ClearAndHistory);
         yield return Case("catalog-prepare-does-not-retire-save-shares-lane-play-fences-final-cas", CatalogCommit);
         foreach (int read in new[] { 1, 2 })
@@ -43,7 +43,7 @@ public static class MusicNativeRecommendationTests
             int number = read;
             yield return Case("narrow-prepare-drains-physical-account-read-" + number + "-then-resumes", () => AccountReadDrain(number));
         }
-        yield return Case("cancelled-hydrate-waiter-settles-with-shared-new-start", CancelHydrate);
+        yield return Case("cancelled-hydrate-waiter-detaches-from-shared-new-start", CancelHydrate);
         yield return Case("narrow-prepare-http-cancelled-waiter-is-not-physical-drain", HttpDrain);
         yield return Case("narrow-prepare-drains-http-response-async-disposal", ResponseDrain);
         yield return Case("narrow-prepare-drains-media-callback-but-keeps-history-writable", CallbackDrain);
@@ -440,7 +440,7 @@ public static class MusicNativeRecommendationTests
         await using var f = await Fixture.Create(); var hold = f.Handler.Hold();
         var starting = f.Start(); await Wait(hold.Entered.Task);
         await f.Call("music.queue.replace", new { songs = new[] { Song(901) }, index = 0 });
-        await Wait(hold.Cancelled.Task); await Pending(starting); hold.Release.TrySetResult();
+        await Pending(starting); Check(!hold.Cancelled.Task.IsCompleted); hold.Release.TrySetResult();
         await starting; Check(N(await f.Queue(), "total") == 1 && f.Selections.IsEmpty && !B(await f.State(), "active"));
     }
     private static async Task ClearAndHistory()
@@ -473,15 +473,19 @@ public static class MusicNativeRecommendationTests
         await using var f = await Fixture.Create();
         var hold = f.Store.HoldRead(MusicAccountOwner.DocumentNamespace, number);
         var start = f.App.ExecuteAsync("music.recommendations.start", new { kind = "fm", platform = "wy" }); await Wait(hold.Entered.Task);
-        var preparing = f.Source.PrepareRecommendationsAsync(); await Wait(hold.Cancelled.Task);
-        await Pending(preparing); await Pending(start); Check(f.Handler.Paths.IsEmpty);
+        var preparing = f.Source.PrepareRecommendationsAsync();
+        await Pending(preparing); Check(!hold.Cancelled.Task.IsCompleted && f.Handler.Paths.IsEmpty);
+        if (number == 1) Error(await start.WaitAsync(TimeSpan.FromSeconds(8)), "CANCELLED");
+        else await Pending(start);
         // Narrow prepare must leave ordinary library reads/writes available.
         await f.Call("music.queue.mode", new { mode = 1 });
         hold.Release.TrySetResult(); await Wait(preparing);
         var result = await start;
         Check(B(result, "ok") ? !B(result, "active") || S(result, "error").Length > 0 : S(result, "code") == "CANCELLED");
-        await f.App.CancelShutdownPreparationAsync(); Check(f.Handler.Paths.IsEmpty);
-        var next = await f.Start(); Check(B(next, "active") && f.Handler.Paths.Count == 1);
+        await f.App.CancelShutdownPreparationAsync();
+        int admittedReads = number == 1 ? 0 : 1;
+        Check(f.Handler.Paths.Count == admittedReads && f.Selections.IsEmpty);
+        var next = await f.Start(); Check(B(next, "active") && f.Handler.Paths.Count == admittedReads + 1);
     }
     private static async Task CancelHydrate()
     {
@@ -490,7 +494,8 @@ public static class MusicNativeRecommendationTests
         var first = f.App.ExecuteAsync("music.recommendations.start", new { kind = "fm", platform = "wy" }, cancellation.Token);
         await Wait(hold.Entered.Task);
         var second = f.Start(); cancellation.Cancel();
-        await Pending(first); await Pending(second); Check(f.Handler.Paths.IsEmpty);
+        Error(await first.WaitAsync(TimeSpan.FromSeconds(8)), "CANCELLED");
+        await Pending(second); Check(!hold.Cancelled.Task.IsCompleted && f.Handler.Paths.IsEmpty);
         hold.Release.TrySetResult(); Error(await first, "CANCELLED"); Check(B(await second, "active") && f.Handler.Paths.Count == 1);
         Check(f.Store.Reads.GetValueOrDefault(MusicAccountOwner.DocumentNamespace) == 3 &&
             f.Store.Reads.GetValueOrDefault(MusicPlatformClientContextOwner.DocumentNamespace) == 1 &&
@@ -501,7 +506,8 @@ public static class MusicNativeRecommendationTests
     {
         await using var f = await Fixture.Create(); var hold = f.Handler.Hold();
         var start = f.Start(); await Wait(hold.Entered.Task); using var waiting = new CancellationTokenSource();
-        var prepare = f.Source.PrepareRecommendationsAsync(waiting.Token); await Wait(hold.Cancelled.Task);
+        var prepare = f.Source.PrepareRecommendationsAsync(waiting.Token);
+        await Pending(prepare); Check(!hold.Cancelled.Task.IsCompleted);
         waiting.Cancel(); await Cancelled(prepare); var physical = f.Source.PrepareRecommendationsAsync();
         await Pending(physical); Check(f.Handler.Disposals == 0 && f.Store.Disposals == 0);
         hold.Release.TrySetResult(); await Wait(physical); await start;
@@ -512,7 +518,7 @@ public static class MusicNativeRecommendationTests
     {
         await using var f = await Fixture.Create(); var hold = f.Handler.HoldResponse();
         var start = f.Start(); await Wait(hold.Read.Entered.Task); var prepare = f.Source.PrepareRecommendationsAsync();
-        await Wait(hold.Read.Cancelled.Task); await Pending(prepare); hold.Read.Release.TrySetResult();
+        await Pending(prepare); Check(!hold.Read.Cancelled.Task.IsCompleted); hold.Read.Release.TrySetResult();
         await Wait(hold.Dispose.Entered.Task); await Pending(prepare); Check(!hold.Disposed);
         hold.Dispose.Release.TrySetResult(); await Wait(prepare); await start; Check(hold.Disposed && f.Selections.IsEmpty);
     }

@@ -10,6 +10,7 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
     private readonly MusicVipPageProtocol protocol;
     private readonly object gate = new();
     private Operation? active;
+    private Task<MusicVipPageSnapshot>? read;
     private Task? preparation, disposal;
     private long epoch, currentGeneration, signedGeneration, signAttemptedGeneration;
     private MusicVipSignCardData? currentSign;
@@ -26,8 +27,21 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
 
     public Task<MusicVipPageSnapshot> ReadVipPageAsync(CancellationToken token = default)
     {
-        var operation = Start(token);
-        return ReadCoreAsync(operation);
+        token.ThrowIfCancellationRequested();
+        Task<MusicVipPageSnapshot> work;
+        lock (gate)
+        {
+            if (closed || stopping) throw new MusicOperationException("CLOSED");
+            if (read is { IsCompleted: false } && active?.Epoch == epoch) work = read;
+            else
+            {
+                var operation = Start(CancellationToken.None);
+                work = read = ReadCoreAsync(operation);
+                _ = work.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
+        }
+        return work.WaitAsync(token);
     }
 
     public Task<MusicVipSignReceipt> SignVipPageAsync(long expectedGeneration,
@@ -67,6 +81,7 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
 
     private async Task<MusicVipPageSnapshot> ReadCoreAsync(Operation operation)
     {
+        await Task.Yield();
         try
         {
             var accountTask = ReadAccountAsync(operation.Token);

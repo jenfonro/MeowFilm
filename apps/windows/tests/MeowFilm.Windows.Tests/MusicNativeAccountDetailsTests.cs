@@ -24,7 +24,7 @@ public static partial class MusicNativeAccountDetailsTests
             yield return Case(p + "-membership-auth-failure-revokes-exact-account", () => AuthFailure(p));
             yield return Case(p + "-profile-identity-mismatch-never-commits", () => IdentityFailure(p));
             yield return Case(p + "-rights-network-unknown-no-logout", () => Unknown(p));
-            yield return Case(p + "-last-cancel-awaits-real-HTTP-settle", () => CancelHttp(p));
+            yield return Case(p + "-last-unsubscribe-retains-cache-refresh", () => CancelHttp(p));
         }
         yield return Case("WY-upstream-clock-absolute-expiry-levels-and-unknown", WySnapshots);
         yield return Case("QQ-native-wire-aliases-precedence-flags-and-boundaries", QqSnapshots);
@@ -42,7 +42,7 @@ public static partial class MusicNativeAccountDetailsTests
         yield return Case("logout-fences-refresh-retained-cache-never-reappears", Logout);
         yield return Case("CAS-conflict-no-replay-no-overwrite", Conflict);
         yield return Case("lost-CAS-receipt-explicit-local-readback-only", LostReceipt);
-        yield return Case("cancel-admitted-CAS-drains-unknown-and-owner-closes", CancelWrite);
+        yield return Case("unsubscribe-admitted-CAS-keeps-real-receipt-and-owner-closes", CancelWrite);
         yield return Case("two-real-owners-same-cache-revision-one-winner", TwoOwners);
         yield return Case("new-account-cache-binding-no-cross-session-display", CacheBinding);
         yield return Case("corrupt-new-row-not-overwritten-no-HTTP", Corrupt);
@@ -180,9 +180,12 @@ public static partial class MusicNativeAccountDetailsTests
         await using var f = new MusicAccountDetailsFixture(platform); await f.Seed(); f.HoldStep = "rights";
         using var cancellation = new CancellationTokenSource();
         var refresh = f.Refresh(cancellation.Token);
-        await Wait(f.Entered.Task); cancellation.Cancel(); await Wait(f.Cancelled.Task); await Pending(refresh);
-        f.Release.TrySetResult(); await Error(() => refresh, "CANCELLED");
-        Check(f.Wrapper.Writes == 0 && (await f.Owner.ReadDetailsAsync(platform)).Profile?.DisplayName == "Saved name");
+        await Wait(f.Entered.Task); cancellation.Cancel();
+        await Error(() => refresh.WaitAsync(TimeSpan.FromSeconds(2)), "CANCELLED");
+        Check(!f.Cancelled.Task.IsCompleted);
+        var joined = f.Refresh();
+        f.Release.TrySetResult(); Check((await joined).Membership.Vip == true);
+        Check(f.Wrapper.Writes == 1 && (await f.Owner.ReadDetailsAsync(platform)).Profile?.DisplayName != "Saved name");
     }
     private static Task WySnapshots()
     {
@@ -315,8 +318,10 @@ public static partial class MusicNativeAccountDetailsTests
     {
         await using var f = new MusicAccountDetailsFixture("wy"); await f.Seed(); f.HoldDisposal = true;
         using var cancellation = new CancellationTokenSource();
-        var task = f.Refresh(cancellation.Token); await Wait(f.Entered.Task); cancellation.Cancel(); await Pending(task);
-        f.Release.TrySetResult(); await Error(() => task, "CANCELLED"); Check(f.Wrapper.Writes == 0);
+        var task = f.Refresh(cancellation.Token); await Wait(f.Entered.Task); cancellation.Cancel();
+        await Error(() => task.WaitAsync(TimeSpan.FromSeconds(2)), "CANCELLED");
+        var joined = f.Refresh();
+        f.Release.TrySetResult(); await joined; Check(f.Wrapper.Writes == 1);
     }
     private static async Task Deadline()
     {
@@ -381,8 +386,12 @@ public static partial class MusicNativeAccountDetailsTests
     {
         await using var f = new MusicAccountDetailsFixture("wy"); await f.Seed(); f.Wrapper.Hold = true;
         using var cancellation = new CancellationTokenSource();
-        var task = f.Refresh(cancellation.Token); await Wait(f.Wrapper.Entered.Task); cancellation.Cancel(); await Pending(task);
-        f.Wrapper.Release.TrySetResult(); await Error(() => task, "COMMIT_UNKNOWN");
+        var task = f.Refresh(cancellation.Token); await Wait(f.Wrapper.Entered.Task); cancellation.Cancel();
+        await Error(() => task.WaitAsync(TimeSpan.FromSeconds(2)), "CANCELLED");
+        var closing = f.Owner.PrepareReadShutdownAsync();
+        Check(!closing.IsCompleted);
+        f.Wrapper.Release.TrySetResult(); await closing;
+        f.Owner.ResumeReads();
         var observed = await f.Owner.ReadDetailsAsync("wy"); Check(observed.Profile?.DisplayName == "Fresh name");
         await Wait(f.Owner.DisposeAsync().AsTask()); Check(f.Wrapper.Disposals == 0);
     }
