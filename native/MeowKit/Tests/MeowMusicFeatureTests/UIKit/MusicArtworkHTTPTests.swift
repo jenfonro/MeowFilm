@@ -16,9 +16,9 @@ private final class MusicArtworkHTTPFixture: @unchecked Sendable {
     private var didStop = false
     var requests: [URLRequest] { lock.lock(); defer { lock.unlock() }; return seen }
 
-    init(host: String = "p1.music.126.net", status: Int = 200, body: Data = Data([1, 2, 3]), length: Int? = nil, held: Bool = false,
+    init(host: String = "p1.music.126.net", url: URL? = nil, status: Int = 200, body: Data = Data([1, 2, 3]), length: Int? = nil, held: Bool = false,
          started: (@Sendable () -> Void)? = nil, stopped: (@Sendable () -> Void)? = nil) {
-        url = URL(string: "https://\(host)/synthetic-\(UUID().uuidString).jpg")!
+        self.url = url ?? URL(string: "https://\(host)/synthetic-\(UUID().uuidString).jpg")!
         self.status = status; self.body = body; self.length = length; self.held = held
         self.started = started; self.stopped = stopped
         MusicArtworkFixtureProtocol.register(self)
@@ -75,6 +75,14 @@ final class MusicArtworkHTTPTests: XCTestCase {
         let value = URLSessionConfiguration.ephemeral
         value.protocolClasses = [MusicArtworkFixtureProtocol.self]
         return value
+    }
+    func testNormalizedHTTPArtworkUsesHTTPSForThePhysicalRequest() async throws {
+        let fixture = MusicArtworkHTTPFixture(); defer { fixture.close() }
+        let source = try XCTUnwrap(MusicArtworkURL.normalized(fixture.url.absoluteString.replacingOccurrences(of: "https:", with: "http:")))
+        let http = MusicArtworkHTTP(configuration: configuration())
+        let data = try await http.read(source)
+        XCTAssertEqual(data, fixture.body)
+        XCTAssertEqual(fixture.requests.map(\.url), [fixture.url])
     }
     func testArtworkRequestsNeverUseOrAdoptAmbientCookiesCredentialsOrHeaders() async throws {
         let fixture = MusicArtworkHTTPFixture(); defer { fixture.close() }
@@ -157,9 +165,12 @@ final class MusicArtworkHTTPTests: XCTestCase {
         }
     }
     func testRejectedResponseStopsItsBodyStream() async throws {
-        for mode in ["status", "length"] {
+        // Sources without a bounded-rendition fallback surface the limit.
+        let qq = URL(string: "https://y.gtimg.cn/music/synthetic-\(UUID().uuidString).jpg")!
+        let processed = URL(string: "https://p1.music.126.net/synthetic-\(UUID().uuidString).jpg?param=200y200")!
+        for (mode, source) in [("status", nil), ("length", qq), ("length", processed)] as [(String, URL?)] {
             let stopped = expectation(description: "\(mode) response stream stopped")
-            let fixture = MusicArtworkHTTPFixture(status: mode == "status" ? 503 : 200, body: Data(),
+            let fixture = MusicArtworkHTTPFixture(url: source, status: mode == "status" ? 503 : 200, body: Data(),
                 length: mode == "length" ? MusicArtworkHTTP.maximumBytes + 1 : nil, held: true,
                 stopped: { stopped.fulfill() })
             let http = MusicArtworkHTTP(configuration: configuration())
@@ -172,11 +183,33 @@ final class MusicArtworkHTTPTests: XCTestCase {
         }
     }
     func testUnknownLengthStillCannotExceedArtworkByteLimit() async throws {
-        let fixture = MusicArtworkHTTPFixture(body: Data(repeating: 1, count: MusicArtworkHTTP.maximumBytes + 1))
+        let fixture = MusicArtworkHTTPFixture(url: URL(string: "https://y.gtimg.cn/music/synthetic-\(UUID().uuidString).jpg")!,
+            body: Data(repeating: 1, count: MusicArtworkHTTP.maximumBytes + 1))
         defer { fixture.close() }
         let http = MusicArtworkHTTP(configuration: configuration())
         do { _ = try await http.read(fixture.url); XCTFail("Oversized stream accepted") }
         catch { XCTAssertEqual((error as? URLError)?.code, .dataLengthExceedsMaximum) }
+    }
+    func testOversizedNeteaseOriginalFallsBackOnceToBoundedSameOriginRendition() async throws {
+        let original = URL(string: "https://p4.music.126.net/synthetic-\(UUID().uuidString)==/109951.png")!
+        let bounded = URL(string: original.absoluteString + "?imageView&thumbnail=1024x1024")!
+        for stillOversized in [false, true] {
+            let first = MusicArtworkHTTPFixture(url: original, body: Data(), length: MusicArtworkHTTP.maximumBytes + 1, held: true)
+            let second = stillOversized
+                ? MusicArtworkHTTPFixture(url: bounded, body: Data(), length: MusicArtworkHTTP.maximumBytes + 1, held: true)
+                : MusicArtworkHTTPFixture(url: bounded, body: Data([4, 5, 6]))
+            defer { first.close(); second.close() }
+            let http = MusicArtworkHTTP(configuration: configuration())
+            do {
+                let data = try await http.read(original)
+                XCTAssertFalse(stillOversized); XCTAssertEqual(data, second.body)
+            } catch {
+                XCTAssertTrue(stillOversized); XCTAssertEqual((error as? URLError)?.code, .dataLengthExceedsMaximum)
+            }
+            XCTAssertEqual(first.requests.map(\.url), [original])
+            XCTAssertEqual(second.requests.map(\.url), [bounded])
+            XCTAssertEqual(second.requests.first?.httpShouldHandleCookies, false)
+        }
     }
     func testCancellingWhileAwaitingBodyStopsActualProtocolExecution() async throws {
         for body in [Data(), Data([1])] {

@@ -123,13 +123,6 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
         let items = try ordered.map { item -> MusicNativeTrackData in
             guard let song = metadata[item.id] else { throw MusicServiceError.targetChanged }
             guard case .object(var row) = try Self.song(song, id: item.id) else { throw MusicServiceError.upstreamInvalid }
-            let album = (song["al"] ?? song["album"]) as? [String: Any]
-            if let text = album?["picUrl"] as? String,
-               let url = URL(string: text), ["https", "http"].contains(url.scheme ?? ""),
-               url.user == nil, url.password == nil, url.fragment == nil,
-               let host = url.host, host == "music.126.net" || host.hasSuffix(".music.126.net") {
-                row["img"] = .string(text)
-            }
             // Credential-free attribution for the existing feedback consumer;
             // this does not itself authorize feedback or include a media URL.
             row["_recommendation"] = .object([

@@ -5,6 +5,15 @@ import MeowMusicFeature
 @testable import MeowMusicPlatform
 
 final class MusicKugouProtocolTests: XCTestCase {
+    func testRawResponseFinalStatusControlsBusinessResult() throws {
+        let good = try MusicQQWire.decode(Data(#"{"status":0,"status":1,"error_code":20018,"error_code":0,"unused":1e400}"#.utf8))
+        XCTAssertNoThrow(try MusicKugouWire.business(good, route: .profile))
+        let denied = try MusicQQWire.decode(Data(#"{"status":1,"error_code":0,"error_code":20018}"#.utf8))
+        XCTAssertThrowsError(try MusicKugouWire.business(denied, route: .profile)) {
+            XCTAssertEqual($0 as? MusicServiceError, .authRequired)
+        }
+    }
+
     func testSignaturesUseExactUTF8BodyAndWebSalt() throws {
         let query = ["z": "汉字", "a": "1", "mid": "123"]
         let body = Data("{\"value\":\"<&\"}".utf8)

@@ -6,7 +6,7 @@ import MeowMusicFeature
 /// Fixed-reference response shapes only; no live account or product fallback data.
 final class MusicNativeHomePresentationTests: XCTestCase {
     private func json(_ text: String) throws -> MJ {
-        try MJ.parse(Data(text.utf8), mode: .upstream)
+        try MJ.parse(Data(text.utf8))
     }
 
     func testHeaderActionsUseDirectoryChannelIdentityAndPreserveCardDestinations() throws {

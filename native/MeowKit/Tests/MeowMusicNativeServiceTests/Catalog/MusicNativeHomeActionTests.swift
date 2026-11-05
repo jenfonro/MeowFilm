@@ -5,7 +5,7 @@ import MeowMusicFeature
 
 final class MusicNativeHomeActionTests: XCTestCase {
     private func json(_ value: String) throws -> MJ {
-        try MJ.parse(Data(value.utf8), mode: .upstream)
+        try MJ.parse(Data(value.utf8))
     }
     private func item(_ row: MJ, channel: Bool = false) throws -> MusicNativePublicBrowseItem {
         try XCTUnwrap(MusicNativePublicBrowseParser.resource(row, index: "fixture", modern: true, channel: channel))

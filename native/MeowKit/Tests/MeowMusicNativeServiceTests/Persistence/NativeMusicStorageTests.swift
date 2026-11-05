@@ -201,8 +201,8 @@ final class NativeMusicStorageTests: XCTestCase {
         XCTAssertEqual(value.fields.count, 3)
         XCTAssertEqual(value["é"].int, 1); XCTAssertEqual(value["e\u{301}"].int, 2)
         XCTAssertEqual(try MusicPlatformProtocol.numericID(value["id"]), "9007199254740993")
-        XCTAssertThrowsError(try MJ.parse(Data("9007199254740993".utf8)))
-        XCTAssertThrowsError(try MJ.parse(Data(#"{"a":1,"a":2}"#.utf8)))
+        XCTAssertEqual(try MJ.parse(Data("9007199254740993".utf8)).id, "9007199254740993")
+        XCTAssertEqual(try MJ.parse(Data(#"{"a":1,"a":2}"#.utf8))["a"].int, 2)
     }
     func testCASConflictAndStaleCollectionRevisionKeepProtectedBytesUnchanged() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)

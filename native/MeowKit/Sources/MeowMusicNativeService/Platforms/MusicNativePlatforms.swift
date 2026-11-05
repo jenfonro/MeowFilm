@@ -137,14 +137,13 @@ actor MusicNativePlatforms {
     func requestData(_ value: MusicNativeHTTPRequest) async throws -> Data {
         try await requestResponse(value).data
     }
-    func request(_ value: MusicNativeHTTPRequest, ignoringUpstreamKeys: Set<String> = [],
+    func request(_ value: MusicNativeHTTPRequest,
                  checkingNeteaseCode: Bool = false, client: MusicNativeClientDevice? = nil) async throws -> MJ {
         let own = epoch
         let response = try await requestResponse(value)
         let result: MJ
         do {
-            result = try MJ.parse(response.data, maximum: 2 * 1024 * 1024, mode: .upstream,
-                                  ignoringUpstreamKeys: ignoringUpstreamKeys)
+            result = try MJ.parse(response.data, maximum: 2 * 1024 * 1024)
             try musicRequire(result.isObject, .upstreamInvalid)
         } catch { throw MusicServiceError.upstreamInvalid }
         // Keep the response header beside its own body across suspension.
@@ -174,12 +173,6 @@ actor MusicNativePlatforms {
         return try await request(.init(url: URL(string: "https://interfacepc.music.163.com/eapi/" + path.dropFirst(5))!, method: "POST",
             headers: ["Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
                       "User-Agent": "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)", "Cookie": cookie], body: body),
-            // The official toplist and some official chart playlist details
-            // repeat these unused fields with different values. Discard them
-            // only on their exact routes, without passing identities through
-            // JSONSerialization/Double rounding.
-            ignoringUpstreamKeys: path == "/api/toplist" ? ["updateFrequency"]
-                : path == "/api/v6/playlist/detail" ? ["alg"] : [],
             checkingNeteaseCode: true, client: client)
     }
     func kg(_ path: String, _ params: [String: String], lyric: Bool = false, clear: Bool = false) async throws -> MJ {

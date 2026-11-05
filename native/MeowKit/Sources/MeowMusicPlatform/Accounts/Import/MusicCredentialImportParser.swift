@@ -227,11 +227,20 @@ enum MusicCredentialImportParser {
         guard Set(value.keys).isSubset(of: allowed) else { throw MusicCredentialImportError.invalidFormat }
     }
     private static func identity(_ value: Any?) throws -> String {
-        do { return try MusicQQWire.id(value) } catch { throw MusicCredentialImportError.identityUnconfirmed }
+        do { return try MusicQQWire.id(integerToken(value)) } catch { throw MusicCredentialImportError.identityUnconfirmed }
     }
     private static func scalar(_ value: Any) throws -> String {
         if let value = value as? String { return value }
-        return String(try MusicQQWire.integer(value))
+        return String(try MusicQQWire.integer(integerToken(value)))
+    }
+    /// Decimal/exponent NSNumber values are not integer tokens. Opaque
+    /// JSONNumber values also fail the ID consumer rather than being rounded;
+    /// neither restriction applies to unused metadata.
+    private static func integerToken(_ value: Any?) throws -> Any? {
+        if let number = value as? NSNumber, ["d", "f"].contains(String(cString: number.objCType)) {
+            throw MusicCredentialImportError.identityUnconfirmed
+        }
+        return value
     }
     private static func text(_ value: Any?, maximum: Int = 8192, empty: Bool = false) throws -> String {
         guard let value = value as? String, empty || !value.isEmpty, value.utf8.count <= maximum,

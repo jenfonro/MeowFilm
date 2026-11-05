@@ -180,7 +180,8 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             try musicRequire(page.items.count <= 30 && page.items.allSatisfy { $0.platform == platform.rawValue }, .upstreamInvalid)
             let items = try page.items.map { raw -> MusicPublicBrowseItem in
                 let track = try remember(MusicModel.normalize(raw))
-                return .init(id: track.songId, title: track.title, subtitle: track.artist, content: .track(track))
+                return .init(id: track.songId, title: track.title, subtitle: track.artist, artwork: track.artwork,
+                             content: .track(track))
             }
             let next = try page.cursor.map { value in
                 try musicRequire(!items.isEmpty && value != remote, .staleResult)
@@ -220,7 +221,10 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
                 let pending = tab.items.contains { item in
                     switch item.content {
                     case .songID: return true
-                    case .collection(let value): return value.title.isEmpty
+                    // The selected tab was already enriched; an absent upstream
+                    // cover there is final. Other tabs fill covers when chosen.
+                    case .collection(let value):
+                        return value.title.isEmpty || (tab.id != section.selectedTab && item.needsPlaylistSummary)
                     default: return false
                     }
                 }
@@ -313,11 +317,7 @@ enum MusicNativePublicBrowseSupport {
         digestData(value.bytes)
     }
     static func artwork(_ value: MJ) -> URL? {
-        guard value.isString, value.string.utf8.count <= 4096,
-              var url = URLComponents(string: value.string), url.user == nil, url.password == nil,
-              url.port == nil || url.port == 443, url.fragment == nil,
-              let host = url.host, !host.isEmpty,
-              url.scheme == "http" || url.scheme == "https" else { return nil }
-        url.scheme = "https"; return url.url
+        guard value.isString, value.string.utf8.count <= 4096 else { return nil }
+        return MusicArtworkURL.normalized(value.string)
     }
 }

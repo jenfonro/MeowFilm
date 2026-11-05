@@ -93,7 +93,8 @@ extension MusicModel {
                 MusicNativePattern.matches(MusicNativePattern.resourceScalar, v.string)
         }
         for key in keys where scalar(raw[key], 4096) { out[key] = raw[key] }
-        if !publicURL(raw["img"]).string.isEmpty { out["img"] = raw["img"] }
+        let image = publicURL(raw["img"])
+        if !image.string.isEmpty { out["img"] = image }
         if out["source"].string == "mg" {
             for key in ["contentId", "md5"] where resource(raw[key]) { out[key] = raw[key] }
             let fields = ["formatType", "resourceType", "size", "androidSize", "iosSize", "asize", "isize",

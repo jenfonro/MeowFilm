@@ -5,6 +5,27 @@ import MeowMusicFeature
 @testable import MeowMusicPlatform
 
 final class MusicNeteaseProtocolTests: XCTestCase {
+    func testPlainAndEncryptedResponsesUseFinalFieldsIncludingNullAndLargeMetadata() throws {
+        let raw = Data(#"{"code":500,"code":200,"playlist":{"id":42,"tracks":[{"alg":null,"\u0061lg":"ops-music-1","picUrl":null,"picUrl":"https://p1.music.126.net/synthetic.jpg"}],"unused":1e400}}"#.utf8)
+        let encrypted = try MusicNeteaseFixture.aes(raw, key: Data("e82ckenh8dichen8".utf8), encrypt: true)
+        for bytes in [raw, encrypted] {
+            let root = try MusicNeteaseWire.response(.init(status: 200, data: bytes))
+            let playlist = try MusicQQWire.object(root["playlist"])
+            let track = try XCTUnwrap((playlist["tracks"] as? [[String: Any]])?.first)
+            XCTAssertEqual(track["alg"] as? String, "ops-music-1")
+            XCTAssertEqual(track["picUrl"] as? String, "https://p1.music.126.net/synthetic.jpg")
+        }
+        for raw in [#"{"code":200,"code":500}"#, #"{"code":200,"data":{"code":200,"code":500}}"#] {
+            XCTAssertThrowsError(try MusicNeteaseWire.response(.init(status: 200, data: Data(raw.utf8)))) {
+                XCTAssertEqual($0 as? MusicServiceError, .upstreamFailed)
+            }
+        }
+        for token in ["1.00000000000000001", "9007199254740991.1", "1e-400", "1e400"] {
+            let root = try MusicQQWire.decode(Data(#"{"id":\#(token)}"#.utf8))
+            XCTAssertThrowsError(try MusicNeteaseWire.id(root["id"]), token)
+        }
+    }
+
     func testHandshakeAuthenticatesNumericAndStringMilliseconds() async throws {
         for numeric in [true, false] {
             let clock = MusicAccountTestClock()

@@ -52,6 +52,36 @@ final class MusicNativeClientContextTests: XCTestCase {
         catch { XCTAssertEqual(error as? MusicServiceError, .storageConflict) }
         XCTAssertNil(failed.peek()); value.close()
     }
+    func testRestoredClientDocumentsUseFinalSchemaAndDeviceForBothPlatforms() async throws {
+        for platform in [MusicAccountPlatform.netease, .kugou] {
+            let document = QQPublicPersistenceMemory()
+            let first = NativeMusicClientService(documents: [platform: document])
+            try first.setAccess(available: true, generation: 1)
+            let device = try await first.nativeClientDevice(platform: platform)
+            first.close()
+            let valid = String(decoding: try XCTUnwrap(document.peek()), as: UTF8.self)
+            let repeated = valid.replacingOccurrences(of: "\"schema\":1", with: "\"schema\":2,\"schema\":1")
+                .replacingOccurrences(of: "\"device\":{", with: "\"device\":null,\"device\":{")
+            XCTAssertNotEqual(valid, repeated)
+            document.replace(Data(repeated.utf8))
+            let restored = NativeMusicClientService(documents: [platform: document])
+            try restored.setAccess(available: true, generation: 1)
+            let current = try await restored.nativeClientDevice(platform: platform)
+            XCTAssertEqual(current.fields, device.fields)
+            XCTAssertEqual(document.counts().commits, 1, "Reading must not regenerate or rewrite the device")
+            restored.close()
+            for bad in [valid.replacingOccurrences(of: "\"schema\":1", with: "\"schema\":1,\"schema\":2"),
+                        String(valid.dropLast()) + #","device":{}}"#] {
+                document.replace(Data(bad.utf8))
+                let invalid = NativeMusicClientService(documents: [platform: document])
+                try invalid.setAccess(available: true, generation: 1)
+                do { _ = try await invalid.nativeClientDevice(platform: platform); XCTFail("Final invalid document accepted") }
+                catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+                XCTAssertEqual(document.counts().commits, 1)
+                invalid.close()
+            }
+        }
+    }
     func testTrustedClientUpdateChecksOriginIdentityRevisionAndAdmissionWithoutAcceptingAuth() async throws {
         let document = QQPublicPersistenceMemory(), value = try owner(document)
         let first = try await value.nativeClientDevice(platform: .netease)
