@@ -2,7 +2,6 @@
 import UIKit
 import Combine
 import MeowUI
-import ImageIO
 
 @MainActor
 public class MusicPageViewController: PageViewController {
@@ -16,107 +15,25 @@ public class MusicPageViewController: PageViewController {
 @MainActor
 enum MusicArtworkImages {
     nonisolated private static let http = MusicArtworkHTTP()
-    private static let cache: NSCache<NSURL, UIImage> = {
-        let value = NSCache<NSURL, UIImage>()
-        value.countLimit = 128
-        value.totalCostLimit = 24 * 1_024 * 1_024
-        return value
-    }()
+    fileprivate static let images = ArtworkImages(maximumBytes: MusicArtworkHTTP.maximumBytes) {
+        try await http.read($0)
+    }
 
-    static func cached(_ url: URL) -> UIImage? { cache.object(forKey: url as NSURL) }
+    static func cached(_ url: URL) -> UIImage? { images.cached(url) }
 
     static func read(_ url: URL, cachedData: Data? = nil) async throws -> (UIImage, Data?) {
-        if cachedData == nil, let image = cached(url) { return (image, nil) }
-        let (image, data) = try await readBytes(url, cachedData: cachedData)
-        try Task.checkCancellation()
-        let cost = (image.cgImage?.width ?? 0) * (image.cgImage?.height ?? 0) * 4
-        cache.setObject(image, forKey: url as NSURL, cost: cost)
-        return (image, data)
-    }
-
-    /// Cancellation follows the physical read; decoding stays off the UI actor.
-    nonisolated private static func readBytes(_ url: URL, cachedData: Data?) async throws -> (UIImage, Data) {
-        let maximum = MusicArtworkHTTP.maximumBytes
-        if let cachedData, cachedData.count <= maximum, let value = decode(cachedData) {
-            try Task.checkCancellation()
-            return (value, cachedData)
-        }
-        let data = try await http.read(url)
-        try Task.checkCancellation()
-        guard let value = decode(data) else { throw URLError(.cannotDecodeContentData) }
-        return (value, data)
-    }
-
-    nonisolated private static func decode(_ data: Data) -> UIImage? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceThumbnailMaxPixelSize: 1_024,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true,
-              ] as CFDictionary) else { return nil }
-        return UIImage(cgImage: image)
+        try await images.read(url, cachedData: cachedData)
     }
 }
 
 @MainActor
-final class MusicArtworkView: UIImageView {
-    var onImage: ((UIImage, Data?) -> Void)?
-    var onFailure: ((URL) -> Void)?
-    private var task: Task<Void, Never>?
-    private var representedURL: URL?
-    private var completed = false
-
+final class MusicArtworkView: ArtworkView {
     init(size: CGFloat = 48) {
-        super.init(frame: .zero)
-        contentMode = .scaleAspectFill
-        clipsToBounds = true
-        layer.cornerRadius = max(8, size * 0.14)
-        backgroundColor = UIColor.white.withAlphaComponent(0.18)
-        if size > 0 {
-            NSLayoutConstraint.activate([
-                widthAnchor.constraint(equalToConstant: size),
-                heightAnchor.constraint(equalToConstant: size),
-            ])
-        }
+        super.init(size: size, images: MusicArtworkImages.images)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func load(_ url: URL?, cachedData: Data? = nil) {
-        if representedURL == url, task != nil || completed { return }
-        task?.cancel()
-        task = nil
-        representedURL = url
-        completed = false
-        image = nil
-        guard let url else { completed = true; return }
-        if cachedData == nil, let cached = MusicArtworkImages.cached(url) {
-            image = cached
-            completed = true
-            onImage?(cached, nil)
-            return
-        }
-        task = Task { [weak self] in
-            do {
-                let (value, data) = try await MusicArtworkImages.read(url, cachedData: cachedData)
-                try Task.checkCancellation()
-                guard self?.representedURL == url else { return }
-                self?.image = value
-                self?.task = nil
-                self?.completed = true
-                self?.onImage?(value, data)
-            } catch {
-                guard !Task.isCancelled, self?.representedURL == url else { return }
-                self?.task = nil
-                self?.completed = true
-                self?.onFailure?(url)
-            }
-        }
-    }
-
-    deinit { task?.cancel() }
 }
 
 @MainActor

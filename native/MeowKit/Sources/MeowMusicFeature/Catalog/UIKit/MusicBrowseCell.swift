@@ -23,6 +23,8 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     private var rankingShowsFallback = false
     private var currentTheme = PageTheme()
     private var openAction: (() -> Void)?
+    private lazy var pressFeedback = PressFeedback(view: contentView)
+    private var embeddedTouchPressed = false
     private(set) var itemID = ""
     var bannerTrailingInset: CGFloat = 14 {
         didSet {
@@ -69,12 +71,78 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    override var isHighlighted: Bool {
+        didSet { applyPressFeedback() }
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        resetPressFeedback()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard window != nil else { resetPressFeedback(); return }
+        var ancestor = superview
+        while let view = ancestor {
+            if let scroll = view as? UIScrollView {
+                scroll.delaysContentTouches = false
+                scroll.canCancelContentTouches = true
+            }
+            ancestor = view.superview
+        }
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesBegan(touches, with: event)
+        guard openAction != nil else { return }
+        embeddedTouchPressed = true
+        applyPressFeedback()
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesMoved(touches, with: event)
+        guard openAction != nil, let touch = touches.first else { return }
+        embeddedTouchPressed = bounds.contains(touch.location(in: self))
+        applyPressFeedback()
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesEnded(touches, with: event)
+        resetPressFeedback()
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesCancelled(touches, with: event)
+        resetPressFeedback()
+    }
+
+    func resetPressFeedback() {
+        embeddedTouchPressed = false
+        isHighlighted = false
+        pressFeedback.reset()
+        for button in previews.arrangedSubviews.compactMap({ $0 as? MusicBrowsePreviewButton }) {
+            button.resetPressFeedback()
+        }
+    }
+
+    private func applyPressFeedback() {
+        // Grouped song previews own their feedback so their rows never scale twice.
+        if previews.arrangedSubviews.contains(where: { ($0 as? MusicBrowsePreviewButton)?.isHighlighted == true }) {
+            pressFeedback.reset()
+        } else {
+            pressFeedback.setPressed(isHighlighted || embeddedTouchPressed)
+        }
+        if style == .songColumns || style == .vipSongs || style == .list { applyCardSurface() }
+    }
+
     func updateArtwork(_ url: URL?) { loadArtwork(url) }
 
     func configure(item: MusicPublicBrowseItem, layout: MusicPublicBrowseSection.Layout,
                    theme: PageTheme, artworkURL: URL? = nil,
                    onPreview: ((MusicRemoteTrack) -> Void)? = nil, showsPlayButton: Bool = true,
                    onPlay: @escaping () -> Void) {
+        if itemID != item.id || style != layout { resetPressFeedback() }
         style = layout; action = onPlay; itemID = item.id; currentTheme = theme
         artwork.contentMode = layout == .banner ? .scaleAspectFit : .scaleAspectFill
         artwork.layer.cornerRadius = layout == .banner ? 0 : 8
@@ -112,9 +180,12 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
                 button.configure(track: track, theme: theme) { onPreview?(track) }
                 return button
             }
-            return MusicBrowsePreviewButton(track: track, theme: theme) { onPreview?(track) }
+            let button = MusicBrowsePreviewButton(track: track, theme: theme) { onPreview?(track) }
+            button.onHighlightChanged = { [weak self] in self?.applyPressFeedback() }
+            return button
         }
         for button in available {
+            button.resetPressFeedback()
             previews.removeArrangedSubview(button); button.removeFromSuperview()
         }
         for (index, button) in buttons.enumerated() {
@@ -175,6 +246,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         CATransaction.commit()
         applyTextGradient()
         applyCardSurface()
+        applyPressFeedback()
         setNeedsLayout()
     }
 
@@ -236,8 +308,10 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             contentView.layer.cornerRadius = 18
             contentView.clipsToBounds = true
         } else {
-            contentView.backgroundColor = .clear
-            contentView.layer.cornerRadius = 0
+            let row = style == .songColumns || style == .vipSongs || style == .list
+            contentView.backgroundColor = row && (isHighlighted || embeddedTouchPressed)
+                ? UIColor(currentTheme.chip) : .clear
+            contentView.layer.cornerRadius = row ? 8 : 0
             contentView.clipsToBounds = false
         }
     }
@@ -251,7 +325,10 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         openAction = action
     }
 
-    @objc private func open() { openAction?() }
+    @objc private func open() {
+        resetPressFeedback()
+        openAction?()
+    }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         var node = touch.view
@@ -263,7 +340,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     }
 
     override func layoutSubviews() {
-        super.layoutSubviews()
+        pressFeedback.layoutAtRest { super.layoutSubviews() }
         let width = bounds.width, height = bounds.height
         let row = style == .songColumns || style == .vipSongs || style == .list
         if row {
@@ -504,23 +581,46 @@ private enum MusicBrowseFeaturePalette {
 private final class MusicBrowsePreviewButton: UIButton {
     private let cover = MusicArtworkView(size: 40)
     private let title = UILabel(), artist = UILabel()
+    private let row = UIStackView()
+    private lazy var pressFeedback = PressFeedback(view: row)
+    private var pressedColor = UIColor.clear
     private var action: (() -> Void)?
     private(set) var reference: MusicReference
+    var onHighlightChanged: (() -> Void)?
 
     init(track: MusicRemoteTrack, theme: PageTheme, action: @escaping () -> Void) {
         reference = track.ref
         super.init(frame: .zero)
         title.font = .systemFont(ofSize: 14); artist.font = .systemFont(ofSize: 11)
         let copy = UIStackView(arrangedSubviews: [title, artist]); copy.axis = .vertical; copy.spacing = 3
-        let row = UIStackView(arrangedSubviews: [cover, copy]); row.spacing = 10; row.alignment = .center
+        row.addArrangedSubview(cover); row.addArrangedSubview(copy)
+        row.spacing = 10; row.alignment = .center
         row.isUserInteractionEnabled = false
+        layer.cornerRadius = 8
         addSubview(row); row.pinEdges(to: self, insets: UIEdgeInsets(top: 3, left: 0, bottom: 3, right: 8))
         addAction(UIAction { [weak self] _ in self?.action?() }, for: .touchUpInside)
         configure(track: track, theme: theme, action: action)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var isHighlighted: Bool {
+        didSet {
+            pressFeedback.setPressed(isHighlighted)
+            backgroundColor = isHighlighted ? pressedColor : .clear
+            onHighlightChanged?()
+        }
+    }
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { resetPressFeedback() }
+    }
+    func resetPressFeedback() {
+        isHighlighted = false
+        pressFeedback.reset()
+    }
     func configure(track: MusicRemoteTrack, theme: PageTheme, action: @escaping () -> Void) {
         reference = track.ref; self.action = action
+        pressedColor = UIColor(theme.chip)
+        backgroundColor = isHighlighted ? pressedColor : .clear
         cover.load(track.artwork)
         title.text = track.title; title.textColor = UIColor(theme.ink)
         artist.text = track.artist; artist.textColor = UIColor(theme.muted)

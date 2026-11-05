@@ -112,7 +112,7 @@ def check(root):
         if not imported <= dependencies:
             failures.append("Undeclared imports for {}: {}".format(target, sorted(imported - dependencies)))
         if target in SHARED_TARGETS:
-            if any(name.startswith("MeowMusic") for name in dependencies):
+            if any(name.startswith(("MeowMusic", "MeowFilm")) for name in dependencies):
                 failures.append("Shared target depends on business: " + target)
     def walk(name, path):
         if name in path:

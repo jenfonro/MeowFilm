@@ -1,6 +1,7 @@
 import UIKit
 import MeowUI
 import MeowMusicFeature
+import MeowFilmFeature
 
 /// The App owns primary chrome. Domain controllers own content and business
 /// tasks; retained containment forwards only the visible page's UIKit lifecycle.
@@ -9,10 +10,13 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
     var onSelectionChanged: ((MeowfilmPrimaryPage, TimeInterval) -> Void)?
     private var pendingChannel: MusicPublicBrowseChannel?
     private var channels: MusicChannelsViewController? {
-        pages.page(at: 1) as? MusicChannelsViewController
+        pages.page(at: index(of: .channels)) as? MusicChannelsViewController
+    }
+    private var film: FilmHomeViewController? {
+        pages.page(at: index(of: .film)) as? FilmHomeViewController
     }
     private var library: MusicLibraryViewController? {
-        pages.page(at: 2) as? MusicLibraryViewController
+        pages.page(at: index(of: .library)) as? MusicLibraryViewController
     }
     private let pages: RetainedPagesController
     private let openMenu: () -> Void
@@ -22,6 +26,7 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
     private lazy var search = PageHeaderTextButton(title: "") { [weak self] in self?.openSearch() }
     private lazy var titleButton = PageHeaderTextButton(title: "") {}
     private let channelTitleHost = UIView()
+    private let filmTitleHost = UIView()
 
     init(pageFactories: [@MainActor () -> UIViewController], themeProvider: any PageThemeProviding,
          openMenu: @escaping () -> Void, openSearch: @escaping () -> Void) {
@@ -138,6 +143,11 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
                 switcher.pinEdges(to: channelTitleHost)
             }
         }
+        if selectedPage == .film, let switcher = film?.sourceSwitcherView, switcher.superview !== filmTitleHost {
+            filmTitleHost.subviews.forEach { $0.removeFromSuperview() }
+            filmTitleHost.addSubview(switcher)
+            switcher.pinEdges(to: filmTitleHost)
+        }
         if selectedPage == .channels, let channel = pendingChannel, let channels {
             pendingChannel = nil
             channels.select(channel)
@@ -148,7 +158,8 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         guard isViewLoaded else { return }
         let apply = {
             self.pageHeader.setTitleView(self.selectedPage == .recommend ? self.search :
-                self.selectedPage == .channels ? self.channelTitleHost : self.titleButton)
+                self.selectedPage == .channels ? self.channelTitleHost :
+                self.selectedPage == .film ? self.filmTitleHost : self.titleButton)
             self.pageHeader.setTrailing(self.selectedPage == .recommend ? [self.feature] :
                 self.selectedPage == .channels ? [self.channelMenu] :
                 self.selectedPage == .library ? [self.add] : [])
@@ -163,5 +174,9 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         } else {
             apply()
         }
+    }
+
+    private func index(of page: MeowfilmPrimaryPage) -> Int {
+        MeowfilmPrimaryPage.allCases.firstIndex(of: page)!
     }
 }

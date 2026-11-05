@@ -5,11 +5,19 @@ import MeowPlayback
 import MeowMusicFeature
 import MeowMusicPlatform
 import MeowMusicNativeService
+import MeowFilmFeature
+import MeowUI
 
 @MainActor
 final class MeowfilmAssembly: ObservableObject {
     let playback = PlaybackController(volumePreferences: PlaybackVolumePreferences())
     let appearance = MusicAppearancePreferencesStore()
+    let filmLibrary = FilmLibrary()
+    let filmSources: [any FilmSource] = [DoubanFilmSource()]
+    private let filmHTTP = FilmHTTP()
+    lazy var filmImages = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { [filmHTTP] in
+        try await filmHTTP.readArtwork($0)
+    }
     @Published private(set) var music: MusicViewModel?
     @Published private(set) var startupFailed = false
     private var resources: MeowfilmResources?

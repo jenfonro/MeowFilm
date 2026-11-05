@@ -49,6 +49,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `native/MeowKit/` — iOS Swift Package
   - `MeowContracts`、`MeowJSON`、`MeowStorage`、`MeowAccounts`、`MeowPlayback`、`MeowUI` — 共享能力
   - `MeowMusicFeature`、`MeowMusicPlatform`、`MeowMusicNativeService` — 音乐界面、平台和原生业务
+  - `MeowFilmFeature` — 影视数据源、首页、详情和收藏
 - `apps/windows/app/` — Windows 应用入口与装配
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约
