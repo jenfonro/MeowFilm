@@ -55,6 +55,31 @@ public static class ArtworkTests
                 Check(ReferenceEquals(first.Image, second.Image)); Equal(1, handler.Count);
                 first.Dispose(); Check(second.Image.IsFrozen);
             }));
+        yield return new("Native artwork requests bounded NetEase thumbnails without changing stored identity or other URLs", () => Sta(async () =>
+        {
+            foreach (var (input, requested) in new[]
+            {
+                ("https://p1.music.126.net/avatar/109951100000001.jpg", "https://p1.music.126.net/avatar/109951100000001.jpg?param=512y512"),
+                ("https://p2.music.163.net/cover/109951100000002.png", "https://p2.music.163.net/cover/109951100000002.png?param=512y512"),
+                ("https://images.invalid/cover/109951100000002.jpg", "https://images.invalid/cover/109951100000002.jpg"),
+                ("https://p1.music.126.net/obj/decoration.png", "https://p1.music.126.net/obj/decoration.png"),
+                ("https://p1.music.126.net/cover/109951100000002.jpg?signature=synthetic", "https://p1.music.126.net/cover/109951100000002.jpg?signature=synthetic"),
+                ("https://p1.music.126.net.evil.invalid/cover/109951100000002.jpg", "https://p1.music.126.net.evil.invalid/cover/109951100000002.jpg")
+            })
+            {
+                int calls = 0;
+                await using var service = new ArtworkService(new Handler((request, _) =>
+                {
+                    calls++;
+                    Equal(requested, request.RequestUri!.AbsoluteUri);
+                    return Task.FromResult(Reply(Encode("png", 512, 512)));
+                }));
+                using var first = await service.AcquireAsync(input);
+                using var second = await service.AcquireAsync(input);
+                Equal(512, first.Image.PixelWidth);
+                Equal(1, calls); Check(ReferenceEquals(first.Image, second.Image));
+            }
+        }));
         yield return new("Native artwork public-only address rejection happens before transport", async () =>
         {
             var handler = new Handler((_, _) => throw new InvalidOperationException("No HTTP expected"));

@@ -20,7 +20,7 @@ public static class FilmPresentationTests
             () => MusicQualityConsumerTests.Sta(SkeletonPresentation));
         yield return new("film-presentation: transparent four-rail home matches card and paging interactions",
             () => MusicQualityConsumerTests.Sta(HomePresentation));
-        yield return new("film-presentation: more opens data while all cards open empty Douban detail",
+        yield return new("film-presentation: more opens data while all cards open the playback page",
             () => MusicQualityConsumerTests.Sta(DataNavigation));
     }
 
@@ -217,11 +217,11 @@ public static class FilmPresentationTests
             var cardButton = (Button)homeCard.FindName("HitButton");
             cardButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Drain();
-            Check(routes.SequenceEqual([FilmCapability.DataRoute, FilmCapability.DoubanRoute]),
+            Check(routes.SequenceEqual([FilmCapability.DataRoute, FilmCapability.PlaybackRoute]),
                 "more and cards request their distinct internal destinations");
             Check(module.ActiveData.Key == "movie" &&
-                ReferenceEquals(module.ActiveDoubanItem, homeItem),
-                "both entry points retain their data and Douban contexts");
+                ReferenceEquals(module.Playback?.Item, homeItem),
+                "both entry points retain their data and playback contexts");
 
             await module.NavigateAsync(FilmCapability.DataRoute, default);
             window.UpdateLayout();
@@ -276,9 +276,9 @@ public static class FilmPresentationTests
             var dataItem = (FilmCardItem)dataCard.DataContext;
             ((Button)dataCard.FindName("HitButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Drain();
-            Check(routes.Count == routeCount + 1 && routes[^1] == FilmCapability.DoubanRoute &&
-                ReferenceEquals(module.ActiveDoubanItem, dataItem),
-                "data cards use the same internal Douban destination and retain the selected id");
+            Check(routes.Count == routeCount + 1 && routes[^1] == FilmCapability.PlaybackRoute &&
+                ReferenceEquals(module.Playback?.Item, dataItem),
+                "data cards use the same internal playback destination and retain the selected id");
 
             pageAction.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Until(() => module.ActiveData.Items.Count == 48, "load more appends another page");
@@ -306,20 +306,20 @@ public static class FilmPresentationTests
                 { Title: "影片数据", SearchVisible: false, SearchEnabled: false },
                 "shell header contribution follows the data route");
 
-            await module.NavigateAsync(FilmCapability.DoubanRoute, default);
+            await module.NavigateAsync(FilmCapability.PlaybackRoute, default);
             window.UpdateLayout();
             await Drain();
-            var douban = (Grid)view.FindName("DoubanPage");
-            Check(module.Heading == "豆瓣" && module.IsDouban &&
+            var playback = (Grid)view.FindName("PlaybackPage");
+            Check(module.Heading == "播放页" && module.IsPlayback &&
                 home.Visibility == Visibility.Collapsed &&
                 data.Visibility == Visibility.Collapsed &&
-                douban.Visibility == Visibility.Visible &&
-                douban.Background is SolidColorBrush { Color.A: 0 } &&
-                douban.Children.Count == 0,
-                "Douban route is an empty transparent internal page");
+                playback.Visibility == Visibility.Visible &&
+                playback.Background is SolidColorBrush { Color.A: 0 } &&
+                Visuals(playback).OfType<FilmPlaybackView>().Single().DataContext == module.Playback,
+                "playback route presents its selected film through the native page");
             Check(((IDesktopHeaderSource)view).Header is
-                { Title: "豆瓣", SearchVisible: false, SearchEnabled: false },
-                "shell header contribution follows the Douban route");
+                { Title: "播放页", SearchVisible: false, SearchEnabled: false },
+                "shell header contribution follows the playback route");
         }
         finally
         {

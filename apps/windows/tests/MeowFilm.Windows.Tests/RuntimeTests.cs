@@ -24,7 +24,7 @@ public static class RuntimeTests
         return path;
     }
     private const string Identity = "aggregate";
-    private static RuntimeModule[] Modules => [new("music", "0.7.0"), new("cat", "0.1.0")];
+    private static RuntimeModule[] Modules => [new("music", "0.7.0"), new("cat", "0.1.0"), new("source", "0.1.0")];
     private static string[] Namespaces => ["music.library.v1", "music.accounts.v1"];
     private static string ScriptData() => Path.Combine(NewData(), "script-runtime");
 
@@ -51,6 +51,10 @@ public static class RuntimeTests
                 using var catStatus = JsonDocument.Parse(cat.GetProperty("data").GetString()!);
                 BridgeTests.Equal(Path.GetFullPath(Path.Combine(scriptData, "settings.json")),
                     catStatus.RootElement.GetProperty("settingsPath").GetString());
+                var sourceStatus = await runtime.CallAsync("source.runtime.status", new { });
+                BridgeTests.Equal(true, sourceStatus.GetProperty("ok").GetBoolean());
+                BridgeTests.Equal("source.runtime.v1", sourceStatus.GetProperty("contract").GetString());
+                BridgeTests.Equal(0, sourceStatus.GetProperty("instances").GetArrayLength());
                 foreach (var method in new[] { "music.library.list", "music.queue.get", "music.accounts.list",
                     "music.catalog.search", "film.script.status", "film.sources.list", "reader.rules.reset",
                     "reader.sources.list", "reader.content.chapter", "missing.operation" })

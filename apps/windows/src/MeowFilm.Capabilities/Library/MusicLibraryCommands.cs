@@ -21,6 +21,8 @@ public sealed partial class MusicLibraryOwner
             return HistoryCommand(method, parameters, document);
         if (method is "music.settings.get" or "music.settings.save")
             return SettingsCommand(method, parameters, document);
+        if (method is "music.catalogSource.settings.get" or "music.catalogSource.settings.save")
+            return CatalogSourceCommand(method, parameters, document);
         if (method is "music.officialSources.settings.get" or "music.officialSources.settings.save")
             return OfficialSourcesCommand(method, parameters, document, cancellationToken);
         if (method is "music.quality.settings.get" or "music.quality.settings.save")

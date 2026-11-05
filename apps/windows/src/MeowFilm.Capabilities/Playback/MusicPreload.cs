@@ -74,7 +74,7 @@ public sealed partial class MusicCapability
 
     private void ObserveMusicPreload()
     {
-        if (musicRecovery is not { Media.Target.Official: true } state || !CurrentRecovery(state) ||
+        if (musicRecovery is not { Media.Target: not null } state || !CurrentRecovery(state) ||
             state.Pending is not null || state.Recovering ||
             !IsPlaying || DurationSeconds <= 0 || DurationSeconds - PositionSeconds is <= 0 or > 20 ||
             mode == 3 || ReferenceEquals(preloadedFrom, state)) return;
@@ -102,7 +102,7 @@ public sealed partial class MusicCapability
             attempt.TargetEntry = MusicDto.Text(entry, "id");
             attempt.QueueObserved = true;
             var song = SongRow.Read(entry.GetProperty("song"), attempt.TargetEntry);
-            if (targetInstallation is not null || recordingChoices.Keys.Any(key =>
+            if (recordingChoices.Keys.Any(key =>
                 key.StartsWith(song.Id + "\0", StringComparison.Ordinal))) return;
             var media = await ResolveAutomaticOfficial(song,
                 state.Media!.Target!.PolicyRequest,

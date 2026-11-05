@@ -16,7 +16,7 @@ public sealed partial class MusicLibraryOwner
     }
     private static void ValidateQualityPolicy(JsonObject policy) => MusicQualityPolicy.Validate(policy);
     private string QualitySignature(JsonObject doc) => LJ.Digest(LJ.Obj(
-        ("contract", "music.quality.v1"), ("scope", scope), ("policy", QualityPolicy(doc)), ("online", Settings(doc))));
+        ("contract", "music.quality.v1"), ("scope", scope), ("policy", QualityPolicy(doc))));
     private JsonObject QualityReply(JsonObject doc) => LJ.Obj(("settings", QualityPolicy(doc)),
         ("signature", QualitySignature(doc)), ("onlineSettings", Settings(doc)));
 

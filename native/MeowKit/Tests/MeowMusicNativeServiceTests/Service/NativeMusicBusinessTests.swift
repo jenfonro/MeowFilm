@@ -32,7 +32,7 @@ final class NativeMusicBusinessTests: XCTestCase {
             func count() -> Int { lock.lock(); defer { lock.unlock() }; return value }
         }
         let counter = Counter()
-        let document = MusicNativeEncryptedDocument(storeFactory: { counter.hit(); throw MusicServiceError.accessUnavailable })
+        let document = MusicNativeLibraryDocument(storeFactory: { counter.hit(); throw MusicServiceError.accessUnavailable })
         let service = NativeMusicService(document: document, qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork())
         XCTAssertEqual(counter.count(), 0)
         do { _ = try await service.state(); XCTFail("locked") } catch { XCTAssertEqual(error as? MusicServiceError, .accessUnavailable) }

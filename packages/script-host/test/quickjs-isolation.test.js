@@ -246,12 +246,16 @@ test('guest constructors, eval and prototype traversal cannot reach Node or the 
       ]) { try { run(); missing.push(false); } catch { missing.push(true); } }
       return { missing, process:typeof process, require:typeof require, module:typeof module,
         invocation:typeof __meowInvocation, hostBridge:typeof __meowBridge,
+        taskContext:typeof __meowTaskContext,
+        ownTaskContext:Object.hasOwn(globalThis, '__meowTaskContext'),
+        dynamicTaskContext:Function('return typeof __meowTaskContext')(),
         guestEval:eval('21*2') };
     }`,
   }) });
   assert.deepEqual(await host.invoke(target()), {
     missing: [true, true, true, true], process: 'undefined', require: 'undefined',
     module: 'undefined', invocation: 'undefined', hostBridge: 'undefined', guestEval: 42,
+    taskContext: 'undefined', ownTaskContext: false, dynamicTaskContext: 'undefined',
   });
 });
 

@@ -68,6 +68,11 @@ public static partial class MusicUiTests
             {
                 for (var i = 0; i < 3; i++) refreshBindings.Invoke(f.Module, null);
                 True(Equals(0, count), "repeated unchanged bindings publish no header change");
+                await f.Module.SetCatalogSourceAsync("kg");
+                Equal("kg", f.Module.CatalogSourcePlatform);
+                Equal(0, count);
+                True(source.Header.Slot is null && source.Header.HeaderActions.Count == 0,
+                    "source preference never adds a discovery platform picker to the library header");
 
                 await f.Module.NavigateAsync("history", default);
                 await Drain();

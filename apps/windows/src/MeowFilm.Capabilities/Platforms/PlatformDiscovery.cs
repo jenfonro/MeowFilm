@@ -17,15 +17,22 @@ internal static class PlatformDiscovery
     private static JsonNode? A(JsonNode? n, params string[] path) => PJ.At(n, path);
     private static JsonNode? Pick(JsonNode? n, params string[] names) => PJ.First(names.Select(k => A(n, k)).ToArray());
     private static IEnumerable<JsonNode?> Children(JsonNode? n) => PJ.Array(A(n, "children"));
-    private static string Title(JsonNode? n) => PJ.Metadata(PJ.First(Pick(n, "name", "title"), A(n, "uiElement", "mainTitle", "title")));
-    private static string Cover(JsonNode? n) => PJ.Image(PJ.First(Pick(n, "cover", "coverImg", "coverUrl", "picUrl", "coverImgUrl", "background"),
-        A(n, "uiElement", "image", "imageUrl"), PJ.Array(A(n, "uiElement", "images")).Select(x => Pick(x, "imageUrl", "url")).FirstOrDefault()));
+    private static string Title(JsonNode? n) => new[] { A(n, "name"), A(n, "title"), A(n, "uiElement", "mainTitle", "title") }
+        .Select(PJ.Metadata).FirstOrDefault(text => text.Length > 0) ?? "";
+    private static string Cover(JsonNode? n) => new[] { A(n, "cover"), A(n, "coverImg"), A(n, "coverUrl"),
+        A(n, "picUrl"), A(n, "coverImgUrl"), A(n, "img1v1Url"), A(n, "background"), A(n, "uiElement", "image", "imageUrl") }
+        .Concat(PJ.Array(A(n, "uiElement", "images")).Select(x => Pick(x, "imageUrl", "url")))
+        .Select(PJ.Image).FirstOrDefault(address => address.Length > 0) ?? "";
     private static JsonNode? Nested(JsonNode? n)
     {
         if (n is JsonObject or JsonArray) return n;
         var s = PJ.Text(n);
         if (s.Length is 0 or >= 50000) return null;
-        try { return JsonNode.Parse(s, documentOptions: new JsonDocumentOptions { MaxDepth = 25 }); }
+        try
+        {
+            using var document = JsonDocument.Parse(s, new JsonDocumentOptions { MaxDepth = 25 });
+            return PJ.Read(document.RootElement);
+        }
         catch (JsonException) { return null; }
     }
     private static Dictionary<string, string[]> Query(Uri uri) => uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
@@ -362,6 +369,39 @@ internal static class PlatformDiscovery
         if (ids.Add("artist")) items.Add(PJ.Obj(("id", "artist"), ("name", "歌手"), ("kind", "artists")));
         return PJ.Obj(("platform", "wy"), ("items", items));
     }
+    private static readonly string[] PrimaryWyChannels =
+        ["feature", "playlist", "chart", "artist", "vip", "euro", "djR", "huayu", "qingge", "acg"];
+    private static readonly string[] MoreWyChannels =
+    [
+        "china", "yingshi", "rock", "music_top_tab_jpop", "paobu", "music_top_tab_game",
+        "yueyu", "music_top_tab_sunoai", "old_hat", "music_top_tab_dance", "hFlow", "music_top_tab_world",
+        "music_top_tab_dj", "rnb", "chuxing", "music_tab_drive", "music_top_tab_tipsy", "rap",
+        "xiangcun", "music_top_tab_french", "sleep", "music_top_tab_light_music", "classic", "music_top_tab_children",
+        "HiFi", "sir", "ballad", "music_top_tab_latin", "music_tab_pioneer", "funk",
+        "landiao", "yueqi", "study", "yinyueju", "music_top_tab_sport"
+    ];
+    internal static JsonObject ChannelDescriptor(JsonObject source)
+    {
+        var descriptor = (JsonObject)source.DeepClone();
+        descriptor["available"] = S(source, "kind") is "featured" or "cube" or "playlists" or "rankings" or
+            "new-songs" or "artists" or "vip";
+        descriptor["kind"] = "channel";
+        return descriptor;
+    }
+    internal static JsonObject ChannelDirectory(JsonObject directory)
+    {
+        var channels = PJ.RowsAll(directory["items"]).ToDictionary(item => S(item, "id"), StringComparer.Ordinal);
+        var items = new JsonArray();
+        foreach (var (ids, placement) in new[] { (PrimaryWyChannels, "primary"), (MoreWyChannels, "more") })
+            foreach (var id in ids)
+                if (channels.TryGetValue(id, out var channel))
+                {
+                    var descriptor = ChannelDescriptor(channel);
+                    descriptor["placement"] = placement;
+                    items.Add(descriptor);
+                }
+        return PJ.Obj(("platform", "wy"), ("items", items));
+    }
     internal static JsonObject Rankings(JsonObject data, string target)
     {
         var groups = PJ.Rows(PJ.First(data["data"], data["list"]), 100);
@@ -431,7 +471,8 @@ internal static class PlatformDiscovery
             PJ.Require(id.Length > 0 && name.Length > 0);
             var count = PJ.OptionalCount(Pick(artist, "musicSize", "songCount"));
             return PJ.Obj(("id", id), ("name", name), ("subtitle", count is null ? "" : "单曲：" + count),
-                ("cover", Cover(artist)), ("kind", "artist"), ("source", "wy"));
+                ("cover", new[] { artist["img1v1Url"], artist["picUrl"] }.Select(PJ.Image)
+                    .FirstOrDefault(address => address.Length > 0) ?? Cover(artist)), ("kind", "artist"), ("source", "wy"));
         }).ToArray();
         var moreNode = PJ.First(data["more"], raw["more"]);
         var more = moreNode is not null && PJ.Bool(moreNode);

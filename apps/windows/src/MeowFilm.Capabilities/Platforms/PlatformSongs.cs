@@ -34,34 +34,12 @@ internal static partial class PlatformSongs
         return NativeMusicSong.CreateOnline(platform, native, title, artist, album, duration, cover);
     }
     private static string M(JsonNode? value) => PJ.Metadata(value);
-    // Discovery returns public CDN thumbnails with rendering parameters. Store the
-    // same original artwork, never a signed/query URL or a guessed alternate host.
-    private static string WyCover(JsonNode? value)
-    {
-        var address = PJ.Image(value);
-        if (!Uri.TryCreate(address, UriKind.Absolute, out var uri) || uri.Query.Length == 0) return address;
-        if (uri.Fragment.Length > 0 || !uri.IsDefaultPort ||
-            !Regex.IsMatch(uri.Host, @"^p[1-4]\.music\.126\.net$", RegexOptions.CultureInvariant)) return "";
-        var keys = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var part in uri.Query[1..].Split('&'))
-        {
-            var pair = part.Split('=', 2);
-            var key = pair[0]; var content = pair.Length == 2 ? pair[1] : "";
-            if (!keys.Add(key)) return "";
-            if (!(key switch
-            {
-                "imageView" => content is "" or "1",
-                "type" => content is "webp" or "jpg" or "jpeg" or "png",
-                "thumbnail" => Regex.IsMatch(content, @"^[1-9][0-9]{0,3}y[1-9][0-9]{0,3}$", RegexOptions.CultureInvariant),
-                _ => false
-            })) return "";
-        }
-        return keys.Contains("imageView") ? uri.GetLeftPart(UriPartial.Path) : "";
-    }
+    private static string WyTitle(JsonNode? song) =>
+        M(PJ.At(song, "name")) is { Length: > 0 } name ? name : M(PJ.At(song, "title"));
     internal static bool HasWyDisplayTitle(JsonNode raw)
     {
         var song = PJ.First(PJ.At(raw, "songInfo"), PJ.At(raw, "songData"), PJ.At(raw, "song"), raw);
-        return !string.IsNullOrWhiteSpace(M(PJ.First(PJ.At(song, "name"), PJ.At(song, "title"))));
+        return !string.IsNullOrWhiteSpace(WyTitle(song));
     }
     internal static JsonObject Wy(JsonNode raw)
     {
@@ -73,11 +51,11 @@ internal static partial class PlatformSongs
         var native = new JsonObject();
         if (PJ.At(album, "id") is { } aid) native["albumId"] = PJ.Id(aid);
         return Song("wy", PJ.Id(PJ.First(PJ.At(s, "id"), PJ.At(s, "songId"))),
-            M(PJ.First(PJ.At(s, "name"), PJ.At(s, "title"))), artist,
+            WyTitle(s), artist,
             album is JsonValue ? M(album) : M(PJ.At(album, "name")),
             PJ.Number(PJ.First(PJ.At(s, "dt"), PJ.At(s, "duration"))) / 1000,
-            WyCover(new[] { PJ.At(album, "picUrl"), PJ.At(s, "picUrl"), PJ.At(s, "coverUrl") }
-                .FirstOrDefault(value => PJ.Text(value).Length > 0)), native);
+            new[] { PJ.At(album, "picUrl"), PJ.At(s, "picUrl"), PJ.At(s, "coverUrl") }
+                .Select(PJ.Image).FirstOrDefault(address => address.Length > 0) ?? "", native);
     }
     internal static JsonObject Tx(JsonNode raw)
     {
@@ -106,8 +84,8 @@ internal static partial class PlatformSongs
     {
         var audio = PJ.At(raw, "audio_info");
         var album = PJ.First(PJ.At(raw, "albuminfo"), PJ.At(raw, "album_info"));
-        var id = KgHash(PJ.First(PJ.At(raw, "hash"), PJ.At(raw, "FileHash"), PJ.At(audio, "hash")));
-        var full = Regex.Replace(M(PJ.First(PJ.At(raw, "name"), PJ.At(raw, "FileName"))), @"\.(mp3|flac|m4a|wav|ape|ogg|aac|wma)$", "", RegexOptions.IgnoreCase);
+        var id = KgHash(PJ.First(PJ.At(raw, "hash"), PJ.At(raw, "FileHash"), PJ.At(audio, "hash"), PJ.At(audio, "hash_128")));
+        var full = Regex.Replace(M(PJ.First(PJ.At(raw, "name"), PJ.At(raw, "FileName"), PJ.At(raw, "filename"))), @"\.(mp3|flac|m4a|wav|ape|ogg|aac|wma)$", "", RegexOptions.IgnoreCase);
         var at = full.IndexOf(" - ", StringComparison.Ordinal);
         var singers = PJ.First(PJ.At(raw, "singerinfo"), PJ.At(raw, "Singers"));
         var artist = singers is JsonArray ? string.Join("、", PJ.Rows(singers, 100).Select(a => M(PJ.First(a["name"], a["author_name"]))))
@@ -126,7 +104,7 @@ internal static partial class PlatformSongs
         var mixId = OptionalId(PJ.At(raw, "mixsongid"), PJ.At(raw, "add_mixsongid"), PJ.At(raw, "album_audio_id"), PJ.At(raw, "MixSongID"));
         var types = new JsonArray(); var nativeTypes = new JsonObject();
         foreach (var (quality, h, size) in new (string, JsonNode?, JsonNode?)[] {
-            ("128k", JsonValue.Create(id), PJ.First(PJ.At(raw,"filesize"),PJ.At(raw,"FileSize"),PJ.At(raw,"size"),PJ.At(audio,"filesize"))),
+            ("128k", JsonValue.Create(id), PJ.First(PJ.At(raw,"filesize"),PJ.At(raw,"FileSize"),PJ.At(raw,"size"),PJ.At(audio,"filesize"),PJ.At(audio,"filesize_128"))),
             ("320k",PJ.First(PJ.At(raw,"hash_320"),PJ.At(raw,"HQFileHash"),PJ.At(audio,"hash_320")),PJ.First(PJ.At(raw,"filesize_320"),PJ.At(raw,"HQFileSize"),PJ.At(audio,"filesize_320"))),
             ("flac",PJ.First(PJ.At(raw,"hash_flac"),PJ.At(raw,"SQFileHash"),PJ.At(audio,"hash_flac")),PJ.First(PJ.At(raw,"filesize_flac"),PJ.At(raw,"SQFileSize"),PJ.At(audio,"filesize_flac"))),
             ("flac24bit",PJ.First(PJ.At(raw,"hash_high"),PJ.At(raw,"ResFileHash"),PJ.At(audio,"hash_high")),PJ.First(PJ.At(raw,"filesize_high"),PJ.At(raw,"ResFileSize"),PJ.At(audio,"filesize_high"))) })
@@ -136,9 +114,10 @@ internal static partial class PlatformSongs
             types.Add(PJ.Obj(("type", quality), ("hash", hash), ("size", sizeText)));
             nativeTypes[quality] = PJ.Obj(("hash", hash), ("size", sizeText));
         }
-        return Song("kg", id, title, artist, M(PJ.First(PJ.At(raw, "AlbumName"), PJ.At(album, "name"), PJ.At(album, "album_name"))),
-            PJ.At(raw, "Duration") is { } d ? PJ.Number(d) : PJ.Number(PJ.First(PJ.At(raw, "timelen"), PJ.At(raw, "timelength"), PJ.At(audio, "timelength"))) / 1000,
-            PJ.Image(PJ.First(PJ.At(raw, "cover"), PJ.At(raw, "Image"), PJ.At(raw, "trans_param", "union_cover"))),
+        return Song("kg", id, title, artist, M(PJ.First(PJ.At(raw, "AlbumName"), PJ.At(album, "name"), PJ.At(album, "album_name"), PJ.At(raw, "album_name"))),
+            PJ.At(raw, "Duration") is { } d ? PJ.Number(d) :
+                PJ.Number(PJ.First(PJ.At(raw, "timelen"), PJ.At(raw, "timelength"), PJ.At(audio, "timelength"), PJ.At(audio, "duration_128"))) / 1000,
+            PJ.Image(PJ.First(PJ.At(raw, "cover"), PJ.At(raw, "Image"), PJ.At(raw, "trans_param", "union_cover"), PJ.At(album, "sizable_cover"))),
             PJ.Obj(("hash", id), ("albumId", albumId), ("album_id", albumId), ("albumAudioId", mixId), ("types", types), ("_types", nativeTypes)));
     }
     internal static JsonObject Playlist(string platform, JsonNode raw)
@@ -150,8 +129,11 @@ internal static partial class PlatformSongs
         PJ.Require(platform != "kg" || !id.StartsWith("id_", StringComparison.Ordinal), "IDENTITY_MISMATCH");
         if (platform == "kg" && raw["global_collection_id"] is { } global && raw["gid"] is { } gid)
             PJ.Require(PJ.Id(global, @"^[\w-]{1,200}$") == PJ.Id(gid, @"^[\w-]{1,200}$"), "IDENTITY_MISMATCH");
-        return PJ.Obj(("id", id), ("name", M(platform == "wy" ? Pick("name", "title") : platform == "tx" ? Pick("title", "dissname", "name", "dirName") : Pick("specialname", "name"))),
-            ("cover", PJ.Image(platform == "wy" ? Pick("picUrl", "coverImgUrl", "cover") : platform == "tx" ? Pick("picurl", "cover", "logo", "picUrl") : Pick("imgurl", "img", "cover", "pic"))),
+        return PJ.Obj(("id", id), ("name", platform == "wy" ? WyTitle(raw) :
+                M(platform == "tx" ? Pick("title", "dissname", "name", "dirName") : Pick("specialname", "name"))),
+            ("cover", platform == "wy" ? new[] { Pick("picUrl"), Pick("coverImgUrl"), Pick("cover") }
+                .Select(PJ.Image).FirstOrDefault(address => address.Length > 0) ?? "" :
+                PJ.Image(platform == "tx" ? Pick("picurl", "cover", "logo", "picUrl") : Pick("imgurl", "img", "cover", "pic"))),
             ("count", PJ.OptionalCount(platform == "wy" ? Pick("trackCount", "songCount") : platform == "tx" ? Pick("songnum", "songNum", "song_cnt") : Pick("songcount", "song_count", "count"))),
             ("creator", M(platform == "wy" ? PJ.At(raw, "creator", "nickname") : platform == "tx" ? Pick("nickname", "creator_nick") : Pick("nickname", "list_create_username"))),
             ("source", platform), ("engine", platform == "wy" ? "Netease" : platform == "tx" ? "QQ" : "Kugou"));

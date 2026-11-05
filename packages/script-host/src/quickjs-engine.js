@@ -11,14 +11,18 @@ const disposeAll = handles => {
   return failure;
 };
 let compiledPromise;
+const taskContextVariant = {
+  ...RELEASE_SYNC,
+  importModuleLoader: () => import('./quickjs/emscripten-module.mjs').then(module => module.default),
+};
 const loadModule = async wasmModule => {
   if (wasmModule) {
     requireValue(wasmModule instanceof WebAssembly.Module);
-    return newQuickJSWASMModuleFromVariant(newVariant(RELEASE_SYNC, { wasmModule }));
+    return newQuickJSWASMModuleFromVariant(newVariant(taskContextVariant, { wasmModule }));
   }
-  compiledPromise ??= readFile(new URL(import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')))
+  compiledPromise ??= readFile(new URL('./quickjs/emscripten-module.wasm', import.meta.url))
     .then(bytes => WebAssembly.compile(bytes));
-  return newQuickJSWASMModuleFromVariant(newVariant(RELEASE_SYNC, { wasmModule: await compiledPromise }));
+  return newQuickJSWASMModuleFromVariant(newVariant(taskContextVariant, { wasmModule: await compiledPromise }));
 };
 
 // The pinned QuickJS build returns signed values from asUintN at wider bit
@@ -51,6 +55,7 @@ export class QuickJSEngine {
       engine.run(() => {
         engine.unwrap(engine.context.evalCode(`(${installIntegerSemantics})();`, 'engine-intrinsics.js')).dispose();
         engine.realm = engine.unwrap(engine.context.evalCode(source, 'script-sdk.js'));
+        engine.unwrap(engine.context.evalCode('delete globalThis.__meowTaskContext;', 'engine-private.js')).dispose();
       });
       return engine;
     } catch (error) {

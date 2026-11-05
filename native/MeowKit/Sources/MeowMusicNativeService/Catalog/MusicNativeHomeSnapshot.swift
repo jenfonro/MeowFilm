@@ -13,10 +13,10 @@ public protocol MusicHomeSnapshotStoring: Sendable {
 public final class MusicNativeHomeSnapshotDocument: MusicHomeSnapshotStoring, @unchecked Sendable {
     public static let namespace = "music.home.snapshot.v1"
     private let lock = NSLock()
-    private let factory: @Sendable () throws -> EncryptedDocumentStore
-    private var store: EncryptedDocumentStore?
-    public init(storeFactory: @escaping @Sendable () throws -> EncryptedDocumentStore) { factory = storeFactory }
-    private func storage() throws -> EncryptedDocumentStore {
+    private let factory: @Sendable () throws -> DocumentStore
+    private var store: DocumentStore?
+    public init(storeFactory: @escaping @Sendable () throws -> DocumentStore) { factory = storeFactory }
+    private func storage() throws -> DocumentStore {
         if let store { return store }
         let value = try factory(); store = value; return value
     }

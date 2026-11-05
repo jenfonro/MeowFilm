@@ -627,3 +627,10 @@ test('Cat acceptance distinguishes a complete empty framework route inventory fr
     siteId: 'metadata', operation: 'discover', state: 'no_actions', reason: 'no_registered_actions',
   });
 });
+
+test('Reader protocol overrides require the explicit source kind', async t => {
+  const { directory, output } = area(t);
+  const result = await run(['--scripts', directory, '--output', output, '--protocol', 'cat']);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /--protocol requires --kind source/);
+});

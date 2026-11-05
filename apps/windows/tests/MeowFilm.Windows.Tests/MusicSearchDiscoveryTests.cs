@@ -27,6 +27,14 @@ public static class MusicSearchDiscoveryTests
         yield return Case("ordinary-client-cookie-update-keeps-rotation-and-completed-cache", () => ClientCache(false));
         yield return Case("authoritative-client-reload-fences-rotation-and-completed-cache", () => ClientCache(false, reload: true));
         yield return Case("empty-default-and-empty-sections-valid", Empty);
+        yield return Case("provider-json-uses-final-fields-without-dropping-discovery-sections", async () =>
+        {
+            await using var f = new Fixture();
+            f.Peer.Reply = (wire, _) => Task.FromResult(Raw(Default(wire).ToJsonString()
+                .Insert(1, "\"code\":500,\"metadata\":{\"alg\":null,\"alg\":\"current\"},")));
+            var result = await f.Service.ReadAsync();
+            Check(result.Failures.Length == 0 && result.Hot.Length == 20 && result.Charts.Length == 3);
+        });
         yield return Case("default-hot-dedup-and-score-null", Dedup);
         foreach (var stage in new[] { "hot", "toplist", "default", "chart" })
         {
@@ -52,7 +60,7 @@ public static class MusicSearchDiscoveryTests
         yield return Case("expired-primary-authorization-is-auth-required-without-client-update", () => ExpiredAuthorization(true));
         yield return Case("expired-partial-authorization-is-auth-required-without-client-update", () => ExpiredAuthorization(false));
         foreach (var fault in new[] { "hot-nonstring", "default-nonstring", "score-negative", "keyword-control", "keyword-limit",
-            "duplicate-json-key", "response-limit", "invalid-json" })
+            "response-limit", "invalid-json" })
         {
             var value = fault;
             yield return Case("bounded-" + value, () => Bounded(value));
@@ -584,7 +592,6 @@ public static class MusicSearchDiscoveryTests
         {
             var data = Default(w);
             if (Stage(w) != stage) return Task.FromResult(Response(data));
-            if (kind == "duplicate-json-key") return Task.FromResult(Raw("""{"code":200,"data":[],"code":200}"""));
             if (kind == "invalid-json") return Task.FromResult(Raw("synthetic-secret-do-not-copy"));
             if (kind == "response-limit") return Task.FromResult(Raw(new string('x', 2 * 1024 * 1024 + 1)));
             if (kind == "default-nonstring") data["data"]!["realkeyword"] = new JsonObject { ["secret"] = "not-a-string" };

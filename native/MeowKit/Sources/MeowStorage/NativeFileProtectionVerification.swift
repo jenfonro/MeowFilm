@@ -3,9 +3,9 @@ import Foundation
 /// A Simulator filesystem is not evidence of device Data Protection. On the
 /// reviewed iOS 26.1 runtime, setting complete protection succeeds but reading
 /// the protection attribute returns nil. Only that absent Simulator attribute
-/// is accepted for development; any reported weaker class is still rejected.
+/// is accepted for development; any other reported class is still rejected.
 public enum NativeFileProtectionVerification: Equatable, Sendable {
-    case complete
+    case completeUntilFirstUserAuthentication
     case unavailableInSimulator
     case rejected
 
@@ -22,9 +22,13 @@ public enum NativeFileProtectionVerification: Equatable, Sendable {
     static func inspect(_ attribute: Any?, simulator: Bool) -> Self {
         if attribute == nil { return simulator ? .unavailableInSimulator : .rejected }
         #if os(iOS)
-        if (attribute as? FileProtectionType) == .complete { return .complete }
+        if (attribute as? FileProtectionType) == .completeUntilFirstUserAuthentication {
+            return .completeUntilFirstUserAuthentication
+        }
         #endif
-        if (attribute as? String) == "NSFileProtectionComplete" { return .complete }
+        if (attribute as? String) == "NSFileProtectionCompleteUntilFirstUserAuthentication" {
+            return .completeUntilFirstUserAuthentication
+        }
         return .rejected
     }
 }

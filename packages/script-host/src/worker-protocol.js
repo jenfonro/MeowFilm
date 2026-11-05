@@ -5,7 +5,7 @@ export const WORKER_PROTOCOL_VERSION = 1;
 const requestMethods = new Set(['start', 'activate', 'invoke', 'stop',
   'stats', 'probe', 'network', 'storage.get',
   'storage.set', 'storage.delete', 'management.detect', 'management.sync',
-  'enhanceM3U8']);
+  'enhanceM3U8', 'capability']);
 const eventNames = new Set(['activated', 'endpoints', 'capabilities', 'alert',
   'failure', 'diagnostic', 'scriptError', 'network', 'stopped', 'stats', 'settings']);
 

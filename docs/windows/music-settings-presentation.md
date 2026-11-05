@@ -9,6 +9,7 @@
 - 搜索没有模式选择，歌曲／歌单面板只显示平台列表；标题右侧“高级设置”打开气泡浮窗，编辑单次请求页数、平台并发数和缓存时长（分钟）。有效输入在失焦、回车或关闭浮窗时立即保存，越界输入恢复为已保存值，Esc 放弃编辑。搜索、音质、元数据、外观、缓存和真实账号操作继续调用既有 `MusicCapability` 与原生 owner，不新建偏好 writer、迁移或旧方案兼容层。
 - 派生的编辑可用状态由 `MusicCapability` 随实际忙碌状态发布；不依赖设置视图曾经 Loaded 或视图代替业务 owner 补发状态。
 - 分类切换、滚动与尺寸变化关闭账号临时浮层；设置激活、退休、取消与排空复用原生生命周期。
+- “账号与平台”提供数据源下拉框，复用现有控件样式；网易云／酷狗选择通过 `music.catalogSource.settings.get/save` 持久化。只在成功回执或权威读取确认后采用新平台，失败可重读，通知复用统一出口。来源偏好与账号、搜索、音源启停及在线设置独立；存储格式见[原生曲库](music-native-library.md)。
 
 ## 参考布局与资源
 
@@ -35,11 +36,12 @@
 
 ## 音源管理契约
 
-- `MusicSourcesSettingsView` 在同一管理列表列出三内置平台及已安装脚本，不再拆成官方源、脚本源两个列表；统一呈现不改变各自的真实管理 API 和状态归属。
+- `MusicSourcesSettingsView` 在同一管理列表列出三内置平台及已安装网络源脚本；内置／网络仅表示类型和适配职责，全部已启用源均可参与当前歌曲的统一播放候选，各自的真实管理 API 和状态归属保持独立。
 - 官方内置源为网易云 `wy`、QQ `tx`、酷狗 `kg`，各自独立持久化启停；设置经原生 owner 的 `music.officialSources.settings.get/save` 读写，不与脚本安装状态或歌词／封面元数据设置共用字段。
-- 官方源开关是音频来源准入策略：关闭的平台不得进入官方自动候选，也不得通过手动候选选择或直接调用官方音频解析绕过。门禁由原生候选与音频 RPC 执行，不依赖客户端隐藏或仅更新视图状态；它只约束官方音频来源，不改变账号操作、通用搜索、歌词或封面行为。
-- 脚本源通过真实的 `music.sources.*` 管理接口持久化安装、启停、更新、回退和移除；内容传输使用 `music.transfer.begin/chunk/cancel`。本地导入支持一次多选 `.js` 文件，网络导入只接受 HTTPS 且拒绝重定向。两种来源取得的字节都进入同一检查、传输和安装流程，共用 `SelectedScriptSnapshot.MaximumBytes` 的 16 MiB 单脚本资源上限，超限不得安装；不设固定安装数量上限，仍受原生元数据与根文档字节边界约束。导入／安装本身不等于启用或执行。安装元数据使用 schema 4，旧格式明确拒绝且不迁移，存储契约见 [原生曲库](music-native-library.md)。
-- 保留真实播放目标切换：切回内置源调用 `UseOfficialSourcesAsync`，使用已启用脚本及其支持平台调用 `UseSourcePlatformAsync`，沿用既有播放目标保存契约。列表选中状态不代表播放目标已经切换，当前目标按真实设置结果显示。
+- 官方源开关是官方音频来源准入策略：关闭的平台不得进入官方自动候选，也不得通过手动录音选择或直接调用官方音频解析绕过。门禁由原生候选与音频 RPC 执行，不依赖客户端隐藏或仅更新视图状态；关闭内置平台不限制已启用脚本的同平台能力，也不改变账号操作、通用搜索、歌词或封面行为。禁用脚本不得参与候选。
+- 脚本源通过真实的 `music.sources.*` 管理接口持久化安装、启停、更新、回退和移除；内容传输使用 `music.transfer.begin/chunk/cancel`。本地导入支持一次多选 `.js` 文件，网络导入只接受 HTTPS 且拒绝重定向。本地文件和 URL 下载仅是取得脚本字节的方式，都进入同一检查、传输和安装流程，共用 `SelectedScriptSnapshot.MaximumBytes` 的 16 MiB 单脚本资源上限，超限不得安装；不设固定安装数量上限，仍受原生元数据与根文档字节边界约束。导入／安装本身不等于启用或执行。安装元数据使用 schema 4，旧格式明确拒绝且不迁移，存储契约见 [原生曲库](music-native-library.md)。
+- 音源管理只管理各源及其启停，不保存全局来源类型或平台目标。列表选中状态只决定管理操作的对象；播放按现有音质顺序、兼容录音、已确认偏好及各源权限统一选择，不增加音源排序或类型模式控件。
+- 播放器中的手动选择限定当前歌曲的录音 `platform + sourceKey`，由满足权限和质量要求的已启用源提供，不绑定内置／网络类型；它不改写队列歌曲身份。候选发现、选择和恢复契约见 [统一音源与录音选择](music-official-selection.md)。
 - 同一列表中的内置平台开关和脚本条目均显示其真实 owner 状态和操作结果；文件选择、网络下载、检查失败及安装失败不能被视图内存状态伪装为成功。
 - 音源管理不设筛选栏，列表保留独立滚动；最小窗口仅缩减页边距，不收紧列表行，保留可见首行及内部滚动。
 - 历史清理：删除无真实契约的音源演示排序、检测、编辑、导出及其入口，不保留相应机制；普通设置优先列表的既有排序不受影响。
@@ -48,9 +50,10 @@
 
 本节记录覆盖契约与测试归属；原生测试执行结果单独记录，不以本文作为通过证据。
 
-- 音源管理 UI 覆盖三内置平台与已安装脚本在同一列表中呈现，`UseOfficialSourcesAsync`、`UseSourcePlatformAsync` 的真实播放目标切换及保存后重读；列表选中状态不能代替保存结果。测试归属为 `MusicSourcesSettingsTests.cs` 与 `MusicOnlineTests.cs`。
+- 音源管理 UI 覆盖三内置平台与已安装网络源在同一列表中呈现、独立启停、混合启用与权威状态重读；管理条目选择不改变播放候选范围，手动录音选择只作用于对应歌曲。测试归属为 `MusicSourcesSettingsTests.cs` 与 `MusicOnlineTests.cs`。
 - 官方设置持久化覆盖缺省全开且读取不写入、`wy/tx/kg` 独立启停及全关、保存后重读与 owner 重启恢复，以及同职责未知 CAS 结算；测试归属为 `MusicOfficialSourcesPolicyTests.cs`。`MusicSourcesSettingsTests.cs` 覆盖设置页读写真实 owner、重载后反映权威状态。
-- 官方候选与音频原生门禁覆盖自动候选过滤，以及手动候选和直接音频解析无法绕过关闭状态，同时验证开关不改变账号、搜索、歌词与封面行为；门禁测试归属为 `MusicOfficialSelectionTests.cs`。`MusicOfficialAudioTests.cs`、`MusicOfficialStandardTests.cs` 保留为现有音频解析、音质与授权基线。
+- 官方候选与音频原生门禁覆盖自动候选过滤，以及手动录音选择和直接官方音频解析无法绕过关闭状态；关闭内置平台仍允许已启用脚本提供同平台录音，同时验证开关不改变账号、搜索、歌词与封面行为。门禁测试归属为 `MusicOfficialSelectionTests.cs`。`MusicOfficialAudioTests.cs`、`MusicOfficialStandardTests.cs` 保留为现有音频解析、音质与授权基线。
 - 脚本源覆盖本地多选、真实 `music.sources.*` 安装及后续管理、HTTPS 下载拒绝重定向、网络和本地内容共用检查安装流程，以及 16 MiB 含边界值；同时验证较大安装集合的本地多选和后续网络安装。测试归属为 `MusicOnlineTests.cs`、`MusicScriptIntegrationTests.cs`、`MusicNativeScriptTests.cs`、`SelectedFileSnapshotTests.cs`、`MusicSourceNetworkDownloadTests.cs` 和 `MusicSourcesSettingsTests.cs`。验证直接断言真实 API、下载安全及 UI 状态，不以本地导入或普通解析成功用例替代网络路径覆盖。
 - 原生 UI 回归覆盖锚点、末段置顶、页头标题与类别切换、两块平铺、优先列表尺寸与移动、让位拖动、整页滚轮、开关、键盘、高对比、取消／资源释放，以及账号和偏好消费者；布局用例位于 `MusicSettingsLayoutTests.cs`。
+- 数据源覆盖默认／重启恢复、保存确认、失败后权威回读与职责隔离（`MusicCatalogSourceSettingsTests.cs`），以及启动请求平台、切换旧结果隔离、跨平台详情、设置控件与窄窗布局（`MusicCatalogPersonalTests.cs`、`MusicSettingsLayoutTests.cs`）；酷狗协议与动作归属 `MusicKgDiscoveryTests.cs`。
 - 使用受控测试数据渲染真实 WPF PNG，对照参考检查 1440、1110 和最小 860×600 的完整桌面壳，以及独立内容区的窄宽度状态。Taste 的浏览器 DOM 检查器不适用于 WPF；不另造 HTML 冒充原生验证。编译、原生行为回归、截图和真实平台／扬声器／系统 DPI 验收分别记录，不能互相替代。

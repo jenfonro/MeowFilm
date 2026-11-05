@@ -66,10 +66,10 @@ struct MusicAccountChorusCache {
         let duration: Double
     }
     struct Entry: Codable { let key: Key; let point: MusicChorusPoint; let expires: Date }
-    private let store: EncryptedDocumentStore?
+    private let store: DocumentStore?
     private var loaded = false
     private var entries: [Entry] = []
-    init(store: EncryptedDocumentStore?) { self.store = store }
+    init(store: DocumentStore?) { self.store = store }
     mutating func value(_ key: Key, actualDuration: Double, at now: Date) -> MusicChorusPoint? {
         load(at: now)
         return entries.first { $0.key == key &&

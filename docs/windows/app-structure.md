@@ -29,7 +29,7 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 | Library / Sync | 歌单、队列、历史、当前本地曲库与显式同步 |
 | Playback / Lyrics | 实际播放编排、恢复、来源选择与歌词 |
 | PlaybackCache | 可淘汰播放缓存、授权复核、容量及读取生命周期 |
-| Scripting | 原始 LX 音源管理、Cat 运行时通信与必要宿主调用，不拥有官方业务 |
+| Scripting | 原始 LX 音源管理、CatNode 与来源运行时通信及必要宿主调用，不拥有官方业务 |
 | Feedback / Settings | 实际反馈协议与设置消费者 |
 | Presentation | 共同视图、主题及中性命名的控件 |
 | Film | 固定影视首页数据、模块生命周期和影片专属展示 |
@@ -55,9 +55,9 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 
 网易云、QQ、酷狗官方业务独立于 LX。账号、平台 API、搜索、曲库、缓存和播放在 .NET 内执行；无脚本操作时不启动 Node。
 
-Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，从公共 `apps/runtime/modules/{music,cat}-script.mjs` 装配 `music@0.7.0`／`music.script.v2` 与 `cat@0.1.0`／`cat.script.v1`。公共层复用一套 script-host／QuickJS 核心；Windows 目录只有启动／命名管道 bootstrap 与薄 entry，没有业务 module 副本。
+Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，从公共 `apps/runtime/modules/{music,cat}-script.mjs` 与 `apps/runtime/modules/source-runtime.mjs` 装配 `music@0.7.0`／`music.script.v2`、`cat@0.1.0`／`cat.script.v1`、`source@0.1.0`／`source.runtime.v1`。公共层复用同一 script-host WorkerSession／worker 协议／QuickJS 后端；Windows 目录只有启动／命名管道 bootstrap 与薄 entry，没有业务 module 副本或第二套 runner。
 
-载荷包含公共 bootstrap、共享 music/Cat 模块、Windows 两个入口文件、runtime-bridge、script-host、有限 Node 兼容依赖、锁定的 QuickJS release-sync 引擎和必要许可，没有普通业务文档桥授权。Cat 设置、源码和私有卷位于 App 固定 `script-runtime` 数据根；公共执行、存储与网络边界见 [共用运行时](../runtime/script-runtime.md)。
+载荷包含公共 bootstrap、共享 music/Cat/source 模块、Windows 两个入口文件、runtime-bridge、script-host、source-runtime、有限 Node 兼容及规则解析依赖、锁定的 QuickJS release-sync 引擎和必要许可，没有普通业务文档桥授权。CatNode 设置、源码和私有卷位于 App 固定 `script-runtime` 数据根，source 的 Reader/CatVod 不继承该私有卷或服务能力。公共执行、存储与网络边界见[共用运行时](../runtime/script-runtime.md)；source 平台能力以[capability ABI](../runtime/source-capability-abi.md)为唯一来源。Node 无关仅指 source-runtime 规则包，不表示 Node 兼容层无需 Node，也不表示已提供阅读 UI 或其他平台客户端。
 
 App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能力数量和 `IDesktopModule.Id` 不要求等于脚本模块数量或名称。增加不依赖脚本的原生能力不会被迫增加 Node 模块；脚本清单只决定按需启动后的 JS 载荷与协议版本。
 

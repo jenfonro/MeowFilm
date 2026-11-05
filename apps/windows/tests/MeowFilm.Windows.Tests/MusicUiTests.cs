@@ -1128,6 +1128,10 @@ public static partial class MusicUiTests
                     ? new MusicCapability(calls, store, output ?? playback, null, dialogs, sourceNetworkDownload)
                     : new MusicCapability(calls, store, native, dialogs);
                 await module.InitializeAsync(default);
+                Equal("wy", module.CatalogSourcePlatform);
+                True(module.CanEditCatalogSource && !module.HasCatalogSourceError, "shared UI fixture restores the native catalog source");
+                Equal(1, calls.Count("music.catalogSource.settings.get"));
+                Equal(0, calls.Count("music.catalogSource.settings.save"));
                 await module.NavigateAsync("favorites", default);
                 True(!runtime.HasStarted, "native initialization never starts Node");
                 return new(playback, dialogs) { Root = root, Store = store, Runtime = runtime, Application = application, Calls = calls, Module = module };
@@ -1220,12 +1224,8 @@ public static partial class MusicUiTests
             bool content = AppIdentity.NativeCollections.Any(collection =>
             {
                 if (!ns.StartsWith(collection + ".", StringComparison.Ordinal)) return false;
-                string[] suffix = ns[(collection.Length + 1)..].Split('.');
-                return suffix.Length == 2 && suffix[0].Length == 64 &&
-                    suffix[0].All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') &&
-                    int.TryParse(suffix[1], System.Globalization.NumberStyles.None,
-                        System.Globalization.CultureInfo.InvariantCulture, out int index) && index >= 0 &&
-                    suffix[1] == index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                string hash = ns[(collection.Length + 1)..];
+                return hash.Length == 64 && hash.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
             });
             if (!AppIdentity.NativeNamespaces.Contains(ns, StringComparer.Ordinal) && !content)
                 throw new DocumentStoreException(DocumentStoreError.InvalidRequest);

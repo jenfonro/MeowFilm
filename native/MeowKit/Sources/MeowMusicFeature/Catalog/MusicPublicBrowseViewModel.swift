@@ -65,7 +65,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     private var generation = UUID(), pageEpoch = UUID(), actionEpoch = UUID()
     /// Module-local identity for page-owned presentations, never queue authority.
     var actionPageID: UUID { pageEpoch }
-    private var available = false, visible = false
+    private var available = false, visible = false, displayVisible = false
     private var contentDay: Date?
     private var isDaily: Bool {
         switch request {
@@ -147,14 +147,18 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         invalidate(clear: true)
         return true
     }
-    public func appear() { visible = true }
+    public func appear() { visible = true; displayVisible = true }
+    /// Resource ownership and actual display demand are separate. A retained
+    /// page may keep its owner active while a covered page must not refill
+    /// display-only content.
+    public func setDisplayVisible(_ value: Bool) { displayVisible = value }
     public var needsDateRefresh: Bool {
         guard isDaily, let contentDay else { return false }
         return !Calendar.current.isDate(contentDay, inSameDayAs: Date())
     }
     /// Visibility only checks date-scoped data; it never suspends page work.
     public func refreshForDateIfNeeded() async {
-        guard available, visible, needsDateRefresh else { return }
+        guard available, visible, displayVisible, needsDateRefresh else { return }
         invalidate(clear: true)
         await load(cursor: nil, direction: 0, refresh: true)
     }
@@ -179,11 +183,11 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             }
             guard scoped else { continue }
             invalidate(clear: true)
-            if available && visible { await refresh() }
+            if available && visible && displayVisible { await refresh() }
         }
     }
     public func restoreHomeIfNeeded() async {
-        guard available, visible, !loaded, !isLoading, case .discovery(.home) = request,
+        guard available, visible, displayVisible, !loaded, !isLoading, case .discovery(.home) = request,
               let home = service as? any MusicHomeBrowsing else { return }
         let own = pageEpoch, access = generation
         do {
@@ -200,7 +204,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         }
     }
     public func disappear() {
-        visible = false
+        visible = false; displayVisible = false
         invalidate(clear: true)
     }
     private func invalidate(clear: Bool) {

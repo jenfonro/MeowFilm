@@ -37,6 +37,17 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     private var refreshButton: PageHeaderButton?
     private var shownReadError: String?
     private var automaticPaginationHeld = false
+    private var cachedLocalTracks: [MusicRemoteTrack]?
+    private var cachedLocalQuery = ""
+    private var localOriginalIndices: [MusicReference: Int] = [:]
+    private var rowActionsRevision = UUID()
+    private var renderedRowActions: RowActionsKey?
+    private struct RowActionsKey: Equatable {
+        let presentation: UUID
+        let filter: UUID?
+        let remoteFilter: String
+        let canEdit: Bool
+    }
 
     private var localPage: MusicCollectionViewModel? {
         guard case .local(let page) = content else { return nil }
@@ -196,9 +207,15 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
 
         switch content {
         case .local(let page):
-            observe(page) { [weak self] in self?.render() }
+            observe(page.$tracks.combineLatest(page.$searchQuery)
+                .removeDuplicates { lhs, rhs in
+                    lhs.0 == rhs.0 && lhs.1.utf8.elementsEqual(rhs.1.utf8)
+                }
+                .map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.render() }
+            observe(page) { [weak self] in self?.renderState() }
         case .remote(_, let page):
-            observe(page) { [weak self] in self?.render() }
+            observe(page.$sections.map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.render() }
+            observe(page) { [weak self] in self?.renderState() }
             observe(model.accessChanges) { [weak self] in self?.activateRemotePage() }
             if let favorites {
                 observe(favorites) { [weak self] in
@@ -212,6 +229,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             self?.renderHeader()
         }
         observe(model.libraryChanges) { [weak self] in
+            self?.rowActionsRevision = UUID()
             self?.renderNavigationActions()
             self?.updateVisibleCells(force: true)
         }
@@ -237,9 +255,11 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     public override func pageDidBecomeVisible() {
         if remotePage != nil { automaticPaginationHeld = false }
         renderState()
+        MusicArtworkView.retryFailedLoads(in: view)
     }
 
     public override func pageDidBecomeHidden() {
+        statusFooter.setDisplayVisible(false)
         if remotePage != nil { automaticPaginationHeld = true }
     }
 
@@ -257,6 +277,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     }
 
     public override func pageDidBecomeInactive() {
+        statusFooter.setDisplayVisible(false)
         if let editor = activeEditor,
            navigationController?.viewControllers.contains(where: { $0 === editor }) == true {
             return
@@ -299,16 +320,30 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         let next: [(id: RowID, row: Row)]
         switch content {
         case .local(let page):
-            next = page.filteredTracks.enumerated().map { filteredIndex, track in
-                (
-                    .local(track.ref),
-                    Row(
-                        track: track,
-                        filteredIndex: filteredIndex,
-                        originalIndex: page.tracks.firstIndex(where: { $0.ref == track.ref })
-                    )
-                )
+            let tracksChanged = cachedLocalTracks != page.tracks
+            if !tracksChanged, cachedLocalQuery.utf8.elementsEqual(page.searchQuery.utf8) {
+                renderState()
+                return
             }
+            if tracksChanged {
+                localOriginalIndices = Dictionary(
+                    page.tracks.enumerated().map { ($0.element.ref, $0.offset) },
+                    uniquingKeysWith: { first, _ in first }
+                )
+                cachedLocalTracks = page.tracks
+            }
+            next = MusicCollectionViewModel.filter(page.tracks, query: page.searchQuery)
+                .enumerated().map { filteredIndex, track in
+                    (
+                        .local(track.ref),
+                        Row(
+                            track: track,
+                            filteredIndex: filteredIndex,
+                            originalIndex: localOriginalIndices[track.ref]
+                        )
+                    )
+                }
+            cachedLocalQuery = page.searchQuery
         case .remote(_, let page):
             next = page.sections.flatMap { section in
                 section.items.compactMap { item -> (RowID, MusicRemoteTrack)? in
@@ -347,10 +382,10 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             snapshot.reconfigureItems(changed)
             dataSource.apply(snapshot, animatingDifferences: false)
         }
-        updateVisibleCells(force: true)
     }
 
     private func configure(_ cell: MusicCollectionTrackCell, row: Row) {
+        updateRowActionsRevision()
         switch content {
         case .local(let page):
             configureLocal(cell, row: row, page: page)
@@ -375,6 +410,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             favoriteEnabled: page.canAct && page.favoritesLoaded,
             actionsEnabled: page.canAct,
             theme: theme,
+            actionRevision: rowActionsRevision,
             menu: row.originalIndex.map {
                 localTrackMenu(
                     track: track,
@@ -383,6 +419,8 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
                     page: page
                 )
             },
+            filteredIndex: row.filteredIndex,
+            originalIndex: row.originalIndex,
             onPlay: { [weak page] in
                 page?.playFiltered(
                     at: row.filteredIndex,
@@ -416,7 +454,10 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
                 favorites?.loading == false && favorites?.busy == false,
             actionsEnabled: enabled,
             theme: theme,
+            actionRevision: rowActionsRevision,
             menu: remoteTrackMenu(track, page: page),
+            filteredIndex: row.filteredIndex,
+            originalIndex: nil,
             onPlay: { [weak self] in self?.playRemote(track, page: page) },
             onFavorite: { [weak self] in self?.toggleRemoteFavorite(track, page: page) },
             onAppend: { [weak self] in self?.enqueueRemote(track, next: false, page: page) }
@@ -505,6 +546,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         willDisplay cell: UITableViewCell,
         forRowAt indexPath: IndexPath
     ) {
+        if isPageVisible { MusicArtworkView.retryFailedLoads(in: cell) }
         guard remotePage != nil, remoteFilter.isEmpty,
               indexPath.row >= max(0, orderedRows.count - 3) else { return }
         loadAutomaticRemoteNextPage()
@@ -520,6 +562,8 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
 
     private func renderState() {
         guard isViewLoaded else { return }
+        updateRowActionsRevision()
+        updateVisibleCells(force: true)
         renderHeader()
         renderNavigationActions()
         switch content {
@@ -543,13 +587,8 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             return
         }
         if page.isLoading, orderedRows.isEmpty {
-            if page.collection == nil {
-                table.backgroundView = statusLabel("加载中")
-                configureFooter()
-            } else {
-                table.backgroundView = nil
-                configureFooter(text: "加载中")
-            }
+            table.backgroundView = nil
+            configureFooter(text: page.collection == nil ? nil : "加载中", loading: page.collection == nil)
         } else if page.collection != nil, orderedRows.isEmpty {
             table.backgroundView = nil
             configureFooter(text: page.searchQuery.isEmpty ? "暂无歌曲" : "无匹配歌曲")
@@ -595,12 +634,9 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         } else if orderedRows.isEmpty, page.loaded {
             text = "暂无歌曲"
         }
-        configureFooter(text: text, previousTitle: previousTitle, nextTitle: nextTitle)
-        if page.isLoading, orderedRows.isEmpty, page.collection == nil {
-            table.backgroundView = statusLabel("加载中")
-        } else {
-            table.backgroundView = nil
-        }
+        configureFooter(text: text, previousTitle: previousTitle, nextTitle: nextTitle,
+                        loading: page.isLoading && orderedRows.isEmpty && !page.loaded)
+        table.backgroundView = nil
         showRemoteActionError()
         showRemoteReadErrorIfNeeded()
         if orderedRows.isEmpty, page.loaded, !page.requiresExplicitNext {
@@ -626,11 +662,11 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             }
             detailHeader.configure(
                 content: detail,
-                filteredCount: page.filteredTracks.count,
+                filteredCount: orderedRows.count,
                 searchQuery: page.searchQuery,
                 playTitle: page.playAllTitle,
                 isPlaying: page.isPlayingCollection,
-                canPlay: page.canAct && !page.filteredTracks.isEmpty,
+                canPlay: page.canAct && !orderedRows.isEmpty,
                 showsSave: false,
                 canSave: false,
                 showsEdit: showsEdit,
@@ -706,8 +742,25 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
                     MusicMiniPlayerFavorites.sameSong($0.track, row.track)
                 } == true
             }
-            if force || cell.representedActive != active { configure(cell, row: row) }
+            if force || cell.representedActive != active {
+                configure(cell, row: row)
+            }
         }
+    }
+
+    private func updateRowActionsRevision() {
+        let key: RowActionsKey
+        switch content {
+        case .local(let page):
+            key = .init(presentation: page.presentationID, filter: page.filterID,
+                        remoteFilter: "", canEdit: page.canEdit)
+        case .remote(_, let page):
+            key = .init(presentation: page.actionPageID, filter: nil,
+                        remoteFilter: remoteFilter, canEdit: false)
+        }
+        guard key != renderedRowActions else { return }
+        renderedRowActions = key
+        rowActionsRevision = UUID()
     }
 
     private func updateHeaderFrame() {
@@ -760,12 +813,15 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     private func configureFooter(
         text: String? = nil,
         previousTitle: String? = nil,
-        nextTitle: String? = nil
+        nextTitle: String? = nil,
+        loading: Bool = false
     ) {
         statusFooter.configure(
             text: text,
             previousTitle: previousTitle,
             nextTitle: nextTitle,
+            loading: loading,
+            visible: isPageVisible,
             theme: theme
         )
         updateFooterFrame()
@@ -880,26 +936,27 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         _ track: MusicRemoteTrack,
         page: MusicPublicBrowseViewModel
     ) -> UIMenu {
+        let request = page.actionPageID
         var elements: [UIMenuElement] = [
             UIAction(
                 title: "下一首播放",
                 image: UIImage(systemName: "text.line.first.and.arrowtriangle.forward")
             ) { [weak self, weak page] _ in
-                guard let page else { return }
+                guard let page, page.actionPageID == request else { return }
                 self?.enqueueRemote(track, next: true, page: page)
             },
             UIAction(
                 title: "音源",
                 image: UIImage(systemName: "slider.horizontal.3")
             ) { [weak self, weak page] _ in
-                guard let page else { return }
+                guard let page, page.actionPageID == request else { return }
                 self?.showRemoteSources(track, page: page)
             },
             UIAction(
                 title: "添加到播放队列",
                 image: PageIcon.image(.append)
             ) { [weak self, weak page] _ in
-                guard let page else { return }
+                guard let page, page.actionPageID == request else { return }
                 self?.enqueueRemote(track, next: false, page: page)
             },
         ]
@@ -910,7 +967,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
                 image: UIImage(systemName: "folder"),
                 children: targets.map { target in
                     UIAction(title: target.title) { [weak self, weak page] _ in
-                        guard let page else { return }
+                        guard let page, page.actionPageID == request else { return }
                         self?.addRemote(track, to: target, page: page)
                     }
                 }
@@ -1239,18 +1296,9 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         present(alert, animated: true)
     }
 
-    private func statusLabel(_ text: String) -> UILabel {
-        let label = UILabel()
-        label.text = text
-        label.textAlignment = .center
-        label.numberOfLines = 0
-        label.font = .systemFont(ofSize: 14)
-        label.textColor = UIColor(theme.muted)
-        return label
-    }
-
     private func refresh() {
         automaticPaginationHeld = false
+        MusicArtworkView.retryFailedLoads(in: view)
         switch content {
         case .local(let page):
             let task = page.reload(preservingContent: true)
