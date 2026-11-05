@@ -2,7 +2,7 @@ import Foundation
 import CryptoKit
 import MeowMusicFeature
 
-/// Ordered JSON keeps legacy locator hashes stable. Foundation Dictionary and
+/// Ordered JSON keeps locator hashes stable. Foundation Dictionary and
 /// sortedKeys must not reorder an existing platform locator object.
 indirect enum MJ: Sendable, Equatable {
     case object([(String, MJ)]), array([MJ]), string(String), number(Double), bool(Bool), null
@@ -123,7 +123,7 @@ indirect enum MJ: Sendable, Equatable {
     }
     /// JSON.stringify enumerates array-index keys before other object keys,
     /// even when a "stable" object was built in lexical order. Receipt hashes
-    /// must retain this rule (e.g. legacy numeric song/binding map IDs).
+    /// must retain this rule (e.g. numeric song/binding map IDs).
     static func indexKey(_ key: String) -> UInt32? {
         guard let n = UInt32(key), n != UInt32.max, String(n).utf8.elementsEqual(key.utf8) else { return nil }
         return n

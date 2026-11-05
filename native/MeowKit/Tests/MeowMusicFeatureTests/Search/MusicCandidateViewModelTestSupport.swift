@@ -105,9 +105,12 @@ actor MusicCandidateViewModelService: MusicServing, MusicCandidateDiscoveryServi
         guard let attemptId else { throw MusicServiceError.invalidRequest }
         cancelExact(attemptId)
     }
-    func playbackOptions(for ref: MusicReference) -> [MusicPlaybackOption] {
-        counts.options += 1; return [Self.option().playback]
+    func sourceAvailability(for ref: MusicReference) -> MusicSourceAvailability {
+        counts.options += 1; return .init(options: [Self.option().playback], scriptState: .ready)
     }
+    func metadataPreferences() throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
+    func updateMetadataPreferences(_ change: MusicMetadataPreferencesChange) throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
+    func metadataCandidates(occurrenceID: String) throws -> MusicMetadataCandidates { throw MusicServiceError.unsupported }
     func resolve(attemptId: String, occurrenceId: String, selection: MusicPlaybackSelection) throws -> MusicPlaybackCandidate {
         counts.manual += 1
         if let manualFailure { throw manualFailure }

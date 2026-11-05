@@ -12,16 +12,8 @@ internal sealed record MusicClientContextDocument(MusicWyClientContext Wy,
     internal const int MaximumBytes = 65536;
     private const long MaximumInteger = 9007199254740991;
     private const long MaximumTimestamp = 253402300799999;
-    internal static MusicClientContextDocument Create(MusicClientContextSeeds seeds)
-    {
-        var wy = seeds.Wy ?? MusicWyClientContext.Create();
-        if (wy.Nnid.Length == 0) wy = wy with { Nnid = wy.Nuid + "," + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
-        var document = new MusicClientContextDocument(wy, seeds.Kg ?? MusicKgClientContext.Create(),
-            seeds.Qq ?? MusicQqClientContext.Create());
-        byte[] bytes = document.Encode();
-        try { return Decode(new(bytes, DocumentFingerprint.FromBytes(bytes))); }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
-    }
+    internal static MusicClientContextDocument Create() =>
+        new(MusicWyClientContext.Create(), MusicKgClientContext.Create(), MusicQqClientContext.Create());
     internal byte[] Encode() => JsonSerializer.SerializeToUtf8Bytes(new
     {
         version = 1,

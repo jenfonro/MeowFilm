@@ -44,9 +44,9 @@ extension MusicViewModel {
         return true
     }
 
-    public func loadLyrics(occurrenceId: String, sourceKey: String) async {
+    public func loadLyrics(occurrenceId: String) async {
         guard isAvailable, !isClosed, current?.id == occurrenceId else { return }
-        beginPlaybackMetadata(fallbackSourceKey: sourceKey)
+        beginPlaybackMetadata()
         await playbackMetadata.flush()
     }
 
@@ -86,7 +86,7 @@ extension MusicViewModel {
             invalidateSelection(stopMedia: true); return
         }
         // The unique native event has passed resource/native generation and
-        // protected-file admission. Never sample the compatibility snapshot path.
+        // protected-file admission.
         feedbackConsumer.consume(event, candidate: candidate, automatic: feedbackAutomatic)
         let kind: MusicPlaybackFact.Kind?
         switch event.kind {
@@ -106,28 +106,6 @@ extension MusicViewModel {
         }
     }
     public func onPlayback(_ event: PlaybackEvent) { onPlaybackEvent(event) }
-    /// Compatibility for product snapshot observers. Resource IDs are
-    /// per-resolution UUIDs, so repeated same-track attempts cannot alias.
-    public func onPlayback(_ snapshot: PlaybackSnapshot) {
-        guard isAvailable, !isClosed, snapshot.owner == "music", let candidate,
-              snapshot.resourceID == candidate.resourceId else { return }
-        guard candidate.fileAuthorization?.isActive != false,
-              candidate.playbackAuthorization?.isActive != false else {
-            invalidateSelection(stopMedia: true); return
-        }
-        let kind: MusicPlaybackFact.Kind
-        switch snapshot.phase {
-        case .playing: kind = phase == .playing ? .progress : .playing
-        case .paused: kind = .paused
-        case .ended: kind = .ended
-        case .failed: kind = .failed
-        case .idle: kind = .stopped
-        case .buffering, .preparing: playbackState.phase = snapshot.phase; return
-        }
-        if phase != snapshot.phase { playbackState.phase = snapshot.phase }
-        onPlayback(MusicPlaybackFact(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
-            resourceId: candidate.resourceId, kind: kind, position: snapshot.position, duration: snapshot.duration))
-    }
     public func onPlayback(_ fact: MusicPlaybackFact) {
         guard isAvailable, !isClosed, let candidate, fact.attemptId == candidate.attemptId,
               fact.occurrenceId == candidate.occurrenceId, fact.resourceId == candidate.resourceId,

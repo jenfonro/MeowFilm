@@ -112,10 +112,10 @@ final class NativeMusicStorageTests: XCTestCase {
 
     func testImportPlansUseRetainedContentCostAndReleaseIndependently() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        let data = try NativeMusicFixture.legacy().bytes
+        let data = try NativeMusicFixture.importLibrary().bytes
         var previews: [MusicImportPreview] = []
         for index in 0..<4 {
-            previews.append(try await service.prepareImport(data: data, sourceId: "synthetic-\(index)", ownerId: "legacy-owner"))
+            previews.append(try await service.prepareImport(data: data, sourceId: "synthetic-\(index)", ownerId: "import-owner"))
         }
         let plans = await service.prepared
         XCTAssertEqual(plans.count, 4)
@@ -129,24 +129,24 @@ final class NativeMusicStorageTests: XCTestCase {
 
     func testV1ImportReceiptIdempotenceRollbackAndNoSecretPersistence() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        var legacy = try NativeMusicFixture.legacy()
-        let id = try XCTUnwrap(legacy["songs"].fields.first?.0)
-        var song = legacy["songs"][id]
+        var library = try NativeMusicFixture.importLibrary()
+        let id = try XCTUnwrap(library["songs"].fields.first?.0)
+        var song = library["songs"][id]
         song["cookie"] = .string("synthetic-private")
         song["url"] = .string("https://media.invalid/temporary")
         song["cover_url"] = .string("https://cover.invalid/a?signature=synthetic-private")
         var source = song["sources"].array.first ?? .obj()
         source["musicInfo"]["credential"] = .string("synthetic-private")
         song["sources"] = .array([source])
-        legacy["songs"][id] = song
-        let preview = try await service.prepareImport(data: legacy.bytes, sourceId: "fixed-synthetic", ownerId: "legacy-owner")
+        library["songs"][id] = song
+        let preview = try await service.prepareImport(data: library.bytes, sourceId: "fixed-synthetic", ownerId: "import-owner")
         XCTAssertNil(store.snapshot().0)
         let report = try await service.commitImport(preview); XCTAssertFalse(report.alreadyApplied)
         let saved = try MJ.parse(XCTUnwrap(store.snapshot().0))
         XCTAssertEqual(saved["version"].int, 1)
         XCTAssertFalse(saved.json.contains("synthetic-private"))
         XCTAssertFalse(saved.json.contains("media.invalid"))
-        let repeatPreview = try await service.prepareImport(data: legacy.stable.bytes, sourceId: "fixed-synthetic", ownerId: "legacy-owner")
+        let repeatPreview = try await service.prepareImport(data: library.stable.bytes, sourceId: "fixed-synthetic", ownerId: "import-owner")
         XCTAssertTrue(repeatPreview.report.alreadyApplied)
         XCTAssertEqual(preview.report.batchId, repeatPreview.report.batchId)
         let again = try await service.commitImport(repeatPreview); XCTAssertTrue(again.alreadyApplied)
@@ -156,7 +156,7 @@ final class NativeMusicStorageTests: XCTestCase {
     }
     func testImportedTargetChangePreventsRollbackAndKeepsTombstone() async throws {
         let service = try await NativeMusicFixture.service()
-        let preview = try await service.prepareImport(data: NativeMusicFixture.legacy().bytes, sourceId: "fixed", ownerId: "legacy-owner")
+        let preview = try await service.prepareImport(data: NativeMusicFixture.importLibrary().bytes, sourceId: "fixed", ownerId: "import-owner")
         _ = try await service.commitImport(preview)
         let created = try await service.createPlaylist(name: "New", refs: [])
         try await service.removePlaylist(created)
@@ -196,6 +196,28 @@ final class NativeMusicStorageTests: XCTestCase {
         catch { XCTFail("Restored valid bytes must be readable: \(error)") }
         await service.close()
     }
+    func testInvalidQueueSerialAndPointersAreRejectedWithoutReadRepair() async throws {
+        let song = try NativeMusicFixture.song()
+        let invalid: [(String, MJ)] = [
+            ("serial", .n(0)), ("currentId", .string("entry-99")),
+            ("priority", .strings(["entry-1"])), ("history", .strings(["entry-99"])),
+            ("failed", .strings(["entry-99"]))
+        ]
+        for (field, value) in invalid {
+            var document = try MusicDocument(nil, runID: "fixture")
+            document.queue["entries"] = .array([.obj([("id", .string("entry-1")), ("song", song)])])
+            document.queue["currentId"] = .string("entry-1"); document.queue["serial"] = .n(1)
+            document.queue[field] = value
+            let bytes = try document.encode(changed: ["queue"]), store = NativeMusicMemoryDocument(bytes)
+            let service = try await NativeMusicFixture.service(store)
+            do { _ = try await service.queue(); XCTFail("Invalid \(field) must not be repaired") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+            do { _ = try await service.changeQueue(.clear, expectedRevision: 0); XCTFail("Do not reset a bad document") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+            XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
+            await service.close()
+        }
+    }
     func testJSONPreservesUnicodeByteIdentitiesAndNativeNumericStrings() throws {
         let value = try MJ.parse(Data(#"{"é":1,"e\u0301":2,"id":"9007199254740993"}"#.utf8))
         XCTAssertEqual(value.fields.count, 3)
@@ -232,7 +254,7 @@ final class NativeMusicStorageTests: XCTestCase {
         let empty = try await service.playedPlaylists(); XCTAssertTrue(empty.isEmpty)
         state = try await service.changeQueue(.replace([ref], index: 0), expectedRevision: state.revision)
         let archives = try await service.playedPlaylists(); XCTAssertEqual(archives.count, 1); XCTAssertEqual(archives[0].count, 3)
-        let options = try await service.playbackOptions(for: ref)
+        let options = (try await service.sourceAvailability(for: ref)).options
         let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: XCTUnwrap(state.currentId),
                                                    selection: options[0].selection(quality: "128k"))
         let ended = MusicPlaybackFact(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId, resourceId: candidate.resourceId, kind: .ended, position: 180)

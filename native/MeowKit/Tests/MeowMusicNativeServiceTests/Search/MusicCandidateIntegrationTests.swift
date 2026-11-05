@@ -90,7 +90,7 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         // Exercise the explicit selection API independently of the source
         // inspector's probes; it must never fall back after a pinned failure.
         let current = try XCTUnwrap(model.current)
-        let options = try await service.playbackOptions(for: .init(kind: .queue, id: current.id))
+        let options = (try await service.sourceAvailability(for: .init(kind: .queue, id: current.id))).options
         let choice = try XCTUnwrap(options.first).selection(quality: "128k")
         await model.choose(choice)
         let calls = await scripts.calls()

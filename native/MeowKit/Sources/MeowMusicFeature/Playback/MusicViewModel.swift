@@ -178,7 +178,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public var importManagement: (any MusicImportHistoryProviding)? { service as? any MusicImportHistoryProviding }
     public var remoteQueueService: (any MusicRemoteQueueServing)? { service as? any MusicRemoteQueueServing }
     public var playbackFeedbackSettings: (any MusicPlaybackFeedbackSettingsServing)? { service as? any MusicPlaybackFeedbackSettingsServing }
-    public var metadataPreferencesService: (any MusicMetadataPreferencesServing)? { service as? any MusicMetadataPreferencesServing }
+    public var metadataPreferencesService: (any MusicMetadataPreferencesServing)? { service }
     let feedbackConsumer: MusicPlaybackFeedbackConsumer
     var feedbackAutomatic = false
     var player: (any MusicPlaybackDriving)?
@@ -442,8 +442,8 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
                 lyricTask?.cancel()
                 beginPlaybackMetadata(); metadataState.lyricLines = []; metadataState.lyricState = "disabled"
             }
-            else if let current, candidate?.occurrenceId == current.id, let lastSelection {
-                await loadLyrics(occurrenceId: current.id, sourceKey: lastSelection.sourceKey)
+            else if let current, candidate?.occurrenceId == current.id {
+                await loadLyrics(occurrenceId: current.id)
             }
         } catch { report(error, epoch: epoch, operation: "保存播放设置", kind: .settings) }
     }

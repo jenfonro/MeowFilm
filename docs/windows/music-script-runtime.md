@@ -27,7 +27,7 @@ Windows 源码目录只保留启动／管道 bootstrap 与薄 entry，没有 `mo
 
 `music.online.resolve` 未指定 `sourceKey` 且歌曲缺少目标平台映射时，原生 owner 在调用脚本前只为该平台请求一次[跨平台匹配](music-official-selection.md#21-按需匹配与匹配状态)：已有接受映射直接复用，不搜索其他平台，不批量补全队列。匹配在 owner 闸门外、同一 25 秒期限内执行；失败、取消或结果不兼容时不调用脚本。成功时响应附带 `recordingSong`（同一 `songId` 的扩展歌曲），播放器之后的精确刷新使用它，队列歌曲与 occurrence 不变。显式 `sourceKey`、歌词与本地文件不触发匹配。
 
-反向存储 RPC 只转发明确 installation/site/generation 的会话请求，不授予通用文档、文件、进程或官方账号权限。全局 `meow.storage`、startup 和 background 不能借助原生适配层获得隐式权限。持久存储的每 key 16 KiB、每 site 64 KiB、每安装 512 KiB 是原生数据契约，仍然生效，不是控制消息限额，见 [原生曲库](music-native-library.md)。
+反向存储 RPC 只转发明确 installation/site/generation 的会话请求，不授予通用文档、文件、进程或官方账号权限。全局 `meow` 只提供 `config`，脚本持久存储的唯一入口是请求处理器第二参数 `context.storage`；已完成请求的 context 拒绝访问，startup 和 background 不能借助原生适配层获得隐式权限。持久存储的每 key 16 KiB、每 site 64 KiB、每安装 512 KiB 是原生数据契约，仍然生效，不是控制消息限额，见 [原生曲库](music-native-library.md)。
 
 握手身份为 `aggregate`、protocol 1，并校验 `music@0.7.0`、`cat@0.1.0`、`source@0.1.0` 三个 module；音乐 owner 消费的业务响应为 `music.script.v2`，旧 descriptor 不作为当前契约接纳。启动参数与管道生命周期见 [Windows 装配](app-runtime.md)，连接失败与显式恢复见 [恢复](runtime-recovery.md)。
 

@@ -174,7 +174,7 @@ struct MusicRecoveryTestFixture {
             original = try await session.resolve(target, attemptID: UUID().uuidString.lowercased())
             await session.close(retainingAttemptID: original.attemptId)
         } else {
-            let options = try await service.playbackOptions(for: .init(kind: .queue, id: "entry-1"))
+            let options = (try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))).options
             guard let option = options.first else { throw MusicServiceError.sourceUnavailable }
             selection = option.selection(quality: "flac")
             if cached {

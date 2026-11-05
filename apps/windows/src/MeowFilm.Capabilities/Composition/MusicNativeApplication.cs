@@ -96,7 +96,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(scriptRuntime);
         http = transportHandler is null ? new MusicPlatformHttp() : MusicPlatformHttp.CreateWithHandler(transportHandler);
-        clients = new(store, token => AccountClientContextImport.ReadAsync(store, token));
+        clients = new(store);
         var clientProtocol = new MusicPlatformClientProtocol(http);
         library = new(store);
         accounts = new(store, new MusicAccountProtocol(http, clients, clientProtocol: clientProtocol), clients, clientProtocol);

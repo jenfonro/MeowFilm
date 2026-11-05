@@ -428,12 +428,12 @@ test('guest JSON and prototype hooks cannot forge the request-bound storage iden
         const read = async capability => {
           try { return await capability.get('key'); } catch(error) { return error.code; }
         };
-        return {global:await read(meow.storage),saved:await read(saved),own:await read(storage)};
+        return {global:'storage' in meow,saved:await read(saved),own:await read(storage)};
       }`,
     }) });
   assert.equal(await host.invoke(target('a', 'kw', { save: true })), true);
   assert.deepEqual(await host.invoke(target('a', 'tx')), {
-    global: 'PERMISSION_DENIED', saved: 'PERMISSION_DENIED', own: 'tx',
+    global: false, saved: 'PERMISSION_DENIED', own: 'tx',
   });
   assert.deepEqual(sites, ['tx']);
 });

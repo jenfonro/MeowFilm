@@ -37,7 +37,9 @@ public static class MusicNativeAccountTests
         yield return Case("owner.close-failure-does-not-dispose-shared-store", PrepareClose);
         yield return Case("owner.issued-session-only-revocation-fences-content", IssuedSession);
         yield return Case("owner.expired-validation-only-current-session-revoked", ExpiredSession);
-        yield return Case("storage.unknown-entry-rejected-without-write", UnknownEntry);
+        yield return Case("storage.unknown-entry-rejected-without-write", () => UnknownEntry("unsupported-entry", new JsonObject { ["kept"] = true }));
+        foreach (string platform in new[] { "kg", "tx" })
+        { var value = platform; yield return Case("storage.device-entry-" + value + "-rejected-without-write", () => DeviceEntry(value)); }
         yield return Case("owner.no-memory-fallback-on-store-read-error", StorageFailure);
         yield return Case("owner.profile-secret-reflection-rejected", ProfileReflection);
         yield return Case("owner.observer-failure-cannot-turn-commit-into-error", ObserverFailure);
@@ -408,16 +410,28 @@ public static class MusicNativeAccountTests
         expired = true; Error(await Command(f.Owner, "validate"), "AUTH_EXPIRED");
         Check(!f.Owner.IsCurrent(session) && f.Store.Writes == 1 && State(await List(f.Owner)) == "revoked");
     }
-    private static async Task UnknownEntry()
+    private static async Task DeviceEntry(string platform)
+    {
+        byte[] bytes = MusicClientContextDocument.Create().Encode();
+        JsonObject value;
+        try { value = JsonNode.Parse(bytes)![platform]!.DeepClone().AsObject(); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+        value["version"] = 1;
+        if (platform == "tx") value["profile"] = "vivo-v1";
+        string device = platform == "tx" ? "tx-feedback" : "kg";
+        await UnknownEntry($"[\"meowfilm\",\"music\",1,\"platform-device\",\"{device}\"]", value);
+    }
+    private static async Task UnknownEntry(string key, JsonObject value)
     {
         var store = new MemoryStore(); store.Seed(CurrentJson());
         var doc = store.Document();
-        doc["entries"]!.AsArray().Add(new JsonObject { ["key"] = "unsupported-entry", ["value"] = new JsonObject { ["kept"] = true } });
+        doc["entries"]!.AsArray().Add(new JsonObject { ["key"] = key, ["value"] = value });
         byte[] original = Encoding.UTF8.GetBytes(doc.ToJsonString());
         store.Bytes = original.ToArray();
         await using var f = new Fixture(store: store);
         Error(await List(f.Owner), "CORRUPT_STORAGE");
         Error(await Import(f.Owner), "CORRUPT_STORAGE");
+        Error(await Command(f.Owner, "logout"), "CORRUPT_STORAGE");
         Check(f.Handler.Calls == 0 && store.Writes == 0 && store.Bytes!.SequenceEqual(original));
         CryptographicOperations.ZeroMemory(original);
     }

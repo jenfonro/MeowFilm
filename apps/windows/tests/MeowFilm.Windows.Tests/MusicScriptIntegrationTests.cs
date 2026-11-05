@@ -23,7 +23,7 @@ public static class MusicScriptIntegrationTests
         yield return new("Native LX real pipe: original local lyric protocol is parsed in native code", Lyrics);
         yield return new("Native LX real pipe: explicit crashed-process recovery preserves native data and rehydrates only selected source", Recover);
         yield return new("Native LX real pipe: concurrent request contexts preserve site and installation storage across awaits", ConcurrentStorage);
-        yield return new("Native LX real pipe: startup global and completed request contexts cannot borrow storage authority", ScopedStorage);
+        yield return new("Native LX real pipe: global storage is absent and completed request contexts cannot borrow storage authority", ScopedStorage);
         yield return new("Native LX real pipe: response envelope preserves original raw value", RawValue);
         yield return new("Native LX real pipe: internal transport preserves large arbitrary LX JSON", LargeTransport);
         yield return new("Native LX real pipe: owner transports legal large recordings and declarations", LargeOwner);
@@ -307,15 +307,15 @@ public static class MusicScriptIntegrationTests
     private static async Task ScopedStorage()
     {
         const string source = """
-            const startup=meow.storage.set('startup','must not persist').then(()=> 'allowed',e=>e.code);
+            const startup=typeof meow.storage === 'undefined';
             let retired;
             lx.on('request',async ({info},{storage})=>{
-              const global=await meow.storage.set('global','must not persist').then(()=> 'allowed',e=>e.code);
+              const global=typeof meow.storage === 'undefined';
               const old=retired ? await retired.set('retired','must not persist').then(()=> 'allowed',e=>e.code) : null;
               await Promise.resolve();
               await storage.set('active',info.value);
               retired=storage;
-              return {startup:await startup,global,old,active:await storage.get('active')};
+              return {startup,global,old,active:await storage.get('active')};
             });
             lx.send('inited',{sources:{wy:{type:'music',actions:['probe'],qualitys:[]}}});
             """;
@@ -323,7 +323,9 @@ public static class MusicScriptIntegrationTests
         await Ok(f, "music.sources.enable", new { installationId = id });
         var first = await InvokeRaw(f, id, "wy", "probe", new { value = "first" });
         var second = await InvokeRaw(f, id, "wy", "probe", new { value = "second" });
-        Check(first.GetProperty("startup").GetString() == "PERMISSION_DENIED" && first.GetProperty("global").GetString() == "PERMISSION_DENIED");
+        Check(first.GetProperty("startup").GetBoolean() && first.GetProperty("global").GetBoolean() &&
+            first.GetProperty("old").ValueKind == JsonValueKind.Null && first.GetProperty("active").GetString() == "first");
+        Check(second.GetProperty("startup").GetBoolean() && second.GetProperty("global").GetBoolean());
         Check(second.GetProperty("old").GetString() == "PERMISSION_DENIED" && second.GetProperty("active").GetString() == "second");
         var metadata = await f.Library.ReadSourceMetadataAsync();
         long revision = metadata.State.GetProperty("revision").GetInt64();

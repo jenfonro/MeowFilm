@@ -23,12 +23,12 @@ enum MusicLibraryValidation {
             }
         }
         for c in lib["collections"].array {
-            try c.requireFields(["id", "kind", "name", "order", "revision", "manualOrder", "bindings", "intents", "deleted", "locallyCreated", "creating"])
+            try c.requireFields(["id", "kind", "name", "order", "revision", "manualOrder", "bindings", "intents", "deleted", "locallyCreated"])
             let id = try c["id"].text(), name = try c["name"].text(600), ids = c["order"].strings
             try musicRequire(name.utf16.count <= 200 && collectionIDs.insert(Data(id.utf8)).inserted && ["favorites", "playlist"].contains(c["kind"].string) &&
                 c["revision"].isInteger && c["order"].isArray && musicIDs(ids).count == ids.count &&
                 ids.allSatisfy { knownSongs.contains(Data($0.utf8)) } && c["bindings"].isArray && c["intents"].isObject &&
-                c["creating"].isObject && c["manualOrder"].isBool, .corruptDocument)
+                c["manualOrder"].isBool, .corruptDocument)
             try musicRequire(c["kind"].string != "favorites" || id == "favorites" && !c["deleted"].bool, .favoritesProtected)
             for key in ["deleted", "locallyCreated"] { try musicRequire(!c.contains(key) || c[key].isBool, .corruptDocument) }
             if id.hasPrefix("playlist:"), let n = Int(id.dropFirst(9)) { try musicRequire(n < lib["nextId"].int, .corruptDocument) }
@@ -42,12 +42,9 @@ enum MusicLibraryValidation {
                     b["baseline"].array.allSatisfy { $0.isString && !$0.string.isEmpty } &&
                     Set(b["baseline"].strings).count == b["baseline"].array.count && b["map"].isObject &&
                     b["writable"].isBool && b["name"].isString, .corruptDocument)
-                for (member, native) in b["map"].fields {
-                    _ = try native.text()
-                    // Native/occurrence -> song is the fixed iWeb v1 format.
-                    // Keep early migrated song -> native maps readable; sync
-                    // canonicalizes them only inside a conditional commit.
-                    try musicRequire(knownSongs.contains(Data(member.utf8)) || knownSongs.contains(Data(native.string.utf8)), .corruptDocument)
+                for (_, songID) in b["map"].fields {
+                    _ = try songID.text()
+                    try musicRequire(knownSongs.contains(Data(songID.string.utf8)), .corruptDocument)
                 }
             }
             for (id, intent) in c["intents"].fields {
@@ -58,16 +55,19 @@ enum MusicLibraryValidation {
                     try musicRequire(intent["acknowledged"].isArray && intent["acknowledged"].strings.allSatisfy(bindings.contains), .corruptDocument)
                 }
             }
-            for (target, creation) in c["creating"].fields {
-                let pair = try MJ.parse(Data(target.utf8), maximum: 4096).array
-                try creation.requireFields(["before", "name"])
-                try musicRequire(pair.count == 2 && lib["accounts"][pair[0].string] == pair[1] &&
-                    creation["before"].isArray && creation["before"].array.allSatisfy { $0.isString && !$0.string.isEmpty }, .corruptDocument)
-                _ = try creation["name"].text()
-            }
         }
         try musicRequire(lib["collections"].array.filter { $0["kind"].string == "favorites" }.count == 1, .favoritesProtected)
         for (platform, id) in lib["accounts"].fields { try musicRequire(MusicModel.sites.contains(platform), .corruptDocument); _ = try id.text() }
+    }
+    static func validateReceipt(_ receipt: MJ) throws {
+        try receipt.requireFields(["batchId", "sourceId", "sourceOwnerId", "appliedAt", "appliedRevision", "afterHash"],
+                                  required: ["batchId", "sourceId", "sourceOwnerId", "appliedAt", "appliedRevision", "afterHash"])
+        try musicRequire(musicHex(receipt["batchId"].string) && musicHex(receipt["afterHash"].string) &&
+            receipt["appliedRevision"].isInteger && receipt["appliedRevision"].int > 0 &&
+            receipt["appliedAt"].isNumber && receipt["appliedAt"].number.isFinite &&
+            receipt["appliedAt"].number >= 0, .corruptDocument)
+        _ = try receipt["sourceId"].text()
+        _ = try receipt["sourceOwnerId"].text()
     }
 }
 
@@ -246,7 +246,7 @@ extension NativeMusicService {
         for (id, song) in songs.fields { songs[id] = try MusicModel.cleanSong(song) }
         lib["songs"] = songs
         try MusicModel.rejectSecrets(lib)
-        lib["status"] = .obj([("phase", .string("blocked")), ("at", .n(0)), ("issues", .array([.obj([("code", .string("legacy_import_requires_rebinding"))])]))])
+        lib["status"] = .obj([("phase", .string("blocked")), ("at", .n(0)), ("issues", .array([.obj([("code", .string("import_requires_rebinding"))])]))])
         let batch = MJ.obj([("sourceId", .string(sourceId)), ("ownerId", .string(ownerId)), ("scope", .string("device")), ("library", lib)]).stable.digest
         let bytes = lib.bytes.count + sourceId.utf8.count + ownerId.utf8.count + batch.utf8.count
         let plan = Import(library: lib, bytes: bytes, sourceID: sourceId, ownerID: ownerId, batch: batch, at: now())
@@ -267,12 +267,12 @@ extension NativeMusicService {
                 // in the SAME CAS, preserving the import receipt/rollback.
                 var ledger = try MusicNativeSyncLedger.load(d.library)
                 var automatic = MusicNativeAutomaticSyncPreferences()
-                automatic.revision = (ledger.automatic?.revision ?? 0) + 1
+                automatic.revision = ledger.automatic.revision + 1
                 ledger.automatic = automatic
                 d.library["sync"] = try ledger.json()
                 var lib = p.library; lib["ownerId"] = .string("device")
                 d.library["library"] = lib; d.library["revision"] = .n(d.library["revision"].int + 1)
-                d.library["receipt"] = .obj([("batchId", .string(p.batch)), ("sourceId", .string(p.sourceID)), ("legacyOwnerId", .string(p.ownerID)),
+                d.library["receipt"] = .obj([("batchId", .string(p.batch)), ("sourceId", .string(p.sourceID)), ("sourceOwnerId", .string(p.ownerID)),
                     ("appliedAt", .number(now().timeIntervalSince1970 * 1000)), ("appliedRevision", d.library["revision"]), ("afterHash", .string(lib.stable.digest))])
             }
             return report(p, applied: applied)

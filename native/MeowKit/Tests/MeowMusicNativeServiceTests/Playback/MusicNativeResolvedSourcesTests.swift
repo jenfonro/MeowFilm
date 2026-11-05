@@ -108,12 +108,12 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
         try await service.setAccess(available: true, generation: 1)
         let hit = try await service.cachedPlayback(attemptID: UUID().uuidString.lowercased(), occurrenceID: "entry-1", selection: nil)
         XCTAssertNotNil(hit)
-        let offered = try await service.playbackOptions(for: .init(kind: .queue, id: "entry-1"))
+        let offered = (try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))).options
         XCTAssertTrue(offered.contains { $0.sourceKey == key })
         await cache.exclude(fingerprint: MusicModel.fingerprint(song), duration: 180, sourceKey: key)
         let miss = try await service.cachedPlayback(attemptID: UUID().uuidString.lowercased(), occurrenceID: "entry-1", selection: nil)
         XCTAssertNil(miss, "a cached file of another recording is not this song")
-        let options = try await service.playbackOptions(for: .init(kind: .queue, id: "entry-1"))
+        let options = (try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))).options
         XCTAssertFalse(options.contains { $0.sourceKey == key })
         let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let snapshot = try await session.snapshot(discover: false, force: false)

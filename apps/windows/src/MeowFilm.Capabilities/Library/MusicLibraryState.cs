@@ -34,7 +34,7 @@ public sealed partial class MusicLibraryOwner
         return false;
     }
 
-    private void ValidateDocument(JsonObject doc, bool allowLegacyOnlineSettings = false)
+    private void ValidateDocument(JsonObject doc)
     {
         try
         {
@@ -92,9 +92,7 @@ public sealed partial class MusicLibraryOwner
             if (HasValue(doc, "online-settings"))
             {
                 var settings = LJ.Object(Value(doc, "online-settings"), "CORRUPT_STORAGE");
-                if (allowLegacyOnlineSettings && LJ.I(settings["schema"]) == 2)
-                    ValidateLegacyOnlineSettings(settings, installations);
-                else ValidateSettings(settings);
+                ValidateSettings(settings);
             }
             if (HasValue(doc, CatalogSourceArea))
                 ValidateCatalogSource(LJ.Object(Value(doc, CatalogSourceArea), "CORRUPT_STORAGE"));

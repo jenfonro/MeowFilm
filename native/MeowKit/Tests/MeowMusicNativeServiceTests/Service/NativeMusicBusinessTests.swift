@@ -54,7 +54,7 @@ final class NativeMusicBusinessTests: XCTestCase {
         let queue = try await service.queue()
         XCTAssertNotEqual(queue.entries[0].id, queue.entries[1].id)
         XCTAssertEqual(queue.entries[0].track.songId, queue.entries[1].track.songId)
-        let options = try await service.playbackOptions(for: tracks[0].ref)
+        let options = (try await service.sourceAvailability(for: tracks[0].ref)).options
         let option = try XCTUnwrap(options.first)
         let beforePlay = try await service.playedSongs()
         XCTAssertTrue(beforePlay.isEmpty)
@@ -83,7 +83,7 @@ final class NativeMusicBusinessTests: XCTestCase {
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
         let page = try await service.search(platform: "tx", query: "A", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace([page.items[0].ref], index: 0), expectedRevision: 0)
-        let options = try await service.playbackOptions(for: page.items[0].ref)
+        let options = (try await service.sourceAvailability(for: page.items[0].ref)).options
         let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: XCTUnwrap(state.currentId), selection: options[0].selection(quality: "128k"))
         let before = store.snapshot().0; store.fail(.storageConflict)
         let fact = MusicPlaybackFact(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId, resourceId: candidate.resourceId, kind: .playing, position: 0)
@@ -142,7 +142,7 @@ final class NativeMusicBusinessTests: XCTestCase {
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
         let page = try await service.search(platform: "tx", query: "A", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
-        let options = try await service.playbackOptions(for: page.items[0].ref)
+        let options = (try await service.sourceAvailability(for: page.items[0].ref)).options
         await scripts.configure(gate: gate)
         let id = UUID().uuidString.lowercased(), occurrence = try XCTUnwrap(state.currentId)
         let task = Task { try await service.resolve(attemptId: id, occurrenceId: occurrence, selection: options[0].selection(quality: "128k")) }
@@ -160,7 +160,7 @@ final class NativeMusicBusinessTests: XCTestCase {
         let tracks = try await service.accountTracks(platform: .qq, collectionID: collections.items[0].id, cursor: nil)
         XCTAssertEqual(recommendations.items[0].songId, tracks.items[0].songId)
         let state = try await service.changeQueue(.replace(tracks.items.map(\.ref), index: 0), expectedRevision: 0)
-        let options = try await service.playbackOptions(for: tracks.items[0].ref)
+        let options = (try await service.sourceAvailability(for: tracks.items[0].ref)).options
         let gate = NativeMusicGate(); await account.suspend(gate)
         let occurrence = try XCTUnwrap(state.currentId)
         let task = Task { try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: occurrence, selection: options[0].selection(quality: "128k")) }

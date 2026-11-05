@@ -62,13 +62,11 @@ final class MusicPlaybackLyricCacheTests: XCTestCase {
         .init(ref: .init(kind: .queue, id: occurrence), songId: song, title: title, duration: duration,
               sources: [.init(sourceKey: source, platform: platform, nativeId: "native")])
     }
-    private func selection(source: String = "source", platform: String = "wy",
-                           installation: String = "official:wy", generation: Int = 1,
-                           quality: String = "128k") -> MusicPlaybackSelection {
-        .init(installationId: installation, generation: generation, siteId: platform, sourceKey: source, quality: quality)
+    private func source(_ key: String = "source", platform: String = "wy") -> MusicNativeSource {
+        .init(sourceKey: key, platform: platform, nativeId: "native")
     }
     private func cacheKey(_ song: String = "song") throws -> Cache.Key {
-        try .init(track: track(song), selection: selection())
+        try .init(track: track(song), source: source())
     }
     private func owner(_ generation: UUID, clock: PlaybackLyricClock = .init()) -> Cache {
         let cache = Cache(now: { clock.read() })
@@ -412,21 +410,21 @@ final class MusicPlaybackLyricCacheTests: XCTestCase {
         catch { XCTAssertEqual(error as? MusicServiceError, .notFound) }
     }
 
-    func testKeysUseContentAndExactSourceNotOccurrenceQualityOrUnicodeNormalization() throws {
-        let original = try Cache.Key(track: track(), selection: selection())
-        XCTAssertEqual(original, try Cache.Key(track: track(occurrence: "duplicate"), selection: selection(quality: "flac")))
-        XCTAssertEqual(original, try Cache.Key(track: track(), selection: selection(installation: "other-audio", generation: 8)))
-        XCTAssertNotEqual(original, try Cache.Key(track: track(source: "other"), selection: selection(source: "other")))
-        XCTAssertNotEqual(original, try Cache.Key(track: track(duration: 6), selection: selection()))
-        XCTAssertNotEqual(original, try Cache.Key(track: track(), selection: selection(), contentRevision: 2))
-        let composed = try Cache.Key(track: track(source: "\u{00e9}"), selection: selection(source: "\u{00e9}"))
-        let decomposed = try Cache.Key(track: track(source: "e\u{0301}"), selection: selection(source: "e\u{0301}"))
+    func testKeysUseContentAndExactSourceNotOccurrenceOrUnicodeNormalization() throws {
+        let original = try Cache.Key(track: track(), source: source())
+        XCTAssertEqual(original, try Cache.Key(track: track(occurrence: "duplicate"), source: source()))
+        XCTAssertNotEqual(original, try Cache.Key(track: track(source: "other"), source: source("other")))
+        XCTAssertNotEqual(original, try Cache.Key(track: track(duration: 6), source: source()))
+        XCTAssertNotEqual(original, try Cache.Key(track: track(), source: source(), contentRevision: 2))
+        let composed = try Cache.Key(track: track(source: "\u{00e9}"), source: source("\u{00e9}"))
+        let decomposed = try Cache.Key(track: track(source: "e\u{0301}"), source: source("e\u{0301}"))
         XCTAssertNotEqual(composed, decomposed)
-        let scriptTrack = track(platform: "script")
-        let script = try Cache.Key(track: scriptTrack, selection: selection(platform: "script", installation: "one"))
-        XCTAssertNotEqual(script, try Cache.Key(track: scriptTrack, selection: selection(platform: "script", installation: "two")))
-        XCTAssertNotEqual(script, try Cache.Key(track: scriptTrack, selection: selection(platform: "script", installation: "one", generation: 2)))
-        XCTAssertThrowsError(try Cache.Key(track: track(), selection: selection(source: "not-present")))
+        XCTAssertThrowsError(try Cache.Key(track: track(), source: source("not-present"))) {
+            XCTAssertEqual($0 as? MusicServiceError, .sourceRequired)
+        }
+        XCTAssertThrowsError(try Cache.Key(track: track(platform: "script"), source: source(platform: "script"))) {
+            XCTAssertEqual($0 as? MusicServiceError, .sourceRequired)
+        }
     }
 
     func testMetadataCandidateKeyIsNotBoundToTheCurrentlyPlayingAudioPlatform() async throws {
@@ -435,14 +433,11 @@ final class MusicPlaybackLyricCacheTests: XCTestCase {
         let tx = MusicNativeSource(sourceKey: "tx-recording", platform: "tx", nativeId: "2")
         let recording = MusicRemoteTrack(ref: .init(kind: .queue, id: "first"), songId: "same-recording",
                                         title: "歌", duration: 5, sources: [wy, tx])
-        let audio = selection(source: wy.sourceKey)
-        let wyKey = try Cache.Key(track: recording, selection: audio)
+        let wyKey = try Cache.Key(track: recording, source: wy)
         // This is a single explicit metadata candidate. The cache neither
         // selects nor silently falls back to the currently playing WY source.
         let txKey = try Cache.Key(track: recording, source: tx)
         XCTAssertNotEqual(txKey, wyKey)
-        XCTAssertEqual(txKey, try Cache.Key(track: recording,
-                                           selection: selection(source: tx.sourceKey, platform: "tx", quality: "flac")))
         _ = try await put(cache, key: txKey, generation: generation, value: snapshot("QQ lyrics"))
         _ = try await put(cache, key: wyKey, generation: generation, value: snapshot("WY lyrics"))
         let txHit = try await hit(cache, key: txKey, generation: generation)

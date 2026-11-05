@@ -497,10 +497,10 @@ public static class MusicNativeRecommendationTests
         Error(await first.WaitAsync(TimeSpan.FromSeconds(8)), "CANCELLED");
         await Pending(second); Check(!hold.Cancelled.Task.IsCompleted && f.Handler.Paths.IsEmpty);
         hold.Release.TrySetResult(); Error(await first, "CANCELLED"); Check(B(await second, "active") && f.Handler.Paths.Count == 1);
-        Check(f.Store.Reads.GetValueOrDefault(MusicAccountOwner.DocumentNamespace) == 3 &&
+        Check(f.Store.Reads.GetValueOrDefault(MusicAccountOwner.DocumentNamespace) == 2 &&
             f.Store.Reads.GetValueOrDefault(MusicPlatformClientContextOwner.DocumentNamespace) == 1 &&
             f.Store.Writes.GetValueOrDefault(MusicPlatformClientContextOwner.DocumentNamespace) == 1,
-            "two waiters share hydration; the admitted batch reads one exact lease and one read-only client import");
+            "two waiters share hydration; the admitted batch reads one exact lease and client initialization never reads accounts");
     }
     private static async Task HttpDrain()
     {

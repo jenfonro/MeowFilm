@@ -9,7 +9,7 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Windows.Tests;
 
 // Explicit synthetic client scope for isolated consumers. Durable integration
-// fixtures pass their own DPAPI store and import the published account document.
+// fixtures pass their own DPAPI store for the current client document.
 internal sealed class MusicClientContextFixture : IAsyncDisposable, IDisposable
 {
     internal readonly MusicPlatformClientContextOwner Owner;
@@ -18,11 +18,11 @@ internal sealed class MusicClientContextFixture : IAsyncDisposable, IDisposable
     private readonly IDocumentStore store;
     private readonly bool ownsStore, ownsHttp;
     internal MusicClientContextFixture(MusicPlatformHttp? http = null, IDocumentStore? store = null,
-        bool importAccounts = false, TimeProvider? clock = null, Func<string>? registrationEntropy = null)
+        TimeProvider? clock = null, Func<string>? registrationEntropy = null)
     {
         this.store = store ?? new MemoryStore(); ownsStore = store is null;
         Http = http ?? MusicPlatformHttp.CreateWithHandler(new NoNetwork()); ownsHttp = http is null;
-        Owner = new(this.store, importAccounts ? token => AccountClientContextImport.ReadAsync(this.store, token) : null);
+        Owner = new(this.store);
         Protocol = new(Http, clock, registrationEntropy);
     }
     internal MusicAccountProtocol CreateAccountProtocol(TimeSpan? timeout = null, TimeProvider? clock = null) =>
@@ -75,7 +75,7 @@ internal sealed class MusicClientContextFixture : IAsyncDisposable, IDisposable
     internal static async Task ConcurrentClientWrite(IDocumentStore store)
     {
         var before = await store.ReadAsync(MusicPlatformClientContextOwner.DocumentNamespace);
-        var current = before.Data is null ? MusicClientContextDocument.Create(new()) : MusicClientContextDocument.Decode(before);
+        var current = before.Data is null ? MusicClientContextDocument.Create() : MusicClientContextDocument.Decode(before);
         var next = current with { Wy = current.Wy with { Generation = current.Wy.Generation + 1, Nmtid = "SYNTHETIC_CONCURRENT" } };
         var bytes = next.Encode();
         try { await store.WriteAsync(MusicPlatformClientContextOwner.DocumentNamespace, bytes, before.Fingerprint); }
