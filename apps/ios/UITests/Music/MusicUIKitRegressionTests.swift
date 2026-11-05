@@ -3095,6 +3095,182 @@ final class MusicPlayerContentModelTests: XCTestCase {
         await content.model.close()
     }
 
+    func testRecordPagingHitAreaFollowsOnlyVisibleCircularDiscs() async throws {
+        let (content, _) = try makeDock()
+        defer { content.model.player = nil }
+        let player = MusicFullPlayerView(content: content)
+        for size in [CGSize(width: 390, height: 844), CGSize(width: 480, height: 640)] {
+            player.frame = CGRect(origin: .zero, size: size)
+            player.layoutIfNeeded()
+            let scroll = try XCTUnwrap(dockViews(player).compactMap { $0 as? MusicRecordScrollView }.first)
+            let disc = try XCTUnwrap(scroll.subviews.compactMap { $0 as? MusicRecordDiscView }.first {
+                $0.frame.contains(CGPoint(x: scroll.bounds.midX, y: scroll.bounds.midY))
+            })
+            XCTAssertGreaterThan(disc.bounds.width, 0)
+            for point in [CGPoint(x: 0.5, y: 0.5), CGPoint(x: 0.1, y: 0.5), CGPoint(x: 0.5, y: 0.9)] {
+                let local = CGPoint(x: point.x * disc.bounds.width, y: point.y * disc.bounds.height)
+                let inScroll = disc.convert(local, to: scroll)
+                XCTAssertTrue(scroll.point(inside: inScroll, with: nil))
+                XCTAssertTrue(player.hitTest(disc.convert(local, to: player), with: nil) === scroll)
+            }
+            for point in [CGPoint(x: 0.02, y: 0.02), CGPoint(x: 0.98, y: 0.02),
+                          CGPoint(x: 0.02, y: 0.98), CGPoint(x: 0.98, y: 0.98),
+                          CGPoint(x: -0.04, y: 0.5), CGPoint(x: 1.04, y: 0.5)] {
+                let local = CGPoint(x: point.x * disc.bounds.width, y: point.y * disc.bounds.height)
+                XCTAssertFalse(scroll.point(inside: disc.convert(local, to: scroll), with: nil))
+                XCTAssertFalse(player.hitTest(disc.convert(local, to: player), with: nil) === scroll)
+            }
+            // Hit testing is in scrolled content coordinates, not a fixed center rectangle.
+            scroll.contentOffset.x += 24
+            XCTAssertTrue(scroll.point(inside: disc.center, with: nil))
+            disc.isHidden = true
+            XCTAssertFalse(scroll.point(inside: disc.center, with: nil))
+            disc.isHidden = false
+            scroll.contentOffset.x -= 24
+        }
+        player.frame.size = CGSize(width: 844, height: 390)
+        player.layoutIfNeeded()
+        let scroll = try XCTUnwrap(dockViews(player).compactMap { $0 as? MusicRecordScrollView }.first)
+        XCTAssertFalse(scroll.point(inside: CGPoint(x: scroll.bounds.midX, y: scroll.bounds.midY), with: nil))
+        await content.model.close()
+    }
+
+    func testProgressTrackTapsSeekForwardBackwardAndEndpointsInFullAndCardControls() async throws {
+        for layout in [MusicPlaybackControlsView.Layout.full, .card] {
+            let (content, _) = try makeDock()
+            let driver = MusicSeekRecordingPlayer()
+            content.model.player = driver
+            let controls = MusicPlaybackControlsView(content: content, layout: layout)
+            controls.frame = CGRect(x: 0, y: 0, width: 390, height: 300)
+            controls.setRendering(true)
+            controls.layoutIfNeeded()
+            let slider = try XCTUnwrap(dockViews(controls).compactMap { $0 as? MusicProgressSlider }.first)
+            XCTAssertTrue(slider.isEnabled)
+            let originalAttempt = try XCTUnwrap(content.model.nativeAttempt)
+            // The 12pt tracking thumb travels from x=6 to width-6.
+            func point(_ fraction: CGFloat) -> CGPoint {
+                CGPoint(x: 6 + fraction * (slider.bounds.width - 12), y: slider.bounds.midY)
+            }
+            // Clock is at 30s of 180s: unplayed, earlier, and both ends.
+            for fraction: CGFloat in [0.75, 0.05, 0, 1] {
+                let previousCount = driver.seeks.count
+                slider.beginTrackTouch(at: point(fraction))
+                XCTAssertEqual(slider.value, Float(fraction) * 180, accuracy: 0.5)
+                XCTAssertEqual(driver.seeks.count, previousCount, "Touch-down only previews")
+                slider.endTrackTouch(at: point(fraction))
+                XCTAssertEqual(driver.seeks.count, previousCount + 1)
+                let seek = try XCTUnwrap(driver.seeks.last)
+                XCTAssertEqual(seek.0, Double(fraction) * 180, accuracy: 0.5)
+                XCTAssertEqual(seek.1.id, originalAttempt.id)
+                XCTAssertEqual(content.model.phase, .paused, "Seeking must not resume playback")
+                XCTAssertEqual(content.model.clock.position, 30, "A seek request is not a playback receipt")
+            }
+            // A press on the track can drag before release; only the release commits.
+            let previousCount = driver.seeks.count
+            slider.beginTrackTouch(at: point(0.75))
+            slider.moveTrackTouch(to: point(0.6))
+            slider.moveTrackTouch(to: point(0.4))
+            XCTAssertEqual(slider.value, 72, accuracy: 0.5)
+            let preview = MusicMiniPlayerText.time(Double(slider.value))
+            XCTAssertTrue(dockViews(controls).contains { ($0 as? UILabel)?.text == preview })
+            XCTAssertEqual(driver.seeks.count, previousCount)
+            slider.endTrackTouch(at: point(0.4))
+            XCTAssertEqual(driver.seeks.count, previousCount + 1)
+            XCTAssertEqual(try XCTUnwrap(driver.seeks.last).0, 72, accuracy: 0.5)
+            content.model.player = nil
+            await content.model.close()
+        }
+    }
+
+    func testProgressTapCancellationAndInvalidatedPlaybackCannotCommit() async throws {
+        for invalidation in ["cancel", "attempt", "access", "hidden"] {
+            let (content, _) = try makeDock()
+            let driver = MusicSeekRecordingPlayer()
+            content.model.player = driver
+            let controls = MusicPlaybackControlsView(content: content, layout: .full)
+            controls.frame = CGRect(x: 0, y: 0, width: 390, height: 300)
+            controls.setRendering(true)
+            controls.layoutIfNeeded()
+            let slider = try XCTUnwrap(dockViews(controls).compactMap { $0 as? MusicProgressSlider }.first)
+            let point = CGPoint(x: slider.bounds.width * 0.8, y: slider.bounds.midY)
+            slider.beginTrackTouch(at: point)
+            XCTAssertGreaterThan(slider.value, 100)
+            switch invalidation {
+            case "cancel":
+                slider.cancelTrackTouch()
+                XCTAssertEqual(slider.value, 30, accuracy: 0.001)
+            case "attempt":
+                content.model.nativeAttempt = .init(id: UUID(), resourceID: "replacement")
+            case "access":
+                content.model.accessState.isAvailable = false
+            default:
+                controls.setRendering(false)
+                XCTAssertEqual(slider.value, 30, accuracy: 0.001)
+            }
+            slider.endTrackTouch(at: point)
+            XCTAssertTrue(driver.seeks.isEmpty, invalidation)
+            content.model.player = nil
+            await content.model.close()
+        }
+    }
+
+    func testProgressSliderFollowsDeclinedTrackTouchAsOneControlSequence() {
+        let slider = MusicProgressSlider(frame: CGRect(x: 0, y: 0, width: 320, height: 44))
+        slider.maximumValue = 180
+        slider.value = 30
+        var events: [String] = []
+        let observed: [(UIControl.Event, String)] = [(.touchDown, "down"), (.valueChanged, "change"),
+            (.touchUpInside, "upInside"), (.touchUpOutside, "upOutside"), (.touchCancel, "cancel")]
+        for (event, name) in observed {
+            slider.addAction(UIAction { _ in events.append(name) }, for: event)
+        }
+        // While a touch is followed, the slider's own recognizers cannot adopt it;
+        // one its owner disabled stays disabled afterwards.
+        let active = UIPanGestureRecognizer(), inactive = UIPanGestureRecognizer()
+        inactive.isEnabled = false
+        slider.addGestureRecognizer(active)
+        slider.addGestureRecognizer(inactive)
+        func x(_ fraction: CGFloat) -> CGFloat { 6 + fraction * 308 }
+
+        slider.beginTrackTouch(at: CGPoint(x: x(0.75), y: 22))
+        XCTAssertEqual(slider.value, 135, accuracy: 0.5)
+        XCTAssertFalse(active.isEnabled)
+        slider.beginTrackTouch(at: CGPoint(x: x(0.1), y: 22))
+        XCTAssertEqual(slider.value, 135, accuracy: 0.5, "A second begin while following is ignored")
+        slider.moveTrackTouch(to: CGPoint(x: x(0.4), y: 22))
+        XCTAssertEqual(slider.value, 72, accuracy: 0.5)
+        slider.moveTrackTouch(to: CGPoint(x: x(0.4), y: 22))
+        slider.endTrackTouch(at: CGPoint(x: x(0.4), y: 22))
+        XCTAssertEqual(events, ["down", "change", "change", "upInside"])
+        XCTAssertTrue(active.isEnabled)
+        XCTAssertFalse(inactive.isEnabled)
+        slider.endTrackTouch(at: CGPoint(x: x(0.9), y: 22))
+        XCTAssertEqual(slider.value, 72, accuracy: 0.5, "Only a followed touch can end")
+
+        events = []
+        slider.beginTrackTouch(at: CGPoint(x: -40, y: 22))
+        XCTAssertEqual(slider.value, 0)
+        slider.endTrackTouch(at: CGPoint(x: 400, y: 90))
+        XCTAssertEqual(slider.value, 180)
+        XCTAssertEqual(events, ["down", "change", "change", "upOutside"])
+
+        events = []
+        slider.beginTrackTouch(at: CGPoint(x: x(0.5), y: 22))
+        slider.cancelTrackTouch()
+        slider.cancelTrackTouch()
+        XCTAssertEqual(events, ["down", "change", "cancel"])
+        XCTAssertTrue(active.isEnabled)
+
+        events = []
+        slider.isEnabled = false
+        let held = slider.value
+        slider.beginTrackTouch(at: CGPoint(x: x(0.1), y: 22))
+        slider.moveTrackTouch(to: CGPoint(x: x(0.2), y: 22))
+        slider.endTrackTouch(at: CGPoint(x: x(0.2), y: 22))
+        XCTAssertEqual(events, [])
+        XCTAssertEqual(slider.value, held)
+    }
+
     private func makeDock() throws -> (MusicPlayerContentModel, MusicPlayerSurface) {
         let playback = PlaybackController()
         let model = MusicViewModel(service: MusicUIKitRegressionService(), playback: playback)
@@ -3484,6 +3660,20 @@ private actor MusicUIKitImportHistoryFixture: MusicImportHistoryProviding {
     func rollbackImportedLibrary(_ authorization: MusicImportRollbackAuthorization) {
         XCTFail("Opening history must not roll back the library")
     }
+}
+
+@MainActor
+private final class MusicSeekRecordingPlayer: MusicPlaybackDriving {
+    var seeks: [(Double, MusicPlayerAttempt)] = []
+    func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
+        XCTFail("Unexpected playback"); return .init(id: UUID(), resourceID: resource.id)
+    }
+    func pause(_ attempt: MusicPlayerAttempt) { XCTFail("Unexpected pause") }
+    func resume(_ attempt: MusicPlayerAttempt) { XCTFail("Unexpected resume") }
+    func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool {
+        seeks.append((position, attempt)); return true
+    }
+    func stop(_ attempt: MusicPlayerAttempt) { XCTFail("Unexpected stop") }
 }
 
 @MainActor
