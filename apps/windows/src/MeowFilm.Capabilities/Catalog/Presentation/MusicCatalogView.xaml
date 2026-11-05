@@ -166,7 +166,7 @@
    <Setter Property="MinHeight" Value="0"/><Setter Property="IsEnabled" Value="{Binding CanPlay}"/>
    <Setter Property="AutomationProperties.Name" Value="{Binding Title,StringFormat=播放 {0}}"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-    <Border Background="#38000000"><local:CardPlayGlyph IsBusy="{Binding IsPreparing}" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+    <Border Background="{StaticResource Card.CoverHover}"><local:CardPlayGlyph IsBusy="{Binding IsPreparing}" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
    </ControlTemplate></Setter.Value></Setter>
    <Style.Triggers>
     <Trigger Property="Opacity" Value="0"><Setter Property="IsHitTestVisible" Value="False"/></Trigger>

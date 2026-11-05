@@ -44,14 +44,14 @@ public sealed class MusicCatalogSkeleton : Panel
         double cardWidth = Math.Max(0, pitch - 16);
         for (int i = 0; i < count; i++)
         {
-            bounds.Add(new(i * pitch, y, cardWidth, cardWidth + (footer ? 34 : 0)));
+            bounds.Add(new(i * pitch, y, cardWidth, cardWidth + (footer ? 48 : 0)));
             if (!footer)
             {
                 bounds.Add(new(i * pitch, y + cardWidth + 8, cardWidth * .88, 16));
                 bounds.Add(new(i * pitch, y + cardWidth + 30, cardWidth * .6, 12));
             }
         }
-        return y + cardWidth + (footer ? 34 : 48);
+        return y + cardWidth + 48;
     }
 
     protected override Size ArrangeOverride(Size finalSize)

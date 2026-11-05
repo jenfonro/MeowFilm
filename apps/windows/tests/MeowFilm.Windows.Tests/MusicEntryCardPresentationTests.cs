@@ -9,6 +9,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
+using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Windows.Tests;
@@ -21,13 +22,17 @@ public static class MusicEntryCardPresentationTests
 
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("resting covers keep readable titles without blending into the footer", BrightCoverContrast);
-        yield return Case("entry subtitles use one natural line and at most two wrapped lines", SubtitleWrapping);
+        yield return Case("resting covers keep a light title shade and a separate muted footer", BrightCoverContrast);
+        yield return Case("entry captions share two lines with single line text on the second baseline", SubtitleWrapping);
         yield return Case("official decoration drives the title palette and failed decoration falls back to the cover", DecorationPalette);
         yield return Case("decorative fades preserve open and explicit play hit regions", HitAndPlayIntent);
         yield return Case("daily calendar days render valid single and double digit dates", CalendarDays);
         yield return Case("daily captions and covers stay stable with only three embedded songs", DailyPreview);
         yield return Case("entry presentations do not add artwork reads or implicit business requests", ReadOnlyPresentation);
+        yield return Case("expanded content stays bottom aligned through resize reversal and rebinding", ContentGeometry);
+        yield return Case("entry surfaces follow artwork colors and use system colors in high contrast", ColorSurfaces);
+        yield return Case("entries without song lists reuse cover-only playlist shading through initialization and rebinding", CoverOnlyHover);
+        yield return Case("titles remain above every hover shade with slightly stronger bounded top protection", TitleLayering);
     }
 
     private static TestCase Case(string name, Func<Task> run) =>
@@ -35,8 +40,6 @@ public static class MusicEntryCardPresentationTests
 
     private static async Task BrightCoverContrast()
     {
-        bool saveVisuals = Environment.GetEnvironmentVariable("MEOWFILM_TEST_ENTRY_CARD_VISUALS") == "1";
-        var snapshots = new List<(BitmapSource Resting, BitmapSource Expanded)>();
         foreach (var model in Cards())
         foreach (double width in new[] { 152d, 168d })
         {
@@ -54,8 +57,11 @@ public static class MusicEntryCardPresentationTests
                 var middle = BrightestCoverSample(frame, cover, sampleX);
                 Check(Luminance(middle) > Luminance(BrightCover) * .8,
                     "the center of the cover is preserved instead of applying a flat dark fill");
-                Check(PaintContrast(frame, titleBounds, sampleX) > 3,
-                    $"{model.Presentation} at {scale}x: actual title glyph pixels contrast with their backdrop");
+                Check(PaintContrast(frame, titleBounds, sampleX) > 1.15,
+                    $"{model.Presentation} at {scale}x: white title glyphs remain visible with the requested light protection");
+                var header = frame.At(new Point(sampleX, 12));
+                Check(Luminance(header) > Luminance(BrightCover) * .5,
+                    "the title region is lightly protected, not replaced by an opaque dark band");
 
                 var lastCover = frame.At(new Point(sampleX, cover.Bottom - 2));
                 var firstFooter = frame.At(new Point(sampleX, cover.Bottom + 2));
@@ -66,41 +72,45 @@ public static class MusicEntryCardPresentationTests
             }
             Check(f.Loader.Addresses.Count == 1 && f.Opens == 0 && f.Plays == 0,
                 "rendering all DPI variants uses one acquired cover and no business intent");
-            if (saveVisuals && width == 152)
-            {
-                var resting = Capture(f.Entry).Image;
-                await f.Expand(true);
-                snapshots.Add((resting, Capture(f.Entry).Image));
-            }
         }
-        if (saveVisuals) SaveVisuals(snapshots);
     }
 
     private static async Task SubtitleWrapping()
     {
         var oneLine = DailyCard() with
         {
-            Subtitle = "符合你口味的新鲜好歌"
+            Subtitle = "符合你口味的好歌"
         };
-        using var f = new Fixture(oneLine, 168);
-        await f.Load();
-        var caption = f.CaptionText;
-        Check(caption.ActualHeight <= 18.5 && caption.DesiredSize.Height - caption.Margin.Top - caption.Margin.Bottom <= 18.5,
-            "a short caption does not reserve an empty second line");
-
         var twoLines = oneLine with
         {
             Subtitle = "根据最近常听与收藏，为你推荐今天值得听的歌曲"
         };
-        await f.Bind(twoLines);
-        caption = f.CaptionText;
-        Check(caption.ActualHeight > 18.5 && caption.ActualHeight <= 36.5,
-            "a longer resting caption wraps naturally and remains bounded to two lines");
-        await f.Expand(true);
-        Check(caption.ActualHeight > 18.5 && caption.ActualHeight <= 36.5,
-            "the expanded caption follows the same two-line bound");
-        Check(f.Opens == 0 && f.Plays == 0 && f.Loader.Addresses.Count == 1,
-            "caption measurement does not trigger a business or artwork reread");
+        foreach (double width in new[] { 152d, 168d, 184d })
+        {
+            using var f = new Fixture(oneLine, width);
+            await f.Load();
+            double height = f.Entry.ActualHeight;
+            var single = f.Bounds(f.CaptionText);
+            Check(single.Height <= 18.5 && Math.Abs(single.Bottom - (height - 6)) < .5,
+                "a single line occupies the second baseline, six DIP above the card bottom");
+            await f.Bind(twoLines);
+            var wrapped = f.Bounds(f.CaptionText);
+            Check(wrapped.Height > 18.5 && wrapped.Height <= 36.5 && f.Entry.ActualHeight == height &&
+                Math.Abs(single.Bottom - wrapped.Bottom) < .5 && Math.Abs(single.Top - wrapped.Top - 18) < .5,
+                "one and two line captions share the same card height and second baseline");
+            foreach (double scale in new[] { 1d, 1.25d, 1.5d, 2d })
+                CheckWholeGlyph(f, f.CaptionText, Capture(f.Entry, scale));
+            await f.Expand(true);
+            Check(f.CaptionText.ActualHeight > 18.5 && f.CaptionText.ActualHeight <= 36.5 && f.Entry.ActualHeight == height,
+                "expansion retains the two line slot and external card height");
+            foreach (var model in Cards().Append(oneLine with { Subtitle = "" }))
+            {
+                await f.Bind(model);
+                Check(f.Entry.ActualHeight == height, "all entry kinds and empty captions retain the same height");
+            }
+            Check(f.Opens == 0 && f.Plays == 0 && f.Loader.Addresses.Count == 1,
+                "caption measurement does not trigger a business or artwork reread");
+        }
     }
 
     private static async Task DecorationPalette()
@@ -117,8 +127,9 @@ public static class MusicEntryCardPresentationTests
             var foreground = (SolidColorBrush)decorated.Text(model.Title).Foreground;
             Check(foreground.Color == Colors.White, "all entries retain white titles, including bright artwork");
             var shade = (LinearGradientBrush)decorated.TitleShade.Background;
-            Check(shade.GradientStops[0].Color.R < 100 && shade.GradientStops[0].Color.A >= 200,
-                "the bright decoration receives a permanent tinted contrast guard");
+            Check(shade.GradientStops[0].Color.A is >= 96 and <= 102 &&
+                shade.GradientStops[^1].Color.A == 0 && decorated.TitleShade.ActualHeight <= 64,
+                "the bright decoration receives only a light, short title gradient");
             var frame = Capture(decorated.Entry, 1);
             var cover = decorated.Bounds(decorated.Cover);
             Check(Luminance(frame.At(new Point(cover.Left + cover.Width / 2, cover.Top + cover.Height * .7))) < .08,
@@ -135,8 +146,9 @@ public static class MusicEntryCardPresentationTests
             Check(((SolidColorBrush)fallback.Text(model.Title).Foreground).Color == Colors.White,
                 "failed decoration falls back to the dark cover palette");
             var shade = (LinearGradientBrush)fallback.TitleShade.Background;
-            Check(shade.GradientStops[0].Color.R == dark.R && shade.GradientStops[0].Color.A >= 200,
-                "the cover fallback receives the ordinary dark-title protection");
+            Check(shade.GradientStops[0].Color.R > shade.GradientStops[0].Color.B &&
+                shade.GradientStops[0].Color.A is >= 48 and <= 60,
+                "the cover fallback keeps the warm image hue with light title protection");
         }
     }
 
@@ -153,7 +165,7 @@ public static class MusicEntryCardPresentationTests
             {
                 new Point(title.Left + title.Width / 2, title.Top + title.Height / 2),
                 new Point(cover.Left + 5, cover.Top + cover.Height / 2),
-                new Point(cover.Right - 5, cover.Bottom - 3)
+                new Point(cover.Left + 5, cover.Bottom - 3)
             };
             foreach (var point in points)
                 Check(ReferenceEquals(f.HitButton(point), f.Open), "decorative title and footer fades do not own input");
@@ -177,8 +189,8 @@ public static class MusicEntryCardPresentationTests
                     "a playable expanded entry exposes its explicit play control");
                 var play = f.HitButton(Center(f.Bounds(f.Play)));
                 Check(ReferenceEquals(play, f.Play), "the expanded play control owns its hit region above the fades");
-                Check(PaintContrast(Capture(f.Entry), f.Bounds(f.Play), f.ContrastProbeX) > 3,
-                    "the white play glyph remains legible on bright artwork for every playable entry kind");
+                Check(PaintContrast(Capture(f.Entry), f.Bounds(f.Play), f.ContrastProbeX) > 1.5,
+                    "the white play glyph paints visible pixels on the muted content surface");
                 Click(play);
                 Check(f.Plays == 1 && f.Opens == 1 && f.LastIntent == model,
                     "play is one separate intent and never also opens the card");
@@ -207,7 +219,7 @@ public static class MusicEntryCardPresentationTests
             Check(IsPainted(date, f.Entry), "the calendar date is effectively visible, not merely bound in a hidden parent");
             var bounds = f.Bounds(date);
             Check(bounds.Right <= f.Bounds(f.Text(model.Title)).Left, "the calendar date and daily title do not overlap");
-            Check(PaintContrast(Capture(f.Entry), bounds, f.ContrastProbeX) > 2,
+            Check(PaintContrast(Capture(f.Entry), bounds, f.ContrastProbeX) > 1.15,
                 "the calendar date paints contrasting glyph pixels on a bright cover");
         }
         foreach (var model in new[] { ReadDaily(null), ReadDaily(null, includeDay: false) })
@@ -232,8 +244,8 @@ public static class MusicEntryCardPresentationTests
         var model = DailyCard();
         using var f = new Fixture(model, 152);
         await f.Load();
-        Check(f.Surface.ActualWidth == 152 && Math.Abs(f.Entry.ActualHeight - (152 + f.CaptionText.ActualHeight + 16)) < 1,
-            "the card reserves only the square artwork and measured caption, without a fixed empty footer");
+        Check(f.Surface.ActualWidth == 152 && Math.Abs(f.Entry.ActualHeight - 200) < 1,
+            "the card reserves the same two-line footer for a short or wrapped caption");
         string[] expected = ["1 第一首", "2 第二首", "3 Waking Up"];
         Check(((MusicCatalogCard)f.Entry.DataContext).PreviewTitles.SequenceEqual(expected), "the bound preview provides exactly the first three songs");
         Check(PaintedTexts(f.Entry).Contains(model.Subtitle),
@@ -275,6 +287,240 @@ public static class MusicEntryCardPresentationTests
             "embedded preview expansion, fallback and rebinding make no extra requests or playback intent");
     }
 
+    private static async Task ContentGeometry()
+    {
+        foreach (double width in new[] { 152d, 168d, 184d })
+        foreach (string subtitle in new[] { "今天值得听", "每日推荐 | 从「Fell In Love」听起，发现今天的新鲜好歌" })
+        {
+            using var f = new Fixture(DailyCard() with { Subtitle = subtitle }, width);
+            await f.Load();
+            var rest = f.Bounds(f.CaptionText);
+            var title = f.Bounds(f.Text("每日推荐"));
+            var source = f.Cover.Source;
+            double height = f.Entry.ActualHeight;
+            await f.Expand(true);
+            AssertExpanded();
+            f.Entry.Width = width + 16; f.Window.Width += 16; f.Window.Height += 16;
+            f.Window.UpdateLayout(); await Drain(); f.Window.UpdateLayout();
+            AssertExpanded();
+            CardMotion.Transition(f.Surface, false, true);
+            await Task.Delay(40); await Drain();
+            double partial = CardMotion.GetProgress(f.Surface);
+            Check(partial is > 0 and < 1, "collapse uses the native presentation animation");
+            CardMotion.Transition(f.Surface, true, true);
+            // WPF can expose the target base value before the replacement clock's
+            // first tick. Observe that clock before accepting its final value.
+            await Until(() => CardMotion.GetProgress(f.Surface) is > 0 and < .999,
+                "reversal starts from the intermediate presentation state");
+            await Until(() => CardMotion.GetProgress(f.Surface) >= .999, "reversed animation settles at the expanded endpoint");
+            AssertExpanded();
+            await f.Expand(false);
+            Check(Math.Abs(f.Bounds(f.CaptionText).Bottom - (f.Entry.ActualHeight - 6)) < .5 &&
+                ReferenceEquals(source, f.Cover.Source), "collapse restores the second baseline without replacing the artwork");
+            await f.Bind(DailyCard() with { Subtitle = subtitle, Preview = [new("唯一歌曲", "", "", 1, null)] });
+            await f.Expand(true);
+            var one = f.Bounds(f.Text("1 唯一歌曲"));
+            Check(Math.Abs(f.Entry.ActualHeight - one.Bottom - 6) < .5 &&
+                f.Bounds(f.CaptionText).Bottom <= f.Bounds(f.Play).Top,
+                "a shorter preview stays at the bottom and its play control does not cover the caption");
+            await f.Bind(DailyCard() with { Subtitle = subtitle, Preview = null });
+            await f.Expand(true);
+            Check(Math.Abs(f.Bounds(f.CaptionText).Bottom - (f.Entry.ActualHeight - 6)) < .5,
+                "rebinding without songs removes the lift instead of retaining old content height");
+            Check(f.Loader.Addresses.Count == 1 && f.Opens == 0 && f.Plays == 0,
+                "layout, reverse animation and rebinding have no data or playback side effects");
+
+            void AssertExpanded()
+            {
+                var caption = f.Bounds(f.CaptionText);
+                var first = f.Bounds(f.Text("1 第一首"));
+                var third = f.Bounds(f.Text("3 Waking Up"));
+                Check(caption.Top < rest.Top && caption.Top >= title.Bottom + 6 &&
+                    first.Top >= caption.Bottom + 7 && third.Bottom <= f.Entry.ActualHeight,
+                    "the same caption lifts above its three rows without covering the title; " +
+                    $"progress {CardMotion.GetProgress(f.Surface):F6}, caption {caption}, rest {rest}, " +
+                    $"title {title}, first {first}, third {third}, card height {f.Entry.ActualHeight}");
+                Check(Math.Abs(f.Entry.ActualHeight - third.Bottom - 6) < .5,
+                    "third row ends at the normal six DIP inset, not an extra blank line");
+                var header = f.Bounds(f.Text("每日推荐"));
+                Check(f.Entry.ActualHeight == height + f.Entry.Width - width &&
+                    header.Location == title.Location && header.Height == title.Height,
+                    "hover does not change outer height or translate the header");
+                foreach (double scale in new[] { 1d, 1.25d, 1.5d, 2d })
+                {
+                    var frame = Capture(f.Entry, scale);
+                    CheckWholeGlyph(f, f.CaptionText, frame);
+                    foreach (string name in new[] { "1 第一首", "2 第二首", "3 Waking Up" })
+                        CheckWholeGlyph(f, f.Text(name), frame);
+                }
+            }
+        }
+    }
+
+    private static async Task ColorSurfaces()
+    {
+        var images = new[]
+        {
+            MusicEntryPaletteTests.CoolArtwork(),
+            MusicEntryPaletteTests.Image((x, y) => Color.FromRgb(206, 145, 99)),
+            MusicEntryPaletteTests.Image((x, y) => Color.FromRgb(48, 33, 28)),
+            MusicEntryPaletteTests.Image((x, y) => Color.FromRgb(138, 55, 218)),
+            MusicEntryPaletteTests.Image((x, y) => Color.FromRgb(245, 245, 245))
+        };
+        var snapshots = new List<(BitmapSource Resting, BitmapSource Expanded)>();
+        foreach (var image in images)
+        {
+            using var f = new Fixture(DailyCard() with { Subtitle = "每日推荐 | 从「Fell In Love」听起" },
+                152, coverImage: image);
+            await f.Load();
+            var surface = (SolidColorBrush)f.Surface.Background;
+            var shade = (Border)f.Entry.FindName("ExpansionShade");
+            var rest = Capture(f.Entry);
+            var footer = new Point(f.Entry.ActualWidth / 2, f.Entry.ActualHeight - 3);
+            Check(rest.At(footer) == surface.Color, "the real footer paints the selected image tone");
+            Check(ReferenceEquals(surface, shade.Background), "hover and footer use one color source");
+            await f.Expand(true);
+            var expanded = Capture(f.Entry);
+            Check(expanded.At(footer) == surface.Color && ReferenceEquals(surface, f.Surface.Background) &&
+                ReferenceEquals(image, f.Cover.Source), "hover reuses the same palette and image");
+            Check(PaintContrast(expanded, f.Bounds(f.Text("3 Waking Up")), f.ContrastProbeX) > 1.5,
+                "the third song is actually painted over the muted surface");
+            snapshots.Add((rest.Image, expanded.Image));
+            DesktopTheme.SetIsHighContrast(f.Entry, true); await Drain(); f.Window.UpdateLayout();
+            Check(((SolidColorBrush)f.Surface.Background).Color == SystemColors.WindowColor &&
+                ((SolidColorBrush)f.Text("每日推荐").Foreground).Color == SystemColors.WindowTextColor &&
+                ((SolidColorBrush)f.CaptionText.Foreground).Color == SystemColors.WindowTextColor,
+                "system high contrast replaces the light image palette and foreground together");
+            Check(Capture(f.Entry).At(new Point(3, 80)) == SystemColors.WindowColor,
+                "high contrast paints an opaque system backdrop, not photo pixels");
+        }
+        if (Environment.GetEnvironmentVariable("MEOWFILM_TEST_ENTRY_CARD_VISUALS") == "1") SaveVisuals(snapshots);
+    }
+
+    private static async Task CoverOnlyHover()
+    {
+        var cover = Color.FromRgb(112, 168, 210);
+        var snapshots = new List<(BitmapSource Resting, BitmapSource Expanded)>();
+        foreach (var model in Cards().Where(card => !card.HasPreview && card.CanPlay)
+                     .Append(DailyCard() with { Preview = null }))
+        {
+            using var f = new Fixture(model, 152, coverColor: cover);
+            await f.Load();
+            var rest = Capture(f.Entry);
+            var caption = f.Bounds(f.CaptionText);
+            var source = f.Cover.Source;
+            var palette = f.Surface.Background;
+            var coverShade = (Border)f.Entry.FindName("CoverShade");
+            var expansion = (Border)f.Entry.FindName("ExpansionShade");
+            await f.Expand(true);
+            var expanded = Capture(f.Entry);
+            Check(coverShade.IsVisible && coverShade.Opacity == 1 && !expansion.IsVisible,
+                "a playable entry without songs uses only the cover shade, not the colored expansion");
+            Check(f.Bounds(coverShade) == f.Bounds(f.Cover) && f.Bounds(f.CaptionText) == caption &&
+                ReferenceEquals(source, f.Cover.Source) && ReferenceEquals(palette, f.Surface.Background),
+                "cover shading neither reaches the footer nor moves text or replaces artwork");
+            var sample = new Point(5, 100);
+            var shaded = expanded.At(sample);
+            var expected = Color.FromRgb((byte)Math.Round(cover.R * 199 / 255d),
+                (byte)Math.Round(cover.G * 199 / 255d), (byte)Math.Round(cover.B * 199 / 255d));
+            Check(Math.Abs(shaded.R - expected.R) <= 1 && Math.Abs(shaded.G - expected.G) <= 1 &&
+                Math.Abs(shaded.B - expected.B) <= 1, "the actual cover receives the existing playlist's neutral 0x38 shade");
+            Check(expanded.At(new Point(5, 190)) == rest.At(new Point(5, 190)),
+                "the footer pixels stay unchanged while the cover dims");
+            Check(ReferenceEquals(f.HitButton(new Point(5, 100)), f.Open) &&
+                ReferenceEquals(f.HitButton(Center(f.Bounds(f.Play))), f.Play),
+                "reusing the playlist shade does not import its full-cover play hit target");
+            snapshots.Add((rest.Image, expanded.Image));
+            DesktopTheme.SetIsHighContrast(f.Entry, true); await Drain(); f.Window.UpdateLayout();
+            Check(Capture(f.Entry).At(sample) == SystemColors.WindowColor &&
+                ((SolidColorBrush)f.Text(model.Title).Foreground).Color == SystemColors.WindowTextColor,
+                "no-list entries retain opaque system backgrounds and foregrounds in high contrast");
+            Check(f.Loader.Addresses.Count == 1 && f.Opens == 0 && f.Plays == 0,
+                "hover shading and high contrast add no artwork reads or business intents");
+        }
+        // Compare to the actual ordinary playlist template, not just a resource value.
+        var view = new MusicCatalogView();
+        var ordinary = (Button)((DataTemplate)view.FindResource("Catalog.PlaylistCard")).LoadContent();
+        ordinary.DataContext = DailyCard();
+        ArtworkScope.SetLoader(ordinary, new ArtworkLoader(cover, false, null));
+        var window = new Window { Content = ordinary, Width = 184, Height = 260, WindowStyle = WindowStyle.None,
+            Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
+        try
+        {
+            window.Show(); window.UpdateLayout();
+            var artwork = Visuals(ordinary).OfType<ArtworkImage>().Single();
+            await Until(() => artwork.Source is not null, "the ordinary playlist cover is acquired");
+            CardMotion.Transition(ordinary, true, false); await Drain(); window.UpdateLayout();
+            var image = Capture(ordinary);
+            var actual = image.At(artwork.TranslatePoint(new Point(5, 100), ordinary));
+            Check(Math.Abs(actual.R - Math.Round(cover.R * 199 / 255d)) <= 1 &&
+                Math.Abs(actual.G - Math.Round(cover.G * 199 / 255d)) <= 1 &&
+                Math.Abs(actual.B - Math.Round(cover.B * 199 / 255d)) <= 1,
+                "the shared brush preserves the ordinary playlist's existing pixels");
+        }
+        finally { window.Close(); }
+
+        var pending = DailyCard() with { Preview = null };
+        using (var f = new Fixture(pending, 152, coverColor: cover))
+        {
+            await f.Load(); await f.Expand(true);
+            var caption = f.Bounds(f.CaptionText);
+            pending.InitializePreview([new("后来到达", "", "", 1, null)]);
+            await Drain(); f.Window.UpdateLayout();
+            Check(((Border)f.Entry.FindName("ExpansionShade")).IsVisible &&
+                !((Border)f.Entry.FindName("CoverShade")).IsVisible &&
+                f.Bounds(f.CaptionText).Top < caption.Top && PaintedTexts(f.Entry).Contains("1 后来到达"),
+                "initialized songs switch to list expansion even when exactly one song exists");
+            await f.Bind(Cards().Single(card => card.Kind == "fm")); await f.Expand(true);
+            Check(!((Border)f.Entry.FindName("ExpansionShade")).IsVisible &&
+                ((Border)f.Entry.FindName("CoverShade")).IsVisible &&
+                !PaintedTexts(f.Entry).Contains("1 后来到达"),
+                "rebinding to FM clears the list expansion without retaining the old shade");
+            Check(f.Loader.Addresses.Count == 1 && f.Opens == 0 && f.Plays == 0,
+                "initialization and rebind do not introduce reads or playback intent");
+        }
+        if (Environment.GetEnvironmentVariable("MEOWFILM_TEST_ENTRY_CARD_VISUALS") == "1")
+            SaveVisuals(snapshots, "entry-cover-hover.png");
+    }
+
+    private static async Task TitleLayering()
+    {
+        foreach (var model in new[] { DailyCard(), Cards().Single(card => card.Kind == "fm"),
+                     Cards().First(card => card.Kind == "similar") })
+        {
+            using var f = new Fixture(model, 152, coverColor: Color.FromRgb(95, 150, 198));
+            await f.Load();
+            var title = f.Text(model.Title);
+            var position = f.Bounds(title);
+            foreach (double scale in new[] { 1d, 1.25d, 1.5d, 2d })
+            {
+                await f.Expand(false);
+                var resting = Capture(f.Entry, scale);
+                await f.Expand(true);
+                var expanded = Capture(f.Entry, scale);
+                int solidInk = 0;
+                for (int y = (int)Math.Ceiling(position.Top * scale); y < (int)Math.Floor(position.Bottom * scale); y++)
+                for (int x = (int)Math.Ceiling(position.Left * scale); x < (int)Math.Floor(position.Right * scale); x++)
+                {
+                    var before = resting.Pixel(x, y);
+                    if (Math.Min(before.R, Math.Min(before.G, before.B)) < 254) continue;
+                    var after = expanded.Pixel(x, y);
+                    Check(Math.Abs(after.R - before.R) <= 1 && Math.Abs(after.G - before.G) <= 1 &&
+                        Math.Abs(after.B - before.B) <= 1, "hover masks cannot tint the actual white title ink");
+                    solidInk++;
+                }
+                Check(solidInk >= 15 && f.Bounds(title) == position,
+                    "real topmost white title glyphs remain in the same position at every DPI");
+            }
+        }
+        using var bright = new Fixture(DailyCard(), 152);
+        await bright.Load();
+        var shade = (LinearGradientBrush)bright.TitleShade.Background;
+        Check(shade.GradientStops[0].Color.A is >= 96 and <= 102 &&
+            shade.GradientStops[^1].Color.A == 0 && bright.TitleShade.ActualHeight == 64,
+            "bright covers receive slightly more top protection without growing its extent");
+    }
+
     private static async Task ReadOnlyPresentation()
     {
         foreach (var model in Cards())
@@ -302,11 +548,13 @@ public static class MusicEntryCardPresentationTests
             var image = Visuals(artwork).OfType<Image>().Single();
             var pixels = image.Source;
             var palette = artwork.RawPaletteBrush;
+            var entryPalette = f.Surface.Background;
             Check(pixels is not null, "the retention check starts with acquired pixels");
             f.Entry.Visibility = Visibility.Collapsed;
             await Drain();
             Check(f.Entry.IsLoaded && f.Loader.Leases.All(lease => !lease.Disposed) &&
-                ReferenceEquals(pixels, image.Source) && ReferenceEquals(palette, artwork.RawPaletteBrush),
+                ReferenceEquals(pixels, image.Source) && ReferenceEquals(palette, artwork.RawPaletteBrush) &&
+                ReferenceEquals(entryPalette, f.Surface.Background) && ReferenceEquals(pixels, artwork.Source),
                 "hidden entries retain their acquired cover and palette");
             Check(!f.Surface.HasAnimatedProperties, "hidden entries stop their hover clock");
             f.Entry.Visibility = Visibility.Visible;
@@ -314,7 +562,7 @@ public static class MusicEntryCardPresentationTests
             Check(f.Loader.Addresses.Count == reads && ReferenceEquals(pixels, image.Source) &&
                 ReferenceEquals(palette, artwork.RawPaletteBrush), "returning reuses the cover without a new request");
             f.Root.Children.Remove(f.Entry); await Drain();
-            Check(f.Loader.Leases.All(lease => lease.Disposed) && image.Source is null,
+            Check(f.Loader.Leases.All(lease => lease.Disposed) && image.Source is null && artwork.Source is null,
                 "actual unmount releases the acquired cover");
         }
 
@@ -342,7 +590,10 @@ public static class MusicEntryCardPresentationTests
     private static IEnumerable<MusicCatalogCard> Cards()
     {
         yield return DailyCard();
+        yield return DailyCard() with { Id = "daily-style", Title = "电音日推", DayOfMonth = null };
         yield return new("similar", "心动模式", "你的红心歌曲和相似推荐", CoverAddress, "similar", "wy",
+            ActionId: "similar", Presentation: MusicCatalogEntryPresentation.Overlay);
+        yield return new("similar-song", "相似歌曲", "从你喜欢的歌听起", CoverAddress, "similar", "wy",
             ActionId: "similar", Presentation: MusicCatalogEntryPresentation.Overlay);
         yield return new("fm", "私人雷达", "你爱的歌值得反复聆听", CoverAddress, "fm", "wy",
             ActionId: "fm", Presentation: MusicCatalogEntryPresentation.Animated);
@@ -524,7 +775,8 @@ public static class MusicEntryCardPresentationTests
         return (Math.Max(a, b) + .05) / (Math.Min(a, b) + .05);
     }
 
-    private static void SaveVisuals(IReadOnlyList<(BitmapSource Resting, BitmapSource Expanded)> snapshots)
+    private static void SaveVisuals(IReadOnlyList<(BitmapSource Resting, BitmapSource Expanded)> snapshots,
+        string fileName = "entry-cards.png")
     {
         Check(snapshots.Count > 0, "the explicitly requested visual sheet contains real rendered cards");
         double width = snapshots.Max(pair => pair.Resting.Width), height = snapshots.Max(pair => pair.Resting.Height);
@@ -543,7 +795,7 @@ public static class MusicEntryCardPresentationTests
             (int)Math.Ceiling(height * 2 + gap * 3), 96, 96, PixelFormats.Pbgra32);
         sheet.Render(visual);
         string path = TestWorkspace.ValidatePath(TestWorkspace.ResultsRoot,
-            Path.Combine(TestWorkspace.ResultsRoot, "windows-native", "entry-cards.png"));
+            Path.Combine(TestWorkspace.ResultsRoot, "windows-native", fileName));
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
         var encoder = new PngBitmapEncoder();
@@ -592,9 +844,11 @@ public static class MusicEntryCardPresentationTests
         internal double ContrastProbeX => Entry.ActualWidth - ((RectangleGeometry)Surface.Clip).RadiusX - 1;
 
         internal Fixture(MusicCatalogCard model, double width = 168, Color? coverColor = null,
-            bool failDecoration = false)
+            bool failDecoration = false, BitmapSource? coverImage = null)
         {
-            Loader = new ArtworkLoader(coverColor ?? BrightCover, failDecoration);
+            Root.Resources.MergedDictionaries.Add(new()
+                { Source = new("/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml", UriKind.Relative) });
+            Loader = new ArtworkLoader(coverColor ?? BrightCover, failDecoration, coverImage);
             ArtworkScope.SetLoader(Root, Loader);
             Entry = new EntryCard { Width = width, VerticalAlignment = VerticalAlignment.Top,
                 HorizontalAlignment = HorizontalAlignment.Left, DataContext = model };
@@ -650,10 +904,10 @@ public static class MusicEntryCardPresentationTests
         private readonly BitmapSource cover;
         private readonly BitmapSource decoration;
         private readonly bool failDecoration;
-        internal ArtworkLoader(Color coverColor, bool failDecoration)
+        internal ArtworkLoader(Color coverColor, bool failDecoration, BitmapSource? coverImage)
         {
             this.failDecoration = failDecoration;
-            cover = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgra32, null,
+            cover = coverImage ?? BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgra32, null,
                 new byte[] { coverColor.B, coverColor.G, coverColor.R, 255 }, 4);
             cover.Freeze();
             var decorationPixels = Enumerable.Range(0, 8)
