@@ -115,21 +115,6 @@ protocol EncryptedDocumentKeychainDriver: Sendable {
     func add(service: String, account: String, data: Data) -> EncryptedDocumentKeychainStatus
 }
 
-/// Keys are readable after first unlock, so sensitive documents stay usable while locked.
-/// A key from an earlier release with the stricter when-unlocked class is adopted in place;
-/// any other class is a policy mismatch, never silently accepted or repaired.
-enum EncryptedDocumentKeyAccessibility: Equatable {
-    case current
-    case adopt
-    case rejected
-
-    static func classify(_ stored: String?) -> Self {
-        if stored == (kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String) { return .current }
-        if stored == (kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String) { return .adopt }
-        return .rejected
-    }
-}
-
 struct SystemEncryptedDocumentKeychainDriver: EncryptedDocumentKeychainDriver {
     func read(service: String, account: String) -> EncryptedDocumentKeychainReadResult {
         var query = baseQuery(service: service, account: account)
@@ -148,17 +133,14 @@ struct SystemEncryptedDocumentKeychainDriver: EncryptedDocumentKeychainDriver {
         guard (attributes[kSecAttrSynchronizable as String] as? Bool) != true else {
             return .init(status: .failure(.policyMismatch), data: nil)
         }
-        switch EncryptedDocumentKeyAccessibility.classify(attributes[kSecAttrAccessible as String] as? String) {
-        case .current: break
-        case .adopt:
-            // The read succeeded, so the device is unlocked. Best effort: a failed
-            // update keeps the stricter class and is retried by the next read.
-            let change: [String: Any] = [kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
-            _ = SecItemUpdate(baseQuery(service: service, account: account) as CFDictionary, change as CFDictionary)
-        case .rejected:
+        guard Self.matchesAccessibility(attributes[kSecAttrAccessible as String] as? String) else {
             return .init(status: .failure(.policyMismatch), data: nil)
         }
         return .init(status: .success, data: data)
+    }
+
+    static func matchesAccessibility(_ stored: String?) -> Bool {
+        stored == (kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
     }
 
     func add(service: String, account: String, data: Data) -> EncryptedDocumentKeychainStatus {
