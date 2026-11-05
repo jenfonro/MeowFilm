@@ -23,6 +23,14 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertTrue(app.buttons["app.menu"].exists)
         XCTAssertTrue(app.buttons["search.open"].exists)
         XCTAssertTrue(app.buttons["app.feature"].exists)
+        waitSelected(app.buttons["app.header.recommend"])
+        assertHeaderOrder([
+            app.buttons["app.menu"], app.buttons["app.header.recommend"],
+            app.buttons["app.header.channels"], app.buttons["search.open"], app.buttons["app.feature"],
+        ])
+        assertPageOwnsHeader("recommend", controls: [
+            "app.menu", "app.header.recommend", "app.header.channels", "search.open", "app.feature",
+        ])
         attach("01-home")
 
         app.buttons["app.primary.channels"].tap()
@@ -32,6 +40,16 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertTrue(switcher.waitForExistence(timeout: 5))
         assertInsideHeader(channelMenu)
         assertInsideHeader(switcher)
+        waitSelected(app.buttons["app.header.channels"])
+        assertHeaderOrder([
+            app.buttons["app.menu"], app.buttons["app.header.recommend"],
+            app.buttons["app.header.channels"], switcher, channelMenu, app.buttons["search.open"],
+        ])
+        assertPageOwnsHeader("channels", controls: [
+            "app.menu", "app.header.recommend", "app.header.channels", "music.channel.switcher",
+            "app.channels", "search.open",
+        ])
+        XCTAssertFalse(app.otherElements["app.page.recommend"].exists)
         attach("02-channels")
 
         channelMenu.tap()
@@ -51,15 +69,92 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertEqual(title.label, "我的")
         assertInsideHeader(title)
         XCTAssertTrue(app.buttons["app.primary.add"].isHittable)
+        assertPageOwnsHeader("library", controls: ["app.menu", "app.primary.title", "app.primary.add"])
+        XCTAssertFalse(app.otherElements["app.page.channels"].exists)
         attach("03-library")
 
         app.buttons["app.primary.recommend"].tap()
         XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
+        assertPageOwnsHeader("recommend", controls: ["app.menu", "search.open", "app.feature"])
+        XCTAssertFalse(app.otherElements["app.page.library"].exists)
         app.collectionViews.firstMatch.swipeUp()
         attach("04-home-scrolled")
         assertInsideHeader(app.buttons["search.open"])
         app.collectionViews.firstMatch.swipeDown()
         attach("05-home-restored")
+    }
+
+    func testHeaderPageSwitchingAndChannelSearchPreserveSelection() {
+        let recommend = app.buttons["app.header.recommend"]
+        let channels = app.buttons["app.header.channels"]
+        XCTAssertTrue(channels.waitForExistence(timeout: 30))
+        channels.tap()
+        waitSelected(channels)
+        waitSelected(app.buttons["app.primary.channels"])
+        XCTAssertTrue(app.buttons["app.channels"].isHittable)
+        let search = app.buttons["search.open"]
+        assertInsideHeader(search)
+        XCTAssertEqual(search.label, "搜索")
+        XCTAssertEqual(search.frame.width, search.frame.height, accuracy: 1)
+        attach("06-channel-search")
+        search.tap()
+        XCTAssertTrue(app.textFields["search.field"].waitForExistence(timeout: 5))
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(channels.waitForExistence(timeout: 5))
+        waitSelected(channels)
+        waitSelected(app.buttons["app.primary.channels"])
+        recommend.tap()
+        waitSelected(recommend)
+        waitSelected(app.buttons["app.primary.recommend"])
+        XCTAssertTrue(app.buttons["app.feature"].isHittable)
+        channels.tap()
+        waitSelected(channels)
+        app.buttons["app.primary.recommend"].tap()
+        waitSelected(recommend)
+    }
+
+    func testChannelContentPagingAndEdgeReturnHaveSeparateGestures() throws {
+        let channels = app.buttons["app.header.channels"]
+        XCTAssertTrue(channels.waitForExistence(timeout: 30))
+        channels.tap()
+        waitSelected(channels)
+        let tabs = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "music.channel.tab."
+        ))
+        let selected = tabs.matching(NSPredicate(format: "selected == true")).firstMatch
+        XCTAssertTrue(selected.waitForExistence(timeout: 30))
+        let originalID = selected.identifier
+        let directory = tabs.allElementsBoundByIndex
+        let index = try XCTUnwrap(directory.firstIndex { $0.identifier == originalID })
+        XCTAssertGreaterThan(directory.count, 1)
+        let nextIndex = index + 1 < directory.count ? index + 1 : index - 1
+        let next = directory[nextIndex]
+        swipeChannelWhitespace(left: nextIndex > index)
+        waitSelected(next)
+        waitSelected(channels)
+        swipeChannelWhitespace(left: nextIndex < index)
+        waitSelected(app.buttons[originalID])
+
+        dragRight(from: 0.005, to: 0.04)
+        waitSelected(channels)
+        waitSelected(app.buttons[originalID])
+        attach("07-channel-edge-cancelled")
+        dragRight(from: 0.005, to: 0.8)
+        waitSelected(app.buttons["app.header.recommend"])
+        waitSelected(app.buttons["app.primary.recommend"])
+        attach("08-channel-edge-returned")
+        channels.tap()
+        waitSelected(channels)
+        waitSelected(app.buttons[originalID])
+
+        let rowY = try horizontalRowMidY()
+        dragRight(from: 0.005, to: 0.8, y: rowY)
+        waitSelected(app.buttons["app.header.recommend"])
+        waitSelected(app.buttons["app.primary.recommend"])
+        attach("09-channel-row-edge-returned")
+        channels.tap()
+        waitSelected(channels)
+        waitSelected(app.buttons[originalID])
     }
 
     func testSearchHeadersAndResults() throws {
@@ -388,9 +483,65 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
                       file: file, line: line)
     }
 
-    private func dragRight(from start: CGFloat, to end: CGFloat) {
-        let origin = app.coordinate(withNormalizedOffset: CGVector(dx: start, dy: 0.5))
-        let target = app.coordinate(withNormalizedOffset: CGVector(dx: end, dy: 0.5))
+    private func assertHeaderOrder(_ controls: [XCUIElement],
+                                   file: StaticString = #filePath, line: UInt = #line) {
+        for control in controls { assertInsideHeader(control, file: file, line: line) }
+        for (left, right) in zip(controls, controls.dropFirst()) {
+            XCTAssertLessThanOrEqual(left.frame.maxX, right.frame.minX + 1, file: file, line: line)
+        }
+    }
+
+    /// The primary pages are separate pages: the only visible header and its
+    /// controls belong to the shown page, not to a header shared by the shell.
+    private func assertPageOwnsHeader(_ page: String, controls: [String],
+                                      file: StaticString = #filePath, line: UInt = #line) {
+        let root = app.otherElements["app.page." + page]
+        XCTAssertTrue(root.exists, file: file, line: line)
+        XCTAssertEqual(app.otherElements.matching(identifier: "page.header").count, 1, file: file, line: line)
+        let header = root.descendants(matching: .other).matching(identifier: "page.header")
+        XCTAssertEqual(header.count, 1, file: file, line: line)
+        for control in controls {
+            XCTAssertTrue(header.firstMatch.descendants(matching: .any)[control].exists,
+                          "\(control) belongs to the \(page) header", file: file, line: line)
+        }
+    }
+
+    private func swipeChannelWhitespace(left: Bool) {
+        let collection = app.collectionViews.firstMatch
+        XCTAssertTrue(collection.waitForExistence(timeout: 10))
+        let y = collection.frame.minY + 2
+        let origin = app.coordinate(withNormalizedOffset: .zero).withOffset(
+            CGVector(dx: app.frame.width * (left ? 0.75 : 0.25), dy: y)
+        )
+        let target = app.coordinate(withNormalizedOffset: .zero).withOffset(
+            CGVector(dx: app.frame.width * (left ? 0.25 : 0.75), dy: y)
+        )
+        origin.press(forDuration: 0.1, thenDragTo: target, withVelocity: .fast, thenHoldForDuration: 0.2)
+    }
+
+    /// The topmost visible row whose cards run past its trailing inset scrolls sideways.
+    private func horizontalRowMidY() throws -> CGFloat {
+        var cards: [CGRect] = []
+        func collect(_ element: XCUIElementSnapshot) {
+            if element.identifier.hasPrefix("music.browse.item.") { cards.append(element.frame) }
+            element.children.forEach(collect)
+        }
+        let screen = try app.snapshot()
+        collect(screen)
+        let width = screen.frame.width, bottom = screen.frame.height * 0.75
+        let visible = cards.filter { $0.minX >= 0 && $0.minX < width && $0.maxY < bottom }
+        let rows = Dictionary(grouping: visible) { $0.midY.rounded() }
+        let scrolling = rows.filter { _, row in
+            guard row.count > 1, let leading = row.map(\.minX).min() else { return false }
+            return row.contains { $0.maxX > width - leading + 1 }
+        }
+        return try XCTUnwrap(scrolling.keys.min(), "No visible row runs past its trailing inset")
+    }
+
+    private func dragRight(from start: CGFloat, to end: CGFloat, y: CGFloat? = nil) {
+        let dy = y.map { $0 / app.frame.height } ?? 0.5
+        let origin = app.coordinate(withNormalizedOffset: CGVector(dx: start, dy: dy))
+        let target = app.coordinate(withNormalizedOffset: CGVector(dx: end, dy: dy))
         origin.press(forDuration: 0.1, thenDragTo: target, withVelocity: .slow, thenHoldForDuration: 0.2)
     }
 

@@ -8,7 +8,7 @@ public final class RetainedPagesController: UIViewController {
     public private(set) var selectedIndex: Int
     public var didSelect: ((Int) -> Void)?
     /// Called when a selection starts, after its page is loaded and before the
-    /// crossfade, with that crossfade's duration (0 when immediate).
+    /// horizontal transition, with that transition's duration (0 when immediate).
     public var willSelect: ((Int, TimeInterval) -> Void)?
     private let pageFactories: [@MainActor () -> UIViewController]
     private var pages: [UIViewController?]
@@ -33,6 +33,7 @@ public final class RetainedPagesController: UIViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
+        view.clipsToBounds = true
         loadPage(at: selectedIndex).view.isHidden = false
     }
 
@@ -102,7 +103,8 @@ public final class RetainedPagesController: UIViewController {
             didSelect?(index)
             return
         }
-        let previous = loadPage(at: selectedIndex), next = loadPage(at: index)
+        let previousIndex = selectedIndex
+        let previous = loadPage(at: previousIndex), next = loadPage(at: index)
         let duration = animated && appearance == .visible && view.window != nil &&
             !UIAccessibility.isReduceMotionEnabled ? 0.22 : 0
         transitioning = true
@@ -115,19 +117,25 @@ public final class RetainedPagesController: UIViewController {
         willSelect?(index, duration)
         let complete = { [weak self] in
             guard let self else { return }
+            previous.view.isHidden = true
+            previous.view.transform = .identity
+            next.view.transform = .identity
             self.finishSwitchAppearance()
             self.transitioning = false
             self.didSelect?(index)
             self.selectPendingPage()
         }
         if duration == 0 {
-            previous.view.isHidden = true
             next.view.isHidden = false
             complete()
         } else {
-            UIView.transition(from: previous.view, to: next.view, duration: duration,
-                              options: [.transitionCrossDissolve, .showHideTransitionViews,
-                                        .allowAnimatedContent]) { _ in complete() }
+            let offset = view.bounds.width * (index > previousIndex ? 1 : -1)
+            next.view.transform = CGAffineTransform(translationX: offset, y: 0)
+            next.view.isHidden = false
+            UIView.animate(withDuration: duration, delay: 0, options: [.allowAnimatedContent]) {
+                previous.view.transform = CGAffineTransform(translationX: -offset, y: 0)
+                next.view.transform = .identity
+            } completion: { _ in complete() }
         }
     }
 
