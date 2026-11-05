@@ -110,61 +110,7 @@ final class NativeMusicStorageTests: XCTestCase {
         }
     }
 
-    func testImportPlansUseRetainedContentCostAndReleaseIndependently() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        let data = try NativeMusicFixture.importLibrary().bytes
-        var previews: [MusicImportPreview] = []
-        for index in 0..<4 {
-            previews.append(try await service.prepareImport(data: data, sourceId: "synthetic-\(index)", ownerId: "import-owner"))
-        }
-        let plans = await service.prepared
-        XCTAssertEqual(plans.count, 4)
-        XCTAssertTrue(plans.values.allSatisfy { $0.bytes > 0 })
-        XCTAssertNil(store.snapshot().0)
-        for preview in previews { try await service.releaseImport(preview) }
-        let remaining = await service.prepared.count
-        XCTAssertEqual(remaining, 0)
-        await service.close()
-    }
 
-    func testV1ImportReceiptIdempotenceRollbackAndNoSecretPersistence() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        var library = try NativeMusicFixture.importLibrary()
-        let id = try XCTUnwrap(library["songs"].fields.first?.0)
-        var song = library["songs"][id]
-        song["cookie"] = .string("synthetic-private")
-        song["url"] = .string("https://media.invalid/temporary")
-        song["cover_url"] = .string("https://cover.invalid/a?signature=synthetic-private")
-        var source = song["sources"].array.first ?? .obj()
-        source["musicInfo"]["credential"] = .string("synthetic-private")
-        song["sources"] = .array([source])
-        library["songs"][id] = song
-        let preview = try await service.prepareImport(data: library.bytes, sourceId: "fixed-synthetic", ownerId: "import-owner")
-        XCTAssertNil(store.snapshot().0)
-        let report = try await service.commitImport(preview); XCTAssertFalse(report.alreadyApplied)
-        let saved = try MJ.parse(XCTUnwrap(store.snapshot().0))
-        XCTAssertEqual(saved["version"].int, 1)
-        XCTAssertFalse(saved.json.contains("synthetic-private"))
-        XCTAssertFalse(saved.json.contains("media.invalid"))
-        let repeatPreview = try await service.prepareImport(data: library.stable.bytes, sourceId: "fixed-synthetic", ownerId: "import-owner")
-        XCTAssertTrue(repeatPreview.report.alreadyApplied)
-        XCTAssertEqual(preview.report.batchId, repeatPreview.report.batchId)
-        let again = try await service.commitImport(repeatPreview); XCTAssertTrue(again.alreadyApplied)
-        try await service.rollbackImport(batchId: report.batchId)
-        try await service.rollbackImport(batchId: report.batchId)
-        let collections = try await service.collections(); XCTAssertEqual(collections.count, 1); XCTAssertEqual(collections[0].count, 0)
-    }
-    func testImportedTargetChangePreventsRollbackAndKeepsTombstone() async throws {
-        let service = try await NativeMusicFixture.service()
-        let preview = try await service.prepareImport(data: NativeMusicFixture.importLibrary().bytes, sourceId: "fixed", ownerId: "import-owner")
-        _ = try await service.commitImport(preview)
-        let created = try await service.createPlaylist(name: "New", refs: [])
-        try await service.removePlaylist(created)
-        do { try await service.rollbackImport(batchId: preview.report.batchId); XCTFail("changed import") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .importedTargetChanged) }
-        let stored = try await service.read()
-        XCTAssertTrue(stored.library["library"]["collections"].array.contains { $0["id"].string == created.id && $0["deleted"].bool })
-    }
     func testCorruptUnknownEnvelopeNeverCreatesNewLibrary() async throws {
         for input in [
             #"{"version":3,"scope":"device","revision":0,"records":{}}"#,

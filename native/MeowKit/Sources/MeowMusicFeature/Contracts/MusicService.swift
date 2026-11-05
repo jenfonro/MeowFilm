@@ -458,24 +458,6 @@ public struct MusicPlayedPlaylist: Codable, Sendable, Identifiable {
     public let at: Double
     public init(id: String, title: String, count: Int, at: Double) { self.id = id; self.title = title; self.count = count; self.at = at }
 }
-public struct MusicImportReport: Codable, Equatable, Sendable {
-    public let batchId: String
-    public let alreadyApplied: Bool
-    public let remoteChanged: Bool
-    public let songs: Int
-    public let collections: Int
-    public let members: Int
-    public init(batchId: String, alreadyApplied: Bool, remoteChanged: Bool = false, songs: Int, collections: Int, members: Int) {
-        self.batchId = batchId; self.alreadyApplied = alreadyApplied; self.remoteChanged = remoteChanged
-        self.songs = songs; self.collections = collections; self.members = members
-    }
-}
-public struct MusicImportPreview: Sendable {
-    public let importId: String
-    public let report: MusicImportReport
-    public init(importId: String, report: MusicImportReport) { self.importId = importId; self.report = report }
-}
-
 /// A single injected business port. No runtime connection, storage authority,
 /// player, credential lookup or periodic polling is created by this protocol.
 public protocol MusicServing: MusicSourceAvailabilityProviding, MusicMetadataPreferencesServing {
@@ -498,8 +480,4 @@ public protocol MusicServing: MusicSourceAvailabilityProviding, MusicMetadataPre
     func playedSongs() async throws -> [MusicPlayedSong]
     func playedPlaylists() async throws -> [MusicPlayedPlaylist]
     func restoreHistory(id: String, expectedRevision: Int) async throws -> MusicPlaybackState
-    func prepareImport(data: Data, sourceId: String, ownerId: String) async throws -> MusicImportPreview
-    func commitImport(_ preview: MusicImportPreview) async throws -> MusicImportReport
-    func releaseImport(_ preview: MusicImportPreview) async throws
-    func rollbackImport(batchId: String) async throws
 }

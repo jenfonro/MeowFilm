@@ -168,8 +168,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var publicQueueSources: [UUID: (collectionID: String, authorization: MusicQueueAuthorization,
                                    reader: MusicNativePublicBrowseQueueRead, bytes: Int, expires: Date)] = [:]
     var spent = Set<String>()
-    struct Import { let library: MJ; let bytes: Int; let sourceID: String; let ownerID: String; let batch: String; let at: Date }
-    var prepared: [String: Import] = [:]
     var operations: [UUID: @Sendable () -> Void] = [:]
     var operationLabels: [UUID: String] = [:]
     var librarySyncRun: (id: UUID, cancel: @Sendable () -> Void)?
@@ -254,7 +252,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         playbackFeedback.invalidate()
         playbackFeedbackAdmission = nil
         librarySyncRun?.cancel()
-        handles.removeAll(); prepared.removeAll(); attempt = nil; spent.removeAll()
+        handles.removeAll(); attempt = nil; spent.removeAll()
         parsedDocument = nil
         lyricEpoch = UUID()
     }

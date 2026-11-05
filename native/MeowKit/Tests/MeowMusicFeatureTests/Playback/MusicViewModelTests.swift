@@ -49,14 +49,8 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     var cacheLookups = 0, cacheDiscards = 0, resolveCalls = 0, lyricCalls = 0
     let cachedFileAuthorization = MusicQueueAuthorization()
     var remoteAuthorization: MusicQueueAuthorization?
-    var importGate: MusicCollectionGate?
-    var importCommitGate: MusicCollectionGate?
     var recordGate: MusicCollectionGate?
-    var releasedImports: [String] = []
-    func blockImport(_ gate: MusicCollectionGate) { importGate = gate }
-    func blockImportCommit(_ gate: MusicCollectionGate) { importCommitGate = gate }
     func blockRecord(_ gate: MusicCollectionGate) { recordGate = gate }
-    func releasedImportIDs() -> [String] { releasedImports }
     func enableRemoteAuthorization() -> MusicQueueAuthorization {
         let value = MusicQueueAuthorization(); remoteAuthorization = value; return value
     }
@@ -242,22 +236,6 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     func restoreHistory(id: String, expectedRevision: Int) async throws -> MusicPlaybackState {
         current = "entry-1"; revision += 1; return snapshot()
     }
-    func prepareImport(data: Data, sourceId: String, ownerId: String) async throws -> MusicImportPreview {
-        guard let gate = importGate else { throw MusicServiceError.unsupported }
-        importGate = nil
-        await gate.wait()
-        return .init(importId: "synthetic-import", report: .init(batchId: "synthetic-batch",
-            alreadyApplied: false, songs: 0, collections: 0, members: 0))
-    }
-    func commitImport(_ preview: MusicImportPreview) async throws -> MusicImportReport {
-        if let gate = importCommitGate {
-            importCommitGate = nil
-            await gate.wait()
-        }
-        throw MusicServiceError.unsupported
-    }
-    func releaseImport(_ preview: MusicImportPreview) async throws { releasedImports.append(preview.importId) }
-    func rollbackImport(batchId: String) async throws { throw MusicServiceError.unsupported }
     func recordedFacts() -> [MusicPlaybackFact] { facts }
     func recordedMoves() -> [String] { moves.map { $0.0.rawValue + ":" + $0.1.rawValue } }
     func setHeaders(_ value: [String: String]) { headers = value }
@@ -352,61 +330,6 @@ final class MusicViewModelTests: XCTestCase {
         await task.value
     }
 
-    @MainActor func testDismissedImportCannotReviveLatePreviewAndReleasesExactToken() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let (service, _, model) = setup()
-        let bytes = Data(#"{"users":[],"songs":[],"playlists":[]}"#.utf8)
-        let file = root.appendingPathComponent("picked.json")
-        try bytes.write(to: file)
-        await model.importFile(file)
-        model.importOwner = "synthetic-owner"
-        let entered = expectation(description: "preview read entered")
-        let gate = MusicCollectionGate { entered.fulfill() }
-        await service.blockImport(gate)
-        let read = Task { await model.previewImport() }
-        await fulfillment(of: [entered], timeout: 2)
-        model.cancelImportPresentation()
-        XCTAssertFalse(model.showingImport)
-        XCTAssertNil(model.importPreview)
-        await gate.release()
-        await read.value
-        XCTAssertNil(model.importPreview)
-        XCTAssertFalse(model.showingImport)
-        XCTAssertNil(model.error)
-        let released = await service.releasedImportIDs()
-        XCTAssertEqual(released, ["synthetic-import"])
-
-        await model.importFile(file)
-        model.importOwner = "synthetic-owner"
-        let ready = MusicCollectionGate {}
-        await ready.release()
-        await service.blockImport(ready)
-        await model.previewImport()
-        XCTAssertNotNil(model.importPreview)
-        let committing = expectation(description: "import commit entered")
-        let commitGate = MusicCollectionGate { committing.fulfill() }
-        await service.blockImportCommit(commitGate)
-        let commit = Task { await model.confirmImport() }
-        await fulfillment(of: [committing], timeout: 2)
-        let cleanup = model.cancelImportPresentation()
-        XCTAssertTrue(model.isImporting, "A dispatched commit retains its physical operation slot")
-        await commitGate.release()
-        await cleanup?.value
-        await commit.value
-        XCTAssertFalse(commit.isCancelled)
-        XCTAssertNil(model.importPreview)
-        XCTAssertFalse(model.showingImport)
-        XCTAssertFalse(model.isImporting)
-        let reported = try XCTUnwrap(model.error)
-        XCTAssertTrue(reported.hasPrefix(MusicServiceError.unsupported.message(operation: "导入曲库")),
-                      "Dismissal must not hide the actual dispatched commit failure")
-        let finalReleases = await service.releasedImportIDs()
-        XCTAssertEqual(finalReleases, ["synthetic-import", "synthetic-import"])
-        XCTAssertEqual(try Data(contentsOf: file), bytes)
-        await model.close()
-    }
 
     @MainActor func testAdoptedInspectedSourceStillChecksCompleteFileBeforeNetworkResolve() async throws {
         let (service, player, model) = setup()
@@ -1094,22 +1017,6 @@ final class MusicViewModelTests: XCTestCase {
         XCTAssertEqual(MusicLyricTimeline.wordProgress(word, at: .infinity), 0)
     }
 
-    @MainActor func testExplicitLibraryImportStagesPreviewWithoutSecondStoreAndLeavesSourceUntouched() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let (service, player, model) = setup()
-        let bytes = Data(#"{"users":[{"id":"synthetic-owner"}],"songs":[],"playlists":[]}"#.utf8)
-        let file = root.appendingPathComponent("picked.json"); try bytes.write(to: file)
-        await model.importFile(file)
-        XCTAssertNil(model.error); XCTAssertTrue(model.showingImport)
-        XCTAssertNil(model.importPreview)
-        XCTAssertTrue(player.resources.isEmpty)
-        let facts = await service.recordedFacts(); XCTAssertTrue(facts.isEmpty)
-        let source = try await ImportedFileReader.read(file, maximumBytes: 7 * 1024 * 1024)
-        XCTAssertEqual(source, bytes)
-        await model.close()
-    }
 }
 
 private actor MusicModelInspectionSession: MusicSourceInspectionSession {

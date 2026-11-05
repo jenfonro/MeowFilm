@@ -152,15 +152,6 @@ public protocol MusicAccountsRefreshing: Sendable {
     func refresh(platform: MusicAccountPlatform) async throws -> MusicAccountStatus
 }
 
-/// Optional, explicit native import. A preview is not a login or validation.
-/// requestID lets a caller cancel even before a non-cooperative preview returns.
-public protocol MusicCredentialsImporting: Sendable {
-    func previewCredentialImport(_ input: MusicCredentialImportInput, platform: MusicAccountPlatform,
-                                 format: MusicCredentialImportFormat, requestID: UUID) async throws -> MusicCredentialImportPreview
-    func commitCredentialImport(id: UUID, replaceExisting: Bool) async throws -> MusicAccountStatus
-    func cancelCredentialImport(id: UUID) async
-}
-
 public struct MusicBrowsePage: Sendable {
     public let items: [MusicRemoteTrack]
     public let cursor: String?

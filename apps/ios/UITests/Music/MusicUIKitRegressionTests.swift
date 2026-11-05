@@ -681,53 +681,6 @@ final class MusicUIKitRegressionTests: XCTestCase {
         subscription.cancel(); image.onFailure = nil; await model.close()
     }
 
-    func testImportHistoryFailureDuringPushIsShownAndReturningDoesNotReadAgain() async throws {
-        let theme = PageLifecycleTestTheme(), root = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
-        let navigation = PageNavigationController(themeProvider: theme)
-        navigation.setViewControllers([root], animated: false)
-        let window = mount(navigation)
-        defer { release(navigation, window: window) }
-        let ready = expectation(for: NSPredicate { _, _ in
-            MainActor.assumeIsolated { root.appearanceEvents.contains("didAppear") }
-        }, evaluatedWith: root)
-        await fulfillment(of: [ready], timeout: 2)
-        let owner = MusicViewModel(service: MusicUIKitRegressionService(), player: MusicUIKitRegressionPlayer())
-        let service = MusicUIKitImportHistoryFixture()
-        let page = MusicImportHistoryViewController(owner: owner, service: service,
-                                                    appearance: MusicAppearancePreferencesStore())
-        page.loadViewIfNeeded()
-        let initialReads = await service.reads
-        XCTAssertEqual(initialReads, 0)
-        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
-        navigation.pushViewController(page, animated: true)
-        navigation.view.layoutIfNeeded()
-        let presented = expectation(for: NSPredicate { _, _ in
-            MainActor.assumeIsolated {
-                guard let alert = page.presentedViewController as? UIAlertController else { return false }
-                return alert.viewIfLoaded?.window != nil && !alert.isBeingPresented &&
-                    alert.transitionCoordinator == nil
-            }
-        }, evaluatedWith: page)
-        await fulfillment(of: [presented], timeout: 2)
-        let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController,
-            "active=\(page.isPageActive), visible=\(page.isPageVisible), canPresent=\(page.canPresentPageAlert)")
-        XCTAssertEqual(alert.message, MusicServiceError.storageFailed.localizedDescription)
-        await withCheckedContinuation { continuation in
-            page.dismiss(animated: false) { continuation.resume() }
-        }
-        navigation.pushViewController(UIViewController(), animated: false)
-        navigation.view.layoutIfNeeded()
-        navigation.popViewController(animated: false)
-        navigation.view.layoutIfNeeded()
-        let returned = expectation(for: NSPredicate { _, _ in
-            MainActor.assumeIsolated { page.isPageVisible }
-        }, evaluatedWith: page)
-        await fulfillment(of: [returned], timeout: 2)
-        let calls = await service.reads
-        XCTAssertEqual(calls, 1)
-        XCTAssertTrue(page.isPageActive)
-        await owner.close()
-    }
 
     func testSettingsErrorWaitsForAppearanceAndIsNotPresentedAgainOnReturn() async throws {
         let appearance = MusicAppearancePreferencesStore()
@@ -4263,10 +4216,6 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func playedSongs() -> [MusicPlayedSong] { [] }
     func playedPlaylists() -> [MusicPlayedPlaylist] { [] }
     func restoreHistory(id: String, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
-    func prepareImport(data: Data, sourceId: String, ownerId: String) throws -> MusicImportPreview { throw MusicServiceError.unsupported }
-    func commitImport(_ preview: MusicImportPreview) throws -> MusicImportReport { throw MusicServiceError.unsupported }
-    func releaseImport(_ preview: MusicImportPreview) {}
-    func rollbackImport(batchId: String) throws { throw MusicServiceError.unsupported }
 }
 
 private actor MusicUIKitResultInspectionSession: MusicSourceInspectionSession {
@@ -4283,16 +4232,6 @@ private actor MusicUIKitResultInspectionSession: MusicSourceInspectionSession {
     func close() { closeCount += 1; pair.continuation.finish() }
 }
 
-private actor MusicUIKitImportHistoryFixture: MusicImportHistoryProviding {
-    private(set) var reads = 0
-    func importHistory() throws -> MusicImportHistorySnapshot {
-        reads += 1
-        throw MusicServiceError.storageFailed
-    }
-    func rollbackImportedLibrary(_ authorization: MusicImportRollbackAuthorization) {
-        XCTFail("Opening history must not roll back the library")
-    }
-}
 
 @MainActor
 private final class MusicSeekRecordingPlayer: MusicPlaybackDriving {

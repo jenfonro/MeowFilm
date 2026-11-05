@@ -57,9 +57,7 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
         guard contentThemeChanged() else { return }
         setContent(MusicAccountsSettingsContent(
             state: state, theme: theme,
-            openAccount: { [weak self] in self?.openAccount($0) },
-            openCredentials: { [weak self] in self?.openCredentials() },
-            openLibrary: { [weak self] in self?.openLibrary() }
+            openAccount: { [weak self] in self?.openAccount($0) }
         ))
     }
 
@@ -178,21 +176,6 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
         reportError(state.error, retry: { [weak state] in state?.retry(generation: access) })
     }
 
-    private func openCredentials() {
-        guard state.canAct(generation: owner.accountAccessGeneration),
-              let service = owner.accounts as? any MusicCredentialsImporting else { return }
-        navigationController?.pushViewController(
-            MusicCredentialImportViewController(owner: owner, service: service, appearance: appearance),
-            animated: true
-        )
-    }
-
-    private func openLibrary() {
-        guard state.canAct(generation: owner.accountAccessGeneration) else { return }
-        navigationController?.pushViewController(
-            MusicLibraryImportViewController(model: owner, appearance: appearance), animated: true
-        )
-    }
 }
 
 @MainActor
@@ -200,8 +183,6 @@ struct MusicAccountsSettingsContent: View {
     @ObservedObject var state: MusicAccountsSettingsState
     let theme: PageTheme
     var openAccount: (MusicAccountStatus) -> Void = { _ in }
-    var openCredentials: () -> Void = {}
-    var openLibrary: () -> Void = {}
 
     var body: some View {
         List {
@@ -226,21 +207,6 @@ struct MusicAccountsSettingsContent: View {
                     .disabled(summary == nil || !state.available || state.pendingAccounts.contains(platform))
                     .modifier(MusicSettingsRowStyle(theme: theme))
                 }
-            }
-            .headerProminence(.increased)
-            Section("导入") {
-                if state.hasCredentialsImport {
-                    Button(action: openCredentials) {
-                        MusicSettingsLinkRow(theme: theme) { Text("导入账号凭据") }
-                    }
-                    .accessibilityIdentifier("music.credentials.import")
-                    .modifier(MusicSettingsRowStyle(theme: theme))
-                }
-                Button(action: openLibrary) {
-                    MusicSettingsLinkRow(theme: theme) { Text("导入曲库") }
-                }
-                .accessibilityIdentifier("music.library.import")
-                .modifier(MusicSettingsRowStyle(theme: theme))
             }
             .headerProminence(.increased)
             .disabled(!state.available)

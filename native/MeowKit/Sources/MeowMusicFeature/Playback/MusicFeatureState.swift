@@ -186,10 +186,6 @@ public extension MusicViewModel {
         merged(changed(libraryState.$playedSongs), changed(libraryState.$playedPlaylists))
     }
 
-    var importChanges: AnyPublisher<Void, Never> {
-        importWorkflow.objectWillChange.eraseToAnyPublisher()
-    }
-
     var noticeChanges: AnyPublisher<Void, Never> {
         merged(distinctChanges(notices.$error), distinctChanges(notices.$queueNotice))
     }
