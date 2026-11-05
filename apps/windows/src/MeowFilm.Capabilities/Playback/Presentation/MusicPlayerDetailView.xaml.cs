@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
@@ -15,16 +16,21 @@ public partial class MusicPlayerDetailView : UserControl
     private int centeredLyric = -1;
     private int centeringLyric = -1;
     private long lyricMotionEpoch;
-    private bool centerQueued;
+    private DispatcherOperation? centerRequest;
+    private FrameworkElement? centeredRow;
     private bool realizingLyric;
     private bool? needlePlaying;
     private CancellationTokenSource? activationRequest;
     private IDisposable? artworkPresentation;
     private Thickness lyricEdgeSpace;
+    private string lyricPresentationKey;
+    private bool lyricPreviewActive;
 
     public MusicPlayerDetailView(MusicCapability module)
     {
         this.module = module;
+        lyricPresentationKey = module.PlaybackPresentationKey;
+        lyricPreviewActive = module.HasLyricPreview;
         InitializeComponent();
         DataContext = module;
         var footer = new MusicPlayerView(module, showArtwork: false);
@@ -58,7 +64,11 @@ public partial class MusicPlayerDetailView : UserControl
         };
         LyricList.PreviewMouseDown += (_, _) => HoldLyrics();
         LyricList.PreviewKeyDown += (_, _) => HoldLyrics();
-        LyricList.SizeChanged += (_, _) => UpdateLyricViewport();
+        LyricList.SizeChanged += (_, e) =>
+        {
+            if (e.WidthChanged) InvalidateLyricCenter();
+            UpdateLyricViewport();
+        };
         IsVisibleChanged += (_, _) =>
         {
             if (IsVisible) { QueueCenterLyric(); SyncNeedle(); }
@@ -69,12 +79,20 @@ public partial class MusicPlayerDetailView : UserControl
                 NeedleRotation.BeginAnimation(RotateTransform.AngleProperty, null);
             }
         };
+        Loaded += (_, _) =>
+        {
+            if (IsVisible) { QueueCenterLyric(); SyncNeedle(); }
+        };
         Unloaded += (_, _) =>
         {
+            StopLyricMotion();
+            NeedleRotation.BeginAnimation(RotateTransform.AngleProperty, null);
+            needlePlaying = null;
             activationRequest?.Cancel();
             artworkPresentation?.Dispose(); artworkPresentation = null;
         };
-        module.PropertyChanged += OnModuleChanged;
+        PropertyChangedEventManager.AddHandler(module, OnModuleChanged, "");
+        CollectionChangedEventManager.AddHandler(module.Lyrics, OnLyricRowsChanged);
     }
 
     internal async Task ActivateAsync(CancellationToken cancellationToken)
@@ -112,13 +130,20 @@ public partial class MusicPlayerDetailView : UserControl
     {
         activationRequest?.Cancel();
         if (!IsVisible) { artworkPresentation?.Dispose(); artworkPresentation = null; }
-        StopLyricMotion();
         module.CancelLyricPreview();
+        StopLyricMotion();
         ((MusicPlayerView)DetailPlayerHost.Content).Deactivate();
     }
 
     private void OnModuleChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(MusicCapability.PlaybackPresentationKey) &&
+            lyricPresentationKey != module.PlaybackPresentationKey)
+        {
+            lyricPresentationKey = module.PlaybackPresentationKey;
+            StopLyricMotion();
+            QueueCenterLyric();
+        }
         if (e.PropertyName == nameof(MusicCapability.IsPlaying))
         {
             if (IsVisible) SyncNeedle();
@@ -128,12 +153,39 @@ public partial class MusicPlayerDetailView : UserControl
             !module.HasLyricPreview && !lyricResumeTimer.IsEnabled &&
             module.LyricDisplayIndex != centeredLyric && module.LyricDisplayIndex != centeringLyric)
             QueueCenterLyric();
-        if (e.PropertyName == nameof(MusicCapability.CanConfirmLyricPreview) &&
-            !module.HasLyricPreview && !lyricResumeTimer.IsEnabled)
+        if (e.PropertyName == nameof(MusicCapability.HasLyricPreview) &&
+            lyricPreviewActive != module.HasLyricPreview)
         {
-            centeredLyric = centeringLyric = -1;
-            QueueCenterLyric();
+            lyricPreviewActive = module.HasLyricPreview;
+            InvalidateLyricCenter();
+            if (!lyricPreviewActive && !lyricResumeTimer.IsEnabled) QueueCenterLyric();
         }
+    }
+
+    private void OnLyricRowsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        InvalidateLyricCenter();
+        QueueCenterLyric();
+    }
+
+    private void InvalidateLyricCenter()
+    {
+        UnwatchCenteredRow();
+        lyricMotionEpoch++;
+        centeredLyric = centeringLyric = -1;
+        if (Descendant<ScrollViewer>(LyricList) is { } scroll) MusicLyricScroll.Stop(scroll);
+    }
+
+    private void UnwatchCenteredRow()
+    {
+        if (centeredRow is not null) centeredRow.SizeChanged -= OnCenteredRowSizeChanged;
+        centeredRow = null;
+    }
+
+    private void OnCenteredRowSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        InvalidateLyricCenter();
+        QueueCenterLyric();
     }
 
     private void UpdateLyricViewport()
@@ -142,9 +194,7 @@ public partial class MusicPlayerDetailView : UserControl
         var space = MusicLyricRowMarginConverter.EdgeSpace(LyricList.ActualHeight, module.IsPlaying);
         if (lyricEdgeSpace != space)
         {
-            lyricMotionEpoch++;
-            centeredLyric = centeringLyric = -1;
-            if (Descendant<ScrollViewer>(LyricList) is { } scroll) MusicLyricScroll.Stop(scroll);
+            InvalidateLyricCenter();
             lyricEdgeSpace = space;
         }
         if (!lyricResumeTimer.IsEnabled) QueueCenterLyric();
@@ -168,29 +218,25 @@ public partial class MusicPlayerDetailView : UserControl
 
     private void HoldLyrics()
     {
-        lyricMotionEpoch++;
-        centeredLyric = centeringLyric = -1;
+        InvalidateLyricCenter();
         lyricResumeTimer.Stop();
         lyricResumeTimer.Start();
-        if (Descendant<ScrollViewer>(LyricList) is { } scroll) MusicLyricScroll.Stop(scroll);
     }
 
     private void StopLyricMotion()
     {
-        lyricMotionEpoch++;
-        centeredLyric = centeringLyric = -1;
+        centerRequest?.Abort(); centerRequest = null;
+        InvalidateLyricCenter();
         lyricResumeTimer.Stop();
-        if (Descendant<ScrollViewer>(LyricList) is { } scroll) MusicLyricScroll.Stop(scroll);
     }
 
     private void QueueCenterLyric()
     {
-        if (centerQueued) return;
-        centerQueued = true;
-        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        if (centerRequest is not null) return;
+        centerRequest = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
         {
-            centerQueued = false;
-            if (IsVisible && !lyricResumeTimer.IsEnabled && !module.HasLyricPreview)
+            centerRequest = null;
+            if (IsLoaded && IsVisible && !lyricResumeTimer.IsEnabled && !module.HasLyricPreview)
                 CenterLyric();
         }));
     }
@@ -201,6 +247,7 @@ public partial class MusicPlayerDetailView : UserControl
         if (index < 0 || index >= module.Lyrics.Count ||
             index == centeringLyric || index == centeredLyric && centeringLyric < 0) return;
         if (Descendant<ScrollViewer>(LyricList) is not { } scroll) return;
+        UnwatchCenteredRow();
         var originalOffset = scroll.VerticalOffset;
         var row = RealizeLyric(index);
         if (row is null) return;
@@ -242,6 +289,8 @@ public partial class MusicPlayerDetailView : UserControl
         }
         centeredLyric = index;
         centeringLyric = -1;
+        centeredRow = row;
+        centeredRow.SizeChanged += OnCenteredRowSizeChanged;
     }
 
     private FrameworkElement? RealizeLyric(int index)

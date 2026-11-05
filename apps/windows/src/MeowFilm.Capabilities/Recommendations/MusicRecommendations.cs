@@ -76,8 +76,8 @@ public sealed partial class MusicCapability
     private void RecommendationChanged(JsonElement snapshot)
     {
         var copy = snapshot.Clone();
-        if (page.Dispatcher.HasShutdownStarted || page.Dispatcher.HasShutdownFinished) return;
-        _ = page.Dispatcher.BeginInvoke(new Action(() =>
+        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
+        _ = Presentation.Dispatcher.BeginInvoke(new Action(() =>
         {
             if (stopping || disposed) return;
             PublishRecommendation(copy);
@@ -218,10 +218,10 @@ public sealed partial class MusicCapability
 
     private Task<bool> SelectRecommendationAsync(MusicRecommendationSelection selection, CancellationToken token)
     {
-        if (page.Dispatcher.HasShutdownStarted || page.Dispatcher.HasShutdownFinished) return Task.FromResult(false);
+        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return Task.FromResult(false);
         // Do not enqueue RunAsync here: the invoking recommendation command may
         // already be inside that lane and must await this exact media callback.
-        return page.Dispatcher.InvokeAsync(() => SelectRecommendationOnUI(selection, token)).Task.Unwrap();
+        return Presentation.Dispatcher.InvokeAsync(() => SelectRecommendationOnUI(selection, token)).Task.Unwrap();
     }
     private async Task<bool> SelectRecommendationOnUI(MusicRecommendationSelection selection, CancellationToken token)
     {

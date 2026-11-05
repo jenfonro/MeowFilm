@@ -83,9 +83,15 @@ public sealed partial class MusicCapability
     {
         get
         {
-            var result = -1;
-            for (var i = 0; i < Lyrics.Count && Lyrics[i].Time <= PositionSeconds; i++) result = i;
-            return result;
+            var position = PositionSeconds;
+            int low = 0, high = Lyrics.Count;
+            while (low < high)
+            {
+                int middle = low + (high - low) / 2;
+                if (Lyrics[middle].Time <= position) low = middle + 1;
+                else high = middle;
+            }
+            return low - 1;
         }
     }
     public string SourceCapabilities => selectedSource?.Capabilities ?? "";
@@ -96,9 +102,10 @@ public sealed partial class MusicCapability
     {
         foreach (var property in new[] { nameof(HasSource), nameof(CanEditSource), nameof(CanLoadSource),
             nameof(CanRollbackSource), nameof(IsLyrics), nameof(LyricStatus),
-            nameof(ActiveLyricIndex), nameof(SourceCapabilities), nameof(SourcePlatforms),
+            nameof(SourceCapabilities), nameof(SourcePlatforms),
             nameof(CanCancelOnline), nameof(CanEditOfficialSources) })
             Changed(property);
+        LyricTimingBindings();
     }
     private CancellationTokenSource BeginOnline(CancellationToken token)
     {

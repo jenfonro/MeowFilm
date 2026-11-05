@@ -25,13 +25,85 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Windows.Tests;
 
 // Native application runs ordinary business. Only authored LX scripts use the
-// on-demand script-only process. DPAPI restart and synthetic-store UI races are
+// on-demand script-only process. Local-store restart and synthetic-store UI races are
 // separate evidence; no production storage fallback exists.
 public static partial class MusicUiTests
 {
     public static IEnumerable<TestCase> Cases()
     {
         foreach (var test in PlayerChromeCases()) yield return test;
+        yield return Case("test document stores authorize exact native namespaces and complete script sources", async () =>
+        {
+            const string hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            byte[] payload = [1, 2, 3];
+            foreach (bool persistent in new[] { false, true })
+            {
+                await using IDocumentStore store = persistent ? ServiceStore() : new DocumentProbe();
+                var names = AppIdentity.NativeNamespaces.Concat(AppIdentity.NativeCollections.Select(collection =>
+                    $"{collection}.{hash}"));
+                foreach (string ns in names)
+                {
+                    Equal(DocumentFingerprint.Missing, (await store.ReadAsync(ns)).Fingerprint);
+                    var fingerprint = await store.WriteAsync(ns, payload, DocumentFingerprint.Missing);
+                    Equal(DocumentFingerprint.FromBytes(payload), fingerprint);
+                    var saved = await store.ReadAsync(ns);
+                    Equal(fingerprint, saved.Fingerprint);
+                    True(saved.Data is not null && saved.Data.SequenceEqual(payload), "authorized namespace roundtrip: " + ns);
+                }
+            }
+        });
+        yield return Case("test document stores reject unknown namespaces and malformed script source names", async () =>
+        {
+            const string hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            foreach (bool persistent in new[] { false, true })
+            {
+                await using IDocumentStore store = persistent ? ServiceStore() : new DocumentProbe();
+                foreach (string collection in AppIdentity.NativeCollections)
+                {
+                    (string Namespace, DocumentStoreError Error)[] denied =
+                    [
+                        ("music.unregistered.v1", DocumentStoreError.Unavailable),
+                        ($"unknown.collection.v1.{hash}", DocumentStoreError.Unavailable),
+                        (collection, DocumentStoreError.Unavailable),
+                        ($"{collection}.", DocumentStoreError.Unavailable),
+                        ($"{collection}x.{hash}", DocumentStoreError.Unavailable),
+                        ($"{collection.ToUpperInvariant()}.{hash}", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash.ToUpperInvariant()}", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash[..^1]}", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}0", DocumentStoreError.Unavailable),
+                        ($"{collection}.{new string('g', 64)}", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.0", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.1", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.2147483647", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.0.extra", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.-1", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.01", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.2147483648", DocumentStoreError.Unavailable),
+                        ($"{collection}.{hash}.+1", DocumentStoreError.InvalidRequest),
+                        ($"{collection}.{hash}.1 ", DocumentStoreError.InvalidRequest),
+                        ($"{collection}..0", DocumentStoreError.InvalidRequest)
+                    ];
+                    foreach (var item in denied)
+                    foreach (var operation in new Func<Task>[]
+                    {
+                        () => store.ReadAsync(item.Namespace),
+                        () => store.WriteAsync(item.Namespace, new byte[] { 1 }, DocumentFingerprint.Missing)
+                    })
+                    {
+                        try
+                        {
+                            await operation();
+                            throw new InvalidOperationException("Expected namespace rejection: " + item.Namespace);
+                        }
+                        catch (DocumentStoreException error)
+                        {
+                            Equal(persistent ? item.Error : DocumentStoreError.InvalidRequest, error.Error);
+                        }
+                    }
+                }
+            }
+        });
         yield return Case("music settings expose current native groups and lyrics use the same playback", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection();
@@ -813,7 +885,7 @@ public static partial class MusicUiTests
             await f.Module.ChangeModeAsync(3); Equal(3, f.Module.Mode);
             await f.Module.PrepareShutdownAsync(); Equal(2, f.Calls.Count("application.prepare"));
         });
-        yield return Case("DPAPI restart restores library/mode/current without starting media", async () =>
+        yield return Case("local document restart restores library/mode/current without starting media", async () =>
         {
             var root = NewRoot(); string id, title;
             await using (var first = await Fixture.Create(root, persistent: true))
@@ -1100,6 +1172,8 @@ public static partial class MusicUiTests
         public Task ResumeAsync() { Resumes++; IsPlaying = true; Changed(); return Task.CompletedTask; }
         public Task StopAsync() { Stops++; HasMedia = false; IsPlaying = false; Changed(); return Task.CompletedTask; }
         public Task SeekAsync(double seconds) { Seek = seconds; Changed(); return Task.CompletedTask; }
+        public void Tick(double seconds)
+        { Seek = seconds; PropertyChanged?.Invoke(this, new(nameof(PositionSeconds))); }
     }
     private sealed class Fixture : IAsyncDisposable
     {

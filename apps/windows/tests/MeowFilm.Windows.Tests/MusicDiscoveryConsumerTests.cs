@@ -194,7 +194,8 @@ public static partial class MusicUiTests
             Render(host, 900, 760);
             var discovery = Visuals(view).OfType<MusicDiscoveryView>().Single();
             True(discovery.IsVisible || discovery.Visibility == Visibility.Visible, "discovery is the selected control");
-            Equal(Visibility.Collapsed, Visuals(view).OfType<MusicCatalogView>().Single().Visibility);
+            True(!Visuals(view).OfType<MusicCatalogView>().Any(),
+                "discovery owns the content body; inactive catalog is unmounted");
             var button = Visuals(discovery).OfType<Button>().First(b => b.Tag is MusicDiscoveryKeyword word && word.Text == "热搜1");
             Click(button);
             await DiscoveryUntil(() => f.Module.IsSearchPage && f.Module.Songs.Count == 3);

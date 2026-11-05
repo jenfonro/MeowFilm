@@ -3,7 +3,7 @@
  xmlns:local="clr-namespace:MeowFilm.Capabilities" xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop"
  FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" TextOptions.TextFormattingMode="Display"
- TextOptions.TextRenderingMode="Grayscale">
+ TextOptions.TextRenderingMode="Auto">
  <UserControl.Resources><ResourceDictionary>
   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/></ResourceDictionary.MergedDictionaries>
   <Style TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}"><Setter Property="Margin" Value="4,0"/><Setter Property="Foreground" Value="#777E90"/><Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger></Style.Triggers></Style>
@@ -13,6 +13,8 @@
    <local:SeekBar x:Name="Progress" Grid.RowSpan="2" Panel.ZIndex="2" VerticalAlignment="Top" Height="16" RailAtTop="True"
     Minimum="0" Maximum="{Binding DurationSeconds}" PlayedBrush="{Binding PlayerProgressBrush}" RailBrush="{DynamicResource Capability.Player.Rail}"
     Value="{Binding PositionSeconds,Mode=OneWay}" ChorusSeconds="{Binding ChorusPositionSeconds}"
+    IsPlaying="{Binding IsPlaying}" PlaybackRate="{Binding AcceptedPlaybackRate}"
+    PresentationKey="{Binding PlaybackPresentationKey}"
     IsEnabled="{Binding CanSeek}" AutomationProperties.Name="播放进度"/>
    <Grid Grid.Row="1">
     <Grid.Resources>

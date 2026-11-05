@@ -7,7 +7,7 @@
         WindowStartupLocation="CenterScreen" WindowStyle="SingleBorderWindow" ResizeMode="CanResize"
         FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
         UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display"
-        TextOptions.TextRenderingMode="Grayscale"
+        TextOptions.TextRenderingMode="Auto"
         Loaded="OnLoaded" PreviewKeyDown="OnPreviewKeyDown"
         AutomationProperties.Name="meowfilm">
     <Window.Resources>
@@ -193,15 +193,15 @@
                 </ListBox>
             </StackPanel></ScrollViewer>
 
-            <Grid x:Name="CaptionBar" Grid.Column="1" Margin="40,0,12,0">
+            <Grid Grid.Column="1" Margin="40,0,12,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <Grid x:Name="SearchChrome" VerticalAlignment="Center" HorizontalAlignment="Left" Margin="0,0,16,0"
-                      IsEnabled="{Binding IsInteractive}" shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                <local:DesktopPageHeader x:Name="PageHeaderHost" IsEnabled="{Binding IsInteractive}"/>
+                <Grid x:Name="SearchChrome" VerticalAlignment="Center" HorizontalAlignment="Left"
+                      shell:WindowChrome.IsHitTestVisibleInChrome="True">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
@@ -231,50 +231,8 @@
                             </Style></Button.Style>
                         </Button>
                     </Grid>
-                    <TextBlock x:Name="SettingsHeading" Grid.Column="1" Text="设置" Visibility="Collapsed"
-                               FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" Margin="8,0,20,0"
-                               AutomationProperties.HeadingLevel="Level1" />
-                    <ContentControl x:Name="SettingsHeaderSlot" Grid.Column="2" Visibility="Collapsed"
-                                    VerticalContentAlignment="Center" Focusable="False" IsTabStop="False" />
                 </Grid>
-                <StackPanel x:Name="PageHeader" Grid.Column="0" Orientation="Horizontal"
-                            HorizontalAlignment="Right" VerticalAlignment="Center" Margin="380,0,12,0"
-                            IsEnabled="{Binding IsInteractive}"
-                            shell:WindowChrome.IsHitTestVisibleInChrome="True">
-                    <ContentControl x:Name="HeaderSlot" VerticalContentAlignment="Center" Margin="0,0,8,0"
-                                    Focusable="False" IsTabStop="False" />
-                    <ItemsControl x:Name="HeaderActions">
-                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Button Content="{Binding Label}" Tag="{Binding}" Click="OnHeaderActionClick"
-                                        IsEnabled="{Binding IsEnabled}" AutomationProperties.Name="{Binding AutomationName}"
-                                        Margin="0,0,8,0">
-                                    <Button.Style>
-                                        <Style TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
-                                            <Setter Property="Padding" Value="12,6" />
-                                            <Setter Property="Margin" Value="0,0,6,0" />
-                                            <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsPrimary}" Value="True">
-                                                    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Accent}" />
-                                                    <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.OnAccent}" />
-                                                    <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}" />
-                                                </DataTrigger>
-                                                <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
-                                                    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}" />
-                                                    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}" />
-                                                    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
-                                                </Trigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </Button.Style>
-                                </Button>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </StackPanel>
-                <!-- One shared caption bar; settings scopes do not switch application modes. -->
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
+                <StackPanel x:Name="CaptionBar" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
                             shell:WindowChrome.IsHitTestVisibleInChrome="True">
                     <Button x:Name="SettingsButton" Style="{StaticResource MeowFilm.CaptionButton}" FontSize="17" Content="&#xE713;"
                             IsEnabled="{Binding IsInteractive}" Click="OnSettingsClick" AutomationProperties.Name="设置" ToolTip="设置" />

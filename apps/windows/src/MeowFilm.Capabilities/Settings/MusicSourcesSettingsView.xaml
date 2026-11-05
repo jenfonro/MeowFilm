@@ -6,6 +6,8 @@
  Loaded="View_Loaded" Unloaded="View_Unloaded" IsVisibleChanged="View_IsVisibleChanged"
  DataContextChanged="View_DataContextChanged" SizeChanged="View_SizeChanged"
  FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
+ UseLayoutRounding="True" SnapsToDevicePixels="True"
  Foreground="{DynamicResource Settings.Brush.Text}" ClipToBounds="True">
  <UserControl.Resources>
   <ResourceDictionary>

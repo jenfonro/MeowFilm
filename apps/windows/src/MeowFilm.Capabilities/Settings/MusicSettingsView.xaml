@@ -4,7 +4,8 @@
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  x:Name="Root" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
- TextOptions.TextRenderingMode="Grayscale"
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
+ UseLayoutRounding="True" SnapsToDevicePixels="True"
  SizeChanged="View_SizeChanged">
  <UserControl.Resources>
   <ResourceDictionary>
@@ -53,7 +54,7 @@
    <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger></Style.Triggers>
   </Style>
  </UserControl.Style>
- <Grid x:Name="MusicContent" Margin="32,0,32,12">
+ <Grid x:Name="MusicContent" Margin="32,0,32,12" local:SettingsLayout.Mode="Sections">
   <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition/></Grid.RowDefinitions>
   <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource Settings.Brush.Border}">
    <ScrollViewer VerticalScrollBarVisibility="Disabled" HorizontalScrollBarVisibility="Hidden">
@@ -93,7 +94,7 @@
     <Border x:Name="SearchSection" Style="{StaticResource Settings.Section}">
      <StackPanel>
       <TextBlock Text="搜索" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,12"/>
-       <Grid x:Name="SearchPanels" SizeChanged="Pair_SizeChanged">
+       <Grid x:Name="SearchPanels" local:SettingsLayout.Mode="Pair">
         <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Settings.PairGap}"/><ColumnDefinition Style="{StaticResource Settings.PairColumn}"/></Grid.ColumnDefinitions>
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <StackPanel x:Name="SongSearchPanel">
@@ -124,7 +125,7 @@
         <TextBlock Text="请求音质" VerticalAlignment="Center" Margin="0,0,22,0"/>
         <ComboBox Width="190" Style="{StaticResource Settings.ComboBox}" ItemsSource="{Binding PlaybackQualityOptions}" SelectedItem="{Binding PlaybackQualityRequest,Mode=OneWay}" ItemTemplate="{StaticResource Quality.Name}" SelectionChanged="PlaybackQuality_Changed" IsEnabled="{Binding CanEditQuality}" AutomationProperties.Name="播放请求音质"/>
        </StackPanel>
-       <Grid x:Name="QualityPanels" SizeChanged="Pair_SizeChanged">
+       <Grid x:Name="QualityPanels" local:SettingsLayout.Mode="Pair">
         <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Settings.PairGap}"/><ColumnDefinition Style="{StaticResource Settings.PairColumn}"/></Grid.ColumnDefinitions>
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <local:SettingsPriorityList x:Name="QualityPriorities" Title="音质优先顺序" Tag="quality" ItemsSource="{Binding QualityCategories}" CanEdit="{Binding CanEditQuality}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>
@@ -148,7 +149,11 @@
       <Grid.ColumnDefinitions><ColumnDefinition Style="{StaticResource Settings.LabelColumn}"/><ColumnDefinition Style="{StaticResource Settings.GapColumn}"/><ColumnDefinition/></Grid.ColumnDefinitions>
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <TextBlock Text="外观" Style="{StaticResource Settings.SectionLabel}"/>
-      <UniformGrid x:Name="AppearanceFields" Style="{StaticResource Settings.SectionContent}" Columns="3">
+      <UniformGrid x:Name="AppearanceFields">
+       <UniformGrid.Style><Style TargetType="UniformGrid" BasedOn="{StaticResource Settings.SectionContent}">
+        <Setter Property="Columns" Value="3"/>
+        <Style.Triggers><Trigger Property="local:SettingsLayout.IsNarrow" Value="True"><Setter Property="Columns" Value="1"/></Trigger></Style.Triggers>
+       </Style></UniformGrid.Style>
        <StackPanel Style="{StaticResource Appearance.Field}"><TextBlock Text="歌单样式" FontSize="13" Margin="0,0,0,10"/>
         <ComboBox Tag="playlistView" Style="{StaticResource Settings.ComboBox}" ItemsSource="{Binding PlaylistViews}" DisplayMemberPath="Name" SelectedValuePath="Key" SelectedValue="{Binding AppearancePlaylistView,Mode=OneWay}" SelectionChanged="Appearance_Changed" IsEnabled="{Binding CanEditAppearance}" AutomationProperties.Name="歌单样式"/>
        </StackPanel>
@@ -167,7 +172,7 @@
     <Border x:Name="MetadataSection" Style="{StaticResource Settings.Section}">
      <StackPanel>
       <TextBlock Text="歌词与封面" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,12"/>
-      <Grid x:Name="MetadataPanels" SizeChanged="Pair_SizeChanged">
+      <Grid x:Name="MetadataPanels" local:SettingsLayout.Mode="Pair">
        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Settings.PairGap}"/><ColumnDefinition Style="{StaticResource Settings.PairColumn}"/></Grid.ColumnDefinitions>
        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
        <local:SettingsPriorityList x:Name="MetadataPriorities" Title="歌词平台优先顺序" Tag="metadata" ShowLogos="True" ItemsSource="{Binding MetadataPlatforms}" CanEdit="{Binding CanEditMetadata}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>
