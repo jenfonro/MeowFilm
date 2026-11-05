@@ -24,14 +24,12 @@
 }
 ```
 
-当前最多八个 entry：
+当前最多六个 entry：
 
 1. `wy`、`tx`、`kg` 三个平台账号；
-2. 三个平台各自的账号资料与权益；
-3. 一个只读迁移用酷狗旧设备条目；
-4. 一个只读迁移用 QQ feedback 旧设备条目。
+2. 三个平台各自的账号资料与权益。
 
-账号 key 为 `["meowfilm","music",1,"platform-account","<platform>"]`。资料和旧迁移成员保留已发布 key。根对象、entry、value、字段集合、类型、范围、规范整数、关系和 fingerprint 在任何业务读取前整文档校验；新账号事务不创建或更新旧设备值。
+账号 key 为 `["meowfilm","music",1,"platform-account","<platform>"]`。账号详情使用各平台对应的资料 key；设备状态仅存于独立客户端文档。根对象、entry、value、字段集合、类型、范围、规范整数、关系和 fingerprint 在任何业务读取前整文档校验。
 
 - 文档不存在时创建内存中的当前空结构。
 - 未知 key、额外或缺失字段、重复属性、损坏 value、错误 fingerprint、非规范整数或超过预算均以 `CORRUPT_STORAGE` 失败。

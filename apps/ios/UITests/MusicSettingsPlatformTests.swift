@@ -440,7 +440,10 @@ private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing {
         settingsRevision += 1
         return state()
     }
-    func playbackOptions(for ref: MusicReference) -> [MusicPlaybackOption] { [] }
+    func sourceAvailability(for ref: MusicReference) -> MusicSourceAvailability { .init(options: [], scriptState: .notConfigured) }
+    func metadataPreferences() throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
+    func updateMetadataPreferences(_ change: MusicMetadataPreferencesChange) throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
+    func metadataCandidates(occurrenceID: String) throws -> MusicMetadataCandidates { throw MusicServiceError.unsupported }
     func resolve(attemptId: String, occurrenceId: String, selection: MusicPlaybackSelection) throws -> MusicPlaybackCandidate { throw MusicServiceError.unsupported }
     func cancel(attemptId: String?) {}
     func record(_ fact: MusicPlaybackFact) -> Bool { false }

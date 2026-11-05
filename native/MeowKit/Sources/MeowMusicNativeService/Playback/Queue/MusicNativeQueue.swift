@@ -178,7 +178,10 @@ extension NativeMusicService {
                 guard let index = rows.firstIndex(where: { $0["id"].string == id }) else { throw MusicServiceError.notFound }
                 rows.remove(at: index); d.queue["entries"] = .array(rows)
                 for key in ["priority", "history", "failed"] { d.queue[key] = .strings(d.queue[key].strings.filter { $0 != id }) }
-                if previous.string == id { d.queue["currentId"] = rows.isEmpty ? .null : rows[min(index, rows.count - 1)]["id"] }
+                if previous.string == id {
+                    if rows.isEmpty { d.queue["currentId"] = .null }
+                    else { select(rows[min(index, rows.count - 1)]["id"].string, queue: &d.queue, remember: false) }
+                }
                 if rows.isEmpty { d.queue["source"] = .null }
             case .reorder(let ids):
                 let rows = d.queue["entries"].array

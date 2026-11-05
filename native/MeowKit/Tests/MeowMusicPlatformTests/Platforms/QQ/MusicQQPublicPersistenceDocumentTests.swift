@@ -184,7 +184,7 @@ final class MusicQQPublicPersistenceDocumentTests: XCTestCase {
     }
 }
 
-private final class QQPublicPersistenceBlockingDocument: MusicQQPublicPersisting, @unchecked Sendable {
+private final class QQPublicPersistenceBlockingDocument: MusicClientContextPersisting, @unchecked Sendable {
     let release = DispatchSemaphore(value: 0)
     var onEnter: (@Sendable () -> Void)?
     private let lock = NSLock()

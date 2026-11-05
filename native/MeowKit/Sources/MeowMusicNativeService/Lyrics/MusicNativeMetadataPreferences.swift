@@ -52,7 +52,7 @@ private struct NativeMetadataPreferences {
     }
 }
 
-extension NativeMusicService: MusicMetadataPreferencesServing {
+extension NativeMusicService {
     public func metadataPreferences() async throws -> MusicMetadataPreferences {
         let own = epoch, d = try read()
         let value = try NativeMetadataPreferences(d.playback)

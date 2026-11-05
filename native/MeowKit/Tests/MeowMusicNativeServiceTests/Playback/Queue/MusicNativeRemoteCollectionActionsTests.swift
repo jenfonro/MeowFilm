@@ -26,7 +26,7 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
         XCTAssertEqual(Set(current.envelope["records"].fields.map(\.0)),
                        Set(old.envelope["records"].fields.map(\.0)).union([MusicModel.key("library")]))
         let local = current.library["library"]["collections"].array.last!
-        XCTAssertTrue(local["bindings"].array.isEmpty); XCTAssertTrue(local["creating"].fields.isEmpty)
+        XCTAssertTrue(local["bindings"].array.isEmpty)
         XCTAssertTrue(current.library["library"]["accounts"].fields.isEmpty)
         XCTAssertEqual(local["intents"].fields.count, 631)
         XCTAssertTrue(local["intents"].fields.allSatisfy { $0.1["origin"].string == "local" && $0.1["pending"].bool })

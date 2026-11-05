@@ -22,7 +22,7 @@ internal sealed class StoredAccount
 internal sealed partial class AccountDocument
 {
     internal const int MaximumBytes = 8 * 1024 * 1024;
-    private const int CurrentEntryCount = 8;
+    private const int CurrentEntryCount = 6;
     private static readonly JsonSerializerOptions Encoding = new()
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
@@ -80,16 +80,6 @@ internal sealed partial class AccountDocument
                 _ = ReadDetails(value, platform);
                 return;
             }
-        }
-        if (key == KgDeviceKey)
-        {
-            _ = ReadKgDevice(value);
-            return;
-        }
-        if (key == QqFeedbackDeviceKey)
-        {
-            _ = ReadQqFeedbackDevice(value);
-            return;
         }
         throw new MusicAccountException("CORRUPT_STORAGE");
     }

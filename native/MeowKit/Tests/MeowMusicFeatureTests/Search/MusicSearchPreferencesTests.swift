@@ -18,6 +18,7 @@ import XCTest
             XCTAssertEqual(store.preferences.songs.concurrency, 1)
             XCTAssertEqual(store.preferences.songs.cacheMinutes, 60)
             XCTAssertEqual(store.preferences.playlists, store.preferences.songs)
+            XCTAssertNil(defaults.data(forKey: MusicSearchPreferencesStore.preferencesKey))
         }
     }
     func testPreferencesNormalizeDuplicatesButPreserveExplicitEmptySelection() {
@@ -124,6 +125,37 @@ import XCTest
             XCTAssertTrue(store.update(.init(songPlatforms: [.qq], searchPlaylists: false)))
             XCTAssertEqual(defaults.data(forKey: "search.history"), history)
             XCTAssertEqual(MusicSearchPreferencesStore(defaults: defaults).preferences.songPlatforms, [.qq])
+        }
+    }
+    func testStoredPolicyRequiresEveryCurrentFieldAndReloadPreservesInvalidBytes() throws {
+        try isolated { defaults in
+            let encoded = try JSONEncoder().encode(MusicSearchPreferences(songPlatforms: [.qq]))
+            let complete = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            for field in ["songs", "playlists", "searchPlaylists"] {
+                var json = complete
+                json.removeValue(forKey: field)
+                let data = try JSONSerialization.data(withJSONObject: json)
+                defaults.set(data, forKey: MusicSearchPreferencesStore.preferencesKey)
+                XCTAssertThrowsError(try JSONDecoder().decode(MusicSearchPreferences.self, from: data))
+                let store = MusicSearchPreferencesStore(defaults: defaults)
+                XCTAssertEqual(store.preferences, MusicSearchPreferences())
+                store.reload()
+                XCTAssertEqual(defaults.data(forKey: MusicSearchPreferencesStore.preferencesKey), data)
+            }
+        }
+    }
+    func testReloadReadsCurrentPolicyWithoutReencodingItsBytes() throws {
+        try isolated { defaults in
+            let value = MusicSearchPreferences(songPlatforms: [.qq], playlistPlatforms: [],
+                                               songPages: 3, playlistConcurrency: 2)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(value)
+            defaults.set(data, forKey: MusicSearchPreferencesStore.preferencesKey)
+            let store = MusicSearchPreferencesStore(defaults: defaults)
+            XCTAssertEqual(store.preferences, value)
+            store.reload()
+            XCTAssertEqual(defaults.data(forKey: MusicSearchPreferencesStore.preferencesKey), data)
         }
     }
 }

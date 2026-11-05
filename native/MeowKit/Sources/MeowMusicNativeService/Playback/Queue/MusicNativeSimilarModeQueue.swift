@@ -114,7 +114,6 @@ extension NativeMusicService {
         queue["history"] = .strings(snapshot["history"].strings.filter { ids.contains($0) })
         queue["failed"] = .array([])
         queue["source"] = rows.isEmpty ? .null : MusicModel.durable(snapshot["source"])
-        queue["serial"] = .n(max(queue["serial"].int, rows.compactMap { Int($0["id"].string.dropFirst(6)) }.max() ?? 0))
     }
 
     /// A real accepted playing/progress fact, or explicit retry of an already

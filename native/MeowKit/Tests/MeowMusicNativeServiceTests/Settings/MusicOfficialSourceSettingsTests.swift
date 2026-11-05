@@ -40,15 +40,29 @@ final class MusicOfficialSourceSettingsTests: XCTestCase {
         }
     }
 
+    func testMissingStoredOfficialSourcesIsRejectedWithoutRepairingOriginalBytes() async throws {
+        var document = try MusicDocument(nil, runID: "test")
+        XCTAssertEqual(document.playback["officialSources"].strings, MusicAccountPlatform.allCases.map(\.rawValue))
+        document.playback.remove("officialSources")
+        let bytes = try document.encode(changed: ["playback"]), store = NativeMusicMemoryDocument(bytes)
+        let service = try await NativeMusicFixture.service(store)
+        await scriptExpectFailure(.corruptDocument) { try await service.state() }
+        await scriptExpectFailure(.corruptDocument) {
+            try await service.updateSettings(.init(ifRevision: 0, officialSources: [.qq]))
+        }
+        XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
+        await service.close()
+    }
+
     func testDisabledOfficialPlatformIsRejectedByOptionsAutomaticManualDirectAndRecoveryWhileScriptsStillWork() async throws {
         let store = try MusicNativeCandidateDiscoveryFixture.store()
         let accounts = NativeMusicAccountFixture(), scripts = NativeMusicScriptFixture()
         let service = try await NativeMusicFixture.service(store, scripts: scripts, accounts: accounts)
         let ref = MusicReference(kind: .queue, id: "entry-1")
-        let before = try await service.playbackOptions(for: ref)
+        let before = (try await service.sourceAvailability(for: ref)).options
         let official = try XCTUnwrap(before.first { $0.installationId.hasPrefix("official:") })
         _ = try await service.updateSettings(.init(ifRevision: 0, officialSources: [.netease, .kugou]))
-        let options = try await service.playbackOptions(for: ref)
+        let options = (try await service.sourceAvailability(for: ref)).options
         XCTAssertEqual(options.map(\.installationId), [NativeMusicFixture.installation])
         let count = await accounts.events().count
         let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
@@ -173,10 +187,10 @@ final class MusicOfficialSourceSettingsTests: XCTestCase {
         let scripts = MusicNativeCandidateDiscoveryScripts()
         await scripts.supported(["kw", "tx"])
         let service = try await NativeMusicFixture.service(store, scripts: scripts, sourceDiscovery: cache)
-        let before = try await service.playbackOptions(for: .init(kind: .queue, id: "entry-1"))
+        let before = (try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))).options
         XCTAssertTrue(before.contains { $0.sourceKey == key })
         await cache.exclude(fingerprint: MusicModel.fingerprint(song), duration: 180, sourceKey: key)
-        let after = try await service.playbackOptions(for: .init(kind: .queue, id: "entry-1"))
+        let after = (try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))).options
         XCTAssertFalse(after.contains { $0.sourceKey == key })
         let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let options = try await session.snapshot(discover: false, force: false)

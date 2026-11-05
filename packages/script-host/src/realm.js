@@ -171,7 +171,7 @@ export const realmSource = String.raw`
   }
   Object.defineProperties(globalThis, {
     lx:{value:lx, configurable:true},
-    meow:{value:freeze({config:deepFreeze(parse(call('config'))),storage:scopedStorage(0)}), configurable:true},
+    meow:{value:freeze({config:deepFreeze(parse(call('config')))}), configurable:true},
     Buffer:{value:ScriptBuffer, configurable:true},
   });
   const timer = (fn,delay,repeat,args) => {

@@ -32,7 +32,7 @@ public actor NativeMusicQQPublicService: MusicPublicQQProviding {
         self.owned = owned; self.clock = clock; persistence = state
         qq = QQMusicAccountAdapter(transport: transport ?? owned!, now: clock, publicPersistence: state)
     }
-    public init(persistence: any MusicQQPublicPersisting,
+    public init(persistence: any MusicClientContextPersisting,
                 transport: (any MusicAccountHTTPTransport)? = nil,
                 clock: @escaping @Sendable () -> Date = { Date() }) {
         let owned = transport == nil ? URLSessionMusicAccountTransport() : nil

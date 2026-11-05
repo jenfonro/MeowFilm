@@ -105,7 +105,7 @@ final class MusicNativeFMTests: XCTestCase {
             XCTFail("no synthetic ended")
         } catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
         let queue = try await service.queue()
-        let options = try await service.playbackOptions(for: queue.entries[0].track.ref)
+        let options = (try await service.sourceAvailability(for: queue.entries[0].track.ref)).options
         let audio = try await service.resolve(attemptId: "00000000-0000-4000-8000-000000000901", occurrenceId: queue.entries[0].id,
             selection: options[0].selection(quality: "128k"))
         let ended = MusicPlaybackFact(attemptId: audio.attemptId, occurrenceId: audio.occurrenceId,

@@ -38,6 +38,14 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     var heldState: CheckedContinuation<MusicPlaybackState, Never>?
     var stateReads = 0
     var hasCachedAudio = false, hasLyrics = false
+    var availability = MusicSourceAvailability(options: [
+        MusicPlaybackOption(installationId: "selected-lx", generation: 1, siteId: "wy", sourceKey: musicSourceKey,
+            qualities: ["128k"], title: "合成音源", version: "1.0", contentHash: String(repeating: "a", count: 64))
+    ], scriptState: .ready)
+    var availabilityGate: MusicCollectionGate?
+    var metadataEnabled: Set<MusicPublicBrowsePlatform> = [.netease]
+    var metadataFailure: MusicServiceError?
+    var lyricSourceKeys: [String] = []
     var cacheLookups = 0, cacheDiscards = 0, resolveCalls = 0, lyricCalls = 0
     let cachedFileAuthorization = MusicQueueAuthorization()
     var remoteAuthorization: MusicQueueAuthorization?
@@ -155,10 +163,48 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     func updateSettings(_ change: MusicSettingsChange) async throws -> MusicPlaybackState {
         if let value = change.mode { mode = value }; settingsRevision += 1; return snapshot()
     }
-    func playbackOptions(for ref: MusicReference) async throws -> [MusicPlaybackOption] {
-        [MusicPlaybackOption(installationId: "selected-lx", generation: 1, siteId: "wy", sourceKey: musicSourceKey,
-                             qualities: ["128k"], title: "合成音源", version: "1.0", contentHash: String(repeating: "a", count: 64))]
+    func sourceAvailability(for ref: MusicReference) async -> MusicSourceAvailability {
+        let value = availability
+        if let gate = availabilityGate { availabilityGate = nil; await gate.wait() }
+        return value
     }
+    func setAvailability(_ value: MusicSourceAvailability, gate: MusicCollectionGate? = nil) {
+        availability = value; availabilityGate = gate
+    }
+    func metadataPreferences() -> MusicMetadataPreferences {
+        .init(revision: settingsRevision, platforms: [.netease, .qq], enabledPlatforms: metadataEnabled)
+    }
+    func updateMetadataPreferences(_ change: MusicMetadataPreferencesChange) throws -> MusicMetadataPreferences {
+        guard change.ifRevision == settingsRevision else { throw MusicServiceError.staleRevision }
+        if let platforms = change.platforms, platforms != [.netease, .qq] { throw MusicServiceError.invalidRequest }
+        if let enabled = change.enabledPlatforms {
+            guard enabled.isSubset(of: [.netease, .qq]) else { throw MusicServiceError.invalidRequest }
+            metadataEnabled = enabled
+        }
+        settingsRevision += 1
+        return metadataPreferences()
+    }
+    func metadataCandidates(occurrenceID: String) throws -> MusicMetadataCandidates {
+        if let metadataFailure { throw metadataFailure }
+        guard current == occurrenceID, let entry = entries.first(where: { $0.id == occurrenceID }) else {
+            throw MusicServiceError.targetChanged
+        }
+        return .init(occurrenceID: occurrenceID, queueRevision: revision, preferences: metadataPreferences(),
+            track: entry.track, contentRevision: nil, contentFingerprint: entry.track.songId,
+            candidates: entry.track.sources.filter {
+                MusicPublicBrowsePlatform(rawValue: $0.platform).map(metadataEnabled.contains) == true
+            }.map { .init(source: $0, artwork: entry.track.artwork) })
+    }
+    func failMetadata(_ error: MusicServiceError) { metadataFailure = error }
+    func addMetadataSource(_ source: MusicNativeSource) {
+        entries = entries.map { entry in
+            let track = entry.track
+            return .init(id: entry.id, track: .init(ref: track.ref, songId: track.songId,
+                title: track.title, artist: track.artist, album: track.album, duration: track.duration,
+                sources: track.sources + [source], artwork: track.artwork))
+        }
+    }
+    func requestedLyricSources() -> [String] { lyricSourceKeys }
     func inspectSources(for reference: MusicReference) async throws -> any MusicSourceInspectionSession {
         guard entries.contains(where: { $0.track.ref == reference }) else { throw MusicServiceError.notFound }
         return MusicModelInspectionSession(service: self)
@@ -187,7 +233,7 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
         facts.append(fact); return true
     }
     func lyrics(occurrenceId: String, sourceKey: String) async throws -> MusicLyricsSnapshot {
-        lyricCalls += 1
+        lyricCalls += 1; lyricSourceKeys.append(sourceKey)
         return MusicLyricsSnapshot(occurrenceId: occurrenceId, state: hasLyrics ? .ready : .none,
             lines: hasLyrics ? [.init(index: 0, time: 0, end: 180, text: "合成歌词")] : [])
     }
@@ -548,17 +594,64 @@ final class MusicViewModelTests: XCTestCase {
         let (service, _, model) = setup()
         await service.enableCaches(audio: false, lyrics: true)
         await model.load(); await model.choose(musicOfficialSelection)
-        await model.loadLyrics(occurrenceId: "entry-1", sourceKey: musicSourceKey)
+        await model.loadLyrics(occurrenceId: "entry-1")
         XCTAssertEqual(model.lyricLines.first?.text, "合成歌词")
         await model.selectOccurrence("entry-2"); await model.choose(musicOfficialSelection)
-        await model.loadLyrics(occurrenceId: "entry-2", sourceKey: musicSourceKey)
+        await model.loadLyrics(occurrenceId: "entry-2")
         let before = await service.cacheCounts()
         XCTAssertEqual(before[3], 1, "occurrence changes must not become lyric content keys")
         model.setAvailable(false); model.setAvailable(true)
         await model.load(); await model.choose(musicOfficialSelection)
-        await model.loadLyrics(occurrenceId: "entry-2", sourceKey: musicSourceKey)
+        await model.loadLyrics(occurrenceId: "entry-2")
         let after = await service.cacheCounts()
         XCTAssertEqual(after[3], 2)
+        await model.close()
+    }
+
+    @MainActor func testLyricsUseMetadataMappingAcrossAudioSourceAndQualityChanges() async throws {
+        let (service, player, model) = setup()
+        let source = MusicNativeSource(sourceKey: "qq-metadata", platform: "tx", nativeId: "metadata")
+        await service.addMetadataSource(source)
+        await service.enableCaches(audio: false, lyrics: true)
+        _ = try await service.updateMetadataPreferences(.init(ifRevision: 0, enabledPlatforms: [.qq]))
+        await model.load(); await model.choose(musicOfficialSelection)
+        await model.loadLyrics(occurrenceId: "entry-1")
+        XCTAssertEqual(model.lyricLines.first?.text, "合成歌词")
+        let differentAudio = MusicPlaybackSelection(installationId: musicSelection.installationId,
+            generation: musicSelection.generation, siteId: musicSelection.siteId,
+            sourceKey: musicSelection.sourceKey, quality: "flac")
+        await model.choose(differentAudio)
+        await model.loadLyrics(occurrenceId: "entry-1")
+        let requested = await service.requestedLyricSources()
+        XCTAssertEqual(requested, [source.sourceKey])
+        XCTAssertEqual(player.resources.count, 2)
+        XCTAssertEqual(model.lyricLines.first?.text, "合成歌词")
+        await model.close()
+    }
+
+    @MainActor func testDisabledMetadataDoesNotDeriveCandidatesFromAudioSelection() async throws {
+        let (service, player, model) = setup()
+        await service.enableCaches(audio: false, lyrics: true)
+        _ = try await service.updateMetadataPreferences(.init(ifRevision: 0, enabledPlatforms: []))
+        await model.load(); await model.choose(musicOfficialSelection)
+        await model.loadLyrics(occurrenceId: "entry-1")
+        let requested = await service.requestedLyricSources()
+        XCTAssertTrue(requested.isEmpty)
+        XCTAssertEqual(model.lyricState, "none"); XCTAssertTrue(model.lyricLines.isEmpty)
+        XCTAssertEqual(player.resources.count, 1)
+        await model.close()
+    }
+
+    @MainActor func testMetadataReadFailureDoesNotDeriveCandidatesFromAudioSelection() async {
+        let (service, player, model) = setup()
+        await service.enableCaches(audio: false, lyrics: true)
+        await service.failMetadata(.upstreamFailed)
+        await model.load(); await model.choose(musicOfficialSelection)
+        await model.loadLyrics(occurrenceId: "entry-1")
+        let requested = await service.requestedLyricSources()
+        XCTAssertTrue(requested.isEmpty)
+        XCTAssertEqual(model.lyricState, "none"); XCTAssertTrue(model.lyricLines.isEmpty)
+        XCTAssertEqual(player.resources.count, 1)
         await model.close()
     }
 
@@ -648,6 +741,71 @@ final class MusicViewModelTests: XCTestCase {
         await model.flushPlaybackFacts()
         let after = await service.recordedFacts(); XCTAssertEqual(after.map(\.kind), [.playing])
         await model.close()
+    }
+
+    @MainActor func testSourceAvailabilityKeepsOfficialOptionsAndScriptDiagnostics() async throws {
+        let (service, player, model) = setup()
+        let official = MusicPlaybackOption(installationId: musicOfficialSelection.installationId, generation: 1,
+            siteId: "wy", sourceKey: musicSourceKey, qualities: ["128k"], title: "官方音源",
+            version: "1", contentHash: String(repeating: "a", count: 64))
+        await service.setAvailability(.init(options: [official], scriptState: .unavailable(.upstreamFailed)))
+        await model.load(); await model.prepareCurrent()
+        XCTAssertEqual(model.options, [official])
+        XCTAssertEqual(model.scriptSourceError, MusicServiceError.upstreamFailed.localizedDescription)
+        XCTAssertNil(model.error); XCTAssertTrue(player.resources.isEmpty)
+
+        await service.setAvailability(.init(options: [], scriptState: .unavailable(.timeout)))
+        await model.prepareCurrent()
+        XCTAssertTrue(model.options.isEmpty)
+        XCTAssertEqual(model.scriptSourceError, MusicServiceError.timeout.localizedDescription)
+        let message = try XCTUnwrap(model.error)
+        XCTAssertNotNil(message.range(of: "^网易云音乐 · 播放歌曲：音源不可用（诊断 [A-F0-9]{8}）$",
+                                      options: .regularExpression))
+        XCTAssertTrue(player.resources.isEmpty)
+        await model.close()
+    }
+
+    @MainActor func testSearchAvailabilityPreservesEmptySourceAndScriptFailureSemantics() async throws {
+        let (service, player, model) = setup()
+        let reference = MusicReference(kind: .queue, id: "entry-1")
+        for state in [MusicSourceAvailability.ScriptState.ready, .notConfigured] {
+            await service.setAvailability(.init(options: [], scriptState: state))
+            let options = try await model.searchPlaybackOptions(for: reference)
+            XCTAssertTrue(options.isEmpty)
+        }
+        await service.setAvailability(.init(options: [], scriptState: .unavailable(.timeout)))
+        do { _ = try await model.searchPlaybackOptions(for: reference); XCTFail("An unavailable host cannot appear as empty success") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .timeout) }
+
+        let official = MusicPlaybackOption(installationId: musicOfficialSelection.installationId, generation: 1,
+            siteId: "wy", sourceKey: musicSourceKey, qualities: ["128k"], title: "官方音源",
+            version: "1", contentHash: String(repeating: "a", count: 64))
+        let unsupported = MusicPlaybackOption(installationId: "other", generation: 1,
+            siteId: "other", sourceKey: "other", qualities: ["128k"], title: "其它",
+            version: "1", contentHash: String(repeating: "b", count: 64))
+        await service.setAvailability(.init(options: [official, unsupported], scriptState: .unavailable(.upstreamFailed)))
+        let options = try await model.searchPlaybackOptions(for: reference)
+        XCTAssertEqual(options, [official])
+        XCTAssertTrue(model.queue.isEmpty); XCTAssertTrue(player.resources.isEmpty)
+        await model.close()
+    }
+
+    @MainActor func testSearchAvailabilityRejectsLateResultAfterAccessOrAccountChanges() async {
+        for accountChanged in [false, true] {
+            let (service, _, model) = setup()
+            let started = expectation(description: "availability read entered")
+            let gate = MusicCollectionGate { started.fulfill() }
+            let availability = await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))
+            await service.setAvailability(availability, gate: gate)
+            let read = Task { try await model.searchPlaybackOptions(for: .init(kind: .queue, id: "entry-1")) }
+            await fulfillment(of: [started], timeout: 2)
+            if accountChanged { model.accountSessionsChanged(.netease) }
+            else { model.setAvailable(false) }
+            await gate.release()
+            do { _ = try await read.value; XCTFail("A revoked source result escaped the search boundary") }
+            catch { XCTAssertEqual(error as? MusicServiceError, accountChanged ? .staleAccess : .accessUnavailable) }
+            await model.close()
+        }
     }
 
     @MainActor func testSynchronousSystemCommandAdmissionOwnsTaskAndRejectsDuplicateUntilFinished() async throws {

@@ -81,15 +81,14 @@ public struct MusicSimilarModeSnapshot: Sendable, Identifiable {
     public let provider: MusicSimilarModeProvider
     public let error: MusicServiceError?
     public let canRetry: Bool
-    public let legacy: Bool
     public init(id: UUID, active: Bool, status: Status, seed: MusicSimilarModeSong, seedEntryID: String?,
                 continueEnabled: Bool, candidates: [MusicSimilarModeCandidate], batches: [MusicSimilarModeBatch],
                 sourceIDs: [String], fromHome: Bool, provider: MusicSimilarModeProvider,
-                error: MusicServiceError?, canRetry: Bool, legacy: Bool = false) {
+                error: MusicServiceError?, canRetry: Bool) {
         self.id = id; self.active = active; self.status = status; self.seed = seed; self.seedEntryID = seedEntryID
         self.continueEnabled = continueEnabled; self.candidates = candidates; self.batches = batches
         self.sourceIDs = sourceIDs; self.fromHome = fromHome; self.provider = provider
-        self.error = error; self.canRetry = canRetry; self.legacy = legacy
+        self.error = error; self.canRetry = canRetry
     }
 }
 

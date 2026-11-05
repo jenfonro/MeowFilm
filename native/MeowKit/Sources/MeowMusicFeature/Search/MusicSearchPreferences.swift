@@ -80,9 +80,9 @@ public struct MusicSearchPreferences: Codable, Equatable, Sendable {
     }
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        searchPlaylists = try container.decodeIfPresent(Bool.self, forKey: .searchPlaylists) ?? true
-        songs = try container.decodeIfPresent(Kind.self, forKey: .songs) ?? .init()
-        playlists = try container.decodeIfPresent(Kind.self, forKey: .playlists) ?? .init()
+        searchPlaylists = try container.decode(Bool.self, forKey: .searchPlaylists)
+        songs = try container.decode(Kind.self, forKey: .songs)
+        playlists = try container.decode(Kind.self, forKey: .playlists)
     }
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -117,9 +117,6 @@ public struct MusicSearchPreferences: Codable, Equatable, Sendable {
         if let data = defaults.data(forKey: Self.preferencesKey),
            let value = try? JSONDecoder().decode(MusicSearchPreferences.self, from: data) {
             preferences = value
-            if let clean = try? JSONEncoder().encode(preferences), clean != data {
-                defaults.set(clean, forKey: Self.preferencesKey)
-            }
         } else { preferences = .init() }
     }
     @discardableResult

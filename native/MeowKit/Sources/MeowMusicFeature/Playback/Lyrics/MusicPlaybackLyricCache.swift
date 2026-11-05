@@ -33,23 +33,12 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
         /// quality/display changes must not defeat the ten-minute content cache.
         init(track: MusicRemoteTrack, source: MusicNativeSource, contentRevision: Int? = nil) throws {
             guard Self.publicPlatforms.contains(source.platform) else { throw MusicServiceError.sourceRequired }
-            identity = try Self.encode(track: track, source: source, script: nil, revision: contentRevision)
-        }
-
-        /// Compatibility for a specifically selected non-public script. Public
-        /// metadata callers should use source:, independent of the audio choice.
-        init(track: MusicRemoteTrack, selection: MusicPlaybackSelection, contentRevision: Int? = nil) throws {
-            guard let source = track.sources.first(where: {
-                $0.sourceKey.utf8.elementsEqual(selection.sourceKey.utf8) && $0.platform == selection.siteId
-            }) else { throw MusicServiceError.sourceRequired }
-            identity = try Self.encode(track: track, source: source,
-                                       script: Self.publicPlatforms.contains(source.platform) ? nil : selection,
-                                       revision: contentRevision)
+            identity = try Self.encode(track: track, source: source, revision: contentRevision)
         }
 
         private static let publicPlatforms = ["wy", "tx", "kg", "kw", "mg"]
         private static func encode(track: MusicRemoteTrack, source: MusicNativeSource,
-                                   script: MusicPlaybackSelection?, revision: Int?) throws -> Data {
+                                   revision: Int?) throws -> Data {
             guard !track.songId.isEmpty, track.duration.isFinite, track.duration >= 0,
                   track.sources.contains(source) else { throw MusicServiceError.sourceRequired }
             struct Identity: Encodable {
@@ -62,14 +51,11 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
                 let sources: [MusicNativeSource]
                 let sourceKey: String
                 let platform: String
-                let script: MusicPlaybackSelection?
             }
-            // Native public-platform lyrics do not depend on audio delivery or
-            // quality. A non-public script DOES receive its exact selection.
             let value = Identity(songID: track.songId, revision: revision, title: track.title,
                                  artist: track.artist, album: track.album, duration: track.duration,
                                  sources: track.sources, sourceKey: source.sourceKey,
-                                 platform: source.platform, script: script)
+                                 platform: source.platform)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             let data = try encoder.encode(value)

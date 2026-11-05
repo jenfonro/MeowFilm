@@ -10,14 +10,6 @@ extension NativeMusicService: MusicImportHistoryProviding {
             try musicRequire(musicHex(rolledBack.string), .corruptDocument)
             return .rolledBack(batchID: rolledBack.string)
         }
-        try receipt.requireFields(["batchId", "sourceId", "legacyOwnerId", "appliedAt", "appliedRevision", "afterHash"],
-                                  required: ["batchId", "sourceId", "legacyOwnerId", "appliedAt", "appliedRevision", "afterHash"])
-        try musicRequire(musicHex(receipt["batchId"].string) && musicHex(receipt["afterHash"].string) &&
-            receipt["appliedRevision"].isInteger && receipt["appliedRevision"].int > 0 &&
-            receipt["appliedAt"].isNumber && receipt["appliedAt"].number.isFinite &&
-            receipt["appliedAt"].number >= 0, .corruptDocument)
-        _ = try musicText(receipt["sourceId"].string)
-        _ = try musicText(receipt["legacyOwnerId"].string)
         let unchanged = receipt["afterHash"].string == document.library["library"].stable.digest &&
             receipt["appliedRevision"] == document.library["revision"]
         return .imported(batchID: receipt["batchId"].string,

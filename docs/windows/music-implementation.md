@@ -14,7 +14,7 @@ Windows 当前交付一个原生 meowfilm App，并接入音乐相关能力。
 | 目录 | 责任 |
 | --- | --- |
 | `Composition` | 唯一音乐装配、导航、生命周期和公开 seam |
-| `Accounts` | 三平台授权、登录交接和账号详情，旧设备格式只读迁移 |
+| `Accounts` | 三平台授权、登录交接和账号详情 |
 | `Platforms` | 固定官方平台 HTTP、协议和歌曲 DTO；`ClientContexts` 独立拥有客户端身份、匿名登记和受控更新 |
 | `Catalog` | 平台目录、个人内容和歌单读取／提交 |
 | `Search` | 歌曲／歌单搜索、策略和请求代次 |
@@ -80,7 +80,7 @@ music.transfer.*   // 仅 kind=script
 
 ## 脚本源生命周期
 
-原生 `MusicScriptOwner` 拥有安装元数据、存储会话绑定、实例代次、取消和持久事务；公共 Node host 拥有实际 JS 执行会话。当前 `music.script.v2` 的请求处理器以第二参数 `context.storage` 取得绑定调用的权限，全局 `meow.storage`／startup／background 无隐式权限。
+原生 `MusicScriptOwner` 拥有安装元数据、存储会话绑定、实例代次、取消和持久事务；公共 Node host 拥有实际 JS 执行会话。全局 `meow` 只提供 `config`，当前 `music.script.v2` 的请求处理器以第二参数 `context.storage` 作为唯一持久存储入口；已完成请求的 context 拒绝访问，startup／background 无隐式权限。
 
 - 安装输入来自原生已选择文件的只读字节快照或 HTTPS 下载；两种获取方式进入同一检查、传输与安装流程。
 - 设置页允许一次明确选择多份 `.js`；导入只持久当前源元数据并保持停用，不连接音源服务器、不执行脚本。

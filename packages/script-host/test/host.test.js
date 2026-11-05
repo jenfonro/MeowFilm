@@ -546,7 +546,7 @@ test('simultaneous storage calls keep their original site after awaits', async t
   assert.deepEqual(await Promise.all([a, b]), ['kw', 'tx']);
 });
 
-test('trial startup cannot write persistent storage; failed trial leaves stable stored data untouched', async t => {
+test('trial startup has no global storage; failed trial leaves stable stored data untouched', async t => {
   const storage = memoryStorage();
   const host = hostFor(t, { storage: storage.adapter });
   await host.install({ installationId: 'a', enabled: true, permissions: { storage: ['read', 'write'] },
@@ -555,7 +555,7 @@ test('trial startup cannot write persistent storage; failed trial leaves stable 
   const old = host.get('a');
   await assert.rejects(host.update('a', {
     source: `(async()=>{await meow.storage.set('key','candidate');})()`,
-  }), { code: 'PERMISSION_DENIED' });
+  }), { code: 'SCRIPT_EXCEPTION' });
   assert.equal(storage.values.get(JSON.stringify(['a', 'kw', 'key'])), 'stable');
   assert.equal(host.get('a').generation, old.generation);
   assert.equal(host.get('a').state, 'ready');

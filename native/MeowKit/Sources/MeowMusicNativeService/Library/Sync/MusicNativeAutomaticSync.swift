@@ -56,7 +56,7 @@ private struct MusicNativeAutomaticSyncPort: MusicNativeLibrarySyncProviding {
 
 extension NativeMusicService: MusicAutomaticLibrarySyncing {
     public func automaticLibrarySyncPreferences() async throws -> MusicAutomaticLibrarySyncPreferences {
-        let saved = try MusicNativeSyncLedger.load(read().library).automatic ?? .init()
+        let saved = try MusicNativeSyncLedger.load(read().library).automatic
         return .init(revision: saved.revision, selections: saved.selections)
     }
 
@@ -95,7 +95,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
     func recordAutomaticLibraryMutation(_ d: inout MusicDocument, collectionID: String,
                                        orderOnly: Bool = false) throws {
         var ledger = try MusicNativeSyncLedger.load(d.library)
-        var preferences = ledger.automatic ?? .init()
+        var preferences = ledger.automatic
         try musicRequire(preferences.intentRevision < 9_007_199_254_740_991, .limit)
         preferences.orderOnly = orderOnly && preferences.intentRevision == preferences.settledIntentRevision
             ? collectionID : nil
@@ -113,7 +113,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
         try authorization.perform {
             try transaction(["library"]) { d in
                 var ledger = try MusicNativeSyncLedger.load(d.library)
-                var preferences = ledger.automatic ?? .init()
+                var preferences = ledger.automatic
                 try musicRequire(preferences.revision == expected, .revisionConflict)
                 try change(&preferences, &ledger)
                 ledger.automatic = preferences
@@ -165,7 +165,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
         try check(); try authorization.check(); try musicRequire(librarySyncRun == nil, .busy)
         guard let port = accounts as? any MusicNativeLibrarySyncProviding else { throw MusicServiceError.unavailable }
         let own = epoch, wrapper = try read().library, ledger = try MusicNativeSyncLedger.load(wrapper)
-        let preferences = ledger.automatic ?? .init()
+        let preferences = ledger.automatic
         try musicRequire(preferences.revision == revision, .revisionConflict)
         var bindings: [String: MusicNativeAutomaticSyncBinding] = [:]
         for selection in preferences.selections {
@@ -203,7 +203,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
 
     private func runAutomaticLibrarySync(_ request: MusicAutomaticLibrarySyncRequest, bind: Bool) async throws -> MusicLibrarySyncState {
         try check(); try request.authorization.check()
-        let preferences = try MusicNativeSyncLedger.load(read().library).automatic ?? .init()
+        let preferences = try MusicNativeSyncLedger.load(read().library).automatic
         if let expected = request.preferenceRevision { try musicRequire(preferences.revision == expected, .revisionConflict) }
         guard !preferences.selections.isEmpty else { return try await librarySyncState() }
         if request.reason == .localMutation {
@@ -215,7 +215,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
         }
         try musicRequire(librarySyncRun == nil, .busy)
         if bind { try await bindAutomaticLibraryAccounts(revision: preferences.revision, authorization: request.authorization) }
-        let current = try MusicNativeSyncLedger.load(read().library).automatic ?? .init()
+        let current = try MusicNativeSyncLedger.load(read().library).automatic
         try musicRequire(current.revision == preferences.revision, .revisionConflict)
         let selected = try automaticSelections(current.selections)
         guard selected.allSatisfy({ current.bindings[$0.platform.rawValue] != nil }) else {
@@ -273,7 +273,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
         // Do not reopen protected storage or replace a newer settings revision.
         guard !Task.isCancelled, authorization.isActive, (try? check()) != nil,
               let current = try? MusicNativeSyncLedger.load(read().library),
-              current.automatic?.revision == expected else { return }
+              current.automatic.revision == expected else { return }
         let code = MusicServiceError.sanitized(error) == .verificationRequired
             ? "automaticBindingRequired" : MusicNativeSyncLogic.code(error)
         try changeAutomaticPreferences(expected: expected, authorization: authorization) { _, ledger in
@@ -296,7 +296,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
             try musicRequire(!local["deleted"].bool, .notFound)
             // Unknown writes are recovered by a later FULL read round, never
             // replayed as a side effect of a reorder.
-            try musicRequire(round.ledger.fences.isEmpty && local["creating"].fields.isEmpty, .commitUnconfirmed)
+            try musicRequire(round.ledger.fences.isEmpty, .commitUnconfirmed)
             for selection in request.selections {
                 let session = try await port.beginLibrarySync(platform: selection.platform)
                 round.sessions[selection.platform.rawValue] = session
@@ -320,7 +320,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
                 for binding in local["bindings"].array where binding["platform"].string == selection.platform.rawValue {
                     guard let remote = round.snapshots[selection.platform.rawValue]?.collections.first(where: { $0.id == binding["id"].string }) else { continue }
                     guard remote.writable else { round.issue("readOnly", platform: selection.platform, collection: collectionID); continue }
-                    let map = try MusicNativeSyncLogic.map(binding, songs: round.library["songs"])
+                    let map = binding["map"]
                     var desired = local["order"].strings.flatMap { id in remote.members.filter { map[$0.occurrenceID].string == id } }
                     let used = Set(desired.map(\.occurrenceID))
                     desired += remote.members.filter { !used.contains($0.occurrenceID) }

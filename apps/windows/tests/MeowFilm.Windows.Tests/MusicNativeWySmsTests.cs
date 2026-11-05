@@ -255,7 +255,7 @@ public static class MusicNativeWySmsTests
     {
         await using var f = new WySmsFixture();
         await using var secondHttp = new AsyncHttp(MusicPlatformHttp.CreateWithHandler(new WySmsHandler(f.Store.Inner)));
-        await using var clientContext1 = new MusicClientContextFixture(secondHttp.Value, f.Store.Inner, importAccounts: true);
+        await using var clientContext1 = new MusicClientContextFixture(secondHttp.Value, f.Store.Inner);
         await using var other = clientContext1.CreateAccountOwner(f.Store);
         f.Transport.BeforeStatus = async () => Check(Ok(await other.CallAsync("music.accounts.logout", new { platform = "wy" })));
         Check(Code(await Login(f.Owner)) == "STORAGE_CONFLICT" && await f.Owner.AcquireAsync("wy") is null);
@@ -345,7 +345,7 @@ internal sealed class WySmsFixture : IAsyncDisposable
         Store = new(new LocalDocumentStore(root ?? MusicNativeWySmsTests.Root(), ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace]));
         Transport = new(Store.Inner);
         Http = MusicPlatformHttp.CreateWithHandler(Transport);
-        Clients = new(Http, Store.Inner, importAccounts: true, clock: Clock);
+        Clients = new(Http, Store.Inner, clock: Clock);
         Protocol = Clients.CreateAccountProtocol(timeout: timeout); Owner = Clients.CreateAccountOwner(Store, Protocol);
     }
     public async ValueTask DisposeAsync()

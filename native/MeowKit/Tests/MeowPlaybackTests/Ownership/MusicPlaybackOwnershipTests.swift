@@ -80,11 +80,14 @@ private actor CrossDomainNavigationService: MusicServing {
         }
         return result
     }
-    func playbackOptions(for ref: MusicReference) -> [MusicPlaybackOption] {
-        [.init(installationId: crossDomainSelection.installationId, generation: 1, siteId: "wy",
+    func sourceAvailability(for ref: MusicReference) -> MusicSourceAvailability {
+        .init(options: [.init(installationId: crossDomainSelection.installationId, generation: 1, siteId: "wy",
                sourceKey: "synthetic-source", qualities: ["128k"], title: "Synthetic",
-               version: "1", contentHash: String(repeating: "a", count: 64))]
+               version: "1", contentHash: String(repeating: "a", count: 64))], scriptState: .ready)
     }
+    func metadataPreferences() throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
+    func updateMetadataPreferences(_ change: MusicMetadataPreferencesChange) throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
+    func metadataCandidates(occurrenceID: String) throws -> MusicMetadataCandidates { throw MusicServiceError.unsupported }
     func resolve(attemptId: String, occurrenceId: String,
                  selection: MusicPlaybackSelection) -> MusicPlaybackCandidate {
         .init(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,

@@ -407,7 +407,7 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
     }
 
     private func currentFact(_ service: NativeMusicService) async throws -> MusicPlaybackFact {
-        let options = try await service.playbackOptions(for: .init(kind: .queue, id: "entry-1"))
+        let options = (try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))).options
         let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: "entry-1",
             selection: XCTUnwrap(options.first).selection(quality: "128k"))
         return .init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,

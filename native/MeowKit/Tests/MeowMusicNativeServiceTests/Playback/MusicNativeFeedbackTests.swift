@@ -69,7 +69,7 @@ final class MusicNativeFeedbackTests: XCTestCase {
     private func ready(_ service: NativeMusicService) async throws -> MusicPlaybackCandidate {
         let page = try await service.search(platform: "tx", query: "SyntheticMID", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
-        let options = try await service.playbackOptions(for: page.items[0].ref)
+        let options = (try await service.sourceAvailability(for: page.items[0].ref)).options
         let option = try XCTUnwrap(options.first { $0.installationId == NativeMusicFixture.installation })
         return try await service.resolve(attemptId: UUID().uuidString.lowercased(),
             occurrenceId: XCTUnwrap(state.currentId), selection: option.selection(quality: "128k"))

@@ -1,8 +1,6 @@
 import Foundation
 import MeowStorage
 
-public typealias MusicQQPublicPersisting = MusicClientContextPersisting
-
 /// Existing QQ namespace and codec stay byte-compatible. Only the shared
 /// protected-document and admission mechanisms are factored out.
 public final class MusicQQPublicPersistenceDocument: MusicClientContextDocument, @unchecked Sendable {
@@ -14,7 +12,7 @@ public final class MusicQQPublicPersistenceDocument: MusicClientContextDocument,
 }
 
 final class MusicQQPublicPersistenceState: MusicClientContextState<[String: Any]>, @unchecked Sendable {
-    init(document: (any MusicQQPublicPersisting)?, compatibilityOpen: Bool = false) {
+    init(document: (any MusicClientContextPersisting)?, compatibilityOpen: Bool = false) {
         super.init(document: document, compatibilityOpen: compatibilityOpen,
                    decode: { try MusicQQPublicPersistenceCodec.decode($0) },
                    encode: { try MusicQQPublicPersistenceCodec.encode($0) })

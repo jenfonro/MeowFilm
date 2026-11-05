@@ -9,7 +9,6 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
 {
     internal const string DocumentNamespace = "music.platform-context.v1";
     private readonly IDocumentStore store;
-    private readonly Func<CancellationToken, Task<MusicClientContextSeeds>>? import;
     private readonly object gate = new();
     private readonly SemaphoreSlim serial = new(1, 1);
     private CancellationTokenSource lifetime = new();
@@ -21,9 +20,8 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
     internal event Action<string>? ContextChanged;
     internal bool NeedsReconciliation { get { lock (gate) return uncertain; } }
 
-    internal MusicPlatformClientContextOwner(IDocumentStore store,
-        Func<CancellationToken, Task<MusicClientContextSeeds>>? import = null)
-    { this.store = store ?? throw new ArgumentNullException(nameof(store)); this.import = import; }
+    internal MusicPlatformClientContextOwner(IDocumentStore store)
+    { this.store = store ?? throw new ArgumentNullException(nameof(store)); }
 
     internal Task InitializeAsync(CancellationToken token = default)
     {
@@ -117,9 +115,8 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
                 MusicClientContextDocument.Require(document.Fingerprint == DocumentFingerprint.Missing, "CORRUPT_STORAGE");
                 lock (gate) { RequireOpen(); fingerprint = document.Fingerprint; uncertain = false; }
                 MusicClientContextDocument.Require(create, "DEVICE_CONTEXT_REQUIRED");
-                var seeds = import is null ? new MusicClientContextSeeds() : await import(token).ConfigureAwait(false);
                 token.ThrowIfCancellationRequested();
-                await WriteAsync(MusicClientContextDocument.Create(seeds), document.Fingerprint, token).ConfigureAwait(false);
+                await WriteAsync(MusicClientContextDocument.Create(), document.Fingerprint, token).ConfigureAwait(false);
                 return;
             }
             lock (gate) observed = true;
