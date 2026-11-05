@@ -82,7 +82,8 @@ public sealed partial class MusicCapability
                 var target = state.Media!.Target!;
                 var result = await QualityCall("music.official.candidates", new {
                     song = KnownOfficialSong(state.Song), quality = target.PolicyRequest,
-                    qualityPolicySignature = target.QualityPolicySignature, discover = true, page = pageNumber
+                    qualityPolicySignature = target.QualityPolicySignature, discover = true,
+                    refresh = true, page = pageNumber
                 }, request.Token);
                 request.Token.ThrowIfCancellationRequested();
                 if (!CurrentRecovery(state) || !ReferenceEquals(recordingDiscovery, request) ||

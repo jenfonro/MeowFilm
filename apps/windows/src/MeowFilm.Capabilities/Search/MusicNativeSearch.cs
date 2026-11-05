@@ -25,7 +25,15 @@ public sealed partial class MusicNativeApplication
         // The coordinator fetches after its admission receipt has returned.
         // Capture the actual lease inside each physical request, not in start().
         using var frame = sessions.Begin();
-        try { return await catalog.SearchAsync(request, token).ConfigureAwait(false); }
+        try
+        {
+            var result = await catalog.SearchAsync(request, token).ConfigureAwait(false);
+            // Remembers the search authority for observed recording evidence; a retired session
+            // leaves no context, so its late page cannot suppress a later matching request.
+            if (frame.Session is not { } current || accounts.IsCurrent(current))
+                lock (gate) matchingContexts[request.Platform] = MatchingContext(request.Platform, frame.Session);
+            return result;
+        }
         catch (MusicPlatformException error) when (error.Code is "AUTH_REQUIRED" or "AUTH_EXPIRED")
         {
             if (frame.Session is { } failed) accounts.Revoke(failed);

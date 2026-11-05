@@ -50,6 +50,7 @@ public interface IMusicLibrarySyncSource
 public sealed partial class MusicNativeApplication : IMusicApplication
 {
     private readonly MusicLibraryOwner library;
+    private readonly MusicSongMatcher songMatcher;
     private readonly MusicLibrarySyncService librarySync;
     private readonly MusicAccountOwner accounts;
     private readonly MusicPlatformClientContextOwner clients;
@@ -104,13 +105,15 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         sourceCache = new(store);
         sessions = new(accounts);
         catalog = new(sessions, http, clients, clientProtocol: clientProtocol);
+        songMatcher = new(library, new(store), SearchCatalogAsync, searchClock);
         nativeCatalog = new(catalog, library);
         recommendationQueue = new(library);
         recommendations = new(catalog, recommendationQueue, SelectRecommendationAsync, readAsync: ReadRecommendationsAsync);
         searchCoordinator = new(catalog, searchClock, searchAsync: SearchCatalogAsync);
+        searchCoordinator.MatchingObserved += ObserveSongMatches;
         var discoverySessions = new DiscoverySessions(accounts);
         discovery = discoveryFactory?.Invoke(discoverySessions, http) ?? new NativeMusicSearchDiscovery(discoverySessions, http, clients);
-        scripts = new(library, scriptRuntime);
+        scripts = new(library, scriptRuntime, null, MatchScriptSongAsync);
         lyrics = new(library, new NativeMusicLyrics(sessions, http, clients), scripts.ExecuteAsync);
         librarySync = new(library, accounts, http, clients, http.SendMusicLibrarySyncCloudAsync);
         Feedback = new(new MusicFeedbackSettingsOwner(store),
@@ -119,6 +122,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         accounts.SessionChanged += RecommendationAccountChanged;
         accounts.SessionChanged += nativeCatalog.Invalidate;
         accounts.SessionChanged += searchCoordinator.Invalidate;
+        accounts.SessionChanged += InvalidateSongMatches;
         accounts.SessionChanged += lyrics.Invalidate;
         accounts.SessionChanged += Feedback.AccountChanged;
         accounts.SessionChanged += librarySync.Invalidate;
@@ -231,6 +235,8 @@ public sealed partial class MusicNativeApplication : IMusicApplication
                     if (frame.Session is { } failed) accounts.Revoke(failed);
                     nativeCatalog.Invalidate(frame.Platform);
                 }
+                if (method == "music.catalog.playlist.commit" && Okay(result))
+                    await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
                 return result;
             }
             if (method.StartsWith("music.sources.", StringComparison.Ordinal) ||
@@ -244,6 +250,10 @@ public sealed partial class MusicNativeApplication : IMusicApplication
             // All final queue mutations share the coordinator's one lane.
             // Native recommendation commands stay private.
             var reply = await recommendationQueue.ExecuteAsync(method, parameters, token).ConfigureAwait(false);
+            // Local membership changes persist earlier matches or evict derived rows for removed members.
+            if (method is ("music.library.create" or "music.library.edit" or "music.library.remove" or
+                "music.library.addSongs" or "music.library.removeSong") && Okay(reply))
+                await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
             if (changesLyrics) lyrics.Invalidate();
             if (method == "music.settings.save" && reply.TryGetProperty("ok", out var saved) && saved.ValueKind == JsonValueKind.True)
                 scripts.CancelPlayback();
@@ -294,10 +304,12 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         try { discovery.Invalidate(); } catch (Exception e) { failure ??= e; }
         await Attempt(discovery.CancelAndDrainAsync).ConfigureAwait(false);
         await Attempt(() => searchCoordinator.PrepareShutdownAsync()).ConfigureAwait(false);
+        await Attempt(songMatcher.DrainAsync).ConfigureAwait(false);
         await Attempt(() => librarySync.PrepareShutdownAsync()).ConfigureAwait(false);
         // Native mutations ignore cancellation after CAS admission. Their receipts
         // must settle before the final library preparation, even on earlier failure.
         await pendingOperations.ConfigureAwait(false);
+        await Attempt(() => SaveSongMatchesAsync(CancellationToken.None)).ConfigureAwait(false);
         await Attempt(() => Feedback.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(() => scripts.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(() => library.PrepareShutdownAsync()).ConfigureAwait(false);

@@ -39,8 +39,10 @@ public sealed partial class MusicNativeApplication
                 "music.official.authorize" or "music.official.confirm", "CAPABILITY_UNAVAILABLE");
             var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
             LJ.Require(LJ.Bytes(input).Length <= 512 * 1024, "LIMIT");
-            LJ.Fields(input, "platform song sourceKey quality scope generation qualityPolicySignature refresh",
+            LJ.Fields(input, "platform song originSong sourceKey quality scope generation qualityPolicySignature refresh cacheOnly",
                 "platform song quality");
+            LJ.Require(input["cacheOnly"] is null || LJ.IsBool(input["cacheOnly"]), "INVALID_REQUEST");
+            LJ.Require(!LJ.B(input["cacheOnly"]) || !LJ.B(input["refresh"]), "INVALID_REQUEST");
             string platform = LJ.S(input["platform"]);
             LJ.Require(platform is "wy" or "tx" or "kg");
             using var officialPolicy = await library.AcquireOfficialSourcesAsync(token).ConfigureAwait(false);
@@ -65,12 +67,16 @@ public sealed partial class MusicNativeApplication
             if (input["qualityPolicySignature"] is not null)
                 LJ.Require(LJ.S(input["qualityPolicySignature"]) == policy.Signature, "QUALITY_POLICY_CHANGED");
             var song = NativeMusicSong.Normalize(input["song"]);
+            var originSong = input["originSong"] is null ? song : NativeMusicSong.Normalize(input["originSong"]);
+            LJ.Require(LJ.S(originSong["songId"]) == LJ.S(song["songId"]) &&
+                new NativeMusicSong.Recordings(originSong).CanMerge(new(song)), "RECORDING_MISMATCH");
             string songId = LJ.S(song["songId"]), sourceKey = LJ.S(input["sourceKey"]);
             var recordings = (song["sources"] as JsonArray ?? []).OfType<JsonObject>()
                 .Where(s => LJ.S(s["source"]) == platform && (sourceKey.Length == 0 || LJ.S(s["sourceKey"]) == sourceKey)).ToArray();
             LJ.Require(recordings.Length == 1, recordings.Length == 0 ? "RECORDING_UNAVAILABLE" : "RECORDING_REQUIRED");
             var recording = recordings[0];
             sourceKey = LJ.S(recording["sourceKey"]);
+            LJ.Require(!songMatcher.IsExcluded(originSong, sourceKey), "RECORDING_MISMATCH");
             LJ.Require(request == "auto" || MusicQualityPolicy.RequestTypes.Contains(request), "QUALITY_UNAVAILABLE");
             string[] qualities = request == "auto"
                 ? MusicQualityPolicy.RequestTypes.Concat(new[] { "jyeffect", "dolby", "sky", "vivid" })
@@ -117,6 +123,12 @@ public sealed partial class MusicNativeApplication
                     return JsonSerializer.SerializeToElement(new { ok = true });
                 });
             }
+            // A cache-only probe is local on a miss. A hit still passes the current rights check below.
+            JsonObject? result = method == "music.official.resolve" && !LJ.B(input["refresh"]) ?
+                await sourceCache.ReadAsync(session.Scope, songId, signature, token).ConfigureAwait(false) : null;
+            Current();
+            if (result is not null && !qualities.Contains(LJ.S(result["quality"]))) result = null;
+            LJ.Require(result is not null || !LJ.B(input["cacheOnly"]), "CACHE_MISS");
             // Standard WY access is decided by the official media response, not
             // by local membership. It never creates an offline license or login.
             var rights = new MusicAccountEntitlements(new(false, "none", null), 0, 0, []);
@@ -154,10 +166,9 @@ public sealed partial class MusicNativeApplication
                 });
             }
             LJ.Require(method == "music.official.resolve", "CAPABILITY_UNAVAILABLE");
-            JsonObject? result = LJ.B(input["refresh"]) ? null :
-                await sourceCache.ReadAsync(session.Scope, songId, signature, token).ConfigureAwait(false);
             Current();
             if (result is not null && !qualities.Contains(LJ.S(result["quality"]))) result = null;
+            LJ.Require(result is not null || !LJ.B(input["cacheOnly"]), "CACHE_MISS");
             if (result is null)
             {
                 await sourceCache.InvalidateAsync(session.Scope, songId, token).ConfigureAwait(false);
@@ -165,9 +176,13 @@ public sealed partial class MusicNativeApplication
                     qualities, rights, token, Current).ConfigureAwait(false);
                 Current();
                 double expected = LJ.N(song["duration"]);
-                LJ.Require(expected <= 0 || media.Duration <= 0 ||
-                    Math.Abs(expected - media.Duration) <= Math.Max(3, Math.Min(expected, media.Duration) * .02),
-                    "RECORDING_MISMATCH");
+                if (expected > 0 && media.Duration > 0 &&
+                    Math.Abs(expected - media.Duration) > Math.Max(3, Math.Min(expected, media.Duration) * .02))
+                {
+                    await songMatcher.ExcludeAsync(originSong, sourceKey, token).ConfigureAwait(false);
+                    await sourceCache.RejectRecordingAsync(session.Scope, songId, sourceKey, token).ConfigureAwait(false);
+                    throw new MusicLibraryException("RECORDING_MISMATCH");
+                }
                 result = LJ.Obj(("ok", true), ("kind", "official"), ("platform", platform), ("songId", songId),
                     ("sourceKey", sourceKey), ("scope", session.Scope), ("generation", session.Generation),
                     ("quality", media.RequestQuality), ("requestedQuality", request), ("actualQuality", media.ActualQuality),

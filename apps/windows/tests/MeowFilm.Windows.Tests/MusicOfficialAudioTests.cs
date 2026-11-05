@@ -124,6 +124,46 @@ public static class MusicOfficialAudioTests
             var revoked = await app.ExecuteAsync("music.official.resolve", input);
             Check(!revoked.GetProperty("ok").GetBoolean() && runtime.Calls == 0 && vkeys == 1);
         });
+        yield return new("Official native cache-only resolve is local on a miss and returns a hit only after current rights", async () =>
+        {
+            await using var store = new MemoryStore(); var runtime = new NoRuntime();
+            int calls = 0, vkeys = 0, rights = 0;
+            await using var app = new MusicNativeApplication(store, runtime, new Handler(async request =>
+            {
+                Interlocked.Increment(ref calls);
+                var input = JsonNode.Parse(await request.Content!.ReadAsStringAsync())!;
+                string method = input["req_0"]!["method"]!.GetValue<string>();
+                if (method == "vip_login_base") Interlocked.Increment(ref rights);
+                if (method == "UrlGetVkey") Interlocked.Increment(ref vkeys);
+                return method switch {
+                    "GetLoginUserInfo" => Qq(new { code = 0 }),
+                    "GetHomepageHeader" => Qq(new { Info = new { BaseInfo = new { EncryptedUin = "FixtureEUIN", Name = "Synthetic", Avatar = "" } } }),
+                    "vip_login_base" => Qq(new { identity = new { vip = 1 }, userinfo = new { expire = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds() } }),
+                    "CgiGetTrackInfo" => Qq(new { tracks = new[] { new { mid = "FixtureMID", interval = 100, file = new { size_320mp3 = 120 } } } }),
+                    "UrlGetVkey" => Qq(new { expiration = 120, midurlinfo = new[] { new { songmid = "FixtureMID", result = 0,
+                        filename = "M800FixtureMIDFixtureMID.mp3", purl = "M800FixtureMIDFixtureMID.mp3", ekey = "" } } }),
+                    _ => throw new InvalidOperationException("Unexpected method " + method)
+                };
+            }));
+            Check((await app.ExecuteAsync("music.accounts.import",
+                new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" })).GetProperty("ok").GetBoolean());
+            var song = Song("tx", "FixtureMID");
+            int before = calls;
+            var miss = await app.ExecuteAsync("music.official.resolve", new { platform = "tx", song, quality = "320k", cacheOnly = true });
+            Check(!miss.GetProperty("ok").GetBoolean() && miss.GetProperty("code").GetString() == "CACHE_MISS" && calls == before,
+                "a cache-only miss performs no account, catalog or media request: " + miss.GetRawText());
+            var resolved = await app.ExecuteAsync("music.official.resolve", new { platform = "tx", song, quality = "320k" });
+            Check(resolved.GetProperty("ok").GetBoolean() && vkeys == 1, resolved.GetRawText());
+            int checks = rights;
+            var hit = await app.ExecuteAsync("music.official.resolve", new { platform = "tx", song, quality = "320k", cacheOnly = true });
+            Check(hit.GetProperty("ok").GetBoolean() && vkeys == 1 &&
+                hit.GetProperty("url").GetString() == resolved.GetProperty("url").GetString(), "a valid receipt is reused: " + hit.GetRawText());
+            Check(rights > checks, "a cached URL is still returned only after the current rights check");
+            var invalid = await app.ExecuteAsync("music.official.resolve",
+                new { platform = "tx", song, quality = "320k", cacheOnly = true, refresh = true });
+            Check(!invalid.GetProperty("ok").GetBoolean() && invalid.GetProperty("code").GetString() == "INVALID_REQUEST");
+            Check(runtime.Calls == 0);
+        });
         yield return new("Official audio QQ vkey exact identity has no script target or credential CDN headers", async () =>
         {
             int calls = 0;

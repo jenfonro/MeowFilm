@@ -247,8 +247,9 @@ public static class PlaybackRecoveryTests
                 f.App.HistoryWrites == 2 && f.App.ConfirmWrites == 2,
                 "prepared next occurrence");
             await prepared.Work.WaitAsync(TimeSpan.FromSeconds(5));
+            // One resolve per occurrence: the next song's existing WY mapping is accepted without discovering QQ.
             Check(f.Output.NetworkOpens == networkOpens && f.Origin.Requests.Count == transfers &&
-                f.Module.CurrentTitle == "下一首" && f.App.Resolutions.Count == 3,
+                f.Module.CurrentTitle == "下一首" && f.App.Resolutions.Count == 2,
                 $"next occurrence reused bytes after a current exact authorization: opens={f.Output.NetworkOpens}/{networkOpens} " +
                 $"transfers={f.Origin.Requests.Count}/{transfers} title={f.Module.CurrentTitle} resolves={f.App.Resolutions.Count}");
             await using var persisted = await f.Cache!.OpenAsync(
@@ -413,6 +414,25 @@ public static class PlaybackRecoveryTests
             Check(fixture.App.HistoryWrites == 1, "one real Started history");
             Check(fixture.Origin.Requests.Any(row => row.Path == "/new.wav" && row.Authorized), "fresh headers native direct");
             Check(fixture.Runtime.Calls == 0, "ordinary domain and media never Node");
+        });
+        yield return Test("music script refresh carries the matched recording without changing the queue song", async () =>
+        {
+            await using var fixture = await MusicFixture.Create(firstFails: true);
+            fixture.App.ExpandRecording = true;
+            var song = MusicSongFixture.Online("wy", "42", "合成歌曲", "fixture", "", 100);
+            Check((await fixture.App.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }))
+                .GetProperty("ok").GetBoolean(), "script queue");
+            await fixture.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
+            await fixture.Module.PlayQueueSurfaceItemAsync(fixture.Module.QueueSurfaceRows.Single());
+            await Decoded(fixture.Native);
+            static bool Matched(JsonElement input) => input.GetProperty("song").GetProperty("sources").EnumerateArray()
+                .Any(source => source.GetProperty("source").GetString() == "kw");
+            Check(fixture.App.Resolutions.Count == 2 && !Matched(fixture.App.Resolutions[0]) && Matched(fixture.App.Resolutions[1]),
+                "the exact refresh uses the accepted matched recording");
+            var queue = await fixture.App.ExecuteAsync("music.queue.get");
+            Check(queue.GetProperty("current").GetProperty("song").GetProperty("sources").GetArrayLength() == 1,
+                "the queue keeps its original song snapshot");
+            fixture.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
         });
         yield return Test("music repeated HTTP failure stops after one re-resolution", async () =>
         {
@@ -1000,6 +1020,7 @@ public static class PlaybackRecoveryTests
         internal bool HoldRefresh;
         internal bool RejectAlternate;
         internal bool RepeatExpiry;
+        internal bool ExpandRecording;
         internal string? Poison;
         internal string? CacheableSongId;
         internal int HistoryWrites, SourceChanges, ConfirmWrites, Authorizations;
@@ -1164,6 +1185,14 @@ public static class PlaybackRecoveryTests
                     expiresAt = expiry && (!fresh || RepeatExpiry) ? (long?)DateTimeOffset.UtcNow.AddSeconds(3).ToUnixTimeMilliseconds() : null,
                     playbackVerified = false }, Json)!.AsObject();
                 if (fresh && Poison is not null) result[Poison] = Poison == "generation" ? JsonValue.Create(8) : JsonValue.Create("other");
+                if (!fresh && ExpandRecording)
+                {
+                    // Synthetic script owner response after matching one missing platform.
+                    var expanded = songNode.DeepClone().AsObject();
+                    expanded["sources"]!.AsArray().Add(MusicSongFixture.Online("kw", "matched", LJ.S(songNode["title"]),
+                        LJ.S(songNode["artist"]), "", LJ.N(songNode["duration"]))["sources"]![0]!.DeepClone());
+                    result["recordingSong"] = NativeMusicSong.Normalize(expanded);
+                }
                 return JsonSerializer.SerializeToElement(result, Json);
             }
             if (method == "music.history.recordPlayed") HistoryWrites++;

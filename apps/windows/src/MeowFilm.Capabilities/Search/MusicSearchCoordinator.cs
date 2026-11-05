@@ -35,11 +35,12 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
     private string keyword = "";
 
     private sealed record CacheKey(MusicSearchKind Kind, string Platform, string Keyword, int Page, int Pages, int Limit);
-    private sealed class CacheEntry(MusicSearchPage page, DateTimeOffset expires, long bytes)
+    private sealed class CacheEntry(MusicSearchPage page, DateTimeOffset expires, long bytes, long checkedAt)
     {
         internal readonly MusicSearchPage Page = page;
         internal readonly DateTimeOffset Expires = expires;
         internal readonly long Bytes = bytes;
+        internal readonly long CheckedAt = checkedAt;
         internal long Used;
     }
     internal sealed record SearchOptions(int Pages, int Concurrency, TimeSpan CacheTime, bool Refresh);
@@ -53,6 +54,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         // Per kind x platform concurrency: this query is the only owner of the kind.
         internal readonly SemaphoreSlim Slots = new(concurrency, concurrency);
         internal int Page, NextPage = 1, Generation;
+        internal long CheckedAt;
         internal bool More = true, Loading;
         internal string Error = "";
         internal CancellationTokenSource? Cancellation;
@@ -71,6 +73,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         internal readonly CancellationTokenSource Lifetime = new();
         internal JsonArray Items = [];
         internal long Revision, DataVersion;
+        internal long FusedVersion = -1;
         internal int Round;
         internal bool RoundOpen, Stopped, Computing, FusionRunning, Released, SettlementNoticePending;
         internal bool InitialIdentityCurrent = true;
@@ -95,7 +98,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
             Keyword == word && Kind == requestedKind && Platforms.SequenceEqual(requestedPlatforms) && Options == requested;
     }
     private sealed record Chunk(int Page, int Pages);
-    private sealed record ChunkResult(MusicSearchPage? Page, string Error, long Bytes, bool Cached);
+    private sealed record ChunkResult(MusicSearchPage? Page, string Error, long Bytes, bool Cached, long CheckedAt);
     /// <summary>A chunk's outcome is published at once; Settled ends with its physical request and slot.</summary>
     private sealed record ChunkFetch(int Index, ChunkResult Result, Task Settled);
 
@@ -107,6 +110,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         this.searchAsync = searchAsync ?? catalog.SearchAsync;
     }
     public event Action<JsonElement>? Changed;
+    internal event Action<JsonElement>? MatchingObserved;
 
     public async Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
     {
@@ -307,12 +311,14 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
                         var chunk = chunks[committed];
                         if (result.Page is null)
                         {
-                            if (result.Error != "CANCELLED") state.Error = result.Error;
+                            if (result.Error != "CANCELLED")
+                            { state.Error = result.Error; state.CheckedAt = result.CheckedAt; }
                             if (result.Error == "UNSUPPORTED") state.More = false;
                             halted = true; break;
                         }
                         if (chunk.Page != state.NextPage) { halted = true; break; }
                         if (!result.Cached) Store(query, state.Platform, chunk, result);
+                        state.CheckedAt = result.CheckedAt;
                         halted = !CommitLocked(query, state, chunk, result.Page);
                         committed++;
                         results.Remove(committed - 1);
@@ -348,10 +354,10 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
                 if (cache.TryGetValue(key, out var entry))
                 {
                     if (entry.Expires > clock.GetUtcNow())
-                    { entry.Used = ++cacheUse; return new(index, new(entry.Page, "", entry.Bytes, true), Task.CompletedTask); }
+                    { entry.Used = ++cacheUse; return new(index, new(entry.Page, "", entry.Bytes, true, entry.CheckedAt), Task.CompletedTask); }
                     EraseLocked(key);
                 }
-        bool admitted = false;
+        bool admitted = false, requested = false;
         Task<JsonElement>? physical = null;
         CancellationTokenSource? deadline = null, linked = null;
         ChunkResult result;
@@ -362,17 +368,19 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
             deadline = new CancellationTokenSource(RequestTimeout, clock);
             linked = CancellationTokenSource.CreateLinkedTokenSource(token, deadline.Token);
             if (!Supports(state.Platform, query.Kind)) throw new MusicLibraryException("UNSUPPORTED");
+            requested = true;
             physical = searchAsync(new(state.Platform, query.Keyword, query.Kind, chunk.Page, state.Paging.PageSize,
                 query.Options.Refresh, chunk.Pages), linked.Token);
             var response = await physical.WaitAsync(linked.Token).ConfigureAwait(false);
             linked.Token.ThrowIfCancellationRequested();
             var parsed = MusicSearchPage.Read(response, state.Platform, query.Kind, chunk.Page);
-            result = new(parsed, "", response.GetRawText().Length * 2L, false);
+            result = new(parsed, "", response.GetRawText().Length * 2L, false, clock.GetUtcNow().ToUnixTimeMilliseconds());
         }
         catch (Exception error)
         {
             result = new(null, token.IsCancellationRequested ? "CANCELLED" :
-                deadline?.IsCancellationRequested == true ? "TIMEOUT" : ErrorCode(error), 0, false);
+                deadline?.IsCancellationRequested == true ? "TIMEOUT" : ErrorCode(error), 0, false,
+                requested ? clock.GetUtcNow().ToUnixTimeMilliseconds() : 0);
         }
         return new(index, result, SettleAsync(state, physical, admitted, linked, deadline));
     }
@@ -416,7 +424,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         if (result.Bytes > CacheBudgetBytes / 4) return;
         while (cacheBytes + result.Bytes > CacheBudgetBytes && cache.Count > 0)
             EraseLocked(cache.MinBy(pair => pair.Value.Used).Key);
-        cache[key] = new(result.Page!, clock.GetUtcNow() + query.Options.CacheTime, result.Bytes) { Used = ++cacheUse };
+        cache[key] = new(result.Page!, clock.GetUtcNow() + query.Options.CacheTime, result.Bytes, result.CheckedAt) { Used = ++cacheUse };
         cacheBytes += result.Bytes;
     }
     private void EraseLocked(CacheKey key) { if (cache.Remove(key, out var entry)) cacheBytes -= entry.Bytes; }
@@ -466,7 +474,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
             {
                 if (!Current(query)) { query.Computing = query.FusionRunning = false; return; }
                 if (version != query.DataVersion) continue;
-                if (items is not null) query.Items = items;
+                if (items is not null) { query.Items = items; query.FusedVersion = version; }
                 query.Plan = FusionPlan.None;
                 query.FusionError = error; query.Computing = query.FusionRunning = false;
                 PublishLocked(query); return;
@@ -499,7 +507,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
                     state.Generation++;
                     if (state.Cancellation is { } pending) cancelled.Add(pending);
                     state.Items.Clear(); state.RoundItems.Clear(); state.Seen.Clear();
-                    state.Page = 0; state.NextPage = 1;
+                    state.Page = 0; state.NextPage = 1; state.CheckedAt = 0;
                     state.More = true; state.Error = "STALE_SESSION";
                 }
                 // Remaining platforms' candidates are fused again from scratch.
@@ -524,7 +532,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
     };
     private static void Cancel(CancellationTokenSource source) { try { source.Cancel(); } catch (ObjectDisposedException) { } catch (AggregateException) { } }
 
-    private JsonElement Snapshot(Query query)
+    private JsonElement Snapshot(Query query, bool includeCheckTimes = false)
     {
         bool partial = query.FusionError.Length > 0 || query.States.Any(s => s.Error.Length > 0);
         string code = query.Stopped ? "CANCELLED" : query.States.Length == 0 ? "NO_PLATFORMS" :
@@ -535,9 +543,14 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
             // A cancelled round never settles; it is loading only while its physical work drains.
             ("loading", query.Computing || query.RoundOpen && !query.Stopped || query.States.Any(s => s.Loading)),
             ("partial", partial), ("code", code), ("cancelled", query.Stopped),
-            ("platforms", LJ.Arr(query.States.Select(s => LJ.Obj(("platform", s.Platform), ("page", s.Page),
-                ("count", s.Items.Count), ("more", !query.Stopped && s.More), ("loading", s.Loading),
-                ("error", s.Error)))))));
+            ("platforms", LJ.Arr(query.States.Select(s =>
+            {
+                var value = LJ.Obj(("platform", s.Platform), ("page", s.Page),
+                    ("count", s.Items.Count), ("more", !query.Stopped && s.More), ("loading", s.Loading),
+                    ("error", s.Error));
+                if (includeCheckTimes) value["checkedAt"] = s.CheckedAt;
+                return value;
+            })))));
     }
 
     private void PublishLocked(Query query)
@@ -551,30 +564,39 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
     {
         while (true)
         {
-            Notice notice;
+            Notice notice; JsonElement? matching = null;
             lock (gate)
             {
                 if (notices.Count == 0) { publishing = false; return; }
                 var first = notices.First(); notice = first.Value; notices.Remove(first.Key);
                 if (closed || stopping || !queries.TryGetValue(notice.Query.Kind, out var current) ||
                     !ReferenceEquals(current, notice.Query) || current.Revision != notice.Revision) continue;
+                if (MatchingObserved is not null && !current.Stopped && current.Kind == MusicSearchKind.Songs &&
+                    !current.Computing && current.FusedVersion == current.DataVersion && current.FusionError.Length == 0)
+                    matching = Snapshot(current, includeCheckTimes: true);
             }
-            foreach (var observer in Changed?.GetInvocationList() ?? [])
+            Notify(notice, Changed, notice.Value);
+            if (matching is { } value) Notify(notice, MatchingObserved, value);
+        }
+    }
+
+    private void Notify(Notice notice, Action<JsonElement>? observers, JsonElement value)
+    {
+        foreach (var observer in observers?.GetInvocationList() ?? [])
+        {
+            // An earlier observer can synchronously invalidate an account or close the owner.
+            // Do not deliver that now-retired notice to the remaining observers.
+            lock (gate)
+                if (closed || stopping || !queries.TryGetValue(notice.Query.Kind, out var current) ||
+                    !ReferenceEquals(current, notice.Query) || current.Revision != notice.Revision) break;
+            var previous = observerFrame.Value;
+            var frame = new ObserverFrame(); observerFrame.Value = frame;
+            try { ((Action<JsonElement>)observer)(value); } catch { /* An observer cannot break request retirement. */ }
+            finally
             {
-                // An earlier observer can synchronously invalidate an account or close the owner.
-                // Do not deliver that now-retired notice to the remaining observers.
-                lock (gate)
-                    if (closed || stopping || !queries.TryGetValue(notice.Query.Kind, out var current) ||
-                        !ReferenceEquals(current, notice.Query) || current.Revision != notice.Revision) break;
-                var previous = observerFrame.Value;
-                var frame = new ObserverFrame(); observerFrame.Value = frame;
-                try { ((Action<JsonElement>)observer)(notice.Value); } catch { /* An observer cannot break request retirement. */ }
-                finally
-                {
-                    // Child tasks may have captured this frame. Once the callback returns,
-                    // they are ordinary external callers, not an excuse to skip a barrier.
-                    Volatile.Write(ref frame.Active, 0); observerFrame.Value = previous;
-                }
+                // Child tasks may have captured this frame. Once the callback returns,
+                // they are ordinary external callers, not an excuse to skip a barrier.
+                Volatile.Write(ref frame.Active, 0); observerFrame.Value = previous;
             }
         }
     }

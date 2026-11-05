@@ -17,6 +17,7 @@ MusicNativeCatalogOwner
 MusicRecommendationCoordinator
 MusicRecommendationQueuePort
 MusicScriptOwner
+MusicSongMatcher
 MusicLyricApplication
 MusicFeedbackController
 搜索与发现协调器
@@ -101,9 +102,9 @@ public interface IMusicApplication : IAsyncDisposable, IScriptPlatformCapabiliti
 
 1. 封闭新请求并取消当前 generation。
 2. 排空推荐启动读取、选择 callback 和协调器工作。
-3. 取消发现、搜索和目录临时状态。
+3. 取消发现、搜索和目录临时状态，并取消排空跨平台匹配请求。
 4. 排空曲库同步、反馈和脚本工作。
-5. 排空所有已准入 application 请求。
+5. 排空所有已准入 application 请求，再保存一次本地成员的匹配状态（可选派生数据，失败不阻塞关闭）。
 6. 准备唯一 `MusicLibraryOwner`，再由客户端 owner 取消并排空共享匿名登记及客户端写入。
 
 准备失败不会释放借用的 App store/runtime/playback。取消关闭会恢复原 owners，但不会自动重放写入、登录、远端同步、脚本调用或播放。

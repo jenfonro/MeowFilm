@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Scripting;
@@ -19,6 +20,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     private readonly MusicScriptTransport scriptTransport;
     private readonly MusicNativeTransfers transfers;
     private readonly TimeProvider clock;
+    private readonly Func<JsonObject, string, CancellationToken, Task<JsonObject>>? matchSong;
     private readonly SemaphoreSlim gate = new(1, 1), storageGate = new(1, 1);
     private readonly CancellationTokenSource lifetime = new();
     private readonly object activityGate = new();
@@ -48,11 +50,16 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     private sealed record Live(long Revision, long Generation, string Grant, JsonObject Capabilities);
 
     public MusicScriptOwner(MusicLibraryOwner library, IRuntimeClient runtime, TimeProvider? clock = null)
+        : this(library, runtime, clock, null) { }
+
+    internal MusicScriptOwner(MusicLibraryOwner library, IRuntimeClient runtime, TimeProvider? clock,
+        Func<JsonObject, string, CancellationToken, Task<JsonObject>>? matchSong)
     {
         this.library = library ?? throw new ArgumentNullException(nameof(library));
         this.runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
         scriptTransport = new(runtime);
         this.clock = clock ?? TimeProvider.System;
+        this.matchSong = matchSong;
         transfers = new(this.clock);
         ScriptCapabilities = new Dictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>(StringComparer.Ordinal)
         {
@@ -76,6 +83,8 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     private static string Code(Exception error) => error switch
     {
         MusicLibraryException e => e.Code,
+        MusicPlaybackCacheDataException => "CACHE_DATA_INCOMPATIBLE",
+        MusicPlaybackCacheCommitException => "CACHE_COMMIT_UNKNOWN",
         BridgeException e => e.Code,
         ProtectedDocumentException e => e.Error == DocumentStoreError.Unavailable
             ? "STORAGE_UNAVAILABLE" : "STORAGE",

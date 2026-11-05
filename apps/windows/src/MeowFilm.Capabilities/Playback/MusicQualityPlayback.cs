@@ -1,5 +1,7 @@
 using System.Text.Json;
 using MeowFilm.Media;
+using System.Text.Json.Nodes;
+using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
 
@@ -13,7 +15,7 @@ public sealed partial class MusicCapability
         var parameters = new Dictionary<string, object>
         {
             ["installationId"] = target.Installation ?? throw new MusicOperationException("TARGET_REQUIRED"), ["platform"] = target.Platform,
-            ["generation"] = target.Generation, ["song"] = song.Raw, ["quality"] = target.Quality
+            ["generation"] = target.Generation, ["song"] = target.RecordingSong ?? song.Raw, ["quality"] = target.Quality
         };
         if (target.SourceKey is not null) parameters["sourceKey"] = target.SourceKey;
         if (target.QualityPolicySignature is not null) parameters["qualityPolicySignature"] = target.QualityPolicySignature;
@@ -23,6 +25,16 @@ public sealed partial class MusicCapability
                 target.QualityCacheSignature is not null);
         var response = await QualityCall("music.online.resolve", parameters, token);
         token.ThrowIfCancellationRequested();
+        // Present only when the resolver added the missing target recording; the queue song is unchanged.
+        var recordingSong = target.RecordingSong;
+        if (response.TryGetProperty("recordingSong", out var expanded))
+        {
+            var normalized = NativeMusicSong.Normalize(JsonNode.Parse(expanded.GetRawText()));
+            MusicDto.Require(LJ.S(normalized["songId"]) == song.Id &&
+                new NativeMusicSong.Recordings(NativeMusicSong.Normalize(JsonNode.Parse(song.Raw.GetRawText())))
+                    .CanMerge(new(normalized)));
+            recordingSong = JsonSerializer.SerializeToElement(normalized);
+        }
         var generation = MusicDto.Integer(response, "generation");
         var sourceKey = MusicDto.Text(response, "sourceKey");
         string actualRequest = MusicDto.Text(response, "quality");
@@ -54,7 +66,7 @@ public sealed partial class MusicCapability
         return new(uri, headers, target with
         {
             Generation = generation, SourceKey = sourceKey, Quality = actualRequest,
-            QualityPolicySignature = policy, QualityCacheSignature = cache
+            QualityPolicySignature = policy, QualityCacheSignature = cache, RecordingSong = recordingSong
         }, expires);
     }
 }

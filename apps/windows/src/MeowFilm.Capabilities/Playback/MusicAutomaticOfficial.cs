@@ -5,6 +5,7 @@ namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicCapability
 {
+    // Accepted player/UI snapshots only. Native candidates own reusable matching state.
     private readonly Dictionary<string, (string Original, JsonElement Expanded)> officialSongSnapshots = [];
     private JsonElement KnownOfficialSong(SongRow song) =>
         officialSongSnapshots.TryGetValue(song.Id, out var known) && known.Original == song.Raw.GetRawText()
@@ -47,6 +48,9 @@ public sealed partial class MusicCapability
         request.CancelAfter(TimeSpan.FromSeconds(35));
         var cancellation = request.Token;
         var settings = savedQualityPolicy!.DeepClone().AsObject();
+        // Sources failed in this attempt only; never a persistent wrong-recording exclusion.
+        var unavailable = new HashSet<string>(rejectedSources ?? new HashSet<string>(), StringComparer.Ordinal);
+        string? knownFailure = null;
         int Rank(ResolvedMusic media)
         {
             string level = media.Target!.Quality;
@@ -59,9 +63,10 @@ public sealed partial class MusicCapability
             .Min(level => MusicQualityPolicy.Priority(level, settings));
         async Task<MusicOnlineTarget[]> Plan(bool discover)
         {
-            var reply = await QualityCall("music.official.candidates", new {
-                song = KnownOfficialSong(song), quality, qualityPolicySignature = policy, discover
-            }, cancellation);
+            object parameters = discover
+                ? new { song = song.Raw, quality, qualityPolicySignature = policy, discover, rejectedSourceKeys = unavailable.ToArray() }
+                : new { song = song.Raw, quality, qualityPolicySignature = policy, discover };
+            var reply = await QualityCall("music.official.candidates", parameters, cancellation);
             MusicDto.Require(MusicDto.Text(reply, "qualityPolicySignature") == policy);
             if (reply.TryGetProperty("authorizationRequired", out var required) && required.ValueKind == JsonValueKind.True)
                 throw new MusicOperationException("AUTH_REQUIRED");
@@ -69,14 +74,24 @@ public sealed partial class MusicCapability
             MusicDto.Require(decorated.Id == song.Id);
             var candidates = reply.GetProperty("candidates").EnumerateArray().ToArray();
             MusicDto.Require(candidates.Length <= 24);
-            return candidates.Where(row => rejectedSources?.Contains(MusicDto.Text(row, "sourceKey")) != true)
+            return candidates.Where(row => !unavailable.Contains(MusicDto.Text(row, "sourceKey")))
                 .Select(row => new MusicOnlineTarget(null, MusicDto.Text(row, "platform"),
                 MusicDto.Integer(row, "generation"), MusicDto.Text(row, "sourceKey"),
                 PolicyRequest: quality, Quality: quality, QualityPolicySignature: policy,
                 AccountScope: MusicDto.Text(row, "scope"), RecordingSong: decorated.Raw, Automatic: true)).ToArray();
         }
+        async Task<ResolvedMusic> Accept(ResolvedMusic media)
+        {
+            var currentPolicy = await QualityCall("music.quality.settings.get", null, token);
+            token.ThrowIfCancellationRequested();
+            if (MusicDto.Text(currentPolicy, "signature") != policy)
+                throw new MusicOperationException("QUALITY_POLICY_CHANGED");
+            // Other successful resolutions are choices only, never a late stream switch or a played-history write.
+            return media;
+        }
         try
         {
+            // Accepted local mappings only: history, the queue song and earlier matches. No catalog request.
             var known = await Plan(false);
             // Probe all authorized complete-file candidates before any catalog discovery or URL resolution.
             // History is preference only; cacheContext still checks account generation and policy.
@@ -85,8 +100,41 @@ public sealed partial class MusicCapability
                 try { return await ResolveOfficialTarget(song, target, cancellation, initial: true, cacheOnly: true); }
                 catch (MusicOperationException e) when (UnavailableOfficialCandidate(e.Code)) { }
             }
+            // A still-valid URL under the current account and quality authority starts before any media lookup.
+            foreach (var target in known)
+            {
+                try
+                {
+                    var cached = await ResolveOfficialTarget(song, target, cancellation, initial: true,
+                        useCache: false, urlCacheOnly: true);
+                    cancellation.ThrowIfCancellationRequested();
+                    if (cached.Uri is { } uri && rejectedUrls?.Contains(uri.AbsoluteUri) == true) continue;
+                    if (Rank(cached) != int.MaxValue) return await Accept(cached);
+                }
+                catch (MusicOperationException e) when (e.Code == "CACHE_MISS") { }
+                catch (MusicOperationException e) when (UnavailableOfficialCandidate(e.Code))
+                { knownFailure ??= e.Code; unavailable.Add(target.SourceKey!); }
+            }
+            // An acceptable existing mapping completes automatic selection; unknown platforms are not
+            // searched merely to compare their quality.
+            foreach (var target in known.Where(target => !unavailable.Contains(target.SourceKey!)).ToArray())
+            {
+                try
+                {
+                    var media = await ResolveOfficialTarget(song, target, cancellation, initial: true,
+                        useCache: false, refresh: true);
+                    cancellation.ThrowIfCancellationRequested();
+                    if (media.Uri is { } uri && rejectedUrls?.Contains(uri.AbsoluteUri) == true)
+                        knownFailure ??= "MEDIA_EXPIRED";
+                    else if (Rank(media) != int.MaxValue) return await Accept(media);
+                    else knownFailure ??= "RECORDING_QUALITY_UNAVAILABLE";
+                }
+                catch (MusicOperationException e) when (UnavailableOfficialCandidate(e.Code)) { knownFailure ??= e.Code; }
+                unavailable.Add(target.SourceKey!);
+            }
+            // Only now: a missing target platform, or every existing source is unavailable.
             var discovered = await Plan(true);
-            if (discovered.Length == 0) throw new MusicOperationException("RECORDING_UNAVAILABLE");
+            if (discovered.Length == 0) throw new MusicOperationException(knownFailure ?? "RECORDING_UNAVAILABLE");
             // At most three native platform workers; each tries its compatible recordings in preference order.
             // Explicit script/recording choices never enter this coordinator.
             var results = await Task.WhenAll(discovered.GroupBy(target => target.Platform).Select(async group =>
@@ -121,12 +169,9 @@ public sealed partial class MusicCapability
             var selected = results.Select(result => result.Media).OfType<ResolvedMusic>().Where(media => Rank(media) != int.MaxValue)
                 .OrderBy(Rank).FirstOrDefault() ?? throw new MusicOperationException(
                     cancellation.IsCancellationRequested ? "TIMEOUT" :
-                    results.Select(result => result.Failure).FirstOrDefault(code => code is not null) ?? "PLAYBACK_UNAVAILABLE");
-            var currentPolicy = await QualityCall("music.quality.settings.get", null, token);
-            if (MusicDto.Text(currentPolicy, "signature") != policy)
-                throw new MusicOperationException("QUALITY_POLICY_CHANGED");
-            // Other successful resolutions are choices only, never a late stream switch or a played-history write.
-            return selected;
+                    results.Select(result => result.Failure).FirstOrDefault(code => code is not null) ??
+                    knownFailure ?? "PLAYBACK_UNAVAILABLE");
+            return await Accept(selected);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested && request.IsCancellationRequested)
         { throw new MusicOperationException("TIMEOUT"); }
