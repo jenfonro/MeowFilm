@@ -13,12 +13,13 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Windows.Tests;
 
 // Production C# services/codecs/parsers with trusted synthetic HTTP, no Node, real accounts or upstream.
-public static class MusicNativePlatformTests
+public static partial class MusicNativePlatformTests
 {
     private const string Huge = "9007199254740993123";
     private const string KgHash = "ABCDEF0123456789ABCDEF0123456789";
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in ChartCases()) yield return test;
         yield return Case("platform response uses the last JSON field at every object without stripping provider metadata", async () =>
         {
             using var http = MusicPlatformHttp.CreateWithHandler(new Handler((_, _) => Task.FromResult(
@@ -890,7 +891,7 @@ public static class MusicNativePlatformTests
                 signedEntry.GetProperty("display").GetBoolean());
             Equal(1, signed.Calls);
         });
-        yield return Case("home daily preserves provider calendar and expanded caption without inventing songs", async () =>
+        yield return Case("home daily preserves provider calendar and permanent full caption without inventing songs", async () =>
         {
             foreach (var day in new[] { "29", "0", "32", "" })
             {
@@ -902,8 +903,7 @@ public static class MusicNativePlatformTests
                 var reply = await f.Catalog.HomeAsync(new("wy"));
                 var entry = reply.GetProperty("entries")[0];
                 Equal("每日推荐", entry.GetProperty("name").GetString());
-                Equal("符合你口味的新鲜好歌", entry.GetProperty("subtitle").GetString());
-                Equal("每日推荐 | 从「合成歌曲」听起", entry.GetProperty("previewSubtitle").GetString());
+                Equal("从「合成歌曲」听起", entry.GetProperty("subtitle").GetString());
                 var card = MusicCatalogDto.Read(reply, "wy", "home", "").Single().Items.Single();
                 Equal(day == "29" ? 29 : (int?)null, card.DayOfMonth);
                 True(!card.HasPreview && !card.CanOpen);

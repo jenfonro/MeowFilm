@@ -59,13 +59,13 @@ public sealed partial class MusicCapability
     public bool IsCatalogDetailPage => IsCatalogPlaylist || IsCatalogArtist;
     public bool IsLocalLibraryPage => IsSongList || IsArchives;
     public bool CanCatalogBrowse => !stopping && commands == 0;
-    public bool CanCatalogNext => CanCatalogBrowse && loadCancellation is null && catalogMore;
-    public bool CanCatalogPrevious => CanCatalogBrowse && loadCancellation is null && !IsCatalogDetailPage && catalogPage > 1;
+    public bool CanCatalogNext => !IsCatalogHome && CanCatalogBrowse && loadCancellation is null && catalogMore;
+    public bool CanCatalogPrevious => CanCatalogBrowse && loadCancellation is null && !IsCatalogHome && !IsCatalogDetailPage && catalogPage > 1;
     public bool CanLoadMoreCatalogPlaylist => IsCatalogPlaylist && CanCatalogNext;
     public bool HasCatalogTags => CatalogTags.Count > 0 && location.Route.StartsWith("catalog-channel/", StringComparison.Ordinal);
     public bool CanCatalogAction => CanCatalogBrowse && loadCancellation is null && IsCatalogCollection;
     public bool CanPlayCatalogPlaylist => CanCatalogAction && total > 0;
-    public bool CanCancelCatalog => loadCancellation is not null || catalogActionCancellation is not null;
+    public bool CanCancelCatalog => loadCancellation is not null || homeContinuationCancellation is not null || catalogActionCancellation is not null;
     public string CatalogPageText => IsCatalogPage ? $"第 {catalogPage} 页" : "";
     private bool catalogMore;
     private int catalogPage = 1;
@@ -95,6 +95,7 @@ public sealed partial class MusicCapability
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public Task Work { get; set; } = Task.CompletedTask;
         public int Subscribers;
+        public bool Published;
     }
     private CatalogLoadFlight? catalogLoadFlight;
 
@@ -183,11 +184,10 @@ public sealed partial class MusicCapability
                 card.MemberId.Length > 0 ? card.MemberId : null);
             if (IsCatalogBatch) return CatalogBatchActionAsync("play", Songs.IndexOf(card.Song));
             try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
-            SelectedSong = card.Song;
-            return PlaySelectionAsync();
+            return PlayCatalogSectionAsync(card);
         }
         if (card.Kind == "song") return PlayCatalogSongAsync(card);
-        if (card.Locator is not null || card.Kind is "daily" or "fm" or "similar" or "album")
+        if (card.Locator is not null || card.Kind is "daily" or "fm" or "similar" or "album" or "chart")
             return OpenPersonalCatalogCardAsync(card);
         RememberCatalogLocation();
         var destination = "catalog-" + card.Kind + "/" + card.Platform + "/" + Uri.EscapeDataString(card.ActionId);
@@ -247,6 +247,7 @@ public sealed partial class MusicCapability
             catalogCursors.Clear(); catalogCursors.AddRange(saved.Cursors);
             catalogPageCode = saved.PageCode;
             PublishCatalog(route, saved.Query, platform, saved.Kind, saved.Page, saved.Pages[saved.Page]);
+            StartHomeContinuation();
             return;
         }
         if (route == "catalog-home" && publishedHomeState is { } home && !RestoreCatalogPage(home, platform))
@@ -495,6 +496,7 @@ public sealed partial class MusicCapability
                 if (!disposed) { RefreshBindings(); CatalogBindings(); }
             }
             flight.Cancellation.Dispose();
+            if (!stopping && flight.Published && flight.Generation == loadGeneration) StartHomeContinuation();
         }
     }
 
@@ -644,10 +646,11 @@ public sealed partial class MusicCapability
             }
             if (operation == "channels") state = state with { Sections = [], Total = 0 };
             if (number == 1) { catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null); }
-            else if (operation == "playlist") catalogPages.Clear();
+            else if (operation is "playlist" or "home") catalogPages.Clear();
             while (catalogCursors.Count <= number) catalogCursors.Add(null);
             catalogCursors[number] = next; catalogPages[number] = state;
-            PublishCatalog(route, query, platform, kind, number, state);
+            PublishCatalog(route, query, platform, kind, number, state, append: operation == "home" && number > 1);
+            flight.Published = true;
         }
         catch (OperationCanceledException) { }
         catch (Exception error)
@@ -677,6 +680,40 @@ public sealed partial class MusicCapability
             }
         }
     }
+    private CancellationTokenSource? homeContinuationCancellation;
+    internal Task HomeInitialization { get; private set; } = Task.CompletedTask;
+    private void StartHomeContinuation()
+    {
+        if (stopping || !IsCatalogHome || !catalogMore || loadCancellation is not null ||
+            homeContinuationCancellation is not null) return;
+        var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        homeContinuationCancellation = request;
+        var generation = loadGeneration;
+        HomeInitialization = Read();
+        loadDrains.Add(HomeInitialization);
+        _ = Drain(HomeInitialization);
+        async Task Drain(Task work) { try { await work; } finally { loadDrains.Remove(work); } }
+        async Task Read()
+        {
+            await Task.Yield();
+            try
+            {
+                while (!stopping && generation == loadGeneration && !request.IsCancellationRequested && IsCatalogHome && catalogMore)
+                {
+                    int previous = catalogPage;
+                    var next = CaptureCatalogLoadRequest(location.Route, catalogQuery, previous + 1, catalogContinuation, false, catalogTag);
+                    await LoadCatalogCoreAsync(new(next, generation, statusEpoch, request));
+                    if (catalogPage == previous) break; // A real failure is published once; no background retry loop.
+                }
+            }
+            finally
+            {
+                if (ReferenceEquals(homeContinuationCancellation, request)) homeContinuationCancellation = null;
+                request.Dispose();
+                if (!disposed) CatalogBindings();
+            }
+        }
+    }
     private static MusicCatalogSection[] MergeCatalogSections(IEnumerable<MusicCatalogSection> existingSections, MusicCatalogSection[] incoming)
     {
         var result = existingSections.ToList();
@@ -703,7 +740,7 @@ public sealed partial class MusicCapability
         }
         while (target.Count > incoming.Length) target.RemoveAt(target.Count - 1);
     }
-    private void PublishCatalog(string route, string query, string platform, string kind, int number, CatalogPageState state)
+    private void PublishCatalog(string route, string query, string platform, string kind, int number, CatalogPageState state, bool append = false)
     {
         publishing = true;
         try
@@ -741,14 +778,17 @@ public sealed partial class MusicCapability
             var songs = songSections.SelectMany(s => s.Items).Select(i => i.Song).OfType<SongRow>().ToArray();
             if (!Songs.SequenceEqual(songs, ReferenceEqualityComparer.Instance))
             { Songs.Clear(); foreach (var song in songs) Songs.Add(song); }
-            selectedSong = null; collection = null; total = state.Total;
+            if (!append) selectedSong = null;
+            collection = null; total = state.Total;
             var visibleCount = IsCatalogHome
                 ? homeDisplaySections.Sum(section => section.Items.Count)
                 : state.Sections.Sum(section => section.Items.Count);
-            status = visibleCount == 0 ? "暂无内容" : "";
+            if (!append) status = visibleCount == 0 ? "暂无内容" : "";
             Changed(nameof(SelectedSong)); RefreshBindings(); CatalogBindings();
         }
         finally { publishing = false; }
+        InitializeCatalogEntries();
+        if (append) return;
         var generation = loadGeneration;
         _ = Presentation.Dispatcher.InvokeAsync(() => { if (!stopping && generation == loadGeneration) Presentation.RestoreScroll(state.Scroll); }, DispatcherPriority.Loaded);
     }

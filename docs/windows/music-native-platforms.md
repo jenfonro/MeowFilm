@@ -138,3 +138,7 @@ Invalidate
 ## 来源与许可
 
 平台协议、固定源码提交、本地修改和许可见 `LICENSES/NOTICE.md`。
+
+## 原生音乐榜详情
+
+Windows 已知音乐榜通过可选 `IMusicChartCatalog` 和 `MusicChartRequest` 读取，参数及页面行为见[目录与频道](music-catalog.md#横幅与榜单)。数字专辑／数字单曲的 albumType 分别为0／1，官方榜每周期请求50项；50是上游榜单请求协议，不是首页目录条目数。歌曲指数按真实返回ID分批补齐歌曲详情，每批至多100首是既有详情接口资源边界。没有通用H5、购买或有声书播放承载。

@@ -1,6 +1,4 @@
-using System.Globalization;
 using System.Windows;
-using System.Windows.Data;
 using System.Windows.Media.Animation;
 
 namespace MeowFilm.Capabilities;
@@ -59,12 +57,4 @@ public static class CardMotion
         { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }, FillBehavior = FillBehavior.Stop },
             HandoffBehavior.SnapshotAndReplace);
     }
-}
-
-public sealed class MusicEntryOffsetConverter : IMultiValueConverter
-{
-    public object Convert(object[] values, Type type, object parameter, CultureInfo culture) =>
-        values.Length == 3 && values[0] is double height && values[1] is double progress && values[2] is true
-            ? -Math.Max(0, height - 80) * progress : 0d;
-    public object[] ConvertBack(object value, Type[] types, object parameter, CultureInfo culture) => throw new NotSupportedException();
 }

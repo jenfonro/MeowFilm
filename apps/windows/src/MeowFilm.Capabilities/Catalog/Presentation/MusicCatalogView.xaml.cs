@@ -299,6 +299,15 @@ public partial class MusicCatalogView : UserControl
         if (ChannelMorePanel.ActualWidth > 0 && ChannelMorePanel.ActualHeight > 0)
             ChannelMoreClip.Rect = new Rect(0, 0, ChannelMorePanel.ActualWidth, ChannelMorePanel.ActualHeight);
     }
+    private async void Chart_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (IsLoaded && sender is ComboBox { IsLoaded: true, SelectedValue: not null } && Owner is { } owner)
+            await owner.ChangeCatalogChartAsync();
+    }
+    private async void ChartYear_Changed(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if (IsLoaded && Owner is { } owner) await owner.ChangeCatalogChartAsync();
+    }
     private async void Tag_Click(object sender, RoutedEventArgs e)
     {
         if (Owner is { } owner && sender is Button { Tag: MusicCatalogTag tag })
@@ -320,7 +329,7 @@ public partial class MusicCatalogView : UserControl
     private async void LoadMoreNearEnd()
     {
         if (loadingMore || !IsVisible || Owner is not { } owner ||
-            !owner.IsCatalogLanding || !owner.CanCatalogNext ||
+            !owner.IsChannelLanding || !owner.CanCatalogNext ||
             ActiveScroll.ScrollableHeight - ActiveScroll.VerticalOffset > 280) return;
         loadingMore = true;
         scrollIntent.Clear();
@@ -403,14 +412,7 @@ public partial class MusicCatalogView : UserControl
         if (Owner is { } owner && sender is EntryCard { DataContext: MusicCatalogCard card })
             try { await owner.OpenCatalogCardAsync(card); } catch { }
     }
-    private async void Entry_Preview(object sender, RoutedEventArgs e)
-    {
-        e.Handled = true;
-        if (Owner is not { } owner || sender is not EntryCard { DataContext: MusicCatalogCard card } entry) return;
-        var token = entry.PreviewCancellation;
-        var titles = await owner.ReadCatalogCardPreviewAsync(card, token);
-        if (!token.IsCancellationRequested && entry.IsLoaded && entry.IsVisible && ReferenceEquals(entry.DataContext, card)) entry.PreviewTitles = titles;
-    }
+
     private async void Favorite_Click(object sender, RoutedEventArgs e)
     {
         if (Owner is { } owner && sender is Button { Tag: MusicCatalogCard card })

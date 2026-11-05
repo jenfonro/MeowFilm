@@ -166,7 +166,7 @@
    <Setter Property="MinHeight" Value="0"/><Setter Property="IsEnabled" Value="{Binding CanPlay}"/>
    <Setter Property="AutomationProperties.Name" Value="{Binding Title,StringFormat=播放 {0}}"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-    <Border Background="#38000000"><Path Data="M 2,1 Q 0,0 0,3 L 0,25 Q 0,28 3,26 L 23,15 Q 26,13 23,11 Z" Fill="White" Width="24" Height="28" Stretch="Fill" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+    <Border Background="#38000000"><local:CardPlayGlyph IsBusy="{Binding IsPreparing}" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
    </ControlTemplate></Setter.Value></Setter>
    <Style.Triggers>
     <Trigger Property="Opacity" Value="0"><Setter Property="IsHitTestVisible" Value="False"/></Trigger>
@@ -174,7 +174,7 @@
    </Style.Triggers>
   </Style>
   <DataTemplate x:Key="Catalog.Entry">
-   <local:EntryCard Margin="0,0,16,0" OpenRequested="Entry_Open" PlayRequested="CardPlay_Click" PreviewRequested="Entry_Preview"/>
+   <local:EntryCard Margin="0,0,16,0" OpenRequested="Entry_Open" PlayRequested="CardPlay_Click"/>
   </DataTemplate>
   <DataTemplate x:Key="Catalog.PlaylistCard">
    <Button x:Name="PlaylistHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
@@ -213,13 +213,28 @@
     </Grid>
    </Button>
   </DataTemplate>
+  <DataTemplate x:Key="Catalog.AlbumRankRow">
+   <Button Tag="{Binding}" Click="Card_Click" IsEnabled="{Binding CanOpen}" Style="{StaticResource Catalog.Flat}" Margin="0,0,0,12" AutomationProperties.Name="{Binding Title}">
+    <Grid Height="72">
+     <Grid.ColumnDefinitions><ColumnDefinition Width="44"/><ColumnDefinition Width="76"/><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+     <TextBlock Text="{Binding RankText}" FontSize="20" VerticalAlignment="Center" HorizontalAlignment="Center" Style="{StaticResource Capability.Muted}"/>
+     <art:ArtworkImage Grid.Column="1" Address="{Binding Cover}" Width="64" Height="64" HorizontalAlignment="Left" local:CardClip.Radius="4"/>
+     <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="8,0,16,0">
+      <TextBlock Text="{Binding Title}" Style="{StaticResource Catalog.SongTitle}"/>
+      <TextBlock Text="{Binding Subtitle}" Style="{StaticResource Catalog.SongArtist}"/>
+     </StackPanel>
+     <TextBlock Grid.Column="3" Text="{Binding SalesText}" Margin="12,0" VerticalAlignment="Center" Style="{StaticResource Capability.Muted}"/>
+    </Grid>
+   </Button>
+  </DataTemplate>
   <local:MusicChannelSelectionConverter x:Key="Catalog.ChannelSelected"/>
   <local:ColumnsConverter x:Key="Catalog.Columns"/>
   <local:BannerHeightConverter x:Key="Catalog.BannerHeight"/>
   <DataTemplate x:Key="Catalog.Banner">
    <Button Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,20,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
-    <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self},Converter={StaticResource Catalog.BannerHeight}}" Background="#E7EAF0" local:CardClip.Radius="8">
-     <art:ArtworkImage Address="{Binding Cover}"/>
+    <Grid x:Name="BannerFrame" Background="#E7EAF0" local:CardClip.Radius="8">
+     <Grid.Height><MultiBinding Converter="{StaticResource Catalog.BannerHeight}"><Binding Path="ActualWidth" ElementName="BannerFrame"/><Binding Path="AspectRatio" ElementName="BannerImage"/></MultiBinding></Grid.Height>
+     <art:ArtworkImage x:Name="BannerImage" Address="{Binding Cover}" Stretch="Uniform"/>
      <TextBlock Text="{Binding Title}" VerticalAlignment="Bottom" Margin="12" FontWeight="SemiBold" TextWrapping="Wrap"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding Cover}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
     </Grid>
    </Button>
@@ -229,7 +244,7 @@
     <Border Background="{DynamicResource MeowFilm.Brush.Surface}" CornerRadius="12" Padding="20" Height="154">
      <StackPanel><DockPanel Margin="0,0,0,14"><TextBlock DockPanel.Dock="Right" Text="{Binding UpdateFrequency}" Style="{StaticResource Capability.Muted}" FontSize="11"/><TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="16" TextTrimming="CharacterEllipsis"/></DockPanel>
       <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="96"/><ColumnDefinition/></Grid.ColumnDefinitions>
-       <Grid Width="80" Height="80" HorizontalAlignment="Left"><Border Background="#E7E9EF" CornerRadius="4" Margin="12,12,-10,-4"/><Border Background="#D6DAE4" CornerRadius="4" Margin="6,6,-5,-2"/><art:ArtworkImage Address="{Binding Cover}" local:CardClip.Radius="4"/><Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" local:CardClip.Radius="4" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankingHost}"/></Grid>
+       <Grid Width="80" Height="80" HorizontalAlignment="Left"><art:ArtworkImage Address="{Binding ThirdPreviewCover}" Margin="12,12,-10,-4" ShowRetry="False" local:CardClip.Radius="4"/><art:ArtworkImage Address="{Binding SecondPreviewCover}" Margin="6,6,-5,-2" ShowRetry="False" local:CardClip.Radius="4"/><art:ArtworkImage Address="{Binding FirstPreviewCover}" local:CardClip.Radius="4"/><Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" local:CardClip.Radius="4" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankingHost}"/></Grid>
        <ItemsControl Grid.Column="1" ItemsSource="{Binding PreviewSongs}"><ItemsControl.ItemTemplate><DataTemplate><Grid Height="27"><Grid.ColumnDefinitions><ColumnDefinition Width="22"/><ColumnDefinition/><ColumnDefinition Width="20"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Rank}" Style="{StaticResource Capability.Muted}"/><TextBlock Grid.Column="1" TextTrimming="CharacterEllipsis"><Run Text="{Binding Title}"/><Run Text=" − "/><Run Text="{Binding Artist}" Foreground="{DynamicResource MeowFilm.Brush.Muted}"/></TextBlock><TextBlock Grid.Column="2" Text="{Binding Movement}" Foreground="{DynamicResource MeowFilm.Brush.Accent}" HorizontalAlignment="Right"/></Grid></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
       </Grid>
      </StackPanel>
@@ -342,6 +357,9 @@
     <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.PlaylistRow}"
                   AutomationProperties.Name="封面列表"/>
    </DataTemplate>
+   <DataTemplate x:Key="Catalog.Section.AlbumChart">
+    <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.AlbumRankRow}"/>
+   </DataTemplate>
    <DataTemplate x:Key="Catalog.Section.Rankings">
     <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.Ranking}">
      <ItemsControl.ItemsPanel><ItemsPanelTemplate>
@@ -378,6 +396,9 @@
       </MultiDataTrigger.Conditions>
       <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.PlaylistRows}"/>
      </MultiDataTrigger>
+     <DataTrigger Binding="{Binding IsAlbumChart}" Value="True">
+      <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.AlbumChart}"/>
+     </DataTrigger>
      <DataTrigger Binding="{Binding IsRankingPreviewSection}" Value="True">
       <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.Rankings}"/>
      </DataTrigger>
@@ -501,6 +522,11 @@
     </ScrollViewer>
    </Border>
   </Popup>
+   <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="24,0,24,12" Visibility="{Binding IsCatalogSalesChart,Converter={StaticResource Visible}}">
+    <ComboBox Width="160" ItemsSource="{Binding CatalogChartKinds}" DisplayMemberPath="Name" SelectedValuePath="Key" SelectedValue="{Binding CatalogChartKind}" SelectionChanged="Chart_Changed"/>
+    <ComboBox Width="90" Margin="12,0,0,0" ItemsSource="{Binding CatalogChartPeriods}" DisplayMemberPath="Name" SelectedValuePath="Key" SelectedValue="{Binding CatalogChartPeriod}" Visibility="{Binding CatalogChartHasPeriods,Converter={StaticResource Visible}}" SelectionChanged="Chart_Changed"/>
+    <TextBox Width="74" Margin="12,0,0,0" Text="{Binding CatalogChartYear}" Visibility="{Binding CatalogChartIsYearly,Converter={StaticResource Visible}}" AutomationProperties.Name="榜单年份" LostKeyboardFocus="ChartYear_Changed"/>
+   </StackPanel>
    <ItemsControl x:Name="ChannelFilters" DockPanel.Dock="Top" ItemsSource="{Binding CatalogTagGroups}"
                  Visibility="{Binding HasCatalogTags,Converter={StaticResource Visible}}" Margin="40,0,40,16" MaxWidth="1490">
     <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
@@ -520,7 +546,7 @@
     </DataTemplate></ItemsControl.ItemTemplate>
   </ItemsControl>
   <Grid>
-   <ScrollViewer x:Name="HomeScroll" local:MusicCatalogSurface.IsHome="True" local:MusicCatalogSurface.IsLanding="True" Visibility="{Binding IsCatalogHome,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}" ScrollChanged="CatalogScroll_Changed" PreviewMouseWheel="CatalogScroll_Wheel" PreviewKeyDown="CatalogScroll_Key">
+   <ScrollViewer x:Name="HomeScroll" local:MusicCatalogSurface.IsHome="True" local:MusicCatalogSurface.IsLanding="True" Visibility="{Binding IsCatalogHome,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}">
     <ItemsControl ItemsSource="{Binding HomeSections}" ItemTemplate="{StaticResource Catalog.SectionsTemplate}" Margin="40,0,40,24" MaxWidth="1490"/>
    </ScrollViewer>
    <ScrollViewer x:Name="SearchOverviewScroll" local:MusicCatalogSurface.IsOverview="True" Visibility="{Binding IsSearchOverview,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}" ScrollChanged="CatalogScroll_Changed" PreviewMouseWheel="CatalogScroll_Wheel" PreviewKeyDown="CatalogScroll_Key">
