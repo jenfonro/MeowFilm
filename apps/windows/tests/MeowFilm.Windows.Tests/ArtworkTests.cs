@@ -295,13 +295,13 @@ public static class ArtworkTests
             using (await view.PrepareForPresentationAsync()) { }
             var pixels = ((Image)view.Children[0]).Source;
             var raw = view.RawPaletteBrush; var palette = view.PaletteBrush; var top = view.TopPaletteBrush;
-            Check(pixels is not null); Equal(1, handler.Count); Check(ObservesLayout(view));
+            Check(pixels is not null && ReferenceEquals(pixels, view.Source)); Equal(1, handler.Count); Check(ObservesLayout(view));
             Check(view.HasTopPalette && !ReferenceEquals(raw, Brushes.DimGray));
             foreach (var visibility in new[] { Visibility.Hidden, Visibility.Collapsed })
             {
                 host.Visibility = visibility; Layout(host); await Tick();
                 Check(!ObservesLayout(view));
-                Check(ReferenceEquals(pixels, ((Image)view.Children[0]).Source));
+                Check(ReferenceEquals(pixels, ((Image)view.Children[0]).Source) && ReferenceEquals(pixels, view.Source));
                 host.Visibility = Visibility.Visible; Layout(host); await Tick();
                 Check(ObservesLayout(view)); Equal(1, handler.Count);
                 Check(ReferenceEquals(pixels, ((Image)view.Children[0]).Source));
@@ -310,7 +310,7 @@ public static class ArtworkTests
                 Check(ReferenceEquals(top, view.TopPaletteBrush));
             }
             host.Children.Remove(view); await Tick();
-            Check(!ObservesLayout(view)); Check(((Image)view.Children[0]).Source is null);
+            Check(!ObservesLayout(view)); Check(((Image)view.Children[0]).Source is null && view.Source is null);
             Check(!view.HasTopPalette);
         }));
         yield return new("Native artwork leaving a visible viewport releases its lease and reuses the bounded cache", () => Sta(async () =>
@@ -435,13 +435,14 @@ public static class ArtworkTests
             var old = new FakeLease();
             var next = new FakeLease();
             loader.Calls[0].Completion.SetResult(old); loader.Calls[1].Completion.SetResult(next); await Tick();
-            Check(old.Disposed); Check(!next.Disposed); Check(ReferenceEquals(next.Image, ((Image)view.Children[0]).Source));
+            Check(old.Disposed); Check(!next.Disposed);
+            Check(ReferenceEquals(next.Image, ((Image)view.Children[0]).Source) && ReferenceEquals(next.Image, view.Source));
             Check(!ReferenceEquals(Brushes.DimGray, view.RawPaletteBrush));
             Check(!ReferenceEquals(Brushes.DimGray, view.PaletteBrush));
             Check(!ReferenceEquals(Brushes.DimGray, view.TopPaletteBrush));
             Check(view.HasTopPalette);
             host.Children.Remove(view); await Tick();
-            Equal(1, next.DisposeCount); Check(((Image)view.Children[0]).Source is null);
+            Equal(1, next.DisposeCount); Check(((Image)view.Children[0]).Source is null && view.Source is null);
             Check(ReferenceEquals(Brushes.DimGray, view.RawPaletteBrush));
             Check(ReferenceEquals(Brushes.DimGray, view.PaletteBrush));
             Check(ReferenceEquals(Brushes.DimGray, view.TopPaletteBrush));
