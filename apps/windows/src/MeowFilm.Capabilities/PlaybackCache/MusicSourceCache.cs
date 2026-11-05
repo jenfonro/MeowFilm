@@ -122,6 +122,19 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
         }, token).ConfigureAwait(false);
     }
 
+    internal async Task RejectRecordingAsync(string scope, string song, string sourceKey, CancellationToken token)
+    {
+        ValidateIdentity(scope, song);
+        await Access(scope, true, false, (record, _) =>
+        {
+            bool removed = false;
+            foreach (string area in new[] { "urls", "pointers" })
+                if (record[area]![song]?["info"]?["sourceKey"]?.GetValue<string>() == sourceKey)
+                    removed |= record[area]!.AsObject().Remove(song);
+            return (null, removed);
+        }, token).ConfigureAwait(false);
+    }
+
     private async Task<JsonObject?> Access(string scope, bool write, bool create,
         Func<JsonObject, long, (JsonObject? Result, bool Changed)> action, CancellationToken token)
     {

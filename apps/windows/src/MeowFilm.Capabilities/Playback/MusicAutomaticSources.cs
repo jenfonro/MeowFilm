@@ -35,10 +35,8 @@ public sealed partial class MusicCapability
         string sourceSet = SourceSetIdentity(items);
         var scripts = items.EnumerateArray().Where(row => row.GetProperty("enabled").GetBoolean()).ToArray();
         var settings = savedQualityPolicy!.DeepClone().AsObject();
-        var plan = new TaskCompletionSource<(JsonElement Song, string[] Preference)>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        void Planned(JsonElement snapshot, string[] preference) =>
-            plan.TrySetResult((snapshot, preference));
+        var attempted = new HashSet<string>(StringComparer.Ordinal);
+        string? scriptFailure = null;
         int Rank(ResolvedMusic media)
         {
             string level = media.Target!.Quality;
@@ -47,109 +45,96 @@ public sealed partial class MusicCapability
                 level = MusicDto.Text(receipt, "actualQuality");
             return MusicQualityPolicy.Priority(level, settings);
         }
-        async Task<(ResolvedMusic? Media, string? Error)> BuiltIn()
-        {
-            try
-            {
-                if (recordingKey is null)
-                    return (await ResolveAutomaticOfficial(song, quality, policy, cancellation,
-                        rejectedSources, rejectedUrls, requireNetwork, Planned), null);
-                Planned(KnownOfficialSong(song), []);
-                var target = new MusicOnlineTarget(null, recordingPlatform!, 0, recordingKey,
-                    quality, quality, policy, RecordingSong: KnownOfficialSong(song));
-                if (rejectedSources?.Contains(SourceIdentity(target)) == true) return (null, null);
-                var media = await ResolveOfficialTarget(song, target, cancellation, initial: true, useCache: !requireNetwork);
-                return (media.Uri is { } uri && rejectedUrls?.Contains(uri.AbsoluteUri) == true ? null : media, null);
-            }
-            catch (MusicOperationException error) when (UnavailableSourceCandidate(error.Code))
-            { return (null, error.Code); }
-            finally { Planned(KnownOfficialSong(song), []); }
-        }
-        async Task<(ResolvedMusic? Media, string? Error)> Network()
+        async Task<ResolvedMusic?> Network(JsonElement snapshot, string[] preference, bool matchMissing,
+            CancellationToken workerToken)
         {
             ResolvedMusic? best = null;
-            string? failure = null;
-            // Share native discovery and recording preference, not its authorization:
-            // a disabled built-in provider cannot filter the script's recordings.
-            var selectedPlan = await plan.Task.WaitAsync(cancellation);
-            if (scripts.Length == 0) return (null, null);
-            var snapshot = selectedPlan.Song;
             int RecordingRank(string key)
             {
-                int index = Array.IndexOf(selectedPlan.Preference, key);
+                int index = Array.IndexOf(preference, key);
                 return index < 0 ? int.MaxValue : index;
             }
-            var recordings = snapshot.GetProperty("sources").EnumerateArray()
-                .Where(row => recordingKey is null || MusicDto.Text(row, "sourceKey") == recordingKey &&
-                    MusicDto.Text(row, "source") == recordingPlatform)
-                .OrderBy(row => RecordingRank(MusicDto.Text(row, "sourceKey"))).ToArray();
+            async Task<JsonElement> Detail(JsonElement script) =>
+                (await Call("music.sources.detail", new { installationId = MusicDto.Text(script, "installationId") }, workerToken))
+                    .GetProperty("item");
+            static bool CanResolve(JsonElement capability) => capability.GetProperty("actions").EnumerateArray()
+                .Any(action => action.GetString() == "musicUrl");
+            async Task Try(JsonElement detail, string platform, string? key)
+            {
+                if (!detail.GetProperty("enabled").GetBoolean()) return;
+                var target = new MusicOnlineTarget(MusicDto.Text(detail, "installationId"), platform,
+                    MusicDto.Integer(detail, "generation"), key, quality, quality, policy,
+                    RecordingSong: snapshot, Automatic: recordingKey is null);
+                string identity = SourceIdentity(target);
+                if (rejectedSources?.Contains(identity) == true || !attempted.Add(identity)) return;
+                try
+                {
+                    var media = await ResolveMusicQualityTarget(song, target, workerToken, initial: true);
+                    if (rejectedSources?.Contains(SourceIdentity(media.Target!)) == true ||
+                        media.Uri is { } uri && rejectedUrls?.Contains(uri.AbsoluteUri) == true) return;
+                    if (Rank(media) != int.MaxValue && (best is null || Rank(media) < Rank(best))) best = media;
+                }
+                catch (MusicOperationException error) when (UnavailableSourceCandidate(error.Code))
+                { scriptFailure ??= error.Code; }
+            }
             int bestRank = quality == "auto"
                 ? MusicQualityPolicy.LxTypes.Min(level => MusicQualityPolicy.Priority(level, settings))
                 : MusicQualityPolicy.Priority(quality, settings);
-            foreach (var recording in recordings)
+            bool Complete() => best is not null && (recordingKey is null || Rank(best) == bestRank);
+            try
             {
-                string platform = MusicDto.Text(recording, "source"), key = MusicDto.Text(recording, "sourceKey");
-                if (!NativeMusicSong.Platforms.Contains(platform)) continue;
-                foreach (var script in scripts)
+                if (matchMissing)
                 {
-                    if (cancellation.IsCancellationRequested)
+                    // An earlier actual request activated idle sources. Only declared missing target
+                    // platforms are matched, never every platform or every song in the queue.
+                    var knownPlatforms = snapshot.GetProperty("sources").EnumerateArray()
+                        .Select(row => MusicDto.Text(row, "source")).ToHashSet(StringComparer.Ordinal);
+                    foreach (var script in scripts)
                     {
-                        token.ThrowIfCancellationRequested();
-                        return (best, failure ?? "TIMEOUT");
+                        var detail = await Detail(script);
+                        if (!detail.GetProperty("enabled").GetBoolean() || MusicDto.Text(detail, "state") != "ready") continue;
+                        foreach (var capability in detail.GetProperty("capabilities").EnumerateArray())
+                        {
+                            string platform = MusicDto.Text(capability, "platform");
+                            if (!NativeMusicSong.Platforms.Contains(platform) || knownPlatforms.Contains(platform) || !CanResolve(capability)) continue;
+                            await Try(detail, platform, null);
+                            if (Complete()) return best;
+                        }
                     }
-                    string id = MusicDto.Text(script, "installationId");
-                    var target = new MusicOnlineTarget(id, platform, 0, key, quality, quality, policy,
-                        RecordingSong: snapshot, Automatic: recordingKey is null);
-                    if (rejectedSources?.Contains(SourceIdentity(target)) == true) continue;
-                    try
-                    {
-                        var detail = (await Call("music.sources.detail", new { installationId = id }, cancellation))
-                            .GetProperty("item");
-                        if (!detail.GetProperty("enabled").GetBoolean()) continue;
-                        // Idle installations have no live declarations. Only an actual
-                        // request may activate one; listing never starts the runtime.
-                        if (MusicDto.Text(detail, "state") == "ready" &&
-                            !detail.GetProperty("capabilities").EnumerateArray().Any(cap =>
-                                MusicDto.Text(cap, "platform") == platform &&
-                                cap.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "musicUrl")))
-                            continue;
-                        target = target with { Generation = MusicDto.Integer(detail, "generation") };
-                        var media = await ResolveMusicQualityTarget(song, target, cancellation, initial: true);
-                        if (media.Uri is { } uri && rejectedUrls?.Contains(uri.AbsoluteUri) == true) continue;
-                        if (Rank(media) != int.MaxValue && (best is null || Rank(media) < Rank(best))) best = media;
-                        if (best is not null && Rank(best) == bestRank) return (best, failure);
-                    }
-                    catch (MusicOperationException error) when (UnavailableSourceCandidate(error.Code))
-                    { failure ??= error.Code; }
-                    catch (Exception error) when (!token.IsCancellationRequested && cancellation.IsCancellationRequested &&
-                        (error is OperationCanceledException || error is MusicOperationException { Code: "CANCELLED" }))
-                    { return (best, failure ?? "TIMEOUT"); }
                 }
+                else
+                {
+                    // Built-in authorization does not filter script recordings. Reuse the same
+                    // native snapshot without launching a second catalog discovery.
+                    var recordings = snapshot.GetProperty("sources").EnumerateArray()
+                        .Where(row => recordingKey is null || MusicDto.Text(row, "sourceKey") == recordingKey &&
+                            MusicDto.Text(row, "source") == recordingPlatform)
+                        .OrderBy(row => RecordingRank(MusicDto.Text(row, "sourceKey")));
+                    foreach (var recording in recordings)
+                    {
+                        string platform = MusicDto.Text(recording, "source"), key = MusicDto.Text(recording, "sourceKey");
+                        if (!NativeMusicSong.Platforms.Contains(platform)) continue;
+                        foreach (var script in scripts)
+                        {
+                            var detail = await Detail(script);
+                            // Listing never starts the runtime. An actual request may activate an
+                            // idle installation, whose declarations are checked by the native owner.
+                            if (MusicDto.Text(detail, "state") == "ready" &&
+                                !detail.GetProperty("capabilities").EnumerateArray().Any(cap =>
+                                    MusicDto.Text(cap, "platform") == platform && CanResolve(cap))) continue;
+                            await Try(detail, platform, key);
+                            if (Complete()) return best;
+                        }
+                    }
+                }
+                return best;
             }
-            return (best, failure);
+            catch (Exception error) when (!token.IsCancellationRequested && workerToken.IsCancellationRequested &&
+                (error is OperationCanceledException || error is MusicOperationException { Code: "CANCELLED" }))
+            { scriptFailure ??= "TIMEOUT"; return best; }
         }
-        ExceptionDispatchInfo? failure = null;
-        async Task<(ResolvedMusic? Media, string? Error)> Guard(Func<Task<(ResolvedMusic? Media, string? Error)>> action)
+        async Task<ResolvedMusic> Accept(ResolvedMusic media)
         {
-            try { return await action(); }
-            catch (OperationCanceledException) when (!token.IsCancellationRequested && cancellation.IsCancellationRequested)
-            { return (null, "TIMEOUT"); }
-            catch (MusicOperationException error) when (error.Code == "CANCELLED" &&
-                !token.IsCancellationRequested && cancellation.IsCancellationRequested)
-            { return (null, "TIMEOUT"); }
-            catch (Exception error)
-            {
-                Interlocked.CompareExchange(ref failure, ExceptionDispatchInfo.Capture(error), null);
-                request.Cancel();
-                return (null, null);
-            }
-        }
-        try
-        {
-            // Native providers and the sequential script worker share one deadline.
-            // A script miss does not suppress built-in sources, or vice versa.
-            var results = await Task.WhenAll(Guard(BuiltIn), Guard(Network));
-            failure?.Throw();
             token.ThrowIfCancellationRequested();
             var currentSources = await Call("music.sources.list", cancellationToken: token);
             if (SourceSetIdentity(currentSources.GetProperty("items")) != sourceSet)
@@ -157,18 +142,57 @@ public sealed partial class MusicCapability
             var currentPolicy = await QualityCall("music.quality.settings.get", null, token);
             if (MusicDto.Text(currentPolicy, "signature") != policy)
                 throw new MusicOperationException("QUALITY_POLICY_CHANGED");
-            var selectedPlan = await plan.Task;
-            int RecordingRank(ResolvedMusic media)
+            return media;
+        }
+        try
+        {
+            if (recordingKey is null)
             {
-                int index = Array.IndexOf(selectedPlan.Preference, media.Target!.SourceKey);
-                return index < 0 ? int.MaxValue : index;
+                // A playable cache or known mapping completes the operation before scripts
+                // or discovery are started. Script fallback is admitted only when needed.
+                try
+                {
+                    return await Accept(await ResolveAutomaticOfficial(song, quality, policy, cancellation,
+                        rejectedSources, rejectedUrls, requireNetwork, scripts.Length == 0 ? null : Network));
+                }
+                catch (MusicOperationException error) when (scriptFailure is not null &&
+                    error.Code is "RECORDING_UNAVAILABLE" or "PLAYBACK_UNAVAILABLE" or "AUTH_REQUIRED")
+                { throw new MusicOperationException(scriptFailure); }
             }
-            // Equal quality retains confirmed recording preference before stable
-            // provider order. A type never excludes another eligible candidate.
-            return results.Select(result => result.Media).OfType<ResolvedMusic>()
-                .Where(media => Rank(media) != int.MaxValue).OrderBy(Rank).ThenBy(RecordingRank).FirstOrDefault()
+            // An explicit recording keeps the existing provider comparison within that recording.
+            // Both workers are drained before any error or successful selection is published.
+            ExceptionDispatchInfo? failure = null;
+            async Task<(ResolvedMusic? Media, string? Error)> Guard(Func<Task<ResolvedMusic?>> action)
+            {
+                try { return (await action(), null); }
+                catch (MusicOperationException error) when (UnavailableSourceCandidate(error.Code))
+                { return (null, error.Code); }
+                catch (Exception error) when (!token.IsCancellationRequested && cancellation.IsCancellationRequested &&
+                    (error is OperationCanceledException || error is MusicOperationException { Code: "CANCELLED" }))
+                { return (null, "TIMEOUT"); }
+                catch (Exception error)
+                {
+                    Interlocked.CompareExchange(ref failure, ExceptionDispatchInfo.Capture(error), null);
+                    request.Cancel();
+                    return (null, null);
+                }
+            }
+            async Task<ResolvedMusic?> BuiltIn()
+            {
+                var target = new MusicOnlineTarget(null, recordingPlatform!, 0, recordingKey,
+                    quality, quality, policy, RecordingSong: KnownOfficialSong(song));
+                if (rejectedSources?.Contains(SourceIdentity(target)) == true) return null;
+                var media = await ResolveOfficialTarget(song, target, cancellation, initial: true, useCache: !requireNetwork);
+                return media.Uri is { } uri && rejectedUrls?.Contains(uri.AbsoluteUri) == true ? null : media;
+            }
+            var results = await Task.WhenAll(Guard(BuiltIn),
+                Guard(() => Network(KnownOfficialSong(song), [], false, cancellation)));
+            failure?.Throw();
+            var selected = results.Select(result => result.Media).OfType<ResolvedMusic>()
+                .Where(media => Rank(media) != int.MaxValue).OrderBy(Rank).FirstOrDefault()
                 ?? throw new MusicOperationException(results.Select(result => result.Error)
-                    .FirstOrDefault(error => error is not null) ?? "PLAYBACK_UNAVAILABLE");
+                    .FirstOrDefault(error => error is not null) ?? scriptFailure ?? "PLAYBACK_UNAVAILABLE");
+            return await Accept(selected);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested && request.IsCancellationRequested)
         { throw new MusicOperationException("TIMEOUT"); }

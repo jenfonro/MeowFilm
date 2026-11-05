@@ -117,12 +117,13 @@ internal static partial class NativeMusicSong
             Identity = preferred.Key == primary ? preferred : preferred with { Key = primary };
             return true;
         }
-        internal bool TryAddSource(JsonObject source)
+        internal bool TryAddSource(JsonObject source, bool replace = false)
         {
             var canonical = DurableSource(source);
             var evidence = ReadIdentity(canonical);
             if (!Accepts(evidence)) return false;
-            sources.TryAdd(LJ.S(canonical["sourceKey"]), new(canonical, evidence));
+            if (replace) sources[LJ.S(canonical["sourceKey"])] = new(canonical, evidence);
+            else sources.TryAdd(LJ.S(canonical["sourceKey"]), new(canonical, evidence));
             if (Identity.Key.Length == 0) Identity = Identity with { Key = evidence.Key };
             return true;
         }

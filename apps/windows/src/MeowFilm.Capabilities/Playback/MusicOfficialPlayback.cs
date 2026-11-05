@@ -11,16 +11,18 @@ public sealed partial class MusicCapability
             "128k" => "标准", "192k" or "320k" => "高音质", "flac" => "无损", "flac24bit" => "Hi-Res",
             "master" => "母带", "dolby" => "杜比", "sky" => "环绕声", "vivid" => "臻音", "jyeffect" => "增强", _ => "音质"
         } : "音质";
-    private object OfficialInput(SongRow song, MusicOnlineTarget target, bool initial, bool refresh) =>
+    private object OfficialInput(SongRow song, MusicOnlineTarget target, bool initial, bool refresh, bool cacheOnly = false) =>
         new {
-            platform = target.Platform, song = target.RecordingSong ?? song.Raw, sourceKey = target.SourceKey,
+            platform = target.Platform, song = target.RecordingSong ?? song.Raw, originSong = song.Raw, sourceKey = target.SourceKey,
             quality = initial ? target.PolicyRequest : target.Quality,
             qualityPolicySignature = target.QualityPolicySignature,
-            scope = target.AccountScope, generation = target.Generation, refresh
+            scope = target.AccountScope, generation = target.Generation, refresh, cacheOnly
         };
 
+    // cacheOnly: complete file only. urlCacheOnly: a still-valid native URL receipt only, no media lookup.
+    // refresh: skip that URL receipt (already found unusable) and request the platform directly.
     private async Task<ResolvedMusic> ResolveOfficialTarget(SongRow song, MusicOnlineTarget target, CancellationToken token, bool initial,
-        bool useCache = true, bool cacheOnly = false)
+        bool useCache = true, bool cacheOnly = false, bool urlCacheOnly = false, bool refresh = false)
     {
         if (initial && useCache && audioFileCache is not null)
         {
@@ -61,7 +63,8 @@ public sealed partial class MusicCapability
             }
         }
         if (cacheOnly) throw new MusicOperationException("CACHE_MISS");
-        var response = await QualityCall("music.official.resolve", OfficialInput(song, target, initial, !initial), token);
+        var response = await QualityCall("music.official.resolve",
+            OfficialInput(song, target, initial, !initial || refresh, urlCacheOnly), token);
         token.ThrowIfCancellationRequested();
         MusicDto.Require(MusicDto.Text(response, "kind") == "official" &&
             MusicDto.Text(response, "platform") == target.Platform && MusicDto.Text(response, "songId") == song.Id &&
