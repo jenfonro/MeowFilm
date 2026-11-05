@@ -44,9 +44,9 @@ public final class MusicNativeHomeSnapshotDocument: MusicHomeSnapshotStoring, @u
 enum MusicNativeHomeSnapshot {
     static let maximumBytes = 400_000
     private static func image(_ url: URL?) -> MJ {
-        guard let url, var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return .null }
-        parts.query = nil; parts.fragment = nil
-        return MusicNativePublicBrowseSupport.artwork(.string(parts.string ?? "")).map { .string($0.absoluteString) } ?? .null
+        guard let url else { return .null }
+        let value = MusicModel.publicURL(.string(url.absoluteString))
+        return value.string.isEmpty ? .null : value
     }
     private static func text(_ value: MJ, maximum: Int = 1024) throws -> String {
         try value.text(maximum, empty: true)

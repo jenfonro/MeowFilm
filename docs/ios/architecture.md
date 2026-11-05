@@ -21,7 +21,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | 模块 | 职责 | 依赖 |
 | --- | --- | --- |
 | `MeowContracts` | 通用请求、生命周期和错误契约 | 无 |
-| `MeowJSON` | 有界 JSON 值与严格解码 | 无 |
+| `MeowJSON` | Codable DTO 值、外部字典 JSON 解析与数字原文转发 | 无 |
 | `MeowStorage` | 普通及加密文档存储 | Contracts |
 | `MeowAccounts` | 凭据与账号状态基础设施 | Contracts |
 | `MeowPlayback` | 系统播放、媒体会话、播放所有权 | Contracts |

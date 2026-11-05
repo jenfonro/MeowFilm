@@ -63,12 +63,6 @@ extension NeteaseMusicAccountAdapter: MusicNeteaseFMProvider {
         return .init(tracks: tracks, artwork: artwork)
     }
     private static func fmArtwork(_ text: String?) -> URL? {
-        guard let text, text.utf8.count <= 4096, var url = URLComponents(string: text),
-              ["http", "https"].contains(url.scheme ?? ""), url.user == nil, url.password == nil,
-              url.port == nil || url.port == 443, url.fragment == nil,
-              let host = url.host?.lowercased(),
-              host == "music.126.net" || host.hasSuffix(".music.126.net") ||
-                host == "music.163.net" || host.hasSuffix(".music.163.net") else { return nil }
-        url.scheme = "https"; return url.url
+        text.flatMap(MusicArtworkURL.normalized)
     }
 }

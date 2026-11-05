@@ -67,7 +67,7 @@ struct MusicKugouSong: Sendable {
         let trans = raw["trans_param"] as? [String: Any] ?? [:]
         let cover = MusicKugouWire.first(raw["cover"], raw["Image"], trans["union_cover"]) as? String ?? ""
         // Images are optional display data, not an arbitrary URL fetch facility.
-        image = (try? Self.assetURL(cover.replacingOccurrences(of: "{size}", with: "480")).absoluteString) ?? ""
+        image = MusicArtworkURL.normalized(cover)?.absoluteString ?? ""
         let hashes: [Any?] = [hash, MusicKugouWire.first(raw["hash_320"], raw["HQFileHash"], audio["hash_320"]),
                              MusicKugouWire.first(raw["hash_flac"], raw["SQFileHash"], audio["hash_flac"]),
                              MusicKugouWire.first(raw["hash_high"], raw["ResFileHash"], audio["hash_high"])]

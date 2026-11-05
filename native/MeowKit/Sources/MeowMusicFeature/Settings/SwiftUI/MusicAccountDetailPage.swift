@@ -139,23 +139,28 @@ struct MusicAccountDetailContent: View {
 private struct MusicAccountAvatar: View {
     let url: URL?
     let theme: PageTheme
+    @State private var image: UIImage?
 
     var body: some View {
-        AsyncImage(url: url) { phase in
-            if let image = phase.image {
-                image.resizable().scaledToFill()
+        ZStack {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
             } else {
-                ZStack {
-                    Color(uiColor: UIColor(theme.chip))
-                    Image(systemName: "person.fill")
-                        .font(.title2)
-                        .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
-                }
+                Color(uiColor: UIColor(theme.chip))
+                Image(systemName: "person.fill")
+                    .font(.title2)
+                    .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
             }
         }
         .frame(width: 60, height: 60)
         .clipShape(Circle())
         .accessibilityHidden(true)
+        // Same isolated, redirect-checked transport and cache as catalogue covers.
+        .task(id: url) {
+            image = nil
+            guard let url, let value = try? await MusicArtworkImages.shared.read(url).0, !Task.isCancelled else { return }
+            image = value
+        }
     }
 }
 

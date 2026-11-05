@@ -17,38 +17,33 @@ private actor MusicUpstreamNumberHTTP: MusicNativeHTTPTransport {
 }
 
 final class MusicNativeUpstreamNumberTests: XCTestCase {
-    func testToplistDiscardsOnlyItsUnusedRepeatedUpdateFrequency() async throws {
-        let raw = #"{"code":200,"list":[{"id":9007199254740993,"name":"Synthetic chart","trackCount":20,"updateFrequency":"daily","updateFrequency":"weekly"}]}"#
+    func testRepeatedMetadataUsesLastValueOnEveryNeteaseRouteWithoutRoundingIDs() async throws {
+        let raw = #"{"code":200,"list":[{"id":9007199254740993,"name":"first","name":"last","updateFrequency":"daily","updateFrequency":"weekly","说明":{"score":1e400}}]}"#
         let http = MusicUpstreamNumberHTTP([raw, raw])
         let platforms = MusicNativePlatforms(transport: http, qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
-        let root = try await platforms.wy("/api/toplist", .obj())
-        XCTAssertEqual(root["list"].array.first?["id"].id, "9007199254740993")
-        XCTAssertFalse(root["list"].array[0].contains("updateFrequency"))
-        do {
-            _ = try await platforms.wy("/api/cloudsearch/pc", .obj())
-            XCTFail("Toplist-only compatibility escaped to search")
-        } catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
-        XCTAssertThrowsError(try MJ.parse(Data(raw.utf8), mode: .document, ignoringUpstreamKeys: ["updateFrequency"]))
-        for raw in [
-            #"{"code":200,"list":[{"id":1,"id":2,"updateFrequency":"daily","updateFrequency":"weekly"}]}"#,
-            #"{"code":200,"list":[{"name":"first","name":"second","updateFrequency":"daily","updateFrequency":"weekly"}]}"#
-        ] {
-            XCTAssertThrowsError(try MJ.parse(Data(raw.utf8), mode: .upstream, ignoringUpstreamKeys: ["updateFrequency"]))
+        for route in ["/api/toplist", "/api/cloudsearch/pc"] {
+            let root = try await platforms.wy(route, .obj())
+            let row = try XCTUnwrap(root["list"].array.first)
+            XCTAssertEqual(row["id"].id, "9007199254740993")
+            XCTAssertEqual(row["name"].string, "last")
+            XCTAssertEqual(row["updateFrequency"].string, "weekly")
+            XCTAssertEqual(row["说明"]["score"].json, "1e400")
         }
     }
-
-    func testPlaylistDetailDiscardsOnlyItsUnusedRepeatedTrackAlgorithm() async throws {
+    func testPlaylistAlgorithmIsPreservedAcrossRoutesAndEscapedDuplicatesUseLastValue() async throws {
         let raw = #"{"code":200,"playlist":{"id":19723756,"tracks":[{"id":9007199254740993,"alg":null,"alg":"ops-music-1"}]}}"#
         let http = MusicUpstreamNumberHTTP([raw, raw])
         let platforms = MusicNativePlatforms(transport: http, qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
-        let root = try await platforms.wy("/api/v6/playlist/detail", .obj())
-        let track = try XCTUnwrap(root["playlist"]["tracks"].array.first)
-        XCTAssertEqual(track["id"].id, "9007199254740993")
-        XCTAssertFalse(track.contains("alg"))
-        do {
-            _ = try await platforms.wy("/api/toplist", .obj())
-            XCTFail("Playlist-detail-only compatibility escaped to another route")
-        } catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
+        for route in ["/api/v6/playlist/detail", "/api/toplist"] {
+            let root = try await platforms.wy(route, .obj())
+            let track = try XCTUnwrap(root["playlist"]["tracks"].array.first)
+            XCTAssertEqual(track["id"].id, "9007199254740993")
+            XCTAssertEqual(track["alg"].string, "ops-music-1")
+        }
+        let object = try MJ.parse(Data(#"{"id":1,"\u0069d":9007199254740993,"nested":{"a":0,"a":2}}"#.utf8))
+        XCTAssertEqual(object["id"].id, "9007199254740993")
+        XCTAssertEqual(object["nested"]["a"].int, 2)
+        XCTAssertEqual(object.fields.count, 2)
     }
 
     private func wySong(_ id: String, title: String = "Synthetic", albumID: String? = "18446744073709551615") -> String {
@@ -289,7 +284,7 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
 
     func testUnconsumedNumericLexemesSurviveAtAnyPathWithoutTruncation() throws {
         let raw = #"{"id":7,"nested":[{"notPic":18446744073709551617},-18446744073709551617,1e999999999999999999999999,9007199254740993.5],"tail":"still present"}"#
-        let parsed = try MJ.parse(Data(raw.utf8), mode: .upstream)
+        let parsed = try MJ.parse(Data(raw.utf8))
         XCTAssertEqual(parsed.json, raw)
         XCTAssertEqual(parsed["nested"].array.count, 4)
         XCTAssertEqual(parsed["nested"].array[0]["notPic"].id, "18446744073709551617")
@@ -298,7 +293,7 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
         XCTAssertFalse(opaque.isNumber); XCTAssertFalse(opaque.isInteger)
         XCTAssertTrue(opaque.number.isNaN); XCTAssertEqual(opaque.int, 0)
         XCTAssertThrowsError(try opaque.integer())
-        XCTAssertThrowsError(try MJ.parse(parsed.bytes), "upstream mode must not leak into document reads")
+        XCTAssertEqual(try MJ.parse(parsed.bytes), parsed)
     }
 
     func testConsumedIDsAreExactIncludingIntegerExponentAndDecimalSpellings() throws {
@@ -314,7 +309,7 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
             ("200.0e+0", "200")
         ]
         for (token, expected) in cases {
-            let value = try MJ.parse(Data(token.utf8), mode: .upstream)
+            let value = try MJ.parse(Data(token.utf8))
             XCTAssertEqual(try MusicPlatformProtocol.numericID(value), expected, token)
             if expected.count <= 20 {
                 XCTAssertEqual(try MusicNativePublicBrowseWire.playlistID(value), expected, token)
@@ -324,11 +319,11 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
         }
         for token in ["9007199254740991.1", "9007199254740993.5", "1.00000000000000001",
                       "1e-400", "-1e-400", "-9007199254740993", "1e64", "1e999999999999999999999999"] {
-            let value = try MJ.parse(Data(token.utf8), mode: .upstream)
+            let value = try MJ.parse(Data(token.utf8))
             XCTAssertThrowsError(try MusicPlatformProtocol.numericID(value), token)
             XCTAssertThrowsError(try MusicNativePublicBrowseWire.playlistID(value), token)
         }
-        let zero = try MJ.parse(Data("-0.0e999999999999999999999999".utf8), mode: .upstream)
+        let zero = try MJ.parse(Data("-0.0e999999999999999999999999".utf8))
         XCTAssertEqual(try MusicPlatformProtocol.numericID(zero, zero: true), "0")
         XCTAssertThrowsError(try MusicPlatformProtocol.numericID(zero))
     }
@@ -347,14 +342,14 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
     func testKugouConsumesExactAudioIDsAndDoesNotSilentlyDiscardInvalidOne() async throws {
         let platforms = MusicNativePlatforms(transport: NativeMusicNoNetwork(), qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
         let raw = #"{"hash":"1234567890ABCDEF1234567890ABCDEF","name":"Synthetic","Audioid":9007199254740993,"audio_id":9007199254740993,"AlbumID":18446744073709551615,"MixSongID":9007199254740995,"Duration":180,"unused":18446744073709551617}"#
-        var value = try MJ.parse(Data(raw.utf8), mode: .upstream)
+        var value = try MJ.parse(Data(raw.utf8))
         let song = try await platforms.kugouSong(value)
         let native = try MJ.parse(song.data)
         XCTAssertEqual(native["songmid"].string, "1234567890ABCDEF1234567890ABCDEF")
         XCTAssertEqual(native["albumId"].string, "18446744073709551615")
         XCTAssertEqual(native["albumAudioId"].string, "9007199254740995")
         for token in ["9007199254740992", "9007199254740993.5", #""09007199254740993""#] {
-            value["audio_id"] = try MJ.parse(Data(token.utf8), mode: .upstream)
+            value["audio_id"] = try MJ.parse(Data(token.utf8))
             do {
                 _ = try await platforms.kugouSong(value)
                 XCTFail("conflicting/fractional/leading-zero Audioid must not be ignored")
@@ -365,7 +360,7 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
     func testKugouEmptyOptionalAlbumIDsDoNotRejectTheRecording() async throws {
         let platforms = MusicNativePlatforms(transport: NativeMusicNoNetwork(), qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
         let raw = #"{"FileHash":"1234567890ABCDEF1234567890ABCDEF","OriSongName":"Synthetic","SingerName":"Artist","Audioid":42,"AlbumID":"","MixSongID":"","Duration":180}"#
-        let original = try MJ.parse(Data(raw.utf8), mode: .upstream)
+        let original = try MJ.parse(Data(raw.utf8))
         let result = try await platforms.kugouSong(original)
         let native = try MJ.parse(result.data)
         XCTAssertEqual(native["songmid"].string, "1234567890ABCDEF1234567890ABCDEF")
@@ -381,29 +376,25 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
         }
     }
 
-    func testDocumentValidationAndExistingStableEncodingRemainStrict() throws {
+    func testUnusedLargeNumbersRoundTripAndExistingStableEncodingIsUnchanged() throws {
         for token in ["9007199254740992", "9007199254740993", "18446744073709551615", "1e400"] {
-            let bytes = Data(#"{"unused":\#(token)}"#.utf8)
-            XCTAssertThrowsError(try MJ.parse(bytes), token)
-            XCTAssertThrowsError(try MJ.parse(bytes, mode: .document), token)
-            XCTAssertNoThrow(try MJ.parse(bytes, mode: .upstream), token)
+            let text = #"{"unused":\#(token)}"#
+            XCTAssertEqual(try MJ.parse(Data(text.utf8)).json, text, token)
         }
         let raw = #"{"10":"ten","2":"two","01":"string","4294967295":"string","a":1e-7,"b":-1e-7,"c":1e-6,"id":"9007199254740993"}"#
         let expected = #"{"2":"two","10":"ten","01":"string","4294967295":"string","a":1e-7,"b":-1e-7,"c":0.000001,"id":"9007199254740993"}"#
-        let document = try MJ.parse(Data(raw.utf8)), upstream = try MJ.parse(Data(raw.utf8), mode: .upstream)
+        let document = try MJ.parse(Data(raw.utf8))
         XCTAssertEqual(document.stable.json, expected)
         XCTAssertEqual(document.stable.digest, "c48099f7385e58a189620dbb6839341e93405a5445884135c9ed0985f7b2e380")
-        XCTAssertEqual(upstream.stable.bytes, document.stable.bytes)
-        XCTAssertEqual(upstream.stable.digest, document.stable.digest)
     }
 
-    func testUpstreamModeDoesNotRelaxJSONStructureOrResourceLimits() throws {
-        for raw in ["01", "+1", "1.", "1e", "NaN", "Infinity", #"{"x":1,"x":2}"#, "[1,]", "1 2"] {
-            XCTAssertThrowsError(try MJ.parse(Data(raw.utf8), mode: .upstream), raw)
+    func testStandardJSONSyntaxAndResourceLimitsRemainEnforced() throws {
+        for raw in ["01", "+1", "1.", "1e", "NaN", "Infinity", "[1,]", "1 2"] {
+            XCTAssertThrowsError(try MJ.parse(Data(raw.utf8)), raw)
         }
         let raw = Data(#"{"unused":18446744073709551617}"#.utf8)
-        XCTAssertThrowsError(try MJ.parse(raw, maximum: raw.count - 1, mode: .upstream))
+        XCTAssertThrowsError(try MJ.parse(raw, maximum: raw.count - 1))
         let deep = String(repeating: "[", count: 41) + "1" + String(repeating: "]", count: 41)
-        XCTAssertThrowsError(try MJ.parse(Data(deep.utf8), mode: .upstream))
+        XCTAssertThrowsError(try MJ.parse(Data(deep.utf8)))
     }
 }

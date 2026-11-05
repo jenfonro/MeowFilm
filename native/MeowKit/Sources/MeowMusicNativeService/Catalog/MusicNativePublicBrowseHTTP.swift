@@ -72,11 +72,8 @@ enum MusicNativePublicBrowseWire {
     static func artwork(_ value: MJ, platform: MusicPublicBrowsePlatform) -> URL? {
         var text = value.string
         if platform == .migu && text.hasPrefix("/") && !text.hasPrefix("//") { text = "https://d.musicapp.migu.cn" + text }
-        guard text.utf8.count <= 4096, var url = URLComponents(string: text),
-              url.user == nil, url.password == nil, url.fragment == nil,
-              url.port == nil || url.port == 443, let host = url.host, !host.isEmpty,
-              url.scheme == "https" || url.scheme == "http" else { return nil }
-        url.scheme = "https"; return url.url
+        guard text.utf8.count <= 4096 else { return nil }
+        return MusicArtworkURL.normalized(text)
     }
 }
 

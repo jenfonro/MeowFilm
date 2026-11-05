@@ -116,7 +116,7 @@ enum MusicPlatformJSON {
             case .null: try add(4)
             case .bool(let v): try add(v ? 4 : 5)
             case .number(let v):
-                guard v.isFinite, v.rounded(.towardZero) != v || abs(v) <= Double(maximumInteger) else { throw MusicServiceError.invalidResponse }
+                guard v.isFinite else { throw MusicServiceError.invalidResponse }
                 try add(String(v).utf8.count)
             case .string(let v): try textBytes(v)
             case .array(let values):

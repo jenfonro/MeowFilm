@@ -4,7 +4,7 @@ import MeowMusicFeature
 
 final class MusicNativePublicBrowseCubeParityTests: XCTestCase {
     private let channel = MusicPublicBrowseChannel(id: "synthetic", title: "Synthetic", kind: .cube, pageCode: "synthetic_page")
-    private func node(_ text: String) throws -> MJ { try MJ.parse(Data(text.utf8), mode: .upstream) }
+    private func node(_ text: String) throws -> MJ { try MJ.parse(Data(text.utf8)) }
     private func response(_ page: MJ) -> MJ {
         .obj([("code", .n(200)), ("data", .obj([("pageProtocol", .obj([("pages", .array([page]))]))]))])
     }
@@ -47,6 +47,37 @@ final class MusicNativePublicBrowseCubeParityTests: XCTestCase {
         if case .track(let track) = selected[0].content { XCTAssertEqual(track.sources[0].nativeId, "11") }
         else { XCTFail("explicit choice must complete its missing display fields") }
         let calls = await http.calls(); XCTAssertEqual(calls.count, 4)
+        await service.close()
+    }
+    func testHiddenTabWithOnlyMissingPlaylistCoverReadsSummaryWhenChosen() async throws {
+        let root = try node(#"""
+        {"componentName":"Root","children":[{"id":"recommend","props":{"title":"官方栏目","recommendModule":[
+          {"title":"一","modules":[{"type":"playlist","id":41,"name":"已有名称"}]},
+          {"title":"二","isDefaultTab":true,"modules":[{"type":"playlist","id":42,"name":"无封面"}]}
+        ]}}]}
+        """#)
+        let http = NativeMusicHTTPFixture([response(root),
+            .obj([("code", .n(200)), ("data", .array([.obj([("id", .n(42)), ("name", .string("无封面"))])]))]),
+            .obj([("code", .n(200)), ("data", .array([.obj([("id", .n(41)), ("name", .string("不可替换原名")),
+                ("coverImgUrl", .string("http://p1.music.126.net/hidden.jpg?param=200y200"))])]))])
+        ])
+        let service = try await NativeMusicFixture.service(http: http)
+        let page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
+        let section = try XCTUnwrap(page.sections.first)
+        XCTAssertEqual(section.items.map(\.title), ["无封面"])
+        XCTAssertNil(section.items[0].artwork)
+        XCTAssertNil(section.tabs[1].loadItems, "An enriched selected tab keeps an absent upstream cover")
+        XCTAssertTrue(section.tabs[0].items.isEmpty)
+        let load = try XCTUnwrap(section.tabs[0].loadItems)
+        let initial = await http.calls(); XCTAssertEqual(initial.count, 2)
+        let selected = try await load()
+        XCTAssertEqual(selected.map(\.title), ["已有名称"])
+        XCTAssertEqual(selected[0].artwork?.absoluteString, "https://p1.music.126.net/hidden.jpg?param=200y200")
+        let calls = await http.calls(); XCTAssertEqual(calls.count, 3)
+        for (call, ids) in zip(calls.dropFirst(), ["42", "41"]) {
+            let request = try MusicNativePublicBrowseFixture.decryptEAPI(call)
+            XCTAssertEqual(request.0, "/api/tag/tab/playlists"); XCTAssertEqual(request.1["ids"].string, ids)
+        }
         await service.close()
     }
     func testGridAndScrollSplitDirectSongsFromCollectionsWithoutFlatteningLeaves() throws {

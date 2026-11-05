@@ -111,8 +111,8 @@ enum MusicNativeKuwoSearch {
         try musicRequire(bytes.count <= 2 * 1024 * 1024, .limit)
         if let value = try? MJ.parse(bytes), value.isObject { return value }
         // Some native results use single-quoted strings. Translate only string
-        // delimiters/escapes; the strict JSON parser still rejects expressions,
-        // duplicate keys, trailing input and unquoted names. No JS evaluation.
+        // delimiters/escapes; the JSON parser still rejects expressions,
+        // trailing input and unquoted names. No JS evaluation.
         let input = Array(bytes)
         var output: [UInt8] = [], quote: UInt8 = 0, i = 0
         while i < input.count {

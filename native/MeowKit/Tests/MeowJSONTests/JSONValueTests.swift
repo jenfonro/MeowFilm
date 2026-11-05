@@ -11,38 +11,26 @@ final class JSONValueTests: XCTestCase {
             "array": .array([.number(1), .string("1"), .bool(true)])
         ])
         let encoded = try JSONEncoder().encode(value)
-        XCTAssertEqual(try StrictJSON.decode(encoded), value)
         XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: encoded), value)
     }
 
-    func testEncodingRejectsUnsafeNumbersAndNonASCIIKeys() {
+    func testEncodingRejectsNonJSONNumbers() {
         let values: [JSONValue] = [
-            .number(.nan), .number(.infinity), .number(-.infinity),
-            .number(9_007_199_254_740_992), .number(-9_007_199_254_740_992),
-            .object(["é": .number(1)]), .array([.object(["中": .null])])
+            .number(.nan), .number(.infinity), .number(-.infinity)
         ]
         for value in values {
-            XCTAssertThrowsError(try JSONEncoder().encode(value)) {
-                XCTAssertEqual($0 as? JSONValueError, .invalidValue)
-            }
+            XCTAssertThrowsError(try JSONEncoder().encode(value))
         }
     }
 
-    func testValidationIncludesNestedValuesAndHasAnExactDepthBound() throws {
-        var value: JSONValue = .null
-        for _ in 0..<64 { value = .array([value]) }
-        XCTAssertNoThrow(try value.validate())
-        XCTAssertThrowsError(try JSONValue.array([value]).validate()) {
-            XCTAssertEqual($0 as? JSONValueError, .invalidValue)
-        }
-        XCTAssertThrowsError(try JSONValue.object(["a": .array([.number(.nan)])]).validate())
+    func testUnicodeKeysAndLargeNumericMetadataRoundTrip() throws {
+        let value: JSONValue = .object(["中文": .array([.number(9_007_199_254_740_992)]),
+                                        "é": .number(-9_007_199_254_740_992)])
+        XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(value)), value)
     }
-
-    func testStrictDocumentBudgetRejectsEmptyAndNonPositiveLimits() {
-        for (bytes, limit) in [(Data(), 1024), (Data("0".utf8), 0), (Data("0".utf8), -1)] {
-            XCTAssertThrowsError(try StrictJSON.decode(bytes, maximumBytes: limit)) {
-                XCTAssertEqual($0 as? JSONValueError, .limit)
-            }
+    func testCodableDecoderRejectsInvalidJSON() throws {
+        for text in ["", "0 1", #"{"x":NaN}"#, #"{"x":}"#] {
+            XCTAssertThrowsError(try JSONDecoder().decode(JSONValue.self, from: Data(text.utf8)))
         }
     }
 }

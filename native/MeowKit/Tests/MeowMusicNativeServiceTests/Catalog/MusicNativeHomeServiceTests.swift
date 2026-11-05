@@ -1,5 +1,6 @@
 import XCTest
 import MeowMusicFeature
+import MeowStorage
 @testable import MeowMusicNativeService
 
 private final class HomeSnapshotFixture: MusicHomeSnapshotStoring, @unchecked Sendable {
@@ -19,10 +20,12 @@ private actor HomeAccountFixture: MusicNativeAccountProviding, MusicNativeHomeDi
     var activityPayload: Data?
     var activityGate: NativeMusicGate?
     var activityFailure: MusicServiceError?
+    var dailyPage: MusicNativeTrackPage?
     init(loggedIn: Bool = true) { binding = .init(scope: loggedIn ? "synthetic-account-a" : "guest", revision: UUID(), loggedIn: loggedIn) }
     func suspend(_ gate: NativeMusicGate) { self.gate = gate }
     func setHome(_ value: Data) { homePayload = value }
     func setActivity(_ value: Data) { activityPayload = value }
+    func setDaily(_ value: MusicNativeTrackPage) { dailyPage = value }
     func suspendActivity(_ gate: NativeMusicGate) { activityGate = gate }
     func failActivity(_ value: MusicServiceError) { activityFailure = value }
     func changeAccount() {
@@ -69,7 +72,10 @@ private actor HomeAccountFixture: MusicNativeAccountProviding, MusicNativeHomeDi
         case .playlistMetadata, .vipSongs: throw MusicServiceError.invalidRequest
         }
     }
-    func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage { throw MusicServiceError.unsupported }
+    func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage {
+        guard platform == .netease, kind == "daily", let dailyPage else { throw MusicServiceError.unsupported }
+        return dailyPage
+    }
     func nativeCollections(platform: MusicAccountPlatform, cursor: String?) throws -> MusicAccountCollectionPage { throw MusicServiceError.unsupported }
     func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicNativeTrackPage { throw MusicServiceError.unsupported }
     func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) throws -> [MusicPlaybackOption] { throw MusicServiceError.unsupported }
@@ -227,6 +233,88 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         var raw = try MJ.parse(data); raw["url"] = .string("https://invalid.example/executable")
         XCTAssertThrowsError(try MusicNativeHomeSnapshot.decode(raw.bytes, source: .netease, scope: "synthetic"))
     }
+    func testImageQueriesSurviveNormalizationLibraryCleaningAndHomeSnapshotRestore() throws {
+        let image = "http://p1.music.126.net/cover.jpg?param=800y800&quality=90&extra=a%2Fb"
+        let expected = image.replacingOccurrences(of: "http:", with: "https:")
+        var raw = MusicNativePublicBrowseFixture.song("41")
+        raw["al"]["picUrl"] = .string(image)
+        let track = try MusicNativePlatforms.browseWYSong(raw)
+        let song = try MusicModel.normalize(track)
+        XCTAssertEqual(song["cover_url"].string, expected)
+        let cleaned = try MusicModel.cleanSong(song)
+        XCTAssertEqual(cleaned["cover_url"].string, expected)
+        XCTAssertEqual(cleaned["sources"].array[0]["musicInfo"]["img"].string, expected)
+        let collection = MusicPublicBrowseCollection(platform: .netease, nativeID: "42", title: "歌单",
+                                                     artwork: URL(string: image))
+        let items: [MusicNativePublicBrowseItem] = [
+            .init(id: "song", title: "歌曲", artwork: URL(string: image), content: .song(track)),
+            .init(id: "playlist", title: "歌单", artwork: collection.artwork, content: .collection(collection))
+        ]
+        let page = MusicNativePublicBrowseDiscovery(sections: [.init(id: "s", title: "", items: items)])
+        let encoded = try MusicNativeHomeSnapshot.encode(page, source: .netease, scope: "synthetic")
+        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(encoded, source: .netease, scope: "synthetic"))
+        XCTAssertEqual(restored.sections[0].items.compactMap { $0.artwork?.absoluteString }, [expected, expected])
+        guard case .song(let restoredTrack) = restored.sections[0].items[0].content,
+              case .collection(let restoredCollection) = restored.sections[0].items[1].content else {
+            return XCTFail("Content identities must survive snapshot restore")
+        }
+        XCTAssertEqual(try MJ.parse(restoredTrack.data)["img"].string, expected)
+        XCTAssertEqual(restoredCollection.artwork?.absoluteString, expected)
+        XCTAssertEqual(MusicModel.publicURL(.string("https://p1.music.126.net/a.jpg?token=synthetic")), .string(""))
+        XCTAssertEqual(MusicModel.publicURL(.string("https://p1.music.126.net/a.jpg?%63ookie=synthetic")), .string(""))
+        for query in ["MUSIC_U=synthetic", "MUSIC%5FA=synthetic", "__csrf=synthetic", "csrf_token=synthetic",
+                      "uin=42", "qm_keyst=synthetic", "vkey=synthetic", "userid=42&t1=synthetic"] {
+            let value = "https://p1.music.126.net/a.jpg?param=200y200&" + query
+            XCTAssertEqual(MusicModel.publicURL(.string(value)), .string(""), query)
+            var credential = MusicNativePublicBrowseFixture.song("41")
+            credential["al"]["picUrl"] = .string(value)
+            let cleaned = try MusicModel.normalize(MusicNativePlatforms.browseWYSong(credential))
+            XCTAssertEqual(cleaned["cover_url"].string, "", query)
+            XCTAssertFalse(cleaned["sources"].array[0]["musicInfo"].contains("img"), query)
+        }
+    }
+    func testSnapshotDocumentRestoresIndependentCDNQueriesWithoutPersistingCredentials() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let factory: @Sendable () throws -> DocumentStore = {
+            try DocumentStore(baseURL: root, namespace: MusicNativeHomeSnapshotDocument.namespace)
+        }
+        let document = MusicNativeHomeSnapshotDocument(storeFactory: factory)
+        let image = URL(string: "http://independent-cdn.invalid/cover.jpg?param=800y800&extra=a%2Fb")!
+        let secret = URL(string: "https://independent-cdn.invalid/avatar.jpg?MUSIC_U=synthetic-private")!
+        let collection = MusicPublicBrowseCollection(platform: .netease, nativeID: "42", title: "歌单", artwork: image)
+        let page = MusicNativePublicBrowseDiscovery(sections: [.init(id: "s", title: "", items: [
+            .init(id: "playlist", title: "歌单", artwork: image, content: .collection(collection)),
+            .init(id: "private", title: "歌单", artwork: secret, content: .collection(collection))
+        ])])
+        try document.write(MusicNativeHomeSnapshot.encode(page, source: .netease, scope: "synthetic"))
+        let reopened = MusicNativeHomeSnapshotDocument(storeFactory: factory)
+        let data = try XCTUnwrap(reopened.read())
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("synthetic-private"))
+        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease, scope: "synthetic"))
+        let expected = "https://independent-cdn.invalid/cover.jpg?param=800y800&extra=a%2Fb"
+        XCTAssertEqual(restored.sections[0].items[0].artwork?.absoluteString, expected)
+        XCTAssertNil(restored.sections[0].items[1].artwork)
+        guard case .collection(let restoredCollection) = restored.sections[0].items[0].content else {
+            return XCTFail("Collection identity must survive document restore")
+        }
+        XCTAssertEqual(restoredCollection.artwork?.absoluteString, expected)
+        try reopened.clear()
+        XCTAssertNil(try document.read())
+    }
+    func testDailyRecommendationRowsKeepNormalizedAlbumArtwork() async throws {
+        let account = HomeAccountFixture(), value = try await service(account)
+        var raw = MusicNativePublicBrowseFixture.song("41")
+        raw["al"]["picUrl"] = .string("http://p1.music.126.net/daily.jpg?param=300y300")
+        await account.setDaily(.init(items: [try MusicNativePlatforms.browseWYSong(raw)]))
+        let page = try await value.publicDiscovery(.daily(.netease), cursor: nil)
+        let item = try XCTUnwrap(page.sections.first?.items.first)
+        XCTAssertEqual(item.artwork?.absoluteString, "https://p1.music.126.net/daily.jpg?param=300y300")
+        guard case .track(let track) = item.content else { return XCTFail("daily row must stay playable") }
+        XCTAssertEqual(track.artwork, item.artwork)
+        await value.close()
+    }
 
     func testArtistActivityIsOnlySupplementedOnTheFirstHomePageAndEmptyWorksStayAbsent() async throws {
         let account = HomeAccountFixture(), value = try await service(account)
@@ -358,7 +446,8 @@ final class MusicNativeHomeServiceTests: XCTestCase {
             """#.utf8)),
             try MJ.parse(Data(#"""
             {"code":200,"data":{"blocks":[{"positionCode":"public","dslData":{"title":"歌单",
-              "items":[{"resourceType":"playlist","id":"41","title":"公开歌单"}]}}],"hasMore":false}}
+              "items":[{"resourceType":"playlist","id":"41","title":"公开歌单",
+                "coverImg":"https://p1.music.126.net/public.jpg"}]}}],"hasMore":false}}
             """#.utf8)),
         ])
         let value = try await service(account, http: http)

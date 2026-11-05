@@ -6,6 +6,23 @@ import MeowJSON
 @testable import MeowMusicPlatform
 
 final class MusicNeteaseBusinessTests: XCTestCase {
+    func testAccountCollectionRetainsAlbumArtworkAndItsImageParameters() async throws {
+        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let image = "http://p1.music.126.net/album.jpg?param=800y800&quality=90"
+        var song = MusicNeteaseFixture.song()
+        song["al"] = ["id": 301, "name": "专辑", "picUrl": image]
+        var detail = MusicNeteaseFixture.detail()
+        var playlist = try XCTUnwrap(detail["playlist"] as? [String: Any])
+        playlist["tracks"] = [song, MusicNeteaseFixture.song(102)]
+        detail["playlist"] = playlist
+        await f.http.replies("/eapi/v6/playlist/detail", [try MusicNeteaseFixture.response(detail)])
+        let page = try await f.service.nativeTracks(platform: .netease, collectionID: "501", cursor: nil)
+        let row = try MusicQQWire.decode(XCTUnwrap(page.items.first).data)
+        XCTAssertEqual(row["img"] as? String, image.replacingOccurrences(of: "http:", with: "https:"))
+        let calls = await f.http.recorded()
+        XCTAssertFalse(calls.contains { $0.request.url.path == "/weapi/v3/song/detail" })
+        _ = await f.service.close()
+    }
     func testAccountCollectionReadsMoreThanTwoThousandSongsWithoutHydratingEveryPage() async throws {
         let f = try MusicNeteaseNativeFixture(); try await f.enable()
         let ids = Array(101..<2102)

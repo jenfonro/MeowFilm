@@ -1,7 +1,6 @@
 import Foundation
 import MeowMusicFeature
 import MeowStorage
-import MeowJSON
 
 /// Installation-client state for WY/KG. QQ retains its existing protected
 /// document and protocol owner. No construction/admission starts platform I/O.
@@ -41,7 +40,6 @@ public final class NativeMusicClientService: MusicNativeClientContextProviding, 
         .init(document: document, compatibilityOpen: available, decode: { bytes in
             do {
                 guard bytes.count <= 32_768 else { throw MusicServiceError.corruptDocument }
-                _ = try StrictJSON.decode(bytes, maximumBytes: 32_768)
                 let root = try MusicQQWire.decode(bytes)
                 guard Set(root.keys) == ["schema", "platform", "device"],
                       try MusicQQWire.integer(root["schema"]) == 1, root["platform"] as? String == platform.rawValue else {

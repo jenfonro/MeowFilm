@@ -26,9 +26,8 @@ final class MusicArtworkHTTP: NSObject, URLSessionDataDelegate, @unchecked Senda
         super.init()
     }
     static func permits(_ url: URL?) -> Bool {
-        guard let url, url.scheme == "https", url.user == nil, url.password == nil, url.fragment == nil,
-              url.port == nil || url.port == 443, let host = url.host, !host.isEmpty else { return false }
-        return true
+        guard let url, url.scheme == "https" else { return false }
+        return MusicArtworkURL.normalized(url.absoluteString) != nil
     }
     private static func request(_ url: URL) -> URLRequest {
         var request = URLRequest(url: url)
@@ -38,6 +37,24 @@ final class MusicArtworkHTTP: NSObject, URLSessionDataDelegate, @unchecked Senda
     func read(_ url: URL) async throws -> Data {
         try Task.checkCancellation()
         guard Self.permits(url) else { throw URLError(.badURL) }
+        do { return try await fetch(url) }
+        catch let error as URLError where error.code == .dataLengthExceedsMaximum {
+            // NetEase NOS serves the uploaded original when no processing
+            // query is present; some exceed the byte budget. Ask the same
+            // origin once for an aspect-preserving rendition no larger than
+            // the 1024-pixel decode bound used by MusicArtworkImages.
+            guard let rendition = Self.boundedNeteaseRendition(url) else { throw error }
+            try Task.checkCancellation()
+            return try await fetch(rendition)
+        }
+    }
+    private static func boundedNeteaseRendition(_ url: URL) -> URL? {
+        guard let host = url.host?.lowercased(), host.hasSuffix(".music.126.net"),
+              var parts = URLComponents(url: url, resolvingAgainstBaseURL: false), parts.percentEncodedQuery == nil else { return nil }
+        parts.percentEncodedQuery = "imageView&thumbnail=1024x1024"
+        return parts.url
+    }
+    private func fetch(_ url: URL) async throws -> Data {
         let flight = Flight()
         let data: Data = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in

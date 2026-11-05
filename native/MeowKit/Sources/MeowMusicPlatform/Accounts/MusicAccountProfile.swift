@@ -19,18 +19,7 @@ enum MusicAccountProfileWire {
         guard let raw, !(raw is NSNull), (raw as? String) != "" else { return nil }
         var text = try MusicAccountPublicText.profile(MusicQQWire.string(raw, maximum: 4096), secrets: secrets)
         if platform == .kugou { text = text.replacingOccurrences(of: "{size}", with: "480") }
-        guard var url = URLComponents(string: text), ["http", "https"].contains(url.scheme ?? ""),
-              url.user == nil, url.password == nil, url.port == nil, url.fragment == nil,
-              let host = url.host?.lowercased() else { throw MusicServiceError.upstreamInvalid }
-        let domains: [String]
-        switch platform {
-        case .netease: domains = ["music.126.net", "music.163.com"]
-        case .kugou: domains = ["kugou.com"]
-        case .qq: domains = ["qlogo.cn", "gtimg.cn", "qq.com"]
-        }
-        guard domains.contains(where: { host == $0 || host.hasSuffix("." + $0) }) else { return nil }
-        url.scheme = "https"
-        return url.url
+        return MusicArtworkURL.normalized(text)
     }
     static func expiry(_ raw: Any?) -> Date? {
         guard let raw, !(raw is NSNull) else { return nil }

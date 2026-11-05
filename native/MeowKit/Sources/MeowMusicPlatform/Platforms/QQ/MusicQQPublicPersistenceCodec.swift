@@ -38,9 +38,9 @@ enum MusicQQPublicPersistenceCodec {
     }
     static func decode(_ bytes: Data) throws -> [String: Any] {
         do {
-            _ = try StrictJSON.decode(bytes, maximumBytes: maximumBytes)
-            guard let root = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-                  Set(root.keys).isSubset(of: ["version", "scope", "device", "qimei", "session"]),
+            guard bytes.count <= maximumBytes else { throw MusicServiceError.corruptDocument }
+            let root = try JSONObject.decode(bytes)
+            guard Set(root.keys).isSubset(of: ["version", "scope", "device", "qimei", "session"]),
                   try MusicQQWire.integer(root["version"], maximum: 1, minimum: 1) == 1,
                   root["scope"] as? String == "qq-public" else { throw MusicServiceError.corruptDocument }
             var device = try object(root["device"], keys: strings.union(numbers))

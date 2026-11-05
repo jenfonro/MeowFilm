@@ -45,9 +45,11 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
         XCTAssertEqual(row["name"].string, "Don't \"stop\" &lt; 中")
         XCTAssertEqual(row["singer"].string, "One、Two")
         for bad in ["{'TOTAL':0};alert(1)", "{'TOTAL':undefined}", "{'TOTAL':0,'abslist':()=>[]}",
-                    "{'x':'unterminated}", "{\"TOTAL\":0}{\"abslist\":[]}", "{'TOTAL':0,'TOTAL':1,'abslist':[]}"] {
+                    "{'x':'unterminated}", "{\"TOTAL\":0}{\"abslist\":[]}"] {
             XCTAssertThrowsError(try MusicNativeKuwoSearch.object(Data(bad.utf8)), bad)
         }
+        let repeated = try MusicNativeKuwoSearch.object(Data("{'TOTAL':0,'TOTAL':1,'abslist':[]}".utf8))
+        XCTAssertEqual(repeated["TOTAL"], .n(1))
         XCTAssertThrowsError(try MusicNativeKuwoSearch.text(.string("&#13;bad"), maximum: 1024))
     }
 

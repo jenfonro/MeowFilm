@@ -12,7 +12,7 @@ private actor BrowseMetadataReads {
 }
 
 final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
-    func testHomeSummaryOnlyFillsMissingTitleWithoutLoadingOptionalCoversOrMembers() async throws {
+    func testHomeSummaryFillsMissingTitleAndArtworkWithoutLoadingMembers() async throws {
         let resources = try MJ.parse(Data(#"""
         [
           {"resourceType":"playlist","id":41,"title":"歌曲预览","subTitle":"私人雷达","singleLineTitle":"官方副标题"},
@@ -20,12 +20,14 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
           {"resourceType":"playlist","id":43,"title":"封面完整","coverImg":"https://p1.music.126.net/complete.jpg"},
           {"resourceType":"playlist","id":44,"title":"保留标题"}
         ]
-        """#.utf8), mode: .upstream)
+        """#.utf8))
         let metadata = try MJ.parse(Data(#"""
         [
-          {"id":42,"name":"补齐歌单名","coverImgUrl":"https://p1.music.126.net/replacement.jpg"}
+          {"id":41,"name":"不可替换原名","coverImgUrl":"http://p1.music.126.net/radar.jpg?param=800y800&quality=90"},
+          {"id":42,"name":"补齐歌单名","coverImgUrl":"https://p1.music.126.net/replacement.jpg"},
+          {"id":44,"name":"不可替换原名","coverImgUrl":"https://p1.music.126.net/new.jpg"}
         ]
-        """#.utf8), mode: .upstream)
+        """#.utf8))
         let block = MJ.obj([("dslData", .obj([("dslShowTitle", .bool(false)),
             ("blockResource", .obj([("resources", resources)]))]))])
         let http = NativeMusicHTTPFixture([
@@ -38,7 +40,8 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
         let items = try XCTUnwrap(page.sections.first).items
         XCTAssertEqual(items.map(\.title), ["私人雷达", "补齐歌单名", "封面完整", "保留标题"])
         XCTAssertEqual(items.map { $0.artwork?.absoluteString },
-            [nil, "https://p1.music.126.net/original.jpg", "https://p1.music.126.net/complete.jpg", nil])
+            ["https://p1.music.126.net/radar.jpg?param=800y800&quality=90", "https://p1.music.126.net/original.jpg",
+             "https://p1.music.126.net/complete.jpg", "https://p1.music.126.net/new.jpg"])
         for item in items {
             if case .collection(let value) = item.content {
                 XCTAssertEqual(value.artwork, item.artwork)
@@ -49,7 +52,45 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
         XCTAssertEqual(calls.count, 2)
         let request = try MusicNativePublicBrowseFixture.decryptEAPI(calls[1])
         XCTAssertEqual(request.0, "/api/tag/tab/playlists")
-        XCTAssertEqual(request.1["ids"].string, "42")
+        XCTAssertEqual(request.1["ids"].string, "41,42,44")
+    }
+    func testMissingCoversAreDeduplicatedAcrossVisibleSectionsAndExistingPreviewsSurvive() async throws {
+        let collection = MusicPublicBrowseCollection(platform: .netease, nativeID: "41", title: "已有名称")
+        let preview = NativeMusicFixture.track()
+        let item = MusicNativePublicBrowseItem(id: "one", title: collection.title, content: .collection(collection),
+                                               previewSongs: [preview])
+        let full = MusicPublicBrowseCollection(platform: .netease, nativeID: "42", title: "完整",
+                                               artwork: URL(string: "https://p1.music.126.net/complete.jpg"))
+        let hidden = MusicNativePublicBrowseItem(id: "hidden", title: "隐藏", content: .collection(
+            .init(platform: .netease, nativeID: "43", title: "隐藏")))
+        let section = MusicNativePublicBrowseSection(id: "s", title: "", items: [item],
+            tabs: [.init(id: "selected", title: "", items: [item]), .init(id: "hidden", title: "", items: [hidden])],
+            selectedTab: "selected")
+        let input = MusicNativePublicBrowseDiscovery(sections: [section, .init(id: "t", title: "", items: [
+            item, .init(id: "full", title: full.title, artwork: full.artwork, content: .collection(full))])])
+        let port = MusicNativePlatforms(transport: NativeMusicNoNetwork(), qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
+        let result = try await port.browseEnrich(input, metadata: { request in
+            guard case .playlistIDs(let ids) = request else { throw MusicServiceError.invalidRequest }
+            XCTAssertEqual(ids, ["41"])
+            return Data(#"{"code":200,"data":[{"id":41,"name":"补读名","coverImgUrl":"https://p1.music.126.net/cover.jpg?param=800y800"}]}"#.utf8)
+        })
+        XCTAssertEqual(result.sections[0].items[0].previewSongs.map(\.data), [preview.data])
+        XCTAssertEqual(result.sections[0].items[0].title, "已有名称")
+        XCTAssertEqual(result.sections[0].items[0].artwork, result.sections[1].items[0].artwork)
+        XCTAssertNil(result.sections[0].tabs[1].items[0].artwork)
+        XCTAssertEqual(result.sections[1].items[1].artwork, full.artwork)
+    }
+    func testOptionalCoverReadFailureKeepsExistingContentAndAuthenticationStillPropagates() async throws {
+        let item = MusicNativePublicBrowseItem(id: "one", title: "歌单", content: .collection(
+            .init(platform: .netease, nativeID: "41", title: "歌单")))
+        let input = MusicNativePublicBrowseDiscovery(sections: [.init(id: "s", title: "", items: [item])])
+        let port = MusicNativePlatforms(transport: NativeMusicNoNetwork(), qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
+        let result = try await port.browseEnrich(input, metadata: { _ in throw MusicServiceError.upstreamFailed })
+        XCTAssertEqual(result.sections[0].items[0].title, "歌单")
+        do {
+            _ = try await port.browseEnrich(input, metadata: { _ in throw MusicServiceError.authRequired })
+            XCTFail("Authentication failures must propagate")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
     }
     func testReturnedSongDataOnlyReadsMissingVisibleIDsAndLeavesHiddenTabUntouched() async throws {
         let ids = (1...30).map(String.init)
@@ -104,7 +145,7 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
     }
 
     func testHomeKeepsSeparateDSLRootsHeadingsHiddenTitleAndLargeMetadata() throws {
-        let dsl = try MJ.parse(Data(#"{"first":{"header":{"title":"原版栏目一"},"items":[{"resourceType":"playlist","id":41,"name":"歌单","coverUrl":"https://p1.music.126.net/a.jpg","metadata":18446744073709551617}]},"second":{"header":{"title":"原版栏目二"},"items":[{"resourceType":"song","id":42,"name":"歌曲"}]}}"#.utf8), mode: .upstream)
+        let dsl = try MJ.parse(Data(#"{"first":{"header":{"title":"原版栏目一"},"items":[{"resourceType":"playlist","id":41,"name":"歌单","coverUrl":"https://p1.music.126.net/a.jpg","metadata":18446744073709551617}]},"second":{"header":{"title":"原版栏目二"},"items":[{"resourceType":"song","id":42,"name":"歌曲"}]}}"#.utf8))
         let decoded = try MusicNativePublicBrowseParser.object(.string(dsl.json))
         XCTAssertEqual(decoded, dsl)
         let block = MJ.obj([("positionCode", .string("root")), ("dslData", decoded)])

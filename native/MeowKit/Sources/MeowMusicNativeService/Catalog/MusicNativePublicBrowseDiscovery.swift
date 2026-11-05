@@ -20,6 +20,11 @@ struct MusicNativePublicBrowseItem: Sendable {
     var recommendationReason = ""
     var coverLabel = ""
     var isRanking = false
+    /// A playlist summary still missing a display field that `browseEnrich` fills.
+    var needsPlaylistSummary: Bool {
+        guard case .collection(let value) = content, value.kind == .playlist else { return false }
+        return value.title.isEmpty || value.artwork == nil || artwork == nil
+    }
 }
 struct MusicNativePublicBrowseSectionTab: Sendable {
     let id: String
@@ -84,7 +89,7 @@ enum MusicNativePublicBrowseParser {
     static func object(_ value: MJ) throws -> MJ {
         if value.isString {
             try musicRequire(value.string.utf8.count <= 512_000, .limit)
-            return try MJ.parse(Data(value.string.utf8), maximum: 512_000, mode: .upstream)
+            return try MJ.parse(Data(value.string.utf8), maximum: 512_000)
         }
         return value
     }
@@ -496,14 +501,14 @@ extension MusicNativePlatforms {
         var songIDs: [String] = [], listIDs: [String] = []
         for item in all {
             if case .songID(let id) = item.content, !songIDs.contains(id) { songIDs.append(id) }
-            if case .collection(let value) = item.content, value.kind == .playlist,
-               value.title.isEmpty, !listIDs.contains(value.nativeID) { listIDs.append(value.nativeID) }
+            if case .collection(let value) = item.content, item.needsPlaylistSummary,
+               !listIDs.contains(value.nativeID) { listIDs.append(value.nativeID) }
         }
         var songs: [String: MusicNativeTrackData] = [:], lists: [String: MusicPublicBrowseCollection] = [:]
         for start in stride(from: 0, to: songIDs.count, by: 100) {
             let ids = Array(songIDs.dropFirst(start).prefix(100))
             let root: MJ
-            if let metadata { root = try MJ.parse(await metadata(.songIDs(ids)), maximum: 2 * 1024 * 1024, mode: .upstream) }
+            if let metadata { root = try MJ.parse(await metadata(.songIDs(ids)), maximum: 2 * 1024 * 1024) }
             else {
                 let c = "[" + ids.map { "{\"id\":" + $0 + "}" }.joined(separator: ",") + "]"
                 root = try await browseWEAPI("/api/v3/song/detail", .obj([("c", .string(c))]))
@@ -518,8 +523,19 @@ extension MusicNativePlatforms {
         for start in stride(from: 0, to: listIDs.count, by: 100) {
             let ids = Array(listIDs.dropFirst(start).prefix(100))
             let root: MJ
-            if let metadata { root = try MJ.parse(await metadata(.playlistIDs(ids)), maximum: 2 * 1024 * 1024, mode: .upstream) }
-            else { root = try await wy("/api/tag/tab/playlists", .obj([("ids", .string(ids.joined(separator: ",")))])) }
+            do {
+                if let metadata { root = try MJ.parse(await metadata(.playlistIDs(ids)), maximum: 2 * 1024 * 1024) }
+                else { root = try await wy("/api/tag/tab/playlists", .obj([("ids", .string(ids.joined(separator: ",")))])) }
+            } catch {
+                let required = all.contains { item in
+                    if case .collection(let value) = item.content { return ids.contains(value.nativeID) && value.title.isEmpty }
+                    return false
+                }
+                let failure = MusicServiceError.sanitized(error)
+                if required || Task.isCancelled || failure.isAuthenticationFailure ||
+                    [.cancelled, .closed, .staleResult, .staleAccess, .accessUnavailable].contains(failure) { throw error }
+                continue
+            }
             let data = root.contains("data") ? root["data"] : root
             let rows = data.isArray ? data : data.contains("playlists") ? data["playlists"] : data["list"]
             try musicRequire(rows.isArray && rows.array.count <= ids.count, .upstreamInvalid)
