@@ -37,6 +37,8 @@ public static partial class MusicUiTests
                 Visuals(sources).OfType<Button>().Any(button => Equals(button.Content, "下载导入")),
                 "local and network source installation are available");
             Equal(3, ((ItemsControl)sources.FindName("SourceList")).Items.Count);
+            True(Visuals(sources).OfType<FrameworkElement>().All(element => element.ToolTip is null),
+                "source names and capabilities have no hover hints");
             var qq = f.Module.OfficialSourceRows.Single(row => row.Platform == "tx");
             var toggle = Visuals(sources).OfType<CheckBox>().Single(box => ReferenceEquals(box.DataContext, qq));
             toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, false);

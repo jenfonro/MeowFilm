@@ -43,6 +43,8 @@ public static class FilmPlaybackTests
             module.IsPlayback && module.Heading == "播放页", "direct route publishes the playback heading");
         Check(scene.Source.Calls == 0, "direct local preview does not load home or film details");
         CheckPreview(scene.Page);
+        Check(Visuals(scene.Playback).OfType<FrameworkElement>().All(element => element.ToolTip is null),
+            "film titles descriptions and disabled playback have no hover hints");
         Check(ReferenceEquals(scene.Playback.DataContext, scene.Page) &&
             Named<Grid>(scene.View, "PlaybackPage").IsVisible,
             "FilmView presents the bound playback page");

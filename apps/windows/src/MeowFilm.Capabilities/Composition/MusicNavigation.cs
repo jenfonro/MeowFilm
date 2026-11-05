@@ -70,7 +70,7 @@ public sealed partial class MusicCapability
     }
     public async Task NavigateAsync(string route, CancellationToken cancellationToken)
     {
-        if (stopping) return;
+        if (stopping || IsUnsupportedCatalogRoute(route)) return;
         RetireOperationStatus();
         long submission = ++navigationSubmission;
         bool retiringDiscovery = route != "catalog-discovery" && (IsDiscovery || discoveryRequest is not null);

@@ -48,7 +48,7 @@
          <Image Grid.Column="1" Style="{StaticResource Settings.PlatformLogo}" Margin="0,0,10,0"
                 Visibility="{Binding ShowLogos,ElementName=Root,Converter={StaticResource MeowFilm.BoolToVisibility}}"
                 AutomationProperties.Name="{Binding Label,StringFormat={}{0}标志}"/>
-         <TextBlock Grid.Column="2" Text="{Binding Label}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Label}">
+         <TextBlock Grid.Column="2" Text="{Binding Label}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis">
           <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
            <Style.Triggers><DataTrigger Binding="{Binding IsSelected,RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
             <Setter Property="Foreground" Value="{Binding Foreground,RelativeSource={RelativeSource AncestorType=ListBoxItem}}"/>

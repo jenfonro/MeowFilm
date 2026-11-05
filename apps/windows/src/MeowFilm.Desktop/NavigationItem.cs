@@ -21,11 +21,9 @@ public sealed class DesktopNavigationGroupAction : ICommand
         ArgumentException.ThrowIfNullOrWhiteSpace(label);
         this.execute = execute ?? throw new ArgumentNullException(nameof(execute));
         this.canExecute = canExecute ?? (() => true);
-        Label = label;
         AutomationName = string.IsNullOrWhiteSpace(automationName) ? label : automationName;
     }
 
-    public string Label { get; }
     public string AutomationName { get; }
     public event EventHandler? CanExecuteChanged;
     public bool CanExecute(object? parameter) => canExecute();

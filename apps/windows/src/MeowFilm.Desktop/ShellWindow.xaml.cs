@@ -796,7 +796,6 @@ public sealed partial class ShellWindow : Window
         MaximizeGlyph.Text = maximized ? "\uE923" : "\uE922";
         var label = maximized ? "还原" : "最大化";
         AutomationProperties.SetName(MaximizeButton, label);
-        MaximizeButton.ToolTip = label;
         UpdatePlayerDetailChrome();
     }
 

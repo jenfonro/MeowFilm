@@ -76,7 +76,7 @@
    <TextBlock Text="{Binding Title}" Margin="0,9,0,0" Height="21"
               Foreground="{DynamicResource MeowFilm.Brush.Text}"
               FontSize="15" FontWeight="ExtraBold" TextAlignment="Center"
-              TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}"/>
+              TextTrimming="CharacterEllipsis"/>
   </StackPanel>
  </Button>
 </UserControl>

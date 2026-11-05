@@ -157,7 +157,7 @@ public static partial class MusicUiTests
             Equal(0.5, slider.Minimum); Equal(3d, slider.Maximum); Equal(0.1, slider.TickFrequency);
             True(slider.IsSnapToTickEnabled, "keyboard/mouse tenths");
             await f.Module.ChangePlaybackRateAsync(1.3); await Drain();
-            Equal("1.3×", button.ToolTip?.ToString()); // Compact footer keeps the requested rate in its tooltip.
+            True(button.ToolTip is null, "the footer has no explanatory hover hint");
             Equal(1.3, slider.Value);
             True(!f.Module.EffectivePlaybackRateVerified, "requested != measured");
         });

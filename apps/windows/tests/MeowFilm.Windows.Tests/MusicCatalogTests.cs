@@ -1576,11 +1576,29 @@ public static class MusicCatalogTests
             card.DataContext = section.Items[0];
             card.Measure(new Size(168, 300)); card.Arrange(new Rect(0, 0, 168, 300)); card.UpdateLayout();
             Equal(1, Descendants<TextBlock>(card).Count(text => text.Text == section.Items[0].Title));
-            True(!Descendants<TextBlock>(card).Any(t =>
-                t.GetBindingExpression(TextBlock.TextProperty)?.ParentBinding.Path?.Path == "ErrorText"),
-                "business errors must not be inserted in card layout");
-            Equal("ErrorText", card.GetBindingExpression(FrameworkElement.ToolTipProperty)?.ParentBinding.Path?.Path);
-
+            True(Descendants<FrameworkElement>(card).Prepend(card).All(element => element.ToolTip is null),
+                "catalog content has no hover hints");
+        });
+        yield return Case("catalog entry cover ranking and artist cards have no hover hints in either availability state", async () =>
+        {
+            var view = new MusicCatalogView();
+            foreach (var template in new[] { "Catalog.Entry", "Catalog.PlaylistCard", "Catalog.RankCoverCard", "Catalog.ArtistCard" })
+            foreach (var available in new[] { true, false })
+            {
+                var data = new MusicCatalogCard("card", "保留的内容标题", "保留的副标题", "",
+                    template == "Catalog.ArtistCard" ? "artist" : "playlist", "wy", ActionId: "123",
+                    Available: available, ErrorCode: available ? "" : "UNSUPPORTED");
+                var card = (FrameworkElement)((DataTemplate)view.FindResource(template)).LoadContent();
+                card.DataContext = data;
+                card.Measure(new Size(184, 300)); card.Arrange(new Rect(0, 0, 184, 300)); card.UpdateLayout();
+                await Drain();
+                var elements = Descendants<FrameworkElement>(card).Prepend(card).ToArray();
+                True(elements.All(element => element.ToolTip is null), template + " exposes no ordinary hover hints");
+                True(elements.OfType<TextBlock>().Any(text => text.Text == data.Title), "visible title remains");
+                var open = card is EntryCard entry ? (Button)entry.FindName("OpenButton") : (Button)card;
+                Equal(data.Title, AutomationProperties.GetName(open));
+                Equal(available, open.IsEnabled);
+            }
         });
         yield return Case("channel entry shelves reuse shared cards and supplied song previews", async () =>
         {
@@ -1692,10 +1710,18 @@ public static class MusicCatalogTests
             Equal("1001", MusicSongFixture.NativeId(song.Song!.Raw));
             True(song.Id != song.ActionId && song.ActionId == "1001", "domain identity not upstream locator");
             var daily = cards.Single(c => c.Kind == "daily");
-            True(!daily.CanOpen && daily.ErrorText.Length > 0, "unavailable business error, not fake clickable");
+            True(!daily.CanOpen && !daily.CanPlay, "unavailable content is not fake clickable");
             var count = f.Client.Log.Count;
+            var status = f.Module.Status;
+            var location = f.Module.CaptureNavigationLocation();
+            var statusChanges = 0;
+            f.Module.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(f.Module.Status)) statusChanges++; };
             await f.Module.OpenCatalogCardAsync(daily);
+            await f.Module.PlayCatalogCardAsync(daily);
+            Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(daily, default)).Count);
             Equal(count, f.Client.Log.Count);
+            Equal(status, f.Module.Status); Equal(0, statusChanges);
+            Equal(location, f.Module.CaptureNavigationLocation());
             Equal("playlist", cards.Single(c => c.Kind == "playlist").Kind);
         });
         yield return Case("channel descriptors expose generic placement and preserve native artists and VIP pages", async () =>

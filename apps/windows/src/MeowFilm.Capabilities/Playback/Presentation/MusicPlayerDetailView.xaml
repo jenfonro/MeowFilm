@@ -111,7 +111,7 @@
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
    <StackPanel>
     <TextBlock Text="{Binding CurrentTitle}" FontSize="26" FontWeight="SemiBold"
-               TextTrimming="CharacterEllipsis" Margin="0,0,0,10" ToolTip="{Binding CurrentTitle}"/>
+               TextTrimming="CharacterEllipsis" Margin="0,0,0,10"/>
     <WrapPanel Opacity=".68" Margin="0,0,0,18">
      <StackPanel Orientation="Horizontal" Margin="0,0,18,0">
       <StackPanel.Style><Style TargetType="StackPanel"><Style.Triggers>
@@ -209,7 +209,7 @@
        </Button>
        <Button Grid.Column="1" Tag="{Binding}" Click="PlayLyric_Click" Content="&#xE768;" Width="30" Height="30"
                IsEnabled="{Binding DataContext.CanSeek,RelativeSource={RelativeSource AncestorType=local:MusicPlayerDetailView}}"
-               AutomationProperties.Name="播放此处" ToolTip="播放此处">
+               AutomationProperties.Name="播放此处">
         <Button.Style><Style TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}">
          <Setter Property="Foreground" Value="#EEEEF0"/><Setter Property="Opacity" Value="0"/>
          <Style.Triggers>

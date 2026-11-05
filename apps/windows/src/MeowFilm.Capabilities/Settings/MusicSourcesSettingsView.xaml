@@ -48,9 +48,9 @@
        <ColumnDefinition/><ColumnDefinition Width="90"/><ColumnDefinition Width="56"/><ColumnDefinition Width="80"/>
       </Grid.ColumnDefinitions>
       <StackPanel VerticalAlignment="Center">
-       <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}"/>
+       <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"/>
        <TextBlock Text="{Binding Metadata}" Style="{StaticResource Source.Muted}" Margin="0,4,0,0"
-                  TextTrimming="CharacterEllipsis" ToolTip="{Binding Capabilities}"/>
+                  TextTrimming="CharacterEllipsis"/>
       </StackPanel>
       <TextBlock Grid.Column="1" Text="{Binding StateText}" Style="{StaticResource Source.Muted}"
                  VerticalAlignment="Center" HorizontalAlignment="Center"/>

@@ -375,6 +375,9 @@ public static partial class MusicUiTests
             });
             source.RootVisual = page;
             Render(page, 1110, 800); await Drain();
+            True(Visuals(page).OfType<FrameworkElement>().All(element => element.ToolTip is null) &&
+                Visuals(ordinary).OfType<FrameworkElement>().All(element => element.ToolTip is null),
+                "player titles and controls have no ordinary hover hints");
             Equal(subscribers, f.Playback.Subscribers);
             f.Playback.Start(); await Drain();
             var play = (Button)footer.FindName("PlayButton");

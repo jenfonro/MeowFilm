@@ -43,6 +43,8 @@ public static partial class DesktopTests
             });
             source.RootVisual = root;
             root.Measure(new(1110, 800)); root.Arrange(new Rect(0, 0, 1110, 800)); root.UpdateLayout(); await DrainAsync();
+            True(ChromeVisuals(root).OfType<FrameworkElement>().All(element => element.ToolTip is null),
+                "window chrome and navigation have no ordinary hover hints");
             var navigation = f.Element<ListBox>("NavigationList");
             True(!navigation.Focusable && !f.Element<ScrollViewer>("SidebarScroll").Focusable,
                 "scroll and list containers do not take focus away from navigation rows");

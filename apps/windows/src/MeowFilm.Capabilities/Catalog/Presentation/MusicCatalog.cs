@@ -371,7 +371,7 @@ public sealed partial class MusicCapability
     private async Task LoadCatalogAsync(string route, string query, int pageNumber, JsonElement? continuation,
         CancellationToken token, bool refresh = false, string tag = "")
     {
-        if (stopping) return;
+        if (stopping || IsUnsupportedCatalogRoute(route)) return;
         token.ThrowIfCancellationRequested();
         if (IsCatalogSourceRoute(route) && !catalogSourceLoaded)
         {
@@ -518,8 +518,6 @@ public sealed partial class MusicCapability
         {
             MusicDto.Require(CatalogPlatforms.Any(item => item.Key == platform));
             MusicDto.Require(CatalogPlatforms.Any(item => item.Key == platform) && number >= 1);
-            if (target is not null && target.Operation is not ("personalPlaylists" or "playlist") && platform != "wy")
-                throw new MusicOperationException("UNSUPPORTED");
             if (target?.Private == true) await ReadCatalogAccountForRequestAsync(platform, generation, token);
             token.ThrowIfCancellationRequested();
             if (stopping || generation != loadGeneration) return;

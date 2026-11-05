@@ -40,8 +40,6 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     public bool CanSimilar => CanFavorite && Platform == "wy" && ActionId.Length > 0;
     public string AlbumId => Song is { } song ? MusicCatalogDto.Text(SongJson.PrimaryInfo(song.Raw), "albumId") : "";
     public bool CanAlbum => CanFavorite && Platform == "wy" && AlbumId.Length > 0;
-    public string ErrorText => Available ? "" : MusicCatalogDto.ErrorText(ErrorCode);
-    public string AccessHint => ErrorText.Length > 0 ? ErrorText : Title;
     public string Key => Platform + "/" + (StableKey.Length > 0 ? StableKey : Kind + "/" + Identity);
     public string ContentKey => Platform + "/" + Kind + "/" + Identity;
     private string Identity => MemberId.Length > 0 ? MemberId : ActionId.Length > 0 ? ActionId : Song?.Id ?? Id;
@@ -339,7 +337,6 @@ public static class MusicCatalogDto
         "VERIFICATION_REQUIRED" => "平台要求验证码验证",
         "SIGNATURE_REQUIRED" => "平台请求签名不可用",
         "DEVICE_CONTEXT_REQUIRED" or "DEVICE_REQUIRED" => "平台客户端状态不可用",
-        "UNSUPPORTED" => "当前内容暂不支持",
         "STALE_SESSION" or "SESSION_CHANGED" => "平台会话已变更",
         "SNAPSHOT_CHANGED" or "REVISION_CONFLICT" => "内容已变更，请刷新",
         "PAGINATION_STALLED" => "分页未前进",

@@ -306,14 +306,14 @@
                 Tag="{Binding DataContext,RelativeSource={RelativeSource AncestorType=UserControl}}"
                 CommandParameter="{Binding}"
                 IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=UserControl}}"
-                AutomationProperties.Name="收藏" ToolTip="收藏">
+                AutomationProperties.Name="收藏">
          <Path Style="{StaticResource Capability.FavoriteIcon}"/>
         </Button>
         <Button Style="{StaticResource Playlist.HoverActionButton}" Click="NextInQueue_Click"
                 Tag="{Binding DataContext,RelativeSource={RelativeSource AncestorType=UserControl}}"
                 CommandParameter="{Binding}"
                 IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=UserControl}}"
-                AutomationProperties.Name="下一首播放" ToolTip="下一首播放">
+                AutomationProperties.Name="下一首播放">
          <Grid Width="20" Height="20">
           <Path Data="M3,2 L3,15 L14,8.5 Z" Fill="Transparent"
                 Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"
@@ -327,7 +327,7 @@
                 Tag="{Binding DataContext,RelativeSource={RelativeSource AncestorType=UserControl}}"
                 CommandParameter="{Binding}"
                 IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=UserControl}}"
-                AutomationProperties.Name="更多" ToolTip="更多">
+                AutomationProperties.Name="更多">
          <StackPanel Orientation="Horizontal">
           <Ellipse Width="2.5" Height="2.5" Margin="0,0,3,0" Fill="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
           <Ellipse Width="2.5" Height="2.5" Margin="0,0,3,0" Fill="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
@@ -414,14 +414,14 @@
                 Tag="{Binding DataContext,RelativeSource={RelativeSource AncestorType=UserControl}}"
                 CommandParameter="{Binding}"
                 IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=UserControl}}"
-                AutomationProperties.Name="收藏" ToolTip="收藏">
+                AutomationProperties.Name="收藏">
          <Path Style="{StaticResource Capability.FavoriteIcon}"/>
         </Button>
         <Button Style="{StaticResource Playlist.HoverActionButton}" Click="NextInQueue_Click"
                 Tag="{Binding DataContext,RelativeSource={RelativeSource AncestorType=UserControl}}"
                 CommandParameter="{Binding}"
                 IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=UserControl}}"
-                AutomationProperties.Name="下一首播放" ToolTip="下一首播放">
+                AutomationProperties.Name="下一首播放">
          <Grid Width="20" Height="20">
           <Path Data="M3,2 L3,15 L14,8.5 Z" Fill="Transparent"
                 Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"
@@ -435,7 +435,7 @@
                 Tag="{Binding DataContext,RelativeSource={RelativeSource AncestorType=UserControl}}"
                 CommandParameter="{Binding}"
                 IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=UserControl}}"
-                AutomationProperties.Name="更多" ToolTip="更多">
+                AutomationProperties.Name="更多">
          <StackPanel Orientation="Horizontal">
           <Ellipse Width="2.5" Height="2.5" Margin="0,0,3,0" Fill="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
           <Ellipse Width="2.5" Height="2.5" Margin="0,0,3,0" Fill="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
@@ -476,7 +476,7 @@
              Style="{StaticResource MeowFilm.IconButton}" Width="32" Height="32" MinHeight="32"
              HorizontalAlignment="Right" VerticalAlignment="Center"
              Click="ClosePlaylistDialog_Click"
-             AutomationProperties.Name="关闭创建歌单" ToolTip="关闭"/>
+             AutomationProperties.Name="关闭创建歌单"/>
      <Grid Grid.Row="1" Margin="0,24,0,0">
       <TextBox x:Name="PlaylistNameInput" Height="82" MaxLength="200"
                Style="{StaticResource Playlist.DialogTextBox}"
