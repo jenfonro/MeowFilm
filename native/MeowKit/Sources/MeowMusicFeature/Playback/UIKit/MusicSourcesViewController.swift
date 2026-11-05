@@ -20,6 +20,8 @@ final class MusicSourcesViewController: MusicPageViewController,
     private var request = UUID()
     private var loading = false
     private var selecting = false
+    /// "Not this song" in flight: keeps rows visible, holds selection/paging.
+    private var rejecting = false
     private var inspecting = false
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
     private var rows: [String: MusicResolvedSource] = [:]
@@ -121,6 +123,11 @@ final class MusicSourcesViewController: MusicPageViewController,
                 do {
                     for try await snapshot in updates {
                         guard !Task.isCancelled, let self, self.request == own else { break }
+                        if self.rejecting, self.model.current?.id == self.fence.occurrence,
+                           self.model.accountAccessGeneration == self.fence.access, self.originIsCurrent() {
+                            self.snapshot = snapshot; self.render()
+                            continue
+                        }
                         if self.selecting, self.model.current?.id == self.fence.occurrence,
                            self.model.accountAccessGeneration == self.fence.access, self.originIsCurrent() {
                             if snapshot.sources.isEmpty { self.snapshot = snapshot; self.render() }
@@ -166,7 +173,7 @@ final class MusicSourcesViewController: MusicPageViewController,
     }
 
     private func reconcileInspection() {
-        guard !selecting, !admitted else { return }
+        guard !selecting, !rejecting, !admitted else { return }
         closeInspection()
         snapshot = nil
         render()
@@ -195,7 +202,7 @@ final class MusicSourcesViewController: MusicPageViewController,
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard admitted, canSelect, !selecting, let session,
+        guard admitted, canSelect, !selecting, !rejecting, let session,
               let id = dataSource.itemIdentifier(for: indexPath), let source = rows[id] else { return }
         let own = request
         runPageTask { [weak self] in
@@ -212,6 +219,41 @@ final class MusicSourcesViewController: MusicPageViewController,
             self.fence = self.currentFence
             if let error = self.model.error { self.showError(error) }
             else { self.dismiss(animated: true) }
+        }
+    }
+
+    /// The primary recording defines the song and is never offered.
+    func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath)
+        -> UISwipeActionsConfiguration? {
+        guard admitted, canSelect, !selecting, !rejecting, session != nil,
+              let id = dataSource.itemIdentifier(for: indexPath), let source = rows[id],
+              source.selection.sourceKey != model.current?.track.sources.first?.sourceKey else { return nil }
+        let reject = UIContextualAction(style: .destructive, title: "不是这首歌") { [weak self] _, _, finish in
+            self?.reject(source)
+            finish(true)
+        }
+        let configuration = UISwipeActionsConfiguration(actions: [reject])
+        configuration.performsFirstActionWithFullSwipe = false
+        return configuration
+    }
+
+    private func reject(_ source: MusicResolvedSource) {
+        guard admitted, canSelect, !selecting, !rejecting, let session else { return }
+        let own = request
+        runPageTask { [weak self] in
+            guard let self else { return }
+            guard !Task.isCancelled, self.request == own, self.admitted, !self.selecting, !self.rejecting else { return }
+            self.rejecting = true
+            self.renderState()
+            defer { self.rejecting = false; self.renderState() }
+            let occurrence = self.fence.occurrence, access = self.fence.access
+            await self.model.rejectInspectedSource(source, session: session)
+            guard !Task.isCancelled, self.request == own else { return }
+            guard self.model.current?.id == occurrence, self.model.accountAccessGeneration == access,
+                  self.originIsCurrent() else { self.dismiss(animated: true); return }
+            // Only our explicit rejection (and its replacement) may advance the fence.
+            self.fence = self.currentFence
+            if let error = self.model.error { self.showError(error) }
         }
     }
 
@@ -251,7 +293,7 @@ final class MusicSourcesViewController: MusicPageViewController,
     private func renderState() {
         guard isViewLoaded else { return }
         more.isHidden = snapshot?.hasMore != true
-        more.isEnabled = admitted && !loading && !selecting
+        more.isEnabled = admitted && !loading && !selecting && !rejecting
         more.tintColor = UIColor(theme.ink)
         let status = inspecting && snapshot == nil || snapshot?.isLoading == true ? "正在获取音源" :
             snapshot?.sources.isEmpty == true ? "暂无可用音源" : nil
@@ -277,7 +319,7 @@ final class MusicSourcesViewController: MusicPageViewController,
         let own = request
         runPageTask { [weak self] in
             guard let self else { return }
-            guard !Task.isCancelled, self.request == own, self.admitted, !self.loading else { return }
+            guard !Task.isCancelled, self.request == own, self.admitted, !self.loading, !self.rejecting else { return }
             self.loading = true
             self.readError = nil; self.shownReadError = nil
             self.renderState()

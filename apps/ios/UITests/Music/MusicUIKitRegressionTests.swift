@@ -4274,6 +4274,9 @@ private actor MusicUIKitResultInspectionSession: MusicSourceInspectionSession {
     func adopt(sourceID: String, occurrenceID: String, expectedQueueRevision: Int) throws -> MusicPlaybackSelection {
         throw MusicServiceError.unsupported
     }
+    func reject(sourceKey: String, occurrenceID: String, expectedQueueRevision: Int) throws {
+        throw MusicServiceError.unsupported
+    }
     func close() { closeCount += 1; pair.continuation.finish() }
 }
 

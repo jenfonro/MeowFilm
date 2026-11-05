@@ -34,6 +34,7 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
             catch { XCTAssertEqual((error as? MusicCandidateDiscoveryFailure)?.failure, failure) }
             let facts = await session.facts()
             XCTAssertEqual(facts.targets.count, 1); XCTAssertEqual(facts.commits, 0)
+            XCTAssertEqual(facts.discoveries, 0)
         }
     }
     func testKnownCandidateDoesNotWaitForDiscoveryAndDoesNotCommitItsLateMetadata() async throws {
@@ -44,6 +45,50 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
         XCTAssertEqual(result.attempts, 1)
         let facts = await session.facts()
         XCTAssertEqual(facts.commits, 0); XCTAssertEqual(facts.retained, result.candidate.attemptId)
+        XCTAssertEqual(facts.discoveries, 0, "A playable known source never starts platform searches")
+    }
+    func testContentFailureTriesNextKnownTargetBeforeAnyDiscovery() async throws {
+        let a = MusicCandidateDiscoveryFixture.option("a", qualities: ["flac"])
+        let b = MusicCandidateDiscoveryFixture.option("b", qualities: ["flac"])
+        for failure in [MusicServiceError.notFound, .contentUnavailable, .audioUnavailable, .permissionDenied, .previewOnly] {
+            let session = MusicCandidateDiscoveryTestSession(known: MusicCandidateDiscoveryFixture.snapshot([a, b]), failures: [failure])
+            let consumer = MusicCandidateDiscoveryConsumer(provider: MusicCandidateDiscoveryTestProvider(session: session))
+            let result = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1, mode: .automatic())
+            XCTAssertEqual(result.target.selection.installationId, "b")
+            XCTAssertEqual(result.issues.map(\.failure), [failure])
+            let facts = await session.facts()
+            XCTAssertEqual(facts.targets.map(\.selection.installationId), ["a", "b"])
+            XCTAssertEqual(facts.discoveries, 0); XCTAssertEqual(facts.commits, 0)
+        }
+    }
+    func testDiscoveryStartsOnlyAfterEveryKnownTargetFailed() async throws {
+        let a = MusicCandidateDiscoveryFixture.option("a", qualities: ["flac"])
+        let found = MusicCandidateDiscoveryFixture.option("b", platform: "wy", source: "new-source", qualities: ["flac"])
+        let session = MusicCandidateDiscoveryTestSession(known: MusicCandidateDiscoveryFixture.snapshot([a]),
+            discovered: MusicCandidateDiscoveryFixture.snapshot([a, found]), failures: [.previewOnly])
+        let consumer = MusicCandidateDiscoveryConsumer(provider: MusicCandidateDiscoveryTestProvider(session: session))
+        let result = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1, mode: .automatic())
+        XCTAssertEqual(result.target.selection.sourceKey, "new-source"); XCTAssertEqual(result.attempts, 2)
+        let facts = await session.facts()
+        XCTAssertEqual(facts.targets.map(\.selection.installationId), ["a", "b"], "the known target is not retried")
+        XCTAssertEqual(facts.discoveries, 1); XCTAssertEqual(facts.commits, 1)
+    }
+    func testExhaustedContentFailuresKeepThePlatformExplanation() async throws {
+        let a = MusicCandidateDiscoveryFixture.option("a", qualities: ["flac"])
+        let b = MusicCandidateDiscoveryFixture.option("b", qualities: ["flac"])
+        let cases: [([MusicServiceError], MusicServiceError)] = [([.permissionDenied, .notFound], .permissionDenied),
+                                                                  ([.previewOnly, .upstreamFailed], .sourceUnavailable)]
+        for (failures, expected) in cases {
+            let session = MusicCandidateDiscoveryTestSession(known: MusicCandidateDiscoveryFixture.snapshot([a, b]), failures: failures)
+            let consumer = MusicCandidateDiscoveryConsumer(provider: MusicCandidateDiscoveryTestProvider(session: session))
+            do { _ = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1, mode: .automatic()); XCTFail("exhausted") }
+            catch {
+                let failure = try XCTUnwrap(error as? MusicCandidateDiscoveryFailure)
+                XCTAssertEqual(failure.failure, expected); XCTAssertEqual(failure.attempts, 2)
+            }
+            let facts = await session.facts()
+            XCTAssertEqual(facts.discoveries, 1); XCTAssertNil(facts.retained)
+        }
     }
     func testDiscoveredSourceIsConsumedOnlyAfterExplicitCASAdoption() async throws {
         let found = MusicCandidateDiscoveryFixture.option("b", platform: "wy", source: "new-source", qualities: ["128k"])
@@ -54,6 +99,7 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
         XCTAssertEqual(result.target.selection.siteId, "wy")
         let facts = await session.facts()
         XCTAssertEqual(facts.commits, 1); XCTAssertEqual(facts.targets.map(\.selection.sourceKey), ["new-source"])
+        XCTAssertEqual(facts.discoveries, 1)
     }
     func testRepeatedSnapshotsDoNotRetrySameRequestOrTruncateValidCandidates() async throws {
         let options = (0..<32).map { MusicCandidateDiscoveryFixture.option("script-\($0)", qualities: ["flac"]) }

@@ -40,7 +40,7 @@ actor MusicCandidateDiscoveryTestSession: MusicCandidateDiscoverySession {
     let resolutionGate: MusicCandidateDiscoveryTestGate?
     let failures: [MusicServiceError]
     private var targets: [MusicCandidateDiscoveryTarget] = []
-    private var snapshots = 0, commits = 0
+    private var snapshots = 0, discoveries = 0, commits = 0
     private var closed = false
     private var retained: String?
     private var cancellations: [String] = []
@@ -52,6 +52,7 @@ actor MusicCandidateDiscoveryTestSession: MusicCandidateDiscoverySession {
     }
     func snapshot(discover: Bool, force: Bool) async throws -> MusicCandidateDiscoverySnapshot {
         snapshots += 1
+        if discover { discoveries += 1 }
         if discover, let discoveryGate { await discoveryGate.wait() }
         if closed || Task.isCancelled { throw MusicServiceError.cancelled }
         return discover ? discovered : known
@@ -74,8 +75,9 @@ actor MusicCandidateDiscoveryTestSession: MusicCandidateDiscoverySession {
         await discoveryGate?.release()
         await resolutionGate?.release()
     }
-    func facts() -> (targets: [MusicCandidateDiscoveryTarget], snapshots: Int, commits: Int, retained: String?, cancellations: [String]) {
-        (targets, snapshots, commits, retained, cancellations)
+    func facts() -> (targets: [MusicCandidateDiscoveryTarget], snapshots: Int, discoveries: Int, commits: Int,
+                     retained: String?, cancellations: [String]) {
+        (targets, snapshots, discoveries, commits, retained, cancellations)
     }
 }
 

@@ -110,6 +110,37 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
     }
 
     func candidateCancelWork(_ label: String) { cancelWork(label) }
+
+    /// Automatic discovery searches only platforms whose rows can become a
+    /// playback candidate now: official accounts that could answer, plus enabled,
+    /// ready script sites declaring musicUrl. Local state and the script list
+    /// only; no account restore or platform request.
+    func candidateDiscoveryScope(seed: MusicNativeCandidateDiscoverySeed, label: String) async throws -> Set<String> {
+        try candidateCheck(seed)
+        var result = Set<String>()
+        if let accounts {
+            if let provider = accounts as? any MusicNativeCandidateScopeProviding {
+                result.formUnion(await provider.candidatePlatforms().map(\.rawValue))
+            } else { result.formUnion(MusicAccountPlatform.allCases.map(\.rawValue)) }
+        }
+        if let scripts {
+            do {
+                let sources = try await work(label: label) { try await scripts.sources() }
+                for source in sources where source.enabled && source.ready {
+                    for capability in source.capabilities where capability.actions.contains("musicUrl") {
+                        result.insert(capability.siteID)
+                    }
+                }
+            } catch {
+                // An unavailable script host narrows the scope; session failures stop.
+                let failure = MusicServiceError.sanitized(error)
+                if [.cancelled, .closed, .accessUnavailable, .staleAccess, .staleRevision, .targetChanged,
+                    .storageFailed, .corruptDocument].contains(failure) { throw failure }
+            }
+        }
+        try candidateCheck(seed)
+        return result
+    }
 }
 
 /// Scoped orchestration only. Durable writes and all media attempts stay on owner.
@@ -121,6 +152,8 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
     var staged: MJ
     var searchIssues: [MusicCandidateDiscoveryIssue] = []
     var searched = false, discovering = false, resolving = false, committing = false, closed = false
+    /// Platforms whose known targets failed in this session, by failure kind.
+    var contentFailed = Set<String>(), otherFailed = Set<String>()
     var ownedAttempt: String?
     var resolvingID: String?
     var resolutionTask: Task<MusicPlaybackCandidate, Error>?
@@ -141,15 +174,31 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
             guard !discovering else { throw MusicServiceError.busy }
             discovering = true
             defer { discovering = false }
-            let cached = await owner.sourceDiscoveryEntries(seed.song)
+            let cache = await owner.sourceDiscoveryState(seed.song)
+            let cached = cache.current(window: MusicSourceDiscoveryWindow.playback)
             staged = await owner.mergeSourceDiscoveryCache(seed.song, entries: cached)
             try check(); try await owner.candidateCheck(seed); try check()
+            // Refresh keeps every enabled platform; automatic playback only its target platforms.
+            let scope: Set<String>?
+            if force { scope = nil }
+            else {
+                scope = try await owner.candidateDiscoveryScope(seed: seed, label: label)
+                try check(); try await owner.candidateCheck(seed); try check()
+            }
             let captured = seed, owner = owner, label = label, timing = timing
             let query = String((seed.song["title"].string + " " + seed.song["artist"].string).prefix(200))
-            let platforms = MusicNativeCandidateDiscoveryMerge.needsDiscovery(staged, force: force, cache: cached)
+            let contentFailed = contentFailed, otherFailed = otherFailed
+            // A platform whose known sources all received content answers in this
+            // session is searched again only when its check is missing or 7+ days old.
+            func recheck(_ platform: String) -> Bool {
+                contentFailed.contains(platform) && !otherFailed.contains(platform) &&
+                    (cache.entries[platform].map { cache.at - $0.checkedAt >= MusicSourceDiscoveryWindow.recheck } ?? true)
+            }
+            let platforms = MusicNativeCandidateDiscoveryMerge.searchable(staged)
                 ? MusicNativeSearchProtocol.platforms.filter {
-                    owner.platformEnabled($0) &&
-                        MusicNativeCandidateDiscoveryMerge.needsPlatform($0, song: staged, force: force, cache: cached[$0])
+                    owner.platformEnabled($0) && scope?.contains($0) != false &&
+                        (MusicNativeCandidateDiscoveryMerge.needsPlatform($0, song: staged, force: force, cache: cached[$0]) ||
+                            recheck($0))
                 } : []
             let results = try await withThrowingTaskGroup(of: MusicNativeCandidateDiscoveryObservation.self) { group in
                 for platform in platforms {
@@ -177,7 +226,7 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
             // never manufacture empty successes for disabled platforms.
             searchIssues = []; searched = false
             if !results.isEmpty {
-                let merged = try MusicNativeCandidateDiscoveryMerge.merge(staged, observations: results)
+                let merged = try MusicNativeCandidateDiscoveryMerge.merge(staged, observations: results, excluded: cache.excluded)
                 for observation in results {
                     guard let page = observation.page else { continue }
                     await owner.recordSourceDiscovery(staged, platform: observation.platform, page: page)
@@ -218,6 +267,10 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
             try check()
             return result
         } catch {
+            let platform = target.selection.siteId
+            if MusicCandidateDiscoveryFailures.isContentFailure(MusicServiceError.sanitized(error)) {
+                contentFailed.insert(platform)
+            } else { otherFailed.insert(platform) }
             await owner.cancelCandidateAttempt(attemptID)
             if ownedAttempt == attemptID { ownedAttempt = nil }
             throw error

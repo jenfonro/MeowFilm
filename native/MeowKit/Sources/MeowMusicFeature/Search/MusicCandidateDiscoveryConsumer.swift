@@ -64,77 +64,77 @@ public actor MusicCandidateDiscoveryConsumer {
         policy: any MusicCandidateDiscoverySelecting, timing: MusicCandidateDiscoveryTiming,
         occurrenceID: String, mode: MusicCandidateDiscoveryMode,
         rejectedURLs: Set<URL>) async throws -> MusicCandidateDiscoveryResolution {
-        var discovery: Task<MusicCandidateDiscoverySnapshot, Error>?
-        do {
-            let value: MusicCandidateDiscoveryResolution
-            switch mode {
-            case .manual(let target):
-                // Do not fetch unrelated capabilities/search when manually pinned.
-                let attempt = UUID().uuidString.lowercased()
-                do {
-                    let candidate = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: timing) {
-                        try await session.resolve(target, attemptID: attempt)
-                    }
-                    try validate(candidate, target: target, attempt: attempt, occurrence: occurrenceID,
-                                 rejectedURLs: rejectedURLs)
-                    value = .init(candidate: candidate, target: target, attempts: 1, issues: [])
-                } catch { await session.cancel(attemptID: attempt); throw error }
-            case .automatic(let preferred, let force):
-                // Start matching in parallel, but never wait for it before trying
-                // already-known sources. Matching itself has no durable side effect.
-                let refresh = Task { try await session.snapshot(discover: true, force: force) }
-                discovery = refresh
-                let known = try await session.snapshot(discover: false, force: false)
-                var issues = known.issues, attempted: [MusicCandidateDiscoveryTarget] = []
-                var winner: MusicCandidateDiscoveryResolution?
-                for pass in 0..<2 {
-                    let snapshot: MusicCandidateDiscoverySnapshot
-                    if pass == 0 { snapshot = known }
-                    else {
-                        snapshot = try await refresh.value
-                        issues += snapshot.issues.filter { !issues.contains($0) }
-                        try await session.commitDiscovery()
-                    }
-                    let plan = try policy.plan(snapshot, preferred: preferred)
-                    for target in plan where !attempted.contains(where: { $0.sameRequest(as: target) }) {
-                        try Task.checkCancellation()
-                        // An injected policy cannot invent a target or disabled quality.
-                        guard snapshot.options.contains(target.option), target.option.playback.qualities.contains(target.quality) else {
-                            throw MusicServiceError.targetChanged
-                        }
-                        attempted.append(target)
-                        let attempt = UUID().uuidString.lowercased()
-                        do {
-                            let candidate = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: timing) {
-                                try await session.resolve(target, attemptID: attempt)
-                            }
-                            try validate(candidate, target: target, attempt: attempt, occurrence: occurrenceID,
-                                         rejectedURLs: rejectedURLs)
-                            winner = .init(candidate: candidate, target: target, attempts: attempted.count, issues: issues)
-                            break
-                        } catch {
-                            await session.cancel(attemptID: attempt)
-                            let failure = MusicServiceError.sanitized(error)
-                            issues.append(.init(stage: .resolution, platform: target.selection.siteId, failure: failure))
-                            guard MusicCandidateDiscoveryFailures.mayTryAnother(failure) else {
-                                throw MusicCandidateDiscoveryFailure(failure: failure, issues: issues, attempts: attempted.count)
-                            }
-                        }
-                    }
-                    if winner != nil { break }
+        let value: MusicCandidateDiscoveryResolution
+        switch mode {
+        case .manual(let target):
+            // Do not fetch unrelated capabilities/search when manually pinned.
+            let attempt = UUID().uuidString.lowercased()
+            do {
+                let candidate = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: timing) {
+                    try await session.resolve(target, attemptID: attempt)
                 }
-                guard let winner else {
-                    throw MusicCandidateDiscoveryFailure(failure: .sourceUnavailable, issues: issues, attempts: attempted.count)
+                try validate(candidate, target: target, attempt: attempt, occurrence: occurrenceID,
+                             rejectedURLs: rejectedURLs)
+                value = .init(candidate: candidate, target: target, attempts: 1, issues: [])
+            } catch { await session.cancel(attemptID: attempt); throw error }
+        case .automatic(let preferred, let force):
+            // Already-known sources first. Matching (platform searches) starts
+            // only after every known target failed, so a playable mapping never
+            // pays for discovery. Matching itself has no durable queue effect
+            // until the explicit CAS below.
+            let known = try await session.snapshot(discover: false, force: false)
+            var issues = known.issues, attempted: [MusicCandidateDiscoveryTarget] = []
+            var winner: MusicCandidateDiscoveryResolution?
+            for pass in 0..<2 {
+                let snapshot: MusicCandidateDiscoverySnapshot
+                if pass == 0 { snapshot = known }
+                else {
+                    snapshot = try await session.snapshot(discover: true, force: force)
+                    issues += snapshot.issues.filter { !issues.contains($0) }
+                    try await session.commitDiscovery()
                 }
-                value = winner
+                let plan = try policy.plan(snapshot, preferred: preferred)
+                for target in plan where !attempted.contains(where: { $0.sameRequest(as: target) }) {
+                    try Task.checkCancellation()
+                    // An injected policy cannot invent a target or disabled quality.
+                    guard snapshot.options.contains(target.option), target.option.playback.qualities.contains(target.quality) else {
+                        throw MusicServiceError.targetChanged
+                    }
+                    attempted.append(target)
+                    let attempt = UUID().uuidString.lowercased()
+                    do {
+                        let candidate = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: timing) {
+                            try await session.resolve(target, attemptID: attempt)
+                        }
+                        try validate(candidate, target: target, attempt: attempt, occurrence: occurrenceID,
+                                     rejectedURLs: rejectedURLs)
+                        winner = .init(candidate: candidate, target: target, attempts: attempted.count, issues: issues)
+                        break
+                    } catch {
+                        await session.cancel(attemptID: attempt)
+                        let failure = MusicServiceError.sanitized(error)
+                        issues.append(.init(stage: .resolution, platform: target.selection.siteId, failure: failure))
+                        // A content answer for one recording (VIP-only, removed,
+                        // preview) is not a session failure: try the next target.
+                        guard MusicCandidateDiscoveryFailures.mayTryAnother(failure) ||
+                              MusicCandidateDiscoveryFailures.isContentFailure(failure) else {
+                            throw MusicCandidateDiscoveryFailure(failure: failure, issues: issues, attempts: attempted.count)
+                        }
+                    }
+                }
+                if winner != nil { break }
             }
-            discovery?.cancel()
-            try Task.checkCancellation()
-            return value
-        } catch {
-            discovery?.cancel()
-            throw error
+            guard let winner else {
+                // Keep the platform's own explanation when only content answers were received.
+                let failures = issues.filter { $0.stage == .resolution }.map(\.failure)
+                let failure = !failures.isEmpty && failures.allSatisfy(MusicCandidateDiscoveryFailures.isContentFailure)
+                    ? failures[0] : .sourceUnavailable
+                throw MusicCandidateDiscoveryFailure(failure: failure, issues: issues, attempts: attempted.count)
+            }
+            value = winner
         }
+        try Task.checkCancellation()
+        return value
     }
     private static func validate(_ candidate: MusicPlaybackCandidate, target: MusicCandidateDiscoveryTarget,
                                  attempt: String, occurrence: String, rejectedURLs: Set<URL>) throws {

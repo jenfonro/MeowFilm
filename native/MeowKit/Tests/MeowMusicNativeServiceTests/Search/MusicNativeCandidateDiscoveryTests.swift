@@ -66,8 +66,8 @@ final class MusicNativeCandidateDiscoveryTests: XCTestCase {
     func testFailedCASLeavesQueueAndAllCandidateMetadataUntouched() async throws {
         let store = try MusicNativeCandidateDiscoveryFixture.store()
         let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
-        let service = try await NativeMusicFixture.service(store, qq: MusicNativeCandidateDiscoveryQQ(),
-            http: MusicNativeCandidateDiscoveryHTTP(), sourceDiscovery: cache)
+        let service = try await NativeMusicFixture.service(store, scripts: MusicNativeCandidateDiscoveryScripts(),
+            qq: MusicNativeCandidateDiscoveryQQ(), http: MusicNativeCandidateDiscoveryHTTP(), sourceDiscovery: cache)
         let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         _ = try await session.snapshot(discover: true, force: false)
         let before = store.snapshot().0
@@ -126,13 +126,15 @@ final class MusicNativeCandidateDiscoveryTests: XCTestCase {
         XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls[0].siteID, "wy")
         let searchedQQ = await qq.calls(), searchedHTTP = await http.calls()
         XCTAssertTrue(searchedQQ.isEmpty)
-        XCTAssertEqual(Set(searchedHTTP), ["wy", "kg", "kw", "mg"]); XCTAssertEqual(searchedHTTP.count, 4)
+        // Only the platform the injected script can play is searched.
+        XCTAssertEqual(searchedHTTP, ["wy"])
         let queue = try await service.queue()
-        XCTAssertEqual(queue.revision, 2); XCTAssertEqual(queue.entries[0].track.sources.count, 5)
+        XCTAssertEqual(queue.revision, 2); XCTAssertEqual(queue.entries[0].track.sources.count, 2)
+        XCTAssertEqual(queue.entries[0].track.sources.first?.platform, "tx", "the seed stays the primary recording")
         XCTAssertEqual(store.snapshot().2, 1, "one CAS; resolution itself does not write history")
         let again = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 2)
         let known = try await again.snapshot(discover: true, force: false)
-        XCTAssertEqual(known.track.sources.count, 5)
+        XCTAssertEqual(known.track.sources.count, 2)
         await again.close(retainingAttemptID: nil)
         let accepted = try await service.record(.init(attemptId: result.candidate.attemptId, occurrenceId: "entry-1",
             resourceId: result.candidate.resourceId, kind: .playing, position: 23))
@@ -156,5 +158,90 @@ final class MusicNativeCandidateDiscoveryTests: XCTestCase {
         XCTAssertEqual(result.target.selection.sourceKey, option.playback.sourceKey)
         XCTAssertEqual(store.snapshot().2, 0)
         await service.close()
+    }
+    func testPlayableKnownSourceNeverSearchesAnyPlatform() async throws {
+        let store = try MusicNativeCandidateDiscoveryFixture.store(), scripts = MusicNativeCandidateDiscoveryScripts()
+        let qq = MusicNativeCandidateDiscoveryQQ(), http = MusicNativeCandidateDiscoveryHTTP()
+        let service = try await NativeMusicFixture.service(store, scripts: scripts, qq: qq, http: http)
+        let consumer = MusicCandidateDiscoveryConsumer(provider: service)
+        let result = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1, mode: .automatic())
+        XCTAssertEqual(result.target.selection.siteId, "tx"); XCTAssertEqual(result.attempts, 1)
+        let httpCalls = await http.calls(), qqCalls = await qq.calls()
+        XCTAssertTrue(httpCalls.isEmpty); XCTAssertTrue(qqCalls.isEmpty)
+        XCTAssertEqual(store.snapshot().2, 0, "no discovery CAS")
+        await service.close()
+    }
+    func testAutomaticScopeSkipsSignedOutAccountsButRefreshSearchesEveryEnabledPlatform() async throws {
+        let seed = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("kg", id: String(repeating: "A", count: 32)))
+        for signedIn in [true, false] {
+            let store = try MusicNativeCandidateDiscoveryFixture.store(song: seed)
+            let accounts = MusicNativeScopedAccounts(signedIn ? [.netease, .qq] : [.netease])
+            let qq = MusicNativeCandidateDiscoveryQQ(), http = MusicNativeCandidateDiscoveryHTTP()
+            let service = NativeMusicService(document: store, accounts: accounts, qq: qq,
+                enabledPlatforms: [.qq, .kugou], transport: http, clock: { NativeMusicFixture.date })
+            try await service.setAccess(available: true, generation: 1)
+            // Netease is playable but disabled; Kugou already has complete data.
+            let automatic = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
+            _ = try await automatic.snapshot(discover: true, force: false)
+            await automatic.close(retainingAttemptID: nil)
+            let automaticHTTP = await http.calls(), automaticQQ = await qq.calls()
+            XCTAssertTrue(automaticHTTP.isEmpty)
+            XCTAssertEqual(automaticQQ.count, signedIn ? 1 : 0, "a signed-out QQ account cannot play a QQ match")
+            let refresh = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
+            _ = try await refresh.snapshot(discover: true, force: true)
+            await refresh.close(retainingAttemptID: nil)
+            let refreshedHTTP = await http.calls(), refreshedQQ = await qq.calls()
+            XCTAssertEqual(refreshedHTTP, ["kg"])
+            XCTAssertEqual(refreshedQQ.count, automaticQQ.count + 1)
+            await service.close()
+        }
+    }
+    func testSevenDayRecheckFollowsOnlyContentFailures() async throws {
+        let day: Double = 24 * 60 * 60 * 1000, now = NativeMusicFixture.date.timeIntervalSince1970 * 1000
+        let cases: [(age: Double?, error: MusicServiceError, searches: Int, failure: MusicServiceError)] = [
+            (nil, .notFound, 1, .notFound), (3 * day, .notFound, 0, .notFound),
+            (8 * day, .previewOnly, 1, .previewOnly), (nil, .timeout, 0, .sourceUnavailable)
+        ]
+        for value in cases {
+            let seed = try MusicNativeCandidateDiscoveryFixture.song(), row = try XCTUnwrap(seed["sources"].array.first)
+            let store = try MusicNativeCandidateDiscoveryFixture.store(song: seed)
+            let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+            if let age = value.age {
+                await cache.record(fingerprint: MusicModel.fingerprint(seed), duration: 180, platform: "tx", checkedAt: now - age,
+                    sources: [.init(sourceKey: row["sourceKey"].string, source: "tx", musicInfo: row["musicInfo"].json)])
+            }
+            let scripts = NativeMusicScriptFixture(), qq = MusicNativeCandidateDiscoveryQQ()
+            await scripts.configure(error: value.error)
+            let service = try await NativeMusicFixture.service(store, scripts: scripts, qq: qq, sourceDiscovery: cache)
+            let consumer = MusicCandidateDiscoveryConsumer(provider: service)
+            do { _ = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1, mode: .automatic()); XCTFail("exhausted") }
+            catch { XCTAssertEqual((error as? MusicCandidateDiscoveryFailure)?.failure, value.failure) }
+            let searches = await qq.calls()
+            XCTAssertEqual(searches.count, value.searches, "age \(String(describing: value.age)) error \(value.error)")
+            if value.searches > 0 {
+                let entries = await cache.entries(fingerprint: MusicModel.fingerprint(seed), duration: 180)
+                XCTAssertEqual(entries["tx"]?.checkedAt, now, "only an actual search refreshes the check time")
+            }
+            await service.close()
+        }
+    }
+}
+
+/// Account adapter whose local scope is fixed by the test; it never answers options.
+private actor MusicNativeScopedAccounts: MusicNativeAccountProviding, MusicNativeCandidateScopeProviding {
+    let platforms: Set<MusicAccountPlatform>
+    init(_ platforms: Set<MusicAccountPlatform>) { self.platforms = platforms }
+    func candidatePlatforms() -> Set<MusicAccountPlatform> { platforms }
+    func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) -> [MusicPlaybackOption] { [] }
+    func nativeResolve(platform: MusicAccountPlatform, nativeID: String,
+                       selection: MusicPlaybackSelection) throws -> MusicNativeAudio { throw MusicServiceError.unsupported }
+    func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage {
+        throw MusicServiceError.unsupported
+    }
+    func nativeCollections(platform: MusicAccountPlatform, cursor: String?) throws -> MusicAccountCollectionPage {
+        throw MusicServiceError.unsupported
+    }
+    func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicNativeTrackPage {
+        throw MusicServiceError.unsupported
     }
 }
