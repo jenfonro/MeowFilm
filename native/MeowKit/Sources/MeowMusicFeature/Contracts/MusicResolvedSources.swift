@@ -30,6 +30,10 @@ public protocol MusicSourceInspectionSession: Sendable {
     /// layer do not block this call; results arrive through updates().
     func loadMore(refresh: Bool) async throws -> MusicResolvedSourcesSnapshot
     func adopt(sourceID: String, occurrenceID: String, expectedQueueRevision: Int) async throws -> MusicPlaybackSelection
+    /// The user confirmed this non-primary recording is a different song. Only
+    /// the "this recording -> that source" relation is excluded; the source is
+    /// removed from the current queue occurrence through its existing CAS.
+    func reject(sourceKey: String, occurrenceID: String, expectedQueueRevision: Int) async throws
     func close() async
 }
 

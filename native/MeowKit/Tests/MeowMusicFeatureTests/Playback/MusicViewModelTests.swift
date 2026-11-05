@@ -971,6 +971,9 @@ private actor MusicModelInspectionSession: MusicSourceInspectionSession {
                                                 occurrenceID: occurrenceID,
                                                 expectedQueueRevision: expectedQueueRevision)
     }
+    func reject(sourceKey: String, occurrenceID: String, expectedQueueRevision: Int) async throws {
+        throw MusicServiceError.unsupported
+    }
     func close() async {}
 }
 #endif

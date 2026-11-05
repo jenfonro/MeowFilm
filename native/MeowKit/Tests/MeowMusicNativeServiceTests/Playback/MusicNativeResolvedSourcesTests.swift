@@ -45,6 +45,93 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
         await inspection.close(); await service.close()
     }
 
+    func testRejectedPeerIsRemovedThroughQueueCASAndNeverSelectedAgain() async throws {
+        let primary = try MusicNativeCandidateDiscoveryFixture.song()
+        let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "cached"))
+        let row = try XCTUnwrap(peer["sources"].array.first), key = row["sourceKey"].string
+        let song = try MusicModel.mergeSources(primary, adding: [row])
+        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+        let fingerprint = MusicModel.fingerprint(song), at = NativeMusicFixture.date.timeIntervalSince1970 * 1000
+        for platform in MusicNativeSearchProtocol.platforms {
+            await cache.record(fingerprint: fingerprint, duration: 180, platform: platform, checkedAt: at,
+                sources: platform == "wy" ? [.init(sourceKey: key, source: platform, musicInfo: row["musicInfo"].json)] : [])
+        }
+        let store = try MusicNativeCandidateDiscoveryFixture.store(song: song), slow = NativeMusicGate()
+        await slow.release()
+        let accounts = MusicInspectionConcurrencyAccounts(slow: slow, onLower: {})
+        let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
+        let service = try await NativeMusicFixture.service(store, accounts: accounts, qq: qq, http: http, sourceDiscovery: cache)
+        let inspection = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
+        let before = try await settle(inspection)
+        XCTAssertTrue(before.sources.contains { $0.selection.sourceKey == key })
+        let bytes = store.snapshot().0, primaryKey = try XCTUnwrap(primary["sources"].array.first)["sourceKey"].string
+        do { try await inspection.reject(sourceKey: primaryKey, occurrenceID: "entry-1", expectedQueueRevision: 1); XCTFail("primary") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .invalidRequest) }
+        do { try await inspection.reject(sourceKey: key, occurrenceID: "entry-1", expectedQueueRevision: 0); XCTFail("stale") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
+        XCTAssertEqual(store.snapshot().0, bytes, "a refused rejection writes nothing")
+        try await inspection.reject(sourceKey: key, occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.revision, 2); XCTAssertEqual(queue.entries[0].track.sources.map(\.platform), ["tx"])
+        let after = try await settle(inspection)
+        XCTAssertFalse(after.sources.contains { $0.selection.sourceKey == key }, "the cached match is not merged back")
+        XCTAssertTrue(after.sources.contains { $0.selection.siteId == "tx" })
+        await inspection.close()
+        let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 2)
+        let snapshot = try await session.snapshot(discover: true, force: false)
+        XCTAssertFalse(snapshot.track.sources.contains { $0.sourceKey == key })
+        XCTAssertFalse(snapshot.options.contains { $0.playback.sourceKey == key })
+        await session.close(retainingAttemptID: nil)
+        let calls = await http.calls(), qqCalls = await qq.calls()
+        XCTAssertTrue(calls.isEmpty); XCTAssertTrue(qqCalls.isEmpty)
+        await service.close()
+    }
+
+    func testExcludedSourceStillInTheQueueIsNotOfferedOrPlayedFromAudioCache() async throws {
+        let clock = MusicRecoveryTestClock()
+        // A Kuwo primary has no account options; the QQ peer is the cached, account-backed source.
+        let primary = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("kw", id: "123"))
+        let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
+        let row = try XCTUnwrap(peer["sources"].array.first), key = row["sourceKey"].string
+        let song = try MusicModel.mergeSources(primary, adding: [row])
+        let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
+        let d = try MusicDocument(store.read(), runID: "exclusion")
+        let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
+        let file = MusicRecoveryTestFileCache(hit: .init(identity: .init(scope: String(repeating: "c", count: 64),
+            songID: song["songId"].string, sourceKey: key, platform: "tx", nativeID: "101", requestedQuality: "flac",
+            playbackSignature: NativeMusicService.audioCacheSignature(song: song, playback: d.playback)),
+            fileURL: URL(fileURLWithPath: "/synthetic-cache/recording.flac"), duration: 180,
+            measuredQuality: "flac", expiresAt: clock.now().addingTimeInterval(3600)))
+        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { clock.now() })
+        let service = NativeMusicService(document: store, accounts: accounts, qq: NativeMusicQQFixture(),
+            sourceDiscovery: cache, audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { clock.now() })
+        try await service.setAccess(available: true, generation: 1)
+        let hit = try await service.cachedPlayback(attemptID: UUID().uuidString.lowercased(), occurrenceID: "entry-1", selection: nil)
+        XCTAssertNotNil(hit)
+        let offered = try await service.playbackOptions(for: .init(kind: .queue, id: "entry-1"))
+        XCTAssertTrue(offered.contains { $0.sourceKey == key })
+        await cache.exclude(fingerprint: MusicModel.fingerprint(song), duration: 180, sourceKey: key)
+        let miss = try await service.cachedPlayback(attemptID: UUID().uuidString.lowercased(), occurrenceID: "entry-1", selection: nil)
+        XCTAssertNil(miss, "a cached file of another recording is not this song")
+        let options = try await service.playbackOptions(for: .init(kind: .queue, id: "entry-1"))
+        XCTAssertFalse(options.contains { $0.sourceKey == key })
+        let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let snapshot = try await session.snapshot(discover: false, force: false)
+        XCTAssertFalse(snapshot.options.contains { $0.playback.sourceKey == key })
+        await session.close(retainingAttemptID: nil); await service.close()
+    }
+
+    func testClosedInspectorCannotReject() async throws {
+        let f = try await MusicRecoveryTestFixture.make()
+        let inspection = try await f.service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
+        await inspection.close()
+        let before = f.store.snapshot().0
+        do { try await inspection.reject(sourceKey: "any", occurrenceID: "entry-1", expectedQueueRevision: 1); XCTFail("closed") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .closed) }
+        XCTAssertEqual(f.store.snapshot().0, before)
+        await f.service.close()
+    }
+
     func testInspectionManualRefreshBypassesSuccessfulEmptyCacheChecks() async throws {
         let song = try MusicNativeCandidateDiscoveryFixture.song()
         let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })

@@ -60,6 +60,12 @@ public protocol MusicNativeAccountProviding: Sendable {
     func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) async throws -> MusicNativeAudio
 }
 
+/// Optional, read-only account facts for automatic source discovery: official
+/// platforms that could produce a playback option now. No network or restore.
+public protocol MusicNativeCandidateScopeProviding: Sendable {
+    func candidatePlatforms() async -> Set<MusicAccountPlatform>
+}
+
 /// Optional native write capability. Each session binds the exact account,
 /// credential revision and access epoch. No credential is returned to business/UI.
 public protocol MusicNativeLibrarySyncProviding: Sendable {

@@ -250,7 +250,8 @@ final class MusicNativeMiguSearchTests: XCTestCase {
             let consumer = MusicCandidateDiscoveryConsumer(provider: service)
             let result = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1, mode: .automatic())
             XCTAssertEqual(result.target.selection.siteId, platform); XCTAssertEqual(result.attempts, 1)
-            let searches = await http.calls(); XCTAssertEqual(Set(searches), ["wy", "kg", "kw", "mg"])
+            // Only the platform the injected script can play is searched.
+            let searches = await http.calls(); XCTAssertEqual(searches, [platform])
             let requests = await scripts.calls(); XCTAssertEqual(requests.count, 1)
             XCTAssertEqual(requests[0].siteID, platform)
             XCTAssertEqual(requests[0].installationID, MusicNativeCandidateDiscoveryFixture.installation)
@@ -259,7 +260,7 @@ final class MusicNativeMiguSearchTests: XCTestCase {
             if platform == "mg" { XCTAssertEqual(native["copyrightId"].string, "600123") }
             let queue = try await service.queue()
             XCTAssertEqual(queue.currentId, "entry-1"); XCTAssertEqual(queue.revision, 2)
-            XCTAssertEqual(Set(queue.entries[0].track.sources.map(\.platform)), ["wy", "tx", "kg", "kw", "mg"])
+            XCTAssertEqual(queue.entries[0].track.sources.map(\.platform), ["tx", platform])
             XCTAssertEqual(store.snapshot().2, 1, "same queue CAS writer; no search-side library/played write")
             let played = try await service.playedSongs(); XCTAssertTrue(played.isEmpty)
             await service.close()

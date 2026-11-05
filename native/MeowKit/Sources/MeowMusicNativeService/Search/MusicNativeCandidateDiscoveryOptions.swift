@@ -11,7 +11,10 @@ extension NativeMusicService {
     func candidateOptions(song: MJ, seed: MusicNativeCandidateDiscoverySeed, label: String,
                           timing: MusicCandidateDiscoveryTiming) async throws -> MusicNativeCandidateDiscoveryOptions {
         try candidateCheck(seed)
-        let rows = try MusicModel.sources(song).filter { platformEnabled($0.platform) }
+        // A source confirmed as another recording is never offered for playback.
+        let excluded = await sourceDiscoveryExcluded(seed.song)
+        try candidateCheck(seed)
+        let rows = try MusicModel.sources(song).filter { platformEnabled($0.platform) && !excluded.contains($0.sourceKey) }
         // Do not probe accounts or a script host for disabled-only saved rows.
         let platforms = (scripts != nil && !rows.isEmpty ? ["lx"] : []) +
             ["wy", "tx", "kg"].filter { platform in rows.contains { $0.platform == platform } }
@@ -21,7 +24,8 @@ extension NativeMusicService {
                     do {
                         return try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: timing) {
                             if platform == "lx" {
-                                return try await self.candidateScriptOptions(song: song, seed: seed, label: label)
+                                return try await self.candidateScriptOptions(song: song, seed: seed, label: label,
+                                                                             excluded: excluded)
                             }
                             return try await self.candidateAccountOptions(rows: rows.filter { $0.platform == platform },
                                 platform: platform, seed: seed, label: label)
@@ -46,8 +50,8 @@ extension NativeMusicService {
         return result
     }
 
-    private func candidateScriptOptions(song: MJ, seed: MusicNativeCandidateDiscoverySeed,
-                                        label: String) async throws -> MusicNativeCandidateDiscoveryOptions {
+    private func candidateScriptOptions(song: MJ, seed: MusicNativeCandidateDiscoverySeed, label: String,
+                                        excluded: Set<String>) async throws -> MusicNativeCandidateDiscoveryOptions {
         guard let scripts else { return .init() }
         let snapshots = try await work(label: label) { try await scripts.sources() }
         try candidateCheck(seed)
@@ -55,7 +59,7 @@ extension NativeMusicService {
         var result = MusicNativeCandidateDiscoveryOptions(scriptState: .ready)
         let prefs = try candidateCheck(seed).playback
         for snapshot in snapshots where snapshot.enabled && snapshot.ready {
-            for source in try MusicModel.sources(song) where platformEnabled(source.platform) {
+            for source in try MusicModel.sources(song) where platformEnabled(source.platform) && !excluded.contains(source.sourceKey) {
                 guard snapshot.capabilities.contains(where: { $0.siteID == source.platform && $0.actions.contains("musicUrl") }) else { continue }
                 let capability = try validate(snapshot, site: source.platform)
                 let row = song["sources"].array.first { $0["sourceKey"].string == source.sourceKey } ?? .null

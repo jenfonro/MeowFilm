@@ -57,7 +57,9 @@ extension NativeMusicService {
     }
     public func sourceAvailability(for ref: MusicReference) async throws -> MusicSourceAvailability {
         let own = epoch, d = try read(), song = try song(ref, d)
-        let rows = try MusicModel.sources(song).filter { platformEnabled($0.platform) }
+        let excluded = await sourceDiscoveryExcluded(song)
+        try check(own)
+        let rows = try MusicModel.sources(song).filter { platformEnabled($0.platform) && !excluded.contains($0.sourceKey) }
         var result: [MusicPlaybackOption] = []
         var scriptState: MusicSourceAvailability.ScriptState = scripts == nil ? .notConfigured : .ready
         if let scripts, !rows.isEmpty {

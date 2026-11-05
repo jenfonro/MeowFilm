@@ -181,6 +181,44 @@ import MeowMusicFeature
         await service.close()
     }
 
+    func testEmptyMappingCheckIsReusedForThirtyDays() async throws {
+        let song = try MusicNativeCandidateDiscoveryFixture.song()
+        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+        await record(cache, song: song)
+        let day: TimeInterval = 24 * 60 * 60
+        for (age, searches) in [(25 * day, 0), (31 * day, 1)] {
+            let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
+            let http = MusicNativeCandidateDiscoveryHTTP(empty: ["wy"]), at = NativeMusicFixture.date.addingTimeInterval(age)
+            let service = try await NativeMusicFixture.service(mappingStore([MusicNativeCandidateDiscoveryFixture.track()]),
+                accounts: peer, http: http, sourceDiscovery: cache, clock: { at })
+            _ = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
+            let calls = await http.calls()
+            XCTAssertEqual(calls.count, searches, "sync rechecks an empty platform only after 30 days")
+            await service.close()
+        }
+    }
+
+    func testExcludedSourceIsNeverMappedFromCacheOrSearch() async throws {
+        let song = try MusicNativeCandidateDiscoveryFixture.song()
+        let source = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "321"))["sources"].array[0]
+        for cached in [true, false] {
+            let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+            if cached { await record(cache, song: song, source: source) }
+            await cache.exclude(fingerprint: MusicModel.fingerprint(song), duration: 180, sourceKey: source["sourceKey"].string)
+            let store = try mappingStore([MusicNativeCandidateDiscoveryFixture.track()])
+            let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
+            let http = MusicNativeCandidateDiscoveryHTTP()
+            let service = try await NativeMusicFixture.service(store, accounts: peer, http: http, sourceDiscovery: cache)
+            let state = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
+            XCTAssertEqual(state.phase, .partial)
+            let saved = try NativeSyncFixture.document(store).library["library"]["songs"][song["songId"].string]
+            XCTAssertEqual(try MusicModel.sources(saved).map(\.platform), ["tx"])
+            let calls = await http.calls(), writes = await peer.calls()
+            XCTAssertEqual(calls.count, cached ? 0 : 1); XCTAssertTrue(writes.isEmpty)
+            await service.close()
+        }
+    }
+
     func testIncompatibleCachedMappingSourcesAreIgnoredWithoutRequeryingSuccessfulPlatform() async throws {
         let song = try MusicNativeCandidateDiscoveryFixture.song()
         let unrelated = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "321", artist: "Other artist"))

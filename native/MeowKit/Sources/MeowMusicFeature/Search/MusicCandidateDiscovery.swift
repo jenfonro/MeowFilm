@@ -108,4 +108,14 @@ public enum MusicCandidateDiscoveryFailures {
         default: return false
         }
     }
+    /// The platform answered that this recording cannot be played as requested
+    /// (missing, removed, no address, no permission, preview only). Network,
+    /// timeout, login, rate-limit and cancellation failures are not content facts.
+    public static func isContentFailure(_ failure: MusicServiceError) -> Bool {
+        switch failure {
+        case .notFound, .contentUnavailable, .audioUnavailable, .permissionDenied, .previewOnly:
+            return true
+        default: return false
+        }
+    }
 }

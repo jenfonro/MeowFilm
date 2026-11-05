@@ -34,8 +34,9 @@ extension NativeMusicService: MusicResolvedSourcesServing {
     func inspectionDiscover(_ seed: MusicSourceInspectionSeed, label: String,
                             force: Bool) async throws -> MJ {
         try inspectionCheck(seed)
-        let cache = await sourceDiscoveryEntries(seed.song)
+        let state = await sourceDiscoveryState(seed.song)
         try inspectionCheck(seed)
+        let cache = state.current(window: MusicSourceDiscoveryWindow.playback)
         let staged = mergeSourceDiscoveryCache(seed.song, entries: cache)
         guard MusicNativeCandidateDiscoveryMerge.needsDiscovery(staged, force: force, cache: cache) else {
             return staged
@@ -63,7 +64,8 @@ extension NativeMusicService: MusicResolvedSourcesServing {
             return values
         }
         try inspectionCheck(seed)
-        let merged = try MusicNativeCandidateDiscoveryMerge.merge(staged, observations: observations).song
+        let merged = try MusicNativeCandidateDiscoveryMerge.merge(staged, observations: observations,
+                                                                  excluded: state.excluded).song
         for observation in observations {
             guard let page = observation.page else { continue }
             await recordSourceDiscovery(staged, platform: observation.platform, page: page)
@@ -89,7 +91,9 @@ extension NativeMusicService: MusicResolvedSourcesServing {
     func inspectionOptions(_ seed: MusicSourceInspectionSeed, staged: MJ, label: String,
                            receive: @escaping @Sendable ([MusicPlaybackOption]) async -> Void) async throws {
         try inspectionCheck(seed)
-        let rows = try MusicModel.sources(staged).filter { platformEnabled($0.platform) }
+        let excluded = await sourceDiscoveryExcluded(seed.song)
+        try inspectionCheck(seed)
+        let rows = try MusicModel.sources(staged).filter { platformEnabled($0.platform) && !excluded.contains($0.sourceKey) }
         try await withThrowingTaskGroup(of: [MusicPlaybackOption].self) { group in
             for source in rows { group.addTask { try await self.inspectionOption(seed, source: source, label: label) } }
             while let options = try await group.next() {
@@ -171,6 +175,27 @@ extension NativeMusicService: MusicResolvedSourcesServing {
               value.generation == option.generation, value.contentHash == option.contentHash,
               value.version == option.version, value.sourceKey == option.sourceKey,
               value.siteId == option.siteId, value.qualities.contains(quality) else { throw MusicServiceError.targetChanged }
+        let next = try candidateCommit(.init(occurrenceID: occurrenceID, song: seed.song,
+            state: seed.state, epoch: seed.epoch, lifetime: seed.lifetime), staged: staged)
+        return .init(ref: seed.ref, song: next.song, state: next.state, playback: seed.playback,
+                     epoch: seed.epoch, lifetime: seed.lifetime)
+    }
+
+    /// Records "this recording -> sourceKey" as a confirmed mismatch, then removes
+    /// the source from the current occurrence through the existing queue CAS.
+    /// Library songs are not rewritten; the primary source cannot be rejected.
+    func inspectionReject(_ seed: MusicSourceInspectionSeed, sourceKey: String, occurrenceID: String,
+                          expectedRevision: Int) async throws -> MusicSourceInspectionSeed {
+        try inspectionCheck(seed)
+        try musicRequire(seed.ref.kind == .queue && seed.ref.id == occurrenceID &&
+            seed.state.revision == expectedRevision, .targetChanged)
+        try musicRequire(seed.song["sources"].array.first?["sourceKey"].string != sourceKey, .invalidRequest)
+        await excludeSourceDiscovery(seed.song, sourceKey: sourceKey)
+        try inspectionCheck(seed)
+        let rows = seed.song["sources"].array
+        guard rows.contains(where: { $0["sourceKey"].string == sourceKey }) else { return seed }
+        var staged = seed.song
+        staged["sources"] = .array(rows.filter { $0["sourceKey"].string != sourceKey })
         let next = try candidateCommit(.init(occurrenceID: occurrenceID, song: seed.song,
             state: seed.state, epoch: seed.epoch, lifetime: seed.lifetime), staged: staged)
         return .init(ref: seed.ref, song: next.song, state: next.state, playback: seed.playback,
@@ -462,6 +487,24 @@ actor MusicNativeSourceInspection: MusicSourceInspectionSession {
         // cache, or refreshes an expired entry. Inspection is not permission
         // to play a stale URL or switch to a different account.
         return value.choice.selection
+    }
+    func reject(sourceKey: String, occurrenceID: String, expectedQueueRevision: Int) async throws {
+        try check()
+        guard !adopting, (seed.song["sources"].array + staged["sources"].array)
+            .contains(where: { $0["sourceKey"].string == sourceKey }) else { throw MusicServiceError.staleResult }
+        let oldLabel = label
+        resetWork()
+        adopting = true
+        defer {
+            adopting = false
+            if !closed, !Task.isCancelled { prepared = true; prepare(force: false); pump(); publish() }
+        }
+        await owner.candidateCancelWork(oldLabel)
+        try check()
+        seed = try await owner.inspectionReject(seed, sourceKey: sourceKey, occurrenceID: occurrenceID,
+                                                expectedRevision: expectedQueueRevision)
+        try check()
+        resolved.removeAll { $0.choice.selection.sourceKey == sourceKey }
     }
     func close() async {
         guard !closed else { return }

@@ -198,4 +198,29 @@ final class MusicNativeCandidateDiscoveryMergeTests: XCTestCase {
         XCTAssertTrue(conflict.song["sources"].array.isEmpty)
         XCTAssertTrue(conflict.issues.contains { $0.failure == .nativeIDConflict })
     }
+    func testDiscoveryMergeKeepsTheSeedPrimaryRecordingFirst() throws {
+        let seed = try MusicNativeCandidateDiscoveryFixture.song()
+        let result = try MusicNativeCandidateDiscoveryMerge.merge(seed, observations: [
+            .init(platform: "kg", page: .init(items: [MusicNativeCandidateDiscoveryFixture.track("kg", id: String(repeating: "B", count: 32))]), failure: nil),
+            .init(platform: "wy", page: .init(items: [MusicNativeCandidateDiscoveryFixture.track("wy", id: "9")]), failure: nil)
+        ])
+        let rows = result.song["sources"].array
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertEqual(rows.first?["sourceKey"], seed["sources"].array.first?["sourceKey"], "sources[0] defines the song")
+        let rest = rows.dropFirst().map { $0["sourceKey"].string }
+        XCTAssertEqual(rest, rest.sorted { $0.utf16.lexicographicallyPrecedes($1.utf16) })
+    }
+    func testExcludedSourceIsNeverProposedAgain() throws {
+        let seed = try MusicNativeCandidateDiscoveryFixture.song()
+        let rejected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "9"))
+        let key = try XCTUnwrap(rejected["sources"].array.first)["sourceKey"].string
+        let result = try MusicNativeCandidateDiscoveryMerge.merge(seed, observations: [
+            .init(platform: "wy", page: .init(items: [MusicNativeCandidateDiscoveryFixture.track("wy", id: "9"),
+                                                     MusicNativeCandidateDiscoveryFixture.track("wy", id: "10")]), failure: nil)
+        ], excluded: [key])
+        let keys = result.song["sources"].array.map { $0["sourceKey"].string }
+        XCTAssertFalse(keys.contains(key))
+        XCTAssertEqual(try MusicModel.sources(result.song).filter { $0.platform == "wy" }.map(\.nativeId), ["10"],
+                       "only the confirmed mismatch is excluded, not the platform")
+    }
 }
