@@ -19,6 +19,7 @@ public partial class FilmPlaybackView : UserControl
         DataContextChanged += (_, _) =>
         {
             PageScroll.ScrollToTop();
+            MetadataScroll.ScrollToTop();
             HorizontalEpisodes.ScrollToLeftEnd();
             RelatedScroll.ScrollToLeftEnd();
         };
@@ -46,7 +47,13 @@ public partial class FilmPlaybackView : UserControl
     private void UpdateMetadataHeight()
     {
         if (MetadataPanel is not null)
+        {
             MetadataPanel.Height = ActualWidth < 840 ? double.NaN : PlayerFrame.ActualHeight;
+            // Keep the identity and actions in the compact desktop viewport; let the image breathe when stacked.
+            Backdrop.Height = ActualWidth < 840
+                ? Math.Clamp(PlayerFrame.ActualWidth * .55, 220, 340)
+                : Math.Clamp(PlayerFrame.ActualHeight - 220, 80, 240);
+        }
     }
 
     // Fade only the edges where metadata continues beyond the panel.
