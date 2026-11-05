@@ -55,9 +55,7 @@ struct MusicNativeSyncLedger: Codable {
     var fences: [MusicNativeSyncFence] = []
     var phase: MusicLibrarySyncState.Phase = .idle
     var issues: [MusicLibrarySyncIssue] = []
-    // Optional on disk: old manual selections NEVER opt a user into automatic
-    // writes. Other library fields retain their current values.
-    var automatic: MusicNativeAutomaticSyncPreferences?
+    var automatic = MusicNativeAutomaticSyncPreferences()
     static func load(_ wrapper: MJ) throws -> Self {
         guard wrapper.contains("sync") else { return .init() }
         let value: Self
@@ -68,7 +66,7 @@ struct MusicNativeSyncLedger: Codable {
               value.scopes.count <= 3, value.scopes.keys.allSatisfy({ MusicAccountPlatform(rawValue: $0) != nil }),
               value.fences.count <= 512, Set(value.fences.map { $0.mutation.id }).count == value.fences.count,
               value.issues.count <= 128 else { throw MusicServiceError.corruptDocument }
-        try value.automatic?.validate()
+        try value.automatic.validate()
         for fence in value.fences {
             guard fence.localRevision >= 0, !fence.localID.isEmpty, !fence.accountID.isEmpty, !fence.scope.isEmpty,
                   fence.localID.utf8.count <= 1024, fence.accountID.utf8.count <= 128, fence.scope.utf8.count <= 1024,
@@ -211,19 +209,6 @@ enum MusicNativeSyncLogic {
             mutation.name.map(MJ.string) ?? .null,
             .strings(mutation.members.map(\.nativeID))
         ]).json
-    }
-    static func map(_ binding: MJ, songs: MJ) throws -> MJ {
-        var result = MJ.obj()
-        for (key, value) in binding["map"].fields {
-            // Fixed iWeb uses native/occurrence -> song. Early migrated
-            // music-core validation also accepted the reverse orientation.
-            if songs.contains(value.string) { result[key] = value }
-            else if songs.contains(key), value.isString {
-                try musicRequire(!result.contains(value.string) || result[value.string].string == key, .corruptDocument)
-                result[value.string] = .string(key)
-            } else { throw MusicServiceError.corruptDocument }
-        }
-        return result
     }
     static func code(_ error: Error) -> String {
         switch MusicServiceError.sanitized(error) {

@@ -51,9 +51,9 @@ enum NativeMusicFixture {
         .init(installationID: installation, generation: generation, enabled: true, ready: true, version: "1",
               contentHash: hash, revisionHash: hash, capabilities: [.init(siteID: "tx", title: "LX synthetic", actions: ["musicUrl", "lyric"], qualities: ["128k", "flac"])])
     }
-    static func legacy() throws -> MJ {
+    static func importLibrary() throws -> MJ {
         let song = try song()
-        var library = MusicModel.emptyLibrary; library["ownerId"] = .string("legacy-owner")
+        var library = MusicModel.emptyLibrary; library["ownerId"] = .string("import-owner")
         library["songs"] = .obj([(song["songId"].string, song)])
         var favorites = library["collections"].array[0]; favorites["order"] = .strings([song["songId"].string])
         library["collections"] = .array([favorites]); return library

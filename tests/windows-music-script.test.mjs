@@ -417,20 +417,19 @@ test('source revisions can skip metadata revisions and never follow another sour
   })).cleanupComplete, true);
 });
 
-test('actual LX startup storage is denied without default scope; formal invocation keeps exact site/grant', async t => {
+test('actual LX has no global storage; formal invocation keeps exact site/grant', async t => {
   const { rpc, native } = setup(t);
   const source = `(async () => {
- let startupCode;
- try { await meow.storage.set('startup','must-not-save'); } catch(error) { startupCode=error.code; }
+ const startupStorage = typeof meow.storage;
  lx.on('request',async ({source}, {storage}) => {
    await storage.set('key',source);
-   return {startupCode,value:await storage.get('key')};
+   return {startupStorage,value:await storage.get('key')};
  });
  await lx.send('inited',{sources:${JSON.stringify(declared)}});
 })()`;
   const spec = storageOptions(), instance = await load(rpc, spec, source);
   assert.equal(native.calls.length, 0);
-  assert.deepEqual(await value(rpc, instance, 'tx'), { startupCode: 'PERMISSION_DENIED', value: 'tx' });
+  assert.deepEqual(await value(rpc, instance, 'tx'), { startupStorage: 'undefined', value: 'tx' });
   for (const { message } of native.calls) {
     assert.equal(message.grant, spec.grant);
     assert.equal(message.installationId, instance.installationId);
@@ -439,9 +438,9 @@ test('actual LX startup storage is denied without default scope; formal invocati
     assert.notEqual(message.key, 'startup');
   }
   const deniedStartup = await upload(rpc, `(async()=>{await meow.storage.set('startup','no');})()`);
-  denied(await rpc('load', { ...storageOptions('one', 2, 1), token: deniedStartup }), 'PERMISSION_DENIED');
+  denied(await rpc('load', { ...storageOptions('one', 2, 1), token: deniedStartup }), 'SCRIPT_FAILURE');
   assert.equal(okay(await rpc('status')).instances[0].generation, instance.generation);
-  assert.deepEqual(await value(rpc, instance), { startupCode: 'PERMISSION_DENIED', value: 'kw' });
+  assert.deepEqual(await value(rpc, instance), { startupStorage: 'undefined', value: 'kw' });
 });
 
 test('storage get/set/delete is isolated by installation and site; no document reverse traffic', async t => {

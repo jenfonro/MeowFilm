@@ -56,31 +56,6 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(LJ.I(settings["schema"]) == 3 && LJ.IsBool(settings["lyrics"]), "CORRUPT_STORAGE");
         _ = Revision(settings);
     }
-    private static void ValidateLegacyOnlineSettings(JsonObject settings, HashSet<string> installations)
-    {
-        LJ.Fields(settings, "schema revision lyrics target", "schema revision lyrics target");
-        LJ.Require(LJ.I(settings["schema"]) == 2 && LJ.IsBool(settings["lyrics"]), "CORRUPT_STORAGE");
-        _ = Revision(settings);
-        if (settings["target"] is { } target)
-        {
-            var t = LJ.Object(target); LJ.Fields(t, "installationId platform", "installationId platform");
-            _ = InstallationId(LJ.Text(t["installationId"])); LJ.Require(NativeMusicSong.Platforms.Append("local").Contains(LJ.S(t["platform"])));
-            LJ.Require(installations.Contains(LJ.S(t["installationId"])), "CORRUPT_STORAGE");
-        }
-    }
-    private async Task ConvertLegacyOnlineSettingsAsync(CancellationToken token)
-    {
-        if (pending is not null || recommendationUnknown is not null ||
-            Value(document!, "online-settings") is not JsonObject settings || LJ.I(settings["schema"]) != 2) return;
-        // Load validated the entire legacy envelope, including the old target reference.
-        // A representation change preserves the settings revision and every other area.
-        var converted = (JsonObject)settings.DeepClone();
-        converted["schema"] = 3;
-        converted.Remove("target");
-        var candidate = (JsonObject)document!.DeepClone();
-        Set(candidate, "online-settings", converted);
-        await CommitAsync(candidate, PendingOwner.OnlineSettings, token).ConfigureAwait(false);
-    }
     /// <summary>Trusted native scripting manager only. Does not execute/activate any source.</summary>
     public async Task<MusicSourceMetadataSnapshot> ReadSourceMetadataAsync(CancellationToken cancellationToken = default)
     {

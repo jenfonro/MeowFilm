@@ -23,11 +23,13 @@ public static class MusicNativeKgAccountTests
         foreach (var pair in new[] { (0, "expired"), (1, "waiting"), (2, "confirming") })
         { var p = pair; yield return Case("qr-state-" + p.Item1, () => State(p.Item1, p.Item2)); }
         foreach (string fault in new[] { "register-length", "register-padding", "register-plain", "register-utf8",
-            "register-duplicate", "register-dfid", "register-data", "register-status", "register-large",
-            "register-ssa", "register-302", "key-empty", "key-injection", "key-data", "key-duplicate", "key-large",
+            "register-dfid", "register-data", "register-status", "register-large",
+            "register-ssa", "register-302", "key-empty", "key-injection", "key-data", "key-large",
             "key-302", "poll-status", "poll-302", "poll-ssa", "poll-auth", "poll-token", "poll-user",
             "poll-t1", "profile-missing-id", "profile-id", "profile-secret", "profile-302", "profile-403" })
         { var f = fault; yield return Case("reject-" + f, () => Reject(f)); }
+        foreach (string step in new[] { "register", "key" })
+        { var value = step; yield return Case("upstream-" + value + "-duplicate-uses-last-value", () => DuplicateResponse(value)); }
         foreach (int write in new[] { 1, 2, 3 })
         {
             int w = write;
@@ -46,7 +48,7 @@ public static class MusicNativeKgAccountTests
         yield return Case("concurrent-poll-busy-and-unthrottled-physical-http", Budget);
         yield return Case("two-native-owners-cannot-mint-competing-installation-seeds", CompetingSeeds);
         yield return Case("unknown-entry-rejected-without-network-or-write", UnknownEntry);
-        yield return Case("corrupt-device-rejects-whole-document-without-write", CorruptDeviceDocument);
+        yield return Case("corrupt-client-document-rejects-device-request-without-write", CorruptDeviceDocument);
         yield return Case("ordinary-content-lyrics-no-new-origin-authority", Origins);
         yield return Case("direct-protocol-uses-explicit-client-owner-no-sms-or-token-operation", Direct);
         yield return Case("borrowed-http-store-and-finite-errors-no-secrets", Borrowed);
@@ -157,6 +159,19 @@ public static class MusicNativeKgAccountTests
         };
         Check(Code(result) == code && !result.GetRawText().Contains("SYNTHETIC"));
         Check(await f.Owner.AcquireAsync("kg") is null && f.Store.Writes <= 2);
+    }
+    private static async Task DuplicateResponse(string step)
+    {
+        await using var f = new KgAccountFixture(); f.Transport.Fault = step + "-duplicate";
+        var result = await Begin(f.Owner);
+        Check(Ok(result) && f.Transport.Steps.SequenceEqual(["register", "key"]));
+        string key = step == "key" ? "b" : KgAccountHandler.QrKey;
+        Check(result.GetProperty("challenge").GetProperty("url").GetString() ==
+            "https://h5.kugou.com/apps/loginQRCode/html/index.html?qrcode=" + key);
+        var device = await KgAccountFixture.ReadDevice(f.Store);
+        if (step == "register") Check(device["dfid"] is null && f.Store.Writes == 1);
+        else Check(device["dfid"]!.GetValue<string>() == KgAccountHandler.Dfid && f.Store.Writes == 2);
+        Check(await f.Owner.AcquireAsync("kg") is null && f.Transport.Polls == 0);
     }
     private static async Task Unknown(int write)
     {
@@ -327,14 +342,21 @@ public static class MusicNativeKgAccountTests
     {
         await using var f = new KgAccountFixture();
         await KgAccountFixture.SeedDevice(f.Store.Inner);
-        await KgAccountFixture.Edit(f.Store.Inner, r =>
-            r["entries"]!.AsArray().Single(n => n!["key"]!.GetValue<string>() == KgAccountFixture.DeviceKey)!["value"]!["seed"] = "corrupt");
-        string original = (await KgAccountFixture.ReadRoot(f.Store)).ToJsonString();
+        await MusicClientContextFixture.MutateDocument(f.Store.Inner, r => r["kg"]!["seed"] = "corrupt");
+        var original = await f.Store.Inner.ReadAsync(MusicPlatformClientContextOwner.DocumentNamespace);
         var bad = await Begin(f.Owner); Check(!Ok(bad) && Code(bad) == "CORRUPT_STORAGE" && f.Transport.Calls == 0);
-        var unrelated = await f.Owner.CallAsync("music.accounts.logout", new { platform = "wy" });
-        Check(!Ok(unrelated) && Code(unrelated) == "CORRUPT_STORAGE" &&
-            f.Transport.Calls == 0 && f.Store.Writes == 0 &&
-            (await KgAccountFixture.ReadRoot(f.Store)).ToJsonString() == original);
+        var retry = await Begin(f.Owner);
+        var after = await f.Store.Inner.ReadAsync(MusicPlatformClientContextOwner.DocumentNamespace);
+        try
+        {
+            Check(!Ok(retry) && Code(retry) == "CORRUPT_STORAGE" && f.Transport.Calls == 0 && f.Store.Writes == 0 &&
+                original.Fingerprint == after.Fingerprint && original.Data!.SequenceEqual(after.Data!));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(original.Data!);
+            CryptographicOperations.ZeroMemory(after.Data!);
+        }
     }
     private static async Task Origins()
     {
@@ -388,7 +410,6 @@ internal sealed class KgAccountClock : TimeProvider
 
 internal sealed class KgAccountFixture : IAsyncDisposable
 {
-    internal const string DeviceKey = "[\"meowfilm\",\"music\",1,\"platform-device\",\"kg\"]";
     internal const string AccountKey = "[\"meowfilm\",\"music\",1,\"platform-account\",\"kg\"]";
     internal const string ConcurrentAccountKey = "[\"meowfilm\",\"music\",1,\"platform-account\",\"wy\"]";
     internal const string Seed = "0123456789abcdef0123456789abcdef";
@@ -405,7 +426,7 @@ internal sealed class KgAccountFixture : IAsyncDisposable
         Path = path ?? MusicNativeKgAccountTests.DataPath();
         Store = new(new LocalDocumentStore(Path, ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace]));
         Http = MusicPlatformHttp.CreateWithHandler(Transport);
-        Clients = new(Http, Store, importAccounts: true, clock: Clock, registrationEntropy: () => "test01");
+        Clients = new(Http, Store, clock: Clock, registrationEntropy: () => "test01");
         Protocol = Clients.CreateAccountProtocol(); Owner = Clients.CreateAccountOwner(Store, Protocol);
         Transport.BeforeRegister = async () =>
         {
@@ -436,9 +457,19 @@ internal sealed class KgAccountFixture : IAsyncDisposable
         }
         finally { if (doc.Data is not null) CryptographicOperations.ZeroMemory(doc.Data); }
     }
-    internal static Task SeedDevice(IDocumentStore store, string? dfid = KgAccountHandler.Dfid) =>
-        Edit(store, root => root["entries"]!.AsArray().Add(new JsonObject { ["key"] = DeviceKey,
-            ["value"] = new JsonObject { ["version"] = 1, ["generation"] = 1, ["seed"] = Seed, ["dfid"] = dfid } }));
+    internal static async Task SeedDevice(IDocumentStore store, string? dfid = KgAccountHandler.Dfid)
+    {
+        var before = await store.ReadAsync(MusicPlatformClientContextOwner.DocumentNamespace);
+        var current = before.Data is null ? MusicClientContextDocument.Create() : MusicClientContextDocument.Decode(before);
+        var next = current with { Kg = new(1, Seed, dfid) };
+        byte[] bytes = next.Encode();
+        try { await store.WriteAsync(MusicPlatformClientContextOwner.DocumentNamespace, bytes, before.Fingerprint); }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(bytes);
+            if (before.Data is not null) CryptographicOperations.ZeroMemory(before.Data);
+        }
+    }
     internal static Task MutateDevice(IDocumentStore store) => MusicClientContextFixture.MutateDocument(store, root =>
     {
         var value = root["kg"]!;
@@ -562,7 +593,7 @@ internal sealed class KgAccountHandler : HttpMessageHandler
                 RegistrationPlain["imsi"]!.GetValue<string>() == "" && RegistrationPlain.Count == 31);
             string text = Fault switch
             {
-                "register-duplicate" => "{\"status\":1,\"status\":1,\"data\":[]}",
+                "register-duplicate" => "{\"status\":0,\"status\":1,\"data\":[]}",
                 "register-dfid" => "{\"status\":1,\"data\":{\"dfid\":\"bad\"}}",
                 "register-data" => "{\"status\":1,\"data\":{}}",
                 "register-status" => "{\"status\":0,\"data\":[]}",

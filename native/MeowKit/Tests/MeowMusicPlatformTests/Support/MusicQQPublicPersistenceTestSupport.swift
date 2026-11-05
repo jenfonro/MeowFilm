@@ -36,7 +36,7 @@ actor QQPublicPersistenceGate {
     }
 }
 
-final class QQPublicPersistenceMemory: MusicQQPublicPersisting, @unchecked Sendable {
+final class QQPublicPersistenceMemory: MusicClientContextPersisting, @unchecked Sendable {
     private let lock = NSLock()
     private var bytes: Data?
     private var readError: MusicServiceError?

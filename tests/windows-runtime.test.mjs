@@ -440,16 +440,13 @@ async function verifyScriptExecution(t, peer, storageCalls) {
   // Self-authored contract fixture, not acceptance evidence for external scripts.
   const source = Buffer.from(`
     // @name Packaged LX contract fixture
-    const startup = meow.storage.get('startup').then(() => 'UNEXPECTED', error => error.code);
+    const startupStorage = typeof meow.storage;
     const background = new Promise(resolve => setTimeout(() => {
-      meow.storage.get('background').then(() => resolve('UNEXPECTED'), error => resolve(error.code));
+      resolve(typeof meow.storage);
     }, 1));
     let previousContext;
     lx.on(lx.EVENT_NAMES.request, async ({source, action}, context) => {
-      const startupCode = await startup, backgroundCode = await background;
-      let globalCode;
-      try { await meow.storage.get('global'); globalCode = 'UNEXPECTED'; }
-      catch (error) { globalCode = error.code; }
+      const backgroundStorage = await background, globalStorage = typeof meow.storage;
       let retiredCode = 'NO_PREVIOUS';
       if (previousContext) {
         try { await previousContext.storage.get('retired'); retiredCode = 'UNEXPECTED'; }
@@ -460,7 +457,7 @@ async function verifyScriptExecution(t, peer, storageCalls) {
       const stored = await context.storage.get('probe-' + action);
       const network = await new Promise((resolve, reject) => lx.request(${JSON.stringify(url)}, {},
         (error, response, body) => error ? reject(error) : resolve(body)));
-      return {source, action, startupCode, backgroundCode, globalCode, retiredCode, stored, network};
+      return {source, action, startupStorage, backgroundStorage, globalStorage, retiredCode, stored, network};
     });
     lx.send(lx.EVENT_NAMES.inited, {sources:{
       '${siteId}':{name:'Fixture',type:'music',actions:['fixtureAction','musicUrl'],
@@ -493,7 +490,7 @@ async function verifyScriptExecution(t, peer, storageCalls) {
     }));
     assert.deepEqual(result.value, {
       source: siteId, action: operation,
-      startupCode: 'PERMISSION_DENIED', backgroundCode: 'PERMISSION_DENIED', globalCode: 'PERMISSION_DENIED',
+      startupStorage: 'undefined', backgroundStorage: 'undefined', globalStorage: 'undefined',
       retiredCode: operation === 'fixtureAction' ? 'NO_PREVIOUS' : 'PERMISSION_DENIED',
       stored: 'native-scoped-value', network: { fixture: 'local-http' },
     });

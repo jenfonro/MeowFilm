@@ -28,7 +28,7 @@ extension NativeMusicService {
             guard let remote = snapshot.collections.first(where: { $0.id == target }) else { throw MusicServiceError.commitUnconfirmed }
             var b = bindingIndex.map { bindings[$0] } ?? .obj([("platform", .string(fence.platform.rawValue)),
                 ("accountId", .string(fence.accountID)), ("id", .string(target)), ("map", .obj())])
-            var mapping = try MusicNativeSyncLogic.map(b, songs: round.library["songs"])
+            var mapping = b["map"]
             for member in remote.members {
                 let song = try MusicModel.normalize(.init(platform: fence.platform.rawValue, data: member.track))
                 let id = try upsert([song], library: &round.library)[0]
@@ -114,10 +114,6 @@ extension NativeMusicService {
                     if bindings.isEmpty {
                         if c["deleted"].bool || c["kind"].string == "favorites" { break }
                         if !c["locallyCreated"].bool, !c["bindings"].array.isEmpty, c["bindings"].array.allSatisfy({ !$0["writable"].bool }) { break }
-                        // An imported old creation receipt has no acknowledged
-                        // remote ID: do not adopt a same-name list or resend.
-                        let key = MJ.array([.string(platform), .string(session.accountID)]).json
-                        if c["creating"].contains(key) { round.issue("unconfirmed", platform: selection.platform, collection: id); break }
                         let mutation = MusicLibrarySyncMutation(action: .create, name: c["name"].string,
                             directoryRevision: round.snapshots[platform]!.revision)
                         let mutationKey = MusicNativeSyncLogic.mutationKey(mutation)
@@ -161,7 +157,7 @@ extension NativeMusicService {
         }
         if c["deleted"].bool { return remote.canDelete ? mutation(.delete) : nil }
         if c["name"].string != remote.name, remote.canRename { return mutation(.rename, name: c["name"].string) }
-        let mapping = try MusicNativeSyncLogic.map(binding, songs: round.library["songs"])
+        let mapping = binding["map"]
         var desired: [MusicLibrarySyncMember] = []
         for id in c["order"].strings {
             let existing = remote.members.filter { mapping[$0.occurrenceID].string == id || mapping[$0.nativeID].string == id }

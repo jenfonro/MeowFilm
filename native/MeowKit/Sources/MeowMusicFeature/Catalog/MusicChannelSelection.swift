@@ -28,15 +28,13 @@ import Combine
             return
         }
         if let key = defaults.string(forKey: lastChannelKey) {
-            if let current = catalogue.first(where: { $0.identity == key ||
-                !key.contains(":") && $0.platform == .netease && ($0.id == key || $0.pageCode == key) }) {
+            if let current = catalogue.first(where: { $0.identity == key }) {
                 // A late catalogue read must not switch the user's selected tab.
                 channel = current
-                defaults.set(current.identity, forKey: lastChannelKey)
                 return
             }
         }
         guard catalogueLoaded else { return }
-        selectChannel(catalogue[0])
+        channel = catalogue[0]
     }
 }

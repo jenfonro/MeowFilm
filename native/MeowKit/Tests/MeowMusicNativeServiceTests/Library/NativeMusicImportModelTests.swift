@@ -2,13 +2,13 @@ import XCTest
 import MeowMusicFeature
 @testable import MeowMusicNativeService
 
-final class NativeMusicLegacyTests: XCTestCase {
-    // Synthetic import-to-compact-schema vectors specified independently of the implementation.
+final class NativeMusicImportModelTests: XCTestCase {
+    // Synthetic current-library vectors specified independently of the implementation.
     // SHA-256 was frozen with Python hashlib, not by running the reference JS.
-    private let batch = "1e5cb64f577b86519ad0399631d6ed068aab2cb37e492ffed07522af86a49eac"
-    private let after = "f55d381355ebc62cac9cacfcc8c5774aff523e9b8b4aca5cb4018a58a5eaf740"
+    private let batch = "e17cfc9a1761babe8423d1054deb3e11edfa471db165957ce2ab42225464d06f"
+    private let after = "a95fe60872976c86cae17c660e594dd47bc890a1b6c4d632112922ab19829b53"
     private let collectionsJSON = #"""
-    [{"id":"favorites","kind":"favorites","name":"Favorites","order":["2"],"revision":3,"manualOrder":false,"bindings":[],"intents":{},"creating":{}},{"id":"playlist:1","kind":"playlist","name":"Saved","order":["10","2"],"revision":4,"manualOrder":true,"locallyCreated":true,"bindings":[{"platform":"wy","accountId":"fixture-owner","id":"fixture-list","writable":false,"baseline":["77"],"map":{"2":"77"},"name":"Saved"}],"intents":{"2":{"present":true,"pending":true,"origin":"local","acknowledged":["[\"wy\",\"fixture-owner\",\"fixture-list\"]"]}},"creating":{"[\"wy\",\"fixture-owner\"]":{"before":["fixture-list"],"name":"Uncertain"}}},{"id":"playlist:2","kind":"playlist","name":"Removed","order":[],"revision":1,"manualOrder":true,"deleted":true,"bindings":[],"intents":{},"creating":{}}]
+    [{"id":"favorites","kind":"favorites","name":"Favorites","order":["2"],"revision":3,"manualOrder":false,"bindings":[],"intents":{}},{"id":"playlist:1","kind":"playlist","name":"Saved","order":["10","2"],"revision":4,"manualOrder":true,"locallyCreated":true,"bindings":[{"platform":"wy","accountId":"fixture-owner","id":"fixture-list","writable":false,"baseline":["77"],"map":{"77":"2"},"name":"Saved"}],"intents":{"2":{"present":true,"pending":true,"origin":"local","acknowledged":["[\"wy\",\"fixture-owner\",\"fixture-list\"]"]}}},{"id":"playlist:2","kind":"playlist","name":"Removed","order":[],"revision":1,"manualOrder":true,"deleted":true,"bindings":[],"intents":{}}]
     """#
     private let expectedOnline = #"""
     {"songId":"2","title":"Frozen track","artist":"Fixture","album":"","duration":180,"cover_url":"","sources":[{"sourceKey":"[\"wy\",\"77\",\"\"]","source":"wy","musicInfo":{"source":"wy","songmid":"77","name":"Frozen track","singer":"Fixture","duration":180,"types":[{"type":"320k","hash":"ABC","size":100}]}}]}
@@ -16,67 +16,102 @@ final class NativeMusicLegacyTests: XCTestCase {
     private let expectedLocal = #"""
     {"songId":"10","title":"Frozen local","artist":"Fixture","album":"","duration":0,"cover_url":"","sources":[]}
     """#
-    private func fixture(normalized: Bool) throws -> MJ {
-        let songs: MJ
-        if normalized {
-            songs = .obj([("10", try MJ.parse(Data(expectedLocal.utf8))), ("2", try MJ.parse(Data(expectedOnline.utf8)))])
-        } else {
-            let local = try MJ.parse(Data(#"{"songId":"10","id":10,"title":"Frozen local","artist":"Fixture","duration":0,"file_path":"Music/synthetic.wav","plugin_entry_path":"local"}"#.utf8))
-            let native = #"{"source":"wy","songmid":"77","name":"Frozen track","singer":"Fixture","duration":180,"types":[{"type":"320k","hash":"ABC","size":100,"discarded":"not-durable"},{"type":"obsolete"}]}"#
-            let online = MJ.obj([("songId", .string("2")), ("id", .n(23)), ("plugin_entry_path", .string("legacy-catalog")),
-                                 ("musicInfo", try MJ.parse(Data(native.utf8)))])
-            songs = .obj([("10", local), ("2", online)])
-        }
+    private func fixture(prepared: Bool = false) throws -> MJ {
+        let songs = MJ.obj([("10", try MJ.parse(Data(expectedLocal.utf8))), ("2", try MJ.parse(Data(expectedOnline.utf8)))])
         return .obj([("version", .n(1)), ("ownerId", .string("frozen-owner")), ("revision", .n(7)), ("nextId", .n(3)),
             ("songs", songs), ("accounts", .obj([("wy", .string("fixture-owner"))])),
             ("collections", try MJ.parse(Data(collectionsJSON.utf8))),
-            ("status", normalized ? .obj([("phase", .string("blocked")), ("at", .n(0)),
-                ("issues", .array([.obj([("code", .string("legacy_import_requires_rebinding"))])]))]) :
+            ("status", prepared ? .obj([("phase", .string("blocked")), ("at", .n(0)),
+                ("issues", .array([.obj([("code", .string("import_requires_rebinding"))])]))]) :
                 .obj([("phase", .string("synced")), ("at", .n(42)), ("issues", .array([]))]))])
     }
-    func testCompactSongNormalizationKeepsIDsAndFiltersUnknownQualityFields() throws {
-        let raw = try fixture(normalized: false), expected = try fixture(normalized: true)
+    func testCompactSongCleaningKeepsIDsAndFiltersUnknownNativeQualityFields() throws {
+        let expected = try fixture()
         for id in ["2", "10"] {
-            let clean = try MusicModel.cleanSong(raw["songs"][id])
+            let clean = try MusicModel.cleanSong(expected["songs"][id])
             XCTAssertEqual(clean.stable, expected["songs"][id].stable)
             XCTAssertEqual(try MusicModel.cleanSong(clean).stable, clean.stable)
         }
-        let data = #"{"source":"wy","songmid":"77","name":"Frozen track","singer":"Fixture","duration":180}"#
-        let fromFile = try MusicModel.cleanSong(.obj([("songId", .string("fixed-id")), ("musicInfo", try MJ.parse(Data(data.utf8)))]))
-        XCTAssertEqual(fromFile["songId"].string, "fixed-id")
-        XCTAssertEqual(fromFile["sources"].array.first?["musicInfo"]["songmid"].string, "77")
-        XCTAssertEqual(fromFile["file_path"].string, "")
-        XCTAssertEqual(MusicModel.publicURL(.string("https://localhost./cover.jpg")), .string(""))
+        var online = expected["songs"]["2"], sources = online["sources"].array
+        var qualities = sources[0]["musicInfo"]["types"].array
+        qualities[0]["discarded"] = .string("not-durable")
+        qualities.append(.obj([("type", .string("obsolete"))]))
+        sources[0]["musicInfo"]["types"] = .array(qualities)
+        online["sources"] = .array(sources)
+        XCTAssertEqual(try MusicModel.cleanSong(online).stable, expected["songs"]["2"].stable)
+        XCTAssertEqual(MusicModel.publicURL(.string("https://localhost./cover.jpg")),
+                       .string("https://localhost./cover.jpg"))
+    }
+    func testOldSongInputsAreRejectedWithoutSourceLossOrTargetWrites() async throws {
+        let current = try fixture(), compact = current["songs"]["2"]
+        var missing = compact; missing.remove("sources")
+        let raw = compact["sources"].array[0]["musicInfo"]
+        let rejected: [MJ] = [
+            missing,
+            .obj([("songId", .string("2")), ("source_data", raw)]),
+            .obj([("songId", .string("2")), ("musicInfo", raw)]),
+            .obj([("songId", .string("2")), ("id", .n(2)), ("name", .string("Old local")),
+                  ("singer", .string("Fixture")), ("file_path", .string("Music/synthetic.wav")),
+                  ("plugin_entry_path", .string("local"))])
+        ] + ["source_data", "file_path", "dedup_key", "plugin_entry_path", "_libraryId", "name", "singer", "img"].map { key in
+            var mixed = compact; mixed[key] = .string("obsolete")
+            return mixed
+        }
+        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        for song in rejected {
+            var input = current; input["songs"]["2"] = song
+            do {
+                _ = try await service.prepareImport(data: input.bytes, sourceId: "fixed-contract", ownerId: "frozen-owner")
+                XCTFail("Non-current song was accepted: \(song.json)")
+            } catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+            XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
+        }
+        await service.close()
     }
     func testImportGoldenBatchReceiptMetadataAndRollback() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        let raw = try fixture(normalized: false)
+        let raw = try fixture()
         let preview = try await service.prepareImport(data: raw.bytes, sourceId: "fixed-contract", ownerId: "frozen-owner")
         XCTAssertEqual(preview.report.batchId, batch)
         _ = try await service.commitImport(preview)
         let saved = try MJ.parse(XCTUnwrap(store.snapshot().0))
         let library = saved["records"][MusicModel.key("library")]
         XCTAssertEqual(library["receipt"]["afterHash"].string, after)
+        XCTAssertEqual(library["receipt"]["sourceOwnerId"].string, "frozen-owner")
         XCTAssertEqual(library["library"]["collections"], raw["collections"])
         XCTAssertEqual(library["library"]["accounts"], raw["accounts"])
         XCTAssertEqual(library["library"]["songs"]["2"]["songId"].string, "2")
-        XCTAssertFalse(saved.json.contains("not-durable"))
         let again = try await service.prepareImport(data: raw.stable.bytes, sourceId: "fixed-contract", ownerId: "frozen-owner")
         XCTAssertTrue(again.report.alreadyApplied)
         try await service.rollbackImport(batchId: batch)
         let empty = try await service.collections()
         XCTAssertEqual(empty.count, 1); XCTAssertEqual(empty[0].count, 0)
     }
+    func testCurrentImportCASFailureKeepsTargetAndPreviewAvailableForExplicitRetry() async throws {
+        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let source = try fixture().bytes
+        let preview = try await service.prepareImport(data: source, sourceId: "fixed-contract", ownerId: "frozen-owner")
+        store.fail(.storageConflict)
+        do { _ = try await service.commitImport(preview); XCTFail("Failed CAS cannot apply an import") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .storageConflict) }
+        XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
+        store.fail(nil)
+        let report = try await service.commitImport(preview)
+        XCTAssertFalse(report.alreadyApplied); XCTAssertEqual(report.batchId, batch)
+        XCTAssertEqual(store.snapshot().2, 1)
+        XCTAssertEqual(source, try fixture().bytes)
+        await service.close()
+    }
     func testCurrentCompactReceiptIsNotRewrittenOrReimportedUnderNewIdentity() async throws {
-        var legacy = try fixture(normalized: true); legacy["ownerId"] = .string("device")
-        XCTAssertEqual(legacy.stable.digest, after)
-        let area = MJ.obj([("schema", .n(1)), ("scope", .string("device")), ("revision", .n(1)), ("library", legacy),
-            ("receipt", .obj([("batchId", .string(batch)), ("sourceId", .string("fixed-contract")), ("legacyOwnerId", .string("frozen-owner")),
+        var library = try fixture(prepared: true); library["ownerId"] = .string("device")
+        XCTAssertEqual(library.stable.digest, after)
+        let area = MJ.obj([("schema", .n(1)), ("scope", .string("device")), ("revision", .n(1)), ("library", library),
+            ("receipt", .obj([("batchId", .string(batch)), ("sourceId", .string("fixed-contract")), ("sourceOwnerId", .string("frozen-owner")),
                 ("appliedAt", .n(1234)), ("appliedRevision", .n(1)), ("afterHash", .string(after))]))])
         let bytes = MJ.obj([("version", .n(1)), ("scope", .string("device")), ("revision", .n(1)),
             ("records", .obj([(MusicModel.key("library"), area)]))]).bytes
         let store = NativeMusicMemoryDocument(bytes), service = try await NativeMusicFixture.service(store)
-        let preview = try await service.prepareImport(data: fixture(normalized: false).bytes, sourceId: "fixed-contract", ownerId: "frozen-owner")
+        let preview = try await service.prepareImport(data: fixture().bytes, sourceId: "fixed-contract", ownerId: "frozen-owner")
         XCTAssertTrue(preview.report.alreadyApplied)
         XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
         let collections = try await service.collections()
@@ -103,12 +138,12 @@ final class NativeMusicLegacyTests: XCTestCase {
         XCTAssertEqual(MusicModel.durable(.string("DATA:text/plain,secret")), .string(""))
     }
     func testConflictingNativeRecordingIsRejectedWithoutDurableQuarantineTable() async throws {
-        var legacy = try fixture(normalized: true)
-        var accepted = legacy["songs"]["2"]["sources"].array
+        var library = try fixture(prepared: true)
+        var accepted = library["songs"]["2"]["sources"].array
         accepted[0]["musicInfo"]["singer"] = .string("Different recording")
-        legacy["songs"]["2"]["sources"] = .array(accepted)
+        library["songs"]["2"]["sources"] = .array(accepted)
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        do { _ = try await service.prepareImport(data: legacy.bytes, sourceId: "fixed", ownerId: "frozen-owner"); XCTFail("conflicting source") }
+        do { _ = try await service.prepareImport(data: library.bytes, sourceId: "fixed", ownerId: "frozen-owner"); XCTFail("conflicting source") }
         catch { XCTAssertEqual(error as? MusicServiceError, .nativeIDConflict) }
         XCTAssertNil(store.snapshot().0)
     }

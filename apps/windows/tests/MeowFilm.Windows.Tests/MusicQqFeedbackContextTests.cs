@@ -564,7 +564,7 @@ public static class MusicQqFeedbackContextTests
             case "module": body["req_0"]!["module"] = "music.pf_song_detail_svr"; break;
             case "pair": body["req_0"]!["method"] = "UrlGetVkey"; break;
             case "batch": body["req_1"] = body["req_0"]!.DeepClone(); code = "INVALID_REQUEST"; break;
-            case "duplicate": code = "INVALID_RESPONSE"; break;
+            case "duplicate": code = "INVALID_REQUEST"; break;
         }
         request.Content = new StringContent(fault == "duplicate"
             ? """{"comm":{},"comm":{},"req_0":{}}""" : body.ToJsonString(), Encoding.UTF8, "application/json");
@@ -748,7 +748,7 @@ public static class MusicQqFeedbackContextTests
             Directory.CreateDirectory(Root);
             Store = new(new LocalDocumentStore(Root, [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace]));
             Handler = new(this); Http = MusicPlatformHttp.CreateWithHandler(Handler);
-            Clients = new(Http, Store, importAccounts: true, clock: Clock);
+            Clients = new(Http, Store, clock: Clock);
             Owner = Clients.CreateAccountOwner(Store);
         }
         internal async Task<MusicPlatformSession> Login()

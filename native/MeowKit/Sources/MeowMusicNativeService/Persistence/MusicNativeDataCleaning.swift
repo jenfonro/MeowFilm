@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Native counterpart of music-core toLibrarySong/cleanNativeData. Normalizing
-// an imported song is not a new identity, remote binding or script operation.
+// Current native locator and durable metadata cleaning.
 import Foundation
 import MeowMusicFeature
 
@@ -25,59 +24,6 @@ extension MusicModel {
             try musicRequire(value[key].number.rounded() == value[key].number &&
                 abs(value[key].number) <= 9_007_199_254_740_991, .invalidImport)
         }
-    }
-    static func normalizeSong(_ raw: MJ) throws -> MJ {
-        try musicRequire(raw.isObject, .invalidImport)
-        try validateNativeNumbers(raw)
-        // Current songs already own their source list. Re-reading a compact
-        // song must not reinterpret it as a local import or rebuild a removed ID.
-        if raw.contains("sources") {
-            try musicRequire(raw["sources"].isArray && raw["sources"].array.count <= 16, .invalidImport)
-            _ = try raw["songId"].text()
-            _ = try raw["title"].text(1024)
-            for field in ["artist", "album"] {
-                try musicRequire(raw[field].isString && raw[field].string.utf8.count <= 1024, .invalidImport)
-            }
-            try musicRequire(!raw.contains("cover_url") || raw["cover_url"].isString, .invalidImport)
-            try musicRequire(raw["duration"].isNumber && raw["duration"].number.isFinite &&
-                (0...604_800).contains(raw["duration"].number), .invalidImport)
-            return raw
-        }
-        var song = raw, data = sourceData(raw)
-        try validateNativeNumbers(data)
-        if sites.contains(data["source"].string) {
-            let native = data["songmid"]
-            try musicRequire(!native.id.isEmpty, .invalidImport)
-            let title = firstText(song["title"], song["name"], data["name"])
-            let artist = firstText(song["artist"], song["singer"], data["singer"])
-            song["title"] = .string(title.isEmpty ? "未知歌曲" : title)
-            song["artist"] = .string(artist.isEmpty ? "未知歌手" : artist)
-            song["album"] = .string(firstText(song["album"], data["albumName"]))
-            song["duration"] = .number(nativeNumber(song["duration"].truthy ? song["duration"] : data["duration"]))
-            song["cover_url"] = .string(firstText(song["cover_url"], song["img"], data["img"]))
-            let key = try sourceKey(data), fp = fingerprint(song)
-            if !song["songId"].truthy { song["songId"] = .string("song:" + hash(!fp.isEmpty && song["duration"].number > 0 ? fp : key)) }
-            let nativeSource = MJ.obj([("sourceKey", .string(key)), ("source", data["source"]), ("musicInfo", data)])
-            song["sources"] = .array([nativeSource])
-        } else {
-            // An old online row without a compact source list is no longer an
-            // import format. Local rows have no platform locator fields.
-            try musicRequire(!sites.contains(song["source"].string) && song["songmid"] == .null &&
-                song["musicInfo"] == .null, .invalidImport)
-            if !song["songId"].truthy {
-                let plugin = song["plugin_entry_path"].string.isEmpty ? "local" : song["plugin_entry_path"].string
-                let id = [song["_libraryId"], song["id"]].first(where: \.truthy)?.id ??
-                    hash(MJ.array([data, song["file_path"], song["title"], song["artist"]]).json)
-                song["songId"] = .string("library:" + plugin + ":" + id)
-            }
-            song["sources"] = .array([])
-            song["title"] = .string(firstText(song["title"], song["name"]).isEmpty ? "未知歌曲" : firstText(song["title"], song["name"]))
-            song["artist"] = .string(firstText(song["artist"], song["singer"]))
-            song["album"] = .string(song["album"].string)
-            song["duration"] = .number(nativeNumber(song["duration"]))
-            song["cover_url"] = .string(firstText(song["cover_url"], song["img"]))
-        }
-        return song
     }
     /// Snapshot cleaning filters unknown quality fields; the compact song
     /// document still requires a valid `songmid` for every source.
@@ -132,13 +78,9 @@ extension MusicModel {
         }
         return out
     }
-    static func durable(_ value: MJ, field: String = "") -> MJ {
+    static func durable(_ value: MJ) -> MJ {
         if value.isString {
             let s = value.string
-            if ["file_path", "dedup_key"].contains(field) && (s.hasPrefix("{") || s.hasPrefix("[")) {
-                guard let json = try? MJ.parse(Data(s.utf8)) else { return .string("") }
-                return .string(durable(json).json)
-            }
             if s.range(of: "blob:", options: [.anchored, .caseInsensitive]) != nil ||
                 s.range(of: "data:", options: [.anchored, .caseInsensitive]) != nil { return .string("") }
             if (s.range(of: "http://", options: [.anchored, .caseInsensitive]) != nil ||
@@ -153,7 +95,7 @@ extension MusicModel {
             return .obj(value.fields.filter {
                 !MusicDurablePattern.transient.contains($0.0.lowercased()) &&
                 !MusicDurablePattern.isSecretField($0.0)
-            }.map { ($0.0, durable($0.1, field: $0.0)) })
+            }.map { ($0.0, durable($0.1)) })
         }
         return value
     }
@@ -184,17 +126,5 @@ private enum MusicDurablePattern {
     }
     static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
         expression.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
-    }
-}
-
-private extension MJ {
-    var truthy: Bool {
-        switch self {
-        case .null: return false
-        case .bool(let v): return v
-        case .number(let v): return v != 0
-        case .string(let v): return !v.isEmpty
-        default: return true
-        }
     }
 }

@@ -63,4 +63,4 @@
 - `storage.<installationId>`：按 site／key 的 JSON 值，与当前 grant、installation、generation 绑定。每安装 512 KiB，每 site 64 KiB／64 项，每值 16 KiB、最多 32 sites；这些是私有数据资源边界，与 Windows owner 一致。
 - 文件位于 `documents/music.scripts.v1/<key>.json`，其中 source 文件保存原始源码字节而非 JSON。单文档资源上限为 16 MiB，不限制命名空间文档数与总字节。安装／启停操作串行完成；读取或导入不执行脚本。删除先撤销运行授权并清除私有存储，再删除目录条目与最后一个引用的源码。
 
-内置官方源开关仍属于 `music.library.v1` 的 playback 记录 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；缺失默认全部启用，空数组全部关闭，不接受 null 或未知平台。写入使用既有 settingsRevision／文档 CAS，不创建第二份设置事实来源。
+内置官方源开关仍属于 `music.library.v1` 的 playback 记录 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；新建文档显式写入全部启用，已有文档必须包含该数组，空数组全部关闭，不接受缺失、null 或未知平台。写入使用既有 settingsRevision／文档 CAS，不创建第二份设置事实来源。

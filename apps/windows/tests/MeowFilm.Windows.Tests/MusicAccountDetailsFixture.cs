@@ -42,7 +42,7 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
         Directory.CreateDirectory(Root);
         Wrapper = new(new LocalDocumentStore(Root, [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace]));
         Http = MusicPlatformHttp.CreateWithHandler(new Handler(this));
-        Clients = new(Http, Wrapper.Inner, importAccounts: true);
+        Clients = new(Http, Wrapper.Inner);
         Owner = Clients.CreateAccountOwner(Wrapper, timeout: timeout);
     }
     internal async Task Seed()

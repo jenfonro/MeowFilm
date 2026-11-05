@@ -450,7 +450,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
                 await rejected { try await owner.setPlaybackFeedback(platform: platform, enabled: true, expectedRevision: settings.revision) }
             }
             if !enabled.isEmpty {
-                let options = try await owner.playbackOptions(for: .init(kind: .queue, id: "entry-1"))
+                let options = (try await owner.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))).options
                 let option = try XCTUnwrap(options.first)
                 let candidate = try await owner.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: "entry-1",
                                                         selection: option.selection(quality: "128k"))

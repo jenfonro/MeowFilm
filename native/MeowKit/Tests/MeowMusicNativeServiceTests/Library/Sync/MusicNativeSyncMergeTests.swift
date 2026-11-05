@@ -530,8 +530,7 @@ import MeowMusicFeature
         XCTAssertEqual(remaining[0].members.map(\.nativeID), ["B"])
     }
 
-    func testReferenceMapBothDirectionsRetainStableIdentitiesInCurrentDocument() async throws {
-        // Both original business-map orientations remain supported; obsolete
+    func testCurrentReferenceMapRetainsIdentityAndReverseMapIsRejectedWithoutWrites() async throws {
         for reversed in [false, true] {
             let member = NativeSyncFixture.member("101"), normalized = try MusicModel.normalize(.init(platform: "wy", data: member.track))
             let songID = normalized["songId"].string
@@ -548,6 +547,18 @@ import MeowMusicFeature
             try store.compareAndSwap(expected: original, replacement: doc.encode(changed: ["library"]))
             let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites, members: [member])])
             let service = try await NativeMusicFixture.service(store, accounts: peer)
+            if reversed {
+                let before = store.snapshot()
+                do {
+                    _ = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
+                    XCTFail("Reverse map must not be converted")
+                } catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+                XCTAssertEqual(store.snapshot().0, before.0); XCTAssertEqual(store.snapshot().2, before.2)
+                let counts = await peer.counts(), calls = await peer.calls()
+                XCTAssertEqual(counts.0, 0); XCTAssertEqual(counts.1, 0); XCTAssertTrue(calls.isEmpty)
+                await service.close()
+                continue
+            }
             _ = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
             let saved = try NativeSyncFixture.document(store)
             XCTAssertEqual(saved.envelope["version"].int, 1)
@@ -573,6 +584,25 @@ import MeowMusicFeature
         XCTAssertEqual(store.snapshot().0, original); XCTAssertEqual(store.snapshot().2, 0)
         let counts = await peer.counts(), calls = await peer.calls()
         XCTAssertEqual(counts.0, 0); XCTAssertEqual(counts.1, 0); XCTAssertTrue(calls.isEmpty)
+    }
+
+    func testOldCollectionCreatingStateIsRejectedWithoutRemoteCallsOrDocumentWrites() async throws {
+        let valid = try NativeSyncFixture.store()
+        let creation = MJ.obj([("before", .strings(["500"])), ("name", .string("Uncertain"))])
+        for creating in [MJ.obj(), .obj([("[\"wy\",\"42\"]", creation)])] {
+            var document = try NativeSyncFixture.document(valid)
+            var collections = document.library["library"]["collections"].array
+            collections[0]["creating"] = creating
+            document.library["library"]["collections"] = .array(collections)
+            let bytes = try document.encode(changed: ["library"]), store = NativeMusicMemoryDocument(bytes)
+            let peer = NativeSyncPeer(), service = try await NativeMusicFixture.service(store, accounts: peer)
+            do { _ = try await service.synchronizeLibrary(NativeSyncFixture.request()); XCTFail("Old creation state") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+            XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
+            let counts = await peer.counts(), calls = await peer.calls()
+            XCTAssertEqual(counts.0, 0); XCTAssertEqual(counts.1, 0); XCTAssertTrue(calls.isEmpty)
+            await service.close()
+        }
     }
 
     func testAnchorMergeAndMalformedFenceFailClosed() throws {

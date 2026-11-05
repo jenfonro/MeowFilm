@@ -20,10 +20,17 @@ import MeowMusicFeature
         return try XCTUnwrap(rows.first { $0.id == id })
     }
 
-    func testFixedDefaultsAndOldManualLedgerNeverAuthorizeAutomaticNetwork() async throws {
+    func testNewAndCurrentManualLedgerDefaultsNeverAuthorizeAutomaticNetwork() async throws {
         let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection()])
         let store = try NativeSyncFixture.store(), service = try await NativeMusicFixture.service(store, accounts: peer)
+        let initial = try await service.automaticLibrarySyncPreferences()
+        XCTAssertEqual(initial, .init())
+        _ = try await run(service, .foreground)
+        let unopened = await peer.counts()
+        XCTAssertEqual(unopened.0, 0); XCTAssertEqual(unopened.1, 0)
         _ = try await service.synchronizeLibrary(NativeSyncFixture.request())
+        let manual = try NativeSyncFixture.document(store).library["sync"]["automatic"]
+        XCTAssertTrue(manual.isObject); XCTAssertEqual(manual["selections"], .array([]))
         let before = await peer.counts()
         let defaults = try await service.automaticLibrarySyncPreferences()
         XCTAssertEqual(defaults, .init())
@@ -32,6 +39,24 @@ import MeowMusicFeature
         let after = await peer.counts()
         XCTAssertEqual(before.0, after.0); XCTAssertEqual(before.1, after.1)
         let calls = await peer.calls(); XCTAssertTrue(calls.isEmpty)
+        await service.close()
+    }
+
+    func testStoredLedgerWithoutAutomaticIsRejectedWithoutAccountCallsOrWrites() async throws {
+        let valid = try NativeSyncFixture.store()
+        var document = try NativeSyncFixture.document(valid), ledger = try MusicNativeSyncLedger().json()
+        ledger.remove("automatic"); document.library["sync"] = ledger
+        let bytes = try document.encode(changed: ["library"]), store = NativeMusicMemoryDocument(bytes)
+        let peer = NativeSyncPeer(), service = try await NativeMusicFixture.service(store, accounts: peer)
+        do { _ = try await service.automaticLibrarySyncPreferences(); XCTFail("Missing current settings") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+        do { _ = try await run(service, .foreground); XCTFail("Old ledger must not authorize a round") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+        do { _ = try await service.synchronizeLibrary(NativeSyncFixture.request()); XCTFail("Old manual ledger") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+        XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
+        let counts = await peer.counts(), writes = await peer.calls()
+        XCTAssertEqual(counts.0, 0); XCTAssertEqual(counts.1, 0); XCTAssertTrue(writes.isEmpty)
         await service.close()
     }
 
@@ -149,13 +174,13 @@ import MeowMusicFeature
         let service = try await NativeMusicFixture.service(store, accounts: peer)
         // All-OFF preference writes must not count as imported library data.
         _ = try await service.saveAutomaticLibrarySync(.init(), requestID: UUID(), authorization: .init())
-        let original = try NativeMusicFixture.legacy().bytes
-        let preview = try await service.prepareImport(data: original, sourceId: "fixture", ownerId: "legacy-owner")
+        let original = try NativeMusicFixture.importLibrary().bytes
+        let preview = try await service.prepareImport(data: original, sourceId: "fixture", ownerId: "import-owner")
         _ = try await service.commitImport(preview)
         _ = try await run(service, .foreground)
         let calls = await peer.calls(), counts = await peer.counts()
         XCTAssertTrue(calls.isEmpty); XCTAssertEqual(counts.0, 0)
-        XCTAssertEqual(original, try NativeMusicFixture.legacy().bytes)
+        XCTAssertEqual(original, try NativeMusicFixture.importLibrary().bytes)
         try await service.rollbackImport(batchId: preview.report.batchId)
         let rows = try await service.collections()
         XCTAssertEqual(rows.count, 1); XCTAssertEqual(rows[0].count, 0)

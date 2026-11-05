@@ -10,7 +10,7 @@
 - 固定签名／加密请求构造在 `Platforms`；请求临时密钥、nonce 和时间戳不进入客户端文档。HTTP 不使用 Cookie jar，不隐式保存状态。
 - 目录、官方播放、歌词、VIP、搜索发现、反馈、同步和登录显式注入同一个客户端 owner。只有真实使用客户端字段的请求捕获对应快照：QQ 类型搜索按需依赖匿名 QIMEI／GetSession；精确目录读取、登录验证、歌词和 vkey 不额外登记。同步或官方候选委托类型搜索时使用同一配方，QQ 反馈使用独立可撤销的账号＋设备 lease。
 
-## 文档与首次导入
+## 文档与首次创建
 
 `music.platform-context.v1` 使用当前 `aggregate` 产品身份下的 DPAPI 保护存储，64 KiB 上限；原生 namespace 对脚本不可见。
 
@@ -26,13 +26,9 @@ App 通过 `LocalDocumentStore` 的敏感命名空间配置保留此保护，原
 
 QIMEI 保存自身代次、q16、q36 和取得时间；匿名 session 保存自身代次、uid、sid、取得时间及依赖的 QIMEI 代次。字段集合、类型、重复键、大小、整数范围、IMEI 校验位、子代次关系和文档 fingerprint 均在发布前校验。损坏、保护失败或不兼容版本拒绝读取；存储不可用另返回 `STORAGE_UNAVAILABLE`，都不重新生成身份。
 
-只有第一次权威读取确认客户端文档真正不存在时，才调用只读 `AccountClientContextImport`：
+只有第一次权威读取确认客户端文档真正不存在时，才直接按当前平台规则生成本地身份，通过 missing fingerprint CAS 保存新文档，取得正确回执后发布内存快照。客户端初始化不读取账号文档，也不从账号 Cookie 或设备条目推导安装身份。
 
-1. 严格读取已发布账号 v1 文档中的 KG／QQ 旧设备条目和 WY 客户端 Cookie 字段。
-2. 保留合法已有值和关联；缺少的必要字段按平台正常本地规则生成。WY 没有 `deviceId` 不代表其他合法客户端字段要丢弃。
-3. 通过 missing fingerprint CAS 保存新文档，取得正确回执后才发布内存快照。
-
-已有客户端文档不再读取迁移源；旧账号文档和产品身份保留，不删除、不重置。账号文档仍严格识别旧设备条目，以保持已发布数据可读取，但它们仅为迁移来源，后续账号事务原样保留，不再生成、更新或同步设备值。
+已有客户端文档严格按当前格式读取；损坏或不支持的格式明确失败并保留原字节，不重新生成或覆盖。账号文档只接受当前账号与账号详情条目，设备状态由客户端 owner 独立持有。
 
 WY 新标识采用现有原生规则：52 位大写 hex deviceId、64 位小写 hex nuid、携带时间戳的 nnid，以及六个小写字母加时间戳的 WNMCID。KG 使用稳定 128 bit seed，派生完整十进制 MID 与 DEV。QQ 使用稳定安装资料和合法 IMEI；这些是协议客户端资料，不读取或冒充本机硬件身份，也不表示设备已获认证。
 
@@ -77,7 +73,7 @@ WY 新标识采用现有原生规则：52 位大写 hex deviceId、64 位小写 
 - 普通取得复用内存快照。KG／QQ 更新核对准确快照引用与平台代次；WY 核对请求所属权威观察，并在串行边界对最新快照应用响应字段。整文档写入仍使用实际 fingerprint 做 CAS，保留未变化平台的快照引用。
 - CAS 冲突清除旧客户端基线，明确失败；后续权威读取只观察新状态，不重放原更新。
 - 调用存储后取消、错误或回执指纹不匹配视为 `COMMIT_UNKNOWN`。未核对前不能继续取得客户端状态、派发依赖它的请求或报告关闭准备成功。
-- `ReloadAsync` 是明确的权威重读，不自动重放写入、不再次导入。权威 missing 读解除未知回执，但已经准入过身份写入后不再次生成安装身份，返回 `DEVICE_CONTEXT_REQUIRED`，直到有效客户端文档经权威重读恢复。
+- `ReloadAsync` 是明确的权威重读，不自动重放写入、不创建身份。权威 missing 读解除未知回执，但已经准入过身份写入后不再次生成安装身份，返回 `DEVICE_CONTEXT_REQUIRED`，直到有效客户端文档经权威重读恢复。
 - 应用显式初始化重试及 `music.accounts.list` 的应用级路径可以核对客户端未知回执；单独账号 owner 的 list 不协调另一个 writer。
 - 重读立即使旧快照不可使用，并与初始化等待共享当前重读；新观察不复活旧快照。
 
@@ -87,7 +83,7 @@ WY 新标识采用现有原生规则：52 位大写 hex deviceId、64 位小写 
 
 长期验证入口：
 
-- `MusicPlatformClientContextTests`：本地初始化、一次导入、严格格式、持久稳定性、并发、CAS、未知回执、重读、取消、关闭及 WY 请求组合。
+- `MusicPlatformClientContextTests`：本地初始化与账号存储隔离、严格格式、持久稳定性、并发、CAS、未知回执、重读、取消、关闭及 WY 请求组合。
 - `MusicNativeKgAccountTests`、`MusicQqFeedbackContextTests`、`MusicQqFeedbackIntegrationTests`：固定平台协议、真实 DPAPI、授权／设备分离和故障生命周期。
 - `MusicWyAccountClientTests`：账号响应校验后交接、二维码／SMS 多步骤状态复用，以及错误身份／资料不写客户端状态。
 - `MusicNativePlatformTests`、`MusicSearchDiscoveryTests`：推荐设备交接、展示请求复用、目录逐分支合法／非法响应交接与消费者边界。

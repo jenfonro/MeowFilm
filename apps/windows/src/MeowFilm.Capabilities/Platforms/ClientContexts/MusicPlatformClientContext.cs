@@ -82,6 +82,3 @@ internal sealed record MusicQqClientContext(
             Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"), digits + (char)('0' + (10 - sum % 10) % 10));
     }
 }
-
-internal sealed record MusicClientContextSeeds(MusicWyClientContext? Wy = null,
-    MusicKgClientContext? Kg = null, MusicQqClientContext? Qq = null);

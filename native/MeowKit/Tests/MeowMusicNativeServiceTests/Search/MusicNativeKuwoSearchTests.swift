@@ -215,7 +215,7 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
             let queue = try await service.queue()
             XCTAssertNotEqual(queue.entries[0].id, queue.entries[1].id)
             XCTAssertEqual(state.currentId, queue.entries[1].id)
-            let options = try await service.playbackOptions(for: tracks[0].ref)
+            let options = (try await service.sourceAvailability(for: tracks[0].ref)).options
             let selected = try XCTUnwrap(options.first)
             XCTAssertEqual(options.count, 1); XCTAssertEqual(selected.siteId, platform)
             XCTAssertEqual(selected.sourceKey, first.sources[0].sourceKey)

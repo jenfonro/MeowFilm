@@ -75,15 +75,12 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             JsonObject candidate;
             if (saved.Data is null) { LJ.Require(saved.Fingerprint == DocumentFingerprint.Missing, "CORRUPT_STORAGE"); candidate = LJ.Obj(("version", 1), ("entries", new JsonArray())); }
             else candidate = LJ.PersistedDocument(saved.Data);
-            ValidateDocument(candidate, allowLegacyOnlineSettings: true);
+            ValidateDocument(candidate);
             if (Value(candidate, "queue") is JsonObject q) RestoreRuntime(q, false);
             else if (force) RestoreRuntime(Queue(candidate), false);
             document = candidate; fingerprint = saved.Fingerprint;
             if (pending is null && recommendationUnknown is null) RefreshOfficialSources(candidate);
         }
-        // Reconciliation observes the attempted CAS before/after bytes without issuing
-        // another write. A new admitted call may retry a conversion that did not commit.
-        if (!force) await ConvertLegacyOnlineSettingsAsync(token).ConfigureAwait(false);
     }
     private static PendingOwner CommandOwner(string method)
     {

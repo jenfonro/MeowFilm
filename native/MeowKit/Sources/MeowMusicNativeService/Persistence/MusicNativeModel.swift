@@ -26,7 +26,7 @@ enum MusicModel {
     static func key(_ area: String) -> String { MJ.array([.string("meowfilm"), .string("music"), .n(1), .string("device"), .string(area)]).json }
     static func freshCollection(_ id: String, _ name: String, _ kind: String = "playlist") -> MJ {
         .obj([("id", .string(id)), ("name", .string(name)), ("kind", .string(kind)), ("order", .array([])),
-              ("revision", .n(0)), ("manualOrder", .bool(false)), ("bindings", .array([])), ("intents", .obj()), ("creating", .obj())])
+              ("revision", .n(0)), ("manualOrder", .bool(false)), ("bindings", .array([])), ("intents", .obj())])
     }
     static var emptyLibrary: MJ {
         .obj([("version", .n(1)), ("ownerId", .string("device")), ("revision", .n(0)), ("nextId", .n(1)),
@@ -37,19 +37,22 @@ enum MusicModel {
     static var queue: MJ { .obj([("schema", .n(1)), ("entries", .array([])), ("currentId", .null), ("priority", .array([])),
         ("history", .array([])), ("source", .null), ("serial", .n(0)), ("revision", .n(0)), ("failed", .array([]))]) }
     static var playback: MJ { .obj([("schema", .n(1)), ("revision", .n(0)), ("mode", .n(1)), ("qualitySettings", .obj()),
+        ("officialSources", .strings(MusicAccountPlatform.allCases.map(\.rawValue))),
         ("lyricsEnabled", .bool(true)), ("showTranslation", .bool(true)), ("position", .obj([("occurrenceId", .null), ("seconds", .n(0))]))]) }
     static var history: MJ { .obj([("schema", .n(1)), ("playlists", .array([])), ("days", .array([]))]) }
     static func norm(_ text: String) -> String { MusicRecordingIdentity.normalize(text) }
     static func hash(_ text: String) -> String { MusicRecordingIdentity.hash(text) }
     static func fingerprint(_ song: MJ) -> String { descriptor(song).fingerprint }
-    /// Adapts the durable/native JSON shapes to the one recording rule.
+    /// Compact songs and individual source rows share one recording rule.
     static func descriptor(_ song: MJ) -> MusicRecordingIdentity {
+        if song["sources"].isArray {
+            return .init(title: song["title"].string, artist: song["artist"].string,
+                         duration: song["duration"].number,
+                         sourceKeys: song["sources"].array.map { $0["sourceKey"].string })
+        }
         let data = sourceData(song)
-        let keys = song["sources"].isArray ? song["sources"].array.map { $0["sourceKey"].string } : [nativeKey(song)]
-        return .init(title: firstText(song["title"], song["name"], data["name"]),
-                     artist: firstText(song["artist"], song["singer"], data["singer"]),
-                     duration: nativeNumber(song["duration"]) > 0 ? nativeNumber(song["duration"]) : nativeNumber(data["duration"]),
-                     sourceKeys: keys)
+        return .init(title: data["name"].string, artist: data["singer"].string,
+                     duration: nativeNumber(data["duration"]), sourceKeys: [nativeKey(song)])
     }
     static func compatible(_ a: MJ, _ b: MJ, sameNative: Bool? = nil) -> Bool {
         descriptor(a).isCompatible(with: descriptor(b), sameNative: sameNative)
@@ -120,23 +123,26 @@ enum MusicModel {
         return .string(url.absoluteString)
     }
     static func cleanSong(_ raw: MJ) throws -> MJ {
-        let normalized = try normalizeSong(raw)
         let fields = ["songId", "title", "artist", "album", "duration", "cover_url", "sources"]
-        var song = durable(.obj(fields.filter(normalized.contains).map { ($0, normalized[$0]) }))
+        var song = durable(raw)
+        try song.requireFields(fields, required: ["songId", "title", "artist", "album", "duration", "sources"])
         _ = try song["songId"].text()
         _ = try song["title"].text(1024)
+        for field in ["artist", "album"] {
+            try musicRequire(song[field].isString && song[field].string.utf8.count <= 1024, .invalidImport)
+        }
+        try musicRequire(!song.contains("cover_url") || song["cover_url"].isString, .invalidImport)
         try musicRequire(song["duration"].isNumber && song["duration"].number.isFinite &&
             (0...604_800).contains(song["duration"].number), .invalidImport)
-        if song.contains("sources") {
-            let rows = try song["sources"].array.map(cleanSource)
-            var keys = Set<String>(), accepted: [MJ] = []
-            for row in rows {
-                try musicRequire(keys.insert(row["sourceKey"].string).inserted &&
-                    compatible(song, row) && accepted.allSatisfy { compatible($0, row) }, .nativeIDConflict)
-                accepted.append(row)
-            }
-            song["sources"] = .array(orderedSources(accepted))
+        try musicRequire(song["sources"].isArray && song["sources"].array.count <= 16, .invalidImport)
+        let rows = try song["sources"].array.map(cleanSource)
+        var keys = Set<String>(), accepted: [MJ] = []
+        for row in rows {
+            try musicRequire(keys.insert(row["sourceKey"].string).inserted &&
+                compatible(song, row) && accepted.allSatisfy { compatible($0, row) }, .nativeIDConflict)
+            accepted.append(row)
         }
+        song["sources"] = .array(orderedSources(accepted))
         if !song["cover_url"].string.isEmpty { song["cover_url"] = publicURL(song["cover_url"]) }
         return song
     }
@@ -212,6 +218,7 @@ enum MusicModel {
     }
     static func normalize(_ value: MusicNativeTrackData) throws -> MJ {
         var raw = try MJ.parse(value.data, maximum: 16 * 1024)
+        try musicRequire(raw.isObject, .invalidResponse)
         raw["source"] = .string(value.platform)
         // Account adapter's public rows use quality strings; the LX locator
         // uses rows. No credential fields cross this conversion.
@@ -224,7 +231,15 @@ enum MusicModel {
         }
         _ = try raw["name"].text(1024)
         try musicRequire(raw["duration"].number.isFinite && (0...604_800).contains(raw["duration"].number), .invalidResponse)
-        return try cleanSong(.obj([("musicInfo", raw)]))
+        let data = try cleanNative(raw), key = try sourceKey(data)
+        let artist = data["singer"].string
+        var song = MJ.obj([("title", data["name"]), ("artist", .string(artist.isEmpty ? "未知歌手" : artist)),
+            ("album", .string(data["albumName"].string)), ("duration", .number(nativeNumber(data["duration"]))),
+            ("cover_url", publicURL(data["img"])),
+            ("sources", .array([.obj([("sourceKey", .string(key)), ("source", data["source"]), ("musicInfo", data)])]))])
+        let recording = fingerprint(song)
+        song["songId"] = .string("song:" + hash(!recording.isEmpty && song["duration"].number > 0 ? recording : key))
+        return try cleanSong(song)
     }
     static func sources(_ song: MJ) throws -> [MusicNativeSource] {
         let rows = song["sources"].array
@@ -252,9 +267,8 @@ enum MusicModel {
         if !enabled.contains(where: { $0 != "spatial" || !spatial.isEmpty }) { enabled = qualityOrder; spatial = spatialOrder }
         return (order.filter(enabled.contains), order, spOrder.filter(spatial.contains), spOrder)
     }
-    /// Built-in audio-source admission. A missing field is the default (all on).
+    /// Built-in audio-source admission from validated playback preferences.
     static func officialSources(_ prefs: MJ) -> [MusicAccountPlatform] {
-        guard prefs.contains("officialSources") else { return MusicAccountPlatform.allCases }
         let enabled = Set(prefs["officialSources"].strings)
         return MusicAccountPlatform.allCases.filter { enabled.contains($0.rawValue) }
     }

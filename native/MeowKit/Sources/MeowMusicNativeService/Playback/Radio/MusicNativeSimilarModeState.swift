@@ -40,7 +40,6 @@ final class MusicNativeSimilarSession {
     let scope: String
     let lease: MusicAccountQueueLease
     var continueEnabled = true
-    var legacy = false
     var batches: [MJ] = []
     var attempted = Set<String>()
     var status: MusicSimilarModeSnapshot.Status = .ready
@@ -58,7 +57,7 @@ final class MusicNativeSimilarSession {
         let context = self.context.map {
             MJ.obj([("pid", .string($0.playlistID)), ("sid", .string($0.seedID))])
         } ?? .null
-        return .obj([("schema", .n(legacy ? 1 : 2)), ("seed", MusicModel.durable(seed)),
+        return .obj([("schema", .n(2)), ("seed", MusicModel.durable(seed)),
             ("seedEntryId", seedEntryID.map(MJ.string) ?? .null), ("returnQueue", returnQueue),
             ("sourceIds", .strings(sourceIDs)), ("fromHome", .bool(fromHome)),
             ("provider", .string(provider.rawValue)), ("providerContext", context),
@@ -108,7 +107,7 @@ enum MusicNativeSimilarData {
         }).map { $0["songmid"].id }
     }
     static func display(_ song: MJ) -> MusicSimilarModeSong {
-        .init(title: MusicModel.firstText(song["title"], song["name"]), artist: song["artist"].string,
+        .init(title: song["title"].string, artist: song["artist"].string,
               album: song["album"].string, artwork: MusicNativePublicBrowseSupport.artwork(song["cover_url"]))
     }
     static func same(_ a: MJ, _ b: MJ) -> Bool {
@@ -127,7 +126,7 @@ enum MusicNativeSimilarData {
         }
         var seenKeys = Set<Data>(), seenByID: [Data: [MJ]] = [:]
         if let maximum, maximum <= 0 { return [] }
-        for value in values where !MusicModel.firstText(value["title"], value["name"]).isEmpty {
+        for value in values where !value["title"].string.isEmpty {
             let keys = Set(((try? MusicModel.sources(value).map(\.sourceKey)) ?? []).map { Data($0.utf8) })
             let id = Data(value["songId"].string.utf8)
             if !keys.isDisjoint(with: knownKeys) || knownByID[id]?.contains(where: { same($0, value) }) == true ||
@@ -141,22 +140,45 @@ enum MusicNativeSimilarData {
     static func queueSnapshot(_ queue: MJ) -> MJ {
         .obj(["entries", "currentId", "priority", "history", "source"].map { ($0, MusicModel.durable(queue[$0])) })
     }
+    static func validateSession(_ saved: MJ, serial: Int) throws {
+        try musicRequire(saved["schema"] == .n(2) && saved["seed"].isObject &&
+            saved["batches"].isArray && saved["attempted"].isArray &&
+            saved["attempted"].array.allSatisfy(\.isString) &&
+            saved["continue"].isBool && saved["fromHome"].isBool, .corruptDocument)
+        try validateQueue(saved["returnQueue"])
+        let maximum = saved["returnQueue"]["entries"].array.compactMap { Int($0["id"].string.dropFirst(6)) }.max() ?? 0
+        try musicRequire(serial >= maximum, .corruptDocument)
+        let sourceIDs = saved["sourceIds"]
+        try musicRequire(sourceIDs.isArray && sourceIDs.array.allSatisfy(\.isString) &&
+            !sourceIDs.array.isEmpty && sourceIDs.array.count <= 20 &&
+            sourceIDs.strings.allSatisfy(id), .corruptDocument)
+        guard let provider = MusicSimilarModeProvider(rawValue: saved["provider"].string),
+              provider != .queueRecommendations else { throw MusicServiceError.corruptDocument }
+        for batch in saved["batches"].array {
+            try musicRequire(batch.isObject && !batch["id"].string.isEmpty &&
+                batch["basedOn"].isObject && batch["entryIds"].isArray &&
+                batch["entryIds"].array.allSatisfy(\.isString) &&
+                MusicSimilarModeProvider(rawValue: batch["provider"].string) != nil, .corruptDocument)
+        }
+    }
     static func validateQueue(_ saved: MJ) throws {
         try musicRequire(saved.isObject && saved["entries"].isArray, .corruptDocument)
         var d = try MusicDocument(nil, runID: "similar-validation")
         for key in ["entries", "currentId", "priority", "history", "source"] { d.queue[key] = saved[key] }
         let serial = saved["entries"].array.compactMap { Int($0["id"].string.dropFirst(6)) }.max() ?? 0
         d.queue["serial"] = .n(serial)
-        if d.queue["currentId"] == .null { d.queue["currentId"] = saved["entries"].array.first?["id"] ?? .null }
         try d.validate()
     }
     static func batch(_ id: String, basedOn: MJ, provider: MusicSimilarModeProvider, rows: [MJ]) -> MJ {
         .obj([("id", .string(id)), ("basedOn", MusicModel.durable(basedOn)),
               ("provider", .string(provider.rawValue)), ("entryIds", .strings(rows.map { $0["id"].string }))])
     }
-    static func batchDTO(_ row: MJ, fallback: MusicSimilarModeProvider) -> MusicSimilarModeBatch {
-        .init(id: row["id"].string, basedOn: display(row["basedOn"]),
-              provider: MusicSimilarModeProvider(rawValue: row["provider"].string) ?? fallback,
+    static func batchDTO(_ row: MJ) throws -> MusicSimilarModeBatch {
+        guard let provider = MusicSimilarModeProvider(rawValue: row["provider"].string) else {
+            throw MusicServiceError.corruptDocument
+        }
+        return .init(id: row["id"].string, basedOn: display(row["basedOn"]),
+              provider: provider,
               entryIDs: row["entryIds"].strings)
     }
 }

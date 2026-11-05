@@ -1,6 +1,6 @@
 import Foundation
 
-/// Optional v1 capability for ordinary playback metadata, independent of audio
+/// Preferences for ordinary playback metadata, independent of audio
 /// delivery, quality and downloads. The revision is the existing playback
 /// settings revision, not a separate counter.
 public struct MusicMetadataPreferences: Equatable, Sendable {
@@ -69,8 +69,8 @@ public struct MusicMetadataCandidates: Equatable, Sendable {
     }
 }
 
-/// Not a requirement of MusicServing: products opt in by supplying this
-/// port. Reads do not initialize storage. Updates use the existing protected
+/// Metadata responsibilities required by MusicServing.
+/// Reads do not initialize storage. Updates use the existing protected
 /// document/CAS writer, preserve unavailable platforms and unrelated records,
 /// and never replay a stale or unconfirmed write.
 ///

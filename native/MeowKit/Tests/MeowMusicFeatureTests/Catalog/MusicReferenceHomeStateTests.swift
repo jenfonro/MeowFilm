@@ -99,15 +99,16 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         XCTAssertNil(restored.channel)
         restored.restoreChannel(from: [playlists, chart], catalogueLoaded: true)
         XCTAssertEqual(restored.channel, playlists)
+        XCTAssertEqual(defaults.string(forKey: "music.ui.lastChannel"), missing.identity)
         let reloaded = MusicChannelSelection(defaults: defaults)
         reloaded.restoreChannel(from: [chart, playlists], catalogueLoaded: true)
-        XCTAssertEqual(reloaded.channel, playlists)
+        XCTAssertEqual(reloaded.channel, chart)
         reloaded.selectChannel(MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists))
         reloaded.restoreChannel(from: [chart], catalogueLoaded: true)
         XCTAssertEqual(reloaded.channel?.id, "playlist")
     }
 
-    func testRestoredChannelMigratesPersistedIdentityWhenStablePageCodeGetsANewID() throws {
+    func testSelectedChannelUpdatesPersistedIdentityWhenStablePageCodeGetsANewID() throws {
         let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -120,6 +121,28 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         let restored = MusicChannelSelection(defaults: defaults)
         restored.restoreChannel(from: [current], catalogueLoaded: true)
         XCTAssertEqual(restored.channel, current)
+    }
+
+    func testChannelRestorationRequiresFullIdentityAndDoesNotRewriteUnmatchedValues() throws {
+        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let channel = MusicPublicBrowseChannel(id: "electronic", title: "电音", kind: .cube,
+            pageCode: "electronic_page", platform: .netease)
+        for stored in [channel.id, channel.pageCode] {
+            defaults.set(stored, forKey: "music.ui.lastChannel")
+            let selection = MusicChannelSelection(defaults: defaults)
+            selection.restoreChannel(from: [chart, channel], catalogueLoaded: false)
+            XCTAssertNil(selection.channel)
+            selection.restoreChannel(from: [chart, channel], catalogueLoaded: true)
+            XCTAssertEqual(selection.channel, chart)
+            XCTAssertEqual(defaults.string(forKey: "music.ui.lastChannel"), stored)
+        }
+        defaults.set(channel.identity, forKey: "music.ui.lastChannel")
+        let selection = MusicChannelSelection(defaults: defaults)
+        selection.restoreChannel(from: [chart, channel], catalogueLoaded: false)
+        XCTAssertEqual(selection.channel, channel)
+        XCTAssertEqual(defaults.string(forKey: "music.ui.lastChannel"), channel.identity)
     }
 
     func testRememberedChannelGetsItsOwnFirstPageAfterCatalogueRestoration() async throws {

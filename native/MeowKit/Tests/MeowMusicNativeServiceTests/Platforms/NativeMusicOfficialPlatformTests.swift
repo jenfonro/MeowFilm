@@ -54,7 +54,7 @@ final class NativeMusicOfficialPlatformTests: XCTestCase {
             let peer = NativeOfficialAccountPeer(platform), service = try await NativeMusicFixture.service(accounts: peer)
             let page = try await service.recommendations(platform: platform, kind: "synthetic", cursor: nil)
             let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
-            let options = try await service.playbackOptions(for: page.items[0].ref)
+            let options = (try await service.sourceAvailability(for: page.items[0].ref)).options
             XCTAssertEqual(options.count, 1); XCTAssertEqual(options[0].siteId, platform.rawValue)
             let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(),
                 occurrenceId: XCTUnwrap(state.currentId), selection: options[0].selection(quality: platform == .netease ? "sky" : "flac"))
@@ -70,7 +70,7 @@ final class NativeMusicOfficialPlatformTests: XCTestCase {
         let state = try await service.state()
         _ = try await service.updateSettings(.init(ifRevision: state.settingsRevision, qualityEnabled: ["spatial", "enhanced", "high"],
             qualityOrder: ["enhanced", "spatial", "high"], spatialEnabled: ["sky", "vivid"], spatialOrder: ["vivid", "sky"]))
-        let options = try await service.playbackOptions(for: page.items[0].ref)
+        let options = (try await service.sourceAvailability(for: page.items[0].ref)).options
         XCTAssertEqual(options[0].qualities, ["jyeffect", "vivid", "sky", "192k", "320k"])
         XCTAssertFalse(options[0].qualities.contains("flac24bit")); XCTAssertFalse(options[0].qualities.contains("dolby"))
         await service.close()
@@ -80,7 +80,7 @@ final class NativeMusicOfficialPlatformTests: XCTestCase {
         let service = try await NativeMusicFixture.service(scripts: scripts, accounts: peer)
         let page = try await service.recommendations(platform: .qq, kind: "guess", cursor: nil)
         let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
-        let options = try await service.playbackOptions(for: page.items[0].ref)
+        let options = (try await service.sourceAvailability(for: page.items[0].ref)).options
         let official = try XCTUnwrap(options.first { $0.installationId.hasPrefix("official:") })
         XCTAssertEqual(options.count, 2)
         await peer.configure(failure: .upstreamFailed)
@@ -99,7 +99,7 @@ final class NativeMusicOfficialPlatformTests: XCTestCase {
             let service = try await NativeMusicFixture.service(accounts: peer)
             let page = try await service.recommendations(platform: .netease, kind: "daily", cursor: nil)
             let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
-            let options = try await service.playbackOptions(for: page.items[0].ref)
+            let options = (try await service.sourceAvailability(for: page.items[0].ref)).options
             await peer.configure(gate: gate)
             let occurrence = try XCTUnwrap(state.currentId)
             let task = Task { try await service.resolve(attemptId: UUID().uuidString.lowercased(),

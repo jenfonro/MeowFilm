@@ -116,15 +116,6 @@ extension NativeMusicService: MusicLibrarySyncing {
                     try await syncCurrent(round); try syncCheckpoint(&round)
                 } else { round.issue("unconfirmed", platform: fence.platform, collection: fence.localID) }
             }
-            for c in round.library["collections"].array {
-                for selection in request.selections {
-                    let session = round.sessions[selection.platform.rawValue]!
-                    let key = MJ.array([.string(selection.platform.rawValue), .string(session.accountID)]).json
-                    if c["creating"].contains(key) {
-                        round.issue("unconfirmed", platform: selection.platform, collection: c["id"].string)
-                    }
-                }
-            }
             if round.ledger.issues.contains(where: { $0.code == "unconfirmed" }) {
                 // No merge can consume ambiguous deltas. This invocation is
                 // recovery-only until every selected dispatched fence settles.
