@@ -57,7 +57,8 @@ public static class MusicCatalogPersonalTests
         yield return Case("cancelling private preparation discards intent without commit", CancelPreparation);
         yield return Case("queue CAS conflict cannot autoplay or replay consumed stage", CasConflict);
         yield return Case("unknown batch save retains actual persistence without automatic retry", UnknownSave);
-        yield return Case("unsupported platform missing account and device error remain business states", Errors);
+        yield return Case("unsupported routes leave content status and requests untouched", UnsupportedRoutes);
+        yield return Case("missing account and device errors remain business states", Errors);
         yield return Case("partial recommendation batch cannot replace successful content", PartialBatch);
         yield return Case("cached navigation detaches a retired noncooperative catalog read", CachedNavigationRetiresRead);
         yield return Case("ordinary channel cursor cache refresh and cancellation remain intact", LegacyPaging);
@@ -939,12 +940,46 @@ public static class MusicCatalogPersonalTests
         await f.App.Library.ReconcileAsync();
         Equal(3L, N(await f.Detail(), "total")); Equal(1, f.Store.LibraryWrites);
     }
+    private static async Task UnsupportedRoutes()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.NavigateAsync("catalog-daily", default);
+        f.App.FailNext("music.catalog.daily", "DEVICE_CONTEXT_REQUIRED");
+        await f.Module.RefreshCatalogAsync();
+        Equal("平台客户端状态不可用", f.Module.Status);
+        var location = f.Module.CaptureNavigationLocation();
+        var songs = f.Module.Songs.ToArray();
+        Check(songs.Length > 0);
+        int calls = f.App.Log.Count, requests = f.Platform.Requests.Count;
+        int statusChanges = 0, navigationRequests = 0;
+        f.Module.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(f.Module.Status)) statusChanges++; };
+        f.Module.NavigationRequested += (_, _) => navigationRequests++;
+        foreach (var platform in new[] { "tx", "kg", "kw", "mg" })
+        {
+            f.Select(platform);
+            foreach (var route in new[] { "catalog-daily", "catalog-fm", $"catalog-daily/{platform}/default",
+                $"catalog-album/{platform}/123", $"catalog-artist/{platform}/123" })
+                await f.Module.NavigateAsync(route, default);
+            await f.Module.OpenCatalogFeatureAsync("daily");
+            await f.Module.OpenCatalogFeatureAsync("fm");
+            await f.Module.CatalogOptionsChangedAsync();
+            await f.Module.RefreshCatalogAsync();
+            Equal(platform, f.Module.SelectedCatalogPlatform.Key);
+        }
+        Equal(calls, f.App.Log.Count); Equal(requests, f.Platform.Requests.Count);
+        Equal(0, statusChanges); Equal(0, navigationRequests);
+        Equal(location, f.Module.CaptureNavigationLocation());
+        Check(songs.SequenceEqual(f.Module.Songs), "ignored content keeps the current displayed batch");
+        Equal("平台客户端状态不可用", f.Module.Status);
+        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+        f.Select("wy");
+        await f.Module.RefreshCatalogAsync();
+        Equal("", f.Module.Status);
+        Check(f.App.Log.Count > calls, "supported content still refreshes explicitly");
+    }
     private static async Task Errors()
     {
-        await using var f = await Fixture.Create(); f.Select("tx");
-        await f.Module.NavigateAsync("catalog-daily", default); Equal("当前内容暂不支持", f.Module.Status);
-        Check(!f.Platform.Requests.OfType<MusicDailyRequest>().Any(), "never switches to wy");
-        f.Select("wy"); f.App.Authenticated = false;
+        await using var f = await Fixture.Create(); f.App.Authenticated = false;
         await f.Module.NavigateAsync("catalog-daily", default); Equal("当前内容需要平台登录", f.Module.Status);
         f.App.Authenticated = true; f.App.AccountGeneration++;
         await f.Module.ReadCatalogAccountAsync();

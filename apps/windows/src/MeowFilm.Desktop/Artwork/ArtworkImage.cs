@@ -41,7 +41,7 @@ public sealed class ArtworkImage : Grid
     public static readonly DependencyProperty HasTopPaletteProperty = HasTopPalettePropertyKey.DependencyProperty;
     public bool HasTopPalette => (bool)GetValue(HasTopPaletteProperty);
     private readonly Image image = new() { Stretch = Stretch.UniformToFill };
-    private readonly Button retry = new() { Content = "重试", ToolTip = "图片加载失败",
+    private readonly Button retry = new() { Content = "重试",
         HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
         Visibility = Visibility.Collapsed, Padding = new Thickness(4), FontSize = 11 };
     private IArtworkLease? lease;

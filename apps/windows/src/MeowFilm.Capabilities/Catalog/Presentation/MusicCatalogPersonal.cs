@@ -101,18 +101,20 @@ public sealed partial class MusicCapability
     }
     public Task OpenCatalogFeatureAsync(string feature)
     {
-        if (!CanCatalogBrowse || feature is not ("personal" or "daily" or "fm")) return Task.CompletedTask;
+        if (!CanCatalogBrowse || feature is not ("personal" or "daily" or "fm") ||
+            IsUnsupportedCatalogRoute("catalog-" + feature)) return Task.CompletedTask;
         return RequestNavigationAsync("catalog-" + feature);
     }
     public Task CatalogOptionsChangedAsync()
     {
         if (publishing || !CanCatalogBrowse) return Task.CompletedTask;
+        string? route = IsCatalogPersonal ? "catalog-personal" : IsCatalogDaily ? "catalog-daily" : IsCatalogFm ? "catalog-fm" : null;
+        if (route is not null && IsUnsupportedCatalogRoute(route)) return Task.CompletedTask;
         PersonalCatalogBindings();
         if (IsCatalogFm && HasActiveRecommendation &&
             RecText(recommendationSnapshot!.Value, "kind") == "fm" &&
             CatalogRouteTarget("catalog-fm", SelectedCatalogPlatform.Key) is { } activeFm)
             return StartRecommendation(activeFm);
-        string? route = IsCatalogPersonal ? "catalog-personal" : IsCatalogDaily ? "catalog-daily" : IsCatalogFm ? "catalog-fm" : null;
         return route is null ? Task.CompletedTask : LoadCatalogAsync(route, "", 1, null, lifetime.Token);
     }
     private static bool IsCatalogRoute(string route) =>
@@ -136,6 +138,13 @@ public sealed partial class MusicCapability
         if (parts.Length == 3 && parts[0] == "catalog-daily")
             return Target("daily", parts[1], parts[2] == "style" ? "风格推荐" : "每日推荐", new { branch = parts[2] });
         return null;
+    }
+    private bool IsUnsupportedCatalogRoute(string route)
+    {
+        if (!IsCatalogRoute(route)) return false;
+        var platform = route.Split('/', 3) is { Length: 3 } parts ? parts[1] : SelectedCatalogPlatform.Key;
+        return CatalogRouteTarget(route, platform) is { Operation: not ("personalPlaylists" or "playlist"), Platform: not "wy" } target &&
+            CatalogPlatforms.Any(item => item.Key == target.Platform);
     }
     private string RegisterCatalogTarget(CatalogTarget target, string? id = null)
     {
@@ -179,7 +188,7 @@ public sealed partial class MusicCapability
                 if (MusicCatalogDto.Text(action, name) is { Length: > 0 } value) p[name] = value;
             return StartRecommendation(Target("fm", card.Platform, card.Title, p));
         }
-        return CatalogBusinessError("UNSUPPORTED");
+        return Task.CompletedTask;
     }
     private Task CatalogBusinessError(string code)
     { status = MusicCatalogDto.ErrorText(code); Changed(nameof(Status)); return Task.CompletedTask; }

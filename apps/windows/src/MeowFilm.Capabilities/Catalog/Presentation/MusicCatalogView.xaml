@@ -174,11 +174,10 @@
    </Style.Triggers>
   </Style>
   <DataTemplate x:Key="Catalog.Entry">
-   <local:EntryCard Margin="0,0,16,0" OpenRequested="Entry_Open" PlayRequested="CardPlay_Click" PreviewRequested="Entry_Preview"
-                    ToolTip="{Binding ErrorText}" ToolTipService.ShowOnDisabled="True"/>
+   <local:EntryCard Margin="0,0,16,0" OpenRequested="Entry_Open" PlayRequested="CardPlay_Click" PreviewRequested="Entry_Preview"/>
   </DataTemplate>
   <DataTemplate x:Key="Catalog.PlaylistCard">
-   <Button x:Name="PlaylistHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}" ToolTip="{Binding ErrorText}" ToolTipService.ShowOnDisabled="True">
+   <Button x:Name="PlaylistHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
     <StackPanel>
      <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" Background="#E7EAF0" local:CardClip.Radius="8">
       <art:ArtworkImage Address="{Binding Cover}"/>
@@ -190,7 +189,7 @@
   </DataTemplate>
   <DataTemplate x:Key="Catalog.RankCoverCard">
    <Button x:Name="RankCoverHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0"
-           IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}" ToolTip="{Binding ErrorText}" ToolTipService.ShowOnDisabled="True">
+           IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
     <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" local:CardClip.Radius="4">
      <Grid.Style><Style TargetType="Grid"><Setter Property="Background" Value="#E7EAF0"/><Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger></Style.Triggers></Style></Grid.Style>
      <art:ArtworkImage Address="{Binding Cover}"/>
@@ -273,7 +272,7 @@
    <DataTemplate x:Key="Catalog.ArtistCard">
     <Button Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" IsEnabled="{Binding CanOpen}"
             Width="184" Margin="0,0,0,48" HorizontalAlignment="Center"
-            AutomationProperties.Name="{Binding Title}" ToolTip="{Binding ErrorText}" ToolTipService.ShowOnDisabled="True">
+            AutomationProperties.Name="{Binding Title}">
      <StackPanel Width="184">
       <Grid Width="184" Height="184" HorizontalAlignment="Center" Background="#E7EAF0" local:CardClip.Radius="92">
        <art:ArtworkImage Address="{Binding Cover}"/>
