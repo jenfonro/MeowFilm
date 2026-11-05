@@ -8,17 +8,18 @@ import MeowMusicPlatform
 /// Stable built-in slots are local identities, never platform user IDs.
 actor MusicAccountAccessGate {
     nonisolated let service: NativeMusicAccountService
-    private var generation = 0
     private var closed = false
 
-    init(bundleIdentifier: String, cacheDocumentRoot: URL,
+    /// Credentials stay readable after first unlock, so locked playback can still
+    /// renew an account URL. They remain encrypted, device-only and unsynchronized.
+    init(bundleIdentifier: String, urlCacheStore: DocumentStore?,
          audioCache: (any MusicAudioFileCaching)?,
          displayCache: (any MusicPlaybackDisplayCaching)?,
          clientContexts: NativeMusicClientService,
          qqClient: NativeMusicQQPublicService) throws {
         let store = try KeychainCredentialStore(
             service: bundleIdentifier + ".music.accounts.v1",
-            accessibility: .whenUnlockedThisDeviceOnly
+            accessibility: .afterFirstUnlockThisDeviceOnly
         )
         let coordinator = AccountSessionCoordinator(store: store)
         let installation = UUID(uuidString: "62e4342a-73e2-4f6b-a965-e227f5724000")!
@@ -34,13 +35,6 @@ actor MusicAccountAccessGate {
                 accountID: UUID(uuidString: id)!
             )
         }
-        let urlCacheStore: EncryptedDocumentStore?
-        do {
-            try FileManager.default.createDirectory(at: cacheDocumentRoot, withIntermediateDirectories: true)
-            let keys = try KeychainEncryptedDocumentKeyProvider(service: bundleIdentifier + ".music.account-url-cache.v1")
-            urlCacheStore = try EncryptedDocumentStore(baseURL: cacheDocumentRoot,
-                namespace: "music.account-url-cache.v1", keyProvider: keys)
-        } catch { urlCacheStore = nil }
         service = NativeMusicAccountService(accounts: coordinator, scopes: scopes,
             urlCacheStore: urlCacheStore, cacheLifecycle: { event in
                 switch event {
@@ -53,16 +47,12 @@ actor MusicAccountAccessGate {
             }, clientContexts: clientContexts, qqClient: qqClient)
     }
 
+    /// Product assembly admits the account service once per process.
     func setAvailable(_ available: Bool) async {
         guard !closed else { return }
-        guard generation < Int(MeowfilmIdentity.maximumAccessGeneration) else {
-            await close(); return
-        }
-        generation += 1
-        let expected = generation
         do {
-            let reply = try await service.setAccess(available: available, generation: expected)
-            guard reply.ok, reply.available == available, reply.generation == expected else {
+            let reply = try await service.setAccess(available: available, generation: 1)
+            guard reply.ok, reply.available == available, reply.generation == 1 else {
                 await close(); return
             }
         } catch { await close() }

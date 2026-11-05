@@ -17,7 +17,7 @@
 
 | 端 | 装配与能力 | 页面与平台 | 存储 |
 | --- | --- | --- | --- |
-| iOS | [架构与职责](../ios/architecture.md) | [音乐能力](../ios/music.md) | [加密文档存储](../ios/storage.md) |
+| iOS | [架构与职责](../ios/architecture.md) | [音乐能力](../ios/music.md) | [本地文档存储](../ios/storage.md) |
 | Windows | [架构与职责](../windows/app-structure.md) | [客户端上下文](../windows/music-platform-client-context.md)、[平台目录](../windows/music-native-platforms.md)、[目录与频道](../windows/music-catalog.md)、[个人目录页面](../windows/music-catalog-personal-ui.md)、[账号](../windows/music-native-accounts.md) | [账号存储](../windows/music-account-storage.md)、[客户端文档](../windows/music-platform-client-context.md#文档与首次导入) |
 
 ## 契约与验证状态

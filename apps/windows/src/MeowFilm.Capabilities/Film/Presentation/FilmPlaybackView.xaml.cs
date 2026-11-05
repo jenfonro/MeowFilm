@@ -1,12 +1,16 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 
 namespace MeowFilm.Capabilities;
 
 public partial class FilmPlaybackView : UserControl
 {
+    private const double MetadataFade = 20;
+    private (bool Top, bool Bottom, double Height) metadataFade;
+
     public event EventHandler<FilmCardActivatedEventArgs>? RecommendationRequested;
 
     public FilmPlaybackView()
@@ -43,6 +47,33 @@ public partial class FilmPlaybackView : UserControl
     {
         if (MetadataPanel is not null)
             MetadataPanel.Height = ActualWidth < 840 ? double.NaN : PlayerFrame.ActualHeight;
+    }
+
+    // Fade only the edges where metadata continues beyond the panel.
+    private void Metadata_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        var scroll = MetadataScroll;
+        (bool Top, bool Bottom, double Height) fade = (scroll.VerticalOffset > .5,
+            scroll.ScrollableHeight - scroll.VerticalOffset > .5, scroll.ActualHeight);
+        if (fade == metadataFade) return;
+        metadataFade = fade;
+        if ((!fade.Top && !fade.Bottom) || fade.Height < MetadataFade * 2)
+        {
+            scroll.ClearValue(OpacityMaskProperty);
+            return;
+        }
+        var clear = Color.FromArgb(0, 0, 0, 0);
+        double edge = MetadataFade / fade.Height;
+        var mask = new LinearGradientBrush
+        {
+            MappingMode = BrushMappingMode.Absolute, StartPoint = new(0, 0), EndPoint = new(0, fade.Height)
+        };
+        mask.GradientStops.Add(new(fade.Top ? clear : Colors.Black, 0));
+        mask.GradientStops.Add(new(Colors.Black, edge));
+        mask.GradientStops.Add(new(Colors.Black, 1 - edge));
+        mask.GradientStops.Add(new(fade.Bottom ? clear : Colors.Black, 1));
+        mask.Freeze();
+        scroll.OpacityMask = mask;
     }
 
     private void Episode_Click(object sender, RoutedEventArgs e)

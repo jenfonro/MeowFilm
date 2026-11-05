@@ -33,7 +33,7 @@ struct MusicNativeAccountURLCache {
         var version = 1
         var entries: [Entry] = []
     }
-    private let store: EncryptedDocumentStore?
+    private let store: DocumentStore?
     private var loaded = false
     private var writable = true
     private var entries: [Entry] = []
@@ -41,7 +41,7 @@ struct MusicNativeAccountURLCache {
     // player. This is short-lived request state, never another disk schema.
     private var rejected: [Key: [(url: URL, at: Date)]] = [:]
 
-    init(store: EncryptedDocumentStore?) { self.store = store }
+    init(store: DocumentStore?) { self.store = store }
 
     /// Preserve the provider's original typed payload (including native media
     /// metadata), not a projection that loses actual level/file license fields.
@@ -173,7 +173,7 @@ struct MusicNativeAccountURLCache {
             guard writable, let store else { return }
             try store.write(data, key: Self.key)
         } catch {
-            // Quota/keychain/disk failure cannot turn usable media into failure.
+            // A disk failure cannot turn usable media into failure.
             // Keep process-local eviction effective instead of reloading stale disk.
             writable = false
         }

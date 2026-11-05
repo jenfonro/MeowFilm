@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Dispatch
+import Security
 import XCTest
 @testable import MeowStorage
 
@@ -572,9 +573,9 @@ final class EncryptedDocumentStoreTests: XCTestCase {
             let saved = attributes[.protectionKey]
             let protection = NativeFileProtectionVerification.inspect(saved)
             #if targetEnvironment(simulator)
-            XCTAssertEqual(protection, saved == nil ? .unavailableInSimulator : .complete)
+            XCTAssertEqual(protection, saved == nil ? .unavailableInSimulator : .completeUntilFirstUserAuthentication)
             #else
-            XCTAssertEqual(protection, .complete)
+            XCTAssertEqual(protection, .completeUntilFirstUserAuthentication)
             #endif
             #endif
         }
@@ -675,6 +676,17 @@ final class EncryptedDocumentKeyProviderTests: XCTestCase {
             let provider = try KeychainEncryptedDocumentKeyProvider(service: "test.encrypted", driver: driver)
             expectKeyError(expected) { try provider.createKeyIfAbsent(namespace: "reader.sources") }
             XCTAssertEqual(driver.calls.map(\.operation), readback == nil ? ["read", "add"] : ["read", "add", "read"])
+        }
+    }
+
+    func testKeysAfterFirstUnlockAreCurrentEarlierStricterKeysAreAdoptedOthersRejected() {
+        XCTAssertEqual(EncryptedDocumentKeyAccessibility.classify(
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String), .current)
+        XCTAssertEqual(EncryptedDocumentKeyAccessibility.classify(
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String), .adopt)
+        for stored in [nil, kSecAttrAccessibleAfterFirstUnlock as String, kSecAttrAccessibleWhenUnlocked as String,
+                       kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly as String, "unknown"] {
+            XCTAssertEqual(EncryptedDocumentKeyAccessibility.classify(stored), .rejected)
         }
     }
 

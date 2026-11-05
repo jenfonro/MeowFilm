@@ -127,7 +127,9 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | 身份 | 所有者／用途 |
 | --- | --- |
 | `dev.meowfilm.aggregate` | 固定产品身份；安装宿主改写安装标识时，内部存储身份不变 |
-| Application Support 下 `meowfilm/encrypted-documents-v1` | 加密文档根目录 |
+| Application Support 下 `meowfilm/documents` | 曲库普通文档根目录 |
+| Caches 下 `meowfilm/documents` | 普通缓存文档根目录 |
+| Application Support 下 `meowfilm/encrypted-documents-v1` | 设备会话等敏感文档的加密根目录 |
 | `music.library.v1` | 曲库、队列、历史和播放记录 |
 | `music.accounts.v1` | 三平台账号凭据与固定账号槽 |
 | `music.account-url-cache.v1` | 账号授权 URL 缓存 |

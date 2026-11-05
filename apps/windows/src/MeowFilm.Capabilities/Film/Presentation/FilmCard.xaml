@@ -50,47 +50,9 @@
       ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton,Converter={StaticResource Film.Scale},ConverterParameter=0.05}"/>
      </art:ArtworkImage.RenderTransform>
     </art:ArtworkImage>
-    <Border x:Name="HoverShade" IsHitTestVisible="False"
-            Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton}">
-     <Border.Background>
-      <LinearGradientBrush StartPoint=".5,1" EndPoint=".5,0">
-       <GradientStop Color="#CC000000" Offset="0"/>
-       <GradientStop Color="#38000000" Offset=".55"/>
-       <GradientStop Color="#00000000" Offset="1"/>
-      </LinearGradientBrush>
-     </Border.Background>
-    </Border>
-    <Grid Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton}">
-     <Grid x:Name="PlayIcon" Width="50" Height="50" Background="Transparent"
-           HorizontalAlignment="Center" VerticalAlignment="Center"
-           RenderTransformOrigin=".5,.5">
-      <Grid.Style><Style TargetType="Grid">
-       <Setter Property="RenderTransform"><Setter.Value><ScaleTransform/></Setter.Value></Setter>
-       <Style.Triggers>
-        <Trigger Property="IsMouseOver" Value="True">
-         <Setter Property="RenderTransform"><Setter.Value><ScaleTransform ScaleX="1.1" ScaleY="1.1"/></Setter.Value></Setter>
-        </Trigger>
-       </Style.Triggers>
-      </Style></Grid.Style>
-      <Ellipse Margin="2" Stroke="White" StrokeThickness=".8">
-       <Ellipse.Style><Style TargetType="Ellipse">
-        <Setter Property="Fill" Value="Transparent"/>
-        <Style.Triggers><DataTrigger Binding="{Binding IsMouseOver,ElementName=PlayIcon}" Value="True">
-         <Setter Property="Fill" Value="#22C55E"/>
-        </DataTrigger></Style.Triggers>
-       </Style></Ellipse.Style>
-      </Ellipse>
-      <Path Data="M 20,15 L 34,25 L 20,35 Z"
-            Stroke="White" StrokeThickness=".8" StrokeLineJoin="Round">
-       <Path.Style><Style TargetType="Path">
-        <Setter Property="Fill" Value="Transparent"/>
-        <Style.Triggers><DataTrigger Binding="{Binding IsMouseOver,ElementName=PlayIcon}" Value="True">
-         <Setter Property="Fill" Value="#22C55E"/>
-        </DataTrigger></Style.Triggers>
-       </Style></Path.Style>
-      </Path>
-     </Grid>
-    </Grid>
+    <local:FilmHoverShade x:Name="HoverShade"
+                          Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton}"/>
+    <local:FilmPlayMark Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton}"/>
     <Border x:Name="ScoreBadge" Width="32" Height="32" CornerRadius="16" Margin="0,8,8,0"
             HorizontalAlignment="Right" VerticalAlignment="Top"
             Visibility="{Binding HasScore,Converter={StaticResource MeowFilm.BoolToVisibility}}"
