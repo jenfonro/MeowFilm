@@ -185,9 +185,10 @@ final class MeowfilmAssembly: ObservableObject {
         )
     }
 
-    private func shutdown() {
+    func shutdown() {
         guard !closed else { return }
         closed = true
+        music?.setAvailable(false)
         automaticSync?.stop()
         startup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
         service?.revokeAccess(generation: musicAccessGeneration)

@@ -13,7 +13,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `apps/ios/Navigation` | 根容器、普通页面导航、播放器及其他非导航呈现的路由 |
 | `apps/ios/Presentation` | 主页面外壳、页头、底部导航和播放器停靠区 |
 | `apps/ios/UITests` | UIKit 与音乐 UI 组件测试，复用已有 UIKit runner，不属于 App 源成员 |
-| `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的运行器集成测试，实际链接、启动内嵌 Node |
+| `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的宿主测试：运行器集成实际链接、启动 Node；冷启动清理测试使用临时数据与模拟 Keychain |
 | `apps/ios/runtime` | iOS socketpair 启动参数／失败边界与 music/Cat 薄 entry，复用公共 JS 模块 |
 
 工程文件由 `scripts/generate-ios-project.py` 生成。App 只编译上述四个职责目录；UITests、RuntimeTests 使用独立测试 target。NodeMobile.xcframework 链接并嵌入签名，完整 JS 载荷作为 `Runtime` 资源随包签名；构建输入准备见[发布](release.md)。
