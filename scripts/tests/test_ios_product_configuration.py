@@ -23,7 +23,7 @@ class ProductConfigurationTests(unittest.TestCase):
         shutil.copyfile(ROOT / "scripts/generate-ios-project.py",
                         cls.root / "scripts/generate-ios-project.py")
         shutil.copyfile(ROOT / "apps/ios/Info.plist", cls.root / "apps/ios/Info.plist")
-        for directory in ("Application", "Composition", "Navigation", "Presentation", "UITests"):
+        for directory in ("Application", "Composition", "Navigation", "Presentation", "UITests", "RuntimeTests"):
             if (ROOT / "apps/ios" / directory).exists():
                 shutil.copytree(ROOT / "apps/ios" / directory, cls.root / "apps/ios" / directory)
         subprocess.run([sys.executable, "-I", "-B", str(cls.root / "scripts/generate-ios-project.py")],
@@ -68,6 +68,21 @@ class ProductConfigurationTests(unittest.TestCase):
         del app["NSAppTransportSecurity"]
         del app["UIApplicationSceneManifest"]
         self.assertEqual(app, base)
+
+    def test_app_embeds_node_mobile_complete_payload_and_license_and_hosts_runtime_tests(self):
+        project = self.project("Meowfilm")
+        self.assertIn('path = "../../.cache/nodejs-mobile/ios/NodeMobile.xcframework";', project)
+        self.assertIn('path = "../../.cache/ios-runtime/Runtime";', project)
+        self.assertIn('path = "../../LICENSES/nodejs-mobile-LICENSE.txt";', project)
+        self.assertIn("CodeSignOnCopy", project)
+        self.assertIn("productName = MeowRuntime;", project)
+        host = next(line for line in project.splitlines()
+                    if "isa = PBXNativeTarget;" in line and "name = MeowfilmRuntimeTests;" in line)
+        self.assertNotIn("packageProductDependencies", host, "Hosted tests use the App's linked products")
+        self.assertIn("BUNDLE_LOADER", project)
+        self.assertIn("TEST_HOST", project)
+        scheme = (self.root / "apps/ios/Meowfilm.xcodeproj/xcshareddata/xcschemes/MeowfilmAcceptance.xcscheme").read_text()
+        self.assertIn('BlueprintName="MeowfilmRuntimeTests"', scheme)
 
     def test_platform_component_tests_share_the_runner_but_not_the_product_assembly(self):
         project = self.project("Meowfilm")

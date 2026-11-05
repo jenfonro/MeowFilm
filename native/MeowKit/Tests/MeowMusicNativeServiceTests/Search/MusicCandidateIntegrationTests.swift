@@ -87,9 +87,8 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         model.onRequestPresentation = { requests.append($0) }
         await model.load(); await model.prepareCurrent(forceSelection: true)
         XCTAssertEqual(requests, [.sources])
-        // The UI now inspects resolved official sources rather than populating
-        // declared script qualities. Exercise the retained explicit script API
-        // directly; it must still never fall back after a pinned failure.
+        // Exercise the explicit selection API independently of the source
+        // inspector's probes; it must never fall back after a pinned failure.
         let current = try XCTUnwrap(model.current)
         let options = try await service.playbackOptions(for: .init(kind: .queue, id: current.id))
         let choice = try XCTUnwrap(options.first).selection(quality: "128k")
@@ -166,7 +165,14 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         await model.rejectInspectedSource(source, session: session)
         XCTAssertNil(model.error)
         calls = await scripts.calls()
-        XCTAssertEqual(calls.map(\.sourceKey), [rejected, kept], "the replacement is chosen automatically")
+        // The open inspector also probes the remaining script qualities. Check
+        // the accepted playback, not the combined playback + inspection count.
+        let replacement = try XCTUnwrap(model.activePlaybackSelection)
+        XCTAssertEqual(replacement.installationId, MusicNativeCandidateDiscoveryFixture.installation)
+        XCTAssertEqual(replacement.siteId, "wy"); XCTAssertEqual(replacement.sourceKey, kept)
+        XCTAssertEqual(replacement.quality, "flac", "automatic replacement keeps the quality-first policy")
+        XCTAssertEqual(calls.filter { $0.sourceKey == rejected }.count, 1)
+        XCTAssertTrue(calls.dropFirst().allSatisfy { $0.sourceKey == kept })
         XCTAssertEqual(player.resources.count, 2); XCTAssertEqual(player.stopped.count, 1)
         XCTAssertEqual(model.state.revision, 2)
         XCTAssertFalse(try XCTUnwrap(model.current).track.sources.contains { $0.sourceKey == rejected })

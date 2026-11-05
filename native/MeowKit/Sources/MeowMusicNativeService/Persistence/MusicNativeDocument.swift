@@ -30,7 +30,8 @@ public final class MusicNativeLibraryDocument: MusicNativeDocumentStoring, @unch
         do { let value = try storeFactory(); store = value; return value }
         catch { throw Self.failure(error) }
     }
-    private static func failure(_ error: Error) -> MusicServiceError {
+    /// Closed storage diagnostics shared by native ordinary-document owners.
+    static func failure(_ error: Error) -> MusicServiceError {
         if let e = error as? MusicServiceError { return e }
         switch error as? DocumentStoreError {
         case .revisionConflict: return .storageConflict

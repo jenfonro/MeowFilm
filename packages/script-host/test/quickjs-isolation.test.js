@@ -98,6 +98,38 @@ test('QuickJS engine closes every context owned by its runtime', async () => {
   assert.equal(runtime.alive, false);
 });
 
+test('QuickJS byte frames survive guest heap growth without losing JSON or copying host references', async () => {
+  const engine = await QuickJSEngine.create({
+    source: `({
+      errorCode() { return 'SCRIPT_EXCEPTION'; },
+      watchStartup() {},
+      exchange(input, frame) {
+        const reply = __meowBridge('bytes', input, frame);
+        return [JSON.stringify(JSON.parse(reply[0])), reply[1]];
+      }
+    })`,
+    bridge(operation, input, frames, output) {
+      assert.equal(operation, 'bytes');
+      assert.deepEqual(input, { label: '中文🎵' });
+      assert.deepEqual(frames, [Buffer.from([1, 2, 3, 4])]);
+      output.push(Buffer.from(frames[0]));
+      return input;
+    },
+    limits: { maxMemoryBytes: 64 * 1024 * 1024, maxStackBytes: 256 * 1024 },
+  });
+  try {
+    for (const size of [0, 20 * 1024 * 1024, 40 * 1024 * 1024]) {
+      engine.evaluate(`globalThis.retained = new Uint8Array(${size});`);
+      const input = Buffer.from([1, 2, 3, 4]);
+      const result = engine.callJSONFrames('exchange', [JSON.stringify({ label: '中文🎵' })], [input]);
+      assert.deepEqual(result, {
+        value: { ok: true, value: { label: '中文🎵' } }, frames: [Buffer.from([1, 2, 3, 4])],
+      });
+      assert.deepEqual(input, Buffer.alloc(4));
+    }
+  } finally { engine.close(); }
+});
+
 test('QuickJS engine continues disposal after an earlier cleanup operation fails', () => {
   const calls = [];
   const first = new Error('synthetic method disposal failure');

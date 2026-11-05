@@ -1085,12 +1085,15 @@ function streamBridgeSource(upstreamOrigin, valuesDigest = '') {
 }
 
 async function startStreamBridge(t, upstream, { files = {} } = {}) {
-  const root = rootFor(t);
+  const root = mkdtempSync(join(tmpdir(), 'meowfilm-cat-runtime-'));
   const volumeRoot = join(root, 'volumes', 'bridge');
   const runtime = createCatRuntime({
     dataRoot: root, network: networkForLocalServers([upstream]),
   });
-  t.after(() => runtime.close());
+  t.after(async () => {
+    try { await runtime.close(); }
+    finally { rmSync(root, { recursive: true, force: true }); }
+  });
   await runtime.install({
     installationId: 'bridge',
     source: streamBridgeSource(upstream.origin, sha256(upstream.values)),

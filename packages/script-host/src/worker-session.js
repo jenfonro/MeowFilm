@@ -1,19 +1,12 @@
 import { Worker } from 'node:worker_threads';
-import { readFileSync } from 'node:fs';
+import { prepareQuickJSModule } from './quickjs-module.js';
 import { clone, deferred, fault, requireValue, safeError, ScriptHostError } from './errors.js';
 import { cancel, errorFromResponse, event, request, response, validateMessage } from './worker-protocol.js';
 
-let compiledModule;
 const processedWorkerResult = Symbol('processed-worker-result');
 
 export function workerResult(value) {
   return { [processedWorkerResult]: true, value };
-}
-
-function wasmModule() {
-  compiledModule ??= Promise.resolve().then(() =>
-    WebAssembly.compile(readFileSync(new URL('./quickjs/emscripten-module.wasm', import.meta.url))));
-  return compiledModule;
 }
 
 export class WorkerSession {
@@ -55,7 +48,7 @@ export class WorkerSession {
 
   async start() {
     this.#rejectStoppedStart();
-    const module = await wasmModule();
+    const module = await prepareQuickJSModule();
     this.#rejectStoppedStart();
     const worker = new Worker(new URL('./worker-entry.js', import.meta.url), {
       workerData: {

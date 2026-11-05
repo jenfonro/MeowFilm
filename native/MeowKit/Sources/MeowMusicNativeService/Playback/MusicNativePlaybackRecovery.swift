@@ -159,6 +159,7 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
             musicSame(try MusicModel.sourceKey(info), pin.selection.sourceKey), .targetChanged)
         try requirePlatform(source.platform)
         try musicRequire(!Self.officialQualities([pin.selection.quality], d.playback).isEmpty, .qualityDisabled)
+        try musicRequire(Self.officialEnabled(source.platform, d.playback), .sourceUnavailable)
     }
 
     private func checkPlaybackRecoveryAttempt(_ pin: MusicNativePlaybackRecoveryPin,

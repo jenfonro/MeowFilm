@@ -40,6 +40,7 @@ class NativeGateOrderTests(unittest.TestCase):
 case "$*" in
  *repository-paths.py*) echo "$GATE_TMP" ;;
  *check-source-scope.py*) echo scope >> "$GATE_EVENTS" ;;
+ *prepare-ios-runtime.py*) echo runtime >> "$GATE_EVENTS"; [ "$GATE_FAIL" != runtime ] ;;
  *check-simulator-signing.py*) echo signing >> "$GATE_EVENTS"; [ "$GATE_FAIL" != signing ] ;;
  *unittest*) echo tools >> "$GATE_EVENTS"; [ "$GATE_FAIL" != tools ] ;;
  *) exit 9 ;;
@@ -100,13 +101,18 @@ echo "$kind" >> "$GATE_EVENTS"; [ "$GATE_FAIL" != "$kind" ]
     def test_explicit_all_compiles_then_runs_both_test_layers(self):
         result = self.run_gate("all")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.recorded()[:6], ["scope", "package", "app", "components", "signing", "tools"])
+        self.assertEqual(self.recorded()[:7], ["scope", "package", "runtime", "app", "components", "signing", "tools"])
         self.assertIn("--skip-build", self.recorded()[-1])
 
     def test_failed_compile_collects_independent_compile_errors_without_running_tests(self):
         result = self.run_gate("all", GATE_FAIL="package")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(self.recorded(), ["scope", "package", "app", "components", "signing"])
+        self.assertEqual(self.recorded(), ["scope", "package", "runtime", "app", "components", "signing"])
+
+    def test_failed_runtime_preparation_never_builds_with_stale_app_inputs(self):
+        result = self.run_gate("compile", GATE_FAIL="runtime")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.recorded(), ["scope", "package", "runtime"])
 
     def test_tool_failure_does_not_hide_swift_test_results(self):
         result = self.run_gate("all", GATE_FAIL="tools")

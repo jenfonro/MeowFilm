@@ -1,6 +1,4 @@
-import { newQuickJSWASMModuleFromVariant, newVariant } from 'quickjs-emscripten-core';
-import { readFile } from 'node:fs/promises';
-import RELEASE_SYNC from '@jitl/quickjs-wasmfile-release-sync';
+import { createQuickJSModule } from './quickjs-module.js';
 import { fault, requireValue } from './errors.js';
 
 const disposeAll = handles => {
@@ -10,21 +8,6 @@ const disposeAll = handles => {
   }
   return failure;
 };
-let compiledPromise;
-const taskContextVariant = {
-  ...RELEASE_SYNC,
-  importModuleLoader: () => import('./quickjs/emscripten-module.mjs').then(module => module.default),
-};
-const loadModule = async wasmModule => {
-  if (wasmModule) {
-    requireValue(wasmModule instanceof WebAssembly.Module);
-    return newQuickJSWASMModuleFromVariant(newVariant(taskContextVariant, { wasmModule }));
-  }
-  compiledPromise ??= readFile(new URL('./quickjs/emscripten-module.wasm', import.meta.url))
-    .then(bytes => WebAssembly.compile(bytes));
-  return newQuickJSWASMModuleFromVariant(newVariant(taskContextVariant, { wasmModule: await compiledPromise }));
-};
-
 // The pinned QuickJS build returns signed values from asUintN at wider bit
 // widths. Restore the standard operation in the guest before any SDK runs.
 function installIntegerSemantics() {
@@ -48,7 +31,7 @@ function installIntegerSemantics() {
 /** One isolated guest heap. The host bridge exchanges JSON and byte frames, never host objects. */
 export class QuickJSEngine {
   static async create({ source, bridge, limits, wasmModule }) {
-    const module = await loadModule(wasmModule);
+    const module = await createQuickJSModule(wasmModule);
     const engine = new QuickJSEngine(module, limits);
     try {
       engine.installBridge(bridge);
@@ -291,7 +274,11 @@ export class QuickJSEngine {
               jsonHandle = first.dup();
               json = this.context.getString(first);
             } finally { first.dispose(); }
-            const length = this.context.getLength(value);
+            // core.getLength caches an output view that becomes stale after heap growth.
+            const lengthHandle = this.context.getProp(value, 'length');
+            let length;
+            try { length = this.context.getNumber(lengthHandle); }
+            finally { lengthHandle.dispose(); }
             for (let index = 1; index < length; index++) {
               const item = this.context.getProp(value, index);
               const view = this.context.getArrayBuffer(item);

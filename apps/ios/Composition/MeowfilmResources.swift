@@ -5,7 +5,8 @@ import MeowMusicFeature
 import MeowMusicPlatform
 import MeowMusicNativeService
 
-/// Filesystem preparation is off MainActor. No script engine, multi-domain
+/// Filesystem preparation is off MainActor. The script owner is passive: its
+/// embedded runtime starts only on the first enabled-script use. No multi-domain
 /// registrations, download service or dormant domain store is constructed.
 struct MeowfilmResources: Sendable {
     let musicDocument: MusicNativeLibraryDocument
@@ -17,6 +18,7 @@ struct MeowfilmResources: Sendable {
     let musicHomeSnapshot: MusicNativeHomeSnapshotDocument
     let musicPublicQQ: NativeMusicQQPublicService
     let musicClients: NativeMusicClientService
+    let musicScripts: NativeMusicScriptService
 
     init() throws {
         // A sideloading host may rewrite the installed bundle identifier while
@@ -46,6 +48,10 @@ struct MeowfilmResources: Sendable {
             maximumDocumentBytes: 4 * 1024 * 1024))
         musicHomeSnapshot = MusicNativeHomeSnapshotDocument(storeFactory: Self.documentFactory(
             base: cacheRoot, namespace: MusicNativeHomeSnapshotDocument.namespace))
+        musicScripts = NativeMusicScriptService(storeFactory: Self.documentFactory(
+            base: libraryRoot, namespace: NativeMusicScriptService.namespace,
+            maximumDocumentBytes: MusicScriptSourceItem.maximumSourceBytes),
+            launcher: MeowfilmScriptRuntime.launcher)
         let protectedRoot = root.appendingPathComponent("encrypted-documents-v1", isDirectory: true)
         musicClients = NativeMusicClientService(storeFactory: { platform in
             try Self.protectedDocumentFactory(base: protectedRoot,

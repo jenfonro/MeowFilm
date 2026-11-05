@@ -12,6 +12,42 @@ mkdirSync(temporary, { recursive: true });
 after(() => rmSync(temporary, { recursive: true, force: true }));
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
+test('Cat source transfer preserves Unicode and rejects malformed UTF-8 and BOM', async t => {
+  const received = [];
+  const module = createCatScriptModule({
+    dataRoot: temporary,
+    runtimeFactory: () => ({
+      async install(input) { received.push(input.source); return { state: 'disabled' }; },
+      async close() {},
+    }),
+  });
+  t.after(() => module.close());
+  async function install(bytes) {
+    const begun = await module.methods['cat.script.stage.begin']({
+      length: bytes.length, sha256: sha256(bytes), kind: 'source',
+    });
+    assert.equal(begun.ok, true);
+    const chunk = await module.methods['cat.script.stage.chunk']({
+      token: begun.token, offset: 0, data: bytes.toString('base64'),
+    });
+    assert.equal(chunk.ok, true);
+    return module.methods['cat.script.install']({ installationId: 'encoding', token: begun.token });
+  }
+  const source = "// 中文🎵\uFFFD\nmodule.exports = {};";
+  assert.equal((await install(Buffer.from(source))).ok, true);
+  assert.deepEqual(received, [source]);
+  for (const bytes of [[0xff], [0xc0, 0xaf], [0xed, 0xa0, 0x80],
+    [0xe2, 0x82], [0xf4, 0x90, 0x80, 0x80]]) {
+    assert.deepEqual(await install(Buffer.from(bytes)), {
+      ok: false, contract: 'cat.script.v1', code: 'SCRIPT_PROTOCOL_ERROR',
+    });
+  }
+  assert.deepEqual(await install(Buffer.from('\uFEFF' + source)), {
+    ok: false, contract: 'cat.script.v1', code: 'SCRIPT_PROTOCOL_ERROR',
+  });
+  assert.deepEqual(received, [source]);
+});
+
 test('Cat runtime module closes its runtime after transfer cleanup reports a failure', async () => {
   const nativeClearTimeout = globalThis.clearTimeout;
   let runtimeClosed = false;

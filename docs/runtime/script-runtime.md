@@ -19,11 +19,13 @@ packages/runtime-bridge/
   有界 JSON 帧、双向 RPC、取消与连接生命周期
 apps/windows/runtime/
   Windows 启动参数、命名管道 bootstrap 与薄 entry
+apps/ios/runtime/
+  iOS fd 启动参数、同进程失败边界与薄 entry
 ```
 
 公共层不依赖 Windows 源码、命名管道或原生业务私有实现。Windows entry 导入公共 `createMusicScriptModule`、`createCatScriptModule` 与 `createSourceRuntimeModule`，不保留平台目录中的业务模块副本。官方平台账号、目录、曲库、歌词、缓存和播放仍由原生业务 owner 承担，不因使用共用脚本核心而获得或改变权限。
 
-当前装配 `music, cat, source` 三个 module：
+Windows 装配 `music, cat, source`，iOS 装配 `music, cat`：
 
 | descriptor | 响应契约 | 输入与职责 |
 | --- | --- | --- |
@@ -43,19 +45,23 @@ CatNode 与 source 使用各自业务 owner，复用同一进程、WorkerSession
 
 Node-independent 只指 `@meowfilm/source-runtime` 的纯规则与 ABI 包：不导入 `node:*` 或 Node／平台全局。script-host 的 worker、QuickJS/WASM 加载和 CatNode 兼容层仍由 Node 承载，不声称其能无 Node 运行。来源能力的跨平台语义以[capability ABI](source-capability-abi.md)为唯一来源；LX 原有网络/存储与 CatNode 能力不改走这套 ABI。
 
-各平台仍负责运行环境的引入／嵌入、生命周期、通信和发布。本仓只实现 Windows 的接入，不据此声明 iOS 或 Android 已可运行，也不新增阅读 UI。
+这里共用的是运行器代码、协议适配机制与 QuickJS 适配，不是同一份 Node 可执行文件。各平台仍负责运行环境的引入／嵌入、进程或容器生命周期、通信和发布。Windows 使用子进程／命名管道；iOS 使用 App 内嵌 NodeMobile.framework／socketpair，`MeowRuntime` 提供通用帧与启动机制，`NativeMusicScriptService` 持有音源文档和授权。iOS 产品入口见[音源管理](../ios/music.md#音源管理)，诊断流程与未覆盖边界见[内嵌 Node 预检](../ios/runtime-preflight.md)。不据此声明 Android 已接入，也不新增猫源／阅读 UI。
+
+公共包的运行时 API 基线包含 Node 18.20.4；根工作区的构建工具仍使用 Node 24，Windows 随包 Node 锁定不变。iOS 采用 Node Mobile 18.20.4 与原版 release-sync asmjs QuickJS，只装配 `music`、`cat`：原版 asmjs 没有任务上下文入口，Node Mobile 也不带 ICU，`source` 不在该装配中。其他平台继续要求可用的 WebAssembly，不因缺失或报错自动降级。Node 18 已结束上游维护，兼容性测试不能代替安全更新。
+
+公共帧、逻辑 JSON 值与源码的严格 UTF-8 检查不依赖 ICU：先验证 UTF-8 字节，再解码；源码保留原有的字节往返一致性及协议各自的 BOM 规则。私有卷写入使用显式 fsync，不依赖较新 Node 才实现的 `flush` 选项。
 
 ## QuickJS 执行边界
 
-用户脚本只在 QuickJS WebAssembly guest heap 中执行；宿主调用交换 JSON 结构和独立字节帧，guest 回调通过 ID 引用，不把 Node 对象或任意宿主 callable 直接交给脚本。不提供任意文件、进程、`require` 或宿主模块加载接口，也不在失败时回退到 `node:vm`。
+用户脚本只在独立 QuickJS guest heap 中执行，桌面为 WASM，iOS 为 asmjs 数字堆；宿主调用交换 JSON 结构和独立字节帧，guest 回调通过 ID 引用，不把 Node 对象或任意宿主 callable 直接交给脚本。不提供任意文件、进程、`require` 或宿主模块加载接口，也不在失败时回退到宿主 `eval` 或 `node:vm`。
 
-每个启用的 LX、CatNode 或 source installation 通过同一 WorkerSession 在独立 `worker_thread` 中执行会话和 QuickJS；ScriptHost 记录、Cat 网关及平台 capability 物理任务留在主线程。编译后的 `WebAssembly.Module` 由主线程共享给 worker，各实例不共享堆。guest 卡住不阻塞主线程或其他实例。调用等待默认为 60 秒；source 初始化也为 60 秒、清理为 3 秒，LX 保持自身初始化/清理时限。到期后探测对应 worker，清理预算内无响应才终止并报告 `TIMEOUT`，不自动重启卡死实例、不设单次同步执行时限或后台心跳。停用、卸载、更新和关闭先触达正在初始化的真实所有者，再等待串行事务和真实线程退出。`stats()` 同步返回最近事实快照，并按读取需求合并发起一次异步刷新，不同步阻塞 worker。
+每个启用的 LX、CatNode 或 source installation 通过同一 WorkerSession 在独立 `worker_thread` 中执行会话和 QuickJS；ScriptHost 记录、Cat 网关及平台 capability 物理任务留在主线程。WASM 后端编译后的 `WebAssembly.Module` 由主线程共享给 worker；iOS 不编译或传递 WASM，直接在 worker 内加载 asmjs。两种后端的实例均不共享 guest 堆。guest 卡住不阻塞主线程或其他实例。调用等待默认为 60 秒；source 初始化也为 60 秒、清理为 3 秒，LX 保持自身初始化/清理时限。到期后探测对应 worker，清理预算内无响应才终止并报告 `TIMEOUT`，不自动重启卡死实例、不设单次同步执行时限或后台心跳。停用、卸载、更新和关闭先触达正在初始化的真实所有者，再等待串行事务和真实线程退出。`stats()` 同步返回最近事实快照，并按读取需求合并发起一次异步刷新，不同步阻塞 worker。
 
 运行器的 60 秒不覆盖平台调用方自己的等待策略：runtime-bridge 默认 30 秒及 Windows C# 调用方超时保持不变，应用调用可能先结束等待。
 
 桥接控制参数使用预先捕获的序列化方法和无原型信封，脚本修改 `JSON.stringify` 或继承的 `toJSON` 不能篡改内部请求身份；业务数据仍按 JSON 语义传递，不通过冻结脚本全局原型限制正常执行。
 
-受信引擎读取 script-host 内 `src/quickjs/emscripten-module.mjs`／`.wasm` 的任务上下文派生产物；npm core／FFI／release-sync 保持原版 `0.32.0`。固定源码、补丁、工具链、产物与许可校验见 [Windows 打包](../windows/runtime-packaging.md#受信-quickjs-wasm)。文件读取不向 guest 授予文件访问。`WebAssembly.compile` 编译模块只执行一次并缓存复用，但每个 installation／generation 独立实例化 WASM，不共享线性内存，避免某个堆或模块损坏影响其他实例。
+受信 `quickjs-module.js` 按真实 `process.platform` 选择固定后端，不接受脚本提供的后端选项。非 iOS 读取 script-host 内 `src/quickjs/emscripten-module.mjs`／`.wasm` 的任务上下文派生产物；npm core／FFI／release-sync 保持原版 `0.32.0`。固定源码、补丁、工具链、产物与许可校验见 [Windows 打包](../windows/runtime-packaging.md#受信-quickjs-wasm)。文件读取不向 guest 授予文件访问。`WebAssembly.compile` 编译模块只执行一次并缓存复用，但每个 installation／generation 独立实例化 WASM，不共享线性内存，避免某个堆或模块损坏影响其他实例。iOS 动态加载锁定的原版 asmjs variant，每次独立创建模块与数字堆，不把用户源码交给 Node 执行。
 
 派生引擎在 Promise reaction、原生 await、异步生成器请求及 FinalizationRegistry 登记时保存 SDK 的任务身份，在执行期间切入并于返回／异常后恢复；不包装公开 `Promise.prototype.then`，不新增微任务或改变排队顺序。portable 来源以此保留旧异步工作的身份，不能借后续动作发 capability；原生入口仅供可信 SDK 初始化捕获，任何用户代码执行前从全局删除。该机制不改变 LX 的显式特权存储契约，也不授予 CatNode 新权限。
 
@@ -65,7 +71,9 @@ LX 与 Cat 的大控制参数／结果均走 64 KiB 字节分片，不设独立�
 
 不按实例、timer、网络、in-flight、storage、method pending、stage token 或 profile 固定数量配额拒绝工作，资源按请求和 session 生命周期回收。Reader 的 DOM 文档/节点/字符串、分页和规则解析预算仍是明确的解析资源边界，ABI JSON、HTTP 语法、重定向和截止时间仍是数据/协议边界。CatNode 的 `os.totalmem()` 返回单脚本内存上限，`os.freemem()` 为上限减当前 guest 堆占用；其余 `os` 字段仍是兼容元数据。公共引擎拒绝超过 1 MiB 的栈配置。取消、超时或卸载 fence 当前结果并按请求、服务和 session 生命周期回收资源；不把取消信号当作不合作外部 I/O 已完成的证明，无法排空时明确报告清理失败。source 的能力与 profile 退休规则见[capability ABI](source-capability-abi.md)。
 
-隔离不依赖 AppContainer、完整虚拟机或 Node permission model；宿主网络／加解密适配是受信代码，不属于 guest 沙箱。JS 引擎/WASM 仍需维护与安全更新，不能承诺抵御引擎本身的漏洞。
+asmjs 保留独立数字堆、受控桥及 Worker 终止，但不具备 WASM 完整的越界／非法间接调用 trap；iOS 已接受此差异，不宣称两种后端具有相同故障隔离。iOS 系统沙箱限制 App 对系统和其他 App 的访问，不能替代本 App 内的数据、网络与资源防护。
+
+脚本边界不依赖 AppContainer、完整虚拟机或 Node permission model；宿主网络／加解密适配是受信代码，不属于 guest 沙箱。JS 引擎仍需维护与安全更新，不能承诺抵御引擎本身的漏洞。
 
 ## v2 特权存储
 
@@ -111,6 +119,6 @@ Cat 安装启用后按需创建回环服务。每个脚本监听器由运行器�
 
 ## 验证与发布
 
-打包闭包为公共 bootstrap、共享 music/Cat/source 模块、runtime-bridge、script-host、source-runtime、有限 Node 兼容与规则解析依赖，以及锁定的 release-sync 引擎；Windows 只补齐启动／管道 bootstrap 和薄 entry。WASM 的精确允许路径、来源、manifest／许可／文件哈希见 [Windows 打包](../windows/runtime-packaging.md)。
+打包闭包为公共 bootstrap、按装配选择的共享模块、runtime-bridge、script-host、source-runtime、有限 Node 兼容与规则解析依赖，以及锁定的 release-sync 引擎。`windows-native` 装配 music/Cat/source，含原 npm 与任务上下文派生的两份 WASM；`ios-embedded` 装配 music/Cat，仅含原版 asmjs，不复制派生 WASM pair。两者都核对 `scripts/quickjs-runtime.json` 中的来源、manifest／许可和引擎文件哈希，不扩展其他 native/WASM 放行范围。Windows 补齐启动／管道 bootstrap 和薄 entry，见 [Windows 打包](../windows/runtime-packaging.md)；iOS 载荷及诊断宿主见 [内嵌 Node 预检](../ios/runtime-preflight.md)。
 
 引擎初始化、合成 LX 回归、Windows 管道集成与外部真实脚本的联网业务验收分别记录。语法或离线初始化通过不能代替声明动作、异步网络、加解密、取消和真实业务数据验收。外部脚本报告和退出条件见 [动态验收](source-acceptance.md)；任务进度及某批样本的数值写入临时工作记录，不作为协议或源码版本冻结条件。

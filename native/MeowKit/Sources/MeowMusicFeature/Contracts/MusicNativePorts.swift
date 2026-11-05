@@ -123,6 +123,43 @@ public protocol MusicScriptResolving: Sendable {
     func lyrics(request: MusicScriptRequest) async throws -> MusicNativeLyrics
 }
 
+/// One installed raw LX script as shown in source management. Metadata comes
+/// from the script header; platforms are the declared, consumable sites of the
+/// last successful load. Never a URL, credential, grant or script source text.
+public struct MusicScriptSourceItem: Sendable, Equatable, Identifiable {
+    /// The single-script source bound of the shared ScriptHost.
+    public static let maximumSourceBytes = 16 * 1024 * 1024
+    public enum Origin: Sendable, Equatable { case file, network(host: String) }
+    public enum State: Sendable, Equatable { case disabled, idle, ready, failed }
+    public let id: String
+    public let name: String
+    public let version: String
+    public let author: String
+    public let summary: String
+    public let homepage: String
+    public let origin: Origin
+    public let platforms: [MusicPublicBrowsePlatform]
+    public let enabled: Bool
+    public let state: State
+    public init(id: String, name: String, version: String, author: String = "", summary: String = "",
+                homepage: String = "", origin: Origin, platforms: [MusicPublicBrowsePlatform],
+                enabled: Bool, state: State) {
+        self.id = id; self.name = name; self.version = version; self.author = author
+        self.summary = summary; self.homepage = homepage; self.origin = origin
+        self.platforms = platforms; self.enabled = enabled; self.state = state
+    }
+}
+
+/// Script-source management for the settings page. Import and download only
+/// store a disabled installation; enabling is the only operation that runs it.
+public protocol MusicScriptSourceManaging: Sendable {
+    func scriptSources() async throws -> [MusicScriptSourceItem]
+    func importScriptSource(_ data: Data, fileName: String) async throws -> MusicScriptSourceItem
+    func downloadScriptSource(from url: URL) async throws -> MusicScriptSourceItem
+    func setScriptSourceEnabled(_ id: String, enabled: Bool) async throws -> MusicScriptSourceItem
+    func removeScriptSource(_ id: String) async throws
+}
+
 /// Source-availability diagnostics for playback consumers.
 /// An empty ready source list and an unavailable script host are distinct.
 public struct MusicSourceAvailability: Sendable {

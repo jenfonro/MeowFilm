@@ -61,6 +61,8 @@ public final class MusicSettingsViewController: HostingPageViewController<MusicS
         switch destination {
         case .aggregation:
             controller = MusicAccountsViewController(model: model, appearance: appearance, router: router)
+        case .sources:
+            controller = MusicSourceManagementViewController(model: model, appearance: appearance)
         case .search:
             controller = MusicSearchSettingsViewController(appearance: appearance)
         case .playback:

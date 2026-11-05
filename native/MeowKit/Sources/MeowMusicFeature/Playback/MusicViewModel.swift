@@ -171,6 +171,8 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     let service: (any MusicServing)?
     lazy var libraryActions = MusicLibraryActions(service: service, access: accessState, state: libraryState)
     public let accounts: (any MusicAccountsServing)?
+    /// Installed script sources; built-in sources are part of the playback settings.
+    public let scriptSources: (any MusicScriptSourceManaging)?
     public var accountBrowser: (any MusicAccountBrowsing)? { service as? any MusicAccountBrowsing }
     public var librarySync: (any MusicLibrarySyncing)? { service as? any MusicLibrarySyncing }
     public var importManagement: (any MusicImportHistoryProviding)? { service as? any MusicImportHistoryProviding }
@@ -262,15 +264,19 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     }
 
     public init(service: any MusicServing, playback: PlaybackController,
-                accounts: (any MusicAccountsServing)? = nil) {
+                accounts: (any MusicAccountsServing)? = nil,
+                scriptSources: (any MusicScriptSourceManaging)? = nil) {
         self.service = service; self.player = SharedMusicPlaybackDriver(playback); self.accounts = accounts
+        self.scriptSources = scriptSources
         feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
         configureMetadata()
         observeAccountSessions()
     }
     public init(service: any MusicServing, player: any MusicPlaybackDriving,
-                accounts: (any MusicAccountsServing)? = nil) {
+                accounts: (any MusicAccountsServing)? = nil,
+                scriptSources: (any MusicScriptSourceManaging)? = nil) {
         self.service = service; self.player = player; self.accounts = accounts
+        self.scriptSources = scriptSources
         feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
         configureMetadata()
         observeAccountSessions()

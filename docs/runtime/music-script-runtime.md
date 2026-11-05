@@ -124,7 +124,7 @@ grant installationId siteId generation key value?
 - 未结束 storage 任务不设固定数量预算，按调用和实例生命周期回收；物理任务保留至 adapter 真正结束。
 - guest 存储回调随请求完成、取消和退休释放；物理任务仍保留归属至 adapter 真正结束。
 
-脚本 guest 不获得任意文件、进程、官方账号凭据、应用数据根或通用 document bridge；可信 Node 引擎读取自身锁定的 WASM 不构成 guest 文件权限。
+脚本 guest 不获得任意文件、进程、官方账号凭据、应用数据根或通用 document bridge；可信 Node 引擎加载自身锁定的 WASM／asmjs 不构成 guest 文件权限。
 
 ## 网络
 

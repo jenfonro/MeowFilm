@@ -302,8 +302,11 @@ test('stage validates names, sequence, canonical base64, chunk size, hash and st
   okay(await rpc('stage.chunk', { token, offset: 0, data: 'YWJk' }));
   denied(await rpc('load', { ...options(), token }), 'SCRIPT_INTEGRITY');
   okay(await rpc('stage.abort', { token }));
-  const bad = await upload(rpc, Buffer.from([0xff, 0xfe]));
-  denied(await rpc('load', { ...options(), token: bad }), 'SCRIPT_ENCODING');
+  for (const bytes of [[0xff, 0xfe], [0xc0, 0xaf], [0xed, 0xa0, 0x80],
+    [0xe2, 0x82], [0xf4, 0x90, 0x80, 0x80]]) {
+    const bad = await upload(rpc, Buffer.from(bytes));
+    denied(await rpc('load', { ...options(), token: bad }), 'SCRIPT_ENCODING');
+  }
   assert.equal(native.calls.length, 0);
 });
 

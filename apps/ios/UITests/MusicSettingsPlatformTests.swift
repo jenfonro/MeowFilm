@@ -10,6 +10,53 @@ import MeowPlayback
 
 @MainActor
 final class MusicSettingsPlatformTests: XCTestCase {
+    func testSourceManagementRendersBuiltInAndScriptSwitchesTogetherAndWritesThroughBindings() throws {
+        let domain = "MusicSourceSettings." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let service = makeService(), scripts = MusicSettingsScriptFixture()
+        let model = MusicViewModel(service: service, player: MusicSettingsPlayerFixture(), scriptSources: scripts)
+        let state = MusicSourceManagementState(model: model)
+        let loaded = expectation(description: "source list loaded")
+        Task { await model.load(); state.start(); await state.flush(); loaded.fulfill() }
+        wait(for: [loaded], timeout: 3)
+        XCTAssertEqual(MusicSettingsDestination.sources.title, "音源管理")
+        XCTAssertEqual(MusicSettingsDestination.sources.accessibilityIdentifier, "music.settings.sources")
+        let host = UIHostingController(rootView: MusicSourceManagementContent(state: state, theme: PageTheme(palette: appearance.pageColorway)))
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        func views(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(views) }
+        let switchesReady = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            host.view.layoutIfNeeded()
+            return views(host.view).compactMap { $0 as? UISwitch }.count == 4
+        }, object: nil)
+        wait(for: [switchesReady], timeout: 3)
+        let switches = views(host.view).compactMap { $0 as? UISwitch }.sorted { $0.convert(.zero, to: host.view).y < $1.convert(.zero, to: host.view).y }
+        XCTAssertEqual(switches.count, 4)
+        guard switches.count == 4 else { return }
+        XCTAssertTrue(switches[0].isOn); XCTAssertFalse(switches[3].isOn)
+        switches[0].setOn(false, animated: false); switches[0].sendActions(for: .valueChanged)
+        switches[3].setOn(true, animated: false); switches[3].sendActions(for: .valueChanged)
+        let saved = expectation(description: "switches persisted")
+        Task { await state.flush(); saved.fulfill() }
+        wait(for: [saved], timeout: 3)
+        XCTAssertFalse(state.officialEnabled(.netease))
+        XCTAssertEqual(state.scripts.first?.state, .ready)
+        let screenshot = XCTAttachment(image: UIGraphicsImageRenderer(bounds: host.view.bounds).image { context in
+            host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+        })
+        screenshot.name = "Unified music sources"; screenshot.lifetime = .keepAlways
+        add(screenshot)
+        state.close()
+        let closed = expectation(description: "source settings closed")
+        Task { await model.close(); closed.fulfill() }
+        wait(for: [closed], timeout: 3)
+    }
+
     /// Synchronous on purpose: pages released inside a Swift task enter the
     /// back-deployed isolated-deinit path, which UIKit owners never use.
     func testSettingsConsumersUseTheAppOwnedHeaderAndKeepFloatingCards() throws {
@@ -322,6 +369,8 @@ private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing {
     private var qrCompletion: MusicAccountStatus.Phase?
     private var qrGate: MusicSettingsQRCheckGate?
     private var sends: [MusicAccountPlatform] = [], submits: [MusicAccountPlatform] = []
+    private var settingsRevision = 0
+    private var official = MusicAccountPlatform.allCases
 
     init(image: Data) { self.image = image }
     func completeQR(as phase: MusicAccountStatus.Phase) { qrCompletion = phase }
@@ -374,7 +423,7 @@ private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing {
     }
     func cancelSMSLogin(attemptID: UUID) {}
 
-    func state() -> MusicPlaybackState { .init() }
+    func state() -> MusicPlaybackState { .init(settingsRevision: settingsRevision, officialSources: official) }
     func platforms() -> [MusicPlatform] { [] }
     func search(platform: String, query: String, page: Int, limit: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
     func collections() -> [MusicCollection] { [] }
@@ -385,7 +434,12 @@ private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing {
     func queue() -> MusicQueueSnapshot { .init(revision: 0, currentId: nil, entries: []) }
     func changeQueue(_ change: MusicQueueChange, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
     func advance(_ direction: MusicDirection, reason: MusicAdvanceReason, expectedRevision: Int) throws -> MusicAdvanceResult { throw MusicServiceError.unsupported }
-    func updateSettings(_ change: MusicSettingsChange) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
+    func updateSettings(_ change: MusicSettingsChange) throws -> MusicPlaybackState {
+        guard change.ifRevision == settingsRevision else { throw MusicServiceError.staleRevision }
+        official = change.officialSources ?? official
+        settingsRevision += 1
+        return state()
+    }
     func playbackOptions(for ref: MusicReference) -> [MusicPlaybackOption] { [] }
     func resolve(attemptId: String, occurrenceId: String, selection: MusicPlaybackSelection) throws -> MusicPlaybackCandidate { throw MusicServiceError.unsupported }
     func cancel(attemptId: String?) {}
@@ -398,6 +452,19 @@ private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing {
     func commitImport(_ preview: MusicImportPreview) throws -> MusicImportReport { throw MusicServiceError.unsupported }
     func releaseImport(_ preview: MusicImportPreview) {}
     func rollbackImport(batchId: String) throws { throw MusicServiceError.unsupported }
+}
+
+private actor MusicSettingsScriptFixture: MusicScriptSourceManaging {
+    var enabled = false
+    func item() -> MusicScriptSourceItem {
+        .init(id: "fixture", name: "合成 LX 音源", version: "2", origin: .file,
+              platforms: [.qq], enabled: enabled, state: enabled ? .ready : .disabled)
+    }
+    func scriptSources() -> [MusicScriptSourceItem] { [item()] }
+    func importScriptSource(_ data: Data, fileName: String) throws -> MusicScriptSourceItem { throw MusicServiceError.unsupported }
+    func downloadScriptSource(from url: URL) throws -> MusicScriptSourceItem { throw MusicServiceError.unsupported }
+    func setScriptSourceEnabled(_ id: String, enabled: Bool) -> MusicScriptSourceItem { self.enabled = enabled; return item() }
+    func removeScriptSource(_ id: String) throws { throw MusicServiceError.unsupported }
 }
 
 /// The base fixture is QR-only; the optional SMS port exists only on this wrapper.

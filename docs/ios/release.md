@@ -4,6 +4,10 @@
 
 `build-ios.sh` 是 iOS 产品构建入口：使用 Xcode 构建 Release／iphoneos／arm64 未签名 IPA，在 `tmp/` 暂存和校验，成功后整体替换 `build/ios/`。
 
+构建机需要 Node 24（参考 24.21.0）及根锁依赖 `npm ci --ignore-scripts`；客户端不需要用户安装 Node。`prepare-ios-runtime.py` 校验 `scripts/ios-node-mobile.json` 锁定的 Node Mobile 18.20.4 archive／许可，复用 `.cache/nodejs-mobile/ios/NodeMobile.xcframework`，并离线生成 `.cache/ios-runtime/Runtime`。后者由 `package-ios-runtime.mjs` 包装公共打包器，包含 `complete`／`ios-socketpair-v1` manifest、iOS entry、music/Cat 和 asmjs，不包含 Windows 入口、WASM 或 source 模块。
+
+`build-ios.sh`、`test-native.sh compile|all` 自动准备这些输入；直接运行 Xcode 前先执行 `python3 -I -B scripts/prepare-ios-runtime.py`。可用 `MEOWFILM_BUILD_NODE` 指定构建工具 Node 路径；它不改变 App 内嵌版本。工程将 NodeMobile.framework 链接并设为 CodeSignOnCopy，载荷及 Node Mobile 许可随 App 资源打包。CI 两个工作流均恢复锁定依赖，不使用系统已装 Node 的隐式状态。
+
 `build/ios/` 只包含：
 
 - `meowfilm-beta-ios.ipa`

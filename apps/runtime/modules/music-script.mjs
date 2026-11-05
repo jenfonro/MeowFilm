@@ -40,9 +40,8 @@ function snapshot(value) {
 const canonical = value => JSON.stringify(value, (_key, item) => object(item)
   ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
 function decode(bytes) {
-  let source;
-  try { source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
-  catch { throw new Failure('SCRIPT_ENCODING'); }
+  // The byte round-trip rejects malformed UTF-8 without requiring ICU.
+  const source = bytes.toString('utf8');
   requireValue(source.trim().length > 0 && Buffer.from(source).equals(bytes), 'SCRIPT_ENCODING');
   return source;
 }
