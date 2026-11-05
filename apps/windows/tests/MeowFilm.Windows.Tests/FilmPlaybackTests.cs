@@ -1,6 +1,9 @@
 using System.Windows;
 using System.Windows.Automation;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -26,8 +29,10 @@ public static class FilmPlaybackTests
             () => MusicQualityConsumerTests.Sta(FlatTiles));
         yield return new("film-playback: hover or focus lifts episode cards rows and recommendations around a centered play mark",
             () => MusicQualityConsumerTests.Sta(HoverLift));
-        yield return new("film-playback: backdrop poster keeps its ratio fades on every side and never sizes metadata",
+        yield return new("film-playback: backdrop poster fills its frame at the original ratio and fades into the page",
             () => MusicQualityConsumerTests.Sta(BackdropPoster));
+        yield return new("film-playback: centered hero actions expose unavailable playback and retain each film favorite",
+            () => MusicQualityConsumerTests.Sta(HeroActions));
         yield return new("film-playback: ambient tint follows the poster stays fixed in the viewport and keeps text readable",
             () => MusicQualityConsumerTests.Sta(AmbientTint));
     }
@@ -287,7 +292,7 @@ public static class FilmPlaybackTests
         var view = scene.Playback;
         var page = scene.Page;
         var metadata = Named<Grid>(view, "MetadataPanel");
-        Check(!Visuals(metadata).OfType<Border>().Any(border => border.IsVisible &&
+        Check(!Visuals(metadata).OfType<Border>().Any(border => border.IsVisible && border.TemplatedParent is not ButtonBase &&
                 ((border.BorderThickness != default && border.BorderBrush is SolidColorBrush { Color.A: > 0 }) ||
                 (border.ActualWidth > metadata.ActualWidth / 2 && border.Background is SolidColorBrush { Color.A: > 0 }))),
             "metadata sits directly on the page without a surface or outlined card");
@@ -411,17 +416,19 @@ public static class FilmPlaybackTests
         const string still = "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/episode-01.jpg";
         var (backdrop, image) = Backdrop(poster, 400, 300);
         Check(backdrop.DesiredSize == default, "the backdrop never asks its panel for size");
-        CheckSlot(backdrop, image, new Rect(200, 0, 200, 300), "a portrait poster fits the panel height at the right edge");
+        CheckSlot(backdrop, image, new Rect(0, -150, 400, 600), "a portrait fills the entire frame with a centered crop");
         var pixels = Pixels((FrameworkElement)backdrop.Parent);
-        Check(Alpha(pixels, 400, 300, 150) > 240, "the poster middle stays visible");
-        Check(new[] { (201, 150), (399, 150), (300, 1), (300, 298), (100, 150) }
-            .All(point => Alpha(pixels, 400, point.Item1, point.Item2) < 10), "every poster edge fades out");
+        Check(new[] { (1, 1), (399, 1), (1, 140), (399, 140), (200, 140) }
+            .All(point => Alpha(pixels, 400, point.Item1, point.Item2) > 240), "the upper half and side edges stay clear");
+        Check(Alpha(pixels, 400, 200, 225) is > 110 and < 140 &&
+            new[] { 1, 200, 399 }.All(x => Alpha(pixels, 400, x, 299) < 5),
+            "the lower half fades continuously into a transparent bottom edge");
 
         (backdrop, image) = Backdrop(poster, 150, 300);
-        CheckSlot(backdrop, image, new Rect(-50, 0, 200, 300), "a narrow panel is covered at the poster ratio");
+        CheckSlot(backdrop, image, new Rect(-25, 0, 200, 300), "a narrow frame crops the portrait equally on each side");
         (backdrop, image) = Backdrop(still, 400, 300);
-        CheckSlot(backdrop, image, new Rect(400 - 300 * 16d / 9, 0, 300 * 16d / 9, 300),
-            "a landscape image covers the panel without stretching");
+        CheckSlot(backdrop, image, new Rect((400 - 300 * 16d / 9) / 2, 0, 300 * 16d / 9, 300),
+            "a landscape image covers the frame with a centered crop and no stretching");
 
         await using var scene = new Scene();
         await scene.Module.NavigateAsync(FilmCapability.PlaybackRoute, default);
@@ -430,20 +437,102 @@ public static class FilmPlaybackTests
         var panel = Named<Grid>(view, "MetadataPanel");
         var real = Named<FilmPlaybackPoster>(view, "Backdrop");
         var preview = real.Children.OfType<Image>().Single();
-        var origin = preview.TranslatePoint(new Point(), real);
-        Check(real.IsVisible && real.Opacity is > .1 and < .2 &&
+        var slot = Bounds(preview, real);
+        Check(real.IsVisible && real.Opacity == 1 &&
             Math.Abs(preview.ActualWidth / preview.ActualHeight - 2d / 3) < .01 &&
-            Math.Abs(preview.ActualHeight - panel.ActualHeight) < 1 &&
-            Math.Abs(origin.X + preview.ActualWidth - real.ActualWidth) < 1,
-            "the wide metadata backdrop keeps the poster ratio at the panel's right edge");
+            slot.Left <= 0 && slot.Top <= 0 && slot.Right >= real.ActualWidth && slot.Bottom >= real.ActualHeight &&
+            Math.Abs(slot.Left + slot.Width / 2 - real.ActualWidth / 2) < 1,
+            "the wide hero fills the full image frame at the poster ratio");
         scene.View.Width = 700;
         scene.Window.Width = 700;
         scene.Window.UpdateLayout();
         await Drain();
         var details = Named<ScrollViewer>(view, "MetadataScroll");
         Check(double.IsNaN(panel.Height) && Math.Abs(panel.ActualHeight - details.DesiredSize.Height) < 1 &&
-            Math.Abs(preview.ActualHeight - panel.ActualHeight) < 1,
-            "stacked metadata keeps its content height and the poster follows it");
+            real.ActualHeight is >= 220 and <= 340 && real.ActualHeight < panel.ActualHeight &&
+            Math.Abs(preview.ActualWidth / preview.ActualHeight - 2d / 3) < .01,
+            "stacked metadata sizes to its content with a bounded image frame and no stretched poster");
+    }
+
+    private static async Task HeroActions()
+    {
+        await using var scene = new Scene();
+        var module = scene.Module;
+        await module.NavigateAsync(FilmCapability.PlaybackRoute, default);
+        await Drain();
+        var page = scene.Page;
+        var view = scene.Playback;
+        var content = Named<StackPanel>(view, "MetadataContent");
+        var details = Named<ScrollViewer>(view, "MetadataScroll");
+        var title = Named<TextBlock>(view, "FilmTitle");
+        var metadata = Named<TextBlock>(view, "FilmMetadata");
+        var actions = Named<StackPanel>(view, "HeroActions");
+        var favorite = Named<ToggleButton>(view, "FavoriteButton");
+        var play = Named<Button>(view, "HeroPlayButton");
+        Check(title.TextAlignment == TextAlignment.Center && metadata.TextAlignment == TextAlignment.Center &&
+            ReferenceEquals(details.Content, content) && content.Children.Contains(Named<FilmPlaybackPoster>(view, "Backdrop")),
+            "the full-width image and centered identity share the metadata scroll content");
+        foreach (double width in new[] { 1237d, 907d, 840d })
+        {
+            scene.Window.Width = scene.View.Width = width;
+            scene.Window.UpdateLayout();
+            details.ScrollToTop();
+            await Drain();
+            foreach (var element in new FrameworkElement[] { title, metadata, Named<WrapPanel>(view, "FilmFacts"), actions })
+            {
+                var bounds = Bounds(element, content);
+                Check(Math.Abs(bounds.Left + bounds.Width / 2 - content.ActualWidth / 2) <= 1,
+                    "identity facts and the action group share the image center");
+            }
+            Check(Bounds(actions, details).Bottom <= details.ViewportHeight + 1,
+                "the standard short title and both actions fit the desktop metadata viewport");
+        }
+        Check(!play.IsEnabled && AutomationProperties.GetName(play).Contains("暂无片源", StringComparison.Ordinal) &&
+            Visuals(play).OfType<TextBlock>().Any(text => text.Text == "暂无片源"),
+            "the hero offers an honestly disabled playback action with a visible and accessible reason");
+        Check(favorite.IsEnabled && favorite.IsTabStop && favorite.Focusable && !page.IsFavorite &&
+            favorite.IsChecked == false && Named<TextBlock>(view, "FavoriteLabel").Text == "收藏",
+            "favorite starts off with a labelled keyboard-accessible toggle");
+        var toggle = (IToggleProvider)new ToggleButtonAutomationPeer(favorite).GetPattern(PatternInterface.Toggle);
+        toggle.Toggle();
+        await Drain();
+        Check(page.IsFavorite && toggle.ToggleState == ToggleState.On &&
+            Named<TextBlock>(view, "FavoriteLabel").Text == "已收藏" &&
+            AutomationProperties.GetName(favorite) == "取消收藏 " + page.Title,
+            "the UIA toggle updates the model, visible favorite label and accessible action");
+        string location = module.CaptureNavigationLocation();
+        await module.OpenRecommendationAsync(page.Recommendations[0]);
+        await Drain();
+        Check(!scene.Page.IsFavorite && favorite.IsChecked == false,
+            "a different film has independent favorite state");
+        await module.RestoreNavigationAsync(location, default);
+        await Drain();
+        Check(ReferenceEquals(scene.Page, page) && page.IsFavorite && favorite.IsChecked == true,
+            "return navigation restores the favorite for the original film");
+        favorite.BringIntoView();
+        var source = PresentationSource.FromVisual(favorite)!;
+        var keyboard = new KeyboardProbe();
+        favorite.RaiseEvent(new KeyEventArgs(keyboard, source, 0, Key.Space) { RoutedEvent = Keyboard.KeyDownEvent });
+        favorite.RaiseEvent(new KeyEventArgs(keyboard, source, 1, Key.Space) { RoutedEvent = Keyboard.KeyUpEvent });
+        await Drain();
+        Check(!page.IsFavorite && favorite.IsChecked == false &&
+            Named<TextBlock>(view, "FavoriteLabel").Text == "收藏", "Space removes the favorite and updates its label");
+        var overview = Named<TextBlock>(view, "OverviewText");
+        Check(overview.TextAlignment == TextAlignment.Left && overview.MaxHeight == 66, "overview starts left-aligned in three lines");
+        Click(Named<Button>(view, "OverviewToggle"));
+        await Drain();
+        Check(page.OverviewExpanded && double.IsPositiveInfinity(overview.MaxHeight), "the full overview still expands");
+        Click(Named<Button>(view, "OverviewToggle"));
+        await Drain();
+        Check(!page.OverviewExpanded && overview.MaxHeight == 66, "the overview still collapses");
+        DesktopTheme.SetIsHighContrast(scene.Window, true);
+        details.ScrollToTop();
+        await Drain();
+        Check(!Named<FilmPlaybackPoster>(view, "Backdrop").IsVisible && Bounds(title, content).Top < 1 &&
+            favorite.Foreground is SolidColorBrush ink && ink.Color == SystemColors.WindowTextColor &&
+            play.Foreground is SolidColorBrush disabled && disabled.Color == SystemColors.GrayTextColor,
+            "high contrast reclaims the image space and uses system colors for both actions");
+        Check(scene.Source.Calls == 0, "hero and favorite interactions issue no source requests");
     }
 
     private static (FilmPlaybackPoster Poster, Image Image) Backdrop(string address, double width, double height)

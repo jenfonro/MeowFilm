@@ -12,15 +12,12 @@ public sealed class FilmPlaybackPoster : Grid
 {
     private const string PreviewPrefix =
         "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/";
-    // Catalog artwork does not expose its decoded size; film posters are treated as two-to-three.
-    private const double PosterRatio = 2d / 3;
-    private const double FeatherLeft = .42, FeatherRight = .16, FeatherTop = .16, FeatherBottom = .30;
 
     public static readonly DependencyProperty AddressProperty = DependencyProperty.Register(
         nameof(Address), typeof(string), typeof(FilmPlaybackPoster),
         new PropertyMetadata("", (value, _) => ((FilmPlaybackPoster)value).UpdateAddress()));
 
-    /// <summary>Backdrop posters keep their ratio against the right edge, fade on every side and never size their host.</summary>
+    /// <summary>Backdrop posters fill their frame at the original ratio and fade down into the page.</summary>
     public static readonly DependencyProperty IsBackdropProperty = DependencyProperty.Register(
         nameof(IsBackdrop), typeof(bool), typeof(FilmPlaybackPoster),
         new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsMeasure,
@@ -38,8 +35,7 @@ public sealed class FilmPlaybackPoster : Grid
 
     private readonly Image preview = new() { Stretch = Stretch.UniformToFill };
     private readonly ArtworkImage artwork = new() { ShowRetry = false };
-    private Size maskSize;
-    private double maskRatio;
+    private double backdropHeight;
 
     public string Address
     {
@@ -80,11 +76,9 @@ public sealed class FilmPlaybackPoster : Grid
     {
         if (!IsBackdrop)
         {
-            preview.ClearValue(OpacityMaskProperty);
-            artwork.ClearValue(OpacityMaskProperty);
             ClearValue(OpacityMaskProperty);
             ClearValue(PaletteBrushPropertyKey);
-            maskSize = default;
+            backdropHeight = 0;
             return;
         }
         if (preview.Source is BitmapSource local)
@@ -117,34 +111,34 @@ public sealed class FilmPlaybackPoster : Grid
     protected override Size ArrangeOverride(Size arrangeSize)
     {
         if (!IsBackdrop) return base.ArrangeOverride(arrangeSize);
-        double ratio = preview.Source is BitmapSource { PixelWidth: > 0, PixelHeight: > 0 } local
-            ? (double)local.PixelWidth / local.PixelHeight
-            : PosterRatio;
-        // Fit the panel height at the poster ratio, anchored right; a wider poster is cropped from its left.
-        double width = arrangeSize.Height * ratio;
-        var slot = new Rect(arrangeSize.Width - width, 0, width, arrangeSize.Height);
-        foreach (UIElement child in InternalChildren) child.Arrange(slot);
-        if (width > 0 && arrangeSize.Width > 0 && (arrangeSize != maskSize || ratio != maskRatio))
+        var slot = new Rect(arrangeSize);
+        if (preview.Source is BitmapSource { PixelWidth: > 0, PixelHeight: > 0 } local)
         {
-            maskSize = arrangeSize;
-            maskRatio = ratio;
-            // Child coordinates start at the slot; the horizontal fade spans only the visible poster part.
-            OpacityMask = Feather(new Point(0, 0), new Point(0, arrangeSize.Height), FeatherTop, FeatherBottom);
-            preview.OpacityMask = artwork.OpacityMask = Feather(
-                new Point(Math.Max(0, -slot.X), 0), new Point(width, 0), FeatherLeft, FeatherRight);
+            double scale = Math.Max(arrangeSize.Width / local.PixelWidth, arrangeSize.Height / local.PixelHeight);
+            double width = local.PixelWidth * scale, height = local.PixelHeight * scale;
+            slot = new Rect((arrangeSize.Width - width) / 2, (arrangeSize.Height - height) / 2, width, height);
+        }
+        preview.Arrange(slot);
+        // ArtworkImage owns the decoded catalog size and its UniformToFill crop; no guessed poster ratio.
+        artwork.Arrange(new Rect(arrangeSize));
+        if (arrangeSize.Height > 0 && backdropHeight != arrangeSize.Height)
+        {
+            backdropHeight = arrangeSize.Height;
+            OpacityMask = CreateBackdropFade(backdropHeight);
         }
         return arrangeSize;
     }
 
-    // Absolute mapping in element coordinates; five stops approximate a smoothstep edge.
-    private static Brush Feather(Point start, Point end, double first, double last)
+    private static Brush CreateBackdropFade(double height)
     {
-        var brush = new LinearGradientBrush { MappingMode = BrushMappingMode.Absolute, StartPoint = start, EndPoint = end };
-        double[] alpha = [0, .156, .5, .844, 1];
-        for (int i = 0; i < alpha.Length; i++)
-            brush.GradientStops.Add(new GradientStop(Color.FromArgb((byte)Math.Round(alpha[i] * 255), 0, 0, 0), first * i / 4));
-        for (int i = alpha.Length - 1; i >= 0; i--)
-            brush.GradientStops.Add(new GradientStop(Color.FromArgb((byte)Math.Round(alpha[i] * 255), 0, 0, 0), 1 - last * i / 4));
+        // Relative bounds include the cropped image overflow; fade against the visible frame instead.
+        var brush = new LinearGradientBrush
+        {
+            MappingMode = BrushMappingMode.Absolute, StartPoint = new(0, 0), EndPoint = new(0, height)
+        };
+        brush.GradientStops.Add(new(Colors.Black, 0));
+        brush.GradientStops.Add(new(Colors.Black, .5));
+        brush.GradientStops.Add(new(Color.FromArgb(0, 0, 0, 0), 1));
         brush.Freeze();
         return brush;
     }
