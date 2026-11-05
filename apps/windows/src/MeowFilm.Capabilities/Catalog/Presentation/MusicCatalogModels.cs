@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.ComponentModel;
 
 namespace MeowFilm.Capabilities;
 
@@ -23,18 +24,37 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     bool Available = true, string ErrorCode = "", string StableKey = "", JsonElement? Action = null,
     JsonElement? Locator = null, string MemberId = "", IReadOnlyList<MusicRankPreview>? Preview = null,
     string UpdateFrequency = "", MusicCatalogEntryPresentation Presentation = MusicCatalogEntryPresentation.Static,
-    string PreviewSubtitle = "", int? DayOfMonth = null, string Decoration = "",
-    bool RequiresAccount = false, bool Display = true, string Placement = "")
+    int? DayOfMonth = null, string Decoration = "",
+    bool RequiresAccount = false, bool Display = true, string Placement = "",
+    bool DirectPlay = true, JsonElement? PlaybackSource = null, string RankText = "", string SalesText = "") : INotifyPropertyChanged
 {
-    public IReadOnlyList<MusicRankPreview> PreviewSongs => Preview ?? [];
+    public event PropertyChangedEventHandler? PropertyChanged;
+    private IReadOnlyList<MusicRankPreview>? initializedPreview;
+    private bool isPreparing;
+    public IReadOnlyList<MusicRankPreview> PreviewSongs => Preview is { Count: > 0 } ? Preview : initializedPreview ?? [];
+    public IReadOnlyList<string> PreviewTitles => PreviewSongs.Take(3).Select((song, index) => $"{index + 1} {song.Title}").ToArray();
+    public string FirstPreviewCover => PreviewSongs.ElementAtOrDefault(0)?.Cover is { Length: > 0 } cover ? cover : Cover;
+    public string SecondPreviewCover => PreviewSongs.ElementAtOrDefault(1)?.Cover ?? "";
+    public string ThirdPreviewCover => PreviewSongs.ElementAtOrDefault(2)?.Cover ?? "";
+    public bool IsPreparing
+    {
+        get => isPreparing;
+        internal set { if (isPreparing == value) return; isPreparing = value; PropertyChanged?.Invoke(this, new(nameof(IsPreparing))); }
+    }
+    internal void InitializePreview(IReadOnlyList<MusicRankPreview> songs)
+    {
+        initializedPreview = songs;
+        foreach (var name in new[] { nameof(PreviewSongs), nameof(PreviewTitles), nameof(HasPreview),
+            nameof(FirstPreviewCover), nameof(SecondPreviewCover), nameof(ThirdPreviewCover) })
+            PropertyChanged?.Invoke(this, new(name));
+    }
     public bool HasPreview => PreviewSongs.Count > 0;
-    public string ExpandedSubtitle => PreviewSubtitle.Length > 0 ? PreviewSubtitle : Subtitle;
     public bool HasCalendarDay => DayOfMonth.HasValue;
     public bool IsPreviewEntry => Presentation == MusicCatalogEntryPresentation.Preview;
     public bool IsOverlayEntry => Presentation == MusicCatalogEntryPresentation.Overlay;
     public bool IsAnimatedEntry => Presentation == MusicCatalogEntryPresentation.Animated;
-    public bool CanRequestPreview => IsPreviewEntry && CanOpen;
-    public bool CanPlay => CanOpen && (Song is not null || Kind is "song" or "playlist" or "daily" or "fm" or "similar" or "album");
+    public bool CanRequestPreview => Display && IsPreviewEntry && CanOpen && Kind is "playlist" or "daily" or "album";
+    public bool CanPlay => DirectPlay && CanOpen && (Song is not null || Kind is "song" or "playlist" or "daily" or "fm" or "similar" or "album");
     public bool CanOpen => Available && (Song is not null || MusicCatalogDto.SupportsAction(Platform, Kind));
     public bool CanFavorite => Available && Song is not null;
     public bool CanSimilar => CanFavorite && Platform == "wy" && ActionId.Length > 0;
@@ -67,7 +87,7 @@ public sealed record MusicCatalogSection(string Title, IReadOnlyList<MusicCatalo
         "banner" => MusicCatalogSectionPresentation.Banner,
         "artists" => MusicCatalogSectionPresentation.Artists,
         "rankings" when Layout is "ranked-songs" or "vip-ranked-songs" ||
-            !Layout.Equals("ONLY_COVER", StringComparison.OrdinalIgnoreCase) && Items.Any(item => item.HasPreview) =>
+            Layout.Equals("TOP_3", StringComparison.OrdinalIgnoreCase) =>
             MusicCatalogSectionPresentation.RankingPreviews,
         "rankings" => MusicCatalogSectionPresentation.RankingCovers,
         _ when Items.Count > 0 && Items.All(item => item.Song is not null) => MusicCatalogSectionPresentation.Songs,
@@ -79,6 +99,7 @@ public sealed record MusicCatalogSection(string Title, IReadOnlyList<MusicCatalo
     public bool IsRankingCoverSection => Presentation == MusicCatalogSectionPresentation.RankingCovers;
     public bool IsBannerSection => Presentation == MusicCatalogSectionPresentation.Banner;
     public bool IsEntrySection => Presentation == MusicCatalogSectionPresentation.Entries;
+    public bool IsAlbumChart => Type == "albums" && Layout == "ranking";
     public bool IsSongShelfSection => IsSongSection && Layout is "rail" or "grid";
     public bool IsPlaylistSection => Presentation == MusicCatalogSectionPresentation.Shelf &&
         Items.Count > 0 && Items.All(item => item.Kind is "playlist" or "album");
@@ -100,7 +121,7 @@ public static class MusicCatalogDto
         if (platform is not ("wy" or "tx" or "kg" or "kw" or "mg")) return false;
         return kind is "song" or "playlist" ||
             (platform is "wy" or "tx" or "kg") && kind == "channel" ||
-            platform == "wy" && kind is "daily" or "fm" or "similar" or "album" or "artist";
+            platform == "wy" && kind is "daily" or "fm" or "similar" or "album" or "artist" or "chart";
     }
     public static string Text(JsonElement element, string name) =>
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) &&
@@ -233,6 +254,7 @@ public static class MusicCatalogDto
             return new(song.Id, song.Title, song.Artist, song.Cover, "song", platform, song,
                 SongJson.NativeId(song.Raw), Available: available, ErrorCode: error, StableKey: Text(item, "key"),
                 MemberId: Text(item, "memberId"), Presentation: presentation,
+                PlaybackSource: item.TryGetProperty("playbackSource", out var playback) && playback.ValueKind == JsonValueKind.Object ? playback.Clone() : null,
                 RequiresAccount: requiresAccount, Display: display);
         }
         var id = Text(item, "id");
@@ -277,8 +299,9 @@ public static class MusicCatalogDto
             Text(item, "cover"), kind, platform, ActionId: actionId, PageCode: pageCode,
             Available: available, ErrorCode: available ? "" : error.Length == 0 ? "UNSUPPORTED" : error, StableKey: Text(item, "key"),
             Action: actionValue, Locator: locator, Preview: Preview(item), UpdateFrequency: Text(item, "updateFrequency"),
-            Presentation: presentation, PreviewSubtitle: Text(item, "previewSubtitle"), DayOfMonth: CalendarDay(item),
-            Decoration: Text(item, "decoration"), RequiresAccount: requiresAccount, Display: display, Placement: placement);
+            Presentation: presentation, DayOfMonth: CalendarDay(item),
+            Decoration: Text(item, "decoration"), RequiresAccount: requiresAccount, Display: display, Placement: placement,
+            DirectPlay: Boolean(item, "canPlay", true), RankText: Text(item, "rankText"), SalesText: Text(item, "salesText"));
     }
     private static bool Boolean(JsonElement item, string name, bool fallback)
     {

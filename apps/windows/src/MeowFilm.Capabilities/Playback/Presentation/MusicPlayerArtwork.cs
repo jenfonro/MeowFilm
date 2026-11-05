@@ -6,15 +6,16 @@ namespace MeowFilm.Capabilities;
 internal static class MusicPlayerArtwork
 {
     // Frozen once; rotation uses a retained native animation, not per-frame drawing.
-    public static Brush Grooves { get; } = CreateGrooves();
-    private static Brush CreateGrooves()
+    public static Brush Grooves { get; } = CreateGrooves(false);
+    public static Brush CompactGrooves { get; } = CreateGrooves(true);
+    private static Brush CreateGrooves(bool compact)
     {
         var drawing = new DrawingGroup();
         using (var dc = drawing.Open())
         {
             dc.DrawEllipse(new SolidColorBrush(Color.FromRgb(22, 23, 25)), null, new(150, 150), 150, 150);
-            for (double radius = 100; radius < 148; radius += 1.7)
-                dc.DrawEllipse(null, new Pen(new SolidColorBrush(Color.FromArgb(60, 68, 69, 71)), .65), new(150, 150), radius, radius);
+            for (double radius = 100; radius < 148; radius += compact ? 14 : 1.7)
+                dc.DrawEllipse(null, new Pen(new SolidColorBrush(Color.FromArgb(60, 68, 69, 71)), compact ? 4 : .65), new(150, 150), radius, radius);
         }
         var brush = new DrawingBrush(drawing); brush.Freeze(); return brush;
     }

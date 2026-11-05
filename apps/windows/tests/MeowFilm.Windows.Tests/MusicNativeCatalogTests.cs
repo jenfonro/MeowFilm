@@ -20,6 +20,7 @@ public static class MusicNativeCatalogTests
         yield return new("Native catalog rejects implicit platform unknown routes and malformed fields", InvalidRequests);
         yield return new("Native catalog complete multi-page save has a single durable handoff", CompleteSave);
         yield return new("Native catalog complete multi-page queue selection and source context", CompleteQueue);
+        yield return new("Native catalog full playlist resolves preview selection by identity and refuses missing songs", CompleteQueueByIdentity);
         yield return new("Native catalog empty playlist saves but cannot replace queue", Empty);
         yield return new("Native catalog duplicate member rejects while equal recording IDs remain legal", Duplicates);
         yield return new("Native catalog failed final page leaves existing queue and library unchanged", TailFailure);
@@ -393,6 +394,19 @@ public static class MusicNativeCatalogTests
         Check(N(queue, "total") == 235 && S(queue, "currentId") == S(reply, "currentId") && N(reply, "version") == 1 && N(reply, "mode") == 1);
         Check(MusicSongFixture.NativeId(queue.GetProperty("current").GetProperty("song")) == NativeId("wy", 101));
         Check(S(queue.GetProperty("source"), "platform") == "wy" && f.Store.Writes == 1);
+    }
+    private static async Task CompleteQueueByIdentity()
+    {
+        await using var f = new Fixture();
+        var stage = await f.Prepare(); string token = S(stage, "token");
+        Error(await f.Run("playlist.commit", new { token, action = "play", expectedVersion = 0,
+            expectedSongId = "absent" }), "SNAPSHOT_CHANGED");
+        Check(N(await f.Queue(), "total") == 0 && f.Store.Writes == 0);
+        var selected = S(Song("wy", 101), "songId");
+        Ok(await f.Run("playlist.commit", new { token, action = "play", expectedVersion = 0, expectedSongId = selected }));
+        var queue = await f.Queue();
+        Check(N(queue, "total") == 235 && S(queue.GetProperty("current").GetProperty("song"), "songId") == selected);
+        Check(f.Store.Writes == 1);
     }
     private static async Task Empty()
     {

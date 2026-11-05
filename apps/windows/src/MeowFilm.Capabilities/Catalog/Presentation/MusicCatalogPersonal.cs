@@ -89,7 +89,33 @@ public sealed partial class MusicCapability
         foreach (string name in new[] { nameof(IsCatalogPersonal), nameof(IsCatalogDaily), nameof(IsCatalogFm),
             nameof(IsCatalogFmScene), nameof(IsCatalogBatch), nameof(IsCatalogCollection), nameof(CanCatalogWy),
             nameof(CanCatalogBatchRefresh), nameof(CatalogAccountText), nameof(CatalogPersonalKind), nameof(CatalogPersonalKinds),
-            nameof(CatalogDailyBranch), nameof(CatalogFmMode), nameof(CatalogFmScene) }) Changed(name);
+            nameof(CatalogDailyBranch), nameof(CatalogFmMode), nameof(CatalogFmScene),
+            nameof(IsCatalogSalesChart), nameof(CatalogChartHasPeriods), nameof(CatalogChartIsYearly),
+            nameof(CatalogChartKind), nameof(CatalogChartPeriod), nameof(CatalogChartYear) }) Changed(name);
+    }
+    public MusicCatalogChoice[] CatalogChartKinds { get; } =
+        [new("albums", "数字专辑"), new("singles", "数字单曲"), new("song-sales", "歌曲畅销指数")];
+    public MusicCatalogChoice[] CatalogChartPeriods { get; } =
+        [new("daily", "日榜"), new("weekly", "周榜"), new("yearly", "年榜"), new("overall", "总榜")];
+    public string CatalogChartKind { get; set; } = "albums";
+    public string CatalogChartPeriod { get; set; } = "daily";
+    public int CatalogChartYear { get; set; } = DateTime.UtcNow.Year;
+    public bool IsCatalogSalesChart => IsCatalogPage && catalogLoadedTarget?.Operation == "chart" &&
+        MusicCatalogDto.Text(catalogLoadedTarget.Parameters, "kind") != "user-recommendations";
+    public bool CatalogChartHasPeriods => IsCatalogSalesChart && CatalogChartKind is "albums" or "singles";
+    public bool CatalogChartIsYearly => CatalogChartHasPeriods && CatalogChartPeriod == "yearly";
+    public Task ChangeCatalogChartAsync()
+    {
+        if (publishing || !CanCatalogBrowse || !IsCatalogSalesChart ||
+            !CatalogChartKinds.Any(choice => choice.Key == CatalogChartKind) ||
+            !CatalogChartPeriods.Any(choice => choice.Key == CatalogChartPeriod)) return Task.CompletedTask;
+        var parameters = new Dictionary<string, object?> { ["kind"] = CatalogChartKind,
+            ["period"] = CatalogChartKind == "song-sales" ? "daily" : CatalogChartPeriod };
+        if (CatalogChartKind != "song-sales" && CatalogChartPeriod == "yearly") parameters["year"] = CatalogChartYear;
+        if (JsonSerializer.SerializeToElement(parameters).GetRawText() == catalogLoadedTarget!.Parameters.GetRawText())
+            return Task.CompletedTask;
+        PersonalCatalogBindings();
+        return OpenCatalogTargetAsync(Target("chart", "wy", "排行榜", parameters), CatalogChartKind);
     }
     public async Task ReadCatalogAccountAsync()
     {
@@ -119,7 +145,7 @@ public sealed partial class MusicCapability
     }
     private static bool IsCatalogRoute(string route) =>
         route is "catalog-home" or "catalog-channels" or "catalog-personal" or "catalog-daily" or "catalog-fm" or "catalog-search" ||
-        new[] { "playlist", "channel", "album", "artist", "daily", "fm", "similar", "heartbeat", "queueRecommendations" }
+        new[] { "playlist", "channel", "chart", "album", "artist", "daily", "fm", "similar", "heartbeat", "queueRecommendations" }
             .Any(kind => route.StartsWith("catalog-" + kind + "/", StringComparison.Ordinal));
     private static CatalogTarget Target(string operation, string platform, string title, object parameters) =>
         new(operation, platform, title, JsonSerializer.SerializeToElement(parameters));
@@ -131,6 +157,8 @@ public sealed partial class MusicCapability
         if (catalogTargets.TryGetValue(route, out var target)) return target;
         if (route == location.Route && catalogLoadedTarget is not null) return catalogLoadedTarget;
         var parts = route.Split('/', 3);
+        if (parts.Length == 3 && parts[0] == "catalog-chart")
+            return Target("chart", parts[1], "排行榜", new { kind = Uri.UnescapeDataString(parts[2]), period = "daily" });
         if (parts.Length == 3 && parts[0] == "catalog-album")
             return Target("album", parts[1], "专辑", new { id = Uri.UnescapeDataString(parts[2]) });
         if (parts.Length == 3 && parts[0] == "catalog-artist")
@@ -166,6 +194,9 @@ public sealed partial class MusicCapability
         var action = card.Action ?? JsonSerializer.SerializeToElement(new { type = card.Kind });
         if (card.Kind == "playlist" && card.Locator is { } locator)
             return OpenCatalogTargetAsync(Target("playlist", card.Platform, card.Title, new { id = card.ActionId, personal = locator }), card.ActionId);
+        if (card.Kind == "chart")
+            return OpenCatalogTargetAsync(Target("chart", card.Platform, card.Title,
+                new { kind = card.ActionId, period = "daily" }), card.ActionId);
         if (card.Kind == "album")
             return OpenCatalogTargetAsync(Target("album", card.Platform, card.Title, new { id = card.ActionId }), card.ActionId);
         if (card.Kind == "daily")
@@ -278,6 +309,12 @@ public sealed partial class MusicCapability
         catalogExpiresAt = state.ExpiresAt;
         if (state.Target is not { } target) return;
         if (target.Operation == "personalPlaylists") CatalogPersonalKind = MusicCatalogDto.Text(target.Parameters, "kind");
+        if (target.Operation == "chart")
+        {
+            CatalogChartKind = MusicCatalogDto.Text(target.Parameters, "kind");
+            CatalogChartPeriod = MusicCatalogDto.Text(target.Parameters, "period");
+            CatalogChartYear = target.Parameters.TryGetProperty("year", out var year) ? year.GetInt32() : DateTime.UtcNow.Year;
+        }
         if (target.Operation == "daily") CatalogDailyBranch = MusicCatalogDto.Text(target.Parameters, "branch");
         if (target.Operation == "fm")
         {

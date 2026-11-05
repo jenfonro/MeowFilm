@@ -189,12 +189,86 @@ public static partial class MusicUiTests
                 Equal(0d, bar.ValueAt(-20)); Equal(180d, bar.ValueAt(420)); Equal(90d, bar.ValueAt(200));
             }
             // Explicit active gesture drives a real animation clock; verify the
-            // settled rail is 5 DIP rather than checking a style setter only.
+            // settled rail is 8 DIP rather than checking a style setter only.
             bar.IsEnabled = true; DesktopTheme.SetIsHighContrast(host, false);
             bar.BeginScrub(); await Task.Delay(170); await Drain();
             Render(host, 400, 8);
             bar.CancelScrub(); await Task.Delay(170); await Drain();
             Render(host, 400, 8);
+        });
+        yield return Case("footer hover paints a thicker rail and upper shade while its white capsule follows playback", async () =>
+        {
+            var bar = new SeekBar { Maximum = 100, Value = 25, Height = 16, RailAtTop = true,
+                PlayedBrush = Brushes.CornflowerBlue, Margin = new Thickness(0, 32, 0, 0), VerticalAlignment = VerticalAlignment.Top };
+            var root = new Grid { Background = Brushes.White }; root.Children.Add(bar);
+            root.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = new Uri("/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml", UriKind.Relative) });
+            using var source = new HwndSource(new HwndSourceParameters("seek-hover-fixture") {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                PositionX = -32000, PositionY = -32000, Width = 400, Height = 80 });
+            source.RootVisual = root; Render(root, 400, 80); await Drain();
+            byte[] Capture()
+            {
+                var bitmap = new RenderTargetBitmap(400, 80, 96, 96, PixelFormats.Pbgra32); bitmap.Render(root);
+                var pixels = new byte[400 * 80 * 4]; bitmap.CopyPixels(pixels, 1600, 0); return pixels;
+            }
+            var resting = Capture();
+            bar.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
+            await Task.Delay(160); await Drain(); Render(root, 400, 80);
+            var active = Capture();
+            // Inspect the actual tooltip and simulate its pointer coordinate, never the system pointer.
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            var tip = (ToolTip)typeof(SeekBar).GetField("preview", flags)!.GetValue(bar)!;
+            var pointer = typeof(SeekBar).GetField("pointerX", flags)!;
+            var update = typeof(SeekBar).GetMethod("UpdatePreview", flags)!;
+            double HoverAt(double x) { pointer.SetValue(bar, x); update.Invoke(bar, null); return tip.HorizontalOffset + tip.DesiredSize.Width / 2; }
+            double left = HoverAt(40), right = HoverAt(360);
+            True(tip.IsOpen && Math.Abs(left - 100) < 1 && Math.Abs(right - 100) < 1,
+                "hovering at either end of a paused track keeps the capsule centered on the 25% playback head");
+            Equal("00:25 / 01:40", tip.Content as string);
+            Equal(Colors.White, ((SolidColorBrush)tip.Background).Color); Equal(Colors.Black, ((SolidColorBrush)tip.Foreground).Color);
+            True(Visuals(tip).OfType<Border>().Any(border => border.CornerRadius.TopLeft >= 16), "actual popup template is a white capsule");
+            for (int y = 30; y <= 36; y++)
+                True(active[(y * 400 + 50) * 4 + 2] < 240, "expanded played rail is visibly thicker than five DIP");
+            True(active[(24 * 400 + 200) * 4 + 2] < resting[(24 * 400 + 200) * 4 + 2], "shade paints above the rail, not only inside its hit area");
+            True(active[(12 * 400 + 200) * 4 + 2] > active[(24 * 400 + 200) * 4 + 2], "upper shade fades smoothly away from the rail");
+            bar.PresentationKey = "hover-track"; bar.PlaybackRate = 1; bar.IsPlaying = true;
+            double before = tip.HorizontalOffset; await Task.Delay(180); await Drain();
+            if (SystemParameters.ClientAreaAnimation) True(tip.HorizontalOffset > before, "the native presentation clock moves both head and capsule without new media ticks");
+            Equal(25d, bar.Value);
+            bar.BeginScrub(); bar.UpdateScrub(75); update.Invoke(bar, null);
+            Equal("01:15 / 01:40", tip.Content as string);
+            True(Math.Abs(tip.HorizontalOffset + tip.DesiredSize.Width / 2 - 300) < 1, "scrubbing uses the target head");
+            bar.CancelScrub(); source.RootVisual = null; await Drain(); True(!tip.IsOpen, "unmount closes the popup");
+        });
+        yield return Case("small record sampling retains antialiased cover edges at fractional DPI and detail grooves", async () =>
+        {
+            var record = new MusicRecordView { Address = "fixture://record", Width = 60, Height = 60 };
+            ArtworkScope.SetLoader(record, new PlayerArtworkFixture());
+            using var source = new HwndSource(new HwndSourceParameters("record-sampling-fixture") {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                PositionX = -32000, PositionY = -32000, Width = 400, Height = 400 });
+            source.RootVisual = record; Render(record, 60, 60); await Drain();
+            var cover = (ArtworkImage)record.FindName("Cover");
+            await Until(() => ((Image)cover.Children[0]).Source is not null);
+            var rotation = (RotateTransform)record.FindName("Rotation");
+            foreach (double scale in new[] { 1d, 1.25d, 1.5d, 2d })
+            foreach (double angle in new[] { 0d, 17d, 43d })
+            {
+                rotation.Angle = angle;
+                var bitmap = new RenderTargetBitmap((int)(60 * scale), (int)(60 * scale), 96 * scale, 96 * scale, PixelFormats.Pbgra32);
+                bitmap.Render(record);
+                var pixels = new byte[bitmap.PixelWidth * bitmap.PixelHeight * 4]; bitmap.CopyPixels(pixels, bitmap.PixelWidth * 4, 0);
+                True(pixels.Where((_, i) => i % 4 == 3).Any(alpha => alpha > 0 && alpha < 255), "rotated circular edge retains antialiased coverage");
+                True(RenderOptions.GetBitmapScalingMode(cover) == BitmapScalingMode.HighQuality, "actual cover inherits high quality minification");
+            }
+            var grooves = (System.Windows.Shapes.Ellipse)record.FindName("Grooves");
+            var small = (DrawingBrush)grooves.Fill;
+            record.Width = record.Height = 388; Render(record, 388, 388); await Drain();
+            var detail = (DrawingBrush)grooves.Fill;
+            True(!ReferenceEquals(small, detail) && small.IsFrozen && detail.IsFrozen, "small and large discs use size-appropriate retained artwork");
+            True(((DrawingGroup)small.Drawing).Children.Count <= 6 && ((DrawingGroup)detail.Drawing).Children.Count > 20,
+                "small discs omit subpixel dense rings while full-size detail keeps its original grooves");
+            source.RootVisual = null;
         });
         yield return Case("seek gesture isolates live ticks commits once and rejects a retired track", async () =>
         {

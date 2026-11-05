@@ -73,7 +73,7 @@ public static class MusicCatalogTests
             try
             {
                 window.Show();
-                await f.Module.NavigateAsync("catalog-home", default); window.UpdateLayout();
+                await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization; window.UpdateLayout();
                 await Until(() => Descendants<Image>(f.Module.View).Any(image => image.Source is not null), "home pixels load");
                 Equal(0, f.Client.Count("music.catalog.channels"));
                 var catalog = (MusicCatalogView)f.Module.View.FindName("CatalogView");
@@ -90,7 +90,7 @@ public static class MusicCatalogTests
                 True(images.All(image => ReferenceEquals(image.Pixels, image.Control.Source)), "hiding preserves decoded pixels");
                 int reads = loader.Addresses.Count;
                 await f.Module.RestoreNavigationAsync(homeLocation, default); await Drain(); window.UpdateLayout();
-                Equal(1, f.Client.Count("music.catalog.home"));
+                Equal(2, f.Client.Count("music.catalog.home"));
                 Equal(reads, loader.Addresses.Count);
                 True(controls.SequenceEqual(Descendants<ArtworkImage>(scroll)), "home keeps its artwork containers");
                 True(images.All(image => ReferenceEquals(image.Pixels, image.Control.Source)), "restoring preserves decoded pixels");
@@ -200,7 +200,7 @@ public static class MusicCatalogTests
                 True(existing.SequenceEqual(f.Module.CatalogSections, ReferenceEqualityComparer.Instance), "channel sections keep identity");
                 await f.Module.NavigateAsync("catalog-home", default);
                 True(home.SequenceEqual(f.Module.HomeSections, ReferenceEqualityComparer.Instance), "home sections keep identity");
-                Equal(1, f.Client.Count("music.catalog.home"));
+                Equal(2, f.Client.Count("music.catalog.home"));
                 f.Module.RetireCatalogSession();
                 True(f.Module.HomeSections.Count == 0 && sections.Count == 0, "invalidation clears hidden retained content");
                 await f.Module.NavigateAsync("catalog-channels", default);
@@ -270,20 +270,20 @@ public static class MusicCatalogTests
             True(!card.IsPreviewEntry && !card.IsOverlayEntry && !card.IsAnimatedEntry && !card.CanRequestPreview,
                 "static contract");
             var previewEntry = new EntryCard { DataContext = preview };
-            var previewRequests = 0; previewEntry.PreviewRequested += (_, _) => previewRequests++;
+            var previewOpens = 0; previewEntry.OpenRequested += (_, _) => previewOpens++;
             previewEntry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = Mouse.MouseEnterEvent });
-            Equal(0, previewRequests);
+            Equal(0, previewOpens);
             var previewHost = new Window { Content = previewEntry, Width = 168, Height = 230,
                 Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
             try
             {
                 previewHost.Show(); previewHost.UpdateLayout(); await Drain();
                 previewEntry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = Mouse.MouseEnterEvent });
-                Equal(1, previewRequests);
+                Equal(0, previewOpens);
                 foreach (var passive in new[] { overlay, animated, card })
                 {
                     var passiveEntry = new EntryCard { DataContext = passive };
-                    var requests = 0; passiveEntry.PreviewRequested += (_, _) => requests++;
+                    var requests = 0; passiveEntry.OpenRequested += (_, _) => requests++;
                     previewHost.Content = passiveEntry; previewHost.UpdateLayout(); await Drain();
                     passiveEntry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = Mouse.MouseEnterEvent });
                     Equal(0, requests);
@@ -301,38 +301,26 @@ public static class MusicCatalogTests
                 True(!((Button)entry.FindName("OpenButton")).IsEnabled && !((Button)entry.FindName("PlayButton")).IsEnabled,
                     "unsupported open and play remain denied; artwork retry is a separate control");
                 entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = Mouse.MouseEnterEvent });
-                Equal(0, entry.PreviewTitles.Count);
+                Equal(0, ((MusicCatalogCard)entry.DataContext).PreviewTitles.Count);
                 CardMotion.Transition(surface, true, false); await Drain();
-                var caption = Descendants<StackPanel>(entry).Single(p => p.RenderTransform is TranslateTransform);
-                Equal(0d, ((TranslateTransform)caption.RenderTransform).Y);
+                var caption = (TextBlock)entry.FindName("Caption");
+                True(caption.RenderTransform.Value.IsIdentity, "caption uses stable layout, not hover translation");
                 CardMotion.Transition(surface, false, false); await Drain();
-                Equal(0d, ((TranslateTransform)caption.RenderTransform).Y);
+                True(caption.RenderTransform.Value.IsIdentity, "caption uses stable layout, not hover translation");
                 Equal(Visibility.Collapsed, ((Button)entry.FindName("PlayButton")).Visibility);
             }
             finally { window.Close(); }
         });
-        yield return Case("catalog card types derive distinct colors from one artwork sample", () =>
+        yield return Case("entry colors use one sampled palette with a white-text contrast guard", () =>
         {
-            var raw = new SolidColorBrush(Color.FromRgb(83, 74, 85));
-            var entry = new MusicCatalogPaletteConverter();
-            SolidColorBrush Entry(MusicCatalogEntryPresentation presentation) =>
-                (SolidColorBrush)entry.Convert([raw, presentation], typeof(Brush), null!,
-                    System.Globalization.CultureInfo.InvariantCulture);
-            var preview = Entry(MusicCatalogEntryPresentation.Preview);
-            var overlay = Entry(MusicCatalogEntryPresentation.Overlay);
-            var animated = Entry(MusicCatalogEntryPresentation.Animated);
-            Equal(Color.FromRgb(83, 74, 85), preview.Color);
-            Equal(Color.FromRgb(78, 62, 62), overlay.Color);
-            Equal(overlay.Color, animated.Color);
-            True(preview.IsFrozen && overlay.IsFrozen && animated.IsFrozen,
-                "catalog palette results are immutable");
-            True(preview.Color != overlay.Color,
-                "preview and overlay entries own separate palette policies");
-
-            var daily = new SolidColorBrush(Color.FromRgb(169, 149, 142));
-            Equal(daily.Color, ((SolidColorBrush)entry.Convert(
-                [daily, MusicCatalogEntryPresentation.Preview], typeof(Brush), null!,
-                System.Globalization.CultureInfo.InvariantCulture)).Color);
+            var converter = new MusicCatalogPaletteConverter();
+            foreach (var color in new[] { Color.FromRgb(83, 74, 85), Color.FromRgb(169, 149, 142), Colors.White })
+            {
+                var brush = (SolidColorBrush)converter.Convert(new SolidColorBrush(color), typeof(Brush), null!, System.Globalization.CultureInfo.InvariantCulture);
+                True(brush.IsFrozen, "sampled palettes are shared immutable render input");
+                True(.2126 * brush.Color.R + .7152 * brush.Color.G + .0722 * brush.Color.B <= 82,
+                    "the same white-text contrast policy applies to every entry kind");
+            }
             return Task.CompletedTask;
         });
         yield return Case("home headings use system typography and unclipped refresh without extra options", async () =>
@@ -420,7 +408,8 @@ public static class MusicCatalogTests
             var card = new MusicCatalogCard("500", "每日推荐", "推荐歌曲", "", "playlist", "wy", ActionId: "500",
                 Presentation: MusicCatalogEntryPresentation.Preview);
             var view = new MusicCatalogView();
-            var entry = new EntryCard { DataContext = card, PreviewTitles = ["第一首", "第二首", "第三首"] };
+            card.InitializePreview(new[] { "第一首", "第二首", "第三首" }.Select((title, i) => new MusicRankPreview(title, "", "", i + 1, null)).ToArray());
+            var entry = new EntryCard { DataContext = card };
             view.Content = entry;
             using var source = new HwndSource(new HwndSourceParameters("entry-system-typography-fixture")
             {
@@ -445,12 +434,12 @@ public static class MusicCatalogTests
                 await Drain();
                 Equal(alternate, view.FontFamily); Equal(alternate, entry.FontFamily);
                 var surface = (Grid)entry.FindName("Surface");
-                var caption = (StackPanel)entry.FindName("Caption");
-                var subtitle = Descendants<TextBlock>(caption).First();
+                var caption = (TextBlock)entry.FindName("Caption");
+                var subtitle = caption;
                 Equal(alternate, subtitle.FontFamily);
                 var entryText = Descendants<TextBlock>(entry).ToArray();
-                Equal(3, entry.PreviewTitles.Count);
-                True(entry.PreviewTitles.All(preview => entryText.Any(text => text.Text == preview)),
+                Equal(3, ((MusicCatalogCard)entry.DataContext).PreviewTitles.Count);
+                True(((MusicCatalogCard)entry.DataContext).PreviewTitles.All(preview => entryText.Any(text => text.Text == preview)),
                     "entry typography covers the actual generated preview text");
                 True(((Button)entry.FindName("OpenButton")).FocusVisualStyle is not null,
                     "entry actions keep the shared rounded keyboard focus");
@@ -461,7 +450,7 @@ public static class MusicCatalogTests
                     CardMotion.Transition(surface, false, false);
                     await Drain();
                     AssertDisplayAutoText(Descendants<TextBlock>(entry), "resting entry title caption and preview");
-                    Equal(0d, ((TranslateTransform)caption.RenderTransform).Y);
+                    True(caption.RenderTransform.Value.IsIdentity, "caption uses stable layout, not hover translation");
                     var y = caption.TranslatePoint(new Point(), surface).Y;
                     var pixelY = y * VisualTreeHelper.GetDpi(surface).DpiScaleY;
                     True(Math.Abs(pixelY - Math.Round(pixelY)) < .01, "caption baseline starts on a display pixel");
@@ -474,7 +463,7 @@ public static class MusicCatalogTests
                     CardMotion.Transition(surface, true, false);
                     await Drain();
                     AssertDisplayAutoText(Descendants<TextBlock>(entry), "raised entry title caption and preview");
-                    True(((TranslateTransform)caption.RenderTransform).Y < 0, "preview rises over its artwork");
+                    True(caption.RenderTransform.Value.IsIdentity, "caption stays fixed while preview fades over artwork");
                     var raisedY = caption.TranslatePoint(new Point(), surface).Y * VisualTreeHelper.GetDpi(surface).DpiScaleY;
                     True(Math.Abs(raisedY - Math.Round(raisedY)) < .01, "settled preview also starts on a display pixel");
                     var layoutClip = LayoutInformation.GetLayoutClip(caption);
@@ -580,9 +569,10 @@ public static class MusicCatalogTests
                 Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(detail));
                 Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(queue));
                 shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
-                await Until(() => f.Module.IsCatalogHome && f.Client.Count("music.catalog.home") == 1 &&
+                await Until(() => f.Module.IsCatalogHome && f.Client.Count("music.catalog.home") >= 1 &&
                     !f.Module.Busy && ((ListBox)shell.FindName("NavigationList")).SelectedItem is
                         ShellNavigationEntry { Route: "catalog-home" }, "headless home startup did not settle");
+                await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
                 Layout(); await Drain();
                 Equal(IntPtr.Zero, new WindowInteropHelper(shell).Handle);
                 True((parameters.WindowStyle & 0x10000000) == 0 && (parameters.ExtendedWindowStyle & 0x08000000) != 0,
@@ -598,17 +588,19 @@ public static class MusicCatalogTests
                 Equal(0, f.Client.Count("music.search.start"));
                 var refresh = Descendants<Button>(catalog).First(button =>
                     button.IsVisible && AutomationProperties.GetName(button) == "刷新推荐");
+                int homeReads = f.Client.Count("music.catalog.home");
                 Invoke(refresh);
-                await Until(() => f.Client.Count("music.catalog.home") == 2 && !f.Module.Busy,
+                await Until(() => f.Client.Count("music.catalog.home") > homeReads && !f.Module.Busy,
                     "headless refresh did not settle");
+                await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
                 Layout(); await Drain();
                 var entry = Descendants<EntryCard>(catalog).First(control =>
                     control.DataContext is MusicCatalogCard { CanRequestPreview: true });
                 var surface = (Grid)entry.FindName("Surface");
                 entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
-                await Until(() => entry.PreviewTitles.Count == 3, "headless preview did not settle");
+                await Until(() => ((MusicCatalogCard)entry.DataContext).PreviewTitles.Count == 3, "headless preview did not settle");
                 CardMotion.Transition(surface, true, false); await Drain();
-                Equal(1, f.Client.Count("music.catalog.playlist"));
+                Equal(4, f.Client.Count("music.catalog.playlist"));
                 True(Descendants<TextBlock>(entry).Any(text => text.Text.StartsWith("1 合成曲", StringComparison.Ordinal)),
                     "preview controls publish the actual native preview receipt");
                 Invoke((Button)entry.FindName("PlayButton"));
@@ -650,9 +642,8 @@ public static class MusicCatalogTests
                 Equal(pages, f.Client.Count("music.catalog.home"));
                 scroll.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.PageDown)
                     { RoutedEvent = Keyboard.PreviewKeyDownEvent });
-                await Until(() => f.Client.Count("music.catalog.home") == pages + 1 && !f.Module.Busy,
-                    "headless page intent did not settle");
-                True(!f.Module.CanCatalogNext, "the direct page intent stops at the native continuation boundary");
+                await Drain(); Equal(pages, f.Client.Count("music.catalog.home"));
+                True(!f.Module.CanCatalogNext, "scrolling cannot restart completed column initialization");
                 foreach (var size in new[] { new Size(860, 600), new Size(1110, 800), new Size(1440, 900) })
                 {
                     root.Measure(size); root.Arrange(new Rect(size)); root.UpdateLayout();
@@ -701,7 +692,7 @@ public static class MusicCatalogTests
                 (new MusicCatalogSection("曲风榜", [playlist], Type: "rankings", Layout: "ONLY_COVER"), "Catalog.Section.Shelf", MusicCatalogSectionPresentation.RankingCovers),
                 (new MusicCatalogSection("官方榜", [playlist], Type: "rankings", Layout: "ranked-songs"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
                 (new MusicCatalogSection("会员榜", [playlist], Type: "rankings", Layout: "vip-ranked-songs"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
-                (new MusicCatalogSection("官方榜数据", [ranking], Type: "rankings"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
+                (new MusicCatalogSection("官方榜数据", [ranking], Type: "rankings", Layout: "TOP_3"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
                 (new MusicCatalogSection("歌曲", [new MusicCatalogCard("s", "歌曲", "歌手", "", "song", "wy", song)]), "Catalog.Section.Songs", MusicCatalogSectionPresentation.Songs),
                 (new MusicCatalogSection("歌曲摘要", [new MusicCatalogCard("s", "歌曲", "歌手", "", "song", "wy", song)],
                     Type: "songs", Layout: "rail"), "Catalog.Section.SongShelf", MusicCatalogSectionPresentation.Songs),
@@ -1241,19 +1232,20 @@ public static class MusicCatalogTests
             True(!((playlist with { Available = false }).CanPlay), "unavailable entry cannot play");
             var view = new MusicCatalogView();
             var entry = (EntryCard)((DataTemplate)view.FindResource("Catalog.Entry")).LoadContent();
-            entry.DataContext = playlist; entry.PreviewTitles = ["1 第一首", "2 第二首", "3 第三首"];
+            playlist.InitializePreview(new[] { "第一首", "第二首", "第三首" }.Select((title, i) => new MusicRankPreview(title, "", "", i + 1, null)).ToArray());
+            entry.DataContext = playlist;
             entry.Measure(new Size(168, 300)); entry.Arrange(new Rect(0, 0, 168, 200)); entry.UpdateLayout();
             var surface = (Grid)entry.FindName("Surface");
             CardMotion.Transition(surface, true, false); await Drain();
             Equal(1d, CardMotion.GetProgress(surface)); Equal(200d, entry.ActualHeight);
-            var shift = Descendants<StackPanel>(entry).Single(p => p.RenderTransform is TranslateTransform);
-            Equal(86d, shift.TranslatePoint(new Point(), surface).Y);
-            entry.DataContext = overlay; CardMotion.Transition(surface, true, false); await Drain();
-            Equal(158d, shift.TranslatePoint(new Point(), surface).Y);
-            Equal(58d, ((Button)entry.FindName("PlayButton")).Margin.Bottom);
-            entry.DataContext = fm; CardMotion.Transition(surface, true, false); await Drain();
-            Equal(158d, shift.TranslatePoint(new Point(), surface).Y);
-            Equal(58d, ((Button)entry.FindName("PlayButton")).Margin.Bottom);
+            var caption = (TextBlock)entry.FindName("Caption");
+            var position = caption.TranslatePoint(new Point(), surface);
+            foreach (var variant in new[] { overlay, fm })
+            {
+                entry.DataContext = variant; CardMotion.Transition(surface, true, false); await Drain();
+                Equal(position, caption.TranslatePoint(new Point(), surface));
+                Equal(10d, ((Button)entry.FindName("PlayButton")).Margin.Bottom);
+            }
             entry.DataContext = staticCard; CardMotion.Transition(surface, true, false); await Drain();
             Equal(Visibility.Collapsed, ((Button)entry.FindName("PlayButton")).Visibility);
             CardMotion.Transition(surface, false, false);
@@ -1262,104 +1254,111 @@ public static class MusicCatalogTests
             surface.RaiseEvent(new RoutedEventArgs(FrameworkElement.UnloadedEvent));
             Equal(0d, CardMotion.GetProgress(surface));
         });
-        yield return Case("entry preview reads only three songs caches within page and never changes queue", async () =>
+        yield return Case("entry initialization reads three songs once without hover or queue changes", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Configure(new { detailLimit = 3 });
+            JsonElement reply = default;
+            f.Client.Transform("music.catalog.playlist", value => { reply = value; return value; });
             await f.Module.NavigateAsync("catalog-home", default);
+            await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
             var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
-            JsonElement previewReply = default;
-            f.Client.Transform("music.catalog.playlist", reply => { previewReply = reply; return reply; });
-            var titles = await f.Module.ReadCatalogCardPreviewAsync(card, default);
-            True(previewReply.ValueKind == JsonValueKind.Object && previewReply.GetProperty("ok").GetBoolean(),
-                "synthetic preview response: " + previewReply);
-            Equal(3, titles.Count); True(titles[0].StartsWith("1 ", StringComparison.Ordinal), "ordered real titles");
+            True(reply.GetProperty("ok").GetBoolean(), "initialization receives real native metadata");
+            Equal(3, card.PreviewTitles.Count);
             Equal(3, f.Client.Last("music.catalog.playlist").GetProperty("limit").GetInt32());
-            var calls = f.Client.Count("music.catalog.playlist");
-            True(titles.SequenceEqual(await f.Module.ReadCatalogCardPreviewAsync(card, default)), "same-page preview cache");
-            Equal(calls, f.Client.Count("music.catalog.playlist"));
-            Equal(0, f.Client.Count("music.catalog.playlist.prepare")); Equal(0, f.Client.Count("music.queue.replace")); Equal(0, f.Playback.Opens.Count);
-            await f.Module.NavigateAsync("favorites", default);
-            Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(card, default)).Count);
-            Equal(calls, f.Client.Count("music.catalog.playlist"));
-        });
-        yield return Case("concurrent entry preview waiters share one request and cancel independently", async () =>
-        {
-            await using var f = await Fixture.Create();
-            await f.Configure(new { detailLimit = 3 });
-            await f.Module.NavigateAsync("catalog-home", default);
-            var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
-            var hold = f.Client.Hold("music.catalog.playlist");
-            using var cancellation = new CancellationTokenSource();
-            var cancelled = f.Module.ReadCatalogCardPreviewAsync(card, cancellation.Token);
-            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            var survivor = f.Module.ReadCatalogCardPreviewAsync(card, default);
-            cancellation.Cancel();
-            Equal(0, (await cancelled).Count);
-            True(!survivor.IsCompleted, "one cancelled preview waiter cancelled shared physical work");
-            True(!hold.Cancelled.Task.IsCompleted, "one cancelled preview waiter signalled shared cancellation");
-            Equal(1, f.Client.Count("music.catalog.playlist"));
-            hold.Release();
-            Equal(3, (await survivor).Count);
-            Equal(1, f.Client.Count("music.catalog.playlist"));
-        });
-        yield return Case("last entry preview waiter cancellation retires publication and shutdown drains physical request", async () =>
-        {
-            await using var f = await Fixture.Create();
-            await f.Configure(new { detailLimit = 3 });
-            await f.Module.NavigateAsync("catalog-home", default);
-            var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
-            var hold = f.Client.Hold("music.catalog.playlist");
-            using var cancellation = new CancellationTokenSource();
-            var preview = f.Module.ReadCatalogCardPreviewAsync(card, cancellation.Token);
-            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            cancellation.Cancel();
-            Equal(0, (await preview).Count);
-            await hold.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            var shutdown = f.Module.PrepareShutdownAsync();
-            await Task.Delay(35);
-            True(!shutdown.IsCompleted, "shutdown returned before cancelled preview request physically settled");
-            hold.Release();
-            await shutdown;
-        });
-        yield return Case("page generation cancels physical preview and blocks late publication", async () =>
-        {
-            await using var f = await Fixture.Create();
-            await f.Configure(new { detailLimit = 3 });
-            await f.Module.NavigateAsync("catalog-home", default);
-            var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
-            var hold = f.Client.Hold("music.catalog.playlist");
-            var pending = f.Module.ReadCatalogCardPreviewAsync(card, default);
-            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await f.Module.NavigateAsync("favorites", default);
-            await hold.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await Task.Delay(35);
-            True(!pending.IsCompleted, "page generation detached a non-cooperative preview request");
-            hold.Release(); Equal(0, (await pending).Count);
+            int reads = f.Client.Count("music.catalog.playlist");
+            var entry = new EntryCard { DataContext = card };
+            entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
+            entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseLeaveEvent });
+            Equal(reads, f.Client.Count("music.catalog.playlist"));
+            Equal(0, f.Client.Count("music.catalog.playlist.prepare")); Equal(0, f.Client.Count("music.queue.replace"));
             Equal(0, f.Playback.Opens.Count);
-            await f.Module.NavigateAsync("catalog-home", default);
-            var current = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
-            Equal(3, (await f.Module.ReadCatalogCardPreviewAsync(current, default)).Count);
-            Equal(2, f.Client.Count("music.catalog.playlist"));
         });
-        yield return Case("cached catalog page switch advances generation and cancels preview", async () =>
+        yield return Case("same-resource cards share page initialization and leaving a card does not cancel it", async () =>
         {
-            await using var f = await Fixture.Create();
-            await f.Configure(new { detailLimit = 3 });
-            await f.Module.NavigateAsync("catalog-home", default);
-            await f.Module.CatalogPageAsync(1);
-            var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
+            await using var f = await Fixture.Create(); await f.Configure(new { detailLimit = 3, homePages = 1 });
+            f.Client.Transform("music.catalog.home", value => Edit(value, page => {
+                var entries = page["entries"]!.AsArray();
+                var card = entries.First(entry => entry?["action"]?["type"]?.GetValue<string>() == "playlist")!;
+                var copy = card.DeepClone(); copy["key"] = "duplicate-preview"; entries.Add(copy);
+            }));
             var hold = f.Client.Hold("music.catalog.playlist");
-            var pending = f.Module.ReadCatalogCardPreviewAsync(card, default);
+            await f.Module.NavigateAsync("catalog-home", default);
+            var pending = f.Module.CatalogEntryInitialization;
             await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await f.Module.CatalogPageAsync(-1);
+            var cards = f.Module.CatalogSections.SelectMany(s => s.Items).Where(c => c.CanRequestPreview).ToArray();
+            var entry = new EntryCard { DataContext = cards[0] };
+            entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
+            entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseLeaveEvent });
+            True(!pending.IsCompleted && !hold.Cancelled.Task.IsCompleted, "pointer departure cannot cancel page work");
+            Equal(1, f.Client.Count("music.catalog.playlist"));
+            hold.Release(); await pending;
+            True(cards.Length >= 2 && cards.All(card => card.PreviewTitles.Count == 3), "shared result publishes to each card");
+        });
+        yield return Case("entry initialization bounds physical concurrency and cancels queued reads on retirement", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.Configure(new { homePages = 1, detailLimit = 3 });
+            f.Client.Transform("music.catalog.home", value => Edit(value, page => {
+                page["entries"] = JsonSerializer.SerializeToNode(Enumerable.Range(500, 8).Select(id => new {
+                    id = id.ToString(), name = "入口 " + id, presentation = "preview", action = new { type = "playlist", id = id.ToString() }
+                }).ToArray());
+            }));
+            var holds = Enumerable.Range(0, 4).Select(_ => f.Client.Hold("music.catalog.playlist")).ToArray();
+            await f.Module.NavigateAsync("catalog-home", default);
+            var pending = f.Module.CatalogEntryInitialization;
+            await Task.WhenAll(holds.Select(hold => hold.Arrived.Task)).WaitAsync(TimeSpan.FromSeconds(5));
+            Equal(4, f.Client.Count("music.catalog.playlist"));
+            await f.Module.NavigateAsync("favorites", default);
+            await Task.WhenAll(holds.Select(hold => hold.Cancelled.Task)).WaitAsync(TimeSpan.FromSeconds(5));
+            foreach (var hold in holds) hold.Release();
+            await pending; Equal(4, f.Client.Count("music.catalog.playlist")); Equal(0, f.Playback.Opens.Count);
+        });
+        yield return Case("cancelled page initialization retains physical work until shutdown drains", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.Configure(new { detailLimit = 3 });
+            var hold = f.Client.Hold("music.catalog.playlist");
+            await f.Module.NavigateAsync("catalog-home", default);
+            var pending = f.Module.CatalogEntryInitialization;
+            var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
+            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            f.Module.CancelCatalog();
             await hold.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await Task.Delay(35);
-            True(!pending.IsCompleted, "cached page switch detached physical preview work");
-            hold.Release(); Equal(0, (await pending).Count);
+            var shutdown = f.Module.PrepareShutdownAsync(); await Task.Delay(35);
+            True(!shutdown.IsCompleted && !pending.IsCompleted, "shutdown waits for the noncooperative physical receipt");
+            hold.Release(); await pending; await shutdown;
+            True(!card.HasPreview, "cancelled initialization cannot publish");
+        });
+        yield return Case("page generation cancels physical initialization and blocks late publication", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.Configure(new { detailLimit = 3 });
+            var hold = f.Client.Hold("music.catalog.playlist");
+            await f.Module.NavigateAsync("catalog-home", default);
+            var pending = f.Module.CatalogEntryInitialization;
+            var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
+            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await f.Module.NavigateAsync("favorites", default);
+            await hold.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            True(!pending.IsCompleted, "logical retirement must retain physical drain");
+            hold.Release(); await pending;
+            True(!card.HasPreview, "late response cannot mutate the retired card");
+            await f.Module.NavigateAsync("catalog-home", default); await f.Module.CatalogEntryInitialization;
+            Equal(3, f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview).PreviewTitles.Count);
+            Equal(2, f.Client.Count("music.catalog.playlist")); Equal(0, f.Playback.Opens.Count);
+        });
+        yield return Case("refresh retires pending initialization without clearing newer card data", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.Configure(new { detailLimit = 3, homePages = 1 });
+            var hold = f.Client.Hold("music.catalog.playlist");
+            await f.Module.NavigateAsync("catalog-home", default);
+            var pending = f.Module.CatalogEntryInitialization;
+            var old = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
+            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await f.Module.RefreshCatalogAsync(); await f.Module.CatalogEntryInitialization;
             var current = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
-            Equal(3, (await f.Module.ReadCatalogCardPreviewAsync(current, default)).Count);
-            Equal(2, f.Client.Count("music.catalog.playlist"));
+            await hold.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            True(!ReferenceEquals(old, current) && current.PreviewTitles.Count == 3, "new generation owns its cards");
+            hold.Release(); await pending;
+            True(!old.HasPreview && current.PreviewTitles.Count == 3, "old completion cannot overwrite the new generation");
         });
         yield return Case("playlist search cards stay static and never request entry previews", async () =>
         {
@@ -1375,26 +1374,27 @@ public static class MusicCatalogTests
             Equal(MusicCatalogEntryPresentation.Static, card.Presentation);
             True(!card.CanRequestPreview, "music search is not an entry preview surface");
             var calls = f.Client.Count("music.catalog.playlist");
-            Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(card, default)).Count);
+            Equal(0, card.PreviewTitles.Count);
             Equal(calls, f.Client.Count("music.catalog.playlist"));
             await f.Module.MoreSearchAsync();
             await WaitForSearch(f.Module);
             var current = f.Module.CatalogSections.Single().Items.First();
             True(ReferenceEquals(card, current), "unchanged first page card keeps its projection");
             Equal(MusicCatalogEntryPresentation.Static, current.Presentation);
-            Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(current, default)).Count);
+            Equal(0, current.PreviewTitles.Count);
             Equal(calls, f.Client.Count("music.catalog.playlist"));
             var appended = f.Module.CatalogSections.Single().Items.Last();
             True(!ReferenceEquals(card, appended), "newly appended page card is a new projection");
             Equal(MusicCatalogEntryPresentation.Static, appended.Presentation);
-            Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(appended, default)).Count);
+            Equal(0, appended.PreviewTitles.Count);
             Equal(calls, f.Client.Count("music.catalog.playlist"));
         });
-        yield return Case("loaded entry hover publishes real native preview titles into WPF", async () =>
+        yield return Case("initialized native titles bind before the first WPF hover", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Configure(new { detailLimit = 3 });
             await f.Module.NavigateAsync("catalog-home", default);
+            await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
             var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
             var view = new MusicCatalogView { DataContext = f.Module };
             var entry = (EntryCard)((DataTemplate)view.FindResource("Catalog.Entry")).LoadContent();
@@ -1405,29 +1405,27 @@ public static class MusicCatalogTests
             {
                 window.Show(); window.UpdateLayout(); await Drain();
                 entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = Mouse.MouseEnterEvent });
-                for (var i = 0; i < 100 && entry.PreviewTitles.Count == 0; i++) { await Task.Delay(10); await Drain(); }
-                Equal(1, f.Client.Count("music.catalog.playlist"));
-                Equal(3, entry.PreviewTitles.Count);
+                await f.Module.CatalogEntryInitialization;
+                Equal(2, f.Client.Count("music.catalog.playlist"));
+                Equal(3, ((MusicCatalogCard)entry.DataContext).PreviewTitles.Count);
                 True(Descendants<TextBlock>(entry).Any(t => t.Text.StartsWith("1 合成曲", StringComparison.Ordinal)), "real preview text rendered");
-                var caption = Descendants<StackPanel>(entry).Single(p => p.RenderTransform is TranslateTransform);
+                var caption = (TextBlock)entry.FindName("Caption");
                 var clip = System.Windows.Controls.Primitives.LayoutInformation.GetLayoutClip(caption);
                 True(clip is null || clip.Bounds.Height >= caption.DesiredSize.Height, "expanded preview is not clipped to the collapsed caption's 48px layout slot");
             }
             finally { window.Close(); }
         });
-        yield return Case("unavailable hover preview does not retry on each entry or request FM", async () =>
+        yield return Case("failed initialization does not retry on hover or request FM", async () =>
         {
-            await using var f = await Fixture.Create();
-            await f.Configure(new { detailLimit = 3 });
-            await f.Module.NavigateAsync("catalog-home", default);
-            var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
+            await using var f = await Fixture.Create(); await f.Configure(new { detailLimit = 3 });
             f.Client.Transform("music.catalog.playlist", _ => JsonSerializer.SerializeToElement(new { ok = false, error = new { code = "UNAVAILABLE" } }));
-            Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(card, default)).Count);
-            var calls = f.Client.Count("music.catalog.playlist");
-            Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(card, default)).Count);
+            await f.Module.NavigateAsync("catalog-home", default); await f.Module.CatalogEntryInitialization;
+            var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
+            Equal(0, card.PreviewTitles.Count);
+            int calls = f.Client.Count("music.catalog.playlist");
+            var entry = new EntryCard { DataContext = card };
+            for (int i = 0; i < 3; i++) entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
             Equal(calls, f.Client.Count("music.catalog.playlist"));
-            Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(card with
-                { Kind = "fm", Presentation = MusicCatalogEntryPresentation.Animated }, default)).Count);
             Equal(0, f.Client.Count("music.catalog.fm")); Equal(0, f.Playback.Opens.Count);
         });
         yield return Case("home card play uses full native playlist once without opening its page", async () =>
@@ -1452,62 +1450,39 @@ public static class MusicCatalogTests
             await f.Module.PlayCatalogCardAsync(card with { Available = false });
             Equal(1, f.Client.Count("music.catalog.playlist.commit"));
         });
-        yield return Case("home loads pages only from current owned scroll gestures", async () =>
+        yield return Case("home completes all columns without scroll and preserves cards playback and offset", async () =>
         {
-            await using var f = await Fixture.Create();
-            var window = new Window { Content = f.Module.View, Width = 906, Height = 220,
-                Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
-            window.Show();
-            try
-            {
-            await f.Configure(new { homePages = 3 });
+            await using var f = await Fixture.Create(); await f.Configure(new { homePages = 3, detailLimit = 3 });
+            // First batch arrives normally; block the following continuation before its receipt.
+            f.Client.Transform("music.catalog.home", value => value);
+            var hold = f.Client.Hold("music.catalog.home");
             await f.Module.NavigateAsync("catalog-home", default);
-            var view = f.Module.View;
-            view.UpdateLayout();
-            await Drain();
-            var catalog = (MusicCatalogView)view.FindName("CatalogView");
-            var scroll = (ScrollViewer)catalog.FindName("HomeScroll");
-            True(catalog.IsVisible, "catalog is visible for gesture admission");
-            True(scroll.ScrollableHeight > 280, "fixture has a non-near-end scroll range");
-            True(f.Module.CanCatalogNext, "public home has a valid next cursor");
-            Equal(1, f.Client.Count("music.catalog.home"));
-            True(!Descendants<Button>(catalog).Any(b => Equals(b.Content, "更多")), "no bottom global more button");
-            var tracked = f.Module.CatalogSections.First(section => section.Items.Count > 0);
-            tracked.HorizontalOffset = 137;
-            scroll.ScrollToTop(); await Drain();
-            scroll.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120)
-                { RoutedEvent = Mouse.PreviewMouseWheelEvent });
-            await Drain();
-            Equal(1, f.Client.Count("music.catalog.home"));
-            scroll.ScrollToEnd(); await Drain(); scroll.UpdateLayout();
-            Equal(1, f.Client.Count("music.catalog.home")); // Expired intent cannot admit later layout/restore scrolling.
-            scroll.ScrollToTop(); await Drain();
-            var bar = (ScrollBar)scroll.Template.FindName("PART_VerticalScrollBar", scroll);
-            var scrollThumb = Descendants<Thumb>(bar).Single();
-            scrollThumb.RaiseEvent(new DragStartedEventArgs(0, 0) { RoutedEvent = Thumb.DragStartedEvent });
-            bar.RaiseEvent(new ScrollEventArgs(ScrollEventType.ThumbTrack, scroll.ScrollableHeight) { RoutedEvent = ScrollBar.ScrollEvent });
-            try
-            {
-                scroll.ScrollToEnd();
-                await Until(() => f.Client.Count("music.catalog.home") == 2 && !f.Module.Busy);
-            }
-            finally { scrollThumb.RaiseEvent(new DragCompletedEventArgs(0, 0, false) { RoutedEvent = Thumb.DragCompletedEvent }); }
-            scroll.UpdateLayout();
-            Equal(2, f.Client.Count("music.catalog.home"));
-            scroll.ScrollToEnd(); await Drain();
-            double before = scroll.VerticalOffset;
-            scroll.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120)
-                { RoutedEvent = Mouse.PreviewMouseWheelEvent });
-            for (int i = 0; i < 200 && (f.Client.Count("music.catalog.home") < 3 || f.Module.Busy); i++)
-            { await Task.Delay(10); await Drain(); }
-            await Drain(); scroll.UpdateLayout();
+            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var first = f.Module.CatalogSections.First(section => section.Items.Count > 0);
+            var card = first.Items[0]; first.HorizontalOffset = 137;
+            True(f.Module.CanCatalogBrowse && !f.Module.Busy, "first content is interactive while later columns load");
+            using var source = new HwndSource(new HwndSourceParameters("home-continuation-fixture")
+                { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080, Width = 906, Height = 300 });
+            source.RootVisual = f.Module.View;
+            f.Module.View.Measure(new(906, 300)); f.Module.View.Arrange(new Rect(0, 0, 906, 300)); f.Module.View.UpdateLayout(); await Drain();
+            var view = (MusicCatalogView)f.Module.View.FindName("CatalogView");
+            var scroll = (ScrollViewer)view.FindName("HomeScroll");
+            scroll.ScrollToVerticalOffset(Math.Min(90, scroll.ScrollableHeight)); await Drain();
+            double offset = scroll.VerticalOffset;
+            var playing = f.Module.CatalogSections.SelectMany(section => section.Items).First(item => item.Kind == "playlist");
+            var preparing = f.Client.Hold("music.catalog.playlist.prepare");
+            var action = f.Module.PlayCatalogCardAsync(playing); await preparing.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            hold.Release(); await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization; await Drain();
             Equal(3, f.Client.Count("music.catalog.home"));
-            True(scroll.VerticalOffset >= before - 1, "append does not reset to top");
-            Equal(137d, f.Module.CatalogSections.Single(section => section.Id == tracked.Id).HorizontalOffset);
-            await Drain();
-            Equal(3, f.Client.Count("music.catalog.home")); // No self-triggering request loop.
-            }
-            finally { window.Content = null; window.Close(); }
+            True(f.Module.CatalogSections.SelectMany(section => section.Items).Any(item => ReferenceEquals(item, card)), "append retains existing card identity");
+            Equal(137d, f.Module.CatalogSections.Single(section => section.Id == first.Id).HorizontalOffset);
+            True(Math.Abs(scroll.VerticalOffset - offset) < 1, "append never restores an obsolete scroll snapshot");
+            True(!f.Module.CanCatalogNext && !f.Module.CanCatalogPrevious, "home has no manual page boundary");
+            scroll.ScrollToEnd(); await Drain(); Equal(3, f.Client.Count("music.catalog.home"));
+            True(playing.IsPreparing && !preparing.Cancelled.Task.IsCompleted, "background column append cannot retire the active playback intent");
+            f.Module.CancelCatalog(); preparing.Release(); await action;
+            True(!playing.IsPreparing, "cancel resets the originating card"); Equal(0, f.Client.Count("music.catalog.playlist.commit"));
+            source.RootVisual = null;
         });
         yield return Case("wheel over a horizontal card shelf scrolls the outer page", async () =>
         {
@@ -1621,6 +1596,7 @@ public static class MusicCatalogTests
                     } }
                 })));
             await f.Module.NavigateAsync("catalog-channel/wy/rock", default);
+            await f.Module.CatalogEntryInitialization;
             var section = f.Module.ChannelSections.Single();
             True(section.IsEntrySection, "channel resource groups use the existing entry presentation");
             var card = section.Items[0];
@@ -1645,21 +1621,22 @@ public static class MusicCatalogTests
                 }
                 await Until(() => loader.Addresses.Count == 3, "channel cover addresses reach the shared artwork loader");
                 var preview = entries.Single(entry => ReferenceEquals(entry.DataContext, card));
-                True(preview.PreviewTitles.SequenceEqual(new[] { "1 第一首电音", "2 第二首电音" }),
+                True(card.PreviewTitles.SequenceEqual(new[] { "1 第一首电音", "2 第二首电音" }),
                     "the response's ordered song summaries reach the shared card");
                 int reads = f.Client.Log.Count;
                 preview.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = Mouse.MouseEnterEvent });
-                True(preview.PreviewTitles.SequenceEqual(await f.Module.ReadCatalogCardPreviewAsync(card, default)),
+                True(card.PreviewTitles.SequenceEqual(new[] { "1 第一首电音", "2 第二首电音" }),
                     "preloaded previews keep the supplied titles");
                 Equal(reads, f.Client.Log.Count);
                 var surface = (Grid)preview.FindName("Surface");
                 CardMotion.Transition(surface, true, false); await Drain();
-                True(((TranslateTransform)((StackPanel)preview.FindName("Caption")).RenderTransform).Y < 0,
-                    "channel hover uses the shared rising preview");
+                True(((TextBlock)preview.FindName("Caption")).RenderTransform.Value.IsIdentity,
+                    "channel hover preserves the shared caption position");
                 Equal(Visibility.Visible, ((Button)preview.FindName("PlayButton")).Visibility);
                 var passive = entries.Single(entry => ((MusicCatalogCard)entry.DataContext).Id == "radio");
                 Equal(Visibility.Collapsed, ((Button)passive.FindName("PlayButton")).Visibility);
-                Equal(0, f.Client.Count("music.catalog.playlist"));
+                Equal(1, f.Client.Count("music.catalog.playlist"));
+                Equal("801", f.Client.Last("music.catalog.playlist").GetProperty("id").GetString());
                 Equal(0, f.Client.Count("music.queue.replace")); Equal(0, f.Playback.Opens.Count);
             }
             finally { window.Content = null; window.Close(); }
@@ -1718,7 +1695,7 @@ public static class MusicCatalogTests
             f.Module.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(f.Module.Status)) statusChanges++; };
             await f.Module.OpenCatalogCardAsync(daily);
             await f.Module.PlayCatalogCardAsync(daily);
-            Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(daily, default)).Count);
+            Equal(0, daily.PreviewTitles.Count);
             Equal(count, f.Client.Log.Count);
             Equal(status, f.Module.Status); Equal(0, statusChanges);
             Equal(location, f.Module.CaptureNavigationLocation());
@@ -1841,7 +1818,7 @@ public static class MusicCatalogTests
         {
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-home", default);
-            await f.Module.CatalogPageAsync(1);
+            await f.Module.HomeInitialization;
             var before = f.Module.CatalogSections.ToArray();
             await f.Configure(new { homeFailure = 503 });
             await f.Module.RefreshAsync(); // exercise owner's public refresh dispatch
@@ -1908,31 +1885,23 @@ public static class MusicCatalogTests
         yield return Case("repeated cursor is rejected even if opaque fields differ", async () =>
         {
             await using var f = await Fixture.Create();
+            f.Client.Transform("music.catalog.home", value => value);
+            f.Client.Transform("music.catalog.home", value => Edit(value, node => {
+                node["more"] = true; node["continuation"] = JsonSerializer.SerializeToNode(new { cursor = "1", scope = "different", target = "wy:home" });
+            }));
             await f.Module.NavigateAsync("catalog-home", default);
             var before = f.Module.CatalogSections.ToArray();
-            f.Client.Transform("music.catalog.home", value => Edit(value, node =>
-            {
-                node["more"] = true;
-                node["continuation"] = JsonSerializer.SerializeToNode(new { cursor = "1", scope = "different", target = "wy:home" });
-            }));
-            await f.Module.CatalogPageAsync(1);
+            await f.Module.HomeInitialization;
             True(before.SequenceEqual(f.Module.CatalogSections), "stalled page cannot replace old content");
-            Equal("分页未前进", f.Module.Status);
+            Equal("分页未前进", f.Module.Status); Equal(2, f.Client.Count("music.catalog.home"));
         });
-        yield return Case("home paging follows continuation through page 101 and stops at the native end", async () =>
+        yield return Case("home follows continuation through page 101 without scrolling", async () =>
         {
-            await using var f = await Fixture.Create();
-            await f.Configure(new { homePages = 101 });
-            await f.Module.NavigateAsync("catalog-home", default);
-            for (int i = 0; i < 99; i++) await f.Module.CatalogPageAsync(1);
-            Equal("第 100 页", f.Module.CatalogPageText);
-            True(f.Module.CanCatalogNext, "page 100 keeps its native continuation");
-            Equal(100, f.Client.Count("music.catalog.home"));
-            await f.Module.CatalogPageAsync(1);
-            Equal("第 101 页", f.Module.CatalogPageText);
+            await using var f = await Fixture.Create(); await f.Configure(new { homePages = 101 });
+            await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization;
+            Equal("第 101 页", f.Module.CatalogPageText); Equal(101, f.Client.Count("music.catalog.home"));
             True(!f.Module.CanCatalogNext, "native final page stops paging");
-            await f.Module.CatalogPageAsync(1);
-            Equal(101, f.Client.Count("music.catalog.home"));
+            await f.Module.CatalogPageAsync(1); Equal(101, f.Client.Count("music.catalog.home"));
         });
         yield return Case("cancelled and retired responses cannot republish private display or cache", async () =>
         {
@@ -1945,7 +1914,8 @@ public static class MusicCatalogTests
             Equal(0, f.Module.CatalogSections.Count); Equal(0, f.Module.Songs.Count);
             var reads = f.Client.Count("music.catalog.home");
             await f.Module.NavigateAsync("catalog-home", default);
-            Equal(reads + 1, f.Client.Count("music.catalog.home"));
+            await f.Module.HomeInitialization;
+            Equal(reads + 2, f.Client.Count("music.catalog.home"));
         });
         yield return Case("late A after B cannot replace current route", async () =>
         {
@@ -2095,7 +2065,7 @@ public static class MusicCatalogTests
         yield return Case("back restores successful merged view without new requests", async () =>
         {
             await using var f = await Fixture.Create();
-            await f.Module.NavigateAsync("catalog-home", default); await f.Module.CatalogPageAsync(1);
+            await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization;
             var before = f.Module.CatalogSections.ToArray(); var calls = f.Client.Count("music.catalog.home");
             await f.Module.NavigateAsync("catalog-channels", default);
             await f.Module.NavigateAsync("catalog-home", default);
@@ -2268,7 +2238,7 @@ public static class MusicCatalogTests
         {
             var row = new MusicCatalogCard("1", "入口标题", "真实描述", "", "playlist", "wy", ActionId: "1");
             var view = new MusicCatalogView();
-            foreach (var (type, width, height) in new[] { ("Catalog.Entry", 168d, 200d), ("Catalog.PlaylistCard", 140d, 172d), ("Catalog.Banner", 282d, 146.72d) })
+            foreach (var (type, width, height) in new[] { ("Catalog.Entry", 168d, 186d), ("Catalog.PlaylistCard", 140d, 172d), ("Catalog.Banner", 282d, 160d) })
             {
                 var card = (FrameworkElement)((DataTemplate)view.FindResource(type)).LoadContent();
                 card.DataContext = row; card.Measure(new Size(width, double.PositiveInfinity));

@@ -25,7 +25,7 @@ public sealed class MusicCatalogSkeleton : Panel
         {
             var (_, pitch) = Shelf.MeasureCards(width, 260, 20, banner: true);
             var cardWidth = Math.Max(0, pitch - 20);
-            var height = cardWidth * .56;
+            const double height = 160; // Unknown until artwork publishes its intrinsic ratio.
             for (int i = 0; i < 2; i++) bounds.Add(new(i * pitch, y, cardWidth, height));
             y += height + 56;
         }
@@ -44,14 +44,14 @@ public sealed class MusicCatalogSkeleton : Panel
         double cardWidth = Math.Max(0, pitch - 16);
         for (int i = 0; i < count; i++)
         {
-            bounds.Add(new(i * pitch, y, cardWidth, cardWidth + (footer ? 48 : 0)));
+            bounds.Add(new(i * pitch, y, cardWidth, cardWidth + (footer ? 34 : 0)));
             if (!footer)
             {
                 bounds.Add(new(i * pitch, y + cardWidth + 8, cardWidth * .88, 16));
                 bounds.Add(new(i * pitch, y + cardWidth + 30, cardWidth * .6, 12));
             }
         }
-        return y + cardWidth + 48;
+        return y + cardWidth + (footer ? 34 : 48);
     }
 
     protected override Size ArrangeOverride(Size finalSize)

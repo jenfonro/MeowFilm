@@ -4,66 +4,30 @@ namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicCapability
 {
-    private readonly Dictionary<string, (long Generation, IReadOnlyList<string> Titles)> entryPreviews = [];
-    private readonly Dictionary<string, CatalogPreviewFlight> entryPreviewFlights = [];
-    private readonly object entryPreviewGate = new();
-    private sealed class CatalogPreviewFlight(
-        string key,
-        long generation,
-        MusicCatalogCard card,
-        CancellationTokenSource cancellation) : IDisposable
-    {
-        internal string Key { get; } = key;
-        internal long Generation { get; } = generation;
-        internal MusicCatalogCard Card { get; } = card;
-        internal CancellationTokenSource Cancellation { get; } = cancellation;
-        internal Task<IReadOnlyList<string>> Work { get; set; } =
-            Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
-        internal int Subscribers;
-        internal bool Retired;
-        internal void Cancel()
-        {
-            try { Cancellation.Cancel(); }
-            catch (ObjectDisposedException) { }
-            catch (AggregateException) { }
-        }
-        public void Dispose() => Cancellation.Dispose();
-    }
+    // Page-owned optional reads. Pointer/focus events have no data lifecycle.
+    private readonly SemaphoreSlim catalogPreviewSlots = new(4);
+    private CancellationTokenSource? catalogPreviewCancellation;
+    private readonly Dictionary<string, Task<IReadOnlyList<MusicRankPreview>>> catalogPreviewReads = [];
+    private readonly HashSet<MusicCatalogCard> initializedEntries = new(ReferenceEqualityComparer.Instance);
+    internal Task CatalogEntryInitialization { get; private set; } = Task.CompletedTask;
 
     private long AdvanceLoadGeneration()
     {
-        CatalogPreviewFlight[] retired;
-        long generation;
-        lock (entryPreviewGate)
-        {
-            generation = ++loadGeneration;
-            retired = RetireCatalogPreviewSurfaceLocked();
-        }
-        foreach (var flight in retired) flight.Cancel();
-        return generation;
+        RetireCatalogPreviewSurface();
+        CancelCatalogLoad(homeContinuationCancellation);
+        homeContinuationCancellation = null;
+        return ++loadGeneration;
     }
-
     private void RetireCatalogPreviewSurface()
     {
-        CatalogPreviewFlight[] retired;
-        lock (entryPreviewGate) retired = RetireCatalogPreviewSurfaceLocked();
-        foreach (var flight in retired) flight.Cancel();
+        var prior = catalogPreviewCancellation; catalogPreviewCancellation = null;
+        catalogPreviewReads.Clear(); initializedEntries.Clear(); CatalogEntryInitialization = Task.CompletedTask;
+        CancelCatalogLoad(prior); prior?.Dispose();
     }
-
-    private CatalogPreviewFlight[] RetireCatalogPreviewSurfaceLocked()
-    {
-        entryPreviews.Clear();
-        var retired = entryPreviewFlights.Values.ToArray();
-        entryPreviewFlights.Clear();
-        foreach (var flight in retired) flight.Retired = true;
-        return retired;
-    }
-
     private Dictionary<string, object?> CardReadParameters(MusicCatalogCard card)
     {
         var parameters = new Dictionary<string, object?> { ["platform"] = card.Platform };
-        if (card.Kind == "daily")
-            parameters["branch"] = CardDailyBranch(card);
+        if (card.Kind == "daily") parameters["branch"] = CardDailyBranch(card);
         else
         {
             parameters["id"] = card.ActionId;
@@ -75,142 +39,51 @@ public sealed partial class MusicCapability
     private static string CardDailyBranch(MusicCatalogCard card) =>
         card.Action is { } action && MusicCatalogDto.Text(action, "branch") == "style" ? "style" : "default";
 
-    // Optional read-only preview, bounded independently from explicit play intent.
-    // Missing/failed data never fabricates titles or starts a recommendation session.
-    public async Task<IReadOnlyList<string>> ReadCatalogCardPreviewAsync(MusicCatalogCard card, CancellationToken cancellationToken)
+    private void InitializeCatalogEntries()
     {
-        if (cancellationToken.IsCancellationRequested || stopping || !IsCatalogPage || loadCancellation is not null ||
-            !CanCatalogBrowse || !card.CanRequestPreview || !ContainsCatalogCard(card)) return [];
-        try { RequireCatalogContent(); } catch (MusicOperationException) { return []; }
-        if (card.HasPreview)
-            return card.PreviewSongs.Take(3).Select((song, index) => $"{index + 1} {song.Title}").ToArray();
+        if (stopping || !IsCatalogPage) return;
+        var cards = CatalogSections.SelectMany(section => section.Items)
+            .Where(card => card.CanRequestPreview && !card.HasPreview && initializedEntries.Add(card)).ToArray();
+        if (cards.Length == 0) return;
+        catalogPreviewCancellation ??= CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        var token = catalogPreviewCancellation.Token;
         var generation = loadGeneration;
-        CatalogPreviewFlight? flight = null;
-        IReadOnlyList<string> cachedTitles = Array.Empty<string>();
-        bool cacheHit = false, stale = false;
-        lock (entryPreviewGate)
+        var work = Task.WhenAll(cards.Select(Initialize));
+        CatalogEntryInitialization = Task.WhenAll(CatalogEntryInitialization, work);
+        loadDrains.Add(work);
+        _ = Drain();
+        async Task Drain() { try { await work; } finally { loadDrains.Remove(work); } }
+        async Task Initialize(MusicCatalogCard card)
         {
-            if (generation != loadGeneration)
-                stale = true;
-            else if (entryPreviews.TryGetValue(card.Key, out var cached) && cached.Generation == generation)
+            // The identity includes the actual branch/locator, never the caption or hover key.
+            var parameters = CardReadParameters(card);
+            var key = card.Kind + ":" + JsonSerializer.Serialize(parameters);
+            if (!catalogPreviewReads.TryGetValue(key, out var read))
+                catalogPreviewReads[key] = read = ReadPreview(card, parameters);
+            var songs = await read;
+            if (!token.IsCancellationRequested && !stopping && generation == loadGeneration && ContainsCatalogCard(card))
+                card.InitializePreview(songs);
+        }
+        async Task<IReadOnlyList<MusicRankPreview>> ReadPreview(MusicCatalogCard card, Dictionary<string, object?> parameters)
+        {
+            bool entered = false;
+            try
             {
-                cacheHit = true;
-                cachedTitles = cached.Titles;
-            }
-            else if (entryPreviewFlights.TryGetValue(card.Key, out var pending))
-            {
-                if (pending.Generation == generation && !pending.Retired &&
-                    !pending.Cancellation.IsCancellationRequested)
-                {
-                    pending.Subscribers++;
-                    flight = pending;
-                }
-                else if (ReferenceEquals(entryPreviewFlights.GetValueOrDefault(card.Key), pending))
-                {
-                    entryPreviewFlights.Remove(card.Key);
-                }
-            }
-            if (!stale && !cacheHit && flight is null)
-            {
-                var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+                await catalogPreviewSlots.WaitAsync(token); entered = true;
+                using var request = CancellationTokenSource.CreateLinkedTokenSource(token);
                 request.CancelAfter(TimeSpan.FromSeconds(8));
-                flight = new(card.Key, generation, card, request) { Subscribers = 1 };
-                var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                loadDrains.Add(drained.Task);
-                entryPreviewFlights[card.Key] = flight;
-                flight.Work = ReadCatalogCardPreviewCoreAsync(card, flight, drained);
+                RequireCatalogContent();
+                string method = "music.catalog." + card.Kind;
+                var reply = ValidateReply(method, await application.ExecuteAsync(method, parameters, request.Token));
+                request.Token.ThrowIfCancellationRequested();
+                if (generation != loadGeneration) return [];
+                RequireCatalogContent();
+                return MusicCatalogDto.Read(reply, card.Platform, card.Kind, "")
+                    .SelectMany(section => section.Items).Where(item => item.Song is not null).Take(3)
+                    .Select((item, index) => new MusicRankPreview(item.Title, item.Subtitle, item.Cover, index + 1, null)).ToArray();
             }
-        }
-        if (stale) return [];
-        if (cacheHit) return cachedTitles;
-        if (flight is null) return [];
-        return await WaitForCatalogPreviewAsync(flight, cancellationToken);
-    }
-
-    private async Task<IReadOnlyList<string>> WaitForCatalogPreviewAsync(
-        CatalogPreviewFlight flight, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await flight.Work.WaitAsync(cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        { return []; }
-        finally
-        {
-            bool cancel = false;
-            lock (entryPreviewGate)
-            {
-                flight.Subscribers--;
-                if (flight.Subscribers == 0 && !flight.Work.IsCompleted)
-                {
-                    flight.Retired = true;
-                    if (entryPreviewFlights.TryGetValue(flight.Key, out var current) &&
-                        ReferenceEquals(current, flight))
-                        entryPreviewFlights.Remove(flight.Key);
-                    cancel = true;
-                }
-            }
-            if (cancel) flight.Cancel();
-        }
-    }
-
-    private async Task<IReadOnlyList<string>> ReadCatalogCardPreviewCoreAsync(
-        MusicCatalogCard card, CatalogPreviewFlight flight, TaskCompletionSource drained)
-    {
-        await Task.Yield(); // Publish the shared flight before any binding callback can re-enter.
-        try
-        {
-            string method = "music.catalog." + card.Kind;
-            var reply = ValidateReply(method, await application.ExecuteAsync(
-                method, CardReadParameters(card), flight.Cancellation.Token));
-            flight.Cancellation.Token.ThrowIfCancellationRequested();
-            if (stopping || !IsCatalogPage || flight.Generation != loadGeneration ||
-                !ReferenceEquals(flight.Card, card) || !ContainsCatalogCard(card)) return [];
-            RequireCatalogContent();
-            var cards = MusicCatalogDto.Read(reply, card.Platform, card.Kind, "");
-            var titles = cards.SelectMany(s => s.Items).Where(c => c.Song is not null).Take(3)
-                .Select((c, i) => $"{i + 1} {c.Title}").ToArray();
-            lock (entryPreviewGate)
-            {
-                if (flight.Retired || flight.Cancellation.IsCancellationRequested ||
-                    stopping || !IsCatalogPage || flight.Generation != loadGeneration ||
-                    !ReferenceEquals(flight.Card, card) || !ContainsCatalogCard(card)) return [];
-                if (entryPreviews.Count >= 32) entryPreviews.Remove(entryPreviews.Keys.First());
-                entryPreviews[card.Key] = (flight.Generation, titles);
-            }
-            return titles;
-        }
-        catch
-        {
-            // Do not retry an unavailable optional preview on every pointer entry.
-            // A refresh/navigation gets a new generation; cancellation is not a failure.
-            if (!flight.Retired && !flight.Cancellation.IsCancellationRequested &&
-                flight.Generation == loadGeneration && IsCatalogPage &&
-                ReferenceEquals(flight.Card, card) && ContainsCatalogCard(card))
-            {
-                lock (entryPreviewGate)
-                {
-                    if (flight.Retired || flight.Cancellation.IsCancellationRequested ||
-                        flight.Generation != loadGeneration || !IsCatalogPage ||
-                        !ReferenceEquals(flight.Card, card) || !ContainsCatalogCard(card)) return [];
-                    if (entryPreviews.Count >= 32) entryPreviews.Remove(entryPreviews.Keys.First());
-                    entryPreviews[card.Key] = (flight.Generation, Array.Empty<string>());
-                }
-            }
-            return []; // Optional preview cannot replace the page's error state.
-        }
-        finally
-        {
-            lock (entryPreviewGate)
-            {
-                if (entryPreviewFlights.TryGetValue(flight.Key, out var current) &&
-                    ReferenceEquals(current, flight))
-                    entryPreviewFlights.Remove(flight.Key);
-            }
-            flight.Dispose();
-            loadDrains.Remove(drained.Task);
-            drained.TrySetResult();
+            catch { return []; } // Optional failure is retained for this page, not retried by hovering.
+            finally { if (entered) catalogPreviewSlots.Release(); }
         }
     }
     public Task PlayCatalogCardAsync(MusicCatalogCard card)
@@ -249,6 +122,6 @@ public sealed partial class MusicCapability
                 catch (OperationCanceledException) { }
                 catch { queueSaved = false; throw; }
             });
-        });
+        }, card: card);
     }
 }
