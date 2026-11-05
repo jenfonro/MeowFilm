@@ -48,7 +48,7 @@ final class RetainedPagesControllerTests: XCTestCase {
         XCTAssertNil(retained.page(at: 0))
     }
 
-    func testWillSelectStartsWithTheCrossfadeAndPrecedesDidSelect() async throws {
+    func testWillSelectStartsWithTheHorizontalTransitionAndPrecedesDidSelect() async throws {
         let theme = PageLifecycleTestTheme()
         let retained = RetainedPagesController(pageFactories: [
             { PageLifecycleTestPage(themeProvider: theme) },
@@ -56,15 +56,15 @@ final class RetainedPagesControllerTests: XCTestCase {
             { PageLifecycleTestPage(themeProvider: theme) }
         ])
         var events: [String] = []
-        var crossfadeWill: (index: Int, duration: TimeInterval)?
+        var horizontalTransitionWill: (index: Int, duration: TimeInterval)?
         retained.willSelect = { index, duration in
             events.append("will \(index)")
-            crossfadeWill = (index, duration)
+            horizontalTransitionWill = (index, duration)
         }
         retained.didSelect = { events.append("did \($0)") }
         retained.select(1, animated: true)
-        XCTAssertEqual(crossfadeWill?.index, 1)
-        XCTAssertEqual(crossfadeWill?.duration, 0)
+        XCTAssertEqual(horizontalTransitionWill?.index, 1)
+        XCTAssertEqual(horizontalTransitionWill?.duration, 0)
         XCTAssertEqual(events, ["will 1", "did 1"])
 
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -85,17 +85,25 @@ final class RetainedPagesControllerTests: XCTestCase {
         await fulfillment(of: [displayed], timeout: 2)
 
         events.removeAll()
-        let selected = expectation(description: "crossfade finished")
+        let selected = expectation(description: "horizontal transition finished")
         retained.didSelect = {
             events.append("did \($0)")
             if $0 == 2 { selected.fulfill() }
         }
         retained.select(2, animated: true)
-        XCTAssertEqual(crossfadeWill?.index, 2)
-        XCTAssertGreaterThan(crossfadeWill?.duration ?? 0, 0)
+        XCTAssertEqual(horizontalTransitionWill?.index, 2)
+        XCTAssertGreaterThan(horizontalTransitionWill?.duration ?? 0, 0)
         XCTAssertEqual(events, ["will 2"])
         await fulfillment(of: [selected], timeout: 2)
         XCTAssertEqual(events, ["will 2", "did 2"])
+    }
+
+    func testForwardHorizontalTransitionMovesPagesLeftWithoutFadingAndRestoresTransforms() async throws {
+        try await assertHorizontalTransition(from: 0, to: 2)
+    }
+
+    func testBackwardHorizontalTransitionMovesPagesRightWithoutFadingAndRestoresTransforms() async throws {
+        try await assertHorizontalTransition(from: 2, to: 0)
     }
 
     func testSwitchingKeepsContainmentStateAndBalancedAppearance() async throws {
@@ -198,7 +206,7 @@ final class RetainedPagesControllerTests: XCTestCase {
         XCTAssertEqual(first.activeCount, 1)
     }
 
-    func testContainerDisappearanceDuringCrossfadeKeepsAppearancePairsBalanced() async throws {
+    func testContainerDisappearanceDuringHorizontalTransitionKeepsAppearancePairsBalanced() async throws {
         let theme = PageLifecycleTestTheme()
         let retained = RetainedPagesController(pageFactories: [
             { PageLifecycleTestPage(themeProvider: theme) },
@@ -220,7 +228,7 @@ final class RetainedPagesControllerTests: XCTestCase {
             }
         }, evaluatedWith: retained)
         await fulfillment(of: [displayed], timeout: 2)
-        let selected = expectation(description: "crossfade finished")
+        let selected = expectation(description: "horizontal transition finished")
         retained.didSelect = { if $0 == 1 { selected.fulfill() } }
         retained.select(1, animated: true)
         retained.beginAppearanceTransition(false, animated: true)
@@ -284,6 +292,133 @@ final class RetainedPagesControllerTests: XCTestCase {
         XCTAssertEqual(page.inactiveCount, 1)
         continuation?.resume()
         await fulfillment(of: [cancelled], timeout: 2)
+    }
+
+    private func assertHorizontalTransition(from previousIndex: Int, to nextIndex: Int) async throws {
+        if UIApplication.shared.applicationState != .active {
+            let runnerIdentifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
+            // Presentation layers update only while the runner is in the foreground.
+            XCUIApplication(bundleIdentifier: runnerIdentifier).activate()
+        }
+        XCTAssertEqual(UIApplication.shared.applicationState, .active)
+        let theme = PageLifecycleTestTheme()
+        let retained = RetainedPagesController(pageFactories: (0..<3).map { _ in
+            { PageLifecycleTestPage(themeProvider: theme) }
+        }, selectedIndex: previousIndex)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        XCTAssertEqual(scene.activationState, .foregroundActive)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = retained
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        let displayed = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                (retained.page(at: previousIndex) as? PageLifecycleTestPage)?.appearanceEvents.last == "didAppear"
+            }
+        }, evaluatedWith: retained)
+        await fulfillment(of: [displayed], timeout: 2)
+        window.layoutIfNeeded()
+        let previous = try XCTUnwrap(retained.page(at: previousIndex))
+        let width = retained.view.bounds.width
+        XCTAssertGreaterThan(width, 0)
+        XCTAssertTrue(retained.view.clipsToBounds)
+        let previousPage = try XCTUnwrap(previous as? PageViewController)
+        XCTAssertTrue(previousPage.hasOwnPageHeader)
+        let safeArea = previous.view.safeAreaInsets
+        let headerRow = previousPage.pageHeader.contentFrame
+        XCTAssertGreaterThan(safeArea.top, 0)
+        XCTAssertGreaterThan(headerRow.width, 0)
+        var events: [String] = []
+        retained.willSelect = { index, duration in
+            events.append("will \(index)")
+            XCTAssertEqual(index, nextIndex)
+            XCTAssertEqual(duration, 0.22)
+        }
+        let selected = expectation(description: "horizontal transition finished")
+        retained.didSelect = { index in
+            events.append("did \(index)")
+            XCTAssertEqual(index, nextIndex)
+            XCTAssertTrue(previous.view.isHidden)
+            XCTAssertEqual(previous.view.transform, .identity)
+            selected.fulfill()
+        }
+        retained.select(nextIndex, animated: true)
+        let next = try XCTUnwrap(retained.page(at: nextIndex))
+        XCTAssertEqual(events, ["will \(nextIndex)"])
+        XCTAssertFalse(previous.view.isHidden)
+        XCTAssertFalse(next.view.isHidden)
+        XCTAssertEqual(previous.view.alpha, 1)
+        XCTAssertEqual(next.view.alpha, 1)
+        // Each page's own header moves with it: the transition must not lay out
+        // either header or page safe area again.
+        window.layoutIfNeeded()
+        for page in [previous, next] {
+            let page = try XCTUnwrap(page as? PageViewController)
+            XCTAssertEqual(page.view.safeAreaInsets, safeArea)
+            XCTAssertEqual(page.pageHeader.contentFrame, headerRow)
+        }
+        let observer = HorizontalTransitionObserver(previous: previous.view, next: next.view)
+        let displayLink = CADisplayLink(target: observer, selector: #selector(HorizontalTransitionObserver.sample(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        defer { displayLink.invalidate() }
+        await fulfillment(of: [selected], timeout: 2)
+        displayLink.invalidate()
+
+        XCTAssertFalse(observer.samples.isEmpty, "Observe rendered frames during the horizontal transition")
+        for sample in observer.samples {
+            XCTAssertEqual(sample.previousOpacity, 1)
+            XCTAssertEqual(sample.nextOpacity, 1)
+            XCTAssertEqual(sample.previous.ty, 0, accuracy: 0.01)
+            XCTAssertEqual(sample.next.ty, 0, accuracy: 0.01)
+        }
+        let movingSamples = observer.samples.filter {
+            abs($0.previous.tx) > 0.1 && abs($0.previous.tx) < width - 0.1 &&
+                abs($0.next.tx) > 0.1 && abs($0.next.tx) < width - 0.1
+        }
+        XCTAssertFalse(movingSamples.isEmpty, "Both pages must visibly move between their starting and ending positions")
+        for sample in movingSamples {
+            if nextIndex > previousIndex {
+                XCTAssertLessThan(sample.previous.tx, 0)
+                XCTAssertGreaterThan(sample.next.tx, 0)
+            } else {
+                XCTAssertGreaterThan(sample.previous.tx, 0)
+                XCTAssertLessThan(sample.next.tx, 0)
+            }
+            XCTAssertEqual(abs(sample.previous.tx) + abs(sample.next.tx), width, accuracy: 1)
+        }
+        XCTAssertEqual(events, ["will \(nextIndex)", "did \(nextIndex)"])
+        XCTAssertEqual(retained.selectedIndex, nextIndex)
+        XCTAssertTrue(previous.view.isHidden)
+        XCTAssertFalse(next.view.isHidden)
+        XCTAssertEqual(previous.view.transform, .identity)
+        XCTAssertEqual(next.view.transform, .identity)
+        XCTAssertEqual(previous.view.alpha, 1)
+        XCTAssertEqual(next.view.alpha, 1)
+        XCTAssertNil(retained.page(at: 1))
+    }
+}
+
+@MainActor
+private final class HorizontalTransitionObserver: NSObject {
+    private let previous: UIView
+    private let next: UIView
+    private(set) var samples: [(previous: CGAffineTransform, next: CGAffineTransform,
+                               previousOpacity: Float, nextOpacity: Float)] = []
+
+    init(previous: UIView, next: UIView) {
+        self.previous = previous
+        self.next = next
+        super.init()
+    }
+
+    @objc func sample(_ displayLink: CADisplayLink) {
+        guard let previous = previous.layer.presentation(), let next = next.layer.presentation() else { return }
+        samples.append((previous.affineTransform(), next.affineTransform(), previous.opacity, next.opacity))
     }
 }
 #endif
