@@ -28,7 +28,7 @@
 ### 密钥
 
 - `EncryptedDocumentKeyProvider` 提供只读 `readKey(namespace:)` 和只插入缺失项的 `createKeyIfAbsent(namespace:)`；密钥固定 32 字节。
-- Keychain 实现使用 generic password、`afterFirstUnlockThisDeviceOnly`、不同步、data-protection Keychain，并禁止交互认证。早期版本创建的 `whenUnlockedThisDeviceOnly` 密钥在下次成功读取时原位改为新类别；其他类别仍按策略不符拒绝。账号凭据按相同规则采用旧项。
+- Keychain 实现使用 generic password、`afterFirstUnlockThisDeviceOnly`、不同步、data-protection Keychain，并禁止交互认证。密钥与账号凭据读取时只接受当前配置的保护类别，不符时拒绝，不在读取时修改 Keychain 项。
 - 不自动轮换、重置或删除密钥；解密失败不回退明文，也不另建命名空间。
 
 ### 文件格式
@@ -40,7 +40,7 @@
 
 ### 写入与失败
 
-- 写入先在同目录 stage 完成加密、文件保护（`completeUntilFirstUserAuthentication`）、权限、备份排除和 fsync，再 rename 替换。早期版本以 complete 保护写入的文件和目录，在下次成功读取后改为新类别。
+- 写入先在同目录 stage 完成加密、文件保护（`completeUntilFirstUserAuthentication`）、权限、备份排除和 fsync，再 rename 替换。读取不修改已有文件或目录的保护等级。
 - 覆盖或删除前先认证原文档。缺 key、错误 key、篡改、未知版本、锁定和 IO 失败使用封闭错误，不暴露路径、密钥或明文。
 - 命名空间已有任何文件但缺少 key 时，不创建新 key。
 - 默认上限：单文档明文 8 MiB、命名空间密文 32 MiB、文件 128 个；可配置硬上限分别为 64 MiB、256 MiB、1024 个。
@@ -49,5 +49,6 @@
 ## 锁屏与旧数据
 
 - 凭据、设备会话、普通文档和音频缓存在首次解锁后均可读。App 锁屏时不撤销音乐服务，锁屏播放、自动下一首和锁屏切歌沿用正常流程；音乐服务每次启动准入一次，只在关闭时撤销。首次解锁前启动在仅 audio 后台模式下不可达，不另行处理。
-- 早期版本以 class B 写入的音频缓存条目在下次成功打开时改为 class C。
+- 音频缓存只接受 class C，保护等级不符按缓存未命中处理，不在打开时修改已有文件的等级。
+- 不提供旧凭据、密钥、加密文件或音频缓存保护等级的兼容、迁移或读取时修复。
 - 普通数据曾以加密文档保存在 `encrypted-documents-v1`。升级后不读取、不迁移、不删除这些旧文档及其 Keychain 密钥，曲库从空开始。

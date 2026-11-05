@@ -1,7 +1,9 @@
 #if os(iOS)
 import UIKit
 
-/// UISlider owns tracking/cancellation. Buffer ranges and chorus are display
+/// UISlider tracks a touch that starts on its thumb. Any other touch on the
+/// track is followed here with the same UIControl events, so the seek owner
+/// keeps one fence and commit path. Buffer ranges and chorus are display
 /// projections of the admitted AVPlayer item, not another playback clock.
 @MainActor
 final class MusicProgressSlider: UISlider {
@@ -13,6 +15,9 @@ final class MusicProgressSlider: UISlider {
     private var thumbDiameter: CGFloat = 8
     private let buffered = CAShapeLayer()
     private let marker = CALayer()
+    /// Non-nil while a track touch is followed: the slider's own recognizers it disabled.
+    private var suspendedRecognizers: [UIGestureRecognizer]?
+    private var followingTrackTouch: Bool { suspendedRecognizers != nil }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -66,6 +71,74 @@ final class MusicProgressSlider: UISlider {
         super.cancelTracking(with: event)
         setThumb(diameter: 8)
     }
+
+    // Changing the value under a touch UISlider accepted leaves iOS 26 tracking
+    // unfinished, so only a touch it declined is followed.
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesBegan(touches, with: event)
+        if !isTracking, let touch = touches.first { beginTrackTouch(at: touch.location(in: self)) }
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesMoved(touches, with: event)
+        if let touch = touches.first { moveTrackTouch(to: touch.location(in: self)) }
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesEnded(touches, with: event)
+        if let touch = touches.first { endTrackTouch(at: touch.location(in: self)) }
+    }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesCancelled(touches, with: event)
+        cancelTrackTouch()
+    }
+
+    func beginTrackTouch(at point: CGPoint) {
+        guard isEnabled, !followingTrackTouch else { return }
+        // Once the thumb moves under the finger, the slider's own pan would adopt
+        // the touch as a second, inertial drag.
+        let recognizers = (gestureRecognizers ?? []).filter(\.isEnabled)
+        recognizers.forEach { $0.isEnabled = false }
+        suspendedRecognizers = recognizers
+        setThumb(diameter: 12)
+        sendActions(for: .touchDown)
+        moveTrackTouch(to: point)
+    }
+    func moveTrackTouch(to point: CGPoint) {
+        guard followingTrackTouch else { return }
+        let target = value(at: point.x)
+        guard target != value else { return }
+        value = target
+        sendActions(for: .valueChanged)
+    }
+    func endTrackTouch(at point: CGPoint) {
+        guard followingTrackTouch else { return }
+        moveTrackTouch(to: point)
+        stopFollowing()
+        sendActions(for: bounds.contains(point) ? .touchUpInside : .touchUpOutside)
+    }
+    func cancelTrackTouch() {
+        guard followingTrackTouch else { return }
+        stopFollowing()
+        sendActions(for: .touchCancel)
+    }
+    private func stopFollowing() {
+        suspendedRecognizers?.forEach { $0.isEnabled = true }
+        suspendedRecognizers = nil
+        setThumb(diameter: 8)
+        // A tap may leave the value unchanged; iOS 26 resizes the thumb only on layout.
+        setNeedsLayout()
+        layoutIfNeeded()
+    }
+
+    /// The value whose thumb center lies under `x`, clamped to the track ends.
+    private func value(at x: CGFloat) -> Float {
+        let track = trackRect(forBounds: bounds)
+        let start = thumbRect(forBounds: bounds, trackRect: track, value: minimumValue).midX
+        let end = thumbRect(forBounds: bounds, trackRect: track, value: maximumValue).midX
+        guard end > start else { return value }
+        let fraction = Float(min(1, max(0, (x - start) / (end - start))))
+        return minimumValue + fraction * (maximumValue - minimumValue)
+    }
+
     private func setThumb(diameter: CGFloat) {
         thumbDiameter = diameter
         let image = UIGraphicsImageRenderer(size: CGSize(width: diameter, height: diameter)).image { _ in

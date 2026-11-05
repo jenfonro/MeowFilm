@@ -679,14 +679,13 @@ final class EncryptedDocumentKeyProviderTests: XCTestCase {
         }
     }
 
-    func testKeysAfterFirstUnlockAreCurrentEarlierStricterKeysAreAdoptedOthersRejected() {
-        XCTAssertEqual(EncryptedDocumentKeyAccessibility.classify(
-            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String), .current)
-        XCTAssertEqual(EncryptedDocumentKeyAccessibility.classify(
-            kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String), .adopt)
-        for stored in [nil, kSecAttrAccessibleAfterFirstUnlock as String, kSecAttrAccessibleWhenUnlocked as String,
+    func testKeysRequireAfterFirstUnlockDeviceOnlyAccessibility() {
+        XCTAssertTrue(SystemEncryptedDocumentKeychainDriver.matchesAccessibility(
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String))
+        for stored in [nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String,
+                       kSecAttrAccessibleAfterFirstUnlock as String, kSecAttrAccessibleWhenUnlocked as String,
                        kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly as String, "unknown"] {
-            XCTAssertEqual(EncryptedDocumentKeyAccessibility.classify(stored), .rejected)
+            XCTAssertFalse(SystemEncryptedDocumentKeychainDriver.matchesAccessibility(stored))
         }
     }
 

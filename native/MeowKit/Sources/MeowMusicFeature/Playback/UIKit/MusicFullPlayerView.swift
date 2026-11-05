@@ -29,7 +29,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     }()
     private let route = AVRoutePickerView()
     private let sourceLabel = UILabel()
-    private let recordScroll = UIScrollView()
+    private let recordScroll = MusicRecordScrollView()
     private let discs = (0..<3).map { _ in MusicRecordDiscView() }
     private let tonearm = MusicTonearmView()
     private let lyricPreview = UIButton(type: .custom)
