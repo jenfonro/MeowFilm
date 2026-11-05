@@ -208,7 +208,7 @@ public static class MusicLyricApplicationTests
                 Equal(mutation == "disable" ? 1L : 2L, f.ScriptInput.GetProperty("generation").GetInt64());
                 Equal(2, f.ScriptCalls);
             });
-        yield return Case("cancelled script lookup drains its request and never starts the next installation", async f =>
+        yield return Case("cancelled script lookup keeps owned read and never starts the next installation", async f =>
         {
             var arrived = Signal(); var release = f.ReleaseGate(); var cancelled = Signal();
             f.Provider.Handler = (_, _) => Task.FromResult<NativeLyricPayload?>(null);
@@ -219,12 +219,13 @@ public static class MusicLyricApplicationTests
             };
             using var cancellation = new CancellationTokenSource();
             var read = f.Lookup(Song(), cancellation.Token); await arrived.Task;
-            cancellation.Cancel(); await cancelled.Task;
-            True(!read.IsCompleted); Equal(1, f.ScriptCalls);
-            release.TrySetResult(); Code(await read, "CANCELLED");
+            cancellation.Cancel(); Code(await read.WaitAsync(TimeSpan.FromSeconds(2)), "CANCELLED");
+            True(!cancelled.Task.IsCompleted); Equal(1, f.ScriptCalls);
+            var drain = f.Owner.DrainAsync(); True(!drain.IsCompleted);
+            release.TrySetResult(); await drain;
             Equal(1, f.ScriptCalls); Equal(0, f.Activated.Count);
         });
-        yield return Case("coalesced subscribers cancel independently until the last one leaves", async f =>
+        yield return Case("coalesced subscribers cancel independently of owned work", async f =>
         {
             var arrived = Signal(); var release = f.ReleaseGate(); bool physicalCancelled = false;
             f.Provider.Handler = async (request, token) => {
@@ -237,7 +238,7 @@ public static class MusicLyricApplicationTests
             a.Cancel(); Code(await first, "CANCELLED"); True(!physicalCancelled);
             release.TrySetResult(); Ready(await second); Equal(1, f.Provider.Requests.Count);
         });
-        yield return Case("last cancelled subscriber drains before the same recording can restart", async f =>
+        yield return Case("last cancelled subscriber leaves a reusable in-flight recording", async f =>
         {
             var arrived = Signal(); var release = f.ReleaseGate(); var cancelled = Signal();
             f.Provider.Handler = async (request, token) => {
@@ -246,17 +247,17 @@ public static class MusicLyricApplicationTests
             };
             using var cancellation = new CancellationTokenSource();
             var first = f.Lookup(Song(), cancellation.Token); await arrived.Task;
-            cancellation.Cancel(); await cancelled.Task;
+            cancellation.Cancel(); Code(await first.WaitAsync(TimeSpan.FromSeconds(2)), "CANCELLED");
+            True(!cancelled.Task.IsCompleted);
             var joined = f.Lookup(Song());
             await Task.Delay(30);
-            True(!first.IsCompleted && !joined.IsCompleted);
+            True(first.IsCompleted && !joined.IsCompleted);
             Equal(1, f.Provider.Requests.Count);
             release.TrySetResult();
             Code(await first, "CANCELLED");
-            Code(await joined, "CANCELLED");
-            f.Provider.Handler = (request, _) => Task.FromResult<NativeLyricPayload?>(Payload(request));
+            Ready(await joined);
             Ready(await f.Lookup(Song()));
-            Equal(2, f.Provider.Requests.Count);
+            Equal(1, f.Provider.Requests.Count);
         });
         yield return Case("account invalidation cancels pending old metadata and cannot publish into new epoch", async f =>
         {

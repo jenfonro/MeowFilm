@@ -20,6 +20,9 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
     private readonly TimeSpan timeout;
     private readonly object gate = new();
     private readonly HashSet<Call> active = [];
+    private readonly Dictionary<string, Flight> flights = [];
+    private readonly Action<MusicPlatformSession>? authenticationFailed;
+    private sealed record Flight(Call Call, TaskCompletionSource<JsonElement> Completion);
     private readonly Dictionary<string, CacheEntry> cache = [];
     private int cacheBytes;
     private bool closed;
@@ -31,11 +34,12 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
 
     internal MusicPlatformCatalog(IMusicPlatformSessionSource sessions, MusicPlatformHttp transport,
         MusicPlatformClientContextOwner clients, TimeSpan? timeout = null, bool leaveOpen = true,
-        MusicPlatformClientProtocol? clientProtocol = null)
+        MusicPlatformClientProtocol? clientProtocol = null, Action<MusicPlatformSession>? authenticationFailed = null)
     {
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(transport);
         this.sessions = sessions;
+        this.authenticationFailed = authenticationFailed;
         this.clients = clients ?? throw new ArgumentNullException(nameof(clients));
         this.timeout = timeout ?? TimeSpan.FromSeconds(25);
         PJ.Require(this.timeout > TimeSpan.Zero);
@@ -51,7 +55,9 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
     {
         internal readonly MusicPlatformCatalog Owner;
         internal readonly string Platform, Operation;
-        internal readonly CancellationToken Caller;
+        internal Task Work = Task.CompletedTask;
+        internal volatile MusicPlatformException? Failure;
+        internal volatile Call? Shared;
         internal readonly TimeSpan Duration;
         internal readonly CancellationTokenSource Deadline, Cancelled, Linked;
         internal readonly long Started = Stopwatch.GetTimestamp();
@@ -62,12 +68,12 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
         internal string Scope = "", Reason = "";
         internal readonly CancellationToken Token;
         internal bool PublicCatalog => Platform is "kw" or "mg";
-        internal Call(MusicPlatformCatalog owner, string platform, string operation, CancellationToken caller)
+        internal Call(MusicPlatformCatalog owner, string platform, string operation)
         {
-            Owner = owner; Platform = platform; Operation = operation; Caller = caller;
+            Owner = owner; Platform = platform; Operation = operation;
             Duration = owner.timeout;
             Deadline = new(Duration); Cancelled = new();
-            Linked = CancellationTokenSource.CreateLinkedTokenSource(caller, Deadline.Token, Cancelled.Token);
+            Linked = CancellationTokenSource.CreateLinkedTokenSource(Deadline.Token, Cancelled.Token);
             Token = Linked.Token;
         }
         internal void Fence(string reason) => Volatile.Write(ref Reason, reason);
@@ -81,7 +87,6 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
         {
             var reason = Volatile.Read(ref Reason);
             if (reason.Length > 0) throw new MusicPlatformException(reason);
-            if (Caller.IsCancellationRequested) throw new MusicPlatformException("CANCELLED");
             if (Deadline.IsCancellationRequested || Stopwatch.GetElapsedTime(Started) >= Duration)
                 throw new MusicPlatformException("TIMEOUT");
             if (Client is not null)
@@ -195,8 +200,33 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
         if (platform is "kw" or "mg")
             PJ.Require(operation is "search" or "song" or "playlist" &&
                 input is not MusicPlaylistRequest { Personal: not null }, "UNSUPPORTED");
-        using var call = new Call(this, platform, operation, token);
-        lock (gate) { PJ.Require(!closed, "CLOSED"); active.Add(call); }
+        PJ.Require(!token.IsCancellationRequested, "CANCELLED");
+        Task<JsonElement> work;
+        Call call;
+        lock (gate)
+        {
+            PJ.Require(!closed, "CLOSED");
+            call = new Call(this, platform, operation);
+            active.Add(call);
+            call.Work = work = RunOwnedAsync(call, input, refresh, action, cacheable, privateCache);
+        }
+        _ = work.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        try { return await work.WaitAsync(token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // Revoking a failed lease can cancel the subscriber synchronously.
+            // Do not replace the already determined service error with cancellation.
+            throw call.Failure ?? call.Shared?.Failure ?? new MusicPlatformException("CANCELLED", platform, operation);
+        }
+    }
+    private async Task<JsonElement> RunOwnedAsync(Call call, object input, bool refresh,
+        Func<Call, Task<JsonObject>> action, bool cacheable, bool privateCache)
+    {
+        await Task.Yield(); // Publish ownership before any synchronous dependency can finish.
+        var platform = call.Platform; var operation = call.Operation;
+        Flight? owned = null;
+        string? flightKey = null;
         try
         {
             call.Session = await AcquireAsync(call);
@@ -220,6 +250,26 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
             {
                 foreach (var expired in cache.Where(p => p.Value.Expires <= DateTimeOffset.UtcNow).Select(p => p.Key).ToArray()) Erase(expired);
                 if (cacheable && (call.Session is null || privateCache) && !refresh && cache.TryGetValue(key, out var entry)) cached = entry.Value.Clone();
+            }
+            Task<JsonElement>? shared = null;
+            if (cached is null)
+                lock (gate)
+                {
+                    call.Guard();
+                    if (flights.TryGetValue(key, out var existing))
+                    { call.Shared = existing.Call; shared = existing.Completion.Task; }
+                    else
+                    {
+                        owned = new(call, new(TaskCreationOptions.RunContinuationsAsynchronously));
+                        flights.Add(key, owned); flightKey = key;
+                        _ = owned.Completion.Task.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+                            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    }
+                }
+            if (shared is not null)
+            {
+                var value = await shared.ConfigureAwait(false);
+                call.Guard(); return value.Clone();
             }
             var result = cached ?? PJ.Element(await (platform switch
             {
@@ -260,17 +310,33 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
                     }
                 }
             }
+            owned?.Completion.TrySetResult(result);
             return result;
         }
         catch (Exception error)
         {
             var code = error is MusicPlatformException known ? known.Code : error is OperationCanceledException ? "CANCELLED" : "INVALID_RESPONSE";
             try { call.Guard(); } catch (MusicPlatformException e) { code = e.Code; }
-            if (code is "AUTH_REQUIRED" or "FORBIDDEN" or "STALE_SESSION")
+            var failure = call.Shared?.Failure ?? new MusicPlatformException(code, platform, operation);
+            call.Failure = failure;
+            code = failure.Code;
+            if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "FORBIDDEN" or "STALE_SESSION")
                 lock (gate) foreach (var k in cache.Where(e => e.Value.Platform == platform).Select(e => e.Key).ToArray()) Erase(k);
-            throw new MusicPlatformException(code, platform, operation);
+            if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED" && call.Session is { } failed)
+                try { authenticationFailed?.Invoke(failed); }
+                catch { /* An observer cannot prevent settlement of shared work. */ }
+            owned?.Completion.TrySetException(failure);
+            throw failure;
         }
-        finally { lock (gate) active.Remove(call); }
+        finally
+        {
+            call.Dispose();
+            lock (gate)
+            {
+                if (flightKey is not null && flights.GetValueOrDefault(flightKey) == owned) flights.Remove(flightKey);
+                active.Remove(call);
+            }
+        }
     }
     private void Erase(string key) { if (cache.Remove(key, out var entry)) cacheBytes -= entry.Bytes; }
     public void Invalidate(string? platform = null)
@@ -282,8 +348,17 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
             foreach (var key in cache.Where(e => platform is null || e.Value.Platform == platform).Select(e => e.Key).ToArray()) Erase(key);
             retired = active.Where(c => platform is null || c.Platform == platform).ToArray();
             foreach (var call in retired) call.Fence("STALE_SESSION");
+            foreach (var key in flights.Where(p => platform is null || p.Value.Call.Platform == platform).Select(p => p.Key).ToArray())
+                flights.Remove(key);
         }
         foreach (var call in retired) call.Cancel();
+    }
+    internal async Task DrainAsync()
+    {
+        Task[] pending;
+        lock (gate) pending = active.Select(c => c.Work).ToArray();
+        try { await Task.WhenAll(pending).ConfigureAwait(false); }
+        catch { /* Each subscriber observes its own outcome; this is physical settlement. */ }
     }
     public void Dispose()
     {
@@ -291,7 +366,7 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
         lock (gate)
         {
             if (closed) return;
-            closed = true; cache.Clear(); cacheBytes = 0;
+            closed = true; cache.Clear(); flights.Clear(); cacheBytes = 0;
             retired = active.ToArray();
             foreach (var call in retired) call.Fence("CLOSED");
         }

@@ -30,7 +30,6 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
         internal Task<MusicSearchDiscoverySnapshot> Task = null!;
         internal MusicPlatformSession? Session;
         internal MusicWyClientContext? Client;
-        internal int Waiters;
         internal string Reason = "";
         internal void Cancel()
         {
@@ -69,17 +68,18 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
                         flight.Linked = CancellationTokenSource.CreateLinkedTokenSource(flight.Cancelled.Token, flight.Deadline.Token);
                         active = flight;
                         flight.Task = Task.Run(() => Fetch(flight));
-                        flight.Waiters++;
+                        _ = flight.Task.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+                            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                         break;
                     }
-                    if (!refresh && previous.Reason.Length == 0 && previous.Generation == generation)
+                    if (previous.Reason.Length == 0 && previous.Generation == generation)
                     {
-                        flight = previous; flight.Waiters++;
+                        flight = previous;
                         break;
                     }
                     if (previous.Reason.Length == 0) Volatile.Write(ref previous.Reason, "STALE_SESSION");
                 }
-                // Invalidate/last-cancel can leave a retiring physical request. Do not
+                // Account invalidation can leave a retiring physical request. Do not
                 // join it or start a replacement until all of its cleanup has settled.
                 previous.Cancel(); await Settle(previous.Task).ConfigureAwait(false);
             }
@@ -98,20 +98,6 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
             }
         }
         catch (OperationCanceledException) { throw Error("CANCELLED"); }
-        finally
-        {
-            var drain = false;
-            lock (gate)
-            {
-                flight.Waiters--;
-                if (flight.Waiters == 0 && !flight.Task.IsCompleted)
-                {
-                    if (flight.Reason.Length == 0) Volatile.Write(ref flight.Reason, "CANCELLED");
-                    drain = true;
-                }
-            }
-            if (drain) { flight.Cancel(); await Settle(flight.Task).ConfigureAwait(false); }
-        }
     }
     private async Task<MusicSearchDiscoverySnapshot> Fetch(Flight flight)
     {

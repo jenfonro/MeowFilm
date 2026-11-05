@@ -142,9 +142,10 @@ public static class MusicSearchObserverTests
             string id = Id(await Start(search)); var request = await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
             var abandoned = search.ExecuteAsync("music.search.cancel", new { id }, waiter.Token);
             var first = Call(search, "cancel", id); var second = Call(search, "cancel", id);
-            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(10)); waiter.Cancel();
-            Check(!(await abandoned).GetProperty("ok").GetBoolean(), "ABANDONED_CANCEL_WAS_REPORTED_AS_SUCCESS");
             await pendingNotice.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Check(!cancelled.Task.IsCompleted, "QUERY_RETIREMENT_ABORTED_ADMITTED_READ");
+            waiter.Cancel();
+            Check(!(await abandoned).GetProperty("ok").GetBoolean(), "ABANDONED_CANCEL_WAS_REPORTED_AS_SUCCESS");
             long pendingRevision = Revision(await Call(search, "get", id));
             var third = Call(search, "cancel", id);
             Check(Revision(await Call(search, "get", id)) == pendingRevision &&

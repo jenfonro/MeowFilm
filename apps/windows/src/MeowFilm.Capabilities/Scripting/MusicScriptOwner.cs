@@ -30,7 +30,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     private readonly HashSet<CancellationTokenSource> onlineOperations = [];
     private MusicSourceMetadataSnapshot? metadata;
     private JsonObject? state;
-    private CancellationTokenSource? resolution, lyrics;
+    private CancellationTokenSource? resolution;
     private bool closed, preparing;
     private volatile bool blocked;
     private int pending;
@@ -109,7 +109,12 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     private void Finish() { lock (activityGate) if (--pending == 0) drained.TrySetResult(); }
     public void CancelPlayback()
     {
-        lock (activityGate) { resolution?.Cancel(); lyrics?.Cancel(); }
+        lock (activityGate) resolution?.Cancel();
+    }
+    private void CancelOnlineOperations()
+    {
+        lock (activityGate)
+            foreach (var operation in onlineOperations.ToArray()) operation.Cancel();
     }
     public async Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
     {
@@ -121,7 +126,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
             var token = request.Token;
             if (method == "music.online.cancel") { LJ.Fields(input, ""); CancelPlayback(); return Okay(new()); }
             if (method.StartsWith("music.sources.", StringComparison.Ordinal) && method is not ("music.sources.list" or "music.sources.detail"))
-                CancelPlayback();
+                CancelOnlineOperations();
             if (method is "music.online.resolve" or "music.online.lyrics")
                 return Okay(await OnlineAsync(method, input, token).ConfigureAwait(false));
             await gate.WaitAsync(token).ConfigureAwait(false); entered = true;
@@ -208,7 +213,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
         {
             blocked = true;
             foreach (var grant in grants.Values) grant.State = "revoked";
-            CancelPlayback();
+            CancelOnlineOperations();
             throw;
         }
         finally { storageGate.Release(); }

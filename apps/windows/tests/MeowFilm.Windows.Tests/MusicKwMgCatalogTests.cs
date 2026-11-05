@@ -511,10 +511,19 @@ public static class MusicKwMgCatalogTests
         else f.Catalog.Invalidate(platform);
         try
         {
-            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(3)); Check(!pending.IsCompleted);
+            if (reason == "cancel")
+            {
+                await Error("CANCELLED", () => pending.WaitAsync(TimeSpan.FromSeconds(3)));
+                Check(!cancelled.Task.IsCompleted && !f.Catalog.DrainAsync().IsCompleted);
+            }
+            else
+            {
+                await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(3)); Check(!pending.IsCompleted);
+            }
         }
         finally { release.TrySetResult(); }
         await Error(reason == "cancel" ? "CANCELLED" : reason == "close" ? "CLOSED" : "STALE_SESSION", () => pending);
+        await f.Catalog.DrainAsync();
         Check(f.Handler.Calls == 1);
         using var other = new MusicPlatformCatalog(f.Accounts, f.Http, f.Clients.Owner);
         _ = await other.SearchAsync(new(platform, "x", Limit: 1)); Check(f.Handler.Calls == 2);
@@ -557,12 +566,21 @@ public static class MusicKwMgCatalogTests
         else if (reason == "close") catalog.Dispose();
         try
         {
-            if (reason != "generation") await accounts.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            Check(!pending.IsCompleted && handler.Calls == 0);
+            if (reason == "cancel")
+            {
+                await Error("CANCELLED", () => pending.WaitAsync(TimeSpan.FromSeconds(2)));
+                Check(!accounts.Cancelled.Task.IsCompleted && !catalog.DrainAsync().IsCompleted);
+                catalog.Invalidate(); // Service retirement, not the departed subscriber, owns cancellation.
+            }
+            else
+            {
+                if (reason != "generation") await accounts.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                Check(!pending.IsCompleted && handler.Calls == 0);
+            }
         }
         finally { accounts.Release.TrySetResult(); }
         await Error(reason switch { "cancel" => "CANCELLED", "close" => "CLOSED", "invalidate" or "generation" => "STALE_SESSION", _ => "TIMEOUT" }, () => pending);
-        Check(handler.Calls == 0);
+        await catalog.DrainAsync(); Check(handler.Calls == 0);
     }
     private sealed class Store : IDocumentStore
     {

@@ -10,7 +10,7 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
     internal const string DocumentNamespace = "music.platform-context.v1";
     private readonly IDocumentStore store;
     private readonly object gate = new();
-    private readonly SemaphoreSlim serial = new(1, 1);
+    private readonly SerialOperationQueue updates = new();
     private CancellationTokenSource lifetime = new();
     private readonly HashSet<Task> work = [];
     private MusicClientContextDocument? current;
@@ -91,10 +91,10 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
             lock (gate) work.Remove(task);
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
-    private async Task LoadAsync(CancellationToken token, bool create)
+    private Task LoadAsync(CancellationToken token, bool create) => updates.Enqueue(async () =>
     {
         await Task.Yield();
-        await serial.WaitAsync(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
         try
         {
             lock (gate)
@@ -128,8 +128,7 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
         catch (MusicPlatformException) { throw; }
         catch (OperationCanceledException) { throw; }
         catch { throw new MusicPlatformException("STORAGE"); }
-        finally { serial.Release(); }
-    }
+    });
     internal async Task<MusicKgClientContext> SaveKgAsync(MusicKgClientContext expected, string dfid,
         CancellationToken token = default) =>
         (await UpdateAsync(expected, document => document with
@@ -152,31 +151,27 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
         lock (gate)
         {
             RequireReady();
-            task = ExecuteAsync(lifetime.Token); Track(task);
+            var generation = lifetime.Token;
+            task = updates.Enqueue(() => ExecuteAsync(generation)); Track(task);
         }
         return task;
         async Task<MusicClientContextDocument> ExecuteAsync(CancellationToken generation)
         {
             await Task.Yield();
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(caller, generation);
-            await serial.WaitAsync(linked.Token).ConfigureAwait(false);
-            try
+            beforeCommit?.Invoke();
+            linked.Token.ThrowIfCancellationRequested();
+            MusicClientContextDocument next; DocumentFingerprint before;
+            lock (gate)
             {
-                beforeCommit?.Invoke();
-                linked.Token.ThrowIfCancellationRequested();
-                MusicClientContextDocument next; DocumentFingerprint before;
-                lock (gate)
-                {
-                    RequireReady();
-                    MusicClientContextDocument.Require(IsCurrent(expected), "STORAGE_CONFLICT");
-                    next = update(current!); before = fingerprint;
-                    if (ReferenceEquals(next, current)) return current!;
-                }
-                await WriteAsync(next, before, linked.Token).ConfigureAwait(false);
-                caller.ThrowIfCancellationRequested();
-                lock (gate) { RequireReady(); return current!; }
+                RequireReady();
+                MusicClientContextDocument.Require(IsCurrent(expected), "STORAGE_CONFLICT");
+                next = update(current!); before = fingerprint;
+                if (ReferenceEquals(next, current)) return current!;
             }
-            finally { serial.Release(); }
+            await WriteAsync(next, before, linked.Token).ConfigureAwait(false);
+            caller.ThrowIfCancellationRequested();
+            lock (gate) { RequireReady(); return current!; }
         }
     }
     private async Task WriteAsync(MusicClientContextDocument next, DocumentFingerprint before, CancellationToken token)
@@ -189,7 +184,9 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
             token.ThrowIfCancellationRequested();
             lock (gate) { RequireOpen(); observed = true; }
             DocumentFingerprint actual;
-            try { actual = await store.WriteAsync(DocumentNamespace, bytes, before, token).ConfigureAwait(false); }
+            // Admission is final: a retiring read must not cancel its durable client
+            // update and fence every later request behind an unknown receipt.
+            try { actual = await store.WriteAsync(DocumentNamespace, bytes, before, CancellationToken.None).ConfigureAwait(false); }
             catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict)
             {
                 lock (gate) { current = null; initialization = null; }
@@ -293,6 +290,6 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
         NotifyAll();
         try { await Task.WhenAll(pending).ConfigureAwait(false); } catch { }
         lock (gate) current = null;
-        serial.Dispose(); generation.Dispose();
+        generation.Dispose();
     }
 }

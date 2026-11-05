@@ -93,6 +93,8 @@ public sealed record MusicArtistRequest(string Platform, string Id, bool Refresh
 /// Native-built catalog JSON retains the existing UI's song/card/page shapes.
 /// Cookie/session objects never appear in results. Each call is explicitly targeted.
 /// Personal batches do not start playback, background polling or cloud writes.
+/// The native catalog owns admitted reads; caller cancellation only unsubscribes.
+/// Timeout, account invalidation and service disposal retain physical cancellation.
 /// </summary>
 public interface IMusicPlatformCatalog : IDisposable
 {

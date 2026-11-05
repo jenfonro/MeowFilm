@@ -41,7 +41,7 @@ public static class MusicRecommendationTests
         yield return new("Recommendation Changed synchronous dispose does not await itself", ObserverDispose);
         yield return new("Recommendation independent dispose waits active observer", ObserverBarrier);
         yield return new("Recommendation real native Catalog HTTP to Library and ephemeral feedback", NativeCatalog);
-        yield return new("Recommendation real native Catalog HTTP cancellation physically drains", NativeHttpDrain);
+        yield return new("Recommendation real native Catalog read settles before retired session drains", NativeHttpDrain);
         yield return new("Recommendation initial FM next waits first batch never skips its first entry", InitialNext);
         yield return new("Recommendation return while seed remains current never restarts media", ReturnSeed);
         yield return new("Recommendation asynchronous selection pause invalidates autoplay admission", LateSelection);
@@ -353,8 +353,13 @@ public static class MusicRecommendationTests
         using var catalog = MusicPlatformCatalog.CreateWithHandler(new Sessions(), handler, clients.Owner);
         await using var f = new Fixture(catalog);
         var start = f.Start("fm"); await handler.Entered.Task;
-        var close = f.Rec.PrepareCloseAsync(); await handler.Cancelled.Task; Check(!close.IsCompleted);
-        handler.Release.TrySetResult(); await start; await close; Check(N(await f.Q(), "total") == 0);
+        var close = f.Rec.PrepareCloseAsync();
+        try
+        {
+            Check(!close.IsCompleted && !handler.Cancelled.Task.IsCompleted);
+        }
+        finally { handler.Release.TrySetResult(); }
+        await start; await close; Check(N(await f.Q(), "total") == 0);
     }
     private static async Task InitialNext()
     {

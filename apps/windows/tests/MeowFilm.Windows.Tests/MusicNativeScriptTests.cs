@@ -33,6 +33,8 @@ public static class MusicNativeScriptTests
         yield return new("Native LX: source metadata change refreshes unrelated active storage revision", MetadataRevision);
         yield return new("Native LX: unknown native commit retires candidate and next command reconciles", Unknown);
         yield return new("Native LX: pending resolve cannot publish after cancel or source mutation", Cancel);
+        yield return new("Native LX: concurrent lyric reads survive new reads and playback cancellation", () => ConcurrentLyrics(false));
+        yield return new("Native LX: source mutation revokes all admitted lyric reads", () => ConcurrentLyrics(true));
         yield return new("Native LX: invalid media expiry flags headers and identity rejected", MediaCandidates);
         yield return new("Native LX: lyric parsing remains native and respects persisted setting", Lyrics);
         yield return new("Native LX: explicit resolve rejects mismatched recording or generation", RecordingIdentity);
@@ -748,6 +750,45 @@ public static class MusicNativeScriptTests
         response = await Ok(f.Owner, "music.online.lyrics", new { installationId = id, platform = "wy", song = Song() });
         Check(response.GetProperty("state").GetString() == "disabled" && calls == f.Runtime.Invoked.Count);
     }
+    private static async Task ConcurrentLyrics(bool invalidate)
+    {
+        await using var f = new Fixture(); string id = await Install(f, true);
+        var entered = new[] { new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),
+            new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int calls = 0, cancelled = 0;
+        f.Runtime.Invoke = async token =>
+        {
+            using var registration = token.Register(() => Interlocked.Increment(ref cancelled));
+            entered[Interlocked.Increment(ref calls) - 1].TrySetResult();
+            await release.Task;
+            return J(new { lyric = "[00:01.00]Hello" });
+        };
+        Task<JsonElement>? first = null, second = null;
+        try
+        {
+            first = f.Owner.ExecuteAsync("music.online.lyrics", new { installationId = id, platform = "wy", song = Song("1") });
+            await entered[0].Task.WaitAsync(TimeSpan.FromSeconds(5));
+            second = f.Owner.ExecuteAsync("music.online.lyrics", new { installationId = id, platform = "wy", song = Song("2") });
+            await entered[1].Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Ok(f.Owner, "music.online.cancel");
+            Check(cancelled == 0 && !first.IsCompleted && !second.IsCompleted,
+                "new lyrics and playback cancellation cannot abort admitted lyric reads");
+            if (invalidate)
+            {
+                await Ok(f.Owner, "music.sources.disable", new { installationId = id });
+                Check(cancelled == 2 && !first.IsCompleted && !second.IsCompleted,
+                    "source revocation must fence all lyrics without pretending physical work has settled");
+            }
+        }
+        finally { release.TrySetResult(); }
+        foreach (var read in new[] { first!, second! })
+        {
+            var result = await read.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(invalidate ? result.GetProperty("code").GetString() == "CANCELLED" :
+                result.GetProperty("ok").GetBoolean() && result.GetProperty("state").GetString() == "ready");
+        }
+    }
     private static async Task RecordingIdentity()
     {
         await using var f = new Fixture(); string id = await Install(f, true);
@@ -1205,6 +1246,7 @@ public static class MusicNativeScriptTests
         internal IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> Capabilities = null!;
         internal bool FailLoad, CandidateWrite, FailAfterCandidate, FailUnload;
         internal TaskCompletionSource? Invoking, Loading, LoadRelease;
+        internal Func<CancellationToken, Task<JsonElement>>? Invoke;
         internal JsonObject? LastCandidate;
         internal string Contract = "music.script.v2";
         internal string CandidateSite = "wy";
@@ -1251,7 +1293,7 @@ public static class MusicNativeScriptTests
                 case "music.script.invoke":
                     Invoked.Add(p["installationId"]!.GetValue<string>());
                     if (Invoking is { } pending) { pending.TrySetResult(); await Task.Delay(Timeout.Infinite, cancellationToken); }
-                    return Reply(new { value = Value });
+                    return Reply(new { value = Invoke is null ? Value : await Invoke(cancellationToken) });
                 default: throw new InvalidOperationException("ordinary business reached Node");
             }
         }
