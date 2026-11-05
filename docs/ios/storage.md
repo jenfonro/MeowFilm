@@ -31,6 +31,7 @@
 - `EncryptedDocumentKeyProvider` 提供只读 `readKey(namespace:)` 和只插入缺失项的 `createKeyIfAbsent(namespace:)`；密钥固定 32 字节。
 - Keychain 实现使用 generic password、`afterFirstUnlockThisDeviceOnly`、不同步、data-protection Keychain，并禁止交互认证。密钥与账号凭据读取时只接受当前配置的保护类别，不符时拒绝，不在读取时修改 Keychain 项。
 - 不自动轮换、重置或删除密钥；解密失败不回退明文，也不另建命名空间。
+- 用户明确确认的本机数据清除是例外，执行边界见下文；正常读取仍不迁移或修复旧密钥。
 
 ### 文件格式
 
@@ -46,6 +47,8 @@
 - 命名空间已有任何文件但缺少 key 时，不创建新 key。
 - 默认上限：单文档明文 8 MiB、命名空间密文 32 MiB、文件 128 个；可配置硬上限分别为 64 MiB、256 MiB、1024 个。
 - 同一命名空间只能有一个存储实例。跨进程事务、恶意同进程代码和回滚攻击不在契约范围内。
+- 原子 rename 后没有可失败步骤。网易云／酷狗／QQ 设备文档的同步写入错误不会因发生在保存阶段就变成 `COMMIT_UNCONFIRMED`；保护属性不符为 `STORAGE_POLICY_MISMATCH`，缺签名权限为 `STORAGE_PERMISSION_DENIED`，其他确定失败按存储／访问／损坏等类别报告。真正明确报告的未知提交（例如账号恢复流程）仍保留原语义。
+- 设备文档适配器在 OSLog `dev.meowfilm.aggregate` / `storage` 记录封闭错误类别、读写阶段和请求诊断 ID，不记录路径、Keychain service、凭据或任意底层错误文本。故障注入能验证分类，不能替代签名真机故障诊断。
 
 ## 锁屏与旧数据
 
@@ -53,6 +56,15 @@
 - 音频缓存只接受 class C，保护等级不符按缓存未命中处理，不在打开时修改已有文件的等级。
 - 不提供旧凭据、密钥、加密文件或音频缓存保护等级的兼容、迁移或读取时修复。
 - 普通数据曾以加密文档保存在 `encrypted-documents-v1`。升级后不读取、不迁移、不删除这些旧文档及其 Keychain 密钥，曲库从空开始。
+
+## 清除本机用户数据
+
+- 设置 → 本机数据 → 清除本机用户数据。二次确认说明不可撤销、清除范围以及需关闭并重新打开 App；取消不产生请求。
+- 确认后只持久写入 Application Support 下独立的 `meowfilm-reset.pending`（排除备份），停止播放、同步、脚本和业务访问，并切换为待重启界面。此时尚未清理；不会强制退出或在原进程热重建服务，前后台切换也不会执行清理。内嵌 Node 每进程只能启动一次，旧任务可能仍在结算。
+- 下次冷启动由 `MeowfilmLaunchController` 在创建 `MeowfilmAssembly` 前执行清理。清除 Application Support/meowfilm、Caches/meowfilm、Caches/meowfilm.music.audio-cache.v1、临时目录下的 meowfilm（运行器回退位置），以及当前 App UserDefaults domain、App Cookie 与 URL 缓存。
+- Keychain 按稳定产品 ID `dev.meowfilm.aggregate` 下的精确 service 清除：账号凭据、网易云／酷狗客户端设备、QQ 设备，以及旧版曲库、播放展示、来源发现、账号 URL 缓存密钥。只删除本地 data-protection generic-password 项，不枚举整个 access group、不按 class 全删，不先读取或验证旧项保护属性。侧载后的偏好域使用实际 bundle ID，Keychain service 仍使用稳定产品 ID。
+- 不调用云端退出／歌单／收藏删除，不删除 App 外导入原文件、链接目标或其他 service。应用根目录中未知的本地文件也属于重置范围，不尝试解密损坏文档。
+- 清理可幂等重做，缺失项视为成功。只有全部完成才删除待清除标志并创建新业务装配；中断或任一失败保留标志，阻断业务启动，在统一信息框提供重试，不将部分清理报告为成功。签名权限问题不能靠清除自动修复。
 
 ## 音源文档
 

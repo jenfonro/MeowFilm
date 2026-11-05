@@ -44,7 +44,10 @@ enum MusicSettingsDestination: CaseIterable, Hashable {
 public struct MusicSettingsContent: View {
     let theme: PageTheme
     var preferenceValue = ""
+    var canResetUserData = false
+    var requestingReset = false
     var open: (MusicSettingsDestination) -> Void = { _ in }
+    var resetUserData: () -> Void = {}
 
     public var body: some View {
         List {
@@ -59,6 +62,19 @@ public struct MusicSettingsContent: View {
                 destinationRow(.appearance)
             }
             .headerProminence(.increased)
+            if canResetUserData {
+                Section("本机数据") {
+                    Button(role: .destructive, action: resetUserData) {
+                        Text(requestingReset ? "正在记录清除请求…" : "清除本机用户数据")
+                            .foregroundStyle(Color(uiColor: .systemRed))
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    }
+                    .disabled(requestingReset)
+                    .accessibilityIdentifier("settings.clearUserData")
+                    .modifier(MusicSettingsRowStyle(theme: theme))
+                }
+                .headerProminence(.increased)
+            }
         }
         .modifier(MusicSettingsListStyle(theme: theme))
     }

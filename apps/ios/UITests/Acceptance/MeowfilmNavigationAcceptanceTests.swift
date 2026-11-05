@@ -289,6 +289,25 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
     }
 
+    func testUserDataResetConfirmationCanBeCancelledWithoutLeavingSettings() {
+        XCTAssertTrue(app.buttons["app.menu"].waitForExistence(timeout: 30))
+        if app.alerts["错误"].exists { app.alerts["错误"].buttons["确定"].tap() }
+        openSettings()
+        let clear = app.buttons["settings.clearUserData"]
+        if !clear.isHittable { app.swipeUp() }
+        XCTAssertTrue(clear.waitForExistence(timeout: 5))
+        clear.tap()
+        let confirmation = app.alerts["清除本机用户数据？"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        XCTAssertTrue(confirmation.buttons["清除并等待重启"].exists)
+        attach("settings-clear-user-data-confirmation")
+        confirmation.buttons["取消"].tap()
+        XCTAssertTrue(clear.waitForExistence(timeout: 5))
+        XCTAssertTrue(clear.isEnabled)
+        XCTAssertFalse(app.staticTexts["等待重新启动"].exists)
+        XCTAssertFalse(confirmation.exists)
+    }
+
     func testSettingsPagesUseAppOwnedHeaders() throws {
         XCTAssertTrue(app.buttons["app.menu"].waitForExistence(timeout: 30))
         app.buttons["app.menu"].tap()
