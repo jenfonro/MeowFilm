@@ -42,6 +42,9 @@ public final class PageNavigationController: UINavigationController,
         disableSystemPopGestures()
     }
 
+    /// The bar stays hidden, so the visible page decides the status bar style.
+    public override var childForStatusBarStyle: UIViewController? { topViewController }
+
     public override func pushViewController(_ viewController: UIViewController, animated: Bool) {
         super.pushViewController(viewController, animated: animated)
         disableSystemPopGestures()
@@ -68,6 +71,7 @@ public final class PageNavigationController: UINavigationController,
         interactive = false
         confirming = false
         disableSystemPopGestures()
+        setNeedsStatusBarAppearanceUpdate()
         if let page = viewController as? PageViewController {
             page.updateHeaderNavigationState(
                 canReturn: navigationController.viewControllers.first !== viewController

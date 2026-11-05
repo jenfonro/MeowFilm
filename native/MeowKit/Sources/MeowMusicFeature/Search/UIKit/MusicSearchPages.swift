@@ -417,6 +417,8 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             page.table.tag = index
             page.table.accessibilityIdentifier = "music.search.results.page.\(index)"
             page.table.delegate = self
+            page.table.delaysContentTouches = false
+            page.table.canCancelContentTouches = true
             page.table.backgroundColor = .clear; page.table.separatorStyle = .none
             page.table.sectionHeaderTopPadding = 0
             page.table.estimatedSectionHeaderHeight = 0
@@ -468,6 +470,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
     override func pageDidBecomeHidden() {
         results.holdPagination()
         finishPagingTransition(at: selected)
+        resetPlaylistPressFeedback()
     }
     override func pageDidBecomeVisible() {
         updateLoadingSkeletons()
@@ -525,6 +528,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
 
     private func beginPagingTransition(to kind: Kind) {
         results.holdPagination()
+        resetPlaylistPressFeedback()
         guard let origin = kinds.firstIndex(of: selected), let target = kinds.firstIndex(of: kind) else {
             pagingOriginIndex = nil; pagingTargetIndex = nil
             return
@@ -644,9 +648,23 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             results.more(.playlists, automatic: true)
         }
     }
+    func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        (cell as? MusicSearchPlaylistCell)?.resetPressFeedback()
+    }
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        if let table = scrollView as? UITableView {
+            for cell in table.visibleCells.compactMap({ $0 as? MusicSearchPlaylistCell }) { cell.resetPressFeedback() }
+        }
         guard isPageVisible, !paging, scrollView === pages[selected]?.table else { return }
         results.resumePagination()
+    }
+
+    private func resetPlaylistPressFeedback() {
+        for page in pages.values {
+            for cell in page.table.visibleCells.compactMap({ $0 as? MusicSearchPlaylistCell }) {
+                cell.resetPressFeedback()
+            }
+        }
     }
 
     private func submit() {
@@ -1079,6 +1097,13 @@ final class MusicSearchPlaylistCell: UITableViewCell {
         backgroundColor = .clear; selectionStyle = .none
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        resetPressFeedback()
+    }
+    func resetPressFeedback() {
+        for tile in tiles { tile.resetPressFeedback() }
+    }
     func configure(_ items: [MusicPublicBrowseCollection], columns: Int, theme: PageTheme,
                    open: @escaping (MusicPublicBrowseCollection) -> Void) {
         self.columns = columns
@@ -1118,7 +1143,7 @@ final class MusicSearchPlaylistCell: UITableViewCell {
 
 @MainActor
 private final class MusicSearchTableController: UIViewController {
-    let table = UITableView(frame: .zero, style: .plain)
+    let table = MusicSearchResultsTableView(frame: .zero, style: .plain)
     var dataSource: UITableViewDiffableDataSource<Int, MusicSearchResultRowID>!
     var playlistRows: [Data: [MusicPublicBrowseCollection]] = [:]
     var headerStates: [Int: MusicSearchHeaderState] = [:]

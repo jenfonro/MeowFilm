@@ -1,22 +1,23 @@
 import UIKit
 import MeowUI
 import MeowMusicFeature
+import MeowFilmFeature
 
 /// The App owns primary chrome. Domain controllers own content and business
 /// tasks; retained containment forwards only the visible page's UIKit lifecycle.
 /// Each primary page keeps its own header, which moves with that page.
 @MainActor
 final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRecognizerDelegate {
-    /// Recommend, channels and library are separate pages with separate headers.
+    /// Recommend, channels, film and library are separate pages with separate headers.
     override var usesPageHeader: Bool { false }
 
     var onSelectionChanged: ((MeowfilmPrimaryPage, TimeInterval) -> Void)?
     private var pendingChannel: MusicPublicBrowseChannel?
     private var channels: MusicChannelsViewController? {
-        (pages.page(at: 1) as? MeowfilmPrimaryPageViewController)?.content as? MusicChannelsViewController
+        (pages.page(at: index(of: .channels)) as? MeowfilmPrimaryPageViewController)?.content as? MusicChannelsViewController
     }
     private var library: MusicLibraryViewController? {
-        (pages.page(at: 2) as? MeowfilmPrimaryPageViewController)?.content as? MusicLibraryViewController
+        (pages.page(at: index(of: .library)) as? MeowfilmPrimaryPageViewController)?.content as? MusicLibraryViewController
     }
     private let pageFactories: [@MainActor () -> UIViewController]
     private lazy var pages = RetainedPagesController(
@@ -123,6 +124,8 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
                 Self.colorEntries(entries, theme: theme)
                 search.backgroundColor = UIColor(theme.control)
             }
+        case .film:
+            header.setTitleView((content as? FilmHomeViewController)?.sourceSwitcherView ?? UIView())
         case .library:
             let title = PageHeaderTextButton(title: page.title) {}
             title.contentHorizontalAlignment = .leading
@@ -136,6 +139,10 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
             primary.themeHeader = { theme in title.setTitleColor(UIColor(theme.ink), for: .normal) }
         }
         return primary
+    }
+
+    private func index(of page: MeowfilmPrimaryPage) -> Int {
+        MeowfilmPrimaryPage.allCases.firstIndex(of: page)!
     }
 
     /// Entries use the channel tabs' 17pt type; only the selected title takes

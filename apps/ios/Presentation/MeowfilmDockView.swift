@@ -142,7 +142,13 @@ final class MeowfilmDockView: UIView {
 
     private func renderNavigation() {
         for (page, button) in buttons {
-            let kind: PageIcon.Kind = page == .recommend ? .home : page == .channels ? .channels : .person
+            let kind: PageIcon.Kind
+            switch page {
+            case .recommend: kind = .home
+            case .channels: kind = .channels
+            case .film: kind = .film
+            case .library: kind = .person
+            }
             button.configuration?.image = PageIcon.image(kind, filled: selected == page)
             button.configuration?.baseForegroundColor = selected == page ? NavigationColors.selected : NavigationColors.unselected
             button.accessibilityTraits = selected == page ? [.button, .selected] : .button

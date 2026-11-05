@@ -78,7 +78,7 @@ def generate():
         "runtimeTestConfigs", "runtimeTestDebug", "runtimeTestRelease", "runtimeTestDependency", "runtimeTestProxy",
     ]})
     libraries = ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowAccounts", "MeowUI", "MeowRuntime",
-                 "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService"]
+                 "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService", "MeowFilmFeature"]
     objects = []
     def obj(key, content):
         objects.append(f"\t\t{ids[key]} = {{ {content} }};")
@@ -270,7 +270,7 @@ def generate():
     )
     acceptance_scheme = acceptance_scheme.replace("  <LaunchAction", test_action + "  <LaunchAction")
     write_lf(scheme_dir / "MeowfilmAcceptance.xcscheme", acceptance_scheme)
-    print(f"Generated {name}: meowfilm, enabled capability music")
+    print(f"Generated {name}: meowfilm, enabled capabilities music, film")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import UIKit
 /// Reference-stable geometry rendered once as a native template image.
 public enum PageIcon {
     public enum Kind: Sendable {
-        case home, channels, person, menu, search, recognize, plus, append, more, play, pause, queue, down
+        case home, channels, film, person, menu, search, recognize, plus, append, more, play, pause, queue, down
         case playerDown, playerPlay, playerPause, lyricPlay, previous, next, miniPrevious, miniNext
         case heart, translation, image, remove, playing, miniResume, reorder, multiSelect
         case back, close
@@ -65,6 +65,11 @@ public enum PageIcon {
             for x in [3.0, 14.0] { for y in [3.0, 14.0] {
                 p.addRoundedRect(in: .init(x: x, y: y, width: 7, height: 7), cornerSize: .init(width: 2, height: 2))
             } }
+        case .film:
+            p.addRoundedRect(in: .init(x: 3, y: 3, width: 18, height: 18), cornerSize: .init(width: 2, height: 2))
+            line([(7,3),(7,21)]); line([(17,3),(17,21)])
+            for y in [8.0, 16.0] { line([(3,y),(7,y)]); line([(17,y),(21,y)]) }
+            line([(7,12),(17,12)])
         case .person:
             p.addEllipse(in: .init(x: 8, y: 3, width: 8, height: 8))
             p.move(to: .init(x: 4, y: 22)); p.addLine(to: .init(x: 4, y: 19))
