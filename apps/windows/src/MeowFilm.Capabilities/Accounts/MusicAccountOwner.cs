@@ -284,8 +284,8 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         Dictionary<string, long> epochs;
         lock (gate) epochs = states.ToDictionary(p => p.Key, p => p.Value.Epoch);
         // Read AND reconcile while holding the same physical storage gate. Otherwise
-        // a device CAS could be admitted after the read, then an older list snapshot
-        // could clear its Uncertain flag or roll back the observed device generation.
+        // an account CAS could be admitted after the read, then an older list snapshot
+        // could clear its Uncertain flag or roll back the observed account generation.
         var physicalRead = DiskAsync(async () =>
         {
             var snapshot = await ReadDocument(token).ConfigureAwait(false);

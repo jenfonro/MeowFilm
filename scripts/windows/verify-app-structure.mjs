@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isWindowsSource, sharedScripts, sourceDirectories } from './source-scope.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const generated = new Set(['bin', 'obj', 'node_modules', '.git']);
@@ -44,7 +45,14 @@ export function verifyAppStructure(directory = root) {
       else fail('non-regular source: ' + child);
     }
   }
-  for (const part of ['apps/windows', 'apps/runtime', 'packages', 'scripts']) walk(part);
+  for (const part of sourceDirectories) walk(part);
+  for (const file of sharedScripts) {
+    const path = join(directory, file);
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    if (!stat) continue;
+    if (!stat.isFile() || !samePath(realpathSync(path), path)) fail('linked/non-regular source: ' + file);
+    files.push(file);
+  }
   for (const [source, expected] of runtimeTrees) {
     const authored = files.filter(file => file.startsWith(source + '/')).map(file => file.slice(source.length + 1));
     if (expected.files.some(file => !authored.includes(file))) fail('missing runtime source: ' + source);
@@ -67,6 +75,8 @@ export function verifyAppStructure(directory = root) {
     if (owner.startsWith('apps/windows/runtime/') &&
         !inside(join(directory, 'apps/windows/runtime'), target) && !inside(join(directory, 'apps/runtime'), target))
       fail('Windows runtime source dependency: ' + owner + ' -> ' + specifier);
+    if (!isWindowsSource(relative(directory, target).split(sep).join('/')))
+      fail('Windows source dependency outside its scope: ' + owner + ' -> ' + specifier);
     imports++;
   }
   for (const file of files) {
@@ -97,7 +107,7 @@ export function verifyAppStructure(directory = root) {
         const uri = match[1], pack = /^\/(MeowFilm\.[A-Za-z]+);component\/(.+)$/.exec(uri);
         const target = pack ? resolve(directory, 'apps/windows/src', pack[1], pack[2])
           : resolve(dirname(join(directory, file)), uri);
-        if (!inside(directory, target) || !existsSync(target) || !lstatSync(target).isFile() ||
+        if (!inside(join(directory, 'apps/windows'), target) || !existsSync(target) || !lstatSync(target).isFile() ||
             lstatSync(target).isSymbolicLink() || !samePath(realpathSync(target), target))
           fail('missing/unsafe XAML resource: ' + file);
         resources++;

@@ -9,7 +9,7 @@ function fixture(t) {
   mkdirSync(temporaryRoot, { recursive: true });
   const source = mkdtempSync(join(temporaryRoot, 'app-structure-'));
   t.after(() => { assertOwnedPath(temporaryRoot, source); rmSync(source, { recursive: true }); });
-  for (const folder of ['apps/windows', 'apps/runtime', 'packages', 'scripts'])
+  for (const folder of ['apps/windows', 'apps/runtime', 'packages', 'scripts/windows', 'scripts/quickjs'])
     mkdirSync(join(source, folder), { recursive: true });
   const write = (path, value) => {
     const file = assertOwnedPath(source, join(source, path), { allowMissing: true });
@@ -36,6 +36,37 @@ test('checks relative imports and resources in the declared source tree', t => {
   assert.equal(result.resourceReferences, 1);
 });
 
+test('Windows scope ignores other-platform sources and generated-runtime templates', t => {
+  const f = fixture(t);
+  f.write('scripts/ios-node-preflight/probe.mjs', "import './app/bootstrap.mjs';");
+  f.write('scripts/package-ios-runtime.mjs', "import './missing-ios-input.mjs';");
+  f.write('apps/ios/runtime/bootstrap.mjs', "import './missing-platform-input.mjs';");
+  const result = verifyAppStructure(f.source);
+  assert.equal(result.relativeImports, 6);
+  assert.ok(result.sourceFiles.every(file => !file.includes('ios')));
+});
+
+test('Windows tools and their shared dependencies remain checked', t => {
+  const f = fixture(t);
+  f.write('scripts/windows/package-runtime.mjs', "export { packageRuntime } from '../package-runtime.mjs';");
+  f.write('scripts/package-runtime.mjs', "export { packageRuntime } from './verify-dependency-lock.mjs';");
+  f.write('scripts/verify-dependency-lock.mjs', 'export const packageRuntime = () => {};');
+  assert.equal(verifyAppStructure(f.source).relativeImports, 8);
+  f.write('scripts/verify-dependency-lock.mjs', "import './missing.mjs';");
+  assert.throws(() => verifyAppStructure(f.source), /missing\/linked relative import/);
+});
+
+for (const owner of ['scripts/windows/tool.mjs', 'scripts/package-runtime.mjs', 'packages/example/index.js']) {
+  test(owner + ' cannot depend on an iOS-only tool', t => {
+    const f = fixture(t);
+    f.write('scripts/package-ios-runtime.mjs', 'export {};');
+    const specifier = owner.startsWith('scripts/windows/') ? '../package-ios-runtime.mjs'
+      : owner.startsWith('packages/') ? '../../scripts/package-ios-runtime.mjs' : './package-ios-runtime.mjs';
+    f.write(owner, `import '${specifier}';`);
+    assert.throws(() => verifyAppStructure(f.source), /Windows source dependency outside its scope/);
+  });
+}
+
 for (const [specifier, error] of [
   ['../../../outside.mjs', /external source/],
   ['./missing.mjs', /missing\/linked relative import/],
@@ -55,6 +86,23 @@ test('resolves WPF pack references and rejects missing resources', t => {
   f.write('apps/windows/src/MeowFilm.Desktop/Page.xaml',
     '<ResourceDictionary Source="/MeowFilm.Desktop;component/Missing.xaml"/>');
   assert.throws(() => verifyAppStructure(f.source), /missing\/unsafe XAML resource/);
+});
+
+test('Windows resources cannot depend on the other platform', t => {
+  const f = fixture(t);
+  f.write('apps/ios/Theme.xaml', '<ResourceDictionary/>');
+  f.write('apps/windows/src/MeowFilm.Desktop/Page.xaml',
+    '<ResourceDictionary Source="../../../ios/Theme.xaml"/>');
+  assert.throws(() => verifyAppStructure(f.source), /missing\/unsafe XAML resource/);
+});
+
+test('shared tool links cannot hide dependency inputs', t => {
+  const f = fixture(t);
+  f.write('packages/shared/package-runtime.mjs', 'export {};');
+  symlinkSync(join(f.source, 'packages/shared'), join(f.source, 'scripts/tools'),
+    process.platform === 'win32' ? 'junction' : 'dir');
+  f.write('scripts/package-runtime.mjs', "import './tools/package-runtime.mjs';");
+  assert.throws(() => verifyAppStructure(f.source), /missing\/linked relative import/);
 });
 
 test('rejects linked source directories', t => {

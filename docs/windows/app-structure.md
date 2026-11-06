@@ -16,6 +16,8 @@ Platform / Desktop → Core
 
 Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口、一套导航与设置、一个原生播放协调、一个系统媒体会话。原生媒体内核与自适应流能力由现有音频链直接使用；当前不装配下载能力。
 
+`scripts/windows/verify-app-structure.mjs` 检查 Windows 源码、公共 `apps/runtime`／`packages`、Windows 工具及其显式共享 Node 工具，不递归扫描整个 `scripts`。iOS 专属模板只在其生成运行时中解析；Windows 源码或工具也不能反向导入这些模板。相对导入、链接安全、运行时目录闭包和 WPF 资源检查保持。Windows 构建输入指纹采用相同源码／工具范围，并包含本端配置、测试、共享引擎输入和随包许可；iOS 专属代码、脚本及测试不影响该指纹。
+
 ## 能力源码
 
 `apps/windows/src/MeowFilm.Capabilities` 按真实职责组织：
