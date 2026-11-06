@@ -13,7 +13,7 @@ export function isWindowsBuildInput(path) {
   const legalNotice = /(?:^|\/)(?:notice|licen[cs]e|copying|copyright|third[-_]?party)(?:[._-][^/]*)?$/i.test(path);
   return (!/\.md$/i.test(path) || legalNotice) && (
     ['package.json', 'package-lock.json', '.gitattributes', '.gitignore', 'build-windows.ps1'].includes(path)
-    || /^(?:apps\/windows\/|apps\/runtime\/|packages\/|scripts\/|tests\/|LICENSES\/)/.test(path)
+    || /^(?:apps\/windows\/|apps\/runtime\/|packages\/|native\/JavaScript\/|scripts\/|tests\/|LICENSES\/)/.test(path)
   );
 }
 

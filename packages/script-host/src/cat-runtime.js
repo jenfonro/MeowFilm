@@ -5,9 +5,11 @@ import { pipeline } from 'node:stream/promises';
 import { randomBytes, createHash } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync, lstatSync, realpathSync, rmSync } from 'node:fs';
 import { resolve, join, isAbsolute, relative, sep } from 'node:path';
+import { parse } from 'acorn';
 import { ScriptHost } from './host.js';
 import { WorkerSession, workerResult } from './worker-session.js';
-import { CatSettingsFile, normalizeCatConfig } from './cat-settings.js';
+import { CatSettingsFile, normalizeCatConfig, catName, catSourceURL } from './cat-settings.js';
+import { downloadCatSource } from './cat-source-download.js';
 import { atomicWrite, removePrivateVolume } from './private-volume.js';
 import { scriptAccessHeader } from './script-services.js';
 import { clone, fault, identifier, requireValue, safeError } from './errors.js';
@@ -18,6 +20,8 @@ import { closeResource } from './resource-close.js';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const execution = spec => spec && [spec.sourceHash, spec.config, spec.version, spec.enabled];
+const sameExecution = (a, b) => same(execution(a), execution(b));
 const hopByHop = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailer', 'transfer-encoding', 'upgrade']);
 const inside = (root, path) => {
@@ -86,9 +90,11 @@ function decodeSource(bytes) {
 /** Shared Cat owner. Platform supplies only the stable data directory; source,
  * settings, sandbox, Cat routing and management remain in this package. */
 export class CatRuntime {
-  constructor({ dataRoot, network, onDiagnostic, onScriptError, onNetwork, limits } = {}) {
+  constructor({ dataRoot, network, onDiagnostic, onScriptError, onNetwork, limits, clock = Date.now } = {}) {
     requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot));
+    requireValue(typeof clock === 'function');
     this.dataRoot = resolve(dataRoot);
+    this.clock = clock;
     this.network = network; this.onDiagnostic = onDiagnostic; this.onScriptError = onScriptError;
     this.onNetwork = onNetwork; this.limits = limits;
     this.sessions = new Map(); this.snapshots = new Map(); this.proxies = new Map();
@@ -103,6 +109,10 @@ export class CatRuntime {
     this.access = randomBytes(32).toString('hex');
     this.applied = new Map();
     this.failures = new Map();
+    this.workers = new Set();
+    this.managementTasks = new Set();
+    this.replacements = new Set();
+    this.managementSignals = new Map();
   }
   serverClosure(server, timeoutMs = 3000) {
     let state = this.serverClosures.get(server);
@@ -182,10 +192,10 @@ export class CatRuntime {
     return task;
   }
   workerSession(input) {
-    return new WorkerSession({
+    const worker = new WorkerSession({
       ...input,
       protocol: 'cat',
-      startSignal: this.initialStartSignal?.signal,
+      startSignal: this.managementSignals.get(input.installationId) ?? this.initialStartSignal.signal,
       startParams: {
         dataRoot: this.dataRoot,
         settings: { value: clone(this.startingSettings ?? this.settings.value) },
@@ -233,6 +243,8 @@ export class CatRuntime {
         this.sweepProxies();
       },
     });
+    this.workers.add(worker);
+    return worker;
   }
   registerProxyMappings(session, entries) {
     for (const entry of entries) {
@@ -313,7 +325,7 @@ export class CatRuntime {
       rmSync(file, { maxRetries: 3, retryDelay: 100 });
     } catch (error) { throw safeError(error, 'STORAGE_ERROR'); }
   }
-  async apply(next, { background = false, only = null, force = false } = {}) {
+  async apply(next, { background = false, only = null } = {}) {
     const candidate = !this.server || next.port !== this.settings.value.port
       ? await this.listen(next.port) : null;
     const gateway = candidate ?? this.server;
@@ -344,15 +356,12 @@ export class CatRuntime {
       }
       let removalFailure;
       for (const [installationId, entry] of removed) {
-        let stopped = true;
-        const owner = this.sessions.get(installationId) ??
-          this.host.initializingSessions().find(session =>
-            session.installationId === installationId);
+        try { await this.stopInstance(installationId); }
+        catch (error) { removalFailure ??= safeError(error, 'SERVICE_ERROR'); }
         try { if (entry.state) await this.host.uninstall(installationId); }
-        catch (error) {
-          stopped = Boolean(owner?.stopped && !owner.worker);
-          removalFailure ??= safeError(error, 'SERVICE_ERROR');
-        }
+        catch (error) { removalFailure ??= safeError(error, 'SERVICE_ERROR'); }
+        const stopped = ![...this.workers].some(worker =>
+          worker.installationId === installationId && worker.worker);
         current.delete(installationId);
         this.applied.delete(installationId); this.failures.delete(installationId);
         this.sessions.delete(installationId);
@@ -372,7 +381,7 @@ export class CatRuntime {
       for (const spec of next.scripts) {
         if (only && !only.has(spec.installationId)) continue;
         const old = this.applied.get(spec.installationId), state = current.get(spec.installationId);
-        if (!force && old && (!spec.enabled || state) && same(old, spec) &&
+        if (old && (!spec.enabled || state) && sameExecution(old, spec) &&
           !this.failures.has(spec.installationId) && state?.state !== 'failed') continue;
         changes.push({ spec, existing: !!state });
       }
@@ -464,7 +473,7 @@ export class CatRuntime {
     try {
       // A disabled installation needs no source or host revision. Stop an
       // existing generation before loading the current file for activation.
-      if (existing) await this.host.disable(spec.installationId);
+      await this.stopInstance(spec.installationId);
       if (!spec.enabled) {
         this.failures.delete(spec.installationId);
         return;
@@ -475,6 +484,15 @@ export class CatRuntime {
           config: spec.config, version: spec.version });
       } else await this.host.install({ ...spec, source, protocol: 'cat', enabled: false });
       await this.host.enable(spec.installationId);
+      const sites = this.hostSites(spec.installationId);
+      if (!same(sites, spec.sites)) {
+        this.settings.save(value => ({ ...value, scripts: value.scripts.map(script => {
+          if (script.installationId !== spec.installationId) return script;
+          requireValue(sameExecution(script, spec), 'STORAGE_CONFLICT');
+          return { ...script, sites };
+        }) }));
+        spec.sites = sites;
+      }
       this.failures.delete(spec.installationId);
     } catch (error) { this.failures.set(spec.installationId, safeError(error).code); }
     finally {
@@ -492,7 +510,7 @@ export class CatRuntime {
       if (spec?.enabled && !this.settled.has(installationId)) {
         const state = this.hostState(spec.installationId);
         const old = this.applied.get(spec.installationId);
-        if (!(old && state && same(old, spec) &&
+        if (!(old && state && sameExecution(old, spec) &&
           !this.failures.has(spec.installationId) && state.state !== 'failed')) {
           await this.applyChange({ spec, existing: !!state });
         }
@@ -521,7 +539,7 @@ export class CatRuntime {
       [script.installationId, script]));
     const diskScripts = new Map(diskSettings.scripts.map(script => [script.installationId, script]));
     for (const id of new Set([...previousSettings.keys(), ...diskScripts.keys()])) {
-      if (!same(previousSettings.get(id), diskScripts.get(id)))
+      if (!sameExecution(previousSettings.get(id), diskScripts.get(id)))
         this.host.stopInitializingSessions(id);
     }
     return this.serial(() => {
@@ -535,74 +553,342 @@ export class CatRuntime {
       return this.apply(next, { only });
     });
   }
-  async install({ installationId, source, config = {}, version = '0.0.0', enabled = false }) {
+  hostSites(installationId) {
+    return Object.entries(this.hostState(installationId)?.capabilities ?? {})
+      .map(([key, value]) => ({ key, ...value }));
+  }
+  async stopInstance(installationId) {
+    let failure;
+    if (this.hostState(installationId)) {
+      try { await this.host.disable(installationId); }
+      catch (error) { failure = error; }
+    }
+    // Worker failure can detach the public session before its thread exits.
+    // Keep that owner until termination is confirmed before sharing its volume.
+    for (const worker of this.workers) {
+      if (worker.installationId !== installationId) continue;
+      try {
+        await worker.stop();
+        await worker.drainAdapters();
+        requireValue(!worker.worker && !worker.live, 'SERVICE_ERROR');
+      } catch (error) { failure ??= error; }
+      if (!worker.worker && !worker.live) this.workers.delete(worker);
+    }
+    if (failure) throw failure;
+  }
+  cancelManagement(installationId) {
+    for (const task of this.managementTasks) {
+      if (task.installationId !== installationId) continue;
+      task.restore = false;
+      task.scope.close(fault('CANCELLED'));
+    }
+  }
+  async manage(installationId, signal, body) {
     identifier(installationId);
-    requireValue(typeof source === 'string' && typeof enabled === 'boolean' &&
-      typeof version === 'string' && version.length > 0 && version.length <= 128);
-    config = normalizeCatConfig(config);
-    await this.start();
-    const bytes = Buffer.from(source), sourceHash = hash(bytes);
-    decodeSource(bytes);
-    requireValue(bytes.length <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
-    if (this.hostState(installationId)) this.host.stopInitializingSessions(installationId);
-    return this.serial(async () => {
-      const current = this.settings.read();
-      const previous = current.scripts.find(script =>
-        script.installationId === installationId);
-      if (!previous) {
-        if (this.hostState(installationId)) {
-          try { await this.host.uninstall(installationId); }
-          catch (error) {
-            const failure = safeError(error, 'SERVICE_ERROR');
-            this.failures.set(installationId, failure.code);
-            throw failure;
-          }
-          this.applied.delete(installationId);
-          this.sessions.delete(installationId);
-          this.snapshots.delete(installationId);
-        }
-        try { removePrivateVolume(this.dataRoot, installationId); }
-        catch (error) {
-          const failure = safeError(error, 'STORAGE_ERROR');
-          this.failures.set(installationId, failure.code);
-          throw failure;
-        }
-      }
-      const file = this.sourcePath(sourceHash);
-      atomicWrite(file, bytes);
-      const next = this.settings.save(value => ({ ...value, scripts: [
-        ...value.scripts.filter(script => script.installationId !== installationId),
-        { installationId, sourceHash, config, version, enabled },
-      ] }));
-      await this.apply(next, { only: new Set([installationId]), force: true });
-      if (this.failures.has(installationId)) throw fault(this.failures.get(installationId));
+    const scope = new ResourceScope();
+    // Native AbortError has a numeric DOMException.code, not a script fault.
+    const cancel = () => scope.close(fault('CANCELLED'));
+    const task = { installationId, scope, restore: true };
+    this.managementTasks.add(task);
+    try {
+      if (signal?.aborted) cancel();
+      else signal?.addEventListener('abort', cancel, { once: true });
+      scope.assertOpen();
+      await this.start();
+      scope.assertOpen();
+      return await this.serial(async () => {
+        scope.assertOpen();
+        const abort = () => this.host?.stopInitializingSessions(installationId);
+        scope.signal.addEventListener('abort', abort, { once: true });
+        try { return await body(task); }
+        finally { scope.signal.removeEventListener('abort', abort); }
+      });
+    } finally {
+      this.managementTasks.delete(task);
+      scope.close();
+      signal?.removeEventListener('abort', cancel);
+    }
+  }
+  installedSpec(installationId) {
+    const spec = this.settings.read().scripts.find(script => script.installationId === installationId);
+    requireValue(spec, 'NOT_FOUND');
+    return spec;
+  }
+  saveSpec(previous, spec) {
+    let next, failure;
+    try {
+      next = this.settings.save(value => {
+        const current = value.scripts.find(script => script.installationId === spec.installationId);
+        requireValue(same(current, previous), 'STORAGE_CONFLICT');
+        return { ...value, scripts: current
+          ? value.scripts.map(script => script.installationId === spec.installationId ? spec : script)
+          : [...value.scripts, spec] };
+      });
+    } catch (error) {
+      next = this.settings.read();
+      if (!same(next.scripts.find(script => script.installationId === spec.installationId), spec)) throw error;
+      failure = error;
+    }
+    this.settings.publish(next);
+    this.applied.set(spec.installationId, spec);
+    this.publishSettingsSnapshot(next);
+    if (failure) throw failure;
+    return next;
+  }
+  async install(input, { signal } = {}) {
+    const proposal = clone(input);
+    identifier(proposal.installationId);
+    requireValue(typeof proposal.source === 'string');
+    if (proposal.config !== undefined) proposal.config = normalizeCatConfig(proposal.config);
+    return this.manage(proposal.installationId, signal, task => this.replaceSource(proposal, task));
+  }
+  async import(input, { signal } = {}) {
+    const proposal = clone(input);
+    catName(proposal.name); catSourceURL(proposal.sourceUrl);
+    requireValue(proposal.enabled === undefined || typeof proposal.enabled === 'boolean');
+    return this.manage(proposal.installationId, signal, async task => {
+      const bytes = await this.downloadSource(proposal.sourceUrl, task.scope.signal);
+      try {
+        return await this.replaceSource({ ...proposal, sourceType: 'network', source: decodeSource(bytes) }, task);
+      } finally { bytes.fill(0); }
+    });
+  }
+  downloadSource(sourceUrl, signal) {
+    return downloadCatSource(sourceUrl, { signal, maxSourceBytes: this.limit('maxSourceBytes'),
+      timeoutMs: this.limit('requestTimeoutMs') });
+  }
+  async edit(input, { signal } = {}) {
+    const { installationId, name, sourceUrl } = clone(input);
+    const displayName = catName(name);
+    if (sourceUrl !== undefined) catSourceURL(sourceUrl);
+    return this.manage(installationId, signal, async task => {
+      const previous = this.installedSpec(installationId);
+      requireValue(sourceUrl === undefined || previous.sourceType === 'network');
+      task.scope.assertOpen();
+      this.saveSpec(previous, { ...previous, name: displayName,
+        ...(sourceUrl === undefined ? {} : { sourceUrl }) });
       return this.instance(installationId);
     });
   }
-  async setEnabled(installationId, enabled) {
+  async update({ installationId, source }, { signal } = {}) {
+    // A staged buffer is decoded here so encoding failures are visible in the
+    // installation's durable update result as well as the RPC error envelope.
+    const bytes = Buffer.isBuffer(source) ? Buffer.from(source) : null;
+    try {
+      return await this.manage(installationId, signal, async task => {
+        const previous = this.installedSpec(installationId);
+        try {
+          requireValue(previous.sourceType === 'local'
+            ? typeof source === 'string' || bytes : source === undefined);
+          const downloaded = previous.sourceType === 'network'
+            ? await this.downloadSource(previous.sourceUrl, task.scope.signal) : null;
+          try {
+            return await this.replaceSource({ installationId,
+              source: downloaded ? decodeSource(downloaded) : bytes ? decodeSource(bytes) : source }, task,
+            { update: true });
+          } finally { downloaded?.fill(0); }
+        } catch (error) {
+          // A post-rename failure may already have committed the candidate.
+          // Never turn that accepted version into a failed/rolled-back update.
+          const current = this.installedSpec(installationId);
+          if (same(current, previous)) this.saveSpec(current, { ...current,
+            updateState: 'failed', updateError: task.scope.signal.aborted
+              ? task.scope.reason.code : safeError(error, 'STORAGE_ERROR').code });
+          throw task.scope.signal.aborted ? task.scope.reason : error;
+        }
+      });
+    } finally { bytes?.fill(0); }
+  }
+  async replaceSource(proposal, task, { update = false } = {}) {
+    const { installationId, source } = proposal;
+    requireValue(proposal.enabled === undefined || typeof proposal.enabled === 'boolean');
+    requireValue(proposal.version === undefined || typeof proposal.version === 'string');
+    requireValue(proposal.sourceType === undefined || ['local', 'network'].includes(proposal.sourceType));
+    if (proposal.name !== undefined) catName(proposal.name);
+    const current = this.settings.read();
+    const previous = current.scripts.find(script => script.installationId === installationId);
+    const spec = { installationId,
+      config: proposal.config ?? previous?.config ?? {},
+      version: proposal.version ?? previous?.version ?? '0.0.0',
+      enabled: proposal.enabled ?? previous?.enabled ?? true,
+      name: catName(proposal.name ?? previous?.name ?? installationId),
+      sourceType: proposal.sourceType ?? previous?.sourceType ?? 'local',
+      sourceUrl: proposal.sourceUrl === undefined ? previous?.sourceUrl ?? null : proposal.sourceUrl,
+      importedAt: previous?.importedAt ?? null, updatedAt: previous?.updatedAt ?? null,
+      updateState: previous?.updateState ?? 'idle', updateError: previous?.updateError ?? null,
+      sites: previous?.sites ?? [],
+    };
+    requireValue(typeof source === 'string' && typeof spec.enabled === 'boolean' &&
+      typeof spec.version === 'string' && spec.version.length > 0 && spec.version.length <= 128 &&
+      ['local', 'network'].includes(spec.sourceType));
+    if (spec.sourceType === 'network') catSourceURL(spec.sourceUrl);
+    else requireValue(spec.sourceUrl === null);
+    const bytes = Buffer.from(source);
+    requireValue(bytes.length <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
+    decodeSource(bytes);
+    // Disabled installations must not execute just to validate an import.
+    // Validate CommonJS syntax here; activation validates its runtime contract.
+    try { parse(source, { ecmaVersion: 'latest', allowReturnOutsideFunction: true }); }
+    catch { throw fault('SCRIPT_EXCEPTION'); }
+    spec.sourceHash = hash(bytes);
+    task.scope.assertOpen();
+    const previousBytes = previous && existsSync(this.sourcePath(previous.sourceHash))
+      ? this.readSource(previous.sourceHash) : null;
+    let previousSource = this.sessions.get(installationId)?.revision.source ?? null;
+    if (previousSource === null && previousBytes) {
+      try { previousSource = decodeSource(previousBytes); } catch { /* An invalid old file can still be replaced. */ }
+    }
+    const changed = previous ? previousSource === null || hash(Buffer.from(previousSource)) !== spec.sourceHash : false;
+    if (update && !changed) {
+      this.saveSpec(previous, { ...previous, updateState: 'unchanged', updateError: null });
+      return this.instance(installationId);
+    }
+    const file = this.sourcePath(spec.sourceHash);
+    const replacedBytes = existsSync(file) ? this.readSource(spec.sourceHash) : null;
+    let touchedSource = false, committed = false, failure;
+    this.replacements.add(installationId);
+    this.managementSignals.set(installationId, task.scope.signal);
+    this.startingSettings = { ...current, scripts: [
+      ...current.scripts.filter(script => script.installationId !== installationId), spec,
+    ] };
+    try {
+      await this.stopInstance(installationId);
+      task.scope.assertOpen();
+      if (!previous) removePrivateVolume(this.dataRoot, installationId);
+      if (this.hostState(installationId)) await this.host.update(installationId, { source,
+        config: spec.config, version: spec.version });
+      else await this.host.install({ ...spec, source, protocol: 'cat', enabled: false });
+      task.scope.assertOpen();
+      if (spec.enabled) {
+        await this.host.enable(installationId);
+        spec.sites = this.hostSites(installationId);
+      }
+      task.scope.assertOpen();
+      requireValue(!this.closed, 'HOST_CLOSED');
+      const now = this.clock();
+      if (!previous) spec.importedAt = now;
+      if (changed) spec.updatedAt = now;
+      spec.updateState = previous ? changed ? 'updated' : 'unchanged' : 'idle';
+      spec.updateError = null;
+      // The candidate has passed activation (or syntax validation if disabled).
+      // Until this point both the old source and its description remain durable.
+      touchedSource = true;
+      atomicWrite(file, bytes);
+      try { this.saveSpec(previous, spec); }
+      catch (error) {
+        const disk = this.settings.read();
+        if (same(disk.scripts.find(script => script.installationId === installationId), spec)) {
+          committed = true;
+        }
+        throw error;
+      }
+      committed = true;
+    } catch (error) {
+      if (!committed) {
+        // Stop a candidate completely before restoring the old revision on the
+        // same private volume. Cancellation never commits partially tested code.
+        this.managementSignals.delete(installationId);
+        this.startingSettings = current;
+        try {
+          await this.stopInstance(installationId);
+          if (touchedSource) {
+            if (replacedBytes && !this.readSource(spec.sourceHash).equals(replacedBytes)) atomicWrite(file, replacedBytes);
+            else if (!replacedBytes && !current.scripts.some(script => script.sourceHash === spec.sourceHash))
+              this.deleteSource(spec.sourceHash);
+          }
+          if (!this.closed) {
+            if (previous && previousSource !== null) {
+              if (this.hostState(installationId)) await this.host.update(installationId, {
+                source: previousSource, config: previous.config, version: previous.version });
+              else await this.host.install({ ...previous, source: previousSource, protocol: 'cat', enabled: false });
+              if (previous.enabled && task.restore) await this.host.enable(installationId);
+              this.failures.delete(installationId);
+            } else {
+              if (this.hostState(installationId)) await this.host.uninstall(installationId);
+              if (!previous) removePrivateVolume(this.dataRoot, installationId);
+              else if (previous.enabled) this.failures.set(installationId, 'CORRUPT_STORAGE');
+            }
+          }
+        } catch (recoveryError) { this.failures.set(installationId, safeError(recoveryError, 'STORAGE_ERROR').code); }
+        if (previous) this.applied.set(installationId, previous);
+      }
+      failure = task.scope.signal.aborted ? task.scope.reason : error;
+    } finally {
+      if (committed) this.failures.delete(installationId);
+      this.settled.add(installationId);
+      this.replacements.delete(installationId);
+      this.managementSignals.delete(installationId);
+      this.startingSettings = null;
+      this.sweepProxies();
+      if (committed && previous && previous.sourceHash !== spec.sourceHash &&
+        !this.settings.value.scripts.some(script => script.sourceHash === previous.sourceHash)) {
+        try { this.deleteSource(previous.sourceHash); }
+        catch (error) { failure ??= error; }
+      }
+    }
+    if (failure) throw failure;
+    return this.instance(installationId);
+  }
+  async restart(installationId, { signal } = {}) {
+    return this.manage(installationId, signal, async task => {
+      const spec = this.installedSpec(installationId);
+      requireValue(spec.enabled, 'DISABLED');
+      this.managementSignals.set(installationId, task.scope.signal);
+      try {
+        await this.applyChange({ spec, existing: !!this.hostState(installationId) });
+        task.scope.assertOpen();
+        this.settings.publish(this.settings.read());
+        if (this.failures.has(installationId)) throw fault(this.failures.get(installationId));
+        return this.instance(installationId);
+      } finally { this.managementSignals.delete(installationId); }
+    });
+  }
+  async setEnabled(installationId, enabled, { signal } = {}) {
     identifier(installationId); requireValue(typeof enabled === 'boolean');
     await this.start();
-    if (!enabled) this.host.stopInitializingSessions(installationId);
-    return this.serial(async () => {
+    if (!enabled) {
+      this.cancelManagement(installationId);
+      this.host.stopInitializingSessions(installationId);
+    }
+    return this.manage(installationId, signal, async task => {
       requireValue(this.settings.read().scripts.some(script => script.installationId === installationId), 'NOT_FOUND');
-      const next = this.settings.save(value => ({ ...value, scripts: value.scripts.map(script =>
-        script.installationId === installationId ? { ...script, enabled } : script) }));
-      await this.apply(next, { only: new Set([installationId]) });
-      if (this.failures.has(installationId)) throw fault(this.failures.get(installationId));
-      return this.instance(installationId);
+      let next, failure;
+      try { next = this.settings.save(value => ({ ...value, scripts: value.scripts.map(script =>
+        script.installationId === installationId ? { ...script, enabled } : script) })); }
+      catch (error) {
+        if (error.code !== 'COMMIT_UNKNOWN') throw error;
+        next = this.settings.read(); failure = error;
+      }
+      this.managementSignals.set(installationId, task.scope.signal);
+      try {
+        await this.apply(next, { only: new Set([installationId]) });
+        task.scope.assertOpen();
+        if (this.failures.has(installationId)) throw fault(this.failures.get(installationId));
+        if (failure) throw failure;
+        return this.instance(installationId);
+      } finally { this.managementSignals.delete(installationId); }
     });
   }
-  async uninstall(installationId) {
+  async uninstall(installationId, { signal } = {}) {
     identifier(installationId); await this.start();
+    this.cancelManagement(installationId);
     this.host.stopInitializingSessions(installationId);
-    return this.serial(async () => {
-      const next = this.settings.save(value => ({ ...value,
-        scripts: value.scripts.filter(script => script.installationId !== installationId) }));
-      return this.apply(next, { only: new Set([installationId]) });
+    return this.manage(installationId, signal, async () => {
+      let next, failure;
+      try { next = this.settings.save(value => ({ ...value,
+        scripts: value.scripts.filter(script => script.installationId !== installationId) })); }
+      catch (error) {
+        if (error.code !== 'COMMIT_UNKNOWN') throw error;
+        next = this.settings.read(); failure = error;
+      }
+      const result = await this.apply(next, { only: new Set([installationId]) });
+      if (failure) throw failure;
+      return result;
     });
   }
   starting(installationId, state = this.hostState(installationId),
     snapshot = this.snapshots.get(installationId)) {
+    if (this.replacements.has(installationId)) return true;
     if (this.failures.has(installationId)) return false;
     const spec = (this.startingSettings ?? this.settings.value).scripts.find(script =>
       script.installationId === installationId);
@@ -616,15 +902,20 @@ export class CatRuntime {
       script.installationId === installationId);
     const state = this.hostState(installationId), snapshot = this.snapshots.get(installationId);
     const failure = this.failures.get(installationId);
-    const status = failure ? 'failed'
+    const status = failure ? 'failed' : spec?.enabled === false ? 'disabled'
       : this.starting(installationId, state, snapshot) ? 'starting'
         : !state ? 'disabled'
           : !state.enabled ? 'disabled' : state.state;
     return { installationId, generation: state?.generation ?? 0, state: status,
+      name: spec?.name ?? installationId, sourceType: spec?.sourceType ?? 'local',
+      sourceUrl: spec?.sourceUrl ?? null, enabled: spec?.enabled ?? false,
+      importedAt: spec?.importedAt ?? null, updatedAt: spec?.updatedAt ?? null,
+      updateState: spec?.updateState ?? 'idle', updateError: spec?.updateError ?? null,
       version: spec?.version ?? state?.version ?? '0.0.0',
-      sourceHash: state?.contentHash ?? spec?.sourceHash ?? null,
+      sourceHash: this.replacements.has(installationId) ? spec?.sourceHash ?? null
+        : state?.contentHash ?? spec?.sourceHash ?? null,
       error: failure ?? state?.lastFailure ?? null,
-      sites: state ? Object.entries(state.capabilities).map(([key, value]) => ({ key, ...value })) : [],
+      sites: clone(status === 'ready' ? this.hostSites(installationId) : spec?.sites ?? []),
       ...(status === 'ready' && snapshot ? {
         ...(snapshot.endpoint ? { managementUrl: snapshot.endpoint.managementUrl } : {}),
         endpoints: snapshot.endpoints.map(({ proxyId, ...endpoint }) => endpoint) } : {}) };
@@ -973,6 +1264,10 @@ export class CatRuntime {
     this.closing = (async () => {
       let failure;
       this.startupQueue.length = 0;
+      for (const task of this.managementTasks) {
+        task.restore = false;
+        task.scope.close(fault('HOST_CLOSED'));
+      }
       this.stopInitializingSessions();
       const host = this.host;
       const hostClosing = Promise.resolve().then(() => host?.close()).then(
@@ -992,6 +1287,12 @@ export class CatRuntime {
           failure ??= fault(timedOut ? 'TIMEOUT' : 'SERVICE_ERROR');
         }
       } catch (error) { failure ??= safeError(error, 'SERVICE_ERROR'); }
+      for (const worker of this.workers) {
+        if (!worker.worker) continue;
+        try { await worker.stop(); }
+        catch (error) { failure ??= safeError(error, 'SERVICE_ERROR'); }
+        if (worker.worker) failure ??= fault('SERVICE_ERROR');
+      }
       this.sessions.clear();
       this.snapshots.clear();
       if (this.server) this.serverClosure(this.server);
@@ -1004,6 +1305,8 @@ export class CatRuntime {
       this.proxies.clear();
       this.applied.clear(); this.failures.clear();
       this.settled.clear();
+      this.workers.clear();
+      this.replacements.clear(); this.managementSignals.clear();
       this.initialization = null;
       this.host = null; this.settings = null;
       this.network = null; this.onDiagnostic = null; this.onScriptError = null; this.onNetwork = null;

@@ -9,6 +9,9 @@ test('Windows input inventory covers shared packaging, locked configuration and 
   for (const path of [
     'scripts/package-runtime.mjs', 'scripts/test-root.mjs', 'scripts/windows/test.ps1',
     'scripts/quickjs-runtime.json', 'apps/runtime/modules/music-script.mjs',
+    'scripts/quickjs-native.json', 'native/JavaScript/CMakeLists.txt',
+    'native/JavaScript/meowfilm_js.c', 'native/JavaScript/quickjs/quickjs.c',
+    'packages/film-rules/film-rules.js', 'LICENSES/quickjs-native-MIT.txt',
     'scripts/quickjs/task-context.patch', 'scripts/quickjs/build.py',
     'packages/script-host/src/quickjs/emscripten-module.mjs',
     'packages/script-host/src/quickjs/emscripten-module.wasm',

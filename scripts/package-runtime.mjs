@@ -749,7 +749,9 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       const location = `${SHARED_SOURCE}/${file}`;
       const input = readFileSync(sourcePath(root, location)), hash = sha256(input);
       const text = new TextDecoder('utf-8', { fatal: true }).decode(input);
-      for (const match of text.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\()\s*['"]([^'"]+)['"]/g)) {
+      // Quoted protocol method names (for example 'import') and member calls
+      // are not module specifiers. Keep compact import'x' and import('x') checks.
+      for (const match of text.matchAll(/(?<![\w$.'"])(?:from\s*|import\s*(?:\(\s*)?|require\s*\()\s*['"]([^'"]+)['"]/g)) {
         const specifier = match[1];
         const target = posix.normalize(posix.join(posix.dirname(file), specifier));
         check(specifier.startsWith('.') ? sharedFiles.includes(target) : SHARED_IMPORTS.has(specifier),

@@ -2,7 +2,7 @@
 
 meowfilm 的 iPhone 与 Windows 原生客户端：
 - iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供业务、平台、账号、播放、缓存和持久化能力。
-- Windows：WPF / .NET 原生桌面应用；公共 Node 运行时仅在执行用户导入的 LX 音源、CatNode 或 Reader／CatVod 来源时按需启动。
+- Windows：WPF / .NET 原生桌面应用；公共 Node 脚本宿主随 App 启动，恢复已启用的猫源，停用脚本不执行。客户端影视规则内嵌原生 QuickJS，不依赖 Node。
 
 ## 命令
 
@@ -36,6 +36,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 ```
 
 - 需要 PATH 上的 .NET SDK（10 或更高）、Node.js、npm 与 Git；参考环境为 .NET SDK 10.0.402、Node.js 24.21.0。
+- 原生规则引擎需要 CMake 3.20+ 和 Windows C 编译器（MSVC，或通过标准 CMake 环境选择的工具链）；源码随仓库锁定，普通增量构建自动生成 DLL，不下载依赖或使用预编译来源不明的二进制。
 - 随 App 发布的 Node 运行时由 `scripts/windows/node-runtime.json` 锁定，并与 `LICENSES/node-LICENSE.txt` 对应；构建时 PATH 上的 `node.exe` 须与其一致。
 - 默认完整发布目录自带 Node、引擎依赖和 .NET，不要求目标电脑安装开发工具；`-FrameworkDependent` 另需系统 .NET Desktop Runtime。
 
@@ -128,7 +129,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 
 - 按风险覆盖实际受影响的契约与消费者：编译、静态检查、单元、组件或集成测试；必要时覆盖失败、取消、恢复和资源释放路径。
 - 可机械核对的目录、依赖和契约约束接入 `scripts`（Windows 为 `scripts/windows`）中的现有检查。
-- 引擎仅按 `scripts/quickjs-runtime.json` 的受审查 release-sync 包及任务上下文派生产物、精确版本／路径、根锁、源码补丁／构建输入及真实文件／许可哈希放行；Windows 固定任务上下文派生 WASM，iOS 固定原版 release-sync asmjs，不按运行失败自动降级。其他 native/WASM 仍拒绝，不全局放行二进制或在打包中安装／修锁。
+- 脚本宿主引擎仅按 `scripts/quickjs-runtime.json` 的受审查 release-sync 包及任务上下文派生产物、精确版本／路径、根锁、源码补丁／构建输入及真实文件／许可哈希放行；Windows 固定任务上下文派生 WASM，iOS 固定原版 release-sync asmjs，不按运行失败自动降级。客户端原生规则引擎单独按 `scripts/quickjs-native.json` 锁定源码与许可，通过 `native/JavaScript` 薄 C ABI 构建；该例外不放宽脚本包的 native/WASM 策略。其他 native/WASM 仍拒绝，不全局放行二进制或在打包中安装／修锁。
 - 长期测试验证现行行为与契约；删除／重构后的旧实现及引用清理检查只做当次验证，通过后移除，不堆入长期测试。功能、安全、取消与资源释放等有效回归保留。
 - 编译成功、测试替身和真实业务验证分别记录，不互相冒充；不为刷绿删除有效断言、隐藏失败或用空测试集代替验证。
 - 外部脚本由 `scripts/accept-sources.mjs` 按实际声明动作验收；未归因、宿主缺失能力、资源超限或清理失败不能因初始化成功而放行。报告只保留脱敏结构和固定分类，见 `docs/runtime/source-acceptance.md`。

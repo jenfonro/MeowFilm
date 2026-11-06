@@ -14,8 +14,6 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     private readonly MusicCapability module;
     private readonly RadioButton[] anchors;
     private readonly Border[] sections;
-    private readonly StackPanel areaTabs;
-    private string area = "music";
     private string searchAdvancedKind = "songs";
     private bool updatingNavigation;
 
@@ -29,18 +27,6 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
             [new(new Point(target.Width - popup.Width, target.Height + 4), PopupPrimaryAxis.Horizontal)];
         anchors = SettingsNavigation.Children.OfType<RadioButton>().ToArray();
         sections = [AccountsSection, SearchSection, QualitySection, CacheSection, AppearanceSection, MetadataSection];
-        // The anchor underline reserves 4 DIP below its text; offset it to centre the labels on the heading.
-        areaTabs = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 4, 0, 0) };
-        // The tabs live in the shell header, outside this view's resource scope.
-        areaTabs.Resources.MergedDictionaries.Add(Resources.MergedDictionaries[0]);
-        AutomationProperties.SetName(areaTabs, "设置类别");
-        var anchor = (Style)FindResource("Settings.Anchor");
-        foreach (var (key, name) in new[] { ("music", "音乐"), ("video", "影视"), ("books", "小说") })
-        {
-            var tab = new RadioButton { Content = name, Tag = key, GroupName = "SettingsArea", Style = anchor, IsChecked = key == area };
-            tab.Checked += Area_Checked;
-            areaTabs.Children.Add(tab);
-        }
         Loaded += View_Loaded;
         Unloaded += View_Unloaded;
         IsVisibleChanged += async (_, _) =>
@@ -50,7 +36,7 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         };
     }
 
-    public MeowFilm.Desktop.DesktopHeaderContribution Header => new("设置", SearchVisible: false, SearchEnabled: false, Slot: areaTabs);
+    public MeowFilm.Desktop.DesktopHeaderContribution Header => new("设置", SearchVisible: false, SearchEnabled: false);
     public event EventHandler? HeaderChanged { add { } remove { } }
 
     private async void View_Loaded(object sender, RoutedEventArgs e)
@@ -63,16 +49,8 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         AccountsPanel.CloseTransientPopups();
         await module.DeactivateSettingsAsync();
     }
-    private Task UpdateActivation() => IsLoaded && IsVisible && area == "music"
+    private Task UpdateActivation() => IsLoaded && IsVisible
         ? module.ActivateSettingsAsync() : module.DeactivateSettingsAsync();
-    private async void Area_Checked(object sender, RoutedEventArgs e)
-    {
-        if (sender is not RadioButton { Tag: string key } || key == area) return;
-        area = key;
-        AccountsPanel.CloseTransientPopups();
-        MusicContent.Visibility = area == "music" ? Visibility.Visible : Visibility.Collapsed;
-        if (IsLoaded) await UpdateActivation();
-    }
     private void View_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         AccountsPanel?.CloseTransientPopups();
@@ -186,7 +164,7 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     }
     private async void CatalogSource_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded || !IsVisible || area != "music" ||
+        if (!IsLoaded || !IsVisible ||
             sender is not ComboBox { SelectedValue: string platform } picker ||
             platform == module.CatalogSourcePlatform) return;
         await module.SetCatalogSourceAsync(platform);
@@ -194,7 +172,7 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     }
     private async void CatalogSourceRetry_Click(object sender, RoutedEventArgs e)
     {
-        if (IsLoaded && IsVisible && area == "music") await module.ReadCatalogSourceSettingsAsync();
+        if (IsLoaded && IsVisible) await module.ReadCatalogSourceSettingsAsync();
     }
     private async void Appearance_Changed(object sender, SelectionChangedEventArgs e)
     {
