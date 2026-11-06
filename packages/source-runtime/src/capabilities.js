@@ -2,7 +2,7 @@ import {
   sourceFault, sourceObject, sourceRequire, sourceSafeError,
 } from './errors.js';
 
-export const hostApiVersion = 1;
+export const hostApiVersion = 2;
 
 const names = new Set([
   'http.request',
@@ -88,25 +88,50 @@ function requestHeaders(value = {}) {
   return result;
 }
 
-function base64(value, maximumBytes, code = 'INVALID_ARGUMENT') {
-  if (value === null || value === undefined || value === '') return '';
-  sourceRequire(typeof value === 'string' &&
-    value.length <= Math.ceil(maximumBytes / 3) * 4 + 4, code);
-  let bytes;
-  try { bytes = base64ToBytes(value); }
-  catch { throw sourceFault(code); }
-  sourceRequire(bytes.length <= maximumBytes && bytesToBase64(bytes) === value, code);
-  return value;
+function bytes(value, code = 'INVALID_ARGUMENT') {
+  sourceRequire(value instanceof Uint8Array, code);
+  return new Uint8Array(value);
 }
 
-function jsonClone(value, maximumBytes, code = 'INVALID_ARGUMENT') {
-  let json;
-  try { json = JSON.stringify(value); }
-  catch { throw sourceFault(code); }
-  sourceRequire(typeof json === 'string' &&
-    new TextEncoder().encode(json).length <= maximumBytes, code);
-  try { return JSON.parse(json); }
-  catch { throw sourceFault(code); }
+function jsonClone(value, code = 'INVALID_ARGUMENT') {
+  const ancestors = new Set(), frames = [];
+  const visit = (input, depth) => {
+    sourceRequire(depth <= 64, code);
+    if (input === null || typeof input === 'boolean') return input;
+    if (typeof input === 'string') {
+      sourceRequire(input.isWellFormed(), code);
+      return input;
+    }
+    if (typeof input === 'number') {
+      sourceRequire(Number.isFinite(input) && (!Number.isInteger(input) || Number.isSafeInteger(input)), code);
+      return input;
+    }
+    sourceRequire(input && typeof input === 'object' && !ArrayBuffer.isView(input) &&
+      !(input instanceof ArrayBuffer) && !ancestors.has(input), code);
+    ancestors.add(input);
+    const array = Array.isArray(input);
+    const output = array ? new Array(input.length) : {};
+    frames.push({ input, output, array, depth, index: 0,
+      entries: array ? null : Object.entries(input), length: array ? input.length : 0 });
+    return output;
+  };
+  const output = visit(value, 0);
+  while (frames.length) {
+    const frame = frames[frames.length - 1];
+    if (frame.index === (frame.array ? frame.length : frame.entries.length)) {
+      ancestors.delete(frame.input);
+      frames.pop();
+      continue;
+    }
+    const index = frame.index++;
+    if (frame.array && !(index in frame.input)) continue;
+    const [key, child] = frame.array ? [index, frame.input[index]] : frame.entries[index];
+    if (!frame.array) sourceRequire(key.isWellFormed(), code);
+    Object.defineProperty(frame.output, key, {
+      value: visit(child, frame.depth + 1), enumerable: true, configurable: true, writable: true,
+    });
+  }
+  return output;
 }
 
 function fields(value, allowed, required = allowed, code = 'INVALID_ARGUMENT') {
@@ -116,7 +141,7 @@ function fields(value, allowed, required = allowed, code = 'INVALID_ARGUMENT') {
   return value;
 }
 
-function validateHttp(input, maximumBytes) {
+function validateHttp(input) {
   fields(input, [
     'version', 'url', 'method', 'headers', 'body', 'timeoutMs', 'redirects', 'cookieProfile',
   ], ['version', 'url']);
@@ -133,14 +158,14 @@ function validateHttp(input, maximumBytes) {
     url: httpUrl(input.url),
     method,
     headers: requestHeaders(input.headers),
-    body: base64(input.body, maximumBytes),
+    body: bytes(input.body ?? new Uint8Array()),
     timeoutMs,
     redirects,
     cookieProfile: input.cookieProfile === undefined ? '' : profile(input.cookieProfile),
   };
 }
 
-function validateHttpResult(value, maximumBytes) {
+function validateHttpResult(value) {
   fields(value, [
     'version', 'status', 'statusText', 'headers', 'url', 'body',
   ], ['version', 'status', 'url', 'body'], 'INVALID_RESPONSE');
@@ -152,13 +177,13 @@ function validateHttpResult(value, maximumBytes) {
     statusText: typeof value.statusText === 'string' ? value.statusText.slice(0, 256) : '',
     headers: headers(value.headers, 'INVALID_RESPONSE'),
     url: httpUrl(value.url, 'INVALID_RESPONSE'),
-    body: base64(value.body, maximumBytes, 'INVALID_RESPONSE'),
+    body: bytes(value.body, 'INVALID_RESPONSE'),
   };
 }
 
-function validateInput(name, input, maximumBytes) {
+function validateInput(name, input) {
   switch (name) {
-    case 'http.request': return validateHttp(input, maximumBytes);
+    case 'http.request': return validateHttp(input);
     case 'cookie.get':
     case 'cookie.clear':
       fields(input, ['version', 'profile', 'url']);
@@ -188,13 +213,12 @@ function validateInput(name, input, maximumBytes) {
       sourceRequire(input.version === hostApiVersion);
       return {
         version: hostApiVersion, profile: profile(input.profile),
-        key: text(input.key, 256), value: jsonClone(input.value, maximumBytes),
+        key: text(input.key, 256), value: jsonClone(input.value),
       };
     case 'encoding.encode':
       fields(input, ['version', 'encoding', 'text']);
       sourceRequire(input.version === hostApiVersion &&
-        typeof input.text === 'string' &&
-        new TextEncoder().encode(input.text).length <= maximumBytes);
+        typeof input.text === 'string');
       return {
         version: hostApiVersion, encoding: text(input.encoding, 64).toLowerCase(),
         text: input.text,
@@ -204,7 +228,7 @@ function validateInput(name, input, maximumBytes) {
       sourceRequire(input.version === hostApiVersion);
       return {
         version: hostApiVersion, encoding: text(input.encoding, 64).toLowerCase(),
-        body: base64(input.body, maximumBytes),
+        body: bytes(input.body ?? new Uint8Array()),
       };
     case 'crypto.digest':
       fields(input, ['version', 'algorithm', 'data']);
@@ -212,7 +236,7 @@ function validateInput(name, input, maximumBytes) {
         ['md5', 'sha1', 'sha256', 'sha512'].includes(input.algorithm));
       return {
         version: hostApiVersion, algorithm: input.algorithm,
-        data: base64(input.data, maximumBytes),
+        data: bytes(input.data),
       };
     case 'crypto.hmac':
       fields(input, ['version', 'algorithm', 'key', 'data']);
@@ -220,7 +244,7 @@ function validateInput(name, input, maximumBytes) {
         ['md5', 'sha1', 'sha256', 'sha512'].includes(input.algorithm));
       return {
         version: hostApiVersion, algorithm: input.algorithm,
-        key: base64(input.key, 4096), data: base64(input.data, maximumBytes),
+        key: bytes(input.key), data: bytes(input.data),
       };
     case 'crypto.aes':
       fields(input, ['version', 'operation', 'algorithm', 'key', 'iv', 'data'],
@@ -229,23 +253,22 @@ function validateInput(name, input, maximumBytes) {
         ['encrypt', 'decrypt'].includes(input.operation) &&
         /^aes-(128|192|256)-(cbc|ecb)$/.test(input.algorithm));
       {
-        const key = base64(input.key, 32);
-        const iv = base64(input.iv ?? '', 16);
+        const key = bytes(input.key);
+        const iv = bytes(input.iv ?? new Uint8Array());
         const bits = Number(/^aes-(128|192|256)-/.exec(input.algorithm)[1]);
-        sourceRequire(base64ToBytes(key).length === bits / 8);
+        sourceRequire(key.length === bits / 8);
         sourceRequire(input.algorithm.endsWith('-ecb')
-          ? iv === '' : base64ToBytes(iv).length === 16);
+          ? iv.length === 0 : iv.length === 16);
         return {
           version: hostApiVersion, operation: input.operation, algorithm: input.algorithm,
           key, iv,
-          data: base64(input.data, maximumBytes),
+          data: bytes(input.data),
         };
       }
     case 'crypto.random':
       fields(input, ['version', 'length']);
       sourceRequire(input.version === hostApiVersion &&
-        Number.isSafeInteger(input.length) && input.length >= 0 &&
-        input.length <= maximumBytes);
+        Number.isSafeInteger(input.length) && input.length >= 0);
       return { version: hostApiVersion, length: input.length };
     case 'web.interact':
       fields(input, ['version', 'profile', 'mode', 'request']);
@@ -254,7 +277,7 @@ function validateInput(name, input, maximumBytes) {
         version: hostApiVersion,
         profile: profile(input.profile),
         mode: text(input.mode, 64),
-        request: jsonClone(sourceObject(input.request), maximumBytes),
+        request: jsonClone(sourceObject(input.request)),
       };
     case 'virtual.register':
       fields(input, ['version', 'profile', 'route', 'metadata'],
@@ -262,7 +285,7 @@ function validateInput(name, input, maximumBytes) {
       sourceRequire(input.version === hostApiVersion);
       return {
         version: hostApiVersion, profile: profile(input.profile),
-        route: route(input.route), metadata: jsonClone(input.metadata ?? {}, maximumBytes),
+        route: route(input.route), metadata: jsonClone(input.metadata ?? {}),
       };
     case 'virtual.unregister':
       fields(input, ['version', 'profile', 'route']);
@@ -274,31 +297,20 @@ function validateInput(name, input, maximumBytes) {
   }
 }
 
-function validateResult(name, value, maximumBytes, input) {
-  if (name === 'http.request') return validateHttpResult(value, maximumBytes);
-  if (name === 'encoding.encode') return base64(value, maximumBytes);
-  if (name === 'encoding.decode') {
-    sourceRequire(typeof value === 'string' && value.length <= maximumBytes * 2, 'INVALID_RESPONSE');
+function validateResult(name, value) {
+  if (name === 'http.request') return validateHttpResult(value);
+  if (name === 'encoding.encode' || name.startsWith('crypto.')) {
+    return bytes(value, 'INVALID_RESPONSE');
+  }
+  if (name === 'encoding.decode' || name === 'cookie.get') {
+    sourceRequire(typeof value === 'string', 'INVALID_RESPONSE');
     return value;
   }
-  if (name.startsWith('crypto.')) {
-    const limit = name === 'crypto.aes' && input.operation === 'encrypt'
-      ? maximumBytes + 16 : maximumBytes;
-    return base64(value, limit, 'INVALID_RESPONSE');
-  }
-  if (name === 'cookie.get') {
-    sourceRequire(typeof value === 'string' && value.length <= maximumBytes, 'INVALID_RESPONSE');
-    return value;
-  }
-  return jsonClone(value, maximumBytes, 'INVALID_RESPONSE');
+  return jsonClone(value, 'INVALID_RESPONSE');
 }
 
-export function createCapabilityClient({
-  invoke,
-  maximumBytes = 8 * 1024 * 1024,
-} = {}) {
+export function createCapabilityClient({ invoke } = {}) {
   sourceRequire(typeof invoke === 'function');
-  sourceRequire(Number.isSafeInteger(maximumBytes) && maximumBytes > 0);
   return Object.freeze({
     version: hostApiVersion,
     names: Object.freeze([...names]),
@@ -306,11 +318,11 @@ export function createCapabilityClient({
       sourceRequire(names.has(name), 'CAPABILITY_UNAVAILABLE');
       sourceRequire(context.signal === undefined || context.signal instanceof AbortSignal);
       if (context.signal?.aborted) throw sourceFault('CANCELLED');
-      const captured = validateInput(name, input, maximumBytes);
+      const captured = validateInput(name, input);
       try {
         const result = await invoke(name, captured, context);
         if (context.signal?.aborted) throw sourceFault('CANCELLED');
-        return validateResult(name, result, maximumBytes, captured);
+        return validateResult(name, result);
       } catch (error) {
         throw sourceSafeError(error, name === 'http.request' ? 'NETWORK_ERROR' : 'CAPABILITY_UNAVAILABLE');
       }
@@ -356,7 +368,7 @@ export function base64ToBytes(value) {
 }
 
 export async function decodeHttpBody(response, capabilities, encoding = 'utf-8', context = {}) {
-  const bytes = base64ToBytes(response.body);
+  const bytes = response.body;
   const label = String(encoding || 'utf-8').trim().toLowerCase();
   try { return new TextDecoder(label, { fatal: false }).decode(bytes); }
   catch {
@@ -369,7 +381,7 @@ export async function decodeHttpBody(response, capabilities, encoding = 'utf-8',
 export async function encodeText(value, capabilities, encoding = 'utf-8', context = {}) {
   const label = String(encoding || 'utf-8').trim().toLowerCase();
   if (['utf-8', 'utf8'].includes(label)) return new TextEncoder().encode(String(value));
-  return base64ToBytes(await capabilities.call('encoding.encode', {
+  return capabilities.call('encoding.encode', {
     version: hostApiVersion, encoding: label, text: String(value),
-  }, context));
+  }, context);
 }

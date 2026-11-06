@@ -164,14 +164,14 @@ test('follow_max above the shared redirect ceiling is truncated instead of rejec
   assert.equal(contacts, 1);
 });
 
-test('compressed response limit applies after real gzip inflation', async t => {
+test('compressed response returns the complete body after real gzip inflation', async t => {
   const server = await serverFor(t, (_req, res) => {
     res.setHeader('Content-Encoding', 'gzip');
     res.end(gzipSync('x'.repeat(4096)));
   });
   const host = await networkHost(t, [server],
-    `async () => ${requestExpression(server.origin)}`, { maxResponseBytes: 256 });
-  await assert.rejects(host.invoke(target()), { code: 'RESOURCE_LIMIT' });
+    `async () => (await ${requestExpression(server.origin)}).body`);
+  assert.equal(await host.invoke(target()), 'x'.repeat(4096));
 });
 
 test('decoded gzip response headers describe the decoded bytes', async t => {
@@ -201,11 +201,12 @@ test('corrupt compressed upstream data is a network failure, not a memory limit'
   await assert.rejects(host.invoke(target()), { code: 'NETWORK_ERROR' });
 });
 
-test('stream response size is bounded before full buffering', async t => {
+test('complete-response API retains every received binary byte', async t => {
   const server = await serverFor(t, (_req, res) => res.end(Buffer.alloc(2048)));
   const host = await networkHost(t, [server],
-    `async () => ${requestExpression(server.origin)}`, { maxResponseBytes: 128 });
-  await assert.rejects(host.invoke(target()), { code: 'RESOURCE_LIMIT' });
+    `async () => { const response = await ${requestExpression(server.origin)};
+      return {length: response.raw.length, first: response.raw[0], last: response.raw[response.raw.length - 1]}; }`);
+  assert.deepEqual(await host.invoke(target()), {length: 2048, first: 0, last: 0});
 });
 
 test('explicit LX abort physically closes a session-owned real HTTP request socket', async t => {

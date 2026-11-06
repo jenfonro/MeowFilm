@@ -1,5 +1,4 @@
 import { Worker } from 'node:worker_threads';
-import { prepareQuickJSModule } from './quickjs-module.js';
 import { clone, deferred, fault, requireValue, safeError, ScriptHostError } from './errors.js';
 import { cancel, errorFromResponse, event, request, response, validateMessage } from './worker-protocol.js';
 
@@ -23,7 +22,6 @@ export class WorkerSession {
     this.alert = null;
     this.catSnapshot = null;
     this.failure = null;
-    this.memoryLimitExceeded = false;
     this.cleanupError = null;
     this.statsSnapshot = { live: true, timers: 0, networkRequests: 0, invocations: 0,
       pendingAdapterTasks: 0 };
@@ -48,13 +46,9 @@ export class WorkerSession {
 
   async start() {
     this.#rejectStoppedStart();
-    const module = await prepareQuickJSModule();
-    this.#rejectStoppedStart();
+    requireValue(this.input.protocol === 'cat', 'UNSUPPORTED_PROTOCOL');
     const worker = new Worker(new URL('./worker-entry.js', import.meta.url), {
-      workerData: {
-        wasmModule: module,
-        protocol: this.input.protocol ?? 'lx',
-      },
+      workerData: { protocol: 'cat' },
       stdout: false,
       stderr: false,
     });
@@ -70,9 +64,8 @@ export class WorkerSession {
         generation: this.generation,
         revision: this.revision,
         limits: this.limits,
-        protocol: this.input.protocol ?? 'lx',
+        protocol: 'cat',
         network: typeof this.input.network === 'function',
-        storage: Boolean(this.input.storage),
         observeScriptErrors: typeof this.input.onScriptError === 'function',
         ...this.startParams,
       };
@@ -281,6 +274,10 @@ export class WorkerSession {
           ? signal.reason : fault('CANCELLED');
         if (requestSent) this.#sendSafely(cancel(id, safeError(error, 'CANCELLED').code));
         pending.settle(error);
+        // A blocked Worker cannot receive cancel. Retiring the caller's wait
+        // must not also remove the only path to its actual execution cleanup.
+        if (requestSent && phase && this.live && !this.stopRequested)
+          this.#probeAfterInterruption(phase, error).catch(() => {});
       };
       signal.addEventListener('abort', abort, { once: true });
       pending.cleanup = () => signal.removeEventListener('abort', abort);
@@ -295,7 +292,7 @@ export class WorkerSession {
       this.#sendSafely(cancel(id, 'TIMEOUT'));
       pending.detach(error);
       if (phase) {
-        const probe = this.#probeAfterTimeout(phase);
+        const probe = this.#probeAfterInterruption(phase, error);
         if (awaitProbe) {
           const finish = () => pending.settle(error);
           probe.then(finish, finish);
@@ -315,13 +312,13 @@ export class WorkerSession {
     return entry.promise;
   }
 
-  async #probeAfterTimeout(phase) {
+  async #probeAfterInterruption(phase, reason) {
     if (!this.worker) return;
     const id = this.nextId++;
     const { entry, pending } = this.#pendingEntry(id, null);
     const timer = setTimeout(() => {
       if (pending.settled) return;
-      Promise.resolve(this.#unresponsive(fault('TIMEOUT'), phase)).then(
+      Promise.resolve(this.#unresponsive(reason, phase)).then(
         () => pending.settle(null),
         error => pending.settle(safeError(error)),
       );
@@ -415,7 +412,7 @@ export class WorkerSession {
     if (!pending || pending.settled) return;
     // A worker answer (including an HTTP error response) completes the wait;
     // it is not a caller cancellation. Worker-owned transport failures still
-    // cancel their adapters explicitly, while storage always loses its lease.
+    // cancel their adapters explicitly.
     pending.detach();
     if (message.ok) pending.settle(null, message.value);
     else pending.settle(errorFromResponse(message));
@@ -450,8 +447,6 @@ export class WorkerSession {
         break;
       case 'failure':
         this.failure = fault(value.code);
-        this.memoryLimitExceeded = Boolean(value.memoryLimitExceeded);
-        if (this.memoryLimitExceeded) this.failure.memoryLimitExceeded = true;
         this.live = false;
         this.stopRequested = true;
         this.lifecycle.abort(this.failure);
@@ -498,12 +493,6 @@ export class WorkerSession {
   }
 
   #adapter(message) {
-    if (message.method === 'capability' && this.input.protocol === 'source' &&
-        this.worker && !this.#termination &&
-        (this.live && !this.stopRequested || message.params?.name === 'virtual.unregister')) {
-      this.#trackAdapter(this.#capability(message));
-      return;
-    }
     if (!this.worker || this.stopRequested || !this.live || this.#termination) {
       this.#sendSafely({ version: 1, kind: 'response', id: message.id, ok: false,
         code: 'STALE_SESSION' });
@@ -513,9 +502,6 @@ export class WorkerSession {
       this.#trackAdapter(this.#network(message));
       return;
     }
-    if (message.method?.startsWith('storage.')) {
-      this.#trackAdapter(this.#storage(message));
-    }
   }
 
   #trackAdapter(task) {
@@ -523,31 +509,6 @@ export class WorkerSession {
     const settled = () => this.adapterTasks.delete(task);
     Promise.resolve(task).then(settled, settled).catch(() => {});
     return task;
-  }
-
-  async #capability(message) {
-    const params = message.params ?? {};
-    const controller = new AbortController();
-    this.adapters.set(message.id, { controller });
-    try {
-      const context = clone(params.context ?? {});
-      const scope = context.scope;
-      requireValue(scope?.installationId === this.installationId &&
-        scope.generation === this.generation &&
-        scope.protocol === this.revision.protocol && scope.siteId === 'source',
-      'PERMISSION_DENIED');
-      requireValue(typeof this.input.capabilitiesClient?.call === 'function',
-        'CAPABILITY_UNAVAILABLE');
-      const result = await this.input.capabilitiesClient.call(params.name, clone(params.input), {
-        ...context, signal: controller.signal,
-      });
-      this.#sendSafely(response(message.id, clone(result ?? null)));
-    } catch (error) {
-      this.#sendSafely({ version: 1, kind: 'response', id: message.id, ok: false,
-        code: safeError(error, 'CAPABILITY_UNAVAILABLE').code });
-    } finally {
-      this.adapters.delete(message.id);
-    }
   }
 
   async #network(message) {
@@ -572,39 +533,11 @@ export class WorkerSession {
             : new TextEncoder().encode(String(result.body)).buffer;
       this.#sendSafely(response(message.id, {
         statusCode: result?.statusCode, statusMessage: result?.statusMessage,
-        headers: result?.headers, url: result?.url,
-      }, [body]), [body]);
+        headers: result?.headers, url: result?.url, body,
+      }), [body]);
     } catch (error) {
       this.#sendSafely({ version: 1, kind: 'response', id: message.id, ok: false,
         code: safeError(error, 'NETWORK_ERROR').code });
-    } finally {
-      this.adapters.delete(message.id);
-    }
-  }
-
-  async #storage(message) {
-    const operation = message.method.slice('storage.'.length);
-    const params = message.params ?? {};
-    const lease = this.leases.get(params.associationId);
-    const controller = new AbortController();
-    this.adapters.set(message.id, { controller, associationId: params.associationId });
-    try {
-      if (!lease?.active || !this.live) throw fault('STALE_SESSION');
-      const storage = this.input.storage;
-      const adapter = storage?.[operation];
-      if (typeof adapter !== 'function') throw fault('PERMISSION_DENIED');
-      const input = {
-        installationId: this.installationId, generation: this.generation,
-        siteId: params.siteId, requestId: params.requestId, key: params.key,
-        signal: controller.signal,
-        isCurrent: () => this.live && lease.active && !controller.signal.aborted,
-      };
-      if (operation === 'set') input.value = clone(params.value);
-      this.#sendSafely(response(message.id,
-        clone(await Reflect.apply(adapter, storage, [input]) ?? null)));
-    } catch (error) {
-      this.#sendSafely({ version: 1, kind: 'response', id: message.id, ok: false,
-        code: safeError(error, 'STORAGE_ERROR').code });
     } finally {
       this.adapters.delete(message.id);
     }
@@ -626,8 +559,7 @@ export class WorkerSession {
       this.leases.delete(associationId);
       for (const adapter of this.adapters.values()) {
         if (adapter.associationId !== associationId) continue;
-        // Storage privileges always expire with the call. A normally returned
-        // Cat call must not abort a still-running script network operation;
+        // A normally returned Cat call must not abort a still-running network operation;
         // explicit cancellation retains the pending transport fence.
         if (adapter.network && !reason) adapter.associationId = undefined;
         else adapter.controller.abort(reason ?? fault('STALE_SESSION'));
@@ -704,11 +636,14 @@ export class WorkerSession {
   }
 
   #retireStats() {
-    this.statsSnapshot = { ...this.statsSnapshot, timers: 0, networkRequests: 0,
+    const snapshot = this.statsSnapshot;
+    this.statsSnapshot = { ...snapshot, timers: 0, networkRequests: 0,
       invocations: 0, pendingAdapterTasks: 0,
-      ...(Object.hasOwn(this.statsSnapshot, 'listeners') ? { listeners: 0 } : {}),
-      ...(Object.hasOwn(this.statsSnapshot, 'nativeHandles') ? { nativeHandles: 0 } : {}),
       live: false };
+    delete this.statsSnapshot.memory;
+    for (const name of ['listeners', 'sockets', 'streams', 'webResources', 'descriptors']) {
+      if (Object.hasOwn(snapshot, name)) this.statsSnapshot[name] = 0;
+    }
   }
 
   async #waitForExit(worker, timeoutMs) {

@@ -1,12 +1,10 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { LXSession } from './lx-session.js';
 import { CatSession } from './cat-session.js';
 import { ownedExtension } from './cat-output.js';
 import { cancel, event, failure, request, response, validateMessage } from './worker-protocol.js';
 import { clone, fault, safeError } from './errors.js';
 
-const PortableSourceSession = workerData.protocol === 'source'
-  ? (await import('./portable-source-session.js')).PortableSourceSession : null;
+if (workerData.protocol !== 'cat') throw fault('UNSUPPORTED_PROTOCOL');
 const sessions = new Map();
 let nextAdapterId = 1;
 const adapterPending = new Map();
@@ -58,25 +56,6 @@ function networkAdapter(input) {
   }, signal);
 }
 
-function storageAdapter(operation, input) {
-  if (!input.signal) throw fault('PERMISSION_DENIED');
-  return adapterCall('storage.' + operation, {
-    associationId: input.associationId,
-    installationId: input.installationId,
-    generation: input.generation,
-    siteId: input.siteId,
-    requestId: input.requestId,
-    key: input.key,
-    ...(operation === 'set' ? { value: clone(input.value) } : {}),
-  }, input.signal);
-}
-
-function sourceCapability(name, input, context = {}) {
-  const { signal, ...details } = context;
-  if (!signal) throw fault('PERMISSION_DENIED');
-  return adapterCall('capability', { name, input: clone(input), context: clone(details) }, signal);
-}
-
 function makeCancellable(message, start) {
   const controller = new AbortController();
   const entry = { controller, detach: () => cancellableRequests.delete(message.id) };
@@ -113,56 +92,35 @@ function applySettingsSnapshot(value) {
 }
 
 function createSession(spec) {
-  const Session = PortableSourceSession
-    ? PortableSourceSession
-    : spec.protocol === 'cat' ? CatSession : LXSession;
-  const { dataRoot, settings, aggregate, protocol, network, storage,
-    observeScriptErrors, sourceMetadata, ...input } = spec;
-  const constructor = Session === CatSession
-    ? { ...input, dataRoot, settings, aggregate }
-    : input;
+  const { dataRoot, settings, aggregate, protocol, network,
+    observeScriptErrors, ...input } = spec;
   let session;
-  session = new Session({
-    ...constructor,
-    wasmModule: workerData.wasmModule,
-    ...(Session === PortableSourceSession ? {
-      capabilities: { version: 1, call: sourceCapability },
-      metadata: sourceMetadata,
-    } : {}),
+  session = new CatSession({
+    ...input, dataRoot, settings, aggregate,
     network: spec.network ? networkAdapter : undefined,
-    storage: spec.storage ? {
-      get: input => storageAdapter('get', input),
-      set: input => storageAdapter('set', input),
-      delete: input => storageAdapter('delete', input),
-    } : undefined,
     onDiagnostic: value => emit('diagnostic', sessionEvent(session, value)),
     onScriptError: spec.observeScriptErrors
       ? value => emit('scriptError', sessionEvent(session, value)) : undefined,
-    ...(Session === CatSession ? {
-      onNetwork: value => emit('network', sessionEvent(session, value)),
-      onEndpointsChanged: () => {
-        if (!session.live) return;
-        emit('endpoints', catEvent(session));
-      },
-      onActivate: () => {
-        if (!session.live) return;
-        emit('activated', catEvent(session));
-      },
-      onStop: () => {
-        emit('stopped', { installationId: session.installationId,
-          generation: session.generation });
-      },
-    } : {}),
+    onNetwork: value => emit('network', sessionEvent(session, value)),
+    onEndpointsChanged: () => {
+      if (!session.live) return;
+      emit('endpoints', catEvent(session));
+    },
+    onActivate: () => {
+      if (!session.live) return;
+      emit('activated', catEvent(session));
+    },
+    onStop: () => {
+      emit('stopped', { installationId: session.installationId,
+        generation: session.generation });
+    },
     onFailure: (value, state) => emit('failure', sessionEvent(session, {
       code: safeError(value).code,
-      memoryLimitExceeded: Boolean(value?.memoryLimitExceeded),
       phase: state?.ready ? 'running' : 'initialization',
     })),
   });
-  if (Session === CatSession) {
-    if (latestSettings !== undefined) session.applySettings?.(clone(latestSettings));
-    if (latestAggregate !== undefined) session.applyAggregate?.(clone(latestAggregate));
-  }
+  if (latestSettings !== undefined) session.applySettings?.(clone(latestSettings));
+  if (latestAggregate !== undefined) session.applyAggregate?.(clone(latestAggregate));
   sessions.set(spec.installationId, session);
   if (typeof session.send === 'function') {
     const originalSend = session.send.bind(session);
@@ -184,7 +142,7 @@ async function startSession(session, spec = {}, signal = null) {
   };
   signal?.addEventListener('abort', abort, { once: true });
   try {
-    await (spec.protocol === 'cat' ? session.start(spec) : session.start());
+    await session.start(spec);
   } finally {
     try { signal?.removeEventListener('abort', abort); } catch {}
   }
@@ -193,10 +151,8 @@ async function startSession(session, spec = {}, signal = null) {
   }));
   const value = { live: session.live, capabilities: session.capabilities, alert: session.alert,
     stats: session.stats() };
-  if (spec.protocol === 'cat') {
-    value.cat = { ...session.endpointSnapshot(),
-      config: session.config, configOrigin: session.configOrigin };
-  }
+  value.cat = { ...session.endpointSnapshot(),
+    config: session.config, configOrigin: session.configOrigin };
   return value;
 }
 
@@ -231,7 +187,7 @@ parentPort.on('message', raw => {
     adapterPending.delete(message.id);
     entry.signal?.removeEventListener('abort', entry.abort);
     if (message.ok) {
-      const body = message.frames?.[0];
+      const body = message.value?.body;
       if (entry.network) {
         entry.resolve({ ...message.value, ...(body ? { body: Buffer.from(body) } : {}) });
       } else {
@@ -260,8 +216,7 @@ parentPort.on('message', raw => {
         const associationId = message.params.options.associationId;
         return makeCancellable(message, signal => session.invoke(message.params.request, {
           ...message.params.options, signal, associationId,
-        })).then(value => session instanceof CatSession
-          ? catResult(value, session.takeNewProxies()) : value)
+        })).then(value => catResult(value, session.takeNewProxies()))
           .finally(() => emit('stats', sessionEvent(session, session.stats())));
       }
       case 'management.detect':

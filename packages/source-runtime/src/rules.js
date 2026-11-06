@@ -471,7 +471,7 @@ async function singleRule(rule, content, context) {
     return queryJson(json, path);
   }
   const root = isDomNode(content)
-    ? content : parseMarkup(toText(content), context.maximumNodes);
+    ? content : parseMarkup(toText(content), context.maximumNodes, context.maximumParseBytes);
   return queryDom(root, expanded);
 }
 
@@ -489,7 +489,7 @@ function singleStaticRule(rule, content, context) {
     return queryJson(json, path);
   }
   const root = isDomNode(content)
-    ? content : parseMarkup(toText(content), context.maximumNodes);
+    ? content : parseMarkup(toText(content), context.maximumNodes, context.maximumParseBytes);
   return queryDom(root, expanded);
 }
 
@@ -597,14 +597,14 @@ export async function readRuleString(rule, content, context = {}, { url = false,
   return result;
 }
 
-export function normalizeBook(book, source = {}, maximumNodes) {
+export function normalizeBook(book, source = {}, maximumNodes, maximumParseBytes) {
   sourceObject(book);
   return {
     name: toText(book.name).replace(/[《》]/g, '').trim(),
     author: toText(book.author).replace(/^作者[:：\s]*/, '').trim(),
     kind: toText(book.kind),
     coverUrl: toText(book.coverUrl),
-    intro: htmlToText(book.intro, maximumNodes),
+    intro: htmlToText(book.intro, maximumNodes, maximumParseBytes),
     bookUrl: toText(book.bookUrl || book.url),
     tocUrl: toText(book.tocUrl || book.bookUrl || book.url),
     wordCount: toText(book.wordCount),

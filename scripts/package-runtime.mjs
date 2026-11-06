@@ -13,38 +13,25 @@ const PRODUCTS = Object.freeze({
 const MODULE_FILES = Object.freeze({
   music: 'modules/music-script.mjs', cat: 'modules/cat-script.mjs', source: 'modules/source-runtime.mjs',
 });
-// The unmodified release-sync asm.js engine has no task-context hook, which
-// portable sources require; the iOS assembly therefore omits that module.
-const PROFILE_MODULES = Object.freeze({
-  'windows-native': ['music', 'cat', 'source'],
-  'ios-embedded': ['music', 'cat'],
-});
 const MANIFEST = 'runtime-manifest.json';
 const SHARED_SOURCE = 'apps/runtime';
-const SHARED_FILES = ['bootstrap.mjs', ...Object.values(MODULE_FILES)];
+const SHARED_FILES = ['bootstrap.mjs', 'entry.mjs', 'client.mjs', 'contracts.mjs',
+  'modules/source-candidates.mjs', ...Object.values(MODULE_FILES)];
 const SHARED_IMPORTS = new Set([
-  'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
+  'node:buffer', 'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
 ]);
-const ENGINE_POLICY = 'scripts/quickjs-runtime.json';
-const ENGINE_VERSION = '0.32.0';
-const ENGINE_SOURCE = 'https://github.com/justjake/quickjs-emscripten';
-const ENGINE_GIT_HEAD = 'df4efb9ef2cb25c417ecb57986da462d11b244ed';
-const ENGINE_ARCHIVE_SHA256 = 'b6f342ad8e18bcff29ab4e78467d6e33c53c9e1a47986e58b91a1462beb31a8e';
-const ENGINE_PATCH = 'scripts/quickjs/task-context.patch';
-const ENGINE_BUILD = 'scripts/quickjs/build.py';
-const ENGINE_LOCAL_LOADER = 'packages/script-host/src/quickjs/emscripten-module.mjs';
-const ENGINE_LOCAL_WASM = 'packages/script-host/src/quickjs/emscripten-module.wasm';
-const WASM_MAGIC = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
-const ENGINE_WASM_PACKAGE = '@jitl/quickjs-wasmfile-release-sync';
-const ENGINE_ASMJS_PACKAGE = '@jitl/quickjs-asmjs-mjs-release-sync';
-const PROFILE_ENGINES = Object.freeze({
-  'windows-native': ENGINE_WASM_PACKAGE,
-  'ios-embedded': ENGINE_ASMJS_PACKAGE,
+const NATIVE_POLICY = 'scripts/quickjs-native.json';
+const NATIVE_ARTIFACT = 'packages/script-host/build/Release/script_host_native.node';
+const NATIVE_RECEIPT = 'packages/script-host/build/Release/script-host-native.json';
+const SOURCE_SDK = 'packages/script-host/build/Release/source-sdk.js';
+const NATIVE_SOURCES = Object.freeze({
+  quickjs: { version: '0.14.0', commit: '3c051980ab7e783dfbfb1c70c014ce5e05ecf24c',
+    repository: 'quickjs-ng/quickjs', license: 'LICENSES/quickjs-ng-LICENSE.txt' },
+  openssl: { version: '3.5.9', commit: '45e844fa2a14ec92d146bd8f5778ac130b6625fb',
+    repository: 'openssl/openssl', license: 'LICENSES/openssl-LICENSE.txt' },
+  zlib: { version: '1.3.1', commit: '51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf',
+    repository: 'madler/zlib', license: 'LICENSES/zlib-LICENSE.txt' },
 });
-const ENGINE_ASMJS_FILES = ['dist/index.mjs', 'dist/emscripten-module.mjs'];
-const ENGINE_PACKAGES = new Set([
-  ENGINE_WASM_PACKAGE, ENGINE_ASMJS_PACKAGE, 'quickjs-emscripten-core', '@jitl/quickjs-ffi-types',
-]);
 const OMIT_DIRECTORIES = new Set([
   'node_modules', 'test', 'tests', '__tests__', 'fixtures', '__fixtures__', '__mocks__',
   'coverage', 'benchmark', 'benchmarks', 'example', 'examples',
@@ -117,6 +104,150 @@ function readJSON(root, location) {
   catch { check(false, 'INVALID_JSON', `Invalid JSON: ${location}`); }
   check(isObject(value), 'INVALID_JSON', `Expected JSON object: ${location}`);
   return { value, hash: sha256(bytes) };
+}
+
+function addInput(inputs, input) {
+  const previous = inputs.find(value => value.path === input.path);
+  check(!previous || previous.sha256 === input.sha256,
+    'SOURCE_CHANGED', `${input.path} has inconsistent input hashes`);
+  if (!previous) inputs.push(input);
+}
+
+function fileHash(root, location) {
+  const file = sourcePath(root, location);
+  const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    check(fstatSync(fd).isFile(), 'INVALID_SOURCE', `Not a regular file: ${location}`);
+    const hash = createHash('sha256'), buffer = Buffer.alloc(64 * 1024);
+    let count;
+    while ((count = readSync(fd, buffer, 0, buffer.length, null)) !== 0) {
+      hash.update(buffer.subarray(0, count));
+    }
+    return hash.digest('hex');
+  } finally { closeSync(fd); }
+}
+
+function inputFiles(root, location) {
+  return readdirSync(sourcePath(root, location), { withFileTypes: true }).flatMap(item => {
+    const path = `${location}/${item.name}`;
+    check(!item.isSymbolicLink(), 'UNSAFE_SYMLINK', `Native input symlink is not allowed: ${path}`);
+    if (item.isDirectory()) return inputFiles(root, path);
+    check(item.isFile(), 'INVALID_SOURCE', `Not a regular native input: ${path}`);
+    return [path];
+  });
+}
+
+function checkNativeTarget(root, artifact) {
+  const fd = openSync(sourcePath(root, artifact), 'r');
+  const bytes = Buffer.alloc(64 * 1024);
+  let length;
+  try { length = readSync(fd, bytes); } finally { closeSync(fd); }
+  let valid = false;
+  if (process.platform === 'linux' && length >= 20 && bytes.subarray(0, 4).equals(Buffer.from([127, 69, 76, 70]))) {
+    valid = bytes[4] === 2 && bytes[5] === 1
+      && bytes.readUInt16LE(18) === { x64: 62, arm64: 183 }[process.arch];
+  } else if (process.platform === 'darwin' && length >= 8 && bytes.readUInt32LE(0) === 0xfeedfacf) {
+    valid = bytes.readUInt32LE(4) === { x64: 0x01000007, arm64: 0x0100000c }[process.arch];
+  } else if (process.platform === 'win32' && length >= 64 && bytes.toString('ascii', 0, 2) === 'MZ') {
+    const offset = bytes.readUInt32LE(60);
+    valid = offset + 6 <= length && bytes.readUInt32LE(offset) === 0x00004550
+      && bytes.readUInt16LE(offset + 4) === { x64: 0x8664, arm64: 0xaa64, ia32: 0x014c }[process.arch];
+  }
+  check(valid, 'NATIVE_TARGET_MISMATCH', 'Native artifact format/architecture does not match this packaging host');
+}
+
+function trustedNative(root, inputs) {
+  const { value: policy, hash: policyHash } = readJSON(root, NATIVE_POLICY);
+  const { value: receipt, hash: receiptHash } = readJSON(root, NATIVE_RECEIPT);
+  const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  const artifact = (value, path) => isObject(value) && value.path === path
+    && Number.isSafeInteger(value.bytes) && value.bytes > 0 && digest(value.sha256);
+  check(policy.schemaVersion === 1 && policy.abi === 1 && policy.napi === 8
+    && isObject(policy.sources) && Object.keys(policy.sources).length === 3
+    && isDeepStrictEqual(policy.artifact, { path: NATIVE_ARTIFACT, manifest: NATIVE_RECEIPT })
+    && Array.isArray(policy.patches) && policy.patches.length === 3
+    && ['task-context.patch', 'bigint-uintn.patch', 'utf16-cstring.patch'].every((name, index) =>
+      policy.patches[index]?.path === `packages/script-host/native/${name}`
+      && policy.patches[index]?.source === 'quickjs' && digest(policy.patches[index]?.sha256))
+    && Array.isArray(policy.mandatoryInputs) && Array.isArray(policy.inputDirectories)
+    && policy.inputDirectories.includes('packages/script-host/native')
+    && policy.nodeHeaders?.version === '24.21.0'
+    && policy.nodeHeaders.url === 'https://nodejs.org/dist/v24.21.0/node-v24.21.0-headers.tar.gz'
+    && policy.nodeHeaders.archivePath === 'tmp/build/runtime-native/node-headers.tar.gz'
+    && digest(policy.nodeHeaders.sha256),
+  'INVALID_NATIVE_POLICY', 'Native policy must pin the reviewed ABI, sources, patch and artifact');
+  const sources = {};
+  for (const [name, expected] of Object.entries(NATIVE_SOURCES)) {
+    const source = policy.sources[name];
+    check(isObject(source) && source.version === expected.version && source.commit === expected.commit
+      && source.url === `https://codeload.github.com/${expected.repository}/tar.gz/${expected.commit}`
+      && digest(source.sha256) && source.license?.path === expected.license && digest(source.license.sha256)
+      && source.archivePath === `tmp/build/runtime-native/${name}.tar.gz`
+      && source.sourcePath === `tmp/build/runtime-native/${name}`,
+    'INVALID_NATIVE_POLICY', `Unreviewed native source: ${name}`);
+    sources[name] = { version: source.version, commit: source.commit, url: source.url, sha256: source.sha256 };
+    check(fileHash(root, source.license.path) === source.license.sha256,
+      'NATIVE_LICENSE_MISMATCH', `Native license does not match policy: ${name}`);
+  }
+  check(receipt.schemaVersion === 1 && receipt.abi === policy.abi && receipt.napi === policy.napi
+    && isDeepStrictEqual(receipt.sources, sources)
+    && isDeepStrictEqual(receipt.nodeHeaders, policy.nodeHeaders)
+    && isObject(receipt.sourceTrees)
+    && artifact(receipt.artifact, NATIVE_ARTIFACT) && artifact(receipt.sdk, SOURCE_SDK)
+    && Array.isArray(receipt.inputs) && receipt.inputs.length > 0,
+  'INVALID_NATIVE_RECEIPT', 'Build receipt does not match the reviewed native policy');
+  check(receipt.platform === process.platform && receipt.arch === process.arch
+    && Number(process.versions.napi) >= receipt.napi,
+  'NATIVE_TARGET_MISMATCH', 'Native build target does not match this packaging host');
+  const recorded = new Map();
+  for (const input of receipt.inputs) {
+    check(isObject(input) && digest(input.sha256), 'INVALID_NATIVE_RECEIPT', 'Malformed native build input');
+    safeRelative(input.path);
+    check(!recorded.has(input.path), 'INVALID_NATIVE_RECEIPT', `Duplicate native build input: ${input.path}`);
+    recorded.set(input.path, input.sha256);
+  }
+  const required = [
+    NATIVE_POLICY, 'packages/script-host/binding.gyp', 'scripts/quickjs/build-native.mjs',
+    'scripts/quickjs/build-source-sdk.mjs', 'package.json', 'package-lock.json',
+    policy.nodeHeaders.archivePath,
+    ...policy.mandatoryInputs,
+    ...policy.patches.map(input => input.path),
+    ...Object.values(policy.sources).flatMap(source => [source.license.path, source.archivePath]),
+    ...policy.inputDirectories.flatMap(path => inputFiles(root, safeRelative(path))),
+  ];
+  for (const path of required) {
+    check(recorded.has(path), 'NATIVE_INPUT_MISMATCH', `Build receipt omits an input: ${path}`);
+  }
+  for (const source of Object.values(policy.sources)) {
+    check(recorded.get(source.archivePath) === source.sha256
+      && recorded.get(source.license.path) === source.license.sha256,
+    'NATIVE_INPUT_MISMATCH', `Build source differs from policy: ${source.version}`);
+  }
+  for (const [name, source] of Object.entries(policy.sources)) {
+    const tree = receipt.sourceTrees[name];
+    check(tree?.path === source.sourcePath && Array.isArray(tree.files) && tree.files.length > 0
+      && new Set(tree.files).size === tree.files.length
+      && tree.files.every(path => typeof path === 'string' && path.startsWith(`${source.sourcePath}/`)
+        && recorded.has(path)),
+    'NATIVE_INPUT_MISMATCH', `Build receipt omits the native source inventory: ${name}`);
+  }
+  check(recorded.get(policy.nodeHeaders.archivePath) === policy.nodeHeaders.sha256,
+    'NATIVE_INPUT_MISMATCH', 'Node headers differ from policy');
+  check(recorded.get(NATIVE_POLICY) === policyHash && policy.patches.every(patch =>
+    recorded.get(patch.path) === patch.sha256),
+  'NATIVE_INPUT_MISMATCH', 'Native policy or patches changed since the build');
+  for (const [path, sha256] of recorded) {
+    check(fileHash(root, path) === sha256, 'NATIVE_INPUT_MISMATCH', `Native input changed since the build: ${path}`);
+    addInput(inputs, { path, sha256 });
+  }
+  for (const value of [receipt.artifact, receipt.sdk]) {
+    check(lstatSync(sourcePath(root, value.path)).size === value.bytes
+      && fileHash(root, value.path) === value.sha256,
+    'NATIVE_HASH_MISMATCH', `Build output differs from its receipt: ${value.path}`);
+  }
+  checkNativeTarget(root, NATIVE_ARTIFACT);
+  addInput(inputs, { path: NATIVE_RECEIPT, sha256: receiptHash });
+  return { policy, receipt, receiptHash };
 }
 
 function dependencyMap(manifest, field, location) {
@@ -325,7 +456,7 @@ function fileDeclarations(root, manifest, location, workspace) {
   return required;
 }
 
-function buildGraph(root, product, profile = 'windows-native') {
+function buildGraph(root, product) {
   const rootJSON = readJSON(root, 'package.json');
   const lockJSON = readJSON(root, 'package-lock.json');
   const manifest = rootJSON.value, lock = lockJSON.value;
@@ -347,86 +478,8 @@ function buildGraph(root, product, profile = 'windows-native') {
   }
   const selected = ['runtime-bridge', 'source-runtime', 'script-host'];
   const workspacePaths = new Map(selected.map(name => [`packages/${name}`, `node_modules/@meowfilm/${name}`]));
-  const nodes = new Map(), edges = [], omitted = [], platformOmitted = [], platformOmittedFiles = [];
+  const nodes = new Map(), edges = [], omitted = [];
   const inputs = [{ path: 'package.json', sha256: rootJSON.hash }, { path: 'package-lock.json', sha256: lockJSON.hash }];
-  let enginePolicy;
-
-  function trustedEngine(pkg, locked, manifestHash, location) {
-    if (!ENGINE_PACKAGES.has(pkg.name)) return undefined;
-    check(!Object.values(PROFILE_ENGINES).includes(pkg.name) || pkg.name === PROFILE_ENGINES[profile],
-      'ENGINE_PROFILE_MISMATCH', `${location}: QuickJS backend is not enabled for ${profile}`);
-    if (!enginePolicy) {
-      const { value, hash } = readJSON(root, ENGINE_POLICY);
-      const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
-      const fields = (value, names) => isObject(value) && Object.keys(value).length === names.length
-        && names.every(name => Object.hasOwn(value, name));
-      const task = value.taskContext;
-      check(value.schemaVersion === 1 && value.version === ENGINE_VERSION && value.variant === 'release-sync'
-        && value.source === ENGINE_SOURCE && value.gitHead === ENGINE_GIT_HEAD
-        && Array.isArray(value.packages) && value.packages.length === ENGINE_PACKAGES.size
-        && new Set(value.packages.map(pkg => pkg?.name)).size === ENGINE_PACKAGES.size
-        && value.packages.every(pkg => isObject(pkg) && ENGINE_PACKAGES.has(pkg.name)
-          && pkg.version === ENGINE_VERSION && pkg.license === 'MIT'
-          && digest(pkg.manifestSha256) && digest(pkg.licenseSha256)
-          && (pkg.name === ENGINE_WASM_PACKAGE
-            ? isObject(pkg.wasm) && pkg.wasm.path === 'dist/emscripten-module.wasm'
-              && Number.isSafeInteger(pkg.wasm.bytes) && pkg.wasm.bytes > 0 && digest(pkg.wasm.sha256)
-            : pkg.wasm === undefined)
-          && (pkg.name === ENGINE_ASMJS_PACKAGE
-            ? Array.isArray(pkg.files) && pkg.files.length === ENGINE_ASMJS_FILES.length
-              && ENGINE_ASMJS_FILES.every(path => pkg.files.some(file => isObject(file) && file.path === path
-                && Number.isSafeInteger(file.bytes) && file.bytes > 0 && digest(file.sha256)))
-            : pkg.files === undefined))
-        && isObject(value.license) && value.license.path === 'LICENSES/quickjs-emscripten-LICENSE.txt'
-        && digest(value.license.sha256)
-        && fields(task, ['revision', 'gitHead', 'upstreamArchiveSha256', 'toolchainVersion', 'patch', 'build', 'artifacts'])
-        && task.revision === 1 && task.gitHead === ENGINE_GIT_HEAD
-        && task.upstreamArchiveSha256 === ENGINE_ARCHIVE_SHA256 && task.toolchainVersion === '5.0.1'
-        && fields(task.patch, ['path', 'sha256']) && task.patch.path === ENGINE_PATCH && digest(task.patch.sha256)
-        && fields(task.build, ['path', 'sha256']) && task.build.path === ENGINE_BUILD && digest(task.build.sha256)
-        && Array.isArray(task.artifacts) && task.artifacts.length === 2
-        && new Set(task.artifacts.map(artifact => artifact?.path)).size === 2
-        && task.artifacts.every(artifact => fields(artifact, ['path', 'bytes', 'sha256'])
-          && [ENGINE_LOCAL_LOADER, ENGINE_LOCAL_WASM].includes(artifact.path)
-          && Number.isSafeInteger(artifact.bytes) && artifact.bytes > 0 && digest(artifact.sha256)),
-      'INVALID_ENGINE_POLICY', 'QuickJS policy must pin only the reviewed release-sync engines and files');
-      for (const pkg of value.packages) registryMetadata(pkg, ENGINE_POLICY);
-      const license = sourcePath(root, value.license.path);
-      check(lstatSync(license).isFile() && sha256(readFileSync(license)) === value.license.sha256,
-        'ENGINE_LICENSE_MISMATCH', 'Reviewed QuickJS license does not match the engine policy');
-      inputs.push({ path: ENGINE_POLICY, sha256: hash }, { ...value.license });
-      // Validate the derived pair and reproduction inputs before any payload copy.
-      // Paths above are pinned in code; the policy cannot grant other binaries.
-      for (const input of [task.patch, task.build, ...task.artifacts]) {
-        const file = sourcePath(root, input.path);
-        check(lstatSync(file).isFile(), 'INVALID_SOURCE', `Not a regular source file: ${input.path}`);
-        const bytes = readFileSync(file);
-        check(sha256(bytes) === input.sha256 && (input.bytes === undefined || bytes.length === input.bytes),
-          'ENGINE_HASH_MISMATCH', `QuickJS task-context input differs from the reviewed revision: ${input.path}`);
-        if (input.path === ENGINE_LOCAL_WASM) check(bytes.subarray(0, 8).equals(WASM_MAGIC),
-          'ENGINE_WASM_MAGIC', 'QuickJS task-context artifact is not a WASM v1 binary');
-        // Artifacts enter inputs when copied, once at their original source path.
-        // The derived pair and its reproduction inputs belong only to the WASM backend.
-        if ((input === task.patch || input === task.build) && PROFILE_ENGINES[profile] === ENGINE_WASM_PACKAGE) {
-          inputs.push({ path: input.path, sha256: input.sha256 });
-        }
-      }
-      enginePolicy = value;
-    }
-    const trusted = enginePolicy.packages.find(expected => expected.name === pkg.name);
-    check(pkg.version === trusted.version && locked.version === trusted.version
-      && locked.resolved === trusted.resolved && locked.integrity === trusted.integrity,
-    'ENGINE_LOCK_MISMATCH', `${location}: QuickJS identity or registry integrity is not pinned`);
-    check(pkg.license === trusted.license && locked.license === trusted.license,
-      'ENGINE_LICENSE_MISMATCH', `${location}: QuickJS license declaration does not match`);
-    check(manifestHash === trusted.manifestSha256, 'ENGINE_MANIFEST_MISMATCH',
-      `${location}: QuickJS package manifest differs from the reviewed release`);
-    const license = sourcePath(root, `${location}/LICENSE`);
-    check(lstatSync(license).isFile() && sha256(readFileSync(license)) === trusted.licenseSha256,
-      'ENGINE_LICENSE_MISMATCH', `${location}: QuickJS license text differs from the reviewed release`);
-    return trusted;
-  }
-
   function outputPath(location) {
     for (const [source, dest] of workspacePaths) {
       if (location === source || location.startsWith(`${source}/node_modules/`)) return dest + location.slice(source.length);
@@ -469,7 +522,8 @@ function buildGraph(root, product, profile = 'windows-native') {
     const pkg = data.value;
     check(pkg.name === expectedName, 'NAME_MISMATCH', `${location}: installed package name mismatch`);
     checkManifest(pkg, locked, location);
-    check(!pkg.gypfile, 'NATIVE_PAYLOAD', `${location}: native build metadata is not allowed`);
+    check(!pkg.gypfile || (location === 'packages/script-host' && pkg.gypfile === true),
+      'NATIVE_PAYLOAD', `${location}: native build metadata is not allowed`);
     check(pkg.name !== 'jsdom',
       'PRODUCT_CLOSURE', 'jsdom is outside the App script closure');
     if (pkg.name.startsWith('@meowfilm/')) {
@@ -485,7 +539,7 @@ function buildGraph(root, product, profile = 'windows-native') {
     const node = {
       location, path: outputPath(location), name: pkg.name, version: pkg.version,
       workspace, manifest: pkg, manifestHash: data.hash, required: fileDeclarations(root, pkg, location, workspace), locked,
-      engine: trustedEngine(pkg, locked, data.hash, location),
+      nativeBuild: pkg.gypfile ? trustedNative(root, inputs) : undefined,
     };
     nodes.set(location, node); // Register before traversal: real dependency cycles are legal.
     const dependencies = dependencyMap(pkg, 'dependencies', location);
@@ -496,15 +550,6 @@ function buildGraph(root, product, profile = 'windows-native') {
       ['peer', dependencyMap(pkg, 'peerDependencies', location)],
     ]) {
       for (const name of Object.keys(entries).sort()) {
-        if (location === 'packages/script-host' && Object.values(PROFILE_ENGINES).includes(name)) {
-          check(kind === 'dependency' && entries[name] === ENGINE_VERSION
-            && dependencies[PROFILE_ENGINES[profile]] === ENGINE_VERSION,
-          'ENGINE_VERSION_PIN', `${location}: QuickJS backends must be exact required dependencies for ${profile}`);
-          if (name !== PROFILE_ENGINES[profile]) {
-            platformOmitted.push({ from: node.path, name, kind, range: entries[name], reason: 'platform', profile });
-            continue;
-          }
-        }
         const optionalEdge = kind === 'optionalDependency' || (kind === 'peer' && pkg.peerDependenciesMeta?.[name]?.optional === true);
         let found;
         for (const candidate of candidates(location, name)) {
@@ -525,8 +570,6 @@ function buildGraph(root, product, profile = 'windows-native') {
         } else {
           check(satisfies(found.version, entries[name]), 'RANGE_MISMATCH',
             `${location}: ${name}@${found.version} does not satisfy ${entries[name]}`);
-          if (found.engine) check(entries[name] === found.engine.version, 'ENGINE_VERSION_PIN',
-            `${location}: QuickJS dependency ${name} must use an exact version`);
         }
         edges.push({ from: node, name, to: found });
       }
@@ -545,25 +588,8 @@ function buildGraph(root, product, profile = 'windows-native') {
     check(destinations.get(resolved) === edge.to, 'RESOLUTION_CHANGED',
       `${edge.from.path}: relocation changes resolution of ${edge.name}`);
   }
-  if (enginePolicy) {
-    const host = nodes.get('packages/script-host');
-    const backends = Object.values(PROFILE_ENGINES).filter(name => name !== PROFILE_ENGINES[profile]);
-    check(host && [...ENGINE_PACKAGES].filter(name => !backends.includes(name))
-      .every(name => [...nodes.values()].some(node => node.name === name)),
-    'ENGINE_LOCK_MISMATCH', 'The selected engine requires the reviewed upstream package closure');
-    const artifacts = enginePolicy.taskContext.artifacts.map(artifact => artifact.path.slice(`${host.location}/`.length));
-    if (PROFILE_ENGINES[profile] === ENGINE_WASM_PACKAGE) {
-      host.taskContext = enginePolicy.taskContext;
-      for (const artifact of artifacts) host.required.add(artifact);
-    } else {
-      // The task-context loader/WASM pair is never copied into an asm.js payload.
-      host.platformOmittedFiles = artifacts;
-      for (const path of artifacts) platformOmittedFiles.push({ path: `${host.path}/${path}`, reason: 'platform', profile });
-    }
-  }
   return { nodes: [...nodes.values()].sort((a, b) => compare(a.path, b.path)),
     omitted: omitted.sort((a, b) => compare(`${a.from}/${a.name}/${a.kind}`, `${b.from}/${b.name}/${b.kind}`)),
-    platformOmitted, platformOmittedFiles,
     inputs };
 }
 
@@ -611,24 +637,22 @@ function includedFile(rel, node) {
  * Synchronous file operations keep each local validation/copy step contiguous.
  */
 export async function packageRuntime({ root = fileURLToPath(new URL('../', import.meta.url)), product, output,
-  profile = 'windows-native' } = {}) {
+  profile = 'common-native' } = {}) {
   check(Object.hasOwn(PRODUCTS, product), 'INVALID_PRODUCT', 'Only the App wire identity aggregate is supported');
-  check(Object.hasOwn(PROFILE_ENGINES, profile), 'INVALID_PROFILE', 'Unknown runtime assembly profile');
+  check(profile === 'common-native', 'INVALID_PROFILE', 'Only common-native is supported');
   check(typeof root === 'string' && isAbsolute(root) && !/^(?:\\\\|\/\/)/.test(root),
     'INVALID_ROOT', 'Root must be a local absolute directory');
   root = realpathSync(root);
   check(lstatSync(root).isDirectory(), 'INVALID_ROOT', 'Root must be a directory');
-  const modules = PRODUCTS[product].filter(name => PROFILE_MODULES[profile].includes(name));
-  const sharedFiles = ['bootstrap.mjs', ...modules.map(name => MODULE_FILES[name])];
+  const modules = PRODUCTS[product];
+  const sharedFiles = SHARED_FILES;
   output = newOutput(root, output);
   const outputIdentity = lstatSync(output);
   let manifestFD;
   const files = [], occupied = new Map([[MANIFEST.toLowerCase(), { path: MANIFEST, directory: false }]]);
   const manifest = {
     schemaVersion: 1, status: 'building', product,
-    ...(profile === 'windows-native'
-      ? { entry: `app/windows/entries/${product}.mjs` }
-      : { sharedEntry: 'app/bootstrap.mjs' }),
+    entry: 'app/entry.mjs',
     assemblyProfile: profile,
     modules,
     integrityScope: 'Build-input inventory only; not an upstream signature or tarball integrity verification.',
@@ -664,10 +688,10 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
     reserve(rel, false);
     return join(output, rel);
   }
-  function copy(location, rel, expectedHash, engineArtifact) {
+  function copy(location, rel, expectedHash, nativeArtifact) {
     const file = sourcePath(root, location);
     check(!NATIVE_FILE.test(posix.basename(location))
-      || (location.endsWith('.wasm') && engineArtifact?.sourcePath === location),
+      || (location === NATIVE_ARTIFACT && nativeArtifact?.path === location),
       'NATIVE_PAYLOAD', `Native payload is not allowed: ${location}`);
     const stat = lstatSync(file);
     check(stat.isFile(), 'INVALID_SOURCE', `Not a regular source file: ${location}`);
@@ -683,10 +707,6 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       const hash = createHash('sha256'), buffer = Buffer.alloc(64 * 1024);
       let bytes = 0, count;
       while ((count = readSync(inputFD, buffer, 0, buffer.length, null)) !== 0) {
-        if (bytes === 0 && engineArtifact && location.endsWith('.wasm')) {
-          check(buffer.subarray(0, Math.min(count, 8)).equals(WASM_MAGIC),
-            'ENGINE_WASM_MAGIC', `QuickJS artifact is not a WASM v1 binary: ${location}`);
-        }
         hash.update(buffer.subarray(0, count));
         for (let offset = 0; offset < count;) offset += writeSync(outputFD, buffer, offset, count - offset);
         bytes += count;
@@ -695,10 +715,10 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       check(before.size === after.size && before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs
         && bytes === before.size && (!expectedHash || expectedHash === digest),
       'SOURCE_CHANGED', `Source changed during packaging: ${location}`);
-      check(!engineArtifact || (bytes === engineArtifact.bytes && digest === engineArtifact.sha256),
-        'ENGINE_HASH_MISMATCH', `QuickJS artifact differs from the reviewed revision: ${location}`);
+      check(!nativeArtifact || (bytes === nativeArtifact.bytes && digest === nativeArtifact.sha256),
+        'NATIVE_HASH_MISMATCH', `Native artifact differs from its build receipt: ${location}`);
       files.push({ path: rel, bytes, sha256: digest });
-      manifest.inputs.push({ path: location, sha256: digest });
+      addInput(manifest.inputs, { path: location, sha256: digest });
       delete manifest.incompleteFile;
     } finally {
       if (outputFD !== undefined) closeSync(outputFD);
@@ -713,12 +733,10 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       const child = posix.join(rel, item.name);
       if (item.name === 'node_modules') continue; // Only the resolved graph can add dependencies.
       check(!item.isSymbolicLink(), 'UNSAFE_SYMLINK', `Package symlink is not allowed: ${location}/${item.name}`);
-      if (item.isFile() && node.platformOmittedFiles?.includes(child)) continue;
-      const artifact = item.isFile() && (node.engine?.wasm?.path === child ? node.engine.wasm
-        : node.engine?.files?.find(file => file.path === child)
-          ?? node.taskContext?.artifacts.find(artifact => artifact.path === posix.join(node.location, child)));
-      const engineArtifact = artifact ? { ...artifact, sourcePath: posix.join(node.location, child) } : undefined;
-      check(!NATIVE_FILE.test(item.name) || (child.endsWith('.wasm') && engineArtifact),
+      // Build intermediates and reviewed native sources are never runtime payloads.
+      // The three exact build outputs are copied below, through sourcePath checks.
+      if (node.nativeBuild && ['build', 'native', 'binding.gyp'].includes(child)) continue;
+      check(!NATIVE_FILE.test(item.name),
         'NATIVE_PAYLOAD', `Native payload is not allowed: ${location}/${item.name}`);
       if (item.isDirectory()) {
         if (OMIT_DIRECTORIES.has(item.name.toLowerCase())
@@ -726,8 +744,7 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
         copyPackage(node, child);
       } else if (includedFile(child, node)) {
         copy(posix.join(node.location, child), posix.join(node.path, child),
-          child === 'package.json' ? node.manifestHash : child === 'LICENSE' ? node.engine?.licenseSha256 : undefined,
-          engineArtifact);
+          child === 'package.json' ? node.manifestHash : undefined);
       }
     }
   }
@@ -761,55 +778,49 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
   try {
     manifestFD = openSync(join(output, MANIFEST), 'wx', 0o644);
     saveManifest();
-    const graph = buildGraph(root, product, profile);
+    const graph = buildGraph(root, product);
     manifest.inputs = graph.inputs;
     manifest.omittedOptionalDependencies = graph.omitted;
-    manifest.omittedPlatformDependencies = graph.platformOmitted;
-    manifest.omittedPlatformFiles = graph.platformOmittedFiles;
     manifest.dependencies = graph.nodes.map(node => ({
       name: node.name, version: node.version, path: node.path, lockPath: node.location,
       workspace: node.workspace,
       ...(!node.workspace ? { resolved: node.locked.resolved, integrity: node.locked.integrity } : {}),
-      ...(node.engine ? { manifestSha256: node.engine.manifestSha256, licenseSha256: node.engine.licenseSha256 } : {}),
     }));
-    manifest.trustedWasm = graph.nodes.filter(node => node.engine?.wasm).map(node => ({
-      package: node.name, version: node.version,
-      ...node.engine.wasm, path: `${node.path}/${node.engine.wasm.path}`,
-      licensePath: `${node.path}/LICENSE`, licenseSha256: node.engine.licenseSha256,
-    }));
-    for (const node of graph.nodes.filter(node => node.taskContext)) {
-      const upstream = graph.nodes.find(node => node.name === ENGINE_WASM_PACKAGE);
-      const artifact = node.taskContext.artifacts.find(artifact => artifact.path === ENGINE_LOCAL_WASM);
-      manifest.trustedWasm.push({
-        package: node.name, version: node.version,
-        bytes: artifact.bytes, sha256: artifact.sha256,
-        path: `${node.path}/${artifact.path.slice(`${node.location}/`.length)}`,
-        taskContext: { revision: node.taskContext.revision, source: ENGINE_SOURCE, gitHead: node.taskContext.gitHead },
-        licensePath: `${upstream.path}/LICENSE`, licenseSha256: upstream.engine.licenseSha256,
-      });
-    }
-    manifest.trustedWasm.sort((a, b) => compare(a.path, b.path));
-    manifest.trustedAsmjs = graph.nodes.filter(node => node.engine?.files).flatMap(node => node.engine.files.map(file => ({
-      package: node.name, version: node.version,
-      ...file, path: `${node.path}/${file.path}`,
-      licensePath: `${node.path}/LICENSE`, licenseSha256: node.engine.licenseSha256,
-    })));
+    manifest.trustedNative = graph.nodes.filter(node => node.nativeBuild).map(node => {
+      const { receipt, policy } = node.nativeBuild;
+      return { package: node.name, version: node.version,
+        ...receipt.artifact, path: `${node.path}/build/Release/script_host_native.node`,
+        platform: receipt.platform, arch: receipt.arch, abi: receipt.abi, napi: receipt.napi,
+        sources: receipt.sources, patches: policy.patches,
+        sdk: { ...receipt.sdk, path: `${node.path}/build/Release/source-sdk.js` },
+        licenses: Object.values(policy.sources).map(source => ({ ...source.license,
+          path: `licenses/${posix.basename(source.license.path)}` })),
+      };
+    });
     copySharedRuntime();
     for (const node of graph.nodes) {
       copyPackage(node);
+      if (node.nativeBuild) {
+        const { receipt, policy, receiptHash } = node.nativeBuild;
+        copy(NATIVE_ARTIFACT, `${node.path}/build/Release/script_host_native.node`,
+          receipt.artifact.sha256, receipt.artifact);
+        copy(NATIVE_RECEIPT, `${node.path}/build/Release/script-host-native.json`, receiptHash);
+        copy(SOURCE_SDK, `${node.path}/build/Release/source-sdk.js`, receipt.sdk.sha256);
+        for (const { license } of Object.values(policy.sources)) {
+          copy(license.path, `licenses/${posix.basename(license.path)}`, license.sha256);
+        }
+      }
       for (const entry of node.required) {
         check(files.some(file => file.path === `${node.path}/${entry}`), 'MISSING_PUBLIC_FILE',
           `${node.location}: public file missing or excluded: ${entry}`);
       }
     }
     for (const input of graph.inputs) {
-      check(sha256(readFileSync(sourcePath(root, input.path))) === input.sha256,
+      check(fileHash(root, input.path) === input.sha256,
         'SOURCE_CHANGED', `${input.path} changed during packaging`);
     }
     files.sort((a, b) => compare(a.path, b.path));
-    // A platform owner must supply and verify its native assembly or platform
-    // bootstrap and entry before this shared payload can be marked executable.
-    manifest.status = 'platform-pending';
+    manifest.status = 'complete';
     saveManifest();
     return manifest;
   } catch (error) {
@@ -830,7 +841,7 @@ async function main(args) {
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
     check(['--product', '--output', '--profile'].includes(args[i]) && args[i + 1] && !Object.hasOwn(options, args[i].slice(2)),
-      'CLI_USAGE', 'Usage: node scripts/package-runtime.mjs --product aggregate --output <new absolute directory> [--profile windows-native|ios-embedded]');
+      'CLI_USAGE', 'Usage: node scripts/package-runtime.mjs --product aggregate --output <new absolute directory> [--profile common-native]');
     options[args[i].slice(2)] = args[i + 1];
   }
   check(options.product && options.output, 'CLI_USAGE', 'Both --product and --output are required');

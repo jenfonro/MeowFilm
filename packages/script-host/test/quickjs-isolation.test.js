@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createScriptHost } from '../src/index.js';
-import { LXSession } from '../src/lx-session.js';
-import { QuickJSEngine } from '../src/quickjs-engine.js';
+import { NativeSession } from '../src/native-session.js';
+import { NativeEngine } from '../src/native-engine.js';
 import { lxScript, target, memoryStorage, deferred, turn } from './fixtures.js';
 
 async function waitFor(predicate, message, timeoutMs = 3000) {
@@ -51,200 +51,120 @@ test('QuickJS unsigned BigInt widths and coercions match JavaScript before SDK i
       writable: descriptor.writable, configurable: descriptor.configurable, enumerable: descriptor.enumerable,
     } };
   }
-  const engine = await QuickJSEngine.create({
+  const engine = NativeEngine.create({
     // The SDK itself computes this value, not a later script invocation.
     source: `(() => {
       const initial = (${inspectIntegers})();
       const convert = BigInt.asUintN;
       return {
-        inspect() { return JSON.stringify(initial); },
+        inspect() { return initial; },
         captured() {
           BigInt.asIntN = () => { throw new Error('modified intrinsic'); };
           Math.trunc = () => { throw new Error('modified intrinsic'); };
           globalThis.BigInt = () => { throw new Error('modified intrinsic'); };
-          return JSON.stringify(String(convert(64.8, -1n)));
+          return String(convert(64.8, -1n));
         },
       };
     })()`,
-    bridge: () => null,
-    limits: {
-      maxMemoryBytes: 32 * 1024 * 1024, maxStackBytes: 128 * 1024,
-      initTimeoutMs: 10000, cleanupTimeoutMs: 1000,
-    },
+    maxStackBytes: 128 * 1024, timeoutMs: 10000,
   });
   try {
-    assert.deepEqual(engine.callJSON('inspect', []), inspectIntegers());
-    assert.equal(engine.callJSON('captured', []), String((1n << 64n) - 1n));
-  } finally { engine.close(); }
+    await engine.ready;
+    assert.deepEqual(structuredClone(await engine.call('inspect')), inspectIntegers());
+    assert.equal(await engine.call('captured'), String((1n << 64n) - 1n));
+  } finally { await engine.stop(); }
 });
 
-test('QuickJS engine closes every context owned by its runtime', async () => {
-  const engine = await QuickJSEngine.create({
-    source: '({ errorCode: () => "SCRIPT_EXCEPTION", watchStartup: () => null })',
-    bridge: () => null,
-    limits: {
-      maxMemoryBytes: 16 * 1024 * 1024, maxStackBytes: 64 * 1024,
-      initTimeoutMs: 1000, cleanupTimeoutMs: 1000,
-    },
-  });
-  const main = engine.context, runtime = engine.runtime, extra = runtime.newContext();
-  const evaluated = extra.evalCode('globalThis.fixture = 1');
-  if (evaluated.error) evaluated.error.dispose();
-  else evaluated.value.dispose();
-  assert.equal(runtime.contextMap.size, 2);
-  engine.close();
-  assert.equal(main.alive, false);
-  assert.equal(extra.alive, false);
-  assert.equal(runtime.alive, false);
+test('native QuickJS closes both contexts and their one runtime and thread', async () => {
+  const engine = NativeEngine.create({ source: '({ value: () => 1 })', guestSource: '({ value: () => 2 })' });
+  try {
+    await engine.ready;
+    const running = await engine.stats({ refresh: true });
+    assert.equal(running.runtimeCount, 1);
+    assert.equal(running.threadCount, 1);
+    assert.equal(running.contextCount, 2);
+    assert.equal(await engine.call('value'), 1);
+  } finally { await engine.stop(); }
+  const stopped = engine.stats();
+  assert.equal(stopped.runtimeCount, 0);
+  assert.equal(stopped.contextCount, 0);
+  assert.equal(stopped.threadCount, 0);
+  assert.equal(stopped.stopped, true);
 });
 
-test('QuickJS byte frames survive guest heap growth without losing JSON or copying host references', async () => {
-  const engine = await QuickJSEngine.create({
-    source: `({
-      errorCode() { return 'SCRIPT_EXCEPTION'; },
-      watchStartup() {},
-      exchange(input, frame) {
-        const reply = __meowBridge('bytes', input, frame);
-        return [JSON.stringify(JSON.parse(reply[0])), reply[1]];
-      }
-    })`,
-    bridge(operation, input, frames, output) {
+test('native typed bytes survive heap growth and snapshot only the supplied view', async () => {
+  const engine = NativeEngine.create({
+    source: `(() => {
+      const host = __meowHost;
+      delete globalThis.__meowHost;
+      return {
+        grow(size) { globalThis.retained = new Uint8Array(size); return size; },
+        exchange(value) { return host('bytes', value); },
+      };
+    })()`,
+    onHostCall(operation, value) {
       assert.equal(operation, 'bytes');
-      assert.deepEqual(input, { label: '中文🎵' });
-      assert.deepEqual(frames, [Buffer.from([1, 2, 3, 4])]);
-      output.push(Buffer.from(frames[0]));
-      return input;
+      assert.equal(Object.getPrototypeOf(value), Object.prototype);
+      assert.deepEqual({ ...value }, { label: '中文🎵\0', bytes: Buffer.from([1, 2, 3, 4]) });
+      return value;
     },
-    limits: { maxMemoryBytes: 64 * 1024 * 1024, maxStackBytes: 256 * 1024 },
   });
   try {
+    await engine.ready;
     for (const size of [0, 20 * 1024 * 1024, 40 * 1024 * 1024]) {
-      engine.evaluate(`globalThis.retained = new Uint8Array(${size});`);
-      const input = Buffer.from([1, 2, 3, 4]);
-      const result = engine.callJSONFrames('exchange', [JSON.stringify({ label: '中文🎵' })], [input]);
-      assert.deepEqual(result, {
-        value: { ok: true, value: { label: '中文🎵' } }, frames: [Buffer.from([1, 2, 3, 4])],
-      });
-      assert.deepEqual(input, Buffer.alloc(4));
+      assert.equal(await engine.call('grow', [size]), size);
+      const backing = Buffer.from([71, 1, 2, 3, 4, 83]);
+      const pending = engine.call('exchange', [{ label: '中文🎵\0', bytes: backing.subarray(1, -1) }]);
+      backing.fill(9, 1, 5);
+      assert.deepEqual({ ...await pending }, { label: '中文🎵\0', bytes: Buffer.from([1, 2, 3, 4]) });
+      assert.equal(backing[0], 71);
+      assert.equal(backing[5], 83);
     }
-  } finally { engine.close(); }
+  } finally { await engine.stop(); }
 });
 
-test('QuickJS engine continues disposal after an earlier cleanup operation fails', () => {
-  const calls = [];
-  const first = new Error('synthetic method disposal failure');
-  const context = name => ({
-    alive: true,
-    dispose() { calls.push(name); this.alive = false; },
-  });
-  const one = context('context-one'), two = context('context-two');
-  const engine = Object.assign(Object.create(QuickJSEngine.prototype), {
-    closed: false,
-    closing: true,
-    limits: { cleanupTimeoutMs: 10 },
-    methods: new Map([
-      ['one', { dispose() { calls.push('method-one'); throw first; } }],
-      ['two', { dispose() { calls.push('method-two'); } }],
-    ]),
-    realm: { dispose() { calls.push('realm'); } },
-    context: one,
-    runtime: {
-      contextMap: new Map([['one', one], ['two', two]]),
-      hasPendingJob: () => false,
-      dispose() { calls.push('runtime'); },
-    },
-  });
-  assert.throws(() => engine.destroy(), error => error === first);
-  assert.deepEqual(calls,
-    ['method-one', 'method-two', 'realm', 'context-one', 'context-two', 'runtime']);
-  assert.equal(engine.context, undefined);
-  assert.equal(engine.runtime, undefined);
-});
-
-test('QuickJS newContext failure releases the already-created runtime', () => {
-  const failure = new Error('synthetic context creation failure');
-  let runtimeDisposed = false;
-  let memoryLimit, stackLimit;
-  const runtime = {
-    setMemoryLimit(value) { memoryLimit = value; },
-    setMaxStackSize(value) { stackLimit = value; },
-    newContext: () => { throw failure; },
-    dispose() { runtimeDisposed = true; },
-  };
-  const module = {
-    newRuntime: () => runtime,
-  };
-  assert.throws(() => new QuickJSEngine(module, {
-    maxMemoryBytes: 1024, maxStackBytes: 1024, cleanupTimeoutMs: 10,
-  }), error => error === failure);
-  assert.equal(memoryLimit, 1024);
-  assert.equal(stackLimit, 1024);
-  assert.equal(runtimeDisposed, true);
-});
-
-test('QuickJS bridge setup disposes the function handle when setProp fails', () => {
-  const failure = new Error('synthetic setProp failure');
-  let disposed = false;
-  const engine = Object.assign(Object.create(QuickJSEngine.prototype), {
-    limits: {},
-    context: {
-      global: {},
-      newFunction: () => ({ dispose() { disposed = true; } }),
-      setProp() { throw failure; },
-    },
-  });
-  assert.throws(() => engine.installBridge(() => null), error => error === failure);
-  assert.equal(disposed, true);
-});
-
-test('QuickJS calls dispose partially-created argument handles after allocation fails', () => {
-  const failure = new Error('synthetic handle allocation failure');
-  for (const method of ['callInside', 'callJSON']) {
-    const disposed = [];
-    let created = 0;
-    const engine = Object.assign(Object.create(QuickJSEngine.prototype), {
-      closed: false, closing: false, depth: 0,
-      limits: {},
-      realm: {},
-      run: body => body(),
-      context: {
-        newString(value) {
-          if (++created === 2) throw failure;
-          return { dispose() { disposed.push(value); } };
-        },
-        newNumber(value) {
-          if (++created === 2) throw failure;
-          return { dispose() { disposed.push(value); } };
-        },
-      },
+for (const failedContext of ['core', 'guest']) {
+  test(`native ${failedContext} initialization failure releases its partially created runtime`, async () => {
+    const engine = NativeEngine.create({
+      source: failedContext === 'core' ? 'throw new Error("synthetic")' : '({value: () => 7})',
+      ...(failedContext === 'guest' ? { guestSource: 'throw new Error("synthetic")' } : {}),
     });
-    assert.throws(() => engine[method]('fixture', ['first', 'second']),
-      error => error === failure);
-    assert.deepEqual(disposed, ['first']);
-  }
+    await assert.rejects(engine.ready, { code: 'SCRIPT_EXCEPTION' });
+    const stopped = engine.stop();
+    assert.equal(engine.stop(), stopped);
+    await stopped;
+    assert.equal(engine.stats().runtimeCount, 0);
+    assert.equal(engine.stats().contextCount, 0);
+    assert.equal(engine.stats().threadCount, 0);
+  });
+}
+
+test('native typed conversion failures release partial input and preserve subsequent calls', async () => {
+  const engine = NativeEngine.create({ source: '({ value: (...args) => args })' });
+  try {
+    await engine.ready;
+    const bytes = Buffer.from([0, 255, 128]);
+    await assert.rejects(engine.call('value', [bytes, { invalid: () => {} }]), { code: 'INVALID_ARGUMENT' });
+    assert.deepEqual(await engine.call('value', [bytes, 'valid']), [bytes, 'valid']);
+    const snapshot = await engine.stats({ refresh: true });
+    assert.equal(snapshot.activeCalls, 0);
+    assert.equal(snapshot.hostCalls, 0);
+  } finally { await engine.stop(); }
 });
 
-test('QuickJS preserves the call failure when argument disposal also fails', () => {
-  const primary = new Error('synthetic call failure');
-  const cleanup = new Error('synthetic argument disposal failure');
-  let disposed = false;
-  const engine = Object.assign(Object.create(QuickJSEngine.prototype), {
-    realm: {},
-    method: () => ({}),
-    unwrap() { throw primary; },
-    context: {
-      newString: () => ({
-        dispose() { disposed = true; throw cleanup; },
-      }),
-      callFunction: () => ({}),
-    },
-  });
-  assert.throws(() => engine.callInside('fixture', ['value']), error => error === primary);
-  assert.equal(disposed, true);
+test('native script failure keeps its primary code and stop remains idempotent', async () => {
+  const engine = NativeEngine.create({ source: `({ fail() { throw Error('synthetic private text'); } })` });
+  await engine.ready;
+  await assert.rejects(engine.call('fail'), error => error.code === 'SCRIPT_EXCEPTION' &&
+    !error.message.includes('synthetic private text'));
+  const stopping = engine.stop();
+  assert.equal(engine.stop(), stopping);
+  await stopping;
+  assert.equal(engine.stats().threadCount, 0);
 });
 
 test('adapter retirement waits for tasks registered by settlement continuations', async () => {
-  const session = new LXSession({
+  const session = new NativeSession({
     installationId: 'adapter-retirement', generation: 1,
     revision: { source: '', permissions: { storage: [] } },
     limits: {},
@@ -261,10 +181,10 @@ test('adapter retirement waits for tasks registered by settlement continuations'
   late.resolve();
   await waiting;
   assert.equal(session.adapterTasks.size, 0);
-  session.stop();
+  await session.stop();
 });
 
-test('guest constructors, eval and prototype traversal cannot reach Node or the old host invocation object', async t => {
+test('guest constructors, eval and prototype traversal cannot reach Node or private native hooks', async t => {
   const host = createScriptHost();
   t.after(() => host.close());
   await host.install({ installationId: 'a', enabled: true, source: lxScript({
@@ -274,20 +194,24 @@ test('guest constructors, eval and prototype traversal cannot reach Node or the 
         () => Function('return process')(),
         () => globalThis.constructor.constructor('return process')(),
         () => lx.request.constructor('return require')(),
-        () => globalThis.__meowInvocation.constructor.constructor('return process')(),
+        () => globalThis.__meowHost.constructor.constructor('return process')(),
       ]) { try { run(); missing.push(false); } catch { missing.push(true); } }
       return { missing, process:typeof process, require:typeof require, module:typeof module,
-        invocation:typeof __meowInvocation, hostBridge:typeof __meowBridge,
         taskContext:typeof __meowTaskContext,
         ownTaskContext:Object.hasOwn(globalThis, '__meowTaskContext'),
         dynamicTaskContext:Function('return typeof __meowTaskContext')(),
+        native:typeof __meowNative, host:typeof __meowHost, emit:typeof __meowEmit,
+        ownHost:Object.hasOwn(globalThis,'__meowHost'),
+        dynamicNative:Function('return typeof __meowNative')(),
         guestEval:eval('21*2') };
     }`,
   }) });
   assert.deepEqual(await host.invoke(target()), {
     missing: [true, true, true, true], process: 'undefined', require: 'undefined',
-    module: 'undefined', invocation: 'undefined', hostBridge: 'undefined', guestEval: 42,
+    module: 'undefined', guestEval: 42,
     taskContext: 'undefined', ownTaskContext: false, dynamicTaskContext: 'undefined',
+    native: 'undefined', host: 'undefined', emit: 'undefined',
+    ownHost: false, dynamicNative: 'undefined',
   });
 });
 
@@ -314,72 +238,12 @@ test('an infinite guest microtask chain retires only its heap and can be explici
   await waitFor(() => host.get('a').state === 'failed', 'timed-out instance did not fail');
   assert.equal(host.get('a').lastFailure, 'TIMEOUT');
   await waitFor(() => diagnostics.some(event =>
-    event.installationId === 'a' && event.operation === 'worker.unresponsive' &&
+    event.installationId === 'a' && event.operation === 'native.unresponsive' &&
     event.code === 'TIMEOUT' && event.phase === 'running'),
-  'missing running worker.unresponsive diagnostic');
+  'missing running native.unresponsive diagnostic');
   assert.equal(await host.invoke(target('b')), 11);
   assert.equal((await host.enable('a')).state, 'ready');
   assert.equal(await host.invoke(target()), 7);
-});
-
-test('guest heap allocation is bounded and failure does not become a false success', async t => {
-  const diagnostics = [];
-  const host = createScriptHost({ limits: { maxMemoryBytes: 2 * 1024 * 1024 },
-    onDiagnostic: event => diagnostics.push(event) });
-  t.after(() => host.close());
-  const installed = await host.install({ installationId: 'a', enabled: true, source: lxScript({
-    handler: 'async () => new Uint8Array(32 * 1024 * 1024)',
-  }) });
-  await assert.rejects(host.invoke(target()), { code: 'RESOURCE_LIMIT' });
-  assert.equal(host.stats().activeRequests, 0);
-  await waitFor(() => host.get('a').state === 'ready' &&
-    host.get('a').generation > installed.generation,
-  'memory-limited instance did not restart');
-  assert.equal(diagnostics.filter(event => event.operation === 'memory.restart').length, 1);
-});
-
-test('a ready instance that exceeds its memory limit restarts once with the same revision', async t => {
-  const diagnostics = [];
-  const host = createScriptHost({ limits: { maxMemoryBytes: 2 * 1024 * 1024 },
-    onDiagnostic: event => diagnostics.push(event) });
-  t.after(() => host.close());
-  const installed = await host.install({ installationId: 'a', enabled: true, source: lxScript({
-    setup: 'let retained;',
-    handler: `async ({info}) => {
-      if (info.musicInfo.allocate) retained = new Uint8Array(32 * 1024 * 1024);
-      return 7;
-    }`,
-  }) });
-  await assert.rejects(host.invoke(target('a', 'kw', { allocate: true })), { code: 'RESOURCE_LIMIT' });
-  let restarted;
-  for (let attempt = 0; attempt < 500; attempt++) {
-    restarted = host.get('a');
-    if (restarted.generation > installed.generation && restarted.state === 'ready') break;
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  assert.equal(restarted.state, 'ready');
-  assert.equal(restarted.enabled, true);
-  assert(restarted.generation > installed.generation);
-  assert.equal(restarted.contentHash, installed.contentHash);
-  assert.equal(diagnostics.filter(event => event.operation === 'memory.restart').length, 1);
-  assert.equal(await host.invoke(target()), 7);
-});
-
-test('initialization memory failure stays failed and does not restart', async t => {
-  const diagnostics = [];
-  const host = createScriptHost({ limits: { maxMemoryBytes: 2 * 1024 * 1024 },
-    onDiagnostic: event => diagnostics.push(event) });
-  t.after(() => host.close());
-  const source = lxScript({
-    setup: 'const retained = new Uint8Array(32 * 1024 * 1024);',
-  });
-  await assert.rejects(host.install({ installationId: 'a', enabled: true, source }),
-    { code: 'RESOURCE_LIMIT' });
-  assert.equal(host.get('a').enabled, true);
-  assert.equal(host.get('a').state, 'failed');
-  assert.equal(host.get('a').lastFailure, 'RESOURCE_LIMIT');
-  assert.equal(diagnostics.filter(event => event.operation === 'memory.restart').length, 0);
-  assert.equal(host.stats().liveSessions, 0);
 });
 
 test('request-bound storage stays scoped even when calls await the same guest promise', async t => {
@@ -619,7 +483,7 @@ test('cancelled network tasks remain tracked until the adapter settles without a
   // Cancellation terminates the request wait; the session-owned adapter task
   // remains tracked until the injected network settles.
   await waitFor(() => host.stats().networkRequests === 1,
-    'the live network request did not reach the worker snapshot');
+    'the live network request did not reach the owner snapshot');
   assert.equal(host.stats().networkRequests, 1);
   assert.equal(host.stats().pendingAdapterTasks, 1);
   assert.equal(await host.invoke(target('a', 'tx')), 'available');

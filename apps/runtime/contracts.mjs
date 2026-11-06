@@ -1,0 +1,31 @@
+export const storageCodes = new Set(['PERMISSION_DENIED', 'STALE_SOURCE', 'CANCELLED', 'CLOSED',
+  'TIMEOUT', 'LIMIT', 'INVALID_REQUEST', 'STORAGE_ERROR']);
+export const storageMethods = new Set(['get', 'set', 'delete'].map(name => `platform.musicScript.storage.${name}`));
+
+export const contracts = Object.freeze({
+  music: { contract: 'music.script.v3', version: '0.8.0', prefix: 'music.script.',
+    operations: ['load', 'unload', 'invoke', 'status', 'close'],
+    codes: new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SCRIPT_INTEGRITY',
+      'SCRIPT_ENCODING', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED',
+      'CAPABILITY_UNAVAILABLE', 'PERMISSION_DENIED', 'TIMEOUT', 'SCRIPT_CLEANUP', 'SCRIPT_FAILURE',
+      'NETWORK_ERROR', 'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'STORAGE_ERROR']) },
+  source: { contract: 'source.runtime.v2', version: '0.2.0', prefix: 'source.runtime.',
+    operations: ['load', 'unload', 'invoke', 'status', 'close'],
+    codes: new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SOURCE_INTEGRITY',
+      'SOURCE_ENCODING', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED',
+      'UNSUPPORTED_PROTOCOL', 'UNSUPPORTED_ACTION', 'UNSUPPORTED_RULE', 'UNSUPPORTED_DEPENDENCY',
+      'CAPABILITY_UNAVAILABLE', 'PERMISSION_DENIED', 'WEB_INTERACTION_REQUIRED', 'TIMEOUT',
+      'SOURCE_CLEANUP', 'SOURCE_FAILURE', 'NETWORK_ERROR', 'HTTP_ERROR', 'INVALID_RESPONSE',
+      'STORAGE_ERROR', 'VIRTUAL_ROUTE_NOT_FOUND']) },
+  cat: { contract: 'cat.script.v2', version: '0.2.0', prefix: 'cat.script.',
+    operations: ['start', 'status', 'refresh', 'install', 'enable', 'uninstall', 'invoke', 'management.describe', 'management.sync'],
+    codes: new Set(['INVALID_ARGUMENT', 'HOST_CLOSED', 'CANCELLED', 'RESOURCE_LIMIT',
+      'SCRIPT_PROTOCOL_ERROR', 'STALE_SESSION', 'NOT_FOUND', 'DISABLED', 'ALREADY_EXISTS',
+      'SCRIPT_EXCEPTION', 'STARTING', 'CORRUPT_STORAGE', 'SERVICE_ERROR', 'TIMEOUT',
+      'PERMISSION_DENIED', 'CAPABILITY_UNAVAILABLE', 'UNSUPPORTED_PROTOCOL', 'UNSUPPORTED_ACTION',
+      'NETWORK_ERROR', 'STORAGE_ERROR', 'SCRIPT_CLEANUP', 'INVALID_JSON', 'UPSTREAM_HTTP_ERROR',
+      'UNSUPPORTED_DEPENDENCY', 'CLOSED', 'STORAGE_CONFLICT', 'COMMIT_UNKNOWN', 'SERVICE_EXISTS',
+      'SERVICE_CLOSED', 'ROLLBACK_UNAVAILABLE', 'UNSUPPORTED_RULE', 'UNSUPPORTED_SCRIPT_ASYNC',
+      'HTTP_ERROR', 'INVALID_RESPONSE', 'UNSUPPORTED_OPTION', 'UNSUPPORTED_CRYPTO',
+      'WEB_INTERACTION_REQUIRED', 'VIRTUAL_ROUTE_NOT_FOUND', 'UNMAPPED_LOCAL_URL']) },
+});

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AsyncLocalStorage, createHook } from 'node:async_hooks';
-import { createCapabilityClient, SourceSession } from '@meowfilm/source-runtime';
-import { PortableSandbox } from '../src/portable-sandbox.js';
+import { createCapabilityClient } from '@meowfilm/source-runtime';
+import { PortableSourceSession } from '../src/portable-source-session.js';
 import { SCRIPT_LIMITS } from '../src/host.js';
 import { createNodeSourceCapabilities } from '../src/source-capabilities.js';
 import { deferred, turn } from './fixtures.js';
@@ -35,12 +35,11 @@ async function sourceSession(t, source, {
       } finally { networkCalls.delete(input); }
     },
   });
-  const session = owned(() => new SourceSession({
+  const session = owned(() => new PortableSourceSession({
     installationId: 'task-context',
-    protocol,
-    source,
+    generation: 1,
+    revision: { protocol, source, version: '1.0.0' },
     capabilities: createCapabilityClient({
-      maximumBytes: SCRIPT_LIMITS.maxMemoryBytes,
       async invoke(name, input, context) {
         const call = { name };
         ownerCalls.add(call);
@@ -56,22 +55,20 @@ async function sourceSession(t, source, {
       },
     }),
     limits: {
-      maximumBytes: SCRIPT_LIMITS.maxMemoryBytes,
-      requestTimeoutMs: 5000, cleanupTimeoutMs: 1000,
+      ...SCRIPT_LIMITS,
+      initTimeoutMs: 5000, requestTimeoutMs: 5000, cleanupTimeoutMs: 1000,
     },
-    createSandbox: options => PortableSandbox.create({
-      ...options,
-      limits: {
-        ...SCRIPT_LIMITS,
-        initTimeoutMs: 5000, requestTimeoutMs: 5000, cleanupTimeoutMs: 1000,
-      },
-    }),
   }));
   const idle = async (live = true) => {
     await owned(() => session.drain());
     // Timeout destroy notifications follow resource retirement on the next turn.
     await turn();
-    assert.deepEqual(session.stats(), {
+    const { native, cleanupError, ...stats } = session.stats();
+    assert.equal(cleanupError, null);
+    assert.equal(native.runtimeCount, live ? 1 : 0);
+    assert.equal(native.contextCount, live ? 2 : 0);
+    assert.equal(native.threadCount, live ? 1 : 0);
+    assert.deepEqual(stats, {
       live, invocations: 0, timers: 0, networkRequests: 0, pendingAdapterTasks: 0,
     });
     assert.equal(ownerCalls.size, 0, 'capability owner calls must have settled');
@@ -82,11 +79,11 @@ async function sourceSession(t, source, {
     try {
       // Closing the session or releasing its profiles must not make this pass.
       await idle();
-      await owned(() => session.close());
+      await owned(() => session.stop());
       await idle(false);
     } finally {
       try {
-        await owned(() => session.close());
+        await owned(() => session.stop());
         await owner.releaseProfiles('source:task-context:');
       } finally {
         hook.disable();
@@ -95,11 +92,11 @@ async function sourceSession(t, source, {
     }
   });
   await owned(() => session.start());
-  session.activate();
+  await session.activate();
   await idle();
   return {
     writes, idle,
-    invoke: (keyword, options) => owned(() => session.invoke(operation, { keyword }, options)),
+    invoke: (keyword, options) => owned(() => session.invoke({ siteId: 'source', operation, payload: { keyword } }, options)),
   };
 }
 

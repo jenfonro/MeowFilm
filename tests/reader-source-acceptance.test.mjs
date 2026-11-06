@@ -3,16 +3,15 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import {
-  mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { assertOwnedPath, temporaryRoot } from '../scripts/windows/working-paths.mjs';
+const temporaryRoot = join(process.cwd(), 'tmp/test-results');
 
 function area(t) {
   mkdirSync(temporaryRoot, { recursive: true });
   const directory = mkdtempSync(join(temporaryRoot, 'source-acceptance-'));
   t.after(() => {
-    assertOwnedPath(temporaryRoot, directory);
     rmSync(directory, { recursive: true });
   });
   return { directory, output: join(directory, 'report.json') };
@@ -26,12 +25,20 @@ async function run(args, { direct = false } = {}) {
   });
   let stdout = '';
   let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
   child.stdout.on('data', value => { stdout += value; });
   child.stderr.on('data', value => { stderr += value; });
-  return await new Promise((resolve, reject) => {
+  const result = await new Promise((resolve, reject) => {
     child.once('error', reject);
-    child.once('exit', code => resolve({ code, stdout, stderr }));
+    child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr }));
   });
+  assert.equal(result.signal, null, exitEvidence(result));
+  return result;
+}
+
+function exitEvidence({ code, signal, stderr }) {
+  return `code=${code}, signal=${signal}\n${stderr}`;
 }
 
 test('Reader inventory accepts CatVod, QYSG, Legado, Yiciyuan and split JSON arrays without copying secrets', async t => {
@@ -74,7 +81,7 @@ test('Reader inventory accepts CatVod, QYSG, Legado, Yiciyuan and split JSON arr
   }));
 
   const result = await run(['--scripts', directory, '--output', output]);
-  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.code, 0, exitEvidence(result));
   const text = readFileSync(output, 'utf8');
   const report = JSON.parse(text);
   assert.equal(report.schema, 2);
@@ -122,7 +129,7 @@ test('live Legado acceptance exercises declared actions with explicit image inpu
     '--output', output,
     '--live',
   ]);
-  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.code, 0, exitEvidence(result));
   const report = JSON.parse(readFileSync(output, 'utf8'));
   assert.deepEqual(report.rows[0].actions.map(action => [action.operation, action.state]), [
     ['search', 'returned'],
@@ -198,7 +205,7 @@ test('live QYSG acceptance detects remote HTML, retries candidates and uses the 
     '--output', output,
     '--live',
   ]);
-  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.code, 0, exitEvidence(result));
   const report = JSON.parse(readFileSync(output, 'utf8'));
   assert.equal(report.rows[0].protocol, 'qysg');
   assert.equal(report.rows[0].initialization, 'ready');
@@ -302,7 +309,7 @@ test('live Spider acceptance requires business actions while offline initializat
       const file = join(directory, 'spider.js');
       writeFileSync(file, script);
       const offline = await run(['--scripts', file, '--output', output]);
-      assert.equal(offline.code, 0, offline.stderr);
+      assert.equal(offline.code, 0, exitEvidence(offline));
       const initialized = JSON.parse(readFileSync(output, 'utf8'));
       assert.equal(initialized.mode, 'offline-init');
       assert.equal(initialized.summary.initialized, 1);
@@ -380,7 +387,7 @@ for (const protocol of ['legado', 'yiciyuan']) {
     const result = await run([
       '--scripts', directory, '--records', records, '--output', output, '--live',
     ]);
-    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.code, 0, exitEvidence(result));
     const text = readFileSync(output, 'utf8'), report = JSON.parse(text), row = report.rows[0];
     assert.equal(row.protocol, protocol);
     assert.equal(row.importedProtocol, protocol);
@@ -450,7 +457,7 @@ test('live QYSG acceptance exercises every declared Reader action with chained a
   const result = await run([
     '--scripts', directory, '--records', records, '--output', output, '--live',
   ]);
-  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.code, 0, exitEvidence(result));
   const text = readFileSync(output, 'utf8'), report = JSON.parse(text);
   assert.deepEqual(report.rows[0].actions.map(action => [action.operation, action.state]), [
     ['search', 'returned'], ['exploreKinds', 'returned'], ['explore', 'returned'],
@@ -520,7 +527,7 @@ test('portable CatVod Spider acceptance keeps its action ABI, playback chain and
   const result = await run([
     '--scripts', directory, '--records', records, '--output', output, '--live',
   ]);
-  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.code, 0, exitEvidence(result));
   const text = readFileSync(output, 'utf8'), report = JSON.parse(text);
   assert.equal(report.kind, 'source');
   assert.equal(report.rows[0].protocol, 'cat');
@@ -562,7 +569,7 @@ test('Reader source records retain file defaults and split-item overrides on bot
     const result = await run([
       '--scripts', directory, '--records', records, '--output', output, '--live',
     ], { direct });
-    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.code, 0, exitEvidence(result));
     const report = JSON.parse(readFileSync(output, 'utf8'));
     assert.equal(report.protocolOverride, 'auto');
     assert.equal(report.summary.sources, 2);
@@ -774,7 +781,7 @@ test('Reader live acceptance preserves genuine network and configuration error a
   const result = await run([
     '--scripts', file, '--records', records, '--output', output, '--live',
   ]);
-  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.code, 0, exitEvidence(result));
   const report = JSON.parse(readFileSync(output, 'utf8'));
   assert.deepEqual(report.rows[0].actions.map(action => [action.operation, action.state, action.code]), [
     ['search', 'upstream_failure', 'NETWORK_ERROR'],
@@ -838,7 +845,7 @@ test('QYSG HTTP bridge sends standalone contentType and honors explicit headers 
   const result = await run([
     '--scripts', file, '--records', records, '--output', output, '--live',
   ]);
-  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.code, 0, exitEvidence(result));
   assert.deepEqual(requests, [
     { path: '/form', method: 'POST', contentType: 'application/x-www-form-urlencoded',
       contentTypeHeaders: 1, body: 'key=a+b' },
@@ -862,7 +869,7 @@ test('Reader protocol override accepts ambiguous Spider input and never falls ba
   assert.notEqual(automatic.code, 0);
   assert.match(automatic.stderr, /UNSUPPORTED_PROTOCOL/);
   const explicit = await run(['--scripts', file, '--output', output, '--protocol', 'cat', '--live']);
-  assert.equal(explicit.code, 0, explicit.stderr);
+  assert.equal(explicit.code, 0, exitEvidence(explicit));
   const report = JSON.parse(readFileSync(output, 'utf8'));
   assert.equal(report.protocolOverride, 'cat');
   assert.equal(report.summary.returned, 1);
@@ -934,8 +941,14 @@ test('Reader keeps failed initialization, thrown invocation and unload or close 
         'node_modules/@meowfilm/source-runtime/src']) {
         mkdirSync(join(payload, path), { recursive: true });
       }
+      for (const file of ['bootstrap.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs']) {
+        cpSync(join('apps/runtime', file), join(payload, 'app', file));
+      }
+      cpSync('packages/runtime-bridge', join(payload, 'node_modules/@meowfilm/runtime-bridge'), { recursive: true });
       writeFileSync(join(payload, 'runtime-manifest.json'), JSON.stringify({
-        status: 'complete', files: [modulePath, hostPath, sourcePath].map(path => ({ path })),
+        status: 'complete', files: [modulePath, hostPath, sourcePath,
+          'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/modules/source-candidates.mjs',
+          'node_modules/@meowfilm/runtime-bridge/src/index.js'].map(path => ({ path })),
       }));
       writeFileSync(join(payload, hostPath), `
         export const createNodeNetwork = () => async () => ({ statusCode: 503, body: '{}' });
@@ -950,24 +963,25 @@ test('Reader keeps failed initialization, thrown invocation and unload or close 
             code: scenario.startsWith('invoke') ? 'SOURCE_FAILURE' : 'SOURCE_CLEANUP',
           }); };
           return {
+            id: 'source', version: '0.2.0', contract: 'source.runtime.v2',
+            upload: async () => ({ ok: true, contract: 'source.runtime.v2', value: { sourceRevision: 1 } }),
             methods: {
-              'source.runtime.stage.begin': async () => ({ ok: true, token: 'fixture', chunkBytes: 65536 }),
-              'source.runtime.stage.chunk': async () => ({ ok: true }),
-              'source.runtime.load': async () => ({ ok: true, instance: {
+              'source.runtime.load': async () => ({ ok: true, contract: 'source.runtime.v2', value: { instance: {
                 state: scenario === 'initialization' ? 'failed' : 'ready',
                 error: 'SOURCE_FAILURE', generation: 1, protocol: 'qysg',
                 capabilities: { source: { protocol: 'qysg', actions: scenario === 'invoke-after-upstream'
                   ? ['search', 'exploreKinds'] : ['search'] } },
-              } }),
+              } } }),
               'source.runtime.invoke': async ({ action }) => {
                 if (scenario === 'invoke' || scenario === 'invoke-after-upstream' && action === 'exploreKinds')
                   return failure();
-                if (scenario === 'limit') return { ok: false, code: 'LIMIT' };
+                if (scenario === 'limit') return { ok: false, contract: 'source.runtime.v2', code: 'LIMIT' };
                 if (scenario === 'invoke-after-upstream') await network({ scope: { requestId: 1 } });
-                return { ok: true, value: [] };
+                return { ok: true, contract: 'source.runtime.v2', value: [] };
               },
               'source.runtime.unload': async () => scenario === 'unload-throw'
-                ? failure() : ({ ok: scenario !== 'unload', code: 'SOURCE_CLEANUP' }),
+                ? failure() : scenario === 'unload' ? ({ ok: false, contract: 'source.runtime.v2', code: 'SOURCE_CLEANUP' })
+                : ({ ok: true, contract: 'source.runtime.v2', value: { unloaded: true, cleanupComplete: true } }),
             },
             close: async () => scenario === 'close-throw'
               ? failure() : ({ ok: scenario !== 'close', code: 'SOURCE_CLEANUP' }),
@@ -993,7 +1007,16 @@ test('Reader keeps failed initialization, thrown invocation and unload or close 
       } else if (scenario === 'limit') {
         assert.equal(report.summary.runtime_limit, 1);
       } else {
-        assert.equal(row.code, 'SOURCE_FAILURE');
+        if (scenario === 'invoke' || scenario === 'invoke-after-upstream') {
+          assert.deepEqual(row.actions.map(({ operation, state, code }) => [operation, state, code]),
+            scenario === 'invoke'
+              ? [['search', 'engine_incompatible', 'SOURCE_FAILURE']]
+              : [['search', 'returned', undefined], ['exploreKinds', 'engine_incompatible', 'SOURCE_FAILURE']]);
+          assert.equal(row.unload, 'complete');
+          assert.equal(row.cleanup, 'complete');
+        } else {
+          assert.equal(row.code, 'SOURCE_FAILURE');
+        }
         assert.equal(report.summary.engine_incompatible, 1);
         if (scenario === 'invoke-after-upstream') assert.equal(report.summary.upstream_failure, 0);
       }

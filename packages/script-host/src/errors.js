@@ -16,6 +16,7 @@ const messages = Object.freeze({
   UNSUPPORTED_SCRIPT_ASYNC: 'Source script cannot be converted to asynchronous calls',
   SCRIPT_PROTOCOL_ERROR: 'Invalid script protocol',
   SCRIPT_EXCEPTION: 'Script execution failed',
+  SCRIPT_CLEANUP: 'Script resources could not be fully released',
   RESOURCE_LIMIT: 'Resource limit exceeded',
   NETWORK_ERROR: 'Network operation failed',
   HTTP_ERROR: 'Source HTTP endpoint failed',

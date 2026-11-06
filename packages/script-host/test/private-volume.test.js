@@ -330,3 +330,66 @@ test('private files reject guest fd and fs injection without taking host ownersh
     assert.equal(fs.readFileSync(path('data'), 'utf8'), 'unchanged');
   } finally { fs.closeSync(fd); }
 });
+
+test('native private streams keep relative paths and close their actual descriptor', async t => {
+  const { api, path } = fixture(t);
+  api.mkdirSync('relative');
+  const output = api.createWriteStream('relative/native.bin');
+  const closed = new Promise((resolve, reject) => {
+    output.once('error', reject);
+    output.once('close', resolve);
+  });
+  output.end(Buffer.from([0, 255, 17, 128]));
+  assert.equal(output.path, 'relative/native.bin');
+  await closed;
+  assert.equal(output.closed, true);
+  assert.deepEqual(fs.readFileSync(path('relative/native.bin')), Buffer.from([0, 255, 17, 128]));
+  const input = api.createReadStream('relative/native.bin');
+  const chunks = [];
+  for await (const chunk of input) chunks.push(chunk);
+  assert.deepEqual(Buffer.concat(chunks), Buffer.from([0, 255, 17, 128]));
+  assert.equal(input.path, 'relative/native.bin');
+  assert.equal(input.closed, true);
+});
+
+test('private native stream fd mutation cannot select or close a volume-external descriptor', async t => {
+  const { volume, api, path } = fixture(t);
+  const sentinel = join(volume.root, '..', 'external-sentinel.txt');
+  fs.writeFileSync(sentinel, 'OUTSIDE');
+  for (const kind of ['read', 'write']) {
+    api.writeFileSync('/inside.txt', 'INSIDE');
+    const outside = fs.openSync(sentinel, 'r+');
+    let owned, assignment, redefinition, detached, chunks = [];
+    try {
+      const stream = kind === 'write' ? api.createWriteStream('/inside.txt')
+        : api.createReadStream('/inside.txt');
+      const completion = closed(stream), errors = [];
+      stream.on('error', error => errors.push(error));
+      stream.once('open', fd => {
+        owned = fd;
+        try { stream.fd = outside; } catch (error) { assignment = error.code; }
+        try { Object.defineProperty(stream, 'fd', { value: outside }); }
+        catch (error) { redefinition = error.name; }
+        try { stream.fd = null; } catch (error) { detached = error.code; }
+        if (kind === 'write') stream.end('OWNED');
+      });
+      if (kind === 'read') stream.on('data', chunk => chunks.push(chunk));
+      await completion;
+      assert.equal(assignment, 'EPERM'); assert.equal(redefinition, 'TypeError');
+      assert.equal(detached, 'EPERM');
+      assert.deepEqual(errors, []);
+      assert.equal(fs.readFileSync(sentinel, 'utf8'), 'OUTSIDE');
+      assert.equal(fs.fstatSync(outside).size, 7);
+      assertClosed(owned);
+      assert.equal(stream.fd, null);
+      assert.equal(fs.readFileSync(path('inside.txt'), 'utf8'), kind === 'write' ? 'OWNED' : 'INSIDE');
+      if (kind === 'read') assert.equal(Buffer.concat(chunks).toString(), 'INSIDE');
+      assert.equal(volume.streams.size, 0); assert.equal(volume.streamCleanup.size, 0);
+    } finally {
+      for (const fd of [owned, outside]) {
+        if (fd === undefined) continue;
+        try { fs.closeSync(fd); } catch (error) { if (error.code !== 'EBADF') throw error; }
+      }
+    }
+  }
+});

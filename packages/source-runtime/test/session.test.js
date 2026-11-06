@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  bytesToBase64,
   createCapabilityClient,
   detectSourceProtocol,
   hostApiVersion,
@@ -11,7 +10,7 @@ import {
 } from '../src/index.js';
 
 const turn = () => new Promise(resolve => setImmediate(resolve));
-const body = value => bytesToBase64(new TextEncoder().encode(value));
+const body = value => new TextEncoder().encode(value);
 
 function sandboxFactory(behavior = {}) {
   return async options => {
@@ -51,7 +50,6 @@ function sandboxFactory(behavior = {}) {
 
 function capabilitiesFor(routes, calls = []) {
   return createCapabilityClient({
-    maximumBytes: 1024 * 1024,
     async invoke(name, input, context = {}) {
       calls.push({
         name,
@@ -202,6 +200,46 @@ test('Legado session executes search, details, table of contents and content thr
   });
 });
 
+test('Legado WebView requests preserve absent optional method and body fields', async t => {
+  const calls = [];
+  const session = new SourceSession({
+    installationId: 'web',
+    source: {
+      ...legadoSource,
+      searchUrl: 'https://books.invalid/search,{"webView":true}',
+    },
+    protocol: 'legado',
+    capabilities: createCapabilityClient({
+      invoke(name, input, context) {
+        calls.push({ name, input, scope: context.scope });
+        assert.equal(name, 'web.interact');
+        return '<div class="book"><h2>Web Book</h2><a href="/web">open</a></div>';
+      },
+    }),
+    createSandbox: sandboxFactory(),
+  });
+  t.after(() => session.close());
+  await session.start();
+  session.activate();
+  const result = await session.invoke('search', { keyword: 'web' });
+  assert.equal(result.books[0].name, 'Web Book');
+  assert.equal(result.books[0].bookUrl, 'https://books.invalid/web');
+  assert.deepEqual(calls, [{
+    name: 'web.interact',
+    input: {
+      version: hostApiVersion, profile: 'source:web:1:web', mode: 'request',
+      request: {
+        mode: 'request', url: 'https://books.invalid/search', headers: {},
+        sourceRegex: '', overrideUrlRegex: '',
+      },
+    },
+    scope: {
+      installationId: 'web', generation: 1, protocol: 'legado',
+      siteId: 'source', requestId: 1,
+    },
+  }]);
+});
+
 test('Yiciyuan input is imported into the Legado contract without executing source code', () => {
   const imported = importYiciyuanSource({
     bookSourceName: 'Legacy',
@@ -289,7 +327,7 @@ test('QYSG combined script bytes remain inside the source budget', async () => {
     protocol: 'qysg',
     capabilities: capabilitiesFor({}),
     createSandbox: sandboxFactory(),
-    limits: { maximumBytes: 128 },
+    limits: { maximumParseBytes: 128 },
   });
   await assert.rejects(session.start(), { code: 'RESOURCE_LIMIT' });
   await session.close();
@@ -351,7 +389,6 @@ test('QYSG remote HTML retries bounded candidates and resolves scripts from the 
   const calls = [];
   let loaded;
   const capabilities = createCapabilityClient({
-    maximumBytes: 1024 * 1024,
     async invoke(name, input, context = {}) {
       assert.equal(name, 'http.request');
       calls.push({
@@ -680,7 +717,7 @@ test('guest DOM results share one cumulative node budget', async t => {
         { __meowMarkup: '<i>two</i>' },
       ],
     }),
-    limits: { maximumNodes: 5, maximumBytes: 1024 },
+    limits: { maximumNodes: 5, maximumParseBytes: 1024 },
   });
   t.after(() => session.close());
   await session.start();
@@ -712,7 +749,7 @@ test('QYSG htmlToText uses the session node budget', async t => {
           signal: options.signal,
         }),
     }),
-    limits: { maximumNodes: 8, maximumBytes: 4096 },
+    limits: { maximumNodes: 8, maximumParseBytes: 4096 },
   });
   t.after(() => session.close());
   await session.start();

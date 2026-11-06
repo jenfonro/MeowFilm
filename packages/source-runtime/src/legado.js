@@ -190,6 +190,7 @@ export class LegadoAdapter {
       getVariable: key => this.kernel.ruleVariableGet(key),
       setVariable: (key, value) => this.kernel.ruleVariableSet(key, value),
       maximumNodes: this.limits.maximumNodes,
+      maximumParseBytes: this.limits.maximumParseBytes,
     };
   }
 
@@ -220,9 +221,9 @@ export class LegadoAdapter {
       const value = await this.kernel.capability('legado.web', {
         mode: 'request',
         url: absolute(url, baseUrl),
-        method: options.method,
+        ...(options.method === undefined ? {} : { method: options.method }),
         headers,
-        body,
+        ...(body === undefined ? {} : { body }),
         sourceRegex: options.sourceRegex ?? '',
         overrideUrlRegex: options.overrideUrlRegex ?? '',
       }, this.kernel.invocationContext(invocation));
@@ -232,8 +233,8 @@ export class LegadoAdapter {
           statusMessage: String(value.statusMessage ?? value.statusText ?? ''),
           headers: objectOrEmpty(value.headers),
           url: String(value.url ?? absolute(url, baseUrl)),
-          body: String(value.body ?? ''),
-          bodyBase64: String(value.bodyBase64 ?? ''),
+          body: value.body instanceof Uint8Array ? value.body
+            : new TextEncoder().encode(String(value.data ?? value.html ?? value.body ?? '')),
           data: String(value.data ?? value.html ?? value.body ?? ''),
           encoding: String(value.encoding ?? 'utf-8'),
         };
@@ -243,8 +244,7 @@ export class LegadoAdapter {
         statusMessage: '',
         headers: {},
         url: absolute(url, baseUrl),
-        body: '',
-        bodyBase64: '',
+        body: new TextEncoder().encode(String(value ?? '')),
         data: String(value ?? ''),
         encoding: 'utf-8',
       };
@@ -302,7 +302,7 @@ export class LegadoAdapter {
       latestChapterTitle: await read('lastChapter'),
       type: fallback.type,
       variable: fallback.variable,
-    }, this.source, this.limits.maximumNodes);
+    }, this.source, this.limits.maximumNodes, this.limits.maximumParseBytes);
     result.bookUrl = absolute(result.bookUrl || fallback.url, baseUrl);
     result.tocUrl = absolute(result.tocUrl || result.bookUrl, baseUrl);
     result.coverUrl = absolute(result.coverUrl, baseUrl);

@@ -198,14 +198,24 @@ export class ScriptServices {
           writeHead: status => args[1].write(`HTTP/1.1 ${status} Forbidden\r\nContent-Length: 0\r\n\r\n`),
           end: () => args[1].destroy(),
         }, this, secure)) return true;
+        if (event === 'request') {
+          const scope = owner.requestScope(args[0]);
+          owner.session.node?.observeEmitter(args[0]);
+          owner.session.node?.observeEmitter(args[1]);
+          return owner.session.contextScope.run(scope, () => super.emit(event, ...args));
+        }
         return super.emit(event, ...args);
       }
       listen(...args) {
         const owner = ownerState.owner;
         const creationScope = ownerState.creationScope;
-        requireValue(owner, 'SERVICE_CLOSED');
+        requireValue(owner && !owner.stopping, 'SERVICE_CLOSED');
         requireValue(creationScope && !this.meowReleased &&
           !creationScope.signal?.aborted, 'SERVICE_CLOSED');
+        if (args[0] && typeof args[0] === 'object')
+          requireValue(args[0].path === undefined && args[0].fd === undefined &&
+            args[0].handle === undefined && listenHost(args[0].host), 'PERMISSION_DENIED');
+        else requireValue(typeof args[1] !== 'string' || listenHost(args[1]), 'PERMISSION_DENIED');
         let port = typeof args[0] === 'object' ? args[0]?.port : args[0];
         requireValue(Number.isInteger(Number(port)) && Number(port) >= 0 &&
           Number(port) <= 65535, 'PERMISSION_DENIED');
@@ -220,7 +230,11 @@ export class ScriptServices {
           requireValue(!this.meowStarted, 'SERVICE_EXISTS');
           this.meowStarted = true;
           queueMicrotask(() => {
-            this.emit('listening'); callback?.call(this);
+            this.emit('listening');
+            if (callback) {
+              if (owner.session.runCallback) owner.session.runCallback(callback, this, [], creationScope);
+              else callback.call(this);
+            }
             if (this === owner.main) owner.started.resolve();
             owner.session?.endpointsChanged?.();
           });
@@ -229,7 +243,10 @@ export class ScriptServices {
         this.meowStarted = true;
         try {
           return Parent.prototype.listen.call(this, 0, '127.0.0.1', () => {
-            callback?.call(this);
+            if (callback) {
+              if (owner.session.runCallback) owner.session.runCallback(callback, this, [], creationScope);
+              else callback.call(this);
+            }
             if (this === owner.main) owner.started.resolve();
             owner.session?.endpointsChanged?.();
           });
@@ -241,7 +258,6 @@ export class ScriptServices {
         }
       }
     }
-    requireValue(!options.IncomingMessage && !options.ServerResponse, 'UNSUPPORTED_OPTION');
     const server = new ManagedServer(this.serverOptions(options, secure));
     server.meowSecure = secure;
     server.meowReleased = false;
@@ -260,7 +276,7 @@ export class ScriptServices {
     const connected = socket => {
       const owner = ownerState.owner;
       const session = owner?.session;
-      if (!session?.root || session.root.signal.aborted) {
+      if (!session?.root || session.root.signal.aborted || owner.stopping) {
         try { socket.destroy(); } catch {}
         return;
       }
@@ -361,6 +377,7 @@ export class ScriptServices {
   }
 
   probe(...args) {
+    requireValue(!this.stopping, 'SERVICE_CLOSED');
     const listener = args.find(value => typeof value === 'function');
     const options = args.find(value => value && typeof value === 'object') ?? {};
     const server = new PortProbeServer(this, options, listener);
@@ -387,6 +404,7 @@ export class ScriptServices {
   }
 
   claimProbe(server, requested) {
+    requireValue(!this.stopping, 'SERVICE_CLOSED');
     const claimed = port => this.aliases.has(port) || this.probePorts.has(port) ||
       [...this.listeners].some(listener => listener.listening &&
         listener.address?.()?.port === port);
@@ -427,6 +445,7 @@ export class ScriptServices {
   }
 
   create(native, secure, ...args) {
+    requireValue(!this.stopping, 'SERVICE_CLOSED');
     const handler = args.find(value => typeof value === 'function');
     const options = args.find(value => value && typeof value === 'object') ?? {};
     const server = !secure && !this.claimed ? this.primary : this.server(native, secure, options);
@@ -437,6 +456,7 @@ export class ScriptServices {
       for (const key of ['keepAliveTimeout', 'headersTimeout', 'requestTimeout'])
         if (selected[key] !== undefined) server[key] = selected[key];
     }
+    this.session.node?.observeEmitter(server);
     if (handler) server.on('request', handler);
     return server;
   }
@@ -453,6 +473,20 @@ export class ScriptServices {
         ...Object.fromEntries(['keepAlive', 'keepAliveMsecs', 'maxSockets', 'maxFreeSockets',
           'maxTotalSockets', 'scheduling', 'timeout'].filter(key => options[key] !== undefined)
           .map(key => [key, options[key]])) });
+      const connect = agent.createConnection;
+      agent.createConnection = function(options, callback) {
+        requireValue(options.socketPath === undefined && options.fd === undefined &&
+          !options.path && !options.socket && !options.lookup && !options.createConnection,
+        'PERMISSION_DENIED');
+        const mapped = owner.connection(options, secure);
+        requireValue(mapped.meowLocal || isLoopbackHost(mapped.host) ||
+          owner.session.network === undefined, 'CAPABILITY_UNAVAILABLE');
+        const clean = { ...options, host: mapped.host, port: mapped.port,
+          ...(secure ? owner.tlsOptions(options, { client: true, local: Boolean(mapped.meowLocal) }) : {}) };
+        const socket = connect.call(this, clean, callback);
+        owner.session.node?.ownNetwork(socket);
+        return socket;
+      };
       const destroy = agent.destroy.bind(agent);
       const state = { owner, detach: null, released: false, release: null };
       const releaseOwnership = () => {
@@ -518,17 +552,23 @@ export class ScriptServices {
         requireValue(!url.username && !url.password, 'PERMISSION_DENIED');
         options = { protocol: url.protocol, hostname: url.hostname, port: url.port,
           path: url.pathname + url.search, ...(typeof args[1] === 'object' ? args[1] : {}) };
-      } else options = { ...args[0] };
+      } else options = projectHttpRequestOptions(args[0],
+        value => value === false || this.agents.has(value)) ?? {};
       // As in Node, an explicit Agent (including agent:false's one-shot Agent)
       // owns connection creation. Its unused per-request callback is metadata,
       // not permission to replace the controlled transport.
       if (options.agent === false || this.agents.has(options.agent))
         options = projectHttpRequestOptions(options, () => true);
-      requireValue(!options.socketPath && options.fd === undefined &&
+      requireValue(options.socketPath === undefined && options.fd === undefined &&
         !options.createConnection && !options.lookup, 'PERMISSION_DENIED');
       options.protocol ??= secure ? 'https:' : 'http:';
-      if (options.protocol !== (secure ? 'https:' : 'http:'))
-        throw Object.assign(new TypeError('Invalid request protocol'), { code: 'ERR_INVALID_PROTOCOL' });
+      if (options.protocol !== (secure ? 'https:' : 'http:')) {
+        const error = Object.assign(new TypeError('Invalid request protocol'), { code: 'ERR_INVALID_PROTOCOL' });
+        this.session.emitScriptDiagnostic?.({
+          kind: error.name, reason: 'host', code: error.code,
+        }, this.session.scope());
+        throw error;
+      }
       options.hostname ??= options.host ?? 'localhost';
       options.port = Number(options.port || (options.protocol === 'https:' ? 443 : 80));
       requireValue(typeof options.hostname === 'string' && Number.isInteger(options.port) &&
@@ -538,7 +578,8 @@ export class ScriptServices {
       // Keep attribution and pending-transport cancellation separate from the
       // session ownership of script-created handles and connection pools.
       const context = this.session.scope();
-      context.assertOpen?.();
+      requireValue(!this.stopping, 'SERVICE_CLOSED');
+      this.session.resourceScope().assertOpen();
       const requested = new URL(`${options.protocol}//${requestHost(options.hostname)}:${options.port}${options.path ?? '/'}`);
       const loopback = isLoopbackHost(requested.hostname);
       const local = loopback && Boolean(this.listener(options.port));
@@ -566,7 +607,6 @@ export class ScriptServices {
         const intercepted = !loopback && this.session.interceptor?.request(requested, clean, outbound, open,
           client => this.ownForward(client, outbound));
         if (intercepted) {
-          this.session.node.tags.set(intercepted, 'request');
           return this.trackRequest(intercepted, outbound, callback);
         }
         return this.trackRequest(open(clean), outbound, callback, scopeToken);
@@ -574,9 +614,12 @@ export class ScriptServices {
       catch (error) { scopeToken?.release(); outbound.close(); throw error; }
     };
     const Server = function(...args) { return create(...args); };
+    Server.prototype = native.Server.prototype;
+    Agent.prototype = native.Agent.prototype;
     return { ...Object.fromEntries(['METHODS', 'STATUS_CODES']
       .filter(key => key in native).map(key => [key, native[key]])),
-      Server, createServer: create,
+      Server, createServer: create, IncomingMessage: http.IncomingMessage,
+      ServerResponse: http.ServerResponse, OutgoingMessage: http.OutgoingMessage,
       Agent, request, get: (...args) => {
         const client = request(...args);
         try { client.end(); } catch (error) { client.destroy(); throw error; }
@@ -635,13 +678,12 @@ export class ScriptServices {
     requests.add(client);
     cleanups.set(client, release);
     try {
-      session.node.tags.set(client, 'request');
       client.on?.('error', ignoreError);
       client.once?.('close', release);
       Object.defineProperty(client, resourceOwner, {
         configurable: true, value: this,
       });
-      state.detach = context.add(() => client.destroy());
+      state.detach = context.add(() => { if (!client.destroyed) client.destroy(); });
       context.assertOpen?.();
       if (client.closed) release();
     } catch (error) {
@@ -690,12 +732,12 @@ export class ScriptServices {
         try { response.destroy?.(); } catch {}
         return;
       }
-      session.node.tags.set(response, 'incoming');
+      session.node?.observeEmitter(response);
       session.networkEvent?.({
         phase: 'response', networkId, statusCode: response.statusCode,
         scope: session.scopeIdentity(state.context),
       });
-      state.callback?.(response);
+      if (state.callback) session.runCallback(state.callback, client, [response], state.context);
     };
     const failed = error => {
       const session = state.owner?.session;
@@ -709,7 +751,6 @@ export class ScriptServices {
     requests.add(client);
     cleanups.set(client, release);
     try {
-      this.session.node.tags.set(client, 'request');
       client.on('error', ignoreError);
       client.once('close', release);
       Object.defineProperty(client, resourceOwner, {
@@ -720,9 +761,10 @@ export class ScriptServices {
       });
       client.once('response', responded);
       client.once('error', failed);
-      state.detach = context.add(() => client.destroy());
+      state.detach = context.add(() => { if (!client.destroyed) client.destroy(); });
       context.assertOpen?.();
       if (client.closed) release();
+      this.session.node?.observeEmitter(client);
     } catch (error) {
       try { client.off?.('response', responded); } catch {}
       try { client.off?.('error', failed); } catch {}
@@ -737,7 +779,7 @@ export class ScriptServices {
   }
 
   tlsOptions(options = {}, { client = false, local = false } = {}) {
-    requireValue(!options.socketPath && options.fd === undefined, 'PERMISSION_DENIED');
+    requireValue(options.socketPath === undefined && options.fd === undefined, 'PERMISSION_DENIED');
     const selected = Object.fromEntries(tlsOptionNames.filter(key => options[key] !== undefined)
       .map(key => [key, options[key]]));
     if (client) {
@@ -750,11 +792,13 @@ export class ScriptServices {
   serverOptions(options, secure) {
     return { ...(secure ? this.tlsOptions(options) : {}),
       ...Object.fromEntries(['keepAliveTimeout', 'headersTimeout', 'requestTimeout',
-        'maxHeaderSize', 'joinDuplicateHeaders'].filter(key => options[key] !== undefined)
+        'maxHeaderSize', 'joinDuplicateHeaders', 'IncomingMessage', 'ServerResponse']
+        .filter(key => options[key] !== undefined)
         .map(key => [key, options[key]])) };
   }
 
   outboundURL(input) {
+    requireValue(!this.stopping, 'SERVICE_CLOSED');
     const target = new URL(input);
     requireValue(['http:', 'https:'].includes(target.protocol) && !target.username && !target.password,
       'PERMISSION_DENIED');
@@ -779,6 +823,7 @@ export class ScriptServices {
   }
 
   connection(options, secure = false) {
+    requireValue(!this.stopping, 'SERVICE_CLOSED');
     const host = options.host ?? options.hostname ?? 'localhost';
     requireValue(typeof host === 'string' && !/[\\/\u0000]/.test(host), 'PERMISSION_DENIED');
     if (!isLoopbackHost(host)) {
@@ -805,7 +850,7 @@ export class ScriptServices {
     };
     cleanups.set(socket, release);
     try {
-      socket.once?.('close', release);
+      EventEmitter.prototype.on.call(socket, 'close', release);
       Object.defineProperty(socket, resourceOwner, {
         configurable: true, value: this,
       });
@@ -875,8 +920,6 @@ export class ScriptServices {
       } catch (error) { failure ??= error; }
       try { detachCompleted?.(); } catch (error) { failure ??= error; }
       detachCompleted = null;
-      try { this.session?.node?.forgetRequestContexts(scope); }
-      catch (error) { failure ??= error; }
       if (parentAttached) {
         try { transferScope.signal.removeEventListener('abort', terminate); }
         catch (error) { failure ??= error; }
@@ -952,7 +995,7 @@ export class ScriptServices {
 
   accept(request, response, server, secure) {
     const session = this.session;
-    if (!session) {
+    if (!session || this.stopping) {
       response.writeHead(410, { 'content-length': '0' });
       response.end();
       return false;
@@ -1026,8 +1069,21 @@ export class ScriptServices {
     return url;
   }
 
+  beginStop() {
+    if (this.stopping) return;
+    this.stopping = true;
+    // Stop active I/O and refuse new admission, but let a cooperative script
+    // close its own listeners before final owner cleanup.
+    for (const target of new Set([...(this.session?.nativeRequests ?? []),
+      ...this.connections, ...this.trustedSockets, ...this.agents])) {
+      try { if (!target.destroyed) target.destroy(); }
+      catch (error) { this.cleanupState.error ??= error; }
+    }
+  }
+
   async close() {
     if (this.closing) return this.closing;
+    this.beginStop();
     let failure;
     try { this.prepareCancel?.(); }
     catch (error) { failure = error; }
@@ -1186,7 +1242,6 @@ class AdapterRequest extends Writable {
             trailers: {}, rawTrailers: [], httpVersion: '1.1', httpVersionMajor: 1,
             httpVersionMinor: 1, complete: true, req: request,
           });
-          request.session.node.tags.set(response, 'incoming');
           request.emit('response', response);
           finish();
         } catch (failure) { finish(failure); }

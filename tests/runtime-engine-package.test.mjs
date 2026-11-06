@@ -1,105 +1,103 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packageRuntime } from '../scripts/package-runtime.mjs';
-import { packageWindowsRuntime } from '../scripts/windows/package-runtime.mjs';
-import { packageIOSRuntime } from '../scripts/package-ios-runtime.mjs';
-import { prepareWindowsTestBundles } from '../scripts/windows/prepare-test-bundles.mjs';
-import { assertOwnedPath, temporaryRoot } from '../scripts/windows/working-paths.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
-const policyPath = 'scripts/quickjs-runtime.json';
+const temporary = join(repository, 'tmp/test-results/runtime-engine-package');
+const policyPath = 'scripts/quickjs-native.json';
+const artifactPath = 'packages/script-host/build/Release/script_host_native.node';
+const receiptPath = 'packages/script-host/build/Release/script-host-native.json';
+const sdkPath = 'packages/script-host/build/Release/source-sdk.js';
+const payloadPath = path => path.replace('packages/script-host/', 'node_modules/@meowfilm/script-host/');
 const readJSON = path => JSON.parse(readFileSync(path, 'utf8'));
-const policy = readJSON(join(repository, policyPath));
-const repositoryLock = readJSON(join(repository, 'package-lock.json'));
-const engine = policy.packages.find(pkg => pkg.name === '@jitl/quickjs-wasmfile-release-sync');
-const asmjs = policy.packages.find(pkg => pkg.name === '@jitl/quickjs-asmjs-mjs-release-sync');
-const profiles = [
-  { profile: 'windows-native', backend: engine, excluded: asmjs },
-  { profile: 'ios-embedded', backend: asmjs, excluded: engine },
-];
-const wasmPath = `node_modules/${engine.name}/${engine.wasm.path}`;
-const taskContext = policy.taskContext;
-const localLoader = taskContext.artifacts.find(artifact => artifact.path.endsWith('.mjs'));
-const localWasm = taskContext.artifacts.find(artifact => artifact.path.endsWith('.wasm'));
-const payloadArtifactPath = artifact =>
-  artifact.path.replace('packages/script-host/', 'node_modules/@meowfilm/script-host/');
-const localWasmPath = payloadArtifactPath(localWasm);
-const localLoaderPath = payloadArtifactPath(localLoader);
-const wasmPaths = [wasmPath, localWasmPath].sort();
-const profileModules = { 'windows-native': ['music', 'cat', 'source'], 'ios-embedded': ['music', 'cat'] };
-const moduleFiles = { music: 'modules/music-script.mjs', cat: 'modules/cat-script.mjs', source: 'modules/source-runtime.mjs' };
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-const inert = 'throw new Error("Synthetic workspace code must never execute");\n';
 
-function fixture(t, profile) {
-  mkdirSync(temporaryRoot, { recursive: true });
-  const area = mkdtempSync(join(temporaryRoot, 'runtime-engine-package-'));
+let workspace;
+const fixtureAreas = [];
+after(() => {
+  for (const area of fixtureAreas) rmSync(area, { recursive: true });
+});
+
+// Copy the real build once for these serial tests. Each case restores its own
+// mutations; packaging still checks all actual inputs on every invocation.
+function sourceFixture() {
+  if (workspace) return workspace;
+  mkdirSync(temporary, { recursive: true });
+  const area = mkdtempSync(join(temporary, 'case-'));
+  fixtureAreas.push(area);
+  const root = join(area, 'source'), output = join(area, 'payload');
+  mkdirSync(root);
+  const receipt = readJSON(join(repository, receiptPath));
+  const lock = readJSON(join(repository, 'package-lock.json'));
+  const copy = path => {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    cpSync(join(repository, path), join(root, path), { recursive: true });
+  };
+  for (const path of new Set(['package.json', 'package-lock.json', policyPath, receiptPath,
+    artifactPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
+  for (const name of ['runtime-bridge', 'source-runtime', 'script-host']) {
+    const location = `packages/${name}`;
+    copy(`${location}/package.json`);
+    copy(`${location}/src`);
+    const installed = join(root, 'node_modules/@meowfilm', name);
+    mkdirSync(dirname(installed), { recursive: true });
+    symlinkSync(join(root, location), installed, process.platform === 'win32' ? 'junction' : 'dir');
+  }
+  for (const [path, entry] of Object.entries(lock.packages)) {
+    if (path.includes('node_modules/') && !entry.link && !entry.dev && existsSync(join(repository, path))) copy(path);
+  }
+  copy('apps/runtime');
+  workspace = { root, output, area };
+  return workspace;
+}
+
+function fixture(t) {
+  const { root, output, area } = sourceFixture();
+  const originals = new Map(), directories = [];
+  const remember = path => {
+    if (!originals.has(path)) originals.set(path,
+      existsSync(join(root, path)) ? readFileSync(join(root, path)) : undefined);
+  };
+  const parent = path => {
+    const missing = [];
+    for (let dir = dirname(join(root, path)); !existsSync(dir); dir = dirname(dir)) missing.push(dir);
+    for (const dir of missing.reverse()) {
+      mkdirSync(dir);
+      directories.push(dir);
+    }
+  };
   t.after(() => {
-    assertOwnedPath(temporaryRoot, area);
-    rmSync(area, { recursive: true });
+    for (const [path, bytes] of [...originals].reverse()) {
+      rmSync(join(root, path), { force: true });
+      if (bytes !== undefined) writeFileSync(join(root, path), bytes);
+    }
+    for (const dir of directories.reverse()) rmdirSync(dir);
+    rmSync(output, { recursive: true, force: true });
   });
-  const root = join(area, 'source');
   const write = (path, value) => {
-    const target = assertOwnedPath(area, join(root, path), { allowMissing: true });
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, typeof value === 'string' || Buffer.isBuffer(value)
+    remember(path);
+    parent(path);
+    writeFileSync(join(root, path), typeof value === 'string' || Buffer.isBuffer(value)
       ? value : `${JSON.stringify(value, null, 2)}\n`);
   };
-  const manifest = { name: 'runtime-engine-fixture', version: '1.0.0', private: true, workspaces: ['packages/*'] };
-  const lock = { name: manifest.name, version: manifest.version, lockfileVersion: 3, packages: { '': { ...manifest } } };
-  write('package.json', manifest);
-  for (const name of ['runtime-bridge', 'script-host', 'source-runtime']) {
-    const location = `packages/${name}`, installed = `node_modules/@meowfilm/${name}`;
-    const pkg = { name: `@meowfilm/${name}`, version: '1.0.0', type: 'module', license: 'UNLICENSED',
-      exports: './src/index.js', files: ['src'],
-      ...(name === 'script-host' ? { dependencies: {
-        '@meowfilm/source-runtime': '1.0.0',
-        'quickjs-emscripten-core': '0.32.0', [engine.name]: '0.32.0', [asmjs.name]: '0.32.0',
-      } } : {}),
-    };
-    write(`${location}/package.json`, pkg);
-    write(`${location}/src/index.js`, inert);
-    lock.packages[location] = { version: pkg.version, ...(pkg.dependencies ? { dependencies: pkg.dependencies } : {}) };
-    lock.packages[installed] = { resolved: location, link: true };
-    mkdirSync(dirname(join(root, installed)), { recursive: true });
-    symlinkSync(join(root, location), join(root, installed), process.platform === 'win32' ? 'junction' : 'dir');
-  }
-  // Both backends are real installed dependencies, as in script-host's manifest.
-  // Profile selection must happen in packaging, never in this fixture's lock.
-  // Real engine files, never a dummy WASM/asmjs or invented registry SRI.
-  // Only these controlled fixture copies are altered by rejection tests.
-  for (const pkg of policy.packages) {
-    const location = `node_modules/${pkg.name}`;
-    mkdirSync(dirname(join(root, location)), { recursive: true });
-    cpSync(join(repository, location), join(root, location), { recursive: true });
-    lock.packages[location] = structuredClone(repositoryLock.packages[location]);
-  }
-  write(policyPath, readFileSync(join(repository, policyPath)));
-  write(policy.license.path, readFileSync(join(repository, policy.license.path)));
-  for (const input of [taskContext.patch, taskContext.build, ...taskContext.artifacts])
-    write(input.path, readFileSync(join(repository, input.path)));
-  write('apps/runtime/bootstrap.mjs', inert);
-  write('apps/runtime/modules/music-script.mjs', inert);
-  write('apps/runtime/modules/cat-script.mjs', inert);
-  write('apps/runtime/modules/source-runtime.mjs', inert);
-  for (const file of ['bootstrap.mjs', 'entries/aggregate.mjs']) {
-    write(`apps/windows/runtime/${file}`, readFileSync(join(repository, 'apps/windows/runtime', file)));
-    write(`apps/ios/runtime/${file}`, readFileSync(join(repository, 'apps/ios/runtime', file)));
-  }
-  const saveLock = () => write('package-lock.json', lock);
-  saveLock();
-  const editManifest = (location, changes) =>
-    write(`${location}/package.json`, { ...readJSON(join(root, location, 'package.json')), ...changes });
-  const output = join(area, 'payload');
-  return { root, area, output, lock, write, saveLock, editManifest,
-    pack: () => packageRuntime({ root, product: 'aggregate', output, profile }) };
+  const remove = path => {
+    remember(path);
+    rmSync(join(root, path));
+  };
+  const symlink = (path, target) => {
+    remove(path);
+    symlinkSync(target, join(root, path));
+  };
+  return { root, output, area, policy: readJSON(join(root, policyPath)),
+    receipt: readJSON(join(root, receiptPath)), write, remove, symlink,
+    pack: () => packageRuntime({ root, product: 'aggregate', output }) };
 }
 
 async function rejected(f, code) {
@@ -109,150 +107,52 @@ async function rejected(f, code) {
   assert.equal(manifest.error.code, code);
   for (const file of manifest.files) {
     const bytes = readFileSync(join(f.output, file.path));
-    assert.equal(file.bytes, bytes.length);
-    assert.equal(file.sha256, hash(bytes));
+    assert.equal(bytes.length, file.bytes);
+    assert.equal(hash(bytes), file.sha256);
   }
-  return manifest;
 }
 
-for (const { profile, backend, excluded } of profiles) {
-  test(`${profile} pins real lock/manifest/license/engine bytes without executing workspace code`, async t => {
-    // The Windows case also verifies the API's unchanged default.
-    const f = fixture(t, profile === 'windows-native' ? undefined : profile), manifest = await f.pack();
-    assert.equal(manifest.status, 'platform-pending');
-    assert.equal(manifest.schemaVersion, 1);
-    assert.equal(manifest.product, 'aggregate');
-    assert.equal(manifest.assemblyProfile, profile);
-    assert.deepEqual(manifest.modules, profileModules[profile]);
-    assert.equal(manifest.sharedEntry, profile === 'ios-embedded' ? 'app/bootstrap.mjs' : undefined);
-    assert.deepEqual(manifest.files.filter(file => file.path.startsWith('app/')).map(file => file.path),
-      ['bootstrap.mjs', ...profileModules[profile].map(name => moduleFiles[name])].map(file => `app/${file}`).sort());
-    assert.deepEqual(manifest.omittedPlatformDependencies, [{
-      from: 'node_modules/@meowfilm/script-host', name: excluded.name,
-      kind: 'dependency', range: '0.32.0', reason: 'platform', profile,
-    }]);
-    assert.deepEqual(manifest.omittedPlatformFiles, backend === engine ? [] : [localLoaderPath, localWasmPath]
-      .map(path => ({ path, reason: 'platform', profile })));
-    assert.deepEqual(manifest.omittedOptionalDependencies, []);
-    assert.equal(manifest.dependencies.some(value => value.name === excluded.name), false);
-    assert.equal(existsSync(join(f.output, 'node_modules', excluded.name)), false);
-    assert.equal(manifest.files.some(file => file.path.startsWith(`node_modules/${excluded.name}/`)), false);
-    assert.equal(manifest.inputs.some(input => input.path.startsWith(`node_modules/${excluded.name}/`)), false);
-    assert.deepEqual(manifest.trustedWasm, backend === engine ? [{
-      package: engine.name, version: engine.version, ...engine.wasm, path: wasmPath,
-      licensePath: `node_modules/${engine.name}/LICENSE`, licenseSha256: engine.licenseSha256,
-    }, {
-      package: '@meowfilm/script-host', version: '1.0.0', ...localWasm, path: localWasmPath,
-      taskContext: { revision: 1, source: policy.source, gitHead: taskContext.gitHead },
-      licensePath: `node_modules/${engine.name}/LICENSE`, licenseSha256: engine.licenseSha256,
-    }] : []);
-    assert.deepEqual(manifest.trustedAsmjs, backend === asmjs ? asmjs.files.map(file => ({
-      package: asmjs.name, version: asmjs.version, ...file, path: `node_modules/${asmjs.name}/${file.path}`,
-      licensePath: `node_modules/${asmjs.name}/LICENSE`, licenseSha256: asmjs.licenseSha256,
-    })) : []);
-    assert.deepEqual(manifest.files.filter(file => /\.wasm$/i.test(file.path)).map(file => file.path),
-      backend === engine ? wasmPaths : []);
-    if (backend === engine) {
-      assert.equal(manifest.entry, 'app/windows/entries/aggregate.mjs');
-      for (const trusted of manifest.trustedWasm) {
-        const wasm = readFileSync(join(f.output, trusted.path));
-        assert.equal(wasm.length, trusted.bytes);
-        assert.equal(hash(wasm), trusted.sha256);
-        assert.deepEqual(wasm.subarray(0, 8), Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]));
-        assert.equal(hash(readFileSync(join(f.output, trusted.licensePath))), trusted.licenseSha256);
-      }
-      const loader = readFileSync(join(f.output, localLoaderPath));
-      assert.equal(loader.length, localLoader.bytes);
-      assert.equal(hash(loader), localLoader.sha256);
-    } else {
-      for (const path of [localLoaderPath, localWasmPath]) assert.equal(existsSync(join(f.output, path)), false);
-      assert.equal(Object.hasOwn(manifest, 'entry'), false);
-      assert.equal(existsSync(join(f.output, 'app/windows')), false);
-      assert.equal(manifest.files.some(file => /\.(?:node|dll|dylib|so|exe|a|o|wasm)$/i.test(file.path)), false);
-    }
-    const artifacts = backend.wasm ? [backend.wasm] : backend.files;
-    for (const file of artifacts) {
-      const path = `node_modules/${backend.name}/${file.path}`, bytes = readFileSync(join(f.output, path));
-      assert.equal(bytes.length, file.bytes);
-      assert.equal(hash(bytes), file.sha256);
-      assert.deepEqual(manifest.files.find(file => file.path === path),
-        { path, bytes: bytes.length, sha256: hash(bytes) });
-    }
-    for (const pkg of policy.packages.filter(pkg => pkg.name !== excluded.name)) {
-      const dependency = manifest.dependencies.find(value => value.name === pkg.name);
-      assert.equal(dependency.version, pkg.version);
-      assert.equal(dependency.resolved, pkg.resolved);
-      assert.equal(dependency.integrity, pkg.integrity);
-      assert.equal(dependency.manifestSha256, hash(readFileSync(join(f.output, dependency.path, 'package.json'))));
-      assert.equal(dependency.licenseSha256, hash(readFileSync(join(f.output, dependency.path, 'LICENSE'))));
-    }
-    const taskInputs = [taskContext.patch.path, taskContext.build.path, localLoader.path, localWasm.path];
-    for (const path of [policyPath, policy.license.path,
-      ...artifacts.map(file => `node_modules/${backend.name}/${file.path}`),
-      ...(backend === engine ? taskInputs : []),
-      'apps/runtime/bootstrap.mjs', ...profileModules[profile].map(name => `apps/runtime/${moduleFiles[name]}`)]) {
-      assert.deepEqual(manifest.inputs.find(input => input.path === path), {
-        path, sha256: hash(readFileSync(join(f.root, path))),
-      });
-      assert.equal(manifest.inputs.filter(input => input.path === path).length, 1);
-    }
-    if (backend !== engine) {
-      for (const path of [...taskInputs, 'apps/runtime/modules/source-runtime.mjs'])
-        assert.equal(manifest.inputs.some(input => input.path === path), false);
-    }
-    assert.ok(!manifest.files.some(file => file.path === taskContext.patch.path || file.path === taskContext.build.path));
-    assert.deepEqual(readJSON(join(f.output, 'node_modules/@meowfilm/script-host/package.json')).dependencies,
-      readJSON(join(f.root, 'packages/script-host/package.json')).dependencies);
-  });
-}
-
-function runOffline(output, program, { profile = 'windows-native' } = {}) {
-  const hook = `
-    import { registerHooks, syncBuiltinESMExports } from 'node:module';
-    import { fileURLToPath } from 'node:url';
-    import { isAbsolute, relative, sep } from 'node:path';
-    import http from 'node:http';
-    import https from 'node:https';
-    import net from 'node:net';
-    const offline = () => { throw new Error('PAYLOAD_NETWORK_ACCESS'); };
-    globalThis.fetch = offline;
-    http.get = http.request = https.get = https.request = offline;
-    net.connect = net.createConnection = net.Socket.prototype.connect = offline;
-    syncBuiltinESMExports();
-    ${profile === 'ios-embedded' ? `
-      Object.defineProperty(process, 'platform', { value: 'ios' });
-      globalThis.WebAssembly = undefined;
-    ` : ''}
-    const root = ${JSON.stringify(output)};
-    registerHooks({ resolve(specifier, context, next) {
-      const result = next(specifier, context);
-      if (result.url.startsWith('file:')) {
-        const path = relative(root, fileURLToPath(result.url));
-        if (path === '..' || path.startsWith('..' + sep) || isAbsolute(path))
-          throw new Error('PAYLOAD_DEPENDENCY_ESCAPED');
-      }
-      return result;
-    } });
-  `;
-  return spawnSync(process.execPath,
-    ['--import', `data:text/javascript,${encodeURIComponent(hook)}`, '--input-type=module', '-e', program], {
-      cwd: output, env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' },
-      encoding: 'utf8', windowsHide: true, timeout: 20000,
-    });
-}
-
-test('packaged task-context engine isolates memory and exposes its native hook only to trusted SDK initialization', async t => {
+test('common native payload preserves exact build, ABI, SDK, source and license evidence', async t => {
   const f = fixture(t);
-  for (const file of ['quickjs-engine.js', 'quickjs-module.js', 'errors.js']) {
-    const path = `packages/script-host/src/${file}`;
-    f.write(path, readFileSync(join(repository, path)));
+  f.write('packages/script-host/build/Release/obj.target/not-shipped.o', 'build intermediate');
+  const manifest = await f.pack();
+  assert.equal(manifest.status, 'complete');
+  assert.equal(manifest.assemblyProfile, 'common-native');
+  assert.equal(manifest.entry, 'app/entry.mjs');
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source']);
+  assert.equal(manifest.trustedNative.length, 1);
+  const native = manifest.trustedNative[0];
+  assert.equal(native.path, payloadPath(artifactPath));
+  assert.equal(native.platform, process.platform);
+  assert.equal(native.arch, process.arch);
+  assert.equal(native.abi, 1);
+  assert.equal(native.napi, 8);
+  assert.deepEqual(native.sources, f.receipt.sources);
+  assert.deepEqual(native.patches, f.policy.patches);
+  assert.equal(native.sdk.path, payloadPath(sdkPath));
+  assert.deepEqual(manifest.files.filter(file => /\.(?:node|dll|dylib|so|exe|a|o|wasm)$/i.test(file.path))
+    .map(file => file.path), [payloadPath(artifactPath)]);
+  for (const value of [native, native.sdk, ...native.licenses]) {
+    const bytes = readFileSync(join(f.output, value.path));
+    assert.equal(hash(bytes), value.sha256);
+    if (value.bytes !== undefined) assert.equal(bytes.length, value.bytes);
   }
-  await f.pack();
+  for (const input of f.receipt.inputs) {
+    assert.deepEqual(manifest.inputs.find(value => value.path === input.path), input);
+    assert.equal(manifest.inputs.filter(value => value.path === input.path).length, 1);
+  }
+  assert.deepEqual(readJSON(join(f.output, payloadPath(receiptPath))), f.receipt);
+  assert.equal(manifest.files.some(file => /\/(?:native|obj\.target)\//.test(file.path)), false);
+});
+
+function runIsolated(output, program) {
   const hook = `
     import { registerHooks } from 'node:module';
     import { fileURLToPath } from 'node:url';
     import { isAbsolute, relative, sep } from 'node:path';
-    const root = ${JSON.stringify(f.output)};
+    const root = ${JSON.stringify(output)};
+    globalThis.WebAssembly = undefined;
+    globalThis.fetch = () => { throw new Error('UNEXPECTED_NETWORK'); };
     registerHooks({ resolve(specifier, context, next) {
       const result = next(specifier, context);
       if (result.url.startsWith('file:')) {
@@ -263,580 +163,176 @@ test('packaged task-context engine isolates memory and exposes its native hook o
       return result;
     } });
   `;
-  const program = `
-    const { readFile } = await import('node:fs/promises');
-    const { newQuickJSWASMModuleFromVariant, newVariant } = await import('quickjs-emscripten-core');
-    const { default: variant } = await import('@jitl/quickjs-wasmfile-release-sync');
-    const { default: loader } = await import(${JSON.stringify(`./${localLoaderPath}`)});
-    const localVariant = { ...variant, importModuleLoader: async () => loader };
-    const wasm = await readFile(new URL(${JSON.stringify(`./${localWasmPath}`)}, import.meta.url));
-    const compiled = await WebAssembly.compile(wasm);
-    const first = await newQuickJSWASMModuleFromVariant(newVariant(localVariant, { wasmModule: compiled }));
-    const second = await newQuickJSWASMModuleFromVariant(newVariant(localVariant, { wasmModule: compiled }));
-    const context = first.newContext(), other = second.newContext();
-    let output;
-    try {
-      const value = context.unwrapResult(context.evalCode(
-        'globalThis.fixtureInstallationMarker = 1; JSON.stringify({ value: 2 + 3, process: typeof process })'));
-      const isolated = other.unwrapResult(other.evalCode('typeof fixtureInstallationMarker'));
-      try {
-        output = { ...JSON.parse(context.getString(value)),
-          isolatedMemory: first.getWasmMemory().buffer !== second.getWasmMemory().buffer,
-          otherInstallation: other.getString(isolated) };
-      } finally { isolated.dispose(); value.dispose(); }
-    } finally { other.dispose(); context.dispose(); }
-    const { QuickJSEngine } = await import('./node_modules/@meowfilm/script-host/src/quickjs-engine.js');
-    const engine = await QuickJSEngine.create({
-      source: \`(() => {
-        const nativeTaskContext = globalThis.__meowTaskContext;
-        return {
-          watchStartup() {},
-          inspectTaskContext() {
-            return JSON.stringify({
-              captured: typeof nativeTaskContext,
-              current: nativeTaskContext(),
-              installed: globalThis.fixtureTaskContext,
-            });
-          },
-        };
-      })()\`,
-      bridge: () => null,
-      limits: { maxMemoryBytes: 16 * 1024 * 1024, maxStackBytes: 128 * 1024,
-        initTimeoutMs: 10000, cleanupTimeoutMs: 1000 },
+  // A file entry keeps eval-only CLI flags out of the real Cat Worker.
+  const entry = join(output, 'isolated-test.mjs');
+  writeFileSync(entry, program, { flag: 'wx' });
+  try {
+    return spawnSync(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(hook)}`, entry], {
+      cwd: output, env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' },
+      encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024,
     });
-    try {
-      engine.evaluate(\`globalThis.fixtureTaskContext = {
-        type: typeof globalThis.__meowTaskContext,
-        own: Object.prototype.hasOwnProperty.call(globalThis, '__meowTaskContext'),
-      };\`);
-      output.taskContext = engine.callJSON('inspectTaskContext', []);
-    } finally { engine.close(); }
-    console.log(JSON.stringify(output));
-  `;
-  const result = spawnSync(process.execPath,
-    ['--import', `data:text/javascript,${encodeURIComponent(hook)}`, '--input-type=module', '-e', program], {
-      cwd: f.output, env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' },
-      encoding: 'utf8', windowsHide: true, timeout: 20000,
-    });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stderr, '');
-  assert.deepEqual(JSON.parse(result.stdout), {
-    value: 5, process: 'undefined', isolatedMemory: true, otherInstallation: 'undefined',
-    taskContext: { captured: 'function', current: 0, installed: { type: 'undefined', own: false } },
-  });
-});
-
-test('packaged asmjs public exports execute offline without WebAssembly and isolate their heaps', async t => {
-  const f = fixture(t, 'ios-embedded');
-  await f.pack();
-  const result = runOffline(f.output, `
-    import assert from 'node:assert/strict';
-    const { newQuickJSWASMModuleFromVariant } = await import('quickjs-emscripten-core');
-    const { default: variant } = await import('@jitl/quickjs-asmjs-mjs-release-sync');
-    const { default: loader } = await import('@jitl/quickjs-asmjs-mjs-release-sync/emscripten-module');
-    assert.equal(typeof WebAssembly, 'undefined');
-    const first = await newQuickJSWASMModuleFromVariant(variant);
-    const second = await newQuickJSWASMModuleFromVariant({ ...variant,
-      importModuleLoader: () => Promise.resolve(loader),
-    });
-    const context = first.newContext(), other = second.newContext();
-    try {
-      const value = context.unwrapResult(context.evalCode(
-        'globalThis.fixtureInstallationMarker = 1; JSON.stringify({ value: 2 + 3, process: typeof process })'));
-      const isolated = other.unwrapResult(other.evalCode('typeof fixtureInstallationMarker'));
-      try {
-        console.log(JSON.stringify({ ...JSON.parse(context.getString(value)),
-          isolatedMemory: first.getWasmMemory().buffer !== second.getWasmMemory().buffer,
-          otherInstallation: other.getString(isolated), webAssembly: typeof WebAssembly }));
-      } finally { isolated.dispose(); value.dispose(); }
-    } finally { other.dispose(); context.dispose(); }
-  `, { profile: 'ios-embedded' });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stderr, '');
-  assert.deepEqual(JSON.parse(result.stdout), {
-    value: 5, process: 'undefined', isolatedMemory: true, otherInstallation: 'undefined', webAssembly: 'undefined',
-  });
-});
-
-for (const { profile } of profiles) {
-  test(`${profile} real shared entry/modules and script-host engine are reachable in the offline payload`, async t => {
-    const f = fixture(t, profile), output = join(f.area, 'real-payload');
-    const manifest = await packageRuntime({ root: repository, product: 'aggregate', output, profile });
-    assert.deepEqual(manifest.modules, profileModules[profile]);
-    const result = runOffline(output, `
-      import assert from 'node:assert/strict';
-      const { createAppRuntime } = await import('./${profile === 'ios-embedded' ? manifest.sharedEntry : 'app/bootstrap.mjs'}');
-      const { createMusicScriptModule } = await import('./app/modules/music-script.mjs');
-      const { createCatScriptModule } = await import('./app/modules/cat-script.mjs');
-      if (${JSON.stringify(profile)} === 'windows-native') {
-        const { createSourceRuntimeModule } = await import('./app/modules/source-runtime.mjs');
-        assert.equal(typeof createSourceRuntimeModule, 'function');
-      }
-      const { createScriptHost } = await import('@meowfilm/script-host');
-      const { QuickJSEngine } = await import('./node_modules/@meowfilm/script-host/src/quickjs-engine.js');
-      for (const value of [createAppRuntime, createMusicScriptModule, createCatScriptModule, createScriptHost])
-        assert.equal(typeof value, 'function');
-      const engine = await QuickJSEngine.create({
-        source: '({ inspect() { return JSON.stringify({ value: String(21n * 2n), process: typeof process, require: typeof require }); } })',
-        bridge: () => null,
-        limits: { maxMemoryBytes: 32 * 1024 * 1024, maxStackBytes: 128 * 1024,
-          initTimeoutMs: 10000, cleanupTimeoutMs: 1000 },
-      });
-      try { console.log(JSON.stringify(engine.callJSON('inspect', []))); }
-      finally { engine.close(); }
-    `, { profile });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stderr, '');
-    assert.deepEqual(JSON.parse(result.stdout), { value: '42', process: 'undefined', require: 'undefined' });
-  });
+  } finally { rmSync(entry); }
 }
 
-for (const input of [taskContext.patch, taskContext.build, ...taskContext.artifacts]) {
-  test(`task-context input drift is rejected before copying: ${input.path}`, async t => {
-    const f = fixture(t), bytes = readFileSync(join(f.root, input.path));
-    bytes[bytes.length - 1] ^= 1;
-    f.write(input.path, bytes);
-    const manifest = await rejected(f, 'ENGINE_HASH_MISMATCH');
-    assert.deepEqual(manifest.files, []);
-  });
-  test(`missing task-context input is rejected before copying: ${input.path}`, async t => {
-    const f = fixture(t);
-    rmSync(assertOwnedPath(f.area, join(f.root, input.path)));
-    const manifest = await rejected(f, 'MISSING_SOURCE');
-    assert.deepEqual(manifest.files, []);
-  });
-}
-
-for (const artifact of taskContext.artifacts) {
-  test(`task-context artifact byte count is independently pinned: ${artifact.path}`, async t => {
-    const f = fixture(t), altered = structuredClone(policy);
-    altered.taskContext.artifacts.find(input => input.path === artifact.path).bytes += 1;
-    f.write(policyPath, altered);
-    const manifest = await rejected(f, 'ENGINE_HASH_MISMATCH');
-    assert.deepEqual(manifest.files, []);
-  });
-}
-
-test('a matching policy hash cannot admit a task-context artifact without WASM v1 magic', async t => {
-  const f = fixture(t), altered = structuredClone(policy), bytes = readFileSync(join(f.root, localWasm.path));
-  bytes[0] ^= 1;
-  f.write(localWasm.path, bytes);
-  altered.taskContext.artifacts.find(artifact => artifact.path === localWasm.path).sha256 = hash(bytes);
-  f.write(policyPath, altered);
-  const manifest = await rejected(f, 'ENGINE_WASM_MAGIC');
-  assert.deepEqual(manifest.files, []);
-});
-
-for (const [label, change] of [
-  ['revision', value => { value.taskContext.revision = 2; }],
-  ['upstream source', value => { value.source = 'https://example.invalid/quickjs'; }],
-  ['upstream gitHead', value => { value.gitHead = '0'.repeat(40); }],
-  ['task-context gitHead', value => { value.taskContext.gitHead = '0'.repeat(40); }],
-  ['upstream archive', value => { value.taskContext.upstreamArchiveSha256 = '0'.repeat(64); }],
-  ['toolchain', value => { value.taskContext.toolchainVersion = '5.0.2'; }],
-  ['patch path', value => { value.taskContext.patch.path = 'scripts/quickjs/other.patch'; }],
-  ['build path traversal', value => { value.taskContext.build.path = '../build.py'; }],
-  ['loader path', value => { value.taskContext.artifacts[0].path = 'packages/script-host/src/other.mjs'; }],
-  ['WASM path', value => { value.taskContext.artifacts[1].path = 'packages/script-host/src/other.wasm'; }],
-  ['extra WASM', value => {
-    value.taskContext.artifacts.push({ ...localWasm, path: 'packages/script-host/src/quickjs/extra.wasm' });
-  }],
-  ['extra task-context field', value => { value.taskContext.otherWasm = { ...localWasm }; }],
-  ['extra reproduction field', value => { value.taskContext.build.args = ['unreviewed']; }],
-  ['extra artifact field', value => { value.taskContext.artifacts[0].package = 'unreviewed'; }],
-  ['duplicate artifact', value => { value.taskContext.artifacts[0] = { ...localWasm }; }],
-  ['missing loader', value => {
-    value.taskContext.artifacts = value.taskContext.artifacts.filter(artifact => artifact.path !== localLoader.path);
-  }],
-  ['unfilled patch hash', value => { value.taskContext.patch.sha256 = null; }],
-  ['unfilled artifact hash', value => { value.taskContext.artifacts[0].sha256 = null; }],
-  ['unfilled artifact bytes', value => { value.taskContext.artifacts[0].bytes = null; }],
-]) {
-  test(`task-context policy cannot change the reviewed ${label}`, async t => {
-    const f = fixture(t), altered = structuredClone(policy);
-    change(altered);
-    f.write(policyPath, altered);
-    const manifest = await rejected(f, 'INVALID_ENGINE_POLICY');
-    assert.deepEqual(manifest.files, []);
-  });
-}
-
-test('workspace files pruning cannot omit the reviewed task-context artifact pair', async t => {
+test('packaged entry starts HTTP and executes all three owners without repository fallback', async t => {
   const f = fixture(t);
-  f.editManifest('packages/script-host', { files: ['src/index.js'] });
-  const manifest = await f.pack();
-  for (const path of [localLoaderPath, localWasmPath]) assert.ok(manifest.files.some(file => file.path === path));
-  assert.deepEqual(manifest.files.filter(file => /\.wasm$/i.test(file.path)).map(file => file.path), wasmPaths);
+  await f.pack();
+  const result = runIsolated(f.output, `
+    import assert from 'node:assert/strict';
+    import { join } from 'node:path';
+    import { createRuntime, createRuntimeClient, createCallbackServer } from './app/entry.mjs';
+    const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
+    const requestKey = 'a'.repeat(64), callbackKey = 'b'.repeat(64);
+    const callback = createCallbackServer({ sessionId, callbackKey, methods: {} });
+    await callback.start();
+    const runtime = createRuntime({ sessionId, requestKey, callbackKey,
+      callbackUrl: callback.baseUrl, dataRoot: join(process.cwd(), 'runtime-data') });
+    const okay = reply => {
+      assert.equal(reply.ok, true, JSON.stringify(reply));
+      return reply.value;
+    };
+    let client;
+    try {
+      await runtime.start();
+      client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
+      const descriptor = await client.describe();
+      assert.equal(descriptor.ok, true);
+      assert.equal(descriptor.value.protocol, 'runtime.http.v1');
+      assert.deepEqual(descriptor.value.modules.map(value => value.contract),
+        ['music.script.v3', 'cat.script.v2', 'source.runtime.v2']);
+      okay(await client.upload('music', 'native-lx', 1, Buffer.from(
+        'let n=0; lx.on(lx.EVENT_NAMES.request, async () => ++n);' +
+        'lx.send(lx.EVENT_NAMES.inited,{status:true,sources:{kw:{type:"music",actions:["musicUrl"],qualitys:["320k"]}}});'),
+        { basename: 'fixture.js' }));
+      const lx = okay(await client.call('music.script.load', {
+        installationId: 'native-lx', sourceRevision: 1, revision: 1, expectedRevision: 0,
+        version: '1.0.0', config: {}, permissions: { storage: [] },
+        grant: '7bd84ef5-9557-4338-a67f-9dc4df2413f9',
+      })).instance;
+      const input = { installationId: lx.installationId, revision: lx.revision,
+        generation: lx.generation, siteId: 'kw', operation: 'musicUrl', payload: { quality: '320k' } };
+      assert.equal(okay(await client.call('music.script.invoke', input)), 1);
+      assert.equal(okay(await client.call('music.script.invoke', input)), 2);
+      okay(await client.upload('cat', 'native-cat', 1, Buffer.from(
+        'module.exports.home = () => ({value: Buffer.from([0,255,65]).toString("hex")});')));
+      const cat = okay(await client.call('cat.script.install', {
+        installationId: 'native-cat', sourceRevision: 1, enabled: true,
+      }));
+      assert.deepEqual(okay(await client.call('cat.script.invoke', {
+        installationId: 'native-cat', generation: cat.generation, siteId: 'default',
+        operation: 'home', payload: {},
+      })), { value: '00ff41' });
+      okay(await client.upload('source', 'native-source', 1, Buffer.from(
+        'export default { searchContent(keyword) { return {list:[{vod_id:keyword,vod_name:keyword}]}; } };'),
+        { basename: 'fixture.js' }));
+      const source = okay(await client.call('source.runtime.load', {
+        installationId: 'native-source', sourceRevision: 1, revision: 1, expectedRevision: 0, protocol: 'cat',
+      })).instance;
+      assert.deepEqual(okay(await client.call('source.runtime.invoke', {
+        installationId: source.installationId, revision: source.revision, generation: source.generation,
+        action: 'search', payload: { keyword: 'fixture' },
+      })), { list: [{ vod_id: 'fixture', vod_name: 'fixture' }] });
+      assert.deepEqual(okay(await client.shutdown()), { closed: true, cleanupComplete: true });
+      console.log('PACKAGED_NATIVE_HTTP_THREE_OWNERS_OK');
+    } finally {
+      await runtime.close();
+      await client?.close();
+      await callback.close();
+    }
+  `);
+  assert.equal(result.signal, null, result.stderr);
+  assert.equal(result.status, 0, result.stderr || result.error?.message);
+  assert.match(result.stdout, /PACKAGED_NATIVE_HTTP_THREE_OWNERS_OK/);
 });
 
-for (const { profile, backend, excluded } of profiles) {
-  for (const pkg of policy.packages.filter(pkg => pkg.name !== excluded.name)) {
-    test(`${profile} reviewed engine manifest rejects drift: ${pkg.name}`, async t => {
-      const f = fixture(t, profile);
-      f.editManifest(`node_modules/${pkg.name}`, { description: 'altered fixture manifest' });
-      await rejected(f, 'ENGINE_MANIFEST_MISMATCH');
-    });
-    test(`${profile} reviewed engine license rejects drift: ${pkg.name}`, async t => {
-      const f = fixture(t, profile);
-      f.write(`node_modules/${pkg.name}/LICENSE`, 'Altered fixture license\n');
-      await rejected(f, 'ENGINE_LICENSE_MISMATCH');
-    });
-  }
-
-  for (const [field, value] of [
-    ['integrity', `sha512-${createHash('sha512').update('not-the-reviewed-tarball').digest('base64')}`],
-    ['resolved', `https://registry.npmjs.org/${backend.name}/-/unreviewed-0.32.0.tgz`],
-  ]) {
-    test(`${profile} reviewed engine requires the exact registry ${field}`, async t => {
-      const f = fixture(t, profile);
-      f.lock.packages[`node_modules/${backend.name}`][field] = value;
-      f.saveLock();
-      await rejected(f, 'ENGINE_LOCK_MISMATCH');
-    });
-  }
-
-  test(`${profile} rejects a matching installed/locked but unreviewed engine version`, async t => {
-    const f = fixture(t, profile), location = `node_modules/${backend.name}`;
-    f.editManifest(location, { version: '0.32.1' });
-    f.lock.packages[location].version = '0.32.1';
-    f.saveLock();
-    await rejected(f, 'ENGINE_LOCK_MISMATCH');
+for (const [field, value, code] of [
+  ['abi', 2, 'INVALID_NATIVE_RECEIPT'], ['napi', 9, 'INVALID_NATIVE_RECEIPT'],
+  ['arch', 'not-the-host', 'NATIVE_TARGET_MISMATCH'],
+  ['platform', 'not-the-host', 'NATIVE_TARGET_MISMATCH'],
+]) {
+  test(`native receipt rejects wrong ${field}`, async t => {
+    const f = fixture(t);
+    f.write(receiptPath, { ...f.receipt, [field]: value });
+    await rejected(f, code);
   });
+}
 
-  for (const pkg of [backend, excluded]) {
-    test(`${profile} requires an exact direct backend declaration even if omitted: ${pkg.name}`, async t => {
-      const f = fixture(t, profile), location = 'packages/script-host';
-      const dependencies = { ...readJSON(join(f.root, location, 'package.json')).dependencies,
-        [pkg.name]: '^0.32.0' };
-      f.editManifest(location, { dependencies });
-      f.lock.packages[location].dependencies = dependencies;
-      f.saveLock();
-      await rejected(f, 'ENGINE_VERSION_PIN');
-    });
-
-    test(`${profile} cannot disguise a backend as optional: ${pkg.name}`, async t => {
-      const f = fixture(t, profile), location = 'packages/script-host';
-      const optionalDependencies = { [pkg.name]: '0.32.0' };
-      f.editManifest(location, { optionalDependencies });
-      f.lock.packages[location].optionalDependencies = optionalDependencies;
-      f.saveLock();
-      await rejected(f, 'ENGINE_VERSION_PIN');
-    });
-  }
-
-  test(`${profile} checks engine license declarations independently of package identity`, async t => {
-    const f = fixture(t, profile), location = `node_modules/${backend.name}`;
-    f.editManifest(location, { license: 'UNLICENSED' });
-    f.lock.packages[location].license = 'UNLICENSED';
-    f.saveLock();
-    await rejected(f, 'ENGINE_LICENSE_MISMATCH');
+for (const path of [artifactPath, sdkPath]) {
+  test(`native build output hash is checked: ${path}`, async t => {
+    const f = fixture(t);
+    f.write(path, Buffer.concat([readFileSync(join(f.root, path)), Buffer.from('changed')]));
+    await rejected(f, 'NATIVE_HASH_MISMATCH');
   });
-
-  test(`${profile} requires the central redistributed engine license to match the reviewed original`, async t => {
-    const f = fixture(t, profile);
-    f.write(policy.license.path, 'Not the QuickJS and quickjs-emscripten license\n');
-    await rejected(f, 'ENGINE_LICENSE_MISMATCH');
-  });
-
-  test(`${profile} missing engine license cannot produce a publishable payload`, async t => {
-    const f = fixture(t, profile);
-    const target = assertOwnedPath(f.area, join(f.root, `node_modules/${backend.name}/LICENSE`));
-    rmSync(target);
+  test(`missing advertised native build output fails: ${path}`, async t => {
+    const f = fixture(t);
+    f.remove(path);
     await rejected(f, 'MISSING_SOURCE');
   });
-
-  test(`${profile} still rejects root manifest/lock drift`, async t => {
-    const f = fixture(t, profile);
-    f.lock.packages[''].workspaces = ['other/*'];
-    f.saveLock();
-    await rejected(f, 'WORKSPACE_MISMATCH');
-  });
-
-  test(`${profile} still rejects script-host dependency manifest/lock drift`, async t => {
-    const f = fixture(t, profile);
-    const dependencies = { ...f.lock.packages['packages/script-host'].dependencies };
-    delete dependencies[excluded.name];
-    f.editManifest('packages/script-host', { dependencies });
-    await rejected(f, 'DEPENDENCIES_MISMATCH');
-  });
-
-  test(`${profile} omits only the other platform backend when it is not installed`, async t => {
-    const f = fixture(t, profile);
-    rmSync(assertOwnedPath(f.area, join(f.root, 'node_modules', excluded.name)), { recursive: true });
-    const manifest = await f.pack();
-    assert.equal(manifest.status, 'platform-pending');
-    assert.deepEqual(manifest.omittedOptionalDependencies, []);
-    assert.deepEqual(manifest.omittedPlatformDependencies, [{
-      from: 'node_modules/@meowfilm/script-host', name: excluded.name,
-      kind: 'dependency', range: '0.32.0', reason: 'platform', profile,
-    }]);
-    assert.ok(manifest.dependencies.some(pkg => pkg.name === backend.name));
-  });
-
-  for (const name of [backend.name, '@jitl/quickjs-ffi-types']) {
-    test(`${profile} missing required engine dependency is never omitted or substituted: ${name}`, async t => {
-      const f = fixture(t, profile);
-      rmSync(assertOwnedPath(f.area, join(f.root, 'node_modules', name)), { recursive: true });
-      await rejected(f, 'MISSING_DEPENDENCY');
-    });
-  }
-
-  test(`${profile} does not omit ordinary required script-host dependencies`, async t => {
-    const f = fixture(t, profile), location = 'packages/script-host';
-    const dependencies = { ...f.lock.packages[location].dependencies, 'missing-required': '1.0.0' };
-    f.editManifest(location, { dependencies });
-    f.lock.packages[location].dependencies = dependencies;
-    f.saveLock();
-    await rejected(f, 'MISSING_DEPENDENCY');
-  });
-
-  test(`${profile} cannot omit or ship the opposite backend requested by another consumer`, async t => {
-    const f = fixture(t, profile), location = 'packages/runtime-bridge';
-    const dependencies = { [excluded.name]: '0.32.0' };
-    f.editManifest(location, { dependencies });
-    f.lock.packages[location].dependencies = dependencies;
-    f.saveLock();
-    await rejected(f, 'ENGINE_PROFILE_MISMATCH');
-  });
-}
-
-test('a changed WASM byte is rejected despite its trusted package/path and valid lock', async t => {
-  const f = fixture(t), bytes = readFileSync(join(f.root, wasmPath));
-  bytes[bytes.length - 1] ^= 1;
-  f.write(wasmPath, bytes);
-  const manifest = await rejected(f, 'ENGINE_HASH_MISMATCH');
-  assert.equal(manifest.incompleteFile, wasmPath);
-});
-
-test('missing advertised WASM cannot leave a platform-pending payload', async t => {
-  const f = fixture(t), target = assertOwnedPath(f.area, join(f.root, wasmPath));
-  rmSync(target);
-  await rejected(f, 'MISSING_PUBLIC_FILE');
-});
-
-for (const file of asmjs.files) {
-  const path = `node_modules/${asmjs.name}/${file.path}`;
-  for (const change of ['byte', 'length']) {
-    test(`asmjs rejects ${change} drift at its reviewed public file: ${file.path}`, async t => {
-      const f = fixture(t, 'ios-embedded'), bytes = readFileSync(join(f.root, path));
-      if (change === 'byte') bytes[bytes.length - 1] ^= 1;
-      f.write(path, change === 'byte' ? bytes : bytes.subarray(0, bytes.length - 1));
-      const manifest = await rejected(f, 'ENGINE_HASH_MISMATCH');
-      assert.equal(manifest.incompleteFile, path);
-    });
-  }
-  test(`missing public asmjs file cannot leave a platform-pending payload: ${file.path}`, async t => {
-    const f = fixture(t, 'ios-embedded');
-    rmSync(assertOwnedPath(f.area, join(f.root, path)));
-    await rejected(f, 'MISSING_PUBLIC_FILE');
-  });
-}
-
-for (const { profile, backend } of profiles) {
-  for (const path of [
-    `node_modules/${backend.name}/extra.wasm`,
-    `node_modules/${backend.name}/dist/extra.wasm`,
-    `node_modules/${backend.name}/dist/emscripten-module.node`,
-    `node_modules/${backend.name}/dist/binding.node`,
-    `node_modules/${backend.name}/dist/extra.dylib`,
-    'node_modules/quickjs-emscripten-core/dist/emscripten-module.wasm',
-    'packages/script-host/src/emscripten-module.wasm',
-    'packages/script-host/src/quickjs/extra.wasm',
-    'packages/script-host/src/quickjs/extra.WASM',
-    'packages/script-host/src/quickjs/binding.node',
-    'packages/script-host/src/quickjs/engine.dll',
-    'packages/source-runtime/src/quickjs/emscripten-module.wasm',
-  ]) {
-    test(`${profile} only the reviewed WASM artifact may be binary: ${path}`, async t => {
-      const f = fixture(t, profile);
-      f.write(path, readFileSync(join(repository, wasmPath)));
-      await rejected(f, 'NATIVE_PAYLOAD');
-    });
-  }
-  if (profile === 'ios-embedded') {
-    test('asmjs cannot acquire the WASM variant artifact at its otherwise reviewed path', async t => {
-      const f = fixture(t, profile);
-      f.write(`node_modules/${backend.name}/${engine.wasm.path}`, readFileSync(join(repository, wasmPath)));
-      await rejected(f, 'NATIVE_PAYLOAD');
-    });
-  }
-
-  test(`${profile} engine policy cannot widen the trusted binary path`, async t => {
-    const f = fixture(t, profile), altered = structuredClone(policy);
-    altered.packages.find(pkg => pkg.name === engine.name).wasm.path = 'dist/other.wasm';
-    f.write(policyPath, altered);
-    await rejected(f, 'INVALID_ENGINE_POLICY');
-  });
-
-  test(`${profile} trusted engine ancestor junctions are rejected rather than dereferenced`, async t => {
-    const f = fixture(t, profile), target = assertOwnedPath(f.area, join(f.root, `node_modules/${backend.name}/dist`));
-    const saved = assertOwnedPath(f.area, join(f.area, 'saved-dist'), { allowMissing: true });
-    renameSync(target, saved);
-    symlinkSync(saved, target, process.platform === 'win32' ? 'junction' : 'dir');
+  test(`native build output cannot be a symlink: ${path}`, async t => {
+    const f = fixture(t);
+    f.symlink(path, join(repository, path));
     await rejected(f, 'UNSAFE_SYMLINK');
   });
 }
 
-for (const path of ['packages/script-host/src/quickjs', 'scripts/quickjs']) {
-  test(`task-context input ancestor junctions are rejected before copying: ${path}`, async t => {
-    const f = fixture(t), target = assertOwnedPath(f.area, join(f.root, path));
-    const saved = assertOwnedPath(f.area, join(f.area, 'saved-inputs'), { allowMissing: true });
-    renameSync(target, saved);
-    symlinkSync(saved, target, process.platform === 'win32' ? 'junction' : 'dir');
-    const manifest = await rejected(f, 'UNSAFE_SYMLINK');
-    assert.deepEqual(manifest.files, []);
-  });
-}
-
-for (const [name, alter] of [
-  ['unreviewed path', pkg => { pkg.files[0].path = 'dist/other.mjs'; }],
-  ['duplicate path', pkg => { pkg.files[1].path = pkg.files[0].path; }],
-  ['missing public module', pkg => { pkg.files.pop(); }],
-  ['additional native file', pkg => { pkg.files.push({ ...pkg.files[0], path: 'dist/extra.node' }); }],
-  ['WASM permission', pkg => { pkg.wasm = structuredClone(engine.wasm); }],
-]) {
-  test(`asmjs policy cannot widen or omit its reviewed files: ${name}`, async t => {
-    const f = fixture(t, 'ios-embedded'), altered = structuredClone(policy);
-    alter(altered.packages.find(pkg => pkg.name === asmjs.name));
-    f.write(policyPath, altered);
-    await rejected(f, 'INVALID_ENGINE_POLICY');
-  });
-}
-
-for (const { profile, backend, excluded } of profiles) {
-  test(`shared packaging CLI selects the fixed ${profile} profile`, t => {
-    const f = fixture(t), script = join(f.root, 'scripts/package-runtime.mjs');
-    f.write('scripts/package-runtime.mjs', readFileSync(join(repository, 'scripts/package-runtime.mjs')));
-    const result = spawnSync(process.execPath, [script, '--product', 'aggregate', '--output', f.output,
-      '--profile', profile], { cwd: f.area, encoding: 'utf8', windowsHide: true, timeout: 20000 });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stderr, '');
-    assert.equal(JSON.parse(result.stdout).status, 'platform-pending');
-    const manifest = readJSON(join(f.output, 'runtime-manifest.json'));
-    assert.equal(manifest.assemblyProfile, profile);
-    assert.ok(manifest.dependencies.some(pkg => pkg.name === backend.name));
-    assert.equal(manifest.dependencies.some(pkg => pkg.name === excluded.name), false);
-  });
-}
-
-test('unknown profiles cannot create a payload or choose arbitrary backends', async t => {
-  const f = fixture(t);
-  for (const profile of ['ios', 'asmjs', '__proto__', '']) {
-    await assert.rejects(packageRuntime({ root: f.root, product: 'aggregate', output: f.output, profile }),
-      { code: 'INVALID_PROFILE' });
-    assert.equal(existsSync(f.output), false);
-  }
-  const script = join(f.root, 'scripts/package-runtime.mjs');
-  f.write('scripts/package-runtime.mjs', readFileSync(join(repository, 'scripts/package-runtime.mjs')));
-  for (const [args, code] of [
-    [['--profile', 'ios'], 'INVALID_PROFILE'],
-    [['--profile'], 'CLI_USAGE'],
-    [['--profile', 'ios-embedded', '--profile', 'windows-native'], 'CLI_USAGE'],
-  ]) {
-    const result = spawnSync(process.execPath, [script, '--product', 'aggregate', '--output', f.output, ...args],
-      { encoding: 'utf8', windowsHide: true, timeout: 20000 });
-    assert.equal(result.status, 1);
-    assert.ok(result.stderr.startsWith(`${code}:`), result.stderr);
-    assert.equal(result.stdout, '');
-    assert.equal(existsSync(f.output), false);
-  }
+test('a self-matching artifact hash cannot hide an invalid binary format', async t => {
+  const f = fixture(t), bytes = Buffer.from('this is not a native addon');
+  f.write(artifactPath, bytes);
+  f.write(receiptPath, { ...f.receipt, artifact: { path: artifactPath, bytes: bytes.length, sha256: hash(bytes) } });
+  await rejected(f, 'NATIVE_TARGET_MISMATCH');
 });
 
-test('Windows wrapper relocates its entry onto the same common module/engine closure', async t => {
-  const f = fixture(t);
-  const manifest = await packageWindowsRuntime({ ...f, product: 'aggregate' });
-  assert.equal(manifest.status, 'complete');
-  assert.deepEqual(manifest.files.filter(file => file.path.startsWith('app/')).map(file => file.path), [
-    'app/bootstrap.mjs', 'app/modules/cat-script.mjs', 'app/modules/music-script.mjs',
-    'app/modules/source-runtime.mjs',
-    'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
-  ]);
-  assert.deepEqual(readFileSync(join(f.output, 'app/modules/music-script.mjs')),
-    readFileSync(join(f.root, 'apps/runtime/modules/music-script.mjs')));
-  assert.deepEqual(readFileSync(join(f.output, 'app/modules/cat-script.mjs')),
-    readFileSync(join(f.root, 'apps/runtime/modules/cat-script.mjs')));
-  assert.deepEqual(readFileSync(join(f.output, 'app/modules/source-runtime.mjs')),
-    readFileSync(join(f.root, 'apps/runtime/modules/source-runtime.mjs')));
-  assert.ok(readFileSync(join(f.output, manifest.entry), 'utf8').includes("from '../../modules/music-script.mjs'"));
-  assert.ok(readFileSync(join(f.output, manifest.entry), 'utf8').includes("from '../../modules/cat-script.mjs'"));
-  assert.ok(readFileSync(join(f.output, manifest.entry), 'utf8').includes("from '../../modules/source-runtime.mjs'"));
-  assert.deepEqual(manifest.files.filter(file => /\.wasm$/i.test(file.path)).map(file => file.path), wasmPaths);
-});
-
-test('iOS wrapper relocates its entry onto the music/Cat asm.js closure and completes the payload', async t => {
-  const f = fixture(t);
-  const manifest = await packageIOSRuntime({ ...f, product: 'aggregate' });
-  assert.equal(manifest.status, 'complete');
-  assert.equal(manifest.entry, 'app/ios/entries/aggregate.mjs');
-  assert.equal(manifest.platform, 'ios');
-  assert.equal(manifest.transport, 'ios-socketpair-v1');
-  assert.equal(manifest.assemblyProfile, 'ios-embedded');
-  assert.equal(Object.hasOwn(manifest, 'sharedEntry'), false);
-  assert.deepEqual(manifest.modules, ['music', 'cat']);
-  assert.deepEqual(manifest.fileHashExcludes, ['runtime-manifest.json']);
-  assert.deepEqual(manifest.files.filter(file => file.path.startsWith('app/')).map(file => file.path), [
-    'app/bootstrap.mjs', 'app/ios/bootstrap.mjs', 'app/ios/entries/aggregate.mjs',
-    'app/modules/cat-script.mjs', 'app/modules/music-script.mjs',
-  ]);
-  assert.deepEqual(manifest.files.filter(file => /\.(?:wasm|node|dll|dylib|so|exe)$/i.test(file.path)), []);
-  assert.deepEqual(manifest.trustedWasm, []);
-  assert.deepEqual(manifest.relocations.map(value => value.path), ['app/ios/bootstrap.mjs', 'app/ios/entries/aggregate.mjs']);
-  const entry = readFileSync(join(f.output, manifest.entry), 'utf8');
-  assert.ok(entry.includes("from '../../modules/music-script.mjs'"));
-  assert.ok(entry.includes("from '../../modules/cat-script.mjs'"));
-  assert.ok(!entry.includes('source-runtime'));
-  assert.ok(readFileSync(join(f.output, 'app/ios/bootstrap.mjs'), 'utf8').includes("from '../bootstrap.mjs'"));
-  for (const file of manifest.files) {
-    const bytes = readFileSync(join(f.output, file.path));
-    assert.equal(bytes.length, file.bytes);
-    assert.equal(hash(bytes), file.sha256);
-  }
-  for (const path of ['apps/ios/runtime/bootstrap.mjs', 'apps/ios/runtime/entries/aggregate.mjs'])
-    assert.deepEqual(manifest.inputs.find(input => input.path === path), { path, sha256: hash(readFileSync(join(f.root, path))) });
-});
-
-for (const [name, change, code] of [
-  ['an extra platform source', f => f.write('apps/ios/runtime/entries/other.mjs', inert), 'IOS_CLOSURE'],
-  ['a missing platform entry', f => rmSync(assertOwnedPath(f.area, join(f.root, 'apps/ios/runtime/entries/aggregate.mjs'))), 'IOS_CLOSURE'],
-  ['an unexpected entry import', f => f.write('apps/ios/runtime/entries/aggregate.mjs',
-    "import { createSourceRuntimeModule } from '../../../runtime/modules/source-runtime.mjs';\n" +
-    readFileSync(join(repository, 'apps/ios/runtime/entries/aggregate.mjs'))), 'IOS_IMPORT'],
-  ['a dynamic platform import', f => f.write('apps/ios/runtime/bootstrap.mjs',
-    readFileSync(join(repository, 'apps/ios/runtime/bootstrap.mjs')) + "\nawait import('node:fs');\n"), 'IOS_IMPORT'],
-]) {
-  test(`iOS wrapper refuses ${name} instead of silently shipping or omitting it`, async t => {
+for (const name of ['quickjs', 'openssl', 'zlib']) {
+  test(`native source identity is bound to the policy: ${name}`, async t => {
     const f = fixture(t);
-    change(f);
-    await assert.rejects(packageIOSRuntime({ ...f, product: 'aggregate' }), { code });
-    const manifest = readJSON(join(f.output, 'runtime-manifest.json'));
-    assert.equal(manifest.status, 'failed');
+    f.receipt.sources[name].commit = '0'.repeat(40);
+    f.write(receiptPath, f.receipt);
+    await rejected(f, 'INVALID_NATIVE_RECEIPT');
+  });
+  test(`native source license is verified: ${name}`, async t => {
+    const f = fixture(t);
+    f.write(f.policy.sources[name].license.path, 'not the upstream license');
+    await rejected(f, 'NATIVE_LICENSE_MISMATCH');
   });
 }
 
-test('native test bundles use the verified closure and never overwrite an existing bundle', async t => {
-  const f = fixture(t), output = join(f.area, 'bundles');
-  const manifest = await prepareWindowsTestBundles({ root: f.root, output });
-  assert.equal(manifest.status, 'complete');
-  assert.equal(hash(readFileSync(join(output, 'aggregate', wasmPath))), engine.wasm.sha256);
-  assert.equal(hash(readFileSync(join(output, 'aggregate', localWasmPath))), localWasm.sha256);
-  assert.equal(hash(readFileSync(join(output, 'aggregate', localLoaderPath))), localLoader.sha256);
-  const before = readFileSync(join(output, 'aggregate/runtime-manifest.json'));
-  await assert.rejects(prepareWindowsTestBundles({ root: f.root, output }), { code: 'OUTPUT_EXISTS' });
-  assert.deepEqual(readFileSync(join(output, 'aggregate/runtime-manifest.json')), before);
-  await assert.rejects(prepareWindowsTestBundles({ root: f.root, output: 'relative-bundles' }),
-    { code: 'INVALID_TEST_OUTPUT' });
-  await assert.rejects(prepareWindowsTestBundles({ root: f.root, output: repository }), /leaves its Windows owner/);
+for (const path of ['packages/script-host/binding.gyp', 'scripts/quickjs/build-native.mjs',
+  'scripts/quickjs/build-source-sdk.mjs', 'packages/script-host/native/task-context.patch',
+  'packages/script-host/native/bigint-uintn.patch', 'packages/script-host/native/utf16-cstring.patch']) {
+  test(`changed build input requires a new valid build: ${path}`, async t => {
+    const f = fixture(t);
+    f.write(path, Buffer.concat([readFileSync(join(f.root, path)), Buffer.from('\nchanged\n')]));
+    await rejected(f, 'NATIVE_INPUT_MISMATCH');
+  });
+}
+
+test('new native source files cannot silently bypass the build input inventory', async t => {
+  const f = fixture(t);
+  f.write('packages/script-host/native/unrecorded.cc', 'int added = 1;');
+  await rejected(f, 'NATIVE_INPUT_MISMATCH');
 });
 
-test('test bundle CLI rejects extra or missing arguments before packaging', () => {
-  const script = join(repository, 'scripts/windows/prepare-test-bundles.mjs');
-  for (const args of [[], ['--help'], [temporaryRoot, 'extra']]) {
-    const result = spawnSync(process.execPath, [script, ...args], {
-      cwd: repository, encoding: 'utf8', windowsHide: true, timeout: 10000,
-    });
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /^CLI_USAGE:/);
-    assert.equal(result.stdout, '');
-  }
-  assert.equal(existsSync(join(repository, 'aggregate')), false);
+test('omitting a mandatory build input invalidates the receipt', async t => {
+  const f = fixture(t);
+  f.write(receiptPath, { ...f.receipt,
+    inputs: f.receipt.inputs.filter(input => input.path !== 'packages/script-host/binding.gyp') });
+  await rejected(f, 'NATIVE_INPUT_MISMATCH');
+});
+
+for (const extension of ['node', 'so', 'dll', 'wasm']) {
+  test(`unreviewed runtime binary is still rejected: ${extension}`, async t => {
+    const f = fixture(t);
+    f.write(`packages/script-host/src/extra.${extension}`, 'not approved');
+    await rejected(f, 'NATIVE_PAYLOAD');
+  });
+}
+
+test('unknown profiles cannot select an unreviewed backend', async t => {
+  mkdirSync(temporary, { recursive: true });
+  const area = mkdtempSync(join(temporary, 'profiles-'));
+  t.after(() => rmSync(area, { recursive: true }));
+  const output = join(area, 'arbitrary');
+  await assert.rejects(packageRuntime({ root: repository, product: 'aggregate', output, profile: 'arbitrary' }),
+    { code: 'INVALID_PROFILE' });
+  assert.equal(existsSync(output), false);
 });

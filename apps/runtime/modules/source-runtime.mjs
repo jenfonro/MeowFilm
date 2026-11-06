@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
   createNodeNetwork,
   createNodeSourceCapabilities,
@@ -13,21 +13,14 @@ import {
   SourceRuntimeError,
 } from '@meowfilm/source-runtime';
 
-export const sourceRuntimeContract = 'source.runtime.v1';
+import { BridgeError, encodeJSONValue, validateJSONValue } from '@meowfilm/runtime-bridge';
+import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
+import { contracts } from '../contracts.mjs';
+
+export const sourceRuntimeContract = contracts.source.contract;
 const sourceBytes = SCRIPT_LIMITS.maxSourceBytes;
-const controlBytes = 1024 * 1024;
-const chunkBytes = 64 * 1024;
-const stageTTL = 300_000;
 const protocols = new Set(['legado', 'yiciyuan', 'qysg', 'cat']);
-const codes = new Set([
-  'INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SOURCE_INTEGRITY',
-  'SOURCE_ENCODING', 'STAGE_NOT_FOUND', 'STALE_SOURCE', 'SOURCE_NOT_FOUND',
-  'SOURCE_DISABLED', 'UNSUPPORTED_PROTOCOL', 'UNSUPPORTED_ACTION', 'UNSUPPORTED_RULE',
-  'UNSUPPORTED_DEPENDENCY', 'CAPABILITY_UNAVAILABLE', 'PERMISSION_DENIED',
-  'WEB_INTERACTION_REQUIRED', 'TIMEOUT', 'SOURCE_CLEANUP', 'SOURCE_FAILURE',
-  'NETWORK_ERROR', 'HTTP_ERROR', 'INVALID_RESPONSE', 'STORAGE_ERROR',
-  'VIRTUAL_ROUTE_NOT_FOUND',
-]);
+const codes = contracts.source.codes;
 
 class Failure extends Error {
   constructor(code) {
@@ -54,27 +47,17 @@ function text(value, maximum = 128) {
 
 function identifier(value) {
   text(value);
-  requireValue(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value));
+  requireValue(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$(?![\s\S])/.test(value));
 }
 
 function integer(value, minimum = 0) {
   requireValue(Number.isSafeInteger(value) && value >= minimum);
 }
 
-function bounded(value, maximum = controlBytes) {
-  let json;
-  try { json = JSON.stringify(value); }
-  catch { throw new Failure('INVALID_REQUEST'); }
-  requireValue(typeof json === 'string', 'INVALID_REQUEST');
-  requireValue(Buffer.byteLength(json) <= maximum, 'LIMIT');
-  return JSON.parse(json);
-}
-
-function decode(bytes) {
-  let value;
-  try { value = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
-  catch { throw new Failure('SOURCE_ENCODING'); }
-  requireValue(value.trim().length > 0 && Buffer.from(value).equals(bytes), 'SOURCE_ENCODING');
+function snapshot(value) { validateJSONValue(value); return structuredClone(value); }
+function metadataValue(value) {
+  requireValue(object(value));
+  requireValue(encodeJSONValue(value).length <= 32 * 1024, 'LIMIT');
   return value;
 }
 
@@ -85,6 +68,7 @@ function canonical(value) {
 
 function errorCode(error) {
   if (error instanceof Failure) return error.code;
+  if (error instanceof BridgeError) return 'INVALID_REQUEST';
   const code = error instanceof ScriptHostError || error instanceof SourceRuntimeError
     ? error.code : error?.name === 'AbortError' ? 'CANCELLED' : '';
   return ({
@@ -111,6 +95,7 @@ function errorCode(error) {
     HTTP_ERROR: 'HTTP_ERROR',
     INVALID_RESPONSE: 'INVALID_RESPONSE',
     STORAGE_ERROR: 'STORAGE_ERROR',
+    SCRIPT_CLEANUP: 'SOURCE_CLEANUP',
     VIRTUAL_ROUTE_NOT_FOUND: 'VIRTUAL_ROUTE_NOT_FOUND',
   })[code] ?? 'SOURCE_FAILURE';
 }
@@ -121,20 +106,15 @@ export function createSourceRuntimeModule({
   network = createNodeNetwork(),
   capabilityOwner,
   platform = 'unknown',
-  clock = Date.now,
-  setTimer = setTimeout,
-  clearTimer = clearTimeout,
 } = {}) {
   requireValue(typeof call === 'function' && typeof hostFactory === 'function' &&
-    typeof network === 'function' && typeof clock === 'function' &&
-    typeof setTimer === 'function' && typeof clearTimer === 'function' &&
+    typeof network === 'function' &&
     typeof platform === 'string' && platform.length > 0 &&
     (capabilityOwner === undefined ||
       typeof capabilityOwner?.invoke === 'function' &&
       typeof capabilityOwner?.releaseProfiles === 'function'));
   const owner = capabilityOwner ?? createNodeSourceCapabilities({ network });
   const capabilities = createCapabilityClient({
-    maximumBytes: SCRIPT_LIMITS.maxMemoryBytes,
     invoke: (name, input, context) => owner.invoke(name, input, context),
   });
   const adapter = createPortableSourceAdapter({
@@ -144,58 +124,21 @@ export function createSourceRuntimeModule({
   const host = hostFactory({
     adapters: { legado: adapter, qysg: adapter, cat: adapter },
   });
-  const stages = new Map();
+  const sources = new SourceCandidates({ module: 'source', fail: code => new Failure(code) });
+  const operations = new InstallationOperations();
   const bindings = new Map();
   const profileInstallations = new Set();
   const lifetime = new AbortController();
   let closed = false;
   let closing;
-  let tail = Promise.resolve();
-  let stageTimer;
 
-  const success = value => bounded({ ok: true, contract: sourceRuntimeContract, ...value });
+  const success = value => { validateJSONValue(value); return { ok: true, contract: sourceRuntimeContract, value }; };
   const failure = error => ({ ok: false, contract: sourceRuntimeContract, code: errorCode(error) });
-  const serialize = body => {
-    const result = tail.then(body);
-    tail = result.catch(() => {});
-    return result;
-  };
   const guard = signal => {
     requireValue(!closed, 'CLOSED');
     requireValue(!signal?.aborted, 'CANCELLED');
   };
   const current = id => host.list().find(value => value.installationId === id);
-  const release = token => {
-    const stage = stages.get(token);
-    if (stage) {
-      stage.bytes.fill(0);
-      stages.delete(token);
-      scheduleSweep();
-    }
-  };
-  const sweep = () => {
-    for (const [token, stage] of stages) if (stage.expiresAt <= clock()) release(token);
-    scheduleSweep();
-  };
-  const scheduleSweep = () => {
-    if (stageTimer !== undefined) clearTimer(stageTimer);
-    stageTimer = undefined;
-    if (closed || !stages.size) return;
-    let expiresAt = Infinity;
-    for (const stage of stages.values()) expiresAt = Math.min(expiresAt, stage.expiresAt);
-    stageTimer = setTimer(() => {
-      stageTimer = undefined;
-      sweep();
-    }, Math.max(1, expiresAt - clock()));
-    stageTimer?.unref?.();
-  };
-  const staged = token => {
-    text(token);
-    sweep();
-    const stage = stages.get(token);
-    requireValue(stage, 'STAGE_NOT_FOUND');
-    return stage;
-  };
   const instance = (binding, live = current(binding.installationId)) => {
     requireValue(live && live.generation === binding.generation, 'STALE_SOURCE');
     return {
@@ -222,15 +165,39 @@ export function createSourceRuntimeModule({
     try { await owner.releaseProfiles(`source:${installationId}:`, keep); }
     catch { throw new Failure('SOURCE_CLEANUP'); }
   };
-  const refreshBinding = async (binding, live) => {
+  const checkGeneration = (binding, live) => {
     if (!binding || !live || binding.generation === live.generation) return;
     requireValue(live.generation > binding.generation &&
       live.contentHash === binding.contentHash && live.version === binding.version &&
       live.protocol === binding.protocol, 'SOURCE_CLEANUP');
+  };
+  const refreshBinding = async (binding, live) => {
+    if (!binding || !live || binding.generation === live.generation) return;
+    checkGeneration(binding, live);
     cleanup(binding.installationId);
     await releaseProfiles(binding.installationId, live.generation);
     requireValue(current(binding.installationId)?.generation === live.generation, 'STALE_SOURCE');
     binding.generation = live.generation;
+    binding.observe = host.observe(binding.installationId);
+  };
+  const interruptLoad = params => {
+    if (!operations.has(params.installationId)) return;
+    const stop = host.captureInitialization(params.installationId);
+    if (!stop) return;
+    const old = bindings.get(params.installationId), live = current(params.installationId);
+    if ((old?.revision ?? 0) !== params.expectedRevision) return;
+    requireValue(!old || params.revision >= old.revision, 'STALE_SOURCE');
+    sources.peek(params.installationId, params.sourceRevision);
+    if (old?.revision === params.revision) return;
+    requireValue(!old || live?.generation === old.generation && live.state === 'ready', 'SOURCE_DISABLED');
+    stop();
+  };
+  const interruptUnload = params => {
+    if (!operations.has(params.installationId)) return;
+    const binding = bindings.get(params.installationId), live = current(params.installationId);
+    if (binding?.revision !== params.revision || live?.generation !== binding?.generation ||
+        params.generation !== undefined && params.generation !== binding?.generation) return;
+    host.captureInitialization(params.installationId)?.();
   };
 
   function method(allowed, required, body) {
@@ -241,7 +208,7 @@ export function createSourceRuntimeModule({
         requireValue(signal === undefined || signal instanceof AbortSignal);
         guard(signal);
         fields(parameters, allowed, required);
-        const captured = bounded(parameters);
+        const captured = snapshot(parameters);
         const active = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
         const result = await body(captured, active);
         guard(active);
@@ -254,7 +221,7 @@ export function createSourceRuntimeModule({
     if (closing) return closing;
     closed = true;
     lifetime.abort();
-    for (const token of stages.keys()) release(token);
+    sources.close();
     closing = (async () => {
       let result;
       let hostClosed = true;
@@ -262,7 +229,7 @@ export function createSourceRuntimeModule({
       try { result = await host.close(); }
       catch { hostClosed = false; }
       finally {
-        await tail;
+        await operations.drain();
         for (const id of bindings.keys()) profileInstallations.add(id);
         const released = await Promise.allSettled(
           [...profileInstallations].map(id => releaseProfiles(id)),
@@ -278,131 +245,113 @@ export function createSourceRuntimeModule({
   }
 
   const methods = {
-    'source.runtime.stage.begin': method(['basename', 'length', 'sha256'], undefined, params => {
-      sweep();
-      text(params.basename, 255);
-      requireValue(!/[\\/:*?"<>|]/.test(params.basename) &&
-        /\.(?:json|js|html?)$/i.test(params.basename));
-      integer(params.length, 1);
-      requireValue(params.length <= sourceBytes, 'LIMIT');
-      requireValue(typeof params.sha256 === 'string' && /^[a-f0-9]{64}$/.test(params.sha256));
-      const token = randomUUID();
-      stages.set(token, {
-        bytes: Buffer.alloc(params.length),
-        length: params.length,
-        hash: params.sha256,
-        offset: 0,
-        expiresAt: clock() + stageTTL,
-      });
-      scheduleSweep();
-      return { token, chunkBytes };
-    }),
-    'source.runtime.stage.chunk': method(['token', 'offset', 'data'], undefined, params => {
-      const stage = staged(params.token);
-      integer(params.offset);
-      requireValue(params.offset === stage.offset, 'SOURCE_INTEGRITY');
-      requireValue(typeof params.data === 'string' &&
-        params.data.length <= Math.ceil(chunkBytes / 3) * 4, 'LIMIT');
-      const bytes = Buffer.from(params.data, 'base64');
-      requireValue(bytes.length > 0 && bytes.length <= chunkBytes &&
-        bytes.toString('base64') === params.data &&
-        stage.offset + bytes.length <= stage.length, 'SOURCE_INTEGRITY');
-      bytes.copy(stage.bytes, stage.offset);
-      stage.offset += bytes.length;
-      stage.expiresAt = clock() + stageTTL;
-      scheduleSweep();
-      return { next: stage.offset };
-    }),
-    'source.runtime.stage.abort': method(['token'], undefined, params => {
-      text(params.token);
-      release(params.token);
-      return { released: true };
-    }),
     'source.runtime.load': method([
-      'token', 'installationId', 'revision', 'expectedRevision', 'protocol', 'version', 'metadata',
-    ], ['token', 'installationId', 'revision', 'expectedRevision'], (params, signal) =>
-      serialize(async () => {
+      'sourceRevision', 'installationId', 'revision', 'expectedRevision', 'protocol', 'version', 'metadata',
+    ], ['sourceRevision', 'installationId', 'revision', 'expectedRevision'], (params, signal) => {
+      guard(signal);
+      identifier(params.installationId);
+      integer(params.revision, 1);
+      integer(params.expectedRevision);
+      if (params.protocol !== undefined) {
+        text(params.protocol);
+        requireValue(protocols.has(params.protocol), 'UNSUPPORTED_PROTOCOL');
+      }
+      const version = params.version ?? '1.0.0';
+      text(version);
+      requireValue(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$(?![\s\S])/.test(version));
+      const metadata = metadataValue(params.metadata ?? {});
+      integer(params.sourceRevision, 1);
+      interruptLoad(params);
+      return operations.run(params.installationId, async () => {
         guard(signal);
-        identifier(params.installationId);
-        integer(params.revision, 1);
-        integer(params.expectedRevision);
-        if (params.protocol !== undefined) {
-          text(params.protocol);
-          requireValue(protocols.has(params.protocol), 'UNSUPPORTED_PROTOCOL');
-        }
-        const version = params.version ?? '1.0.0';
-        text(version);
-        requireValue(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version));
-        const metadata = bounded(params.metadata ?? {}, 32 * 1024);
-        requireValue(object(metadata));
-        const stage = staged(params.token);
-        requireValue(stage.offset === stage.length && digest(stage.bytes) === stage.hash,
-          'SOURCE_INTEGRITY');
-        const uploaded = decode(stage.bytes);
-        const normalized = normalizeSourceDefinition(uploaded, params.protocol);
-        const normalizedSource = JSON.stringify(normalized.source);
-        requireValue(Buffer.byteLength(normalizedSource) <= sourceBytes, 'LIMIT');
-        const signature = digest(canonical({
-          protocol: normalized.protocol,
-          importedProtocol: normalized.importedProtocol,
-          source: normalized.source,
-          version,
-          metadata,
-        }));
         const id = params.installationId;
         const old = bindings.get(id);
         const live = current(id);
-        await refreshBinding(old, live);
         requireValue((old?.revision ?? 0) === params.expectedRevision, 'STALE_SOURCE');
+        await refreshBinding(old, live);
+        guard(signal);
         requireValue(Boolean(old) === Boolean(live), 'SOURCE_CLEANUP');
         requireValue(!old || params.revision >= old.revision, 'STALE_SOURCE');
+        const uploaded = sources.peek(id, params.sourceRevision);
+        let execution = uploaded.execution;
+        if (!execution || execution.inputProtocol !== params.protocol) {
+          try {
+            const normalized = normalizeSourceDefinition(uploaded.source, params.protocol);
+            const source = JSON.stringify(normalized.source);
+            requireValue(Buffer.byteLength(source) <= sourceBytes, 'LIMIT');
+            const hash = source === uploaded.source ? uploaded.contentHash
+              : source === execution?.source ? execution.hash : digest(source);
+            // Revision equality retains the existing object-order-independent
+            // definition identity, separate from actual executed byte identity.
+            const identity = canonical(normalized.source);
+            execution = { inputProtocol: params.protocol, protocol: normalized.protocol,
+              importedProtocol: normalized.importedProtocol, source, hash,
+              identityHash: identity === source ? hash : digest(identity) };
+            uploaded.execution = execution;
+          } catch (error) {
+            sources.finish(sources.take(id, params.sourceRevision));
+            throw error;
+          }
+        }
+        const { protocol, importedProtocol, source: normalizedSource, hash: executionHash, identityHash } = execution;
+        const signature = digest(canonical({
+          protocol,
+          importedProtocol,
+          contentHash: identityHash,
+          version,
+          metadata,
+        }));
         if (old?.revision === params.revision) {
           requireValue(old.signature === signature, 'SOURCE_INTEGRITY');
           requireValue(live.generation === old.generation && live.state === 'ready', 'SOURCE_DISABLED');
-          release(params.token);
+          sources.finish(sources.take(id, params.sourceRevision), true);
           return { instance: instance(old, live) };
         }
         requireValue(!old || live.state === 'ready' && live.generation === old.generation,
           'SOURCE_DISABLED');
         const spec = {
           installationId: id,
-          protocol: normalized.protocol,
+          protocol,
           source: normalizedSource,
+          contentHash: executionHash,
           version,
-          metadata: { ...metadata, importedProtocol: normalized.importedProtocol },
+          metadata: { ...metadata, importedProtocol },
           permissions: { storage: [] },
           enabled: true,
         };
-        const uploadHash = stage.hash;
-        release(params.token);
+        const uploadHash = uploaded.contentHash;
+        sources.take(id, params.sourceRevision);
         profileInstallations.add(id);
         try {
-          const result = old ? await host.update(id, spec) : await host.install(spec);
+          const result = old ? await host.update(id, spec, { signal }) : await host.install(spec, { signal });
           guard(signal);
           const next = current(id);
           requireValue(next && result?.generation === next.generation &&
-            next.state === 'ready' && next.protocol === normalized.protocol &&
-            next.contentHash === digest(normalizedSource) && next.version === version,
+            next.state === 'ready' && next.protocol === protocol &&
+            next.contentHash === executionHash && next.version === version,
           'SOURCE_INTEGRITY');
           cleanup(id);
           const binding = {
             installationId: id,
             revision: params.revision,
             generation: next.generation,
-            protocol: normalized.protocol,
-            importedProtocol: normalized.importedProtocol,
+            protocol,
+            importedProtocol,
             uploadHash,
             signature,
             contentHash: next.contentHash,
             version: next.version,
+            observe: host.observe(id),
           };
           const response = { instance: instance(binding, next) };
           success(response);
           bindings.set(id, binding);
           await releaseProfiles(id, next.generation);
           guard(signal);
+          sources.finish(uploaded, true);
           return response;
         } catch (error) {
+          sources.finish(uploaded);
           if (closed) throw error;
           const remaining = current(id);
           if (old && remaining?.generation === old.generation &&
@@ -417,18 +366,18 @@ export function createSourceRuntimeModule({
                 recovered.state === 'ready' && recovered.protocol === live.protocol &&
                 recovered.contentHash === live.contentHash && recovered.version === live.version,
               'SOURCE_CLEANUP');
-              bindings.set(id, { ...old, generation: recovered.generation });
+              bindings.set(id, { ...old, generation: recovered.generation, observe: host.observe(id) });
               cleanup(id);
               await releaseProfiles(id, recovered.generation);
             } catch {
-              bindings.delete(id);
+              bindings.delete(id); sources.retire(id);
               try { if (current(id)) await host.uninstall(id); }
               catch { /* Report the cleanup failure below. */ }
               await releaseProfiles(id);
               throw new Failure('SOURCE_CLEANUP');
             }
           } else {
-            bindings.delete(id);
+            bindings.delete(id); sources.retire(id);
             if (remaining) {
               try { await host.uninstall(id); }
               catch { throw new Failure('SOURCE_CLEANUP'); }
@@ -439,33 +388,39 @@ export function createSourceRuntimeModule({
           }
           throw error;
         }
-      })),
+      });
+    }),
     'source.runtime.unload': method(
       ['installationId', 'revision', 'generation'],
       ['installationId', 'revision'],
-      (params, signal) => serialize(async () => {
+      (params, signal) => {
         guard(signal);
         identifier(params.installationId);
         integer(params.revision, 1);
         if (params.generation !== undefined) integer(params.generation, 1);
-        const binding = bindings.get(params.installationId);
-        const live = current(params.installationId);
-        requireValue(binding && live, 'SOURCE_NOT_FOUND');
-        await refreshBinding(binding, live);
-        requireValue(binding.revision === params.revision &&
-          (params.generation === undefined || binding.generation === params.generation),
-        'STALE_SOURCE');
-        try { await host.uninstall(params.installationId); }
-        catch { throw new Failure('SOURCE_CLEANUP'); }
-        finally {
-          if (!current(params.installationId)) bindings.delete(params.installationId);
-        }
-        requireValue(!current(params.installationId), 'SOURCE_CLEANUP');
-        cleanup(params.installationId);
-        await releaseProfiles(params.installationId);
-        profileInstallations.delete(params.installationId);
-        return { unloaded: true, cleanupComplete: true };
-      }),
+        interruptUnload(params);
+        return operations.run(params.installationId, async () => {
+          guard(signal);
+          const binding = bindings.get(params.installationId);
+          const live = current(params.installationId);
+          requireValue(binding && live, 'SOURCE_NOT_FOUND');
+          await refreshBinding(binding, live);
+          requireValue(binding.revision === params.revision &&
+            (params.generation === undefined || binding.generation === params.generation),
+          'STALE_SOURCE');
+          sources.remove(params.installationId);
+          try { await host.uninstall(params.installationId); }
+          catch { throw new Failure('SOURCE_CLEANUP'); }
+          finally {
+            if (!current(params.installationId)) bindings.delete(params.installationId);
+          }
+          requireValue(!current(params.installationId), 'SOURCE_CLEANUP');
+          cleanup(params.installationId);
+          await releaseProfiles(params.installationId);
+          profileInstallations.delete(params.installationId);
+          return { unloaded: true, cleanupComplete: true };
+        });
+      },
     ),
     'source.runtime.invoke': method([
       'installationId', 'revision', 'generation', 'action', 'payload', 'timeoutMs',
@@ -479,7 +434,7 @@ export function createSourceRuntimeModule({
         integer(params.timeoutMs, 1);
         requireValue(params.timeoutMs <= 60_000);
       }
-      const { binding, live } = await serialize(async () => {
+      const { binding, live } = await operations.run(params.installationId, async () => {
         guard(signal);
         const binding = bindings.get(params.installationId);
         const live = current(params.installationId);
@@ -501,16 +456,17 @@ export function createSourceRuntimeModule({
       guard(signal);
       requireValue(bindings.get(params.installationId) === binding &&
         current(params.installationId)?.generation === params.generation, 'STALE_SOURCE');
-      return { value: value ?? null };
+      return value ?? null;
     }),
-    'source.runtime.status': method([], undefined, (_params, signal) => serialize(async () => {
+    'source.runtime.status': method([], undefined, (_params, signal) => {
       guard(signal);
-      for (const binding of bindings.values()) {
-        await refreshBinding(binding, current(binding.installationId));
-      }
-      guard(signal);
-      return { instances: [...bindings.values()].map(binding => instance(binding)) };
-    })),
+      return { instances: [...bindings.values()].map(binding => {
+        const live = operations.has(binding.installationId)
+          ? binding.observe() : current(binding.installationId);
+        checkGeneration(binding, live);
+        return instance({ ...binding, generation: live?.generation }, live);
+      }) };
+    }),
     'source.runtime.close': async (params = {}) => {
       try {
         fields(params, []);
@@ -523,5 +479,9 @@ export function createSourceRuntimeModule({
     try { return success(await shutdown()); }
     catch (error) { return failure(error); }
   };
-  return { id: 'source', version: '0.1.0', methods, close };
+  async function upload(input, bytes, { signal } = {}) {
+    try { guard(signal); return success(sources.put(input, bytes, signal)); }
+    catch (error) { return failure(error); }
+  }
+  return { id: 'source', version: contracts.source.version, contract: sourceRuntimeContract, methods, upload, close };
 }

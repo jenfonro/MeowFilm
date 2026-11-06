@@ -645,54 +645,48 @@ test('Node cookie and profile storage remain scoped and reject obvious public-su
   }), 'music');
 });
 
-test('Node capability owner bounds cumulative storage, cookies and virtual metadata', async () => {
-  const owner = createNodeSourceCapabilities({
-    stateLimits: {
-      storageBytes: 160,
-      storageProfileBytes: 96,
-      cookieBytes: 128,
-      virtualBytes: 128,
-    },
-  });
+test('Node capability owner retains complete storage, cookies and virtual metadata until profile release', async () => {
+  const owner = createNodeSourceCapabilities();
   const client = createCapabilityClient({
-    maximumBytes: 1024,
     invoke: (name, input, context) => owner.invoke(name, input, context),
   });
-  await client.call('storage.set', {
-    version: hostApiVersion,
-    profile: 'source:small:1:storage',
-    key: 'a',
-    value: 'x'.repeat(60),
-  });
-  await assert.rejects(client.call('storage.set', {
-    version: hostApiVersion,
-    profile: 'source:small:1:storage',
-    key: 'b',
-    value: 'x'.repeat(60),
-  }), { code: 'RESOURCE_LIMIT' });
-  await assert.rejects(client.call('cookie.set', {
+  for (const key of ['a', 'b']) {
+    assert.equal(await client.call('storage.set', {
+      version: hostApiVersion, profile: 'source:small:1:storage', key, value: 'x'.repeat(60),
+    }), true);
+    assert.equal(await client.call('storage.get', {
+      version: hostApiVersion, profile: 'source:small:1:storage', key,
+    }), 'x'.repeat(60));
+  }
+  assert.equal(await client.call('cookie.set', {
     version: hostApiVersion,
     profile: 'source:small:1:http',
     url: 'https://fixture.invalid/',
     values: [`session=${'x'.repeat(160)}; Path=/`],
-  }), { code: 'RESOURCE_LIMIT' });
-  await assert.rejects(client.call('virtual.register', {
-    version: hostApiVersion,
-    profile: 'source:small:1',
-    route: 'route-1',
+  }), true);
+  assert.equal(await client.call('cookie.get', {
+    version: hostApiVersion, profile: 'source:small:1:http', url: 'https://fixture.invalid/',
+  }), `session=${'x'.repeat(160)}`);
+  await client.call('virtual.register', {
+    version: hostApiVersion, profile: 'source:small:1', route: 'route-1',
     metadata: { value: 'x'.repeat(160) },
-  }), { code: 'RESOURCE_LIMIT' });
+  });
+  assert.deepEqual(owner.resolveVirtual('source:small:1', 'route-1'), { value: 'x'.repeat(160) });
   await owner.releaseProfiles('source:small:');
+  assert.equal(owner.resolveVirtual('source:small:1', 'route-1'), null);
+  assert.equal(await client.call('cookie.get', {
+    version: hostApiVersion, profile: 'source:small:1:http', url: 'https://fixture.invalid/',
+  }), '');
+  assert.equal(await client.call('storage.get', {
+    version: hostApiVersion, profile: 'source:small:1:storage', key: 'a',
+  }), null);
   assert.equal(await client.call('storage.set', {
-    version: hostApiVersion,
-    profile: 'source:small:2:storage',
-    key: 'b',
-    value: 'x'.repeat(60),
+    version: hostApiVersion, profile: 'source:small:2:storage', key: 'b', value: 'x'.repeat(60),
   }), true);
 });
 
-test('portable Cat routes cannot retain metadata beyond the session byte budget', async t => {
-  const { host, owner } = sourceHost(t, { limits: { maxMemoryBytes: 16 * 1024 * 1024 } });
+test('portable Cat routes retain complete large metadata and unregister on close', async t => {
+  const { host, owner } = sourceHost(t);
   await host.install({
     installationId: 'route-budget',
     protocol: 'cat',
@@ -715,14 +709,19 @@ test('portable Cat routes cannot retain metadata beyond the session byte budget'
     `,
     enabled: true,
   });
-  await assert.rejects(host.invoke(target('route-budget', 'play')), {
-    code: 'RESOURCE_LIMIT',
-  });
-  assert.equal(owner.resolveVirtual('source:route-budget:1', 'route-1'), null);
-  assert.equal(host.get('route-budget').state, 'ready');
+  const result = await host.invoke(target('route-budget', 'play'));
+  assert.ok(result.url.endsWith('/route-201'));
+  for (let index = 1; index <= 201; index++) {
+    assert.equal(owner.resolveVirtual('source:route-budget:1', `route-${index}`).headers.value, 'x'.repeat(90000));
+  }
+  await host.disable('route-budget');
+  for (let index = 1; index <= 201; index++) {
+    assert.equal(owner.resolveVirtual('source:route-budget:1', `route-${index}`), null);
+  }
+  assert.equal(host.get('route-budget').state, 'disabled');
 });
 
-test('portable Cat routes are bounded by metadata bytes, not a fixed route count', async t => {
+test('portable Cat retains every registered route', async t => {
   const { host, owner } = sourceHost(t);
   await host.install({
     installationId: 'many-routes',
@@ -746,8 +745,8 @@ test('portable Cat routes are bounded by metadata bytes, not a fixed route count
   assert.ok(value.url.includes('route-129'));
 });
 
-test('portable session state cannot grow beyond the host byte budget', async t => {
-  const { host } = sourceHost(t, { limits: { maxMemoryBytes: 16 * 1024 * 1024 } });
+test('portable session state retains complete values across calls', async t => {
+  const { host } = sourceHost(t);
   await host.install({
     installationId: 'state-budget',
     protocol: 'legado',
@@ -755,18 +754,31 @@ test('portable session state cannot grow beyond the host byte budget', async t =
       bookSourceName: 'State budget',
       bookSourceUrl: 'https://fixture.invalid/',
       coverDecodeJs: `
+        if (result === 'check') {
+          let bytes = 0;
+          for (let index = 0; index < 130; index++) {
+            const value = source.get('key-' + index);
+            if (value !== 'x'.repeat(128 * 1024)) throw Error('state changed');
+            bytes += value.length;
+          }
+          return bytes;
+        }
         for (let index = 0; index < 130; index++) {
           source.put('key-' + index, 'x'.repeat(128 * 1024));
         }
-        result
+        source.get('key-129').length + ':' + result
       `,
     }),
     enabled: true,
   });
-  await assert.rejects(host.invoke(target('state-budget', 'image', {
+  assert.deepEqual(await host.invoke(target('state-budget', 'image', {
     url: 'https://fixture.invalid/image',
     body: 'fixture',
-  })), { code: 'RESOURCE_LIMIT' });
+  })), { body: '131072:fixture', url: 'https://fixture.invalid/image' });
+  assert.deepEqual(await host.invoke(target('state-budget', 'image', {
+    url: 'https://fixture.invalid/image', body: 'check',
+  })), { body: 130 * 128 * 1024, url: 'https://fixture.invalid/image' });
+  assert.equal(host.get('state-budget').state, 'ready');
 });
 
 test('portable DOM preserves browser, jQuery and Jsoup missing-attribute semantics', async t => {

@@ -9,9 +9,6 @@ createMusicScriptModule({
   call,
   hostFactory = createScriptHost,
   network = createNodeNetwork(),
-  clock = Date.now,
-  setTimer = setTimeout,
-  clearTimer = clearTimeout,
 })
 ```
 
@@ -19,55 +16,38 @@ createMusicScriptModule({
 
 ```text
 id: music
-version: 0.7.0
-contract: music.script.v2
+version: 0.8.0
+contract: music.script.v3
 ```
 
-响应为 `{ok,contract,...}`；失败只返回固定 `code`，不返回源码、配置、存储 grant、原生错误正文或堆栈。
+成功响应为 `{ok:true,contract,value}`；失败只返回固定 `code`，不返回源码、配置、存储 grant、原生错误正文或堆栈。
 
-## RPC
+## HTTP 业务入口
 
-所有方法以 `music.script.` 为前缀：
+公共 [runtime.http.v1](runtime-bridge.md) 将本地逻辑名 `music.script.*` 映射到以下 POST operation：
 
-| 方法 | 作用 |
+| 方法 | value / 作用 |
 | --- | --- |
-| `stage.begin` | 创建有限期源码暂存，校验 basename、长度和 SHA-256 |
-| `stage.chunk` | 按 offset 顺序写入规范 Base64 分片 |
-| `stage.abort` | 幂等释放暂存并清零内存 |
-| `control.begin/chunk/abort` | 暂存完整控制参数 JSON，与源码暂存分离 |
-| `control.call` | 消费控制参数 token，调用明确的原有业务方法 |
-| `blob.read/release` | 分片读取并释放完整业务成功信封 |
-| `load` | 完整源码校验后安装或更新一个明确实例 |
-| `unload` | 按 installation、revision 和可选 generation 卸载 |
-| `invoke` | 定向调用实例、site 和声明动作 |
-| `status` | 返回当前实例，不访问原生文档 |
-| `close` | 封闭新请求并回收本模块拥有的实例和任务 |
+| `load` | `{instance}`，按完整 sourceRevision 安装或更新明确实例 |
+| `unload` | `{unloaded:true,cleanupComplete:true}`，installation/revision/可选 generation |
+| `invoke` | 脚本业务值或 null，不再额外包 `{value:...}` |
+| `status` | `{documentAccess:false,instances}`，不等待其他安装初始化 |
+| `close` | `{closed:true,cleanupComplete:true}`，只关闭 music owner |
 
 ## 控制数据传输
 
-控制请求和结果不设独立总字节上限；通用 bridge 的 1 MiB 是物理单帧边界，不是 LX 业务数据上限。小请求和结果保持原有 JSON 形状，大数据由传输适配层透明上传或读回，上层仍使用相同的 `music.script.v2` 业务值。
+普通参数一次 JSON POST，结果直接在统一 value 中返回，不设普通 JSON 总字节上限，不按大小选择另一套协议。严格 UTF-8、重复键拒绝、Unicode 键原样保留、业务值深度 64 和安全整数检查保持；业务字段名 `blob` 等只是普通数据。旧 frame、stage/control/blob、Base64、token/TTL/offset 和传输 checksum 均已删除。
 
-- 完整参数 JSON 不超过 64 KiB 时直接调用原方法；更大时，先以 `control.begin({length,sha256})` 取得 token，通过 `control.chunk({token,offset,data})` 连续上传，再以 `control.call({operation,token})` 执行。`operation` 仅为 `load`、`unload`、`invoke` 或 `status`；不得递归分派分片方法。
-- 完整业务成功信封不超过 64 KiB 时直接返回；更大时返回 `{ok:true,contract:"music.script.v2",blob:{token,length,sha256,chunkBytes}}`。blob 内容是原始完整成功信封的 UTF-8 JSON，不是仅 `value`。业务 `value` 内的 `blob` 字段不会被当作传输描述符。
-- `blob.read({token,offset})` 返回普通小信封中的 `data`（规范 Base64）和 `next`。调用方核对每片长度、next、完整长度和 SHA-256，解析原信封并核对契约后恢复业务结果，不向上层暴露分片元数据。
-- 上传和读取的字节块均最多 64 KiB；字符串可跨块拆开，整份完成后才严格解码。逻辑 JSON 与直接 bridge JSON 采用相同的 Unicode、重复键、ASCII 属性名、安全整数和深度校验，不借分片绕过数据契约。
-- 每个调用在成功、失败、取消或超时后释放其已知上传 token／结果 token。失去收据的未完成暂存、未领取结果按最近有效活动起五分钟主动回收；模块关闭清空全部传输，并继续关闭脚本 host，不以取消调用代替实际资源回收。
+## 源码候选与加载
 
-源码 `stage.*` 与控制暂存相互独立；物理分片帧和释放回包不再套一层分片。控制分片不改变 generation、grant、定向调用和原生持久事务的校验。
+`PUT /v1/music/sources/{installationId}/{sourceRevision}?basename=...` 使用原始 body，一次完整登记 1 至 16 MiB 源码。basename 是 255 字符内无路径 `.js` 文件名。严格 UTF-8 保留原有 BOM 行为，合法 U+FFFD 字符可保留，非法字节不可由替换解码蒙混通过。上传不执行源码、不改变 enabled、不新增磁盘事实源。
 
-## 暂存与加载
-
-- basename 只允许单个 `.js` 文件名，不允许路径。
-- 整份源码最多 16 MiB，在 `stage.begin` 按声明长度提前拒绝；不设置活动暂存 token 数量上限，未完成暂存仅按超时、显式取消和模块关闭回收，实际分配失败按资源错误处理。
-- 分片最多 64 KiB，必须连续，长度和小写规范 SHA-256 必须一致。
-- 完成后严格 UTF-8 解码，不接受替换字符或非规范字节。
-- 暂存从创建或最近一次有效分片起五分钟后由单个主动 timer 回收；任一暂存变更后按最早过期时间重排，陈旧回调只清理已过期项，模块关闭时同步取消并清空全部暂存。失效 token 返回 `STAGE_NOT_FOUND`。
-- stage 是一次加载事务的临时字节容器，不是持久记录或文档桥。
+同安装只保留一个尚未采用的完整候选；新上传完整成功后才替换，未完成/断线 body 不影响旧候选。仍持有的同键同内容幂等、不同内容报 SCRIPT_INTEGRITY；内容 hash 算一次并复用。没有过期 timer 或上传读取/release 动作。load 必须精确选择 sourceRevision，不存在报 SOURCE_NOT_FOUND；字段/身份/CAS 前置拒绝不消费候选，试运行失败释放，下一次试运行须显式上传。卸载和关闭释放未采用候选，当前/退休执行内容由实际 owner 保留至无引用。
 
 `load` 必须包含：
 
 ```text
-token installationId revision expectedRevision version config permissions grant
+sourceRevision installationId revision expectedRevision version config permissions grant
 ```
 
 - `revision` 是正安全整数；`expectedRevision` 精确匹配当前 binding，首次安装为 0。
@@ -97,7 +77,7 @@ LX 请求数据保留 `{source,action,info}`：
 - 其他声明动作保留自身数据语义；`search` 与 `musicSearch` 不被强行视作所有脚本通用的别名。
 - 返回数据按 LX 处理器实际值传递，不改成 Cat 或 Reader 的业务格式。
 
-脚本内部字节处理、桥接与 `invokeResult` 受单脚本内存上限约束；宿主缓冲网络响应体及解压输出以同一内存上限为上界。不设全局／实例／site 调用数量预算。没有单次同步执行时限；初始化等待上限为 5 秒，调用等待与请求内截止均为 60 秒。调用或初始化等待到期后由主线程探测对应 worker，`cleanupTimeoutMs` 内无回应才终止并判 `TIMEOUT`。
+LX 每实例使用一个原生线程、一个 QuickJS Runtime/Context。普通字节、网络响应、解压与脚本内数据不再受运行器自设内存配额限制，无配额耗尽自动重启；不设全局/实例/site 固定调用数。初始化等待 5 秒、调用与请求截止 60 秒、清理预算 100 ms 保留；原生执行可由主控取消并等待真实线程结束，没有新增单段同步计算时限。
 
 ## 请求绑定的存储
 
@@ -124,7 +104,7 @@ grant installationId siteId generation key value?
 - 未结束 storage 任务不设固定数量预算，按调用和实例生命周期回收；物理任务保留至 adapter 真正结束。
 - guest 存储回调随请求完成、取消和退休释放；物理任务仍保留归属至 adapter 真正结束。
 
-脚本 guest 不获得任意文件、进程、官方账号凭据、应用数据根或通用 document bridge；可信 Node 引擎加载自身锁定的 WASM／asmjs 不构成 guest 文件权限。
+脚本 guest 不获得任意文件、进程、官方账号凭据、应用数据根或通用 document bridge；可信 Node 只加载精确受信原生扩展，该加载不构成用户脚本文件权限。
 
 ## 网络
 
@@ -134,11 +114,11 @@ LX `request` 的回调、返回体和取消语义保留；`follow_max` 在 Node 
 
 已遇到的扩展选项 `followRedirect` 按布尔值控制自动跳转；false 优先关闭跳转，true 仍遵守重定向上限，`follow_max` 超过上限时按上限截断。`retry` 兼容接受，不额外启动宿主重试或重放 POST；与核对的 LX 桌面 request 封装不消费该字段的行为一致。网络任务在取消后仍保持登记，直至底层确认结束。
 
-LX 继续使用原有网络适配器及请求绑定的原生 storage grant，不套用 source 的 capability 网络包装。Reader/CatVod 的[capability ABI](source-capability-abi.md)属于独立输入契约；三类 module 只共用 WorkerSession、worker 协议和 QuickJS 机制，不互换 site/action/quality 或数据权限。
+LX 继续使用原有网络适配器及请求绑定的原生 storage grant，不套用 source 的 capability 网络包装。Reader/CatVod 的[capability ABI](source-capability-abi.md)属于独立输入契约；LX/source 共用原生绑定机制，Cat 使用独立 Node Worker；三类 module 共用 HTTP 与生命周期基础设施，不互换 site/action/quality 或数据权限。
 
 ## 取消与关闭
 
-- 控制调用消费调用方 signal；取消 fence 当前结果并退休所属作用域，不假装不合作 adapter 已结束。
+- HTTP abort 或未完成 response close 取消对应调用；正常 finish 不误取消。取消 fence 结果并退休所属作用域，不假装不合作 adapter 已结束。
 - 忽略 signal 的外部任务仍计入实际 drain，不能确认排空时返回 `SCRIPT_CLEANUP`。
 - unload、失败更新和 close 退休对应存储 binding。
 - close 幂等；成功必须证明 host 中无本模块当前实例且所属任务已排空，不释放其他业务借用的核心。
@@ -148,7 +128,6 @@ LX 继续使用原有网络适配器及请求绑定的原生 storage grant，不
 ```text
 INVALID_REQUEST
 LIMIT
-STAGE_NOT_FOUND
 SCRIPT_INTEGRITY
 SCRIPT_ENCODING
 STALE_SOURCE
@@ -166,5 +145,7 @@ CLOSED
 SCRIPT_CLEANUP
 SCRIPT_FAILURE
 ```
+
+Windows/iOS 旧调用接入本轮未迁移，新公共 wire 不保留旧协议回退。通用原生构建与定向回归已通过，适用环境及未覆盖项见[通用验证范围](script-runtime.md#构建发布与验证边界)。
 
 测试夹具、引擎打包回归和真实外部脚本验收不能互相冒充。外部验收枚举实际声明动作，按协议传递输入和结果，明确区分宿主能力、资源限额、输入、脚本和上游失败；见 [动态验收](source-acceptance.md)。

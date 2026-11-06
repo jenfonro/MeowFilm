@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import {
   lstat, mkdir, readFile, readdir, realpath, rename, writeFile,
 } from 'node:fs/promises';
@@ -203,13 +203,13 @@ async function inventory(input) {
       const source = `${JSON.stringify(entry)}\n`;
       const bytes = Buffer.from(source);
       const itemName = entries.length === 1 ? file.name : `${file.name}#${index + 1}`;
-      const stageName = entries.length === 1
+      const sourceName = entries.length === 1
         ? basename(file.name)
         : basename(file.name).replace(/\.json$/i, `-${index + 1}.json`);
       result.push({
         file: file.name,
         label: itemName,
-        basename: stageName,
+        basename: sourceName,
         bytes,
         originalHash,
         path: file.path,
@@ -234,6 +234,9 @@ if (options.payload) {
     'app/modules/source-runtime.mjs',
     'node_modules/@meowfilm/script-host/src/index.js',
     'node_modules/@meowfilm/source-runtime/src/index.js',
+    'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs',
+    'app/modules/source-candidates.mjs',
+    'node_modules/@meowfilm/runtime-bridge/src/index.js',
   ];
   if (manifest?.status !== 'complete' || !Array.isArray(manifest.files) || required.some(path =>
     !manifest.files.some(file => file.path === path))) {
@@ -260,6 +263,34 @@ const [{ createSourceRuntimeModule }, hostExports] = await Promise.all([
   import(pathToFileURL(hostModulePath).href),
 ]);
 const { createNodeNetwork, createScriptHost, ScriptHostError } = hostExports;
+const modulePath = sourceModulePath;
+
+const runtimeDirectory = dirname(dirname(modulePath));
+const [{ createAppRuntime }, { createRuntimeClient, createCallbackServer }] = await Promise.all([
+  import(pathToFileURL(join(runtimeDirectory, 'bootstrap.mjs')).href),
+  import(pathToFileURL(join(runtimeDirectory, 'client.mjs')).href),
+]);
+async function openHttp(module) {
+  const sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex'), callbackKey = randomBytes(32).toString('hex');
+  const callbacks = createCallbackServer({ sessionId, callbackKey, methods: Object.fromEntries(
+    ['get', 'set', 'delete'].map(operation => [`platform.musicScript.storage.${operation}`,
+      async () => ({ ok: false, code: 'PERMISSION_DENIED' })])) });
+  await callbacks.start();
+  let runtime, client;
+  try {
+    runtime = createAppRuntime({ sessionId, requestKey, callbackKey, callbackUrl: callbacks.baseUrl, modules: [module] });
+    await runtime.start();
+    client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
+    return { client, async close() {
+      const results = await Promise.allSettled([client.close(), runtime.close(), callbacks.close()]);
+      if (results.some(result => result.status === 'rejected')) throw Object.assign(new Error(), { code: 'SCRIPT_CLEANUP' });
+    } };
+  } catch (error) {
+    await Promise.allSettled([client?.close(), runtime?.close(), callbacks.close()]);
+    throw error;
+  }
+}
+
 const recordsPath = options.records ? await realpath(options.records) : null;
 if (recordsPath) excludedSourcePaths.add(resolve(recordsPath));
 let records = {};
@@ -570,25 +601,6 @@ function networkAdapter(audit) {
   };
 }
 
-async function stage(rpc, item) {
-  const contentHash = createHash('sha256').update(item.bytes).digest('hex');
-  const begun = await rpc('stage.begin', {
-    basename: item.basename,
-    length: item.bytes.length,
-    sha256: contentHash,
-  });
-  if (!begun.ok) throw Object.assign(new Error(), { code: begun.code });
-  for (let offset = 0; offset < item.bytes.length; offset += begun.chunkBytes) {
-    const chunk = await rpc('stage.chunk', {
-      token: begun.token,
-      offset,
-      data: item.bytes.subarray(offset, offset + begun.chunkBytes).toString('base64'),
-    });
-    if (!chunk.ok) throw Object.assign(new Error(), { code: chunk.code });
-  }
-  return { token: begun.token, contentHash };
-}
-
 function sanitizedNetwork(events) {
   return events.map(({ scope, statusCode, code, bodyKind, businessCode, responseReason }) => ({
     scope, ...(statusCode === undefined ? {} : { statusCode }),
@@ -616,6 +628,7 @@ async function accept(item, index) {
   let failureDiagnosticsStart = 0;
   let instance;
   let module;
+  let transport;
   let rpc;
   const id = `accept-${index}-${row.contentHash.slice(0, 8)}`;
   try {
@@ -630,11 +643,13 @@ async function accept(item, index) {
       network,
       platform: 'acceptance',
     });
-    rpc = (name, params) => module.methods[`source.runtime.${name}`](params);
-    const uploaded = await stage(rpc, item);
+    transport = await openHttp(module);
+    rpc = (name, params) => transport.client.call(`source.runtime.${name}`, params);
+    const uploaded = await transport.client.upload('source', id, 1, item.bytes, { basename: item.basename });
+    if (!uploaded.ok) throw Object.assign(new Error(), { code: uploaded.code });
     const began = Date.now();
     const load = {
-      token: uploaded.token,
+      sourceRevision: 1,
       installationId: id,
       revision: 1,
       expectedRevision: 0,
@@ -645,7 +660,7 @@ async function accept(item, index) {
     const loaded = await rpc('load', load);
     row.initializationMs = Date.now() - began;
     if (!loaded.ok) throw Object.assign(new Error(), { code: loaded.code });
-    instance = loaded.instance;
+    instance = loaded.value.instance;
     if (instance?.state !== 'ready') {
       throw Object.assign(new Error(), { code: instance?.error ?? 'SOURCE_FAILURE' });
     }
@@ -743,6 +758,7 @@ async function accept(item, index) {
     } else {
       row.cleanup = 'cleanup_failure';
     }
+    try { await transport?.close(); } catch { row.cleanup = 'cleanup_failure'; }
     if (row.initialization === 'ready') {
       row.backgroundNetwork = audit.filter((event, at) =>
         (at >= startupAuditEnd && event.scope === 'session') || startupPending.has(event))

@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto';
 import { clone, fault, identifier, requireValue, safeError } from './errors.js';
 
-/** Script-layer limits shared by every protocol and counted per script. */
+/** Source and stack contracts shared by every protocol. */
 export const SCRIPT_LIMITS = Object.freeze({
   maxSourceBytes: 16 * 1024 * 1024,
-  maxMemoryBytes: 256 * 1024 * 1024,
   maxStackBytes: 256 * 1024,
 });
 
@@ -63,9 +62,14 @@ function revision(spec, base, maxSourceBytes = SCRIPT_LIMITS.maxSourceBytes) {
   // Configuration is a JSON public contract; no functions, cycles or binary handles.
   let json;
   try { json = JSON.stringify(config); } catch { throw fault('INVALID_ARGUMENT'); }
+  // Trusted composition can reuse the hash already computed for a complete
+  // source upload. This field is not accepted by the public HTTP methods.
+  requireValue(spec.contentHash === undefined ||
+    typeof spec.contentHash === 'string' && /^[a-f0-9]{64}$/.test(spec.contentHash));
   return {
     source, version, protocol,
-    hash: createHash('sha256').update(source).digest('hex'),
+    hash: spec.contentHash ?? (source === base?.source ? base.hash
+      : createHash('sha256').update(source).digest('hex')),
     config: JSON.parse(json), metadata, protocolOptions,
     permissions: permissions(spec.permissions ?? base?.permissions),
   };
@@ -130,7 +134,8 @@ export class ScriptHost {
     }).catch(() => {});
     return promise;
   }
-  async #start(id, rev) {
+  async #start(id, rev, signal) {
+    requireValue(!signal?.aborted, 'CANCELLED');
     const factory = this.adapters[rev.protocol];
     requireValue(typeof factory === 'function', 'UNSUPPORTED_PROTOCOL');
     const generation = (this.#generations.get(id) ?? 0) + 1;
@@ -140,11 +145,18 @@ export class ScriptHost {
       installationId: id, generation, revision: rev,
       network: this.network, storage: this.storage, onDiagnostic: this.onDiagnostic,
       onScriptError: this.onScriptError, limits: this.#limitsFor(rev.protocol),
-      onFailure: (failure, state) => this.#sessionFailed(id, session, failure, state),
+      onFailure: failure => this.#sessionFailed(id, session, failure),
+      startSignal: signal,
     });
     this.#sessions.add(session);
     this.#initializingSessions.add(session);
     this.#initializingOwners.set(id, session);
+    const abort = () => {
+      try { Promise.resolve(session.stop(fault('CANCELLED'))).catch(() => {}); }
+      catch { /* The owning start/stop path reports cleanup failures. */ }
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
     const initializing = (async () => {
       await session.start();
       this.#open();
@@ -153,6 +165,7 @@ export class ScriptHost {
       // A lifecycle caller may have stopped this owner while activation was
       // in flight. Such a late transaction must not publish the session.
       requireValue(!this.#initializationStopped(session), 'STALE_SESSION');
+      requireValue(!signal?.aborted, 'CANCELLED');
       return session;
     })();
     initializing.finally(() => {
@@ -163,10 +176,11 @@ export class ScriptHost {
       await initializing;
       return session;
     } catch (e) {
-      const failure = e instanceof Error && e.code ? e : safeError(e);
+      const failure = signal?.aborted ? fault('CANCELLED')
+        : e instanceof Error && e.code ? e : safeError(e);
       try { await this.#stop(session); } catch { /* Preserve the initiating failure. */ }
       throw failure;
-    }
+    } finally { signal?.removeEventListener('abort', abort); }
   }
   #initializationStopped(session) {
     return !session.live || Boolean(session.stopping) || session.stopRequested === true;
@@ -174,10 +188,19 @@ export class ScriptHost {
   #stopInitializingFor(id) {
     identifier(id);
     this.#open();
+    this.captureInitialization(id)?.();
+  }
+  // Admission captures the actual owner. Calling this stop later cannot
+  // select a replacement that happens to reuse the installation ID.
+  captureInitialization(id) {
+    identifier(id);
     const session = this.#initializingOwners.get(id);
-    if (!session) return;
-    try { Promise.resolve(session.stop()).catch(() => {}); }
-    catch { /* Cleanup errors are reported by the lifecycle caller. */ }
+    if (!session) return null;
+    return () => {
+      if (!this.#initializingSessions.has(session)) return;
+      try { Promise.resolve(session.stop()).catch(() => {}); }
+      catch { /* Cleanup errors are reported by the lifecycle caller. */ }
+    };
   }
   initializingSessions() {
     return [...this.#initializingSessions];
@@ -192,41 +215,10 @@ export class ScriptHost {
     }
     return sessions;
   }
-  #sessionFailed(id, session, failure, state) {
+  #sessionFailed(id, session, failure) {
     const record = this.#records.get(id);
-    if (!record || record.session !== session || !record.enabled ||
-      !session.memoryLimitExceeded || !state?.ready) return;
-    return this.#scheduleMemoryRestart(record, session, failure);
-  }
-  #scheduleMemoryRestart(record, session, failure) {
-    if (record.restarting || record.memoryRestarts >= 1) return record.restarting;
-    record.restarting = this.#locked(record.id, () =>
-      this.#restartAfterMemory(record, session, failure))
-      .finally(() => { record.restarting = null; });
-    record.restarting.catch(() => {});
-    return record.restarting;
-  }
-  async #restartAfterMemory(record, session, failure) {
-    if (record.session !== session || !record.enabled || record.memoryRestarts >= 1) return;
-    record.memoryRestarts++;
-    const generation = session.generation;
-    try {
-      this.onDiagnostic?.(Object.freeze({
-        installationId: record.id, generation,
-        kind: 'ScriptHostError', reason: 'host', operation: 'memory.restart',
-        code: 'RESOURCE_LIMIT', phase: 'running',
-      }));
-    } catch { /* Diagnostics cannot alter restart behavior. */ }
-    record.session = null;
-    try { await this.#stop(session); }
-    catch { /* The old generation is still detached before replacement. */ }
-    if (!record.enabled) return;
-    try {
-      record.session = await this.#start(record.id, record.revision);
-      record.lastFailure = null;
-    } catch (error) {
-      record.lastFailure = error instanceof Error && error.code ? error.code : safeError(error).code;
-    }
+    if (!record || record.session !== session) return;
+    record.lastFailure = safeError(failure).code;
   }
   #stop(session) {
     if (!session) return Promise.resolve();
@@ -302,23 +294,33 @@ export class ScriptHost {
     };
   }
 
-  install(spec) {
+  install(spec, { signal } = {}) {
+    requireValue(signal === undefined || signal instanceof AbortSignal);
+    requireValue(!signal?.aborted, 'CANCELLED');
     requireValue(spec && typeof spec === 'object');
     const id = identifier(spec.installationId);
     const rev = revision(spec, undefined, this.limits.maxSourceBytes);
     requireValue(Object.hasOwn(this.adapters, rev.protocol), 'UNSUPPORTED_PROTOCOL');
     requireValue(spec.enabled === undefined || typeof spec.enabled === 'boolean');
     return this.#locked(id, async () => {
+      requireValue(!signal?.aborted, 'CANCELLED');
       requireValue(!this.#records.has(id), 'ALREADY_EXISTS');
-      const record = { id, revision: rev, enabled: false, session: null, previous: null,
-        memoryRestarts: 0, restarting: null };
+      const record = { id, revision: rev, enabled: false, session: null, previous: null };
       // Import does not execute code by default; enable is an explicit operation.
       this.#records.set(id, record);
       if (spec.enabled) {
-        try { record.session = await this.#start(id, rev); record.enabled = true; }
+        try {
+          record.session = await this.#start(id, rev, signal);
+          requireValue(!signal?.aborted, 'CANCELLED');
+          record.enabled = true;
+        }
         catch (e) {
+          if (record.session && signal?.aborted) {
+            try { await this.#stop(record.session); } catch { /* Preserve cancellation. */ }
+            record.session = null;
+          }
           record.lastFailure = e instanceof Error && e.code ? e.code : safeError(e).code;
-          if (e?.memoryLimitExceeded || e?.code === 'TIMEOUT') record.enabled = true;
+          if (e?.code === 'TIMEOUT') record.enabled = true;
           throw e;
         }
       }
@@ -326,8 +328,10 @@ export class ScriptHost {
     });
   }
 
-  enable(id) {
+  enable(id, { signal } = {}) {
+    requireValue(signal === undefined || signal instanceof AbortSignal);
     return this.#locked(id, async () => {
+      requireValue(!signal?.aborted, 'CANCELLED');
       const record = this.#record(id);
       if (!record.session?.live) {
         const previous = record.session;
@@ -335,13 +339,17 @@ export class ScriptHost {
         record.enabled = false;
         await this.#stop(previous);
         try {
-          record.session = await this.#start(id, record.revision);
+          record.session = await this.#start(id, record.revision, signal);
+          requireValue(!signal?.aborted, 'CANCELLED');
           record.enabled = true;
           record.lastFailure = null;
-          record.memoryRestarts = 0;
         } catch (e) {
+          if (record.session && signal?.aborted) {
+            try { await this.#stop(record.session); } catch { /* Preserve cancellation. */ }
+            record.session = null;
+          }
           record.lastFailure = e instanceof Error && e.code ? e.code : safeError(e).code;
-          if (e?.memoryLimitExceeded || e?.code === 'TIMEOUT') record.enabled = true;
+          if (e?.code === 'TIMEOUT') record.enabled = true;
           throw e;
         }
       }
@@ -362,12 +370,18 @@ export class ScriptHost {
     });
   }
 
-  async #replace(record, next) {
+  async #replace(record, next, signal) {
     const old = record.session;
     let session = null;
     if (record.enabled) {
-      try { session = await this.#start(record.id, next); }
+      try {
+        session = await this.#start(record.id, next, signal);
+        requireValue(!signal?.aborted, 'CANCELLED');
+      }
       catch (e) {
+        if (session) {
+          try { await this.#stop(session); } catch { /* Preserve the trial failure. */ }
+        }
         record.lastFailure = e instanceof Error && e.code ? e.code : safeError(e).code;
         throw e; // Old live session is never stopped on trial failure.
       }
@@ -376,13 +390,14 @@ export class ScriptHost {
     record.revision = next;
     record.session = session;
     record.lastFailure = null;
-    record.memoryRestarts = 0;
     // Publish the new generation before invalidating old callbacks.
     await this.#stop(old);
     return this.#snapshot(record);
   }
 
-  update(id, spec) {
+  update(id, spec, { signal } = {}) {
+    requireValue(signal === undefined || signal instanceof AbortSignal);
+    requireValue(!signal?.aborted, 'CANCELLED');
     // Capture the proposal at call time, not after another lifecycle operation.
     const proposal = clone(spec);
     identifier(id);
@@ -391,15 +406,17 @@ export class ScriptHost {
       try {
         const next = revision(proposal, current.revision, this.limits.maxSourceBytes);
         requireValue(Object.hasOwn(this.adapters, next.protocol), 'UNSUPPORTED_PROTOCOL');
+        if (proposal.source !== undefined) proposal.contentHash = next.hash;
       }
       catch (error) { return Promise.reject(error); }
     }
     this.#stopInitializingFor(id);
     return this.#locked(id, () => {
+      requireValue(!signal?.aborted, 'CANCELLED');
       const record = this.#record(id);
       const next = revision(proposal, record.revision, this.limits.maxSourceBytes);
       requireValue(Object.hasOwn(this.adapters, next.protocol), 'UNSUPPORTED_PROTOCOL');
-      return this.#replace(record, next);
+      return this.#replace(record, next, signal);
     });
   }
 
@@ -427,6 +444,16 @@ export class ScriptHost {
   }
 
   get(id) { return this.#snapshot(this.#record(id)); }
+  // A composition binding keeps this read-only view until its own commit.
+  // Its revision/session never follow #records into a different generation;
+  // live state and resource counts still come from the captured real owner.
+  observe(id) {
+    const record = this.#record(id);
+    const { revision, enabled, session, lastFailure } = record;
+    const generation = session?.generation ?? this.#generations.get(id) ?? 0;
+    return () => ({ ...this.#snapshot({ id, revision, session, lastFailure,
+      enabled: record.session === session ? record.enabled : enabled }), generation });
+  }
   list() { return [...this.#records.values()].map(r => this.#snapshot(r)); }
 
   #target(target) {

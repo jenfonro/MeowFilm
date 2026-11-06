@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID, randomBytes } from 'node:crypto';
 import { readFile, readdir, stat, mkdir, mkdtemp, writeFile, rename, realpath, rm } from 'node:fs/promises';
 import { registerHooks } from 'node:module';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
@@ -46,7 +46,11 @@ if (options.kind === 'source') {
     const payload = await realpath(options.payload);
     const manifest = JSON.parse(await readFile(join(payload, 'runtime-manifest.json'), 'utf8'));
     const entry = `app/modules/${moduleFile}`;
-    if (manifest.status !== 'complete' || !manifest.files.some(file => file.path === entry)) throw new Error('Incomplete runtime payload');
+    const required = [entry, 'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs',
+      'app/modules/source-candidates.mjs', 'node_modules/@meowfilm/runtime-bridge/src/index.js',
+      'node_modules/@meowfilm/script-host/src/index.js'];
+    if (manifest.status !== 'complete' || !Array.isArray(manifest.files) ||
+        required.some(path => !manifest.files.some(file => file.path === path))) throw new Error('Incomplete runtime payload');
     modulePath = join(payload, entry);
     hook = registerHooks({
       resolve(specifier, context, next) {
@@ -76,6 +80,32 @@ if (options.kind === 'source') {
   }
   const createMusicScriptModule = runtimeModule.createMusicScriptModule;
   const createCatScriptModule = runtimeModule.createCatScriptModule;
+
+  const runtimeDirectory = dirname(dirname(modulePath));
+  const [{ createAppRuntime }, { createRuntimeClient, createCallbackServer }] = await Promise.all([
+    import(pathToFileURL(join(runtimeDirectory, 'bootstrap.mjs')).href),
+    import(pathToFileURL(join(runtimeDirectory, 'client.mjs')).href),
+  ]);
+  async function openHttp(module) {
+    const sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex'), callbackKey = randomBytes(32).toString('hex');
+    const callbacks = createCallbackServer({ sessionId, callbackKey, methods: Object.fromEntries(
+      ['get', 'set', 'delete'].map(operation => [`platform.musicScript.storage.${operation}`,
+        async () => ({ ok: false, code: 'PERMISSION_DENIED' })])) });
+    await callbacks.start();
+    let runtime, client;
+    try {
+      runtime = createAppRuntime({ sessionId, requestKey, callbackKey, callbackUrl: callbacks.baseUrl, modules: [module] });
+      await runtime.start();
+      client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
+      return { client, async close() {
+        const results = await Promise.allSettled([client.close(), runtime.close(), callbacks.close()]);
+        if (results.some(result => result.status === 'rejected')) throw Object.assign(new Error(), { code: 'SCRIPT_CLEANUP' });
+      } };
+    } catch (error) {
+      await Promise.allSettled([client?.close(), runtime?.close(), callbacks.close()]);
+      throw error;
+    }
+  }
   const report = { kind: options.kind, mode: options.live ? 'live' : 'offline-init', modulePath, rows: [] };
 
   function describe(value, action) {
@@ -140,52 +170,6 @@ if (options.kind === 'source') {
       try { await reader?.cancel(); } catch { /* Request abort below also releases transport. */ }
       controller.abort();
       clearTimeout(timer);
-    }
-  }
-
-  async function catResult(rpc, reply) {
-    if (!reply.ok) return reply;
-    let bytes;
-    if (typeof reply.data === 'string') bytes = Buffer.from(reply.data);
-    else if (reply.blob && typeof reply.blob === 'object') {
-      const { token, length, sha256 } = reply.blob;
-      const chunks = [];
-      let offset = 0;
-      try {
-        while (offset < length) {
-          const part = await rpc('blob.read', { token, offset });
-          if (!part.ok || typeof part.data !== 'string' || !Number.isSafeInteger(part.next) ||
-            part.next <= offset || part.next > length) throw Object.assign(new Error(), { code: part.code ?? 'SCRIPT_PROTOCOL_ERROR' });
-          const chunk = Buffer.from(part.data, 'base64');
-          if (!chunk.length || chunk.toString('base64') !== part.data || offset + chunk.length !== part.next)
-            throw Object.assign(new Error(), { code: 'SCRIPT_PROTOCOL_ERROR' });
-          chunks.push(chunk); offset = part.next;
-        }
-        bytes = Buffer.concat(chunks);
-        if (bytes.length !== length || createHash('sha256').update(bytes).digest('hex') !== sha256)
-          throw Object.assign(new Error(), { code: 'SCRIPT_PROTOCOL_ERROR' });
-      } finally { await rpc('blob.release', { token }); }
-    } else throw Object.assign(new Error(), { code: 'SCRIPT_PROTOCOL_ERROR' });
-    try { return { ...reply, value: JSON.parse(bytes.toString('utf8')) }; }
-    catch { throw Object.assign(new Error(), { code: 'SCRIPT_PROTOCOL_ERROR' }); }
-  }
-
-  async function catPayload(rpc, value) {
-    const bytes = Buffer.from(JSON.stringify(value));
-    if (bytes.length <= 48 * 1024) return { payload: bytes.toString() };
-    const sha256 = createHash('sha256').update(bytes).digest('hex');
-    const begun = await rpc('stage.begin', { length: bytes.length, sha256, kind: 'json' });
-    if (!begun.ok) throw Object.assign(new Error(), { code: begun.code });
-    try {
-      for (let offset = 0; offset < bytes.length; offset += begun.chunkBytes) {
-        const chunk = await rpc('stage.chunk', { token: begun.token, offset,
-          data: bytes.subarray(offset, offset + begun.chunkBytes).toString('base64') });
-        if (!chunk.ok) throw Object.assign(new Error(), { code: chunk.code });
-      }
-      return { payloadToken: begun.token };
-    } catch (error) {
-      await rpc('stage.abort', { token: begun.token });
-      throw error;
     }
   }
 
@@ -297,19 +281,16 @@ if (options.kind === 'source') {
         finally { event.finished = true; }
       },
     });
-    const rpc = (name, params) => module.methods[`music.script.${name}`](params);
+    let transport;
     try {
+      transport = await openHttp(module);
+      const rpc = (name, params) => transport.client.call(`music.script.${name}`, params);
       const bytes = await readFile(join(directory, file));
-      row.contentHash = createHash('sha256').update(bytes).digest('hex');
-      const begun = await rpc('stage.begin', { basename: file, length: bytes.length, sha256: row.contentHash });
-      if (!begun.ok) throw Object.assign(new Error(), { code: begun.code });
-      for (let offset = 0; offset < bytes.length; offset += begun.chunkBytes) {
-        const chunk = await rpc('stage.chunk', { token: begun.token, offset,
-          data: bytes.subarray(offset, offset + begun.chunkBytes).toString('base64') });
-        if (!chunk.ok) throw Object.assign(new Error(), { code: chunk.code });
-      }
+      const uploaded = await transport.client.upload('music', id, 1, bytes, { basename: file });
+      if (!uploaded.ok) throw Object.assign(new Error(), { code: uploaded.code });
+      row.contentHash = uploaded.value.contentHash;
       const start = Date.now();
-      const loaded = await rpc('load', { token: begun.token, installationId: id, revision: 1, expectedRevision: 0,
+      const loaded = await rpc('load', { sourceRevision: 1, installationId: id, revision: 1, expectedRevision: 0,
         version: 'acceptance', config: {}, permissions: { storage: [] }, grant: randomUUID() });
       row.initializationMs = Date.now() - start;
       if (!loaded.ok) throw Object.assign(new Error(), { code: loaded.code });
@@ -318,7 +299,7 @@ if (options.kind === 'source') {
       row.initializationDiagnostics = diagnostics.map(diagnostic);
       startupAuditEnd = audit.length; startupDiagnosticsEnd = diagnostics.length;
       for (const event of audit) if (!event.finished) startupPending.add(event);
-      const instance = loaded.instance;
+      const instance = loaded.value.instance;
       row.initialization = 'ready';
       row.capabilities = Object.fromEntries(Object.entries(instance.capabilities).map(([site, cap]) =>
         [site, { actions: cap.actions, qualitys: cap.qualitys }]));
@@ -367,6 +348,7 @@ if (options.kind === 'source') {
         const close = await module.close();
         row.cleanup = close.ok ? 'complete' : close.code;
       } catch (error) { row.cleanup = error.code ?? 'SCRIPT_CLEANUP'; }
+      try { await transport?.close(); } catch (error) { row.cleanup = error.code ?? 'SCRIPT_CLEANUP'; }
       if (row.initialization === 'ready') {
         row.backgroundNetwork = audit.filter((event, index) => event.requestId === null &&
           (index >= startupAuditEnd || startupPending.has(event)))
@@ -395,7 +377,7 @@ if (options.kind === 'source') {
     const row = { file, actions: [] };
     let initializationAuditEnd, initializationDiagnosticsEnd, initializationNetwork;
     let progressAt = Date.now();
-    let dataRoot, module, instance;
+    let dataRoot, module, instance, transport;
     const { createCatRuntime } = await import(pathToFileURL(
       options.payload ? join(options.payload, 'node_modules/@meowfilm/script-host/src/index.js')
         : join(root, 'packages/script-host/src/index.js')).href);
@@ -425,23 +407,17 @@ if (options.kind === 'source') {
         runtimeFactory: input => createCatRuntime({ ...input, onNetwork: observeNetwork,
           ...sourceDiagnosticObservers(diagnostics) }),
       });
-      const rpc = (name, params = {}) => module.methods[`cat.script.${name}`](params);
+      transport = await openHttp(module);
+      const rpc = (name, params = {}) => transport.client.call(`cat.script.${name}`, params);
       const bytes = await readFile(join(directory, file));
-      row.contentHash = createHash('sha256').update(bytes).digest('hex');
-      const begun = await rpc('stage.begin', {
-        length: bytes.length, sha256: row.contentHash, kind: 'source',
-      });
-      if (!begun.ok) throw Object.assign(new Error(), { code: begun.code });
-      for (let offset = 0; offset < bytes.length; offset += begun.chunkBytes) {
-        const chunk = await rpc('stage.chunk', { token: begun.token, offset,
-          data: bytes.subarray(offset, offset + begun.chunkBytes).toString('base64') });
-        if (!chunk.ok) throw Object.assign(new Error(), { code: chunk.code });
-      }
+      const uploaded = await transport.client.upload('cat', id, 1, bytes);
+      if (!uploaded.ok) throw Object.assign(new Error(), { code: uploaded.code });
+      row.contentHash = uploaded.value.contentHash;
       const start = Date.now();
-      const installed = await catResult(rpc, await rpc('install', {
-        installationId: id, token: begun.token, version: 'acceptance', enabled: true,
-        config: JSON.stringify({}),
-      }));
+      const installed = await rpc('install', {
+        installationId: id, sourceRevision: 1, version: 'acceptance', enabled: true,
+        config: {},
+      });
       initializationAuditEnd = audit.length;
       initializationDiagnosticsEnd = diagnostics.length;
       initializationNetwork = audit.map(({ finished, statusCode, code }) =>
@@ -480,19 +456,11 @@ if (options.kind === 'source') {
           }
           const before = audit.length, beforeDiagnostic = diagnostics.length, began = Date.now();
           let reply;
-          let staged;
           try {
-            staged = await catPayload(rpc, payload);
-            reply = await catResult(rpc, await rpc('invoke', {
-              installationId: id, generation: instance.generation, siteId: site.key, operation,
-              ...staged,
-            }));
+            reply = await rpc('invoke', {
+              installationId: id, generation: instance.generation, siteId: site.key, operation, payload,
+            });
           } catch (error) { reply = { ok: false, code: error.code ?? 'HOST_ERROR' }; }
-          finally {
-            if (staged?.payloadToken) {
-              try { await rpc('stage.abort', { token: staged.payloadToken }); } catch {}
-            }
-          }
           entry.elapsedMs = Date.now() - began;
           entry.network = audit.slice(before)
             .map(({ requestId, finished, statusCode, code, businessCode, responseReason }) =>
@@ -519,7 +487,7 @@ if (options.kind === 'source') {
           }
         }
       }
-      const removed = await catResult(rpc, await rpc('uninstall', { installationId: id }));
+      const removed = await rpc('uninstall', { installationId: id });
       if (!removed.ok) row.unloadCode = removed.code;
     } catch (error) {
       row.initialization ??= 'failed';
@@ -533,6 +501,7 @@ if (options.kind === 'source') {
         await module?.close();
         row.cleanup = 'complete';
       } catch (error) { row.cleanup = error.code ?? 'SCRIPT_CLEANUP'; }
+      try { await transport?.close(); } catch (error) { row.cleanup = error.code ?? 'SCRIPT_CLEANUP'; }
       if (dataRoot) {
         try { await rm(dataRoot, { recursive: true, force: true }); }
         catch { row.cleanup = 'SCRIPT_CLEANUP'; }

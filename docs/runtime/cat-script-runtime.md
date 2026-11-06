@@ -6,29 +6,31 @@
 
 ```text
 id: cat
-version: 0.1.0
-contract: cat.script.v1
+version: 0.2.0
+contract: cat.script.v2
 ```
 
-`createCatScriptModule({dataRoot})` 只接收平台选定的稳定绝对数据目录。平台负责进程与通信；公共模块负责源码传输、设置、安装、QuickJS guest、私有卷、服务端口、Cat 调用和关闭。
+`createCatScriptModule({dataRoot})` 接收受信调用方选定的稳定绝对数据目录。公共独立入口见 [Runtime HTTP](runtime-bridge.md)；模块负责完整源码候选、设置、安装、Node Worker、私有卷、服务端口、Cat 调用和关闭。Windows/iOS 的旧接入本轮未迁移，不提供旧 wire 兼容。
 
-## RPC 与分片
+## HTTP 与完整导入
 
-方法均以 `cat.script.` 为前缀：
+逻辑方法均以 `cat.script.` 为前缀，由公共客户端映射为 `POST /v1/cat/{operation}`：
 
-| 方法 | 作用 |
+| operation | 作用 |
 | --- | --- |
-| `stage.begin/chunk/abort` | 分片暂存 `source` 或大型 JSON 请求 |
-| `blob.read/release` | 分片读取大型 JSON 结果 |
 | `start/status` | 启动运行器并读取当前设置，或返回当前状态；`start` 不等待各脚本实例就绪 |
 | `refresh` | 重新读取同一设置文件，校验设置结构后按目标实例应用 |
 | `install/enable/uninstall` | 保存源码、更新设置并管理一个 installation |
 | `invoke` | 定向调用 installation/generation/site/action |
 | `management.describe/sync` | 探测脚本原生管理协议并同步一个明确 provider |
 
-源码和 JSON 分片均为 64 KiB、连续 offset、规范 Base64 与完整 SHA-256。源码声明长度最多 16 MiB，在 `stage.begin` 提前拒绝；脚本结果不设 8 MiB 上限。未完成 transfer 按活动 token 保留并在超时、显式释放或运行器关闭时回收，不设置并发 token 数量门槛，也不把分片帧大小当作整份源码大小上限。小结果返回 `data` JSON 字符串，大结果返回 `blob` 描述符；调用方校验长度和 SHA-256 后必须释放 token。
+源码一次 `PUT /v1/cat/sources/{installationId}/{sourceRevision}`，body 为 `application/octet-stream`，不需要 basename；仅完整、有效的上传成为候选。`install` 指定 installationId/sourceRevision，config 直接为 object，version/enabled 沿现有默认值，不增加 Cat revision CAS。`invoke.payload` 和 `management.sync.credentials` 直接为 object，不接受 JSON 字符串替代；invoke 的 generation 可选，payload 缺省空 object。
 
-源码严格按无 BOM UTF-8 解码。`install` 将实际给定源码原子写入普通文件 `sources/<importhash>.js`，设置的 `sourceHash` 只作为导入时的文件引用和内容标识；不加密源码，不保护其字节不可变，读取时不比较历史 hash 或导入长度。显式重新导入会原子替换该文件，即使设置和导入内容标识未变也重新应用目标实例。不存在旧格式迁移或内联源码回退。
+普通请求一次 JSON POST，成功 `{ok:true,contract:"cat.script.v2",value}`；value 是原业务对象、数组、标量或 null。没有普通 JSON 大小分流、总字节配额、正文压缩或自动加工；旧 stage/control/blob、Base64、分片 token、TTL、offset 和传输 checksum 已删除。HTTP 取消和实际排空见 [公共传输](runtime-bridge.md#取消反向能力与清理)。
+
+源码保持 1 至 16 MiB、严格无 BOM UTF-8、非空。同 installation/sourceRevision 的仍持有内容幂等，内容冲突报 INVALID_ARGUMENT，不存在版本报 NOT_FOUND，编码错误报 SCRIPT_PROTOCOL_ERROR，超限报 RESOURCE_LIMIT。新完整上传只替换尚未采用候选，部分上传不能覆盖；字段前置拒绝不消费，安装取入后失败释放，重试须显式上传。当前执行版本、已取入操作及未采用候选各由实际所有者持有，不缓存全版本历史；卸载/关闭释放候选。
+
+`install` 将实际给定源码原子写入普通文件 `sources/<importhash>.js`，设置的 `sourceHash` 只作为导入时的文件引用和内容标识；上传生成的可信内容 hash 在安装内复用，不接受用户提交 contentHash。不加密源码，不保护其字节不可变，读取时不比较历史 hash 或导入长度。显式重新导入会原子替换该文件，即使设置和导入内容标识未变也重新应用目标实例。不存在旧格式迁移或内联源码回退。
 
 ## 设置文件
 
@@ -62,23 +64,23 @@ contract: cat.script.v1
 
 `port=0` 由系统选择聚合端口。缺省 provider 表示未启用对应拦截。客户端可原子改写该文件后调用 `refresh`；刷新先校验设置结构，设置损坏时不发布部分状态、不覆盖文件，也不替换当前有效运行快照。有效设置只对配置变更、新增、移除或失败的目标实例应用，未变的正常实例不重读源码、不重新启动。provider、映射和聚合端口变更通过设置快照发布，不要求全量重读源码。冷启动设置损坏明确返回存储错误。
 
-`start` 完成数据根、设置读取和聚合 server 监听后返回与 `status` 相同的快照，各已启用脚本随后按 `settings.scripts` 顺序在后台逐个启动，不并发、不增加并发设置项。每个目标实例启动时读取一次当前源码，按实际字节检查 16 MiB 上限并解码，不做全量源码预检；禁用实例不读取源码，也无需创建 host revision。源码缺失、非法编码、超限或引擎语法/执行错误只使对应实例失败并列入 `failures`，不阻止聚合入口或其他实例就绪。合法手工编辑即使改变长度，也可在停用后重新启用或进程重启时运行；运行中不监视文件变化。
+`start` 完成数据根、设置读取和聚合 server 监听后返回与 `status` 相同的快照，各已启用脚本随后在各自 Worker 启动；慢实例不阻止另一实例或 status，不增加并发数量配置。每个目标实例启动时读取一次当前源码，按实际字节检查 16 MiB 上限并解码，不做全量源码预检；禁用实例不读取源码，也无需创建 host revision。源码缺失、非法编码、超限或引擎语法/执行错误只使对应实例失败并列入 `failures`，不阻止聚合入口或其他实例就绪。合法手工编辑即使改变长度，也可在停用后重新启用或进程重启时运行；运行中不监视文件变化。
 
-每个 enabled installation 使用独立 worker thread 运行 CatSession、QuickJS、私有卷访问和 listener；主线程保留 ScriptHost 记录、CatRuntime 网关、设置文件与平台适配器。实例就绪即可调用；尚未启动或正在启动的实例在 `status` 中报告 `starting`，对它的 `invoke`、管理和会话访问立即返回 `STARTING`，不隐藏等待；聚合 HTTP 入口对 `STARTING` 返回 503。禁用实例的调用和管理访问返回 `DISABLED`。安装、启用、刷新和卸载与后台启动共用同一串行队列，可在两个实例启动之间插入；与目标一致的实例不重复启动。更新仍先停旧 generation 再启动新 generation，避免同一实例两代并写私有卷。
+每个 enabled installation 使用独立 worker thread 直接运行 CatSession、Node 脚本、私有卷访问和 listener；主线程保留 ScriptHost 记录、CatRuntime 网关、设置文件与平台适配器。实例就绪即可调用；尚未启动或正在启动的实例在 `status` 中报告 `starting`，对它的 `invoke`、管理和会话访问立即返回 `STARTING`，不隐藏等待；聚合 HTTP 入口对 `STARTING` 返回 503。禁用实例的调用和管理访问返回 `DISABLED`。同 installation 的安装、启用、刷新目标和卸载有序，设置提交按发布顺序处理；不以全局初始化队列阻塞其他 installation。与目标一致的实例不重复启动。更新先试运行候选，失败或初始化取消时保留旧 generation 及其有效运行状态；候选就绪并通过发布检查后切换，再停止和排空旧 owner。私有卷仍按实例归属和既有事务规则管理，不能把候选失败当作旧实例已卸载。
 
-## QuickJS 与有限 Node 风格能力
+## Worker 中的直接 Node 执行
 
-用户源码仍在独立 QuickJS guest 堆中执行；桌面 WASM 与 iOS asmjs 的故障隔离差异见 [公共运行器](script-runtime.md#quickjs-执行边界)。`require` 只解析运行器明确实现的内置模块子集；不存在任意 npm 包、宿主模块搜索、`NODE_PATH` 穿透、原生 addon、`child_process`、宿主 `worker_threads`、`node:vm` 或真实 `process` 对象回退。
+每个 enabled installation 使用独立 Node Worker/V8 isolate，CommonJS 命名上下文由 Node `vm` 承载；不使用 QuickJS、QuickJS handle 桥或第二层字节 JSON/Base64 编码。这不是新增的恶意脚本安全沙箱，也不以 vm 宣称安全隔离。LX/source 的 native QuickJS 拓扑见 [公共运行器](script-runtime.md)。
 
-兼容层提供脚本样本需要的 Buffer、URL、`Event`／`EventTarget`／`CustomEvent`、Abort、流、HTTP(S)、DNS、net/tls、crypto、zlib、path、util、有限 console/timer/Web API 和 CommonJS 启动语义。Web 事件对象和监听器完全位于 guest，不桥接宿主 EventTarget。传给 guest 的原生对象由角色表限制可见成员，宿主回调、句柄和接收者身份均经桥接核对。
+受控 loader 仅解析明确支持的内置模块、审核过的 SDK 和 installation 私有文件；不搜索任意宿主 npm 包、NODE_PATH、native addon、child_process 或 worker_threads。process 保持 Node 类型身份，但 env、路径和文件访问沿投影边界；不向脚本发布主进程会话密钥、平台账号或宿主文件能力。
 
-Buffer 的 `base64url` 编码遵循 Node 语义：输出使用 URL 安全字母表并省略填充，读取同时接受普通 Base64 和 URL 安全字母表；构造、读写、填充和编码检查使用同一客体实现，不增加跨宿主字节传输路径。
+Buffer、typed arrays、KeyObject、X509Certificate、ECDH、Web 事件、Promise 和 stream 在 Worker 内使用真实 Node 对象。公开算法和 base64url 语义遵循 Node；显式 Base64 编解码工具仍可用，但不是运行器传输通道。os/platform/arch/cpus/内存字段采用 Node 实际含义，不伪造 guest 堆余额。不存在单实例内存配额、粘性耗尽或 OOM 自动重启。
 
-每个获准进入脚本 listener 的 HTTP 请求拥有独立的传输子生命周期，并继承所属 Cat 调用的设置、拦截、持久写回与失败观察上下文；不同 Cat 调用可以各自等待 I/O，不经过单调用串行队列。请求作用域只拥有该次 HTTP 交换的 incoming／response／socket 包装、scope token 和本地 client，传输 close 分派完成后释放。脚本在回调中创建的 timer、流、socket、文件句柄、派生异步上下文和未完成桥接 Promise 归实例 session 所有，在 timer 触发或清除、Promise settle、句柄关闭等自然结束时释放对应 lease；流／socket close 先释放真实 I/O 所有权，非入站传输对象的已关闭状态与方法在 guest 仍持有对象或其绑定方法时继续有效，代理不可达后再回收终态句柄；后台任务不因创建它的请求结束而中断。值型原生句柄和一次性回调随可达性释放：客体只以弱引用缓存代理，客体死亡后由下一次桥接发送前的安全点批量通知宿主；宿主回调包装也只被弱引用持有，宿主 GC 回收包装函数时释放对应回调 receipt。请求结束后重新解码的同一回调 id 会撤销尚未发送的释放通知。活动资源（listener、server、incoming／response／socket、流、文件句柄、Agent 等）不因客体弱引用消失而强制 dispose，而按各自 close 路径或实例停用、更新、卸载时由 session 统一回收。相同对象被多个仍存活作用域使用时按引用保留。运行器不因当前累计句柄、活动资源或调用并发数量拒绝 Cat 请求；这些对象仍逐一登记并按所属生命周期确定性回收。原生桥的三个字节方向（host→guest 回调参数、guest→host 调用参数、host→guest 调用返回值）均以 ArrayBuffer 帧传输，JSON 只含 `{$:'bytes',frame:n}` 结构与帧索引；帧在跨边界时复制，不暴露宿主 Buffer。桥接内部与脚本结果不设字节上限，脚本内数据处理只受单脚本内存上限约束；宿主整体缓冲的聚合入口请求体和 listener 响应汇总以单脚本内存上限为上界，超出报 `RESOURCE_LIMIT`，请求失败而实例继续服务。单脚本内存上限与其他协议同值；运行中超限使实例失败，已就绪实例自动重启一次并保留私有卷，初始化超限不重启。`os.totalmem()` 返回该单脚本内存上限，`os.freemem()` 为上限减当前 guest 堆占用；其余 `os` 字段仍是隔离环境兼容元数据。桥接参数编码或 callback 执行失败只关闭所属请求或 session，不得逃逸为宿主进程未捕获异常；调用结束后到达的后台 callback 异常只产生结构化诊断，不关闭 scope，也不使实例失败。
+每个入站 HTTP 交换有独立取消和传输所有权；正常 finish 后的 close 不取消成功调用。不同调用可同时等待 I/O。请求回调创建的 timer、出站网络、Agent、stream、fd 和后台 Promise 归实例所有，按自然完成或实例 stop 回收；正常返回不撤销后台网络，但特权存储租约在请求结束时失效，不能借后台任务延续权限。主动取消关闭当前传输并拒绝迟到结果，不把仍运行的物理任务当作已结束。
 
-正常完成 HTTP 响应后，仍在进行的脚本出站请求、响应句柄和 Agent 继续由实例管理，不因原调用租约结束而撤销；主动取消／未完成的传输断开仍终止该传输的在途请求。主线程的特权存储租约在正常完成或取消时均失效，不能借后台网络延续存储权限。注入的缓冲网络适配器若解压响应，会同时移除压缩编码和压缩长度头；损坏压缩体报告网络失败，只有真实解压输出超过内存缓冲上界才报告资源超限。
+所有资源登记在所属生命周期，一次终止后等待真实 close，再解除所有权。清理失败如实返回 SCRIPT_CLEANUP；有界清理超时仅留下不持有 session 图的迟到错误守卫，不通过重复 destroy/off 隐藏失败。finish/close 监听器在传输所有权释放前执行。实例停用、更新、卸载和关闭回收所有残余资源与 Worker；后台 callback 异常只产生结构化诊断，不因已结束请求而伤及另一调用。
 
-服务、网络连接、私有流和监听器共用同一关闭机制：每个资源只执行一次终止操作，等待真实 `close`，再执行一次所有权释放；超过清理时限则解除所有者并仅保留不持有会话图的错误守卫，并如实报告超时。关闭路径不通过重复调用 `destroy`／`off` 猜测“临时失败”，一次失败直接进入清理结果。原生响应、连接及升级后的传输共用终止 `close` 事件分派完成边界，再结束其作用域，保证框架的 `finish`／`close` 回调均先执行；每个原生对象的分派适配随所有者回收。控制调用取消或 socket 断开先终止传输，再按实际关闭回收请求；控制调用不能接受迟到结果，实例停止仍撤销全部资源，不依赖连续微任务延迟。
+聚合入口请求体、listener 响应和普通调用结果没有由内存配额派生的字节上限。媒体代理继续流式背压，不把媒体转成控制 JSON。注入网络适配器若解压响应，会移除失效的压缩编码/长度头，损坏压缩体报告网络失败；不能以移除配额为由改变错误或取消归属。
 
 启动优先采用明确导出的 `start` 或函数入口，其次识别已求值函数的明确服务启动信号及其包装器。已有可选入口或直接导出的 spider 时不扫描整份 bundle；只有无法从已求值作用域找到入口的闭包包装器，才由 Acorn 一次词法索引、定向解析目标函数和单调用包装链。静态发现不执行表达式、不解析整份 bundle AST，不把字符串／注释内的代码当作声明，也不使用脚本名或作者名白名单。
 
@@ -86,21 +88,17 @@ Buffer 的 `base64url` 编码遵循 Node 语义：输出使用 URL 安全字母�
 
 Fastify 通过标准 `fastify.initialization` 诊断频道和 `onRoute` hook 收集实际方法与完整路由，按服务端口及 site API 前缀发布 `actions`／`methods`。中文路径按 URL 段解码比较；前缀内的命名参数可以匹配当前 site，但动作段必须明确。不把通配路由、动态兜底或其他站点／管理路由当作当前站点的动作，也不依赖扫描几个固定动作名。启动等到框架 ready 及配置服务真实监听后才读取配置。
 
-没有框架注册信息时，在 guest 内按需使用 Acorn 解析源码，只识别常量模板／拼接、明确路由调用、`METHOD path` Map 和首尾锚定且动作枚举明确的正则分派。绑定按词法作用域解析，不执行表达式、不扫描字符串内的伪路由、不按固定动作列表猜能力。解析后的 AST、启动源码引用与临时路由记录及时释放。调用只接受已发布的 action。
+没有框架注册信息时，在所属 Worker 内按需使用 Acorn 解析源码，只识别常量模板／拼接、明确路由调用、`METHOD path` Map 和首尾锚定且动作枚举明确的正则分派。绑定按词法作用域解析，不执行表达式、不扫描字符串内的伪路由、不按固定动作列表猜能力。解析后的 AST、启动源码引用与临时路由记录及时释放。调用只接受已发布的 action。
 
 标准 Cat HTTP `category` 输入为 `{id,page,filter,filters}`，`search` 为 `{wd,quick,page}`，`detail` 为 `{id}`，`play` 为 `{flag,id,flags}`。HTTP 服务保留这些字段；direct spider 在调用边界转为其位置参数，亦接受直接调用习惯的 `tid/pg/extend`。同一路由优先使用 POST，否则使用其实际注册方法；GET／HEAD 将字段编码为查询参数，对象与数组使用 JSON，不丢弃输入。
 
-启动期经有限 `vm` 兼容层动态执行的源码及其框架注册也参与发现，不离开 guest、不保留第二份完整源码，不按动作数量截断。整份源码入口在 ScriptHost install／update 与暂存 `begin` 按 16 MiB 上限校验。运行期动态代码不会扩大已发布能力。实例关闭时回收该 runtime 登记的全部 QuickJS context，再释放 QuickJS runtime。
+启动期通过受控 `vm` 接口动态执行的源码及框架注册也参与发现，仍留在同一 Worker，不保留额外完整源码或按动作数量截断。整份源码在完整上传和 ScriptHost install/update 保留 16 MiB 输入校验；运行期动态代码不扩大已发布能力。
 
-`process` 保留 Node 的 `[object process]` 类型标识，供依赖正确选择 HTTP adapter；这不增加宿主信息或进程能力。旧式 `url.parse` 对象、TLS 证书链、`crypto.X509Certificate` 及 ECDH 密钥交换按有限数据角色传递，支持证书链自引用、证书公钥加密及共享密钥计算，但不开放宿主原型访问。可导出的 `crypto.KeyObject` 以受控 DER／raw 数据保存在 guest，传给加解密 API 时在所属调用内重建；`export`／`equals` 经有限操作执行，宿主持有临时 Buffer 后清零。这样脚本跨请求缓存密钥不依赖已结束请求的 opaque handle，也不会让临时密钥永久挂到 session。不可导出语义的 `CryptoKey` 仍是不透明角色，不按 KeyObject 泛化。
+HTTP 请求与 `url.format` 仅消费实际使用的字段，库自用 transport 元数据、循环对象和无关 getter 不成为额外权限。`lookup/fd/socketPath` 及替换受控连接的 `createConnection` 仍拒绝；显式受控 Agent 或 `agent:false` 按 Node 建连，其不消费的请求级 createConnection 不执行。HTTP 模块和 URL 协议错配保留 ERR_INVALID_PROTOCOL，不自动替换协议。框架 inject 在 Worker 中使用 Node HTTP/流语义，不为模拟请求额外开启端口；真实 headers/rawHeaders 的对象身份和解压器修改保留。
 
-HTTP 请求与 `url.format` 在 guest 编码前按各自真正消费的字段投影参数，并在宿主侧核对相同边界。库自用的 transport 模块、循环元数据及无关 getter 不跨边界、不产生无主回调；`lookup/fd/socketPath` 及试图替换受控连接的 `createConnection` 仍拒绝。显式受控 Agent 或 `agent:false` 按 Node 语义由 Agent 建连，其不消费的请求级 `createConnection` 不传递、不执行。原生方法的 guest wrapper 可作为普通受控回调注册、执行和移除，不能直接把原生 callable 句柄作为回调解码。协议与所用 HTTP 模块不匹配时按 Node 保留 `ERR_INVALID_PROTOCOL`，不自动替换协议。
+TLS 证书链可保留循环引用，缓存的真实 KeyObject 可跨请求使用；不再通过桥导出重建或要求私有句柄回执。公开加解密能力不扩大文件、环境和私有卷权限。
 
-框架的 `inject` 使用 guest-local `IncomingMessage`／`ServerResponse`、响应头和流，不为模拟请求开启额外端口。相同原型的标准方法处理真实响应时仍需本实例有效 native handle，guest 自建对象不能借此获取宿主响应或套接字。真实响应的 `headers`／`rawHeaders` 首次读取后在 guest 保持对象身份，脚本删除或补充响应头不会在下次读取时被宿主副本恢复；请求结束时仍随所属作用域释放。
-
-HTTP 请求和 `url.format` 的字段投影由同一份规则驱动，guest 编码前与宿主复核使用相同字段集；宿主安全校验不因投影而减少。`onDiagnostic` 只报告固定错误种类、稳定 Node／宿主错误码和受限符号／位置，不分类脚本文本。验收工具通过受信任、默认关闭的 `onScriptError` 观察回调瞬时归因配置、HTTP 和 JSON 文本；该回调不改变脚本结果或权限，异常原文不进入产品报告。
-
-公共 QuickJS 初始化会在任何 SDK 执行前校正锁定引擎的 `BigInt.asUintN` 无符号语义；宽度按一次 ToIndex 转换，负数结果按标准补足无符号位。该修正在公共引擎层完成，LX、Cat 和后续协议共享，不依赖脚本或平台。
+`onDiagnostic` 只报告固定错误类别、稳定代码和受限符号/位置。验收工具可显式启用默认关闭的 `onScriptError`，瞬时归因原始消息后丢弃正文；它不改变结果或权限，异常原文不进入产品报告。
 
 旧服务器模式的 `/msg` Dart bridge 不存在，`catDartServerPort()` 固定返回 `0`。账号和 profile 由私有卷及明确的管理同步持久化，不能把脚本主服务端口误报为并不存在的 bridge 端口。
 
@@ -177,10 +175,14 @@ HTTP 请求和 `url.format` 的字段投影由同一份规则驱动，guest 编�
 
 同步只面向调用方指定的 installation、generation 和 provider，主线程只向该实例 worker 发送一次管理 RPC，探测、凭据发送和持久写回执等待全部在该 worker 内完成；凭据不写入日志或事件。成功写入还必须收到私有卷持久写回执；不按作者、文件名或源码 hash 猜协议，也不向所有脚本广播账号。
 
-更新先停止该 installation 的旧 generation，再装载并启动新 generation，避免两个 generation 并发写同一私有卷。若脚本 stop 返回 Promise，运行器在有界清理时限内等待其完成，以便关闭服务并落盘；超时或失败后仍强制回收实例自有资源。停用、卸载和关闭回收 listener、socket、timer、流、fd、代理身份和 guest 内存。
+更新先停止该 installation 的旧 generation，再装载并启动新 generation，避免两个 generation 并发写同一私有卷。若脚本 stop 返回 Promise，运行器在有界清理时限内等待其完成，以便关闭服务并落盘；超时或失败后仍强制回收实例自有资源。停用、卸载和关闭回收 listener、socket、timer、流、fd、代理身份和 Worker 内存。
 
-卸载或刷新时脚本从配置移除，实例停止、资源回收后在同一次调用内递归删除 `volumes/<installationId>`，并删除不再被任何 installation 引用的 `sources/<importhash>.js`；更新成功后也清理不再引用的旧源码文件，返回时删除已完成。删除依据设置中的原始文件引用，不使用 host 的实际执行内容摘要；状态中的 `sourceHash` 在已有 host revision 时报告该实际摘要，手工编辑后可与设置引用不同。共享引用仍保留，未知文件不扫描删除。目录身份、普通文件、符号链接和硬链接隔离检查继续保留。同一 installationId 重新安装从空卷开始；若上次删除失败留有残卷，安装时先删除，仍失败则安装失败、不启动。停止、停用、更新、端口变化、进程重启和内存超限重启均保留私有卷。删除失败如实进入 `failures`，实例仍算已卸载，不影响其他实例；删除只作用于已校验的卷目录，不跟随符号链接。运行器启动和冷启动不扫描或清理 `volumes`。
+卸载或刷新时脚本从配置移除，实例停止、资源回收后在同一次调用内递归删除 `volumes/<installationId>`，并删除不再被任何 installation 引用的 `sources/<importhash>.js`；更新成功后也清理不再引用的旧源码文件，返回时删除已完成。删除依据设置中的原始文件引用，不使用 host 的实际执行内容摘要；状态中的 `sourceHash` 在已有 host revision 时报告该实际摘要，手工编辑后可与设置引用不同。共享引用仍保留，未知文件不扫描删除。目录身份、普通文件、符号链接和硬链接隔离检查继续保留。同一 installationId 重新安装从空卷开始；若上次删除失败留有残卷，安装时先删除，仍失败则安装失败、不启动。停止、停用、更新、端口变化、进程重启均保留私有卷。删除失败如实进入 `failures`，实例仍算已卸载，不影响其他实例；删除只作用于已校验的卷目录，不跟随符号链接。运行器启动和冷启动不扫描或清理 `volumes`。
 
-`refresh`／`uninstall` 在各自变更全部处理完后返回 `applied`／`failures`，`install`／`enable` 在目标实例处理完后返回其状态。关闭时停止尚未开始的启动队列，先向已有及正在初始化的实例发停止，再等待在途事务、真实线程退出和 server 回收，不先等完整初始化截止时间；后台启动失败记入 `failures`，不产生未处理 rejection。
+`refresh`／`uninstall` 在各自变更全部处理完后返回 `applied`／`failures`，`install`／`enable` 在目标实例处理完后返回其状态。关闭时停止尚未开始的启动工作，先向已有及正在初始化的实例发停止，再等待在途事务、真实线程退出和 server 回收，不先等完整初始化截止时间；后台启动失败记入 `failures`，不产生未处理 rejection。
 
 主线程每次 `settings.publish` 后按发布顺序向各 worker 推送只读设置快照和实际聚合端口；worker 不持久化或读取第二份设置文件，之后发出的调用使用新快照，调用开始时读取设置快照的语义不变。脚本结果的 mapUrl、本地代理 id 生成和可选 M3U8 元数据增强及变体改写在所属 worker 内完成；主线程转发媒体时的 Location／HLS／MPD 改写只查已登记代理与真实 endpoints 快照，不生成新的代理 id，也不为改写发起同步 RPC。
+
+## 构建与验证边界
+
+通用 payload 唯一 profile 为 `common-native`，入口 `app/entry.mjs`，使用同一 HTTP v1。原生引擎固定输入见 `scripts/quickjs-native.json` 与 `scripts/quickjs/build-native.mjs`（LX/source 使用；Cat 不进入 QuickJS）。Windows/iOS 原 launcher 和旧调用接入属于后续迁移。通用原生构建、打包 payload 三协议启动与定向回归已通过，真实第三方脚本未覆盖；适用环境及边界见[通用验证范围](script-runtime.md#构建发布与验证边界)。

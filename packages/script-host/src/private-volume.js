@@ -76,7 +76,6 @@ export class PrivateVolume {
     this.currentResource = currentResource;
     this.failure = null;
     this.source = Buffer.from(source ?? '');
-    this.roles = new WeakMap();
     this.cleanupTimeoutMs = cleanupTimeoutMs;
     fs.mkdirSync(join(this.root, 'tmp'), { recursive: true });
   }
@@ -418,25 +417,50 @@ export class PrivateVolume {
     };
     for (const name of ['createReadStream', 'createWriteStream']) api[name] = (input, options = {}) => {
       const settings = typeof options === 'string' ? { encoding: options } : { ...options };
+      if (settings.fd !== undefined || settings.fs !== undefined) throw nativeError('EPERM');
       if (isSource(input)) {
         if (name !== 'createReadStream') throw nativeError('EPERM');
         // A source mount has no host filename or descriptor.
         return ownStream(new SourceReadable(this.source, settings), this.resourceScope());
       }
       const path = this.path(input, { missing: name === 'createWriteStream' });
-      if (settings.fd !== undefined || settings.fs !== undefined) throw nativeError('EPERM');
       const existed = fs.existsSync(path);
       const dirtyOnOpen = name === 'createWriteStream' &&
         mutatesOnOpen(settings.flags ?? 'w', existed);
       const observation = this.ownerScope();
       const scope = this.resourceScope();
       if (name === 'createWriteStream') delete settings.flush;
-      const stream = fs[name](path, { ...settings,
+      let ownedFd = null, closingFd = false;
+      const io = method => (fd, ...args) => {
+        if (ownedFd !== null && fd === ownedFd) return method(fd, ...args);
+        const callback = args.at(-1);
+        queueMicrotask(() => callback(nativeError('EPERM')));
+      };
+      const stream = fs[name](input, { ...settings,
         autoClose: true, emitClose: true,
-        ...(name === 'createWriteStream' ? { fs: {
-          open: fs.open, write: fs.write, writev: fs.writev, close: syncAndClose,
-        } } : {}) });
-      // The native path and fs implementation are never public capability fields.
+        fs: {
+          open: (_input, flags, mode, callback) => {
+            // The accepted stream owns this already validated path. Closing
+            // the volume still lets its queued open/write/fsync finish.
+            fs.open(path, flags, mode, (error, fd) => {
+              if (!error) ownedFd = fd;
+              callback(error, fd);
+            });
+          },
+          read: io(fs.read), write: io(fs.write), writev: io(fs.writev),
+          close: io((fd, callback) => {
+            closingFd = true;
+            const close = name === 'createWriteStream' ? syncAndClose : fs.close;
+            close(fd, error => {
+              ownedFd = null;
+              callback(error);
+            });
+          }),
+        } });
+      Object.defineProperty(stream, 'fd', {
+        configurable: false, enumerable: true, get: () => closingFd ? null : ownedFd,
+        set: fd => { if (fd !== ownedFd && !(closingFd && fd === null)) throw nativeError('EPERM'); },
+      });
       const persisted = () => {
         try {
           if (stream.errored || !dirtyOnOpen && stream.bytesWritten === 0) return;
@@ -492,7 +516,6 @@ export class PrivateVolume {
         read: async (buffer, ...args) => ({ bytesRead: api.readSync(id, buffer, ...args), buffer }),
         write: async (buffer, ...args) => ({ bytesWritten: api.writeSync(id, buffer, ...args), buffer }),
       };
-      this.roles.set(handle, 'fileHandle');
       return handle;
     };
     api.promises = promises;
@@ -501,12 +524,6 @@ export class PrivateVolume {
 
   release(value) {
     if (!value || this.closed) return false;
-    if (this.roles.get(value) === 'fileHandle') {
-      const id = value.fd;
-      if (Number.isSafeInteger(id) && this.descriptors.has(id))
-        Promise.resolve(value.close()).catch(() => {});
-      return true;
-    }
     if (!this.streams.has(value)) return false;
     if (!value.closed && !value.destroyed) {
       try {
@@ -559,7 +576,6 @@ export class PrivateVolume {
       this.onWrite = null;
       this.currentScope = null;
       this.currentResource = null;
-      this.roles = new WeakMap();
       if (this.failure) throw this.failure;
     })();
     return this.closing;

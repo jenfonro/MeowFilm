@@ -20,7 +20,7 @@ const cssIdentifier = value => String(value).replace(
   character => `\\${character.codePointAt(0).toString(16)} `,
 );
 const defaultMaximumNodes = 20_000;
-const defaultMaximumBytes = 8 * 1024 * 1024;
+const defaultMaximumParseBytes = 8 * 1024 * 1024;
 const textEncoder = new TextEncoder();
 
 function countNodeForest(roots, maximumNodes = defaultMaximumNodes) {
@@ -42,8 +42,9 @@ export function countDomNodes(root, maximumNodes = defaultMaximumNodes) {
   return countNodeForest([root], maximumNodes);
 }
 
-export function parseMarkup(value, maximumNodes = defaultMaximumNodes) {
+export function parseMarkup(value, maximumNodes = defaultMaximumNodes, maximumParseBytes = defaultMaximumParseBytes) {
   const source = typeof value === 'string' ? value : String(value ?? '');
+  sourceRequire(textEncoder.encode(source).length <= maximumParseBytes, 'RESOURCE_LIMIT');
   const document = new DOMParser().parseFromString(source, htmlType);
   countDomNodes(document, maximumNodes);
   return document;
@@ -300,8 +301,8 @@ export function queryDom(root, rule) {
   });
 }
 
-export function htmlToText(value, maximumNodes = defaultMaximumNodes) {
-  const document = parseMarkup(String(value ?? ''), maximumNodes);
+export function htmlToText(value, maximumNodes = defaultMaximumNodes, maximumParseBytes = defaultMaximumParseBytes) {
+  const document = parseMarkup(String(value ?? ''), maximumNodes, maximumParseBytes);
   for (const element of document.querySelectorAll('script,style,noscript')) element.remove();
   return domText(document).replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n').trim();
@@ -318,28 +319,28 @@ export class DocumentRegistry {
   #domBytes = 0;
   #maximumDocuments;
   #maximumNodes;
-  #maximumBytes;
+  #maximumParseBytes;
 
   constructor({
     maximumDocuments = 32,
     maximumNodes = 10000,
-    maximumBytes = defaultMaximumBytes,
+    maximumParseBytes = defaultMaximumParseBytes,
   } = {}) {
     sourceRequire(Number.isSafeInteger(maximumDocuments) && maximumDocuments > 0);
     sourceRequire(Number.isSafeInteger(maximumNodes) && maximumNodes > 0);
-    sourceRequire(Number.isSafeInteger(maximumBytes) && maximumBytes > 0);
+    sourceRequire(Number.isSafeInteger(maximumParseBytes) && maximumParseBytes > 0);
     this.#maximumDocuments = maximumDocuments;
     this.#maximumNodes = maximumNodes;
-    this.#maximumBytes = maximumBytes;
+    this.#maximumParseBytes = maximumParseBytes;
   }
 
   #text(value) {
     const text = String(value ?? '');
-    sourceRequire(textEncoder.encode(text).length <= this.#maximumBytes, 'RESOURCE_LIMIT');
+    sourceRequire(textEncoder.encode(text).length <= this.#maximumParseBytes, 'RESOURCE_LIMIT');
     return text;
   }
 
-  #measure(roots, maximumNodes, maximumBytes) {
+  #measure(roots, maximumNodes, maximumParseBytes) {
     const nodes = countNodeForest(roots, maximumNodes);
     const top = new Set();
     for (const value of roots) {
@@ -350,7 +351,7 @@ export class DocumentRegistry {
     let bytes = 0;
     const add = value => {
       bytes += textEncoder.encode(String(value ?? '')).length;
-      sourceRequire(bytes <= maximumBytes, 'RESOURCE_LIMIT');
+      sourceRequire(bytes <= maximumParseBytes, 'RESOURCE_LIMIT');
     };
     for (const root of top) add(domHTML(root, true));
 
@@ -392,7 +393,7 @@ export class DocumentRegistry {
     const previous = this.#documentSizes.get(documentId) ?? 0;
     const previousBytes = this.#documentBytes.get(documentId) ?? 0;
     const available = this.#maximumNodes - this.#documentNodes + previous;
-    const availableBytes = this.#maximumBytes - this.#domBytes + previousBytes;
+    const availableBytes = this.#maximumParseBytes - this.#domBytes + previousBytes;
     const roots = [document];
     for (const entry of this.#nodes.values()) {
       if (entry.documentId === documentId) roots.push(entry.node);
@@ -410,12 +411,10 @@ export class DocumentRegistry {
     sourceRequire(this.#documents.size < this.#maximumDocuments, 'RESOURCE_LIMIT');
     sourceRequire(this.#nodes.size < this.#maximumNodes, 'RESOURCE_LIMIT');
     const available = this.#maximumNodes - this.#documentNodes;
-    const availableBytes = this.#maximumBytes - this.#domBytes;
+    const availableBytes = this.#maximumParseBytes - this.#domBytes;
     sourceRequire(available > 0, 'RESOURCE_LIMIT');
     sourceRequire(availableBytes > 0, 'RESOURCE_LIMIT');
-    const source = this.#text(markup);
-    sourceRequire(textEncoder.encode(source).length <= availableBytes, 'RESOURCE_LIMIT');
-    const document = parseMarkup(source, available);
+    const document = parseMarkup(markup, available, availableBytes);
     const measured = this.#measure([document], available, availableBytes);
     const documentId = ++this.#next;
     this.#documents.set(documentId, document);

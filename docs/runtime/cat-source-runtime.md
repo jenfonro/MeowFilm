@@ -1,8 +1,8 @@
 # source CatVod Spider 运行时
 
-本文件描述 `@meowfilm/source-runtime` 中原 portable CatVod adapter 的独立 Spider 输入，由 `source@0.1.0`／`source.runtime.v1` 的 `protocol: cat` 接纳。它与 Reader 共用[来源 capability ABI](source-capability-abi.md)，并与 LX、CatNode 复用 script-host 的同一 WorkerSession、worker 协议和 QuickJS 后端，不另建 runner。
+本文件描述 `@meowfilm/source-runtime` 中原 portable CatVod adapter 的独立 Spider 输入，由 `source@0.2.0`／`source.runtime.v2` 的 `protocol: cat` 接纳。它与 Reader 共用[来源 capability ABI](source-capability-abi.md)，通用 script-host 为每个 source 创建独立原生线程、一个 QuickJS Runtime 和可信 core/用户 realm 两个 Context；LX 共用原生绑定机制，CatNode 则直接使用 Node Worker。
 
-完整 CatNode 输入属于 [`cat@0.1.0`／`cat.script.v1`](cat-script-runtime.md)：包含有限 Node 兼容、HTTP 服务、direct Spider、私有卷和管理同步。本 source adapter 只执行 Spider；即使两个入口都能调用 Spider 动作，也不能将这里的支持范围冒充为 CatNode，或将 Node 兼容层写成无 Node 可运行。
+完整 CatNode 输入属于 [`cat@0.2.0`／`cat.script.v2`](cat-script-runtime.md)：包含有限 Node 兼容、HTTP 服务、direct Spider、私有卷和管理同步。本 source adapter 只执行 Spider；即使两个入口都能调用 Spider 动作，也不能将这里的支持范围冒充为 CatNode，或将 Node 兼容层写成无 Node 可运行。
 
 ## 脚本入口与动作
 
@@ -41,6 +41,6 @@ QuickJS realm 提供受限 `Buffer`、URL、定时器、HTTP helper、作用域�
 
 ## 排除项
 
-本输入只支持 CatVod JS Spider。TVBox Android JAR／DEX、任意 JVM 插件和 Android API 不在当前范围，也不提供 CatNode 的文件、服务和管理 API。Node-independent 仅指 source-runtime 纯规则包，当前 Windows 执行仍由 Node 中的 worker 承载；本次不新增其他平台接入。
+本输入只支持 CatVod JS Spider。TVBox Android JAR／DEX、任意 JVM 插件和 Android API 不在当前范围，也不提供 CatNode 的文件、服务和管理 API。Node-independent 仅指 source-runtime 纯规则包，当前通用执行由 Node 主控和原生 QuickJS 线程承载；Windows/iOS 旧接入本轮未迁移。
 
-上传、控制帧和 CAS 规则与[Reader 来源入口](reader-source-runtime.md#生命周期与-rpc)相同；源码/heap/栈、60 秒初始化与请求、3 秒清理、worker 终止及 OOM 重启遵循[共用运行时](script-runtime.md#quickjs-执行边界)。虚拟路由、状态与响应保留字节预算，不设实例、并发、timer、网络或 profile 固定计数门槛。
+一次 raw HTTP 源码上传、普通 JSON、完整候选和 CAS 与[Reader 来源入口](reader-source-runtime.md#生命周期与-rpc)相同。源码 16 MiB、栈、60 秒初始化/请求和 3 秒清理保持；取消、真实线程退出见[共用运行时](script-runtime.md#quickjs-执行边界)。虚拟路由、变量、Cookie、存储和响应不再有运行器累计内存配额，不进行 OOM 自动重启；`maximumParseBytes` 仅限制解析，不限制普通 body 或状态。资源仍按 owner 释放，无固定实例/并发/timer/网络/profile 数量。通用原生构建与定向回归已通过，适用环境及未覆盖项见[通用验证范围](script-runtime.md#构建发布与验证边界)。

@@ -1,166 +1,149 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BridgePeer, FrameDecoder, encodeFrame } from '../src/index.js';
+import { randomUUID } from 'node:crypto';
+import { createHttpClient, createHttpServer, HTTP_PROTOCOL } from '../src/index.js';
+import { pair, rawRequest, credentials, deferred, until, turn } from './http-fixture.js';
 
-function pair(t, methodsA = {}, methodsB = {}, options = {}) {
-  let a, b;
-  a = new BridgePeer({ session: 'test-session', methods: methodsA, send: bytes => b.receive(bytes), ...options });
-  b = new BridgePeer({ session: 'test-session', methods: methodsB, send: bytes => a.receive(bytes), ...options });
-  t.after(() => { a.close(); b.close(); });
-  return [a, b];
-}
-const message = { version: 1, session: 'session', kind: 'request', id: 1, method: 'test.echo', params: { text: '中文' } };
+const okay = reply => { assert.equal(reply.ok, true); return reply.value; };
 
-test('framing handles every-byte fragmentation and coalesced frames', () => {
-  const bytes = encodeFrame(message);
-  const received = [];
-  const decoder = new FrameDecoder();
-  for (const byte of bytes) decoder.push(Uint8Array.of(byte), value => received.push(value));
-  decoder.push(Buffer.concat([bytes, bytes]), value => received.push(value));
-  decoder.finish();
-  assert.deepEqual(received, [message, message, message]);
-});
-test('size, UTF-8, schema, unsafe integers and incomplete streams reject', () => {
-  assert.throws(() => encodeFrame({ ...message, session: 'session\n' }), { code: 'INVALID_MESSAGE' });
-  assert.throws(() => encodeFrame({ ...message, params: 2 ** 60 }), { code: 'INVALID_MESSAGE' });
-  assert.throws(() => encodeFrame({ ...message, params: undefined }), { code: 'INVALID_MESSAGE' });
-  assert.throws(() => encodeFrame({ ...message, extra: 'secret' }), { code: 'INVALID_MESSAGE' });
-  assert.throws(() => encodeFrame({ ...message, params: '\u4e2d'.repeat(1024 * 1024) }), { code: 'LIMIT' });
-  const decoder = new FrameDecoder();
-  assert.throws(() => decoder.push(Buffer.from([0xff, 0xff, 0xff, 0xff]), () => {}), { code: 'LIMIT' });
-  assert.throws(() => decoder.push(Buffer.from([0]), () => {}), { code: 'CLOSED' });
-  const incomplete = new FrameDecoder();
-  incomplete.push(Buffer.from([0]), () => {});
-  assert.throws(() => incomplete.finish(), { code: 'INVALID_MESSAGE' });
-  const badUTF8 = new FrameDecoder();
-  assert.throws(() => badUTF8.push(Buffer.from([0, 0, 0, 1, 0xff]), () => {}), { code: 'INVALID_MESSAGE' });
-});
-test('wire UTF-8 preserves scalar identity and rejects malformed bytes before JSON replacement', () => {
-  function frame(body) {
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(body.length);
-    return Buffer.concat([header, body]);
-  }
-  const input = { ...message, params: '中文🎵\uFEFF\uFFFD' };
-  const body = Buffer.from(JSON.stringify(input));
-  for (const bytes of [body, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body])]) {
-    const received = [];
-    new FrameDecoder().push(frame(bytes), value => received.push(value));
-    assert.deepEqual(received, [input]);
-  }
-  const template = JSON.stringify({ ...message, params: '@' }).split('@');
-  for (const bytes of [[0xff], [0xc0, 0xaf], [0xed, 0xa0, 0x80],
-    [0xe2, 0x82], [0xf4, 0x90, 0x80, 0x80]]) {
-    const malformed = Buffer.concat([Buffer.from(template[0]), Buffer.from(bytes), Buffer.from(template[1])]);
-    assert.throws(() => new FrameDecoder().push(frame(malformed), () => assert.fail('dispatched')),
-      { code: 'INVALID_MESSAGE' });
+test('HTTP accepts every-byte body writes, Unicode and legal large JSON without a frame quota', async t => {
+  const { server, identity, call } = await pair(t, value => value);
+  const input = { é: 1, 'e\u0301': 2, text: '猫😀' };
+  const raw = rawRequest(server.baseUrl, identity, { end: false });
+  for (const byte of Buffer.from(JSON.stringify(input))) raw.request.write(Buffer.from([byte]));
+  raw.request.end();
+  const result = await raw.response;
+  assert.equal(result.status, 200);
+  assert.equal(result.headers['x-meow-request-id'], raw.requestId);
+  assert.deepEqual(result.value.value, input);
+  for (const size of [512 * 1024, 1024 * 1024 + 1, 8 * 1024 * 1024 + 1]) {
+    const text = 'x'.repeat(size);
+    assert.equal(okay(await call(text)), text);
   }
 });
-test('duplex explicitly registered methods and null results round trip', async t => {
-  const [a, b] = pair(t, { 'native.echo': value => value }, {
-    'business.echo': value => value, 'business.null': () => null
-  });
-  assert.deepEqual(await a.call('business.echo', { text: '中文', list: [false, null, 3.5] }), { text: '中文', list: [false, null, 3.5] });
-  assert.equal(await a.call('business.null'), null);
-  assert.deepEqual(await b.call('native.echo', { id: 'exact-installation' }), { id: 'exact-installation' });
-  await assert.rejects(a.call('unknown'), { code: 'METHOD_UNAVAILABLE' });
-});
-test('nested native callback does not deadlock the shared peer', async t => {
-  let b;
-  const connected = pair(t, { 'native.read': ({ id }) => `stored:${id}` }, {
-    'business.read': params => b.call('native.read', params)
-  });
-  const a = connected[0]; b = connected[1];
-  assert.equal(await a.call('business.read', { id: 'source' }), 'stored:source');
-});
-test('arguments are captured, errors redacted, no arbitrary eval', async t => {
-  const [a] = pair(t, {}, {
-    'business.read': value => value,
-    'business.fail': () => { throw new Error('private provider credential must never cross bridge'); }
-  });
-  const params = { id: 'first' };
-  const result = a.call('business.read', params);
-  params.id = 'second';
-  assert.deepEqual(await result, { id: 'first' });
-  await assert.rejects(a.call('business.fail'), error => error.code === 'INTERNAL' && error.message === 'INTERNAL');
-  await assert.rejects(a.call('eval', 'process.exit()'), { code: 'METHOD_UNAVAILABLE' });
-});
-test('cancelled handlers stay owned while fresh calls exceed the old pending quota', async t => {
-  let release, started;
-  const ready = new Promise(resolve => { started = resolve; });
-  const held = new Promise(resolve => { release = resolve; });
-  let count = 0;
-  const signals = [];
-  const [a,b] = pair(t, {}, {'business.wait': (_, {signal}) => {
-    signals.push(signal); if (++count === 96) started(); return held;
-  }, 'business.echo': value => value});
-  const controller = new AbortController();
-  const pending = Array.from({length:96}, () => assert.rejects(
-    a.call('business.wait', null, {signal:controller.signal}), {code:'CANCELLED'}));
-  try {
-    await ready;
-    controller.abort(); await Promise.all(pending);
-    await new Promise(resolve => setImmediate(resolve));
-    assert(signals.every(signal => signal.aborted));
-    assert.equal(b.state.active, 96);
-    assert.equal(await a.call('business.echo', 'fresh'), 'fresh');
-  } finally { release('late'); }
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(b.state.active, 0); assert.equal(a.state.pending, 0);
+
+test('HTTP rejects invalid UTF-8, duplicate keys, unsafe integers, depth and truncated bodies before dispatch', async t => {
+  let calls = 0;
+  const { server, identity } = await pair(t, value => { calls++; return value; });
+  for (const body of [Buffer.from([0xff]), Buffer.from([0xed, 0xa0, 0x80]), Buffer.from('{'),
+    Buffer.from('{"x":1,"\\u0078":2}'), Buffer.from('9007199254740992'),
+    Buffer.from('"\\ud800"'), Buffer.from('['.repeat(65) + 'null' + ']'.repeat(65))]) {
+    const result = await rawRequest(server.baseUrl, identity, { body }).response;
+    assert.equal(result.status, 400);
+    assert.deepEqual(result.value, { ok: false, contract: HTTP_PROTOCOL, code: 'INVALID_REQUEST' });
+  }
+  const raw = rawRequest(server.baseUrl, identity, { body: '{"unfinished":', end: false });
+  await until(() => server.state.active === 1);
+  raw.request.destroy();
+  await raw.response.catch(() => {});
+  await until(() => server.state.active === 0);
+  assert.equal(calls, 0);
 });
 
-test('timeout and closed transport reject without late revival', async t => {
-  let release;
-  const [a] = pair(t, {}, { 'business.wait': () => new Promise(resolve => { release = resolve; }) });
-  await assert.rejects(a.call('business.wait', null, { timeout: 5 }), { code: 'TIMEOUT' });
-  release('late');
-  a.close();
-  await assert.rejects(a.call('business.wait'), { code: 'CLOSED' });
+test('registered methods round trip all JSON types and isolate malformed results', async t => {
+  const { call } = await pair(t, value => value === 'invalid' ? undefined : value);
+  for (const input of [null, false, 3, 'text', [1], { value: 'raw' }]) assert.deepEqual(okay(await call(input)), input);
+  assert.deepEqual(await call('invalid'), { ok: false, contract: HTTP_PROTOCOL, code: 'INVALID_RESPONSE' });
+  assert.equal(okay(await call('alive')), 'alive');
+  let nested = null;
+  for (let i = 0; i < 64; i++) nested = [nested];
+  assert.deepEqual(okay(await call(nested)), nested);
 });
-test('cancelled unsent frames release their queue ownership behind a stalled write', async t => {
-  let enter, release;
-  const entered = new Promise(resolve => { enter = resolve; });
-  const held = new Promise(resolve => { release = resolve; });
-  let sent = 0;
-  const peer = new BridgePeer({ session: 'cancel-queue', send: async () => {
-    sent++; enter(); await held;
+
+test('nested reverse HTTP callback runs while the forward request is waiting', async t => {
+  const identity = credentials();
+  const callbacks = createHttpServer({ ...identity, resolve: ({ method, url }) => {
+    if (method !== 'POST' || url.pathname !== '/v1/capabilities/test.echo' || url.search) return;
+    return { contentType: 'application/json', contract: HTTP_PROTOCOL,
+      handler: async input => ({ ok: true, contract: HTTP_PROTOCOL, value: input.key }) };
   } });
-  t.after(() => { release(); peer.close(); });
-  const first = assert.rejects(peer.call('business.wait'), { code: 'CLOSED' });
-  await entered;
-  const baseline = peer.state.queuedBytes;
-  for (let i = 0; i < 600; i++) {
-    const controller = new AbortController();
-    const cancelled = assert.rejects(peer.call('business.wait', 'x'.repeat(128 * 1024),
-      { signal: controller.signal }), { code: 'CANCELLED' });
-    controller.abort(); await cancelled;
-    assert.equal(peer.state.queuedBytes, baseline);
-    assert.equal(peer.state.pending, 1);
+  await callbacks.start();
+  const reverse = createHttpClient({ ...identity, baseUrl: callbacks.baseUrl });
+  t.after(async () => { await Promise.all([reverse.close(), callbacks.close()]); });
+  const { call } = await pair(t, async input => okay(await reverse.request({
+    path: '/v1/capabilities/test.echo', body: input,
+  })));
+  assert.equal(okay(await call({ key: '中文' })), '中文');
+});
+
+test('arguments are captured, errors redacted and arbitrary routes are unavailable', async t => {
+  const { call, server, identity } = await pair(t, input => {
+    if (input === 'fail') throw new Error('PRIVATE-provider-secret');
+    return input;
+  });
+  const input = { original: 1 }, pending = call(input); input.original = 2;
+  assert.deepEqual(okay(await pending), { original: 1 });
+  assert.deepEqual(await call('fail'), { ok: false, contract: HTTP_PROTOCOL, code: 'INVALID_RESPONSE' });
+  const missing = await rawRequest(server.baseUrl, identity, { path: '/v1/eval', body: '{}' }).response;
+  assert.equal(missing.status, 404); assert.equal(missing.value.code, 'METHOD_NOT_FOUND');
+});
+
+test('cancelled noncooperative handlers remain owned while fresh independent calls proceed', async t => {
+  const entered = deferred(), released = deferred();
+  const signals = [];
+  t.after(() => released.resolve());
+  const { call, server } = await pair(t, async (input, context) => {
+    if (input === 'slow') {
+      signals.push(context.signal);
+      if (signals.length === 96) entered.resolve();
+      await released.promise;
+    }
+    return input;
+  });
+  const controller = new AbortController();
+  const rejected = Array.from({ length: 96 }, () =>
+    assert.rejects(call('slow', { signal: controller.signal }), { code: 'CANCELLED' }));
+  await entered.promise;
+  assert.equal(server.state.active, 96);
+  controller.abort(); await Promise.all(rejected);
+  await until(() => signals.every(signal => signal.aborted));
+  assert.equal(signals.length, 96);
+  assert.equal(server.state.active, 96);
+  const values = await Promise.all(Array.from({ length: 130 }, (_, i) => call(i)));
+  assert.deepEqual(values.map(okay), Array.from({ length: 130 }, (_, i) => i));
+  assert.equal(server.state.active, 96);
+  released.resolve(); await until(() => server.state.active === 0);
+});
+
+test('timeout aborts HTTP and close waits for actual handler completion without late publication', async t => {
+  const entered = deferred(), released = deferred();
+  const { call, server } = await pair(t, async () => { entered.resolve(); await released.promise; return 'late'; });
+  const timed = assert.rejects(call({}, { timeout: 100 }), { code: 'TIMEOUT' });
+  await entered.promise; await timed;
+  let closed = false;
+  const closing = server.close().then(() => { closed = true; });
+  await turn(); assert.equal(closed, false);
+  released.resolve(); await closing;
+  assert.equal(server.state.active, 0);
+});
+
+test('session identity and duplicate active request IDs reject before dispatch, completed IDs leave no history', async t => {
+  const entered = deferred(), release = deferred(); let calls = 0;
+  const { call, server, identity } = await pair(t, async input => {
+    calls++; if (input === 'slow') { entered.resolve(); await release.promise; } return input;
+  });
+  const requestId = randomUUID();
+  const pending = call('slow', { requestId }); await entered.promise;
+  const duplicate = await call('other', { requestId });
+  assert.equal(duplicate.code, 'INVALID_REQUEST'); assert.equal(calls, 1);
+  for (const headers of [{ authorization: 'Bearer wrong' }, { 'x-meow-session': randomUUID() }, { host: 'example.invalid' }]) {
+    assert.equal((await rawRequest(server.baseUrl, identity, { headers, body: '{}' }).response).status, 401);
   }
-  release();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(sent, 1);
-  assert.equal(peer.state.queuedBytes, 0);
-  peer.close(); await first;
+  release.resolve(); await pending;
+  await until(() => server.state.active === 0);
+  assert.equal(okay(await call('again', { requestId })), 'again');
 });
-test('wrong generations and replayed IDs close before dispatch', async t => {
-  let calls = 0;
-  const peer = new BridgePeer({ session: 'current', send: () => {}, methods: { 'test.echo': () => { calls++; return null; } } });
-  t.after(() => peer.close());
-  assert.throws(() => peer.receive(encodeFrame(message)), { code: 'INVALID_MESSAGE' });
+
+test('pre-aborted HTTP never dispatches and normal response finish never cancels its owner', async t => {
+  let calls = 0, signal, isCurrent;
+  const { call } = await pair(t, (_input, context) => {
+    calls++; signal = context.signal; isCurrent = context.isCurrent;
+    assert.equal(isCurrent(), true); return null;
+  });
+  const cancelled = new AbortController(); cancelled.abort();
+  await assert.rejects(call({}, { signal: cancelled.signal }), { code: 'CANCELLED' });
   assert.equal(calls, 0);
-  assert.equal(peer.state.closed, true);
-  const other = new BridgePeer({ session: 'session', send: () => {}, methods: { 'test.echo': () => { calls++; return null; } } });
-  t.after(() => other.close());
-  other.receive(encodeFrame(message));
-  assert.throws(() => other.receive(encodeFrame(message)), { code: 'INVALID_MESSAGE' });
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(calls, 0); // closed before the scheduled handler starts
-});
-test('pre-aborted calls never dispatch and invalid result is an explicit error', async t => {
-  let calls = 0;
-  const [a] = pair(t, {}, { 'test.echo': () => { calls++; return undefined; } });
-  await assert.rejects(a.call('test.echo', null, { signal: AbortSignal.abort() }), { code: 'CANCELLED' });
-  assert.equal(calls, 0);
-  await assert.rejects(a.call('test.echo'), { code: 'INVALID_MESSAGE' });
+  assert.equal(okay(await call({})), null);
+  await turn(); assert.equal(signal.aborted, false);
+  assert.equal(isCurrent(), false);
 });

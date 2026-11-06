@@ -88,7 +88,7 @@ export function verifyBoundaries(root = windowsRoot) {
   }
   const shared = join(root, 'apps/runtime');
   const sharedImports = new Set([
-    'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
+    'node:buffer', 'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
   ]);
   if (existsSync(shared)) {
     if (lstatSync(shared).isSymbolicLink()) errors.push('apps/runtime: linked source');

@@ -21,7 +21,7 @@ const adapters = Object.freeze({
   cat: CatAdapter,
 });
 const defaults = Object.freeze({
-  maximumBytes: 8 * 1024 * 1024,
+  maximumParseBytes: 8 * 1024 * 1024,
   requestTimeoutMs: 30_000,
   maximumDocuments: 64,
   maximumNodes: 20_000,
@@ -32,29 +32,8 @@ const defaults = Object.freeze({
 });
 const textEncoder = new TextEncoder();
 
-function jsonBytes(value) {
-  let json;
-  try { json = JSON.stringify(value); }
-  catch { throw sourceFault('INVALID_ARGUMENT'); }
-  sourceRequire(typeof json === 'string');
-  return textEncoder.encode(json).length;
-}
-
-function decodeRequestBody(value) {
-  return value && typeof value === 'object' && Object.keys(value).length === 1 &&
-    Object.hasOwn(value, '__meowBodyBase64') && typeof value.__meowBodyBase64 === 'string'
-    ? base64ToBytes(value.__meowBodyBase64)
-    : value;
-}
-
-class BoundedState {
+class SessionState {
   #entries = new Map();
-  #bytes = 0;
-
-  constructor(maximumBytes) {
-    sourceRequire(Number.isSafeInteger(maximumBytes) && maximumBytes > 0);
-    this.maximumBytes = maximumBytes;
-  }
 
   #identity(namespace, key) {
     const name = String(key);
@@ -63,74 +42,74 @@ class BoundedState {
   }
 
   get(namespace, key, fallback) {
-    const entry = this.#entries.get(this.#identity(namespace, key));
-    return sourceClone(entry ? entry.value : fallback);
+    const identity = this.#identity(namespace, key);
+    return sourceClone(this.#entries.has(identity) ? this.#entries.get(identity) : fallback);
   }
 
   set(namespace, key, value) {
-    const identity = this.#identity(namespace, key);
     const captured = sourceClone(value === undefined ? null : value);
-    const bytes = textEncoder.encode(identity).length + jsonBytes(captured);
-    const previous = this.#entries.get(identity);
-    sourceRequire(this.#bytes - (previous?.bytes ?? 0) + bytes <= this.maximumBytes,
-      'RESOURCE_LIMIT');
-    this.#entries.set(identity, { value: captured, bytes });
-    this.#bytes += bytes - (previous?.bytes ?? 0);
+    this.#entries.set(this.#identity(namespace, key), captured);
     return sourceClone(captured);
   }
 
-  clear() {
-    this.#entries.clear();
-    this.#bytes = 0;
+  clear() { this.#entries.clear(); }
+}
+
+function mapSourceValue(value, budget) {
+  const ancestors = new Set(), frames = [];
+  const visit = input => {
+    if (!input || typeof input !== 'object' || input instanceof Uint8Array) return input;
+    if (!budget && isDomNode(input)) {
+      return { __meowMarkup: domHTML(input, true), __meowNodeType: input.nodeType };
+    }
+    const array = Array.isArray(input);
+    if (budget && !array) {
+      const keys = Object.keys(input);
+      const encodedNode = typeof input.__meowMarkup === 'string' &&
+        keys.every(key => key === '__meowMarkup' || key === '__meowNodeType');
+      if (encodedNode) {
+        const bytes = textEncoder.encode(input.__meowMarkup).length;
+        sourceRequire(bytes <= budget.bytes, 'RESOURCE_LIMIT');
+        sourceRequire(budget.nodes > 0, 'RESOURCE_LIMIT');
+        const document = parseMarkup(input.__meowMarkup, budget.nodes, budget.bytes);
+        budget.nodes -= countDomNodes(document, budget.nodes);
+        budget.bytes -= bytes;
+        if (Number.isInteger(input.__meowNodeType) && input.__meowNodeType !== 9) {
+          return [...(document.childNodes ?? [])]
+            .find(node => node.nodeType === input.__meowNodeType) ?? document;
+        }
+        return document;
+      }
+    }
+    sourceRequire(!ancestors.has(input));
+    ancestors.add(input);
+    const output = array ? new Array(input.length) : Object.create(null);
+    frames.push({ input, output, array, index: 0,
+      entries: array ? null : Object.entries(input), length: array ? input.length : 0 });
+    return output;
+  };
+  const output = visit(value);
+  while (frames.length) {
+    const frame = frames[frames.length - 1];
+    if (frame.index === (frame.array ? frame.length : frame.entries.length)) {
+      ancestors.delete(frame.input);
+      frames.pop();
+      continue;
+    }
+    const index = frame.index++;
+    if (frame.array && !(index in frame.input)) continue;
+    const [key, child] = frame.array ? [index, frame.input[index]] : frame.entries[index];
+    frame.output[key] = visit(child);
   }
+  return output;
 }
 
 function guestValue(value) {
-  if (isDomNode(value)) {
-    return {
-      __meowMarkup: domHTML(value, true),
-      __meowNodeType: value.nodeType,
-    };
-  }
-  if (Array.isArray(value)) return value.map(guestValue);
-  if (value && typeof value === 'object') {
-    const result = {};
-    for (const [key, child] of Object.entries(value)) result[key] = guestValue(child);
-    return result;
-  }
-  return value;
+  return mapSourceValue(value);
 }
 
-function hydrateHostValue(value, budget) {
-  if (Array.isArray(value)) return value.map(child => hydrateHostValue(child, budget));
-  if (value && typeof value === 'object') {
-    const keys = Object.keys(value);
-    const encodedNode = typeof value.__meowMarkup === 'string' &&
-      keys.every(key => key === '__meowMarkup' || key === '__meowNodeType');
-    if (encodedNode) {
-      const bytes = textEncoder.encode(value.__meowMarkup).length;
-      sourceRequire(bytes <= budget.bytes, 'RESOURCE_LIMIT');
-      sourceRequire(budget.nodes > 0, 'RESOURCE_LIMIT');
-      const document = parseMarkup(value.__meowMarkup, budget.nodes);
-      budget.nodes -= countDomNodes(document, budget.nodes);
-      budget.bytes -= bytes;
-      if (Number.isInteger(value.__meowNodeType) && value.__meowNodeType !== 9) {
-        return [...(document.childNodes ?? [])]
-          .find(node => node.nodeType === value.__meowNodeType) ?? document;
-      }
-      return document;
-    }
-    const result = {};
-    for (const [key, child] of Object.entries(value)) {
-      result[key] = hydrateHostValue(child, budget);
-    }
-    return result;
-  }
-  return value;
-}
-
-function hostValue(value, maximumNodes, maximumBytes) {
-  return hydrateHostValue(value, { nodes: maximumNodes, bytes: maximumBytes });
+function hostValue(value, maximumNodes, maximumParseBytes) {
+  return mapSourceValue(value, { nodes: maximumNodes, bytes: maximumParseBytes });
 }
 
 function aborted(signal, fallback = 'CANCELLED') {
@@ -189,13 +168,12 @@ class SessionKernel {
       metadata, limits, onDiagnostic, signal,
     });
     this.http = new SourceHttpClient({
-      capabilities, profile, scope: capabilityScope, maximumBytes: limits.maximumBytes,
+      capabilities, profile, scope: capabilityScope,
     });
     this.rootRegistry = this.createRegistry();
     this.registries = new Map();
-    this.state = new BoundedState(limits.maximumBytes);
+    this.state = new SessionState();
     this.virtualRoutes = new Map();
-    this.virtualRouteBytes = 0;
     this.pendingVirtualRoutes = new Set();
     this.registeredVirtualRoutes = new Set();
     this.nextRoute = 0;
@@ -206,14 +184,14 @@ class SessionKernel {
     return new DocumentRegistry({
       maximumDocuments: this.limits.maximumDocuments,
       maximumNodes: this.limits.maximumNodes,
-      maximumBytes: this.limits.maximumBytes,
+      maximumParseBytes: this.limits.maximumParseBytes,
     });
   }
 
   setInitialDocument(markup) {
     sourceRequire(this.protocol === 'qysg' && this.initialDocument === undefined);
     const value = String(markup ?? '');
-    sourceRequire(textEncoder.encode(value).length <= this.limits.maximumBytes, 'RESOURCE_LIMIT');
+    sourceRequire(textEncoder.encode(value).length <= this.limits.maximumParseBytes, 'RESOURCE_LIMIT');
     this.initialDocument = value;
   }
 
@@ -290,7 +268,7 @@ class SessionKernel {
       },
     });
     await this.flushVirtualRoutes(invocation);
-    return hostValue(result, this.limits.maximumNodes, this.limits.maximumBytes);
+    return hostValue(result, this.limits.maximumNodes, this.limits.maximumParseBytes);
   }
 
   async evaluateScript(source, bindings, invocation, {
@@ -311,7 +289,7 @@ class SessionKernel {
       },
     });
     await this.flushVirtualRoutes(invocation);
-    return hostValue(result, this.limits.maximumNodes, this.limits.maximumBytes);
+    return hostValue(result, this.limits.maximumNodes, this.limits.maximumParseBytes);
   }
 
   sync(name, input, context) {
@@ -322,17 +300,17 @@ class SessionKernel {
       case 'legado.ruleValues':
         return guestValue(readStaticRuleValues(
           String(input.rule ?? ''),
-          hostValue(input.content, this.limits.maximumNodes, this.limits.maximumBytes),
-          { maximumNodes: this.limits.maximumNodes },
+          hostValue(input.content, this.limits.maximumNodes, this.limits.maximumParseBytes),
+          { maximumNodes: this.limits.maximumNodes, maximumParseBytes: this.limits.maximumParseBytes },
         ));
       case 'legado.ruleString':
         return readStaticRuleString(
           String(input.rule ?? ''),
-          hostValue(input.content, this.limits.maximumNodes, this.limits.maximumBytes),
-          { maximumNodes: this.limits.maximumNodes },
+          hostValue(input.content, this.limits.maximumNodes, this.limits.maximumParseBytes),
+          { maximumNodes: this.limits.maximumNodes, maximumParseBytes: this.limits.maximumParseBytes },
         );
       case 'legado.htmlToText':
-        return htmlToText(String(input.value ?? ''), this.limits.maximumNodes);
+        return htmlToText(String(input.value ?? ''), this.limits.maximumNodes, this.limits.maximumParseBytes);
       case 'legado.requestParts':
         return parseLegadoRequestParts(input.value);
       case 'legado.runtimeInfo':
@@ -356,8 +334,6 @@ class SessionKernel {
         return String(this.source.variable ?? this.source.bookSourceVariable ?? '');
       case 'legado.sourceVariableSet': {
         const value = String(input.value ?? '');
-        sourceRequire(textEncoder.encode(value).length <=
-          this.limits.maximumBytes, 'RESOURCE_LIMIT');
         this.source.variable = value;
         return value;
       }
@@ -407,11 +383,7 @@ class SessionKernel {
           url: String(input.url ?? ''),
           headers: sourceClone(input.headers ?? {}),
         };
-        const bytes = textEncoder.encode(route).length + jsonBytes(metadata);
-        sourceRequire(this.virtualRouteBytes + bytes <= this.limits.maximumBytes,
-          'RESOURCE_LIMIT');
-        this.virtualRoutes.set(route, { metadata, bytes });
-        this.virtualRouteBytes += bytes;
+        this.virtualRoutes.set(route, { metadata, invocationId: context.invocationId });
         this.pendingVirtualRoutes.add(route);
         return `meow-source://${encodeURIComponent(this.profile)}/${route}`;
       }
@@ -427,8 +399,8 @@ class SessionKernel {
     switch (name) {
       case 'legado.request': return this.http.request({
         ...input,
-        body: decodeRequestBody(input.body),
-        data: decodeRequestBody(input.data),
+        body: input.body,
+        data: input.data,
         baseUrl: this.source.bookSourceUrl,
       }, trustedContext);
       case 'legado.cookieGet':
@@ -469,7 +441,7 @@ class SessionKernel {
           url: input.url,
           method: options.method,
           headers: options.headers,
-          body: decodeRequestBody(options.body ?? options.data),
+          body: options.body ?? options.data,
           timeout: options.timeout,
           followRedirect: options.redirect ?? options.followRedirect,
           follow_max: options.follow_max,
@@ -483,7 +455,6 @@ class SessionKernel {
           content: response.data,
           data: response.data,
           body: response.body,
-          bodyBase64: response.bodyBase64,
           url: response.url,
         };
       }
@@ -502,7 +473,7 @@ class SessionKernel {
       case 'http': {
         const [method, url, body, headers, followRedirects, contentType] = args;
         return this.http.request({
-          method, url, body: decodeRequestBody(body), headers, followRedirects, contentType,
+          method, url, body, headers, followRedirects, contentType,
           baseUrl: this.source.bookSourceUrl,
         }, trustedContext);
       }
@@ -596,7 +567,7 @@ class SessionKernel {
           value: args[1],
         });
       case 'htmlToText':
-        return htmlToText(String(args[0] ?? ''), this.limits.maximumNodes);
+        return htmlToText(String(args[0] ?? ''), this.limits.maximumNodes, this.limits.maximumParseBytes);
       case 'base64encode':
         return bytesToBase64(new TextEncoder().encode(String(args[0] ?? '')));
       case 'base64decode':
@@ -605,7 +576,7 @@ class SessionKernel {
         const body = await call('encoding.encode', {
           encoding: 'gbk', text: String(args[0] ?? ''),
         });
-        return [...base64ToBytes(body)]
+        return [...body]
           .map(byte => `%${byte.toString(16).toUpperCase().padStart(2, '0')}`).join('');
       }
       case 'buildNumber': return Number(this.metadata.buildNumber ?? 1);
@@ -674,12 +645,12 @@ class SessionKernel {
     const entry = this.virtualRoutes.get(route);
     if (!entry) return;
     this.virtualRoutes.delete(route);
-    this.virtualRouteBytes -= entry.bytes;
   }
 
   async flushVirtualRoutes(invocation) {
     if (!this.pendingVirtualRoutes.size) return;
-    const routes = [...this.pendingVirtualRoutes];
+    const routes = [...this.pendingVirtualRoutes].filter(route =>
+      this.virtualRoutes.get(route)?.invocationId === invocation.id);
     const attempted = [];
     try {
       for (const route of routes) {
@@ -723,7 +694,7 @@ class SessionKernel {
     }
   }
 
-  async close() {
+  async close({ drain = true } = {}) {
     this.sandbox?.close(sourceFault('STALE_SESSION'));
     const cleanup = new AbortController();
     const timer = setTimeout(() => cleanup.abort(sourceFault('TIMEOUT')), this.limits.cleanupTimeoutMs);
@@ -749,12 +720,11 @@ class SessionKernel {
     this.registeredVirtualRoutes.clear();
     this.pendingVirtualRoutes.clear();
     this.virtualRoutes.clear();
-    this.virtualRouteBytes = 0;
     this.rootRegistry.close();
     for (const registry of this.registries.values()) registry.close();
     this.registries.clear();
     this.state.clear();
-    await this.drain();
+    if (drain) await this.drain();
     if (!Array.isArray(results) || results.some(result =>
       result.status === 'rejected' || result.value !== true)) {
       throw sourceFault('CAPABILITY_UNAVAILABLE');
@@ -817,7 +787,6 @@ export class SourceSession {
     this.lifetime = new AbortController();
     this.live = true;
     this.active = false;
-    this.tail = Promise.resolve();
     this.nextInvocation = 0;
   }
 
@@ -896,11 +865,9 @@ export class SourceSession {
     sourceRequire(Number.isSafeInteger(timeoutMs) && timeoutMs > 0 &&
       timeoutMs <= this.limits.requestTimeoutMs);
     const operation = operationSignal([signal, this.lifetime.signal], timeoutMs);
-    const prior = this.tail.catch(() => {});
     let task;
     try {
       task = (async () => {
-        await waitFor(prior, operation.signal);
         const failure = aborted(operation.signal, operation.timedOut() ? 'TIMEOUT' : 'CANCELLED');
         if (failure) throw failure;
         const id = ++this.nextInvocation;
@@ -920,7 +887,6 @@ export class SourceSession {
           return sourceClone(value ?? null);
         } finally { this.kernel.endInvocation(id); }
       })();
-      this.tail = task.catch(() => {});
       this.kernel.trackAdapterTask(task);
       return await waitFor(task, operation.signal);
     } catch (error) {
@@ -931,12 +897,12 @@ export class SourceSession {
     }
   }
 
-  async close() {
+  async close(options) {
     if (!this.live) return;
     this.live = false;
     this.active = false;
     this.lifetime.abort(sourceFault('STALE_SESSION'));
-    await this.kernel?.close();
+    await this.kernel?.close(options);
   }
 
   async drain() {
