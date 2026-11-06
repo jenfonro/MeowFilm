@@ -68,7 +68,7 @@ library
 library-sync
 queue
 history
-lx-installations
+native-source-exclusions
 online-settings
 native-catalog-source
 native-official-sources
@@ -83,28 +83,10 @@ native-local-lyrics
 playback-settings
 ```
 
-脚本私有 area 使用当前安装实例和站点构成的精确 key；每个实例最多 32 个有界站点标识，不存在实例、非法标识或重复 key 均拒绝。
-
-`lx-installations` 唯一当前格式为 schema 4：
-
-```json
-{
-  "schema": 4,
-  "revision": 0,
-  "installations": []
-}
-```
-
-- 不设固定安装实例数量或根文档 entries 数量上限；仍受 metadata 的 3 MiB 和根文档的 8 MiB 字节边界约束。
-- 每个 `current`／`previous` 只包含 `sourceHash`、`sourceBytes`、`version`、`permissions`。
-- `permissions` 仅含 `storage`，值为不重复的 `read`／`write` 数组。
-- metadata 总量最多 3 MiB；单个脚本源码最多 16 MiB，与公共 ScriptHost 上限一致。
-- 源码位于普通文件 collection `music.script-sources.v2`，每份源码是完整的 `<导入内容hash>.js`；没有源码加密或落盘分片。hash 仅用于文件引用和导入内容标识，`sourceBytes` 记录导入时大小，不要求当前文件与历史内容或长度相同。
-- 发布 metadata 前先原子写入源码文件；激活时直接读取当前文件，按实际长度执行单脚本 16 MiB 上限，不做历史源码哈希门禁。编辑后重新启用或重启可执行新内容；语法与运行错误由引擎报告。显式重新导入可原子替换同一引用的文件，仍受当前文件 CAS 保护。
-- 曲库、设置和 LX 脚本 KV 随普通 `music.library.v1` JSON 明文存储；脚本自行保存的 Cookie 等值不由运行器特殊加密。文件和会话隔离、整文档 CAS 与未知提交恢复继续生效。未被 metadata 引用的源码不会被静默删除或当作安装实例。
-- 开发阶段不迁移旧加密文档或 `music.script-sources.v1` 分片，不提供读取回退，也不自动删除旧数据。
-- 安装启停或删除不修改在线设置及其 revision；删除安装实例仍在同一 CAS 中移除该实例的私有 storage。
-- 安装元数据只按 schema 4 及上述字段、引用约束读取，读取不写入。在线设置按下述 schema 3 及字段集合校验。
+脚本安装与私有 KV 由[公共音乐模块](../runtime/music-script-runtime.md)唯一持久化。
+旧 `lx-installations` 与 `lx-data` 条目不读取、验证、迁移或改写；原文档随无关设置保存原样保留。
+`native-source-exclusions` 保存 schema 1、revision、items，每项包含 songId/provider/platform/providerName/title/artist/at。
+同身份幂等添加，只显式 remove 解除，不随缓存清理删除。沿用根文档的字节资源边界，不另设条数上限。
 
 ## 在线设置当前格式
 

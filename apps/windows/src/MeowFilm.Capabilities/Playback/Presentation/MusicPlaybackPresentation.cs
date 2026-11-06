@@ -15,7 +15,7 @@ public sealed partial class MusicCapability
 // values cross into WPF bindings; the media port remains the source of truth.
 internal sealed class MusicPlaybackPresentation(MusicCapability module, Action<string> changed)
 {
-    private bool playing, canSeek, canRate, canToggle;
+    private bool playing, canSeek, canRate, canToggle, hasQuality;
     private double position, duration = 1;
     private double? rate;
     private int volume;
@@ -33,6 +33,7 @@ internal sealed class MusicPlaybackPresentation(MusicCapability module, Action<s
         Publish(ref playing, module.IsPlaying, nameof(MusicCapability.IsPlaying));
         Publish(ref source, module.CurrentSource, nameof(MusicCapability.CurrentSource));
         Publish(ref quality, module.CurrentQualityLabel, nameof(MusicCapability.CurrentQualityLabel));
+        Publish(ref hasQuality, module.HasQualityButton, nameof(MusicCapability.HasQualityButton));
         Publish(ref glyph, module.PlayGlyph, nameof(MusicCapability.PlayGlyph));
         Publish(ref duration, module.DurationSeconds, nameof(MusicCapability.DurationSeconds));
         Publish(ref durationText, module.DurationText, nameof(MusicCapability.DurationText));

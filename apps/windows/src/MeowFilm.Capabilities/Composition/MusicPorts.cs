@@ -45,8 +45,15 @@ public interface IMusicPlaybackRate
     Task<MusicPlaybackRate> SetRateAsync(NativePlaybackScope scope, double rate, CancellationToken token = default);
 }
 
-internal sealed class NativeMusicPlayback(NativePlayback native) : IMusicPlayback, INativePlaybackContinuation, IMusicPlaybackRate
+internal sealed class NativeMusicPlayback(NativePlayback native) : IMusicPlayback, INativePlaybackContinuation,
+    IMusicPlaybackRate, INativePlaybackHandoff
 {
+    public Task PrepareHandoffAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token) =>
+        native.PrepareHandoffAsync(uri, headers, token);
+    public Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token) => native.PrepareReadHandoffAsync(lease, token);
+    public double PreparedHandoffDurationSeconds => native.PreparedHandoffDurationSeconds;
+    public Task CommitHandoffAsync(CancellationToken token) => native.CommitHandoffAsync(token);
+    public Task DiscardHandoffAsync() => native.DiscardHandoffAsync();
     public async Task<MusicPlaybackRate?> ReadRateAsync(CancellationToken token = default)
     {
         var tracks = await native.ReadTracksAsync(token);

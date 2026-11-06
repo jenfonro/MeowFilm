@@ -18,7 +18,7 @@ public static class MusicSongMatcherTests
         yield return new("Song matching broad search absence cannot suppress a different focused query", SearchConditions);
         yield return new("Song matching persistence starts at local membership and survives restart without searching", Persistence);
         yield return new("Song matching removed membership evicts derived data without changing queue or history", Removal);
-        yield return new("Song matching wrong recording exclusion is original-specific and survives forced discovery", Exclusion);
+        yield return new("Song matching wrong recording exclusion is original-specific and survives subsequent discovery", Exclusion);
         yield return new("Song matching incompatible versions and all-pair durations never become sources", Identity);
         yield return new("Song matching duplicate callers share one physical request and cancellation is waiter-local", Concurrent);
         yield return new("Song matching account invalidation cancels and fences noncooperative old responses", Invalidation);
@@ -59,8 +59,8 @@ public static class MusicSongMatcherTests
             }, Clock);
         }
         internal Task<MusicSongMatcher.MatchResult> Match(JsonObject song, string platform = "tx",
-            bool refresh = false, CancellationToken token = default) =>
-            Matcher.MatchAsync(song, platform, Context(platform), token, refresh);
+            CancellationToken token = default) =>
+            Matcher.MatchAsync(song, platform, Context(platform), token);
         internal async Task<JsonElement> Command(string method, object input)
         {
             var reply = await Library.ExecuteAsync(method, input);
@@ -97,10 +97,10 @@ public static class MusicSongMatcherTests
         Check(f.Requests.Count == 1, "time passing must not schedule background work");
         await f.Match(song);
         Check(f.Requests.Count == 2);
-        await f.Match(song, refresh: true);
-        Check(f.Requests.Count == 3, "explicit discovery bypasses negative cooling");
+        await f.Match(song);
+        Check(f.Requests.Count == 2, "repeated discovery retains negative cooling");
         await f.Matcher.MatchAsync(song, "tx", NativeMusicSong.Hash("new-account"), default);
-        Check(f.Requests.Count == 4, "different search authority is a different matching condition");
+        Check(f.Requests.Count == 3, "different search authority is a different matching condition");
     }
     private static async Task Failure()
     {
@@ -114,9 +114,9 @@ public static class MusicSongMatcherTests
         f.Reply = (request, _) => Task.FromResult(Page(request, Song("tx", "mapped")));
         Check(Has((await f.Match(song)).Song, "tx") && f.Requests.Count == 2);
         f.Reply = (_, _) => throw new MusicPlatformException("NETWORK_ERROR");
-        var refresh = await f.Match(song, refresh: true);
-        Check(refresh.Error == "NETWORK_ERROR" && Has(refresh.Song, "tx"),
-            "transport errors do not remove correct identities");
+        var refresh = await f.Match(song);
+        Check(refresh.Error is null && Has(refresh.Song, "tx") && f.Requests.Count == 2,
+            "an accepted identity is reused without a new transport request");
     }
     private static async Task Freshness()
     {
@@ -131,9 +131,9 @@ public static class MusicSongMatcherTests
         Check(f.Requests.Count == 1 && Has(await f.Matcher.KnownAsync(song, default), "tx"));
         Check(LJ.I(f.Saved.Single()!["platforms"]!["tx"]!["checkedAt"]) == checkedAt,
             "reading and persisting must not renew freshness");
-        var excluded = new HashSet<string> { NativeMusicSong.SourceKey(Song("tx", "mapped")) };
+        await f.Matcher.ExcludeAsync(song, NativeMusicSong.SourceKey(Song("tx", "mapped")), default);
         f.Reply = (request, _) => Task.FromResult(Page(request, Song("tx", "replacement")));
-        var rechecked = await f.Matcher.MatchAsync(song, "tx", Context("tx"), default, rejected: excluded);
+        var rechecked = await f.Matcher.MatchAsync(song, "tx", Context("tx"), default);
         Check(f.Requests.Count == 2 && rechecked.Song["sources"]!.AsArray().OfType<JsonObject>()
             .Any(source => NativeMusicSong.NativeId(source) == "replacement"));
     }
@@ -201,10 +201,10 @@ public static class MusicSongMatcherTests
         await f.Match(original);
         await f.Matcher.ExcludeAsync(original, wrong, default);
         Check(!Has(await f.Matcher.KnownAsync(original, default), "tx"));
-        Check(!Has((await f.Match(original, refresh: true)).Song, "tx"),
-            "a forced search must not immediately select the same wrong recording");
+        Check(!Has((await f.Match(original)).Song, "tx"),
+            "a subsequent search must not immediately select the same wrong recording");
         var anotherOriginal = Song("kg", "another-original");
-        Check(Has((await f.Match(anotherOriginal, refresh: true)).Song, "tx"),
+        Check(Has((await f.Match(anotherOriginal)).Song, "tx"),
             "exclusion is not a global ban on the target recording");
         Check(!Has(await f.Matcher.KnownAsync(original, default), "tx"));
     }

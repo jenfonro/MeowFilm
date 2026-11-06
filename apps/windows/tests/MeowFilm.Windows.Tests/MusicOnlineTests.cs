@@ -31,7 +31,7 @@ public static partial class MusicUiTests
             True(!info.TryGetProperty("interval", out _), "formatted duration is not persisted");
             var reply = await f.Rpc("music.online.resolve", new
             {
-                installationId = f.Module.Sources.Single().InstallationId, platform = "wy", song, quality = "320k"
+                installationId = ScriptRow(f).InstallationId, platform = "wy", song, quality = "320k"
             });
             Equal("https://media.invalid/precise", reply.GetProperty("url").GetString());
             Equal(180.125, song.GetProperty("sources")[0].GetProperty("musicInfo").GetProperty("duration").GetDouble());
@@ -47,7 +47,7 @@ public static partial class MusicUiTests
             await f.Module.SetPlaybackQualityRequestAsync("flac");
             await Until(() => f.Module.CanEditQuality && f.Module.PlaybackQualityRequest == "flac");
             Equal("flac", (await f.Rpc("music.quality.settings.get")).GetProperty("settings").GetProperty("request").GetString());
-            var source = f.Module.Sources.Single();
+            var source = ScriptRow(f);
             True(source.Enabled, "explicit source enabled");
             await PlayOnlineSong(f.Module);
             Equal(1, f.Playback.Opens.Count);
@@ -74,21 +74,23 @@ public static partial class MusicUiTests
                     StringComparison.Ordinal)), "no script pathname RPC");
             var requests = f.Calls.Log.Where(call => call.Method == "music.online.resolve").ToArray();
             Equal(source.InstallationId, requests.Single().Parameters.GetProperty("installationId").GetString());
-            await f.Module.SourceActionAsync("disable"); True(!f.Playback.HasMedia, "source disable stops owned media");
+            await f.Module.SetSourceEnabledAsync(ScriptRow(f), false); await Until(() => f.Module.CanEdit);
+            True(!f.Playback.HasMedia, "source disable stops owned media");
         });
-        yield return Case("late online resolver cannot open after cancellation; no synthetic history", async () =>
+        yield return Case("late online resolver cannot open after its playback retires; no synthetic history", async () =>
         {
             await using var f = await Fixture.Create(); await SetupOnline(f);
             var held = f.Calls.HoldNext("music.online.resolve");
             var play = PlayOnlineSong(f.Module); await held.Arrived.Task;
-            var cancel = f.Module.CancelOnlineAsync(); await Drain();
-            True(!cancel.IsCompleted && !play.IsCompleted, "cancel retains the actual unresolved reply until it settles");
+            var retire = f.Module.PrepareShutdownAsync(); await Drain();
+            True(!retire.IsCompleted && !play.IsCompleted, "retirement retains the actual unresolved reply until it settles");
             Equal(0, f.Playback.Opens.Count); Equal(0, f.Calls.Count("music.history.recordPlayed"));
-            held.Release(); await Task.WhenAll(cancel, play); await Drain();
+            held.Release(); await Task.WhenAll(retire, play); await Drain();
             Equal(0, f.Playback.Opens.Count); Equal(0, f.Calls.Count("music.history.recordPlayed"));
+            await f.Module.CancelShutdownPreparationAsync();
             await f.Module.TogglePlaybackAsync(); Equal(1, f.Playback.Opens.Count);
         });
-        yield return Case("lyric settings leave in-flight LX audio intact and explicit cancellation drains it", async () =>
+        yield return Case("lyric settings leave in-flight LX audio intact and the caller's cancellation drains it", async () =>
         {
             await using var f = await Fixture.Create();
             await SetupOnline(f, "new Promise(() => {})");
@@ -96,15 +98,16 @@ public static partial class MusicUiTests
                 title = "合成歌曲", artist = "合成艺人" })).GetProperty("song");
             var settings = (await f.Rpc("music.settings.get")).GetProperty("settings");
             var revision = settings.GetProperty("revision").GetInt64();
+            using var request = new CancellationTokenSource();
             var resolution = f.Application.ExecuteAsync("music.online.resolve", new {
-                installationId = f.Module.Sources.Single().InstallationId, platform = "wy", song, quality = "320k" });
-            await Until(() => f.Runtime.Calls.Contains("music.script.invoke"));
+                installationId = ScriptRow(f).InstallationId, platform = "wy", song, quality = "320k" }, request.Token);
+            await Until(() => f.Runtime.Calls.Contains("music.script.resolve"));
             var rejected = await f.Application.ExecuteAsync("music.settings.save", new {
                 ifRevision = revision + 1, lyrics = false });
             True(!rejected.GetProperty("ok").GetBoolean() && !resolution.IsCompleted, "rejected save does not cancel playback");
             await f.Rpc("music.settings.save", new { ifRevision = revision, lyrics = false });
             True(!resolution.IsCompleted, "lyric settings do not choose or cancel an audio provider");
-            await f.Rpc("music.online.cancel");
+            request.Cancel();
             var cancelled = await resolution.WaitAsync(TimeSpan.FromSeconds(5));
             Equal("CANCELLED", cancelled.GetProperty("code").GetString());
             Equal(0, f.Playback.Opens.Count);
@@ -112,20 +115,25 @@ public static partial class MusicUiTests
         yield return Case("JS update failure preserves source, safe multi-chunk update and explicit rollback", async () =>
         {
             await using var f = await Fixture.Create(); await SetupOnline(f);
-            var before = f.Module.Sources.Single();
-            f.Dialogs.Confirmation = false;
+            var before = ScriptRow(f);
             File.WriteAllText(f.Dialogs.ScriptPath!, "throw new Error('synthetic failure');", new UTF8Encoding(false));
-            await f.Module.UpdateSourceAsync();
+            await f.Module.UpdateSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
             True(f.Module.Status.Length > 0, "trial failure visible");
-            await f.Module.RefreshOnlineAsync(); Equal(before.Hash, f.Module.Sources.Single().Hash);
+            await f.Module.RefreshSourceManagementAsync(); await Until(() => f.Module.CanEdit);
+            Equal(before.ExecutionHash, ScriptRow(f).ExecutionHash);
             File.WriteAllText(f.Dialogs.ScriptPath!, TestScript("'https://media.invalid/updated'", version: "2") +
                 "/*" + new string('x', 40000) + "*/", new UTF8Encoding(false));
-            await f.Module.UpdateSourceAsync();
+            await f.Module.UpdateSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
             True(f.Calls.Count("music.transfer.chunk") >= 5, "multiple owned byte chunks");
-            Equal("2", f.Module.Sources.Single().Version);
+            Equal("2", ScriptRow(f).Version);
+            f.Dialogs.Confirmation = false;
+            await f.Module.RollbackSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
+            Equal("2", ScriptRow(f).Version);
             f.Dialogs.Confirmation = true;
-            await f.Module.SourceActionAsync("rollback"); Equal(before.Hash, f.Module.Sources.Single().Hash);
-            await f.Module.SourceActionAsync("remove"); Equal(0, f.Module.Sources.Count);
+            await f.Module.RollbackSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
+            Equal(before.ExecutionHash, ScriptRow(f).ExecutionHash);
+            await f.Module.RemoveSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
+            Equal(0, ScriptRows(f).Length);
         });
         yield return Case("source enable and update are operational while removal still requires confirmation", async () =>
         {
@@ -134,20 +142,22 @@ public static partial class MusicUiTests
             File.WriteAllText(path, TestScript(), new UTF8Encoding(false));
             f.Dialogs.ScriptPath = path;
             f.Dialogs.Confirmation = false;
-            await f.Module.ImportSourceAsync();
-            await f.Module.SourceActionAsync("enable");
-            True(f.Module.Sources.Single().Enabled, "source enable is not a network grant");
+            await f.Module.ImportSourceAsync(); await Until(() => f.Module.CanEdit);
+            await f.Module.SetSourceEnabledAsync(ScriptRow(f), true); await Until(() => f.Module.CanEdit);
+            True(ScriptRow(f).Enabled, "source enable is not a network grant");
             File.WriteAllText(path, TestScript(version: "2"), new UTF8Encoding(false));
-            await f.Module.UpdateSourceAsync();
-            Equal("2", f.Module.Sources.Single().Version);
-            var permissions = f.Calls.Last("music.sources.update").GetProperty("permissions");
-            True(permissions.EnumerateObject().Select(field => field.Name).SequenceEqual(["storage"]),
-                "the native update contract owns only storage permissions");
-            await f.Module.SourceActionAsync("remove"); Equal(1, f.Module.Sources.Count);
+            await f.Module.UpdateSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
+            Equal("2", ScriptRow(f).Version);
+            var update = f.Calls.Last("music.sources.update");
+            True(update.EnumerateObject().Select(field => field.Name).OrderBy(name => name, StringComparer.Ordinal)
+                .SequenceEqual(["installationId", "token"]), "an update carries only the target and its staged file");
+            await f.Module.RemoveSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
+            Equal(1, ScriptRows(f).Length);
             f.Dialogs.Confirmation = true;
-            await f.Module.SourceActionAsync("remove"); Equal(0, f.Module.Sources.Count);
+            await f.Module.RemoveSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
+            Equal(0, ScriptRows(f).Length);
         });
-        yield return Case("multi-file source import reads script metadata and remains Node-free", async () =>
+        yield return Case("multi-file source import reads script metadata without executing a script", async () =>
         {
             await using var f = await Fixture.Create();
             var first = Path.Combine(f.Root, "source-a.js");
@@ -155,28 +165,29 @@ public static partial class MusicUiTests
             File.WriteAllText(first, TestScript(name: "音源 A"), new UTF8Encoding(false));
             File.WriteAllText(second, TestScript(version: "2", name: "音源 B"), new UTF8Encoding(false));
             f.Dialogs.ScriptPaths = [first, second];
-            await f.Module.ImportSourceAsync();
-            Equal(2, f.Module.Sources.Count);
-            True(f.Module.Sources.Select(source => source.Name).SequenceEqual(["音源 A", "音源 B"]),
+            await f.Module.ImportSourceAsync(); await Until(() => f.Module.CanEdit);
+            var scripts = ScriptRows(f);
+            Equal(2, scripts.Length);
+            True(scripts.Select(source => source.Name).SequenceEqual(["音源 A", "音源 B"]),
                 "multi-file import preserves selection order and header names");
-            Equal("2", f.Module.Sources[1].Version);
-            Equal("音源 B", f.Module.SelectedSource?.Name);
-            var detail = await f.Rpc("music.sources.detail", new { installationId = f.Module.SelectedSource!.InstallationId });
-            True(detail.GetProperty("permissions").EnumerateObject().Select(field => field.Name).SequenceEqual(["storage"]),
-                "import persists only storage permissions");
-            True(!f.Runtime.HasStarted, "import and listing never start Node");
+            Equal("2", scripts[1].Version);
+            var detail = await f.Rpc("music.sources.detail", new { installationId = scripts[1].InstallationId });
+            True(detail.GetProperty("item").GetProperty("state").GetString() == "disabled" &&
+                detail.GetProperty("item").GetProperty("origin").GetProperty("kind").GetString() == "file",
+                "an import is a disabled local source");
+            True(!f.Runtime.Calls.Contains("music.script.resolve") && !f.Runtime.Calls.Contains("music.script.sources.enable"),
+                "import and listing never execute a script");
         });
-        yield return Case("two-phase source pause unloads LX and explicit resumed play reactivates without replay", async () =>
+        yield return Case("two-phase pause replays no source call and explicit resumed play resolves once", async () =>
         {
             await using var f = await Fixture.Create(); await SetupOnline(f);
             await PlayOnlineSong(f.Module); Equal(1, f.Playback.Opens.Count);
             await f.Module.PrepareShutdownAsync();
-            True(f.Runtime.Calls.Contains("music.script.unload"), "script resources retired during prepare");
-            var invokes = f.Runtime.Calls.Count(m => m == "music.script.invoke");
+            var resolves = f.Runtime.Calls.Count(m => m == "music.script.resolve");
             await f.Module.CancelShutdownPreparationAsync();
-            Equal(invokes, f.Runtime.Calls.Count(m => m == "music.script.invoke")); Equal(1, f.Playback.Opens.Count);
+            Equal(resolves, f.Runtime.Calls.Count(m => m == "music.script.resolve")); Equal(1, f.Playback.Opens.Count);
             await PlayOnlineSong(f.Module);
-            Equal(2, f.Playback.Opens.Count); Equal(invokes + 1, f.Runtime.Calls.Count(m => m == "music.script.invoke"));
+            Equal(2, f.Playback.Opens.Count); Equal(resolves + 1, f.Runtime.Calls.Count(m => m == "music.script.resolve"));
         });
         yield return Case("playlist loaded-page selection adds through the destination current revision", async () =>
         {
@@ -237,18 +248,19 @@ public static partial class MusicUiTests
     {
         f.Dialogs.ScriptPath = Path.Combine(f.Root, "authored-lx.js");
         File.WriteAllText(f.Dialogs.ScriptPath, TestScript(result ?? "'https://media.invalid/' + info.musicInfo.songmid"), new UTF8Encoding(false));
-        await f.Module.ImportSourceAsync(); Equal(1, f.Module.Sources.Count);
-        f.Module.SelectedSource = f.Module.Sources.Single();
-        await f.Module.LoadSourceAsync(f.Module.SelectedSource);
-        await f.Module.SourceActionAsync("enable");
+        await f.Module.ImportSourceAsync(); await Until(() => f.Module.CanEdit);
+        Equal(1, ScriptRows(f).Length);
+        await f.Module.SetSourceEnabledAsync(ScriptRow(f), true);
         await Until(() => f.Module.CanEdit);
-        await f.Module.RefreshOnlineAsync();
+        await f.Module.RefreshSourceManagementAsync(); await Until(() => f.Module.CanEdit);
         var saved = (await f.Rpc("music.settings.get")).GetProperty("settings");
-        True(f.Module.Sources.Single().Enabled, "the enabled network source is eligible without a global selection");
+        True(ScriptRow(f).Enabled, "the enabled network source is eligible without a global selection");
         Equal(3, saved.GetProperty("schema").GetInt32());
         True(!saved.TryGetProperty("quality", out _), "online settings must not duplicate native quality policy");
         True(f.Module.Status.Length == 0, "source activation and native settings refresh succeeded");
     }
+    private static MusicSourceRow[] ScriptRows(Fixture f) => f.Module.Sources.Where(row => row.IsScript).ToArray();
+    private static MusicSourceRow ScriptRow(Fixture f) => ScriptRows(f).Single();
     private static Task PlayOnlineSong(MusicCapability module) =>
         module.PlayOnlineSongAsync("wy", "合成歌曲", "合成艺人", "",
             JsonSerializer.SerializeToElement(new { songmid = "42" }));
@@ -326,30 +338,26 @@ public static partial class MusicUiTests
 }
 
 /// <summary>
-/// Executes only the checked-in LX script-only module, on first explicit script
-/// call. Native business and document RPC are not installed in this test process.
-/// Authored fixture scripts are the only executed sources.
+/// Executes only the checked-in LX script-only module. The App starts its runtime with the
+/// App; this fixture process starts at the first script call so tests can observe that native
+/// business never needs it. It offers no reverse methods. Authored fixture scripts are the only
+/// executed sources.
 /// </summary>
 internal sealed class NativeMusicScriptTestRuntime : IRuntimeClient, IAsyncDisposable
 {
-    private readonly OnDemandRuntimeClient runtime;
-    private IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> capabilities
-        = new Dictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>();
+    private readonly AppRuntimeClient runtime;
+    private readonly object gate = new();
+    private readonly string dataRoot = Path.Combine(Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT")
+        ?? Path.GetTempPath(), "script-fixture-" + Guid.NewGuid().ToString("N"));
     public System.Collections.Concurrent.ConcurrentQueue<string> Calls { get; } = new();
     public int DisposeCalls { get; private set; }
     public bool HasStarted => runtime.HasStarted;
     public NativeMusicScriptTestRuntime() => runtime = new(StartAsync);
-    public void Register(IScriptPlatformCapabilities application)
-    {
-        if (HasStarted) throw new InvalidOperationException("Capabilities must be frozen before scripts start");
-        capabilities = application.ScriptCapabilities.ToDictionary(p => p.Key, p => p.Value);
-        if (capabilities.Keys.Any(k => !k.StartsWith("platform.musicScript.", StringComparison.Ordinal)))
-            throw new InvalidOperationException("No generic document authority in script fixture");
-    }
     public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
     {
         if (!method.StartsWith("music.script.", StringComparison.Ordinal))
             throw new InvalidOperationException("Ordinary music business must remain native");
+        lock (gate) if (!runtime.HasStarted) runtime.Start();
         Calls.Enqueue(method); return runtime.CallAsync(method, parameters, cancellationToken);
     }
     private async Task<IRuntimeSession> StartAsync(CancellationToken token)
@@ -363,6 +371,8 @@ internal sealed class NativeMusicScriptTestRuntime : IRuntimeClient, IAsyncDispo
         var entry = Path.Combine(root.FullName, "apps/windows/tests/fixtures/music-script-runtime.mjs");
         var info = new ProcessStartInfo(node) { WorkingDirectory = root.FullName, UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true };
+        Directory.CreateDirectory(dataRoot);
+        info.Environment["MEOWFILM_SCRIPT_DATA_ROOT"] = dataRoot;
         foreach (var arg in new[] { entry, "--meow-pipe", pipeName, "--meow-session", session })
             info.ArgumentList.Add(arg);
         Process? child = null;
@@ -373,7 +383,8 @@ internal sealed class NativeMusicScriptTestRuntime : IRuntimeClient, IAsyncDispo
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             timeout.CancelAfter(TimeSpan.FromSeconds(10));
             await pipe.WaitForConnectionAsync(timeout.Token).ConfigureAwait(false);
-            return new ScriptSession(child, new BridgePeer(pipe, session, capabilities), output, errors);
+            return new ScriptSession(child, new BridgePeer(pipe, session,
+                new Dictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>()), output, errors);
         }
         catch
         {

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -151,8 +152,11 @@ public static partial class MusicUiTests
             await using var f = await Fixture.Create(output: output);
             await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var player = (MusicPlayerView)f.Module.PlayerView;
-            var button = (Button)player.FindName("RateButton");
-            Equal("播放倍速", AutomationProperties.GetName(button));
+            var button = (Button)player.FindName("MoreButton");
+            Equal("更多", AutomationProperties.GetName(button));
+            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            var rate = (MenuItem)button.ContextMenu.Items[0];
+            True(rate.Header.ToString()!.StartsWith("播放倍速"), "rate is a more-menu action");
             var slider = (Slider)player.FindName("RateSlider");
             Equal(0.5, slider.Minimum); Equal(3d, slider.Maximum); Equal(0.1, slider.TickFrequency);
             True(slider.IsSnapToTickEnabled, "keyboard/mouse tenths");

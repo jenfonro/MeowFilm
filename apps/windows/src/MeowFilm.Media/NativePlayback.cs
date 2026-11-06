@@ -11,7 +11,8 @@ namespace MeowFilm.Media;
 
 /// <summary>
 /// Inject one instance into the App's enabled capability owners. Commands are serialized;
-/// a new session is created only after the preceding player has stopped and disposed.
+/// ordinary opens retire the preceding player; handoff prepares a muted, paused input
+/// beside it and commits without two audible outputs.
 /// Construct on the owning STA dispatcher; await disposal before shutting it down.
 /// </summary>
 public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDisposable
@@ -464,19 +465,44 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
 
     private async Task RetireAsync()
     {
+        await DiscardHandoffCoreAsync();
         var session = _session;
         if (session is null) return;
+        bool failed;
+        try { failed = await ReleaseNativeAsync(session, detachView: true); }
+        finally
+        {
+            _session = null;
+            Set(ref _isPlaying, false, nameof(IsPlaying));
+            Set(ref _hasMedia, false, nameof(HasMedia));
+        }
+        if (failed)
+        {
+            _releaseFaulted = true;
+            throw Error(PlaybackError.ReleaseFailed);
+        }
+    }
+
+    /// <summary>Stops and frees one session's native resources. A session that is no longer
+    /// displayed (replaced by a handoff, or never published) leaves the view alone.</summary>
+    private async Task<bool> ReleaseNativeAsync(Session session, bool detachView)
+    {
+        if (session.Released) return false;
+        session.Released = true;
         session.ContinuationReady?.TrySetCanceled(new CancellationToken(true));
         session.Invalidate();
         session.ProgressTimer?.Stop();
         session.Cancellation.Dispose(); // Cancellation callback only enqueues work; never waits for this dispatcher.
-        _view.BeginRetirement();
+        if (detachView) _view.BeginRetirement();
         bool failed = false;
         // Stop joins native threads. Never call it on a libVLC callback or block the WPF message pump.
         try { await Task.Run(session.Player.Stop); }
         catch { failed = true; }
-        try { _view.SetPlayer(null); }
-        catch { failed = true; }
+        if (detachView)
+        {
+            try { _view.SetPlayer(null); }
+            catch { failed = true; }
+        }
         try
         {
             await Task.Run(() =>
@@ -502,18 +528,8 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         catch { failed = true; }
         try { if (session.Resource is not null) await session.Resource.DisposeAsync(); }
         catch { failed = true; }
-        finally
-        {
-            session.ProgressTimer = null;
-            _session = null;
-            Set(ref _isPlaying, false, nameof(IsPlaying));
-            Set(ref _hasMedia, false, nameof(HasMedia));
-        }
-        if (failed)
-        {
-            _releaseFaulted = true;
-            throw Error(PlaybackError.ReleaseFailed);
-        }
+        finally { session.ProgressTimer = null; }
+        return failed;
     }
 
     private async Task DisposeCoreAsync()
@@ -654,6 +670,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
 
     private long BeginReplacement()
     {
+        _handoffOpening?.Cancel(); // A prepared input never outlives the playback it was prepared for.
         RevokeContinuation();
         ++_intentSequence;
         Set(ref _pauseRequested, false, nameof(PauseRequested));
@@ -781,7 +798,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
             Adaptive?.Cancel();
             Resource?.Cancel();
         }
-        internal bool HasStarted, Terminal;
+        internal bool HasStarted, Terminal, Released;
         internal TaskCompletionSource? ContinuationReady;
         internal bool ContinuationInitializing;
         internal double ContinuationPosition;
@@ -831,6 +848,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
 
         internal void Detach()
         {
+            if (_playing is null) return; // Never attached: a prepared handoff that was not committed.
             Player.Playing -= _playing;
             Player.Paused -= _paused;
             Player.EndReached -= _ended;

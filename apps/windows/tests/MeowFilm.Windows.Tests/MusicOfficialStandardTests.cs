@@ -63,7 +63,7 @@ public static class MusicOfficialStandardTests
             var policy = await app.ExecuteAsync("music.quality.settings.get");
             var input = new { platform = "wy", song = Song("wy"), quality = "128k" };
             var candidates = await app.ExecuteAsync("music.official.candidates", new {
-                song = Song("wy"), quality = "128k", discover = false,
+                song = Song("wy"), quality = "128k",
                 qualityPolicySignature = policy.GetProperty("signature").GetString()
             });
             Check(candidates.GetProperty("ok").GetBoolean(), candidates.GetRawText());
@@ -95,7 +95,7 @@ public static class MusicOfficialStandardTests
                 var before = await clients.Owner.AcquireWyAsync();
                 var response = await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(
                     new("wy", "fixture", 1, "123", "MUSIC_U=synthetic"), new() { ["songmid"] = "1" },
-                    ["128k"], new(membership, 0, 0, []), default, () => { });
+                    ["128k"], default, () => { });
                 Check(handler.Calls == 1 && !response.QualityVerified && response.ActualQuality == "");
                 Check(response.RequestQuality == "128k");
                 var current = await clients.Owner.AcquireWyAsync();
@@ -116,7 +116,7 @@ public static class MusicOfficialStandardTests
                 {
                     await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(
                         new("wy", "fixture", 0, "0", "__remember_me=true"), new() { ["songmid"] = "1" },
-                        ["128k"], new(new(false, "none", null), 0, 0, []), default, () => { });
+                        ["128k"], default, () => { });
                 }
                 catch (MusicPlatformException) { rejected = true; }
                 Check(rejected && ReferenceEquals(before, await clients.Owner.AcquireWyAsync()));
@@ -143,7 +143,7 @@ public static class MusicOfficialStandardTests
             var reply = await app.ExecuteAsync("music.official.resolve", new { platform = "wy", song = Song("wy"), quality = "320k" });
             Check(!reply.GetProperty("ok").GetBoolean() && reply.GetProperty("code").GetString() == "AUTH_REQUIRED");
             var plan = await app.ExecuteAsync("music.official.candidates", new {
-                song = Song("wy"), quality = "320k", discover = false,
+                song = Song("wy"), quality = "320k",
                 qualityPolicySignature = policy.GetProperty("signature").GetString()
             });
             Check(plan.GetProperty("ok").GetBoolean() && plan.GetProperty("authorizationRequired").GetBoolean());
@@ -198,6 +198,10 @@ public static class MusicOfficialStandardTests
     private sealed class NoNode : IRuntimeClient
     {
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-            => throw new InvalidOperationException("Official standard request must not start Node");
+        {
+            if (method == "music.script.sources.list")
+                return Task.FromResult(JsonSerializer.SerializeToElement(new { ok = true, contract = "music.script.v3", items = Array.Empty<object>() }));
+            throw new InvalidOperationException("Official standard request must not invoke scripts");
+        }
     }
 }

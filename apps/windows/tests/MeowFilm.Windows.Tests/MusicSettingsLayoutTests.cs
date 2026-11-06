@@ -173,25 +173,41 @@ public static partial class MusicUiTests
         yield return Case("replica hidden unloaded and nonmusic source controls cannot save", async () =>
         {
             await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
-            var view = (MusicSettingsView)f.Module.SettingsView; using var mount = new ReplicaMount(view);
-            await Until(() => f.Module.CanEditCatalogSource);
-            var picker = (ComboBox)view.FindName("CatalogSourcePicker");
-            int saves = f.Calls.Count("music.catalogSource.settings.save");
-            view.Visibility = Visibility.Collapsed; await Drain();
-            picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg"); await Drain();
-            Equal(saves, f.Calls.Count("music.catalogSource.settings.save"));
-            view.Visibility = Visibility.Visible; await Drain();
-            picker.GetBindingExpression(ComboBox.SelectedValueProperty)!.UpdateTarget();
-            var areas = ((Panel)view.Header.Slot!).Children.OfType<RadioButton>().ToArray();
-            areas[1].IsChecked = true; await Drain();
-            picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg"); await Drain();
-            Equal(saves, f.Calls.Count("music.catalogSource.settings.save"));
-            areas[0].IsChecked = true; await Drain();
-            picker.GetBindingExpression(ComboBox.SelectedValueProperty)!.UpdateTarget();
-            mount.Window.Content = null; await Drain();
-            picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg"); await Drain();
-            Equal(saves, f.Calls.Count("music.catalogSource.settings.save"));
-            Equal("wy", f.Module.CatalogSourcePlatform);
+            var view = (MusicSettingsView)f.Module.SettingsView;
+            var film = new SettingsNavigationTests.Module("film", "影视");
+            var shell = new ShellWindow([f.Module, film], () => Task.CompletedTask)
+            {
+                Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
+            };
+            try
+            {
+                shell.Show(); await Drain();
+                ((Button)shell.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                await Drain(); await Until(() => view.IsVisible && f.Module.CanEditCatalogSource);
+                var picker = (ComboBox)view.FindName("CatalogSourcePicker");
+                int saves = f.Calls.Count("music.catalogSource.settings.save");
+                view.Visibility = Visibility.Collapsed; await Drain();
+                picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg"); await Drain();
+                Equal(saves, f.Calls.Count("music.catalogSource.settings.save"));
+                view.Visibility = Visibility.Visible; await Drain();
+                picker.GetBindingExpression(ComboBox.SelectedValueProperty)!.UpdateTarget();
+                var header = (DesktopPageHeader)shell.FindName("PageHeaderHost");
+                var slot = (ContentControl)header.FindName("LeadingSlot");
+                var areas = ((Panel)slot.Content).Children.OfType<RadioButton>().ToArray();
+                areas[1].IsChecked = true; await Drain();
+                True(film.SettingsView.IsVisible && !view.IsVisible, "the shared shell owns nonmusic settings navigation");
+                picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg"); await Drain();
+                Equal(saves, f.Calls.Count("music.catalogSource.settings.save"));
+                areas[0].IsChecked = true; await Drain();
+                await Until(() => view.IsVisible && f.Module.CanEditCatalogSource);
+                picker.GetBindingExpression(ComboBox.SelectedValueProperty)!.UpdateTarget();
+                Visuals(shell).OfType<ContentControl>().Single(host => ReferenceEquals(host.Content, view)).Content = null;
+                await Drain(); True(!view.IsLoaded, "the music settings controls are actually unloaded");
+                picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg"); await Drain();
+                Equal(saves, f.Calls.Count("music.catalogSource.settings.save"));
+                Equal("wy", f.Module.CatalogSourcePlatform);
+            }
+            finally { shell.Close(); await shell.ShutdownCompletion; }
         });
         yield return Case("replica settings keep six reference anchors and continuous groups with an independent source page", async () =>
         {
@@ -439,7 +455,13 @@ public static partial class MusicUiTests
                 True(tabsTop - regionTop < 1, "settings content starts directly below the compact header");
                 foreach (var size in new[] { new Size(1440, 900), new Size(1110, 869), new Size(860, 600) })
                 {
+                    // RDP's current monitor can clamp an offscreen HWND. A fixed test
+                    // viewport exercises the requested size without resizing the desktop.
+                    shell.MinWidth = shell.MaxWidth = size.Width;
+                    shell.MinHeight = shell.MaxHeight = size.Height;
                     shell.Width = size.Width; shell.Height = size.Height; shell.UpdateLayout(); await Drain(); root.UpdateLayout();
+                    True(Math.Abs(root.ActualWidth - size.Width) < 1 && Math.Abs(root.ActualHeight - size.Height) < 1,
+                        "the shell visual uses the actual requested screenshot viewport");
                     var sidebar = (ScrollViewer)shell.FindName("SidebarScroll"); var footer = (Border)shell.FindName("PlayerFrame");
                     Equal(Visibility.Visible, sidebar.Visibility); Equal(Visibility.Collapsed, footer.Visibility);
                     True(ReferenceEquals(player, ((ContentControl)shell.FindName("PlayerHost")).Content),
@@ -460,18 +482,39 @@ public static partial class MusicUiTests
                     ReplicaAnchors(view)[^1].IsChecked = true; await Drain(); root.UpdateLayout();
                     True(((MusicSourcesSettingsView)view.FindName("SourcesPage")).IsVisible &&
                         footer.Visibility == Visibility.Collapsed, "independent source management keeps the player hidden");
+                    var sources = (MusicSourcesSettingsView)view.FindName("SourcesPage");
+                    var items = (ItemsControl)sources.FindName("SourceList");
+                    var body = (ScrollViewer)items.Template.FindName("ItemsScroll", items);
+                    var sourceHeader = (Grid)sources.FindName("SourceHeader");
+                    var firstRow = Visuals((DependencyObject)items.ItemContainerGenerator.ContainerFromIndex(0))
+                        .OfType<Grid>().Single(grid => grid.ColumnDefinitions.Count == 7);
+                    var firstName = firstRow.Children.OfType<StackPanel>().Single(panel => Grid.GetColumn(panel) == 2);
+                    var nameHeader = sourceHeader.Children.OfType<TextBlock>().Single(text => text.Text == "名称");
+                    True(Math.Abs(firstName.TranslatePoint(new Point(), sources).X -
+                        nameHeader.TranslatePoint(new Point(), sources).X) < 1,
+                        $"table name alignment at {size.Width}: header={nameHeader.TranslatePoint(new Point(), sources).X} " +
+                        $"row={firstName.TranslatePoint(new Point(), sources).X}; headerWidth={sourceHeader.ActualWidth} " +
+                        $"viewport={body.ViewportWidth} extent={body.ExtentWidth} rowWidth={firstRow.ActualWidth}");
                     if (size.Width == 860)
                     {
-                        var sources = (MusicSourcesSettingsView)view.FindName("SourcesPage");
-                        var items = (ItemsControl)sources.FindName("SourceList");
-                        var body = (ScrollViewer)items.Template.FindName("ItemsScroll", items);
                         True(body.ViewportHeight >= 82 && body.ScrollableHeight > 0,
                             "the minimum shell retains a visible source row and its internal scrollbar");
                     }
                     CaptureSettings(root, "replica-shell-source-" + (int)size.Width + ".png");
+                    body.ScrollToRightEnd(); await Drain(); root.UpdateLayout();
+                    var headerScroll = (ScrollViewer)sources.FindName("HeaderScroll");
+                    True(Math.Abs(headerScroll.HorizontalOffset - body.HorizontalOffset) < 1,
+                        "the fixed header follows horizontal source-table scrolling");
+                    var remove = Visuals(sources).OfType<Button>().First(button => Equals(button.Content, "删除"));
+                    var removeBounds = new Rect(remove.TranslatePoint(new Point(), sources), remove.RenderSize);
+                    True(removeBounds.Left >= 0 && removeBounds.Right <= sources.ActualWidth,
+                        "the four fixed row actions are reachable at every supported window width");
+                    CaptureSettings(root, "replica-shell-source-actions-" + (int)size.Width + ".png");
+                    body.ScrollToLeftEnd(); await Drain();
                     ReplicaAnchors(view)[0].IsChecked = true; await Drain(); root.UpdateLayout();
                     CaptureSettings(root, "replica-shell-accounts-" + (int)size.Width + ".png");
-                    True(!f.Runtime.HasStarted, "ordinary replica settings never activate scripts");
+                    True(!f.Runtime.Calls.Any(method => method is "music.script.invoke" or "music.script.resolve"),
+                        "source management reads the shared catalog without invoking scripts");
                 }
                 var content = (FrameworkElement)settingsView.FindName("MusicContent");
                 True(content.IsVisible, "music content remains owned by the visible module settings");

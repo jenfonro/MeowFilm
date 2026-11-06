@@ -439,7 +439,6 @@ public static partial class MusicUiTests
                 new { songCount = 30, songs = SearchSongPage(count).ToArray() } } };
             var inner = new MusicNativeApplication(store, runtime, http);
             var forwarder = new SearchSnapshotForwarder(inner);
-            runtime.Register(inner);
             await using var module = new MusicCapability(forwarder, store, new PlaybackProbe(), new Dialogs());
             await module.InitializeAsync(default); await Drain();
             await SetSearchPolicy(module, ["wy"], []);
@@ -863,7 +862,7 @@ public static partial class MusicUiTests
         internal readonly MusicCapability Module;
         private SearchScene(TimeProvider? clock = null)
         {
-            App = new(Store, Runtime, Http, null, null, clock); Runtime.Register(App);
+            App = new(Store, Runtime, Http, null, null, clock);
             Module = new(App, Store, new PlaybackProbe(), new Dialogs());
         }
         internal static async Task<SearchScene> Create(TimeProvider? clock = null)

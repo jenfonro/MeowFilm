@@ -50,11 +50,11 @@ public static class AppCompositionTests
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "meowfilm", "aggregate"));
         Check(AppIdentity.ScriptModules.Select(m => (m.Id, m.Version)).SequenceEqual(new[]
         {
-            ("music", "0.7.0"),
+            ("music", "0.8.0"),
             ("cat", "0.1.0"),
             ("source", "0.1.0")
         }));
-        Check(AppIdentity.NativeCollections.SequenceEqual(new[] { MusicLibraryOwner.ScriptContentCollection }));
+        Check(AppIdentity.NativeCollections.Count == 0, "music sources are stored by the shared runtime module");
         Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v1"));
         Check(AppIdentity.NativeNamespaces.Contains("music.platform-context.v1"));
         Check(AppIdentity.ProtectedNamespaces.SequenceEqual(new[] { "music.accounts.v1", "music.platform-context.v1" }));
@@ -66,7 +66,7 @@ public static class AppCompositionTests
         await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
         await using var documents = new ProtectedDocumentBridge(store, []);
         IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>? methods = null;
-        await using var runtime = new OnDemandRuntimeClient(async token =>
+        await using var runtime = new AppRuntimeClient(async token =>
             await NodeRuntime.StartAsync(Required("MEOWFILM_TEST_NODE"),
                 RuntimeBundle.Verify(Path.Combine(Required("MEOWFILM_TEST_RUNTIME_ROOT"), "aggregate"),
                     AppIdentity.RuntimeId, AppIdentity.ScriptModules), AppIdentity.ScriptModules,
@@ -77,7 +77,8 @@ public static class AppCompositionTests
         var lifecycle = new AppShutdown([music], []);
         try
         {
-            methods = AppLauncher.ComposeScriptCapabilities(documents.Methods, [music]);
+            methods = AppLauncher.ComposeScriptCapabilities(documents.Methods, []);
+            runtime.Start();
             await music.InitializeAsync(default);
             Check(music.Status.Length == 0);
             Check(music.CatalogSourcePlatform == "wy" && music.CanEditCatalogSource && !music.HasCatalogSourceError,
@@ -87,11 +88,12 @@ public static class AppCompositionTests
             Check(music.Navigation.Count > 0 && music.Navigation.Select(n => n.Route).Distinct().Count() == music.Navigation.Count);
             RenderComponent(music.View, 1050, 650);
             RenderComponent(music.SettingsView, 860, 650);
-            Check(!playback.HasMedia && !runtime.HasStarted, "native browsing does not start playback or Node");
+            Check(!playback.HasMedia, "native browsing does not start playback");
             foreach (string ns in AppIdentity.NativeNamespaces.Concat(new[] { "unknown.namespace" }))
                 await DeniedDocument(documents, ns);
-            var status = await runtime.CallAsync("music.script.status", new { });
-            Check(status.GetProperty("ok").GetBoolean() && runtime.HasStarted);
+            var status = await runtime.CallAsync("music.script.sources.list", new { });
+            Check(status.GetProperty("ok").GetBoolean() && status.GetProperty("items").GetArrayLength() == 0 &&
+                runtime.State == RuntimeConnectionState.Ready, "the App's runtime started with the App and runs no script");
             foreach (string method in new[] { "music.library.list", "missing.method" })
                 await BridgeTests.Expect("METHOD_UNAVAILABLE", () => runtime.CallAsync(method, new { }));
             await lifecycle.CloseAsync();
@@ -105,7 +107,8 @@ public static class AppCompositionTests
         {
             await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
             await using var documents = new ProtectedDocumentBridge(store, []);
-            await using var runtime = new OnDemandRuntimeClient(_ => throw new InvalidOperationException("Node unavailable"));
+            await using var runtime = new AppRuntimeClient(_ => throw new InvalidOperationException("Node unavailable"));
+            runtime.Start();
             await using var owner = new MusicNativeApplication(store, runtime);
             if (pass == 0)
             {
@@ -118,7 +121,10 @@ public static class AppCompositionTests
             var accounts = await owner.ExecuteAsync("music.accounts.list", new { });
             Check(accounts.GetProperty("ok").GetBoolean() && accounts.GetProperty("items").GetArrayLength() == 3);
             Check(accounts.GetProperty("items").EnumerateArray().All(a => a.GetProperty("state").GetString() == "none"));
-            Check(!runtime.HasStarted);
+            var sources = await owner.ExecuteAsync("music.sources.list", new { });
+            Check(!sources.GetProperty("ok").GetBoolean() &&
+                sources.GetProperty("code").GetString() == "SCRIPT_RUNTIME_UNAVAILABLE",
+                "a failed runtime is reported as an unavailable script service, never as no scripts");
             foreach (string ns in AppIdentity.NativeNamespaces) await DeniedDocument(documents, ns);
         }
     }
@@ -128,7 +134,8 @@ public static class AppCompositionTests
         for (int pass = 0; pass < 2; pass++)
         {
             await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
-            await using var runtime = new OnDemandRuntimeClient(_ => throw new InvalidOperationException("Node must stay dormant"));
+            await using var runtime = new AppRuntimeClient(_ => throw new InvalidOperationException("Node unavailable"));
+            runtime.Start();
             await using var playback = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
             var transport = new StartupTransport();
             var application = new MusicNativeApplication(store, runtime, transport);
@@ -152,8 +159,8 @@ public static class AppCompositionTests
                 RenderComponent((FrameworkElement)shell.Content, 1244, 848);
                 shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
                 await Dispatcher.Yield(DispatcherPriority.Background);
-                Check(transport.Calls == 1 && !runtime.HasStarted && !playback.HasMedia,
-                    "startup must load one visible page without Node or automatic playback");
+                Check(transport.Calls == 1 && !playback.HasMedia,
+                    "startup must load one visible page without automatic playback, even when Node fails");
                 if (pass == 0)
                 {
                     Check(!music.HasCurrent, "fresh storage must not manufacture a current song");
@@ -179,7 +186,7 @@ public static class AppCompositionTests
                     await music.NavigateAsync("history", default);
                     Check(music.Status.Length == 0 && music.HistoryDates.Count == 1 && music.Songs.Count == 1,
                         "current history must remain readable after reopening");
-                    Check(!runtime.HasStarted && !playback.HasMedia, "restored selection is not playback");
+                    Check(!playback.HasMedia, "restored selection is not playback");
                 }
             }
             finally
@@ -199,7 +206,8 @@ public static class AppCompositionTests
             ("key", LJ.Stringify(new JsonArray("meowfilm", "music", 1, "local", area))),
             ("value", JsonNode.Parse(value))))));
         var fingerprint = await store.WriteAsync(MusicLibraryOwner.DocumentNamespace, LJ.Bytes(document), DocumentFingerprint.Missing);
-        await using var runtime = new OnDemandRuntimeClient(_ => throw new InvalidOperationException("Node must stay dormant"));
+        await using var runtime = new AppRuntimeClient(_ => throw new InvalidOperationException("Node unavailable"));
+        runtime.Start();
         await using var playback = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
         var transport = new StartupTransport();
         var application = new MusicNativeApplication(store, runtime, transport);
@@ -225,7 +233,7 @@ public static class AppCompositionTests
             Check(messages.Count == 0 && music.Status.Length == 0 &&
                 ((NoticeStack)shell.FindName("Notices")).Children.Count == 0,
                 "Shell-owned failure must not publish a second module notification");
-            Check(transport.Calls == 0 && !runtime.HasStarted && !playback.HasMedia,
+            Check(transport.Calls == 0 && !playback.HasMedia,
                 "rejected startup must not start unrelated work");
             var saved = await store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
             try { Check(saved.Fingerprint == fingerprint, "non-current user data must remain unchanged"); }

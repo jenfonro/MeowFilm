@@ -380,7 +380,7 @@ public static class MusicAccountIntegrationTests
         private Fixture(string data, ControlledStore store)
         {
             Data = data; Store = store;
-            Application = new(store, Runtime, Transport); Runtime.Register(Application);
+            Application = new(store, Runtime, Transport);
             Module = new(Application, store, new Output(), new Dialogs());
         }
         public static async Task<Fixture> Create(string? data = null)

@@ -236,7 +236,7 @@ public static partial class MusicUiTests
         internal readonly MusicCapability Module;
         private RecommendationScene()
         {
-            App = new(Store, Runtime, Http, (_, _) => Reports); Runtime.Register(App);
+            App = new(Store, Runtime, Http, (_, _) => Reports);
             Module = new(App, Store, Playback, Dialog);
         }
         internal static async Task<RecommendationScene> Create()
@@ -275,19 +275,18 @@ public static partial class MusicUiTests
             var before = await Call("music.quality.settings.get");
             Dialog.ScriptPath = Path.Combine(Root, "recommendation-authored-lx.js");
             File.WriteAllText(Dialog.ScriptPath, TestScript(), new UTF8Encoding(false));
-            await Module.ImportSourceAsync(); Equal(1, Module.Sources.Count);
-            Module.SelectedSource = Module.Sources.Single();
-            await Module.LoadSourceAsync(Module.SelectedSource); await Module.SourceActionAsync("enable");
-            await Module.RefreshOnlineAsync();
+            await Module.ImportSourceAsync(); Equal(1, Module.Sources.Count(row => !row.IsBuiltIn));
+            await Module.SetSourceEnabledAsync(Module.Sources.Single(row => !row.IsBuiltIn), true);
+            await Module.RefreshSourceManagementAsync();
             True(Module.CanEditQuality, "recommendation setup loaded native quality policy");
             var installed = (await Call("music.sources.list")).GetProperty("items").EnumerateArray().Single();
-            Equal(Module.Sources.Single().InstallationId, installed.GetProperty("installationId").GetString());
+            Equal(Module.Sources.Single(row => !row.IsBuiltIn).InstallationId, installed.GetProperty("installationId").GetString());
             True(installed.GetProperty("enabled").GetBoolean(), "enabled script participates in recommendation playback");
             True(Module.Status.Length == 0, "script enable accepted");
             var saved = await Call("music.quality.settings.get");
             Equal(before.GetProperty("settings").GetRawText(), saved.GetProperty("settings").GetRawText());
             Equal(before.GetProperty("signature").GetString(), saved.GetProperty("signature").GetString());
-            Equal("320k", saved.GetProperty("settings").GetProperty("request").GetString());
+            Equal("flac", saved.GetProperty("settings").GetProperty("request").GetString());
             var online = saved.GetProperty("onlineSettings");
             Equal(3, online.GetProperty("schema").GetInt32());
             True(online.EnumerateObject().Select(field => field.Name).ToHashSet()

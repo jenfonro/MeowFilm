@@ -2522,7 +2522,6 @@ public static class MusicCatalogTests
         {
             this.store = store;
             var native = new MusicNativeApplication(store, runtime, transport);
-            runtime.Register(native);
             IMusicApplication application = native;
             if (vipAccount) application = Vip = new(native);
             Client = new(application); Module = new(Client, store, Playback);
@@ -2567,6 +2566,8 @@ public static class MusicCatalogTests
         }
         public async Task SetupSource()
         {
+            await Module.ActivateQualitySettingsAsync();
+            await Module.SetPlaybackQualityRequestAsync("320k");
             const string source = """
                 lx.on(lx.EVENT_NAMES.request, async ({info}) => 'https://media.invalid/' + info.musicInfo.songmid);
                 lx.send(lx.EVENT_NAMES.inited,{status:true,sources:{wy:{name:'合成',type:'music',actions:['musicUrl'],qualitys:['320k']}}});
@@ -2576,13 +2577,11 @@ public static class MusicCatalogTests
                 sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)) });
             var token = upload.GetProperty("token").GetString()!;
             await Rpc("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) });
-            var result = await Rpc("music.sources.install", new { token, name = "合成源", version = "1",
-                permissions = new { storage = Array.Empty<string>() } });
+            var result = await Rpc("music.sources.add", new { token });
             var installationId = result.GetProperty("item").GetProperty("installationId").GetString();
             var enabled = await Rpc("music.sources.enable", new { installationId });
             True(enabled.GetProperty("item").GetProperty("enabled").GetBoolean(), "enabled script participates in catalog playback");
-            await Module.RefreshOnlineAsync();
-            Module.SelectedSource = Module.Sources.Single(); await Module.LoadSourceAsync(Module.SelectedSource);
+            await Module.RefreshSourceManagementAsync();
         }
         public async ValueTask DisposeAsync()
         {

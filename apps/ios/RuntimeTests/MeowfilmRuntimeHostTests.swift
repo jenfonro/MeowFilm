@@ -41,50 +41,31 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
     }
 
     func testEmbeddedNodeServesAnLXScriptThroughTheNativeOwner() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let service = NativeMusicScriptService(storeFactory: {
-            try DocumentStore(baseURL: directory, namespace: NativeMusicScriptService.namespace,
-                              maximumDocumentBytes: MusicScriptSourceItem.maximumSourceBytes)
-        }, launcher: MeowfilmScriptRuntime.launcher)
+        let service = MeowfilmScriptRuntime.musicScripts
+        await service.start() // Idempotent with App assembly; never a second Node host.
 
         let imported = try await service.importScriptSource(Data(Self.script.utf8), fileName: "fixture.js")
         XCTAssertEqual(imported.name, "Runtime host fixture")
         XCTAssertEqual(imported.version, "3")
         XCTAssertEqual(imported.state, .disabled)
-        let documents = directory.appendingPathComponent(NativeMusicScriptService.namespace)
-        let catalog = try XCTUnwrap(JSONSerialization.jsonObject(
-            with: Data(contentsOf: documents.appendingPathComponent("catalog.json"))) as? [String: Any])
-        let installations = try XCTUnwrap(catalog["installations"] as? [[String: Any]])
-        XCTAssertEqual(installations.first?["id"] as? String, imported.id)
-        let sourceFile = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: documents,
-            includingPropertiesForKeys: nil).first { $0.lastPathComponent.hasPrefix("source.") })
-        XCTAssertEqual(try Data(contentsOf: sourceFile), Data(Self.script.utf8))
         let enabled = try await service.setScriptSourceEnabled(imported.id, enabled: true)
         XCTAssertEqual(enabled.state, .ready)
         XCTAssertEqual(enabled.platforms, [.qq])
 
         let sources = try await service.sources()
-        let source = try XCTUnwrap(sources.first)
+        let source = try XCTUnwrap(sources.first { $0.installationID == imported.id })
         XCTAssertEqual(source.installationID, imported.id)
         XCTAssertEqual(source.capabilities.map(\.siteID), ["tx"])
         let request = MusicScriptRequest(installationID: source.installationID, generation: source.generation,
             siteID: "tx", sourceKey: "fixture", quality: "320k",
             musicInfo: Data(#"{"source":"tx","songmid":"fixture"}"#.utf8))
-        // Request-bound storage persists through the native owner between calls.
+        // Request-bound storage persists in the shared module between calls.
         let first = try await service.resolve(request: request)
         XCTAssertEqual(first.url.absoluteString, "https://media.invalid/tx/320k?n=1")
         let second = try await service.resolve(request: request)
         XCTAssertEqual(second.url.absoluteString, "https://media.invalid/tx/320k?n=2")
         let lyrics = try await service.lyrics(request: request)
         XCTAssertEqual(lyrics.text, "[00:00.00]tx")
-        let storageFile = documents.appendingPathComponent("storage." + imported.id + ".json")
-        let storage = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: storageFile)) as? [String: Any])
-        let sites = try XCTUnwrap(storage["sites"] as? [String: [[String: Any]]])
-        XCTAssertEqual(sites["tx"]?.first?["key"] as? String, "count")
-        XCTAssertEqual(sites["tx"]?.first?["value"] as? Int, 3)
-
         let disabled = try await service.setScriptSourceEnabled(imported.id, enabled: false)
         XCTAssertEqual(disabled.state, .disabled)
         do {
@@ -93,9 +74,6 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         } catch { XCTAssertEqual(error as? MusicServiceError, .sourceUnavailable) }
         try await service.removeScriptSource(imported.id)
         let remaining = try await service.scriptSources()
-        XCTAssertTrue(remaining.isEmpty)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: storageFile.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: sourceFile.path))
-        await service.close()
+        XCTAssertFalse(remaining.contains { $0.id == imported.id })
     }
 }

@@ -55,22 +55,17 @@ internal sealed class OfficialMusicAudio
             Guard(token);
         }
     }
+    /// <summary>Requests the first listed quality the recording offers. No local membership
+    /// decides playability: trial, restricted or mismatched platform responses are rejected.</summary>
     internal async Task<OfficialAudioResult> ResolveAsync(MusicPlatformSession session, JsonObject data,
-        IReadOnlyList<string> qualities, MusicAccountEntitlements rights, CancellationToken token, Action accountGuard)
+        IReadOnlyList<string> qualities, CancellationToken token, Action accountGuard)
     {
-        bool member = !rights.VerificationDeferred && rights.Membership.Vip == true &&
-            (rights.Membership.ExpiresAt is null || rights.Membership.ExpiresAt > Now);
-        if (!member)
-        {
-            PJ.Require(session.Platform == "wy" && qualities.Contains("128k"), "VIP_REQUIRED");
-            qualities = ["128k"];
-        }
         accountGuard();
         var client = session.Platform is "wy" or "kg"
             ? await clients.AcquireAsync(session.Platform, token).ConfigureAwait(false) : null;
         var c = new Call(this, session, client, accountGuard);
         return session.Platform switch {
-            "wy" => await Wy(c, session, data, qualities, rights, token).ConfigureAwait(false),
+            "wy" => await Wy(c, session, data, qualities, token).ConfigureAwait(false),
             "tx" => await Tx(c, session, data, qualities, token).ConfigureAwait(false),
             "kg" => await Kg(c, session, data, qualities, token).ConfigureAwait(false),
             _ => throw new MusicPlatformException("CAPABILITY_UNAVAILABLE")
@@ -95,7 +90,7 @@ internal sealed class OfficialMusicAudio
         PJ.Id(data[field], pattern, "INVALID_REQUEST");
 
     private async Task<OfficialAudioResult> Wy(Call c, MusicPlatformSession session, JsonObject data,
-        IReadOnlyList<string> qualities, MusicAccountEntitlements rights, CancellationToken token)
+        IReadOnlyList<string> qualities, CancellationToken token)
     {
         string id = Id(data, "songmid", "^[1-9][0-9]{0,19}$");
         if (qualities.Count > 0 && qualities[0] == "128k")
@@ -110,7 +105,7 @@ internal sealed class OfficialMusicAudio
             ["vivid"] = ("vivid", "vi")
         };
         string? quality = qualities.FirstOrDefault(q => keys.TryGetValue(q, out var entry) &&
-            (q == "128k" || rights.AudioLevels.Contains(entry.Level)) && PJ.At(resources, "data", entry.Resource) is not null);
+            PJ.At(resources, "data", entry.Resource) is not null);
         PJ.Require(quality is not null, "QUALITY_UNAVAILABLE");
         await c.AcceptWy(resourceResponse.Cookies, token).ConfigureAwait(false);
         if (quality == "128k") return await WyStandard(c, session, id, token).ConfigureAwait(false);

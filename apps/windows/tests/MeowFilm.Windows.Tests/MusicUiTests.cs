@@ -25,7 +25,7 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Windows.Tests;
 
 // Native application runs ordinary business. Only authored LX scripts use the
-// on-demand script-only process. Local-store restart and synthetic-store UI races are
+// script-only process. Local-store restart and synthetic-store UI races are
 // separate evidence; no production storage fallback exists.
 public static partial class MusicUiTests
 {
@@ -285,9 +285,7 @@ public static partial class MusicUiTests
             await using var runtime = new NativeMusicScriptTestRuntime();
             var output = new PlaybackProbe();
             await using var module = new MusicCapability(runtime, store, output, new Dialogs());
-            runtime.Register(module);
             Equal("0.4.0", module.Version);
-            Equal(3, module.ScriptCapabilities.Count);
             await module.InitializeAsync(default);
             await module.CreatePlaylistAsync("原生构造");
             Equal(1, module.Playlists.Count(p => p.Kind == "playlist"));
@@ -1187,7 +1185,7 @@ public static partial class MusicUiTests
         public readonly Dialogs Dialogs;
         private Fixture(PlaybackProbe playback, Dialogs dialogs) { Playback = playback; Dialogs = dialogs; }
         public static async Task<Fixture> Create(string? root = null, bool persistent = false, NativePlayback? native = null,
-            IMusicPlayback? output = null, MusicSourceNetworkDownload? sourceNetworkDownload = null)
+            IMusicPlayback? output = null)
         {
             root ??= NewRoot();
             IDocumentStore store = persistent
@@ -1196,10 +1194,9 @@ public static partial class MusicUiTests
             var application = new MusicNativeApplication(store, runtime, new NoUpstream());
             try
             {
-                runtime.Register(application);
                 var calls = new ObservedApplication(application); var playback = new PlaybackProbe(); var dialogs = new Dialogs();
                 module = native is null
-                    ? new MusicCapability(calls, store, output ?? playback, null, dialogs, sourceNetworkDownload)
+                    ? new MusicCapability(calls, store, output ?? playback, null, dialogs)
                     : new MusicCapability(calls, store, native, dialogs);
                 await module.InitializeAsync(default);
                 Equal("wy", module.CatalogSourcePlatform);

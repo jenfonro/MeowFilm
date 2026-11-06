@@ -97,46 +97,66 @@
      <Button Click="Queue_Click" AutomationProperties.Name="播放队列"><Path Data="M0,1 L4,3 0,5 Z M7,3 L18,3 M0,10 L18,10 M0,17 L18,17" Width="19" Height="19" StrokeThickness="1.3" Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}" Stretch="Uniform"/></Button>
     </StackPanel>
     <StackPanel x:Name="OptionsPanel" Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,22,0">
-     <Button x:Name="QualityButton" Click="Quality_Click" AutomationProperties.Name="音质"><Border CornerRadius="3" BorderThickness="1" BorderBrush="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}" Padding="2,0"><TextBlock Text="{Binding CurrentQualityLabel}" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="10"/></Border></Button>
+     <Button x:Name="QualityButton" Click="Quality_Click" AutomationProperties.Name="{Binding CurrentQualityLabel,StringFormat='音质：{0}'}">
+      <Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Style.Triggers><DataTrigger Binding="{Binding HasQualityButton}" Value="False"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Button.Style>
+      <Border CornerRadius="3" BorderThickness="1" BorderBrush="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}" Padding="2,0"><TextBlock Text="{Binding CurrentQualityLabel}" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="10"/></Border>
+     </Button>
      <Button x:Name="PlaylistButton" Content="&#xE710;" Click="PlaylistMenu_Click" IsEnabled="{Binding CanPlay}" AutomationProperties.Name="收藏到歌单"/>
      <Button x:Name="VolumeButton" Content="&#xE767;" Click="Volume_Click" AutomationProperties.Name="音量"/>
-     <Button x:Name="RateButton" Content="&#xE712;" Click="Rate_Click" AutomationProperties.Name="播放倍速"/>
+     <Button x:Name="MoreButton" Content="&#xE712;" Click="More_Click" AutomationProperties.Name="更多"/>
     </StackPanel>
    </Grid>
    <Popup x:Name="VolumePopup" PlacementTarget="{Binding ElementName=VolumeButton}" Placement="Top" StaysOpen="False" AllowsTransparency="True"><Border Style="{StaticResource MeowFilm.Surface}" Padding="16"><Slider x:Name="VolumeSlider" Width="130" Minimum="0" Maximum="100" Value="{Binding Volume}" PreviewMouseLeftButtonUp="VolumeCommit_MouseUp" PreviewKeyUp="VolumeCommit_KeyUp" AutomationProperties.Name="音量"/></Border></Popup>
    <Popup x:Name="PlaylistPopup" PlacementTarget="{Binding ElementName=PlaylistButton}" Placement="Top" StaysOpen="False" AllowsTransparency="True"><Border Style="{StaticResource MeowFilm.Surface}" Padding="12"><ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto"><ItemsControl ItemsSource="{Binding Playlists}"><ItemsControl.ItemTemplate><DataTemplate><Button Content="{Binding Name}" Tag="{Binding Id}" Click="AddCurrent_Click" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" HorizontalContentAlignment="Left" MinWidth="180"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></ScrollViewer></Border></Popup>
    <Popup x:Name="QualityPopup" PlacementTarget="{Binding ElementName=QualityButton}" Placement="Top" StaysOpen="False" AllowsTransparency="True" Closed="Quality_Closed">
-    <Border Style="{StaticResource MeowFilm.Surface}" Padding="16">
-     <StackPanel Width="250">
-      <TextBlock Text="音质" FontWeight="SemiBold" Margin="0,0,0,12"/>
-      <ComboBox ItemsSource="{Binding PlaybackQualityOptions}"
-                SelectedItem="{Binding PlaybackQualityRequest,Mode=OneWay}"
-                SelectionChanged="PlaybackQuality_Changed"
-                IsEnabled="{Binding CanEditQuality}" AutomationProperties.Name="播放请求音质"/>
-      <desktop:NoticeOutlet Message="{Binding QualityStatus}"/>
-      <StackPanel>
-       <StackPanel.Style><Style TargetType="StackPanel"><Style.Triggers><DataTrigger Binding="{Binding HasCurrentRecordings}" Value="False"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></StackPanel.Style>
-       <Separator Margin="0,10"/>
-       <DockPanel Margin="0,0,0,8">
-        <Button x:Name="SourceSearchButton" DockPanel.Dock="Right" Content="源搜索" Click="SourceSearch_Click"
-         IsEnabled="{Binding CanSelectCurrentRecording}" AutomationProperties.Name="源搜索"
-         Style="{StaticResource MeowFilm.QuietButton}"
-         FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="12" Padding="6"/>
-        <TextBlock Text="来源" FontWeight="SemiBold" VerticalAlignment="Center"/>
+    <Border Style="{StaticResource MeowFilm.Surface}" Padding="8" KeyboardNavigation.TabNavigation="Cycle">
+     <Grid Width="260">
+      <StackPanel x:Name="QualityMenu">
+       <Button x:Name="SourceListButton" Content="查看更多" Click="SourceList_Click" IsEnabled="{Binding CanSwitchSource}" HorizontalContentAlignment="Left"
+        FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="13" Padding="10,7" AutomationProperties.Name="查看更多音源"/>
+       <Separator Margin="0,4"/>
+       <StackPanel x:Name="QualityItems"/>
+       <Button x:Name="SpatialButton" Click="Spatial_Click" MouseEnter="Spatial_MouseEnter" PreviewKeyDown="Spatial_KeyDown"
+        HorizontalContentAlignment="Stretch" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="13" Padding="10,7"
+        AutomationProperties.Name="空间音质">
+        <DockPanel><TextBlock DockPanel.Dock="Right" Text="›"/><TextBlock Text="空间"/></DockPanel>
+       </Button>
+      </StackPanel>
+      <StackPanel x:Name="SourcePanel" Visibility="Collapsed">
+       <DockPanel Margin="0,0,0,6">
+        <Button Content="‹" Click="SourceBack_Click" DockPanel.Dock="Left" Padding="8,4" AutomationProperties.Name="返回音质"/>
+        <TextBlock Text="音源" FontWeight="SemiBold" VerticalAlignment="Center" Margin="6,0,0,0"/>
        </DockPanel>
-       <ScrollViewer MaxHeight="180" VerticalScrollBarVisibility="Auto" ScrollChanged="Recordings_ScrollChanged">
-        <ItemsControl ItemsSource="{Binding CurrentRecordings}" IsEnabled="{Binding CanSelectCurrentRecording}">
+       <ScrollViewer MaxHeight="260" VerticalScrollBarVisibility="Auto">
+        <ItemsControl ItemsSource="{Binding SourceChoices}" IsEnabled="{Binding CanSwitchSource}">
          <ItemsControl.ItemTemplate><DataTemplate>
-          <Button Content="{Binding Label}" Tag="{Binding}" Click="Recording_Click" HorizontalContentAlignment="Left"
-           FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="12" Padding="6" Margin="0,2"/>
+          <Button Tag="{Binding}" Click="SourceChoice_Click" IsEnabled="{Binding Selectable}" HorizontalContentAlignment="Stretch" Padding="8,6" Margin="0,1"
+           FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="12"
+           AutomationProperties.Name="{Binding Provider}">
+           <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <TextBlock TextTrimming="CharacterEllipsis"><Run Text="{Binding Provider,Mode=OneWay}"/><Run Text=" "/><Run Text="{Binding Platform,Mode=OneWay}"/></TextBlock>
+            <TextBlock Grid.Column="1" Text="{Binding Quality}" Margin="8,0,0,0"/>
+            <TextBlock Grid.Column="2" Margin="8,0,0,0">
+             <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Text" Value="{Binding State}"/><Style.Triggers><DataTrigger Binding="{Binding Current}" Value="True"><Setter Property="Text" Value="✓"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
+            </TextBlock>
+           </Grid>
+          </Button>
          </DataTemplate></ItemsControl.ItemTemplate>
         </ItemsControl>
        </ScrollViewer>
+       <Button x:Name="LoadMoreSourcesButton" Content="加载更多" Click="LoadMoreSources_Click" IsEnabled="{Binding CanLoadMoreSources}" Margin="0,6,0,0" Padding="8,6"
+        FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="12"/>
       </StackPanel>
-     </StackPanel>
+     </Grid>
     </Border>
    </Popup>
-    <Popup x:Name="RatePopup" PlacementTarget="{Binding ElementName=RateButton}" Placement="Top" StaysOpen="False" AllowsTransparency="True">
+   <Popup x:Name="SpatialPopup" PlacementTarget="{Binding ElementName=SpatialButton}" Placement="Right" StaysOpen="True" AllowsTransparency="True">
+    <Border Style="{StaticResource MeowFilm.Surface}" Padding="8" MouseLeave="SpatialPopup_MouseLeave">
+     <StackPanel x:Name="SpatialItems" Width="170" PreviewKeyDown="SpatialItems_KeyDown"/>
+    </Border>
+   </Popup>
+    <Popup x:Name="RatePopup" PlacementTarget="{Binding ElementName=MoreButton}" Placement="Top" StaysOpen="False" AllowsTransparency="True">
      <Border Style="{StaticResource MeowFilm.Surface}" Padding="12">
       <StackPanel DataContext="{Binding PlacementTarget.DataContext,ElementName=RatePopup}">
        <TextBlock Text="播放倍速" Margin="0,0,0,8"/>

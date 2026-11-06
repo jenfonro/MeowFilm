@@ -21,8 +21,6 @@ internal abstract class MusicApplicationTestDouble : IMusicApplication
     public virtual Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     public virtual Task AbortAsync(CancellationToken cancellationToken = default) => DisposeAsync().AsTask();
     public virtual ValueTask DisposeAsync() => ValueTask.CompletedTask;
-    public virtual IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> ScriptCapabilities
-        => ReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>.Empty;
 
     public virtual event Action? DiscoveryInvalidated { add { } remove { } }
     public virtual Task<MusicSearchDiscoverySnapshot> ReadDiscoveryAsync(bool refresh,
@@ -137,8 +135,6 @@ internal abstract class MusicApplicationForwarder(IMusicApplication inner) : Mus
     public override Task AbortAsync(CancellationToken cancellationToken = default) =>
         Inner.AbortAsync(cancellationToken);
     public override ValueTask DisposeAsync() => Inner.DisposeAsync();
-    public override IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> ScriptCapabilities =>
-        Inner.ScriptCapabilities;
 
     public override event Action? DiscoveryInvalidated
     {
