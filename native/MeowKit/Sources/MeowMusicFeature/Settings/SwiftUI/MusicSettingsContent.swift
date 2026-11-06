@@ -46,8 +46,12 @@ public struct MusicSettingsContent: View {
     var preferenceValue = ""
     var canResetUserData = false
     var requestingReset = false
+    /// Durable home/channel catalogue source; nil hides the row until read.
+    var catalogSource: MusicHomeSourceSelection? = nil
+    var savingCatalogSource = false
     var open: (MusicSettingsDestination) -> Void = { _ in }
     var resetUserData: () -> Void = {}
+    var selectCatalogSource: (MusicPublicBrowsePlatform) -> Void = { _ in }
 
     public var body: some View {
         List {
@@ -55,6 +59,19 @@ public struct MusicSettingsContent: View {
                 ForEach([MusicSettingsDestination.aggregation, .sources, .search, .playback, .metadata], id: \.self) {
                     destination in
                     destinationRow(destination)
+                }
+                if let catalogSource, !catalogSource.available.isEmpty {
+                    Picker(selection: Binding(get: { catalogSource.selected }, set: { selectCatalogSource($0) })) {
+                        ForEach(catalogSource.available) { platform in
+                            Text(platform.title).tag(platform)
+                        }
+                    } label: {
+                        MusicSettingsIconLabel(symbol: "music.note.house", title: "数据源", theme: theme)
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(savingCatalogSource)
+                    .accessibilityIdentifier("music.settings.catalogSource")
+                    .modifier(MusicSettingsRowStyle(theme: theme))
                 }
             }
             .headerProminence(.increased)

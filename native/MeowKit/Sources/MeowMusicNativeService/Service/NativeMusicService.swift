@@ -8,18 +8,20 @@ struct MusicDocument {
     var queue: MJ
     var playback: MJ
     var history: MJ
+    var catalogSource: MJ
     init(_ data: Data?, runID: String) throws {
         envelope = try data.map { try MJ.parse($0) } ?? .obj([("version", .n(1)), ("scope", .string("device")), ("revision", .n(0)), ("records", .obj())])
         try envelope.requireFields(["version", "scope", "revision", "records"], required: ["version", "scope", "revision", "records"])
         try musicRequire(envelope["version"] == .n(1) && envelope["scope"].string == "device" &&
                          envelope["revision"].isInteger && envelope["records"].isObject, .corruptDocument)
         let records = envelope["records"]
-        let allowed = ["library", "queue", "history", "playback"]
+        let allowed = ["library", "queue", "history", "playback", "catalogSource"]
         try musicRequire(records.fields.allSatisfy { allowed.map(MusicModel.key).contains($0.0) }, .corruptDocument)
         library = records.contains(MusicModel.key("library")) ? records[MusicModel.key("library")] : MusicModel.library
         queue = records.contains(MusicModel.key("queue")) ? records[MusicModel.key("queue")] : MusicModel.queue
         playback = records.contains(MusicModel.key("playback")) ? records[MusicModel.key("playback")] : MusicModel.playback
         history = records.contains(MusicModel.key("history")) ? records[MusicModel.key("history")] : MusicModel.history
+        catalogSource = records.contains(MusicModel.key("catalogSource")) ? records[MusicModel.key("catalogSource")] : MusicModel.catalogSource
         try validate()
         if queue["runId"].string != runID { queue["history"] = .array([]); queue["failed"] = .array([]) }
         queue["runId"] = .string(runID)
@@ -28,7 +30,7 @@ struct MusicDocument {
     mutating func resetPosition() { playback["position"] = .obj([("occurrenceId", queue["currentId"]), ("seconds", .n(0))]) }
     func validate() throws {
         do {
-            for value in [library, queue, playback, history] { try MusicModel.rejectSecrets(value) }
+            for value in [library, queue, playback, history, catalogSource] { try MusicModel.rejectSecrets(value) }
         } catch { throw MusicServiceError.corruptDocument }
         try musicRequire(library["schema"] == .n(1) && library["scope"].string == "device" && library["revision"].isInteger, .corruptDocument)
         try MusicLibraryValidation.validate(library["library"], owner: "device")
@@ -75,6 +77,9 @@ struct MusicDocument {
             official.strings.allSatisfy { MusicAccountPlatform(rawValue: $0) != nil }, .corruptDocument)
         try musicRequire(history["schema"] == .n(1) && history["playlists"].isArray && history["playlists"].array.count <= 5 &&
                          history["days"].isArray && history["days"].array.count <= 7, .corruptDocument)
+        try catalogSource.requireFields(["schema", "revision", "platform"], required: ["schema", "revision", "platform"])
+        try musicRequire(catalogSource["schema"] == .n(1) && catalogSource["revision"].isInteger &&
+            catalogSource["platform"].isString && ["wy", "kg"].contains(catalogSource["platform"].string), .corruptDocument)
     }
     mutating func encode(changed: Set<String>) throws -> Data {
         var records = envelope["records"]
@@ -90,6 +95,7 @@ struct MusicDocument {
                 durable["position"]["seconds"] = .n(0)
                 value = durable
             case "history": value = history
+            case "catalogSource": value = catalogSource
             default: throw MusicServiceError.invalidRequest
             }
             records[MusicModel.key(area)] = value
@@ -136,10 +142,11 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var lastAudioCacheScope: String?
     var homeCache: (source: MusicPublicBrowsePlatform, scope: String, revision: UUID,
                     expires: Date, page: MusicNativePublicBrowseDiscovery)?
-    var selectedHomeSource: MusicPublicBrowsePlatform?
+    /// Last adopted durable `catalogSource`; nil until first read.
+    var homeSource: (platform: MusicPublicBrowsePlatform, revision: Int)?
     var homeSourceRevision = UUID()
     var homeObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
-    var anonymousHomeBinding: MusicNativeHomeBinding?
+    var anonymousHomeBindings: [MusicPublicBrowsePlatform: MusicNativeHomeBinding] = [:]
     var lastHomeScope: String?
     let ownedTransport: URLSessionMusicNativeHTTPTransport?
     let now: @Sendable () -> Date
@@ -193,7 +200,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         self.sourceDiscovery = sourceDiscovery ?? MusicNativeMemorySourceDiscoveryCache(clock: clock)
         now = clock; self.random = random
         self.enabledPlatforms = enabledPlatforms
-        selectedHomeSource = enabledPlatforms.contains(.netease) ? .netease : nil
         let owned = transport == nil ? URLSessionMusicNativeHTTPTransport() : nil
         ownedTransport = owned
         publicPlatforms = MusicNativePlatforms(transport: transport ?? owned!, qq: qq, clock: clock, clients: clientContexts)
@@ -246,7 +252,8 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         homeCache = nil
         for observer in homeObservers.values { observer.finish() }
         homeObservers.removeAll()
-        anonymousHomeBinding?.authorization.revoke(); anonymousHomeBinding = nil
+        for binding in anonymousHomeBindings.values { binding.authorization.revoke() }
+        anonymousHomeBindings.removeAll()
         lastHomeScope = nil
         playbackFeedback.invalidate()
         playbackFeedbackAdmission = nil

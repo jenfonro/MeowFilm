@@ -25,15 +25,20 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
     var subscribed = false
     var waiters: [CheckedContinuation<Void, Never>] = []
     var source: MusicPublicBrowsePlatform = .netease
+    var sourceRevision = 0
     var emptyFirstPage = false
     var gate: HomeLifecycleGate?
     var snapshotReads = 0
     func hold(_ gate: HomeLifecycleGate) { self.gate = gate }
-    func homeSourceSelection() -> MusicHomeSourceSelection { .init(selected: source, available: [.netease, .qq]) }
-    func selectHomeSource(_ value: MusicPublicBrowsePlatform) throws {
+    func homeSourceSelection() -> MusicHomeSourceSelection {
+        .init(selected: source, revision: sourceRevision, available: [.netease, .qq])
+    }
+    func selectHomeSource(_ value: MusicPublicBrowsePlatform, ifRevision: Int) throws -> MusicHomeSourceSelection {
         guard homeSourceSelection().available.contains(value) else { throw MusicServiceError.unsupported }
-        guard source != value else { return }
-        source = value; subscription?.yield(())
+        guard ifRevision == sourceRevision else { throw MusicServiceError.staleRevision }
+        guard source != value else { return homeSourceSelection() }
+        source = value; sourceRevision += 1; subscription?.yield(())
+        return homeSourceSelection()
     }
     func startWithFilteredPage() { emptyFirstPage = true }
     static func page(_ ids: [String], cursor: String? = nil, source: MusicPublicBrowsePlatform = .netease) -> MusicPublicBrowsePage {
@@ -129,8 +134,8 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
         await value.refresh()
         let observation = Task { await value.observeHomeChanges() }
         await service.waitForSubscription()
-        try await service.selectHomeSource(.netease)
-        try await service.selectHomeSource(.qq)
+        _ = try await service.selectHomeSource(.netease, ifRevision: 0)
+        _ = try await service.selectHomeSource(.qq, ifRevision: 0)
         await service.end(); await observation.value
         guard let item = value.sections.first?.items.first, case .collection(let collection) = item.content else {
             return XCTFail("Selected source must replace the home page")
@@ -164,7 +169,7 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
             let observation = Task { await value.observeHomeChanges() }
             await service.waitForSubscription()
             value.setDisplayVisible(false)
-            try await service.selectHomeSource(.qq)
+            _ = try await service.selectHomeSource(.qq, ifRevision: 0)
             await service.end(); await observation.value
             XCTAssertTrue(value.sections.isEmpty, "Hidden content from the revoked scope must clear immediately")
             XCTAssertFalse(value.loaded); XCTAssertFalse(value.contentIsCurrent)

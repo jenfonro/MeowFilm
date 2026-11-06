@@ -57,7 +57,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         case .accountRecommendation(let platform, _, _): return platform.title + " · 推荐读取"
         case .discovery(.daily(let platform)): return platform.title + " · 推荐读取"
         case .discovery(.channel(let channel, _)): return channel.platform.title + " · 音乐内容读取"
-        default: return "网易云 · 音乐内容读取"
+        // Home actions are NetEase account/radio recipes.
+        case .homeAction: return "网易云 · 音乐内容读取"
+        default: return "音乐内容读取"
         }
     }
     private let service: any MusicPublicBrowsing
@@ -90,7 +92,8 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         case .accountRecommendation(let platform, _, _): return .init(accountPlatform: platform)
         case .discovery(.daily(let platform)): return .init(accountPlatform: platform)
         case .discovery(.channel(let channel, _)): return channel.platform
-        default: return .netease
+        case .homeAction: return .netease
+        default: return nil
         }
     }
     private var failedPage: (cursor: String?, direction: Int)?

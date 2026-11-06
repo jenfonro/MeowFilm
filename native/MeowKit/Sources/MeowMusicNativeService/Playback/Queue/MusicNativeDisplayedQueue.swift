@@ -11,15 +11,19 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
         try musicRequire(before.queue["revision"].int == expectedRevision, .staleRevision)
         let context: MJ, binding: MusicNativeHomeBinding?
         let historyDate: String?
+        // Displayed home rows are single-source; KuGou rows use the KuGou guest binding.
+        let source: MusicPublicBrowsePlatform = tracks.allSatisfy { track in
+            !track.sources.isEmpty && track.sources.allSatisfy { $0.platform == MusicPublicBrowsePlatform.kugou.rawValue }
+        } ? .kugou : .netease
         switch origin {
         case .song:
             context = .obj([("sourceType", .string("song"))])
-            binding = try await currentHomeBinding(); historyDate = nil
+            binding = try await currentHomeBinding(source: source); historyDate = nil
         case .section(let title):
             _ = try MJ.string(title).text(1024, empty: true)
             context = .obj([("sourceType", .string("section")),
                             ("sourceTitle", .string(title)), ("playlist", .string(title))])
-            binding = try await currentHomeBinding(); historyDate = nil
+            binding = try await currentHomeBinding(source: source); historyDate = nil
         case .history(let date):
             _ = try musicText(date, maximum: 32)
             try musicRequire(tracks.count == 1)
@@ -31,7 +35,7 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
         var resolved: [Int: MJ] = [:], missing: [(Int, String)] = [], bytes = 0
         var cached: [MJ] = []
         if historyDate == nil, let binding, let cache = homeCache,
-           cache.source == .netease, cache.scope == binding.scope, cache.revision == binding.revision {
+           cache.source == source, cache.scope == binding.scope, cache.revision == binding.revision {
             for section in cache.page.sections {
                 for item in section.items {
                     if case .song(let raw) = item.content { cached.append(try MusicModel.normalize(raw)) }
