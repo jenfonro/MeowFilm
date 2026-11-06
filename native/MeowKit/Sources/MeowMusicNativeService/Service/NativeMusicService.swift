@@ -32,7 +32,6 @@ struct MusicDocument {
         } catch { throw MusicServiceError.corruptDocument }
         try musicRequire(library["schema"] == .n(1) && library["scope"].string == "device" && library["revision"].isInteger, .corruptDocument)
         try MusicLibraryValidation.validate(library["library"], owner: "device")
-        if library["receipt"] != .null { try MusicLibraryValidation.validateReceipt(library["receipt"]) }
         _ = try MusicNativeSyncLedger.load(library)
         try musicRequire(queue["schema"] == .n(1) && queue["revision"].isInteger && queue["serial"].isInteger &&
                          queue["entries"].isArray, .corruptDocument)
@@ -168,8 +167,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var publicQueueSources: [UUID: (collectionID: String, authorization: MusicQueueAuthorization,
                                    reader: MusicNativePublicBrowseQueueRead, bytes: Int, expires: Date)] = [:]
     var spent = Set<String>()
-    struct Import { let library: MJ; let bytes: Int; let sourceID: String; let ownerID: String; let batch: String; let at: Date }
-    var prepared: [String: Import] = [:]
     var operations: [UUID: @Sendable () -> Void] = [:]
     var operationLabels: [UUID: String] = [:]
     var librarySyncRun: (id: UUID, cancel: @Sendable () -> Void)?
@@ -254,7 +251,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         playbackFeedback.invalidate()
         playbackFeedbackAdmission = nil
         librarySyncRun?.cancel()
-        handles.removeAll(); prepared.removeAll(); attempt = nil; spent.removeAll()
+        handles.removeAll(); attempt = nil; spent.removeAll()
         parsedDocument = nil
         lyricEpoch = UUID()
     }

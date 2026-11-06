@@ -304,23 +304,54 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         var rows = try MetadataNativeFixture.all.flatMap { p in
             try ["03", "01", "02"].map { try MetadataNativeFixture.row(p, $0) }
         }
-        // Missing or invalid row artwork must not fall through to another
-        // platform or the primary audio artwork.
+        // Missing row artwork must not fall through to another platform or
+        // the primary audio artwork; a valid independent CDN URL is retained.
         rows[1]["musicInfo"]["img"] = .string("")
-        rows[2]["musicInfo"]["img"] = .string("https://untrusted.invalid/image.jpg")
+        rows[2]["musicInfo"]["img"] = .string("https://independent-cdn.invalid/image.jpg")
         let store = NativeMusicMemoryDocument(try MetadataNativeFixture.document(song: MetadataNativeFixture.song(rows)))
         let service = try await MetadataNativeFixture.service(store, enabled: Set(MetadataNativeFixture.all))
         let result = try await service.metadataCandidates(occurrenceID: "entry-1")
         XCTAssertEqual(result.candidates.count, 10)
         XCTAssertEqual(result.candidates.map(\.source.platform), ["wy", "wy", "tx", "tx", "kg", "kg", "kw", "kw", "mg", "mg"])
         XCTAssertNil(result.candidates[0].artwork)
-        XCTAssertNil(result.candidates[1].artwork)
+        XCTAssertEqual(result.candidates[1].artwork, URL(string: "https://independent-cdn.invalid/image.jpg"))
         XCTAssertEqual(result.candidates[2].artwork?.host, "y.gtimg.cn")
         XCTAssertEqual(result.candidates[6].artwork?.host, "img.kuwo.cn")
         XCTAssertEqual(result.candidates[8].artwork?.host, "d.musicapp.migu.cn")
         XCTAssertFalse(result.candidates.compactMap { $0.artwork?.absoluteString }
             .contains("https://y.gtimg.cn/AudioMID.jpg"), "primary audio artwork is not a candidate cover")
         await service.close()
+    }
+
+    func testCandidateArtworkAcceptsIndependentCDNsAndRejectsUnsafeURLsWithoutFallback() async throws {
+        for unsafe in ["https://user@independent-cdn.invalid/cover.jpg",
+                       "https://independent-cdn.invalid:444/cover.jpg",
+                       "https://independent-cdn.invalid/cover.jpg#fragment",
+                       "file:///cover.jpg", "javascript:alert(1)"] {
+            let rows = try MetadataNativeFixture.all.flatMap { platform -> [MJ] in
+                var accepted = try MetadataNativeFixture.row(platform, "01")
+                var rejected = try MetadataNativeFixture.row(platform, "02")
+                accepted["musicInfo"]["img"] = .string("http://independent-cdn.invalid/\(platform.rawValue).jpg?param=800y800&extra=a%2Fb")
+                rejected["musicInfo"]["img"] = .string(unsafe)
+                return [accepted, rejected]
+            }
+            let bytes = try MetadataNativeFixture.document(song: MetadataNativeFixture.song(rows))
+            let store = NativeMusicMemoryDocument(bytes), probe = MetadataNetworkProbe()
+            let service = try await MetadataNativeFixture.service(store, enabled: Set(MetadataNativeFixture.all), probe: probe)
+            let result = try await service.metadataCandidates(occurrenceID: "entry-1")
+            XCTAssertEqual(result.candidates.count, 10)
+            for platform in MetadataNativeFixture.all {
+                let candidates = result.candidates.filter { $0.source.platform == platform.rawValue }
+                XCTAssertEqual(candidates.count, 2)
+                let accepted = try XCTUnwrap(candidates.first), rejected = try XCTUnwrap(candidates.last)
+                XCTAssertEqual(accepted.artwork?.absoluteString,
+                               "https://independent-cdn.invalid/\(platform.rawValue).jpg?param=800y800&extra=a%2Fb")
+                XCTAssertNil(rejected.artwork, "\(platform.rawValue): \(unsafe)")
+            }
+            let calls = await probe.calls(); XCTAssertTrue(calls.isEmpty)
+            XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
+            await service.close()
+        }
     }
 
     func testExplicitEmptySourcesDoNotResurrectSongLevelPrimaryOrWrite() async throws {

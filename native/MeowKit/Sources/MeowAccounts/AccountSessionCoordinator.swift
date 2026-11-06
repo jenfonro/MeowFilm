@@ -22,7 +22,6 @@ public actor AccountSessionCoordinator {
     }
 
     private let store: any CredentialStore
-    private let coordinatorID = UUID()
     private var entries: [AccountIdentity: Entry] = [:]
     private var observers: [UUID: Observer] = [:]
 
@@ -232,73 +231,6 @@ public actor AccountSessionCoordinator {
             entries[token.identity]?.failure = nil
             publish(token.identity)
             return snapshot(for: token.identity)
-        }
-    }
-
-    /// Read-only preparation for a user-confirmed import. Captures absence as
-    /// well as existing bytes, without beginning login or deleting a live session.
-    public func credentialImportLease(for identity: AccountIdentity) throws -> AccountCredentialImportLease {
-        try Task.checkCancellation()
-        let entry = entries[identity]
-        guard entry?.phase != .signingIn, entry?.phase != .removalPending else {
-            throw AccountSessionError.invalidState
-        }
-        let record: CredentialRecord?
-        if let entry, entry.phase == .signedIn || entry.phase == .requiresValidation {
-            record = try checkedRecord(AccountSessionToken(identity: identity, generation: entry.generation))
-        } else {
-            do { record = try store.read(for: identity) }
-            catch { throw AccountSessionError.storage(CredentialStoreError.sanitized(error)) }
-        }
-        return AccountCredentialImportLease(
-            identity: identity, coordinatorID: coordinatorID,
-            generation: entry?.generation, phase: entry?.phase, record: record
-        )
-    }
-
-    /// One write with exact readback; imported bytes always require fresh platform
-    /// validation. A conflict never replays an old preview or deletes newer data.
-    /// This local actor transaction detects observed changes, not cross-process CAS.
-    public func commitCredentialImport(
-        _ lease: AccountCredentialImportLease, credential: AccountCredential, replaceExisting: Bool
-    ) throws -> AccountSessionToken {
-        try lease.withCommitAuthorization {
-            try Task.checkCancellation()
-            guard lease.coordinatorID == coordinatorID else { throw AccountSessionError.staleSession }
-            let identity = lease.identity
-            guard entries[identity]?.generation == lease.generation,
-                  entries[identity]?.phase == lease.phase else { throw AccountSessionError.staleSession }
-            guard !lease.requiresReplacement || replaceExisting else { throw AccountSessionError.invalidState }
-            let observed: CredentialRecord?
-            do { observed = try store.read(for: identity) }
-            catch { throw AccountSessionError.storage(CredentialStoreError.sanitized(error)) }
-            guard observed == lease.originalRecord else {
-                // An external record changed. A live in-memory permission for the
-                // old bytes must not survive, but the external record stays untouched.
-                if let phase = entries[identity]?.phase,
-                   phase == .signedIn || phase == .requiresValidation {
-                    revokeAccess(identity, failure: .credentialsChanged)
-                }
-                throw AccountSessionError.storage(.conflict)
-            }
-            let replacement = CredentialRecord(credential: credential)
-            do {
-                try store.write(replacement, for: identity)
-                guard try store.read(for: identity) == replacement else { throw CredentialStoreError.conflict }
-            } catch {
-                let failure = CredentialStoreError.sanitized(error)
-                // Even write-before-throw is unconfirmed. Revoke, preserve disk,
-                // and require explicit restore/validation; never delete or retry.
-                entries[identity] = Entry(generation: UUID(), phase: .failed,
-                                          failure: .storage(failure), credentialRevision: nil)
-                publish(identity)
-                throw AccountSessionError.storage(failure)
-            }
-            let generation = UUID()
-            entries[identity] = Entry(generation: generation, phase: .requiresValidation,
-                                      failure: nil, credentialRevision: replacement.revision)
-            publish(identity)
-            return AccountSessionToken(identity: identity, generation: generation)
         }
     }
 

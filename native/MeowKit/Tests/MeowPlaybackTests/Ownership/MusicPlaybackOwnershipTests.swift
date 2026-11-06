@@ -118,10 +118,6 @@ private actor CrossDomainNavigationService: MusicServing {
     func removePlaylist(_ collection: MusicCollection) throws { throw MusicServiceError.unsupported }
     func updateSettings(_ change: MusicSettingsChange) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
     func restoreHistory(id: String, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
-    func prepareImport(data: Data, sourceId: String, ownerId: String) throws -> MusicImportPreview { throw MusicServiceError.unsupported }
-    func commitImport(_ preview: MusicImportPreview) throws -> MusicImportReport { throw MusicServiceError.unsupported }
-    func releaseImport(_ preview: MusicImportPreview) {}
-    func rollbackImport(batchId: String) throws { throw MusicServiceError.unsupported }
 }
 
 /// This suite belongs to the playback owner, which alone creates addressed

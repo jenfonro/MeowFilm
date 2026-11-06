@@ -112,7 +112,7 @@ public struct MusicAccountCloseReport: Sendable, Equatable {
 /// Product lifetime. Secrets stay native between this owner, the injected shared
 /// coordinator and a fixed platform adapter. Callers receive typed native
 /// capabilities, never secrets, arbitrary HTTP or credential-store enumeration.
-public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsImporting {
+public actor NativeMusicAccountService: MusicAccountsServing {
     private let accounts: AccountSessionCoordinator
     private let scopes: [MusicAccountPlatform: AccountIdentity]
     private let providers: [MusicAccountPlatform: any MusicAccountProvider]
@@ -142,9 +142,6 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
     private var credentialUpdates: [MusicAccountPlatform: AccountCredentialUpdateLease] = [:]
     private var requiresExplicitRestore = Set<MusicAccountPlatform>()
     private var restoreNativeIDs: [MusicAccountPlatform: String] = [:]
-    private var credentialImports: [UUID: MusicCredentialImportDraft] = [:]
-    private var credentialImportExpiries: [UUID: Task<Void, Never>] = [:]
-    private var preparingCredentialImports: [UUID: MusicAccountPlatform] = [:]
     private var librarySyncBindings: [UUID: MusicAccountSyncBinding] = [:]
     private var accountQueueBindings: [UUID: MusicAccountQueueBinding] = [:]
     private var playbackFeedbackLeases: [UUID: MusicPlaybackFeedbackLease] = [:]
@@ -346,13 +343,12 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
         if error is CredentialStoreError { return .storageFailed }
         return MusicServiceError.sanitized(error)
     }
-    private func rotate(_ platform: MusicAccountPlatform, keepingImport: UUID? = nil,
-                        preservingCurrentRequest: Bool = false) {
+    private func rotate(_ platform: MusicAccountPlatform, preservingCurrentRequest: Bool = false) {
         revokeLocalCacheScopes(platform, event: .accountChanged, preservingCurrentRequest: preservingCurrentRequest)
         accountEpochs[platform] = UUID()
-        invalidateBusiness(platform, keepingImport: keepingImport, preservingCurrentRequest: preservingCurrentRequest)
+        invalidateBusiness(platform, preservingCurrentRequest: preservingCurrentRequest)
     }
-    private func invalidateBusiness(_ platform: MusicAccountPlatform, keepingImport: UUID? = nil,
+    private func invalidateBusiness(_ platform: MusicAccountPlatform,
                                     preservingCurrentRequest: Bool = false) {
         playbackAuthorizations.removeValue(forKey: platform)?.revoke()
         if platform == .netease { guestAudioGrants.removeAll() }
@@ -362,7 +358,6 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
         revokePlaybackFeedback(platform)
         revokeLibrarySync(platform)
         revokeAccountQueues(platform)
-        revokeCredentialImports(platform: platform, excluding: keepingImport)
         credentialUpdates[platform]?.revoke()
         revisions[platform, default: 0] += 1; validated.remove(platform); profiles.removeValue(forKey: platform)
         displayProfiles.removeValue(forKey: platform); profileRequests.removeValue(forKey: platform)
@@ -443,7 +438,6 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
         revokePlaybackFeedback()
         revokeLibrarySync()
         revokeAccountQueues()
-        revokeCredentialImports()
         for lease in credentialUpdates.values { lease.revoke() }
         validated.removeAll(); profiles.removeAll(); pages.removeAll(); grants.removeAll()
         displayProfiles.removeAll(); profileRequests.removeAll()
@@ -482,7 +476,6 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
             revokePlaybackFeedback()
             revokeLibrarySync()
             revokeAccountQueues()
-            revokeCredentialImports()
             for lease in credentialUpdates.values { lease.revoke() }
             for operation in operations.values { operation.cancel() }
             let old = login, oldToken = old.flatMap { tokens[$0.platform] }; login = nil
@@ -492,7 +485,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
         }
         await drainCacheLifecycle()
         let inFlight = operations.count + restoring.count + localCacheRestoring.count +
-            transitions.count + preparingCredentialImports.count + localCacheReads.waiterCount +
+            transitions.count + localCacheReads.waiterCount +
             playbackFeedbackLeases.values.reduce(0) { $0 + $1.authorization.inFlight }
         return .init(cleanupComplete: inFlight == 0 && pendingWrites == 0,
                      inFlight: inFlight, pendingCredentialWrites: pendingWrites)
@@ -656,13 +649,11 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
             let provider = providers[platform]!, restoredNativeID = restoreNativeIDs[platform]
             try await withTaskCancellationHandler {
                 let value = try await run(platform) {
-                    let validationCredential = try MusicCredentialImportStored.forValidation(
-                        lease.credential, platform: platform, explicit: force && !refresh)
-                    let bound = try await provider.nativeID(validationCredential)
+                    let bound = try await provider.nativeID(lease.credential)
                     guard restoredNativeID == nil || restoredNativeID == bound else { throw MusicServiceError.targetChanged }
                     let value: MusicQQVerified
-                    if refresh { value = try await provider.refresh(validationCredential) }
-                    else { value = try await provider.verify(validationCredential) }
+                    if refresh { value = try await provider.refresh(lease.credential) }
+                    else { value = try await provider.verify(lease.credential) }
                     guard value.nativeID == bound, try await provider.nativeID(value.credential) == bound else {
                         throw MusicServiceError.targetChanged
                     }
@@ -702,153 +693,12 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
         try await validToken(token, platform: platform, own: own)
         return .init(platform: platform, phase: .signedIn, nickname: profiles[platform] ?? "", canLogin: true)
     }
-    private func revokeCredentialImports(platform: MusicAccountPlatform? = nil, excluding: UUID? = nil) {
-        for (id, draft) in credentialImports where id != excluding && (platform == nil || draft.platform == platform) {
-            draft.revoke()
-            credentialImportExpiries.removeValue(forKey: id)?.cancel()
-            credentialImports.removeValue(forKey: id)
-        }
-    }
-    public func cancelCredentialImport(id: UUID) {
-        credentialImports.removeValue(forKey: id)?.revoke()
-        credentialImportExpiries.removeValue(forKey: id)?.cancel()
-    }
-    private func checkCredentialImport(_ draft: MusicCredentialImportDraft) throws {
-        try check(draft.epoch)
-        if draft.expires <= now() {
-            cancelCredentialImport(id: draft.id); throw MusicCredentialImportError.expired
-        }
-        guard credentialImports[draft.id] === draft,
-              accountEpochs[draft.platform] == draft.binding,
-              revisions[draft.platform, default: 0] == draft.revision else {
-            throw MusicCredentialImportError.expired
-        }
-        guard !transitions.contains(draft.platform), !restoring.contains(draft.platform),
-              login?.platform != draft.platform else { throw MusicCredentialImportError.busy }
-    }
-    private func importFailure(_ error: Error) -> MusicCredentialImportError {
-        if let error = error as? AccountSessionError {
-            switch error {
-            case .storage(.conflict), .credentialsUnavailable, .staleSession: return .storageConflict
-            case .storage: return .storageFailed
-            case .invalidState: return .busy
-            }
-        }
-        return .sanitized(error)
-    }
-    public func previewCredentialImport(_ input: MusicCredentialImportInput, platform: MusicAccountPlatform,
-                                        format: MusicCredentialImportFormat, requestID: UUID) async throws -> MusicCredentialImportPreview {
-        defer { input.revoke() }
-        do {
-            try check()
-            let identity = try configured(platform)
-            for (id, draft) in credentialImports where draft.expires <= now() { cancelCredentialImport(id: id) }
-            guard credentialImports[requestID] == nil, preparingCredentialImports[requestID] == nil,
-                  Set(credentialImports.keys).union(preparingCredentialImports.keys).count < 3,
-                  !credentialImports.values.contains(where: { $0.platform == platform }),
-                  !preparingCredentialImports.values.contains(platform),
-                  !transitions.contains(platform), !restoring.contains(platform), login?.platform != platform else {
-                throw MusicCredentialImportError.busy
-            }
-            let draft = MusicCredentialImportDraft(id: requestID, platform: platform, epoch: epoch,
-                binding: accountEpochs[platform], revision: revisions[platform, default: 0],
-                expires: now().addingTimeInterval(180),
-                material: try MusicCredentialImportParser.parse(input.consume(), platform: platform, format: format))
-            credentialImports[requestID] = draft; preparingCredentialImports[requestID] = platform
-            localCacheEpoch = UUID()
-            aggregateCacheBinding?.value.authorization.revoke(); aggregateCacheBinding = nil
-            enqueueCacheLifecycle(.importPending)
-            defer { preparingCredentialImports.removeValue(forKey: requestID) }
-            do {
-                return try await withTaskCancellationHandler {
-                    let before = await accounts.snapshot(for: identity)
-                    try checkCredentialImport(draft)
-                    let lease = try await accounts.credentialImportLease(for: identity)
-                    try draft.install(lease)
-                    try checkCredentialImport(draft)
-                    let after = await accounts.snapshot(for: identity)
-                    try checkCredentialImport(draft)
-                    guard before.generation == after.generation, before.phase == after.phase else {
-                        throw MusicCredentialImportError.storageConflict
-                    }
-                    let result = try draft.preview()
-                    credentialImportExpiries[requestID] = Task { [weak self] in
-                        do { try await Task.sleep(nanoseconds: 180_000_000_000) } catch { return }
-                        await self?.cancelCredentialImport(id: requestID)
-                    }
-                    return result
-                } onCancel: { draft.revoke() }
-            } catch {
-                cancelCredentialImport(id: requestID)
-                throw error
-            }
-        } catch { throw importFailure(error) }
-    }
-    public func commitCredentialImport(id: UUID, replaceExisting: Bool) async throws -> MusicAccountStatus {
-        defer { if Task.isCancelled { cancelCredentialImport(id: id) } }
-        do {
-            guard let draft = credentialImports[id] else { throw MusicCredentialImportError.expired }
-            try checkCredentialImport(draft)
-            let platform = draft.platform, identity = try configured(platform)
-            let before = await accounts.snapshot(for: identity)
-            try checkCredentialImport(draft)
-            // Confirmation errors do not consume the draft or touch Accounts.
-            let (lease, material) = try draft.take(replaceExisting: replaceExisting)
-            defer { cancelCredentialImport(id: id) }
-            let pending = try MusicCredentialImportStored.pending(material.credential, platform: platform)
-            let oldToken = tokens[platform], wasValidated = validated.contains(platform), nickname = profiles[platform]
-            transitions.insert(platform)
-            defer { transitions.remove(platform); notifyNativeHome(platform); notifyAccountSession(platform) }
-            rotate(platform, keepingImport: id)
-            let own = epoch, binding = accountEpochs[platform]
-            pendingWrites += 1; defer { pendingWrites -= 1 }
-            do {
-                return try await withTaskCancellationHandler {
-                    await drainCacheLifecycle()
-                    try check(own)
-                    guard accountEpochs[platform] == binding else { throw MusicCredentialImportError.expired }
-                    let token = try await accounts.commitCredentialImport(lease, credential: pending, replaceExisting: replaceExisting)
-                    // Retain only the opaque token across a protection change so
-                    // unlock can validate; never publish an old page's success.
-                    if accountEpochs[platform] == binding {
-                        tokens[platform] = token; inspected.insert(platform)
-                        requiresExplicitRestore.remove(platform); restoreNativeIDs.removeValue(forKey: platform)
-                    }
-                    notifyAccountSession(platform)
-                    try check(own)
-                    guard accountEpochs[platform] == binding, tokens[platform] == token else {
-                        throw MusicCredentialImportError.expired
-                    }
-                    return .init(platform: platform, phase: .requiresValidation, canLogin: true)
-                } onCancel: { draft.revoke() }
-            } catch {
-                let failure = error
-                let after = await accounts.snapshot(for: identity)
-                if accountEpochs[platform] == binding {
-                    if let sessionError = failure as? AccountSessionError, case .storage = sessionError,
-                       after.generation != before.generation, after.phase == .failed, case .storage? = after.failure {
-                        tokens.removeValue(forKey: platform)
-                        requiresExplicitRestore.insert(platform); restoreNativeIDs[platform] = material.nativeID
-                        throw MusicCredentialImportError.commitUnconfirmed
-                    }
-                    // A rejected write/CAS must not destroy the unchanged live
-                    // session. Old business grants stay revoked, never revived.
-                    if own == epoch, available, !closed, wasValidated, let oldToken,
-                       tokens[platform] == oldToken, after.generation == oldToken.generation, after.phase == .signedIn {
-                        validated.insert(platform); profiles[platform] = nickname
-                    }
-                }
-                throw failure
-            }
-        } catch { throw importFailure(error) }
-    }
     private func beginAccount(_ identity: AccountIdentity) async throws -> AccountSessionToken {
         pendingWrites += 1; defer { pendingWrites -= 1 }
         return try await accounts.beginLogin(for: identity)
     }
     public func beginLogin(platform: MusicAccountPlatform) async throws -> MusicLoginChallenge {
         try check(); let identity = try configured(platform)
-        revokeCredentialImports(platform: platform)
         guard !transitions.contains(platform), login == nil else { throw MusicServiceError.busy }
         transitions.insert(platform)
         defer { transitions.remove(platform); notifyNativeHome(platform); notifyAccountSession(platform) }
@@ -932,7 +782,6 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
     }
     public func logout(platform: MusicAccountPlatform) async throws {
         try check(); let identity = try configured(platform), own = epoch
-        revokeCredentialImports(platform: platform)
         guard !transitions.contains(platform) else { throw MusicServiceError.busy }
         transitions.insert(platform)
         defer { transitions.remove(platform); notifyNativeHome(platform); notifyAccountSession(platform) }
@@ -1783,9 +1632,7 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
               revisions[platform, default: 0] == revision,
               !transitions.contains(platform), !restoring.contains(platform), !localCacheRestoring.contains(platform),
               login?.platform != platform, !requiresExplicitRestore.contains(platform),
-              credentialUpdates[platform] == nil,
-              !preparingCredentialImports.values.contains(platform),
-              !credentialImports.values.contains(where: { $0.platform == platform }) else {
+              credentialUpdates[platform] == nil else {
             throw MusicServiceError.staleResult
         }
     }
@@ -2016,8 +1863,8 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
                                         event: MusicNativeCacheLifecycleEvent? = nil,
                                         preservingCurrentRequest: Bool = false) {
         // Screen lock alone does not revoke an already-held remote stream.
-        // Account replacement/logout/import and shutdown do, synchronously.
-        if event == .accountChanged || event == .importPending || event == .closed {
+        // Account replacement/logout and shutdown do, synchronously.
+        if event == .accountChanged || event == .closed {
             for key in Array(playbackAuthorizations.keys) where platform == nil || platform == key {
                 playbackAuthorizations.removeValue(forKey: key)?.revoke()
             }
@@ -2091,9 +1938,6 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
             guard account == accountEpochs[platform], tokens[platform] == token,
                   !transitions.contains(platform), login?.platform != platform,
                   !requiresExplicitRestore.contains(platform) else { throw MusicServiceError.staleResult }
-            // A confirmed import that has not been explicitly validated is not
-            // permitted to reuse full audio files, even after a process restart.
-            _ = try MusicCredentialImportStored.forValidation(lease.credential, platform: platform, explicit: false)
             return lease
         } catch { lease.revoke(); throw error }
     }
@@ -2181,7 +2025,6 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
         do {
             try check()
             guard cacheLifecycleTail == nil else { throw MusicServiceError.busy }
-            guard credentialImports.isEmpty, preparingCredentialImports.isEmpty else { throw MusicServiceError.verificationRequired }
             if let current = aggregateCacheBinding?.value {
                 try await checkNativeCacheScope(current); return current
             }
@@ -2196,8 +2039,7 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
                 guard try await localCacheScope(platform: platform) == parts[platform] else { throw MusicServiceError.staleResult }
             }
             try check(own)
-            guard localCacheEpoch == cacheEpoch, cacheLifecycleTail == nil,
-                  credentialImports.isEmpty, preparingCredentialImports.isEmpty else {
+            guard localCacheEpoch == cacheEpoch, cacheLifecycleTail == nil else {
                 throw MusicServiceError.staleResult
             }
             struct Part: Encodable { let platform: String; let identity: AccountIdentity; let record: String? }
@@ -2220,7 +2062,6 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
         do {
             try check(); try value.authorization.check()
             guard cacheLifecycleTail == nil else { throw MusicServiceError.busy }
-            guard credentialImports.isEmpty, preparingCredentialImports.isEmpty else { throw MusicServiceError.verificationRequired }
             guard let binding = aggregateCacheBinding, binding.value == value, binding.epoch == epoch else {
                 throw MusicServiceError.staleResult
             }

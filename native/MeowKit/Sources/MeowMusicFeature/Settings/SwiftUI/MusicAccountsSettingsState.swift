@@ -77,7 +77,6 @@ final class MusicAccountsSettingsState: ObservableObject {
     let accounts: MusicAccountsViewModel?
     let sync: MusicLibrarySyncViewModel?
     let feedback: MusicPlaybackFeedbackSettingsModel?
-    let hasCredentialsImport: Bool
     private let owner: MusicViewModel
     private var started = false
     private var generation: UUID?
@@ -113,7 +112,6 @@ final class MusicAccountsSettingsState: ObservableObject {
                 try await owner?.reconcilePlaybackFeedbackSettings(accessGeneration: generation)
             }
         }
-        hasCredentialsImport = owner.accounts is any MusicCredentialsImporting
         let statuses = accounts?.$rows.eraseToAnyPublisher() ?? Just<[MusicAccountStatus]>([]).eraseToAnyPublisher()
         statuses.map { $0.map { MusicAccountSettingsSummary(account: $0) } }
             .removeDuplicates()

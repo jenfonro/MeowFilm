@@ -138,26 +138,27 @@ final class NativeMusicAccountSessionObservationTests: XCTestCase {
         _ = await guest.service.close(); await fulfillment(of: [guestObservation.finished], timeout: 3)
     }
 
-    func testValidationRefreshAndCredentialImportPublishOnlyTheirPlatform() async throws {
-        let f = try MusicCredentialImportOwnerFixture(); try await f.enable(); try await f.signedIn()
-        let observation = await observe(f.service); await waitForEvents(observation, count: 2)
+    func testValidationAndRefreshPublishOnlyTheirPlatform() async throws {
+        let identity = try MusicAccountFixture.identity(), store = MusicUpdateStore(), provider = MusicAccountTestProvider()
+        let accounts = AccountSessionCoordinator(store: store)
+        let service = NativeMusicAccountService(accounts: accounts,
+            scopes: [.qq: identity, .netease: try MusicAccountFixture.identity("wy")],
+            providers: [.qq: provider, .netease: provider])
+        _ = try await service.setAccess(available: true, generation: 1)
+        store.seed(try MusicAccountFixture.credential(42), for: identity)
+        _ = try await service.validate(platform: .qq)
+        let observation = await observe(service); await waitForEvents(observation, count: 2)
         _ = await observation.events.take()
-        let before = await f.accounts.snapshot(for: f.identity)
-        _ = try await f.service.validate(platform: .qq); await waitForEvents(observation)
+        let before = await accounts.snapshot(for: identity)
+        _ = try await service.validate(platform: .qq); await waitForEvents(observation)
         let validation = await observation.events.take(); XCTAssertTrue(validation.allSatisfy { $0 == .qq })
-        _ = try await f.service.refresh(platform: .qq); await waitForEvents(observation)
+        _ = try await service.refresh(platform: .qq); await waitForEvents(observation)
         let refresh = await observation.events.take(); XCTAssertTrue(refresh.allSatisfy { $0 == .qq })
-        let after = await f.accounts.snapshot(for: f.identity)
+        let after = await accounts.snapshot(for: identity)
         XCTAssertEqual(after.generation, before.generation)
-        let preview = try await f.preview()
-        _ = try await f.service.commitCredentialImport(id: preview.id, replaceExisting: true)
-        await waitForEvents(observation)
-        let imported = await observation.events.take(); XCTAssertTrue(imported.allSatisfy { $0 == .qq })
-        let statuses = try await f.service.statuses()
-        XCTAssertEqual(statuses.first { $0.platform == .qq }?.phase, .requiresValidation)
-        let counts = await f.provider.counts()
+        let counts = await provider.counts()
         XCTAssertEqual(counts.verify, 2); XCTAssertEqual(counts.refresh, 1); XCTAssertEqual(counts.begin, 0)
-        _ = await f.service.close(); await fulfillment(of: [observation.finished], timeout: 3)
+        _ = await service.close(); await fulfillment(of: [observation.finished], timeout: 3)
     }
 
     func testSameTokenExternalCommitAndLocalStorageFailureDoNotCancelAnotherPlatform() async throws {

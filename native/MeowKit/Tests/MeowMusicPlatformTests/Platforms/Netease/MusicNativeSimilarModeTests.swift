@@ -161,7 +161,7 @@ import MeowJSON
 /// Deliberately omits a provider-side final check to exercise the real owner's
 /// last credential/authorization fence, rather than making the test self-pass.
 private actor MusicSimilarModeGateProvider: MusicAccountProvider, MusicAccountSimilarModeProvider {
-    private let account = MusicCredentialImportProvider()
+    private let account = MusicAccountTestProvider()
     private var gate: MusicAccountQueueOwnerGate?
     func hold(_ value: MusicAccountQueueOwnerGate) { gate = value }
     func similarMode(_ request: MusicNativeSimilarModeRequest, credential: AccountCredential,

@@ -40,14 +40,11 @@ public protocol MusicNativeCacheScopeProviding: Sendable {
 /// No secrets, account IDs or URLs are carried. The callback must not call back
 /// into the same account owner (its lifecycle barrier would deadlock).
 public enum MusicNativeCacheLifecycleEvent: Sendable, Equatable {
-    /// Logout/login replacement, committed import, credential revision change
+    /// Logout/login replacement, credential revision change
     /// or observed external replacement. Clear this owner's complete-file cache.
     case accountChanged
     /// Protection generation changed. Cancel pending work, retain disk bytes.
     case accessChanged
-    /// Preview is unresolved. Cancel pending work, retain disk bytes until an
-    /// actual replacement; dismissing preview may reuse the original scope.
-    case importPending
     /// Owner shuts down. Cancel pending work, retain disk bytes across restart.
     case closed
 }

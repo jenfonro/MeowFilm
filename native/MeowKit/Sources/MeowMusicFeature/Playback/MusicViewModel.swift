@@ -79,32 +79,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         accountEvents.eraseToAnyPublisher()
     }
     public var onRequestPresentation: (@MainActor (MusicPlaybackDestination) -> Void)?
-    public private(set) lazy var importWorkflow = MusicLibraryImportWorkflow(
-        service: service,
-        context: { [weak self] in
-            guard let self else { return (false, true, UUID()) }
-            return (self.isAvailable, self.isClosed, self.lifecycle)
-        },
-        didCommit: { [weak self] in await self?.load() },
-        report: { [weak self] error, epoch, operation in
-            guard let self else { return }
-            let failure = MusicServiceError.sanitized(error)
-            if self.isClosed {
-                if failure != .cancelled { self.error = failure.message(operation: operation) }
-            } else if let failure = error as? ImportedFileError {
-                if self.lifecycle == epoch, self.isAvailable { self.error = failure.localizedDescription }
-            } else {
-                self.report(error, epoch: epoch, operation: operation, kind: .library)
-            }
-        }
-    )
-    public var importPreview: MusicImportPreview? { importWorkflow.preview }
-    public var isImporting: Bool { importWorkflow.isBusy }
-    public var showingImport: Bool { importWorkflow.isOpen }
-    public var importOwner: String {
-        get { importWorkflow.owner }
-        set { importWorkflow.owner = newValue }
-    }
     public var hasLoadedLibrary: Bool { libraryState.isLoaded }
     public func ensureLibraryLoaded() async {
         if !libraryState.isLoaded, !isLoading { await load() }
@@ -175,7 +149,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public let scriptSources: (any MusicScriptSourceManaging)?
     public var accountBrowser: (any MusicAccountBrowsing)? { service as? any MusicAccountBrowsing }
     public var librarySync: (any MusicLibrarySyncing)? { service as? any MusicLibrarySyncing }
-    public var importManagement: (any MusicImportHistoryProviding)? { service as? any MusicImportHistoryProviding }
     public var remoteQueueService: (any MusicRemoteQueueServing)? { service as? any MusicRemoteQueueServing }
     public var playbackFeedbackSettings: (any MusicPlaybackFeedbackSettingsServing)? { service as? any MusicPlaybackFeedbackSettingsServing }
     public var metadataPreferencesService: (any MusicMetadataPreferencesServing)? { service }
@@ -395,7 +368,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         invalidateSelection(stopMedia: false); eventTail?.cancel()
         candidate = nil; resolvingAttempt = nil; terminalAttempt = nil
         playbackState.state = MusicPlaybackState(); playbackState.queue = []; notices.queueNotice = nil; libraryState.collections = []; libraryState.platforms = []
-        libraryState.playedSongs = []; libraryState.playedPlaylists = []; importWorkflow.invalidate()
+        libraryState.playedSongs = []; libraryState.playedPlaylists = []
         libraryState.isLoaded = false; libraryState.isLoading = false
         position = 0; duration = nil; error = nil
         notifyCollectionPages(.access)
@@ -450,16 +423,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public func setMode(_ mode: MusicPlaybackMode) async {
         await updateSettings(MusicSettingsChange(ifRevision: state.settingsRevision, mode: mode))
     }
-    public func importFile(_ url: URL) async { await importWorkflow.loadFile(url) }
-    public func previewImport() async {
-        do { _ = try enter() } catch { return }
-        await importWorkflow.previewImport()
-    }
-    public func confirmImport() async { await importWorkflow.confirmImport() }
-    public func cancelImport() async { await importWorkflow.cancel() }
-    @discardableResult
-    func cancelImportPresentation() -> Task<Void, Never>? { importWorkflow.cancelPresentation() }
-
     public func close() async {
         guard !isClosed else { return }
         favoritesObservation?.cancel(); favoritesObservation = nil
@@ -479,7 +442,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         playbackState.queue = []; notices.queueNotice = nil; metadataState.lyricLines = []
         libraryState.isLoaded = false
         await favoritesStorage?.flush()
-        await importWorkflow.close()
         if let service {
             if let attempt { do { try await service.cancel(attemptId: attempt) } catch { self.error = MusicServiceError.sanitized(error).localizedDescription } }
         }

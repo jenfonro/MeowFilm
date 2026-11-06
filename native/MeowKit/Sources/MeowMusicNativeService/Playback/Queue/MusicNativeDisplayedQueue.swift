@@ -39,7 +39,7 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
             }
         }
         var cachedByID: [Data: MJ] = [:]
-        for value in cached { cachedByID[Data(value["songId"].string.utf8)] = value }
+        for value in cached { cachedByID[try Self.identityKey(value)] = value }
         let historySongs: [Data: MJ]
         if let historyDate {
             let rows = (before.history["days"].array.first {
@@ -59,19 +59,19 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
             if let historyDate {
                 raw = historySongs[Data(track.songId.utf8)]
                 guard raw != nil else { throw MusicServiceError.notFound }
-            } else if let value = resolvedByID[Data(track.songId.utf8)] {
+            } else if let value = resolvedByID[Self.identityKey(songId: track.songId, sourceKeys: track.sources.map(\.sourceKey))] {
                 raw = value
             } else if let value = try? song(track.ref, before) {
                 raw = value
             } else {
-                raw = cachedByID[Data(track.songId.utf8)]
+                raw = cachedByID[Self.identityKey(songId: track.songId, sourceKeys: track.sources.map(\.sourceKey))]
             }
             if let raw {
                 try Self.checkDisplayedIdentity(raw, track)
                 bytes += raw.bytes.count
                 try musicRequire(bytes <= 4 * 1024 * 1024, .limit)
                 resolved[position] = raw
-                resolvedByID[Data(track.songId.utf8)] = raw
+                resolvedByID[try Self.identityKey(raw)] = raw
             } else {
                 // Reference discovery songs are NetEase recordings. Re-fetch
                 // only that exact native ID, never title-search or another source.
@@ -153,6 +153,19 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
         else { result = try commit() }
         invalidatePlayback(); similarDidChangeQueue(.replace)
         return result
+    }
+
+    /// De-duplication identity: the same identity checkDisplayedIdentity
+    /// enforces, songId plus the sources in order. Keying by songId alone
+    /// folds distinct recordings that share a fingerprint-derived songId
+    /// (same title/artist/version, different native IDs) into one entry,
+    /// so a later track resolves to the wrong recording and fails the
+    /// identity check as if its target had changed.
+    private static func identityKey(songId: String, sourceKeys: [String]) -> Data {
+        Data((songId + "\n" + sourceKeys.joined(separator: "\n")).utf8)
+    }
+    private static func identityKey(_ song: MJ) throws -> Data {
+        try identityKey(songId: song["songId"].string, sourceKeys: MusicModel.sources(song).map(\.sourceKey))
     }
 
     private static func checkDisplayedIdentity(_ song: MJ, _ displayed: MusicRemoteTrack) throws {
