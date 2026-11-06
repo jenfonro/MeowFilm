@@ -649,12 +649,11 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             let provider = providers[platform]!, restoredNativeID = restoreNativeIDs[platform]
             try await withTaskCancellationHandler {
                 let value = try await run(platform) {
-                    let validationCredential = lease.credential
-                    let bound = try await provider.nativeID(validationCredential)
+                    let bound = try await provider.nativeID(lease.credential)
                     guard restoredNativeID == nil || restoredNativeID == bound else { throw MusicServiceError.targetChanged }
                     let value: MusicQQVerified
-                    if refresh { value = try await provider.refresh(validationCredential) }
-                    else { value = try await provider.verify(validationCredential) }
+                    if refresh { value = try await provider.refresh(lease.credential) }
+                    else { value = try await provider.verify(lease.credential) }
                     guard value.nativeID == bound, try await provider.nativeID(value.credential) == bound else {
                         throw MusicServiceError.targetChanged
                     }

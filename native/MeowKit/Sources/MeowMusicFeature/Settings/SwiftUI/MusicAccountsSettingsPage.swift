@@ -175,7 +175,6 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
         let access = owner.accountAccessGeneration
         reportError(state.error, retry: { [weak state] in state?.retry(generation: access) })
     }
-
 }
 
 @MainActor
@@ -209,7 +208,6 @@ struct MusicAccountsSettingsContent: View {
                 }
             }
             .headerProminence(.increased)
-            .disabled(!state.available)
         }
         .modifier(MusicSettingsListStyle(theme: theme))
     }

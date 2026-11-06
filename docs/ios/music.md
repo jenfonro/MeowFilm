@@ -75,13 +75,12 @@
 - 歌词缓存合并同录音在途读取，各队列 occurrence 独立取消并重绑定；页面／收藏读取、酷狗请求、FM source 和播放恢复不以活动任务数拒绝新有效意图。取消的旧执行仍追踪到实际完成，不能回写当前代次。
 - 受控媒体读取不设总任务、每 host、每 asset 或本地 HLS 连接／listener 次数门槛；URLSession 沿用系统连接管理。控制器仍核算 16 MiB 保留载荷、分窗回压及实际连接收尾，HLS 资源图／地址与重定向政策不变。音频文件缓存保留实际磁盘字节预算和同 key 去重，不以 fill 数拒绝。
 - 播放候选按已声明且启用的质量排序并去重，不设源数量或尝试次数截断；同一 provider 的当前质量请求串行，其他 provider 不受全局槽限制。登录单飞／短信发送冷却、播放 attempt 身份防重及同步未知提交围栏各有真实作用域，不充当网络额度；未知提交不能自动重发。
-- 歌曲持久模型只保留 `songId`、`title`、`artist`、`album`、`duration`、`cover_url` 和 `sources`；每个来源使用 `sourceKey`、`source`、`musicInfo`，仅保留平台定位、展示与录音核对所需元信息。`musicInfo.img` 仍供封面候选使用；平台录音 ID 只读 `musicInfo.songmid`（酷狗为 hash），原生账号、同步、歌词与 LX 契约均消费该字段。
+- 歌曲持久模型只保留 `songId`、`title`、`artist`、`album`、`duration`、`cover_url` 和 `sources`；每个来源使用 `sourceKey`、`source`、`musicInfo`，仅保留平台定位、展示与录音核对所需元信息。`musicInfo.img` 仍供封面候选使用，沿用图片 URL 校验，不使用平台／CDN 域名白名单；字段缺失或 URL 不合法时该候选无封面，不借用其他平台或主录音的封面。平台录音 ID 只读 `musicInfo.songmid`（酷狗为 hash），原生账号、同步、歌词与 LX 契约均消费该字段。
 
 ## 当前持久数据与服务契约
 
-- 曲库使用当前紧凑歌曲及当前曲库结构。歌曲必须是包含上述当前字段的对象（`cover_url` 可选）；缺少必要字段明确失败，不补 ID、名称或来源，`sources=[]` 表示合法本地歌曲。平台原始响应通过专用转换入口进入当前模型。
+- 曲库使用当前紧凑歌曲及当前曲库结构。歌曲必须是包含上述当前字段的对象（`cover_url` 可选）；缺少必要字段明确失败，不补 ID、名称或来源，`sources=[]` 表示合法本地歌曲。平台原始响应通过专用转换入口进入当前模型。持久文档任一区域出现秘密字段名即按损坏拒绝。
 - `cleanSong` 仅提取当前歌曲字段；完整合法歌曲附加的无关字段不参与转换、不持久化，也不影响歌曲 ID、来源及录音元信息。字段类型、来源一致性、秘密和瞬态字段规则，以及来源数量、时长和长度边界仍按当前契约校验。
-- 导入回执必含 `batchId`、`sourceId`、`sourceOwnerId`、`appliedAt`、`appliedRevision`、`afterHash` 六字段，读取时校验类型、数值及摘要格式；普通额外字段不阻止读取，读取不回写。文档秘密字段仍拒绝。
 - collection 与 `sources` 来源行使用封闭字段集合，未知字段会被拒绝。同步 ledger 的 `automatic` 为必填；整份 ledger 不存在时创建当前状态且默认不自动远端写入。绑定 `map` 固定为 native／occurrence ID 到 song ID，并校验歌曲引用。
 - 相似模式会话的当前 schema 为 2，平台与 source ID 使用当前字段，队列身份与授权按当前契约校验。无效持久文档明确失败并保留原文件；可淘汰缓存按各自的未命中规则处理，不清扫用户数据。
 - `MusicServing` 要求当前来源可用性与播放元数据契约；来源列表由 `sourceAvailability` 提供。播放 owner 消费带身份的 event／fact。
@@ -94,7 +93,7 @@ App 通过 `MeowfilmResources` 与 `MeowfilmAssembly` 注入受保护客户端�
 | --- | --- |
 | 网易云 | 安装客户端资料由 `NativeMusicClientService` 在独立受保护文档中持有，公开读取、新登录及适用的播放读取复用。已有凭据的不同设备绑定保留原身份；账号授权及绑定资料仍由凭据 writer 验证和保存。 |
 | QQ | 公开客户端 owner 继续使用既有 `music.qq-public.v1` 文档、QIMEI 与匿名 session；账号 adapter 取得同一客户端资料，但账号 auth 不进入公开实例或匿名文档。 |
-| 酷狗 | 安装 seed、派生 MID 与已确认 dfid 由客户端 owner 保存，新登录复用；登记只在协议需要的明确业务中发生。不同设备绑定不替换成安装标识。 |
+| 酷狗 | 安装 seed、派生 MID 与已确认 dfid 由客户端 owner 保存，新登录复用；登记只在协议需要的明确业务中发生。已有凭据的不同设备绑定保留原设备，不替换成安装标识。 |
 
 - `NativeMusicClientService` 使用 `music.client-context.<platform>.v1` 文档；QQ 仍使用 `music.qq-public.v1`。文档校验及预期修订保存由 `MusicClientContextPersistence.swift` 提供，账号授权仍通过账号 lease／CAS 交接。
 - QQ 设备协商复用 `MusicAccountSingleFlight`，由 `MusicQQDevice.swift` 消费客户端范围。独立构造且未注入持久化的客户端上下文仅保留内存状态，App 装配不采用这种易失构造。
@@ -118,7 +117,7 @@ App 通过 `MeowfilmResources` 与 `MeowfilmAssembly` 注入受保护客户端�
 - 每张音乐卡的成员区域与横纵滚动及安全区后的真实可用视口相交，才准入缺少的成员读取。只有标题露出不读成员；页面至多串行执行一个成员页读取。布局、主题和本地操作不刷新成功内容，失败也不因布局或返回自动重试。
 - 成员复用 `MusicPublicBrowsing.publicDetail` 的 30 个原始位置首页，返回 `MusicPublicBrowseMember` 的原生 ID、绝对零基源位置和可操作歌曲。原生 owner 保留整页；搜索只投影前 20 个原始位置，不分页、不用第 21–30 名填补缺歌，排名与紧凑播放队列下标分离。
 - 网易 head 先校验真实成员身份，直接消费其中完整合法的必要歌曲字段，缺口才走一次 `/weapi/v3/song/detail` 批量补读。head 的 45 秒缓存及同资源快照／30 个有序 ID 的 120 秒原生歌曲批次供搜索、详情与完整队列读取复用；完整队列仍只在明确操作中加载并验证，搜索不自动打开它。
-- JSON 解析不预扫描拒绝重复键或 Unicode 键，不因未消费的数字元数据拒绝整份响应，网易云 `alg`、`updateFrequency` 不再按路由丢弃。MJ 与账号响应、本机客户端和 QQ 公共设备文档使用的 `MeowJSON.JSONObject` 均在每层对象中采用最后一个同名成员的值，转义后同名也遵循此规则，不合并被替换的对象。MJ 保留数字原文与 locator 顺序；JSONObject 对不可表示或会舍入为错误整数的数字保留 `JSONNumber`，网易云首页净化后转发仍写为原始数字，不变成字符串或空值。真实身份、最终业务状态及文档版本仍由消费者校验；导入账号 ID 只接受字符串或整数字面量，小数、指数及超出安全整数范围的数字不作为 ID。标准 JSON 语法、传输字节预算和递归栈资源边界继续有效。Foundation 编码自有字典和内部 Codable DTO/缓存不负责解析上游重复成员。
+- JSON 解析不预扫描拒绝重复键或 Unicode 键，不因未消费的数字元数据拒绝整份响应，网易云 `alg`、`updateFrequency` 不再按路由丢弃。MJ 与账号响应、本机客户端和 QQ 公共设备文档使用的 `MeowJSON.JSONObject` 均在每层对象中采用最后一个同名成员的值，转义后同名也遵循此规则，不合并被替换的对象。MJ 保留数字原文与 locator 顺序；JSONObject 对不可表示或会舍入为错误整数的数字保留 `JSONNumber`，网易云首页净化后转发仍写为原始数字，不变成字符串或空值。真实身份、最终业务状态及文档版本仍由消费者校验。标准 JSON 语法、传输字节预算和递归栈资源边界继续有效。Foundation 编码自有字典和内部 Codable DTO/缓存不负责解析上游重复成员。
 - 成员页在原生服务上整批预留后注册 handle，纯数据缓存不延长旧 handle 或授予权限。明确播放时只重新消费该成员首页，在当前范围重新注册、核对快照／原生 ID／源位置／录音身份后交给既有播放 owner，仍只播放该搜索预览。
 - 热搜榜仅在服务声明 `needPlay` 且存在专用能力时显示标题播放按钮。点击后把当前显示的有序关键词一次传给 `/eapi/hot/search/relate/song/get`，要求响应逐位置返回等量歌曲，整批标准化并注册 handle 后交给同一个播放 owner；不预取歌曲、不逐词普通搜索，短缺或无法可靠对齐的响应整体拒绝。
 - 被结果页覆盖时保留内容及横滑／历史状态，不取消已准入展示读取，但停止新屏外需求。隐藏期间范围变化立即清空并撤销发布资格，不重读；再次可见只加载当前所需。移出导航栈后取消等待，迟到结果不能恢复内容或播放意图。

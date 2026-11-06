@@ -681,7 +681,6 @@ final class MusicUIKitRegressionTests: XCTestCase {
         subscription.cancel(); image.onFailure = nil; await model.close()
     }
 
-
     func testSettingsErrorWaitsForAppearanceAndIsNotPresentedAgainOnReturn() async throws {
         let appearance = MusicAppearancePreferencesStore()
         let page = MusicSettingsPageViewController(appearance: appearance, content: Text("设置"))
@@ -4231,7 +4230,6 @@ private actor MusicUIKitResultInspectionSession: MusicSourceInspectionSession {
     }
     func close() { closeCount += 1; pair.continuation.finish() }
 }
-
 
 @MainActor
 private final class MusicSeekRecordingPlayer: MusicPlaybackDriving {

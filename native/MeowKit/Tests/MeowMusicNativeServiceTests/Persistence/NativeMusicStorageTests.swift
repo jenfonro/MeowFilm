@@ -110,7 +110,6 @@ final class NativeMusicStorageTests: XCTestCase {
         }
     }
 
-
     func testCorruptUnknownEnvelopeNeverCreatesNewLibrary() async throws {
         for input in [
             #"{"version":3,"scope":"device","revision":0,"records":{}}"#,

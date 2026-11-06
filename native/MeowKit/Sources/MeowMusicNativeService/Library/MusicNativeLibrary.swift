@@ -59,16 +59,6 @@ enum MusicLibraryValidation {
         try musicRequire(lib["collections"].array.filter { $0["kind"].string == "favorites" }.count == 1, .favoritesProtected)
         for (platform, id) in lib["accounts"].fields { try musicRequire(MusicModel.sites.contains(platform), .corruptDocument); _ = try id.text() }
     }
-    static func validateReceipt(_ receipt: MJ) throws {
-        try musicRequire(receipt.isObject &&
-            ["batchId", "sourceId", "sourceOwnerId", "appliedAt", "appliedRevision", "afterHash"].allSatisfy(receipt.contains), .corruptDocument)
-        try musicRequire(musicHex(receipt["batchId"].string) && musicHex(receipt["afterHash"].string) &&
-            receipt["appliedRevision"].isInteger && receipt["appliedRevision"].int > 0 &&
-            receipt["appliedAt"].isNumber && receipt["appliedAt"].number.isFinite &&
-            receipt["appliedAt"].number >= 0, .corruptDocument)
-        _ = try receipt["sourceId"].text()
-        _ = try receipt["sourceOwnerId"].text()
-    }
 }
 
 extension NativeMusicService {

@@ -330,7 +330,6 @@ final class MusicViewModelTests: XCTestCase {
         await task.value
     }
 
-
     @MainActor func testAdoptedInspectedSourceStillChecksCompleteFileBeforeNetworkResolve() async throws {
         let (service, player, model) = setup()
         await service.enableCaches(audio: true, lyrics: false)

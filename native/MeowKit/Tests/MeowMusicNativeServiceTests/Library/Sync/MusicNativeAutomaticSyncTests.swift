@@ -169,7 +169,6 @@ import MeowMusicFeature
         await service.close()
     }
 
-
     func testPureOrderRefusesChangedRemoteMembershipBeforeAnyWrite() async throws {
         let a = NativeSyncFixture.member("101"), b = NativeSyncFixture.member("102"), c = NativeSyncFixture.member("103")
         let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection(members: [a, b])])

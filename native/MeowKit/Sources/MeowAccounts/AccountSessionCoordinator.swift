@@ -22,7 +22,6 @@ public actor AccountSessionCoordinator {
     }
 
     private let store: any CredentialStore
-    private let coordinatorID = UUID()
     private var entries: [AccountIdentity: Entry] = [:]
     private var observers: [UUID: Observer] = [:]
 
