@@ -11,7 +11,7 @@ public static class NativeAudioCacheProbe
 {
     public static async Task<double> ValidateAsync(string file, double expectedDuration, CancellationToken token)
     {
-        if (!double.IsFinite(expectedDuration) || expectedDuration <= 0)
+        if (!double.IsFinite(expectedDuration) || expectedDuration < 0)
             throw new PlaybackException(PlaybackError.InvalidRequest);
         return await Task.Run(async () =>
         {
@@ -22,9 +22,11 @@ public static class NativeAudioCacheProbe
                 "--no-video", "--no-osd", "--no-sub-autodetect-file", "--no-metadata-network-access");
             engine.Log += (_, _) => { };
             using var media = new LibVLCSharp.Shared.Media(engine, file, FromType.FromPath);
-            await media.Parse(MediaParseOptions.ParseLocal, 5000, deadline.Token).ConfigureAwait(false);
+            // LibVLCSharp Parse completes inline on the native parser callback. Stay on this
+            // worker when rejecting a duration: disposing LibVLC from that callback deadlocks.
+            media.Parse(MediaParseOptions.ParseLocal, 5000, deadline.Token).GetAwaiter().GetResult();
             double duration = media.Duration / 1000d;
-            if (!double.IsFinite(duration) || duration <= 0 || Math.Abs(duration - expectedDuration) > Math.Max(2, expectedDuration * .02))
+            if (!double.IsFinite(duration) || duration <= 0 || expectedDuration > 0 && Math.Abs(duration - expectedDuration) > 10)
                 throw new PlaybackException(PlaybackError.ReadFailed);
             media.AddOption(":start-time=" + Math.Max(0, duration - .5).ToString("R", CultureInfo.InvariantCulture));
             using var player = new MediaPlayer(media);

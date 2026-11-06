@@ -239,7 +239,7 @@ function mediaCandidate(raw, clock, expected, duration = 0) {
     requireValue(typeof candidate.duration === 'number' && Number.isFinite(candidate.duration) && candidate.duration >= 0,
       'INVALID_MEDIA_CANDIDATE');
     if (duration > 0 && candidate.duration > 0)
-      requireValue(Math.abs(duration - candidate.duration) <= Math.max(3, Math.min(duration, candidate.duration) * .02),
+      requireValue(Math.abs(duration - candidate.duration) <= 10,
         'RECORDING_MISMATCH');
   }
   return { url, headers: mediaHeaders(candidate.headers), expiresAt };

@@ -10,6 +10,7 @@ public interface INativePlaybackContinuation
     NativePlaybackContinuation? CaptureContinuation();
     Task ReopenAsync(NativePlaybackContinuation continuation, Uri uri,
         IReadOnlyDictionary<string, string> headers, CancellationToken token = default);
+    Task ReopenReadAsync(NativePlaybackContinuation continuation, INativeMediaReadLease lease, CancellationToken token = default);
 }
 
 /// <summary>A single-use, in-memory capability; stop, replacement and authorization cancellation revoke it.</summary>
@@ -45,7 +46,19 @@ public sealed partial class NativePlayback : INativePlaybackContinuation
     }
 
     public Task ReopenAsync(NativePlaybackContinuation continuation, Uri uri,
-        IReadOnlyDictionary<string, string> headers, CancellationToken token = default) => DispatchAsync(async () =>
+        IReadOnlyDictionary<string, string> headers, CancellationToken token = default) =>
+        DispatchAsync(() => ReopenCoreAsync(continuation, uri, headers, null, token));
+
+    public async Task ReopenReadAsync(NativePlaybackContinuation continuation, INativeMediaReadLease lease,
+        CancellationToken token = default)
+    {
+        if (lease is null) throw Error(PlaybackError.InvalidReadLease);
+        var input = new ReadLeaseMediaInput(lease);
+        try { await DispatchAsync(() => ReopenCoreAsync(continuation, null, null, input, token)); }
+        catch { await input.DisposeAsync(); throw; }
+    }
+    private async Task ReopenCoreAsync(NativePlaybackContinuation continuation, Uri? uri,
+        IReadOnlyDictionary<string, string>? headers, ReadLeaseMediaInput? input, CancellationToken token)
     {
         ThrowIfDisposed();
         if (continuation is null || !ReferenceEquals(_continuation, continuation) || continuation.Used ||
@@ -53,21 +66,26 @@ public sealed partial class NativePlayback : INativePlaybackContinuation
             continuation.Scope.Identity != _identity) throw Error(PlaybackError.Superseded);
         continuation.Revoked.ThrowIfCancellationRequested();
         token.ThrowIfCancellationRequested();
-        Validate(_ownerId!, _identity!, uri, _title, headers);
-        if (uri.Scheme is not ("http" or "https") || headers is null) throw Error(PlaybackError.InvalidRequest);
+        if (input is not null) input.Validate();
+        else
+        {
+            if (uri?.Scheme is not ("http" or "https") || headers is null) throw Error(PlaybackError.InvalidRequest);
+            Validate(_ownerId!, _identity!, uri, _title, headers);
+        }
         continuation.Used = true;
-        // Retain the original authorization even after the old native input has retired.
         using var operation = CancellationTokenSource.CreateLinkedTokenSource(token, continuation.Revoked);
         try
         {
-            await OpenCoreAsync(_ownerId!, _identity!, uri, _title, headers, _continuationAuthority!.Token,
-                continuation: continuation, preparationToken: operation.Token);
+            if (input is not null)
+                await OpenReadCoreAsync(_ownerId!, _identity!, input, _title, _continuationAuthority!.Token,
+                    continuation, operation.Token);
+            else
+                await OpenCoreAsync(_ownerId!, _identity!, uri!, _title, headers, _continuationAuthority!.Token,
+                    continuation: continuation, preparationToken: operation.Token);
         }
         catch
         {
-            // A failed input consumed this capability, not the logical playback's
-            // position/pause authority. An owner may capture a fresh continuation for
-            // another bounded attempt; the used token itself can never be replayed.
+            // A failed input consumes only this capability, never the logical position/pause authority.
             if (ReferenceEquals(_continuation, continuation) && !continuation.Revoked.IsCancellationRequested &&
                 _ownerId == continuation.Scope.OwnerId && _identity == continuation.Scope.Identity)
             {
@@ -78,7 +96,7 @@ public sealed partial class NativePlayback : INativePlaybackContinuation
         }
         continuation.Revoked.ThrowIfCancellationRequested();
         continuation.ReopenedScope = new(_ownerId!, _identity!, _generation);
-    });
+    }
 
     private void RevokeContinuation()
     {

@@ -12,7 +12,8 @@ public interface INativePlaybackHandoff
     Task PrepareHandoffAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token);
     Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token);
     double PreparedHandoffDurationSeconds { get; }
-    Task CommitHandoffAsync(CancellationToken token);
+    // Invokes the non-throwing provenance callback synchronously at publication, before events/release.
+    Task CommitHandoffAsync(Action committed, CancellationToken token);
     Task DiscardHandoffAsync();
 }
 
@@ -34,7 +35,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         try { await DispatchAsync(() => PrepareHandoffCoreAsync(null, null, input, token)); }
         catch { await input.DisposeAsync(); throw; }
     }
-    public Task CommitHandoffAsync(CancellationToken token) => DispatchAsync(() => CommitHandoffCoreAsync(token));
+    public Task CommitHandoffAsync(Action committed, CancellationToken token) => DispatchAsync(() => CommitHandoffCoreAsync(committed, token));
     public Task DiscardHandoffAsync() => DispatchAsync(DiscardHandoffCoreAsync);
 
     private async Task PrepareHandoffCoreAsync(Uri? uri, IReadOnlyDictionary<string, string>? headers,
@@ -144,7 +145,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         }
     }
 
-    private async Task CommitHandoffCoreAsync(CancellationToken token)
+    private async Task CommitHandoffCoreAsync(Action committed, CancellationToken token)
     {
         ThrowIfDisposed();
         token.ThrowIfCancellationRequested();
@@ -199,6 +200,8 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
             current.Invalidate();
             _generation = prepared.Generation;
             _session = prepared;
+            // Publish business provenance in this same dispatcher turn, before events or old-input release.
+            committed();
             prepared.HasStarted = true;
             prepared.Attach(this);
             _view.SetPlayer(prepared.Player);
