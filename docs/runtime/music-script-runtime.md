@@ -1,151 +1,77 @@
 # 共用原始 LX 音源契约
 
-## 工厂与当前身份
+## 工厂与身份
 
-业务实现位于 `apps/runtime/modules/music-script.mjs`，不依赖 Windows 启动方式：
+`apps/runtime/modules/music-script.mjs` 导出 `createMusicScriptModule({dataRoot, hostFactory, network, download, clock, setTimer, clearTimer})`，身份为 `music@0.8.0` / `music.script.v3`。通用 `apps/runtime` 入口提供本地 HTTP；构造与启动不读取安装目录、不执行脚本、不检测，管理首次使用才打开 `<dataRoot>/music`。
 
-```js
-createMusicScriptModule({
-  call,
-  hostFactory = createScriptHost,
-  network = createNodeNetwork(),
-})
-```
+成功响应为 `{ok:true,contract:"music.script.v3",value}`，失败为 `{ok:false,contract:"music.script.v3",code}`。错误只含固定分类，不泄漏源码、凭据或异常正文。音乐无需反向 callback 端点。Windows/iOS 旧启动、分片与客户端所有权接入尚未迁移，不将通用运行器契约描述为平台 App 已接通。
 
-构造阶段不执行用户脚本、不读取用户文件、不发起网络请求。入口只装配明确业务 owner；安装与调用由原生显式命令触发。
+## 完整 HTTP 输入与业务方法
+
+文件先上传一次完整源码：
 
 ```text
-id: music
-version: 0.8.0
-contract: music.script.v3
+PUT /v1/music/sources/{installationId}/{sourceRevision}?basename=fixture.js
+Content-Type: application/octet-stream
 ```
 
-成功响应为 `{ok:true,contract,value}`；失败只返回固定 `code`，不返回源码、配置、存储 grant、原生错误正文或堆栈。
+首次文件导入的 `installationId` 由调用方预分配 UUID；`sourceRevision` 是正整数，只标识该安装的完整候选，与 catalog revision 或执行 generation 无关。完整接收、UTF-8 和源码边界通过后才替换待选候选；中断或非法上传不改变安装和既有完整候选。同身份重传必须保持源码及 basename 相同。管理精确选择候选；成功候选可重复选择以得到内容不变的结果，失败试运行释放其输入，后续已上传候选保持独立。
 
-## HTTP 业务入口
+所有业务调用以 `POST /v1/music/<operation>` 发送完整 JSON；Node 调用端的方法前缀为 `music.script.`。
 
-公共 [runtime.http.v1](runtime-bridge.md) 将本地逻辑名 `music.script.*` 映射到以下 POST operation：
-
-| 方法 | value / 作用 |
+| 方法 | 输入与 `value` |
 | --- | --- |
-| `load` | `{instance}`，按完整 sourceRevision 安装或更新明确实例 |
-| `unload` | `{unloaded:true,cleanupComplete:true}`，installation/revision/可选 generation |
-| `invoke` | 脚本业务值或 null，不再额外包 `{value:...}` |
-| `status` | `{documentAccess:false,instances}`，不等待其他安装初始化 |
-| `close` | `{closed:true,cleanupComplete:true}`，只关闭 music owner |
+| `sources.list` | `{}` → `{revision,items}`；只读安装事实，不执行脚本 |
+| `sources.detail` | `{installationId}` → `{item}`；网络源详情包含完整更新地址 |
+| `sources.add` | `{installationId,sourceRevision}` → `{item}`；消费完整文件候选，创建停用安装 |
+| `sources.download` | `{url}` → `{item}`；运行器分配 UUID，下载并创建停用网络安装 |
+| `sources.edit` | `{installationId,name?,url?}`；只改显示名与网络地址，不改变来源类型 |
+| `sources.update` | `{installationId,sourceRevision?}`；文件必须指定候选，网络只从保存地址下载 |
+| `sources.rollback` | `{installationId}`；交换 current 与 previous |
+| `sources.enable/disable/remove` | `{installationId}`；启用成功才保存 enabled，停用/删除退休实例 |
+| `sources.check` | `{installationId}`；独立轻量检测 |
+| `resolve` | `{installationId,platform,quality,musicInfo}`；一次具体音质的媒体解析 |
+| `invoke` | `{installationId,siteId,operation,payload}`；返回原始业务值 |
+| `close` | `{}` → `{closed:true,cleanupComplete:true}`；停止接收并清理本模块 |
 
-## 控制数据传输
+`invoke` 的 HTTP `value` 就是脚本结果，包括普通 `blob`、`token`、`value` 字段；不再包一层安装身份。调用选择当前启用内容，执行前捕获 generation，返回前核对未退休。客户端不传外部 CAS、grant、config 或 permissions；旧 load/unload/status 与手工分片接口不提供兼容路径。
 
-普通参数一次 JSON POST，结果直接在统一 value 中返回，不设普通 JSON 总字节上限，不按大小选择另一套协议。严格 UTF-8、重复键拒绝、Unicode 键原样保留、业务值深度 64 和安全整数检查保持；业务字段名 `blob` 等只是普通数据。旧 frame、stage/control/blob、Base64、token/TTL/offset 和传输 checksum 均已删除。
+`resolve` 的 `value` 包含 installationId、generation、contentHash、platform、quality、url、headers、expiresAt。URL 必须为 HTTP(S)，拒绝凭据 URL、试听/加密标志、禁止请求头、过期时间及相反目标身份。正时长与已知录音时长相差超过 `max(3s,较短×2%)` 时返回 `RECORDING_MISMATCH`；未知时长不判错。不补搜、不换源、不降级；请求音质不代表已实测音质。
 
-## 源码候选与加载
+公开请求与业务结果遵守64层 JSON 契约，65层拒绝；控制信封和内部 KV 文档包装不占用业务值深度。完整 JSON 不设独立总字节上限，不使用应用层 stage/control/blob、Base64 分片或 TTL 暂存。
 
-`PUT /v1/music/sources/{installationId}/{sourceRevision}?basename=...` 使用原始 body，一次完整登记 1 至 16 MiB 源码。basename 是 255 字符内无路径 `.js` 文件名。严格 UTF-8 保留原有 BOM 行为，合法 U+FFFD 字符可保留，非法字节不可由替换解码蒙混通过。上传不执行源码、不改变 enabled、不新增磁盘事实源。
+## 安装事实与私有 KV
 
-同安装只保留一个尚未采用的完整候选；新上传完整成功后才替换，未完成/断线 body 不影响旧候选。仍持有的同键同内容幂等、不同内容报 SCRIPT_INTEGRITY；内容 hash 算一次并复用。没有过期 timer 或上传读取/release 动作。load 必须精确选择 sourceRevision，不存在报 SOURCE_NOT_FOUND；字段/身份/CAS 前置拒绝不消费候选，试运行失败释放，下一次试运行须显式上传。卸载和关闭释放未采用候选，当前/退休执行内容由实际 owner 保留至无引用。
+音乐模块是 `<dataRoot>/music` 的唯一 writer。`PrivateDocuments` 限定私有路径、拒绝链接与路径穿越，原子替换完整文件。
 
-`load` 必须包含：
+- `catalog.json`：schema、revision、UUID、名称、origin、enabled、current/previous、完整声明与检测快照。
+- `sources/<sha256>.js`：内容寻址源码；current、previous 和正在试运行的候选保留，完成管理后回收无引用文件。
+- `data/<installationId>.json`：按 site 隔离的 guest KV，删除安装时先删除私有数据。
+- 文件/网络来源由导入操作决定，不由脚本头推断。网络地址持久保存，列表只显示 host，详情返回完整 URL。
+- 客户端可保存常用列表和检测结果等读取快照；运行器仍是安装事实所有者。不读、不迁移、不双写、不删除旧原生数据，不保存脚本执行内存快照。
+- 损坏目录/文档明确报错，格式损坏为 `CORRUPT_STORAGE`，I/O 写失败为 `STORAGE_ERROR`，不静默重置目录或发布未落盘状态。
+- 源码最多16 MiB、严格 UTF-8、非空；允许前导 BOM，文件名为平面 `.js` basename。脚本头只提供名称、版本、作者、描述和主页元数据。
 
-```text
-sourceRevision installationId revision expectedRevision version config permissions grant
-```
+脚本 `meow.config` 固定为空对象；处理器第二参数的 `context.storage` 提供私有 get/set/delete。请求内读写固定启用，每次操作检查 scope 当前性、installation、generation、声明 site 和取消信号。startup/background 无存储权限，旧 context 不能借用后续请求的权限。
 
-- `revision` 是正安全整数；`expectedRevision` 精确匹配当前 binding，首次安装为 0。
-- `config` 是有界 JSON 对象，最多 32 KiB。
-- `permissions` 只有 `storage`，值为不重复的 `read`／`write` 数组；不接受网络 origin、私网或域名授权字段。
-- `grant` 是非零 UUID，属于原生存储会话绑定，不是网络权限。
-- 相同 revision 仅在源码、版本、config、storage 权限和 grant 全部一致时幂等；新 revision 必须更大并使用未使用过的 grant。
-- 不设安装实例数量上限；load 只安装启用实例。禁用和删除由原生 owner 调用 unload，公共模块不保存 disabled 影子状态。
-- 更新失败仅在公开 host 保持旧 generation、源码和 ready 状态时保留旧 binding。host 已换代时退休改变后的会话并要求原生明确协调，不通过再次生成代次伪造回滚。
+KV 保留持久化数据边界：每值16 KiB，每 site 最多64键/64 KiB，每安装最多32 sites/512 KiB。逐值独立验证 JSON；site/安装文档只做编码字节计量，不把包装层计入64层业务限制。这些是数据契约，与脚本引擎堆配额无关。
 
-实例响应只含 installationId、revision、generation、state、contentHash、protocol、version 和 capabilities，不泄漏配置、grant 或原生数据路径。当前 protocol 明确为 `lx`。
+## 声明、检测与生命周期
 
-## 动作与请求语义
+安装的 `capabilities` 返回全部站点及完整声明，包括扩展 site/action。`sites` 仅是五平台 actions/qualitys 的界面投影；执行和验收 CLI 使用完整声明，不据五平台投影截断能力。
 
-`invoke` 必须包含：
+轻量检测为五平台各一个固定公开样本，选择声明的基础音质调用 musicUrl，只校验取链契约，不下载音频。停用源临时加载后卸载，enabled 保持不变；检测和播放拥有独立请求取消信号。持久检测仅含内容身份、时间、样本、音质、状态和固定错误码，不保存媒体 URL、请求头或凭据。内容变化使旧结果失效，不后台复检。
 
-```text
-installationId revision generation siteId operation payload
-```
+同安装生命周期顺序执行，catalog 提交为短同步操作；A 的下载、初始化和退休不阻塞 B 管理、调用或列表查询。有效替换、停用、删除在等待队列前取消被捕获的真实初始化/下载 owner，迟到取消不选择后继实例。LX 更新试运行失败保留原 generation 和状态；候选发布后的清理或持久化失败会退休未确认代次并明确报错。
 
-site/action 来自脚本有效声明，不以旧平台／两三个动作白名单裁剪扩展动作。可选 qualitys 对象 `{type,label}` 归一为 type，字符串音质保持自身身份。声明并不证明处理器存在或业务已成功，实际调用仍需验证；目标不存在、代次过时、实例未 ready、动作未声明或音质不支持时明确失败，不遍历其他实例或静默换源。
+冷启动只恢复目录，启用来源在首次 invoke/resolve/check 时惰性加载。同进程失败的 owner 或失败恢复记录不会被普通调用静默重建；列表报告 failed，可由显式 enable 或更新重试。正常实例不闲置回收、不自动重启，运行变量自然保留。
 
-LX 请求数据保留 `{source,action,info}`：
+取消立即封闭权限与结果；网络任务仍登记到实际完成。关闭先终止真实 owner，再排空安装事务与源码下载；清理不能确认时报告 `SCRIPT_CLEANUP`。停用/删除后旧 generation 的结果和 KV 操作不能发布。
 
-- source 为明确 siteId，action 为明确 operation。
-- `musicUrl` 将 `payload.type` 或 `payload.quality` 映射为 `info.type`，保留 `musicInfo`；非 local source 仍需匹配声明音质。
-- 其他声明动作保留自身数据语义；`search` 与 `musicSearch` 不被强行视作所有脚本通用的别名。
-- 返回数据按 LX 处理器实际值传递，不改成 Cat 或 Reader 的业务格式。
+## 网络与承载
 
-LX 每实例使用一个原生线程、一个 QuickJS Runtime/Context。普通字节、网络响应、解压与脚本内数据不再受运行器自设内存配额限制，无配额耗尽自动重启；不设全局/实例/site 固定调用数。初始化等待 5 秒、调用与请求截止 60 秒、清理预算 100 ms 保留；原生执行可由主控取消并等待真实线程结束，没有新增单段同步计算时限。
+源码下载默认使用 `createSourceDownload({maxSourceBytes:SCRIPT_LIMITS.maxSourceBytes,maxRedirects:0})`。保留 HTTPS `.js` URL、无凭据/fragment、拒绝重定向、只接受200、30秒期限。源码实际传输及显式解压都受16 MiB边界约束；取消等待 request/response/socket/解压流的真实完成。
 
-## 请求绑定的存储
+普通 guest 网络仍使用 `createNodeNetwork`，只验证 HTTP(S) 语法，不设域名或私网授权名单，不继承源码下载字节边界。LX request 的回调、字节和取消语义保持；followRedirect=false 禁止跳转，true 与 follow_max 遵守既有重定向上限，retry 不启动宿主重放。
 
-请求处理器第二参数 `context.storage` 的 get/set/delete 是 v2 的唯一存储入口；它绑定调用 ID、site、installation 和 generation，不通过 `AsyncLocalStorage` 推断 guest 异步身份。全局 `meow` 只提供 `config`，startup 和 background 不获得隐式存储权限，保存的旧 context 不能借用新调用。完整边界见 [共用核心](script-runtime.md#v2-特权存储)。
-
-宿主对原生只发出：
-
-```text
-platform.musicScript.storage.get
-platform.musicScript.storage.set
-platform.musicScript.storage.delete
-```
-
-消息只含：
-
-```text
-grant installationId siteId generation key value?
-```
-
-- grant 仅在受信适配层与原生存储 owner 之间传递，guest 不获得它。
-- 每次回调在调用前后核对实例、generation、site、当前绑定与取消信号。
-- 原生保持安装事务与 storage overlay 的发布归属；候选 binding 的登记不赋予 LX startup 特权。
-- 旧实例与迟到回调不能借用新 binding 的 grant；结束的请求 context 不能被其他活跃调用接管。
-- 未结束 storage 任务不设固定数量预算，按调用和实例生命周期回收；物理任务保留至 adapter 真正结束。
-- guest 存储回调随请求完成、取消和退休释放；物理任务仍保留归属至 adapter 真正结束。
-
-脚本 guest 不获得任意文件、进程、官方账号凭据、应用数据根或通用 document bridge；可信 Node 只加载精确受信原生扩展，该加载不构成用户脚本文件权限。
-
-## 网络
-
-注入适配器接收 `validateURL`，只验证 HTTP(S) 语法；没有域名／私网授权名单，也不按源码哈希补 origin。网络能访问已开放服务，不能将文件／进程隔离写成网络隔离。
-
-LX `request` 的回调、返回体和取消语义保留；`follow_max` 在 Node 适配器中受最大重定向次数约束，不等于任意 LX 版本都定义该字段。`showConfigView` 等扩展事件也不等于当前已提供 Web 管理服务，需依脚本实际路径单独验收。
-
-已遇到的扩展选项 `followRedirect` 按布尔值控制自动跳转；false 优先关闭跳转，true 仍遵守重定向上限，`follow_max` 超过上限时按上限截断。`retry` 兼容接受，不额外启动宿主重试或重放 POST；与核对的 LX 桌面 request 封装不消费该字段的行为一致。网络任务在取消后仍保持登记，直至底层确认结束。
-
-LX 继续使用原有网络适配器及请求绑定的原生 storage grant，不套用 source 的 capability 网络包装。Reader/CatVod 的[capability ABI](source-capability-abi.md)属于独立输入契约；LX/source 共用原生绑定机制，Cat 使用独立 Node Worker；三类 module 共用 HTTP 与生命周期基础设施，不互换 site/action/quality 或数据权限。
-
-## 取消与关闭
-
-- HTTP abort 或未完成 response close 取消对应调用；正常 finish 不误取消。取消 fence 结果并退休所属作用域，不假装不合作 adapter 已结束。
-- 忽略 signal 的外部任务仍计入实际 drain，不能确认排空时返回 `SCRIPT_CLEANUP`。
-- unload、失败更新和 close 退休对应存储 binding。
-- close 幂等；成功必须证明 host 中无本模块当前实例且所属任务已排空，不释放其他业务借用的核心。
-
-## 固定错误码
-
-```text
-INVALID_REQUEST
-LIMIT
-SCRIPT_INTEGRITY
-SCRIPT_ENCODING
-STALE_SOURCE
-SOURCE_NOT_FOUND
-SOURCE_DISABLED
-PERMISSION_DENIED
-CAPABILITY_UNAVAILABLE
-NETWORK_ERROR
-UPSTREAM_HTTP
-UPSTREAM_FORMAT
-STORAGE_ERROR
-TIMEOUT
-CANCELLED
-CLOSED
-SCRIPT_CLEANUP
-SCRIPT_FAILURE
-```
-
-Windows/iOS 旧调用接入本轮未迁移，新公共 wire 不保留旧协议回退。通用原生构建与定向回归已通过，适用环境及未覆盖项见[通用验证范围](script-runtime.md#构建发布与验证边界)。
-
-测试夹具、引擎打包回归和真实外部脚本验收不能互相冒充。外部验收枚举实际声明动作，按协议传递输入和结果，明确区分宿主能力、资源限额、输入、脚本和上游失败；见 [动态验收](source-acceptance.md)。
+LX 使用逐实例原生线程及 QuickJS Runtime，脚本宿主来源策略为 [`scripts/script-host-native.json`](../../scripts/script-host-native.json)。客户端影视规则的独立 QuickJS 策略不属于本模块。其他来源的 [capability ABI](source-capability-abi.md) 是独立输入契约，不互换 site/action/quality 或数据权限。生命周期边界见[共用核心](script-runtime.md)，外部脚本验收见[动态验收](source-acceptance.md)。

@@ -5,135 +5,81 @@ import XCTest
 @testable import MeowMusicNativeService
 
 final class NativeMusicScriptServiceTests: XCTestCase {
-    func testImportInspectsOnlyLeadingMetadataAndRemainsDisabledAcrossReopenWithoutStartingRuntime() async throws {
-        let documents = try MusicScriptTestDocuments(); defer { documents.remove() }
-        let runtime = MusicScriptTestRuntime(), service = documents.owner(runtime)
-        let item = try await service.importScriptSource(musicScriptFixture, fileName: "source.JS")
-        XCTAssertEqual(item.name, "合成 LX 音源"); XCTAssertEqual(item.version, "2")
-        XCTAssertEqual(item.author, "Fixture"); XCTAssertEqual(item.homepage, "https://source.invalid")
-        XCTAssertEqual(item.summary, "Synthetic test source"); XCTAssertEqual(item.origin, .file)
-        XCTAssertFalse(item.enabled); XCTAssertEqual(item.state, .disabled); XCTAssertTrue(item.platforms.isEmpty)
-        let catalog = try MusicScriptCatalog.decode(Data(contentsOf: documents.file("catalog")))
-        XCTAssertEqual(catalog.installations.map(\.id), [item.id])
-        XCTAssertEqual(try Data(contentsOf: documents.file("source." + musicScriptSHA256(musicScriptFixture))), musicScriptFixture)
-        let reopened = try await documents.owner(runtime).scriptSources()
-        XCTAssertEqual(reopened, [item])
-        let metrics = await runtime.metrics(); XCTAssertEqual(metrics.connects, 0)
-        let other = try await service.importScriptSource(Data("throw Error('never run'); // @name not metadata".utf8), fileName: "fallback.js")
-        XCTAssertEqual(other.name, "fallback")
-        await service.close()
-    }
-
-    func testInvalidImportsLeaveNoCatalogOrSourceAndDoNotLaunch() async throws {
-        let documents = try MusicScriptTestDocuments(); defer { documents.remove() }
-        let runtime = MusicScriptTestRuntime(), service = documents.owner(runtime)
-        for (data, name, expected) in [
-            (Data(), "a.js", MusicServiceError.invalidScript),
-            (Data(" \n\t".utf8), "a.js", .invalidScript),
-            (Data([0xff, 0xfe, 0x61]), "a.js", .invalidScript),
-            (Data([0xef, 0xbb, 0xbf]) + musicScriptFixture, "a.js", .invalidScript),
-            (musicScriptFixture, "a.txt", .invalidScript),
-            (Data(repeating: 65, count: MusicScriptSourceItem.maximumSourceBytes + 1), "a.js", .limit),
-        ] {
-            await scriptExpectFailure(expected) { try await service.importScriptSource(data, fileName: name) }
-        }
-        XCTAssertNil(try documents.store.read(key: "catalog"))
-        let items = try await service.scriptSources(), metrics = await runtime.metrics()
-        XCTAssertTrue(items.isEmpty); XCTAssertEqual(metrics.connects, 0)
-        await service.close()
-    }
-
-    func testEnableDisableReloadFenceInvokeAndStorageAndDeletionRemovesPrivateDataAndLastSourceReference() async throws {
-        let documents = try MusicScriptTestDocuments(); defer { documents.remove() }
-        let runtime = MusicScriptTestRuntime(), service = documents.owner(runtime)
-        let a = try await service.importScriptSource(musicScriptFixture, fileName: "a.js")
-        let b = try await service.importScriptSource(musicScriptFixture, fileName: "b.js")
-        let enabled = try await service.setScriptSourceEnabled(a.id, enabled: true)
-        XCTAssertTrue(enabled.enabled); XCTAssertEqual(enabled.state, .ready); XCTAssertEqual(enabled.platforms, [.qq])
-        let sources = try await service.sources(), first = try XCTUnwrap(sources.first)
-        let binding = try await runtime.binding(a.id)
-        let stored = try await runtime.reverse("set", binding: binding)
-        XCTAssertEqual(stored["ok"], .bool(true))
-        XCTAssertNotNil(try documents.store.read(key: "storage." + a.id))
-        let storage = try MusicScriptStorage.decode(Data(contentsOf: documents.file("storage." + a.id)))
-        XCTAssertEqual(storage.value(site: "tx", key: "count"), .number(7))
-        let wrongGeneration = try await runtime.reverse("get", binding: binding, generation: first.generation + 1)
-        XCTAssertEqual(wrongGeneration["code"], .string("STALE_SOURCE"))
-        let request = MusicScriptRequest(installationID: a.id, generation: first.generation, siteID: "tx",
-                                        sourceKey: "tx:test", quality: "128k", musicInfo: Data("{}".utf8))
-        let audio = try await service.resolve(request: request)
-        XCTAssertEqual(audio.url.absoluteString, "https://media.invalid/track.mp3")
-        _ = try await service.setScriptSourceEnabled(a.id, enabled: false)
-        let stale = try await runtime.reverse("get", binding: binding)
-        XCTAssertEqual(stale["code"], .string("STALE_SOURCE"))
-        await scriptExpectFailure(.sourceUnavailable) { try await service.resolve(request: request) }
-        _ = try await service.setScriptSourceEnabled(a.id, enabled: true)
-        let next = try await service.source(installationID: a.id)
-        XCTAssertGreaterThan(next.generation, first.generation)
-        let nextBinding = try await runtime.binding(a.id)
-        let retained = try await runtime.reverse("get", binding: nextBinding)
-        XCTAssertEqual(retained["value"], .number(7))
-        let stillStale = try await runtime.reverse("get", binding: binding)
-        XCTAssertEqual(stillStale["code"], .string("STALE_SOURCE"))
-        try await service.removeScriptSource(a.id)
-        XCTAssertNil(try documents.store.read(key: "storage." + a.id))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: documents.file("storage." + a.id).path))
-        XCTAssertNotNil(try documents.store.read(key: "source." + musicScriptSHA256(musicScriptFixture)))
-        try await service.removeScriptSource(b.id)
-        XCTAssertNil(try documents.store.read(key: "source." + musicScriptSHA256(musicScriptFixture)))
-        let reopened = try await documents.owner(runtime).scriptSources()
-        XCTAssertTrue(reopened.isEmpty)
-        let calls = await runtime.metrics().calls
-        XCTAssertEqual(calls.filter { $0 == "unload" }.count, 2)
+    func testExplicitStartupIsSharedAndDoesNotExecuteScripts() async throws {
+        let runtime = MusicScriptTestRuntime(), service = NativeMusicScriptService(launcher: runtime)
+        await scriptExpectFailure(.scriptRuntimeUnavailable) { try await service.scriptSources() }
+        await service.start(); await service.start()
+        let items = try await service.scriptSources()
+        XCTAssertTrue(items.isEmpty)
+        let metrics = await runtime.metrics()
+        XCTAssertEqual(metrics.connects, 1); XCTAssertEqual(metrics.calls, ["runtime.describe", "sources.list"])
+        let handlers = await runtime.reverseHandlers; XCTAssertTrue(handlers.isEmpty)
         await service.close(); await runtime.close()
     }
-
-    func testFailedLoadAndLostReceiptNeverPersistEnabledAndReconcilePublishedBinding() async throws {
-        for mode in [MusicScriptTestRuntime.Load.failed, .lostReceipt] {
-            let documents = try MusicScriptTestDocuments(); defer { documents.remove() }
-            let runtime = MusicScriptTestRuntime(), service = documents.owner(runtime)
-            await runtime.configure(mode)
-            let item = try await service.importScriptSource(musicScriptFixture, fileName: "source.js")
-            await scriptExpectFailure(mode == .failed ? .scriptFailed : .timeout) {
-                try await service.setScriptSourceEnabled(item.id, enabled: true)
-            }
-            let items = try await documents.owner(runtime).scriptSources()
-            XCTAssertEqual(items, [item])
-            let calls = await runtime.metrics().calls
-            XCTAssertTrue(calls.contains("status"))
-            if mode == .lostReceipt { XCTAssertTrue(calls.contains("unload")) }
-            let instances = await runtime.instances
-            XCTAssertTrue(instances.isEmpty)
-            await runtime.configure(.success)
-            let enabled = try await service.setScriptSourceEnabled(item.id, enabled: true)
-            XCTAssertTrue(enabled.enabled, "An explicit retry can load after a script failure")
-            await service.close(); await runtime.close()
-        }
+    func testImportStagesThenUsesSharedManagementWithoutNativeStorage() async throws {
+        let runtime = MusicScriptTestRuntime(), service = NativeMusicScriptService(launcher: runtime)
+        await service.start()
+        let bytes = Data(repeating: 65, count: 128 * 1024 + 1)
+        let item = try await service.importScriptSource(bytes, fileName: "selected.js")
+        XCTAssertEqual(item.name, "Synthetic source"); XCTAssertFalse(item.enabled)
+        let calls = await runtime.parameters
+        XCTAssertEqual(calls.filter { $0.0 == "stage.chunk" }.count, 3)
+        XCTAssertEqual(calls.first { $0.0 == "stage.begin" }?.1["basename"], .string("selected.js"))
+        XCTAssertEqual(calls.first { $0.0 == "stage.begin" }?.1["sha256"], .string(musicScriptSHA256(bytes)))
+        XCTAssertTrue(calls.contains { $0.0 == "sources.add" }); XCTAssertFalse(calls.contains { $0.0 == "sources.enable" })
+        let stages = await runtime.stages; XCTAssertTrue(stages.isEmpty)
+        let listed = try await service.scriptSources(); XCTAssertEqual(listed, [item])
+        await service.close(); await runtime.close()
     }
-
-    func testDisablingRejectsLateInvokeAndRuntimeExitIsFinal() async throws {
-        let documents = try MusicScriptTestDocuments(); defer { documents.remove() }
-        let runtime = MusicScriptTestRuntime(), service = documents.owner(runtime)
+    func testSingleQualityResolvePreservesHeadersExpiryAndFencesDisabledOrOldGeneration() async throws {
+        let runtime = MusicScriptTestRuntime(), service = NativeMusicScriptService(launcher: runtime)
+        await service.start()
         let item = try await service.importScriptSource(musicScriptFixture, fileName: "source.js")
         _ = try await service.setScriptSourceEnabled(item.id, enabled: true)
-        let source = try await service.source(installationID: item.id), gate = NativeMusicGate()
-        await runtime.holdInvoke(gate)
-        let task = Task {
-            try await service.resolve(request: .init(installationID: item.id, generation: source.generation,
-                siteID: "tx", sourceKey: "test", quality: "128k", musicInfo: Data("{}".utf8)))
-        }
-        await gate.started()
+        let source = try await service.source(installationID: item.id)
+        XCTAssertEqual(source.capabilities.map(\.siteID), ["tx"])
+        let request = MusicScriptRequest(installationID: item.id, generation: source.generation,
+            siteID: "tx", sourceKey: "test", quality: "128k", musicInfo: Data("{}".utf8))
+        let audio = try await service.resolve(request: request)
+        XCTAssertEqual(audio.url.absoluteString, "https://media.invalid/track.mp3")
+        XCTAssertEqual(audio.headers, ["X-Test": "public"])
+        XCTAssertEqual(audio.expiresAt, Date(timeIntervalSince1970: 1900000000))
+        let lyric = try await service.lyrics(request: request); XCTAssertEqual(lyric.text, "[00:00]line")
         _ = try await service.setScriptSourceEnabled(item.id, enabled: false)
-        await gate.release()
-        await scriptExpectFailure(.sourceUnavailable) { try await task.value }
+        await scriptExpectFailure(.sourceUnavailable) { try await service.resolve(request: request) }
         _ = try await service.setScriptSourceEnabled(item.id, enabled: true)
+        await scriptExpectFailure(.sourceUnavailable) { try await service.resolve(request: request) }
+        let metrics = await runtime.metrics(); XCTAssertEqual(metrics.calls.filter { $0 == "resolve" }.count, 1)
+        await service.close(); await runtime.close()
+    }
+    func testAllManagementOperationsForwardToTheSharedOwner() async throws {
+        let runtime = MusicScriptTestRuntime(), service = NativeMusicScriptService(launcher: runtime)
+        await service.start()
+        let item = try await service.downloadScriptSource(from: URL(string: "https://source.invalid/source.js")!)
+        _ = try await service.editScriptSource(item.id, name: "Renamed", networkURL: "https://source.invalid/new.js")
+        _ = try await service.updateScriptSource(item.id)
+        _ = try await service.updateScriptSource(item.id, data: musicScriptFixture, fileName: "new.js")
+        _ = try await service.rollbackScriptSource(item.id)
+        _ = try await service.checkScriptSource(item.id)
+        _ = try await service.scriptSourceDetail(item.id)
+        try await service.removeScriptSource(item.id)
+        let methods = await runtime.metrics().calls
+        for name in ["download", "edit", "update", "rollback", "check", "detail", "remove"] {
+            XCTAssertTrue(methods.contains("sources." + name))
+        }
+        await service.close(); await runtime.close()
+    }
+    func testStorageFailuresAndHostFailureAreNotEmptySourceLists() async throws {
+        let runtime = MusicScriptTestRuntime(), service = NativeMusicScriptService(launcher: runtime)
+        await service.start()
+        await runtime.fail("CORRUPT_STORAGE")
+        await scriptExpectFailure(.corruptDocument) { try await service.scriptSources() }
+        await runtime.fail("STORAGE_ERROR")
+        await scriptExpectFailure(.storageFailed) { try await service.scriptSources() }
         await runtime.close()
-        await scriptExpectFailure(.sourceUnavailable) { try await service.sources() }
-        let items = try await service.scriptSources()
-        XCTAssertEqual(items.first?.state, .failed)
-        await scriptExpectFailure(.scriptRuntimeUnavailable) { try await service.setScriptSourceEnabled(item.id, enabled: true) }
-        let count = await runtime.metrics().connects
-        XCTAssertEqual(count, 1)
+        await scriptExpectFailure(.scriptRuntimeUnavailable) { try await service.sources() }
+        await service.start()
+        let connects = await runtime.metrics().connects; XCTAssertEqual(connects, 1)
         await service.close()
     }
 }

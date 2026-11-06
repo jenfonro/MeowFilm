@@ -10,6 +10,76 @@ import MeowPlayback
 
 @MainActor
 final class MusicSettingsPlatformTests: XCTestCase {
+    func testUserDataResetRequiresDestructiveConfirmationAndCancelDoesNotRequestIt() throws {
+        let domain = "MusicResetUI." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let service = makeService()
+        let owner = makeOwner(service: service, accounts: service)
+        var requests = 0
+        let page = MusicSettingsViewController(model: owner, appearance: appearance,
+            router: MusicSettingsRouterFixture(), resetUserData: { requests += 1 })
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController = page; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        let visible = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { page.canPresentPageAlert }
+        }, evaluatedWith: page)
+        wait(for: [visible], timeout: 3)
+        let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: page.view.bounds).image { _ in
+            page.view.drawHierarchy(in: page.view.bounds, afterScreenUpdates: true)
+        })
+        attachment.name = "Settings user data reset"; attachment.lifetime = .keepAlways
+        add(attachment)
+        page.confirmUserDataReset()
+        let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        XCTAssertEqual(alert.title, "清除本机用户数据？")
+        XCTAssertTrue(alert.message?.contains("云端数据和 App 外的原始文件不受影响") == true)
+        XCTAssertTrue(alert.message?.contains("重新打开") == true)
+        XCTAssertEqual(alert.actions.map(\.style), [.cancel, .destructive])
+        XCTAssertEqual(alert.actions.map(\.title), ["取消", "清除并等待重启"])
+        XCTAssertEqual(requests, 0, "Opening the confirmation is not consent")
+        let cancelled = expectation(description: "confirmation dismissed without consent")
+        page.dismiss(animated: false) { cancelled.fulfill() }
+        wait(for: [cancelled], timeout: 3)
+        XCTAssertEqual(requests, 0)
+        let closed = expectation(description: "owner closed")
+        Task { await owner.close(); closed.fulfill() }
+        wait(for: [closed], timeout: 3)
+    }
+
+    func testConfirmedUserDataResetIsSingleFlightAndFailureAllowsRetry() throws {
+        let domain = "MusicResetUI." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let service = makeService()
+        let owner = makeOwner(service: service, accounts: service)
+        var requests = 0
+        let requested = expectation(description: "confirmed request")
+        let retried = expectation(description: "retry request")
+        let page = MusicSettingsViewController(model: owner, appearance: .init(defaults: defaults),
+            router: MusicSettingsRouterFixture(), resetUserData: {
+                requests += 1
+                if requests == 1 { requested.fulfill() } else { retried.fulfill() }
+                throw MusicServiceError.storageFailed
+            })
+        page.loadViewIfNeeded()
+        page.requestUserDataReset()
+        page.requestUserDataReset()
+        wait(for: [requested], timeout: 3)
+        XCTAssertEqual(requests, 1)
+        page.requestUserDataReset()
+        wait(for: [retried], timeout: 3)
+        XCTAssertEqual(requests, 2)
+        let closed = expectation(description: "owner closed")
+        Task { await owner.close(); closed.fulfill() }
+        wait(for: [closed], timeout: 3)
+    }
+
     func testSourceManagementRendersBuiltInAndScriptSwitchesTogetherAndWritesThroughBindings() throws {
         let domain = "MusicSourceSettings." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
@@ -451,10 +521,6 @@ private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing {
     func playedSongs() -> [MusicPlayedSong] { [] }
     func playedPlaylists() -> [MusicPlayedPlaylist] { [] }
     func restoreHistory(id: String, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
-    func prepareImport(data: Data, sourceId: String, ownerId: String) throws -> MusicImportPreview { throw MusicServiceError.unsupported }
-    func commitImport(_ preview: MusicImportPreview) throws -> MusicImportReport { throw MusicServiceError.unsupported }
-    func releaseImport(_ preview: MusicImportPreview) {}
-    func rollbackImport(batchId: String) throws { throw MusicServiceError.unsupported }
 }
 
 private actor MusicSettingsScriptFixture: MusicScriptSourceManaging {

@@ -303,24 +303,29 @@ public static class MusicCatalogTests
                 entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = Mouse.MouseEnterEvent });
                 Equal(0, ((MusicCatalogCard)entry.DataContext).PreviewTitles.Count);
                 CardMotion.Transition(surface, true, false); await Drain();
-                var caption = (TextBlock)entry.FindName("Caption");
-                True(caption.RenderTransform.Value.IsIdentity, "caption uses stable layout, not hover translation");
+                var caption = (FrameworkElement)entry.FindName("ContentBlock");
+                True(caption.RenderTransform.Value.IsIdentity, "an unsupported entry without songs has no content to lift");
                 CardMotion.Transition(surface, false, false); await Drain();
-                True(caption.RenderTransform.Value.IsIdentity, "caption uses stable layout, not hover translation");
+                True(caption.RenderTransform.Value.IsIdentity, "an unsupported entry retains the resting footer position");
                 Equal(Visibility.Collapsed, ((Button)entry.FindName("PlayButton")).Visibility);
             }
             finally { window.Close(); }
         });
-        yield return Case("entry colors use one sampled palette with a white-text contrast guard", () =>
+        yield return Case("entry palette conversion uses decoded artwork without changing shared image tones", () =>
         {
             var converter = new MusicCatalogPaletteConverter();
+            var tones = new List<Color>();
             foreach (var color in new[] { Color.FromRgb(83, 74, 85), Color.FromRgb(169, 149, 142), Colors.White })
             {
-                var brush = (SolidColorBrush)converter.Convert(new SolidColorBrush(color), typeof(Brush), null!, System.Globalization.CultureInfo.InvariantCulture);
+                var image = MusicEntryPaletteTests.Image((x, y) => color);
+                var raw = (SolidColorBrush)ArtworkImage.SamplePalette(image).Raw;
+                var brush = (SolidColorBrush)converter.Convert(image, typeof(Brush), null!, System.Globalization.CultureInfo.InvariantCulture);
                 True(brush.IsFrozen, "sampled palettes are shared immutable render input");
-                True(.2126 * brush.Color.R + .7152 * brush.Color.G + .0722 * brush.Color.B <= 82,
-                    "the same white-text contrast policy applies to every entry kind");
+                Equal(color, raw.Color);
+                tones.Add(brush.Color);
             }
+            True(tones[2].G > 150 && tones[2].G > tones[0].G + 50 && tones[1].R > tones[1].B,
+                "light and dark images retain distinct roles, while a warm image retains its color family");
             return Task.CompletedTask;
         });
         yield return Case("home headings use system typography and unclipped refresh without extra options", async () =>
@@ -450,7 +455,8 @@ public static class MusicCatalogTests
                     CardMotion.Transition(surface, false, false);
                     await Drain();
                     AssertDisplayAutoText(Descendants<TextBlock>(entry), "resting entry title caption and preview");
-                    True(caption.RenderTransform.Value.IsIdentity, "caption uses stable layout, not hover translation");
+                    True(((FrameworkElement)entry.FindName("ContentBlock")).RenderTransform.Value.IsIdentity,
+                        "the content starts in its two-line footer");
                     var y = caption.TranslatePoint(new Point(), surface).Y;
                     var pixelY = y * VisualTreeHelper.GetDpi(surface).DpiScaleY;
                     True(Math.Abs(pixelY - Math.Round(pixelY)) < .01, "caption baseline starts on a display pixel");
@@ -463,7 +469,8 @@ public static class MusicCatalogTests
                     CardMotion.Transition(surface, true, false);
                     await Drain();
                     AssertDisplayAutoText(Descendants<TextBlock>(entry), "raised entry title caption and preview");
-                    True(caption.RenderTransform.Value.IsIdentity, "caption stays fixed while preview fades over artwork");
+                    True(caption.TranslatePoint(new Point(), surface).Y < y,
+                        "the caption rises with its preview instead of remaining underneath it");
                     var raisedY = caption.TranslatePoint(new Point(), surface).Y * VisualTreeHelper.GetDpi(surface).DpiScaleY;
                     True(Math.Abs(raisedY - Math.Round(raisedY)) < .01, "settled preview also starts on a display pixel");
                     var layoutClip = LayoutInformation.GetLayoutClip(caption);
@@ -1236,14 +1243,16 @@ public static class MusicCatalogTests
             entry.DataContext = playlist;
             entry.Measure(new Size(168, 300)); entry.Arrange(new Rect(0, 0, 168, 200)); entry.UpdateLayout();
             var surface = (Grid)entry.FindName("Surface");
+            var caption = (TextBlock)entry.FindName("Caption");
+            var restingPosition = caption.TranslatePoint(new Point(), surface);
             CardMotion.Transition(surface, true, false); await Drain();
             Equal(1d, CardMotion.GetProgress(surface)); Equal(200d, entry.ActualHeight);
-            var caption = (TextBlock)entry.FindName("Caption");
-            var position = caption.TranslatePoint(new Point(), surface);
+            True(caption.TranslatePoint(new Point(), surface).Y < restingPosition.Y,
+                "a preview entry lifts its caption with the initialized songs");
             foreach (var variant in new[] { overlay, fm })
             {
                 entry.DataContext = variant; CardMotion.Transition(surface, true, false); await Drain();
-                Equal(position, caption.TranslatePoint(new Point(), surface));
+                Equal(restingPosition, caption.TranslatePoint(new Point(), surface));
                 Equal(10d, ((Button)entry.FindName("PlayButton")).Margin.Bottom);
             }
             entry.DataContext = staticCard; CardMotion.Transition(surface, true, false); await Drain();
@@ -1629,9 +1638,12 @@ public static class MusicCatalogTests
                     "preloaded previews keep the supplied titles");
                 Equal(reads, f.Client.Log.Count);
                 var surface = (Grid)preview.FindName("Surface");
+                CardMotion.Transition(surface, false, false); await Drain();
+                var caption = (TextBlock)preview.FindName("Caption");
+                double restingY = caption.TranslatePoint(new Point(), surface).Y;
                 CardMotion.Transition(surface, true, false); await Drain();
-                True(((TextBlock)preview.FindName("Caption")).RenderTransform.Value.IsIdentity,
-                    "channel hover preserves the shared caption position");
+                True(caption.TranslatePoint(new Point(), surface).Y < restingY,
+                    "channel entries lift the same caption together with supplied songs");
                 Equal(Visibility.Visible, ((Button)preview.FindName("PlayButton")).Visibility);
                 var passive = entries.Single(entry => ((MusicCatalogCard)entry.DataContext).Id == "radio");
                 Equal(Visibility.Collapsed, ((Button)passive.FindName("PlayButton")).Visibility);
@@ -2238,7 +2250,7 @@ public static class MusicCatalogTests
         {
             var row = new MusicCatalogCard("1", "入口标题", "真实描述", "", "playlist", "wy", ActionId: "1");
             var view = new MusicCatalogView();
-            foreach (var (type, width, height) in new[] { ("Catalog.Entry", 168d, 186d), ("Catalog.PlaylistCard", 140d, 172d), ("Catalog.Banner", 282d, 160d) })
+            foreach (var (type, width, height) in new[] { ("Catalog.Entry", 168d, 200d), ("Catalog.PlaylistCard", 140d, 172d), ("Catalog.Banner", 282d, 160d) })
             {
                 var card = (FrameworkElement)((DataTemplate)view.FindResource(type)).LoadContent();
                 card.DataContext = row; card.Measure(new Size(width, double.PositiveInfinity));
@@ -2510,7 +2522,6 @@ public static class MusicCatalogTests
         {
             this.store = store;
             var native = new MusicNativeApplication(store, runtime, transport);
-            runtime.Register(native);
             IMusicApplication application = native;
             if (vipAccount) application = Vip = new(native);
             Client = new(application); Module = new(Client, store, Playback);
@@ -2555,6 +2566,8 @@ public static class MusicCatalogTests
         }
         public async Task SetupSource()
         {
+            await Module.ActivateQualitySettingsAsync();
+            await Module.SetPlaybackQualityRequestAsync("320k");
             const string source = """
                 lx.on(lx.EVENT_NAMES.request, async ({info}) => 'https://media.invalid/' + info.musicInfo.songmid);
                 lx.send(lx.EVENT_NAMES.inited,{status:true,sources:{wy:{name:'合成',type:'music',actions:['musicUrl'],qualitys:['320k']}}});
@@ -2564,13 +2577,11 @@ public static class MusicCatalogTests
                 sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)) });
             var token = upload.GetProperty("token").GetString()!;
             await Rpc("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) });
-            var result = await Rpc("music.sources.install", new { token, name = "合成源", version = "1",
-                permissions = new { storage = Array.Empty<string>() } });
+            var result = await Rpc("music.sources.add", new { token });
             var installationId = result.GetProperty("item").GetProperty("installationId").GetString();
             var enabled = await Rpc("music.sources.enable", new { installationId });
             True(enabled.GetProperty("item").GetProperty("enabled").GetBoolean(), "enabled script participates in catalog playback");
-            await Module.RefreshOnlineAsync();
-            Module.SelectedSource = Module.Sources.Single(); await Module.LoadSourceAsync(Module.SelectedSource);
+            await Module.RefreshSourceManagementAsync();
         }
         public async ValueTask DisposeAsync()
         {

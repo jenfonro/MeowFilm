@@ -234,16 +234,9 @@ private struct RecoveryAccountFixture {
         _ = await f.service.close()
     }
 
-    func testPendingImportAndSigningInRefuseBeforeCredentialRead() async throws {
+    func testSigningInRefusesBeforeCredentialRead() async throws {
         let f = try RecoveryAccountFixture(); try await f.enable()
-        let selected = try await f.selection(), id = UUID()
-        _ = try await f.service.previewCredentialImport(MusicCredentialImportFixture.input(.netease),
-            platform: .netease, format: .iwebPlusSnapshot, requestID: id)
-        let reads = f.store.counts().reads, calls = await f.provider.captured()
-        await refuseBoth(f.service, selected)
-        XCTAssertEqual(f.store.counts().reads, reads)
-        let captured = await f.provider.captured(); XCTAssertEqual(captured, calls)
-        await f.service.cancelCredentialImport(id: id)
+        let selected = try await f.selection()
         let qr = try await f.service.beginLogin(platform: .netease)
         // Validated was removed by beginLogin; even the guessed new revision is
         // not permission to read the store or start session()/capabilities.
@@ -297,24 +290,20 @@ private struct RecoveryAccountFixture {
         _ = await f.service.close()
     }
 
-    func testSuspendedCapabilitiesCannotPublishAfterImportLockLogoutOrCancellation() async throws {
-        for mode in ["import", "lock", "logout", "cancel"] {
+    func testSuspendedCapabilitiesCannotPublishAfterLockLogoutOrCancellation() async throws {
+        for mode in ["lock", "logout", "cancel"] {
             let f = try RecoveryAccountFixture(); try await f.enable()
-            let selected = try await f.selection(), gate = MusicAccountTestGate(), id = UUID()
+            let selected = try await f.selection(), gate = MusicAccountTestGate()
             await f.provider.holdCapabilities(gate)
             let pending = Task { try await f.service.nativeRecoveryOptions(platform: .netease, nativeID: "101", selection: selected) }
             await gate.started()
             switch mode {
-            case "import":
-                _ = try await f.service.previewCredentialImport(MusicCredentialImportFixture.input(.netease),
-                    platform: .netease, format: .iwebPlusSnapshot, requestID: id)
             case "lock": _ = try await f.service.setAccess(available: false, generation: 2)
             case "logout": try await f.service.logout(platform: .netease)
             default: pending.cancel()
             }
             await gate.release()
             do { _ = try await pending.value; XCTFail("Late recovery published: \(mode)") } catch {}
-            if mode == "import" { await f.service.cancelCredentialImport(id: id) }
             do {
                 _ = try await f.service.nativeRefreshAudio(platform: .netease, nativeID: "101", selection: selected, rejectedURL: rejected)
                 XCTFail("Late grant survived: \(mode)")

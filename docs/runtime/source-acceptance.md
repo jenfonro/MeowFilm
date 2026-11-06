@@ -29,7 +29,7 @@ node scripts/accept-sources.mjs --kind source --scripts <文件或目录绝对�
 - 不制造其他平台的 ID，不以网络歌曲替代 `local` 输入，不将缺少输入写成已执行。特殊平台／扩展动作需要调用方提供其实际协议数据。
 - `--probe-media` 对 LX `musicUrl` 或 Cat `play` 返回的 HTTP(S) URL 发起有界字节探测；它不下载完整媒体，不证明整首播放或所有画质可用。
 - `--output` 必须是仓库 `tmp/` 内的绝对路径；默认报告为 `tmp/test-results/script-sources/acceptance.json`，运行中滚动替换。
-- Cat 每份脚本使用独立临时 dataRoot；关闭运行器后递归清理。源码一次 raw PUT 登记完整候选，再以 sourceRevision 一次 JSON POST 安装；源码仍为 1 至 16 MiB。调用和结果均直接 JSON/value，无大小分流、分片、Base64、TTL 或普通字节配额。中断上传不替换完整候选，CAS 前置失败不消费，取入试运行失败释放；原始源码和 source 规范化执行内容的身份不混淆。
+- 音乐/Cat 每份脚本使用独立临时 dataRoot；关闭运行器后递归清理。源码一次 raw PUT 登记完整候选，再以 sourceRevision 一次 JSON POST 导入/安装；源码仍为 1 至 16 MiB。调用和结果均直接 JSON/value，无大小分流、分片、Base64、TTL 或普通字节配额。中断上传不替换完整候选，前置字段/身份失败不消费，取入操作失败释放；原始源码和 source 规范化执行内容的身份不混淆。
 
 ## Reader 与 portable CatVod
 
@@ -77,7 +77,7 @@ node scripts/accept-sources.mjs \
   --payload <common-native payload绝对路径> --live --probe-media
 ```
 
-`--payload` 从 complete manifest 定位公共模块，要求真实使用的 HTTP bootstrap/client/contracts、完整候选 owner、runtime-bridge 和业务包入口都在 manifest 中；拒绝任何依赖解析到 payload 外。验收工具仍由仓库提供，不随应用发布。每次验收会话在内存生成独立身份和反向 listener，调用与源码路径和产品同为 HTTP；不新增密钥 CLI 或持久化凭据。
+`--payload` 从 complete manifest 定位公共模块，要求真实使用的 HTTP bootstrap/client/contracts、完整候选 owner、runtime-bridge 和业务包入口都在 manifest 中；拒绝任何依赖解析到 payload 外。验收工具仍由仓库提供，不随应用发布。每次验收会话在内存生成独立身份，调用与源码路径和产品同为 HTTP；不新增密钥 CLI、反向存储 listener 或持久化凭据。音乐安装和 KV 使用验收会话自己的临时数据根，不读取用户安装目录。
 
 Reader 所需公共入口为：
 
@@ -92,7 +92,7 @@ node_modules/@meowfilm/script-host/src/index.js
 node_modules/@meowfilm/source-runtime/src/index.js
 ```
 
-Reader 不需要同时实例化 music/CatNode。LX/CatNode 对应替换业务模块入口，使用相同 HTTP 装配。整个公共 payload 仅支持 `common-native`，入口 `app/entry.mjs`；native 固定来源与构建见 `scripts/quickjs-native.json`、`scripts/quickjs/build-native.mjs`。本轮不改 Windows/iOS launcher、旧管道或嵌入式接入，也不能把公共 Node HTTP 验收称作平台应用验证。通用构建与夹具回归已通过（见[通用验证范围](script-runtime.md#构建发布与验证边界)）；真实外部来源验收未覆盖，不能据此宣称真实来源通过。
+Reader 不需要同时实例化 music/CatNode。LX/CatNode 对应替换业务模块入口，使用相同 HTTP 装配。整个公共 payload 仅支持 `common-native`，入口 `app/entry.mjs`；native 固定来源与构建见 `scripts/script-host-native.json`、`scripts/quickjs/build-native.mjs`。本轮不改 Windows/iOS launcher、旧管道或嵌入式接入，也不能把公共 Node HTTP 验收称作平台应用验证。通用构建与夹具回归已通过（见[通用验证范围](script-runtime.md#构建发布与验证边界)）；真实外部来源验收未覆盖，不能据此宣称真实来源通过。
 
 普通数据采用 ABI2 typed bytes 跨 native 边界；显式 Base64 算法仍可用，但工具不对正文自动编码/压缩/摘要。maximumParseBytes 仅限制 DOM/规则解析，不限制普通 HTTP、存储状态或会话内存；不存在单实例内存配额或 OOM 自动重启。
 

@@ -136,23 +136,15 @@ public sealed class MusicLyricApplication(
                     cancellationToken.ThrowIfCancellationRequested();
                     CheckEpoch(policy, platform, epoch);
                     string id = installation.GetProperty("installationId").GetString()!;
-                    var detail = await script("music.sources.detail", new { installationId = id },
-                        cancellationToken).ConfigureAwait(false);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    CheckEpoch(policy, platform, epoch);
-                    if (!detail.GetProperty("ok").GetBoolean()) return detail;
-                    var item = detail.GetProperty("item");
-                    if (!item.GetProperty("enabled").GetBoolean()) continue;
-                    // Idle installations have no live capabilities. Only the
-                    // actual lyric request may activate the next installation.
-                    if (item.GetProperty("state").GetString() == "ready" &&
-                        !item.GetProperty("capabilities").EnumerateArray().Any(capability =>
-                            capability.GetProperty("platform").GetString() == platform &&
-                            capability.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "lyric")))
+                    // Known declarations skip a platform without lyric; an undeclared
+                    // installation is loaded by the actual lyric request itself.
+                    var sites = installation.GetProperty("sites");
+                    if (sites.ValueKind == JsonValueKind.Object &&
+                        !(sites.TryGetProperty(platform, out var site) &&
+                            site.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "lyric")))
                         continue;
                     var result = await ReadScriptAsync(platform, new {
-                        installationId = id, platform, sourceKey, song,
-                        generation = item.GetProperty("generation").GetInt64()
+                        installationId = id, platform, sourceKey, song
                     }, policy, epoch, cancellationToken).ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
                     CheckEpoch(policy, platform, epoch);

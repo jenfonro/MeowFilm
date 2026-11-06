@@ -42,7 +42,14 @@ public sealed partial class ShellWindow
                 },
                 () => !_isClosing, automationName: target.Page.Title)).ToArray()
             : [];
-        PageHeaderHost.Present(source, fallback, settings ? "设置" : null, additionalActions);
+        if (settings)
+        {
+            SelectSettingsTab(current);
+            PageHeaderHost.Present(null,
+                new("设置", SearchVisible: false, SearchEnabled: false, Slot: _settingsTabs),
+                "设置", additionalActions);
+        }
+        else PageHeaderHost.Present(source, fallback, additionalActions: additionalActions);
     }
 
     private void ApplyHeaderContext(ModuleSession current, DesktopHeaderContribution contribution)

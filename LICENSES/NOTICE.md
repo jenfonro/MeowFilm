@@ -149,7 +149,8 @@ Adapted portions:
   `util/{helper,request}.js`, `util/config.json`; `module/song_url.js`; the `song_climax`
   chorus recipe; `ClientContexts/MusicKgClientProtocol.cs` adapts `module/register_dev.js`
   and its fixed crypto/request helpers with the same retained MIT notice.
-- Discovery: `Platforms/PlatformKgDiscovery*.cs` adapts
+- Discovery: `Platforms/PlatformKgDiscovery*.cs` and
+  `native/MeowKit/Sources/MeowMusicNativeService/Catalog/MusicNativePublicBrowseKugou.swift` adapt
   `module/{top_playlist,top_song,playlist_tags,rank_list,rank_audio}.js` and the fixed
   signing helpers above; the directory, tags and rank-audio recipes remain data-only
   native calls, without a generic upstream module dispatcher.
@@ -206,6 +207,18 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   `scripts/ios-node-mobile.json` and checked during build preparation.
 - This component and its license are not distributed by the Windows packager.
 
+## Native QuickJS-NG — MIT
+
+- Source: https://github.com/quickjs-ng/quickjs, v0.18.0,
+  commit `d7215b0ad3fc2c562e8317fd9bca058fd4863804`.
+- License: `quickjs-native-MIT.txt`; original copyright notices remain in the
+  unmodified engine sources under `native/JavaScript/quickjs`.
+- Source and license hashes: `scripts/quickjs-native.json`.
+- Windows links the engine into `meowfilm_js.dll` through the application's
+  JSON-only C adapter. The upstream command-line interpreter, libc/I/O module
+  and module loader are not included. This client-side engine is independent
+  of the Node script host and does not replace its native script-execution engine.
+
 ## QuickJS-NG — MIT
 
 - Source: `https://github.com/quickjs-ng/quickjs`, version `0.14.0`, commit
@@ -245,7 +258,7 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   execution thread. Ordinary client requests do not run these algorithms.
 
 All three native source archives, licenses, the ordered patches, build tools and
-artifact locations are pinned in `scripts/quickjs-native.json`. Reproduce with
+artifact locations are pinned in `scripts/script-host-native.json`. Reproduce with
 `scripts/quickjs/build-native.mjs`; the build receipt records source/SDK inputs,
 ABI, platform, architecture and artifact hashes. The common packager verifies
 that inventory without building, fetching or changing the lock.
@@ -313,6 +326,21 @@ the original dependency license files.
 ## QR Code generator — MIT
 
 Copyright (c) 2018 Manuel Bleichenbacher. License: `qr-code-generator-LICENSE.txt`.
+
+## Entry artwork color-selection references — Windows
+
+The Windows music entry palette uses the muted/light-muted color-role approach
+described by AndroidX Palette (Copyright 2018 The Android Open Source Project,
+Apache-2.0; license text: `Apache-2.0.txt`):
+[Palette.java](https://github.com/androidx/androidx/blob/a6a6dfbfb81d34881205521e9e5cb886d91e5011/palette/palette/src/main/java/androidx/palette/graphics/Palette.java)
+and [Target.java](https://github.com/androidx/androidx/blob/a6a6dfbfb81d34881205521e9e5cb886d91e5011/palette/palette/src/main/java/androidx/palette/graphics/Target.java).
+The application implements its own bounded, alpha-weighted RGB histogram and
+population/lightness/chroma scoring in `MusicEntryPalette.cs`; it does not ship
+AndroidX, node-vibrant, their quantizers, skin-tone filters or generated swatch
+fallbacks. Tone adjustment uses the standard
+[Oklab color-space transforms](https://bottosson.github.io/posts/oklab/).
+No additional runtime dependency is used.
+
 ## Music platform brand marks
 
 The Windows music-platform assets identify NetEase Cloud Music, QQ Music, KuGou

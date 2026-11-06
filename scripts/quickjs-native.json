@@ -1,89 +1,29 @@
 {
   "schemaVersion": 1,
-  "abi": 1,
-  "napi": 8,
-  "sources": {
-    "quickjs": {
-      "version": "0.14.0",
-      "commit": "3c051980ab7e783dfbfb1c70c014ce5e05ecf24c",
-      "url": "https://codeload.github.com/quickjs-ng/quickjs/tar.gz/3c051980ab7e783dfbfb1c70c014ce5e05ecf24c",
-      "sha256": "2faf39d4256801fcc1e33a3631c3e4a23b9e72889f8240d449142baea347a3e8",
-      "license": {
-        "path": "LICENSES/quickjs-ng-LICENSE.txt",
-        "sha256": "96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171"
-      },
-      "archivePath": "tmp/build/runtime-native/quickjs.tar.gz",
-      "sourcePath": "tmp/build/runtime-native/quickjs"
-    },
-    "openssl": {
-      "version": "3.5.9",
-      "commit": "45e844fa2a14ec92d146bd8f5778ac130b6625fb",
-      "url": "https://codeload.github.com/openssl/openssl/tar.gz/45e844fa2a14ec92d146bd8f5778ac130b6625fb",
-      "sha256": "f54250b21795bb01240f3f9b42c384868d04460e339e39275aaaf93487f2d903",
-      "license": {
-        "path": "LICENSES/openssl-LICENSE.txt",
-        "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
-      },
-      "archivePath": "tmp/build/runtime-native/openssl.tar.gz",
-      "sourcePath": "tmp/build/runtime-native/openssl"
-    },
-    "zlib": {
-      "version": "1.3.1",
-      "commit": "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
-      "url": "https://codeload.github.com/madler/zlib/tar.gz/51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
-      "sha256": "d9e270d46252734aa49770fbc544125391617956266f220bd63216c834f3a522",
-      "license": {
-        "path": "LICENSES/zlib-LICENSE.txt",
-        "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243"
-      },
-      "archivePath": "tmp/build/runtime-native/zlib.tar.gz",
-      "sourcePath": "tmp/build/runtime-native/zlib"
-    }
-  },
-  "patches": [
-    {
-      "path": "packages/script-host/native/task-context.patch",
-      "sha256": "d1998ccfb73364405f2c6b2824d035b1dee15db2b880869856fe0a0f0d16e7fa",
-      "source": "quickjs"
-    },
-    {
-      "path": "packages/script-host/native/bigint-uintn.patch",
-      "sha256": "1fa50dca54580b2315a87fe3fca0cdfa6568b380174ebd97a99fe8b406e641f5",
-      "source": "quickjs"
-    },
-    {
-      "path": "packages/script-host/native/utf16-cstring.patch",
-      "sha256": "7219fcd43242d9975128a5943d1bd69dc1398d65c3e38fbb628b71238f8c08d6",
-      "source": "quickjs"
-    }
-  ],
-  "build": {
-    "node": "24.21.0",
-    "nodeGyp": "11.5.0",
-    "esbuild": "0.28.1",
-    "cache": "tmp/build/runtime-native",
-    "language": {
-      "binding": "c++17",
-      "quickjs": "c11"
-    }
-  },
-  "artifact": {
-    "path": "packages/script-host/build/Release/script_host_native.node",
-    "manifest": "packages/script-host/build/Release/script-host-native.json"
-  },
-  "mandatoryInputs": [
-    "packages/script-host/binding.gyp",
-    "scripts/quickjs/build-native.mjs",
-    "scripts/quickjs-native.json"
-  ],
-  "inputDirectories": [
-    "packages/script-host/native"
-  ],
-  "nodeHeaders": {
-    "version": "24.21.0",
-    "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-headers.tar.gz",
-    "checksumsUrl": "https://nodejs.org/dist/v24.21.0/SHASUMS256.txt",
-    "sha256": "57c6bee2e30bbbee5bd51d6cc343eb992e174b56a2a1d0eab7a7510771c20ea2",
-    "archivePath": "tmp/build/runtime-native/node-headers.tar.gz"
+  "project": "quickjs-ng/quickjs",
+  "version": "0.18.0",
+  "commit": "d7215b0ad3fc2c562e8317fd9bca058fd4863804",
+  "sourceUrl": "https://codeload.github.com/quickjs-ng/quickjs/tar.gz/d7215b0ad3fc2c562e8317fd9bca058fd4863804",
+  "archiveSha256": "a49defe70cbcae9226d9fac025af116e87ebae2440dcff1ca3c80b79e1cdef0b",
+  "licenseSha256": "96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171",
+  "files": {
+    "builtin-array-fromasync.h": "d313ac1e47eaa08f39b2cb0929a512d88e492906c400f650e141d00b79faa905",
+    "builtin-iterator-zip-keyed.h": "5b015a8063088987f0fb19357c9da5ec44a7197493fdbb23740fde8f470049a4",
+    "builtin-iterator-zip.h": "54834b615ddc59541515a7aa6d2c66fbfbf3213608f52e463d2469d63d395465",
+    "cutils.h": "dffec8bea17f08108da5a91c1178804754698bbbb6202dc100268e78e8c5b770",
+    "dtoa.c": "a8d2cf2d04db406e0c16acdd95ab0e709d309902865722f41dac07a1ba5676af",
+    "dtoa.h": "1c4a4540c0038632c8a4c225472fbc21bd476fb35c4da4a857a11965b58231b9",
+    "libregexp-opcode.h": "2a98d646089f3a72f25480116297c5fdb5b28fd9f815447273951f4ade4a115e",
+    "libregexp.c": "af13e996abb1767fe0cdfda123c45b811d53688d403a2ac47142e97bf79f1fae",
+    "libregexp.h": "53ff95a038f7001b752c455d195d998e2955f0ae4ed62a002c13eca798db3ceb",
+    "libunicode-table.h": "5840a921ac11664b505ee37b1219f518fff2a04972fe848b4bdf1e85c5a0bd83",
+    "libunicode.c": "c4724e77ec5f122373d2635b6d481cfb5d96024a38453a54a0830007c4b5f3c9",
+    "libunicode.h": "ad13f66aaea3fab1616e84b9c048f2a315e1bdbab628b966617a7a3e55bcba2b",
+    "list.h": "cb6e24e8ee54bccdd66234fe54cd702d1160b9841db2b9b9adeb5003afe301d5",
+    "quickjs-atom.h": "8045b870825a43ecdb50692aac7ad21b43139b288df466ca5f7b780bde4ac13f",
+    "quickjs-c-atomics.h": "29883c742a5c512278fce54d19b1b9af949006e1d7dfc9ffa2e0946b184d8c5c",
+    "quickjs-opcode.h": "0054b0c45fd091afa308c3fb93b5862e0b071235918d3d73e413d23fce388bbc",
+    "quickjs.c": "51b1d3919ffe812d0e01793f85d347bcea48c924c11262c5c5f00df1e4759d74",
+    "quickjs.h": "6d3879c856551653a1c64fabe52d6d07dc84e97bac3df45848df626702fc30de"
   }
 }

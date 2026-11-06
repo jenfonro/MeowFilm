@@ -189,3 +189,39 @@ struct MusicNativeFixture {
         }
     }
 }
+
+/// Synthetic account provider for owner tests. nativeID reads the fixture
+/// credential shapes: QQ `auth.musicid`, other platforms `accountID`.
+actor MusicAccountTestProvider: MusicAccountProvider {
+    private(set) var verifications = 0
+    private(set) var refreshes = 0
+    private(set) var began = 0
+    func counts() -> (verify: Int, refresh: Int, begin: Int) { (verifications, refreshes, began) }
+    func nativeID(_ credential: AccountCredential) throws -> String {
+        let root = try MusicQQWire.decode(credential.dataRepresentation())
+        if root["platform"] as? String == "tx" {
+            return try MusicQQWire.id(MusicQQWire.object(root["auth"])["musicid"])
+        }
+        return try MusicQQWire.id(root["accountID"])
+    }
+    func verify(_ credential: AccountCredential) throws -> MusicQQVerified {
+        verifications += 1
+        return .init(credential: credential, nickname: "Synthetic", nativeID: try nativeID(credential))
+    }
+    func refresh(_ credential: AccountCredential) throws -> MusicQQVerified {
+        refreshes += 1
+        return .init(credential: credential, nickname: "Synthetic", nativeID: try nativeID(credential))
+    }
+    func createQR(id: UUID) -> MusicLoginChallenge {
+        began += 1
+        return .init(id: id, platform: .qq, image: Data([0]), expiresAt: Date().addingTimeInterval(180))
+    }
+    func pollQR(id: UUID) -> MusicQQLoginResult { .init(progress: .waiting, verified: nil) }
+    func cancelQR(_ id: UUID) {}
+    func revoke() {}
+    func recommendations(kind: String, page: Int, credential: AccountCredential) -> MusicQQRecommendation { .init(rows: [], nextPage: nil) }
+    func collectionRows(credential: AccountCredential) -> [JSONValue] { [] }
+    func tracks(collectionID: String, credential: AccountCredential) -> [JSONValue] { [] }
+    func capabilities(mid: String, credential: AccountCredential) -> [String] { ["128k"] }
+    func resolve(mid: String, quality: String, credential: AccountCredential) -> JSONValue { .null }
+}

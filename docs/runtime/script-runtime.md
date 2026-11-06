@@ -19,7 +19,7 @@ packages/runtime-bridge/
   标准 Node HTTP、严格 JSON、反向调用和交换生命周期
 ```
 
-通用运行器不依赖平台目录。官方账号、目录、曲库、歌词、缓存、播放及持久来源元数据仍由调用方业务 owner 管理，不因加载脚本获得额外权限。独立入口描述 `aggregate`，模块为：
+通用运行器不依赖平台目录。官方账号、目录、曲库、歌词、播放等原生业务由调用方管理；脚本安装、源码、来源地址和私有数据由运行器持久管理。客户端可保存来源列表、检测结果等供原生界面直接读取的快照，不形成第二套安装管理或脚本存储。独立入口描述 `aggregate`，模块为：
 
 | 模块 | 响应契约 | 输入职责 |
 | --- | --- | --- |
@@ -35,13 +35,15 @@ Node 主控负责客户端 HTTP、安装与代次、调度、共享异步 I/O �
 
 LX 每个启用实例有一个原生线程、一个原生 QuickJS Runtime 和一个 Context。source 每个启用实例有一个原生线程、一个 Runtime、两个 Context：可信规则/SDK core 与用户脚本 realm；两个 Context 共用同实例 Runtime，不给每个书源再套 V8 Worker。CatNode 每个实例使用独立 Node Worker/V8 直接执行，移除内部 QuickJS。独立实例保留状态，不通过闲置卸载、重建或固定活跃数配额降低成本。
 
+脚本正常运行中的变量由引擎自然持有，不做内存快照持久化。Cat 同一私有卷只允许一个 Worker：更新前先退出旧 Worker，失败恢复的是旧源码而不是旧内存状态；其他实例不因此重建。明确管理重启与闲置回收是不同操作。尚未接入的网盘宿主缓存不在当前实现内。
+
 慢实例的同步 JavaScript、显式算法或网络等待不通过全局执行队列阻塞其他实例或控制 HTTP；同安装管理修改有序，各协议原有动作调度语义保留。实际 CPU/内存竞争仍存在，原生进程崩溃不承诺仅影响单实例。
 
 Node-independent 只描述 `@meowfilm/source-runtime` 的纯规则与 ABI 包；它不导入 `node:*` 或平台全局。CatNode 的 Node 能力不能据此宣称无 Node 可运行。source 的 `protocol: cat` 是 CatVod Spider，不能代替 CatNode 的服务、私有卷和管理能力。
 
 ## QuickJS 执行边界
 
-引擎采用 QuickJS-NG 原生 Node-API 绑定，来源、ABI、架构及精确输入以 `scripts/quickjs-native.json` 为准；不加载旧 WASM/asmjs，不在失败时切换后端。原生 Runtime 的建立、Context、求值、pending jobs、值引用和释放均由所属线程拥有，主线程不调用跨线程 JSValue。宿主回调传递明确身份、结构和 typed bytes，必要的所有权边界复制保留，不声称零拷贝。
+引擎采用 QuickJS-NG 原生 Node-API 绑定，来源、ABI、架构及精确输入以 `scripts/script-host-native.json` 为准；不加载旧 WASM/asmjs，不在失败时切换后端。原生 Runtime 的建立、Context、求值、pending jobs、值引用和释放均由所属线程拥有，主线程不调用跨线程 JSValue。宿主回调传递明确身份、结构和 typed bytes，必要的所有权边界复制保留，不声称零拷贝。
 
 LX/source 用户脚本不能直接获得 Node 对象、任意宿主 callable、文件、进程或模块加载器。原生绑定线程与 Cat Worker 是执行及生命周期隔离，不是对恶意代码或引擎漏洞的安全保证；既有私有卷、grant、scope 和网络访问身份仍必须保留。
 
@@ -75,11 +77,13 @@ lx.on(lx.EVENT_NAMES.request, async (payload, context) => {
 
 `context.storage.get/set/delete` 绑定调用 ID、site、installation、generation 及 read/write 权限，跨 await 保持同一身份。请求结束、取消或退休后旧引用失效。全局 `meow` 只提供 config；startup/background 不获得隐式存储授权，即使另一请求活跃也不能借用。Node AsyncLocalStorage 不能推断 guest Promise 的特权。
 
-每 session 一个反向 HTTP 入口，以独立 callbackKey 访问；grant 不进入脚本、配置或 public instance。回调前后均检查当前性。持久存储、overlay、CAS 仍属于调用方 owner；取消不提前遗弃物理存储工作。详见 [音乐脚本契约](music-script-runtime.md)。
+私有 KV 由音乐模块在 `<dataRoot>/music` 中持久保存，不再通过客户端 grant 或反向存储 RPC；运行器在处理器有效请求内提供读写权限，旧 context 在请求结束、取消或退休后失效。已有 KV 文档大小和键数边界是持久化数据契约，不是脚本内存配额。详见 [音乐脚本契约](music-script-runtime.md)。
 
 ## 网络与 Cat 持久资源
 
 LX 网络适配器形状保持 `network({url,options,signal,scope,validateURL})`。validateURL 检查 HTTP(S)、URL userinfo 和重定向语法，不是域名/私网白名单；跨 origin 不转发 Authorization/Cookie。`followRedirect:false` 禁止自动跳转，true 仍服从既有次数边界；`retry` 兼容字段不触发宿主自动重试或重放 POST。脚本显式 crypto/zlib、既有字符集/JSON/HTTP 解压语义保留，没有附加正文加工层。
+
+管理入口的网络源码通过专用 `createSourceDownload` 下载，沿用各模块的 URL、状态、重定向和期限规则；传输与解压后的源码均受 16 MiB 输入边界约束，取消等待连接与解压流真实关闭。普通 guest 网络适配器不恢复响应字节配额，也不套用源码大小限制。
 
 Cat 的 HTTP(S)、DNS、net/TLS 不按公网、私网或链路本地地址过滤；已登记 listener 别名映射本实例实际回环端点并携带访问身份，未登记回环目标直接访问且不附加凭据。socketPath/fd 与私有卷规则继续属于文件/IPC 边界。完整服务、管理 Cookie、provider 拦截和目录规则见 [CatNode 契约](cat-script-runtime.md)。
 
@@ -87,8 +91,10 @@ Cat 真实 Buffer/流/密钥对象按 Node 语义工作，资源按请求或实�
 
 ## 构建、发布与验证边界
 
-公共构建输入见 `scripts/quickjs-native.json`，构建入口为 `scripts/quickjs/build-native.mjs`；公共打包 `scripts/package-runtime.mjs` 仅支持 `common-native`，manifest 的 entry 为 `app/entry.mjs`、status 为 complete 时表示打包完成。闭包含公共 8 个 app 文件、三 workspace 包、规则 SDK、Cat 依赖和精确受信原生扩展。平台 wrapper 不在本轮改造范围，旧 profile 不提供兼容后端。
+公共构建输入见 `scripts/script-host-native.json`，构建入口为 `scripts/quickjs/build-native.mjs`；公共打包 `scripts/package-runtime.mjs` 仅支持 `common-native`，manifest 的 entry 为 `app/entry.mjs`、status 为 complete 时表示打包完成。闭包含公共 8 个 app 文件、三 workspace 包、规则 SDK、Cat 依赖和精确受信原生扩展。平台 wrapper 不在本轮改造范围，旧 profile 不提供兼容后端。
 
-构建成功、原生可加载、合成行为测试、清理/取消验证、真实第三方联网动作和同机性能测量是不同证据。评审返修后在 Linux arm64／Node 24.21.0 上完成最终原生／SDK 增量构建；受影响的 33 个测试文件、740 个不同用例结合定向复验均通过，包含真实独立 payload 的三协议启动。首轮仅三个新增 Cat 夹具遗漏实例标准流基线，修正为完整对象身份及实际关闭检查后，三例复验通过；产品输入未变，其余通过结果复用。
+构建成功、原生可加载、合成行为测试、清理/取消验证、真实第三方联网动作和同机性能测量是不同证据。main 整合前的定档 `b2ec723` 已在 Linux arm64／Node 24.21.0 上完成原生／SDK 增量构建；受影响的 33 个测试文件、740 个不同用例结合定向复验均通过，包含真实独立 payload 的三协议启动。首轮仅三个新增 Cat 夹具遗漏实例标准流基线，修正为完整对象身份及实际关闭检查后，三例复验通过；产品输入未变，其余通过结果复用。这些是定档证据，不代替本次管理功能与 HTTP 接线整合后的定向验证。
+
+本次整合 main `17b97e2` 后，在同一环境完成最终 native／SDK 增量构建；20 个相关测试文件的 495 个不同用例结合定向复验通过，无 skip。覆盖音乐/Cat 管理、完整 HTTP 与 64/65 层、源码下载的真实取消/关闭、独立推进、私有 KV、验收 CLI、打包边界和实际三协议 payload。首轮六项失败分别修复了 LX 存储控制包装重复计深及四处测试夹具/预期不匹配；复验另有一项 HTTP 取消用例偶发失败，同输入精确重跑通过，未修改该断言，原失败日志保留。详细测试迁移、输入适用范围及不确定点见任务交付记录。
 
 返修前另有 30 条完整请求链路及 LX/Cat/source 同步 JS、显式算法的六组独立推进时序证据；本次没有重跑整套性能测量，不将历史测量冒充新产物实测。Windows/iOS 旧接入本轮未迁移，真实第三方脚本和外部来源验收未覆盖；这些结果不代表全平台、平台应用验证或可发布。外部验收和脱敏报告规则见 [来源动态验收](source-acceptance.md)；逐次结果保存在任务证据中。

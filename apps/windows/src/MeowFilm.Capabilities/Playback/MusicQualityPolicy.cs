@@ -12,7 +12,7 @@ internal static class MusicQualityPolicy
     // Script host protocol vocabulary, not the identity of an official provider.
     internal static readonly string[] LxTypes = [.. RequestTypes];
     internal const string Fields = "schema revision request qualityOrder qualityEnabled spatialOrder spatialEnabled";
-    internal static JsonObject Default(string request = "320k") => LJ.Obj(("schema", 1), ("revision", 0),
+    internal static JsonObject Default(string request = "flac") => LJ.Obj(("schema", 1), ("revision", 0),
         ("request", request), ("qualityOrder", LJ.Arr(Categories)), ("qualityEnabled", LJ.Arr(Categories)),
         ("spatialOrder", LJ.Arr(Spatial)), ("spatialEnabled", LJ.Arr(Spatial)));
 
@@ -57,36 +57,41 @@ internal static class MusicQualityPolicy
         Array.IndexOf(Strings(policy["qualityOrder"]), Category(level)) * (Spatial.Length + 1) +
         (Category(level) == "spatial" && level != "spatial" ? Array.IndexOf(Strings(policy["spatialOrder"]), level) : 0);
 
-    internal static string[] Select(JsonObject policy, string request, JsonObject recording, JsonObject capability, bool local)
+    /// <summary>Exact official request levels; spatial and enhanced are platform effects, not LX types.</summary>
+    internal static readonly string[] OfficialTypes = [.. RequestTypes, "jyeffect", "dolby", "sky", "vivid"];
+    /// <summary>The request levels of one category in preference order (spatial follows its own order).</summary>
+    internal static string[] Levels(string category, JsonObject policy) => category switch
     {
-        LJ.Require(request == "auto" || LxTypes.Contains(request));
-        if (local)
-        {
-            // The fixed LX local contract deliberately has qualitys: [].
-            // Preserve explicit local requests, but never claim an automatic
-            // platform-quality intersection for a file without that metadata.
-            LJ.Require(request != "auto", "QUALITY_UNAVAILABLE");
-            LJ.Require(Enabled(request, policy), "QUALITY_DISABLED");
-            return [request];
-        }
-        var declared = Strings(capability["qualitys"]);
-        // Native WY metadata can omit types. That is unknown, not a definite
-        // miss: an explicit declared request may ask the real resolver, without
-        // claiming verification. Auto still requires a known intersection.
-        bool unknown = !recording.ContainsKey("types") && !LJ.B(recording["qualityKnown"]);
-        var types = (recording["types"] as JsonArray ?? []).OfType<JsonObject>()
-            .Select(n => LJ.S(n["type"])).ToArray();
-        var available = LxTypes.Where(t => declared.Contains(t) && types.Contains(t) && Enabled(t, policy));
-        if (request != "auto")
-        {
-            LJ.Require(Enabled(request, policy), "QUALITY_DISABLED");
-            LJ.Require(declared.Contains(request), "CAPABILITY_UNAVAILABLE");
-            LJ.Require(unknown || types.Contains(request), "RECORDING_QUALITY_UNAVAILABLE");
-            return [request];
-        }
-        var ordered = available.OrderBy(t => Priority(t, policy))
-            .ThenBy(t => t == "320k" ? 0 : t == "192k" ? 1 : 2).ToArray();
-        LJ.Require(ordered.Length > 0, "QUALITY_UNAVAILABLE");
-        return ordered;
+        "master" => ["master"], "hires" => ["flac24bit"], "lossless" => ["flac"], "high" => ["320k", "192k"],
+        "standard" => ["128k"], "enhanced" => ["jyeffect"],
+        "spatial" => Strings(policy["spatialOrder"]).Where(level => OfficialTypes.Contains(level) &&
+            Enabled(level, policy)).ToArray(),
+        _ => []
+    };
+    internal sealed record Tier(string Category, string[] Levels);
+    /// <summary>
+    /// Automatic order: the preferred category (auto: the first), then every later enabled
+    /// category of the saved order. A category is exhausted across all sources before the next.
+    /// </summary>
+    internal static Tier[] Tiers(JsonObject policy)
+    {
+        string request = LJ.S(policy["request"]);
+        var order = Strings(policy["qualityOrder"]);
+        int start = request == "auto" ? 0 : Math.Max(0, Array.IndexOf(order, Category(request)));
+        return order.Skip(start).Where(category => Strings(policy["qualityEnabled"]).Contains(category))
+            .Select(category => new Tier(category, category == Category(request) && request != "auto" &&
+                Levels(category, policy).Contains(request)
+                    ? Levels(category, policy).SkipWhile(level => level != request).ToArray()
+                    : Levels(category, policy)))
+            .Where(tier => tier.Levels.Length > 0).ToArray();
+    }
+    /// <summary>One manually chosen category or spatial level; never followed by another tier.</summary>
+    internal static Tier? Exact(string choice, JsonObject policy)
+    {
+        if (Categories.Contains(choice))
+            return Strings(policy["qualityEnabled"]).Contains(choice) && Levels(choice, policy) is { Length: > 0 } levels
+                ? new(choice, levels) : null;
+        return Spatial.Contains(choice) && OfficialTypes.Contains(choice) && Enabled(choice, policy)
+            ? new("spatial", [choice]) : null;
     }
 }

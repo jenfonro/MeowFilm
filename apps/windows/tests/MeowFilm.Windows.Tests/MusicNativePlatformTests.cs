@@ -56,16 +56,14 @@ public static partial class MusicNativePlatformTests
                     Equal("/api/song/music/detail/get", path); Equal("123", S(body["songId"]));
                     return Task.FromResult(Json(J(new { code = 200, data = new { h = new { size = 123456 } } })));
                 }));
-                var rights = new MeowFilm.Capabilities.Accounts.MusicAccountEntitlements(new(true, "vip",
-                    DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeMilliseconds()), 1, 0, ["exhigh"]);
                 await using var clients = new MusicClientContextFixture(transport);
                 if (trial)
                     await Error("PLAYBACK_RESTRICTED", () => new OfficialMusicAudio(transport, clients.Owner).ResolveAsync(DeviceSession(),
-                        new() { ["songmid"] = "123" }, ["320k"], rights, default, () => { }));
+                        new() { ["songmid"] = "123" }, ["320k"], default, () => { }));
                 else
                 {
                     var result = await new OfficialMusicAudio(transport, clients.Owner).ResolveAsync(DeviceSession(),
-                        new() { ["songmid"] = "123" }, ["320k"], rights, default, () => { });
+                        new() { ["songmid"] = "123" }, ["320k"], default, () => { });
                     Equal("320k", result.RequestQuality); Equal("128k", result.ActualQuality); True(result.QualityVerified);
                 }
             }

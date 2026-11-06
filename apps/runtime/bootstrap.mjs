@@ -1,6 +1,5 @@
-import { BridgeError, HTTP_PROTOCOL, createHttpServer, createHttpClient,
-  validateSession, validateEndpoint } from '@meowfilm/runtime-bridge';
-import { contracts, storageCodes, storageMethods } from './contracts.mjs';
+import { BridgeError, HTTP_PROTOCOL, createHttpServer, validateSession } from '@meowfilm/runtime-bridge';
+import { contracts } from './contracts.mjs';
 import { sourceByteLimit } from './modules/source-candidates.mjs';
 
 const invalid = () => { throw new BridgeError('INVALID_REQUEST'); };
@@ -9,34 +8,23 @@ const publicCodes = new Set(['INVALID_REQUEST', 'METHOD_NOT_FOUND', 'PERMISSION_
 const success = value => ({ ok: true, contract: HTTP_PROTOCOL, value });
 
 /** Trusted session configuration; no platform bootstrap or persistent identity. */
-export function createAppRuntime({ sessionId, requestKey, callbackUrl, callbackKey,
+export function createAppRuntime({ sessionId, requestKey,
   product = 'aggregate', modules, assemble } = {}) {
   validateSession({ sessionId, key: requestKey });
-  validateSession({ sessionId, key: callbackKey });
-  validateEndpoint(callbackUrl);
   if (typeof product !== 'string' || !/^[a-z][a-z0-9-]{0,63}$(?![\s\S])/.test(product) ||
       assemble !== undefined && (modules !== undefined || typeof assemble !== 'function')) invalid();
-  const callback = createHttpClient({ baseUrl: callbackUrl, sessionId, key: callbackKey });
-  let started = false, disposed = false, disposal, shutdown, closing;
-  const call = async (method, params, options) => {
-    if (!started || disposed) throw new BridgeError('CLOSED');
-    if (!storageMethods.has(method)) throw new BridgeError('METHOD_NOT_FOUND');
-    const reply = await callback.request({ path: `/v1/capabilities/${method}`, body: params,
-      contract: HTTP_PROTOCOL, codes: storageCodes, ...options });
-    return reply.ok ? { ok: true, value: reply.value } : { ok: false, code: reply.code };
-  };
+  let disposed = false, disposal, shutdown, closing;
   const dispose = () => disposal ??= (async () => {
     disposed = true;
     const results = await Promise.allSettled((Array.isArray(modules) ? [...new Set(modules)] : [])
       .map(module => Promise.resolve().then(() => module?.close?.())));
-    await callback.close();
     if (results.some(result => result.status === 'rejected' || result.value?.ok === false)) {
       throw new BridgeError('INVALID_RESPONSE');
     }
   })();
   const descriptors = [], methods = new Map(), owners = new Map();
   try {
-    if (assemble) modules = assemble({ call });
+    if (assemble) modules = assemble();
     if (!Array.isArray(modules) || !modules.length) invalid();
     for (const module of modules) {
       const contract = contracts[module?.id];
@@ -113,7 +101,7 @@ export function createAppRuntime({ sessionId, requestKey, callbackUrl, callbackK
     get state() { return server.state; },
     async start() {
       if (disposed) throw new BridgeError('CLOSED');
-      try { await server.start(); started = true; return runtime; }
+      try { await server.start(); return runtime; }
       catch (error) { await dispose().catch(() => {}); throw error; }
     },
     close() {

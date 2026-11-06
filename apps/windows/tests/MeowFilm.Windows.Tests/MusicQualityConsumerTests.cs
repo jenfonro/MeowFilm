@@ -62,7 +62,7 @@ public static class MusicQualityConsumerTests
         var before = await f.Fixture.Ok("music.quality.settings.get");
         await f.Fixture.Ok("music.settings.save", new {
             ifRevision = before.GetProperty("onlineSettings").GetProperty("revision").GetInt64(), lyrics = true });
-        await f.Module.RefreshOnlineAsync(); await Editable(f.Module);
+        await f.Module.RefreshSourceManagementAsync(); await Editable(f.Module);
         var after = await f.Fixture.Ok("music.quality.settings.get");
         Check(after.GetProperty("settings").GetRawText() == before.GetProperty("settings").GetRawText() &&
             after.GetProperty("signature").GetString() == before.GetProperty("signature").GetString(),
@@ -113,7 +113,6 @@ public static class MusicQualityConsumerTests
         var store = new QualityFixture.DocumentStore();
         await using var runtime = new NativeMusicScriptTestRuntime();
         await using var app = new MusicNativeApplication(store, runtime, new QualityFixture.RejectHttp());
-        runtime.Register(app);
         async Task<JsonElement> Call(string method, object? p = null)
         {
             var r = await app.ExecuteAsync(method, p); Check(r.GetProperty("ok").GetBoolean(), method + r.GetRawText()); return r;
@@ -131,8 +130,7 @@ public static class MusicQualityConsumerTests
         string token = (await Call("music.transfer.begin", new { kind = "script", basename = "quality-lx.js",
             length = bytes.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)) })).GetProperty("token").GetString()!;
         await Call("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) });
-        string id = (await Call("music.sources.install", new { token, name = "quality fixture", version = "1",
-            permissions = new { storage = Array.Empty<string>() } }))
+        string id = (await Call("music.sources.add", new { token }))
             .GetProperty("item").GetProperty("installationId").GetString()!;
         await Call("music.sources.enable", new { installationId = id });
         foreach (string quality in new[] { "master", "192k" })

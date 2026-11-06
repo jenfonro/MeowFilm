@@ -181,7 +181,11 @@ export class LXAdapterOwner {
     this.assertLive();
     try {
       if (operation === 'request') return await this.request(input);
-      if (operation === 'storage') return await this.storageCall(input);
+      if (operation === 'storage') {
+        const [storageScope, action, key, value] = input;
+        input = { scopeId: storageScope, operation: action, key, value };
+        return await this.storageCall(input);
+      }
       if (operation === 'abortRequest') {
         this.networks.get(input)?.close(fault('CANCELLED'));
         return null;

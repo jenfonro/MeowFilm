@@ -169,24 +169,6 @@ import MeowMusicFeature
         await service.close()
     }
 
-    func testImportNeverSchedulesSyncAndKeepsReceiptRollback() async throws {
-        let store = try NativeSyncFixture.store(), peer = NativeSyncPeer()
-        let service = try await NativeMusicFixture.service(store, accounts: peer)
-        // All-OFF preference writes must not count as imported library data.
-        _ = try await service.saveAutomaticLibrarySync(.init(), requestID: UUID(), authorization: .init())
-        let original = try NativeMusicFixture.importLibrary().bytes
-        let preview = try await service.prepareImport(data: original, sourceId: "fixture", ownerId: "import-owner")
-        _ = try await service.commitImport(preview)
-        _ = try await run(service, .foreground)
-        let calls = await peer.calls(), counts = await peer.counts()
-        XCTAssertTrue(calls.isEmpty); XCTAssertEqual(counts.0, 0)
-        XCTAssertEqual(original, try NativeMusicFixture.importLibrary().bytes)
-        try await service.rollbackImport(batchId: preview.report.batchId)
-        let rows = try await service.collections()
-        XCTAssertEqual(rows.count, 1); XCTAssertEqual(rows[0].count, 0)
-        await service.close()
-    }
-
     func testPureOrderRefusesChangedRemoteMembershipBeforeAnyWrite() async throws {
         let a = NativeSyncFixture.member("101"), b = NativeSyncFixture.member("102"), c = NativeSyncFixture.member("103")
         let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection(members: [a, b])])

@@ -34,7 +34,6 @@ function setup(t, { owner: suppliedOwner, hostFactory } = {}) {
   });
   const owner = suppliedOwner ?? createNodeSourceCapabilities({ network });
   const module = createSourceRuntimeModule({
-    call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
     network,
     capabilityOwner: owner,
     hostFactory,
@@ -186,7 +185,6 @@ test('source owner receives trusted generation scope and a source-domain profile
 
 test('external source owners must implement profile cleanup', () => {
   assert.throws(() => createSourceRuntimeModule({
-    call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
     network: async () => ({}),
     capabilityOwner: { invoke() {} },
   }), { code: 'INVALID_REQUEST' });
@@ -194,7 +192,6 @@ test('external source owners must implement profile cleanup', () => {
 
 test('source close reports host shutdown failures as cleanup failures', async () => {
   const module = createSourceRuntimeModule({
-    call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
     network: async () => ({}),
     hostFactory: () => ({
       list: () => [],
@@ -208,7 +205,6 @@ for (const hostFailure of ['throw', 'incomplete']) {
   test(`source direct and RPC close preserve the ${hostFailure} cleanup failure and run once`, async () => {
     let closes = 0;
     const module = createSourceRuntimeModule({
-      call: async () => assert.fail('close must not make outbound RPC calls'),
       network: async () => assert.fail('close must not use the network'),
       hostFactory: () => ({
         list: () => [],
@@ -832,7 +828,6 @@ function mockSourceRuntime(t) {
     },
   };
   const module = createSourceRuntimeModule({
-    call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
     hostFactory: () => host,
     network: async () => { throw new Error('mock host must not execute guest network'); },
     capabilityOwner: {

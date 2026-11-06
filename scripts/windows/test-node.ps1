@@ -19,7 +19,9 @@ if (-not $All) {
 }
 $Failed = $false
 foreach ($Stage in @('verify-dependency-lock', 'test-packages', 'test-root', 'verify-boundaries')) {
-    $Exit = Invoke-WindowsLoggedTool -Executable $WindowsNode -Arguments @((Join-Path $WindowsRoot "scripts\$Stage.mjs")) `
+    $Arguments = @((Join-Path $WindowsRoot "scripts\$Stage.mjs"))
+    if ($Stage -eq 'test-root') { $Arguments += @('--platform', 'windows') }
+    $Exit = Invoke-WindowsLoggedTool -Executable $WindowsNode -Arguments $Arguments `
         -Log (Join-Path $Run ($Stage + '.log'))
     if ($Exit -ne 0) { $Failed = $true }
     if ($Stage -eq 'verify-dependency-lock' -and $Failed) { throw 'Dependency lock validation failed.' }

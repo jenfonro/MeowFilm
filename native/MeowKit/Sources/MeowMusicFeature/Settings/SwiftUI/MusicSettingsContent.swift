@@ -44,7 +44,14 @@ enum MusicSettingsDestination: CaseIterable, Hashable {
 public struct MusicSettingsContent: View {
     let theme: PageTheme
     var preferenceValue = ""
+    var canResetUserData = false
+    var requestingReset = false
+    /// Durable home/channel catalogue source; nil hides the row until read.
+    var catalogSource: MusicHomeSourceSelection? = nil
+    var savingCatalogSource = false
     var open: (MusicSettingsDestination) -> Void = { _ in }
+    var resetUserData: () -> Void = {}
+    var selectCatalogSource: (MusicPublicBrowsePlatform) -> Void = { _ in }
 
     public var body: some View {
         List {
@@ -53,12 +60,38 @@ public struct MusicSettingsContent: View {
                     destination in
                     destinationRow(destination)
                 }
+                if let catalogSource, !catalogSource.available.isEmpty {
+                    Picker(selection: Binding(get: { catalogSource.selected }, set: { selectCatalogSource($0) })) {
+                        ForEach(catalogSource.available) { platform in
+                            Text(platform.title).tag(platform)
+                        }
+                    } label: {
+                        MusicSettingsIconLabel(symbol: "music.note.house", title: "数据源", theme: theme)
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(savingCatalogSource)
+                    .accessibilityIdentifier("music.settings.catalogSource")
+                    .modifier(MusicSettingsRowStyle(theme: theme))
+                }
             }
             .headerProminence(.increased)
             Section("偏好") {
                 destinationRow(.appearance)
             }
             .headerProminence(.increased)
+            if canResetUserData {
+                Section("本机数据") {
+                    Button(role: .destructive, action: resetUserData) {
+                        Text(requestingReset ? "正在记录清除请求…" : "清除本机用户数据")
+                            .foregroundStyle(Color(uiColor: .systemRed))
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    }
+                    .disabled(requestingReset)
+                    .accessibilityIdentifier("settings.clearUserData")
+                    .modifier(MusicSettingsRowStyle(theme: theme))
+                }
+                .headerProminence(.increased)
+            }
         }
         .modifier(MusicSettingsListStyle(theme: theme))
     }

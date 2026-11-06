@@ -71,7 +71,8 @@ final class MeowfilmAssembly: ObservableObject {
         startup = Task.detached(priority: .userInitiated) { [weak self] in
             do {
                 let resources = try MeowfilmResources()
-                guard !Task.isCancelled else { return }
+                await resources.musicScripts.start()
+                guard !Task.isCancelled else { await resources.musicScripts.close(); return }
                 await self?.install(resources)
             } catch {
                 await self?.failedStartup()
@@ -185,9 +186,10 @@ final class MeowfilmAssembly: ObservableObject {
         )
     }
 
-    private func shutdown() {
+    func shutdown() {
         guard !closed else { return }
         closed = true
+        music?.setAvailable(false)
         automaticSync?.stop()
         startup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
         service?.revokeAccess(generation: musicAccessGeneration)

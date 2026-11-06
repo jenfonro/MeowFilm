@@ -5,6 +5,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Data;
 using System.ComponentModel;
+using System.Windows.Automation;
 
 namespace MeowFilm.Capabilities;
 
@@ -35,10 +36,12 @@ public partial class MusicPlayerView : UserControl
     }
     internal void Deactivate()
     {
+        SpatialPopup.IsOpen = false;
         QualityPopup.IsOpen = false;
         PlaylistPopup.IsOpen = false;
         VolumePopup.IsOpen = false;
         RatePopup.IsOpen = false;
+        if (MoreButton.ContextMenu is { } menu) menu.IsOpen = false;
         Progress.CancelScrub(); RestoreProgress();
     }
     private async void Surface_MouseUp(object sender, MouseButtonEventArgs e)
@@ -69,39 +72,109 @@ public partial class MusicPlayerView : UserControl
     }
     private async void Quality_Click(object sender, RoutedEventArgs e)
     {
-        QualityPopup.IsOpen = !QualityPopup.IsOpen;
-        if (!QualityPopup.IsOpen) return;
+        if (QualityPopup.IsOpen) { QualityPopup.IsOpen = false; return; }
         await module.ActivateQualitySettingsAsync();
+        ShowQualityMenu();
+        QualityPopup.IsOpen = true;
     }
-    private async void SourceSearch_Click(object sender, RoutedEventArgs e)
+    /// <summary>Quality choices of the current playback; spatial levels form the right-hand submenu.</summary>
+    private void ShowQualityMenu()
     {
-        if (QualityPopup.IsOpen) await module.RefreshCurrentRecordingsAsync();
+        SourcePanel.Visibility = Visibility.Collapsed;
+        QualityMenu.Visibility = Visibility.Visible;
+        Fill(QualityItems, module.QualityChoices());
+        var spatial = module.SpatialChoices();
+        Fill(SpatialItems, spatial);
+        SpatialButton.Visibility = spatial.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        SpatialButton.Tag = spatial.Any(choice => choice.Current) ? "current" : null;
     }
-    private async void PlaybackQuality_Changed(object sender, SelectionChangedEventArgs e)
+    private void Fill(Panel panel, IReadOnlyList<MusicQualityChoice> choices)
     {
-        if (!IsLoaded || sender is not ComboBox { SelectedItem: string value } ||
-            value == module.PlaybackQualityRequest) return;
-        await module.SetPlaybackQualityRequestAsync(value);
+        panel.Children.Clear();
+        foreach (var choice in choices)
+        {
+            var item = new Button
+            {
+                Content = choice.Current ? choice.Label + "  ✓" : choice.Label, Tag = choice.Key,
+                HorizontalContentAlignment = HorizontalAlignment.Left, Padding = new(10, 7, 10, 7), FontSize = 13,
+                FontFamily = SystemFonts.MessageFontFamily, IsEnabled = module.CanSwitchSource
+            };
+            AutomationProperties.SetName(item, choice.Label);
+            item.Click += QualityChoice_Click;
+            panel.Children.Add(item);
+        }
+    }
+    private async void QualityChoice_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: string key }) return;
+        SpatialPopup.IsOpen = false;
+        QualityPopup.IsOpen = false;
+        await module.SwitchQualityAsync(key);
+    }
+    private void Spatial_Click(object sender, RoutedEventArgs e) => OpenSpatial(focus: true);
+    private void Spatial_MouseEnter(object sender, MouseEventArgs e) => OpenSpatial(focus: false);
+    private void Spatial_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Right) return;
+        e.Handled = true;
+        OpenSpatial(focus: true);
+    }
+    private void OpenSpatial(bool focus)
+    {
+        if (SpatialItems.Children.Count == 0) return;
+        SpatialPopup.IsOpen = true;
+        if (focus && SpatialItems.Children[0] is Button first)
+            Dispatcher.BeginInvoke(() => first.Focus(), System.Windows.Threading.DispatcherPriority.Input);
+    }
+    private void SpatialItems_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key is not (Key.Left or Key.Escape)) return;
+        e.Handled = true;
+        SpatialPopup.IsOpen = false;
+        SpatialButton.Focus();
+    }
+    private void SpatialPopup_MouseLeave(object sender, MouseEventArgs e)
+    {
+        if (!SpatialButton.IsMouseOver) SpatialPopup.IsOpen = false;
+    }
+    private void SourceList_Click(object sender, RoutedEventArgs e)
+    {
+        SpatialPopup.IsOpen = false;
+        module.OpenSourceChoices();
+        QualityMenu.Visibility = Visibility.Collapsed;
+        SourcePanel.Visibility = Visibility.Visible;
+    }
+    private void SourceBack_Click(object sender, RoutedEventArgs e) => ShowQualityMenu();
+    private async void LoadMoreSources_Click(object sender, RoutedEventArgs e) => await module.LoadMoreSourcesAsync();
+    private async void SourceChoice_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: MusicSourceChoice choice }) return;
+        QualityPopup.IsOpen = false;
+        await module.SelectSourceChoiceAsync(choice);
     }
     private async void Quality_Closed(object? sender, EventArgs e)
-    { module.CloseCurrentRecordings(); await module.DeactivateQualityAsync(); }
-    private async void Recording_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is Button { Tag: MusicRecordingRow row })
-            await module.SelectCurrentRecordingAsync(row);
+        SpatialPopup.IsOpen = false;
+        module.CloseSourceChoices();
+        await module.DeactivateQualityAsync();
     }
-    private async void Recordings_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    /// <summary>The "more" menu: playback rate (its own panel) and "wrong source".</summary>
+    private void More_Click(object sender, RoutedEventArgs e)
     {
-        if (QualityPopup.IsOpen && e.VerticalChange > 0 &&
-            e.VerticalOffset + e.ViewportHeight >= e.ExtentHeight - 24)
-            await module.LoadCurrentRecordingsAsync();
+        var menu = new ContextMenu { PlacementTarget = MoreButton, Placement = PlacementMode.Top };
+        var rate = new MenuItem { Header = "播放倍速 · " + module.PlaybackRateText };
+        rate.Click += (_, _) => { menu.IsOpen = false; RatePopup.IsOpen = true; };
+        var wrong = new MenuItem { Header = "音源不对", IsEnabled = module.CanSwitchSource };
+        wrong.Click += async (_, _) => { menu.IsOpen = false; await module.ReportWrongSourceAsync(); };
+        menu.Items.Add(rate); menu.Items.Add(wrong);
+        MoreButton.ContextMenu = menu;
+        menu.IsOpen = true;
     }
     private async void Play_Click(object sender, RoutedEventArgs e) => await module.TogglePlaybackAsync();
     private async void Previous_Click(object sender, RoutedEventArgs e) => await module.StepAsync(false);
     private async void Next_Click(object sender, RoutedEventArgs e) => await module.StepAsync(true);
     private async void Mode_Click(object sender, RoutedEventArgs e) => await module.ChangeModeAsync((module.Mode + 1) % 4);
     private async void Queue_Click(object sender, RoutedEventArgs e) => await module.OpenPlayQueueAsync();
-    private void Rate_Click(object sender, RoutedEventArgs e) => RatePopup.IsOpen = !RatePopup.IsOpen;
     private async void Rate_MouseUp(object sender, MouseButtonEventArgs e) => await module.ChangePlaybackRateAsync(Math.Round(RateSlider.Value, 1));
     private async void Rate_KeyUp(object sender, KeyEventArgs e)
     {

@@ -12,9 +12,11 @@
 .\build-windows.ps1       # Windows：构建结果为 build\windows\meowfilm.exe
 ```
 
-Windows 默认生成 Release、win-x64 自包含版本；可选参数 `-Configuration Debug`、`-FrameworkDependent`。需要 PATH 上的 .NET SDK（10 或更高）、Node.js、npm 与 Git。日志与暂存文件位于 `tmp/`。
+Windows 默认生成 Release、win-x64 自包含版本；可选参数 `-Configuration Debug`、`-FrameworkDependent`。需要 PATH 上的 .NET SDK（10 或更高）、Node.js、npm、Git、CMake 3.20+ 与 Windows C 编译器。日志与暂存文件位于 `tmp/`。
 
 上述工具只用于开发与构建。Windows 部署需要完整的 `build/windows/`，不能只复制 `meowfilm.exe`；`-FrameworkDependent` 版本另外需要匹配的 .NET Desktop Runtime。当前通用运行器已改用原生引擎及 HTTP；Windows／iOS 启动接入和平台包装尚待独立迁移，本轮不代表平台 App 已可直接构建发布。
+
+客户端影视规则另由 `native/JavaScript` 构建原生 `meowfilm_js.dll` 随 App 输出，与通用脚本宿主引擎无关；目标电脑不需要 CMake 或编译器。
 
 ## 测试
 
@@ -38,6 +40,8 @@ Windows 上运行 Python 脚本时将 `python3` 换为 `python -X utf8`。iOS �
 ## 脚本运行时
 
 通用运行器由一个 Node 主控管理：LX 和 Reader／CatVod 来源分别使用逐实例原生线程与 QuickJS Runtime；CatNode 使用逐实例 Node Worker，直接执行 Node 能力，不再嵌套 QuickJS／WASM。源码一次完整 HTTP 上传，普通调用使用 JSON，请求与结果不走业务分片。当前模块为 `music@0.8.0`／`music.script.v3`、`cat@0.2.0`／`cat.script.v2`、`source@0.2.0`／`source.runtime.v2`。见 [公共运行时](docs/runtime/script-runtime.md)。
+
+已同步的 Windows 业务采用随 App 启动公共宿主、恢复启用猫源的生命周期，官方原生业务不以 Node 为前置条件；其启动与传输接入仍须迁到上述通用 HTTP 契约。客户端魔法规则独立使用原生 QuickJS-NG，见[影视设置](docs/windows/film-settings.md)。
 
 通用运行器构建使用 Node 24.21.0、C/C++ 编译工具、Perl 和 make（Windows 为对应原生工具链）：
 

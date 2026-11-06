@@ -176,7 +176,7 @@ import MeowJSON
 
 private actor MusicHomeActionOwnerProvider: MusicAccountProvider, MusicAccountHomeActionProvider, MusicNeteaseHomeProvider {
     struct Calls: Sendable { let actions: [MusicHomeAction]; let verifies: Int }
-    private let account = MusicCredentialImportProvider()
+    private let account = MusicAccountTestProvider()
     private var actions: [MusicHomeAction] = [], verifies = 0
     private var gate: MusicAccountQueueOwnerGate?
     private var next: Int?, failure: MusicServiceError?

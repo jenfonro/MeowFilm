@@ -1,14 +1,15 @@
-export const storageCodes = new Set(['PERMISSION_DENIED', 'STALE_SOURCE', 'CANCELLED', 'CLOSED',
-  'TIMEOUT', 'LIMIT', 'INVALID_REQUEST', 'STORAGE_ERROR']);
-export const storageMethods = new Set(['get', 'set', 'delete'].map(name => `platform.musicScript.storage.${name}`));
-
 export const contracts = Object.freeze({
   music: { contract: 'music.script.v3', version: '0.8.0', prefix: 'music.script.',
-    operations: ['load', 'unload', 'invoke', 'status', 'close'],
+    operations: ['sources.list', 'sources.detail', 'sources.add', 'sources.download', 'sources.edit',
+      'sources.update', 'sources.rollback', 'sources.enable', 'sources.disable', 'sources.remove',
+      'sources.check', 'resolve', 'invoke', 'close'],
     codes: new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SCRIPT_INTEGRITY',
       'SCRIPT_ENCODING', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED',
       'CAPABILITY_UNAVAILABLE', 'PERMISSION_DENIED', 'TIMEOUT', 'SCRIPT_CLEANUP', 'SCRIPT_FAILURE',
-      'NETWORK_ERROR', 'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'STORAGE_ERROR']) },
+      'SCRIPT_PROTOCOL_ERROR', 'NETWORK_ERROR', 'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'STORAGE_ERROR',
+      'CORRUPT_STORAGE', 'ROLLBACK_UNAVAILABLE', 'INVALID_SOURCE_URL', 'SOURCE_DOWNLOAD_FAILED',
+      'SOURCE_REDIRECT', 'MEDIA_UNAVAILABLE', 'INVALID_MEDIA_CANDIDATE', 'EXPIRED_MEDIA_CANDIDATE',
+      'MEDIA_HEADERS_UNSUPPORTED', 'TARGET_CHANGED', 'RECORDING_MISMATCH']) },
   source: { contract: 'source.runtime.v2', version: '0.2.0', prefix: 'source.runtime.',
     operations: ['load', 'unload', 'invoke', 'status', 'close'],
     codes: new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SOURCE_INTEGRITY',
@@ -18,7 +19,8 @@ export const contracts = Object.freeze({
       'SOURCE_CLEANUP', 'SOURCE_FAILURE', 'NETWORK_ERROR', 'HTTP_ERROR', 'INVALID_RESPONSE',
       'STORAGE_ERROR', 'VIRTUAL_ROUTE_NOT_FOUND']) },
   cat: { contract: 'cat.script.v2', version: '0.2.0', prefix: 'cat.script.',
-    operations: ['start', 'status', 'refresh', 'install', 'enable', 'uninstall', 'invoke', 'management.describe', 'management.sync'],
+    operations: ['start', 'status', 'refresh', 'install', 'import', 'edit', 'update', 'restart',
+      'enable', 'uninstall', 'invoke', 'management.describe', 'management.sync'],
     codes: new Set(['INVALID_ARGUMENT', 'HOST_CLOSED', 'CANCELLED', 'RESOURCE_LIMIT',
       'SCRIPT_PROTOCOL_ERROR', 'STALE_SESSION', 'NOT_FOUND', 'DISABLED', 'ALREADY_EXISTS',
       'SCRIPT_EXCEPTION', 'STARTING', 'CORRUPT_STORAGE', 'SERVICE_ERROR', 'TIMEOUT',

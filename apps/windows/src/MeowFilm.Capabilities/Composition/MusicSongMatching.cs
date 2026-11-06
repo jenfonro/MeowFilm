@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.PlaybackCache;
@@ -27,21 +28,59 @@ public sealed partial class MusicNativeApplication
         songMatcher.Invalidate(platform);
     }
 
-    private async Task<JsonObject> MatchScriptSongAsync(JsonObject song, string platform, CancellationToken token)
+    /// <summary>
+    /// The one supplementary recording search of a playback selection: only requested
+    /// platforms the song has no accepted mapping for. The matcher's notFound window and
+    /// freshness rules apply; built-in and script providers share the merged result.
+    /// </summary>
+    private async Task<JsonElement> CompleteSongAsync(object? parameters, CancellationToken token)
     {
-        var known = await songMatcher.KnownAsync(song, token).ConfigureAwait(false);
-        if (LJ.Array(known["sources"]).OfType<JsonObject>().Any(source => LJ.S(source["source"]) == platform))
-            return known;
-        using var frame = sessions.Begin();
-        var session = await sessions.AcquireAsync(platform, token).ConfigureAwait(false);
-        string context = MatchingContext(platform, session);
-        var result = await songMatcher.MatchAsync(song, platform, context, token).ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
-        if (session is not null) LJ.Require(accounts.IsCurrent(session), "AUTH_CHANGED");
-        if (result.Error is not null) throw new MusicLibraryException(result.Error);
-        LJ.Require(LJ.Array(result.Song["sources"]).OfType<JsonObject>().Any(source =>
-            LJ.S(source["source"]) == platform), "RECORDING_UNAVAILABLE");
-        return result.Song;
+        try
+        {
+            var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
+            LJ.Require(LJ.Bytes(input).Length <= 512 * 1024, "LIMIT");
+            LJ.Fields(input, "song platforms", "song platforms");
+            var platforms = LJ.Array(input["platforms"]).Select(value => LJ.Text(value)).Distinct(StringComparer.Ordinal).ToArray();
+            LJ.Require(platforms.Length is > 0 and <= 5 && platforms.All(NativeMusicSong.Platforms.Contains));
+            var origin = NativeMusicSong.Normalize(input["song"]);
+            var song = await songMatcher.KnownAsync(origin, token).ConfigureAwait(false);
+            var known = LJ.Array(song["sources"]).OfType<JsonObject>().Select(source => LJ.S(source["source"]))
+                .ToHashSet(StringComparer.Ordinal);
+            var failures = new JsonArray();
+            var targets = platforms.Where(platform => !known.Contains(platform)).ToArray();
+            var results = await Task.WhenAll(targets.Select(async platform =>
+            {
+                // A catalog frame holds one platform's account lease. Parallel completion
+                // needs one frame per platform, never one shared captured lease.
+                using var frame = sessions.Begin();
+                MusicPlatformSession? session = null;
+                try
+                {
+                    session = await sessions.AcquireAsync(platform, token).ConfigureAwait(false);
+                    var match = await songMatcher.MatchAsync(origin, platform,
+                        MatchingContext(platform, session), token).ConfigureAwait(false);
+                    return (Platform: platform, Session: session, Match: match);
+                }
+                catch (MusicPlatformException e)
+                { return (Platform: platform, Session: session, Match: new MusicSongMatcher.MatchResult(origin, Error: e.Code)); }
+            })).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            foreach (var (platform, session, match) in results)
+            {
+                if (session is not null) LJ.Require(accounts.IsCurrent(session), "AUTH_CHANGED");
+                if (match.Error is { } error) failures.Add(LJ.Obj(("platform", platform), ("code", error)));
+            }
+            // Every accepted match is merged into the matcher's entry for this recording.
+            if (targets.Length > 0) song = await songMatcher.KnownAsync(origin, token).ConfigureAwait(false);
+            await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
+            return JsonSerializer.SerializeToElement(new { ok = true, song, failures });
+        }
+        catch (OperationCanceledException) { return Failed("CANCELLED"); }
+        catch (MusicLibraryException e) { return Failed(e.Code); }
+        catch (MusicAccountException e) { return Failed(e.Code); }
+        catch (MusicPlatformException e) { return Failed(e.Code); }
+        catch (MusicPlaybackCacheDataException) { return Failed("CACHE_DATA_INCOMPATIBLE"); }
+        catch (JsonException) { return Failed("INVALID_REQUEST"); }
     }
 
     private async Task SaveSongMatchesAsync(CancellationToken token)

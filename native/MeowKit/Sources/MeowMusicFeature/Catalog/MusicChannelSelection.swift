@@ -17,6 +17,11 @@ import Combine
     }
     public func restoreChannel(from catalogue: [MusicPublicBrowseChannel], catalogueLoaded: Bool) {
         guard !catalogue.isEmpty else { return }
+        if let channel, !catalogue.contains(where: { $0.platform == channel.platform }) {
+            // The directory changed source. Retire the in-memory choice only;
+            // the remembered identity is never rewritten by restoration.
+            self.channel = nil
+        }
         if let channel {
             if let current = catalogue.first(where: { $0.platform == channel.platform &&
                 ($0.id == channel.id || !channel.pageCode.isEmpty && $0.pageCode == channel.pageCode) }) {

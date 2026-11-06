@@ -10,6 +10,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     let primaryPlaybackPresentation = MusicMiniPlayerPresentation()
     private let window: UIWindow
     private let assembly: MeowfilmAssembly
+    private let resetUserData: @MainActor () async throws -> Void
     private let navigation: PageNavigationController
     private let root: MeowfilmRootContainerViewController
     private var observations: Set<AnyCancellable> = []
@@ -21,9 +22,11 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private var accessGeneration: UUID?
     private var presentedError: String?
 
-    init(window: UIWindow, assembly: MeowfilmAssembly) {
+    init(window: UIWindow, assembly: MeowfilmAssembly,
+         resetUserData: @escaping @MainActor () async throws -> Void) {
         self.window = window
         self.assembly = assembly
+        self.resetUserData = resetUserData
         navigation = PageNavigationController(themeProvider: assembly.appearance)
         root = MeowfilmRootContainerViewController(navigation: navigation, themeProvider: assembly.appearance)
         super.init()
@@ -84,7 +87,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     func showSettings() {
         guard let model = assembly.music else { return }
         navigation.pushViewController(MusicSettingsViewController(
-            model: model, appearance: assembly.appearance, router: self
+            model: model, appearance: assembly.appearance, router: self, resetUserData: resetUserData
         ), animated: true)
     }
 

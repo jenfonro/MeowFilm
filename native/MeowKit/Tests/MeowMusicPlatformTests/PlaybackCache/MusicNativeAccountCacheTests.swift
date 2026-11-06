@@ -204,7 +204,7 @@ private struct AccountURLCacheFixture {
         _ = await f.service.close()
     }
 
-    func testLocalAggregateScopeIsStableAcrossRestartAndNeverAcceptsPendingImport() async throws {
+    func testLocalAggregateScopeIsStableAcrossLockRestartAndLogout() async throws {
         let credentials = MusicAccountTestStore(), clock = MusicAccountTestClock()
         let http = MusicAccountTestHTTP(clock: clock)
         let scopes: [MusicAccountPlatform: AccountIdentity] = [
@@ -236,37 +236,20 @@ private struct AccountURLCacheFixture {
         XCTAssertFalse(cold.authorization.isActive)
         let other = try await restarted.nativeCacheScope(); XCTAssertNotEqual(other.scope, cold.scope)
         _ = await restarted.close()
-
-        let pending = try MusicCredentialImportStored.pending(MusicNeteaseFixture.credential(), platform: .netease)
-        try credentials.write(.init(credential: pending), for: scopes[.netease]!)
-        let imported = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: credentials), scopes: scopes, transport: http)
-        _ = try await imported.setAccess(available: true, generation: 1)
-        do { _ = try await imported.nativeCacheScope(); XCTFail("Pending import authorized local audio") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .verificationRequired) }
         let finalRequests = await http.recorded(); XCTAssertTrue(finalRequests.isEmpty)
-        _ = await imported.close()
     }
 
-    func testForgedScopeCannotRevokeRealScopeAndPreviewRevokesOnlyLocalFilePermission() async throws {
+    func testForgedScopeCannotRevokeRealScopeAndStorageErrorIsNotAGuestScope() async throws {
         let f = try AccountURLCacheFixture(); try await f.enable()
         let original = try await f.service.nativeCacheScope()
         let forged = MusicNativeCacheScope(scope: original.scope, revision: original.revision)
         do { try await f.service.checkNativeCacheScope(forged); XCTFail("Copied cache identity forged permission") }
         catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
         XCTAssertTrue(original.authorization.isActive)
-        let preview = try await f.service.previewCredentialImport(MusicCredentialImportFixture.input(.netease),
-            platform: .netease, format: .iwebPlusSnapshot, requestID: UUID())
-        XCTAssertFalse(original.authorization.isActive)
-        do { _ = try await f.service.nativeCacheScope(); XCTFail("Pending import preview reused file permission") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .verificationRequired) }
-        await f.service.cancelCredentialImport(id: preview.id)
-        let restored = try await f.service.nativeCacheScope()
-        XCTAssertEqual(restored.scope, original.scope)
-        XCTAssertFalse(restored.authorization === original.authorization)
         f.credentials.fail("read")
-        do { try await f.service.checkNativeCacheScope(restored); XCTFail("Storage error became a guest scope") }
+        do { try await f.service.checkNativeCacheScope(original); XCTFail("Storage error became a guest scope") }
         catch { XCTAssertEqual(error as? MusicServiceError, .storageFailed) }
-        XCTAssertFalse(restored.authorization.isActive)
+        XCTAssertFalse(original.authorization.isActive)
         f.credentials.fail(nil)
         let calls = await f.provider.counts(); XCTAssertEqual(calls, [0, 0, 0])
         _ = await f.service.close()

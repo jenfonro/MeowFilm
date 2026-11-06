@@ -33,6 +33,9 @@ public sealed class SeekBar : Slider
     private static readonly DependencyProperty ExpansionProperty = DependencyProperty.Register(
         "Expansion", typeof(double), typeof(SeekBar),
         new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
+    private static readonly DependencyProperty HoverShadeOpacityProperty = DependencyProperty.Register(
+        "HoverShadeOpacity", typeof(double), typeof(SeekBar),
+        new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
     public static readonly DependencyProperty IsPlayingProperty = DependencyProperty.Register(
         nameof(IsPlaying), typeof(bool), typeof(SeekBar), new PropertyMetadata(false, PlaybackChanged));
     public static readonly DependencyProperty PlaybackRateProperty = DependencyProperty.Register(
@@ -50,6 +53,7 @@ public sealed class SeekBar : Slider
         IsHitTestVisible = false
     };
     private bool pointerGesture, pointerWithin;
+    private static readonly Pen HeadOutline = (Pen)new Pen(Frozen("#33000000"), 1).GetAsFrozen();
     private long previewSecond = -1, previewDuration = -1;
     private Brush hoverShade = CreateHoverShade(Brushes.Gray);
     private double pointerX;
@@ -88,7 +92,9 @@ public sealed class SeekBar : Slider
         {
             SystemParameters.StaticPropertyChanged -= OnSystemSettingChanged;
             pointerWithin = false; CancelScrub(); preview.IsOpen = false;
-            BeginAnimation(ExpansionProperty, null); BeginAnimation(DisplayValueProperty, null);
+            BeginAnimation(ExpansionProperty, null); SetValue(ExpansionProperty, 0d);
+            BeginAnimation(HoverShadeOpacityProperty, null); SetValue(HoverShadeOpacityProperty, 0d);
+            BeginAnimation(DisplayValueProperty, null);
         };
         IsVisibleChanged += (_, _) =>
         {
@@ -96,6 +102,7 @@ public sealed class SeekBar : Slider
             {
                 pointerWithin = false; CancelScrub(); preview.IsOpen = false;
                 BeginAnimation(ExpansionProperty, null); SetValue(ExpansionProperty, 0d);
+                BeginAnimation(HoverShadeOpacityProperty, null); SetValue(HoverShadeOpacityProperty, 0d);
             }
             SynchronizePlayback();
         };
@@ -111,12 +118,13 @@ public sealed class SeekBar : Slider
         bool highContrast = DesktopTheme.GetIsHighContrast(this);
         Brush active = highContrast ? SystemColors.HighlightBrush : PlayedBrush;
         double expansion = Math.Clamp((double)GetValue(ExpansionProperty), 0, 1);
+        double shadeOpacity = Math.Clamp((double)GetValue(HoverShadeOpacityProperty), 0, 1);
         Brush rail = highContrast ? SystemColors.WindowTextBrush : RailBrush;
         double thickness = 2 + expansion * 6, y = RailAtTop ? 1 : height / 2;
-        if (RailAtTop && expansion > 0 && !highContrast)
+        if (RailAtTop && shadeOpacity > 0 && !highContrast)
         {
-            dc.PushOpacity(expansion);
-            dc.DrawRectangle(hoverShade, null, new Rect(0, y - thickness / 2 - 24, width, 24));
+            dc.PushOpacity(shadeOpacity);
+            dc.DrawRectangle(hoverShade, null, new Rect(0, y - thickness / 2 - 40, width, 40));
             dc.Pop();
         }
         double end = Fraction(DisplayValue) * width;
@@ -131,11 +139,18 @@ public sealed class SeekBar : Slider
         }
         if (expansion > 0 && IsEnabled)
         {
-            double radius = 4 * expansion;
-            dc.DrawEllipse(highContrast ? SystemColors.HighlightBrush : active,
-                null, new(Math.Clamp(end, radius, Math.Max(radius, width - radius)), y), radius, radius);
+            double radius = 7 * expansion, inset = radius + .5;
+            dc.DrawEllipse(highContrast ? SystemColors.HighlightTextBrush : Brushes.White,
+                highContrast ? null : HeadOutline,
+                new(Math.Clamp(end, inset, Math.Max(inset, width - inset)), y), radius, radius);
         }
     }
+
+    // Decorative drawing above the footer must not keep MouseEnter active or
+    // intercept page clicks after the pointer leaves the actual seek surface.
+    protected override HitTestResult? HitTestCore(PointHitTestParameters hitTestParameters) =>
+        new Rect(RenderSize).Contains(hitTestParameters.HitPoint)
+            ? new PointHitTestResult(this, hitTestParameters.HitPoint) : null;
 
     private static void PlayedBrushChanged(DependencyObject value, DependencyPropertyChangedEventArgs _) =>
         ((SeekBar)value).hoverShade = CreateHoverShade(((SeekBar)value).PlayedBrush);
@@ -143,7 +158,7 @@ public sealed class SeekBar : Slider
     {
         var color = brush is SolidColorBrush solid ? solid.Color : Colors.Gray;
         var gradient = new LinearGradientBrush(Color.FromArgb(0, color.R, color.G, color.B),
-            Color.FromArgb(90, color.R, color.G, color.B), new Point(0, 0), new Point(0, 1));
+            Color.FromArgb(36, color.R, color.G, color.B), new Point(0, 0), new Point(0, 1));
         gradient.Freeze(); return gradient;
     }
     private static void DisplayChanged(DependencyObject value, DependencyPropertyChangedEventArgs _)
@@ -187,15 +202,25 @@ public sealed class SeekBar : Slider
         if (e.Property == DesktopTheme.IsHighContrastProperty ||
             e.Property == MaximumProperty || e.Property == MinimumProperty) SynchronizePlayback();
         if (e.Property == IsKeyboardFocusWithinProperty || e.Property == DesktopTheme.IsHighContrastProperty) UpdateExpansion();
+        // The inherited theme property does not carry AffectsRender. Highlight
+        // values can remain unchanged while every painted color needs replacing.
+        if (e.Property == DesktopTheme.IsHighContrastProperty) InvalidateVisual();
     }
     private void UpdateExpansion()
     {
-        double target = IsEnabled && (pointerWithin || IsKeyboardFocusWithin || IsScrubbing) ? 1 : 0;
-        if (!SystemParameters.ClientAreaAnimation || DesktopTheme.GetIsHighContrast(this))
-        { BeginAnimation(ExpansionProperty, null); SetValue(ExpansionProperty, target); }
-        else BeginAnimation(ExpansionProperty, new DoubleAnimation(target, TimeSpan.FromMilliseconds(120))
-        { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } });
+        AnimateHighlight(ExpansionProperty, IsEnabled && (pointerWithin || IsKeyboardFocusWithin || IsScrubbing) ? 1 : 0);
+        // Focus keeps the keyboard control visible, but must not leave a colored
+        // veil over page content after a pointer seek has finished.
+        AnimateHighlight(HoverShadeOpacityProperty, IsEnabled && (pointerWithin || IsScrubbing) ? 1 : 0);
         if (!IsEnabled) preview.IsOpen = false;
+    }
+    private void AnimateHighlight(DependencyProperty property, double target)
+    {
+        if (!IsLoaded || !IsVisible) target = 0;
+        if (!IsLoaded || !IsVisible || !IsEnabled || !SystemParameters.ClientAreaAnimation || DesktopTheme.GetIsHighContrast(this))
+        { BeginAnimation(property, null); SetValue(property, target); }
+        else BeginAnimation(property, new DoubleAnimation(target, TimeSpan.FromMilliseconds(120))
+        { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } });
     }
     protected override void OnMouseEnter(MouseEventArgs e)
     { base.OnMouseEnter(e); pointerWithin = true; UpdateExpansion(); UpdatePreview(); }

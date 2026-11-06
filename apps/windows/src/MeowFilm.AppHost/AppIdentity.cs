@@ -14,18 +14,18 @@ public static class AppIdentity
     public static IReadOnlyList<RuntimeModule> ScriptModules { get; } =
         Array.AsReadOnly(new[]
         {
-            new RuntimeModule("music", "0.7.0"),
+            new RuntimeModule("music", "0.8.0"),
             new RuntimeModule("cat", "0.1.0"),
             new RuntimeModule("source", "0.1.0")
         });
-    public static IReadOnlyList<string> NativeCollections { get; } =
-        Array.AsReadOnly(new[] { "music.script-sources.v2" });
+    /// <summary>Trusted native content collections. Music sources are stored by the shared runtime module.</summary>
+    public static IReadOnlyList<string> NativeCollections { get; } = Array.AsReadOnly(Array.Empty<string>());
     public static IReadOnlyList<string> ProtectedNamespaces { get; } =
         Array.AsReadOnly(new[] { "music.accounts.v1", "music.platform-context.v1" });
     public static IReadOnlyList<string> NativeNamespaces { get; } = Array.AsReadOnly(new[]
     {
         "music.library.v1", "music.files.v1", "music.accounts.v1", "music.feedback.v1",
         "music.playback-sources.v1", "music.playback-files.v1", "music.chorus.v1", "music.platform-context.v1",
-        "music.song-matches.v1"
+        "music.song-matches.v1", "film.magic-rules.v1", "film.video-sources.v1"
     });
 }

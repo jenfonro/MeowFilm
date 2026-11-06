@@ -4,9 +4,6 @@ import MeowMusicFeature
 
 final class NativeMusicImportModelTests: XCTestCase {
     // Synthetic current-library vectors specified independently of the implementation.
-    // SHA-256 was frozen with Python hashlib, not by running the reference JS.
-    private let batch = "e17cfc9a1761babe8423d1054deb3e11edfa471db165957ce2ab42225464d06f"
-    private let after = "a95fe60872976c86cae17c660e594dd47bc890a1b6c4d632112922ab19829b53"
     private let collectionsJSON = #"""
     [{"id":"favorites","kind":"favorites","name":"Favorites","order":["2"],"revision":3,"manualOrder":false,"bindings":[],"intents":{}},{"id":"playlist:1","kind":"playlist","name":"Saved","order":["10","2"],"revision":4,"manualOrder":true,"locallyCreated":true,"bindings":[{"platform":"wy","accountId":"fixture-owner","id":"fixture-list","writable":false,"baseline":["77"],"map":{"77":"2"},"name":"Saved"}],"intents":{"2":{"present":true,"pending":true,"origin":"local","acknowledged":["[\"wy\",\"fixture-owner\",\"fixture-list\"]"]}}},{"id":"playlist:2","kind":"playlist","name":"Removed","order":[],"revision":1,"manualOrder":true,"deleted":true,"bindings":[],"intents":{}}]
     """#
@@ -16,14 +13,19 @@ final class NativeMusicImportModelTests: XCTestCase {
     private let expectedLocal = #"""
     {"songId":"10","title":"Frozen local","artist":"Fixture","album":"","duration":0,"cover_url":"","sources":[]}
     """#
-    private func fixture(prepared: Bool = false) throws -> MJ {
+    private func fixture() throws -> MJ {
         let songs = MJ.obj([("10", try MJ.parse(Data(expectedLocal.utf8))), ("2", try MJ.parse(Data(expectedOnline.utf8)))])
         return .obj([("version", .n(1)), ("ownerId", .string("frozen-owner")), ("revision", .n(7)), ("nextId", .n(3)),
             ("songs", songs), ("accounts", .obj([("wy", .string("fixture-owner"))])),
             ("collections", try MJ.parse(Data(collectionsJSON.utf8))),
-            ("status", prepared ? .obj([("phase", .string("blocked")), ("at", .n(0)),
-                ("issues", .array([.obj([("code", .string("import_requires_rebinding"))])]))]) :
-                .obj([("phase", .string("synced")), ("at", .n(42)), ("issues", .array([]))]))])
+            ("status", .obj([("phase", .string("synced")), ("at", .n(42)), ("issues", .array([]))]))])
+    }
+    /// The fixture library as the persisted device document's library area.
+    private func stored(_ library: MJ) -> Data {
+        var library = library; library["ownerId"] = .string("device")
+        let area = MJ.obj([("schema", .n(1)), ("scope", .string("device")), ("revision", .n(1)), ("library", library)])
+        return MJ.obj([("version", .n(1)), ("scope", .string("device")), ("revision", .n(1)),
+            ("records", .obj([(MusicModel.key("library"), area)]))]).bytes
     }
     func testCompactSongCleaningKeepsIDsAndFiltersUnknownNativeQualityFields() throws {
         let expected = try fixture()
@@ -42,126 +44,91 @@ final class NativeMusicImportModelTests: XCTestCase {
         XCTAssertEqual(MusicModel.publicURL(.string("https://localhost./cover.jpg")),
                        .string("https://localhost./cover.jpg"))
     }
-    func testImportIgnoresAdditionalSongFieldsWithoutChangingCurrentData() async throws {
+    func testCleanSongIgnoresAdditionalSongFieldsWithoutChangingCurrentData() throws {
         let current = try fixture()
-        var input = current
         for id in ["2", "10"] {
-            var song = input["songs"][id]
+            var song = current["songs"][id]
             song["extension"] = .obj([("title", .string("Unrelated title")), ("sources", .strings(["unrelated"]))])
             song["annotation"] = .string("Not part of the recording")
             song["displayOrder"] = .n(42)
-            input["songs"][id] = song
+            XCTAssertEqual(try MusicModel.cleanSong(song).stable, current["songs"][id].stable)
         }
-        let bytes = input.bytes, store = NativeMusicMemoryDocument()
-        let service = try await NativeMusicFixture.service(store)
-        let preview = try await service.prepareImport(data: bytes, sourceId: "fixed-contract", ownerId: "frozen-owner")
-        XCTAssertEqual(preview.report.batchId, batch)
-        XCTAssertEqual(preview.report.songs, 2)
-        XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
-        _ = try await service.commitImport(preview)
-        let saved = try MJ.parse(XCTUnwrap(store.snapshot().0))["records"][MusicModel.key("library")]
-        XCTAssertEqual(saved["library"]["songs"].stable, current["songs"].stable)
-        XCTAssertEqual(saved["receipt"]["afterHash"].string, after)
-        XCTAssertEqual(input.bytes, bytes)
-        await service.close()
-
-        let before = store.snapshot(), reopened = try await NativeMusicFixture.service(store)
-        let again = try await reopened.prepareImport(data: current.bytes, sourceId: "fixed-contract", ownerId: "frozen-owner")
-        XCTAssertTrue(again.report.alreadyApplied)
-        XCTAssertEqual(again.report.batchId, batch)
-        let collections = try await reopened.collections()
-        let tracks = try await reopened.tracks(in: collections[1])
-        XCTAssertEqual(tracks.map(\.songId), ["10", "2"])
-        XCTAssertTrue(tracks[0].sources.isEmpty)
-        XCTAssertEqual(tracks[1].sources.count, 1)
-        XCTAssertEqual(store.snapshot().0, before.0); XCTAssertEqual(store.snapshot().2, before.2)
-        await reopened.close()
     }
-    func testImportRequiresSongFieldsWithoutTargetWrites() async throws {
-        let current = try fixture(), compact = current["songs"]["2"]
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        for field in ["songId", "title", "artist", "album", "duration", "sources"] {
-            var song = compact; song.remove(field)
-            var input = current; input["songs"]["2"] = song
-            do {
-                _ = try await service.prepareImport(data: input.bytes, sourceId: "fixed-contract", ownerId: "frozen-owner")
-                XCTFail("Song missing \(field) was accepted")
-            } catch {
-                XCTAssertEqual(error as? MusicServiceError, field == "songId" ? .songIDConflict : .corruptDocument)
-            }
-            XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
-        }
-        await service.close()
-    }
-    func testSongShapeAndSourceArrayTypesAreValidated() async throws {
-        for raw in [MJ.null, .array([]), .string("not a song"), .n(1)] {
-            XCTAssertThrowsError(try MusicModel.cleanSong(raw)) {
-                XCTAssertEqual($0 as? MusicServiceError, .corruptDocument)
-            }
-        }
-        let current = try fixture(), store = NativeMusicMemoryDocument()
-        let service = try await NativeMusicFixture.service(store)
-        for sources in [MJ.null, .obj(), .string("not an array"), .n(0)] {
-            var input = current; input["songs"]["2"]["sources"] = sources
-            do {
-                _ = try await service.prepareImport(data: input.bytes, sourceId: "fixed-contract", ownerId: "frozen-owner")
-                XCTFail("Invalid source array was accepted")
-            } catch { XCTAssertEqual(error as? MusicServiceError, .invalidImport) }
-            XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
-        }
-        await service.close()
-    }
-    func testImportGoldenBatchReceiptMetadataAndRollback() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        let raw = try fixture()
-        let preview = try await service.prepareImport(data: raw.bytes, sourceId: "fixed-contract", ownerId: "frozen-owner")
-        XCTAssertEqual(preview.report.batchId, batch)
-        _ = try await service.commitImport(preview)
-        let saved = try MJ.parse(XCTUnwrap(store.snapshot().0))
-        let library = saved["records"][MusicModel.key("library")]
-        XCTAssertEqual(library["receipt"]["afterHash"].string, after)
-        XCTAssertEqual(library["receipt"]["sourceOwnerId"].string, "frozen-owner")
-        XCTAssertEqual(library["library"]["collections"], raw["collections"])
-        XCTAssertEqual(library["library"]["accounts"], raw["accounts"])
-        XCTAssertEqual(library["library"]["songs"]["2"]["songId"].string, "2")
-        let again = try await service.prepareImport(data: raw.stable.bytes, sourceId: "fixed-contract", ownerId: "frozen-owner")
-        XCTAssertTrue(again.report.alreadyApplied)
-        try await service.rollbackImport(batchId: batch)
-        let empty = try await service.collections()
-        XCTAssertEqual(empty.count, 1); XCTAssertEqual(empty[0].count, 0)
-    }
-    func testCurrentImportCASFailureKeepsTargetAndPreviewAvailableForExplicitRetry() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        let source = try fixture().bytes
-        let preview = try await service.prepareImport(data: source, sourceId: "fixed-contract", ownerId: "frozen-owner")
-        store.fail(.storageConflict)
-        do { _ = try await service.commitImport(preview); XCTFail("Failed CAS cannot apply an import") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .storageConflict) }
-        XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
-        store.fail(nil)
-        let report = try await service.commitImport(preview)
-        XCTAssertFalse(report.alreadyApplied); XCTAssertEqual(report.batchId, batch)
-        XCTAssertEqual(store.snapshot().2, 1)
-        XCTAssertEqual(source, try fixture().bytes)
-        await service.close()
-    }
-    func testCurrentCompactReceiptIsNotRewrittenOrReimportedUnderNewIdentity() async throws {
-        var library = try fixture(prepared: true); library["ownerId"] = .string("device")
-        XCTAssertEqual(library.stable.digest, after)
-        let area = MJ.obj([("schema", .n(1)), ("scope", .string("device")), ("revision", .n(1)), ("library", library),
-            ("receipt", .obj([("batchId", .string(batch)), ("sourceId", .string("fixed-contract")), ("sourceOwnerId", .string("frozen-owner")),
-                ("appliedAt", .n(1234)), ("appliedRevision", .n(1)), ("afterHash", .string(after))]))])
-        let bytes = MJ.obj([("version", .n(1)), ("scope", .string("device")), ("revision", .n(1)),
-            ("records", .obj([(MusicModel.key("library"), area)]))]).bytes
+    func testStoredCurrentLibraryLoadsWithoutRewriteOrVisibleTombstone() async throws {
+        let bytes = stored(try fixture())
         let store = NativeMusicMemoryDocument(bytes), service = try await NativeMusicFixture.service(store)
-        let preview = try await service.prepareImport(data: fixture().bytes, sourceId: "fixed-contract", ownerId: "frozen-owner")
-        XCTAssertTrue(preview.report.alreadyApplied)
-        XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
         let collections = try await service.collections()
         XCTAssertEqual(collections.count, 2, "tombstone remains stored, not visible")
         let tracks = try await service.tracks(in: collections[1])
         XCTAssertEqual(tracks.map(\.songId), ["10", "2"])
         XCTAssertTrue(tracks[0].sources.isEmpty, "local metadata is not a fabricated LX source")
+        XCTAssertEqual(tracks[1].sources.count, 1)
+        XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
+        await service.close()
+    }
+    func testStoredSongMissingFieldsOrConflictingRecordingFailsWithoutWrite() async throws {
+        let current = try fixture()
+        var cases = ["songId", "title", "artist", "album", "duration", "sources"].map { field -> (String, MJ, MusicServiceError) in
+            var song = current["songs"]["2"]; song.remove(field)
+            return ("missing " + field, song, field == "songId" ? .songIDConflict : .corruptDocument)
+        }
+        var conflicting = current["songs"]["2"], sources = conflicting["sources"].array
+        sources[0]["musicInfo"]["singer"] = .string("Different recording")
+        conflicting["sources"] = .array(sources)
+        cases.append(("conflicting recording", conflicting, .nativeIDConflict))
+        for (label, song, expected) in cases {
+            var library = current; library["songs"]["2"] = song
+            let bytes = stored(library)
+            let store = NativeMusicMemoryDocument(bytes), service = try await NativeMusicFixture.service(store)
+            do { _ = try await service.collections(); XCTFail("Stored song accepted: \(label)") }
+            catch { XCTAssertEqual(error as? MusicServiceError, expected, label) }
+            XCTAssertEqual(store.snapshot().0, bytes, label); XCTAssertEqual(store.snapshot().2, 0, label)
+            await service.close()
+        }
+    }
+    func testStoredDocumentRejectsSecretFieldNamesInAnyAreaWithoutWrite() async throws {
+        let current = try fixture()
+        // An ordinary additional song field still loads, so the rejections
+        // below come from the secret-name rule rather than a closed field set.
+        var ordinary = current; ordinary["songs"]["2"]["annotation"] = .string("synthetic-note")
+        let ordinaryBytes = stored(ordinary)
+        let ordinaryStore = NativeMusicMemoryDocument(ordinaryBytes)
+        let loaded = try await NativeMusicFixture.service(ordinaryStore)
+        let collections = try await loaded.collections(); XCTAssertEqual(collections.count, 2)
+        XCTAssertEqual(ordinaryStore.snapshot().0, ordinaryBytes); XCTAssertEqual(ordinaryStore.snapshot().2, 0)
+        await loaded.close()
+        var cases: [(String, Data)] = []
+        var song = current; song["songs"]["2"]["cookie"] = .string("synthetic-private")
+        cases.append(("song cookie", stored(song)))
+        var nested = current, sources = nested["songs"]["2"]["sources"].array
+        sources[0]["musicInfo"]["accessToken"] = .string("synthetic-private")
+        nested["songs"]["2"]["sources"] = .array(sources)
+        cases.append(("source accessToken", stored(nested)))
+        var document = try MJ.parse(stored(current)), history = MusicModel.history
+        history["cookie"] = .string("synthetic-private")
+        document["records"][MusicModel.key("history")] = history
+        cases.append(("history cookie", document.bytes))
+        for (label, bytes) in cases {
+            let store = NativeMusicMemoryDocument(bytes), service = try await NativeMusicFixture.service(store)
+            do { _ = try await service.collections(); XCTFail("Stored secret accepted: \(label)") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument, label) }
+            XCTAssertEqual(store.snapshot().0, bytes, label); XCTAssertEqual(store.snapshot().2, 0, label)
+            await service.close()
+        }
+    }
+    func testSongShapeAndSourceArrayTypesAreValidated() throws {
+        for raw in [MJ.null, .array([]), .string("not a song"), .n(1)] {
+            XCTAssertThrowsError(try MusicModel.cleanSong(raw)) {
+                XCTAssertEqual($0 as? MusicServiceError, .corruptDocument)
+            }
+        }
+        let current = try fixture()
+        for sources in [MJ.null, .obj(), .string("not an array"), .n(0)] {
+            var song = current["songs"]["2"]; song["sources"] = sources
+            XCTAssertThrowsError(try MusicModel.cleanSong(song)) {
+                XCTAssertEqual($0 as? MusicServiceError, .invalidImport)
+            }
+        }
     }
     func testStableJSONEnumeratesIndexKeysAndUsesECMAScriptSmallNumbers() throws {
         let value = try MJ.parse(Data(#"{"10":"ten","2":"two","01":"string","4294967295":"string","a":1e-7,"b":-1e-7,"c":1e-6}"#.utf8))
@@ -179,16 +146,6 @@ final class NativeMusicImportModelTests: XCTestCase {
         XCTAssertEqual(MusicModel.durable(.string("HTTPS://host/a?Token=1")), .string(""))
         XCTAssertEqual(MusicModel.durable(.string("blob:https://host/a")), .string(""))
         XCTAssertEqual(MusicModel.durable(.string("DATA:text/plain,secret")), .string(""))
-    }
-    func testConflictingNativeRecordingIsRejectedWithoutDurableQuarantineTable() async throws {
-        var library = try fixture(prepared: true)
-        var accepted = library["songs"]["2"]["sources"].array
-        accepted[0]["musicInfo"]["singer"] = .string("Different recording")
-        library["songs"]["2"]["sources"] = .array(accepted)
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        do { _ = try await service.prepareImport(data: library.bytes, sourceId: "fixed", ownerId: "frozen-owner"); XCTFail("conflicting source") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .nativeIDConflict) }
-        XCTAssertNil(store.snapshot().0)
     }
     func testDuplicateSourceKeysRemainRejectedAfterOrdering() throws {
         let song = try NativeMusicFixture.song()

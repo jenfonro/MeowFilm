@@ -38,7 +38,7 @@ public sealed partial class MusicCapability
     public ObservableCollection<MusicQualityRow> QualityCategories { get; } = [];
     public ObservableCollection<MusicQualityRow> SpatialQualities { get; } = [];
     public string[] PlaybackQualityOptions { get; } = ["auto", "128k", "192k", "320k", "flac", "flac24bit", "master"];
-    public string PlaybackQualityRequest { get; private set; } = "320k";
+    public string PlaybackQualityRequest { get; private set; } = "flac";
     public string QualityStatus => qualityStatus;
     public bool CanEditQuality => CanEdit && qualityLoaded && !qualityBusy;
     internal void QualityBindings()

@@ -5,8 +5,7 @@ import { createRuntimeClient } from '../apps/runtime/client.mjs';
 /** A real local HTTP exchange for public module tests; no platform launcher. */
 export function moduleHttp(t, module) {
   const sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex');
-  const runtime = createAppRuntime({ sessionId, requestKey, callbackKey: randomBytes(32).toString('hex'),
-    callbackUrl: 'http://127.0.0.1:1', modules: [module] });
+  const runtime = createAppRuntime({ sessionId, requestKey, modules: [module] });
   const ready = runtime.start().then(() => createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey }));
   ready.catch(() => {});
   t.after(async () => {

@@ -5,15 +5,15 @@ import { createSourceRuntimeModule } from './modules/source-runtime.mjs';
 
 export { createMusicScriptModule, createCatScriptModule, createSourceRuntimeModule };
 export { createAppRuntime } from './bootstrap.mjs';
-export { createRuntimeClient, createCallbackServer } from './client.mjs';
+export { createRuntimeClient } from './client.mjs';
 
 export function createRuntime({ dataRoot, music = {}, cat = {}, source = {}, ...config } = {}) {
-  return createAppRuntime({ ...config, product: 'aggregate', assemble: ({ call }) => {
+  return createAppRuntime({ ...config, product: 'aggregate', assemble: () => {
     const modules = [];
     try {
-      modules.push(createMusicScriptModule({ ...music, call }));
+      modules.push(createMusicScriptModule({ ...music, dataRoot }));
       modules.push(createCatScriptModule({ ...cat, dataRoot }));
-      modules.push(createSourceRuntimeModule({ ...source, call }));
+      modules.push(createSourceRuntimeModule(source));
       return modules;
     } catch (error) {
       for (const module of modules) void Promise.resolve(module.close()).catch(() => {});

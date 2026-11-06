@@ -154,10 +154,6 @@ actor MusicCandidateViewModelService: MusicServing, MusicCandidateDiscoveryServi
     func playedSongs() -> [MusicPlayedSong] { [] }
     func playedPlaylists() -> [MusicPlayedPlaylist] { [] }
     func restoreHistory(id: String, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
-    func prepareImport(data: Data, sourceId: String, ownerId: String) throws -> MusicImportPreview { throw MusicServiceError.unsupported }
-    func commitImport(_ preview: MusicImportPreview) throws -> MusicImportReport { throw MusicServiceError.unsupported }
-    func releaseImport(_ preview: MusicImportPreview) {}
-    func rollbackImport(batchId: String) throws { throw MusicServiceError.unsupported }
 
     private struct Session: MusicCandidateDiscoverySession {
         let owner: MusicCandidateViewModelService, id: UUID, occurrenceID: String

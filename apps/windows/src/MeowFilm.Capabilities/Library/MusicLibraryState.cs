@@ -6,8 +6,9 @@ public sealed partial class MusicLibraryOwner
 {
     private static readonly string[] CurrentAreas =
     [
-        "library", LibrarySyncArea, "queue", "history", "lx-installations", "online-settings",
+        "library", LibrarySyncArea, "queue", "history", "online-settings",
         CatalogSourceArea, OfficialSourcesArea, QualityPolicyArea, LyricDisplayArea, MetadataPolicyArea, AppearanceArea, DeviceSettingsArea,
+        SourceExclusionsArea,
         SearchPolicyArea, SearchHistoryArea, LocalLyricsArea, "playback-settings"
     ];
 
@@ -42,20 +43,11 @@ public sealed partial class MusicLibraryOwner
             LJ.Require(LJ.I(doc["version"]) == 1, "CORRUPT_STORAGE");
             var entries = LJ.Array(doc["entries"]);
             var keys = new HashSet<string>(StringComparer.Ordinal);
-            var scriptKeys = new HashSet<string>(StringComparer.Ordinal);
-            var scriptEntries = new List<(string Installation, string Site)>();
             foreach (var n in entries)
             {
                 var entry = LJ.Object(n); LJ.Fields(entry, "key value", "key value");
                 string key = LJ.S(entry["key"]); LJ.Require(key.Length is > 0 and <= 8192 && keys.Add(key), "CORRUPT_STORAGE");
-                if (TryCurrentAreaKey(key, out _)) continue;
-                if (TryScriptAreaKey(key, out string installation, out string site))
-                {
-                    LJ.Require(scriptKeys.Add(ScriptArea(installation, site)), "CORRUPT_STORAGE");
-                    ValidateScriptStorage(LJ.Object(entry["value"], "CORRUPT_STORAGE"));
-                    scriptEntries.Add((installation, site));
-                    continue;
-                }
+                if (TryCurrentAreaKey(key, out _) || IsRetiredArea(key)) continue;
                 throw new MusicLibraryException("CORRUPT_STORAGE");
             }
             JsonObject? currentLibrary = null;
@@ -77,18 +69,6 @@ public sealed partial class MusicLibraryOwner
             }
             if (HasValue(doc, "queue")) ValidateQueue(LJ.Object(Value(doc, "queue"), "CORRUPT_QUEUE"), true);
             if (HasValue(doc, "history")) ValidateHistory(LJ.Object(Value(doc, "history"), "CORRUPT_HISTORY"));
-            var installations = new HashSet<string>(StringComparer.Ordinal);
-            if (HasValue(doc, "lx-installations"))
-            {
-                var sources = LJ.Object(Value(doc, "lx-installations"), "CORRUPT_STORAGE");
-                ValidateSources(sources);
-                foreach (var item in LJ.Array(sources["installations"]).OfType<JsonObject>())
-                    installations.Add(LJ.S(item["id"]));
-            }
-            foreach (var script in scriptEntries)
-                LJ.Require(installations.Contains(script.Installation), "CORRUPT_STORAGE");
-            foreach (string installation in scriptEntries.Select(script => script.Installation).Distinct(StringComparer.Ordinal))
-                _ = ScriptSites(doc, installation);
             if (HasValue(doc, "online-settings"))
             {
                 var settings = LJ.Object(Value(doc, "online-settings"), "CORRUPT_STORAGE");
@@ -103,6 +83,8 @@ public sealed partial class MusicLibraryOwner
             if (HasValue(doc, MetadataPolicyArea)) ValidateMetadataPolicy(LJ.Object(Value(doc, MetadataPolicyArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, AppearanceArea)) ValidateAppearance(LJ.Object(Value(doc, AppearanceArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, DeviceSettingsArea)) ValidateDeviceSettings(LJ.Object(Value(doc, DeviceSettingsArea), "CORRUPT_STORAGE"));
+            if (HasValue(doc, SourceExclusionsArea))
+                ValidateSourceExclusions(LJ.Object(Value(doc, SourceExclusionsArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, SearchPolicyArea)) ValidateSearchPolicy(LJ.Object(Value(doc, SearchPolicyArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, SearchHistoryArea)) ValidateSearchHistory(LJ.Object(Value(doc, SearchHistoryArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, LocalLyricsArea)) ValidateLocalLyrics(LJ.Object(Value(doc, LocalLyricsArea), "CORRUPT_STORAGE"));

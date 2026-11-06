@@ -1,0 +1,93 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop">
+ <ResourceDictionary.MergedDictionaries>
+  <ResourceDictionary Source="/MeowFilm.Capabilities;component/Settings/SettingsTheme.xaml"/>
+ </ResourceDictionary.MergedDictionaries>
+ <Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}"/>
+ <Style x:Key="FilmSettings.Anchor" TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.SettingsArea}">
+  <Setter Property="Height" Value="44"/><Setter Property="Margin" Value="0,0,28,0"/>
+  <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
+ </Style>
+ <Style x:Key="FilmSettings.Grid" TargetType="DataGrid">
+  <Setter Property="AutoGenerateColumns" Value="False"/><Setter Property="CanUserAddRows" Value="False"/>
+  <Setter Property="CanUserDeleteRows" Value="False"/><Setter Property="CanUserReorderColumns" Value="False"/>
+  <Setter Property="CanUserSortColumns" Value="False"/><Setter Property="IsReadOnly" Value="True"/>
+  <Setter Property="HeadersVisibility" Value="Column"/><Setter Property="RowHeaderWidth" Value="0"/>
+  <Setter Property="GridLinesVisibility" Value="Horizontal"/><Setter Property="RowHeight" Value="56"/>
+  <Setter Property="ColumnHeaderHeight" Value="38"/><Setter Property="BorderThickness" Value="0"/>
+  <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Surface}"/>
+  <Setter Property="Foreground" Value="{DynamicResource Settings.Brush.Text}"/>
+  <Setter Property="HorizontalGridLinesBrush" Value="{DynamicResource Settings.Brush.Rule}"/>
+  <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+  <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+  <Setter Property="EnableRowVirtualization" Value="True"/><Setter Property="EnableColumnVirtualization" Value="True"/>
+  <Setter Property="SelectionMode" Value="Single"/>
+  <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+   <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+   <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   <Setter Property="HorizontalGridLinesBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+  </Trigger></Style.Triggers>
+ </Style>
+ <Style TargetType="DataGridColumnHeader">
+  <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/>
+  <Setter Property="Padding" Value="8,0"/><Setter Property="FontSize" Value="12"/>
+  <Setter Property="Foreground" Value="{DynamicResource Settings.Brush.Muted}"/>
+  <Setter Property="HorizontalContentAlignment" Value="Left"/>
+  <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger></Style.Triggers>
+ </Style>
+ <Style TargetType="DataGridRow">
+  <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/>
+  <Setter Property="Validation.ErrorTemplate" Value="{x:Null}"/>
+  <Style.Triggers>
+   <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource Settings.Brush.Active}"/></Trigger>
+   <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{DynamicResource Settings.Brush.Selected}"/></Trigger>
+   <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger>
+  </Style.Triggers>
+ </Style>
+ <Style TargetType="DataGridCell">
+  <Setter Property="BorderThickness" Value="1"/><Setter Property="BorderBrush" Value="Transparent"/>
+  <Setter Property="Padding" Value="7,0"/><Setter Property="Background" Value="Transparent"/>
+  <Setter Property="Foreground" Value="{DynamicResource Settings.Brush.Text}"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="DataGridCell">
+   <Border BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+           Padding="{TemplateBinding Padding}" Background="{TemplateBinding Background}">
+    <ContentPresenter VerticalAlignment="Center"/>
+   </Border>
+  </ControlTemplate></Setter.Value></Setter>
+  <Style.Triggers>
+   <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource Settings.Brush.Text}"/></Trigger>
+   <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
+   <MultiTrigger><MultiTrigger.Conditions><Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsKeyboardFocusWithin" Value="True"/></MultiTrigger.Conditions><Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
+  </Style.Triggers>
+ </Style>
+ <Style x:Key="FilmSettings.CellText" TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
+  <Setter Property="FontSize" Value="13"/><Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+ </Style>
+ <Style x:Key="FilmSettings.ErrorCell" TargetType="TextBlock" BasedOn="{StaticResource FilmSettings.CellText}">
+  <Setter Property="ToolTip" Value="{Binding ErrorText}"/>
+  <Setter Property="AutomationProperties.HelpText" Value="{Binding ErrorText}"/>
+ </Style>
+ <Style x:Key="FilmSettings.UpdateCell" TargetType="TextBlock" BasedOn="{StaticResource FilmSettings.CellText}">
+  <Setter Property="ToolTip" Value="{Binding UpdateErrorText}"/>
+  <Setter Property="AutomationProperties.HelpText" Value="{Binding UpdateErrorText}"/>
+ </Style>
+ <Style x:Key="FilmSettings.DateCell" TargetType="TextBlock" BasedOn="{StaticResource FilmSettings.CellText}">
+  <Setter Property="TextAlignment" Value="Right"/><Setter Property="Typography.NumeralAlignment" Value="Tabular"/>
+ </Style>
+ <Style x:Key="FilmSettings.Radio" TargetType="RadioButton">
+  <Setter Property="Width" Value="28"/><Setter Property="Height" Value="32"/>
+  <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
+   <Grid Background="Transparent">
+    <Ellipse x:Name="Ring" Width="16" Height="16" Fill="{DynamicResource MeowFilm.Brush.Surface}" Stroke="{DynamicResource Settings.Brush.Control}"/>
+    <Ellipse x:Name="Dot" Width="8" Height="8" Fill="{DynamicResource Settings.Brush.Text}" Visibility="Collapsed"/>
+   </Grid>
+   <ControlTemplate.Triggers>
+    <Trigger Property="IsChecked" Value="True"><Setter TargetName="Dot" Property="Visibility" Value="Visible"/></Trigger>
+    <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Ring" Property="Opacity" Value=".6"/></Trigger>
+    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter TargetName="Ring" Property="Fill" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/><Setter TargetName="Ring" Property="Stroke" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/><Setter TargetName="Dot" Property="Fill" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
+   </ControlTemplate.Triggers>
+  </ControlTemplate></Setter.Value></Setter>
+ </Style>
+</ResourceDictionary>

@@ -7,6 +7,7 @@ export const realmSource = String.raw`
 (() => {
   'use strict';
   const host = globalThis.__meowHost;
+  const hostArgs = globalThis.__meowHostArgs;
   const emit = globalThis.__meowEmit;
   const native = globalThis.__meowNative;
   const taskContext = globalThis.__meowTaskContext;
@@ -70,7 +71,10 @@ export const realmSource = String.raw`
     }
   };
   const hostCall = (operation, input, scope = taskContext()) => {
-    try { return host(operation,input,scope).catch(e => { throw error(e?.code || 'SCRIPT_EXCEPTION'); }); }
+    try {
+      const call = operation === 'storage' ? hostArgs : host;
+      return call(operation,input,scope).catch(e => { throw error(e?.code || 'SCRIPT_EXCEPTION'); });
+    }
     catch (e) { return promiseReject(error(e?.code || 'SCRIPT_EXCEPTION')); }
   };
   const size = n => {
@@ -202,9 +206,9 @@ export const realmSource = String.raw`
       operation,(key,value)=>{
         if (!active.has(scopeId)) return promiseReject(error('PERMISSION_DENIED'));
         try {
-          return withScope(scopeId,()=>hostCall('storage',{
-            scopeId,operation,key,...(operation==='set'?{value}:{}),
-          },scopeId));
+          return withScope(scopeId,()=>hostCall('storage',[
+            scopeId,operation,key,...(operation==='set'?[value]:[]),
+          ],scopeId));
         } catch(e) { return promiseReject(error(e?.code||'PERMISSION_DENIED')); }
       },
     ])));

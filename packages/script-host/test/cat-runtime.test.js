@@ -1377,7 +1377,7 @@ test('Cat imports reuse the complete uploaded source identity but enables read e
     assert.equal(runtime.settings.read().scripts[0].sourceHash, contentHash);
   });
 
-test('Cat install cancellation stops only its candidate and cannot cancel a later generation',
+test('Cat install cancellation restores accepted source after real exit and cannot cancel a later generation',
   { timeout: 30000 }, async t => {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
     t.after(() => runtime.close());
@@ -1397,8 +1397,9 @@ test('Cat install cancellation stops only its candidate and cannot cancel a late
     controller.abort();
     await rejected;
     assert.equal(candidate.worker, null);
-    assert.equal(runtime.host.get('cancel-import').generation, original.generation);
-    assert.deepEqual(await invoke(), { count: 2 });
+    assert.equal(runtime.host.get('cancel-import').generation, original.generation + 2);
+    assert.equal(runtime.instance('cancel-import').sourceHash, original.sourceHash);
+    assert.deepEqual(await invoke(), { count: 1 });
     const nextSignal = new AbortController();
     const next = await runtime.install({ installationId: 'cancel-import', enabled: true,
       source: 'module.exports.home = () => ({ value: "replacement" });' }, { signal: nextSignal.signal });
@@ -1447,7 +1448,7 @@ test('Cat enable cancellation reaches the initializing worker before returning',
   { timeout: 30000 }, async t => {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
     t.after(() => runtime.close());
-    await runtime.install({ installationId: 'cancel-enable', source: delayedSource('enable', 10000) });
+    await runtime.install({ installationId: 'cancel-enable', source: delayedSource('enable', 10000), enabled: false });
     const controller = new AbortController();
     const pending = runtime.setEnabled('cancel-enable', true, { signal: controller.signal });
     const rejected = assert.rejects(pending, { code: 'CANCELLED' });
@@ -1737,7 +1738,7 @@ test('Cat source file failures affect only the enabled instance',
         const runtime = createCatRuntime({ dataRoot: root });
         t.after(() => runtime.close());
         const brokenSource = `module.exports = { home() { return "${kind}"; } };`;
-        await runtime.install({ installationId: 'broken-file', source: brokenSource });
+        await runtime.install({ installationId: 'broken-file', source: brokenSource, enabled: false });
         await runtime.install({
           installationId: 'healthy-file', source: delayedSource('healthy-file', 0), enabled: true,
         });
@@ -1856,7 +1857,7 @@ test('Cat refresh cancelled in an installation queue cannot apply after the prec
     assert.equal(runtime.host.initializingSessions().length, 0);
   });
 
-test('Cat refresh cancellation exits only its candidate and preserves A, B and later updates',
+test('Cat refresh cancellation exits A and reports failed while preserving B and later updates',
   { timeout: 30000 }, async t => {
     const gates = new Map();
     const upstream = await serverFor(t, (request, response) => {
@@ -1891,13 +1892,15 @@ test('Cat refresh cancellation exits only its candidate and preserves A, B and l
     let exited = false;
     worker.once('exit', () => { exited = true; });
     const starting = await runtime.status();
-    for (const id of ['a', 'b']) {
-      const state = starting.instances.find(instance => instance.installationId === id);
-      assert.equal(state.state, 'ready');
-      assert.equal(state.generation, originals.get(id).generation);
-      assert.deepEqual(await runtime.invoke({ installationId: id,
-        siteId: `site-${id}`, operation: 'home', payload: {} }), { instance: id });
-    }
+    assert.equal(starting.instances.find(instance => instance.installationId === 'a').state, 'starting');
+    assert.equal(owners.get('a').worker, null);
+    await assert.rejects(runtime.invoke({ installationId: 'a', siteId: 'site-a',
+      operation: 'home', payload: {} }), { code: 'STARTING' });
+    const runningB = starting.instances.find(instance => instance.installationId === 'b');
+    assert.equal(runningB.state, 'ready');
+    assert.equal(runningB.generation, originals.get('b').generation);
+    assert.deepEqual(await runtime.invoke({ installationId: 'b', siteId: 'site-b',
+      operation: 'home', payload: {} }), { instance: 'b' });
     controller.abort();
     await cancelled;
     assert.equal(exited, true);
@@ -1907,7 +1910,7 @@ test('Cat refresh cancellation exits only its candidate and preserves A, B and l
     await waitFor(() => gates.get('/refresh').socket.destroyed,
       'cancelled candidate retained its initialization connection');
     assert.equal(gates.get('/refresh').response.writableEnded, false);
-    for (const id of ['a', 'b']) {
+    for (const id of ['b']) {
       const retained = runtime.instance(id), original = originals.get(id);
       assert.equal(retained.state, 'ready');
       assert.equal(retained.generation, original.generation);
@@ -1920,6 +1923,13 @@ test('Cat refresh cancellation exits only its candidate and preserves A, B and l
         generation: original.generation, siteId: `site-${id}`,
         operation: 'home', payload: {} }), { instance: id });
     }
+    assert.equal(runtime.instance('a').state, 'failed');
+    assert.equal(runtime.instance('a').generation, candidate.generation);
+    assert.equal(runtime.instance('a').managementUrl, undefined);
+    assert.equal(runtime.instance('a').endpoints, undefined);
+    assert.throws(() => runtime.getSession('a'), { code: 'DISABLED' });
+    await assert.rejects(runtime.invoke({ installationId: 'a', siteId: 'site-a',
+      operation: 'home', payload: {} }), { code: 'DISABLED' });
     assert.equal(runtime.instance('a').error, 'CANCELLED');
     assert.deepEqual(runtime.applyResult(), {
       applied: false, failures: [{ installationId: 'a', code: 'CANCELLED' }],
@@ -2003,6 +2013,7 @@ test('Cat leaves disabled bad files unread and refresh loads only changed enable
       assert.equal((await reopened.setEnabled('disabled', false)).state, 'disabled');
       assert.equal(reopened.instance('changed').state, 'ready');
       const published = reopened.instance('changed');
+      const oldOwner = reopened.getSession('changed');
       writeFileSync(files.changed, 'module.exports = { home( };');
       writeSettings(reopened.settings.path, value => ({
         ...value, scripts: value.scripts.map(script =>
@@ -2012,17 +2023,18 @@ test('Cat leaves disabled bad files unread and refresh loads only changed enable
         applied: false, failures: [{ installationId: 'changed', code: 'SCRIPT_EXCEPTION' }],
       });
       const retained = reopened.instance('changed');
-      assert.equal(retained.state, 'ready');
+      assert.equal(retained.state, 'failed');
       assert.equal(retained.error, 'SCRIPT_EXCEPTION');
-      assert.equal(retained.generation, published.generation);
-      assert.equal(retained.version, published.version);
-      assert.equal(retained.sourceHash, published.sourceHash);
-      assert.equal(retained.managementUrl, published.managementUrl);
-      assert.deepEqual(retained.endpoints, published.endpoints);
-      assert.deepEqual(await reopened.invoke({
+      assert.ok(retained.generation > published.generation);
+      assert.equal(oldOwner.worker, null);
+      assert.equal(retained.version, '3');
+      assert.equal(retained.sourceHash, sourceHash('module.exports = { home( };'));
+      assert.equal(retained.managementUrl, undefined);
+      assert.equal(retained.endpoints, undefined);
+      await assert.rejects(reopened.invoke({
         installationId: 'changed', generation: published.generation,
         siteId: 'site-changed', operation: 'home', payload: {},
-      }), { instance: 'changed' });
+      }), { code: 'DISABLED' });
       assert.equal(reopened.instance('unchanged').state, 'ready');
       assert.equal(reopened.instance('unchanged').generation, unchangedGeneration);
       writeFileSync(files.changed, delayedSource('changed', 0) + '\n// repaired file');
@@ -2056,7 +2068,7 @@ test('Cat explicit reimport atomically replaces edited bytes even with unchanged
     assert.deepEqual(await runtime.invoke(target), { value: 'imported' });
   });
 
-test('Cat failed atomic reimport preserves the edited file and running generation',
+test('Cat failed atomic reimport preserves the edited file and restores the working revision',
   { timeout: 30000 }, async t => {
     const root = rootFor(t);
     const runtime = createCatRuntime({ dataRoot: root });
@@ -2068,6 +2080,7 @@ test('Cat failed atomic reimport preserves the edited file and running generatio
     const file = sourceFile(root, sourceHash(original));
     writeFileSync(file, edited);
     const generation = runtime.instance('atomic-reimport').generation;
+    const previousWorker = runtime.getSession('atomic-reimport');
     const settings = readFileSync(runtime.settings.path, 'utf8');
     const rename = fs.renameSync;
     fs.renameSync = (from, to) => {
@@ -2083,7 +2096,9 @@ test('Cat failed atomic reimport preserves the edited file and running generatio
     }
     assert.equal(readFileSync(file, 'utf8'), edited);
     assert.equal(readFileSync(runtime.settings.path, 'utf8'), settings);
-    assert.equal(runtime.instance('atomic-reimport').generation, generation);
+    assert.equal(runtime.instance('atomic-reimport').generation, generation + 2);
+    assert.equal(previousWorker.worker, null);
+    assert.equal(runtime.instance('atomic-reimport').sourceHash, sourceHash(original));
     assert.deepEqual(await runtime.invoke({
       installationId: 'atomic-reimport', siteId: 'default', operation: 'home', payload: {},
     }), { value: 'original' });

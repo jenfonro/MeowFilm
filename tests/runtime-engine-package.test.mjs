@@ -11,7 +11,7 @@ import { packageRuntime } from '../scripts/package-runtime.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const temporary = join(repository, 'tmp/test-results/runtime-engine-package');
-const policyPath = 'scripts/quickjs-native.json';
+const policyPath = 'scripts/script-host-native.json';
 const artifactPath = 'packages/script-host/build/Release/script_host_native.node';
 const receiptPath = 'packages/script-host/build/Release/script-host-native.json';
 const sdkPath = 'packages/script-host/build/Release/source-sdk.js';
@@ -180,13 +180,10 @@ test('packaged entry starts HTTP and executes all three owners without repositor
   const result = runIsolated(f.output, `
     import assert from 'node:assert/strict';
     import { join } from 'node:path';
-    import { createRuntime, createRuntimeClient, createCallbackServer } from './app/entry.mjs';
+    import { createRuntime, createRuntimeClient } from './app/entry.mjs';
     const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
-    const requestKey = 'a'.repeat(64), callbackKey = 'b'.repeat(64);
-    const callback = createCallbackServer({ sessionId, callbackKey, methods: {} });
-    await callback.start();
-    const runtime = createRuntime({ sessionId, requestKey, callbackKey,
-      callbackUrl: callback.baseUrl, dataRoot: join(process.cwd(), 'runtime-data') });
+    const requestKey = 'a'.repeat(64);
+    const runtime = createRuntime({ sessionId, requestKey, dataRoot: join(process.cwd(), 'runtime-data') });
     const okay = reply => {
       assert.equal(reply.ok, true, JSON.stringify(reply));
       return reply.value;
@@ -200,17 +197,20 @@ test('packaged entry starts HTTP and executes all three owners without repositor
       assert.equal(descriptor.value.protocol, 'runtime.http.v1');
       assert.deepEqual(descriptor.value.modules.map(value => value.contract),
         ['music.script.v3', 'cat.script.v2', 'source.runtime.v2']);
-      okay(await client.upload('music', 'native-lx', 1, Buffer.from(
+      const installationId = '7bd84ef5-9557-4338-a67f-9dc4df2413f9';
+      okay(await client.upload('music', installationId, 1, Buffer.from(
         'let n=0; lx.on(lx.EVENT_NAMES.request, async () => ++n);' +
         'lx.send(lx.EVENT_NAMES.inited,{status:true,sources:{kw:{type:"music",actions:["musicUrl"],qualitys:["320k"]}}});'),
         { basename: 'fixture.js' }));
-      const lx = okay(await client.call('music.script.load', {
-        installationId: 'native-lx', sourceRevision: 1, revision: 1, expectedRevision: 0,
-        version: '1.0.0', config: {}, permissions: { storage: [] },
-        grant: '7bd84ef5-9557-4338-a67f-9dc4df2413f9',
-      })).instance;
-      const input = { installationId: lx.installationId, revision: lx.revision,
-        generation: lx.generation, siteId: 'kw', operation: 'musicUrl', payload: { quality: '320k' } };
+      const added = okay(await client.call('music.script.sources.add', {
+        installationId, sourceRevision: 1,
+      })).item;
+      assert.equal(added.installationId, installationId);
+      assert.equal(added.enabled, false);
+      const lx = okay(await client.call('music.script.sources.enable', { installationId })).item;
+      assert.equal(lx.state, 'ready');
+      const input = { installationId: lx.installationId,
+        siteId: 'kw', operation: 'musicUrl', payload: { quality: '320k' } };
       assert.equal(okay(await client.call('music.script.invoke', input)), 1);
       assert.equal(okay(await client.call('music.script.invoke', input)), 2);
       okay(await client.upload('cat', 'native-cat', 1, Buffer.from(
@@ -237,7 +237,6 @@ test('packaged entry starts HTTP and executes all three owners without repositor
     } finally {
       await runtime.close();
       await client?.close();
-      await callback.close();
     }
   `);
   assert.equal(result.signal, null, result.stderr);

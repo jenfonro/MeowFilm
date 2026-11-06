@@ -3,6 +3,8 @@ import { readFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
+import { isWindowsSource } from './source-scope.mjs';
+import { licenseFiles } from './package-licenses.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -13,7 +15,11 @@ export function isWindowsBuildInput(path) {
   const legalNotice = /(?:^|\/)(?:notice|licen[cs]e|copying|copyright|third[-_]?party)(?:[._-][^/]*)?$/i.test(path);
   return (!/\.md$/i.test(path) || legalNotice) && (
     ['package.json', 'package-lock.json', '.gitattributes', '.gitignore', 'build-windows.ps1'].includes(path)
-    || /^(?:apps\/windows\/|apps\/runtime\/|packages\/|scripts\/|tests\/|LICENSES\/)/.test(path)
+    || isWindowsSource(path)
+    || path.startsWith('native/JavaScript/')
+    || licenseFiles.some(name => path === `LICENSES/${name}`)
+    || ['scripts/quickjs-runtime.json', 'scripts/quickjs-native.json'].includes(path)
+    || (path.startsWith('tests/') && !path.startsWith('tests/ios-'))
   );
 }
 

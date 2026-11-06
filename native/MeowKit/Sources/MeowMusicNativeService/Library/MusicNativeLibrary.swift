@@ -59,16 +59,6 @@ enum MusicLibraryValidation {
         try musicRequire(lib["collections"].array.filter { $0["kind"].string == "favorites" }.count == 1, .favoritesProtected)
         for (platform, id) in lib["accounts"].fields { try musicRequire(MusicModel.sites.contains(platform), .corruptDocument); _ = try id.text() }
     }
-    static func validateReceipt(_ receipt: MJ) throws {
-        try musicRequire(receipt.isObject &&
-            ["batchId", "sourceId", "sourceOwnerId", "appliedAt", "appliedRevision", "afterHash"].allSatisfy(receipt.contains), .corruptDocument)
-        try musicRequire(musicHex(receipt["batchId"].string) && musicHex(receipt["afterHash"].string) &&
-            receipt["appliedRevision"].isInteger && receipt["appliedRevision"].int > 0 &&
-            receipt["appliedAt"].isNumber && receipt["appliedAt"].number.isFinite &&
-            receipt["appliedAt"].number >= 0, .corruptDocument)
-        _ = try receipt["sourceId"].text()
-        _ = try receipt["sourceOwnerId"].text()
-    }
 }
 
 extension NativeMusicService {
@@ -220,80 +210,5 @@ extension NativeMusicService {
             try recordAutomaticLibraryMutation(&d, collectionID: c["id"].string)
         }
         publishAutomaticLibrarySync(.localMutation)
-    }
-    func checkImport(_ d: MusicDocument, _ plan: Import) throws -> Bool {
-        let receipt = d.library["receipt"]
-        if receipt != .null {
-            try musicRequire(receipt["batchId"].string == plan.batch, .importConflict)
-            try musicRequire(receipt["afterHash"].string == d.library["library"].stable.digest &&
-                receipt["appliedRevision"] == d.library["revision"], .importedTargetChanged)
-            return true
-        }
-        // A local automatic-settings save is not user library content. It must
-        // not make an otherwise empty target ineligible for read-only import.
-        try musicRequire(d.library["library"].stable.digest == MusicModel.emptyLibrary.stable.digest &&
-            (try MusicNativeSyncLedger.load(d.library)).fences.isEmpty, .importConflict); return false
-    }
-    func report(_ p: Import, applied: Bool) -> MusicImportReport {
-        .init(batchId: p.batch, alreadyApplied: applied, songs: p.library["songs"].fields.count,
-              collections: p.library["collections"].array.count, members: p.library["collections"].array.reduce(0) { $0 + $1["order"].array.count })
-    }
-    public func prepareImport(data: Data, sourceId: String, ownerId: String) async throws -> MusicImportPreview {
-        try check(); _ = try musicText(sourceId); _ = try musicText(ownerId)
-        var lib = try MJ.parse(data, maximum: 7 * 1024 * 1024)
-        try MusicLibraryValidation.validate(lib, owner: ownerId)
-        var songs = lib["songs"]
-        for (id, song) in songs.fields { songs[id] = try MusicModel.cleanSong(song) }
-        lib["songs"] = songs
-        try MusicModel.rejectSecrets(lib)
-        lib["status"] = .obj([("phase", .string("blocked")), ("at", .n(0)), ("issues", .array([.obj([("code", .string("import_requires_rebinding"))])]))])
-        let batch = MJ.obj([("sourceId", .string(sourceId)), ("ownerId", .string(ownerId)), ("scope", .string("device")), ("library", lib)]).stable.digest
-        let bytes = lib.bytes.count + sourceId.utf8.count + ownerId.utf8.count + batch.utf8.count
-        let plan = Import(library: lib, bytes: bytes, sourceID: sourceId, ownerID: ownerId, batch: batch, at: now())
-        let applied = try checkImport(read(), plan)
-        prepared = prepared.filter { now().timeIntervalSince($0.value.at) < 600 }
-        try musicRequire(prepared.values.reduce(bytes, { $0 + $1.bytes }) <= 14 * 1024 * 1024, .limit)
-        let id = UUID().uuidString.lowercased(); prepared[id] = plan
-        return .init(importId: id, report: report(plan, applied: applied))
-    }
-    public func commitImport(_ preview: MusicImportPreview) async throws -> MusicImportReport {
-        try check()
-        guard let p = prepared[preview.importId], p.batch == preview.report.batchId, now().timeIntervalSince(p.at) < 600 else { throw MusicServiceError.importNotFound }
-        let result = try transaction(["library"]) { d in
-            let applied = try checkImport(d, p)
-            if !applied {
-                // Imported local data is NOT automatic remote-write consent.
-                // Disable (do not inherit) any empty-target automatic settings
-                // in the SAME CAS, preserving the import receipt/rollback.
-                var ledger = try MusicNativeSyncLedger.load(d.library)
-                var automatic = MusicNativeAutomaticSyncPreferences()
-                automatic.revision = ledger.automatic.revision + 1
-                ledger.automatic = automatic
-                d.library["sync"] = try ledger.json()
-                var lib = p.library; lib["ownerId"] = .string("device")
-                d.library["library"] = lib; d.library["revision"] = .n(d.library["revision"].int + 1)
-                d.library["receipt"] = .obj([("batchId", .string(p.batch)), ("sourceId", .string(p.sourceID)), ("sourceOwnerId", .string(p.ownerID)),
-                    ("appliedAt", .number(now().timeIntervalSince1970 * 1000)), ("appliedRevision", d.library["revision"]), ("afterHash", .string(lib.stable.digest))])
-            }
-            return report(p, applied: applied)
-        }
-        automaticLibrarySyncRuntime.authorization?.revoke()
-        automaticLibrarySyncRuntime.task?.cancel()
-        publishAutomaticLibrarySync(.refreshed) // NOT a sync intent.
-        return result
-    }
-    public func releaseImport(_ preview: MusicImportPreview) async throws { try check(); prepared.removeValue(forKey: preview.importId) }
-    public func rollbackImport(batchId: String) async throws {
-        try performImportRollback(batchId: batchId)
-    }
-    func performImportRollback(batchId: String) throws {
-        try transaction(["library"]) { d in
-            let receipt = d.library["receipt"]
-            if receipt == .null && d.library["rolledBack"].string == batchId { return }
-            try musicRequire(receipt["batchId"].string == batchId, .importNotFound)
-            try musicRequire(receipt["afterHash"].string == d.library["library"].stable.digest &&
-                receipt["appliedRevision"] == d.library["revision"], .importedTargetChanged)
-            d.library = MusicModel.library; d.library["rolledBack"] = .string(batchId)
-        }
     }
 }

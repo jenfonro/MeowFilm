@@ -82,27 +82,23 @@ if (options.kind === 'source') {
   const createCatScriptModule = runtimeModule.createCatScriptModule;
 
   const runtimeDirectory = dirname(dirname(modulePath));
-  const [{ createAppRuntime }, { createRuntimeClient, createCallbackServer }] = await Promise.all([
+  const [{ createAppRuntime }, { createRuntimeClient }] = await Promise.all([
     import(pathToFileURL(join(runtimeDirectory, 'bootstrap.mjs')).href),
     import(pathToFileURL(join(runtimeDirectory, 'client.mjs')).href),
   ]);
   async function openHttp(module) {
-    const sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex'), callbackKey = randomBytes(32).toString('hex');
-    const callbacks = createCallbackServer({ sessionId, callbackKey, methods: Object.fromEntries(
-      ['get', 'set', 'delete'].map(operation => [`platform.musicScript.storage.${operation}`,
-        async () => ({ ok: false, code: 'PERMISSION_DENIED' })])) });
-    await callbacks.start();
+    const sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex');
     let runtime, client;
     try {
-      runtime = createAppRuntime({ sessionId, requestKey, callbackKey, callbackUrl: callbacks.baseUrl, modules: [module] });
+      runtime = createAppRuntime({ sessionId, requestKey, assemble: () => [module] });
       await runtime.start();
       client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
       return { client, async close() {
-        const results = await Promise.allSettled([client.close(), runtime.close(), callbacks.close()]);
+        const results = await Promise.allSettled([client.close(), runtime.close()]);
         if (results.some(result => result.status === 'rejected')) throw Object.assign(new Error(), { code: 'SCRIPT_CLEANUP' });
       } };
     } catch (error) {
-      await Promise.allSettled([client?.close(), runtime?.close(), callbacks.close()]);
+      await Promise.allSettled([client?.close(), runtime?.close()]);
       throw error;
     }
   }
@@ -236,8 +232,8 @@ if (options.kind === 'source') {
   }
 
   const batches = new Set(), concurrency = 4;
-  async function acceptLx(file, index) {
-    const id = `accept-${index}`, audit = [], diagnostics = [];
+  async function acceptLx(file) {
+    const audit = [], diagnostics = [];
     const row = { file, actions: [] };
     let startupAuditEnd = 0, startupDiagnosticsEnd = 0;
     const startupPending = new Set();
@@ -245,8 +241,11 @@ if (options.kind === 'source') {
       options.payload ? join(options.payload, 'node_modules/@meowfilm/script-host/src/index.js')
         : join(root, 'packages/script-host/src/index.js')).href);
     const network = createNodeNetwork();
+    const temporary = join(root, 'tmp/test-results/script-sources');
+    await mkdir(temporary, { recursive: true });
+    const dataRoot = await mkdtemp(join(temporary, 'lx-runtime-'));
     const module = createMusicScriptModule({
-      call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
+      dataRoot,
       hostFactory: input => createScriptHost({ ...input, ...sourceDiagnosticObservers(diagnostics) }),
       network: async input => {
         const event = { requestId: input.scope.requestId, siteId: input.scope.siteId,
@@ -286,12 +285,14 @@ if (options.kind === 'source') {
       transport = await openHttp(module);
       const rpc = (name, params) => transport.client.call(`music.script.${name}`, params);
       const bytes = await readFile(join(directory, file));
-      const uploaded = await transport.client.upload('music', id, 1, bytes, { basename: file });
+      const installationId = randomUUID();
+      const uploaded = await transport.client.upload('music', installationId, 1, bytes, { basename: file });
       if (!uploaded.ok) throw Object.assign(new Error(), { code: uploaded.code });
       row.contentHash = uploaded.value.contentHash;
+      const imported = await rpc('sources.add', { installationId, sourceRevision: 1 });
+      if (!imported.ok) throw Object.assign(new Error(), { code: imported.code });
       const start = Date.now();
-      const loaded = await rpc('load', { sourceRevision: 1, installationId: id, revision: 1, expectedRevision: 0,
-        version: 'acceptance', config: {}, permissions: { storage: [] }, grant: randomUUID() });
+      const loaded = await rpc('sources.enable', { installationId });
       row.initializationMs = Date.now() - start;
       if (!loaded.ok) throw Object.assign(new Error(), { code: loaded.code });
       row.initializationNetwork = audit.map(({ finished, statusCode, code }) =>
@@ -299,7 +300,7 @@ if (options.kind === 'source') {
       row.initializationDiagnostics = diagnostics.map(diagnostic);
       startupAuditEnd = audit.length; startupDiagnosticsEnd = diagnostics.length;
       for (const event of audit) if (!event.finished) startupPending.add(event);
-      const instance = loaded.value.instance;
+      const instance = loaded.value.item;
       row.initialization = 'ready';
       row.capabilities = Object.fromEntries(Object.entries(instance.capabilities).map(([site, cap]) =>
         [site, { actions: cap.actions, qualitys: cap.qualitys }]));
@@ -318,8 +319,7 @@ if (options.kind === 'source') {
             const payload = search ? { keyword: '海阔天空', page: 1, limit: 10, pagesize: 10 }
               : { musicInfo: recording, ...(operation === 'musicUrl' ? { quality:
                 cap.qualitys.includes('128k') ? '128k' : cap.qualitys[0] ?? null } : {}) };
-            const reply = await rpc('invoke', { installationId: id, revision: 1,
-              generation: instance.generation, siteId, operation, payload });
+            const reply = await rpc('invoke', { installationId, siteId, operation, payload });
             entry.elapsedMs = Date.now() - began;
             entry.network = audit.slice(before)
               .map(({ requestId, statusCode, code, bodyKind, businessCode, responseReason }) =>
@@ -340,7 +340,7 @@ if (options.kind === 'source') {
           }
         }
       }
-      const unloaded = await rpc('unload', { installationId: id, revision: 1, generation: instance.generation });
+      const unloaded = await rpc('sources.disable', { installationId });
       if (!unloaded.ok) row.unloadCode = unloaded.code;
     } catch (error) { row.initialization = 'failed'; row.code = error.code ?? 'HOST_ERROR'; }
     finally {
@@ -349,6 +349,7 @@ if (options.kind === 'source') {
         row.cleanup = close.ok ? 'complete' : close.code;
       } catch (error) { row.cleanup = error.code ?? 'SCRIPT_CLEANUP'; }
       try { await transport?.close(); } catch (error) { row.cleanup = error.code ?? 'SCRIPT_CLEANUP'; }
+      await rm(dataRoot, { recursive: true, force: true });
       if (row.initialization === 'ready') {
         row.backgroundNetwork = audit.filter((event, index) => event.requestId === null &&
           (index >= startupAuditEnd || startupPending.has(event)))

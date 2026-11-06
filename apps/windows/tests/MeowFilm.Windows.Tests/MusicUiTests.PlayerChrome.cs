@@ -240,6 +240,145 @@ public static partial class MusicUiTests
             True(Math.Abs(tip.HorizontalOffset + tip.DesiredSize.Width / 2 - 300) < 1, "scrubbing uses the target head");
             bar.CancelScrub(); source.RootVisual = null; await Drain(); True(!tip.IsOpen, "unmount closes the popup");
         });
+        yield return Case("footer shade stays light and continuous with a larger white head across colors and DPI", async () =>
+        {
+            var bar = new SeekBar { Maximum = 100, Value = 25, Height = 16, RailAtTop = true,
+                Margin = new Thickness(0, 56, 0, 0), VerticalAlignment = VerticalAlignment.Top };
+            var root = new Grid { Background = Brushes.White }; root.Children.Add(bar); DesktopTheme.SetIsHighContrast(root, false);
+            using var source = new HwndSource(new HwndSourceParameters("seek-color-fixture") {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                PositionX = -32000, PositionY = -32000, Width = 400, Height = 96 });
+            source.RootVisual = root; Render(root, 400, 96); await Drain();
+            var frames = new List<BitmapSource>();
+            foreach (var backdrop in new[] { Brushes.White, Brushes.DarkSlateGray })
+            foreach (var played in new[] { Brushes.DimGray, Brushes.Crimson })
+            {
+                root.Background = backdrop; bar.PlayedBrush = played; bar.Value = 25;
+                Render(root, 400, 96); frames.Add(CaptureSeekFrame(root, 1));
+                bar.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
+                await Task.Delay(170); await Drain(); Render(root, 400, 96);
+                frames.Add(CaptureSeekFrame(root, 1));
+                foreach (double scale in new[] { 1d, 1.25d, 1.5d, 2d })
+                {
+                    var frame = CaptureSeekFrame(root, scale);
+                    // Infer composited coverage from the most distinct channel, not
+                    // from the control's gradient stops or internal animation value.
+                    byte[] background = [backdrop.Color.R, backdrop.Color.G, backdrop.Color.B];
+                    byte[] foreground = [played.Color.R, played.Color.G, played.Color.B];
+                    int channel = Enumerable.Range(0, 3).MaxBy(i => Math.Abs(foreground[i] - background[i]));
+                    double quantization = 1d / Math.Abs(foreground[channel] - background[channel]);
+                    double Coverage(double y)
+                    {
+                        var pixel = SeekPixel(frame, 300, y);
+                        byte[] rgb = [pixel.R, pixel.G, pixel.B];
+                        return (rgb[channel] - background[channel]) / (double)(foreground[channel] - background[channel]);
+                    }
+                    Equal(backdrop.Color, SeekPixel(frame, 300, 8));
+                    True(Coverage(20) > .005 && Coverage(50) is > .08 and < .20,
+                        $"at {scale}x the shade reaches beyond 32 DIP but its base stays below 20% coverage");
+                    double previous = Coverage(14);
+                    for (int y = 15; y <= 51; y++)
+                    {
+                        double next = Coverage(y);
+                        // Compositing an 8-bit alpha gradient can round one channel
+                        // down by one byte. A visual step must exceed that precision.
+                        True(next >= previous - quantization - 1e-6 && next - previous < .015 + quantization,
+                            $"continuous shade: background={backdrop.Color}, played={played.Color}, scale={scale}, y={y}, previous={previous:F4}, next={next:F4}");
+                        previous = next;
+                    }
+                    True(Coverage(50) - Coverage(36) > .02, "the lower shade keeps fading instead of forming a flat strip");
+                    foreach (double position in new[] { 0d, 25d, 100d })
+                    {
+                        bar.Value = position; Render(root, 400, 96);
+                        var head = CaptureSeekFrame(root, scale);
+                        double center = position == 0 ? 7.5 : position == 100 ? 392.5 : 100;
+                        Equal(Colors.White, SeekPixel(head, center, 57));
+                        int start = (int)(Math.Max(0, center - 12) * scale);
+                        int end = (int)(Math.Min(400, center + 12) * scale);
+                        int white = Enumerable.Range(start, end - start).Count(x =>
+                        {
+                            var pixel = SeekPixel(head, (x + .5) / scale, 57);
+                            return pixel.R >= 250 && pixel.G >= 250 && pixel.B >= 250;
+                        });
+                        True(white / scale is >= 12 and <= 14.5,
+                            $"at {scale}x and {position}% the white head is larger than the rail and not clipped at an endpoint");
+                    }
+                    bar.Value = 25; Render(root, 400, 96);
+                }
+                bar.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseLeaveEvent });
+                await Task.Delay(170); await Drain(); Render(root, 400, 96);
+                var resting = CaptureSeekFrame(root, 1);
+                for (int y = 8; y <= 53; y++)
+                    Equal(backdrop.Color, SeekPixel(resting, 300, y));
+            }
+            if (Environment.GetEnvironmentVariable("MEOWFILM_TEST_SEEK_VISUALS") == "1")
+            {
+                var visual = new DrawingVisual();
+                using (var drawing = visual.RenderOpen())
+                    for (int i = 0; i < frames.Count; i++)
+                        drawing.DrawImage(frames[i], new Rect(i % 2 * 400, i / 2 * 96, 400, 96));
+                var sheet = new RenderTargetBitmap(800, 384, 96, 96, PixelFormats.Pbgra32); sheet.Render(visual);
+                SaveSeekFrame(sheet, "seekbar-states.png");
+            }
+            source.RootVisual = null;
+        });
+        yield return Case("footer shade retires after pointer exit despite focus and clears on disabled hidden unload and high contrast", async () =>
+        {
+            var bar = new SeekBar { Maximum = 100, Value = 25, Height = 16, RailAtTop = true,
+                PlayedBrush = Brushes.DimGray, Margin = new Thickness(0, 56, 0, 0), VerticalAlignment = VerticalAlignment.Top };
+            var root = new Grid { Background = Brushes.White }; root.Children.Add(bar);
+            DesktopTheme.SetIsHighContrast(root, false);
+            var window = new Window { Content = root, Width = 400, Height = 96, WindowStyle = WindowStyle.None,
+                Left = -32000, Top = -32000, ShowActivated = false, ShowInTaskbar = false };
+            try
+            {
+                window.Show(); Render(root, 400, 96); await Drain();
+                var source = PresentationSource.FromVisual(root)!;
+                async Task Shade(bool visible, [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
+                {
+                    await Task.Delay(170); await Drain(); Render(root, 400, 96);
+                    var pixel = SeekPixel(CaptureSeekFrame(root, 1), 300, 40);
+                    True(visible ? pixel.R < 250 : pixel == Colors.White,
+                        $"shade at line {line}: expectedVisible={visible}, pixel={pixel}, loaded={bar.IsLoaded}, visible={bar.IsVisible}, enabled={bar.IsEnabled}, focus={bar.IsKeyboardFocusWithin}, scrubbing={bar.IsScrubbing}");
+                }
+                void Hover(bool within) => bar.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0)
+                    { RoutedEvent = within ? Mouse.MouseEnterEvent : Mouse.MouseLeaveEvent });
+                Hover(true); await Shade(true);
+                True(ReferenceEquals(root.InputHitTest(new Point(300, 40)), root) &&
+                    ReferenceEquals(root.InputHitTest(new Point(300, 60)), bar),
+                    "decorative pixels never extend the actual seek hit area into page content");
+                True(bar.Focus() && bar.IsKeyboardFocusWithin, "offscreen HWND supplies real focus without moving the system pointer");
+                Hover(false); await Shade(false);
+                Equal(Colors.White, SeekPixel(CaptureSeekFrame(root, 1), 100, 57));
+                True(SeekPixel(CaptureSeekFrame(root, 1), 50, 60).R < 200,
+                    "keyboard focus retains the expanded rail without the decorative shade");
+                bar.Value = 35; await Shade(false);
+                bar.Value = 25; Hover(true); bar.BeginScrub(); Hover(false);
+                bar.UpdateScrub(50); await Shade(true);
+                bar.EndScrub(true); await Shade(false);
+                bar.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.Right)
+                    { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+                await Shade(true);
+                bar.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.Right)
+                    { RoutedEvent = Keyboard.PreviewKeyUpEvent });
+                await Shade(false);
+                Equal(55d, bar.Value);
+                bar.Value = 50;
+                Hover(true); DesktopTheme.SetIsHighContrast(root, true); await Shade(false);
+                Equal(SystemColors.HighlightTextColor, SeekPixel(CaptureSeekFrame(root, 1), 200, 57));
+                DesktopTheme.SetIsHighContrast(root, false); await Shade(true);
+                bar.IsEnabled = false; await Shade(false);
+                True(!bar.HasAnimatedProperties, "disabled seek surface releases highlight clocks");
+                bar.IsEnabled = true; await Shade(true);
+                bar.Visibility = Visibility.Collapsed; await Shade(false);
+                bar.Visibility = Visibility.Visible; await Shade(false);
+                Hover(true); await Shade(true);
+                window.Content = null; await Drain();
+                True(!bar.HasAnimatedProperties && !bar.IsScrubbing, "unmount removes presentation clocks and active gestures");
+                window.Content = root; Render(root, 400, 96); await Drain(); await Shade(false);
+            }
+            finally { window.Close(); }
+        });
         yield return Case("small record sampling retains antialiased cover edges at fractional DPI and detail grooves", async () =>
         {
             var record = new MusicRecordView { Address = "fixture://record", Width = 60, Height = 60 };
@@ -471,7 +610,9 @@ public static partial class MusicUiTests
             Click(Visuals(footer).OfType<Button>().Single(button =>
                 System.Windows.Automation.AutomationProperties.GetName(button) == "播放队列"));
             Equal(1, requests);
-            Click((Button)footer.FindName("RateButton"));
+            var more = (Button)footer.FindName("MoreButton");
+            Click(more);
+            ((MenuItem)more.ContextMenu.Items[0]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
             var rate = (System.Windows.Controls.Primitives.Popup)footer.FindName("RatePopup");
             True(rate.IsOpen, "page footer popup opens");
             progress.BeginScrub(); progress.UpdateScrub(90);
@@ -882,6 +1023,26 @@ public static partial class MusicUiTests
                 f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail); await Drain();
             }
         });
+    }
+    private static RenderTargetBitmap CaptureSeekFrame(FrameworkElement root, double scale)
+    {
+        var frame = new RenderTargetBitmap((int)(400 * scale), (int)(96 * scale), 96 * scale, 96 * scale, PixelFormats.Pbgra32);
+        frame.Render(root); return frame;
+    }
+    private static Color SeekPixel(BitmapSource frame, double x, double y)
+    {
+        var pixel = new byte[4];
+        frame.CopyPixels(new Int32Rect((int)(x * frame.DpiX / 96), (int)(y * frame.DpiY / 96), 1, 1), pixel, 4, 0);
+        return Color.FromArgb(pixel[3], pixel[2], pixel[1], pixel[0]);
+    }
+    private static void SaveSeekFrame(BitmapSource frame, string fileName)
+    {
+        string path = TestWorkspace.ValidatePath(TestWorkspace.ResultsRoot,
+            Path.Combine(TestWorkspace.ResultsRoot, "windows-native", fileName));
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var stream = File.Create(path);
+        var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(frame)); encoder.Save(stream);
+        Console.WriteLine("VISUAL " + path);
     }
     private sealed class CallbackArtworkLoader(Func<string, CancellationToken, Task<IArtworkLease>> acquire) : IArtworkLoader
     {

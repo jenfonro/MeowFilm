@@ -40,9 +40,11 @@ export class SourceCandidates {
       ...(this.#held.get(installationId)?.keys() ?? [])].find(record => record?.sourceRevision === sourceRevision);
     if (existing) {
       this.#require(existing.source === source, this.#code('integrity'));
+      if (this.module === 'music') this.#require(existing.basename === input.basename, this.#code('integrity'));
       return this.receipt(existing);
     }
     const record = { installationId, sourceRevision, source, sourceBytes: bytes.length,
+      ...(this.module === 'music' ? { basename: input.basename } : {}),
       contentHash: createHash('sha256').update(bytes).digest('hex') };
     this.#pending.set(installationId, record);
     return this.receipt(record);

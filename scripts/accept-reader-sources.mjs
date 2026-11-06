@@ -266,27 +266,23 @@ const { createNodeNetwork, createScriptHost, ScriptHostError } = hostExports;
 const modulePath = sourceModulePath;
 
 const runtimeDirectory = dirname(dirname(modulePath));
-const [{ createAppRuntime }, { createRuntimeClient, createCallbackServer }] = await Promise.all([
+const [{ createAppRuntime }, { createRuntimeClient }] = await Promise.all([
   import(pathToFileURL(join(runtimeDirectory, 'bootstrap.mjs')).href),
   import(pathToFileURL(join(runtimeDirectory, 'client.mjs')).href),
 ]);
 async function openHttp(module) {
-  const sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex'), callbackKey = randomBytes(32).toString('hex');
-  const callbacks = createCallbackServer({ sessionId, callbackKey, methods: Object.fromEntries(
-    ['get', 'set', 'delete'].map(operation => [`platform.musicScript.storage.${operation}`,
-      async () => ({ ok: false, code: 'PERMISSION_DENIED' })])) });
-  await callbacks.start();
+  const sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex');
   let runtime, client;
   try {
-    runtime = createAppRuntime({ sessionId, requestKey, callbackKey, callbackUrl: callbacks.baseUrl, modules: [module] });
+    runtime = createAppRuntime({ sessionId, requestKey, modules: [module] });
     await runtime.start();
     client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
     return { client, async close() {
-      const results = await Promise.allSettled([client.close(), runtime.close(), callbacks.close()]);
+      const results = await Promise.allSettled([client.close(), runtime.close()]);
       if (results.some(result => result.status === 'rejected')) throw Object.assign(new Error(), { code: 'SCRIPT_CLEANUP' });
     } };
   } catch (error) {
-    await Promise.allSettled([client?.close(), runtime?.close(), callbacks.close()]);
+    await Promise.allSettled([client?.close(), runtime?.close()]);
     throw error;
   }
 }
@@ -638,7 +634,6 @@ async function accept(item, index) {
       onDiagnostic: event => diagnostics.push(safeDiagnostic(event)),
     });
     module = createSourceRuntimeModule({
-      call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
       hostFactory,
       network,
       platform: 'acceptance',

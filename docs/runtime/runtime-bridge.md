@@ -4,7 +4,7 @@
 
 ## 会话与公共入口
 
-`apps/runtime/entry.mjs` 导出 `createRuntime(config)` 和 `startRuntime(config)`。受信调用方提供 `sessionId`（UUID）、`requestKey`、`callbackUrl`、`callbackKey` 和 Cat 的 `dataRoot`；两个 key 分别为 256-bit 随机十六进制值。`createRuntime` 返回 `{start(),close(),baseUrl}`，`startRuntime` 返回已监听的同一对象。身份不接受脚本覆盖，不进入 CLI 参数、URL、日志或持久化。调用方持有会话存活句柄并负责终止时调用 `close()`；一次 HTTP keep-alive 断开不代表整个会话结束。
+`apps/runtime/entry.mjs` 导出 `createRuntime(config)` 和 `startRuntime(config)`。受信调用方提供 `sessionId`（UUID）、`requestKey`（256-bit 随机十六进制值）及音乐/Cat 共用的 `dataRoot`；两类业务分别拥有自己的私有目录。`createRuntime` 返回 `{start(),close(),baseUrl}`，`startRuntime` 返回已监听的同一对象。身份不接受脚本覆盖，不进入 CLI 参数、URL、日志或持久化。调用方持有会话存活句柄并负责终止时调用 `close()`；一次 HTTP keep-alive 断开不代表整个会话结束。
 
 默认监听 `127.0.0.1:0`。每个请求携带：
 
@@ -24,7 +24,7 @@ X-Meow-Request-Id: <UUID>
 | --- | --- | --- |
 | `GET /v1/describe` | 无 body | `{protocol:"runtime.http.v1",product:"aggregate",modules:[{id,version,contract,methods}]}` |
 | `PUT /v1/{music\|cat\|source}/sources/{installationId}/{sourceRevision}?basename=...` | `application/octet-stream` 原始源码；Cat 无 basename | `{installationId,sourceRevision,sourceBytes,contentHash}` |
-| `POST /v1/{module}/{operation}` | `application/json`，body 即业务参数 | 业务值；`management.describe`、`management.sync` 是字面 operation 段 |
+| `POST /v1/{module}/{operation}` | `application/json`，body 即业务参数 | 业务值；`sources.list`、`management.describe` 等是字面 operation 段 |
 | `POST /v1/close` | `{}` | 停止全部模块、取消其他交换并等待实际排空，成功值为 `{closed:true,cleanupComplete:true}` |
 
 成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。三模块为 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.2.0/source.runtime.v2`。
@@ -41,25 +41,17 @@ X-Meow-Request-Id: <UUID>
 
 每个安装只保留当前执行记录和一个未采用完整候选；已取入操作及退休执行版本由实际所有者持有至结束。新完整上传原子替换未采用候选，不建立全版本缓存。尚持有的同键同内容幂等，不同内容报模块完整性错误；同一份源码身份 hash 只计算一次并复用。source 的规范化执行源码与原始上传内容身份分别保留。
 
-load/install 必须指定 sourceRevision；不存在的版本明确失败，不采用最新候选。sourceRevision 是正安全整数，可跳号。字段、身份、revision CAS 前置拒绝不消费候选；真正取入试运行后失败释放候选，重试须显式重新上传。未采用候选在下一次完整上传、卸载或会话关闭释放，无超时或数量额度。卸载/会话关闭后不保留上传历史，实际源码的后续编辑可再次导入。
+音乐文件 `sources.add/update`、Cat 文件 `install/update` 及 source `load` 必须指定 sourceRevision；不存在的版本明确失败，不采用最新候选。音乐首次文件导入由调用方预分配 UUID，网络导入由运行器分配。sourceRevision 是正安全整数，可跳号，不是安装目录 revision 或执行 generation。字段、身份及各模块前置拒绝不消费候选；真正取入操作后失败释放候选，重试须显式重新上传。未采用候选在下一次完整上传、删除或会话关闭释放，无超时或数量额度。实际源码由业务安装目录持久保存，不把上传候选当作第二份安装事实。
 
-## 取消、反向能力与清理
+## 取消与清理
 
 客户端复用连接并允许并行连接，没有固定并发配额或全局请求队列。未发请求取消仅在本地结束；已发请求通过 HTTP abort 关闭未完成交换的连接。服务端在读取 body 前登记请求所有者，监听 body `aborted` 和未完成 response 的 `close`；正常 `finish` 后的 close 不取消成功调用。body 已发完但结果尚未返回、响应背压阶段均继续受取消控制。不提供 DELETE 取消、取消墓碑或 ACK 协议。
 
 结果 fence 与物理排空分别处理。非合作 handler、网络或存储工作在实际 owner 保留至真实完成，关闭等待这些所有者；不能用本地 await 取消证明远端 I/O 已结束。同 installation 的管理修改有序，其他安装和 status 独立推进。
 
-每 session 使用一个反向 HTTP server，只允许：
+音乐私有 KV 由运行器管理，不再通过客户端反向存储 RPC；公共装配不要求反向 listener、callback key 或 grant。脚本仍只在有效处理器请求内使用 `context.storage`，校验 installation/site/generation、请求当前性与取消；旧 context 不获得后续请求的权限。客户端可以保存来源列表、检测结果等界面快照，但运行器安装与私有数据仍是唯一事实来源。
 
-```text
-POST /v1/capabilities/platform.musicScript.storage.get
-POST /v1/capabilities/platform.musicScript.storage.set
-POST /v1/capabilities/platform.musicScript.storage.delete
-```
-
-Node 使用独立 callbackKey、相同 session 和新的关联请求 ID；callbackUrl 必须是受信回环端点，不跟随重定向。body 为 `grant,installationId,siteId,generation,key`，set 另有 value。反向信封 contract 为 `runtime.http.v1`，value 直接适配存储 owner 的业务值，错误保留既有安全存储码。scope 当前性、grant、site、代次和取消在回调前后重检。存储事务、overlay、CAS 仍属于客户端 owner；callback server 在连接取消后继续登记未完成物理存储任务。两方向采用同一 HTTP 生命周期。
-
-Node 调用方从 `apps/runtime/client.mjs`（或公共 `entry.mjs`）导入 `createCallbackServer`，传入上述方法的业务 handler。方法名单与存储错误码由 `apps/runtime/contracts.mjs` 定义；回包投影由该业务装配处理。共享 `@meowfilm/runtime-bridge` 仅提供 `createHttpServer` / `createHttpClient` 等通用 HTTP 能力，不内置音乐存储方法或存储错误策略。
+共享 `@meowfilm/runtime-bridge` 的 `createHttpServer` / `createHttpClient` 是通用 HTTP 能力，可由各自调用方组合；其中没有音乐存储分派或客户端缓存策略。
 
 ## 错误
 

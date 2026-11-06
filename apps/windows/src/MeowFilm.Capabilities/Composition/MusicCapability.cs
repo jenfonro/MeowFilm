@@ -13,12 +13,11 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigationSource, IScriptPlatformCapabilities
+public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigationSource
 {
     private readonly IMusicApplication application;
     private readonly IMusicPlayback playback;
     private readonly IMusicDialogs dialogs;
-    private readonly MusicSourceNetworkDownload sourceNetworkDownload;
     private readonly GrantedMediaFiles files;
     private readonly PlaybackCache.MusicAudioFileCache? audioFileCache;
     private readonly PlaybackCache.MusicChorusCache persistentChorus;
@@ -54,12 +53,10 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             dialogs) { }
 
     internal MusicCapability(IMusicApplication application, IDocumentStore store, IMusicPlayback playback,
-        PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null,
-        MusicSourceNetworkDownload? sourceNetworkDownload = null)
+        PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null)
     {
         this.application = application ?? throw new ArgumentNullException(nameof(application));
         this.playback = playback; this.dialogs = dialogs ?? new MusicDialogs();
-        this.sourceNetworkDownload = sourceNetworkDownload ?? new MusicSourceNetworkDownload();
         Presentation = new(this);
         playbackPresentation = new(this, property => Changed(property));
         audioFileCache = playbackCache;
@@ -76,9 +73,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         SubscribePlayback();
         RebuildNavigation();
     }
-
-    public IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> ScriptCapabilities
-        => application.ScriptCapabilities;
 
     public string Id => "music";
     public string Title => "音乐";
@@ -202,7 +196,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(CanPlayContentDetail), nameof(CurrentTitle),
             nameof(CurrentArtist), nameof(CurrentAlbum), nameof(HasCurrent), nameof(CurrentArtwork), nameof(CanPlay), nameof(Mode), nameof(ModeText),
             nameof(PlaybackPresentationKey),
-            nameof(PlaybackRateText), nameof(CanSelectCurrentRecording) })
+            nameof(PlaybackRateText), nameof(CanSwitchSource) })
             Changed(name);
         OnlineBindings();
         CatalogSourceBindings();
@@ -332,6 +326,15 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         SelectedLyricSnapshotException { Error: SelectedLyricSnapshotError.TooLarge } => "歌词文件超过大小限制",
         SelectedScriptSnapshotException or SelectedLyricSnapshotException => "所选文件不可用",
         MusicOperationException { Code: "INVALID_LYRIC_RESPONSE" } => "歌词格式无效",
+        MusicOperationException { Code: "SCRIPT_RUNTIME_UNAVAILABLE" } => "脚本音源服务不可用",
+        MusicOperationException { Code: "SOURCE_REDIRECT" } => "音源地址发生重定向，请填写最终地址",
+        MusicOperationException { Code: "SOURCE_DISABLED" } => "音源已停用",
+        MusicOperationException { Code: "SOURCE_NOT_FOUND" } => "音源不存在",
+        MusicOperationException { Code: "STALE_SOURCE" } => "音源已变更，请重试",
+        MusicOperationException { Code: "SCRIPT_FAILURE" } => "音源执行失败",
+        MusicOperationException { Code: "SCRIPT_CLEANUP" } => "音源未能完全停止，请重启后重试",
+        MusicOperationException { Code: "MEDIA_UNAVAILABLE" or "INVALID_MEDIA_CANDIDATE" or "EXPIRED_MEDIA_CANDIDATE" } => "音源未返回可用音频",
+        MusicOperationException { Code: "RECORDING_MISMATCH" } => "音源返回的歌曲不匹配",
         System.Text.Json.JsonException => "JSON 格式错误",
         BridgeException { Code: "CLOSED" } => "业务连接已中断",
         _ => "操作失败，请重试"
@@ -760,6 +763,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         else
         {
             if (args.PropertyName != nameof(IMusicPlayback.Volume)) SyncChorus();
+            if (args.PropertyName == nameof(IMusicPlayback.DurationSeconds)) CheckMediaDuration();
             playbackPresentation.Refresh();
         }
     }
@@ -967,7 +971,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         try { await DisposeAccountDetailsAsync(); } catch (Exception error) { failure ??= error; }
         try { await vipPage.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         try { await application.AbortAsync(); } catch (Exception error) { failure ??= error; }
-        sourceNetworkDownload.Dispose();
         UnsubscribeSearch();
         UnsubscribeDiscovery();
         ReleaseRecommendations();
@@ -998,7 +1001,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             catch (Exception error) { failure ??= error; }
             try { await application.DisposeAsync(); }
             catch (Exception error) { failure ??= error; }
-            sourceNetworkDownload.Dispose();
             // The capability owns its application. Runtime, store and playback remain App-owned.
         }
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();

@@ -19,7 +19,7 @@ namespace MeowFilm.Capabilities;
 /// Complete in-process contract of the one current Windows music application.
 /// The optional runtime executes source scripts only; application capabilities are not optional.
 /// </summary>
-public interface IMusicApplication : IAsyncDisposable, IScriptPlatformCapabilities,
+public interface IMusicApplication : IAsyncDisposable,
     IMusicRecommendationSource, IMusicDiscoverySource, IMusicAccountDetailsSource,
     IMusicAccountDetailsNotifications, IMusicPlaybackFeedbackSource, IMusicLibrarySyncSource,
     IMusicSearchSource, IMusicChorusInvalidationSource, IMusicOfficialPlaybackAuthority,
@@ -113,7 +113,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         searchCoordinator.MatchingObserved += ObserveSongMatches;
         var discoverySessions = new DiscoverySessions(accounts);
         discovery = discoveryFactory?.Invoke(discoverySessions, http) ?? new NativeMusicSearchDiscovery(discoverySessions, http, clients);
-        scripts = new(library, scriptRuntime, null, MatchScriptSongAsync);
+        scripts = new(library, scriptRuntime);
         lyrics = new(library, new NativeMusicLyrics(sessions, http, clients,
             authenticationFailed: failed => accounts.Revoke(failed)), scripts.ExecuteAsync);
         librarySync = new(library, accounts, http, clients, http.SendMusicLibrarySyncCloudAsync);
@@ -160,9 +160,6 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         await librarySync.StartAsync(request.Token).ConfigureAwait(false);
     }
 
-    public IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> ScriptCapabilities
-        => scripts.ScriptCapabilities;
-
     public async Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
         CancellationToken cancellationToken = default)
     {
@@ -181,6 +178,10 @@ public sealed partial class MusicNativeApplication : IMusicApplication
             if (method is null) return Failed("INVALID_REQUEST");
             if (method == "music.official.candidates")
                 return await ExecuteOfficialCandidatesAsync(parameters, token).ConfigureAwait(false);
+            if (method == "music.official.check")
+                return await CheckOfficialSourceAsync(parameters, token).ConfigureAwait(false);
+            if (method == "music.songs.complete")
+                return await CompleteSongAsync(parameters, token).ConfigureAwait(false);
             if (method.StartsWith("music.official.", StringComparison.Ordinal))
                 return await ExecuteOfficialAudioAsync(method, parameters, token).ConfigureAwait(false);
             if (method.StartsWith("music.accountDetails.", StringComparison.Ordinal))
@@ -238,7 +239,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
                 method.StartsWith("music.transfer.", StringComparison.Ordinal))
             {
                 bool changesSource = method.StartsWith("music.sources.", StringComparison.Ordinal) &&
-                    method is not ("music.sources.list" or "music.sources.detail");
+                    method is not ("music.sources.list" or "music.sources.detail" or "music.sources.check" or "music.sources.edit");
                 if (changesSource) lyrics.Invalidate();
                 try { return await scripts.ExecuteAsync(method, parameters, token).ConfigureAwait(false); }
                 finally { if (changesSource) lyrics.Invalidate(); }

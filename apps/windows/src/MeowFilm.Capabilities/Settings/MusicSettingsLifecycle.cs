@@ -98,6 +98,9 @@ public sealed partial class MusicCapability
         if (!qualityLoaded)
             await EnsureQualitySettingsAsync();
         token.ThrowIfCancellationRequested();
+        try { await ReloadSourceExclusions(token); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (Exception error) { status = ErrorText(error); Changed(nameof(Status)); }
         await searchHistory;
     }
 

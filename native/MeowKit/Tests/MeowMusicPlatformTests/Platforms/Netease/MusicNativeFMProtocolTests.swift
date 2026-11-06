@@ -74,7 +74,12 @@ final class MusicNativeFMProtocolTests: XCTestCase {
         let f = try MusicNeteaseNativeFixture(); try await f.enable()
         let binding = try await f.service.nativeHomeBinding()
         let rule = MusicHomeAction.ruleFM(ruleID: "40000", tabTagID: "", sourceName: "")
-        for url in ["https://untrusted.invalid/cover", "https://user@p1.music.126.net/cover", "https://p1.music.126.net:444/cover"] {
+        // FM covers use the shared host-agnostic artwork URL contract; unsafe
+        // URL forms and reflected credentials remain rejected.
+        await f.http.replies("/eapi/tag/tab/fm/cover", [try MusicNeteaseFixture.response(["code": 200, "data": ["cover": "https://other-cdn.invalid/cover"]])])
+        let accepted = try await f.service.nativeFM(rule, preview: true, binding: binding)
+        XCTAssertEqual(accepted.artwork, URL(string: "https://other-cdn.invalid/cover")); XCTAssertTrue(accepted.tracks.isEmpty)
+        for url in ["https://user@p1.music.126.net/cover", "https://p1.music.126.net:444/cover"] {
             await f.http.replies("/eapi/tag/tab/fm/cover", [try MusicNeteaseFixture.response(["code": 200, "data": ["cover": url]])])
             let value = try await f.service.nativeFM(rule, preview: true, binding: binding)
             XCTAssertNil(value.artwork); XCTAssertTrue(value.tracks.isEmpty)

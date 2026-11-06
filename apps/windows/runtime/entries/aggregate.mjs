@@ -6,7 +6,7 @@ import { createSourceRuntimeModule } from '../../../runtime/modules/source-runti
 // Current wire identity; one App, not a selectable aggregate product.
 await startWindowsAppRuntime({
   product: 'aggregate', assemble: ({ call }) => [
-    createMusicScriptModule({ call }),
+    createMusicScriptModule({ dataRoot: windowsScriptDataRoot() }),
     createCatScriptModule({ dataRoot: windowsScriptDataRoot() }),
     createSourceRuntimeModule({ call, platform: 'windows' }),
   ],

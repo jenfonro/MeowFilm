@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -21,7 +22,10 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
     private readonly HashSet<Task> operations = [];
     private readonly Dictionary<string, FilmPlaybackPage> playbackPages = new(StringComparer.Ordinal);
     private readonly FilmView view;
-    private readonly Grid settings = new() { Background = Brushes.Transparent };
+    private readonly FrameworkElement settings;
+    private readonly FilmRuleService? rules;
+    private readonly FilmSourceService? sources;
+    private Task? sourceStartup;
     private Task? preparation;
     private Task? disposal;
     private Task? abortion;
@@ -32,13 +36,18 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
     private bool stopping;
     private bool disposed;
 
-    public FilmCapability() : this(new DoubanFilmHomeSource())
+    public FilmCapability(FilmRuleService rules, FilmSourceService sources)
+        : this(new DoubanFilmHomeSource(), rules, sources)
     {
     }
 
-    internal FilmCapability(IFilmHomeSource source)
+    internal FilmCapability(IFilmHomeSource source) : this(source, null, null) { }
+
+    private FilmCapability(IFilmHomeSource source, FilmRuleService? rules, FilmSourceService? sources)
     {
         this.source = source ?? throw new ArgumentNullException(nameof(source));
+        this.rules = rules;
+        this.sources = sources;
         Sections = FilmSectionDefinition.Home.Select(definition => new FilmHomeSection(definition)).ToArray();
         DataSections = FilmSectionDefinition.Home.Select(definition => new FilmDataSection(definition)).ToArray();
         ActiveData = DataSections[0];
@@ -49,6 +58,9 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
             new(PlaybackRoute, "播放页", "\uE8B2", ShowInSidebar: false)
         ];
         view = new(this);
+        settings = rules is not null && sources is not null
+            ? new FilmSettingsView(rules, sources)
+            : new Grid { Background = Brushes.Transparent }; // Home-only test composition.
     }
 
     public string Id => "film";
@@ -82,6 +94,21 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
         if (stopping) return Task.CompletedTask;
         ObjectDisposedException.ThrowIf(disposed, this);
         return Task.CompletedTask;
+    }
+
+    /// <summary>Called by App composition, never by view visibility. Failures stay
+    /// observable on the source service and do not disable native rule settings.</summary>
+    public Task StartSourcesAsync()
+    {
+        if (stopping || disposed || sources is null) return Task.CompletedTask;
+        return sourceStartup ??= StartCoreAsync();
+
+        async Task StartCoreAsync()
+        {
+            try { await sources.StartAsync(lifetime.Token); }
+            catch (OperationCanceledException) { }
+            catch (Exception) { /* Source owner publishes its fixed RuntimeError. */ }
+        }
     }
 
     public async Task NavigateAsync(string route, CancellationToken cancellationToken)
@@ -418,7 +445,16 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
         stopping = true;
         navigationGeneration++;
         RetireRequests();
-        return preparation = DrainOperationsAsync();
+        return preparation = PrepareCoreAsync();
+    }
+
+    private async Task PrepareCoreAsync()
+    {
+        await Task.WhenAll(
+            rules?.PrepareShutdownAsync() ?? Task.CompletedTask,
+            sources?.PrepareShutdownAsync() ?? Task.CompletedTask,
+            DrainOperationsAsync());
+        if (sourceStartup is not null) await sourceStartup;
     }
 
     public async Task CancelShutdownPreparationAsync()
@@ -429,6 +465,13 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
         await preparation;
         preparation = null;
         stopping = false;
+        rules?.Resume();
+        sources?.Resume();
+        if (sourceStartup is not null)
+        {
+            sourceStartup = null;
+            _ = StartSourcesAsync();
+        }
         foreach (var section in Sections.Where(section => section.State == FilmHomeSectionState.Loading))
             section.Cancel();
         foreach (var section in DataSections.Where(section => section.State == FilmDataSectionState.Loading))
@@ -449,6 +492,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
         lifetime.Cancel();
         RetireRequests();
         await DrainOperationsAsync();
+        await ReleaseSettingsAsync();
         Release();
     }
 
@@ -465,7 +509,15 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
         await prepare;
         lifetime.Cancel();
         await DrainOperationsAsync();
+        await ReleaseSettingsAsync();
         Release();
+    }
+
+    private async Task ReleaseSettingsAsync()
+    {
+        await Task.WhenAll(rules?.DisposeAsync().AsTask() ?? Task.CompletedTask,
+            sources?.DisposeAsync().AsTask() ?? Task.CompletedTask);
+        if (sourceStartup is not null) await sourceStartup;
     }
 
     private void Release()

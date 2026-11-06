@@ -214,8 +214,8 @@ public static class MusicLyricDisplayTests
             {
                 await using var f = await Fixture.Create(allowScripts: true);
                 var source = await f.InstallScript();
-                await f.Module.SourceActionAsync(source, "enable");
-                Check(f.Module.Sources.Single().Enabled);
+                await f.Module.SetSourceEnabledAsync(source, true);
+                Check(f.Module.Sources.Single(row => !row.IsBuiltIn).Enabled);
                 var arrived = Signal(); var release = Signal();
                 var published = new List<string>();
                 f.Module.Lyrics.CollectionChanged += (_, _) => published.AddRange(f.Module.Lyrics.Select(row => row.Text));
@@ -228,15 +228,15 @@ public static class MusicLyricDisplayTests
                     f.Http.Block = null; f.Http.Text = "CURRENT_SOURCE";
                     if (mutation == "disable")
                     {
-                        await f.Module.SourceActionAsync(f.Module.Sources.Single(), "disable");
-                        Check(!f.Module.Sources.Single().Enabled);
+                        await f.Module.SetSourceEnabledAsync(f.Module.Sources.Single(row => !row.IsBuiltIn), false);
+                        Check(!f.Module.Sources.Single(row => !row.IsBuiltIn).Enabled);
                     }
                     else
                     {
-                        string previousHash = f.Module.Sources.Single().Hash;
+                        string previousHash = f.Module.Sources.Single(row => !row.IsBuiltIn).ExecutionHash;
                         await File.WriteAllTextAsync(f.ScriptPath, "// updated lyric source");
-                        await f.Module.UpdateSourceAsync(f.Module.Sources.Single());
-                        Check(f.Module.Sources.Single().Hash != previousHash);
+                        await f.Module.UpdateSourceAsync(f.Module.Sources.Single(row => !row.IsBuiltIn));
+                        Check(f.Module.Sources.Single(row => !row.IsBuiltIn).ExecutionHash != previousHash);
                     }
                     var retry = f.Module.RestoreLyricsAsync();
                     await Dispatcher.Yield(DispatcherPriority.Background);
@@ -263,18 +263,18 @@ public static class MusicLyricDisplayTests
             await f.InstallScript();
             await f.Module.RestoreLyricsAsync();
             Equal("SYNTHETIC_LYRIC", f.Module.Lyrics[0].Text);
-            Equal(1, f.Http.Calls); Equal(0, f.Runtime.Calls); Equal(0, f.Playback.Opens);
+            Equal(1, f.Http.Calls); Equal(0, f.Runtime.Invocations); Equal(0, f.Playback.Opens);
         }));
         yield return new("Native lyric lookup after restart activates only the first usable enabled script", () => Sta(async () =>
         {
             string root = NewRoot(), firstId, unusedId;
             await using (var saved = await Fixture.Create(root, allowScripts: true))
             {
-                var first = await saved.InstallScript(); firstId = first.InstallationId;
-                await saved.Module.SourceActionAsync(first, "enable");
-                var second = await saved.InstallScript(); unusedId = second.InstallationId;
+                var first = await saved.InstallScript(); firstId = first.InstallationId!;
+                await saved.Module.SetSourceEnabledAsync(first, true);
+                var second = await saved.InstallScript(); unusedId = second.InstallationId!;
                 Check(firstId != unusedId);
-                await saved.Module.SourceActionAsync(second, "enable");
+                await saved.Module.SetSourceEnabledAsync(second, true);
             }
             await using var f = await Fixture.Create(root, seed: false, allowScripts: true);
             var listed = Ok(await f.Application.ExecuteAsync("music.sources.list"));
@@ -286,7 +286,7 @@ public static class MusicLyricDisplayTests
                     new { installationId = source.GetProperty("installationId").GetString() }));
                 Equal("idle", detail.GetProperty("item").GetProperty("state").GetString());
             }
-            Equal(0, f.Runtime.Calls);
+            Equal(0, f.Runtime.Invocations); Check(f.Runtime.Loaded.Count == 0);
             f.Http.Empty = true;
             await f.Module.RefreshLyricsAsync();
             Equal("SCRIPT_LYRIC", f.Module.Lyrics.Single().Text);
@@ -625,7 +625,7 @@ public static class MusicLyricDisplayTests
     {
         internal readonly LocalDocumentStore Store;
         internal readonly WriteFaultStore Access;
-        internal readonly LyricRuntime Runtime = new();
+        internal readonly LyricRuntime Runtime;
         internal readonly Handler Http = new();
         internal readonly MusicNativeApplication Application;
         internal readonly Playback Playback = new();
@@ -639,6 +639,7 @@ public static class MusicLyricDisplayTests
         private int syncNoticeHeld;
         private Fixture(string root, bool holdSync)
         {
+            Runtime = new(root);
             ScriptPath = Path.Combine(root, "lyric-source.js");
             Store = new(root, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
             Access = new(Store);
@@ -678,10 +679,10 @@ public static class MusicLyricDisplayTests
         {
             await File.WriteAllTextAsync(ScriptPath, "// synthetic lyric source");
             Dialogs.ScriptFile = ScriptPath;
-            int previousCount = Module.Sources.Count;
+            int previousCount = Module.Sources.Count(row => !row.IsBuiltIn);
             await Module.ImportSourceAsync();
             Equal("", Module.Status);
-            Equal(previousCount + 1, Module.Sources.Count);
+            Equal(previousCount + 1, Module.Sources.Count(row => !row.IsBuiltIn));
             return Module.Sources.Last();
         }
         public async ValueTask DisposeAsync()
@@ -734,49 +735,54 @@ public static class MusicLyricDisplayTests
             }), Encoding.UTF8, "application/json") };
         }
     }
-    private sealed class LyricRuntime : IRuntimeClient
+    private sealed class LyricRuntime(string root) : IRuntimeClient
     {
+        // Durable state of the fake shared module, shared only by fixture reopen.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Dictionary<string, JsonObject>> documents = new();
+        private readonly Dictionary<string, JsonObject> items = documents.GetOrAdd(root, _ => []);
+        private readonly HashSet<string> ready = [];
         internal int Calls, Invocations;
         internal bool AllowScripts;
         internal readonly List<string> Loaded = [];
-        private long generation;
-        private readonly Dictionary<string, JsonElement> instances = [];
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested(); Calls++;
-            if (!AllowScripts) throw new InvalidOperationException("Ordinary lyrics must not start scripts");
-            var input = JsonSerializer.SerializeToElement(parameters);
-            object result;
+            var input = JsonSerializer.SerializeToElement(parameters); object result;
+            string Id() => input.GetProperty("installationId").GetString()!;
+            JsonObject Row(string id)
+            {
+                var row = items[id].DeepClone().AsObject();
+                row["state"] = !row["enabled"]!.GetValue<bool>() ? "disabled" : ready.Contains(id) ? "ready" : "idle";
+                return row;
+            }
             switch (method)
             {
-                case "music.script.stage.begin":
-                    result = new { token = Guid.NewGuid().ToString("D"), chunkBytes = 65536 }; break;
-                case "music.script.stage.chunk":
-                    result = new { next = input.GetProperty("offset").GetInt32() +
-                        Convert.FromBase64String(input.GetProperty("data").GetString()!).Length }; break;
-                case "music.script.stage.abort":
-                    result = new { released = true }; break;
-                case "music.script.load":
-                    string id = input.GetProperty("installationId").GetString()!;
-                    Loaded.Add(id);
-                    var instance = JsonSerializer.SerializeToElement(new {
-                        installationId = id, revision = input.GetProperty("revision").GetInt64(),
-                        generation = ++generation, state = "ready",
-                        capabilities = new { wy = new { actions = new[] { "lyric" }, qualitys = Array.Empty<string>() } }
-                    });
-                    instances[id] = instance;
-                    result = new { instance }; break;
-                case "music.script.status":
-                    result = new { documentAccess = false, instances = instances.Values.ToArray() }; break;
-                case "music.script.unload":
-                    instances.Remove(input.GetProperty("installationId").GetString()!);
-                    result = new { cleanupComplete = true }; break;
+                case "music.script.stage.begin": result = new { token = Guid.NewGuid().ToString(), chunkBytes = 65536 }; break;
+                case "music.script.stage.chunk": result = new { next = input.GetProperty("offset").GetInt32() +
+                    Convert.FromBase64String(input.GetProperty("data").GetString()!).Length }; break;
+                case "music.script.stage.abort": result = new { released = true }; break;
+                case "music.script.sources.add":
+                    string id = Guid.NewGuid().ToString();
+                    items[id] = JsonSerializer.SerializeToNode(new { installationId = id, name = "Lyric fixture", version = "1",
+                        origin = new { kind = "file" }, enabled = false, executionHash = new string('a', 64), rollbackAvailable = false,
+                        sites = new { wy = new { actions = new[] { "lyric" }, qualitys = Array.Empty<string>() } }, check = (object?)null })!.AsObject();
+                    result = new { item = Row(id) }; break;
+                case "music.script.sources.list": result = new { items = items.Keys.Select(Row).ToArray() }; break;
+                case "music.script.sources.detail": result = new { item = Row(Id()) }; break;
+                case "music.script.sources.enable":
+                    items[Id()]["enabled"] = true; ready.Add(Id()); result = new { item = Row(Id()) }; break;
+                case "music.script.sources.disable":
+                    items[Id()]["enabled"] = false; ready.Remove(Id()); result = new { item = Row(Id()) }; break;
+                case "music.script.sources.update":
+                    items[Id()]["executionHash"] = new string('b', 64); result = new { item = Row(Id()) }; break;
                 case "music.script.invoke":
+                    Check(AllowScripts);
+                    if (ready.Add(Id())) Loaded.Add(Id());
                     Invocations++; result = new { value = "[00:01]SCRIPT_LYRIC" }; break;
                 default: throw new InvalidOperationException("Unexpected script method: " + method);
             }
             var reply = JsonSerializer.SerializeToNode(result)!.AsObject();
-            reply["ok"] = true; reply["contract"] = "music.script.v2";
+            reply["ok"] = true; reply["contract"] = "music.script.v3";
             return Task.FromResult(JsonSerializer.SerializeToElement(reply));
         }
     }

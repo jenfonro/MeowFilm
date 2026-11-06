@@ -1,5 +1,7 @@
 # Windows App 脚本载荷打包
 
+> 本文下方的 Node 平台包装描述保留待迁移消费者现状；通用运行器现已使用 `common-native`、标准 HTTP 及 `scripts/script-host-native.json`，不再提供旧 WASM/profile/分片后端。Windows wrapper 与 launcher 尚未迁移，本文不能作为当前分支可发布 App 的证明。客户端影视规则的 `native/JavaScript` 和 `scripts/quickjs-native.json` 是独立引擎，不受这项宿主迁移替代。
+
 Windows meowfilm App 的脚本载荷由以下两个阶段生成。打包参数 --product aggregate 是保留的 wire 身份；其他值明确拒绝。普通原生业务不在 Node 中运行。
 
 ## 两个构建阶段
@@ -11,9 +13,11 @@ Windows meowfilm App 的脚本载荷由以下两个阶段生成。打包参数 -
 
 目标电脑使用完整 `build/windows/`，原生 launcher 只从应用的 `runtime/node.exe` 启动，不查询 PATH 或借用系统 Node。默认发布同时包含 .NET Desktop Runtime；构建主机的 Node/npm/.NET SDK 不是运行依赖。此发布目录需要整体复制，不能仅分发 exe；`-FrameworkDependent` 才要求目标机另装匹配的 .NET Desktop Runtime。
 
+客户端影视规则另使用 `native/JavaScript` 的 QuickJS-NG，通过 `MeowFilm.Platform` 项目正常增量构建为 `meowfilm_js.dll` 并随 App 输出／发布。构建主机需 CMake 3.20+ 与 Windows C 编译器；`CMAKE_GENERATOR`／`CC` 等标准 CMake 环境可选择工具链，默认 Visual Studio x64。`scripts/verify-native-javascript.mjs` 在编译前核对 `scripts/quickjs-native.json` 的源码清单与许可哈希，不在构建时下载源码。此 DLL 不属于 Node runtime 闭包，不放宽下述 native／WASM 拒绝策略。固定规则程序作为 Capabilities 的 `MeowFilm.FilmRules.js` 资源内嵌，规则保存于客户端；目标电脑不需要 CMake 或编译器。
+
 ## 输入闭包
 
-运行 descriptor 为 `music@0.7.0`、`cat@0.1.0`、`source@0.1.0`，响应契约分别为 `music.script.v2`、`cat.script.v1`、`source.runtime.v1`；载荷清单 modules 为 `music, cat, source`，product 保持 aggregate。LX 与 Cat 的大控制数据走 64 KiB 分片；source 控制帧为 1 MiB、源码分片为 64 KiB。三者共用同一 WorkerSession/worker 协议/QuickJS 后端。
+运行 descriptor 为 `music@0.8.0`、`cat@0.1.0`、`source@0.1.0`，响应契约分别为 `music.script.v3`、`cat.script.v1`、`source.runtime.v1`；载荷清单 modules 为 `music, cat, source`，product 保持 aggregate。LX 与 Cat 的大控制数据走 64 KiB 分片；source 控制帧为 1 MiB、源码分片为 64 KiB。三者共用同一 WorkerSession/worker 协议/QuickJS 后端。
 
 ```text
 app/bootstrap.mjs
@@ -67,3 +71,11 @@ SHA-256 105c3bed22d457e43e3d1c3c1c6959fda62a8fe06f0fc8a985303c3a2be72232
 除上述三个 QuickJS 包外，Cat 有限 Node 兼容层还使用锁定的纯 JavaScript 依赖闭包；直接依赖为 `@opentelemetry/api`、`buffer`、`events`、`path-browserify`、`readable-stream`、`supports-color` 和 `util`。其传递依赖按根 lock 实际解析，包内许可原文保留，中央归属见 `LICENSES/NOTICE.md` 和 `npm-node-compat-*.txt`。受审查引擎记录来自实际 registry tarball／安装文件核对；普通 JS 依赖仍执行来源/SRI/manifest/闭包检查，但不冒充独立上游签名。打包本身离线，不重新拉取 tarball。
 
 `scripts/windows/prepare-test-bundles.mjs` 在仓库 tmp 内的显式绝对测试目录调用同一闭包；已存在的 aggregate bundle 不覆盖。回归分别验证真实 release-sync 引擎离线初始化、Windows 入口／管道、v2 请求存储与受控 HTTP 服务访问，不冒充外部脚本验收。外部样本可通过 [验收工具的 `--payload`](../runtime/source-acceptance.md) 指向完整发布 runtime，并由其中的 node.exe 执行，以验证不借用工作区依赖。
+
+## Node 测试范围
+
+`scripts/windows/test-node.ps1 -All` 保留依赖锁、共享包和边界检查，根测试通过 `scripts/test-root.mjs --platform windows` 选择 `tests/windows-*.test.mjs` 与无平台前缀的共享测试，不加载 `tests/ios-*.test.mjs`。`--platform ios` 对称选择 iOS 与共享测试；不传平台或传 `--platform all` 仍执行全部根测试，`npm test` 保持显式仓库共同验证的完整覆盖。
+
+`scripts/test-packages.mjs` 只发现根 `package.json` 声明的 workspaces，并逐包执行其 `test`／`tests` 下的测试。Windows 独有的原生引擎源码检查位于 `tests/windows-native-javascript-source.test.mjs`；无 npm workspace manifest 的 `packages/film-rules` 通过 `tests/windows-film-rules.test.mjs` 执行原有规则测试，两者都进入 Windows 与仓库共同验证。
+
+端侧 wrapper 用例分别位于 `tests/windows-runtime-engine-package.test.mjs`、`tests/ios-runtime-engine-package.test.mjs`，各自夹具只读取本端源码。`tests/runtime-engine-package.test.mjs` 保留共享 packager 的双 profile、引擎和闭包契约，其公共夹具不读取两端 runtime 源码。所有选择继续要求实际执行非空测试集，失败、取消、跳过和 todo 均不能满足门禁。

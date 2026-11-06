@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(import.meta.url);
-const policyPath = 'scripts/quickjs-native.json';
+const policyPath = 'scripts/script-host-native.json';
 const policyBytes = await readFile(resolve(root, policyPath));
 const policy = JSON.parse(policyBytes.toString('utf8'));
 const loadedBuildInputs = [

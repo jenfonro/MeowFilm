@@ -13,7 +13,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `apps/ios/Navigation` | 根容器、普通页面导航、播放器及其他非导航呈现的路由 |
 | `apps/ios/Presentation` | 主页面外壳、页头、底部导航和播放器停靠区 |
 | `apps/ios/UITests` | UIKit 与音乐 UI 组件测试，复用已有 UIKit runner，不属于 App 源成员 |
-| `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的运行器集成测试，实际链接、启动内嵌 Node |
+| `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的宿主测试：运行器集成实际链接、启动 Node；冷启动清理测试使用临时数据与模拟 Keychain |
 | `apps/ios/runtime` | iOS socketpair 启动参数／失败边界与 music/Cat 薄 entry，复用公共 JS 模块 |
 
 工程文件由 `scripts/generate-ios-project.py` 生成。App 只编译上述四个职责目录；UITests、RuntimeTests 使用独立测试 target。NodeMobile.xcframework 链接并嵌入签名，完整 JS 载荷作为 `Runtime` 资源随包签名；构建输入准备见[发布](release.md)。
@@ -35,6 +35,8 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `MeowFilmFeature` | 影视数据源、首页、详情与收藏，见[影视能力](film.md) | UI |
 
 共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。
+
+原生源码检查仅覆盖 `apps/ios` 和 `native/MeowKit`，不遍历 Windows 专属源码。Node 根测试可用 `node scripts/test-root.mjs --platform ios` 选择 iOS 与共享契约测试；共享 packager 用例不读取 Windows 入口源码，iOS 入口及生成载荷由本端 wrapper 用例验证。
 
 平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器的 ASCII 对象键、安全整数、重复键和深度约束仅由 `MeowRuntime.RuntimeBridgeJSON` 在 RPC／脚本传输边界执行，不作为通用 JSON 限制。
 
@@ -84,8 +86,9 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 - 页面内容在创建时构建并加载一次，返回页面不重新构建、不重新请求。主题、深浅色和字体大小变化仍更新样式与布局。
 - 推荐、频道、我的和歌单页提供下拉刷新，失败时提供重试。搜索结果不刷新，获取不同结果需要重新搜索。
 - 本地数据变化（收藏、新建／重命名／删除歌单、当前播放等）同步到已显示的页面，包括插入和删除列表项，只更新受影响的部分，不重载整页；这是本地状态同步，不等同于网络刷新。
-- 默认不自动重新拉取网络数据，账号变化及按日期内容失效除外：
+- 默认不自动重新拉取网络数据，账号／数据源变化及按日期内容失效除外：
   - 登录、退出或切换账号后，旧账号的数据与结果立即失效，依赖账号的页面清空并按新账号及页面需要加载。已确认无本地账号的普通业务准入只返回鉴权结果，不重建账号范围或触发首页刷新；显式验证仍核对凭据并保留原失效边界。
+  - 音乐数据源由原生业务服务独立持久化，设置在网易云／酷狗间切换；首页、频道与标签随来源失效，隐藏页不读取，恢复可见后按需读取一次。网易云账号变化不影响酷狗匿名目录；资源详情和已交接播放仍按各自平台与生命周期运行。
   - 按日期生效的内容（如每日推荐）跨天后失效，下次显示时重新加载。
 - 搜索发现的摘要、热词及各榜成员状态分别持有；真实可见需求只补未加载成员，失败目标仅显式重试。页面隐藏期间范围失效立即清空，但不为隐藏页重读；详细数据范围与缓存见[音乐能力](music.md#搜索发现)。
 

@@ -101,13 +101,12 @@ function errorCode(error) {
 }
 
 export function createSourceRuntimeModule({
-  call,
   hostFactory = createScriptHost,
   network = createNodeNetwork(),
   capabilityOwner,
   platform = 'unknown',
 } = {}) {
-  requireValue(typeof call === 'function' && typeof hostFactory === 'function' &&
+  requireValue(typeof hostFactory === 'function' &&
     typeof network === 'function' &&
     typeof platform === 'string' && platform.length > 0 &&
     (capabilityOwner === undefined ||

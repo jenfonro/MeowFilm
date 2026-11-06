@@ -269,7 +269,11 @@ for (const operation of ['enable', 'uninstall', 'install']) {
         'INVALID_ARGUMENT');
       assert.equal(candidate.live, true, 'invalid fields must not stop the current owner');
       assert.equal(response.destroyed, false);
-      assert.equal(okay(await rpc('status')).instances.find(instance => instance.installationId === 'a').state, 'starting');
+      const starting = okay(await rpc('status')).instances.find(instance => instance.installationId === 'a');
+      assert.equal(starting.state, 'starting');
+      assert.equal(starting.sourceHash, null);
+      assert.deepEqual(starting.sites, []);
+      assert.equal(runtime().settings.read().scripts.some(script => script.installationId === 'a'), false);
       assert.deepEqual(okay(await invoke('b', b.generation)), { marker: 'b', count: 1 });
       const managing = rpc(operation, { installationId: 'a',
         ...(operation === 'enable' ? { enabled: false }
@@ -277,24 +281,26 @@ for (const operation of ['enable', 'uninstall', 'install']) {
       await gate.disconnected.promise;
       assert.equal(response.writableFinished, false, 'initialization I/O was cancelled, not released by the fixture');
       assert.equal(controller.signal.aborted, false);
-      assert.equal((await trial).code, 'STALE_SESSION');
-      const result = okay(await managing);
+      assert.equal((await trial).code, operation === 'install' ? 'STALE_SESSION' : 'CANCELLED');
+      const managed = await managing;
+      const result = operation === 'enable' ? null : okay(managed);
+      if (operation === 'enable') assert.deepEqual(managed,
+        { ok: false, contract: 'cat.script.v2', code: 'NOT_FOUND' });
       assert.equal(candidate.worker, null);
       assert.equal(runtime().host.initializingSessions().length, 0);
       assert.deepEqual(okay(await invoke('b', b.generation)), { marker: 'b', count: 2 });
       if (operation === 'install') {
         controller.abort();
         assert.deepEqual(okay(await invoke('a', result.generation)), { marker: 'next', count: 1 });
-      } else if (operation === 'enable') assert.equal(result.state, 'disabled');
-      else assert.equal(okay(await rpc('status')).instances.some(instance => instance.installationId === 'a'), false);
+      } else assert.equal(okay(await rpc('status')).instances.some(instance => instance.installationId === 'a'), false);
     });
 }
 
-test('real HTTP refresh disconnect stops only its real Cat candidate and leaves old A and B usable',
+test('real HTTP refresh disconnect reports failed A after real exit and keeps B and later A usable',
   { timeout: 30000 }, async t => {
     const gate = await catInitGate(t), { rpc, runtime, install, invoke } = realCat(t);
     const a = await install('a', catFixture('old-a')), b = await install('b', catFixture('b'));
-    const oldHost = runtime().host.get('a');
+    const oldOwner = runtime().getSession('a');
     assert.deepEqual(okay(await invoke('a', a.generation)), { marker: 'old-a', count: 1 });
     const settingsPath = okay(await rpc('status')).settingsPath;
     const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
@@ -314,12 +320,13 @@ test('real HTTP refresh disconnect stops only its real Cat candidate and leaves 
     await until(() => rpc.transport.runtime.state.active === 0);
     assert.equal(response.writableFinished, false);
     assert.equal(candidate.worker, null);
-    assert.equal(runtime().host.get('a').generation, oldHost.generation);
-    assert.equal(runtime().host.get('a').contentHash, oldHost.contentHash);
+    assert.equal(oldOwner.worker, null);
+    assert.equal(runtime().host.get('a').generation, candidate.generation);
     const states = okay(await rpc('status')).instances;
-    assert.equal(states.find(instance => instance.installationId === 'a').state, 'ready');
+    assert.equal(states.find(instance => instance.installationId === 'a').state, 'failed');
+    assert.equal(states.find(instance => instance.installationId === 'a').error, 'CANCELLED');
     assert.equal(states.find(instance => instance.installationId === 'b').generation, b.generation);
-    assert.deepEqual(okay(await invoke('a', a.generation)), { marker: 'old-a', count: 2 });
+    assert.equal((await invoke('a', a.generation)).code, 'DISABLED');
     assert.deepEqual(okay(await invoke('b', b.generation)), { marker: 'b', count: 1 });
     const next = await install('a', catFixture('new-a'), 2);
     assert.ok(next.generation > a.generation);
