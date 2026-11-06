@@ -7,6 +7,11 @@ import sys
 import runpy
 APPLICATION_DIRECTORIES = set(runpy.run_path(str(Path(__file__).with_name("generate-ios-project.py")))["APPLICATION_DIRECTORIES"])
 SHARED_TARGETS = {"MeowContracts", "MeowJSON", "MeowStorage", "MeowAccounts", "MeowPlayback", "MeowUI", "MeowRuntime"}
+# Exact local packages: the native engine and the one shared rule program.
+LOCAL_PRODUCTS = {
+    "MeowJavaScript": ("javascript", "../JavaScript"),
+    "FilmRuleProgram": ("film-rules", "../../packages/film-rules"),
+}
 
 def application_membership(base, project_text):
     """Exact source closure in each target, not just PBXFileReference presence."""
@@ -72,6 +77,17 @@ def check(root):
     failures = []
     package = root / "native/MeowKit"
     manifest = (package / "Package.swift").read_text(encoding="utf-8")
+    local_paths = set(re.findall(r'\.package\(path: "([^"\n]+)"\)', manifest))
+    product_pattern = r'\.product\(name: "([^"\n]+)", package: "([^"\n]+)"\)'
+    external = set()
+    for name, identity in re.findall(product_pattern, manifest):
+        expected = LOCAL_PRODUCTS.get(name)
+        if expected is None or identity != expected[0] or expected[1] not in local_paths:
+            failures.append("Unapproved local product: " + name)
+        else:
+            external.add(name)
+    if local_paths - {path for _, path in LOCAL_PRODUCTS.values()}:
+        failures.append("Unapproved package path")
     declarations = re.findall(
         r'\.(target|testTarget)\(name: "([^"\n]+)", dependencies: \[([^\]]*)\]', manifest)
     targets = {}
@@ -79,7 +95,9 @@ def check(root):
     for kind, name, dependencies in declarations:
         if name in targets:
             failures.append("Duplicate target: " + name)
-        targets[name] = set(re.findall(r'"([^"\n]+)"', dependencies))
+        product_dependencies = {product for product, _ in re.findall(product_pattern, dependencies)}
+        literals = re.sub(product_pattern, "", dependencies)
+        targets[name] = set(re.findall(r'"([^"\n]+)"', literals)) | product_dependencies
         kinds[name] = kind
     sources = {name for name, kind in kinds.items() if kind == "target"}
     tests = {name for name, kind in kinds.items() if kind == "testTarget"}
@@ -102,7 +120,7 @@ def check(root):
         if not linked or not linked <= sources:
             failures.append("Invalid package product targets: " + name)
     for target, dependencies in targets.items():
-        if not dependencies <= sources:
+        if not dependencies <= sources | external:
             failures.append("Non-source dependency: " + target)
         folder = "Sources" if target in sources else "Tests"
         imported = set()
@@ -111,7 +129,7 @@ def check(root):
                 failures.append("Linked source: " + str(path.relative_to(root)))
                 continue
             text = path.read_text(encoding="utf-8")
-            imported.update(re.findall(r"^(?:@testable )?import (Meow\w+)", text, re.M))
+            imported.update(re.findall(r"^(?:@testable )?import (Meow\w+|FilmRuleProgram)", text, re.M))
         if not imported <= dependencies:
             failures.append("Undeclared imports for {}: {}".format(target, sorted(imported - dependencies)))
         if target in SHARED_TARGETS:

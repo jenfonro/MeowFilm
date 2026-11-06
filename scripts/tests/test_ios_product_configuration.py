@@ -74,6 +74,7 @@ class ProductConfigurationTests(unittest.TestCase):
         self.assertIn('path = "../../.cache/nodejs-mobile/ios/NodeMobile.xcframework";', project)
         self.assertIn('path = "../../.cache/ios-runtime/Runtime";', project)
         self.assertIn('path = "../../LICENSES/nodejs-mobile-LICENSE.txt";', project)
+        self.assertIn('path = "../../LICENSES/quickjs-native-MIT.txt";', project)
         self.assertIn("CodeSignOnCopy", project)
         self.assertIn("productName = MeowRuntime;", project)
         host = next(line for line in project.splitlines()

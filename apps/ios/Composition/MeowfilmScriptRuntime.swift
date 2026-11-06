@@ -3,7 +3,8 @@ import NodeMobile
 import MeowRuntime
 
 /// The App's single embedded Node Mobile runtime. Node starts at most once per
-/// process, lazily on the first script use; its payload is a signed resource.
+/// process. App startup requests Cat restoration through its shared session;
+/// merely starting the host does not execute disabled scripts.
 enum MeowfilmScriptRuntime {
     static let launcher = RuntimeEmbeddedLauncher(
         payload: {

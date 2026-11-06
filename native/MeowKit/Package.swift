@@ -18,6 +18,10 @@ let package = Package(
         .library(name: "MeowMusicNativeService", targets: ["MeowMusicNativeService"]),
         .library(name: "MeowFilmFeature", targets: ["MeowFilmFeature"])
     ],
+    dependencies: [
+        .package(path: "../JavaScript"),
+        .package(path: "../../packages/film-rules")
+    ],
     targets: [
         .target(name: "MeowContracts", dependencies: []),
         .target(name: "MeowJSON", dependencies: []),
@@ -29,7 +33,9 @@ let package = Package(
         .target(name: "MeowMusicFeature", dependencies: ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowUI"]),
         .target(name: "MeowMusicPlatform", dependencies: ["MeowMusicFeature", "MeowContracts", "MeowJSON", "MeowAccounts", "MeowStorage"], linkerSettings: [.linkedLibrary("z")]),
         .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowRuntime", "MeowStorage"], linkerSettings: [.linkedLibrary("z")]),
-        .target(name: "MeowFilmFeature", dependencies: ["MeowUI"]),
+        .target(name: "MeowFilmFeature", dependencies: ["MeowUI", "MeowJSON", "MeowStorage", "MeowRuntime",
+            .product(name: "MeowJavaScript", package: "javascript"),
+            .product(name: "FilmRuleProgram", package: "film-rules")]),
         .testTarget(name: "MeowJSONTests", dependencies: ["MeowJSON"]),
         .testTarget(name: "MeowAccountTests", dependencies: ["MeowAccounts", "MeowContracts"]),
         .testTarget(name: "MeowCoreTests", dependencies: ["MeowContracts", "MeowStorage"]),
@@ -39,7 +45,11 @@ let package = Package(
         .testTarget(name: "MeowPlaybackTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback"]),
         .testTarget(name: "MeowRuntimeTests", dependencies: ["MeowJSON", "MeowRuntime"]),
         .testTarget(name: "MeowUITests", dependencies: ["MeowUI"]),
-        .testTarget(name: "MeowFilmFeatureTests", dependencies: ["MeowFilmFeature"])
+        .testTarget(name: "MeowFilmFeatureTests", dependencies: ["MeowFilmFeature", "MeowStorage", "MeowJSON", "MeowRuntime",
+            .product(name: "MeowJavaScript", package: "javascript"),
+            .product(name: "FilmRuleProgram", package: "film-rules")]),
+        .testTarget(name: "MeowJavaScriptTests", dependencies: [
+            .product(name: "MeowJavaScript", package: "javascript")])
     ],
     swiftLanguageVersions: [.v5]
 )

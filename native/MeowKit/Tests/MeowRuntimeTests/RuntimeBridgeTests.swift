@@ -264,6 +264,43 @@ final class RuntimeBridgeConnectionTests: XCTestCase {
 }
 
 final class RuntimeEmbeddedLauncherTests: XCTestCase {
+    func testSessionCloseWaitsForEmbeddedExecutorReturnAfterBridgeEOF() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data().write(to: root.appendingPathComponent("entry.mjs"))
+        try JSONSerialization.data(withJSONObject: ["schemaVersion": 1, "status": "complete", "product": "aggregate",
+            "entry": "entry.mjs", "platform": "ios", "transport": "ios-socketpair-v1"])
+            .write(to: root.appendingPathComponent("runtime-manifest.json"))
+        let eof = expectation(description: "embedded executor observed EOF")
+        let permitExit = DispatchSemaphore(value: 0), returned = RuntimeLaunchRecord()
+        let launcher = RuntimeEmbeddedLauncher(payload: { try RuntimePayload(root: root) },
+            dataDirectory: root, start: { arguments in
+                let peer = RuntimeBridgeRawPeer(descriptor: Int32(arguments[3])!, session: arguments[5])
+                XCTAssertNil(peer.read())
+                peer.close()
+                eof.fulfill()
+                XCTAssertEqual(permitExit.wait(timeout: .now() + 5), .success)
+                returned.set(["executor returned"])
+                return 0
+            })
+        let session = RuntimeBridgeSession(launcher: launcher)
+        try await session.configure(handlers: [:])
+        let connection = try await session.connection()
+        let completed = expectation(description: "close cannot finish at bridge EOF")
+        completed.isInverted = true
+        let close = Task { await session.close(); completed.fulfill() }
+        await fulfillment(of: [eof], timeout: 2)
+        XCTAssertTrue(connection.isClosed)
+        XCTAssertNil(returned.get())
+        await fulfillment(of: [completed], timeout: 0.05)
+        permitExit.signal()
+        await close.value
+        XCTAssertEqual(returned.get(), ["executor returned"])
+        await launcher.waitForExit()
+        await session.close()
+    }
+
     func testPayloadRequiresACompleteIOSManifestAndARegularEntry() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root.appendingPathComponent("app/ios/entries"), withIntermediateDirectories: true)
@@ -321,6 +358,7 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
         XCTAssertEqual(arguments[6], "--meow-data"); XCTAssertEqual(arguments[7], root.appendingPathComponent("data").path)
         connection.close()
         await fulfillment(of: [closed], timeout: 5)
+        await launcher.waitForExit()
         do { _ = try await launcher.connect(handlers: [:]); XCTFail("second start") }
         catch { XCTAssertEqual(error as? RuntimeLaunchError, .alreadyStarted) }
     }

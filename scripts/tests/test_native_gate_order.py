@@ -34,8 +34,15 @@ class NativeGateOrderTests(unittest.TestCase):
         self.tmp = self.root / "tmp"
         self.env = dict(os.environ, GATE_EVENTS=str(self.events), GATE_TMP=str(self.tmp),
                         GATE_FAIL="", GATE_SKIP="", GATE_COUNT="12")
+        self.env.pop("MEOWFILM_BUILD_NODE", None)
         self.command("uname", 'if [ "$1" = -s ]; then echo Darwin; else echo x86_64; fi')
         self.command("git", 'exit 99')
+        self.command("node", """
+case "$*" in
+ *verify-native-javascript.mjs*) echo javascript >> "$GATE_EVENTS"; [ "$GATE_FAIL" != javascript ] ;;
+ *) exit 9 ;;
+esac
+""")
         self.command("python3", """
 case "$*" in
  *repository-paths.py*) echo "$GATE_TMP" ;;
@@ -95,8 +102,13 @@ echo "$kind" >> "$GATE_EVENTS"; [ "$GATE_FAIL" != "$kind" ]
     def test_filtered_tests_build_only_the_package_and_do_not_require_git_or_prior_receipts(self):
         result = self.run_gate("test", "--filter", "MeowUITests.SomeCase")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.recorded(), ["swift test --package-path native/MeowKit -j 2 --filter MeowUITests.SomeCase"])
+        self.assertEqual(self.recorded(), ["javascript", "swift test --package-path native/MeowKit -j 2 --filter MeowUITests.SomeCase"])
         self.assertEqual(self.run_gate("test", "--filter", "MeowUITests.SomeCase").returncode, 0)
+
+    def test_native_source_verification_failure_never_compiles_or_runs_tests(self):
+        result = self.run_gate("test", "--filter", "SomeCase", GATE_FAIL="javascript")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.recorded(), ["javascript"])
 
     def test_explicit_all_compiles_then_runs_both_test_layers(self):
         result = self.run_gate("all")

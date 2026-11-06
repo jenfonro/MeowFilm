@@ -213,7 +213,9 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   unmodified engine sources under `native/JavaScript/quickjs`.
 - Source and license hashes: `scripts/quickjs-native.json`.
 - Windows links the engine into `meowfilm_js.dll` through the application's
-  JSON-only C adapter. The upstream command-line interpreter, libc/I/O module
+  JSON-only C adapter; iOS statically links the same source through the local
+  `MeowJavaScript` Swift package and bundles `quickjs-native-MIT.txt`.
+  The upstream command-line interpreter, libc/I/O module
   and module loader are not included. This client-side engine is independent
   of the Node script host and is not a replacement for its WASM/asm.js engines.
 

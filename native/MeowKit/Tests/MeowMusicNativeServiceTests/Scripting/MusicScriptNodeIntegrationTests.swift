@@ -64,13 +64,15 @@ private actor MusicScriptNodeLauncher: RuntimeBridgeLaunching {
         connection?.close()
         return await exit?.value ?? -1
     }
+    func waitForExit() async { _ = await exit?.value }
 }
 
 final class MusicScriptNodeIntegrationTests: XCTestCase {
     func testNativeOwnerLoadsInvokesPersistsStorageAndUnloadsThroughTheRealIOSRuntimeEntry() async throws {
         let documents = try MusicScriptTestDocuments(); defer { documents.remove() }
         let launcher = try MusicScriptNodeLauncher(dataRoot: documents.root.appendingPathComponent("runtime"))
-        let service = documents.owner(launcher)
+        let session = RuntimeBridgeSession(launcher: launcher)
+        let service = try await documents.owner(session: session)
         do {
             let item = try await service.importScriptSource(musicScriptFixture, fileName: "fixture.js")
             let enabled = try await service.setScriptSourceEnabled(item.id, enabled: true)
@@ -93,10 +95,13 @@ final class MusicScriptNodeIntegrationTests: XCTestCase {
             try await service.removeScriptSource(item.id)
             XCTAssertNil(try documents.store.read(key: "storage." + item.id))
             let remaining = try await service.sources(); XCTAssertTrue(remaining.isEmpty)
-            await service.close()
+            try await service.close()
+            await session.close()
             let exit = await launcher.finish(); XCTAssertEqual(exit, 0)
         } catch {
-            await service.close()
+            do { try await service.close() }
+            catch { XCTFail("Music cleanup failed: \(error)") }
+            await session.close()
             _ = await launcher.finish()
             throw error
         }

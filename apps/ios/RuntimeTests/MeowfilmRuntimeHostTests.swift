@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 import MeowMusicFeature
 import MeowMusicNativeService
 import MeowRuntime
@@ -40,16 +41,19 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         XCTAssertNotNil(Bundle.main.url(forResource: "nodejs-mobile-LICENSE", withExtension: "txt"))
     }
 
+    @MainActor
     func testEmbeddedNodeServesAnLXScriptThroughTheNativeOwner() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let service = NativeMusicScriptService(storeFactory: {
-            try DocumentStore(baseURL: directory, namespace: NativeMusicScriptService.namespace,
-                              maximumDocumentBytes: MusicScriptSourceItem.maximumSourceBytes)
-        }, launcher: MeowfilmScriptRuntime.launcher)
+        let resources = try await hostResources()
+        let service = resources.musicScripts
+        let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: false).appendingPathComponent("meowfilm/documents")
 
         let imported = try await service.importScriptSource(Data(Self.script.utf8), fileName: "fixture.js")
+        addTeardownBlock {
+            if try await service.scriptSources().contains(where: { $0.id == imported.id }) {
+                try await service.removeScriptSource(imported.id)
+            }
+        }
         XCTAssertEqual(imported.name, "Runtime host fixture")
         XCTAssertEqual(imported.version, "3")
         XCTAssertEqual(imported.state, .disabled)
@@ -57,16 +61,18 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let catalog = try XCTUnwrap(JSONSerialization.jsonObject(
             with: Data(contentsOf: documents.appendingPathComponent("catalog.json"))) as? [String: Any])
         let installations = try XCTUnwrap(catalog["installations"] as? [[String: Any]])
-        XCTAssertEqual(installations.first?["id"] as? String, imported.id)
+        XCTAssertTrue(installations.contains { $0["id"] as? String == imported.id })
         let sourceFile = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: documents,
-            includingPropertiesForKeys: nil).first { $0.lastPathComponent.hasPrefix("source.") })
+            includingPropertiesForKeys: nil).first {
+                $0.lastPathComponent.hasPrefix("source.") && (try? Data(contentsOf: $0)) == Data(Self.script.utf8)
+            })
         XCTAssertEqual(try Data(contentsOf: sourceFile), Data(Self.script.utf8))
         let enabled = try await service.setScriptSourceEnabled(imported.id, enabled: true)
         XCTAssertEqual(enabled.state, .ready)
         XCTAssertEqual(enabled.platforms, [.qq])
 
         let sources = try await service.sources()
-        let source = try XCTUnwrap(sources.first)
+        let source = try XCTUnwrap(sources.first { $0.installationID == imported.id })
         XCTAssertEqual(source.installationID, imported.id)
         XCTAssertEqual(source.capabilities.map(\.siteID), ["tx"])
         let request = MusicScriptRequest(installationID: source.installationID, generation: source.generation,
@@ -93,9 +99,9 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         } catch { XCTAssertEqual(error as? MusicServiceError, .sourceUnavailable) }
         try await service.removeScriptSource(imported.id)
         let remaining = try await service.scriptSources()
-        XCTAssertTrue(remaining.isEmpty)
+        XCTAssertFalse(remaining.contains { $0.id == imported.id })
         XCTAssertFalse(FileManager.default.fileExists(atPath: storageFile.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: sourceFile.path))
-        await service.close()
+
     }
 }

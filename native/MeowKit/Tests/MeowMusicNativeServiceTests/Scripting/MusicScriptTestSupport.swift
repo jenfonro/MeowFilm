@@ -20,9 +20,14 @@ struct MusicScriptTestDocuments {
         root.appendingPathComponent(NativeMusicScriptService.namespace).appendingPathComponent(key + ".json")
     }
     func remove() { try? FileManager.default.removeItem(at: root) }
-    func owner(_ launcher: any RuntimeBridgeLaunching, download: MusicScriptDownload = .init()) -> NativeMusicScriptService {
-        NativeMusicScriptService(storeFactory: { store }, launcher: launcher, download: download,
-                                 clock: { NativeMusicFixture.date })
+    func owner(_ launcher: any RuntimeBridgeLaunching, download: MusicScriptDownload = .init()) async throws -> NativeMusicScriptService {
+        try await owner(session: RuntimeBridgeSession(launcher: launcher), download: download)
+    }
+    func owner(session: RuntimeBridgeSession, download: MusicScriptDownload = .init()) async throws -> NativeMusicScriptService {
+        let service = NativeMusicScriptService(storeFactory: { store }, connection: { try await session.connection() },
+                                              download: download, clock: { NativeMusicFixture.date })
+        try await session.configure(handlers: service.storageHandlers())
+        return service
     }
 }
 
@@ -40,9 +45,15 @@ actor MusicScriptTestRuntime: RuntimeBridgeLaunching {
     var native: RuntimeBridgeConnection?
     var peer: RuntimeBridgeConnection?
     var invokeGate: NativeMusicGate?
+    var loadGate: NativeMusicGate?
+    var cleanupComplete = true
+    var musicAvailable = true
 
     func configure(_ mode: Load) { self.mode = mode }
     func holdInvoke(_ gate: NativeMusicGate) { invokeGate = gate }
+    func holdLoad(_ gate: NativeMusicGate) { loadGate = gate }
+    func setCleanupComplete(_ value: Bool) { cleanupComplete = value }
+    func setMusicAvailable(_ value: Bool) { musicAvailable = value }
     func metrics() -> (connects: Int, calls: [String]) { (connects, calls) }
     func binding(_ id: String) throws -> JSONValue { try XCTUnwrap(bindings[id]) }
     func connect(handlers: [String: RuntimeBridgeConnection.Handler]) throws -> RuntimeBridgeConnection {
@@ -64,6 +75,7 @@ actor MusicScriptTestRuntime: RuntimeBridgeLaunching {
         return result
     }
     func close() { peer?.close(); native?.close() }
+    func waitForExit() async { await peer?.closeAndWait() }
     func reverse(_ operation: String, binding: JSONValue, generation: Int? = nil) async throws -> JSONValue {
         guard let peer else { throw RuntimeBridgeError.closed }
         var fields: [String: JSONValue] = [
@@ -81,9 +93,9 @@ actor MusicScriptTestRuntime: RuntimeBridgeLaunching {
         calls.append(method)
         switch method {
         case "runtime.describe":
-            return .object(["protocol": .number(1), "modules": .array([
+            return .object(["protocol": .number(1), "modules": .array(musicAvailable ? [
                 .object(["id": .string("music"), "version": .string("0.7.0")]),
-            ])])
+            ] : [])])
         case "stage.begin":
             let token = UUID().uuidString
             stages[token] = Data()
@@ -111,12 +123,13 @@ actor MusicScriptTestRuntime: RuntimeBridgeLaunching {
             instances[id] = instance
             bindings[id] = .object(["grant": value["grant"]!, "installationId": .string(id),
                                    "generation": .number(Double(generation))])
+            if let loadGate { await loadGate.wait() }
             if mode == .lostReceipt { throw RuntimeBridgeError.timeout }
             return success(["instance": instance])
         case "status": return success(["instances": .array(Array(instances.values))])
         case "unload":
-            instances[value["installationId"]!.scriptText!] = nil
-            return success(["unloaded": .bool(true), "cleanupComplete": .bool(true)])
+            if cleanupComplete { instances[value["installationId"]!.scriptText!] = nil }
+            return success(["unloaded": .bool(true), "cleanupComplete": .bool(cleanupComplete)])
         case "invoke":
             if let invokeGate { await invokeGate.wait() }
             return success(["value": .string("http://media.invalid/track.mp3")])

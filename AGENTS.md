@@ -1,7 +1,7 @@
 # AGENTS.md
 
 meowfilm 的 iPhone 与 Windows 原生客户端：
-- iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供业务、平台、账号、播放、缓存和持久化能力。
+- iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供业务、平台、账号、播放、缓存和持久化能力。公共 Node 脚本宿主随 App 启动恢复启用猫源；客户端影视规则静态链接原生 QuickJS，不依赖 Node。
 - Windows：WPF / .NET 原生桌面应用；公共 Node 脚本宿主随 App 启动，恢复已启用的猫源，停用脚本不执行。客户端影视规则内嵌原生 QuickJS，不依赖 Node。
 
 ## 命令
@@ -53,7 +53,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `native/MeowKit/` — iOS Swift Package
   - `MeowContracts`、`MeowJSON`、`MeowStorage`、`MeowAccounts`、`MeowPlayback`、`MeowUI`、`MeowRuntime` — 共享能力
   - `MeowMusicFeature`、`MeowMusicPlatform`、`MeowMusicNativeService` — 音乐界面、平台和原生业务
-  - `MeowFilmFeature` — 影视数据源、首页、详情和收藏
+  - `MeowFilmFeature` — 影视数据源、首页、详情、收藏、规则设置与来源管理
 - `apps/windows/app/` — Windows 应用入口与装配
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约

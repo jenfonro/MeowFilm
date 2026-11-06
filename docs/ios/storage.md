@@ -5,6 +5,7 @@
 | 数据 | 存储 | 位置 |
 | --- | --- | --- |
 | 曲库、队列、历史、设置（`music.library.v1`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
+| 影视规则与视频映射／选项／删除记录 | 普通文档 | `meowfilm/documents/film.magic-rules.v1`、`film.video-sources.v1`，参与备份 |
 | 脚本目录、源码与私有数据（`music.scripts.v1`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
 | 播放展示、来源发现、首页快照、账号 URL 与副歌点缓存 | 普通文档 | Caches 下 `meowfilm/documents` |
 | 客户端设备会话（`music.client-context.<平台>.v1`）、QQ 设备身份（`music.qq-public.v1`） | 加密文档 | Application Support 下 `meowfilm/encrypted-documents-v1`，排除备份 |
@@ -60,7 +61,7 @@
 ## 清除本机用户数据
 
 - 设置 → 本机数据 → 清除本机用户数据。二次确认说明不可撤销、清除范围以及需关闭并重新打开 App；取消不产生请求。
-- 确认后只持久写入 Application Support 下独立的 `meowfilm-reset.pending`（排除备份），停止播放、同步、脚本和业务访问，并切换为待重启界面。此时尚未清理；不会强制退出或在原进程热重建服务，前后台切换也不会执行清理。内嵌 Node 每进程只能启动一次，旧任务可能仍在结算。
+- 确认后只持久写入 Application Support 下独立的 `meowfilm-reset.pending`（排除备份），停止播放、同步、脚本和业务访问，并切换为待重启界面。此时尚未清理；不会强制退出或在原进程热重建服务，前后台切换也不会执行清理。内嵌 Node 每进程只能启动一次。App 等待规则／来源 owner 取消排空、音乐卸载、共享 bridge 和 Node 线程实际结束；仍需新进程才进行删除。
 - 下次冷启动由 `MeowfilmLaunchController` 在创建 `MeowfilmAssembly` 前执行清理。清除 Application Support/meowfilm、Caches/meowfilm、Caches/meowfilm.music.audio-cache.v1、临时目录下的 meowfilm（运行器回退位置），以及当前 App UserDefaults domain、App Cookie 与 URL 缓存。
 - Keychain 按稳定产品 ID `dev.meowfilm.aggregate` 下的精确 service 清除：账号凭据、网易云／酷狗客户端设备、QQ 设备，以及旧版曲库、播放展示、来源发现、账号 URL 缓存密钥。只删除本地 data-protection generic-password 项，不枚举整个 access group、不按 class 全删，不先读取或验证旧项保护属性。侧载后的偏好域使用实际 bundle ID，Keychain service 仍使用稳定产品 ID。
 - 不调用云端退出／歌单／收藏删除，不删除 App 外导入原文件、链接目标或其他 service。应用根目录中未知的本地文件也属于重置范围，不尝试解密损坏文档。
@@ -76,3 +77,7 @@
 - 文件位于 `documents/music.scripts.v1/<key>.json`，其中 source 文件保存原始源码字节而非 JSON。单文档资源上限为 16 MiB，不限制命名空间文档数与总字节。安装／启停操作串行完成；读取或导入不执行脚本。删除先撤销运行授权并清除私有存储，再删除目录条目与最后一个引用的源码。
 
 内置官方源开关仍属于 `music.library.v1` 的 playback 记录 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；新建文档显式写入全部启用，已有文档必须包含该数组，空数组全部关闭，不接受缺失、null 或未知平台。写入使用既有 settingsRevision／文档 CAS，不创建第二份设置事实来源。
+
+## 影视设置
+
+`film.magic-rules.v1/rules` 保存共享 JS 的四组文档；`film.video-sources.v1/catalog` 保存客户端视频映射、排序、四选项、检测结果、猫源管理元数据及 tombstone。均以 DocumentStore CAS 写入后发布状态，不存脚本源码、运行端口或 generation。Node 在 `meowfilm/script-runtime` 保存自身安装和私有卷，不拥有客户端视频选项。详细身份、删除恢复与调用边界见[影视设置](film-settings.md)。

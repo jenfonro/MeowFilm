@@ -5,7 +5,7 @@ import MeowRuntime
 import MeowStorage
 
 /// The native owner of installed raw LX scripts: metadata, source bytes, private
-/// storage, grants, generations and the embedded runtime connection. Listing
+/// storage, grants and generations. The App owns the shared runtime. Listing
 /// and importing never start the runtime; enabling or an actual playback /
 /// lyric request loads an installation through music.script.v2.
 public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceManaging {
@@ -26,7 +26,7 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
     private struct Grant { let installationID: String; var generation: Int? }
 
     private let factory: @Sendable () throws -> DocumentStore
-    private let launcher: any RuntimeBridgeLaunching
+    private let getConnection: @Sendable () async throws -> RuntimeBridgeConnection
     private let download: MusicScriptDownload
     private let now: @Sendable () -> Date
     private var document: DocumentStore?
@@ -34,6 +34,11 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
     private var connecting: Task<RuntimeBridgeConnection, Error>?
     private var runtimeFailed = false
     private var closed = false
+    private var closing: Task<Void, Error>?
+    private var cleanupPending: Set<String> = []
+    private var invocations: [UUID: Task<[String: JSONValue], Error>] = [:]
+    private var downloads: [UUID: Task<(data: Data, host: String), Error>] = [:]
+    private var operations: [UUID: @Sendable () async -> Void] = [:]
     private var live: [String: Live] = [:]
     private var failed: Set<String> = []
     private var revisions: [String: Int] = [:]
@@ -43,23 +48,55 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
 
     /// Passive: no directory, document or runtime access until used.
     public init(storeFactory: @escaping @Sendable () throws -> DocumentStore,
-                launcher: any RuntimeBridgeLaunching,
+                connection: @escaping @Sendable () async throws -> RuntimeBridgeConnection,
                 clock: @escaping @Sendable () -> Date = { Date() }) {
-        self.init(storeFactory: storeFactory, launcher: launcher, download: .init(), clock: clock)
+        self.init(storeFactory: storeFactory, connection: connection, download: .init(), clock: clock)
     }
 
     init(storeFactory: @escaping @Sendable () throws -> DocumentStore,
-         launcher: any RuntimeBridgeLaunching, download: MusicScriptDownload,
+         connection: @escaping @Sendable () async throws -> RuntimeBridgeConnection, download: MusicScriptDownload,
          clock: @escaping @Sendable () -> Date = { Date() }) {
-        factory = storeFactory; self.launcher = launcher; self.download = download; now = clock
+        factory = storeFactory; getConnection = connection; self.download = download; now = clock
     }
 
-    /// Ends the runtime connection; the embedded runtime disposes its modules.
-    public func close() {
+    /// Revokes grants, drains accepted music work and unloads music instances.
+    /// The borrowed connection remains available to other modules.
+    public func close() async throws {
+        if let closing { return try await closing.value }
         closed = true
+        grants.removeAll()
         connecting?.cancel()
-        connection?.close()
-        live.removeAll(); grants.removeAll()
+        let calls = Array(invocations.values)
+        let fetches = Array(downloads.values)
+        let mutations = Array(operations.values)
+        for call in calls { call.cancel() }
+        for fetch in fetches { fetch.cancel() }
+        let task = Task {
+            for call in calls { _ = await call.result }
+            for fetch in fetches { _ = await fetch.result }
+            _ = await self.connecting?.result
+            for mutation in mutations { await mutation() }
+            await self.acquire()
+            defer { self.releaseLock() }
+            // An in-flight load reconciles its late receipt before releasing
+            // the operation lock; queued operations reject the closed owner.
+            var cleanupFailed = false
+            for id in Array(self.live.keys) {
+                if !(await self.unload(id)) { cleanupFailed = true }
+            }
+            if let connection = self.connection {
+                let transport = MusicScriptTransport(connection: connection)
+                for id in self.cleanupPending {
+                    if !(await self.reconcile(id, transport: transport)) { cleanupFailed = true }
+                }
+            }
+            self.connection = nil
+            self.connecting = nil
+            self.cleanupPending.removeAll()
+            try musicRequire(!cleanupFailed, .scriptCleanupFailed)
+        }
+        closing = task
+        try await task.value
     }
 
     // MARK: Management
@@ -80,7 +117,14 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
         try musicRequire(!closed, .closed)
         _ = try MusicScriptDownload.validate(url)
         try musicRequire(url.lastPathComponent.lowercased().hasSuffix(".js"), .invalidScript)
-        let fetched = try await download.fetch(url)
+        let id = UUID()
+        let task = Task { [download] in try await download.fetch(url) }
+        downloads[id] = task
+        defer { downloads[id] = nil }
+        let fetched = try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: { task.cancel() }
+        try musicRequire(!closed, .closed)
         let last = url.lastPathComponent
         let inspection = try MusicScriptHeader.inspect(fetched.data,
             fileName: last.isEmpty || last == "/" ? fetched.host : last)
@@ -137,11 +181,14 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
     /// not abandon a started load or CAS; the UI separately fences late results.
     private func owned<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) async throws -> T {
         try musicRequire(!closed, .closed)
+        let id = UUID()
         let task = Task { () async throws -> T in
             await self.acquire()
             do { let value = try await body(); self.releaseLock(); return value }
             catch { self.releaseLock(); throw error }
         }
+        operations[id] = { _ = await task.result }
+        defer { operations[id] = nil }
         return try await task.value
     }
 
@@ -247,6 +294,7 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
             catch { continue }
         }
         // Declared sites are display metadata; a failed write never fails playback.
+        try musicRequire(!closed, .closed)
         if changed { try? writeCatalog(&catalog) }
         if result.isEmpty && (unavailable || runtimeFailed) &&
             catalog.installations.contains(where: \.enabled) { throw MusicServiceError.sourceUnavailable }
@@ -257,6 +305,7 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
 
     private func activate(_ item: MusicScriptCatalog.Installation) async throws -> Live {
         let transport = try await runtime()
+        try musicRequire(!closed, .closed)
         let bytes: Data
         do {
             guard let data = try store().read(key: Self.sourceKey(item.sourceSHA256)), data.count == item.sourceBytes,
@@ -284,12 +333,15 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
                              .scriptFailed)
             grants[grant]?.generation = current.generation
             live[item.id] = current
+            cleanupPending.remove(item.id)
             return current
         } catch {
             grants[grant] = nil
             if let token { await transport.release("stage.abort", token) }
             // A lost load receipt may still have published a binding.
-            await reconcile(item.id, transport: transport)
+            let reconciled = await reconcile(item.id, transport: transport)
+            if !reconciled { cleanupPending.insert(item.id) }
+            else { cleanupPending.remove(item.id) }
             failed.insert(item.id)
             throw Self.loadFailure(error)
         }
@@ -335,26 +387,32 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
                 "generation": .number(Double(current.generation)),
             ])
             try musicRequire(reply["unloaded"] == .bool(true) && reply["cleanupComplete"] == .bool(true), .scriptCleanupFailed)
+            cleanupPending.remove(id)
             return true
         } catch {
             if connection.isClosed { return true }
-            await reconcile(id, transport: transport)
+            if !(await reconcile(id, transport: transport)) { cleanupPending.insert(id) }
             return false
         }
     }
 
     /// Retires any runtime binding for `id` that native state does not own.
-    private func reconcile(_ id: String, transport: MusicScriptTransport) async {
+    @discardableResult
+    private func reconcile(_ id: String, transport: MusicScriptTransport) async -> Bool {
+        if transport.connection.isClosed { return true }
         guard let status = try? await transport.call("status", [:]),
-              case .array(let instances)? = status["instances"] else { return }
+              case .array(let instances)? = status["instances"] else { return transport.connection.isClosed }
+        var complete = true
         for case .object(let instance) in instances where instance["installationId"] == .string(id) {
             guard let revision = instance["revision"]?.scriptInteger,
-                  let generation = instance["generation"]?.scriptInteger else { continue }
-            _ = try? await transport.call("unload", [
+                  let generation = instance["generation"]?.scriptInteger else { complete = false; continue }
+            let reply = try? await transport.call("unload", [
                 "installationId": .string(id), "revision": .number(Double(revision)),
                 "generation": .number(Double(generation)),
             ])
+            if reply?["unloaded"] != .bool(true) || reply?["cleanupComplete"] != .bool(true) { complete = false }
         }
+        return complete || transport.connection.isClosed
     }
 
     private func invoke(_ request: MusicScriptRequest, operation: String,
@@ -364,39 +422,48 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
               current.capabilities.contains(where: { $0.siteID == request.siteID && $0.actions.contains(operation) }),
               let connection, !connection.isClosed else { throw MusicServiceError.sourceUnavailable }
         let reply: [String: JSONValue]
-        do {
-            reply = try await MusicScriptTransport(connection: connection).call("invoke", [
+        let id = UUID()
+        let task = Task {
+            try await MusicScriptTransport(connection: connection).call("invoke", [
                 "installationId": .string(request.installationID), "revision": .number(Double(current.revision)),
                 "generation": .number(Double(current.generation)), "siteId": .string(request.siteID),
                 "operation": .string(operation), "payload": .object(payload),
             ])
+        }
+        invocations[id] = task
+        defer { invocations[id] = nil }
+        do {
+            reply = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: { task.cancel() }
         } catch { throw Self.invokeFailure(error) }
-        guard live[request.installationID]?.generation == request.generation else { throw MusicServiceError.sourceUnavailable }
+        guard !closed, live[request.installationID]?.generation == request.generation else { throw MusicServiceError.sourceUnavailable }
         guard let value = reply["value"] else { throw MusicServiceError.invalidResponse }
         return value
     }
 
     private func runtime() async throws -> MusicScriptTransport {
-        if let connection, !connection.isClosed { return MusicScriptTransport(connection: connection) }
         try musicRequire(!runtimeFailed && !closed, .scriptRuntimeUnavailable)
-        let task = connecting ?? Task { [launcher, handlers = storageHandlers()] in
-            let connection = try await launcher.connect(handlers: handlers)
-            do {
-                let described = try await connection.call("runtime.describe", .null, timeout: 60)
-                guard described["protocol"]?.scriptInteger == 1, case .array(let modules)? = described["modules"],
-                      modules.contains(where: { $0["id"] == .string("music") && $0["version"] == .string("0.7.0") }) else {
-                    throw MusicServiceError.scriptRuntimeUnavailable
-                }
-            } catch { connection.close(); throw error }
+        if let connection, !connection.isClosed { return MusicScriptTransport(connection: connection) }
+        let task = connecting ?? Task { [getConnection] in
+            let connection = try await getConnection()
+            let described = try await connection.call("runtime.describe", .null, timeout: 60)
+            guard described["protocol"]?.scriptInteger == 1, case .array(let modules)? = described["modules"],
+                  modules.contains(where: { $0["id"] == .string("music") && $0["version"] == .string("0.7.0") }) else {
+                throw MusicServiceError.scriptRuntimeUnavailable
+            }
             return connection
         }
         connecting = task
         do {
             let value = try await task.value
-            guard !closed else { value.close(); throw MusicServiceError.closed }
+            guard !closed, !value.isClosed else { throw MusicServiceError.closed }
             if connection !== value {
                 connection = value
-                value.onClose { [weak self] in Task { await self?.runtimeClosed(value) } }
+                value.onClose { [weak self, weak value] in
+                    guard let value else { return }
+                    Task { await self?.runtimeClosed(value) }
+                }
             }
             return MusicScriptTransport(connection: value)
         } catch {
@@ -420,7 +487,7 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
 
     // MARK: Request-bound storage (runtime → native)
 
-    private nonisolated func storageHandlers() -> [String: RuntimeBridgeConnection.Handler] {
+    public nonisolated func storageHandlers() -> [String: RuntimeBridgeConnection.Handler] {
         var handlers: [String: RuntimeBridgeConnection.Handler] = [:]
         for operation in ["get", "set", "delete"] {
             handlers["platform.musicScript.storage." + operation] = { [weak self] params in

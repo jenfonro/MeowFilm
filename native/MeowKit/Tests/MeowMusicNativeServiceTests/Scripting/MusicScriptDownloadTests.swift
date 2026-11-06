@@ -29,20 +29,20 @@ final class MusicScriptDownloadTests: XCTestCase {
     func testHTTPSBytesUseTheSameDisabledInstallPathAndKeepOnlyOriginHost() async throws {
         let documents = try MusicScriptTestDocuments(); defer { documents.remove() }
         let runtime = MusicScriptTestRuntime()
-        let service = documents.owner(runtime, download: .init(protocolClasses: [MusicScriptURLProtocol.self]))
+        let service = try await documents.owner(runtime, download: .init(protocolClasses: [MusicScriptURLProtocol.self]))
         let item = try await service.downloadScriptSource(from: URL(string: "https://source.invalid/ok.js?token=synthetic")!)
         XCTAssertEqual(item.origin, .network(host: "source.invalid"))
         XCTAssertEqual(item.name, "合成 LX 音源"); XCTAssertFalse(item.enabled)
         let catalog = String(decoding: try XCTUnwrap(documents.store.read(key: "catalog")), as: UTF8.self)
         XCTAssertFalse(catalog.contains("token")); XCTAssertFalse(catalog.contains("ok.js"))
         let connects = await runtime.metrics().connects; XCTAssertEqual(connects, 0)
-        await service.close()
+        try await service.close()
     }
 
     func testRejectedDownloadsNeverInstall() async throws {
         let documents = try MusicScriptTestDocuments(); defer { documents.remove() }
         let runtime = MusicScriptTestRuntime()
-        let service = documents.owner(runtime, download: .init(protocolClasses: [MusicScriptURLProtocol.self]))
+        let service = try await documents.owner(runtime, download: .init(protocolClasses: [MusicScriptURLProtocol.self]))
         for (url, expected) in [
             ("http://source.invalid/ok.js", MusicServiceError.insecureScriptURL),
             ("file:///source.js", .insecureScriptURL),
@@ -60,6 +60,6 @@ final class MusicScriptDownloadTests: XCTestCase {
         let items = try await service.scriptSources(), count = await runtime.metrics().connects
         XCTAssertTrue(items.isEmpty); XCTAssertEqual(count, 0)
         XCTAssertNil(try documents.store.read(key: "catalog"))
-        await service.close()
+        try await service.close()
     }
 }
