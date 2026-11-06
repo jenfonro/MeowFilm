@@ -71,14 +71,14 @@
      </Style.Triggers>
     </Style></TextBlock.Style>
    </TextBlock>
-   <TextBox x:Name="NewPattern" Grid.Row="1" Style="{StaticResource Rule.Pattern}" TextChanged="NewPattern_Changed" AutomationProperties.Name="{Binding Title,ElementName=Root,StringFormat='新增{0}正则'}"/>
+   <TextBox x:Name="NewPattern" Grid.Row="1" Style="{StaticResource Rule.Pattern}" AutomationProperties.Name="{Binding Title,ElementName=Root,StringFormat='新增{0}正则'}"/>
    <TextBox x:Name="NewReplace" AutomationProperties.Name="{Binding Title,ElementName=Root,StringFormat='新增{0}替换'}">
     <TextBox.Style><Style TargetType="TextBox" BasedOn="{StaticResource Rule.Replace}">
      <Setter Property="Grid.Row" Value="1"/>
      <Style.Triggers><Trigger Property="local:SettingsLayout.IsNarrow" Value="True"><Setter Property="Grid.Row" Value="2"/></Trigger></Style.Triggers>
     </Style></TextBox.Style>
    </TextBox>
-   <Button x:Name="AddButton" Content="添加" Grid.Row="1" Grid.Column="2" HorizontalAlignment="Right" IsEnabled="False"
+   <Button x:Name="AddButton" Content="添加" Grid.Row="1" Grid.Column="2" HorizontalAlignment="Right"
            Style="{StaticResource Settings.Button}" Click="Add_Click" AutomationProperties.Name="{Binding Title,ElementName=Root,StringFormat='添加{0}'}"/>
   </Grid>
  </StackPanel>

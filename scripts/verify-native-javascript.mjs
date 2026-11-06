@@ -23,9 +23,35 @@ export function verifyNativeJavaScript(directory = root) {
     if (!stat.isFile() || stat.isSymbolicLink() || digest(readFileSync(path)) !== manifest.files[name])
       throw new Error('Native JavaScript source hash differs: ' + name);
   }
+  const patch = manifest.patch;
+  if (!patch || patch.path !== 'native/JavaScript/patches/regexp-compile-interrupt.patch' ||
+      !/^[a-f0-9]{64}$/.test(patch.sha256) || !patch.upstreamFiles ||
+      Object.keys(patch.upstreamFiles).length === 0 ||
+      Object.entries(patch.upstreamFiles).some(([name, hash]) =>
+        !names.includes(name) || !/^[a-f0-9]{64}$/.test(hash) || hash === manifest.files[name]))
+    throw new Error('Invalid native JavaScript patch manifest');
+  const patchPath = resolve(directory, patch.path);
+  if (!lstatSync(patchPath).isFile() || lstatSync(patchPath).isSymbolicLink() ||
+      digest(readFileSync(patchPath)) !== patch.sha256)
+    throw new Error('Native JavaScript patch hash differs');
   const license = resolve(directory, 'LICENSES/quickjs-native-MIT.txt');
   if (lstatSync(license).isSymbolicLink() || digest(readFileSync(license)) !== manifest.licenseSha256)
     throw new Error('Native JavaScript license hash differs');
+  const unicode = manifest.unicodeLicense;
+  if (!unicode || unicode.path !== 'LICENSES/Unicode-3.0.txt' ||
+      unicode.source !== 'libunicode-table.h' || !/^[a-f0-9]{64}$/.test(unicode.sha256))
+    throw new Error('Invalid native JavaScript Unicode license manifest');
+  const unicodePath = resolve(directory, unicode.path);
+  const unicodeStat = lstatSync(unicodePath);
+  if (!unicodeStat.isFile() || unicodeStat.isSymbolicLink())
+    throw new Error('Native JavaScript Unicode license hash differs');
+  const unicodeBytes = readFileSync(unicodePath);
+  if (digest(unicodeBytes) !== unicode.sha256)
+    throw new Error('Native JavaScript Unicode license hash differs');
+  const notice = readFileSync(resolve(base, unicode.source), 'utf8')
+    .match(/\/\*\n(UNICODE LICENSE V3\n[\s\S]*?)\*\//)?.[1];
+  if (!notice || !unicodeBytes.equals(Buffer.from(notice, 'utf8')))
+    throw new Error('Native JavaScript Unicode license differs from the source notice');
   return { project: manifest.project, version: manifest.version, commit: manifest.commit, files: names.length };
 }
 

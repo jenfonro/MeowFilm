@@ -8,7 +8,11 @@
 
 `FilmRuleService.ProcessAsync(request)` 使用已保存快照；`ProcessAsync(request, draft)` 使用明确草稿。两者调用同一程序、返回同一 `FilmRuleResult`，测试不保存草稿。请求包含分区、文本以及搜索分区可空查询词；后续业务可直接消费 `OutputText`、命中、分组键、尾号保护与错误等结果，无需再写净化算法。本轮不接入搜索／播放消费者。
 
-逐行保存、新增、删除提交四组完整草稿；分区恢复默认同样保存完整草稿。非法正则允许保存，在处理时报告；空组保存后保持为空，在下次服务初始化时按服务端首次默认补齐。首次默认与页面恢复默认有意保留参考差异。处理顺序、flags、替换、电影预处理及搜索尾号保护均由共用 JS 程序负责，不使用 .NET Regex 重写。
+`ProcessedText` 始终表示已执行预处理后的文本，即使集数匹配组为空而报告“无匹配规则”，仍保留清洗结果；没有匹配替换时 `OutputText` 直接使用它，不退回未清洗原文。
+
+逐行保存、新增、删除提交四组完整草稿；分区恢复默认同样保存完整草稿。新增输入统一由 JS normalizer 判定，UI 不另设 .NET 空白门禁。非法正则允许保存，在处理时报告；空组保存后保持为空，在下次服务初始化时按服务端首次默认补齐。首次默认与页面恢复默认有意保留参考差异。处理顺序、flags、替换、电影预处理及搜索尾号保护均由共用 JS 程序负责，不使用 .NET Regex 重写。
+
+保存保留页面 JS trim → 服务端 Go Unicode TrimSpace／空行过滤 → 页面响应解码的阶段顺序；NEL 与 BOM 在两种 trim 中不同，不能合并为空白字符并集。未保存草稿不执行后端保存规范化，匹配规则编码后的 JSON 内部 pattern／replace 也不受 Go trim 影响。
 
 原生 `NativeJavaScriptJsonEngine` 在一个后台线程串行持有 QuickJS-NG；源码和许可锁定于 `scripts/quickjs-native.json`，C ABI 与资源边界见 [native/JavaScript](../../native/JavaScript/README.md)。规则程序随 App 内嵌，无 Node、WASM、HTTP 或脚本 RPC 依赖；pattern／replace 仅作为 JSON 数据传入。超时、取消、内存失败后释放原生上下文，可重新执行同一固定程序。
 
@@ -22,6 +26,12 @@
 
 停用回收脚本，保留视频源清单，停用期间不能重启或检测；删除父源同步清除其客户端映射、选项、检测与删除记录。App 装配完成即恢复已启用猫源，启动失败可在猫源管理刷新重试，不阻断纯客户端规则功能。
 
+管理请求取消、桥接失败（含默认 30 秒 RPC 的 `TIMEOUT`）或错误回执，都不能证明 Node 没有提交或已经完成回滚。客户端先撤销缓存代次的检测资格，再由来源服务使用自己的生命周期读取状态，观察目标 starting 结束；页面切换或调用方取消不丢弃该协调，关闭准备与最终关闭可取消并排空它。协调后仍向调用方抛出原管理异常，`BridgeException(TIMEOUT)` 不改成取消或成功。
+
+协调只读取状态，不重放更新／导入／重启／启停／卸载，也不把失败的重新导入当作恢复删除条目的成功回执。真实状态确认卸载时，按父源删除规则清除关联数据；其他父源的删除记录不受影响。协调失败时保留本地列表和选项，但不继续授权旧运行代次；回滚恢复成功后可直接检测，无需手动刷新。
+
+Node 管理已完成、客户端同步文档保存失败时，也先撤销旧代次检测资格再由 owner 读取真实状态；原存储异常仍返回调用方。只在本地 CAS 确认后发布新列表，持续存储故障保留最后已落盘选项／排序／删除记录并禁止旧代次检测。协调不重放管理，也不借失败的重新导入清除删除记录。
+
 ## 视频源管理
 
 `FilmSourceService` 是本地清单与用户配置的唯一 owner，使用普通文档 `film.video-sources.v1`。稳定身份为 `installationId + siteKey`；端口和 generation 只用于运行期路由／迟到结果隔离，不是持久主键。首页等未来消费者直接读取本地 `Videos`，不需为每次列表访问调用 Node。
@@ -32,8 +42,14 @@
 
 视频源行内操作只有检测、删除。检测经真实 `cat.script.invoke`，按声明能力调用 home、category、必要 detail／play 和条件 search；按阶段记录 success／unsupported／empty／failed，并形成 valid／search_error／category_error／invalid 汇总。播放地址解析成功只记 `PlaybackResolved`，`MediaPlaybackVerified` 始终 false，不声称媒体可播放。停用、删除、父源更新／generation 变化后迟到检测不发布。
 
+初次详情读取沿参考提交 `934a03e5` 的响应边界：HTTP 失败或调用异常短路，HTTP 成功响应中的脚本错误仍保留 body，空详情继续按缺播放信息进入 search 回退；原 detail 错误保留为 failed 阶段，搜索解析成功可形成 valid。导航根文档的 `ok:false` 仍拒绝遍历，其列表不触发子请求或成为播放候选，但保留缺播放信息的 search 回退。导航子请求仍拒绝显式错误，即使其 action 也叫 `detail`，不能把失败分支的元数据用作成功播放候选。
+
+公共 Cat 调用在成功与失败回执时都核对原 session 归属；Worker 实际失效的在途检测按生命周期错误取消，不覆盖内存或磁盘上的原 Detection。仍存活实例的普通 `RESOURCE_LIMIT` 等调用错误保持阶段失败，不按错误码一概取消。不增加客户端常驻轮询或管理重放；运行器自主重启后可显式刷新取得新代次，再正常检测。
+
 ## 界面与验证范围
 
 沿用 WPF 主题、原生键盘焦点、统一通知与确认浮层；表格在自身视口横向滚动。规则测试结果是业务内容，操作错误走通知，不插入教程／解释性占位文案。
 
-长期测试分别归属 `FilmRulesTests`、`NativeJavaScriptTests`、`FilmSourcesTests`、`FilmSettingsUiTests`、`SettingsNavigationTests`；共享规则与 Cat 管理另有定向 Node 用例。替身验证只证明客户端请求与状态契约，真实原生执行、脚本 fixture 路由及 Windows 界面／构建须分别记录。本轮不包含 iOS 实施、用户环境安装、实际媒体播放或所有外部脚本兼容承诺。
+长期测试分别归属 `FilmRulesTests`、`NativeJavaScriptTests`、`FilmSourcesTests`、`FilmSourceRuntimeTests`、`FilmSettingsUiTests`、`SettingsNavigationTests`；共享规则与 Cat 管理另有定向 Node 用例。`FilmSourcesTests` 覆盖超时后延迟协调、失败回执、已提交变更后本地写失败、删除记录及关闭排空；`FilmSourceRuntimeTests` 使用真实默认 RPC 超时验证 Node 回滚后直接完成五阶段检测，并覆盖真实更新成功后一次客户端写前存储故障。替身验证只证明客户端请求与状态契约，真实原生执行、脚本 fixture 路由及 Windows 界面／构建须分别记录。本轮不包含 iOS 实施、用户环境安装、实际媒体播放或所有外部脚本兼容承诺。
+
+来源回归还包含初次详情脚本错误的 search 回退、HTTP／导航失败边界及其真实 Node 对照；真实 Worker 单次内存超限用默认 256MiB 引擎上限和一次 512MiB 申请，验证未取消调用下失效检测不写入、同源码新代次经显式刷新后恢复。测试只在受控私有卷计数触发一次，关闭沿公开 owner 排空并验证 Node 进程退出，不修改宿主限制或模拟 failure。

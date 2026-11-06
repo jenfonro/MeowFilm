@@ -24,7 +24,7 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const sources = [
   'NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt', 'KuGouMusicApi-MIT.txt',
   'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt', 'node-LICENSE.txt', 'qr-code-generator-LICENSE.txt',
-  'quickjs-emscripten-LICENSE.txt', 'quickjs-native-MIT.txt', 'catpawrunner-MIT.txt',
+  'quickjs-emscripten-LICENSE.txt', 'quickjs-native-MIT.txt', 'Unicode-3.0.txt', 'catpawrunner-MIT.txt',
   'npm-node-compat-BSD-3-Clause.txt', 'npm-node-compat-ISC.txt', 'npm-node-compat-MIT.txt',
 ].map(name => ({ source: `LICENSES/${name}`, path: name }));
 function boundedPath(path) {
@@ -84,6 +84,28 @@ test('licenses: every reviewed file is copied byte-for-byte into one flat direct
   verify(f, result);
   assert.equal(result.files.length, sources.length);
   assert.ok(result.files.every(file => !file.path.includes('/')));
+});
+test('licenses: native Unicode notice and attribution reach the packaged bytes and manifest', settings, async () => {
+  const outputRoot = mkdtempSync(join(temporary, 'unicode-'));
+  const output = join(outputRoot, 'licenses');
+  const manifest = await packageLicenses({ root: repository, outputRoot, output });
+  verify({ root: repository, output }, manifest);
+  const table = readFileSync(join(repository, 'native/JavaScript/quickjs/libunicode-table.h'), 'utf8');
+  const start = table.indexOf('UNICODE LICENSE V3\n');
+  assert.ok(start >= 0);
+  const expected = Buffer.from(table.slice(start, table.indexOf('*/', start)), 'utf8');
+  const copied = readFileSync(join(output, 'Unicode-3.0.txt'));
+  assert.deepEqual(copied, expected);
+  assert.match(copied.toString('utf8'), /Copyright © 1991-2026 Unicode, Inc\./);
+  const savedManifest = JSON.parse(readFileSync(join(output, manifestName), 'utf8'));
+  assert.deepEqual(savedManifest.files.find(file => file.path === 'Unicode-3.0.txt'), {
+    sourcePath: 'LICENSES/Unicode-3.0.txt', path: 'Unicode-3.0.txt',
+    bytes: expected.length, sha256: digest(expected),
+  });
+  const notice = readFileSync(join(output, 'NOTICE.md'), 'utf8');
+  assert.match(notice, /Unicode-3\.0\.txt/);
+  assert.match(notice, /libunicode-table\.h/);
+  assert.match(notice, /1991-2026 Unicode, Inc\./);
 });
 test('licenses: output is reproducible', settings, async () => {
   const f = fixture();

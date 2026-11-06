@@ -1,8 +1,10 @@
 // One-off migration evidence. Reads the original Vue functions rather than
 // keeping a second copy of their algorithms in this package.
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
 const server = process.argv[2];
@@ -36,7 +38,13 @@ const refs = [
 ];
 const marker = read('frontend/src/shared/episodeMarkerNormalize.js').replace(/^import[^\n]*\n/gm, '').replaceAll('export ', '');
 const normalize = read('frontend/src/shared/normalize.js').replaceAll('export ', '');
-const context = vm.createContext({});
+const saveRows = (payload) => JSON.parse(execFileSync('go', ['run',
+  fileURLToPath(new URL('./server-save.go', import.meta.url))], {
+  input: JSON.stringify(Object.fromEntries(
+    ['episodeCleanRegexRules', 'episodeRules', 'movieRules', 'aggregateRegexRules'].map(group => [group, payload[group]]))),
+  encoding: 'utf8', env: { ...process.env, GO111MODULE: 'off', GOWORK: 'off', GOTOOLCHAIN: 'local' }
+}));
+const context = vm.createContext({ saveRows });
 vm.runInContext([
   'const computed = (get) => ({ get value() { return get(); } });',
   ...refs.map((name) => `const ${name} = { value: null };`),
@@ -100,7 +108,7 @@ vm.runInContext(`
   };
   globalThis.saveReference = (rules) => {
     setRules(rules);
-    const payload = buildMagicSavePayload();
+    const payload = saveRows(buildMagicSavePayload());
     applyMagicSettings(payload);
     return { document: payload, rules: readRules() };
   };
@@ -134,10 +142,12 @@ for (const section of ['episode', 'movie', 'search']) {
 }
 assert.deepEqual(sharedRestored, restored, 'restored defaults match all four page groups');
 const draft = {
-  episodeCleanRegexRules: ['  ', '  /foo/m ', 'foo', 'foo'],
+  episodeCleanRegexRules: ['  ', '  /foo/m ', 'foo', 'foo', '\u0085foo\u0085', '\u0085',
+    '\u0085\ufeffbar\ufeff\u0085', 'a\u0085b', '\ufeff\u0085baz\u0085\ufeff', '\u200bkeep\u200b'],
   episodeRules: [{ pattern: String.raw` ^\\\\d+$ `, replace: '  $1  ', flags: ' g ' }, { pattern: ' ' }],
   movieRules: [{ pattern: '/movie/i', replace: ' value ', flags: '' }, { pattern: '[', replace: '', flags: '' }],
-  aggregateRegexRules: ['  \\d+$  ', '']
+  aggregateRegexRules: ['  \\d+$  ', '', '\u0085foo\u0085', '\u0085',
+    '\u0085\ufeffbar\ufeff\u0085', 'a\u0085b', '\ufeff\u0085baz\u0085\ufeff', '\u200bkeep\u200b']
 };
 const referenceSaved = clone(context.saveReference(draft));
 const sharedSaved = invoke({ operation: 'save', rules: draft });

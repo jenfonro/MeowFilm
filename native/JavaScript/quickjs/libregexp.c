@@ -96,6 +96,8 @@ typedef struct {
     int capture_count;
     int total_capture_count; /* -1 = not computed yet */
     int has_named_captures; /* -1 = don't know, 0 = no, 1 = yes */
+    int interrupt_counter;
+    bool interrupted;
     void *opaque;
     DynBuf group_names;
     union {
@@ -703,6 +705,20 @@ static int re_parse_out_of_memory(REParseState *s)
     return re_parse_error(s, "out of memory");
 }
 
+static int re_poll_timeout(REParseState *s, bool force)
+{
+    if (s->interrupted)
+        return -1;
+    if (!force && --s->interrupt_counter > 0)
+        return 0;
+    s->interrupt_counter = INTERRUPT_COUNTER_INIT;
+    if (lre_check_timeout(s->opaque)) {
+        s->interrupted = true;
+        return re_parse_error(s, "interrupted");
+    }
+    return 0;
+}
+
 /* If allow_overflow is false, return -1 in case of
    overflow. Otherwise return INT32_MAX. */
 static int parse_digits(const uint8_t **pp, bool allow_overflow)
@@ -1065,6 +1081,8 @@ static int get_class_atom(REParseState *s, REStringList *cr,
     uint32_t c;
     int ret;
 
+    if (re_poll_timeout(s, false))
+        return -1;
     p = *pp;
 
     c = *p;
@@ -1431,6 +1449,8 @@ static int re_parse_nested_class(REParseState *s, REStringList *cr, const uint8_
     REStringList cr1_s, *cr1 = &cr1_s;
     bool invert, is_first;
 
+    if (re_poll_timeout(s, true))
+        return -1;
     if (lre_check_stack_overflow(s->opaque, 0))
         return re_parse_error(s, "stack overflow");
 
@@ -1447,6 +1467,8 @@ static int re_parse_nested_class(REParseState *s, REStringList *cr, const uint8_
     /* handle unions */
     is_first = true;
     for(;;) {
+        if (re_poll_timeout(s, true))
+            goto fail;
         if (*p == ']')
             break;
         if (*p == '[' && s->unicode_sets) {
@@ -1521,6 +1543,8 @@ static int re_parse_nested_class(REParseState *s, REStringList *cr, const uint8_
             if (*p == '&' && p[1] == '&' && p[2] != '&') {
                 /* handle '&&' */
                 for(;;) {
+                    if (re_poll_timeout(s, true))
+                        goto fail;
                     if (*p == ']') {
                         break;
                     } else if (*p == '&' && p[1] == '&' && p[2] != '&') {
@@ -1538,6 +1562,8 @@ static int re_parse_nested_class(REParseState *s, REStringList *cr, const uint8_
             } else if (*p == '-' && p[1] == '-') {
                 /* handle '--' */
                 for(;;) {
+                    if (re_poll_timeout(s, true))
+                        goto fail;
                     if (*p == ']') {
                         break;
                     } else if (*p == '-' && p[1] == '-') {
@@ -1727,7 +1753,8 @@ static int re_parse_group_name(char *buf, int buf_size, const uint8_t **pp)
 }
 
 /* if capture_name = NULL: return the number of captures + 1.
-   Otherwise, return the number of matching capture groups  */
+   Otherwise, return the number of matching capture groups.
+   Return -1 on interruption. */
 static int re_parse_captures(REParseState *s, int *phas_named_captures,
                              const char *capture_name, bool emit_group_index)
 {
@@ -1739,6 +1766,8 @@ static int re_parse_captures(REParseState *s, int *phas_named_captures,
     n = 0;
     *phas_named_captures = 0;
     for (p = s->buf_start; p < s->buf_end; p++) {
+        if (re_poll_timeout(s, false))
+            return -1;
         switch (*p) {
         case '(':
             if (p[1] == '?') {
@@ -1770,6 +1799,8 @@ static int re_parse_captures(REParseState *s, int *phas_named_captures,
             break;
         case '[':
             for (p += 1 + (*p == ']'); p < s->buf_end && *p != ']'; p++) {
+                if (re_poll_timeout(s, false))
+                    return -1;
                 if (*p == '\\')
                     p++;
             }
@@ -1787,16 +1818,21 @@ static int re_parse_captures(REParseState *s, int *phas_named_captures,
 static int re_count_captures(REParseState *s)
 {
     if (s->total_capture_count < 0) {
-        s->total_capture_count = re_parse_captures(s, &s->has_named_captures,
-                                                   NULL, false);
+        int has_named_captures;
+        int count = re_parse_captures(s, &has_named_captures, NULL, false);
+        if (count < 0)
+            return -1;
+        s->total_capture_count = count;
+        s->has_named_captures = has_named_captures;
     }
     return s->total_capture_count;
 }
 
-static bool re_has_named_captures(REParseState *s)
+/* Return 0 or 1 on success, -1 on interruption. */
+static int re_has_named_captures(REParseState *s)
 {
-    if (s->has_named_captures < 0)
-        re_count_captures(s);
+    if (s->has_named_captures < 0 && re_count_captures(s) < 0)
+        return -1;
     return s->has_named_captures;
 }
 
@@ -2098,7 +2134,10 @@ static int re_parse_term(REParseState *s, bool is_backward_dir)
                     /* annex B: we tolerate invalid group names in non
                        unicode mode if there is no named capture
                        definition */
-                    if (s->is_unicode || re_has_named_captures(s))
+                    n = s->is_unicode ? 1 : re_has_named_captures(s);
+                    if (n < 0)
+                        return -1;
+                    if (n)
                         return re_parse_error(s, "expecting group name");
                     else
                         goto parse_class_atom;
@@ -2106,7 +2145,10 @@ static int re_parse_term(REParseState *s, bool is_backward_dir)
                 p1 += 3;
                 if (re_parse_group_name(s->u.tmp_buf, sizeof(s->u.tmp_buf),
                                         &p1)) {
-                    if (s->is_unicode || re_has_named_captures(s))
+                    n = s->is_unicode ? 1 : re_has_named_captures(s);
+                    if (n < 0)
+                        return -1;
+                    if (n)
                         return re_parse_error(s, "invalid group name");
                     else
                         goto parse_class_atom;
@@ -2117,8 +2159,13 @@ static int re_parse_term(REParseState *s, bool is_backward_dir)
                     /* no capture name parsed before, try to look
                        after (inefficient, but hopefully not common */
                     n = re_parse_captures(s, &dummy_res, s->u.tmp_buf, false);
+                    if (n < 0)
+                        return -1;
                     if (n == 0) {
-                        if (s->is_unicode || re_has_named_captures(s))
+                        n = s->is_unicode ? 1 : re_has_named_captures(s);
+                        if (n < 0)
+                            return -1;
+                        if (n)
                             return re_parse_error(s, "group name not defined");
                         else
                             goto parse_class_atom;
@@ -2131,7 +2178,8 @@ static int re_parse_term(REParseState *s, bool is_backward_dir)
                 /* emit back references to all the captures indexes matching the group name */
                 re_emit_op_u8(s, REOP_back_reference + 2 * is_backward_dir + s->ignore_case, n);
                 if (is_forward) {
-                    re_parse_captures(s, &dummy_res, s->u.tmp_buf, true);
+                    if (re_parse_captures(s, &dummy_res, s->u.tmp_buf, true) < 0)
+                        return -1;
                 } else {
                     find_group_name(s, s->u.tmp_buf, true);
                 }
@@ -2160,9 +2208,15 @@ static int re_parse_term(REParseState *s, bool is_backward_dir)
         case '9':
             {
                 const uint8_t *q = ++p;
+                int capture_count = s->capture_count;
 
                 c = parse_digits(&p, false);
-                if (c < 0 || (c >= s->capture_count && c >= re_count_captures(s))) {
+                if (c >= capture_count) {
+                    capture_count = re_count_captures(s);
+                    if (capture_count < 0)
+                        return -1;
+                }
+                if (c < 0 || c >= capture_count) {
                     if (!s->is_unicode) {
                         /* Annex B.1.4: accept legacy octal */
                         p = q;
@@ -2426,6 +2480,10 @@ static int re_parse_alternative(REParseState *s, bool is_backward_dir)
 
     start = s->byte_code.size;
     for(;;) {
+        /* Backward terms move the entire preceding bytecode. Poll each
+           such step rather than treating that work as a constant cost. */
+        if (re_poll_timeout(s, is_backward_dir))
+            return -1;
         p = s->buf_ptr;
         if (p >= s->buf_end)
             break;
@@ -2456,6 +2514,8 @@ static int re_parse_disjunction(REParseState *s, bool is_backward_dir)
 {
     int start, len, pos;
 
+    if (re_poll_timeout(s, true))
+        return -1;
     if (lre_check_stack_overflow(s->opaque, 0))
         return re_parse_error(s, "stack overflow");
 
@@ -2463,6 +2523,8 @@ static int re_parse_disjunction(REParseState *s, bool is_backward_dir)
     if (re_parse_alternative(s, is_backward_dir))
         return -1;
     while (*s->buf_ptr == '|') {
+        if (re_poll_timeout(s, true))
+            return -1;
         s->buf_ptr++;
 
         len = s->byte_code.size - start;
@@ -2476,7 +2538,10 @@ static int re_parse_disjunction(REParseState *s, bool is_backward_dir)
 
         pos = re_emit_op_u32(s, REOP_goto, 0);
 
-        if (re_has_named_captures(s) && s->group_name_scope == GROUP_NAME_SCOPE_MAX)
+        int has_named_captures = re_has_named_captures(s);
+        if (has_named_captures < 0)
+            return -1;
+        if (has_named_captures && s->group_name_scope == GROUP_NAME_SCOPE_MAX)
             return re_parse_error(s, "too many named groups");
 
         s->group_name_scope++;
@@ -2496,7 +2561,7 @@ static int re_parse_disjunction(REParseState *s, bool is_backward_dir)
 
 /* Allocate the registers as a stack. The control flow is recursive so
    the analysis can be linear. */
-static int compute_register_count(uint8_t *bc_buf, int bc_buf_len)
+static int compute_register_count(REParseState *s, uint8_t *bc_buf, int bc_buf_len)
 {
     int stack_size, stack_size_max, pos, opcode, len;
     uint32_t val;
@@ -2507,6 +2572,8 @@ static int compute_register_count(uint8_t *bc_buf, int bc_buf_len)
     bc_buf_len -= RE_HEADER_LEN;
     pos = 0;
     while (pos < bc_buf_len) {
+        if (re_poll_timeout(s, false))
+            return -1;
         opcode = bc_buf[pos];
         len = reopcode_info[opcode].size;
         assert(opcode < REOP_COUNT);
@@ -2571,7 +2638,8 @@ static void *lre_bytecode_realloc(void *opaque, void *ptr, size_t size)
 }
 
 /* 'buf' must be a zero terminated UTF-8 string of length buf_len.
-   Return NULL if error and allocate an error message in *perror_msg,
+   Return NULL on error, with plen = LRE_RET_TIMEOUT on interruption
+   (zero for other errors) and a message in error_msg,
    otherwise the compiled bytecode and its length in plen.
 */
 uint8_t *lre_compile(int *plen, char *error_msg, int error_msg_size,
@@ -2622,7 +2690,7 @@ uint8_t *lre_compile(int *plen, char *error_msg, int error_msg_size,
         dbuf_free(&s->byte_code);
         dbuf_free(&s->group_names);
         js__pstrcpy(error_msg, error_msg_size, s->u.error_msg);
-        *plen = 0;
+        *plen = s->interrupted ? LRE_RET_TIMEOUT : 0;
         return NULL;
     }
 
@@ -2640,11 +2708,15 @@ uint8_t *lre_compile(int *plen, char *error_msg, int error_msg_size,
         goto error;
     }
 
-    register_count = compute_register_count(s->byte_code.buf, s->byte_code.size);
+    register_count = compute_register_count(s, s->byte_code.buf, s->byte_code.size);
     if (register_count < 0) {
+        if (s->interrupted)
+            goto error;
         re_parse_error(s, "too many imbricated quantifiers");
         goto error;
     }
+    if (re_poll_timeout(s, true))
+        goto error;
 
     s->byte_code.buf[RE_HEADER_CAPTURE_COUNT] = s->capture_count;
     s->byte_code.buf[RE_HEADER_REGISTER_COUNT] = register_count;
@@ -2795,7 +2867,9 @@ typedef struct {
     StackElem static_stack_buf[32]; /* static stack to avoid allocation in most cases */
 } REExecContext;
 
-static int lre_poll_timeout(REExecContext *s)
+/* One counter covers opcode dispatch and variable-length work inside an
+   opcode. Successful assertions and long references must not bypass it. */
+static inline int lre_poll_timeout(REExecContext *s)
 {
     if (unlikely(--s->interrupt_counter <= 0)) {
         s->interrupt_counter = INTERRUPT_COUNTER_INIT;
@@ -2875,6 +2949,8 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
         StackElem *sp1;                         \
         sp1 = sp;                               \
         for(;;) {                               \
+            if (lre_poll_timeout(s))            \
+                return LRE_RET_TIMEOUT;         \
             if (sp1 > bp) {                             \
                 if (sp1[-2].val == idx)                 \
                     break;                              \
@@ -2895,6 +2971,8 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
     printf("%5s %5s %5s %5s %s\n", "PC", "CP", "BP", "SP", "OPCODE");
 #endif    
     for(;;) {
+        if (lre_poll_timeout(s))
+            return LRE_RET_TIMEOUT;
         opcode = *pc++;
 #ifdef DUMP_EXEC
         printf("%5ld %5ld %5ld %5ld %s\n",
@@ -2910,10 +2988,14 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
         no_match:
             for(;;) {
                 REExecStateEnum type;
+                if (lre_poll_timeout(s))
+                    return LRE_RET_TIMEOUT;
                 if (bp == s->stack_buf)
                     return 0;
                 /* undo the modifications to capture[] */
                 while (sp > bp) {
+                    if (lre_poll_timeout(s))
+                        return LRE_RET_TIMEOUT;
                     capture[sp[-2].val] = sp[-1].ptr;
                     sp -= 2;
                 }
@@ -2926,8 +3008,6 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                 if (type != RE_EXEC_STATE_LOOKAHEAD)
                     break;
             }
-            if (lre_poll_timeout(s))
-                return LRE_RET_TIMEOUT;
             break;
         case REOP_lookahead_match:
             /* pop all the saved states until reaching the start of
@@ -2939,6 +3019,8 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
 
                 sp_top = sp;
                 for(;;) {
+                    if (lre_poll_timeout(s))
+                        return LRE_RET_TIMEOUT;
                     sp1 = sp;
                     sp = bp;
                     pc = sp[-3].ptr;
@@ -2954,10 +3036,15 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                     /* keep the undo info if there is a saved state */
                     sp1 = sp;
                     while (sp1 < sp_top) {
+                        if (lre_poll_timeout(s))
+                            return LRE_RET_TIMEOUT;
                         next_sp = (void *)sp1[2].ptr;
                         sp1 += 3;
-                        while (sp1 < next_sp)
+                        while (sp1 < next_sp) {
+                            if (lre_poll_timeout(s))
+                                return LRE_RET_TIMEOUT;
                             *sp++ = *sp1++;
+                        }
                     }
                 }
             }
@@ -2966,9 +3053,13 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
             /* pop all the saved states until reaching start of the negative lookahead */
             for(;;) {
                 REExecStateEnum type;
+                if (lre_poll_timeout(s))
+                    return LRE_RET_TIMEOUT;
                 type = bp[-1].bp.type;
                 /* undo the modifications to capture[] */
                 while (sp > bp) {
+                    if (lre_poll_timeout(s))
+                        return LRE_RET_TIMEOUT;
                     capture[sp[-2].val] = sp[-1].ptr;
                     sp -= 2;
                 }
@@ -3037,8 +3128,6 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
         case REOP_goto:
             val = get_u32(pc);
             pc += 4 + (int)val;
-            if (lre_poll_timeout(s))
-                return LRE_RET_TIMEOUT;
             break;
         case REOP_line_start:
         case REOP_line_start_m:
@@ -3129,8 +3218,6 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                 SAVE_CAPTURE_CHECK(idx, (void *)(uintptr_t)val2);
                 if (val2 != 0) {
                     pc += (int)val;
-                    if (lre_poll_timeout(s))
-                        return LRE_RET_TIMEOUT;
                 }
             }
             break;
@@ -3153,8 +3240,6 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                 if (val2 > limit) {
                     /* normal loop if counter > limit */
                     pc += (int)val;
-                    if (lre_poll_timeout(s))
-                        return LRE_RET_TIMEOUT;
                 } else {
                     /* check advance */
                     if ((opcode == REOP_loop_check_adv_split_goto_first ||
@@ -3255,6 +3340,8 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                             opcode == REOP_back_reference_i) {
                             cptr1 = cptr1_start;
                             while (cptr1 < cptr1_end) {
+                                if (lre_poll_timeout(s))
+                                    return LRE_RET_TIMEOUT;
                                 if (cptr >= cbuf_end)
                                     goto no_match;
                                 GET_CHAR(c1, cptr1, cptr1_end, cbuf_type);
@@ -3269,6 +3356,8 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                         } else {
                             cptr1 = cptr1_end;
                             while (cptr1 > cptr1_start) {
+                                if (lre_poll_timeout(s))
+                                    return LRE_RET_TIMEOUT;
                                 if (cptr == s->cbuf)
                                     goto no_match;
                                 GET_PREV_CHAR(c1, cptr1, cptr1_start, cbuf_type);
