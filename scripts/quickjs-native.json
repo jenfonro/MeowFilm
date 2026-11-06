@@ -6,6 +6,11 @@
   "sourceUrl": "https://codeload.github.com/quickjs-ng/quickjs/tar.gz/d7215b0ad3fc2c562e8317fd9bca058fd4863804",
   "archiveSha256": "a49defe70cbcae9226d9fac025af116e87ebae2440dcff1ca3c80b79e1cdef0b",
   "licenseSha256": "96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171",
+  "unicodeLicense": {
+    "path": "LICENSES/Unicode-3.0.txt",
+    "source": "libunicode-table.h",
+    "sha256": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96"
+  },
   "files": {
     "builtin-array-fromasync.h": "d313ac1e47eaa08f39b2cb0929a512d88e492906c400f650e141d00b79faa905",
     "builtin-iterator-zip-keyed.h": "5b015a8063088987f0fb19357c9da5ec44a7197493fdbb23740fde8f470049a4",
@@ -14,8 +19,8 @@
     "dtoa.c": "a8d2cf2d04db406e0c16acdd95ab0e709d309902865722f41dac07a1ba5676af",
     "dtoa.h": "1c4a4540c0038632c8a4c225472fbc21bd476fb35c4da4a857a11965b58231b9",
     "libregexp-opcode.h": "2a98d646089f3a72f25480116297c5fdb5b28fd9f815447273951f4ade4a115e",
-    "libregexp.c": "af13e996abb1767fe0cdfda123c45b811d53688d403a2ac47142e97bf79f1fae",
-    "libregexp.h": "53ff95a038f7001b752c455d195d998e2955f0ae4ed62a002c13eca798db3ceb",
+    "libregexp.c": "a82c4d4748c7eea80405914e0aecf91f7516e6f6694d5c451195c36c0fc77e6d",
+    "libregexp.h": "3fe4d65d47b92b5373955069fffa4157c0a5fc155511c389f6abcc4c33116ea0",
     "libunicode-table.h": "5840a921ac11664b505ee37b1219f518fff2a04972fe848b4bdf1e85c5a0bd83",
     "libunicode.c": "c4724e77ec5f122373d2635b6d481cfb5d96024a38453a54a0830007c4b5f3c9",
     "libunicode.h": "ad13f66aaea3fab1616e84b9c048f2a315e1bdbab628b966617a7a3e55bcba2b",
@@ -23,7 +28,16 @@
     "quickjs-atom.h": "8045b870825a43ecdb50692aac7ad21b43139b288df466ca5f7b780bde4ac13f",
     "quickjs-c-atomics.h": "29883c742a5c512278fce54d19b1b9af949006e1d7dfc9ffa2e0946b184d8c5c",
     "quickjs-opcode.h": "0054b0c45fd091afa308c3fb93b5862e0b071235918d3d73e413d23fce388bbc",
-    "quickjs.c": "51b1d3919ffe812d0e01793f85d347bcea48c924c11262c5c5f00df1e4759d74",
+    "quickjs.c": "9ddfb97bab0d9e56fdfa0c23e7ab85a530a1a1c0d4bc000c8bb597b4f4f6fda4",
     "quickjs.h": "6d3879c856551653a1c64fabe52d6d07dc84e97bac3df45848df626702fc30de"
+  },
+  "patch": {
+    "path": "native/JavaScript/patches/regexp-compile-interrupt.patch",
+    "sha256": "a41a2dc87a1fdc12a62dd41d4b456b03139ce4aa4e1bf46fd793842e99b8d2f2",
+    "upstreamFiles": {
+      "libregexp.c": "af13e996abb1767fe0cdfda123c45b811d53688d403a2ac47142e97bf79f1fae",
+      "libregexp.h": "53ff95a038f7001b752c455d195d998e2955f0ae4ed62a002c13eca798db3ceb",
+      "quickjs.c": "51b1d3919ffe812d0e01793f85d347bcea48c924c11262c5c5f00df1e4759d74"
+    }
   }
 }

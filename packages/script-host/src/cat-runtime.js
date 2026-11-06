@@ -381,7 +381,7 @@ export class CatRuntime {
       for (const spec of next.scripts) {
         if (only && !only.has(spec.installationId)) continue;
         const old = this.applied.get(spec.installationId), state = current.get(spec.installationId);
-        if (old && (!spec.enabled || state) && sameExecution(old, spec) &&
+        if (old && (state ? state.enabled === spec.enabled : !spec.enabled) && sameExecution(old, spec) &&
           !this.failures.has(spec.installationId) && state?.state !== 'failed') continue;
         changes.push({ spec, existing: !!state });
       }
@@ -510,7 +510,7 @@ export class CatRuntime {
       if (spec?.enabled && !this.settled.has(installationId)) {
         const state = this.hostState(spec.installationId);
         const old = this.applied.get(spec.installationId);
-        if (!(old && state && sameExecution(old, spec) &&
+        if (!(old && state?.enabled && sameExecution(old, spec) &&
           !this.failures.has(spec.installationId) && state.state !== 'failed')) {
           await this.applyChange({ spec, existing: !!state });
         }
@@ -579,7 +579,6 @@ export class CatRuntime {
   cancelManagement(installationId) {
     for (const task of this.managementTasks) {
       if (task.installationId !== installationId) continue;
-      task.restore = false;
       task.scope.close(fault('CANCELLED'));
     }
   }
@@ -588,7 +587,7 @@ export class CatRuntime {
     const scope = new ResourceScope();
     // Native AbortError has a numeric DOMException.code, not a script fault.
     const cancel = () => scope.close(fault('CANCELLED'));
-    const task = { installationId, scope, restore: true };
+    const task = { installationId, scope };
     this.managementTasks.add(task);
     try {
       if (signal?.aborted) cancel();
@@ -598,7 +597,12 @@ export class CatRuntime {
       scope.assertOpen();
       return await this.serial(async () => {
         scope.assertOpen();
-        const abort = () => this.host?.stopInitializingSessions(installationId);
+        const abort = () => {
+          // Rollback relinquishes this signal before starting the old source.
+          // A late abort must not stop that independent initialization.
+          if (this.managementSignals.get(installationId) === scope.signal)
+            this.host?.stopInitializingSessions(installationId);
+        };
         scope.signal.addEventListener('abort', abort, { once: true });
         try { return await body(task); }
         finally { scope.signal.removeEventListener('abort', abort); }
@@ -801,7 +805,9 @@ export class CatRuntime {
               if (this.hostState(installationId)) await this.host.update(installationId, {
                 source: previousSource, config: previous.config, version: previous.version });
               else await this.host.install({ ...previous, source: previousSource, protocol: 'cat', enabled: false });
-              if (previous.enabled && task.restore) await this.host.enable(installationId);
+              // A queued disable/uninstall is not a committed change of intent.
+              // Finish rollback first; that command may itself cancel or fail.
+              if (previous.enabled) await this.host.enable(installationId);
               this.failures.delete(installationId);
             } else {
               if (this.hostState(installationId)) await this.host.uninstall(installationId);
@@ -848,7 +854,8 @@ export class CatRuntime {
     await this.start();
     if (!enabled) {
       this.cancelManagement(installationId);
-      this.host.stopInitializingSessions(installationId);
+      // Active replacement cancellation owns the candidate, not its rollback.
+      if (!this.replacements.has(installationId)) this.host.stopInitializingSessions(installationId);
     }
     return this.manage(installationId, signal, async task => {
       requireValue(this.settings.read().scripts.some(script => script.installationId === installationId), 'NOT_FOUND');
@@ -872,7 +879,7 @@ export class CatRuntime {
   async uninstall(installationId, { signal } = {}) {
     identifier(installationId); await this.start();
     this.cancelManagement(installationId);
-    this.host.stopInitializingSessions(installationId);
+    if (!this.replacements.has(installationId)) this.host.stopInitializingSessions(installationId);
     return this.manage(installationId, signal, async () => {
       let next, failure;
       try { next = this.settings.save(value => ({ ...value,
@@ -932,21 +939,31 @@ export class CatRuntime {
     return session;
   }
   async invoke(target, options) {
+    const signal = options?.signal;
     await this.start();
-    requireValue(this.settings.value.scripts.find(script =>
-      script.installationId === target.installationId)?.enabled !== false, 'DISABLED');
-    requireValue(!this.starting(target.installationId), 'STARTING');
-    const result = await this.host.invoke(target, options);
+    const session = this.getSession(target.installationId, target.generation);
+    const assertCurrent = () => {
+      requireValue(!signal?.aborted, 'CANCELLED');
+      requireValue(!this.closed, 'HOST_CLOSED');
+      requireValue(session.live && this.sessions.get(session.installationId) === session, 'STALE_SESSION');
+    };
+    let result;
+    // A failed receipt can also belong to a retired generation.
+    try { result = await this.host.invoke(target, options); }
+    finally { assertCurrent(); }
     if (!result || typeof result !== 'object' || typeof result.url !== 'string' ||
       !/\.m3u8(?:\?|$)/i.test(result.url) ||
       result._meow && !result[ownedExtension]) return result;
     // Optional metadata enhancement is never a playback/provider parser.
     try {
-      return await this.getSession(target.installationId, target.generation)
-        .request('enhanceM3U8', {
-          value: result, owned: Boolean(result[ownedExtension]),
-        }, { timeoutMs: 3000 });
-    } catch { return result; }
+      result = await session.request('enhanceM3U8', {
+        value: result, owned: Boolean(result[ownedExtension]),
+      }, { signal, timeoutMs: 3000 });
+    } catch (error) {
+      if (error?.code === 'CANCELLED') throw error;
+    }
+    assertCurrent();
+    return result;
   }
   async management(installationId, generation) {
     await this.start();
@@ -1265,7 +1282,6 @@ export class CatRuntime {
       let failure;
       this.startupQueue.length = 0;
       for (const task of this.managementTasks) {
-        task.restore = false;
         task.scope.close(fault('HOST_CLOSED'));
       }
       this.stopInitializingSessions();

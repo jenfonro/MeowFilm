@@ -3,6 +3,8 @@ using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
@@ -14,6 +16,7 @@ using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Core.Scripting;
 using MeowFilm.Desktop;
+using MeowFilm.Platform.Scripting;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -26,6 +29,7 @@ public static class FilmSettingsUiTests
     {
         yield return Case("draft testing passes all four groups and query without saving", DraftTesting);
         yield return Case("row save add delete and section restore preserve whole panel scope", RuleEditing);
+        yield return Case("native new-rule inputs share JavaScript whitespace semantics through the loaded view", NativeRuleInputs);
         yield return Case("rule cancellation and errors cannot publish into a hidden view", RuleLifetime);
         yield return Case("local scripts preserve valid UTF8 bytes and reject invalid UTF8", LocalScriptEncoding);
         yield return Case("cat edits toggles restart and bulk deletion reach the source owner", CatManagement);
@@ -113,6 +117,88 @@ public static class FilmSettingsUiTests
             restored.EpisodeRules[0].Pattern == "restored-episode" &&
             restored.AggregateRegexRules.SequenceEqual(["search-unsaved"]),
             "episode restore replaces its two groups and saves other groups' drafts");
+    }
+
+    private static async Task NativeRuleInputs()
+    {
+        await using var store = new MemoryStore();
+        await using var rules = new FilmRuleService(new NativeJavaScriptJsonEngine(FilmRuleService.LoadProgramSource()), store);
+        await using var sources = new FilmSourceService(new RecordingRuntime(0), store);
+        await rules.SaveAsync(new FilmRuleSet
+        {
+            EpisodeCleanRegexRules = ["^never$"],
+            EpisodeRules = [new("^never$", "unused")],
+            MovieRules = [new("^never$", "unused")],
+            AggregateRegexRules = ["^never$"]
+        });
+        var view = new FilmSettingsView(rules, sources);
+        var window = new Window { Content = view, Width = 1248, Height = 820, Left = -10000, Top = -10000,
+            WindowStyle = WindowStyle.None, ShowActivated = false, ShowInTaskbar = false };
+        var notices = new List<string>();
+        window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
+        {
+            if (args.Message.Length > 0) notices.Add(args.Message);
+        }));
+        try
+        {
+            window.Show();
+            await Until(() => view.RulesLoaded && !view.RulesBusy);
+            foreach (var (name, section) in new[]
+            {
+                ("MovieEditor", FilmRuleSection.Movie), ("EpisodeEditor", FilmRuleSection.Episode)
+            })
+            {
+                var editor = (FilmSettingsRuleEditor)view.FindName(name);
+                var pattern = (TextBox)editor.FindName("NewPattern");
+                var replace = (TextBox)editor.FindName("NewReplace");
+                var add = (Button)editor.FindName("AddButton");
+                async Task InvokeAdd()
+                {
+                    add.BringIntoView(); view.UpdateLayout(); await Drain();
+                    Check(add.IsEnabled && add.IsLoaded && add.IsVisible, "real new-rule button accepts input");
+                    ((IInvokeProvider)new ButtonAutomationPeer(add).GetPattern(PatternInterface.Invoke)).Invoke();
+                }
+                pattern.Text = "\u0085"; replace.Text = "X";
+                Check(pattern.Text == "\u0085", "WPF preserves the NEL input");
+                int writes = store.Writes;
+                await InvokeAdd();
+                await Until(() => store.Writes > writes && !view.RulesBusy);
+                var saved = rules.GetSavedSnapshot();
+                var matches = section == FilmRuleSection.Movie ? saved.MovieRules : saved.EpisodeRules;
+                Check(matches[^1].Pattern == "\u0085" && matches[^1].Replace == "X",
+                    "the native normalizer accepts NEL and saves the same rule");
+                var request = new FilmRuleRequest(section, "a\u0085b");
+                Check((await rules.ProcessAsync(request)).OutputText == "aXb" &&
+                    (await rules.ProcessAsync(request, saved)).OutputText == "aXb",
+                    "saved and draft consumers share the native rule result");
+
+                pattern.Text = "b"; replace.Text = "Y";
+                writes = store.Writes;
+                await InvokeAdd();
+                await Until(() => store.Writes > writes && !view.RulesBusy);
+                Check((await rules.ProcessAsync(new(section, "ab"))).OutputText == "aY",
+                    "ordinary rule input remains functional");
+
+                pattern.Text = " \t\uFEFF"; replace.Text = "invalid";
+                writes = store.Writes;
+                int count = editor.Rows.Count, noticeCount = notices.Count;
+                await InvokeAdd();
+                await Until(() => notices.Count > noticeCount && !view.RulesBusy);
+                Check(notices[^1].Contains("请输入正则", StringComparison.Ordinal) &&
+                    store.Writes == writes && editor.Rows.Count == count,
+                    "JavaScript whitespace reaches the shared normalizer and cannot be saved");
+            }
+            await using var reopened = new FilmRuleService(
+                new NativeJavaScriptJsonEngine(FilmRuleService.LoadProgramSource()), store);
+            await reopened.InitializeAsync();
+            foreach (var section in new[] { FilmRuleSection.Movie, FilmRuleSection.Episode })
+                Check((await reopened.ProcessAsync(new(section, "a\u0085b"))).OutputText == "aXb",
+                    "both NEL rules survive reopening the saved document");
+        }
+        finally
+        {
+            window.Content = null; window.Close(); await Drain();
+        }
     }
 
     private static async Task RuleLifetime()

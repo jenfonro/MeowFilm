@@ -395,6 +395,261 @@ for (const operation of ['cancel', 'disable', 'uninstall', 'close']) {
     });
 }
 
+for (const operation of ['disable', 'uninstall']) {
+  for (const failure of ['cancel', 'storage']) {
+    test(`Cat uncommitted ${operation} ${failure} cannot suppress the old enabled source rollback`,
+      { timeout: 30000 }, async t => {
+        const entered = gate(), release = gate();
+        const { url } = await serverFor(t, async (_request, response) => {
+          entered.resolve();
+          await release.promise;
+          response.end('reject');
+        });
+        const runtime = runtimeFor(t);
+        const original = await runtime.install({ installationId: 'retained', source: source('accepted') });
+        const workers = [runtime.getSession('retained')], overlaps = [];
+        const create = runtime.workerSession.bind(runtime);
+        runtime.workerSession = input => {
+          overlaps.push(workers.some(worker => worker.worker !== null));
+          const worker = create(input);
+          workers.push(worker);
+          return worker;
+        };
+        const updating = assert.rejects(runtime.update({ installationId: 'retained', source: waitingSource(url) }),
+          { code: 'CANCELLED' });
+        await entered.promise;
+        const controller = new AbortController();
+        const save = runtime.settings.save.bind(runtime.settings);
+        if (failure === 'storage') runtime.settings.save = change => {
+          const candidate = change(runtime.settings.read());
+          if (!candidate.scripts.some(script => script.installationId === 'retained' && script.enabled))
+            throw fault('STORAGE_ERROR');
+          return save(() => candidate);
+        };
+        const following = operation === 'disable'
+          ? runtime.setEnabled('retained', false, { signal: controller.signal })
+          : runtime.uninstall('retained', { signal: controller.signal });
+        const rejected = assert.rejects(following, { code: failure === 'cancel' ? 'CANCELLED' : 'STORAGE_ERROR' });
+        if (failure === 'cancel') controller.abort();
+        release.resolve();
+        await Promise.all([updating, rejected]);
+        runtime.settings.save = save;
+        const actual = (await runtime.status()).instances[0];
+        assert.equal(actual.enabled, true);
+        assert.equal(actual.state, 'ready');
+        assert.equal(actual.sourceHash, original.sourceHash);
+        assert.equal(actual.importedAt, original.importedAt);
+        assert.equal(actual.updatedAt, original.updatedAt);
+        assert.deepEqual(actual.sites, original.sites);
+        assert.deepEqual(await runtime.invoke(target('retained')), { value: 'accepted' });
+        assert.equal((await runtime.setEnabled('retained', true)).state, 'ready');
+        assert.deepEqual(await runtime.invoke(target('retained')), { value: 'accepted' });
+        assert.ok(overlaps.length > 0 && overlaps.every(overlap => !overlap));
+        await runtime.close();
+        assert.ok(workers.every(worker => !worker.worker && !worker.live));
+      });
+  }
+}
+
+async function restoringUpdate(t) {
+  const candidateEntered = gate(), restoreEntered = gate(), disconnected = gate();
+  let candidateResponse, restoreResponse, starts = 0;
+  const { url } = await serverFor(t, (request, response) => {
+    if (request.url === '/candidate') {
+      candidateResponse = response;
+      candidateEntered.resolve();
+    } else {
+      starts++;
+      if (starts === 1) response.end('start');
+      else {
+        restoreResponse = response;
+        request.socket.once('close', disconnected.resolve);
+        restoreEntered.resolve();
+      }
+    }
+  });
+  const root = mkdtempSync(join(tmpdir(), 'meow-cat-restore-'));
+  let now = 1000, updating;
+  const runtime = createCatRuntime({ dataRoot: root, clock: () => now });
+  t.after(async () => {
+    try {
+      await runtime.close();
+      await updating?.catch(() => {});
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  const workers = [], nativeWorkers = [], overlaps = [];
+  const create = runtime.workerSession.bind(runtime);
+  runtime.workerSession = input => {
+    overlaps.push(workers.some(worker => worker.worker !== null || worker.live));
+    const worker = create(input);
+    workers.push(worker);
+    return worker;
+  };
+  const oldSource = `
+    const http = require('http');
+    let server;
+    module.exports.start = async options => {
+      await new Promise((resolve, reject) => {
+        const request = http.get(options.gateURL, response => {
+          response.resume();
+          response.once('end', resolve);
+          response.once('error', reject);
+        });
+        request.once('error', reject);
+      });
+      server = http.createServer((request, response) => {
+        response.setHeader('content-type', 'application/json');
+        if (request.url === '/config' || request.url === '/full-config')
+          response.end(JSON.stringify({video:{sites:[{
+            key:'old', name:'Accepted old site', api:'/api/old', actions:['home']
+          }]}}));
+        else if (request.url === '/api/old/home')
+          response.end(JSON.stringify({value:'accepted-old'}));
+        else { response.statusCode = 404; response.end(); }
+      });
+      await new Promise(resolve => server.listen(Number(process.env.PORT), '127.0.0.1', resolve));
+    };
+    module.exports.stop = () => {
+      if (!server?.listening) return;
+      server.closeAllConnections();
+      return new Promise(resolve => server.close(resolve));
+    };
+  `;
+  const original = await runtime.install({ installationId: 'restoring', source: oldSource,
+    name: 'Accepted old source', version: 'old-version', config: { gateURL: url + '/old' } });
+  assert.equal(original.state, 'ready');
+  nativeWorkers.push(runtime.getSession('restoring').worker);
+  const home = () => runtime.invoke({ installationId: 'restoring', siteId: 'old',
+    operation: 'home', payload: {} });
+  assert.deepEqual(await home(), { value: 'accepted-old' });
+  const before = disk(runtime);
+  now = 2000;
+  const controller = new AbortController();
+  updating = runtime.update({ installationId: 'restoring', source: waitingSource(url + '/candidate') },
+    { signal: controller.signal });
+  updating.catch(() => {});
+  // Capture the real candidate thread before rejecting it, then wait for the
+  // old source's second HTTP startup. Cancellation below is not candidate-time.
+  await candidateEntered.promise;
+  nativeWorkers.push(runtime.host.initializingSessions()[0].worker);
+  candidateResponse.end('reject candidate');
+  await restoreEntered.promise;
+  const recovering = runtime.host.initializingSessions()[0];
+  nativeWorkers.push(recovering.worker);
+  assert.equal(starts, 2);
+  assert.equal(workers.length, 3);
+  assert.equal(recovering.revision.hash, original.sourceHash);
+  assert.ok(nativeWorkers.every(worker => worker !== null));
+  assert.ok(nativeWorkers.slice(0, 2).every(worker => worker.threadId === -1));
+  assert.ok(workers.slice(0, 2).every(worker => !worker.worker && !worker.live));
+  assert.equal((await runtime.status()).instances[0].state, 'starting');
+  assert.deepEqual(disk(runtime), before);
+  return { runtime, original, oldSource, before, home, controller, updating,
+    recovering, workers, nativeWorkers, overlaps, disconnected, restoreResponse,
+    release: () => restoreResponse.end('restore old source'), starts: () => starts };
+}
+
+for (const operation of ['cancel', 'disable-cancel', 'uninstall-cancel',
+  'disable-storage', 'uninstall-storage', 'disable-success', 'uninstall-success', 'close']) {
+  test(`Cat ${operation} after old restoration reaches HTTP gate preserves rollback ownership`,
+    { timeout: 30000 }, async t => {
+      const fixture = await restoringUpdate(t);
+      const { runtime, original, before, home, updating, recovering } = fixture;
+      const code = operation === 'close' ? 'HOST_CLOSED' : 'CANCELLED';
+      const rejected = assert.rejects(updating, { code });
+      const [followingOperation, outcome] = operation.split('-');
+      let following;
+      const save = runtime.settings.save.bind(runtime.settings);
+      try {
+        if (operation === 'cancel') fixture.controller.abort();
+        else if (operation === 'close') {
+          // Do not release the gate: close must stop and drain this real worker.
+          await runtime.close();
+          await fixture.disconnected.promise;
+          assert.equal(fixture.restoreResponse.writableFinished, false);
+        } else {
+          if (outcome === 'storage') runtime.settings.save = change => {
+            const next = change(runtime.settings.read());
+            if (!next.scripts.some(script => script.installationId === 'restoring' && script.enabled))
+              throw fault('STORAGE_ERROR');
+            return save(() => next);
+          };
+          const controller = new AbortController();
+          following = followingOperation === 'disable'
+            ? runtime.setEnabled('restoring', false, { signal: controller.signal })
+            : runtime.uninstall('restoring', { signal: controller.signal });
+          following.catch(() => {});
+          // Let the public request enter and queue behind rollback before
+          // cancelling it; it must not stop the already restoring generation.
+          await new Promise(resolve => setImmediate(resolve));
+          if (outcome === 'cancel') controller.abort();
+        }
+        if (operation !== 'close') fixture.release();
+        await rejected;
+        if (following) {
+          if (outcome === 'success') await following;
+          else await assert.rejects(following, {
+            code: outcome === 'cancel' ? 'CANCELLED' : 'STORAGE_ERROR',
+          });
+        }
+      } finally {
+        if (runtime.settings) runtime.settings.save = save;
+      }
+      assert.equal(fixture.starts(), 2);
+      if (operation !== 'close') {
+        assert.equal(recovering.activated, true, 'old recovery completes before the queued command');
+        assert.equal(fixture.restoreResponse.writableFinished, true);
+      }
+      const saved = disk(runtime);
+      if (operation === 'uninstall-success') {
+        assert.deepEqual((await runtime.status()).instances, []);
+        assert.deepEqual(saved.scripts, []);
+        assert.deepEqual(readdirSync(join(runtime.dataRoot, 'sources')), []);
+        assert.equal(existsSync(join(runtime.dataRoot, 'volumes', 'restoring')), false);
+      } else {
+        assert.deepEqual(saved, { ...before, scripts: [{ ...before.scripts[0],
+          enabled: operation !== 'disable-success', updateState: 'failed', updateError: code }] });
+        assert.equal(readFileSync(join(runtime.dataRoot, 'sources', original.sourceHash + '.js'), 'utf8'),
+          fixture.oldSource);
+        assert.deepEqual(readdirSync(join(runtime.dataRoot, 'sources')), [original.sourceHash + '.js']);
+        if (operation !== 'close') {
+          const current = (await runtime.status()).instances[0];
+          assert.equal(current.enabled, operation !== 'disable-success');
+          assert.deepEqual(current.sites, original.sites);
+          assert.equal(current.error, null);
+          if (operation === 'disable-success') {
+            assert.equal(current.state, 'disabled');
+            await assert.rejects(home(), { code: 'DISABLED' });
+          } else {
+            assert.equal(current.state, 'ready');
+            assert.deepEqual(await home(), { value: 'accepted-old' });
+          }
+        }
+      }
+      await runtime.close();
+      await fixture.disconnected.promise;
+      assert.deepEqual(fixture.overlaps, [false, false, false]);
+      assert.ok(fixture.nativeWorkers.every(worker => worker.threadId === -1));
+      assert.ok(fixture.workers.every(worker => !worker.worker && !worker.live));
+      t.diagnostic(JSON.stringify({ operation, oldStartupRequests: fixture.starts(),
+        restoreGateReached: true, restoreActivated: recovering.activated,
+        restoreResponseFinished: fixture.restoreResponse.writableFinished,
+        noOverlappingWorkers: true, nativeThreadIds: fixture.nativeWorkers.map(worker => worker.threadId) }));
+    });
+}
+
+test('Cat enable reconciles a disabled host even when the durable intent is already enabled',
+  { timeout: 30000 }, async t => {
+    const runtime = runtimeFor(t);
+    await runtime.install({ installationId: 'intent', source: source('accepted') });
+    await runtime.host.disable('intent');
+    assert.equal(runtime.instance('intent').enabled, true);
+    await assert.rejects(runtime.invoke(target('intent')), { code: 'DISABLED' });
+    const enabled = await runtime.setEnabled('intent', true);
+    assert.equal(enabled.state, 'ready');
+    assert.deepEqual(await runtime.invoke(target('intent')), { value: 'accepted' });
+  });
+
 test('Cat failed settings commit restores source and old runtime; an already committed save is reconciled',
   { timeout: 30000 }, async t => {
     let now = 10;

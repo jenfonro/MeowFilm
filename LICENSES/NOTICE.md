@@ -211,12 +211,30 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
 - Source: https://github.com/quickjs-ng/quickjs, v0.18.0,
   commit `d7215b0ad3fc2c562e8317fd9bca058fd4863804`.
 - License: `quickjs-native-MIT.txt`; original copyright notices remain in the
-  unmodified engine sources under `native/JavaScript/quickjs`.
-- Source and license hashes: `scripts/quickjs-native.json`.
+  engine sources under `native/JavaScript/quickjs`.
+- Local changes add interrupt polling during RegExp compilation (including
+  capture pre-scans), execution opcode dispatch, forward/backward references,
+  assertion/backtracking stack loops and the global empty-replacement loop.
+  Interruption is propagated as uncatchable engine errors. The reproducible patch
+  is `native/JavaScript/patches/regexp-compile-interrupt.patch`.
+- Upstream, patched-source, patch and license hashes: `scripts/quickjs-native.json`.
 - Windows links the engine into `meowfilm_js.dll` through the application's
   JSON-only C adapter. The upstream command-line interpreter, libc/I/O module
   and module loader are not included. This client-side engine is independent
   of the Node script host and is not a replacement for its WASM/asm.js engines.
+
+### Native Unicode tables — Unicode License V3
+
+- Source: `libunicode-table.h` in the same QuickJS-NG commit
+  `d7215b0ad3fc2c562e8317fd9bca058fd4863804`, included by `libunicode.c`
+  and compiled into the Windows `meowfilm_js.dll`.
+- Copyright © 1991-2026 Unicode, Inc.
+- License: `Unicode-3.0.txt` is the complete original copyright and permission
+  notice extracted from that table's header, without the C comment delimiters.
+  The table and this license are hash-pinned in `scripts/quickjs-native.json`;
+  source verification also checks that the standalone notice matches the header.
+- The Windows license package includes this notice and its manifest entry.
+  Node's separate ICU declaration does not replace this native-table attribution.
 
 ## QuickJS / quickjs-emscripten — MIT
 
