@@ -1,9 +1,10 @@
 import Foundation
 import NodeMobile
 import MeowRuntime
+import MeowMusicNativeService
 
 /// The App's single embedded Node Mobile runtime. Node starts at most once per
-/// process, lazily on the first script use; its payload is a signed resource.
+/// process, at App startup; its payload is a signed resource.
 enum MeowfilmScriptRuntime {
     static let launcher = RuntimeEmbeddedLauncher(
         payload: {
@@ -16,7 +17,9 @@ enum MeowfilmScriptRuntime {
         }
     )
 
-    /// App-owned script data (Cat private volumes), never a script-selected path.
+    static let musicScripts = NativeMusicScriptService(launcher: launcher)
+
+    /// App-owned script data (music installations and Cat private volumes), never a script-selected path.
     private static var dataDirectory: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)

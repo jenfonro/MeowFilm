@@ -9,7 +9,7 @@ namespace MeowFilm.Capabilities.Scripting;
 internal sealed class MusicNativeTransfers(TimeProvider clock) : IDisposable
 {
     internal const int ChunkBytes = 16 * 1024;
-    internal sealed record Snapshot(byte[] Bytes, string Basename, string Hash, string InstallationId) : IDisposable
+    internal sealed record Snapshot(byte[] Bytes, string Basename, string Hash) : IDisposable
     {
         public void Dispose() => CryptographicOperations.ZeroMemory(Bytes);
     }
@@ -171,7 +171,7 @@ internal sealed class MusicNativeTransfers(TimeProvider clock) : IDisposable
                 if (LJ.Hash(bytes) != stage.Hash)
                     throw new MusicLibraryException("TRANSFER_INTEGRITY");
                 transferred = true;
-                return new(bytes, stage.Basename, stage.Hash, "lx-" + token);
+                return new(bytes, stage.Basename, stage.Hash);
             }
             finally { if (!transferred) CryptographicOperations.ZeroMemory(bytes); }
         }

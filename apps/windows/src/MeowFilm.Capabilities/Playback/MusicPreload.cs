@@ -104,9 +104,10 @@ public sealed partial class MusicCapability
             var song = SongRow.Read(entry.GetProperty("song"), attempt.TargetEntry);
             if (recordingChoices.Keys.Any(key =>
                 key.StartsWith(song.Id + "\0", StringComparison.Ordinal))) return;
-            var media = await ResolveAutomaticOfficial(song,
-                state.Media!.Target!.PolicyRequest,
-                state.Media.Target.QualityPolicySignature!, attempt.Cancellation.Token);
+            // Built-in, already-mapped recordings only: preparing a file never searches or runs scripts.
+            var session = await BeginSourceSession(song, attempt.Cancellation.Token, officialOnly: true);
+            if (session.Signature != state.Media!.Target!.QualityPolicySignature) return;
+            var media = await session.AutomaticAsync(attempt.Cancellation.Token);
             if (media.Uri is null || media.Receipt is not { } receipt || media.Target is not { } selected) return;
             string platform = selected.Platform;
             if (!ReferenceEquals(musicPreload, attempt) || !CurrentRecovery(state) || audioFileCache is null) return;

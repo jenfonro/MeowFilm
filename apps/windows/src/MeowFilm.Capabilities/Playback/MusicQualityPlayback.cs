@@ -1,40 +1,28 @@
 using System.Text.Json;
 using MeowFilm.Media;
-using System.Text.Json.Nodes;
-using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicCapability
 {
-    // The existing recovery consumer delegates here. Initial policy selection
-    // and refresh use one native contract, but refresh cannot select another type.
+    // One exact script request. A refresh re-asks the same installation, platform, recording
+    // and quality; its accepted cache signature proves the same content and policy.
     private async Task<ResolvedMusic> ResolveMusicQualityTarget(SongRow song, MusicOnlineTarget target,
         CancellationToken token, bool initial = false)
     {
         var parameters = new Dictionary<string, object>
         {
             ["installationId"] = target.Installation ?? throw new MusicOperationException("TARGET_REQUIRED"), ["platform"] = target.Platform,
-            ["generation"] = target.Generation, ["song"] = target.RecordingSong ?? song.Raw, ["quality"] = target.Quality
+            ["song"] = target.RecordingSong ?? song.Raw, ["quality"] = target.Quality
         };
         if (target.SourceKey is not null) parameters["sourceKey"] = target.SourceKey;
         if (target.QualityPolicySignature is not null) parameters["qualityPolicySignature"] = target.QualityPolicySignature;
         if (target.QualityCacheSignature is not null) parameters["qualityCacheSignature"] = target.QualityCacheSignature;
         if (!initial)
-            MusicDto.Require(target.Quality != "auto" && target.QualityPolicySignature is not null &&
-                target.QualityCacheSignature is not null);
+            MusicDto.Require(target.QualityPolicySignature is not null && target.QualityCacheSignature is not null);
         var response = await QualityCall("music.online.resolve", parameters, token);
         token.ThrowIfCancellationRequested();
-        // Present only when the resolver added the missing target recording; the queue song is unchanged.
         var recordingSong = target.RecordingSong;
-        if (response.TryGetProperty("recordingSong", out var expanded))
-        {
-            var normalized = NativeMusicSong.Normalize(JsonNode.Parse(expanded.GetRawText()));
-            MusicDto.Require(LJ.S(normalized["songId"]) == song.Id &&
-                new NativeMusicSong.Recordings(NativeMusicSong.Normalize(JsonNode.Parse(song.Raw.GetRawText())))
-                    .CanMerge(new(normalized)));
-            recordingSong = JsonSerializer.SerializeToElement(normalized);
-        }
         var generation = MusicDto.Integer(response, "generation");
         var sourceKey = MusicDto.Text(response, "sourceKey");
         string actualRequest = MusicDto.Text(response, "quality");
@@ -42,10 +30,9 @@ public sealed partial class MusicCapability
         string cache = MusicDto.Text(response, "qualityCacheSignature");
         MusicDto.Require(MusicDto.Text(response, "installationId") == target.Installation &&
             MusicDto.Text(response, "platform") == target.Platform && MusicDto.Text(response, "songId") == song.Id &&
-            MusicQualityPolicy.LxTypes.Contains(actualRequest) &&
-            (initial && target.Quality == "auto" || actualRequest == target.Quality) &&
-            (initial || generation == target.Generation) &&
+            MusicQualityPolicy.LxTypes.Contains(actualRequest) && actualRequest == target.Quality &&
             (target.SourceKey is null || sourceKey == target.SourceKey) &&
+            (initial || generation == target.Generation) &&
             IsQualityHash(policy) && IsQualityHash(cache) &&
             (target.QualityPolicySignature is null || policy == target.QualityPolicySignature) &&
             (target.QualityCacheSignature is null || cache == target.QualityCacheSignature) &&

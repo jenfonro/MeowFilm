@@ -629,12 +629,13 @@ public static class FilmSourcesTests
     {
         var session = new Runtime { StartingStatuses = 1 }; session.Add("restored");
         int factories = 0;
-        await using var runtime = new OnDemandRuntimeClient(_ => ++factories == 1
+        await using var runtime = new AppRuntimeClient(_ => ++factories == 1
             ? Task.FromException<IRuntimeSession>(new BridgeException("INTERNAL"))
             : Task.FromResult<IRuntimeSession>(session));
         await using var service = new FilmSourceService(runtime, new Store());
         await service.InitializeAsync();
         Check(factories == 0, "local initialization never enters the runtime factory");
+        runtime.Start();
         try { await service.StartAsync(); throw new InvalidOperationException("Expected factory failure"); }
         catch (BridgeException error) { Check(error.Code == "INTERNAL", "failed factory is observable"); }
         Check(service.RuntimeError is not null && runtime.CanRetry && factories == 1, "first failed epoch is retained");

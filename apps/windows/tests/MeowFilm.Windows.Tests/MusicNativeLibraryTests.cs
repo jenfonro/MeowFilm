@@ -41,28 +41,13 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music third-party CAS conflict stays fenced without a discard fallback", Conflict);
         yield return new("Native music corrupt envelope and domain records fail closed", Corrupt);
         yield return new("Native music explicit null owned areas never become empty state", NullAreas);
-        yield return new("Native music malformed script values never overwrite damaged storage", CorruptScriptStorage);
         yield return new("Native music read failure does not become empty library", ReadFailure);
         yield return new("Native music cancellation before admission cannot mutate state", CancelAdmission);
         yield return new("Native music cancellation after CAS admission observes real result", CancelCommit);
         yield return new("Native music shutdown pending failure and reversible preparation", Shutdown);
-        yield return new("Native music source metadata single owner CAS alongside library", SourceMetadata);
-        yield return new("Native music source snapshots preserve both versions and never write on reads or restart", SourceSnapshots);
-        yield return new("Native music source metadata unknown commit and atomic private storage removal", SourceFailure);
-        yield return new("Native music online settings revision and independent source enablement", Settings);
-        yield return new("Native music script storage permissions revisions scope and quotas", ScriptStorage);
+        yield return new("Native music online settings revision and exact fields", Settings);
+        yield return new("Native music retired script areas stay unread, unchanged and never block other owners", RetiredAreas);
         yield return new("Native music non-current envelopes fail every owner entry without writes", NonCurrentDocuments);
-        yield return new("Native music source metadata malformed input never commits", InvalidSource);
-        yield return new("Native music arbitrary bounded script sites retain installation isolation and quotas", DeclaredSiteStorage);
-        yield return new("Native music complete bounded script-site storage coexists with ordinary owned areas", CompleteSiteStorage);
-        yield return new("Native music source files read edits and preserve the single-script size bound", SourceBudget);
-        yield return new("Native music candidate overlay new disabled installation atomic restart", Overlay);
-        yield return new("Native music candidate overlay detects intervening live storage without metadata change", OverlayConflict);
-        yield return new("Native music candidate overlay cannot change another installation", OverlayIsolation);
-        yield return new("Native music candidate overlay before commit failure preserves both old halves", () => OverlayUnknown(false));
-        yield return new("Native music candidate overlay after commit failure observes both new halves", () => OverlayUnknown(true));
-        yield return new("Native music queued stale and cancelled script calls cannot enter CAS", QueuedScript);
-        yield return new("Native music script values reject duplicate JSON properties and over-budget sites", OverlayInvalid);
         yield return new("Native music LRC graphemes weighting and duplicate timestamps", LyricsLrc);
         yield return new("Native music YRC QRC exact intervals and negative offset", LyricsWords);
         yield return new("Native music word LRC absolute relative tags and trailing markers", LyricsMarkers);
@@ -117,15 +102,8 @@ public static partial class MusicNativeLibraryTests
         internal int FailAtWrite;
         internal bool FailRead, Disposed;
         internal TaskCompletionSource? Entered, Release;
-        private static bool ContentNamespace(string value)
-        {
-            string prefix = MusicLibraryOwner.ScriptContentCollection + ".";
-            if (!value.StartsWith(prefix, StringComparison.Ordinal)) return false;
-            string hash = value[prefix.Length..];
-            return hash.Length == 64 && hash.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
-        }
         private static void Namespace(string value) =>
-            Check(value == MusicLibraryOwner.DocumentNamespace || ContentNamespace(value), "Unexpected document namespace");
+            Check(value == MusicLibraryOwner.DocumentNamespace, "Unexpected document namespace");
         internal void Seed(string documentNamespace, byte[] bytes)
         {
             Namespace(documentNamespace);
@@ -190,10 +168,6 @@ public static partial class MusicNativeLibraryTests
         var list = await Ok(owner, "music.library.list"); Check(list.GetProperty("total").GetInt32() == 1 && list.GetProperty("items")[0].GetProperty("id").GetString() == "favorites");
         var q = await Ok(owner, "music.queue.get"); Check(q.GetProperty("total").GetInt32() == 0 && q.GetProperty("mode").GetInt32() == 1);
         await Ok(owner, "music.history.get"); await Ok(owner, "music.settings.get");
-        var sources = await owner.ReadSourceMetadataAsync();
-        Check(sources.State.GetProperty("schema").GetInt32() == 4 && sources.State.GetProperty("revision").GetInt64() == 0 &&
-            sources.State.GetProperty("installations").GetArrayLength() == 0);
-        Check(!(await owner.ReadSourceScriptDataAsync("test-install-a", 0)).Sites.EnumerateObject().Any());
         Check(f.Store.Bytes is null && f.Store.Writes == 0);
     }
     private static async Task Collections()
@@ -394,22 +368,12 @@ public static partial class MusicNativeLibraryTests
     {
         string root = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT") ?? throw new InvalidOperationException("Test data root required");
         Check(Path.IsPathFullyQualified(root) && Directory.Exists(root)); string path = Path.Combine(root, "native-music-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(path);
-        byte[] source = Encoding.UTF8.GetBytes("// plain source\n" + new string('猫', 600_000));
-        MusicScriptContent content;
-        await using (var store = new LocalDocumentStore(path, [MusicLibraryOwner.DocumentNamespace],
-            [MusicLibraryOwner.ScriptContentCollection]))
+        await using (var store = new LocalDocumentStore(path, [MusicLibraryOwner.DocumentNamespace], []))
         await using (var first = new MusicLibraryOwner(store))
-        {
             await Ok(first, "music.library.create", new { name = "Plain files", songs = new[] { Song() } });
-            content = await first.StoreScriptContentAsync(source);
-        }
-        await using var reopened = new LocalDocumentStore(path, [MusicLibraryOwner.DocumentNamespace],
-            [MusicLibraryOwner.ScriptContentCollection]);
+        await using var reopened = new LocalDocumentStore(path, [MusicLibraryOwner.DocumentNamespace], []);
         await using var second = new MusicLibraryOwner(reopened);
         Check((await Ok(second, "music.library.list")).GetProperty("total").GetInt32() == 2);
-        byte[] restored = await second.ReadScriptContentAsync(content.Sha256);
-        try { Check(source.SequenceEqual(restored)); }
-        finally { CryptographicOperations.ZeroMemory(restored); CryptographicOperations.ZeroMemory(source); }
     }
     private static async Task UnknownCommit(bool committed)
     {
@@ -523,138 +487,9 @@ public static partial class MusicNativeLibraryTests
             ["library"] = library
         };
     }
-    private static JsonObject CurrentSources() => new()
-    {
-        ["schema"] = 4,
-        ["revision"] = 1,
-        ["installations"] = new JsonArray(Installation())
-    };
-    private static async Task SourceSnapshots()
-    {
-        var sources = CurrentSources(); sources["revision"] = 7;
-        byte[] currentBytes = Encoding.UTF8.GetBytes("// current source\n// 中文 header and stable bytes");
-        byte[] previousBytes = Encoding.UTF8.GetBytes("// previous source");
-        var currentContent = new MusicScriptContent(Convert.ToHexStringLower(SHA256.HashData(currentBytes)), currentBytes.Length);
-        var previousContent = new MusicScriptContent(Convert.ToHexStringLower(SHA256.HashData(previousBytes)), previousBytes.Length);
-        var item = sources["installations"]![0]!.AsObject();
-        item["current"]!["sourceHash"] = currentContent.Sha256;
-        item["current"]!["sourceBytes"] = currentContent.Length;
-        item["current"]!["version"] = "2.3";
-        item["previous"] = item["current"]!.DeepClone();
-        item["previous"]!["sourceHash"] = previousContent.Sha256;
-        item["previous"]!["sourceBytes"] = previousContent.Length;
-        item["previous"]!["version"] = "1.8";
-        item["previous"]!["permissions"]!["storage"] = new JsonArray("read");
-        var disabled = Installation("test-install-b", false);
-        disabled["current"]!["permissions"]!["storage"] = new JsonArray();
-        sources["installations"]!.AsArray().Add(disabled);
-        await using var f = new Fixture();
-        f.Store.Seed(ContentKey(currentContent.Sha256), currentBytes);
-        f.Store.Seed(ContentKey(previousContent.Sha256), previousBytes);
-        f.Store.Bytes = Document(
-            ("lx-installations", sources),
-            ("library", CurrentLibraryState()), ("queue", CurrentQueue()), ("history", CurrentHistory()),
-            ("online-settings", O(new { schema = 3, revision = 3, lyrics = false })),
-            ("[\"lx-data\",\"test-install-a\",\"wy\"]", O(new { schema = 1, values = new[] { new { key = "keep", value = "source-a" } } })),
-            ("[\"lx-data\",\"test-install-a\",\"tx\"]", O(new { schema = 1, values = new[] { new { key = "keep", value = "source-a-tx" } } })),
-            ("[\"lx-data\",\"test-install-b\",\"wy\"]", O(new { schema = 1, values = new[] { new { key = "keep", value = "source-b" } } })));
-        byte[] original = f.Store.Bytes.ToArray(); var o = f.Owner();
-        await Ok(o, "music.library.list");
-        var before = await o.ReadSourceScriptDataAsync("test-install-a", 7);
-        var metadata = await o.ReadSourceMetadataAsync();
-        Check(JsonNode.DeepEquals(sources, Parsed(metadata.State)));
-        await Ok(o, "music.queue.get"); await Ok(o, "music.history.get"); await Ok(o, "music.settings.get");
-        Check((await o.ReadSourceScriptDataAsync("test-install-a", 7)).Sha256 == before.Sha256);
-        Check((await o.ReadSourceMetadataAsync()).Sha256 == metadata.Sha256);
-        Check(f.Store.Writes == 0 && original.SequenceEqual(f.Store.Bytes!));
-        await o.DisposeAsync();
-        var restored = f.Owner();
-        Check((await restored.ReadSourceMetadataAsync()).Sha256 == metadata.Sha256);
-        Check((await restored.ReadScriptValueAsync("test-install-a", "wy", "keep", 7)).GetString() == "source-a");
-        Check((await restored.ReadSourceScriptDataAsync("test-install-a", 7)).Sha256 == before.Sha256);
-        Check((await restored.ReadSourceScriptDataAsync("test-install-b", 7)).Sites.GetProperty("wy")
-            .GetProperty("values")[0].GetProperty("value").GetString() == "source-b");
-        byte[] currentSource = await restored.ReadScriptContentAsync(currentContent.Sha256);
-        byte[] previousSource = await restored.ReadScriptContentAsync(previousContent.Sha256);
-        try
-        {
-            Check(currentSource.SequenceEqual(currentBytes));
-            Check(previousSource.SequenceEqual(previousBytes));
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(currentSource);
-            CryptographicOperations.ZeroMemory(previousSource);
-        }
-        Check(f.Store.Writes == 0 && original.SequenceEqual(f.Store.Bytes!));
-    }
-    private static async Task DeclaredSiteStorage()
-    {
-        await using var f = new Fixture(); var o = f.Owner(); await Install(o, Installation(), Installation("test-install-b"));
-        for (int index = 0; index < 32; index++)
-            await o.CommitScriptValueAsync("test-install-a", "site-" + index, "same", 1, E(index), false);
-        await o.CommitScriptValueAsync("test-install-b", "site-0", "same", 1, E("isolated"), false);
-        Check((await o.ReadScriptValueAsync("test-install-a", "site-0", "same", 1)).GetInt32() == 0);
-        Check((await o.ReadScriptValueAsync("test-install-b", "site-0", "same", 1)).GetString() == "isolated");
-        int writes = f.Store.Writes; byte[] original = f.Store.Bytes!.ToArray();
-        await Throws("LIMIT", async () => await o.CommitScriptValueAsync("test-install-a", "site-overflow", "same", 1, E("overflow"), false));
-        foreach (string site in new[] { "", " spaced", "control\nsite", "site\n", new string('s', 129) })
-            await Throws("INVALID_REQUEST", async () => await o.CommitScriptValueAsync("test-install-b", site, "same", 1, E("invalid"), false));
-        Check(f.Store.Writes == writes && original.SequenceEqual(f.Store.Bytes!));
-        await o.DisposeAsync();
-        Check((await f.Owner().ReadSourceScriptDataAsync("test-install-a", 1)).Sites.EnumerateObject().Count() == 32);
-    }
-    private static async Task CompleteSiteStorage()
-    {
-        var sources = CurrentSources();
-        sources["installations"] = new JsonArray(Enumerable.Range(0, 34)
-            .Select(index => (JsonNode)Installation("test-install-" + index)).ToArray());
-        var entries = new List<(string Area, JsonNode Value)>
-        {
-            ("lx-installations", sources), ("library", CurrentLibraryState()),
-            ("queue", CurrentQueue()), ("history", CurrentHistory())
-        };
-        foreach (var item in sources["installations"]!.AsArray())
-        {
-            string id = item!["id"]!.GetValue<string>();
-            for (int site = 0; site < (id == "test-install-33" ? 31 : 32); site++)
-            {
-                string area = new JsonArray("lx-data", id, "site-" + site).ToJsonString();
-                entries.Add((area, O(new { schema = 1, values = new[] { new { key = "same", value = id } } })));
-            }
-        }
-        await using var f = new Fixture(); f.Store.Bytes = Document(entries.ToArray()); var o = f.Owner();
-        await Ok(o, "music.library.list");
-        for (int index = 0; index < 34; index++)
-        {
-            string id = "test-install-" + index;
-            Check((await o.ReadSourceScriptDataAsync(id, 1)).Sites.EnumerateObject().Count() == (index == 33 ? 31 : 32));
-            Check((await o.ReadScriptValueAsync(id, "site-0", "same", 1)).GetString() == id);
-        }
-        Check(f.Store.Writes == 0);
-        await o.CommitScriptValueAsync("test-install-0", "site-0", "same", 1, E("updated"), false);
-        await Ok(o, "music.settings.save", new { ifRevision = 0, lyrics = false });
-        await o.CommitScriptValueAsync("test-install-33", "site-31", "same", 1, E("new-site"), false);
-        int writes = f.Store.Writes; byte[] original = f.Store.Bytes!.ToArray();
-        await Throws("LIMIT", async () => await o.CommitScriptValueAsync("test-install-33", "site-overflow", "same", 1, E("overflow"), false));
-        Check(f.Store.Writes == writes && original.SequenceEqual(f.Store.Bytes!));
-        await o.DisposeAsync();
-        var restored = f.Owner();
-        Check((await restored.ReadSourceMetadataAsync()).State.GetProperty("installations").GetArrayLength() == 34);
-        await Ok(restored, "music.library.list");
-        Check(!(await Ok(restored, "music.settings.get")).GetProperty("settings").GetProperty("lyrics").GetBoolean());
-        for (int index = 0; index < 34; index++)
-        {
-            string id = "test-install-" + index;
-            Check((await restored.ReadSourceScriptDataAsync(id, 1)).Sites.EnumerateObject().Count() == 32);
-            Check((await restored.ReadScriptValueAsync(id, "site-0", "same", 1)).GetString() == (index == 0 ? "updated" : id));
-            Check((await restored.ReadScriptValueAsync(id, "site-31", "same", 1)).GetString() == (index == 33 ? "new-site" : id));
-        }
-        Check(f.Store.Writes == writes && original.SequenceEqual(f.Store.Bytes!));
-    }
     private static async Task NullAreas()
     {
-        foreach (string area in new[] { "library", "queue", "history", "playback-settings", "online-settings", "lx-installations", "[\"lx-data\",\"test-install-a\",\"wy\"]" })
+        foreach (string area in new[] { "library", "queue", "history", "playback-settings", "online-settings", "native-source-exclusions" })
         {
             await using var f = new Fixture();
             f.Store.Bytes = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, entries = new[] { new { key = AreaKey(area), value = (object?)null } } });
@@ -662,19 +497,6 @@ public static partial class MusicNativeLibraryTests
             for (int i = 0; i < 2; i++)
                 Check(!(await o.ExecuteAsync("music.library.create", new { name = "Never overwrite" })).GetProperty("ok").GetBoolean(), area);
             Check(f.Store.Writes == 0 && original.SequenceEqual(f.Store.Bytes));
-        }
-    }
-    private static async Task CorruptScriptStorage()
-    {
-        string[] states = ["{\"schema\":1,\"values\":null}", "{\"schema\":1,\"values\":[null]}",
-            "{\"schema\":1,\"values\":[{\"key\":\"x\"}]}", "{\"schema\":1,\"values\":[{\"key\":\"x\",\"value\":1},{\"key\":\"x\",\"value\":2}]}",
-            "{\"schema\":2,\"values\":[]}", "{\"schema\":1,\"values\":[{\"key\":\"\",\"value\":1}]}"];
-        foreach (string raw in states)
-        {
-            await using var f = new Fixture();
-            f.Store.Bytes = JsonSerializer.SerializeToUtf8Bytes(new { version = 1,
-                entries = new[] { new { key = AreaKey("[\"lx-data\",\"test-install-a\",\"wy\"]"), value = JsonDocument.Parse(raw).RootElement } } });
-            Check(!(await f.Owner().ExecuteAsync("music.library.list")).GetProperty("ok").GetBoolean() && f.Store.Writes == 0);
         }
     }
     private static async Task ReadFailure()
@@ -706,49 +528,27 @@ public static partial class MusicNativeLibraryTests
         Check((await Ok(o, "music.library.list")).GetProperty("total").GetInt32() == 2);
         await o.DisposeAsync(); Check(!f.Store.Disposed); await Error(o, "music.queue.get", null, "CLOSED");
     }
-    private const string SyntheticSource = "// synthetic inert fixture; never executed";
-    private static MusicScriptContent Content(string source)
+    /// <summary>Script installations moved to the shared runtime module. Earlier entries are not read,
+    /// migrated or deleted: they ride along unchanged, and even malformed ones never fail other owners.</summary>
+    private static async Task RetiredAreas()
     {
-        byte[] bytes = Encoding.UTF8.GetBytes(source);
-        try { return new(Convert.ToHexStringLower(SHA256.HashData(bytes)), bytes.Length); }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
-    }
-    private static string ContentKey(string hash) => $"{MusicLibraryOwner.ScriptContentCollection}.{hash}";
-    private static JsonObject Installation(string id = "test-install-a", bool enabled = true,
-        MusicScriptContent? content = null)
-    {
-        content ??= Content(SyntheticSource);
-        return O(new
+        await using var f = new Fixture();
+        var retired = new (string Area, JsonNode Value)[]
         {
-            id, name = "Synthetic source", enabled, previous = (object?)null,
-            current = new { sourceHash = content.Sha256, sourceBytes = content.Length, version = "1",
-                permissions = new { storage = new[] { "read", "write" } } }
-        });
-    }
-    private static async Task<MusicSourceMetadataSnapshot> Install(MusicLibraryOwner o, params JsonObject[] items)
-    {
-        var current = await o.ReadSourceMetadataAsync(); var state = Parsed(current.State); state["revision"] = state["revision"]!.GetValue<long>() + 1;
-        foreach (var item in items) state["installations"]!.AsArray().Add(item.DeepClone());
-        return await o.CommitSourceMetadataAsync(E(state), current.Sha256);
-    }
-    private static async Task SourceMetadata()
-    {
-        await using var f = new Fixture(); var o = f.Owner(); var before = await o.ReadSourceMetadataAsync();
-        await Ok(o, "music.library.create", new { name = "Local" });
-        var state = Parsed(before.State); state["revision"] = 1; state["installations"]!.AsArray().Add(Installation());
-        var next = await o.CommitSourceMetadataAsync(E(state), before.Sha256); Check(next.State.GetProperty("revision").GetInt64() == 1);
-        await Throws("REVISION_CONFLICT", async () => await o.CommitSourceMetadataAsync(E(state), before.Sha256));
-        Check((await Ok(o, "music.library.list")).GetProperty("total").GetInt32() == 2);
-    }
-    private static async Task SourceFailure()
-    {
-        await using var f = new Fixture(); var o = f.Owner(); var installed = await Install(o, Installation());
-        await o.CommitScriptValueAsync("test-install-a", "wy", "value", 1, E("synthetic"), false);
-        var state = Parsed(installed.State); state["installations"] = new JsonArray(); state["revision"] = 2;
-        f.Store.Failure = 2; await Throws("COMMIT_UNKNOWN", async () => await o.CommitSourceMetadataAsync(E(state), installed.Sha256));
-        await Throws("COMMIT_UNKNOWN", async () => await o.ReadSourceMetadataAsync());
-        await o.ReconcileAsync(); Check((await o.ReadSourceMetadataAsync()).State.GetProperty("installations").GetArrayLength() == 0);
-        Check(f.Store.Root["entries"]!.AsArray().All(e => !e!["key"]!.GetValue<string>().Contains("lx-data")));
+            ("lx-installations", O(new { schema = 4, revision = 7, installations = new[] { new { id = "old-install" } } })),
+            ("[\"lx-data\",\"old-install\",\"wy\"]", JsonValue.Create("not a current record")!),
+            ("[\"lx-data\",\"missing-installation\",\"tx\"]", O(new { schema = 1, values = Array.Empty<object>() }))
+        };
+        f.Store.Bytes = Document(retired);
+        var o = f.Owner();
+        Check((await Ok(o, "music.library.list")).GetProperty("total").GetInt32() == 1);
+        await Ok(o, "music.library.create", new { name = "Kept" });
+        var entries = JsonNode.Parse(f.Store.Bytes!)!["entries"]!.AsArray();
+        foreach (var (area, value) in retired)
+            Check(entries.Any(entry => entry!["key"]!.GetValue<string>() == AreaKey(area) &&
+                JsonNode.DeepEquals(entry["value"], value)), "retired entry must be carried unchanged: " + area);
+        await o.DisposeAsync();
+        Check((await Ok(f.Owner(), "music.library.list")).GetProperty("total").GetInt32() == 2);
     }
     private static async Task Settings()
     {
@@ -765,40 +565,12 @@ public static partial class MusicNativeLibraryTests
         await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true, target = (object?)null }, "INVALID_REQUEST");
         await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true, target = new { installationId = "missing", platform = "wy" } }, "INVALID_REQUEST");
         Check(f.Store.Writes == writes);
-        await Install(o, Installation());
-        writes = f.Store.Writes;
-        await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true, target = new { installationId = "test-install-a", platform = "wy" } }, "INVALID_REQUEST");
-        Check(f.Store.Writes == writes);
         var saved = (await Ok(o, "music.settings.save", new { ifRevision = 0, lyrics = false })).GetProperty("settings");
         Check(saved.GetProperty("schema").GetInt32() == 3 && saved.GetProperty("revision").GetInt64() == 1 &&
             !saved.GetProperty("lyrics").GetBoolean() && saved.EnumerateObject().Count() == 3);
         await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true }, "REVISION_CONFLICT");
-        foreach (bool enabled in new[] { false, true })
-        {
-            var source = await o.ReadSourceMetadataAsync();
-            var next = NextMetadata(source); next["installations"]![0]!["enabled"] = enabled;
-            await o.CommitSourceMetadataAsync(E(next), source.Sha256);
-            Check((await Ok(o, "music.settings.get")).GetProperty("settings").GetRawText() == saved.GetRawText());
-        }
-        var metadata = await o.ReadSourceMetadataAsync();
-        var removed = NextMetadata(metadata); removed["installations"] = new JsonArray();
-        await o.CommitSourceMetadataAsync(E(removed), metadata.Sha256);
-        Check((await Ok(o, "music.settings.get")).GetProperty("settings").GetRawText() == saved.GetRawText());
         await o.DisposeAsync();
         Check((await Ok(f.Owner(), "music.settings.get")).GetProperty("settings").GetRawText() == saved.GetRawText());
-    }
-    private static async Task ScriptStorage()
-    {
-        await using var f = new Fixture(); var o = f.Owner(); await Install(o, Installation(), Installation("test-install-b"));
-        await o.CommitScriptValueAsync("test-install-a", "wy", "same", 1, E(new { value = "a" }), false);
-        await o.CommitScriptValueAsync("test-install-b", "wy", "same", 1, E(new { value = "b" }), false);
-        Check((await o.ReadScriptValueAsync("test-install-a", "wy", "same", 1)).GetProperty("value").GetString() == "a");
-        Check((await o.ReadScriptValueAsync("test-install-a", "tx", "same", 1)).ValueKind == JsonValueKind.Null);
-        await Throws("STALE_SESSION", async () => await o.CommitScriptValueAsync("test-install-a", "wy", "same", 0, E("stale"), false));
-        await Throws("LIMIT", async () => await o.CommitScriptValueAsync("test-install-a", "wy", "large", 1, E(new string('x', 17000)), false));
-        var old = await o.ReadSourceMetadataAsync(); var state = Parsed(old.State); state["revision"] = 2; state["installations"]![0]!["enabled"] = false;
-        await o.CommitSourceMetadataAsync(E(state), old.Sha256);
-        await Throws("PERMISSION_DENIED", async () => await o.ReadScriptValueAsync("test-install-a", "wy", "same", 2));
     }
     private static async Task RejectDocument(byte[] bytes, string expected = "CORRUPT_STORAGE")
     {
@@ -808,12 +580,6 @@ public static partial class MusicNativeLibraryTests
         var owner = f.Owner();
         await Error(owner, "music.library.list", null, expected);
         await Error(owner, "music.library.create", new { name = "Must not write" }, expected);
-        await Throws(expected, async () => await owner.ReadSourceMetadataAsync());
-        await Throws(expected, async () => await owner.ReadSourceScriptDataAsync("test-install-a", 0));
-        await Throws(expected, async () => await owner.CommitScriptValueAsync(
-            "test-install-a", "wy", "key", 0, E("value"), false));
-        await Throws(expected, async () => await owner.CommitSourceMetadataAsync(
-            E(new { schema = 4, revision = 0, installations = Array.Empty<object>() }), new string('0', 64)));
         await Throws(expected, async () => await owner.ReadLibrarySyncAsync());
         Check(f.Store.Writes == 0 && original.SequenceEqual(f.Store.Bytes!), "Non-current data changed");
     }
@@ -824,7 +590,6 @@ public static partial class MusicNativeLibraryTests
             """{"version":1,"entries":[{"key":"[\"meowfilm\",\"music\",1,\"local\",\"future\"]","value":{}}]}""",
             """{"version":1,"entries":[{"key":"[\"meowfilm\",\"music\",1,\"other\",\"queue\"]","value":{"schema":1,"entries":[],"currentId":null,"priority":[],"source":null}}]}""",
             """{"version":1,"entries":[{"key":"[\"meowfilm\",\"music\",1.0,\"local\",\"queue\"]","value":{"schema":1,"entries":[],"currentId":null,"priority":[],"source":null}}]}""",
-            """{"version":1,"entries":[{"key":"[\"meowfilm\",\"music\",1,\"local\",\"[\\\"lx-data\\\",\\\"missing-installation\\\",\\\"wy\\\"]\"]","value":{"schema":1,"values":[]}}]}""",
             """{"version":1.0,"entries":[]}""",
             """{"version":1e0,"entries":[]}"""
         ];
@@ -888,29 +653,6 @@ public static partial class MusicNativeLibraryTests
         })
             await RejectDocument(Document(("library", invalid)), "CORRUPT_LIBRARY");
 
-        var sources = CurrentSources();
-        sources["installations"]![0]!["previous"] = sources["installations"]![0]!["current"]!.DeepClone();
-        foreach (var invalid in new[]
-        {
-            Changed(sources, state => state["schema"] = 1),
-            Changed(sources, state => state["schema"] = 2),
-            Changed(sources, state => state["schema"] = 3),
-            Changed(sources, state => state["schema"] = 5),
-            Changed(sources, state => state["schema"] = "4"),
-            Changed(sources, state => state["installations"]![0]!["current"]!["config"] = new JsonObject()),
-            Changed(sources, state => state["installations"]![0]!["current"]!["sourceHash"] = new string('0', 63)),
-            Changed(sources, state => state["installations"]![0]!["current"]!["sourceBytes"] = 0),
-            Changed(sources, state => state["installations"]![0]!["current"]!["sourceBytes"] =
-                SelectedScriptSnapshot.MaximumBytes + 1),
-            Changed(sources, state => state["installations"]![0]!["current"]!["source"] = SyntheticSource),
-            Changed(sources, state => state["installations"]![0]!["current"]!["permissions"]!["unsupported"] = new JsonArray()),
-            Changed(sources, state => state["installations"]![0]!["current"]!["permissions"]!.AsObject().Remove("storage")),
-            Changed(sources, state => state["installations"]![0]!["previous"]!["permissions"]!["storage"] = new JsonArray("read", "read")),
-            Changed(sources, state => state["installations"]![0]!["previous"]!["permissions"]!["storage"] = new JsonArray("unknown")),
-            Changed(sources, state => state["installations"]![0]!["previous"]!["permissions"]!["unsupported"] = false),
-            Changed(sources, state => state["installations"]![0]!["enabled"] = null)
-        })
-            await RejectDocument(Document(("lx-installations", invalid)));
 
         await RejectDocument(Document(("online-settings", O(new
         {
@@ -919,143 +661,6 @@ public static partial class MusicNativeLibraryTests
             lyrics = true,
             target = new { installationId = "missing-installation", platform = "wy" }
         }))));
-    }
-    private static async Task InvalidSource()
-    {
-        await using var f = new Fixture(); var o = f.Owner(); var read = await o.ReadSourceMetadataAsync();
-        var bad = Parsed(read.State); bad["revision"] = 1; bad["installations"]!.AsArray().Add(Installation("../escape"));
-        try { await o.CommitSourceMetadataAsync(E(bad), read.Sha256); throw new InvalidOperationException("Bad metadata accepted"); }
-        catch (MusicLibraryException) { Check(f.Store.Writes == 0); }
-    }
-    private static async Task SourceBudget()
-    {
-        await using var f = new Fixture(); var owner = f.Owner();
-        byte[] source = Encoding.UTF8.GetBytes("// large source\n" + new string('猫', 900_000));
-        var content = await owner.StoreScriptContentAsync(source);
-        Check(content.Length == source.Length &&
-            content.Sha256 == Convert.ToHexStringLower(SHA256.HashData(source)));
-        var metadata = await owner.ReadSourceMetadataAsync();
-        var next = Parsed(metadata.State); next["revision"] = 1;
-        next["installations"]!.AsArray().Add(Installation(content: content));
-        await owner.CommitSourceMetadataAsync(E(next), metadata.Sha256);
-        var committed = await owner.ReadSourceMetadataAsync();
-        var oversized = Parsed(committed.State); oversized["revision"] = 2;
-        oversized["installations"]!.AsArray().Add(Installation("oversized",
-            content: new MusicScriptContent(new string('a', 64), SelectedScriptSnapshot.MaximumBytes + 1)));
-        await Throws("INVALID_REQUEST", async () =>
-            await owner.CommitSourceMetadataAsync(E(oversized), committed.Sha256));
-        await owner.DisposeAsync();
-        var reopened = f.Owner();
-        await Throws("LIMIT", async () =>
-            await reopened.StoreScriptContentAsync(new byte[SelectedScriptSnapshot.MaximumBytes + 1]));
-        byte[] restored = await reopened.ReadScriptContentAsync(content.Sha256);
-        Check(source.SequenceEqual(restored));
-        byte[] edited = Encoding.UTF8.GetBytes("// manually edited source with a different length");
-        f.Store.Seed(ContentKey(content.Sha256), edited);
-        Check((await reopened.ReadScriptContentAsync(content.Sha256)).SequenceEqual(edited));
-        f.Store.Seed(ContentKey(content.Sha256), new byte[SelectedScriptSnapshot.MaximumBytes + 1]);
-        await Throws("LIMIT", async () => await reopened.ReadScriptContentAsync(content.Sha256));
-        f.Store.Seed(ContentKey(content.Sha256), edited);
-        var reimported = await reopened.StoreScriptContentAsync(source);
-        Check(reimported.Sha256 == content.Sha256 &&
-            (await reopened.ReadScriptContentAsync(content.Sha256)).SequenceEqual(source));
-        await Throws("NOT_FOUND", async () => await reopened.ReadScriptContentAsync(new string('b', 64)));
-
-        byte[] interrupted = Encoding.UTF8.GetBytes("// interrupted write");
-        f.Store.FailAtWrite = f.Store.Writes + 1;
-        bool failed = false;
-        try { await reopened.StoreScriptContentAsync(interrupted); }
-        catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Storage); failed = true; }
-        Check(failed && (await reopened.ReadSourceMetadataAsync()).State.GetProperty("revision").GetInt64() == 1);
-        var resumed = await reopened.StoreScriptContentAsync(interrupted);
-        Check((await reopened.ReadScriptContentAsync(resumed.Sha256)).SequenceEqual(interrupted));
-    }
-    private static JsonObject Sites(string value) => O(new { wy = new { schema = 1, values = new[] { new { key = "shared-key", value } } } });
-    private static JsonObject NextMetadata(MusicSourceMetadataSnapshot old)
-    { var state = Parsed(old.State); state["revision"] = state["revision"]!.GetValue<long>() + 1; return state; }
-    private static async Task Overlay()
-    {
-        await using var f = new Fixture(); var o = f.Owner(); var metadata = await o.ReadSourceMetadataAsync();
-        var snapshot = await o.ReadSourceScriptDataAsync("test-install-a", 0);
-        Check(!snapshot.Sites.EnumerateObject().Any() && f.Store.Writes == 0);
-        var next = NextMetadata(metadata); next["installations"]!.AsArray().Add(Installation(enabled: false));
-        var overlay = Sites("candidate"); int writes = f.Store.Writes;
-        var committed = await o.CommitSourceWithScriptDataAsync(E(next), metadata.Sha256, "test-install-a", E(overlay), snapshot.Sha256);
-        Check(f.Store.Writes == writes + 1 && committed.State.GetProperty("revision").GetInt64() == 1);
-        overlay["wy"]!["values"]![0]!["value"] = "mutated caller";
-        await Throws("PERMISSION_DENIED", async () => await o.ReadScriptValueAsync("test-install-a", "wy", "shared-key", 1));
-        await o.DisposeAsync(); var restarted = f.Owner();
-        var durable = await restarted.ReadSourceScriptDataAsync("test-install-a", 1);
-        Check(durable.Sites.GetProperty("wy").GetProperty("values")[0].GetProperty("value").GetString() == "candidate");
-        await Throws("STALE_SESSION", async () => await restarted.ReadSourceScriptDataAsync("test-install-a", 0));
-    }
-    private static async Task OverlayConflict()
-    {
-        await using var f = new Fixture(); var o = f.Owner(); var metadata = await Install(o, Installation());
-        var snapshot = await o.ReadSourceScriptDataAsync("test-install-a", 1);
-        await o.CommitScriptValueAsync("test-install-a", "wy", "shared-key", 1, E("live"), false);
-        var next = NextMetadata(metadata); next["installations"]![0]!["current"]!["version"] = "2";
-        int writes = f.Store.Writes;
-        await Throws("SCRIPT_DATA_CONFLICT", async () => await o.CommitSourceWithScriptDataAsync(E(next), metadata.Sha256, "test-install-a", E(Sites("candidate")), snapshot.Sha256));
-        Check(writes == f.Store.Writes && (await o.ReadSourceMetadataAsync()).Sha256 == metadata.Sha256);
-        Check((await o.ReadScriptValueAsync("test-install-a", "wy", "shared-key", 1)).GetString() == "live");
-        var fresh = await o.ReadSourceScriptDataAsync("test-install-a", 1);
-        await o.CommitSourceWithScriptDataAsync(E(next), metadata.Sha256, "test-install-a", E(Sites("candidate")), fresh.Sha256);
-        await Throws("STALE_SESSION", async () => await o.CommitScriptValueAsync("test-install-a", "wy", "shared-key", 1, E("late"), false));
-        Check((await o.ReadScriptValueAsync("test-install-a", "wy", "shared-key", 2)).GetString() == "candidate");
-    }
-    private static async Task OverlayIsolation()
-    {
-        await using var f = new Fixture(); var o = f.Owner(); var metadata = await Install(o, Installation(), Installation("test-install-b"));
-        await o.CommitScriptValueAsync("test-install-a", "tx", "delete-me", 1, E("a"), false);
-        await o.CommitScriptValueAsync("test-install-b", "wy", "shared-key", 1, E("b"), false);
-        var a = await o.ReadSourceScriptDataAsync("test-install-a", 1); var b = await o.ReadSourceScriptDataAsync("test-install-b", 1);
-        var next = NextMetadata(metadata); next["installations"]![1]!["name"] = "Not the candidate";
-        await Throws("REVISION_CONFLICT", async () => await o.CommitSourceWithScriptDataAsync(E(next), metadata.Sha256, "test-install-a", E(Sites("a2")), a.Sha256));
-        next = NextMetadata(metadata); next["installations"]![0]!["current"]!["version"] = "2";
-        await o.CommitSourceWithScriptDataAsync(E(next), metadata.Sha256, "test-install-a", E(Sites("a2")), a.Sha256);
-        Check((await o.ReadSourceScriptDataAsync("test-install-b", 2)).Sha256 == b.Sha256);
-        Check((await o.ReadScriptValueAsync("test-install-a", "tx", "delete-me", 2)).ValueKind == JsonValueKind.Null);
-    }
-    private static async Task OverlayUnknown(bool committed)
-    {
-        await using var f = new Fixture(); var o = f.Owner(); var metadata = await Install(o, Installation());
-        await o.CommitScriptValueAsync("test-install-a", "wy", "shared-key", 1, E("old"), false);
-        var snapshot = await o.ReadSourceScriptDataAsync("test-install-a", 1); var next = NextMetadata(metadata);
-        next["installations"]![0]!["current"]!["version"] = "2"; f.Store.Failure = committed ? 2 : 1;
-        await Throws("COMMIT_UNKNOWN", async () => await o.CommitSourceWithScriptDataAsync(E(next), metadata.Sha256, "test-install-a", E(Sites("new")), snapshot.Sha256));
-        await Throws("COMMIT_UNKNOWN", async () => await o.ReadSourceScriptDataAsync("test-install-a", 1));
-        int writes = f.Store.Writes; await o.ReconcileAsync(); Check(f.Store.Writes == writes);
-        Check((await o.ReadSourceMetadataAsync()).State.GetProperty("revision").GetInt64() == (committed ? 2 : 1));
-        Check((await o.ReadScriptValueAsync("test-install-a", "wy", "shared-key", committed ? 2 : 1)).GetString() == (committed ? "new" : "old"));
-        await o.DisposeAsync(); Check((await f.Owner().ReadSourceMetadataAsync()).State.GetProperty("revision").GetInt64() == (committed ? 2 : 1));
-    }
-    private static async Task QueuedScript()
-    {
-        await using var f = new Fixture(); var o = f.Owner(); var metadata = await Install(o, Installation());
-        f.Store.Entered = new(TaskCreationOptions.RunContinuationsAsynchronously); f.Store.Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        var next = NextMetadata(metadata); next["installations"]![0]!["enabled"] = false;
-        var disabling = o.CommitSourceMetadataAsync(E(next), metadata.Sha256);
-        await f.Store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        using var cancel = new CancellationTokenSource();
-        var cancelled = o.CommitScriptValueAsync("test-install-a", "wy", "late", 1, E("cancelled"), false, cancel.Token);
-        var stale = o.CommitScriptValueAsync("test-install-a", "wy", "late", 1, E("stale"), false);
-        cancel.Cancel(); f.Store.Release.TrySetResult(); await disabling;
-        bool observed = false;
-        try { await cancelled; } catch (OperationCanceledException) { observed = true; }
-        Check(observed); await Throws("STALE_SESSION", async () => await stale);
-        Check(!(await o.ReadSourceScriptDataAsync("test-install-a", 2)).Sites.EnumerateObject().Any() && f.Store.Writes == 2);
-    }
-    private static async Task OverlayInvalid()
-    {
-        await using var f = new Fixture(); var o = f.Owner(); var metadata = await Install(o, Installation());
-        using var duplicate = JsonDocument.Parse("{\"name\":1,\"name\":2}");
-        await Throws("CORRUPT_STORAGE", async () => await o.CommitScriptValueAsync("test-install-a", "wy", "value", 1, duplicate.RootElement, false));
-        var snapshot = await o.ReadSourceScriptDataAsync("test-install-a", 1); var next = NextMetadata(metadata);
-        var invalid = O(new { wy = new { schema = 1, values = Enumerable.Range(0, 65).Select(i => new { key = "key-" + i, value = i }).ToArray() } });
-        await Throws("LIMIT", async () => await o.CommitSourceWithScriptDataAsync(E(next), metadata.Sha256, "test-install-a", E(invalid), snapshot.Sha256));
-        await Throws("INVALID_REQUEST", async () => await o.CommitSourceWithScriptDataAsync(E(next), metadata.Sha256, "test-install-a", E(new Dictionary<string, object> { [""] = new { schema = 1, values = new object[0] } }), snapshot.Sha256));
-        Check(f.Store.Writes == 1);
     }
     private static Task LyricsLrc()
     {

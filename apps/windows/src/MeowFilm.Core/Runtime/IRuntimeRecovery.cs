@@ -4,7 +4,7 @@ public enum RuntimeConnectionState { Dormant, Starting, Ready, Failed, Recoverin
 
 /// <summary>
 /// Product-local lifecycle contract. Recovery never replays business operations.
-/// Registration is frozen at the first script request, not a global event bus.
+/// Registration is frozen when the App starts the runtime, not a global event bus.
 /// </summary>
 public interface IRuntimeRecovery
 {

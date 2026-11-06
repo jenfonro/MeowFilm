@@ -108,6 +108,26 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         e.Handled = true;
     }
     private async void ClearPlaybackCache_Click(object sender, RoutedEventArgs e) => await module.ClearPlaybackCacheAsync();
+    private async void ExclusionAdd_Click(object sender, RoutedEventArgs e)
+    {
+        ExclusionSong.SelectedItem = ExclusionProvider.SelectedItem = ExclusionPlatform.SelectedItem = null;
+        await module.PrepareSourceExclusionFormAsync();
+        if (IsLoaded) ExclusionPopup.IsOpen = true;
+    }
+    private void ExclusionCancel_Click(object sender, RoutedEventArgs e) => ExclusionPopup.IsOpen = false;
+    private async void ExclusionConfirm_Click(object sender, RoutedEventArgs e)
+    {
+        var song = ExclusionSong.SelectedItem as MusicExclusionOption;
+        var provider = ExclusionProvider.SelectedItem as MusicExclusionOption;
+        var platform = ExclusionPlatform.SelectedItem as MusicExclusionOption;
+        if (song is null || provider is null || platform is null) return;
+        ExclusionPopup.IsOpen = false;
+        await module.AddSourceExclusionAsync(song, provider, platform);
+    }
+    private async void ExclusionRestore_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: MusicSourceExclusionRow row }) await module.RestoreSourceExclusionAsync(row);
+    }
     private async void SearchHistoryClear_Click(object sender, RoutedEventArgs e) => await module.ClearSearchHistoryAsync();
     private MusicSearchKindSettings SearchAdvancedSettings => searchAdvancedKind == "songs" ? module.SongSearch : module.PlaylistSearch;
     private void SearchAdvanced_Click(object sender, RoutedEventArgs e)

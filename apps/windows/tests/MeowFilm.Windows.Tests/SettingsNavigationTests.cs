@@ -31,7 +31,7 @@ public static class SettingsNavigationTests
         await using var store = new LocalDocumentStore(path,
             [FilmRuleService.DocumentNamespace, FilmSourceService.DocumentNamespace]);
         int starts = 0;
-        await using var runtime = new OnDemandRuntimeClient(_ =>
+        await using var runtime = new AppRuntimeClient(_ =>
         {
             starts++;
             throw new InvalidOperationException("Synthetic Node startup failure");
@@ -41,6 +41,7 @@ public static class SettingsNavigationTests
         await using var module = new FilmCapability(rules, sources);
         await module.InitializeAsync(default);
         Check(starts == 0 && !module.SettingsView.IsLoaded);
+        runtime.Start();
         await Task.WhenAll(module.StartSourcesAsync(), module.StartSourcesAsync());
         Check(starts == 1 && sources.RuntimeError is not null && !module.SettingsView.IsLoaded);
         await rules.InitializeAsync();
@@ -116,7 +117,7 @@ public static class SettingsNavigationTests
         if (!condition) throw new InvalidOperationException("Settings navigation assertion failed");
     }
 
-    private sealed class Module(string id, string title) : IDesktopModule
+    internal sealed class Module(string id, string title) : IDesktopModule
     {
         public string Id => id;
         public string Title => title;

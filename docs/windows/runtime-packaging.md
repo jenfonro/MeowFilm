@@ -15,7 +15,7 @@ Windows meowfilm App 的脚本载荷由以下两个阶段生成。打包参数 -
 
 ## 输入闭包
 
-运行 descriptor 为 `music@0.7.0`、`cat@0.1.0`、`source@0.1.0`，响应契约分别为 `music.script.v2`、`cat.script.v1`、`source.runtime.v1`；载荷清单 modules 为 `music, cat, source`，product 保持 aggregate。LX 与 Cat 的大控制数据走 64 KiB 分片；source 控制帧为 1 MiB、源码分片为 64 KiB。三者共用同一 WorkerSession/worker 协议/QuickJS 后端。
+运行 descriptor 为 `music@0.8.0`、`cat@0.1.0`、`source@0.1.0`，响应契约分别为 `music.script.v3`、`cat.script.v1`、`source.runtime.v1`；载荷清单 modules 为 `music, cat, source`，product 保持 aggregate。LX 与 Cat 的大控制数据走 64 KiB 分片；source 控制帧为 1 MiB、源码分片为 64 KiB。三者共用同一 WorkerSession/worker 协议/QuickJS 后端。
 
 ```text
 app/bootstrap.mjs

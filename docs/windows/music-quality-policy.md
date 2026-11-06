@@ -17,7 +17,7 @@
 {
   "schema": 1,
   "revision": 0,
-  "request": "320k",
+  "request": "flac",
   "qualityOrder": ["master", "spatial", "enhanced", "hires", "lossless", "high", "standard"],
   "qualityEnabled": ["master", "spatial", "enhanced", "hires", "lossless", "high", "standard"],
   "spatialOrder": ["dolby", "dts_x", "sony360", "sky", "vivid", "qq_atmos", "viper_atmos"],
@@ -71,9 +71,8 @@
 
 ## 播放选择
 
-- 自动模式只在同一脚本实例、同一平台和同一录音的已声明能力交集中按策略排序。
-- 显式请求只尝试请求的具体类型，不静默改成其他类型。
-- 录音缺少 `types` 且未声明 `qualityKnown:true` 时，仅允许已启用并由脚本声明的显式类型交给真实解析器判断；自动模式不得猜测。
-- 空类型、相反类型或 `qualityKnown:true` 构成明确反证时，在调用脚本前拒绝。
-- 策略签名变化撤销旧解析资格并取消仍在途的旧解析；不因设置变化重启已经打开的媒体。
-- 刷新必须绑定原策略签名、缓存签名、脚本代次、录音和具体类型，旧回调不得覆盖当前播放状态。
+自动播放从首选档起沿 qualityOrder 向后跳禁用项，每档穷尽官方与脚本、缓存优先，再降级；auto 从首档开始。
+同一请求对应的缓存若经解码证实为排序更高的已启用音质，自动播放可以直接复用并展示实际音质；低档缓存不能提前跳过高档，手动换档仍须命中指定档位。
+已有录音缺少 types 且未声明 qualityKnown:true，可向声明该音质的脚本明确取链；明确反证则不派发。
+`music.online.resolve` 本身只取一个具体音质，不执行自动回退。播放器手动换档不改设置、不降级，准备成功后才交接。
+策略变更取消在途旧解析、拒绝旧缓存签名，但不重启已打开媒体。完整行为见[统一选源](music-official-selection.md)。

@@ -113,7 +113,7 @@ public static partial class MusicUiTests
         internal readonly MusicCapability Module;
         private DetailsScene()
         {
-            App = new(Store, Runtime, Http); Runtime.Register(App);
+            App = new(Store, Runtime, Http);
             Module = new(App, Store, new PlaybackProbe(), new Dialogs());
         }
         internal static async Task<DetailsScene> Create()
