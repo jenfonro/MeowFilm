@@ -31,11 +31,17 @@ test('Windows input inventory covers shared packaging, locked configuration and 
     'docs/windows/music-implementation.md', 'apps/windows/README.md',
     'apps/windows/src/MeowFilm.Media/IMPLEMENTATION.md',
     'apps/ios/MeowFilm/App.swift', '.local/test-results/native.log',
+    'native/MeowKit/Package.swift', 'scripts/generate-ios-project.py',
+    'scripts/package-ios-runtime.mjs', 'scripts/prepare-ios-runtime.py',
+    'scripts/ios-node-preflight/probe.mjs', 'scripts/ios-node-mobile.json',
+    'scripts/tests/test_source_scope.py', 'tests/ios-runtime.test.mjs', 'tests/ios-runtime-support.mjs',
+    'LICENSES/nodejs-mobile-LICENSE.txt',
     'build/meowfilm.exe', 'tmp/test-results/native.log', 'tmp/working/项目工作记录.md'
   ]) assert.equal(isWindowsBuildInput(path), false, path);
 });
 
 test('Windows fingerprint binds bytes and paths; inventory order and duplicates are irrelevant', () => {
+  mkdirSync(temporaryRoot, { recursive: true });
   const root = mkdtempSync(join(temporaryRoot, 'meowfilm-inputs-'));
   try {
     const files = ['build-windows.ps1', 'scripts/package-runtime.mjs', 'apps/windows/NuGet.Config'];
@@ -45,11 +51,17 @@ test('Windows fingerprint binds bytes and paths; inventory order and duplicates 
     }
     const original = fingerprintInputs(root, files);
     assert.equal(fingerprintInputs(root, [...files.toReversed(), files[0], 'docs/README.md']), original);
+    const ios = 'scripts/ios-node-preflight/probe.mjs';
+    mkdirSync(dirname(join(root, ios)), { recursive: true });
+    writeFileSync(join(root, ios), "import './app/bootstrap.mjs';");
+    assert.equal(fingerprintInputs(root, [...files, ios]), original);
+    writeFileSync(join(root, ios), "import './changed-runtime-input.mjs';");
+    assert.equal(fingerprintInputs(root, [...files, ios]), original);
     writeFileSync(join(root, files[0]), 'second');
     assert.notEqual(fingerprintInputs(root, files), original);
     writeFileSync(join(root, files[0]), 'first');
     assert.notEqual(fingerprintInputs(root, [files[0]]), original);
-    assert.throws(() => fingerprintInputs(root, [...files, 'scripts/missing.mjs']), /ENOENT/);
+    assert.throws(() => fingerprintInputs(root, [...files, 'scripts/windows/missing.mjs']), /ENOENT/);
     assert.throws(() => fingerprintInputs(root, ['README.md']), /No Windows code inputs/);
   } finally {
     assert.equal(dirname(resolve(root)), resolve(temporaryRoot));

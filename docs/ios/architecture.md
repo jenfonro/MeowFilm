@@ -36,6 +36,8 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 
 共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。
 
+原生源码检查仅覆盖 `apps/ios` 和 `native/MeowKit`，不遍历 Windows 专属源码。Node 根测试可用 `node scripts/test-root.mjs --platform ios` 选择 iOS 与共享契约测试；共享 packager 用例不读取 Windows 入口源码，iOS 入口及生成载荷由本端 wrapper 用例验证。
+
 平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器的 ASCII 对象键、安全整数、重复键和深度约束仅由 `MeowRuntime.RuntimeBridgeJSON` 在 RPC／脚本传输边界执行，不作为通用 JSON 限制。
 
 ## UI 技术选型

@@ -77,11 +77,38 @@ test('shared runtime may use its own modules and data-only builtins', t => {
   assert.deepEqual(verifyBoundaries(f.root), { packages: 2 });
 });
 
-test('shared runtime cannot depend on Windows source', t => {
-  const f = fixture(t);
-  f.write('apps/runtime/modules/music-script.mjs', "import '../../windows/runtime/bootstrap.mjs';");
-  assert.throws(() => verifyBoundaries(f.root), /shared runtime depends on platform source/);
-});
+for (const owner of ['packages/a/src/index.js', 'apps/runtime/modules/cat-script.mjs']) {
+  test(`${owner} can contain import vocabulary without declaring a dependency`, t => {
+    const f = fixture(t);
+    f.write(owner, `
+      // import 'node:child_process';
+      const source = "require('node:fs')";
+      const pattern = /from\\s*'node:net'/;
+      const text = \`export { value } from 'node:net';\`;
+      function method() {}
+      method('import', ['installationId', 'name'], () => {});
+      const object = { import() {} };
+      object.import('node:net');
+    `);
+    assert.deepEqual(verifyBoundaries(f.root), { packages: 2 });
+  });
+}
+
+for (const platform of ['windows', 'ios']) {
+  for (const source of [
+    `import '../../${platform}/runtime/bootstrap.mjs';`,
+    `export * from '../../${platform}/runtime/bootstrap.mjs';`,
+    `export { value } from '../../${platform}/runtime/bootstrap.mjs';`,
+    `const runtime = import('../../${platform}/runtime/bootstrap.mjs');`,
+    `const runtime = require('../../${platform}/runtime/bootstrap.mjs');`,
+  ]) {
+    test(`shared runtime rejects ${platform} source dependency: ${source}`, t => {
+      const f = fixture(t);
+      f.write('apps/runtime/modules/music-script.mjs', source);
+      assert.throws(() => verifyBoundaries(f.root), /shared runtime depends on platform source/);
+    });
+  }
+}
 
 for (const specifier of ['node:net', 'node:child_process', '@meowfilm/script-host/src/host.js']) {
   test(`shared runtime rejects platform/private import: ${specifier}`, t => {

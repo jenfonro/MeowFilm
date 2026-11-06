@@ -12,17 +12,20 @@ const portableGlobals = new Set([
   'Packages', 'Java', 'ActiveXObject', 'Deno', 'Bun',
 ]);
 
-function portableReferences(text) {
-  let ast;
-  try { ast = parse(text, { ecmaVersion: 'latest', sourceType: 'module' }); }
-  catch { return []; }
-  const references = [];
+function sourceReferences(text) {
+  const ast = parse(text, { ecmaVersion: 'latest', sourceType: 'module' });
+  const imports = [], globals = [];
   function visit(node, parent) {
     if (!node || typeof node !== 'object') return;
+    const source = ['ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration', 'ImportExpression'].includes(node.type)
+      ? node.source
+      : node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === 'require'
+        ? node.arguments[0] : null;
+    if (source?.type === 'Literal' && typeof source.value === 'string') imports.push(source.value);
     if (node.type === 'MemberExpression' && !node.computed &&
         ['globalThis', 'global', 'window'].includes(node.object?.name) &&
         portableGlobals.has(node.property?.name)) {
-      references.push(node.property.name);
+      globals.push(node.property.name);
     } else if (node.type === 'Identifier' && portableGlobals.has(node.name)) {
       const propertyKey = parent?.type === 'Property' && parent.key === node &&
         !parent.computed && !parent.shorthand;
@@ -32,7 +35,7 @@ function portableReferences(text) {
         parent.key === node && !parent.computed;
       const label = ['LabeledStatement', 'BreakStatement', 'ContinueStatement'].includes(parent?.type) &&
         parent.label === node;
-      if (!propertyKey && !memberKey && !methodKey && !label) references.push(node.name);
+      if (!propertyKey && !memberKey && !methodKey && !label) globals.push(node.name);
     }
     for (const [key, value] of Object.entries(node)) {
       if (['start', 'end', 'loc', 'range'].includes(key)) continue;
@@ -42,7 +45,7 @@ function portableReferences(text) {
     }
   }
   visit(ast, null);
-  return [...new Set(references)];
+  return { imports, globals: [...new Set(globals)] };
 }
 
 export function verifyBoundaries(root = windowsRoot) {
@@ -63,9 +66,8 @@ export function verifyBoundaries(root = windowsRoot) {
       ...manifest.peerDependencies, ...manifest.devDependencies }));
     graph.set(manifest.name, [...dependencies].filter(name => names.has(name)));
     for (const file of walk(base).filter(path => /\.[cm]?js$/.test(path) && !/[\\/]tests?[\\/]/.test(path))) {
-      const text = readFileSync(file, 'utf8');
-      for (const match of text.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\()\s*['"]([^'"]+)['"]/g)) {
-        const target = match[1];
+      const references = sourceReferences(readFileSync(file, 'utf8'));
+      for (const target of references.imports) {
         if (manifest.name === portablePackage && target.startsWith('node:')) {
           errors.push(`${relative(root, file)}: portable runtime imports Node builtin ${target}`);
         }
@@ -80,7 +82,7 @@ export function verifyBoundaries(root = windowsRoot) {
         }
       }
       if (manifest.name === portablePackage) {
-        for (const name of portableReferences(text)) {
+        for (const name of references.globals) {
           errors.push(`${relative(root, file)}: portable runtime uses host global ${name}`);
         }
       }
@@ -93,9 +95,7 @@ export function verifyBoundaries(root = windowsRoot) {
   if (existsSync(shared)) {
     if (lstatSync(shared).isSymbolicLink()) errors.push('apps/runtime: linked source');
     else for (const file of walk(shared).filter(path => /\.[cm]?js$/.test(path))) {
-      const text = readFileSync(file, 'utf8');
-      for (const match of text.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\()\s*['"]([^'"]+)['"]/g)) {
-        const target = match[1];
+      for (const target of sourceReferences(readFileSync(file, 'utf8')).imports) {
         if (target.startsWith('.')) {
           const path = relative(shared, resolve(dirname(file), target));
           if (path === '..' || path.startsWith('..' + sep) || isAbsolute(path))
