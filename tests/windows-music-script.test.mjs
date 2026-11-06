@@ -267,6 +267,8 @@ test('musicUrl results are checked once for playback: empty, malformed, restrict
   denied(await media({ case: 'changed' }), 'TARGET_CHANGED');
   denied(await media({ case: 'timed', duration: 120 }), 'RECORDING_MISMATCH');
   okay(await media({ case: 'timed', duration: 183 }));
+  for (const duration of [170, 190]) okay(await media({ case: 'timed', duration }));
+  for (const duration of [169.99, 190.01]) denied(await media({ case: 'timed', duration }), 'RECORDING_MISMATCH');
   okay(await media({ case: 'timed', duration: 0 }));
   const future = okay(await media({ case: 'future' }));
   assert.equal(future.expiresAt, 4102444800000);

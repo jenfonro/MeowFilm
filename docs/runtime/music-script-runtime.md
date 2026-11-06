@@ -30,7 +30,7 @@
 
 `resolve` 返回 installationId、generation、contentHash、platform、quality、url、headers、expiresAt。
 URL 必须是合法 HTTP(S)，拒绝凭据 URL、试听/加密标志、禁止请求头、过期时间及相反的目标身份。
-脚本提供的正时长与已知录音时长相差超过 `max(3s,较短×2%)` 时返回 `RECORDING_MISMATCH`；未知时长不判错。
+脚本提供的正时长与已知录音时长相差超过 10 秒 时返回 `RECORDING_MISMATCH`；未知时长不判错。
 该接口不补搜、不选其他脚本、不降级；原生选源会话拥有这些策略。请求音质不是实测音质。
 
 ## 持久化与隔离

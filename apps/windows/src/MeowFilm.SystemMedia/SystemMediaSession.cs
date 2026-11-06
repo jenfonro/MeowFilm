@@ -164,7 +164,10 @@ public sealed class SystemMediaSession : IAsyncDisposable
                 expectedOwner is null || !owners.TryGetValue(expectedOwner, out var registered)) return;
             switch (request.Command)
             {
-                case SystemPlaybackCommand.Play: await playback.PlayAsync(); break;
+                case SystemPlaybackCommand.Play:
+                    if (registered.Play is { } play) await play(lifetime.Token);
+                    else await playback.PlayAsync();
+                    break;
                 case SystemPlaybackCommand.Pause: await playback.PauseAsync(); break;
                 case SystemPlaybackCommand.Stop: await playback.StopAsync(); break;
                 case SystemPlaybackCommand.Next when registered.Next is not null:

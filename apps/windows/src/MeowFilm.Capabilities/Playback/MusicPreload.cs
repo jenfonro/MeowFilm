@@ -106,7 +106,7 @@ public sealed partial class MusicCapability
                 key.StartsWith(song.Id + "\0", StringComparison.Ordinal))) return;
             // Built-in, already-mapped recordings only: preparing a file never searches or runs scripts.
             var session = await BeginSourceSession(song, attempt.Cancellation.Token, officialOnly: true);
-            if (session.Signature != state.Media!.Target!.QualityPolicySignature) return;
+            if (session.Signature != savedQualitySignature) return;
             var media = await session.AutomaticAsync(attempt.Cancellation.Token);
             if (media.Uri is null || media.Receipt is not { } receipt || media.Target is not { } selected) return;
             string platform = selected.Platform;
@@ -118,8 +118,8 @@ public sealed partial class MusicCapability
             if (await audioFileCache.ReadInfoAsync(scope, songId, signature, attempt.Cancellation.Token) is not null) return;
             if (!ReferenceEquals(musicPreload, attempt) || !CurrentRecovery(state)) return;
             preparedEntry = attempt.TargetEntry;
-            ownedPrepared = audioFileCache.Prepare(scope, songId, signature, receipt,
-                () => !stopping && savedQualitySignature == state.Media.Target.QualityPolicySignature &&
+            ownedPrepared = audioFileCache.Prepare(scope, songId, signature, FileReceipt(song, receipt),
+                () => !stopping && savedQualitySignature == session.Signature &&
                     application.IsOfficialPlaybackCurrent(platform, scope, generation), lifetime.Token);
             preparedAudio = ownedPrepared;
             // Complete validated bytes remain provisional until this exact queue entry really starts.

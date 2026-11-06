@@ -6,7 +6,7 @@
 
 - App 窗口只附加一个 `SystemMediaSession` 和一个 `WindowsSystemMediaBackend`。
 - `ISystemPlayback` 投影当前播放器状态及 play、pause、stop、seek；生产装配直接包装唯一 `NativePlayback`。
-- `SystemPlaybackOwner` 按 `OwnerId` 注册 next／previous 和 audio／video kind。未注册 owner 的媒体不会向系统控制面声明可操作。
+- `SystemPlaybackOwner` 按 `OwnerId` 注册 next／previous 和 audio／video kind，可提供 Play 回调执行业务恢复准入；提供后不再回退到原生 Play。音乐用此入口阻止恢复已排除的错源，未提供回调的 owner 保持原生恢复行为。未注册 owner 的媒体不会向系统控制面声明可操作。
 - 系统只接收标题、播放状态、位置、时长和能力标志；不接收平台凭据、媒体 URL、文件路径或脚本状态。
 
 ## 命令围栏

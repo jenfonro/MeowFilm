@@ -103,6 +103,9 @@ public sealed partial class MusicCapability
         // command queue: an in-flight replacement must not commit while this is waiting.
         if (musicRecovery is { Switching: { } switching } active && active.Song.Id == row.Id)
             switching.Cancel();
+        if (musicRecovery is { Pending.Media.Target: { } pending } recovering && recovering.Song.Id == row.Id &&
+            (pending.Installation ?? MusicLibraryOwner.OfficialProvider) == provider.Key && pending.Platform == platform.Key)
+            CancelPendingMedia(recovering, "SOURCE_EXCLUDED");
         string name = provider.Key == MusicLibraryOwner.OfficialProvider ? MusicSourceRow.OfficialName(platform.Key) : provider.Name;
         return RunAsync(async () =>
         {

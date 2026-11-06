@@ -46,7 +46,8 @@ internal static class Program
                 // restoration is App-owned and independent of the selected page.
                 _ = capabilities.OfType<FilmCapability>().Single().StartSourcesAsync();
                 return new SystemMediaWindowAttachment(window, playback!,
-                    [new("music", _ => music.StepAsync(true), _ => music.StepAsync(false))]);
+                    [new("music", _ => music.StepAsync(true), _ => music.StepAsync(false),
+                        Play: _ => music.ResumePlaybackAsync())]);
             });
     }
 }

@@ -478,7 +478,13 @@ public static class MusicOfficialPlaybackScopeTests
             throw new InvalidOperationException("exploration must not prepare playback");
         public Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token) =>
             throw new InvalidOperationException("exploration must not prepare playback");
-        public Task CommitHandoffAsync(CancellationToken token) => throw new InvalidOperationException("no handoff during exploration");
+        public async Task ReopenReadAsync(NativePlaybackContinuation continuation, INativeMediaReadLease lease,
+            CancellationToken token = default)
+        {
+            await lease.DisposeAsync();
+            throw new InvalidOperationException("no read continuation during exploration");
+        }
+        public Task CommitHandoffAsync(Action committed, CancellationToken token) => throw new InvalidOperationException("no handoff during exploration");
         public Task DiscardHandoffAsync() => Task.CompletedTask;
         public NativePlaybackContinuation? CaptureContinuation() => null;
         public Task ReopenAsync(NativePlaybackContinuation continuation, Uri uri,
