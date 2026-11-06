@@ -24,6 +24,12 @@ public sealed class ArtworkImage : Grid
         typeof(ArtworkImage), new PropertyMetadata(Stretch.UniformToFill, (value, args) => ((ArtworkImage)value).image.Stretch = (Stretch)args.NewValue));
     public static readonly DependencyProperty ShowRetryProperty = DependencyProperty.Register(nameof(ShowRetry), typeof(bool),
         typeof(ArtworkImage), new PropertyMetadata(true, (value, _) => ((ArtworkImage)value).UpdateRetryVisibility()));
+    private static readonly DependencyPropertyKey SourcePropertyKey = DependencyProperty.RegisterReadOnly(nameof(Source),
+        typeof(BitmapSource), typeof(ArtworkImage), new PropertyMetadata(null,
+            (value, args) => ((ArtworkImage)value).image.Source = (BitmapSource?)args.NewValue));
+    public static readonly DependencyProperty SourceProperty = SourcePropertyKey.DependencyProperty;
+    /// <summary>Borrowed decoded pixels; cleared with the artwork lease, without another acquisition.</summary>
+    public BitmapSource? Source => (BitmapSource?)GetValue(SourceProperty);
     private static readonly DependencyPropertyKey AspectRatioPropertyKey = DependencyProperty.RegisterReadOnly(nameof(AspectRatio),
         typeof(double), typeof(ArtworkImage), new PropertyMetadata(0d));
     public static readonly DependencyProperty AspectRatioProperty = AspectRatioPropertyKey.DependencyProperty;
@@ -126,7 +132,7 @@ public sealed class ArtworkImage : Grid
         epoch++;
         var priorRequest = request; request = null; requestTask = null; attempted = failed = false;
         var priorLease = lease; lease = null;
-        image.Source = null; SetValue(AspectRatioPropertyKey, 0d); SetValue(RawPaletteBrushPropertyKey, Brushes.DimGray);
+        SetValue(SourcePropertyKey, null); SetValue(AspectRatioPropertyKey, 0d); SetValue(RawPaletteBrushPropertyKey, Brushes.DimGray);
         SetValue(PaletteBrushPropertyKey, Brushes.DimGray);
         SetValue(TopPaletteBrushPropertyKey, Brushes.DimGray);
         SetValue(HasTopPalettePropertyKey, false);
@@ -227,7 +233,7 @@ public sealed class ArtworkImage : Grid
             {
                 acquired = await loader.AcquireAsync(address, current.Token);
                 if (stamp != epoch || current.IsCancellationRequested || !HasDemand()) return;
-                lease = acquired; acquired = null; image.Source = lease.Image;
+                lease = acquired; acquired = null; SetValue(SourcePropertyKey, lease.Image);
                 SetValue(AspectRatioPropertyKey, (double)lease.Image.PixelWidth / lease.Image.PixelHeight);
                 var palettes = SamplePalettes(lease.Image);
                 SetValue(RawPaletteBrushPropertyKey, palettes.Raw);

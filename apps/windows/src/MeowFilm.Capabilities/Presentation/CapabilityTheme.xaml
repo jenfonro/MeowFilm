@@ -3,6 +3,7 @@
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop">
  <ResourceDictionary.MergedDictionaries>
   <ResourceDictionary Source="/MeowFilm.Desktop;component/Theme.xaml"/>
+  <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/Controls/CardBrushes.xaml"/>
   <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/Controls/OverlayScrollChrome.xaml"/>
  </ResourceDictionary.MergedDictionaries>
  <Style x:Key="Capability.SeekPreview" TargetType="ToolTip">

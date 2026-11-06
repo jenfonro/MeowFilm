@@ -1,6 +1,7 @@
 import Foundation
 import MeowMusicFeature
 import MeowStorage
+import os
 
 public protocol MusicClientContextPersisting: Sendable {
     func read() throws -> Data?
@@ -26,7 +27,7 @@ public class MusicClientContextDocument: MusicClientContextPersisting, @unchecke
     public func read() throws -> Data? {
         lock.lock(); defer { lock.unlock() }
         do { return try storage().read(key: storageKey) }
-        catch { throw Self.failure(error) }
+        catch { Self.record(error, operation: "read"); throw Self.failure(error) }
     }
     public func compareAndSwap(expected: Data?, replacement: Data) throws {
         lock.lock(); defer { lock.unlock() }
@@ -40,20 +41,41 @@ public class MusicClientContextDocument: MusicClientContextPersisting, @unchecke
                 }
                 bytes = replacement
             }
-        } catch { throw conflict ? MusicServiceError.storageConflict : Self.failure(error, committing: true) }
+        } catch {
+            Self.record(error, operation: "write")
+            throw conflict ? MusicServiceError.storageConflict : Self.failure(error)
+        }
     }
-    static func failure(_ error: Error, committing: Bool = false) -> MusicServiceError {
+    static func failure(_ error: Error) -> MusicServiceError {
         if let error = error as? MusicServiceError { return error }
         if let error = error as? EncryptedDocumentStoreError {
             switch error {
             case .keyProvider(.locked), .keyProvider(.accessDenied), .keyProvider(.unavailable): return .accessUnavailable
+            case .keyProvider(.policyMismatch): return .storagePolicyMismatch
+            case .keyProvider(.missingEntitlement): return .storagePermissionDenied
             case .revisionConflict: return .storageConflict
             case .invalidEnvelope, .unsupportedVersion, .authenticationFailed, .missingKey: return .corruptDocument
             case .documentTooLarge, .namespaceFull: return .limit
-            default: break
+            case .keyProvider(.invalidKeyMaterial): return .corruptDocument
+            default: return .storageFailed
             }
         }
-        return committing ? .commitUnconfirmed : .storageFailed
+        // The synchronous store has no fallible work after its atomic rename.
+        // Unknown errors here do not imply an ambiguous commit. An explicitly
+        // reported MusicServiceError.commitUnconfirmed is still preserved above.
+        return .storageFailed
+    }
+
+    private static let logger = Logger(subsystem: "dev.meowfilm.aggregate", category: "storage")
+    private static func record(_ error: Error, operation: String) {
+        // Both enums are closed and contain no paths, item names or values.
+        // Never format an arbitrary underlying Error into the log.
+        let cause: String
+        if let error = error as? EncryptedDocumentStoreError { cause = String(describing: error) }
+        else if let error = error as? MusicServiceError { cause = error.rawValue }
+        else { cause = "storageFailure" }
+        let id = MusicRequestTrace.current?.logicalID ?? "-"
+        logger.error("id=\(id, privacy: .public) op=\(operation, privacy: .public) cause=\(cause, privacy: .public)")
     }
 }
 
@@ -156,7 +178,7 @@ class MusicClientContextState<Value>: @unchecked Sendable {
             try document?.compareAndSwap(expected: expected, replacement: bytes)
             expected = bytes; self.value = value; revision = UUID()
         } catch {
-            let failure = MusicClientContextDocument.failure(error, committing: true); fault = failure
+            let failure = MusicClientContextDocument.failure(error); fault = failure
             throw failure
         }
     }
@@ -181,7 +203,7 @@ class MusicClientContextState<Value>: @unchecked Sendable {
             expected = bytes; value = next; revision = UUID()
             return (next, revision)
         } catch {
-            let failure = MusicClientContextDocument.failure(error, committing: true)
+            let failure = MusicClientContextDocument.failure(error)
             fault = failure
             throw failure
         }

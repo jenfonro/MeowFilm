@@ -286,6 +286,21 @@ copied into the application's protocol adapters.
 ## QR Code generator — MIT
 
 Copyright (c) 2018 Manuel Bleichenbacher. License: `qr-code-generator-LICENSE.txt`.
+
+## Entry artwork color-selection references — Windows
+
+The Windows music entry palette uses the muted/light-muted color-role approach
+described by AndroidX Palette (Copyright 2018 The Android Open Source Project,
+Apache-2.0; license text: `Apache-2.0.txt`):
+[Palette.java](https://github.com/androidx/androidx/blob/a6a6dfbfb81d34881205521e9e5cb886d91e5011/palette/palette/src/main/java/androidx/palette/graphics/Palette.java)
+and [Target.java](https://github.com/androidx/androidx/blob/a6a6dfbfb81d34881205521e9e5cb886d91e5011/palette/palette/src/main/java/androidx/palette/graphics/Target.java).
+The application implements its own bounded, alpha-weighted RGB histogram and
+population/lightness/chroma scoring in `MusicEntryPalette.cs`; it does not ship
+AndroidX, node-vibrant, their quantizers, skin-tone filters or generated swatch
+fallbacks. Tone adjustment uses the standard
+[Oklab color-space transforms](https://bottosson.github.io/posts/oklab/).
+No additional runtime dependency is used.
+
 ## Music platform brand marks
 
 The Windows music-platform assets identify NetEase Cloud Music, QQ Music, KuGou
