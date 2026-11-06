@@ -29,10 +29,12 @@ public static class FilmPlaybackTests
             () => MusicQualityConsumerTests.Sta(FlatTiles));
         yield return new("film-playback: hover or focus lifts episode cards rows and recommendations around a centered play mark",
             () => MusicQualityConsumerTests.Sta(HoverLift));
-        yield return new("film-playback: backdrop poster fills its frame at the original ratio and fades into the page",
+        yield return new("film-playback: poster covers the whole information region behind its foreground",
             () => MusicQualityConsumerTests.Sta(BackdropPoster));
         yield return new("film-playback: centered hero actions expose unavailable playback and retain each film favorite",
             () => MusicQualityConsumerTests.Sta(HeroActions));
+        yield return new("film-playback: overlay text stays readable on bright dark and missing posters",
+            () => MusicQualityConsumerTests.Sta(OverlayReadability));
         yield return new("film-playback: ambient tint follows the poster stays fixed in the viewport and keeps text readable",
             () => MusicQualityConsumerTests.Sta(AmbientTint));
     }
@@ -179,6 +181,8 @@ public static class FilmPlaybackTests
                     "wide metadata stays the same height as the player");
             if (width == 840)
             {
+                Click(Named<Button>(view, "OverviewToggle"));
+                await Drain();
                 var details = Visuals(metadata).OfType<ScrollViewer>().Single();
                 double pageOffset = scroll.VerticalOffset;
                 Check(details.ScrollableHeight > 0, "wide metadata has its own vertical scroll range");
@@ -186,6 +190,9 @@ public static class FilmPlaybackTests
                 await Drain();
                 Check(details.VerticalOffset > 0 && Math.Abs(scroll.VerticalOffset - pageOffset) < .5,
                     "scrolling metadata leaves the page viewport in place");
+                CheckBackgroundCoverage(view);
+                Click(Named<Button>(view, "OverviewToggle"));
+                await Drain();
             }
             var content = (FrameworkElement)scroll.Content;
             double margin = stacked ? 24 : 32;
@@ -292,7 +299,9 @@ public static class FilmPlaybackTests
         var view = scene.Playback;
         var page = scene.Page;
         var metadata = Named<Grid>(view, "MetadataPanel");
-        Check(!Visuals(metadata).OfType<Border>().Any(border => border.IsVisible && border.TemplatedParent is not ButtonBase &&
+        var backdropLayer = Named<Grid>(view, "MetadataBackdrop");
+        Check(!Visuals(metadata).OfType<Border>().Any(border => border.IsVisible &&
+                !border.IsDescendantOf(backdropLayer) && border.TemplatedParent is not ButtonBase &&
                 ((border.BorderThickness != default && border.BorderBrush is SolidColorBrush { Color.A: > 0 }) ||
                 (border.ActualWidth > metadata.ActualWidth / 2 && border.Background is SolidColorBrush { Color.A: > 0 }))),
             "metadata sits directly on the page without a surface or outlined card");
@@ -418,11 +427,9 @@ public static class FilmPlaybackTests
         Check(backdrop.DesiredSize == default, "the backdrop never asks its panel for size");
         CheckSlot(backdrop, image, new Rect(0, -150, 400, 600), "a portrait fills the entire frame with a centered crop");
         var pixels = Pixels((FrameworkElement)backdrop.Parent);
-        Check(new[] { (1, 1), (399, 1), (1, 140), (399, 140), (200, 140) }
-            .All(point => Alpha(pixels, 400, point.Item1, point.Item2) > 240), "the upper half and side edges stay clear");
-        Check(Alpha(pixels, 400, 200, 225) is > 110 and < 140 &&
-            new[] { 1, 200, 399 }.All(x => Alpha(pixels, 400, x, 299) < 5),
-            "the lower half fades continuously into a transparent bottom edge");
+        Check(new[] { (1, 1), (399, 1), (1, 140), (399, 140), (200, 140), (200, 225), (1, 299), (399, 299) }
+            .All(point => Alpha(pixels, 400, point.Item1, point.Item2) > 240),
+            "the image remains present across the full region including behind the lower content");
 
         (backdrop, image) = Backdrop(poster, 150, 300);
         CheckSlot(backdrop, image, new Rect(-25, 0, 200, 300), "a narrow frame crops the portrait equally on each side");
@@ -442,16 +449,43 @@ public static class FilmPlaybackTests
             Math.Abs(preview.ActualWidth / preview.ActualHeight - 2d / 3) < .01 &&
             slot.Left <= 0 && slot.Top <= 0 && slot.Right >= real.ActualWidth && slot.Bottom >= real.ActualHeight &&
             Math.Abs(slot.Left + slot.Width / 2 - real.ActualWidth / 2) < 1,
-            "the wide hero fills the full image frame at the poster ratio");
+            "the wide information background keeps the poster ratio");
+        CheckBackgroundCoverage(view);
         scene.View.Width = 700;
         scene.Window.Width = 700;
         scene.Window.UpdateLayout();
         await Drain();
         var details = Named<ScrollViewer>(view, "MetadataScroll");
         Check(double.IsNaN(panel.Height) && Math.Abs(panel.ActualHeight - details.DesiredSize.Height) < 1 &&
-            real.ActualHeight is >= 220 and <= 340 && real.ActualHeight < panel.ActualHeight &&
             Math.Abs(preview.ActualWidth / preview.ActualHeight - 2d / 3) < .01,
-            "stacked metadata sizes to its content with a bounded image frame and no stretched poster");
+            "stacked metadata sizes to its content without stretching the poster");
+        CheckBackgroundCoverage(view);
+        double collapsedHeight = panel.ActualHeight;
+        Click(Named<Button>(view, "OverviewToggle"));
+        await Drain();
+        Check(panel.ActualHeight > collapsedHeight && Named<TextBlock>(view, "OverviewText").IsVisible,
+            "the expanded overview grows the narrow information region");
+        CheckBackgroundCoverage(view);
+    }
+
+    private static void CheckBackgroundCoverage(FilmPlaybackView view)
+    {
+        var panel = Named<Grid>(view, "MetadataPanel");
+        var backdrop = Named<FilmPlaybackPoster>(view, "Backdrop");
+        var bounds = Bounds(backdrop, panel);
+        Check(bounds.TopLeft == default && Math.Abs(bounds.Width - panel.ActualWidth) < 1 &&
+            Math.Abs(bounds.Height - panel.ActualHeight) < 1,
+            "the poster covers the whole information region, not a separate image above it");
+        foreach (var element in new FrameworkElement[] { Named<TextBlock>(view, "FilmTitle"),
+            Named<TextBlock>(view, "FilmMetadata"), Named<StackPanel>(view, "HeroActions"),
+            Named<Button>(view, "OverviewToggle"), Named<TextBlock>(view, "OverviewText") })
+        {
+            if (!element.IsVisible) continue;
+            var visible = Bounds(element, panel);
+            visible.Intersect(new Rect(panel.RenderSize));
+            if (!visible.IsEmpty)
+                Check(bounds.Contains(visible), "every visible foreground element is superimposed on the poster");
+        }
     }
 
     private static async Task HeroActions()
@@ -470,8 +504,8 @@ public static class FilmPlaybackTests
         var favorite = Named<ToggleButton>(view, "FavoriteButton");
         var play = Named<Button>(view, "HeroPlayButton");
         Check(title.TextAlignment == TextAlignment.Center && metadata.TextAlignment == TextAlignment.Center &&
-            ReferenceEquals(details.Content, content) && content.Children.Contains(Named<FilmPlaybackPoster>(view, "Backdrop")),
-            "the full-width image and centered identity share the metadata scroll content");
+            content.IsDescendantOf(details) && !Named<FilmPlaybackPoster>(view, "Backdrop").IsDescendantOf(details),
+            "identity and actions scroll in front of a background covering their whole viewport");
         foreach (double width in new[] { 1237d, 907d, 840d })
         {
             scene.Window.Width = scene.View.Width = width;
@@ -484,8 +518,10 @@ public static class FilmPlaybackTests
                 Check(Math.Abs(bounds.Left + bounds.Width / 2 - content.ActualWidth / 2) <= 1,
                     "identity facts and the action group share the image center");
             }
-            Check(Bounds(actions, details).Bottom <= details.ViewportHeight + 1,
-                "the standard short title and both actions fit the desktop metadata viewport");
+            Check(Bounds(title, details).Top >= 0 && Bounds(actions, details).Bottom <= details.ViewportHeight + 1 &&
+                Bounds(Named<Button>(view, "OverviewToggle"), details).Bottom <= details.ViewportHeight + 1,
+                "the short title playback favorite and overview action fit the desktop metadata viewport");
+            CheckBackgroundCoverage(view);
         }
         Check(!play.IsEnabled && AutomationProperties.GetName(play).Contains("暂无片源", StringComparison.Ordinal) &&
             Visuals(play).OfType<TextBlock>().Any(text => text.Text == "暂无片源"),
@@ -518,26 +554,90 @@ public static class FilmPlaybackTests
         Check(!page.IsFavorite && favorite.IsChecked == false &&
             Named<TextBlock>(view, "FavoriteLabel").Text == "收藏", "Space removes the favorite and updates its label");
         var overview = Named<TextBlock>(view, "OverviewText");
-        Check(overview.TextAlignment == TextAlignment.Left && overview.MaxHeight == 66, "overview starts left-aligned in three lines");
-        Click(Named<Button>(view, "OverviewToggle"));
+        var overviewToggle = Named<Button>(view, "OverviewToggle");
+        Check(!page.OverviewExpanded && overview.Visibility == Visibility.Collapsed &&
+            overview.DesiredSize == default && (string)overviewToggle.Content == "简介",
+            "only the overview action is initially visible; the body takes no layout space");
+        double collapsedHeight = content.ActualHeight;
+        Click(overviewToggle);
         await Drain();
-        Check(page.OverviewExpanded && double.IsPositiveInfinity(overview.MaxHeight), "the full overview still expands");
-        Click(Named<Button>(view, "OverviewToggle"));
+        Check(page.OverviewExpanded && overview.IsVisible && overview.Text == page.Overview &&
+            overview.TextAlignment == TextAlignment.Left && overview.TextTrimming == TextTrimming.None &&
+            (string)overviewToggle.Content == "收起简介" && content.ActualHeight > collapsedHeight,
+            "clicking the overview action reveals the complete text and changes its label");
+        await module.OpenRecommendationAsync(page.Recommendations[0]);
         await Drain();
-        Check(!page.OverviewExpanded && overview.MaxHeight == 66, "the overview still collapses");
+        Check(!scene.Page.OverviewExpanded && overview.Visibility == Visibility.Collapsed,
+            "another film begins with a collapsed overview");
+        await module.RestoreNavigationAsync(location, default);
+        await Drain();
+        Check(page.OverviewExpanded && overview.IsVisible, "return navigation restores the expanded overview");
+        PressEnter(overviewToggle);
+        await Drain();
+        Check(!page.OverviewExpanded && overview.Visibility == Visibility.Collapsed &&
+            Math.Abs(content.ActualHeight - collapsedHeight) < 1 &&
+            AutomationProperties.GetItemStatus(overviewToggle) == "已收起",
+            "Enter collapses the overview and reclaims its layout space");
         DesktopTheme.SetIsHighContrast(scene.Window, true);
         details.ScrollToTop();
         await Drain();
-        Check(!Named<FilmPlaybackPoster>(view, "Backdrop").IsVisible && Bounds(title, content).Top < 1 &&
+        Check(!Named<FilmPlaybackPoster>(view, "Backdrop").IsVisible && !Named<Border>(view, "MetadataWash").IsVisible &&
+            Bounds(title, content).Top < 1 &&
             favorite.Foreground is SolidColorBrush ink && ink.Color == SystemColors.WindowTextColor &&
             play.Foreground is SolidColorBrush disabled && disabled.Color == SystemColors.GrayTextColor,
             "high contrast reclaims the image space and uses system colors for both actions");
         Check(scene.Source.Calls == 0, "hero and favorite interactions issue no source requests");
     }
 
+    private static async Task OverlayReadability()
+    {
+        await using var scene = new Scene(907);
+        await scene.Module.NavigateAsync(FilmCapability.PlaybackRoute, default);
+        await Drain();
+        var view = scene.Playback;
+        var panel = Named<Grid>(view, "MetadataPanel");
+        var scroll = Named<ScrollViewer>(view, "MetadataScroll");
+        var poster = Named<FilmPlaybackPoster>(view, "Backdrop");
+        var image = poster.Children.OfType<Image>().Single();
+        foreach (bool dark in new[] { false, true })
+        {
+            var window = dark ? Color.FromRgb(0x19, 0x1B, 0x20) : Color.FromRgb(0xF7, 0xF8, 0xFA);
+            var text = dark ? Color.FromRgb(0xF1, 0xF2, 0xF4) : Color.FromRgb(0x30, 0x34, 0x43);
+            view.Resources["MeowFilm.Brush.Window"] = new SolidColorBrush(window);
+            view.Resources["MeowFilm.Brush.Text"] = new SolidColorBrush(text);
+            panel.Background = new SolidColorBrush(window);
+            foreach (byte? value in new byte?[] { 0, 255, null })
+            {
+                image.Source = value is byte channel
+                    ? BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgra32, null, new byte[] { channel, channel, channel, 255 }, 4)
+                    : null;
+                poster.InvalidateArrange();
+                await Drain();
+                var ink = ((SolidColorBrush)Named<TextBlock>(view, "FilmMetadata").Foreground).Color;
+                Check(ink == text, "the contrast experiment uses the requested theme's actual text color");
+                scroll.Visibility = Visibility.Hidden;
+                await Drain();
+                var pixels = Pixels(panel);
+                int width = (int)panel.ActualWidth, height = (int)panel.ActualHeight;
+                double worst = 99;
+                for (int y = 22; y < height - 22; y += 4)
+                    for (int x = 20; x < width - 20; x += 4)
+                    {
+                        int offset = (y * width + x) * 4;
+                        Check(pixels[offset + 3] == 255, "contrast samples must contain the painted information background");
+                        var color = Color.FromRgb(pixels[offset + 2], pixels[offset + 1], pixels[offset]);
+                        worst = Math.Min(worst, Contrast(ink, color));
+                    }
+                scroll.Visibility = Visibility.Visible;
+                await Drain();
+                Check(worst >= 4.5, $"overlay text stays readable for {(dark ? "dark" : "light")} theme and poster {value}: {worst}");
+            }
+        }
+    }
+
     private static (FilmPlaybackPoster Poster, Image Image) Backdrop(string address, double width, double height)
     {
-        // A host keeps the poster's own clip and opacity mask in the rendered visual tree.
+        // A host keeps the poster's crop in the rendered visual tree.
         var poster = new FilmPlaybackPoster { IsBackdrop = true, Address = address };
         var host = new Grid { Width = width, Height = height, Children = { poster } };
         host.Measure(new Size(width, height));
@@ -558,7 +658,11 @@ public static class FilmPlaybackTests
     {
         int width = (int)element.ActualWidth, height = (int)element.ActualHeight;
         var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(element);
+        // Render into local coordinates; a mounted panel's parent offset is outside this bitmap.
+        var visual = new DrawingVisual();
+        using (var drawing = visual.RenderOpen())
+            drawing.DrawRectangle(new VisualBrush(element), null, new Rect(0, 0, width, height));
+        bitmap.Render(visual);
         var pixels = new byte[width * height * 4];
         bitmap.CopyPixels(pixels, width * 4, 0);
         return pixels;
