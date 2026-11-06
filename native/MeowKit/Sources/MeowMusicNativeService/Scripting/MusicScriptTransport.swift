@@ -4,19 +4,19 @@ import MeowJSON
 import MeowMusicFeature
 import MeowRuntime
 
-/// A music.script.v2 failure envelope with its closed runtime code.
+/// A music.script.v3 failure envelope with its closed runtime code.
 struct MusicScriptCallError: Error, Equatable { let code: String }
 
-/// music.script.v2 over the embedded runtime: source staging, transparent
+/// music.script.v3 over the embedded runtime: source staging, transparent
 /// control upload and blob results. Business validation stays with the owner.
 struct MusicScriptTransport: Sendable {
-    static let contract = "music.script.v2"
+    static let contract = "music.script.v3"
     static let chunkBytes = 64 * 1024
     /// Largest complete business result the native owner decodes.
     static let maximumResultBytes = 8 * 1024 * 1024
     let connection: RuntimeBridgeConnection
 
-    /// load / unload / invoke / status, chunking large params or results as the module requires.
+    /// Management and invocation, chunking large params or results as the module requires.
     func call(_ operation: String, _ params: [String: JSONValue], timeout: TimeInterval? = nil) async throws -> [String: JSONValue] {
         let value = JSONValue.object(params)
         let bytes: Data
@@ -43,10 +43,10 @@ struct MusicScriptTransport: Sendable {
         return try Self.success(reply)
     }
 
-    /// Stages one complete source; the caller releases the token after load.
-    func stage(_ bytes: Data) async throws -> String {
+    /// Stages one complete source; the caller releases the token after the management operation.
+    func stage(_ bytes: Data, basename: String) async throws -> String {
         let begin = try Self.success(await rpc("stage.begin", .object([
-            "basename": .string("source.js"), "length": .number(Double(bytes.count)),
+            "basename": .string(basename), "length": .number(Double(bytes.count)),
             "sha256": .string(musicScriptSHA256(bytes)),
         ])))
         guard let token = begin["token"]?.scriptText, begin["chunkBytes"]?.scriptInteger == Self.chunkBytes else {

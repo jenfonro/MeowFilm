@@ -287,10 +287,24 @@ test('unlisted shared helpers are rejected rather than silently omitted', async 
   await fails(f, 'SHARED_CLOSURE');
 });
 
+test('shared runtime packaging accepts ordinary method names named import', async () => {
+  const f = fixture();
+  f.file('apps/runtime/modules/cat-script.mjs', `${sourceCode}\nconst methods = { 'import': () => null };\nmethods.import('installationId');\n`);
+  assert.equal((await packageRuntime({ root: f.root, product: 'aggregate', output: f.output() })).status, 'platform-pending');
+});
+
 for (const specifier of ['../../windows/runtime/bootstrap.mjs', 'node:net', '@meowfilm/script-host/src/host.js']) {
   test(`shared runtime packaging cannot bypass its platform/public closure: ${specifier}`, async () => {
     const f = fixture();
     f.file('apps/runtime/modules/music-script.mjs', `import '${specifier}';\n${sourceCode}`);
+    await fails(f, 'SHARED_IMPORT');
+  });
+}
+
+for (const statement of ["import'node:net';", "import('node:net');", "require('node:net');"]) {
+  test(`shared runtime packaging rejects compact module syntax: ${statement}`, async () => {
+    const f = fixture();
+    f.file('apps/runtime/modules/music-script.mjs', `${statement}\n${sourceCode}`);
     await fails(f, 'SHARED_IMPORT');
   });
 }

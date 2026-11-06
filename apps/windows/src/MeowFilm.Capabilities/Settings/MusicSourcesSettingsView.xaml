@@ -16,51 +16,97 @@
    </ResourceDictionary.MergedDictionaries>
    <Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}"/>
    <Style x:Key="Source.Muted" TargetType="TextBlock" BasedOn="{StaticResource Settings.Subtitle}"/>
-   <Style x:Key="Source.Row" TargetType="Border">
-    <Setter Property="Height" Value="76"/>
-    <Setter Property="BorderThickness" Value="0,0,0,1"/>
-    <Setter Property="BorderBrush" Value="{DynamicResource Settings.Brush.Rule}"/>
-    <Setter Property="Padding" Value="14,0"/>
+   <Style x:Key="Source.Action" TargetType="Button" BasedOn="{StaticResource Settings.QuietButton}">
+    <Setter Property="MinWidth" Value="52"/><Setter Property="Height" Value="30"/><Setter Property="MinHeight" Value="30"/>
+    <Setter Property="Padding" Value="8,0"/><Setter Property="FontSize" Value="13"/><Setter Property="Margin" Value="2,0"/>
    </Style>
-   <DataTemplate DataType="{x:Type local:MusicOfficialSourceRow}">
-    <Border Style="{StaticResource Source.Row}">
-     <Grid>
-      <Grid.ColumnDefinitions>
-       <ColumnDefinition/><ColumnDefinition Width="90"/><ColumnDefinition Width="56"/><ColumnDefinition Width="80"/>
-      </Grid.ColumnDefinitions>
-      <StackPanel VerticalAlignment="Center">
-       <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"/>
-       <TextBlock Text="内置源" Style="{StaticResource Source.Muted}" Margin="0,4,0,0"/>
-      </StackPanel>
-      <TextBlock Grid.Column="1" Text="{Binding StateText}" Style="{StaticResource Source.Muted}"
-                 VerticalAlignment="Center" HorizontalAlignment="Center"/>
-      <CheckBox Grid.Column="2" Style="{StaticResource Settings.Switch}" IsChecked="{Binding Enabled,Mode=OneWay}"
-                Click="OfficialSource_Click" HorizontalAlignment="Center"
-                IsEnabled="{Binding DataContext.CanEditOfficialSources,RelativeSource={RelativeSource AncestorType=local:MusicSourcesSettingsView}}"
-                AutomationProperties.Name="{Binding Name,StringFormat='启用{0}音源'}"/>
-     </Grid>
+   <Style x:Key="Source.Pill" TargetType="Border">
+    <Setter Property="CornerRadius" Value="11"/><Setter Property="Height" Value="22"/><Setter Property="Padding" Value="9,0"/>
+    <Setter Property="HorizontalAlignment" Value="Left"/><Setter Property="VerticalAlignment" Value="Center"/>
+    <Setter Property="Background" Value="#F0F1F4"/><Setter Property="TextElement.Foreground" Value="#616573"/>
+    <Style.Triggers>
+     <DataTrigger Binding="{Binding StatusKind}" Value="normal"><Setter Property="Background" Value="#E6F6EC"/><Setter Property="TextElement.Foreground" Value="#1E7A44"/></DataTrigger>
+     <DataTrigger Binding="{Binding StatusKind}" Value="partial"><Setter Property="Background" Value="#FFF3DD"/><Setter Property="TextElement.Foreground" Value="#9A5B00"/></DataTrigger>
+     <DataTrigger Binding="{Binding StatusKind}" Value="abnormal"><Setter Property="Background" Value="#FCE9ED"/><Setter Property="TextElement.Foreground" Value="#C2203F"/></DataTrigger>
+     <DataTrigger Binding="{Binding StatusKind}" Value="checking"><Setter Property="Background" Value="#E8F0FE"/><Setter Property="TextElement.Foreground" Value="#2459B8"/></DataTrigger>
+     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+      <Setter Property="TextElement.Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/><Setter Property="BorderThickness" Value="1"/>
+     </Trigger>
+    </Style.Triggers>
+   </Style>
+   <DataTemplate x:Key="Source.Platform" DataType="{x:Type local:MusicSourcePlatformState}">
+    <Border CornerRadius="10" Height="20" Padding="7,0" Margin="0,0,5,0" BorderThickness="1"
+            AutomationProperties.Name="{Binding StateText,StringFormat={}{0}}" ToolTip="{Binding StateText}">
+     <Border.Style><Style TargetType="Border">
+      <Setter Property="Background" Value="White"/><Setter Property="BorderBrush" Value="#E3E5E9"/>
+      <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+       <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+       <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+      </Trigger></Style.Triggers>
+     </Style></Border.Style>
+     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+      <Ellipse Width="7" Height="7" Margin="0,0,5,0" StrokeThickness="1">
+       <Ellipse.Style><Style TargetType="Ellipse">
+        <Setter Property="Fill" Value="#B7BCC7"/><Setter Property="Stroke" Value="#B7BCC7"/>
+        <Style.Triggers>
+         <DataTrigger Binding="{Binding State}" Value="ok"><Setter Property="Fill" Value="#22A35A"/><Setter Property="Stroke" Value="#22A35A"/></DataTrigger>
+         <DataTrigger Binding="{Binding State}" Value="failed"><Setter Property="Fill" Value="#E5484D"/><Setter Property="Stroke" Value="#E5484D"/></DataTrigger>
+         <DataTrigger Binding="{Binding State}" Value="unsupported"><Setter Property="Fill" Value="Transparent"/><Setter Property="Stroke" Value="#CED1D8"/></DataTrigger>
+        </Style.Triggers>
+       </Style></Ellipse.Style>
+      </Ellipse>
+      <TextBlock Text="{Binding Name}" FontSize="12" VerticalAlignment="Center">
+       <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
+        <Style.Triggers><DataTrigger Binding="{Binding State}" Value="unsupported"><Setter Property="Foreground" Value="{DynamicResource Settings.Brush.Faint}"/></DataTrigger></Style.Triggers>
+       </Style></TextBlock.Style>
+      </TextBlock>
+     </StackPanel>
     </Border>
    </DataTemplate>
-   <DataTemplate DataType="{x:Type local:MusicSourceRow}">
-    <Border Style="{StaticResource Source.Row}">
+   <DataTemplate x:Key="Source.Row" DataType="{x:Type local:MusicSourceRow}">
+    <Border Height="64" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource Settings.Brush.Rule}" Padding="10,0">
      <Grid>
       <Grid.ColumnDefinitions>
-       <ColumnDefinition/><ColumnDefinition Width="90"/><ColumnDefinition Width="56"/><ColumnDefinition Width="80"/>
+       <ColumnDefinition Width="36"/><ColumnDefinition Width="64"/><ColumnDefinition MinWidth="140"/><ColumnDefinition Width="56"/>
+       <ColumnDefinition Width="96"/><ColumnDefinition Width="332"/><ColumnDefinition Width="248"/>
       </Grid.ColumnDefinitions>
-      <StackPanel VerticalAlignment="Center">
-       <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"/>
-       <TextBlock Text="{Binding Metadata}" Style="{StaticResource Source.Muted}" Margin="0,4,0,0"
-                  TextTrimming="CharacterEllipsis"/>
-      </StackPanel>
-      <TextBlock Grid.Column="1" Text="{Binding StateText}" Style="{StaticResource Source.Muted}"
-                 VerticalAlignment="Center" HorizontalAlignment="Center"/>
-      <CheckBox Grid.Column="2" Style="{StaticResource Settings.Switch}" IsChecked="{Binding Enabled,Mode=OneWay}"
+      <CheckBox Style="{StaticResource Settings.CheckBox}" IsChecked="{Binding Selected}" HorizontalAlignment="Center"
+                AutomationProperties.Name="{Binding Name,StringFormat='选择{0}'}"/>
+      <CheckBox Grid.Column="1" IsChecked="{Binding Enabled,Mode=OneWay}"
                 Click="SourceEnabled_Click" HorizontalAlignment="Center"
-                IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=local:MusicSourcesSettingsView}}"
-                AutomationProperties.Name="{Binding Name,StringFormat='启用音源{0}'}"/>
-      <Button Grid.Column="3" Content="更多" Style="{StaticResource Settings.QuietButton}" Click="More_Click"
-              IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=local:MusicSourcesSettingsView}}"
-              AutomationProperties.Name="{Binding Name,StringFormat='音源{0}更多操作'}"/>
+                AutomationProperties.Name="{Binding Name,StringFormat='启用{0}'}">
+       <CheckBox.Style><Style TargetType="CheckBox" BasedOn="{StaticResource Settings.Switch}"><Style.Triggers>
+        <DataTrigger Binding="{Binding IsBuiltIn}" Value="True"><Setter Property="IsEnabled" Value="{Binding DataContext.CanEditOfficialSources,RelativeSource={RelativeSource AncestorType=local:MusicSourcesSettingsView}}"/></DataTrigger>
+        <DataTrigger Binding="{Binding IsBuiltIn}" Value="False"><Setter Property="IsEnabled" Value="{Binding DataContext.CanEditScripts,RelativeSource={RelativeSource AncestorType=local:MusicSourcesSettingsView}}"/></DataTrigger>
+       </Style.Triggers></Style></CheckBox.Style>
+      </CheckBox>
+      <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="4,0,8,0">
+       <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"/>
+       <TextBlock Text="{Binding Version}" Style="{StaticResource Source.Muted}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis">
+        <TextBlock.Visibility><Binding Path="HasVersion"><Binding.Converter><BooleanToVisibilityConverter/></Binding.Converter></Binding></TextBlock.Visibility>
+       </TextBlock>
+      </StackPanel>
+      <TextBlock Grid.Column="3" Text="{Binding TypeText}" Style="{StaticResource Source.Muted}" VerticalAlignment="Center"/>
+      <Border Grid.Column="4" Style="{StaticResource Source.Pill}" AutomationProperties.Name="{Binding StatusText}">
+       <TextBlock Text="{Binding StatusText}" FontSize="12" VerticalAlignment="Center" Foreground="{Binding (TextElement.Foreground),RelativeSource={RelativeSource AncestorType=Border}}"/>
+      </Border>
+      <ItemsControl Grid.Column="5" ItemsSource="{Binding Platforms}" ItemTemplate="{StaticResource Source.Platform}"
+                    VerticalAlignment="Center" Focusable="False" AutomationProperties.Name="平台">
+       <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+      </ItemsControl>
+      <StackPanel Grid.Column="6" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+       <Button Content="检测" Style="{StaticResource Source.Action}" Click="Check_Click"
+               IsEnabled="{Binding Checking,Converter={x:Static local:MusicSourcesSettingsView.Not}}"
+               AutomationProperties.Name="{Binding Name,StringFormat='检测{0}'}"/>
+       <Button Content="编辑" Style="{StaticResource Source.Action}" Click="Edit_Click" IsEnabled="{Binding IsScript}"
+               AutomationProperties.Name="{Binding Name,StringFormat='编辑{0}'}"/>
+       <Button Content="更新" Style="{StaticResource Source.Action}" Click="Update_Click" IsEnabled="{Binding IsScript}"
+               AutomationProperties.Name="{Binding Name,StringFormat='更新{0}'}"/>
+       <Button Content="删除" Style="{StaticResource Source.Action}" Click="Remove_Click" IsEnabled="{Binding IsScript}"
+               AutomationProperties.Name="{Binding Name,StringFormat='删除{0}'}"/>
+      </StackPanel>
      </Grid>
     </Border>
    </DataTemplate>
@@ -68,16 +114,19 @@
  </UserControl.Resources>
  <Grid x:Name="ManagementContent" MaxWidth="1248" Margin="28,24,28,20">
   <Grid.RowDefinitions>
-   <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
-   <RowDefinition Height="Auto"/><RowDefinition Height="*"/>
+   <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/>
   </Grid.RowDefinitions>
   <Grid x:Name="SourceTitleRow" Margin="0,0,0,18">
-   <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+   <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
    <TextBlock Text="音源管理" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
-   <Button Grid.Column="1" Content="刷新" Style="{StaticResource Settings.Button32}" Click="Refresh_Click"
+   <Button Grid.Column="1" Content="检测所选" Style="{StaticResource Settings.Button32}" Click="CheckSelected_Click"
+           IsEnabled="{Binding CanCheckSelectedSources}" Margin="0,0,10,0"/>
+   <Button Grid.Column="2" Content="删除所选" Style="{StaticResource Settings.Button32}" Click="RemoveSelected_Click"
+           IsEnabled="{Binding CanRemoveSelectedSources}" Margin="0,0,10,0"/>
+   <Button Grid.Column="3" Content="刷新" Style="{StaticResource Settings.Button32}" Click="Refresh_Click"
            IsEnabled="{Binding CanEdit}" Margin="0,0,10,0"/>
-   <Button Grid.Column="2" Content="导入音源" Style="{StaticResource Settings.PrimaryButton}" Click="ImportLocal_Click"
-           IsEnabled="{Binding CanEdit}" AutomationProperties.Name="从本地文件导入音源"/>
+   <Button Grid.Column="4" Content="导入音源" Style="{StaticResource Settings.PrimaryButton}" Click="ImportLocal_Click"
+           IsEnabled="{Binding CanEditScripts}" AutomationProperties.Name="从本地文件导入音源"/>
   </Grid>
   <Grid Grid.Row="1" Margin="0,0,0,14">
    <Grid.ColumnDefinitions>
@@ -85,23 +134,31 @@
    </Grid.ColumnDefinitions>
    <TextBlock Text="网络地址" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" Margin="0,0,12,0"/>
    <TextBox x:Name="NetworkAddress" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="36"
-            VerticalContentAlignment="Center" AutomationProperties.Name="HTTPS 音源脚本地址" IsEnabled="{Binding CanEdit}"/>
+            VerticalContentAlignment="Center" AutomationProperties.Name="HTTPS 音源脚本地址" IsEnabled="{Binding CanEditScripts}"/>
    <Button Grid.Column="2" Content="下载导入" Style="{StaticResource Settings.Button32}"
-           Margin="10,0,0,0" Click="Download_Click" IsEnabled="{Binding CanEdit}"/>
+           Margin="10,0,0,0" Click="Download_Click" IsEnabled="{Binding CanEditScripts}"/>
    <Button Grid.Column="3" Content="取消" Style="{StaticResource Settings.Button32}"
-           Margin="8,0,0,0" Click="Cancel_Click" IsEnabled="{Binding CanCancelOnline}"/>
+           Margin="8,0,0,0" Click="Cancel_Click" IsEnabled="{Binding CanCancelSourceTransfer}"/>
   </Grid>
-  <Grid Grid.Row="2" Height="36" Margin="14,0">
+  <ScrollViewer x:Name="HeaderScroll" Grid.Row="2" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled"
+                HorizontalAlignment="Left" Margin="1,0,0,0" Focusable="False">
+  <Grid x:Name="SourceHeader" Height="36" Margin="10,0">
    <Grid.ColumnDefinitions>
-    <ColumnDefinition/><ColumnDefinition Width="90"/><ColumnDefinition Width="56"/><ColumnDefinition Width="80"/>
+    <ColumnDefinition Width="36"/><ColumnDefinition Width="64"/><ColumnDefinition MinWidth="140"/><ColumnDefinition Width="56"/>
+    <ColumnDefinition Width="96"/><ColumnDefinition Width="332"/><ColumnDefinition Width="248"/>
    </Grid.ColumnDefinitions>
-   <TextBlock Text="音源名称" Style="{StaticResource Source.Muted}" VerticalAlignment="Center"/>
-   <TextBlock Grid.Column="1" Text="状态" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" HorizontalAlignment="Center"/>
-   <TextBlock Grid.Column="2" Text="启用" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" HorizontalAlignment="Center"/>
-   <TextBlock Grid.Column="3" Text="操作" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+   <CheckBox Style="{StaticResource Settings.CheckBox}" IsChecked="{Binding AllSourcesSelected,Mode=OneWay}" Click="SelectAll_Click"
+             HorizontalAlignment="Center" AutomationProperties.Name="选择全部音源"/>
+   <TextBlock Grid.Column="1" Text="启用" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+   <TextBlock Grid.Column="2" Text="名称" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" Margin="4,0,0,0"/>
+   <TextBlock Grid.Column="3" Text="类型" Style="{StaticResource Source.Muted}" VerticalAlignment="Center"/>
+   <TextBlock Grid.Column="4" Text="状态" Style="{StaticResource Source.Muted}" VerticalAlignment="Center"/>
+   <TextBlock Grid.Column="5" Text="平台" Style="{StaticResource Source.Muted}" VerticalAlignment="Center"/>
+   <TextBlock Grid.Column="6" Text="操作" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,8,0"/>
   </Grid>
+  </ScrollViewer>
   <Border Grid.Row="3" ClipToBounds="True" Style="{StaticResource Settings.PopupSurface}">
-   <ItemsControl x:Name="SourceList" AutomationProperties.Name="音源列表">
+   <ItemsControl x:Name="SourceList" ItemTemplate="{StaticResource Source.Row}" AutomationProperties.Name="音源列表">
     <ItemsControl.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
     <ItemsControl.Style><Style TargetType="ItemsControl">
      <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True"/>
@@ -111,13 +168,34 @@
     <ItemsControl.Template>
      <ControlTemplate TargetType="ItemsControl">
       <ScrollViewer x:Name="ItemsScroll" CanContentScroll="True" VerticalScrollBarVisibility="Auto"
-                    HorizontalScrollBarVisibility="Disabled" Focusable="False">
+                    HorizontalScrollBarVisibility="Auto" Focusable="False">
        <ItemsPresenter/>
       </ScrollViewer>
      </ControlTemplate>
     </ItemsControl.Template>
    </ItemsControl>
   </Border>
+  <Popup x:Name="EditPopup" Placement="Bottom" StaysOpen="False" AllowsTransparency="True">
+   <Border Style="{StaticResource Settings.PopupSurface}" CornerRadius="8" Padding="16" Width="380" KeyboardNavigation.TabNavigation="Cycle">
+    <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="4" Opacity=".13"/></Border.Effect>
+    <StackPanel>
+     <TextBlock Text="编辑音源" Style="{StaticResource Settings.PopupTitle}" Margin="0,0,0,12"/>
+     <TextBlock Text="名称" Style="{StaticResource Source.Muted}" Margin="0,0,0,6"/>
+     <TextBox x:Name="EditName" Style="{StaticResource Settings.TextBox}" Height="36" AutomationProperties.Name="音源名称"
+              TextChanged="EditName_TextChanged"/>
+     <StackPanel x:Name="EditAddressPanel" Margin="0,12,0,0">
+      <TextBlock Text="网络地址" Style="{StaticResource Source.Muted}" Margin="0,0,0,6"/>
+      <TextBox x:Name="EditAddress" Style="{StaticResource Settings.TextBox}" Height="36" AutomationProperties.Name="音源网络地址"/>
+     </StackPanel>
+     <Grid Margin="0,16,0,0">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <Button x:Name="EditRollback" Content="回退版本" Style="{StaticResource Settings.Button32}" Click="EditRollback_Click"/>
+      <Button Grid.Column="2" Content="取消" Style="{StaticResource Settings.Button32}" Click="EditCancel_Click" Margin="0,0,8,0"/>
+      <Button x:Name="EditSave" Grid.Column="3" Content="保存" Style="{StaticResource Settings.PrimaryButton}" Click="EditSave_Click"/>
+     </Grid>
+    </StackPanel>
+   </Border>
+  </Popup>
   <desktop:NoticeOutlet Message="{Binding Status}"/>
  </Grid>
 </UserControl>

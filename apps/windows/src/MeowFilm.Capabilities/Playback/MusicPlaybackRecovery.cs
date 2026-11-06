@@ -32,10 +32,10 @@ public sealed partial class MusicCapability
         internal ResolvedMusic? Media;
         internal PendingMusic? Pending;
         internal bool Attempted, Opening, Recovering, Cached, RecoveryDisabled;
-        internal bool ConfirmSourceOnStart, RestartFeedbackOnStart;
-        internal int SourceFallbacks;
-        internal readonly HashSet<string> RejectedSources = new(StringComparer.Ordinal);
-        internal readonly HashSet<string> RejectedUrls = new(StringComparer.Ordinal);
+        internal bool ConfirmSourceOnStart, RestartFeedbackOnStart, DurationChecked;
+        internal CancellationTokenSource? Switching;
+        /// <summary>The one source selection of this playback; every source operation shares it.</summary>
+        internal MusicSourceSession? Session;
         internal CancellationTokenSource? Expiry;
         internal string? PendingFailure;
         internal Task Work = Task.CompletedTask;
@@ -51,7 +51,6 @@ public sealed partial class MusicCapability
 
     private static bool CanChangeFailedSource(MusicRecovery state, string? code) =>
         !state.RecoveryDisabled && state.Media?.Target is not null &&
-        state.SourceFallbacks < 4 &&
         (RefreshableMusicError(code) || code is PlaybackError.HttpFormatUnsupported or
             PlaybackError.OpenFailed or PlaybackError.PlaybackFailed or "PLAYBACK_UNAVAILABLE" ||
             code is not null && UnavailableSourceCandidate(code));
@@ -174,7 +173,7 @@ public sealed partial class MusicCapability
         onlineCancellation = access;
         try
         {
-            try { state.Media = await ResolveOnline(song, state.Token); }
+            try { state.Media = await ResolveOnline(state); }
             finally
             {
                 // A prepared official file is speculative, not a playback choice.
@@ -312,17 +311,19 @@ public sealed partial class MusicCapability
         TrackMusicRecovery(RecoverMusic(state, expired: false));
         return true;
     }
-    private async Task<bool> RecoverMusic(MusicRecovery state, bool expired)
+    private async Task<bool> RecoverMusic(MusicRecovery state, bool expired, bool mismatch = false)
     {
         if (!CurrentRecovery(state) || state.RecoveryDisabled || state.Recovering ||
             state.Media?.Target is not { } target ||
             playback is not INativePlaybackContinuation port || playback.OwnerId != Id ||
-            playback.Identity != state.Song.EntryId || !expired && !RecoverableMusicError(state, port.LastErrorCode) ||
-            expired && state.Attempted && !CanChangeFailedSource(state, PlaybackError.HttpExpired))
+            playback.Identity != state.Song.EntryId ||
+            !mismatch && !expired && !RecoverableMusicError(state, port.LastErrorCode) ||
+            (expired || mismatch) && (mismatch || state.Attempted) && !CanChangeFailedSource(state, PlaybackError.HttpExpired))
             return false;
         var continuation = port.CaptureContinuation();
         if (continuation is null) return false;
-        bool refreshExact = !state.Attempted && (expired || RefreshableMusicError(port.LastErrorCode));
+        // A mismatched recording is never refreshed: a different source must replace it.
+        bool refreshExact = !mismatch && !state.Attempted && (expired || RefreshableMusicError(port.LastErrorCode));
         state.Recovering = true;
         state.PendingFailure = null;
         using var request = CancellationTokenSource.CreateLinkedTokenSource(state.Token, continuation.Revoked);
@@ -334,6 +335,7 @@ public sealed partial class MusicCapability
             if (state.Cached) await InvalidatePlaybackFileCache(state);
             while (true)
             {
+                bool exactAttempt = refreshExact;
                 try
                 {
                     ResolvedMusic refreshed;
@@ -345,16 +347,16 @@ public sealed partial class MusicCapability
                     }
                     else
                     {
-                        if (!CanChangeFailedSource(state, PlaybackError.HttpExpired))
+                        if (!CanChangeFailedSource(state, PlaybackError.HttpExpired) || state.Session is null)
                             throw new MusicOperationException("PLAYBACK_UNAVAILABLE");
-                        state.RejectedSources.Add(SourceIdentity(state.Media!.Target!));
-                        if (state.Media.Uri is { } rejectedUri) state.RejectedUrls.Add(rejectedUri.AbsoluteUri);
-                        state.SourceFallbacks++;
-                        refreshed = await ResolveAutomaticSources(state.Song,
-                            target.PolicyRequest, target.QualityPolicySignature!, request.Token,
-                            state.RejectedSources, state.RejectedUrls, requireNetwork: true,
-                            recordingPlatform: target.Automatic ? null : target.Platform,
-                            recordingKey: target.Automatic ? null : target.SourceKey);
+                        state.Session.Reject(state.Media!, port.LastErrorCode ?? "PLAYBACK_UNAVAILABLE");
+                        // A manual source keeps its quality; an automatic one re-walks the tiers.
+                        refreshed = target.Automatic
+                            ? await state.Session.AutomaticAsync(request.Token)
+                            : await state.Session.ExactAsync(MusicQualityPolicy.Exact(
+                                MusicQualityPolicy.Category(target.Quality), state.Session.Policy) ??
+                                throw new MusicOperationException("QUALITY_UNAVAILABLE"), request.Token) ??
+                              throw new MusicOperationException(state.Session.Failure ?? "PLAYBACK_UNAVAILABLE");
                     }
                     request.Token.ThrowIfCancellationRequested();
                     if (!CurrentRecovery(state)) throw new OperationCanceledException(request.Token);
@@ -383,15 +385,13 @@ public sealed partial class MusicCapability
                     if (alreadyStarted) ConfirmRecoveredSourceStarted(state);
                     return true;
                 }
-                catch (Exception error) when (error is not OperationCanceledException && CurrentRecovery(state) &&
+                catch (Exception error) when ((exactAttempt || state.Pending is not null) &&
+                    error is not OperationCanceledException && CurrentRecovery(state) &&
                     CanChangeFailedSource(state, error is PlaybackException mediaError ? mediaError.Code :
                         error is MusicOperationException musicError ? musicError.Code : null))
                 {
                     if (state.Pending?.Media is { } failed)
-                    {
-                        if (failed.Target is { } rejected) state.RejectedSources.Add(SourceIdentity(rejected));
-                        if (failed.Uri is { } rejectedUri) state.RejectedUrls.Add(rejectedUri.AbsoluteUri);
-                    }
+                        state.Session?.Reject(failed, error is PlaybackException rejectedMedia ? rejectedMedia.Code : "PLAYBACK_UNAVAILABLE");
                     DiscardPendingMedia(state);
                     continuation = port.CaptureContinuation() ?? throw new MusicOperationException("CONTINUATION_UNAVAILABLE");
                     state.PendingFailure = null;
@@ -444,7 +444,7 @@ public sealed partial class MusicCapability
     {
         var state = musicRecovery; musicRecovery = null;
         if (state is null) return Task.CompletedTask;
-        CloseCurrentRecordings();
+        CloseSourceChoices();
         state.Access.Cancel();
         return Drain();
         async Task Drain()

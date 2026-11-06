@@ -38,3 +38,6 @@ LICENSES/qr-code-generator-LICENSE.txt whitespace=-blank-at-eof
 # These pinned MIT texts retain their original CRLF bytes.
 LICENSES/api-enhanced-MIT.txt -text whitespace=cr-at-eol
 LICENSES/KuGouMusicApi-MIT.txt -text whitespace=cr-at-eol
+# Native engine sources are verified byte-for-byte, including on autocrlf hosts.
+native/JavaScript/quickjs/* -text
+native/JavaScript/*.c text eol=lf

@@ -9,6 +9,7 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
     case unavailable = "UNAVAILABLE", accessUnavailable = "ACCESS_UNAVAILABLE", staleAccess = "STALE_ACCESS"
     case staleResult = "STALE_RESULT", staleRevision = "STALE_REVISION"
     case storageFailed = "STORAGE_FAILED", storageConflict = "STORAGE_CONFLICT"
+    case storagePolicyMismatch = "STORAGE_POLICY_MISMATCH", storagePermissionDenied = "STORAGE_PERMISSION_DENIED"
     case commitUnconfirmed = "COMMIT_UNCONFIRMED", corruptDocument = "CORRUPT_DOCUMENT"
     case notFound = "NOT_FOUND", handleExpired = "HANDLE_EXPIRED"
     case sourceRequired = "SOURCE_REQUIRED", sourceUnavailable = "SOURCE_UNAVAILABLE", targetChanged = "TARGET_CHANGED"
@@ -16,8 +17,7 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
     case authRequired = "AUTH_REQUIRED", verificationRequired = "VERIFICATION_REQUIRED", rateLimited = "RATE_LIMITED"
     case sessionExpired = "SESSION_EXPIRED"
     case unsupported = "UNSUPPORTED", invalidMediaCandidate = "INVALID_MEDIA_CANDIDATE"
-    case importConflict = "IMPORT_CONFLICT", importedTargetChanged = "IMPORTED_TARGET_CHANGED"
-    case importNotFound = "IMPORT_NOT_FOUND", invalidImport = "INVALID_IMPORT", revisionConflict = "REVISION_CONFLICT"
+    case invalidImport = "INVALID_IMPORT", revisionConflict = "REVISION_CONFLICT"
     case nativeIDConflict = "NATIVE_ID_CONFLICT", songIDConflict = "SONG_ID_CONFLICT", favoritesProtected = "FAVORITES_PROTECTED"
     case lyricIdentityMismatch = "LYRIC_IDENTITY_MISMATCH", lyricSessionChanged = "LYRIC_SESSION_CHANGED"
     case invalidLyricResponse = "INVALID_LYRIC_RESPONSE", lyricFetchFailed = "LYRIC_FETCH_FAILED", lyricTimeout = "LYRIC_TIMEOUT"
@@ -54,12 +54,13 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
         case .timeout, .lyricTimeout, .resolutionTimeout: return "请求超时"
         case .commitUnconfirmed: return "保存结果未确认"
         case .storageFailed: return "保存失败"
+        case .storagePolicyMismatch: return "本机密钥保护属性不匹配"
+        case .storagePermissionDenied: return "当前安装缺少钥匙串访问权限，请检查签名"
         case .corruptDocument: return "音乐数据损坏"
-        case .importConflict, .importedTargetChanged: return "曲库导入冲突"
         case .invalidImport: return "曲库文件无效"
         case .favoritesProtected: return "收藏夹不可删除"
         case .handleExpired: return "内容已过期"
-        case .notFound, .importNotFound: return "内容不存在"
+        case .notFound: return "内容不存在"
         case .busy: return "音乐服务忙"
         case .lyricIdentityMismatch, .lyricSessionChanged, .invalidLyricResponse, .lyricFetchFailed: return "歌词获取失败"
         case .invalidMediaCandidate, .resolutionFailed: return "播放地址获取失败"
@@ -458,24 +459,6 @@ public struct MusicPlayedPlaylist: Codable, Sendable, Identifiable {
     public let at: Double
     public init(id: String, title: String, count: Int, at: Double) { self.id = id; self.title = title; self.count = count; self.at = at }
 }
-public struct MusicImportReport: Codable, Equatable, Sendable {
-    public let batchId: String
-    public let alreadyApplied: Bool
-    public let remoteChanged: Bool
-    public let songs: Int
-    public let collections: Int
-    public let members: Int
-    public init(batchId: String, alreadyApplied: Bool, remoteChanged: Bool = false, songs: Int, collections: Int, members: Int) {
-        self.batchId = batchId; self.alreadyApplied = alreadyApplied; self.remoteChanged = remoteChanged
-        self.songs = songs; self.collections = collections; self.members = members
-    }
-}
-public struct MusicImportPreview: Sendable {
-    public let importId: String
-    public let report: MusicImportReport
-    public init(importId: String, report: MusicImportReport) { self.importId = importId; self.report = report }
-}
-
 /// A single injected business port. No runtime connection, storage authority,
 /// player, credential lookup or periodic polling is created by this protocol.
 public protocol MusicServing: MusicSourceAvailabilityProviding, MusicMetadataPreferencesServing {
@@ -498,8 +481,4 @@ public protocol MusicServing: MusicSourceAvailabilityProviding, MusicMetadataPre
     func playedSongs() async throws -> [MusicPlayedSong]
     func playedPlaylists() async throws -> [MusicPlayedPlaylist]
     func restoreHistory(id: String, expectedRevision: Int) async throws -> MusicPlaybackState
-    func prepareImport(data: Data, sourceId: String, ownerId: String) async throws -> MusicImportPreview
-    func commitImport(_ preview: MusicImportPreview) async throws -> MusicImportReport
-    func releaseImport(_ preview: MusicImportPreview) async throws
-    func rollbackImport(batchId: String) async throws
 }

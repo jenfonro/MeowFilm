@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { readFile, readdir, stat, mkdir, mkdtemp, writeFile, rename, realpath, rm } from 'node:fs/promises';
 import { registerHooks } from 'node:module';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
@@ -252,8 +252,8 @@ if (options.kind === 'source') {
   }
 
   const batches = new Set(), concurrency = 4;
-  async function acceptLx(file, index) {
-    const id = `accept-${index}`, audit = [], diagnostics = [];
+  async function acceptLx(file) {
+    const audit = [], diagnostics = [];
     const row = { file, actions: [] };
     let startupAuditEnd = 0, startupDiagnosticsEnd = 0;
     const startupPending = new Set();
@@ -261,9 +261,13 @@ if (options.kind === 'source') {
       options.payload ? join(options.payload, 'node_modules/@meowfilm/script-host/src/index.js')
         : join(root, 'packages/script-host/src/index.js')).href);
     const network = createNodeNetwork();
+    const temporary = join(root, 'tmp/test-results/script-sources');
+    await mkdir(temporary, { recursive: true });
+    const dataRoot = await mkdtemp(join(temporary, 'lx-runtime-'));
+    let host;
     const module = createMusicScriptModule({
-      call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
-      hostFactory: input => createScriptHost({ ...input, ...sourceDiagnosticObservers(diagnostics) }),
+      dataRoot,
+      hostFactory: input => host = createScriptHost({ ...input, ...sourceDiagnosticObservers(diagnostics) }),
       network: async input => {
         const event = { requestId: input.scope.requestId, siteId: input.scope.siteId,
           mode: options.live ? 'live' : 'blocked', finished: false };
@@ -308,9 +312,11 @@ if (options.kind === 'source') {
           data: bytes.subarray(offset, offset + begun.chunkBytes).toString('base64') });
         if (!chunk.ok) throw Object.assign(new Error(), { code: chunk.code });
       }
+      const imported = await rpc('sources.add', { token: begun.token });
+      if (!imported.ok) throw Object.assign(new Error(), { code: imported.code });
+      const installationId = imported.item.installationId;
       const start = Date.now();
-      const loaded = await rpc('load', { token: begun.token, installationId: id, revision: 1, expectedRevision: 0,
-        version: 'acceptance', config: {}, permissions: { storage: [] }, grant: randomUUID() });
+      const loaded = await rpc('sources.enable', { installationId });
       row.initializationMs = Date.now() - start;
       if (!loaded.ok) throw Object.assign(new Error(), { code: loaded.code });
       row.initializationNetwork = audit.map(({ finished, statusCode, code }) =>
@@ -318,7 +324,8 @@ if (options.kind === 'source') {
       row.initializationDiagnostics = diagnostics.map(diagnostic);
       startupAuditEnd = audit.length; startupDiagnosticsEnd = diagnostics.length;
       for (const event of audit) if (!event.finished) startupPending.add(event);
-      const instance = loaded.instance;
+      // Every declared site, not only the native music platforms the list projects.
+      const instance = host.list().find(record => record.installationId === installationId);
       row.initialization = 'ready';
       row.capabilities = Object.fromEntries(Object.entries(instance.capabilities).map(([site, cap]) =>
         [site, { actions: cap.actions, qualitys: cap.qualitys }]));
@@ -337,8 +344,7 @@ if (options.kind === 'source') {
             const payload = search ? { keyword: '海阔天空', page: 1, limit: 10, pagesize: 10 }
               : { musicInfo: recording, ...(operation === 'musicUrl' ? { quality:
                 cap.qualitys.includes('128k') ? '128k' : cap.qualitys[0] ?? null } : {}) };
-            const reply = await rpc('invoke', { installationId: id, revision: 1,
-              generation: instance.generation, siteId, operation, payload });
+            const reply = await rpc('invoke', { installationId, siteId, operation, payload });
             entry.elapsedMs = Date.now() - began;
             entry.network = audit.slice(before)
               .map(({ requestId, statusCode, code, bodyKind, businessCode, responseReason }) =>
@@ -359,7 +365,7 @@ if (options.kind === 'source') {
           }
         }
       }
-      const unloaded = await rpc('unload', { installationId: id, revision: 1, generation: instance.generation });
+      const unloaded = await rpc('sources.disable', { installationId });
       if (!unloaded.ok) row.unloadCode = unloaded.code;
     } catch (error) { row.initialization = 'failed'; row.code = error.code ?? 'HOST_ERROR'; }
     finally {
@@ -367,6 +373,7 @@ if (options.kind === 'source') {
         const close = await module.close();
         row.cleanup = close.ok ? 'complete' : close.code;
       } catch (error) { row.cleanup = error.code ?? 'SCRIPT_CLEANUP'; }
+      await rm(dataRoot, { recursive: true, force: true });
       if (row.initialization === 'ready') {
         row.backgroundNetwork = audit.filter((event, index) => event.requestId === null &&
           (index >= startupAuditEnd || startupPending.has(event)))

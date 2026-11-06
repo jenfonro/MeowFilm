@@ -51,6 +51,8 @@ struct MusicNativePublicBrowseDiscovery: Sendable {
     var selected = ""
     var notice: String? = nil
     var consumed: Int? = nil
+    /// Continuation pages extend the same section IDs instead of adding sections.
+    var stableSections = false
     static func key(_ destination: MusicPublicBrowseDestination) -> String {
         switch destination {
         case .home: return "home"
@@ -419,10 +421,12 @@ enum MusicNativeBrowseMetadataRequest: Sendable {
 extension MusicNativePlatforms {
     func browseDiscovery(_ destination: MusicPublicBrowseDestination, source: MusicPublicBrowsePlatform,
                          remote: MJ, offset: Int) async throws -> MusicNativePublicBrowseDiscovery {
-        try musicRequire(source == .netease, .unsupported)
+        try musicRequire(source == .netease || source == .kugou, .unsupported)
         if case .channel(let channel, _) = destination {
             try musicRequire(channel.platform == source, .invalidRequest)
         }
+        // KuGou rows already carry their display fields; no NetEase enrichment.
+        if source == .kugou { return try await browseKugou(destination, remote: remote) }
         var result: MusicNativePublicBrowseDiscovery
         switch destination {
         case .home, .featured:

@@ -1,13 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { SourceTransfers, ScriptHostError } from '@meowfilm/script-host';
 import { BridgePeer, encodeFrame, encodeJSONValue, decodeJSONValue, MAX_FRAME_BYTES } from '@meowfilm/runtime-bridge';
 import { createMusicScriptModule, musicScriptContract } from '../apps/runtime/modules/music-script.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const chunkBytes = 65536;
-const envelope = value => ({ ok: true, contract: musicScriptContract, value });
+// The invoke business envelope: the directed instance identity plus the raw value.
+const invoked = (instance, value) => ({ ok: true, contract: musicScriptContract,
+  installationId: instance.installationId, generation: instance.generation,
+  contentHash: instance.contentHash, siteId: 'kw', value });
 const turn = () => new Promise(resolve => setImmediate(resolve));
 const success = reply => {
   assert.equal(reply.ok, true, JSON.stringify(reply));
@@ -21,8 +27,10 @@ const failure = (reply, code) => {
 };
 function setup(t, options = {}) {
   const state = { invokes: [], closed: 0, records: [] };
+  const dataRoot = mkdtempSync(join(tmpdir(), 'music-transfers-'));
+  t.after(() => rmSync(dataRoot, { recursive: true, force: true }));
   const module = createMusicScriptModule({
-    call: async () => { throw new Error('unexpected storage'); },
+    dataRoot,
     hostFactory: () => ({
       list: () => state.records,
       stats: () => ({ cleanupIssues: [] }),
@@ -93,19 +101,21 @@ async function restore(rpc, reply) {
     return result;
   } finally { success(await rpc('blob.release', { token: blob.token })); }
 }
-async function load(rpc, control = false) {
-  const source = '/* transfer fixture */';
+async function stageSource(rpc, source = '/* transfer fixture */') {
   const stage = success(await rpc('stage.begin', { basename: 'fixture.js', length: Buffer.byteLength(source), sha256: hash(source) }));
   success(await rpc('stage.chunk', { token: stage.token, offset: 0, data: Buffer.from(source).toString('base64') }));
-  const input = { token: stage.token, installationId: 'one', revision: 1,
-    expectedRevision: 0, version: 'fixture', config: {}, permissions: { storage: [] }, grant: randomUUID() };
+  return stage.token;
+}
+async function load(rpc, control = false) {
+  const imported = success(await rpc('sources.add', { token: await stageSource(rpc) })).item;
+  const input = { installationId: imported.installationId };
   const reply = control ? await rpc('control.call', {
-    token: await upload(rpc, encodeJSONValue(input)), operation: 'load',
-  }) : await rpc('load', input);
-  return (await restore(rpc, reply)).instance;
+    token: await upload(rpc, encodeJSONValue(input)), operation: 'sources.enable',
+  }) : await rpc('sources.enable', input);
+  return (await restore(rpc, reply)).item;
 }
 const request = (instance, payload) => ({ installationId: instance.installationId,
-  revision: instance.revision, generation: instance.generation, siteId: 'kw', operation: 'musicUrl', payload });
+  siteId: 'kw', operation: 'musicUrl', payload });
 async function invoke(rpc, input) {
   const token = await upload(rpc, encodeJSONValue(input));
   return rpc('control.call', { operation: 'invoke', token });
@@ -119,15 +129,15 @@ test('B1 small business envelopes preserve values named blob and ordinary transf
   for (const value of [null, false, 0, ['a', null, false, 1.25], { blob: { token: 'business' }, ok: true }]) {
     // payload itself is the existing object contract; its JSON values are arbitrary.
     const payload = { value };
-    assert.deepEqual(await rpc('invoke', request(instance, payload)), envelope(payload));
+    assert.deepEqual(await rpc('invoke', request(instance, payload)), invoked(instance, payload));
   }
-  const small = { value: 'x'.repeat(chunkBytes - Buffer.byteLength(JSON.stringify(envelope({ value: '' })))) };
+  const small = { value: 'x'.repeat(chunkBytes - Buffer.byteLength(JSON.stringify(invoked(instance, { value: '' })))) };
   const reply = await rpc('invoke', request(instance, small));
   assert.equal(encodeJSONValue(reply).length, chunkBytes);
-  assert.deepEqual(reply, envelope(small));
+  assert.deepEqual(reply, invoked(instance, small));
   const next = success(await rpc('invoke', request(instance, { value: `${small.value}x` })));
   assert.equal(next.blob.length, chunkBytes + 1);
-  assert.deepEqual(await restore(rpc, next), envelope({ value: `${small.value}x` }));
+  assert.deepEqual(await restore(rpc, next), invoked(instance, { value: `${small.value}x` }));
 });
 
 test('B2 complete 512 KiB, above 512 KiB, above 1 MiB and above 8 MiB requests and results retain JSON', async t => {
@@ -137,15 +147,15 @@ test('B2 complete 512 KiB, above 512 KiB, above 1 MiB and above 8 MiB requests a
     const input = request(instance, { text: '' });
     input.payload.text = 'x'.repeat(length - encodeJSONValue(input).length);
     assert.equal(encodeJSONValue(input).length, length);
-    assert.deepEqual(await restore(rpc, await invoke(rpc, input)), envelope(input.payload));
+    assert.deepEqual(await restore(rpc, await invoke(rpc, input)), invoked(instance, input.payload));
     assert.deepEqual(state.invokes.at(-1).payload, input.payload);
-    const outputSize = length - encodeJSONValue(envelope({ text: '' })).length;
+    const outputSize = length - encodeJSONValue(invoked(instance, { text: '' })).length;
     const output = { text: 'r'.repeat(outputSize) };
     const reply = await invoke(rpc, request(instance, output));
     assert.equal(reply.blob.length, length);
-    assert.deepEqual(await restore(rpc, reply), envelope(output));
+    assert.deepEqual(await restore(rpc, reply), invoked(instance, output));
   }
-  assert.equal(success(await rpc('status')).instances.length, 1);
+  assert.equal(success(await rpc('sources.list')).items[0].state, 'ready');
 });
 
 test('B2 UTF-8 scalars cross both upload and result boundaries with escaped and structured values', async t => {
@@ -158,13 +168,15 @@ test('B2 UTF-8 scalars cross both upload and result boundaries with escaped and 
   const encoded = encodeJSONValue(input);
   assert.equal(encoded[chunkBytes - 1], 0xe7);
   assert.equal(encoded[chunkBytes], 0x8c);
-  assert.deepEqual(await restore(rpc, await invoke(rpc, input)), envelope(input.payload));
+  assert.deepEqual(await restore(rpc, await invoke(rpc, input)), invoked(instance, input.payload));
   assert.deepEqual(state.invokes.at(-1).payload, input.payload);
-  const output = { text: 'a'.repeat(chunkBytes - Buffer.byteLength('{"ok":true,"contract":"music.script.v2","value":{"text":"') - 1) + '😀猫' };
-  const expected = encodeJSONValue(envelope(output));
+  const prefixBytes = encodeJSONValue(invoked(instance, { text: '' })).indexOf(Buffer.from('"text":"')) +
+    Buffer.byteLength('"text":"');
+  const output = { text: 'a'.repeat(chunkBytes - prefixBytes - 1) + '😀猫' };
+  const expected = encodeJSONValue(invoked(instance, output));
   assert.equal(expected[chunkBytes - 1], 0xf0);
   assert.equal(expected[chunkBytes], 0x9f);
-  assert.deepEqual(await restore(rpc, await invoke(rpc, request(instance, output))), envelope(output));
+  assert.deepEqual(await restore(rpc, await invoke(rpc, request(instance, output))), invoked(instance, output));
 });
 
 test('B4 malformed upload chunks discard identifiable tokens without executing the handler', async t => {
@@ -184,7 +196,7 @@ test('B4 malformed upload chunks discard identifiable tokens without executing t
   const begin = success(await rpc('control.begin', { length: 2, sha256: hash(bytes) }));
   success(await rpc('control.chunk', { token: begin.token, offset: 0, data: 'ew==' }));
   failure(await rpc('control.chunk', { token: begin.token, offset: 0, data: 'fQ==' }));
-  failure(await rpc('control.call', { token: begin.token, operation: 'status' }), 'STAGE_NOT_FOUND');
+  failure(await rpc('control.call', { token: begin.token, operation: 'sources.list' }), 'STAGE_NOT_FOUND');
   assert.equal(state.invokes.length, 0);
 });
 
@@ -200,7 +212,7 @@ test('B4 incomplete, hash, encoding and logical JSON failures consume tokens bef
   failure(await rpc('control.call', { token: wrongHash, operation: 'invoke' }), 'SCRIPT_INTEGRITY');
   failure(await rpc('control.call', { token: wrongHash, operation: 'invoke' }), 'STAGE_NOT_FOUND');
   for (const bytes of [Buffer.from([0xc3, 0x28]), Buffer.from('{'),
-    Buffer.from('{"installationId":"one","installationId":"two"}'),
+    Buffer.from(`{"installationId":"${instance.installationId}","installationId":"two"}`),
     Buffer.from('{"x":0,"\\u0078":1}'), Buffer.from('{"非ASCII":1}'),
     Buffer.from('{"x":"\\ud800"}'), Buffer.from('{"x":1e400}'),
     Buffer.from('{"x":9007199254740992}'), Buffer.from('['.repeat(66) + '0' + ']'.repeat(66)),
@@ -221,7 +233,8 @@ test('B4 incomplete, hash, encoding and logical JSON failures consume tokens bef
 test('B3 control.call permits only original business methods and consumes failures without retries', async t => {
   const { rpc, state } = setup(t, { invoke: async () => { throw new ScriptHostError('TIMEOUT'); } });
   const instance = await load(rpc, true);
-  for (const operation of ['control.call', 'stage.begin', 'blob.read', 'close', 'music.script.invoke']) {
+  for (const operation of ['control.call', 'stage.begin', 'blob.read', 'close', 'music.script.invoke',
+    'load', 'unload', 'status']) {
     const token = await upload(rpc, Buffer.from('{}'));
     failure(await rpc('control.call', { token, operation }), 'INVALID_REQUEST');
     failure(await rpc('control.chunk', { token, offset: 0, data: 'e30=' }), 'STAGE_NOT_FOUND');
@@ -230,28 +243,30 @@ test('B3 control.call permits only original business methods and consumes failur
   failure(await rpc('control.call', { token, operation: 'invoke' }), 'TIMEOUT');
   failure(await rpc('control.call', { token, operation: 'invoke' }), 'STAGE_NOT_FOUND');
   assert.equal(state.invokes.length, 1);
-  const status = await upload(rpc, Buffer.from('{}'));
-  assert.equal(success(await rpc('control.call', { token: status, operation: 'status' })).instances.length, 1);
-  const unload = await upload(rpc, encodeJSONValue({ installationId: 'one', revision: 1 }));
-  assert.equal(success(await rpc('control.call', { token: unload, operation: 'unload' })).unloaded, true);
-  assert.deepEqual(success(await rpc('status')).instances, []);
+  const listed = await upload(rpc, Buffer.from('{}'));
+  assert.equal(success(await rpc('control.call', { token: listed, operation: 'sources.list' })).items.length, 1);
+  const disabled = await upload(rpc, encodeJSONValue({ installationId: instance.installationId }));
+  assert.equal(success(await rpc('control.call', { token: disabled, operation: 'sources.disable' })).item.state,
+    'disabled');
+  assert.deepEqual(state.records, []);
 });
 
-test('B3 load and status transfer complete large declaration envelopes and keep generation fences', async t => {
-  const capabilities = Object.fromEntries(Array.from({ length: 32 }, (_, index) => [`s${index}`, {
-    name: '猫'.repeat(256), type: 'music',
-    actions: Array.from({ length: 32 }, (_, item) => `a${item}`.padEnd(128, 'a')),
-    qualitys: Array.from({ length: 32 }, (_, item) => `q${item}`.padEnd(64, 'q')),
-  }]));
-  const { rpc, state } = setup(t, { capabilities });
+test('B3 large source lists transfer complete envelopes and disable fences queued invocations', async t => {
+  const { rpc, state } = setup(t);
+  const header = `/**\n * @name ${'猫'.repeat(255)}\n * @description ${'漢'.repeat(1024)}\n` +
+    ` * @author ${'作'.repeat(1024)}\n * @homepage ${'页'.repeat(1024)}\n */\n`;
+  for (let index = 0; index < 8; index++)
+    success(await rpc('sources.add', { token: await stageSource(rpc, `${header}// ${index}`) }));
   const instance = await load(rpc, true);
-  assert.deepEqual(instance.capabilities, capabilities);
-  const status = success(await rpc('status'));
-  assert.ok(status.blob.length > chunkBytes);
-  assert.deepEqual((await restore(rpc, status)).instances, [instance]);
+  const listed = success(await rpc('sources.list'));
+  assert.ok(listed.blob.length > chunkBytes);
+  const items = (await restore(rpc, listed)).items;
+  assert.equal(items.length, 9);
+  assert.equal(items[0].description, '漢'.repeat(1024));
+  assert.deepEqual(items.at(-1), instance);
   const token = await upload(rpc, encodeJSONValue(request(instance, { text: 'x'.repeat(chunkBytes) })));
-  success(await rpc('unload', { installationId: 'one', revision: 1 }));
-  failure(await rpc('control.call', { token, operation: 'invoke' }), 'SOURCE_NOT_FOUND');
+  success(await rpc('sources.disable', { installationId: instance.installationId }));
+  failure(await rpc('control.call', { token, operation: 'invoke' }), 'SOURCE_DISABLED');
   assert.equal(state.invokes.length, 0);
   failure(await rpc('control.call', { token, operation: 'invoke' }), 'STAGE_NOT_FOUND');
 });
@@ -270,7 +285,7 @@ test('B4 logical results cannot bypass bridge JSON validation through blobs', as
     assert.equal(timers.size, 0);
   }
   output = false;
-  assert.deepEqual(await invoke(rpc, request(instance, {})), envelope(false));
+  assert.deepEqual(await invoke(rpc, request(instance, {})), invoked(instance, false));
 });
 
 test('B5 pre-cancelled chunk/call/read release tokens and aborted business consumes upload', async t => {
@@ -286,9 +301,9 @@ test('B5 pre-cancelled chunk/call/read release tokens and aborted business consu
   const controller = new AbortController(); controller.abort();
   for (const method of ['control.chunk', 'control.call']) {
     const token = await upload(rpc, Buffer.from('{}'));
-    const input = method === 'control.chunk' ? { token, offset: 0, data: 'e30=' } : { token, operation: 'status' };
+    const input = method === 'control.chunk' ? { token, offset: 0, data: 'e30=' } : { token, operation: 'sources.list' };
     failure(await rpc(method, input, { signal: controller.signal }), 'CANCELLED');
-    failure(await rpc('control.call', { token, operation: 'status' }), 'STAGE_NOT_FOUND');
+    failure(await rpc('control.call', { token, operation: 'sources.list' }), 'STAGE_NOT_FOUND');
   }
   const blob = success(await invoke(rpc, request(instance, { text: 'x'.repeat(chunkBytes) }))).blob;
   failure(await rpc('blob.read', { token: blob.token, offset: 0 }, { signal: controller.signal }), 'CANCELLED');
@@ -301,7 +316,7 @@ test('B5 pre-cancelled chunk/call/read release tokens and aborted business consu
   failure(await result, 'CANCELLED');
   failure(await rpc('control.call', { token, operation: 'invoke' }), 'STAGE_NOT_FOUND');
   delayed = false;
-  assert.deepEqual(await restore(rpc, await invoke(rpc, request(instance, { next: true }))), envelope({ next: true }));
+  assert.deepEqual(await restore(rpc, await invoke(rpc, request(instance, { next: true }))), invoked(instance, { next: true }));
   assert.equal(state.invokes.length, 3);
 });
 
@@ -362,9 +377,9 @@ test('B5 active five-minute TTL renews on chunks and reads, then expires without
   now = 600000;
   for (const timer of [...timers]) timer.callback();
   assert.equal(timers.size, 0);
-  failure(await rpc('control.call', { token, operation: 'status' }), 'STAGE_NOT_FOUND');
+  failure(await rpc('control.call', { token, operation: 'sources.list' }), 'STAGE_NOT_FOUND');
   failure(await rpc('blob.read', { token: blob.token, offset: 0 }), 'STAGE_NOT_FOUND');
-  assert.equal(success(await rpc('status')).instances.length, 1);
+  assert.equal(success(await rpc('sources.list')).items[0].state, 'ready');
 });
 
 test('B4 invalid blob offsets discard the result, release is idempotent and types cannot cross', async t => {
@@ -380,9 +395,9 @@ test('B4 invalid blob offsets discard the result, release is idempotent and type
   const token = success(await rpc('control.begin', { length: 2, sha256: hash('{}') })).token;
   success(await rpc('control.chunk', { token, offset: 0, data: 'ew==' }));
   failure(await rpc('blob.read', { token, offset: 0 }), 'SCRIPT_INTEGRITY');
-  failure(await rpc('control.call', { token, operation: 'status' }), 'STAGE_NOT_FOUND');
+  failure(await rpc('control.call', { token, operation: 'sources.list' }), 'STAGE_NOT_FOUND');
   const blob = success(await invoke(rpc, request(instance, { text: 'x'.repeat(chunkBytes) }))).blob;
-  failure(await rpc('control.call', { token: blob.token, operation: 'status' }), 'SCRIPT_INTEGRITY');
+  failure(await rpc('control.call', { token: blob.token, operation: 'sources.list' }), 'SCRIPT_INTEGRITY');
   failure(await rpc('blob.read', { token: blob.token, offset: 0 }), 'STAGE_NOT_FOUND');
 });
 
@@ -401,12 +416,12 @@ test('B5 close clears uploads and results and still closes host after transfer c
   failure(await module.close(), 'SCRIPT_CLEANUP');
   assert.equal(state.closed, 1);
   for (const timer of timers) timer.callback();
-  failure(await rpc('control.call', { token, operation: 'status' }), 'CLOSED');
+  failure(await rpc('control.call', { token, operation: 'sources.list' }), 'CLOSED');
   failure(await rpc('blob.read', { token: blob.token, offset: 0 }), 'CLOSED');
   failure(await module.close(), 'SCRIPT_CLEANUP');
   assert.equal(state.closed, 1);
   const other = setup(t);
-  assert.deepEqual(success(await other.rpc('status')).instances, []);
+  assert.deepEqual(success(await other.rpc('sources.list')).items, []);
 });
 
 test('B5 physical bridge TIMEOUT cancels a staged invocation and leaves no reusable upload', async t => {
@@ -428,7 +443,7 @@ test('B5 physical bridge TIMEOUT cancels a staged invocation and leaves no reusa
   await started; await rejected; await turn(); await turn();
   failure(await rpc('control.call', { token, operation: 'invoke' }), 'STAGE_NOT_FOUND');
   assert.equal(state.invokes.length, 1);
-  assert.equal(success(await rpc('status')).instances.length, 1);
+  assert.equal(success(await rpc('sources.list')).items[0].state, 'ready');
   assert.equal(left.state.pending, 0); assert.equal(right.state.active, 0);
 });
 

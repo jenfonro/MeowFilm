@@ -29,7 +29,7 @@ Windows 装配 `music, cat, source`，iOS 装配 `music, cat`：
 
 | descriptor | 响应契约 | 输入与职责 |
 | --- | --- | --- |
-| `music@0.7.0` | `music.script.v2` | 原始 LX 音源 |
+| `music@0.8.0` | `music.script.v3` | 原始 LX 音源 |
 | `cat@0.1.0` | `cat.script.v1` | CatNode 的有限 Node 兼容、HTTP 服务、direct Spider、私有卷与管理同步 |
 | `source@0.1.0` | `source.runtime.v1` | Legado、异次元、轻悦时光及独立 CatVod Spider 输入 |
 

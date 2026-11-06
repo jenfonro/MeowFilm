@@ -121,7 +121,7 @@ for (const failedModule of [undefined, 'music', 'cat']) {
     const noNetwork = async () => assert.fail('passive modules must not use the network');
     const noCall = async () => assert.fail('disposal must not make outbound RPC calls');
     const music = createMusicScriptModule({
-      call: noCall,
+      dataRoot: '/unused-assembly-fixture',
       network: noNetwork,
       hostFactory: () => ({
         async close() {

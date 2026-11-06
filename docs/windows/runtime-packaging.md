@@ -11,9 +11,11 @@ Windows meowfilm App 的脚本载荷由以下两个阶段生成。打包参数 -
 
 目标电脑使用完整 `build/windows/`，原生 launcher 只从应用的 `runtime/node.exe` 启动，不查询 PATH 或借用系统 Node。默认发布同时包含 .NET Desktop Runtime；构建主机的 Node/npm/.NET SDK 不是运行依赖。此发布目录需要整体复制，不能仅分发 exe；`-FrameworkDependent` 才要求目标机另装匹配的 .NET Desktop Runtime。
 
+客户端影视规则另使用 `native/JavaScript` 的 QuickJS-NG，通过 `MeowFilm.Platform` 项目正常增量构建为 `meowfilm_js.dll` 并随 App 输出／发布。构建主机需 CMake 3.20+ 与 Windows C 编译器；`CMAKE_GENERATOR`／`CC` 等标准 CMake 环境可选择工具链，默认 Visual Studio x64。`scripts/verify-native-javascript.mjs` 在编译前核对 `scripts/quickjs-native.json` 的源码清单与许可哈希，不在构建时下载源码。此 DLL 不属于 Node runtime 闭包，不放宽下述 native／WASM 拒绝策略。固定规则程序作为 Capabilities 的 `MeowFilm.FilmRules.js` 资源内嵌，规则保存于客户端；目标电脑不需要 CMake 或编译器。
+
 ## 输入闭包
 
-运行 descriptor 为 `music@0.7.0`、`cat@0.1.0`、`source@0.1.0`，响应契约分别为 `music.script.v2`、`cat.script.v1`、`source.runtime.v1`；载荷清单 modules 为 `music, cat, source`，product 保持 aggregate。LX 与 Cat 的大控制数据走 64 KiB 分片；source 控制帧为 1 MiB、源码分片为 64 KiB。三者共用同一 WorkerSession/worker 协议/QuickJS 后端。
+运行 descriptor 为 `music@0.8.0`、`cat@0.1.0`、`source@0.1.0`，响应契约分别为 `music.script.v3`、`cat.script.v1`、`source.runtime.v1`；载荷清单 modules 为 `music, cat, source`，product 保持 aggregate。LX 与 Cat 的大控制数据走 64 KiB 分片；source 控制帧为 1 MiB、源码分片为 64 KiB。三者共用同一 WorkerSession/worker 协议/QuickJS 后端。
 
 ```text
 app/bootstrap.mjs

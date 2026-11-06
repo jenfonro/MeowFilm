@@ -1,5 +1,6 @@
+using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
@@ -10,84 +11,51 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities.Scripting;
 
 /// <summary>
-/// Native source metadata and online orchestration. Only original LX execution
-/// crosses the borrowed script port. The library remains the only document writer.
+/// Native adapter of the shared music source module. Installation facts, source
+/// files, checks and guest storage are owned and persisted by the module; native
+/// code selects recordings, applies the quality policy and parses LX lyrics.
 /// </summary>
-public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsyncDisposable
+public sealed class MusicScriptOwner : IAsyncDisposable
 {
+    private static readonly string[] Commands = ["list", "detail", "add", "download", "edit", "update",
+        "rollback", "enable", "disable", "remove", "check"];
     private readonly MusicLibraryOwner library;
     private readonly IRuntimeClient runtime;
     private readonly MusicScriptTransport scriptTransport;
     private readonly MusicNativeTransfers transfers;
-    private readonly TimeProvider clock;
-    private readonly Func<JsonObject, string, CancellationToken, Task<JsonObject>>? matchSong;
-    private readonly SemaphoreSlim gate = new(1, 1), storageGate = new(1, 1);
     private readonly CancellationTokenSource lifetime = new();
     private readonly object activityGate = new();
-    private readonly Dictionary<string, Grant> grants = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, Live> live = new(StringComparer.Ordinal);
-    private readonly HashSet<string> touched = new(StringComparer.Ordinal);
-    private readonly HashSet<CancellationTokenSource> onlineOperations = [];
-    private MusicSourceMetadataSnapshot? metadata;
-    private JsonObject? state;
-    private CancellationTokenSource? resolution;
+    private readonly HashSet<CancellationTokenSource> operations = [];
     private bool closed, preparing;
-    private volatile bool blocked;
     private int pending;
     private TaskCompletionSource drained = Complete();
     private Task? preparation, disposal;
-    private sealed class Grant(string id, string installation, JsonObject permissions, long revision)
-    {
-        internal string Id = id, Installation = installation;
-        internal JsonObject Permissions = permissions;
-        internal long Revision = revision, Generation;
-        internal string State = "candidate";
-        internal JsonObject Sites = new();
-        internal HashSet<string>? DeclaredSites;
-        internal readonly HashSet<string> AccessedSites = new(StringComparer.Ordinal);
-        internal string DataHash = "";
-    }
-    private sealed record Live(long Revision, long Generation, string Grant, JsonObject Capabilities);
 
     public MusicScriptOwner(MusicLibraryOwner library, IRuntimeClient runtime, TimeProvider? clock = null)
-        : this(library, runtime, clock, null) { }
-
-    internal MusicScriptOwner(MusicLibraryOwner library, IRuntimeClient runtime, TimeProvider? clock,
-        Func<JsonObject, string, CancellationToken, Task<JsonObject>>? matchSong)
     {
         this.library = library ?? throw new ArgumentNullException(nameof(library));
         this.runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
         scriptTransport = new(runtime);
-        this.clock = clock ?? TimeProvider.System;
-        this.matchSong = matchSong;
-        transfers = new(this.clock);
-        ScriptCapabilities = new Dictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>(StringComparer.Ordinal)
-        {
-            ["platform.musicScript.storage.get"] = (input, token) => StorageAsync("get", input, token),
-            ["platform.musicScript.storage.set"] = (input, token) => StorageAsync("set", input, token),
-            ["platform.musicScript.storage.delete"] = (input, token) => StorageAsync("delete", input, token)
-        };
-        if (runtime is IRuntimeRecovery recovery) recovery.RegisterRecoveryScope(this);
+        transfers = new(clock ?? TimeProvider.System);
     }
-    public IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> ScriptCapabilities { get; }
     private static TaskCompletionSource Complete() { var result = new TaskCompletionSource(); result.SetResult(); return result; }
     private static JsonObject Parse(object? value)
     {
         var bytes = BridgeCodec.EncodeJSONValue(value ?? new { });
-        try
-        {
-            return LJ.Object(JsonNode.Parse(bytes, documentOptions: new() { MaxDepth = 67 }));
-        }
+        try { return LJ.Object(JsonNode.Parse(bytes, documentOptions: new() { MaxDepth = 67 })); }
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }
-    private static string Code(Exception error) => error switch
+    private string Code(Exception error) => error switch
     {
         MusicLibraryException e => e.Code,
         MusicPlaybackCacheDataException => "CACHE_DATA_INCOMPATIBLE",
         MusicPlaybackCacheCommitException => "CACHE_COMMIT_UNKNOWN",
+        // A closed transport while this owner is open: the script service, not the request, is unavailable.
+        BridgeException { Code: "CLOSED" } when !closed => "SCRIPT_RUNTIME_UNAVAILABLE",
+        BridgeException when !closed && runtime is IRuntimeRecovery
+            { State: RuntimeConnectionState.Failed or RuntimeConnectionState.Recovering } => "SCRIPT_RUNTIME_UNAVAILABLE",
         BridgeException e => e.Code,
-        DocumentStoreException e => e.Error == DocumentStoreError.Unavailable
-            ? "STORAGE_UNAVAILABLE" : "STORAGE",
+        DocumentStoreException e => e.Error == DocumentStoreError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE",
         OperationCanceledException => "CANCELLED",
         JsonException or FormatException => "INVALID_REQUEST",
         _ => "SCRIPT_EXCEPTION"
@@ -98,225 +66,262 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
         return BridgeCodec.DecodeJSONValue(BridgeCodec.EncodeJSONValue(result));
     }
     private static JsonElement Fail(string code) => JsonSerializer.SerializeToElement(new { ok = false, code });
-    private void Admit()
+    private CancellationTokenSource Admit(CancellationToken token)
     {
         lock (activityGate)
         {
-            LJ.Require(!closed && !preparing && !recoveringRuntime, "CLOSED");
+            LJ.Require(!closed && !preparing, "CLOSED");
             if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            var operation = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
+            operations.Add(operation);
+            return operation;
         }
     }
-    private void Finish() { lock (activityGate) if (--pending == 0) drained.TrySetResult(); }
-    public void CancelPlayback()
-    {
-        lock (activityGate) resolution?.Cancel();
-    }
-    private void CancelOnlineOperations()
+    private void Finish(CancellationTokenSource operation)
     {
         lock (activityGate)
-            foreach (var operation in onlineOperations.ToArray()) operation.Cancel();
+        {
+            operations.Remove(operation);
+            if (--pending == 0) drained.TrySetResult();
+        }
+        operation.Dispose();
     }
+
     public async Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
     {
-        bool admitted = false, entered = false;
+        CancellationTokenSource? operation = null;
         try
         {
-            var input = Parse(parameters); Admit(); admitted = true;
-            using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
-            var token = request.Token;
-            if (method == "music.online.cancel") { LJ.Fields(input, ""); CancelPlayback(); return Okay(new()); }
-            if (method.StartsWith("music.sources.", StringComparison.Ordinal) && method is not ("music.sources.list" or "music.sources.detail"))
-                CancelOnlineOperations();
-            if (method is "music.online.resolve" or "music.online.lyrics")
-                return Okay(await OnlineAsync(method, input, token).ConfigureAwait(false));
-            await gate.WaitAsync(token).ConfigureAwait(false); entered = true;
-            token.ThrowIfCancellationRequested();
-            await ReconcileBlockedWriteAsync(token).ConfigureAwait(false);
-            return Okay(await CommandAsync(method, input, token).ConfigureAwait(false));
+            var input = Parse(parameters);
+            operation = Admit(cancellationToken);
+            var token = operation.Token;
+            if (method == "music.transfer.begin") return Okay(transfers.Begin(input));
+            if (method == "music.transfer.chunk") return Okay(transfers.Chunk(input));
+            if (method == "music.transfer.cancel") return Okay(transfers.Cancel(input));
+            if (method == "music.online.song") return Okay(Song(input));
+            if (method == "music.online.resolve") return Okay(await ResolveAsync(input, token).ConfigureAwait(false));
+            if (method == "music.online.lyrics") return Okay(await LyricsAsync(input, token).ConfigureAwait(false));
+            const string prefix = "music.sources.";
+            if (method.StartsWith(prefix, StringComparison.Ordinal) && Commands.Contains(method[prefix.Length..]))
+                return Okay(await SourcesAsync(method[prefix.Length..], input, token).ConfigureAwait(false));
+            throw new MusicLibraryException("METHOD_UNAVAILABLE");
         }
         catch (Exception error) { return Fail(Code(error)); }
-        finally { if (entered) gate.Release(); if (admitted) Finish(); }
+        finally { if (operation is not null) Finish(operation); }
     }
-    private async Task EnsureAsync(CancellationToken token)
+
+    private async Task<JsonObject> SourcesAsync(string command, JsonObject p, CancellationToken token)
     {
-        await ReconcileBlockedWriteAsync(token).ConfigureAwait(false);
-        if (metadata is not null) return;
-        metadata = await library.ReadSourceMetadataAsync(token).ConfigureAwait(false);
-        state = LJ.Object(JsonNode.Parse(metadata.State.GetRawText()));
-    }
-    private async Task ReconcileBlockedWriteAsync(CancellationToken token)
-    {
-        if (!blocked) return;
-        await RetireAllAsync(token).ConfigureAwait(false);
-        await library.ReconcileAsync(token).ConfigureAwait(false);
-        metadata = null;
-        state = null;
-        blocked = false;
-    }
-    private JsonArray Installations => LJ.Array(state!["installations"]);
-    private JsonObject Find(string id)
-    {
-        LJ.Require(LJ.Id(id, 128));
-        return Installations.OfType<JsonObject>().SingleOrDefault(i => LJ.S(i["id"]) == id)
-            ?? throw new MusicLibraryException("NOT_FOUND");
-    }
-    private JsonObject View(JsonObject item)
-    {
-        string id = LJ.S(item["id"]);
-        live.TryGetValue(id, out var active);
-        var capabilities = new JsonArray();
-        if (active is not null)
-            foreach (var pair in active.Capabilities)
+        switch (command)
+        {
+            case "list": LJ.Fields(p, ""); break;
+            case "download": LJ.Fields(p, "url", "url"); LJ.Text(p["url"], 2048); break;
+            case "edit": LJ.Fields(p, "installationId name url", "installationId"); break;
+            case "add": LJ.Fields(p, "token", "token"); break;
+            case "update": LJ.Fields(p, "installationId token", "installationId"); break;
+            default: LJ.Fields(p, "installationId", "installationId"); break;
+        }
+        if (p["token"] is not null)
+        {
+            // A native selected-file snapshot becomes one staged module upload.
+            using var snapshot = transfers.Take(LJ.Text(p["token"], 80), "script");
+            string stage = await StageAsync(snapshot, token).ConfigureAwait(false);
+            try
             {
-                var cap = LJ.Object(pair.Value).DeepClone().AsObject();
-                cap["platform"] = pair.Key; capabilities.Add(cap);
+                p["token"] = stage;
+                return await ScriptAsync("sources." + command, p, token).ConfigureAwait(false);
             }
-        var current = LJ.Object(item["current"]);
-        return LJ.Obj(("installationId", id), ("name", item["name"]), ("version", current["version"]),
-            ("contentHash", current["sourceHash"]),
-            ("executionHash", LJ.Digest(current)), ("sourceRevision", state!["revision"]),
-            ("generation", active?.Generation ?? 0), ("enabled", LJ.B(item["enabled"])),
-            ("state", active is not null ? "ready" : LJ.B(item["enabled"]) ? "idle" : "disabled"),
-            ("capabilities", capabilities), ("rollbackAvailable", item["previous"] is not null), ("lastFailure", null));
+            finally { await ReleaseStageAsync(stage).ConfigureAwait(false); }
+        }
+        return await ScriptAsync("sources." + command, p, token).ConfigureAwait(false);
     }
-    private static JsonObject Permissions(JsonNode? value)
+    private async Task<string> StageAsync(MusicNativeTransfers.Snapshot snapshot, CancellationToken token)
     {
-        var permissions = LJ.Object(value);
-        LJ.Fields(permissions, "storage", "storage");
-        var storage = LJ.Array(permissions["storage"]);
-        LJ.Require(storage.Count <= 2 && storage.All(n => LJ.S(n) is "read" or "write") &&
-            storage.Select(n => LJ.S(n)).Distinct(StringComparer.Ordinal).Count() == storage.Count);
-        return LJ.Obj(("storage", storage));
-    }
-    private JsonObject Next(JsonObject? replacement = null, string? removed = null)
-    {
-        var next = state!.DeepClone().AsObject();
-        next["revision"] = LJ.I(state["revision"]) + 1;
-        next["installations"] = LJ.Arr(Installations.Where(n => LJ.S(n?["id"]) != removed)
-            .Select(n => replacement is not null && LJ.S(n?["id"]) == LJ.S(replacement["id"]) ? replacement : n));
-        return next;
-    }
-    private async Task PersistAsync(JsonObject next, Grant? candidate, CancellationToken token)
-    {
-        await storageGate.WaitAsync(token).ConfigureAwait(false);
+        var begin = await ScriptAsync("stage.begin", new { basename = snapshot.Basename,
+            length = snapshot.Bytes.Length, sha256 = snapshot.Hash }, token).ConfigureAwait(false);
+        string stage = LJ.Text(begin["token"]);
         try
         {
-            metadata = candidate is null
-                ? await library.CommitSourceMetadataAsync(LJ.Element(next), metadata!.Sha256, token).ConfigureAwait(false)
-                : await library.CommitSourceWithScriptDataAsync(LJ.Element(next), metadata!.Sha256,
-                    candidate.Installation, LJ.Element(candidate.Sites), candidate.DataHash, token).ConfigureAwait(false);
-            state = JsonNode.Parse(metadata.State.GetRawText())!.AsObject();
-            foreach (var grant in grants.Values) grant.Revision = LJ.I(state["revision"]);
-            if (candidate is not null) { candidate.State = "active"; candidate.Sites = new(); }
-        }
-        catch (MusicLibraryException error) when (error.Code is "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT" or "SCRIPT_DATA_CONFLICT")
-        {
-            blocked = true;
-            foreach (var grant in grants.Values) grant.State = "revoked";
-            CancelOnlineOperations();
-            throw;
-        }
-        finally { storageGate.Release(); }
-    }
-    private async Task<JsonObject> CommandAsync(string method, JsonObject p, CancellationToken token)
-    {
-        if (method == "music.online.describe")
-        {
-            LJ.Fields(p, "");
-            return LJ.Obj(("version", 1), ("search", false), ("platforms", NativeMusicSong.Platforms.Append("local").ToArray()),
-                ("qualities", MusicQualityPolicy.LxTypes),
-                ("trustedScriptsOnly", false), ("transfer", new { chunkBytes = MusicNativeTransfers.ChunkBytes }));
-        }
-        if (method == "music.transfer.begin") return transfers.Begin(p);
-        if (method == "music.transfer.chunk") return transfers.Chunk(p);
-        if (method == "music.transfer.cancel") return transfers.Cancel(p);
-        if (method == "music.online.song")
-        {
-            LJ.Fields(p, "platform musicInfo title artist album duration", "platform musicInfo title");
-            string platform = LJ.Text(p["platform"]); LJ.Require(NativeMusicSong.Platforms.Contains(platform));
-            var info = LJ.Object(p["musicInfo"]).DeepClone().AsObject();
-            var song = NativeMusicSong.CreateOnline(platform, info, LJ.Text(p["title"], 512),
-                LJ.S(p["artist"]), LJ.S(p["album"]), LJ.N(p["duration"]));
-            return LJ.Obj(("song", song));
-        }
-        await EnsureAsync(token).ConfigureAwait(false);
-        if (method == "music.sources.list")
-        {
-            LJ.Fields(p, ""); return LJ.Obj(("revision", state!["revision"]), ("items", LJ.Arr(Installations.OfType<JsonObject>().Select(View))));
-        }
-        if (method == "music.sources.install")
-        {
-            LJ.Fields(p, "token name version permissions", "token name version permissions");
-            string name = LJ.Text(p["name"], 255), version = LJ.Text(p["version"], 128);
-            var permissions = Permissions(p["permissions"]);
-            using var snapshot = transfers.Take(LJ.Text(p["token"]), "script");
-            var content = await library.StoreScriptContentAsync(snapshot.Bytes, token).ConfigureAwait(false);
-            var item = LJ.Obj(("id", snapshot.InstallationId), ("name", name), ("enabled", false), ("previous", null),
-                ("current", LJ.Obj(("sourceHash", content.Sha256), ("sourceBytes", content.Length),
-                    ("version", version), ("permissions", permissions))));
-            var next = Next(); LJ.Array(next["installations"]).Add(item.DeepClone());
-            await PersistAsync(next, null, token).ConfigureAwait(false);
-            return LJ.Obj(("item", View(item))); // Import and ordinary listing never start Node.
-        }
-        string id = LJ.Text(p["installationId"], 128);
-        var selected = Find(id).DeepClone().AsObject();
-        if (method == "music.sources.detail")
-        {
-            LJ.Fields(p, "installationId", "installationId");
-            return LJ.Obj(("item", View(selected)), ("permissions", selected["current"]!["permissions"]));
-        }
-        if (method is "music.sources.enable" or "music.sources.disable" or "music.sources.remove" or "music.sources.rollback")
-            LJ.Fields(p, "installationId", "installationId");
-        if (method == "music.sources.enable")
-        {
-            if (live.ContainsKey(id) && LJ.B(selected["enabled"])) return LJ.Obj(("item", View(selected)));
-            selected["enabled"] = true;
-            await ActivateAsync(selected, token).ConfigureAwait(false);
-        }
-        else if (method is "music.sources.disable" or "music.sources.remove")
-        {
-            await UnloadAsync(id, token).ConfigureAwait(false); selected["enabled"] = false;
-            await PersistAsync(method.EndsWith("remove", StringComparison.Ordinal) ? Next(removed: id) : Next(selected), null, token).ConfigureAwait(false);
-            if (method.EndsWith("remove", StringComparison.Ordinal)) return LJ.Obj(("removed", true));
-        }
-        else if (method is "music.sources.update" or "music.sources.rollback")
-        {
-            var previous = selected["current"]!.DeepClone();
-            if (method == "music.sources.rollback")
+            int chunkBytes = (int)LJ.I(begin["chunkBytes"], 1, 65536);
+            for (int offset = 0; offset < snapshot.Bytes.Length;)
             {
-                LJ.Require(selected["previous"] is not null, "ROLLBACK_UNAVAILABLE");
-                selected["current"] = selected["previous"]!.DeepClone();
+                int count = Math.Min(chunkBytes, snapshot.Bytes.Length - offset);
+                var result = await ScriptAsync("stage.chunk", new { token = stage, offset,
+                    data = Convert.ToBase64String(snapshot.Bytes, offset, count) }, token).ConfigureAwait(false);
+                LJ.Require(LJ.I(result["next"]) == offset + count, "INVALID_RESPONSE");
+                offset += count;
             }
-            else
-            {
-                LJ.Fields(p, "installationId token version permissions", "installationId token version permissions");
-                string version = LJ.Text(p["version"], 128);
-                var permissions = Permissions(p["permissions"]);
-                using var snapshot = transfers.Take(LJ.Text(p["token"]), "script");
-                var content = await library.StoreScriptContentAsync(snapshot.Bytes, token).ConfigureAwait(false);
-                selected["current"]!["sourceHash"] = content.Sha256;
-                selected["current"]!["sourceBytes"] = content.Length; selected["current"]!["version"] = version;
-                selected["current"]!["permissions"] = permissions;
-            }
-            selected["previous"] = previous;
-            if (LJ.B(selected["enabled"])) await ActivateAsync(selected, token).ConfigureAwait(false);
-            else await PersistAsync(Next(selected), null, token).ConfigureAwait(false);
+            return stage;
         }
-        else throw new MusicLibraryException("METHOD_UNAVAILABLE");
-        return LJ.Obj(("item", View(Find(id))));
+        catch { await ReleaseStageAsync(stage).ConfigureAwait(false); throw; }
     }
-    private static JsonObject RequireSuccess(JsonElement reply)
+    private async Task ReleaseStageAsync(string stage)
     {
-        var value = LJ.Object(JsonNode.Parse(reply.GetRawText(), documentOptions: new() { MaxDepth = 67 }));
-        LJ.Require(LJ.IsBool(value["ok"]), "INVALID_RESPONSE");
-        if (!LJ.B(value["ok"])) throw new MusicLibraryException(LJ.Text(value["code"]));
-        value.Remove("ok"); return value;
+        try
+        {
+            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            await ScriptAsync("stage.abort", new { token = stage }, cleanup.Token).ConfigureAwait(false);
+        }
+        catch { /* A staged buffer expires in the module; it grants nothing. */ }
     }
+
+    private static JsonObject Song(JsonObject p)
+    {
+        LJ.Fields(p, "platform musicInfo title artist album duration", "platform musicInfo title");
+        string platform = LJ.Text(p["platform"]); LJ.Require(NativeMusicSong.Platforms.Contains(platform));
+        var info = LJ.Object(p["musicInfo"]).DeepClone().AsObject();
+        var song = NativeMusicSong.CreateOnline(platform, info, LJ.Text(p["title"], 512),
+            LJ.S(p["artist"]), LJ.S(p["album"]), LJ.N(p["duration"]));
+        return LJ.Obj(("song", song));
+    }
+
+    /// <summary>One musicUrl request for one exact quality. Ordering, fallback and
+    /// caching belong to the playback selection session, not to this adapter.</summary>
+    private async Task<JsonObject> ResolveAsync(JsonObject p, CancellationToken external)
+    {
+        LJ.Fields(p, "installationId platform song sourceKey quality qualityPolicySignature qualityCacheSignature",
+            "installationId platform song quality");
+        string id = LJ.Text(p["installationId"], 128), platform = LJ.Text(p["platform"]);
+        LJ.Require(NativeMusicSong.Platforms.Contains(platform));
+        string quality = LJ.Text(p["quality"]);
+        LJ.Require(MusicQualityPolicy.LxTypes.Contains(quality), "QUALITY_UNAVAILABLE");
+        var song = NativeMusicSong.Normalize(p["song"]);
+        var selected = SelectRecording(song, platform, p["sourceKey"]);
+        bool unknown = !selected.Data.ContainsKey("types") && !LJ.B(selected.Data["qualityKnown"]);
+        LJ.Require(unknown || (selected.Data["types"] as JsonArray ?? []).OfType<JsonObject>()
+            .Any(type => LJ.S(type["type"]) == quality), "RECORDING_QUALITY_UNAVAILABLE");
+        using var policy = await library.AcquireQualityAsync(external).ConfigureAwait(false);
+        if (p.ContainsKey("qualityPolicySignature"))
+            LJ.Require(LJ.Text(p["qualityPolicySignature"], 64) == policy.Signature, "QUALITY_POLICY_CHANGED");
+        LJ.Require(MusicQualityPolicy.Enabled(quality, policy.Policy), "QUALITY_DISABLED");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        using var timed = CancellationTokenSource.CreateLinkedTokenSource(external, policy.Token, deadline.Token);
+        var token = timed.Token;
+        try
+        {
+            var result = await ScriptAsync("resolve", new { installationId = id, platform, quality,
+                musicInfo = ScriptInfo(selected.Data) }, token).ConfigureAwait(false);
+            await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
+            LJ.Require(LJ.S(result["installationId"]) == id && LJ.S(result["platform"]) == platform &&
+                LJ.S(result["quality"]) == quality, "TARGET_CHANGED");
+            long generation = LJ.I(result["generation"], 1);
+            string signature = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v2"),
+                ("policy", policy.Signature), ("installation", id), ("platform", platform),
+                ("content", result["contentHash"]), ("sourceKey", selected.Key), ("recording", selected.Data),
+                ("songId", song["songId"]), ("duration", song["duration"]), ("quality", quality)));
+            if (p.ContainsKey("qualityCacheSignature"))
+                LJ.Require(LJ.Text(p["qualityCacheSignature"], 64) == signature, "QUALITY_CACHE_CHANGED");
+            return LJ.Obj(("url", result["url"]), ("headers", result["headers"]?.DeepClone() ?? new JsonObject()),
+                ("songId", song["songId"]), ("sourceKey", selected.Key), ("installationId", id),
+                ("platform", platform), ("generation", generation), ("contentHash", result["contentHash"]),
+                ("quality", quality), ("requestedQuality", quality), ("expiresAt", result["expiresAt"]),
+                ("playbackVerified", false), ("qualityVerified", false),
+                ("qualityPolicySignature", policy.Signature), ("qualityCacheSignature", signature));
+        }
+        catch (Exception error) when (deadline.IsCancellationRequested && !external.IsCancellationRequested &&
+            Code(error) == "CANCELLED")
+        { throw new MusicLibraryException("TIMEOUT"); }
+    }
+
+    private async Task<JsonObject> LyricsAsync(JsonObject p, CancellationToken external)
+    {
+        LJ.Fields(p, "installationId platform song sourceKey", "installationId platform song");
+        string id = LJ.Text(p["installationId"], 128), platform = LJ.Text(p["platform"]);
+        LJ.Require(NativeMusicSong.Platforms.Append("local").Contains(platform));
+        var song = NativeMusicSong.Normalize(p["song"]);
+        var setting = await library.ExecuteAsync("music.settings.get", cancellationToken: external).ConfigureAwait(false);
+        var settings = LJ.Object(JsonNode.Parse(setting.GetRawText()));
+        LJ.Require(LJ.B(settings["ok"]), LJ.S(settings["code"]) is { Length: > 0 } code ? code : "STORAGE");
+        if (!LJ.B(settings["settings"]!["lyrics"])) return LJ.Obj(("state", "disabled"), ("lines", new JsonArray()));
+        var selected = SelectRecording(song, platform, p["sourceKey"]);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        using var timed = CancellationTokenSource.CreateLinkedTokenSource(external, deadline.Token);
+        try
+        {
+            var result = await ScriptAsync("invoke", new { installationId = id, siteId = platform, operation = "lyric",
+                payload = new JsonObject { ["musicInfo"] = ScriptInfo(selected.Data) } }, timed.Token).ConfigureAwait(false);
+            var raw = result["value"];
+            LJ.Require(raw is JsonValue v && v.TryGetValue<string>(out _) ||
+                raw is JsonObject o && o["lyric"] is JsonValue l && l.TryGetValue<string>(out _), "INVALID_LYRIC_RESPONSE");
+            string text = raw is JsonValue ? LJ.S(raw) : LJ.S(raw?["lyric"]);
+            string translation = raw is JsonObject lyricsResult ? LJ.S(lyricsResult["tlyric"]) : "";
+            var lines = MusicLyricTiming.Parse(text, translation, LJ.N(song["duration"]));
+            return LJ.Obj(("state", lines.GetArrayLength() > 0 ? "ready" : "none"),
+                ("generation", result["generation"]), ("lines", lines));
+        }
+        catch (Exception error) when (deadline.IsCancellationRequested && !external.IsCancellationRequested &&
+            Code(error) == "CANCELLED")
+        { throw new MusicLibraryException("TIMEOUT"); }
+    }
+
+    private static JsonObject ScriptInfo(JsonObject recording)
+    {
+        var info = recording.DeepClone().AsObject();
+        if (info["duration"] is { } duration)
+            info["duration"] = Math.Max(0, LJ.N(duration));
+        return info;
+    }
+    private static (string Key, JsonObject Data) SelectRecording(JsonObject song, string platform, JsonNode? key)
+    {
+        if (platform == "local")
+        {
+            LJ.Require(!NativeMusicSong.IsOnline(song), "TARGET_CHANGED");
+            return (LJ.Text(song["songId"]), new JsonObject());
+        }
+        var records = LJ.Array(song["sources"]).OfType<JsonObject>()
+            .Where(s => LJ.S(s["source"]) == platform && (key is null || LJ.S(s["sourceKey"]) == LJ.Text(key))).ToArray();
+        LJ.Require(records.Length == 1, records.Length > 0 ? "TARGET_REQUIRED" : "RECORDING_UNAVAILABLE");
+        return (LJ.Text(records[0]["sourceKey"]), NativeMusicSong.SourceData(records[0]).DeepClone().AsObject());
+    }
+
     private async Task<JsonObject> ScriptAsync(string operation, object parameters, CancellationToken token)
     {
         var reply = await scriptTransport.CallAsync(operation, parameters, token).ConfigureAwait(false);
-        var result = RequireSuccess(reply);
-        LJ.Require(LJ.S(result["contract"]) == "music.script.v2", "INVALID_RESPONSE");
-        result.Remove("contract"); return result;
+        var value = LJ.Object(JsonNode.Parse(reply.GetRawText(), documentOptions: new() { MaxDepth = 67 }));
+        LJ.Require(LJ.IsBool(value["ok"]) && LJ.S(value["contract"]) == MusicScriptTransport.Contract, "INVALID_RESPONSE");
+        if (!LJ.B(value["ok"])) throw new MusicLibraryException(LJ.Text(value["code"]));
+        value.Remove("ok"); value.Remove("contract");
+        return value;
+    }
+
+    public Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
+    {
+        lock (activityGate)
+        {
+            if (preparation is null)
+            {
+                preparing = true;
+                foreach (var operation in operations.ToArray()) operation.Cancel();
+                preparation = drained.Task;
+            }
+            return preparation.WaitAsync(cancellationToken);
+        }
+    }
+    public async Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
+    {
+        Task? task;
+        lock (activityGate) { LJ.Require(!closed, "CLOSED"); task = preparation; }
+        if (task is not null) await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        lock (activityGate) { LJ.Require(!closed, "CLOSED"); preparation = null; preparing = false; }
+    }
+    public ValueTask DisposeAsync()
+    {
+        lock (activityGate) return new(disposal ??= DisposeCoreAsync());
+    }
+    private async Task DisposeCoreAsync()
+    {
+        await Task.Yield();
+        lock (activityGate)
+        {
+            closed = true; lifetime.Cancel();
+            foreach (var operation in operations.ToArray()) operation.Cancel();
+        }
+        Exception? failure = null;
+        try { await PrepareShutdownAsync().ConfigureAwait(false); }
+        catch (Exception error) { failure = error; }
+        try { transfers.Dispose(); }
+        catch (Exception error) { failure ??= error; }
+        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
+        // The App owns the runtime; its shutdown closes the shared module and every instance.
     }
 }

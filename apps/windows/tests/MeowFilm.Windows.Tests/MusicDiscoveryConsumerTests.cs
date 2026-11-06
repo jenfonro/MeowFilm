@@ -221,7 +221,6 @@ public static partial class MusicUiTests
             await using var runtime = new NativeMusicScriptTestRuntime();
             var service = new PausedInvalidationDiscovery();
             await using var app = new MusicNativeApplication(store, runtime, new NoUpstream(), null, (_, _) => service);
-            runtime.Register(app);
             var old = await app.ReadDiscoveryAsync(false);
             True(app.IsDiscoveryCurrent(old.Generation), "anonymous result initially current");
             service.Block = true;
@@ -278,7 +277,7 @@ public static partial class MusicUiTests
         private DiscoveryScene(IDocumentStore? selectedStore = null)
         {
             store = selectedStore ?? ServiceStore();
-            App = new(store, Runtime, Http); Runtime.Register(App);
+            App = new(store, Runtime, Http);
             Module = new(App, store, Playback, Dialog);
         }
         internal static async Task<DiscoveryScene> Create(IDocumentStore? store = null)
@@ -305,12 +304,11 @@ public static partial class MusicUiTests
             var before = (await Call("music.settings.get")).GetProperty("settings");
             Dialog.ScriptPath = Path.Combine(Root, "discovery-authored-lx.js");
             File.WriteAllText(Dialog.ScriptPath, TestScript(), new UTF8Encoding(false));
-            await Module.ImportSourceAsync(); Equal(1, Module.Sources.Count);
-            Module.SelectedSource = Module.Sources.Single();
-            await Module.LoadSourceAsync(Module.SelectedSource); await Module.SourceActionAsync("enable");
+            await Module.ImportSourceAsync(); Equal(1, Module.Sources.Count(row => !row.IsBuiltIn));
+            await Module.SetSourceEnabledAsync(Module.Sources.Single(row => !row.IsBuiltIn), true);
             await Until(() => Module.CanEdit);
             var installed = (await Call("music.sources.list")).GetProperty("items").EnumerateArray().Single();
-            Equal(Module.Sources.Single().InstallationId, installed.GetProperty("installationId").GetString());
+            Equal(Module.Sources.Single(row => !row.IsBuiltIn).InstallationId, installed.GetProperty("installationId").GetString());
             True(installed.GetProperty("enabled").GetBoolean(), "enabled script participates in discovery playback");
             var saved = (await Call("music.settings.get")).GetProperty("settings");
             Equal(3, saved.GetProperty("schema").GetInt32());

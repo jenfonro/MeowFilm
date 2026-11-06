@@ -345,22 +345,6 @@ import MeowJSON
         _ = await f.service.close()
     }
 
-    func testConfirmedCredentialImportInvalidatesHomeAndRequiresExplicitValidation() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
-        let binding = try await f.service.nativeHomeBinding()
-        let preview = try await f.service.previewCredentialImport(MusicCredentialImportFixture.input(.netease),
-            platform: .netease, format: .iwebPlusSnapshot, requestID: UUID())
-        XCTAssertTrue(binding.authorization.isActive, "Preview is not replacement")
-        _ = try await f.service.commitCredentialImport(id: preview.id, replaceExisting: true)
-        XCTAssertFalse(binding.authorization.isActive)
-        do { _ = try await f.service.nativeHomeBinding(); XCTFail("Pending import auto-accepted or became guest") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .verificationRequired) }
-        _ = try await f.service.validate(platform: .netease)
-        let current = try await f.service.nativeHomeBinding()
-        XCTAssertTrue(current.loggedIn); XCTAssertNotEqual(current.scope, binding.scope)
-        _ = await f.service.close()
-    }
-
     func testForgedBindingAndUnrelatedPlatformDoNotRevokeValidHome() async throws {
         let f = try MusicHomeOwnerFixture(); try await f.enable()
         let binding = try await f.service.nativeHomeBinding()

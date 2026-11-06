@@ -244,22 +244,10 @@ public static class MusicCatalogSourceSettingsTests
 
     private static async Task Independent(MusicLibraryOwner owner, Store store)
     {
-        var metadata = await owner.ReadSourceMetadataAsync();
-        var sources = JsonNode.Parse(metadata.State.GetRawText())!.AsObject();
-        sources["revision"] = 1;
-        sources["installations"]!.AsArray().Add(JsonSerializer.SerializeToNode(new
-        {
-            id = "catalog-source-test", name = "Synthetic source", enabled = true, previous = (object?)null,
-            current = new { sourceHash = new string('a', 64), sourceBytes = 1, version = "1",
-                permissions = new { storage = new[] { "read", "write" } } }
-        }));
-        await owner.CommitSourceMetadataAsync(JsonSerializer.SerializeToElement(sources), metadata.Sha256);
         await Ok(owner, "music.settings.save", new { ifRevision = 0, lyrics = false });
         await Ok(owner, "music.officialSources.settings.save", new { ifRevision = 0, enabled = new[] { "tx" } });
         await Ok(owner, "music.search.settings.save", SearchParameters());
         await Ok(owner, "music.search.history.record", new { text = "Synthetic search", kind = "songs" });
-        await owner.CommitScriptValueAsync("catalog-source-test", "wy", "synthetic", 1,
-            JsonSerializer.SerializeToElement("retained"), false);
         var song = MusicSongFixture.Online("tx", "catalog-source-song", "Synthetic song");
         await Ok(owner, "music.library.create", new { name = "Synthetic playlist", songs = new[] { song } });
         await Ok(owner, "music.queue.replace", new { songs = new[] { song }, index = 0 });

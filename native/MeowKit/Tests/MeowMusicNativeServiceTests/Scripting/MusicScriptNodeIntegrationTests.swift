@@ -71,6 +71,7 @@ final class MusicScriptNodeIntegrationTests: XCTestCase {
         let documents = try MusicScriptTestDocuments(); defer { documents.remove() }
         let launcher = try MusicScriptNodeLauncher(dataRoot: documents.root.appendingPathComponent("runtime"))
         let service = documents.owner(launcher)
+        await service.start()
         do {
             let item = try await service.importScriptSource(musicScriptFixture, fileName: "fixture.js")
             let enabled = try await service.setScriptSourceEnabled(item.id, enabled: true)
@@ -91,7 +92,8 @@ final class MusicScriptNodeIntegrationTests: XCTestCase {
                 siteID: "tx", sourceKey: "test", quality: "128k", musicInfo: Data("{}".utf8)))
             XCTAssertEqual(audioAfterReload.url.absoluteString, "https://media.invalid/tx/128k?n=3")
             try await service.removeScriptSource(item.id)
-            XCTAssertNil(try documents.store.read(key: "storage." + item.id))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: documents.root
+                .appendingPathComponent("runtime/music/data/" + item.id + ".json").path))
             let remaining = try await service.sources(); XCTAssertTrue(remaining.isEmpty)
             await service.close()
             let exit = await launcher.finish(); XCTAssertEqual(exit, 0)

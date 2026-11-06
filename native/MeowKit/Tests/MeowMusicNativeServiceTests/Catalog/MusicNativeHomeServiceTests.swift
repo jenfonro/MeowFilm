@@ -382,10 +382,10 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let account = HomeAccountFixture(), store = HomeSnapshotFixture(), value = try await service(account, store: store)
         let first = try await value.homePage(cursor: nil, refresh: true)
         let saved = store.read(), before = await account.calls
-        let selection = await value.homeSourceSelection()
-        XCTAssertEqual(selection, .init(selected: .netease, available: [.netease]))
-        try await value.selectHomeSource(.netease)
-        do { try await value.selectHomeSource(.qq); XCTFail("Unimplemented home source accepted") }
+        let selection = try await value.homeSourceSelection()
+        XCTAssertEqual(selection, .init(selected: .netease, revision: 0, available: [.netease, .kugou]))
+        _ = try await value.selectHomeSource(.netease, ifRevision: 0)
+        do { _ = try await value.selectHomeSource(.qq, ifRevision: 0); XCTFail("Unimplemented home source accepted") }
         catch { XCTAssertEqual(error as? MusicServiceError, .unsupported) }
         let cached = try await value.homePage(cursor: nil, refresh: false)
         XCTAssertEqual(cached.sections.map(\.id), first.sections.map(\.id))

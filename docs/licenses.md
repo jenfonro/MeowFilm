@@ -14,6 +14,7 @@
 | `nodejs-mobile-LICENSE.txt` | 仅 iOS 内嵌的 Node Mobile 18.20.4 及其第三方声明 |
 | `qr-code-generator-LICENSE.txt` | QR Code generator |
 | `quickjs-emscripten-LICENSE.txt` | QuickJS 与 quickjs-emscripten 的原始 MIT／版权声明，随受信 release-sync 引擎发布 |
+| `quickjs-native-MIT.txt` | 客户端内嵌 QuickJS-NG 的 MIT／版权声明，源码独立锁定于 `scripts/quickjs-native.json` |
 | `catpawrunner-MIT.txt` | Cat 兼容实现所参考 catpawrunner 的 MIT 正文 |
 | `npm-node-compat-MIT.txt` | 有限 Node 兼容依赖闭包中的 MIT 原始版权与许可文本 |
 | `npm-node-compat-BSD-3-Clause.txt`、`npm-node-compat-ISC.txt` | 对应传递依赖的原始许可文本 |

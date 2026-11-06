@@ -6,7 +6,7 @@
 
 - `MusicNativeCatalogOwner` 是固定平台目录、频道、歌单／歌手详情和目录动作的唯一原生 owner。
 - `MusicCapability` 的 Catalog presentation 只负责当前页面状态、用户意图、代次与取消；不保存第二份目录真值。
-- 网易云、QQ、酷狗请求由原生 `IMusicPlatformCatalog` 完成。普通目录读取不启动 Node。
+- 网易云、QQ、酷狗请求由原生 `IMusicPlatformCatalog` 完成。普通目录读取不调用脚本服务。
 
 ## 视觉与文本
 

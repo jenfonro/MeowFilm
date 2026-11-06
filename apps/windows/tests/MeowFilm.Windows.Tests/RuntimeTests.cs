@@ -24,7 +24,7 @@ public static class RuntimeTests
         return path;
     }
     private const string Identity = "aggregate";
-    private static RuntimeModule[] Modules => [new("music", "0.7.0"), new("cat", "0.1.0"), new("source", "0.1.0")];
+    private static RuntimeModule[] Modules => [new("music", "0.8.0"), new("cat", "0.1.0"), new("source", "0.1.0")];
     private static string[] Namespaces => ["music.library.v1", "music.accounts.v1"];
     private static string ScriptData() => Path.Combine(NewData(), "script-runtime");
 
@@ -42,10 +42,10 @@ public static class RuntimeTests
             {
                 pid = runtime.ProcessId;
                 BridgeTests.Equal(true, runtime.IsConnected);
-                var status = await runtime.CallAsync("music.script.status", new { });
-                BridgeTests.Equal("music.script.v2", status.GetProperty("contract").GetString());
-                BridgeTests.Equal(false, status.GetProperty("documentAccess").GetBoolean());
-                BridgeTests.Equal(0, status.GetProperty("instances").GetArrayLength());
+                var status = await runtime.CallAsync("music.script.sources.list", new { });
+                BridgeTests.Equal("music.script.v3", status.GetProperty("contract").GetString());
+                BridgeTests.Equal(true, status.GetProperty("ok").GetBoolean());
+                BridgeTests.Equal(0, status.GetProperty("items").GetArrayLength());
                 var cat = await runtime.CallAsync("cat.script.status", new { });
                 BridgeTests.Equal(true, cat.GetProperty("ok").GetBoolean());
                 using var catStatus = JsonDocument.Parse(cat.GetProperty("data").GetString()!);
@@ -105,12 +105,12 @@ public static class RuntimeTests
                 new Dictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>(), ScriptData());
             using (var owned = Process.GetProcessById(runtime.ProcessId)) owned.Kill();
             await runtime.Completion.WaitAsync(TimeSpan.FromSeconds(5));
-            await BridgeTests.Expect("CLOSED", () => runtime.CallAsync("music.script.status", new { }));
+            await BridgeTests.Expect("CLOSED", () => runtime.CallAsync("music.script.sources.list", new { }));
         });
         yield return new("native-runtime: wrong identity, module, version and remote data roots fail closed", async () =>
         {
             var description = BridgeCodec.Value(new { protocol = 1, product = Identity,
-                modules = new[] { new { id = "music", version = "0.2.0", methods = new[] { "music.script.status" } } } });
+                modules = new[] { new { id = "music", version = "0.2.0", methods = new[] { "music.script.sources.list" } } } });
             BridgeTests.Throws("INVALID_MESSAGE", () => NodeRuntime.ValidateDescription(description, Identity, Modules));
             BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(Path.Combine(Bundles, Identity), "music", Modules));
             BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity,

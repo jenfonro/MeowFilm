@@ -9,7 +9,7 @@
 ## 共用脚本运行时
 
 - [公共核心与平台边界](runtime/script-runtime.md)
-- [原始 LX 音源契约 music.script.v2](runtime/music-script-runtime.md)
+- [原始 LX 音源契约 music.script.v3](runtime/music-script-runtime.md)
 - [CatNode 脚本契约 cat.script.v1](runtime/cat-script-runtime.md)
 - [Reader 书源契约 source.runtime.v1](runtime/reader-source-runtime.md)
 - [source CatVod Spider 输入契约](runtime/cat-source-runtime.md)
@@ -34,6 +34,7 @@
 - [桌面壳](windows/desktop-shell.md)
 - [影视首页](windows/film-home.md)
 - [影视播放页](windows/film-playback.md)
+- [影视设置、客户端规则与来源管理](windows/film-settings.md)
 - [本地文档与敏感信息保护](windows/protected-storage.md)
 - [公共图像](windows/artwork.md)
 - [系统媒体会话](windows/system-media.md)

@@ -272,7 +272,10 @@ final class MusicAccountSMSProfileTests: XCTestCase {
         let membership = try JSONDecoder().decode(MusicAccountMembership.self, from: Data("{}".utf8))
         XCTAssertNil(membership.vip); XCTAssertEqual(membership.tier, "")
         XCTAssertThrowsError(try MusicAccountProfileWire.avatar("https://p1.music.126.net/%73ynthetic-secret", platform: .netease, secrets: ["synthetic-secret"]))
-        XCTAssertNil(try MusicAccountProfileWire.avatar("https://not-a-cdn.invalid/avatar.png", platform: .qq, secrets: []))
+        // Avatars use the shared host-agnostic artwork URL contract; reflected
+        // secrets and unsafe URL forms remain the boundaries.
+        XCTAssertEqual(try MusicAccountProfileWire.avatar("https://not-a-cdn.invalid/avatar.png", platform: .qq, secrets: []),
+                       URL(string: "https://not-a-cdn.invalid/avatar.png"))
     }
 
     func testSMSWhitelistRejectsHostMethodQueryAndRedirectTargets() {

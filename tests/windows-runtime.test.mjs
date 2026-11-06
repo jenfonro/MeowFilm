@@ -339,8 +339,7 @@ test('failed assembly releases its connected Windows pipe and disposes the modul
   assert.equal(closes, 1);
 });
 
-function spawnRuntime(t, entry, argv, payload) {
-  const scriptDataRoot = mkdtempSync(join(temporary, 'script-runtime-'));
+function spawnRuntime(t, entry, argv, payload, scriptDataRoot = mkdtempSync(join(temporary, 'script-runtime-'))) {
   t.after(() => rmSync(scriptDataRoot, { recursive: true, force: true }));
   const env = { ...process.env, NODE_OPTIONS: '', NODE_PATH: '',
     MEOWFILM_SCRIPT_DATA_ROOT: scriptDataRoot };
@@ -397,7 +396,7 @@ async function assertRealBusiness(peer, product, domains) {
   await assert.rejects(peer.call('eval', privateMarker), { code: 'METHOD_UNAVAILABLE' });
   await assert.rejects(peer.call('runtime.describe', {}), { code: 'INVALID_MESSAGE' });
   const music = description.modules.find(module => module.id === 'music');
-  assert.equal(music.version, '0.7.0');
+  assert.equal(music.version, '0.8.0');
   assert.ok(music.methods.every(method => method.startsWith('music.script.')));
   const cat = description.modules.find(module => module.id === 'cat');
   assert.equal(cat.version, '0.1.0');
@@ -405,8 +404,8 @@ async function assertRealBusiness(peer, product, domains) {
   const source = description.modules.find(module => module.id === 'source');
   assert.equal(source.version, '0.1.0');
   assert.ok(source.methods.every(method => method.startsWith('source.runtime.')));
-  assert.deepEqual(await peer.call('music.script.status', {}), {
-    ok: true, contract: 'music.script.v2', documentAccess: false, instances: [],
+  assert.deepEqual(await peer.call('music.script.sources.list', {}), {
+    ok: true, contract: 'music.script.v3', revision: 0, items: [],
   });
   assert.deepEqual(await peer.call('source.runtime.status', {}), {
     ok: true, contract: 'source.runtime.v1', instances: [],
@@ -419,7 +418,7 @@ async function assertRealBusiness(peer, product, domains) {
     await assert.rejects(peer.call(method, {}), { code: 'METHOD_UNAVAILABLE' });
 }
 
-async function verifyScriptExecution(t, peer, storageCalls) {
+async function verifyScriptExecution(t, peer, storageCalls, scriptDataRoot) {
   let requests = 0;
   const upstream = createHTTPServer((request, response) => {
     requests++;
@@ -454,6 +453,7 @@ async function verifyScriptExecution(t, peer, storageCalls) {
       }
       previousContext = context;
       await Promise.resolve();
+      await context.storage.set('probe-' + action, 'module-scoped-' + action);
       const stored = await context.storage.get('probe-' + action);
       const network = await new Promise((resolve, reject) => lx.request(${JSON.stringify(url)}, {},
         (error, response, body) => error ? reject(error) : resolve(body)));
@@ -466,7 +466,7 @@ async function verifyScriptExecution(t, peer, storageCalls) {
   `);
   const okay = reply => {
     assert.equal(reply.ok, true, JSON.stringify(reply));
-    assert.equal(reply.contract, 'music.script.v2');
+    assert.equal(reply.contract, 'music.script.v3');
     return reply;
   };
   const staged = okay(await peer.call('music.script.stage.begin', {
@@ -475,34 +475,29 @@ async function verifyScriptExecution(t, peer, storageCalls) {
   assert.equal(okay(await peer.call('music.script.stage.chunk', {
     token: staged.token, offset: 0, data: source.toString('base64'),
   })).next, source.length);
-  const grant = randomUUID();
-  const instance = okay(await peer.call('music.script.load', {
-    token: staged.token, installationId: 'packaged-fixture', revision: 1, expectedRevision: 0,
-    version: 'fixture-1', config: {}, permissions: { storage: ['read'] }, grant,
-  })).instance;
-  assert.deepEqual(instance.capabilities[siteId].actions, ['fixtureAction', 'musicUrl']);
-  assert.deepEqual(instance.capabilities[siteId].qualitys, ['320k']);
-  assert.equal(storageCalls.length, 0, 'startup/background storage never reaches native');
+  const imported = okay(await peer.call('music.script.sources.add', { token: staged.token })).item;
+  assert.equal(imported.name, 'Packaged LX contract fixture');
+  const instance = okay(await peer.call('music.script.sources.enable',
+    { installationId: imported.installationId })).item;
+  assert.equal(instance.state, 'ready');
   for (const operation of ['fixtureAction', 'musicUrl']) {
     const result = okay(await peer.call('music.script.invoke', {
-      installationId: instance.installationId, revision: instance.revision, generation: instance.generation,
-      siteId, operation, payload: { quality: '320k', musicInfo: {} },
+      installationId: instance.installationId, siteId, operation, payload: { type: '320k', musicInfo: {} },
     }));
     assert.deepEqual(result.value, {
       source: siteId, action: operation,
       startupStorage: 'undefined', backgroundStorage: 'undefined', globalStorage: 'undefined',
       retiredCode: operation === 'fixtureAction' ? 'NO_PREVIOUS' : 'PERMISSION_DENIED',
-      stored: 'native-scoped-value', network: { fixture: 'local-http' },
+      stored: `module-scoped-${operation}`, network: { fixture: 'local-http' },
     });
   }
-  assert.deepEqual(storageCalls, ['fixtureAction', 'musicUrl'].map(operation => ({
-    grant, installationId: instance.installationId, siteId, generation: instance.generation, key: `probe-${operation}`,
-  })));
+  assert.equal(storageCalls.length, 0, 'guest storage never reaches native documents');
+  assert.deepEqual(JSON.parse(readFileSync(join(scriptDataRoot, 'music', 'data', `${instance.installationId}.json`),
+    'utf8')).sites[siteId].map(entry => entry.key), ['probe-fixtureAction', 'probe-musicUrl']);
   assert.equal(requests, 2, 'the controlled local HTTP service is reachable without an origin/private-network grant');
-  assert.equal(okay(await peer.call('music.script.unload', {
-    installationId: instance.installationId, revision: instance.revision, generation: instance.generation,
-  })).cleanupComplete, true);
-  assert.deepEqual(okay(await peer.call('music.script.status', {})).instances, []);
+  assert.equal(okay(await peer.call('music.script.sources.disable', {
+    installationId: instance.installationId })).item.state, 'disabled');
+  assert.equal(okay(await peer.call('music.script.sources.list', {})).items[0].state, 'disabled');
 }
 
 async function verifySourceExecution(t, peer) {
@@ -603,10 +598,11 @@ async function runProduct(t, product, entry, payload) {
     },
   };
   const server = await pipeServer(t, { methods });
-  const child = spawnRuntime(t, entry, server.argv, payload);
+  const scriptDataRoot = mkdtempSync(join(temporary, 'script-runtime-'));
+  const child = spawnRuntime(t, entry, server.argv, payload, scriptDataRoot);
   const { peer } = await bounded(server.connection);
   await assertRealBusiness(peer, product, products[product]);
-  await verifyScriptExecution(t, peer, storageCalls);
+  await verifyScriptExecution(t, peer, storageCalls, scriptDataRoot);
   await verifySourceExecution(t, peer);
   assert.equal(server.peers.length, 1, 'one runtime connection serves the whole product');
   assert.equal(reads, 0);
@@ -627,7 +623,8 @@ for (const product of Object.keys(products)) {
       ['../bootstrap.mjs', '../../../runtime/modules/music-script.mjs',
         '../../../runtime/modules/cat-script.mjs', '../../../runtime/modules/source-runtime.mjs']);
     assert.equal(source.match(/await startWindowsAppRuntime\(/g)?.length, 1);
-    if (products[product].includes('music')) assert.ok(source.includes('createMusicScriptModule({ call })'));
+    if (products[product].includes('music'))
+      assert.ok(source.includes('createMusicScriptModule({ dataRoot: windowsScriptDataRoot() })'));
     if (products[product].includes('cat')) assert.ok(source.includes('createCatScriptModule({ dataRoot: windowsScriptDataRoot() })'));
     if (products[product].includes('source')) {
       assert.ok(source.includes("createSourceRuntimeModule({ call, platform: 'windows' })"));

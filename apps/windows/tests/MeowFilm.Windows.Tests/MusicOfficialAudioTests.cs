@@ -48,6 +48,8 @@ public static class MusicOfficialAudioTests
             await using var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
             await using var module = new MusicCapability(app, f.Store, new NativeMusicPlayback(player), new CacheDialogs(), playbackCacheRoot: f.Root);
             await module.InitializeAsync(default);
+            await module.ActivateQualitySettingsAsync();
+            await module.SetPlaybackQualityRequestAsync("320k");
             Check((await app.ExecuteAsync("music.accounts.import",
                 new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" })).GetProperty("ok").GetBoolean());
             var oneSecondSong = JsonSerializer.SerializeToNode(Song("tx", "FixtureMID"))!.AsObject();
@@ -76,6 +78,7 @@ public static class MusicOfficialAudioTests
             Check(player.HasMedia && player.OwnerId == "music" && vkeys == 1 && runtime.Calls == 0 && offlineRequests == 0,
                 "licensed file-first must play with zero network and zero Node calls");
             Check(module.CurrentSource.Contains("QQ", StringComparison.Ordinal), "source is official not LX");
+            Check(module.CurrentQualityLabel == "无损", "the decoded cache reports its actual higher quality, not the 320k request");
             await app.ExecuteAsync("music.accounts.logout", new { platform = "tx" });
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             while (player.HasMedia) await Task.Delay(10, deadline.Token);
@@ -184,7 +187,7 @@ public static class MusicOfficialAudioTests
             }));
             await using var clients = new MusicClientContextFixture(http);
             var result = await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session("tx"),
-                new JsonObject { ["songmid"] = "FixtureMID" }, ["320k"], Rights(), default, () => { });
+                new JsonObject { ["songmid"] = "FixtureMID" }, ["320k"], default, () => { });
             Check(calls == 2 && result.RequestQuality == "320k" && !result.QualityVerified && result.ActualQuality == "" &&
                 result.Full && result.Size == 1234567 && result.ExpiresAt <= DateTimeOffset.UtcNow.AddSeconds(120).ToUnixTimeMilliseconds());
         });
@@ -201,7 +204,7 @@ public static class MusicOfficialAudioTests
                         ekey = wrong == "ekey" ? "protected" : "" } } }))));
                 bool denied = false;
                 await using var clients = new MusicClientContextFixture(http);
-                try { await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session("tx"), new() { ["songmid"] = "FixtureMID" }, ["320k"], Rights(), default, () => { }); }
+                try { await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session("tx"), new() { ["songmid"] = "FixtureMID" }, ["320k"], default, () => { }); }
                 catch (MusicPlatformException) { denied = true; }
                 Check(denied, wrong);
             }
@@ -231,24 +234,29 @@ public static class MusicOfficialAudioTests
                 try
                 {
                     var result = await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session("kg"),
-                        new() { ["hash"] = hash }, ["128k"], Rights(), default, () => { });
+                        new() { ["hash"] = hash }, ["128k"], default, () => { });
                     Check(result.Full && !result.QualityVerified && result.ExpiresAt is null);
                 }
                 catch (MusicPlatformException e) when (e.Code == "TRIAL_ONLY") { denied = true; }
                 Check(denied == trial && calls == 2);
             }
         });
-        yield return new("Official audio requires real membership before any resource request", async () =>
+        yield return new("Official audio never rejects a non-member locally; the platform response decides", async () =>
         {
-            using var http = MusicPlatformHttp.CreateWithHandler(new Handler(_ => throw new InvalidOperationException("Unexpected network")));
+            int requests = 0;
+            using var http = MusicPlatformHttp.CreateWithHandler(new Handler(_ => { requests++; throw new InvalidOperationException("synthetic upstream"); }));
             await using var clients = new MusicClientContextFixture(http);
-            foreach (string platform in new[] { "wy", "tx", "kg" })
+            foreach (string platform in new[] { "tx", "kg" })
             {
-                bool denied = false;
-                try { await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session(platform), new(), ["320k"],
-                    Rights() with { Membership = new(false, "none", null) }, default, () => { }); }
-                catch (MusicPlatformException e) when (e.Code == "VIP_REQUIRED") { denied = true; }
-                Check(denied);
+                int before = requests;
+                try
+                {
+                    await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session(platform),
+                        platform == "kg" ? new() { ["hash"] = new string('a', 32) } : new() { ["songmid"] = "FixtureMID" }, ["320k"], default, () => { });
+                }
+                catch (MusicPlatformException e) { Check(e.Code != "VIP_REQUIRED", e.Code); }
+                catch (Exception) { }
+                Check(requests > before, "a non-member request reaches the platform: " + platform);
             }
         });
         yield return new("Official audio application without account fails AUTH_REQUIRED without Node", async () =>
@@ -565,8 +573,6 @@ public static class MusicOfficialAudioTests
     }
     private static MusicPlatformSession Session(string platform) => new(platform, new string('a', 64), 1, "123",
         platform switch { "tx" => "musicid=123; musickey=synthetic", "kg" => "userid=123; token=synthetic; KUGOU_API_MID=123456", _ => "MUSIC_U=synthetic; deviceId=fixture" });
-    private static MusicAccountEntitlements Rights() => new(new(true, "vip", DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeMilliseconds()),
-        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeMilliseconds(), ["standard", "exhigh"]);
     private static HttpResponseMessage Qq(object value) => Json(new { code = 0, req_0 = new { code = 0, data = value } });
     private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK) {
         Content = new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json") };
@@ -610,7 +616,11 @@ public static class MusicOfficialAudioTests
     {
         internal int Calls;
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-        { Calls++; throw new InvalidOperationException("Official business called Node"); }
+        {
+            if (method == "music.script.sources.list")
+                return Task.FromResult(JsonSerializer.SerializeToElement(new { ok = true, contract = "music.script.v3", items = Array.Empty<object>() }));
+            Calls++; throw new InvalidOperationException("Official business invoked a script");
+        }
     }
     private sealed class CacheDialogs : IMusicDialogs
     {

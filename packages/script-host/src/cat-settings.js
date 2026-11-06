@@ -1,9 +1,22 @@
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { atomicWrite } from './private-volume.js';
-import { clone, fault, identifier, requireValue } from './errors.js';
+import { clone, fault, identifier, requireValue, safeError } from './errors.js';
 
 export const catProviders = Object.freeze(['baidu', 'quark', 'uc', 'tianyi', 'yidong']);
+const managementFields = ['name', 'sourceType', 'sourceUrl', 'importedAt', 'updatedAt',
+  'updateState', 'updateError', 'sites'];
+export function catSourceURL(value) {
+  requireValue(typeof value === 'string' && value.trim().length > 0);
+  let url;
+  try { url = new URL(value); } catch { throw fault('INVALID_ARGUMENT'); }
+  requireValue(['http:', 'https:'].includes(url.protocol));
+  return value;
+}
+export function catName(value) {
+  requireValue(typeof value === 'string' && value.trim().length > 0);
+  return value.trim();
+}
 function jsonShape(value) {
   try { return JSON.parse(JSON.stringify(value)); }
   catch { throw fault('INVALID_ARGUMENT'); }
@@ -38,17 +51,44 @@ export function validateCatSettings(input) {
   }
   requireValue(Array.isArray(input.scripts));
   const identities = new Set();
-  for (const script of input.scripts) {
+  const result = clone(input);
+  for (const script of result.scripts) {
     requireValue(script && Object.keys(script).every(key =>
-      ['installationId', 'sourceHash', 'enabled', 'version', 'config'].includes(key)));
+      ['installationId', 'sourceHash', 'enabled', 'version', 'config', ...managementFields].includes(key)));
     identifier(script.installationId);
     requireValue(!identities.has(script.installationId));
     identities.add(script.installationId);
     requireValue(/^[a-f0-9]{64}$/.test(script.sourceHash) && typeof script.enabled === 'boolean' &&
       typeof script.version === 'string' && script.version.length > 0 && script.version.length <= 128 &&
       script.config && typeof script.config === 'object' && !Array.isArray(script.config));
+    // Version 1 previously stored exactly the five fields above. Their source
+    // was staged locally; neither a display name nor timestamps were recorded.
+    if (!managementFields.some(key => Object.hasOwn(script, key))) Object.assign(script, {
+      name: script.installationId, sourceType: 'local', sourceUrl: null,
+      importedAt: null, updatedAt: null, updateState: 'idle', updateError: null, sites: [],
+    });
+    catName(script.name);
+    requireValue(['local', 'network'].includes(script.sourceType));
+    if (script.sourceType === 'network') catSourceURL(script.sourceUrl);
+    else requireValue(script.sourceUrl === null);
+    for (const value of [script.importedAt, script.updatedAt])
+      requireValue(value === null || Number.isSafeInteger(value) && value >= 0);
+    requireValue(['idle', 'updated', 'unchanged', 'failed'].includes(script.updateState));
+    requireValue(script.updateState === 'failed'
+      ? typeof script.updateError === 'string' && script.updateError.length > 0
+      : script.updateError === null);
+    requireValue(Array.isArray(script.sites));
+    const sites = new Set();
+    for (const site of script.sites) {
+      requireValue(site && typeof site.key === 'string' && site.key.length > 0 &&
+        !sites.has(site.key) && typeof site.name === 'string' && typeof site.api === 'string' &&
+        Array.isArray(site.actions) && site.actions.every(action => typeof action === 'string') &&
+        site.methods && typeof site.methods === 'object' && !Array.isArray(site.methods) &&
+        Object.values(site.methods).every(method => typeof method === 'string'));
+      sites.add(site.key);
+    }
   }
-  return clone(input);
+  return result;
 }
 
 /** The file is the only durable settings authority. A failed reload neither
@@ -68,7 +108,13 @@ export class CatSettingsFile {
   publish(value) { this.value = validateCatSettings(value); }
   save(change) {
     const next = validateCatSettings(jsonShape(change(this.read())));
-    atomicWrite(this.path, JSON.stringify(next, null, 2) + '\n');
+    try { atomicWrite(this.path, JSON.stringify(next, null, 2) + '\n'); }
+    catch (error) {
+      // A rename can succeed before directory synchronization fails. Callers
+      // must reconcile the actual file instead of rolling a committed source back.
+      if (JSON.stringify(this.read()) === JSON.stringify(next)) throw fault('COMMIT_UNKNOWN');
+      throw safeError(error, 'STORAGE_ERROR');
+    }
     return next;
   }
 }

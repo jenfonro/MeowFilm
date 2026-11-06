@@ -5,12 +5,6 @@ namespace MeowFilm.Capabilities;
 public sealed partial class MusicCapability
 {
     private long officialAccountEpoch;
-    public string CurrentQualityLabel => musicRecovery?.Media?.Receipt is { } receipt &&
-        receipt.TryGetProperty("qualityVerified", out var verified) && verified.ValueKind == JsonValueKind.True
-        ? MusicDto.Text(receipt, "actualQuality") switch {
-            "128k" => "标准", "192k" or "320k" => "高音质", "flac" => "无损", "flac24bit" => "Hi-Res",
-            "master" => "母带", "dolby" => "杜比", "sky" => "环绕声", "vivid" => "臻音", "jyeffect" => "增强", _ => "音质"
-        } : "音质";
     private object OfficialInput(SongRow song, MusicOnlineTarget target, bool initial, bool refresh, bool cacheOnly = false) =>
         new {
             platform = target.Platform, song = target.RecordingSong ?? song.Raw, originSong = song.Raw, sourceKey = target.SourceKey,
@@ -80,6 +74,10 @@ public sealed partial class MusicCapability
         long? expiry = response.GetProperty("expiresAt").ValueKind == JsonValueKind.Number
             ? response.GetProperty("expiresAt").GetInt64() : null;
         MusicDto.Require(expiry is null || expiry > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        var currentPolicy = await QualityCall("music.quality.settings.get", null, token);
+        token.ThrowIfCancellationRequested();
+        if (MusicDto.Text(currentPolicy, "signature") != target.QualityPolicySignature)
+            throw new MusicOperationException("QUALITY_POLICY_CHANGED");
         return new(uri, new Dictionary<string, string>(), target with {
             Generation = MusicDto.Integer(response, "generation"), SourceKey = MusicDto.Text(response, "sourceKey"),
             AccountScope = MusicDto.Text(response, "scope"), Quality = request,

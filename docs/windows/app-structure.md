@@ -53,12 +53,12 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 
 ## 原生和脚本边界
 
-网易云、QQ、酷狗官方业务独立于 LX。账号、平台 API、搜索、曲库、缓存和播放在 .NET 内执行；无脚本操作时不启动 Node。
+网易云、QQ、酷狗官方业务独立于 LX。账号、平台 API、搜索、曲库、缓存和播放在 .NET 内执行，不以 Node 连接为前置条件。公共宿主随 App 启动，宿主失败不阻断原生业务；影视随后恢复启用猫源，不因此执行音乐或停用的猫源脚本。
 
-Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，从公共 `apps/runtime/modules/{music,cat}-script.mjs` 与 `apps/runtime/modules/source-runtime.mjs` 装配 `music@0.7.0`／`music.script.v2`、`cat@0.1.0`／`cat.script.v1`、`source@0.1.0`／`source.runtime.v1`。公共层复用同一 script-host WorkerSession／worker 协议／QuickJS 后端；Windows 目录只有启动／命名管道 bootstrap 与薄 entry，没有业务 module 副本或第二套 runner。
+Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，从公共 `apps/runtime/modules/{music,cat}-script.mjs` 与 `apps/runtime/modules/source-runtime.mjs` 装配 `music@0.8.0`／`music.script.v3`、`cat@0.1.0`／`cat.script.v1`、`source@0.1.0`／`source.runtime.v1`。公共层复用同一 script-host WorkerSession／worker 协议／QuickJS 后端；Windows 目录只有启动／命名管道 bootstrap 与薄 entry，没有业务 module 副本或第二套 runner。
 
 载荷包含公共 bootstrap、共享 music/Cat/source 模块、Windows 两个入口文件、runtime-bridge、script-host、source-runtime、有限 Node 兼容及规则解析依赖、锁定的 QuickJS release-sync 引擎和必要许可，没有普通业务文档桥授权。CatNode 设置、源码和私有卷位于 App 固定 `script-runtime` 数据根，source 的 Reader/CatVod 不继承该私有卷或服务能力。公共执行、存储与网络边界见[共用运行时](../runtime/script-runtime.md)；source 平台能力以[capability ABI](../runtime/source-capability-abi.md)为唯一来源。Node 无关仅指 source-runtime 规则包，不表示 Node 兼容层无需 Node，也不表示已提供阅读 UI 或其他平台客户端。
 
-App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能力数量和 `IDesktopModule.Id` 不要求等于脚本模块数量或名称。增加不依赖脚本的原生能力不会被迫增加 Node 模块；脚本清单只决定按需启动后的 JS 载荷与协议版本。
+App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能力数量和 `IDesktopModule.Id` 不要求等于脚本模块数量或名称。增加不依赖脚本的原生能力不会被迫增加 Node 模块；脚本清单只决定 App 启动时的 JS 载荷与协议版本。
 
-当前 App 先注册音乐能力，再注册不依赖脚本、存储或播放器的 `FilmCapability`，因此启动页保持音乐推荐。影视首页的数据和路由边界见[影视首页](film-home.md)。
+当前 App 先注册音乐能力，再注册 `FilmCapability`，因此启动页保持音乐推荐。影视能力拥有客户端规则及视频源服务；首页仍独立读取豆瓣，未接入视频源播放。影视首页的数据和路由边界见[影视首页](film-home.md)，设置与生命周期见[影视设置](film-settings.md)。

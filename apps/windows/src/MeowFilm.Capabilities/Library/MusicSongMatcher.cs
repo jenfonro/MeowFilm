@@ -48,7 +48,7 @@ internal sealed class MusicSongMatcher
             catch (Exception error) when (error is ObjectDisposedException or AggregateException) { }
         }
     }
-    internal sealed record MatchResult(JsonObject Song, bool More = false, string? Error = null);
+    internal sealed record MatchResult(JsonObject Song, string? Error = null);
 
     internal MusicSongMatcher(MusicLibraryOwner library, MusicSongMatchStore store,
         Func<MusicSearchRequest, CancellationToken, Task<JsonElement>> search, TimeProvider? time = null)
@@ -198,12 +198,11 @@ internal sealed class MusicSongMatcher
     }
 
     internal async Task<MatchResult> MatchAsync(JsonObject song, string platform, string context,
-        CancellationToken token, bool refresh = false, int page = 1, IReadOnlySet<string>? rejected = null)
+        CancellationToken token)
     {
         LJ.Require(NativeMusicSong.Platforms.Contains(platform), "INVALID_REQUEST");
         LJ.Require(context.Length == 0 || context.Length == 16 &&
             context.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'), "INVALID_REQUEST");
-        LJ.Require(page is >= 1 and <= 3, "LIMIT");
         song = NativeMusicSong.Normalize(song);
         await LoadAsync(token).ConfigureAwait(false);
         Flight flight;
@@ -213,21 +212,20 @@ internal sealed class MusicSongMatcher
             var entry = Accept(song);
             var known = Project(song, entry);
             bool hasSource = LJ.Array(known["sources"]).OfType<JsonObject>().Any(row =>
-                LJ.S(row["source"]) == platform && rejected?.Contains(LJ.S(row["sourceKey"])) != true);
+                LJ.S(row["source"]) == platform);
             long now = clock.GetUtcNow().ToUnixTimeMilliseconds();
             var status = entry.Platforms[platform] as JsonObject;
             bool sameContext = status is not null && LJ.S(status["context"]) == context;
             bool sameQuery = status is not null && LJ.S(status["query"]) == Query(song);
             long age = status is null ? long.MaxValue : now - LJ.I(status["checkedAt"]);
             bool recent = age >= 0;
-            // Later bounded pages are explicit source-list requests, never an automatic recheck.
-            if (!refresh && page == 1 && (hasSource ||
+            if (hasSource ||
                 sameContext && recent && (LJ.S(status!["state"]) == "notFound" && sameQuery && age < NotFoundRetry ||
-                    LJ.S(status!["state"]) == "matched" && age < Freshness)))
+                    LJ.S(status!["state"]) == "matched" && age < Freshness))
                 return new(known);
             if (!NativeMusicSong.IsOnline(song) || NativeMusicSong.Fingerprint(song).Length == 0 ||
                 LJ.N(song["duration"]) <= 0) return new(known);
-            flightKey = LJ.Stringify(new JsonArray(entry.Key, platform, context, refresh, page,
+            flightKey = LJ.Stringify(new JsonArray(entry.Key, platform, context,
                 generations.GetValueOrDefault(platform)));
             if (!flights.TryGetValue(flightKey, out flight!))
             {
@@ -235,7 +233,7 @@ internal sealed class MusicSongMatcher
                 flights.Add(flightKey, flight);
                 int generation = generations.GetValueOrDefault(platform);
                 var current = flight;
-                flight.Work = Task.Run(() => SearchAsync(song, platform, context, page, refresh,
+                flight.Work = Task.Run(() => SearchAsync(song, platform, context,
                     generation, current.Cancellation.Token));
                 _ = flight.Work.ContinueWith(done =>
                 {
@@ -251,7 +249,7 @@ internal sealed class MusicSongMatcher
         return result with { Song = Reuse(song, result.Song, platform) };
     }
     private async Task<MatchResult> SearchAsync(JsonObject song, string platform, string context,
-        int page, bool refresh, int generation, CancellationToken token)
+        int generation, CancellationToken token)
     {
         MusicSearchPage? result = null;
         string? error = null;
@@ -259,10 +257,10 @@ internal sealed class MusicSongMatcher
         using var request = CancellationTokenSource.CreateLinkedTokenSource(token, deadline.Token);
         try
         {
-            var reply = await search(new(platform, Query(song), MusicSearchKind.Songs, page, 30, refresh), request.Token)
+            var reply = await search(new(platform, Query(song), MusicSearchKind.Songs, 1, 30, false), request.Token)
                 .ConfigureAwait(false);
             request.Token.ThrowIfCancellationRequested();
-            result = MusicSearchPage.Read(reply, platform, MusicSearchKind.Songs, page);
+            result = MusicSearchPage.Read(reply, platform, MusicSearchKind.Songs, 1);
         }
         catch (MusicPlatformException e) { error = e.Code; }
         catch (MusicLibraryException e) { error = e.Code; }
@@ -291,7 +289,7 @@ internal sealed class MusicSongMatcher
             Touch(entry);
             var output = Project(song, entry);
             Trim();
-            return new(output, result?.More ?? false, error);
+            return new(output, error);
         }
     }
     private static JsonObject Status(string state, long at, string context, string query, string code) =>

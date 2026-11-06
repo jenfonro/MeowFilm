@@ -74,26 +74,27 @@ music.sources.*
 music.online.describe
 music.online.resolve
 music.online.lyrics
-music.online.cancel
 music.transfer.*   // 仅 kind=script
 ```
 
-不运行脚本时，官方业务不启动或依赖 Node。Node 没有通用文档访问、任意文件、进程、账号凭据或 App 内部状态能力。
+公共宿主随 App 启动；官方业务不依赖脚本服务可用。guest 没有通用文档访问、任意文件、进程、账号凭据或 App 内部状态能力。
 
 ## 脚本源生命周期
 
-原生 `MusicScriptOwner` 拥有安装元数据、存储会话绑定、实例代次、取消和持久事务；公共 Node host 拥有实际 JS 执行会话。全局 `meow` 只提供 `config`，当前 `music.script.v2` 的请求处理器以第二参数 `context.storage` 作为唯一持久存储入口；已完成请求的 context 拒绝访问，startup／background 无隐式权限。
+`MusicScriptOwner` 是公共 `music.script.v3` 的薄适配。安装、源码、网络地址、声明、检测与 guest KV 由公共音乐模块持有；
+原生拥有文件选择、歌曲匹配、质量策略和播放会话。App 显式启动唯一宿主，但启动不执行脚本。请求存储只经 `context.storage`，无原生反向存储接口。
+详见[脚本接入](music-script-runtime.md)与[统一选源](music-official-selection.md)。
 
 - 安装输入来自原生已选择文件的只读字节快照或 HTTPS 下载；两种获取方式进入同一检查、传输与安装流程。
 - 设置页允许一次明确选择多份 `.js`；导入只持久当前源元数据并保持停用，不连接音源服务器、不执行脚本。
 - transfer 只接受 `.js`、规范 SHA-256、严格 UTF-8 和顺序 Base64 分片。
 - 当前 transfer 只允许 `kind=script`。
-- 每个 installation、platform 和 generation 都显式指定。
+- 每个 installation、platform、recording 和 quality 都显式指定；共享模块管理运行 generation。
 - 启用状态决定实例是否可参与候选；应用启动和列出候选不激活全部脚本，实际需要时才按顺序请求并激活实例。
 - 脚本在线请求的内部 25 秒期限届满返回 `TIMEOUT`，统一选择将其作为该候选不可用处理，保留其他已成功的内置候选。普通调用方取消、源撤销或质量取消仍返回 `CANCELLED`，终止旧操作。
-- 更新启用中的实例时，先撤销旧 grant，再验证候选；候选 metadata 与脚本 storage 通过同一 library envelope CAS 发布。
+- 更新由公共模块验证候选并原子发布安装事实，失败不让未提交候选成为持久安装；guest startup 无存储权限。
 - source rollback 只是在当前安装实例的 `current`／`previous` 之间切换当前脚本版本，不解释或转换旧数据格式。
-- 迟到脚本回调、旧 grant 和旧 generation 不能覆盖当前实例。
+- 迟到脚本回调和旧 generation 不能覆盖当前实例。
 - 音源不再维护域名／私网授权名单；`validateURL` 只检查 HTTP(S) 语法，网络可以访问已开放服务。文件／进程隔离不是网络隔离，官方业务的授权规则保持独立。
 
 ## 曲库、队列和播放
@@ -102,10 +103,10 @@ music.transfer.*   // 仅 kind=script
 - `MusicRecommendationQueuePort` 串行所有最终 queue mutation。
 - 队列只持久歌曲身份、公开元数据、occurrence 和上下文，不持久短期媒体 URL 或账号凭据。
 - 内置源与网络源是类型区别，已启用源均可按需参与统一选择。关闭内置平台只关闭该平台的官方音频能力，不限制已启用脚本提供同平台录音；禁用脚本不参与。
-- 自动选择先复用可播完整文件和有效 URL，再尝试已有映射；符合当前音质设置就接受，不为比较全部来源的最高音质额外请求。`ResolveAutomaticSources` 在已有官方来源不可用时将录音快照与偏好顺序交给脚本；已有脚本映射也不可用时才补其缺少的目标平台，再按需进行官方发现。共享录音信息不共享账号凭据或授予播放权限，详见[自动选择](music-official-selection.md#3-自动选择)。
-- 官方取链须完成当前账号、质量和媒体授权；LX 每次取链必须指定 installation、platform、generation、song/sourceKey 和 quality。统一选择由能力层协调，脚本按需顺序尝试；已分类的候选不可用可继续到另一类型，取消、存储损坏、未知提交与策略变化必须终止旧操作。
+- 按设置从首选档向后，逐档缓存优先并穷尽所有可参与来源；候选耗尽才一次补搜缺失映射。已有低档缓存不抢过高档来源。详见[统一选源](music-official-selection.md)。
+- 官方取链须完成当前账号、质量和媒体授权；LX 每次取链必须指定 installation、platform、generation、song/sourceKey 和 quality。统一选择由能力层协调，脚本按声明交集并发最多三个尝试；已分类的候选不可用可继续到另一类型，取消、存储损坏、未知提交与策略变化必须终止旧操作。
 - 手动选择只限定当前歌曲的录音，由符合质量与权限的已启用源提供，不指定全局类型。当前播放仍保留真实来源的 installation、platform、generation 和 sourceKey，队列歌曲身份不变。
-- 自动恢复可以双向跨类型，排除键为 `installation + platform + sourceKey`，另排除失败 URL；仍限制最多 4 次来源切换、总计 55 秒。手动指定录音的恢复保持原 20 秒预算，精确刷新失败后可换同一录音的 provider。录音选择与恢复细节见 [统一音源与录音选择](music-official-selection.md) 和 [原生播放续接](playback-recovery.md)。
+- 自动恢复先一次精确刷新，再排除失败候选后从本会话继续；候选去重形成终止条件，不额外限制四次。操作仍有期限与取消，手动换档只尝试同档并准备好再交接。
 - 只有真实播放器 `Started` 事件记录播放历史并开始反馈。
 
 ## 缓存

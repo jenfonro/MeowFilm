@@ -41,7 +41,7 @@ actor MusicAccountAccessGate {
                 case .accountChanged:
                     await audioCache?.clear()
                     await displayCache?.clear()
-                case .accessChanged, .importPending, .closed:
+                case .accessChanged, .closed:
                     await audioCache?.cancelPending()
                 }
             }, clientContexts: clientContexts, qqClient: qqClient)

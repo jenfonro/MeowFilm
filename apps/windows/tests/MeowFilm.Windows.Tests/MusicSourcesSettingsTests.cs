@@ -1,7 +1,4 @@
 using System.IO;
-using System.Net;
-using System.Net.Http;
-using System.Security.Cryptography;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -19,203 +16,189 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SourcesSettingsCases()
     {
-        yield return Case("source settings bind real official and installed script sources without fixture rows", async () =>
+        yield return Case("wrong-source form reads every queue page and persists an exact manual choice", async () =>
         {
             await using var f = await Fixture.Create();
+            var songs = Enumerable.Range(0, 205).Select(index => MusicSongFixture.Online("wy", "Excluded" + index)).ToArray();
+            await f.Rpc("music.queue.replace", new { songs, index = 0 });
+            int reads = f.Calls.Count("music.queue.get");
+            await f.Module.PrepareSourceExclusionFormAsync();
+            Equal(205, f.Module.ExclusionSongs.Count);
+            Equal(3, f.Calls.Count("music.queue.get") - reads);
+            var song = f.Module.ExclusionSongs.Last();
+            await f.Module.AddSourceExclusionAsync(song,
+                f.Module.ExclusionProviders.Single(provider => provider.Key == "official"),
+                f.Module.ExclusionPlatforms.Single(platform => platform.Key == "wy"));
+            True(f.Module.SourceExclusions.Single().SongId == songs[^1]["songId"]!.GetValue<string>(),
+                "a song beyond the first two pages is selectable by its real identity");
+            True(!f.Module.HasCurrent, "manual exclusion never begins playback");
+        });
+        yield return Case("source settings table lists built-in and script rows with type, health and fixed actions", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await InstallSettingsSources(f, 1);
             var view = (MusicSettingsView)f.Module.SettingsView;
             using var mount = new ReplicaMount(view);
             var sources = (MusicSourcesSettingsView)view.FindName("SourcesPage");
             var category = Visuals(view).OfType<RadioButton>().Single(button => Equals(button.Content, "音源"));
             category.IsChecked = true;
-            await Until(() => f.Calls.Count("music.officialSources.settings.get") > 0 && !f.Module.Busy);
-            Equal(3, f.Module.OfficialSourceRows.Count);
-            True(f.Module.OfficialSourceRows.Select(row => row.Name)
-                .SequenceEqual(["网易云音乐", "QQ 音乐", "酷狗音乐"]), "the three official providers have separate identities");
-            True(f.Module.OfficialSourceRows.All(row => row.Enabled) && f.Module.Sources.Count == 0,
-                "native defaults are visible without script fixtures");
-            True(Visuals(sources).OfType<Button>().Any(button => Equals(button.Content, "导入音源")) &&
-                Visuals(sources).OfType<Button>().Any(button => Equals(button.Content, "下载导入")),
-                "local and network source installation are available");
-            Equal(3, ((ItemsControl)sources.FindName("SourceList")).Items.Count);
-            True(Visuals(sources).OfType<FrameworkElement>().All(element => element.ToolTip is null),
-                "source names and capabilities have no hover hints");
-            var qq = f.Module.OfficialSourceRows.Single(row => row.Platform == "tx");
-            var toggle = Visuals(sources).OfType<CheckBox>().Single(box => ReferenceEquals(box.DataContext, qq));
+            await Until(() => f.Calls.Count("music.officialSources.settings.get") > 0 && f.Module.CanEdit);
+            sources.UpdateLayout(); await Drain();
+            True(f.Module.Sources.Select(row => row.Name).SequenceEqual(["网易云音乐", "QQ 音乐", "酷狗音乐", "测试音源 0"]),
+                "built-in providers and the installed script share one table");
+            True(f.Module.Sources.Select(row => row.TypeText).SequenceEqual(["内置", "内置", "内置", "本地"]), "source settings expectation");
+            var script = f.Module.Sources[^1];
+            True(script.Version == "1" && script.HasVersion && !f.Module.Sources[0].HasVersion, "the version sits under a script's name");
+            True(f.Module.Sources.All(row => row.StatusText == "未检测"), "enablement is not health");
+            True(script.Platforms.Select(cell => cell.Platform).SequenceEqual(["wy", "tx", "kw", "kg", "mg"]) &&
+                script.Platforms.All(cell => cell.State == "idle"),
+                "a never-loaded script has no declaration yet: every platform is unchecked, none is claimed unsupported");
+            var builtIn = f.Module.Sources.Single(row => row.Platform == "tx");
+            True(builtIn.Platforms.Single(cell => cell.Platform == "tx").State == "idle" &&
+                builtIn.Platforms.Where(cell => cell.Platform != "tx").All(cell => cell.State == "unsupported"), "only the built-in platform is supported");
+            var header = Visuals(sources).OfType<TextBlock>().Select(text => text.Text).ToArray();
+            foreach (string column in new[] { "启用", "名称", "类型", "状态", "平台", "操作" })
+                True(header.Contains(column), "column " + column);
+            foreach (var row in f.Module.Sources)
+            {
+                var actions = Visuals(sources).OfType<Button>().Where(button => ReferenceEquals(button.DataContext, row))
+                    .Select(button => (button.Content as string, button.IsEnabled)).ToArray();
+                True(actions.Select(action => action.Item1).SequenceEqual(["检测", "编辑", "更新", "删除"]), "fixed inline actions");
+                True(actions[0].IsEnabled && actions.Skip(1).All(action => action.IsEnabled == row.IsScript),
+                    "built-in rows keep the action positions but only check");
+            }
+            True(Visuals(sources).OfType<Button>().All(button => !Equals(button.Content, "更多")), "no hidden more menu");
+            var toggle = Visuals(sources).OfType<CheckBox>().Single(box => ReferenceEquals(box.DataContext, builtIn) &&
+                box.GetBindingExpression(ToggleButton.IsCheckedProperty)?.ParentBinding.Path.Path == "Enabled");
             toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, false);
             toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-            await Until(() => !f.Module.Busy && !qq.Enabled);
+            await Until(() => f.Module.CanEdit && !f.Module.Sources.Single(row => row.Platform == "tx").Enabled);
             Equal(1, f.Calls.Count("music.officialSources.settings.save"));
-            True(Visuals(sources).OfType<Button>().All(button => !ReferenceEquals(button.DataContext, qq)),
-                "built-in source rows expose no script update or delete action");
-        });
-
-        yield return Case("source settings persist independent official platform switches through the real owner", async () =>
-        {
-            await using var f = await Fixture.Create();
-            await f.Module.RefreshSourceManagementAsync();
-            await Until(() => f.Module.CanEdit);
-            var qq = f.Module.OfficialSourceRows.Single(row => row.Platform == "tx");
-            await f.Module.SetOfficialSourceEnabledAsync(qq, false);
-            await Until(() => f.Module.CanEdit);
-            True(!qq.Enabled && f.Module.OfficialSourceRows.Single(row => row.Platform == "wy").Enabled &&
-                f.Module.OfficialSourceRows.Single(row => row.Platform == "kg").Enabled,
-                "only the selected official provider changes");
             var persisted = await f.Rpc("music.officialSources.settings.get");
             True(persisted.GetProperty("settings").GetProperty("enabled").EnumerateArray()
-                .Select(value => value.GetString()).SequenceEqual(["wy", "kg"]),
-                "the user setting is durably stored");
-            await f.Module.RefreshSourceManagementAsync();
-            await Until(() => f.Module.CanEdit);
-            True(!f.Module.OfficialSourceRows.Single(row => row.Platform == "tx").Enabled,
-                "refresh restores the saved switch");
+                .Select(value => value.GetString()).SequenceEqual(["wy", "kg"]), "only the toggled provider changes");
         });
 
-        yield return Case("source settings enable alongside built-ins update rollback and remove the captured installation", async () =>
+        yield return Case("source settings check rows without changing enablement and keep results across refresh", async () =>
         {
             await using var f = await Fixture.Create();
             await InstallSettingsSources(f, 1);
-            var settings = (MusicSettingsView)f.Module.SettingsView;
-            using var mount = new ReplicaMount(settings);
-            ReplicaAnchors(settings)[^1].IsChecked = true;
+            await f.Module.RefreshSourceManagementAsync();
             await Until(() => f.Module.CanEdit);
-            var view = (MusicSourcesSettingsView)settings.FindName("SourcesPage");
-            Button More() => Visuals(view).OfType<Button>().Single(button =>
-                button.DataContext is MusicSourceRow && Equals(button.Content, "更多"));
-            async Task Choose(string title)
-            {
-                var button = More();
-                Click(button); await Drain();
-                var item = button.ContextMenu!.Items.OfType<MenuItem>().Single(item => Equals(item.Header, title));
-                item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-                await Until(() => f.Module.CanEdit);
-                view.UpdateLayout();
-            }
-            var toggle = Visuals(view).OfType<CheckBox>().Single(box => box.DataContext is MusicSourceRow);
-            toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, true);
-            toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-            await Until(() => f.Module.CanEdit && f.Module.Sources.Single().Enabled);
-            True(f.Module.OfficialSourceRows.All(row => row.Enabled),
-                "enabling a network source leaves all built-in sources eligible");
-            Equal(0, f.Calls.Count("music.settings.save"));
-            var enabled = f.Module.Sources.Single();
-            await f.Module.SetOfficialSourceEnabledAsync(f.Module.OfficialSourceRows[0], false);
+            var script = f.Module.Sources[^1];
+            await f.Module.CheckSourcesAsync([script, f.Module.Sources[0]]);
+            await Until(() => f.Module.Sources.All(row => !row.Checking));
+            var checkedScript = f.Module.Sources[^1];
+            True(!checkedScript.Enabled && checkedScript.StatusText == "正常" &&
+                checkedScript.Platforms.Single(cell => cell.Platform == "wy").State == "ok" &&
+                checkedScript.Platforms.Where(cell => cell.Platform != "wy").All(cell => cell.State == "unsupported"),
+                "a disabled script is checked temporarily and stays disabled");
+            var wy = f.Module.Sources[0];
+            True(wy.Platforms.Single(cell => cell.Platform == "wy").State is "ok" or "failed" &&
+                wy.StatusText is "正常" or "异常", "a built-in check reports its sample result");
+            Equal(1, f.Calls.Count("music.official.check"));
+            await f.Module.RefreshSourceManagementAsync();
             await Until(() => f.Module.CanEdit);
-            True(enabled.Enabled && f.Module.Sources.Single().Enabled,
-                "disabling one built-in provider does not disable a network source for that platform");
-            f.Dialogs.ScriptPath = Path.Combine(f.Root, "update.js");
-            File.WriteAllText(f.Dialogs.ScriptPath, TestScript(version: "2"), new UTF8Encoding(false));
-            await Choose("更新脚本");
-            Equal("2", f.Module.Sources.Single().Version);
-            True(f.Module.Sources.Single().RollbackAvailable, "the actual previous script is retained");
-            await Choose("回退版本");
-            Equal("1", f.Module.Sources.Single().Version);
-            await Choose("删除音源");
-            Equal(0, f.Module.Sources.Count);
-            True(f.Calls.Count("music.sources.update") == 1 && f.Calls.Count("music.sources.rollback") == 1 &&
-                f.Calls.Count("music.sources.remove") == 1, "row actions reach the persistent native owner");
+            True(f.Module.Sources[^1].StatusText == "正常" && f.Module.Sources[0].StatusText == wy.StatusText,
+                "derived check facts survive a refresh");
+            True((await f.Rpc("music.sources.list")).GetProperty("items")[0].GetProperty("check").GetProperty("summary")
+                .GetString() == "normal", "check facts are saved by the shared owner");
         });
 
-        yield return Case("source settings retire detached menus when hidden and keep the unified list scrollable", async () =>
+        yield return Case("source settings enable update edit rollback and remove one installation", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await InstallSettingsSources(f, 1);
+            await f.Module.RefreshSourceManagementAsync();
+            await Until(() => f.Module.CanEdit);
+            await f.Module.SetSourceEnabledAsync(f.Module.Sources[^1], true);
+            await Until(() => f.Module.CanEdit && f.Module.Sources[^1].Enabled);
+            True(f.Module.Sources.Where(row => row.IsBuiltIn).All(row => row.Enabled),
+                "enabling a script leaves every built-in provider eligible");
+            f.Dialogs.ScriptPath = Path.Combine(f.Root, "update.js");
+            File.WriteAllText(f.Dialogs.ScriptPath, TestScript(version: "2"), new UTF8Encoding(false));
+            await f.Module.UpdateSourceAsync(f.Module.Sources[^1]);
+            await Until(() => f.Module.CanEdit);
+            True(f.Module.Sources[^1].Version == "2" && f.Module.Sources[^1].RollbackAvailable && f.Module.Sources[^1].Enabled, "source settings expectation");
+            await f.Module.EditSourceAsync(f.Module.Sources[^1], " 改名 ", null);
+            await Until(() => f.Module.CanEdit);
+            Equal("改名", f.Module.Sources[^1].Name);
+            await f.Module.RollbackSourceAsync(f.Module.Sources[^1]);
+            await Until(() => f.Module.CanEdit);
+            True(f.Module.Sources[^1].Version == "1" && f.Module.Sources[^1].Name == "改名", "rollback keeps the management name");
+            await f.Module.RemoveSourceAsync(f.Module.Sources[^1]);
+            await Until(() => f.Module.CanEdit);
+            True(f.Module.Sources.All(row => row.IsBuiltIn) && f.Calls.Count("music.sources.update") == 1 &&
+                f.Calls.Count("music.sources.edit") == 1 && f.Calls.Count("music.sources.rollback") == 1 &&
+                f.Calls.Count("music.sources.remove") == 1, "row actions reach the shared module");
+        });
+
+        yield return Case("source settings select rows for batch check and remove only scripts", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await InstallSettingsSources(f, 3);
+            await f.Module.RefreshSourceManagementAsync();
+            await Until(() => f.Module.CanEdit);
+            True(!f.Module.CanCheckSelectedSources && !f.Module.CanRemoveSelectedSources, "source settings expectation");
+            f.Module.Sources[0].Selected = true;
+            True(f.Module.CanCheckSelectedSources && !f.Module.CanRemoveSelectedSources, "built-in rows are never deleted");
+            f.Module.Sources[3].Selected = true; f.Module.Sources[4].Selected = true;
+            True(f.Module.CanRemoveSelectedSources, "source settings expectation");
+            await f.Module.CheckSelectedSourcesAsync();
+            await Until(() => f.Module.Sources.All(row => !row.Checking));
+            Equal(2, f.Calls.Count("music.sources.check"));
+            True(f.Module.Sources[3].Selected && f.Module.Sources[4].Selected, "selection survives row replacement");
+            await f.Module.RemoveSelectedSourcesAsync();
+            await Until(() => f.Module.CanEdit);
+            True(f.Module.Sources.Select(row => row.Name).SequenceEqual(["网易云音乐", "QQ 音乐", "酷狗音乐", "测试音源 2"]), "source settings expectation");
+            f.Module.AllSourcesSelected = true;
+            True(f.Module.Sources.All(row => row.Selected), "source settings expectation");
+        });
+
+        yield return Case("source settings edit popup changes management facts only and stale row actions are ignored", async () =>
         {
             await using var f = await Fixture.Create();
             await InstallSettingsSources(f, 6);
             var settings = (MusicSettingsView)f.Module.SettingsView;
             using var mount = new ReplicaMount(settings);
-            mount.Window.Width = 620; mount.Window.Height = 430;
+            mount.Window.Width = 1100; mount.Window.Height = 430;
             ReplicaAnchors(settings)[^1].IsChecked = true;
             await Until(() => f.Module.CanEdit); await Drain();
             var view = (MusicSourcesSettingsView)settings.FindName("SourcesPage");
             var list = (ItemsControl)view.FindName("SourceList");
             Equal(9, list.Items.Count);
             var scroll = (ScrollViewer)list.Template.FindName("ItemsScroll", list);
-            True(scroll.ViewportHeight >= 76 && scroll.ScrollableHeight > 0, "a visible row and independent scroll survive a short host");
-            scroll.ScrollToVerticalOffset(228); view.UpdateLayout(); await Drain();
-            var button = Visuals(view).OfType<Button>().First(item =>
-                item.DataContext is MusicSourceRow && Equals(item.Content, "更多"));
-            Click(button); await Drain();
-            var stale = button.ContextMenu!.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "删除音源"));
+            True(scroll.ViewportHeight >= 64 && scroll.ScrollableHeight > 0, "a visible row and independent scroll survive a short host");
+            var row = f.Module.Sources[3];
+            var edit = Visuals(view).OfType<Button>().First(button => ReferenceEquals(button.DataContext, row) && Equals(button.Content, "编辑"));
+            Click(edit); await Drain();
+            var popup = (Popup)view.FindName("EditPopup");
+            var name = (TextBox)view.FindName("EditName");
+            True(popup.IsOpen && name.Text == row.Name && ((FrameworkElement)view.FindName("EditAddressPanel")).Visibility == Visibility.Collapsed,
+                "a local source has no address to edit");
+            name.Text = "新名称";
+            Click((Button)view.FindName("EditSave"));
+            await Until(() => f.Module.CanEdit && f.Module.Sources[3].Name == "新名称");
+            var stale = Visuals(view).OfType<Button>().First(button => button.DataContext is MusicSourceRow { IsScript: true } &&
+                Equals(button.Content, "删除"));
             ReplicaAnchors(settings)[0].IsChecked = true; await Drain();
-            stale.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            stale.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
             Equal(0, f.Calls.Count("music.sources.remove"));
-            Equal(6, f.Module.Sources.Count);
+            Equal(9, f.Module.Sources.Count);
         });
 
-        yield return Case("source settings install a one MiB HTTPS script using the native staged transfer", async () =>
+        yield return Case("source settings import local files in order and reject a non-HTTPS address before any request", async () =>
         {
-            byte[] bytes = Encoding.UTF8.GetBytes("// @name Network Source\n// @version 1.2\n".PadRight(1024 * 1024));
-            var transport = new SourceDownloadHandler(new(HttpStatusCode.OK)
-            {
-                Content = new ByteArrayContent(bytes)
-            });
-            await using var f = await Fixture.Create(sourceNetworkDownload: new(transport));
-            await f.Module.ImportSourceFromUrlAsync("https://sources.invalid/source.js");
-            await Until(() => f.Module.CanEdit);
-            Equal(1, f.Module.Sources.Count);
-            Equal("Network Source", f.Module.Sources[0].Name);
-            Equal("1.2", f.Module.Sources[0].Version);
-            var detail = await f.Rpc("music.sources.detail", new { installationId = f.Module.Sources[0].InstallationId });
-            Equal(Convert.ToHexStringLower(SHA256.HashData(bytes)),
-                detail.GetProperty("item").GetProperty("contentHash").GetString());
-            True(f.Calls.Count("music.transfer.begin") == 1 && f.Calls.Count("music.transfer.chunk") > 1 &&
-                f.Calls.Count("music.sources.install") == 1 && !f.Runtime.HasStarted,
-                "downloaded bytes use the normal validated install path without executing the script");
-        });
-
-        yield return Case("source settings retain a large local import and a further network installation", async () =>
-        {
-            var transport = new SourceDownloadHandler(new(HttpStatusCode.OK)
-            {
-                Content = new StringContent("// @name Downloaded Source\n// @version 1\n", Encoding.UTF8)
-            });
-            await using var f = await Fixture.Create(sourceNetworkDownload: new(transport));
+            await using var f = await Fixture.Create();
             await InstallSettingsSources(f, 40);
             await Until(() => f.Module.CanEdit);
-            Equal(40, f.Module.Sources.Count);
-            True(f.Module.Sources.Select(source => source.Name)
-                .SequenceEqual(Enumerable.Range(0, 40).Select(index => "测试音源 " + index)),
+            var scripts = f.Module.Sources.Where(row => row.IsScript).ToArray();
+            True(scripts.Select(source => source.Name).SequenceEqual(Enumerable.Range(0, 40).Select(index => "测试音源 " + index)),
                 "local multi-selection preserves every installation in selection order");
-            await f.Module.ImportSourceFromUrlAsync("https://sources.invalid/source.js");
+            True(scripts.All(source => !source.Enabled && source.Kind == MusicSourceKind.Local), "imports are disabled local sources");
+            await f.Module.ImportSourceFromUrlAsync("http://sources.invalid/source.js");
             await Until(() => f.Module.CanEdit);
-            await f.Module.RefreshSourceManagementAsync();
-            await Until(() => f.Module.CanEdit);
-            Equal(41, f.Module.Sources.Count);
-            Equal("Downloaded Source", f.Module.Sources[^1].Name);
-            Equal(41, f.Module.Sources.Select(source => source.InstallationId).Distinct().Count());
-            Equal(41, f.Calls.Count("music.sources.install"));
-            True(f.Module.Sources.All(source => !source.Enabled) && !f.Runtime.HasStarted,
-                "import persists all sources without enabling them or starting Node");
-        });
-
-        yield return Case("source download rejects redirects and oversize responses without staged partial installs", async () =>
-        {
-            foreach (var response in new[]
-            {
-                new HttpResponseMessage(HttpStatusCode.Redirect) { Headers = { Location = new Uri("https://elsewhere.invalid/source.js") } },
-                new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(new byte[16 * 1024 * 1024 + 1]) }
-            })
-            {
-                var transport = new SourceDownloadHandler(response);
-                await using var f = await Fixture.Create(sourceNetworkDownload: new(transport));
-                await f.Module.ImportSourceFromUrlAsync("https://sources.invalid/source.js");
-                await Until(() => f.Module.CanEdit);
-                Equal(0, f.Module.Sources.Count);
-                Equal(0, f.Calls.Count("music.transfer.begin"));
-                True(f.Module.Status.Length > 0, "the download failure is reported");
-            }
-        });
-
-        yield return Case("source download cancellation drains the request and leaves no transfer stage", async () =>
-        {
-            var transport = new SourceDownloadHandler();
-            await using var f = await Fixture.Create(sourceNetworkDownload: new(transport));
-            var download = f.Module.ImportSourceFromUrlAsync("https://sources.invalid/source.js");
-            await transport.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await f.Module.CancelOnlineAsync();
-            await download.WaitAsync(TimeSpan.FromSeconds(5));
-            await Until(() => f.Module.CanEdit);
-            Equal(0, f.Module.Sources.Count);
-            Equal(0, f.Calls.Count("music.transfer.begin"));
-            True(transport.Cancelled, "the active HTTP request observed cancellation");
+            True(f.Module.Status == "请输入 HTTPS .js 音源地址" && f.Module.Sources.Count == 43, "the module validates the address");
         });
     }
 
@@ -229,21 +212,6 @@ public static partial class MusicUiTests
         }).ToArray();
         try { await f.Module.ImportSourceAsync(); }
         finally { f.Dialogs.ScriptPaths = null; }
-    }
-
-    private sealed class SourceDownloadHandler(HttpResponseMessage? response = null) : HttpMessageHandler
-    {
-        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal bool Cancelled;
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
-        {
-            Entered.TrySetResult();
-            if (response is null)
-            {
-                try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
-                catch (OperationCanceledException) { Cancelled = true; throw; }
-            }
-            return response!;
-        }
+        await Until(() => f.Module.CanEdit);
     }
 }

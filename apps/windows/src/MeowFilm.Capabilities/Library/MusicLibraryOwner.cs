@@ -33,10 +33,9 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         Quality,
         Queue,
         Recommendation,
-        ScriptData,
         SearchHistory,
         SearchPolicy,
-        SourceMetadata,
+        SourceExclusions,
         Sync
     }
     private sealed record Pending(JsonObject Candidate, DocumentFingerprint Before, DocumentFingerprint After, string Code,
@@ -95,6 +94,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         if (method is "music.metadata.settings.save") return PendingOwner.Metadata;
         if (method is "music.appearance.save") return PendingOwner.Appearance;
         if (method is "music.device.settings.save") return PendingOwner.DeviceSettings;
+        if (method is "music.sourceExclusions.add" or "music.sourceExclusions.remove") return PendingOwner.SourceExclusions;
         if (method is "music.search.settings.save") return PendingOwner.SearchPolicy;
         if (method is "music.search.history.record" or "music.search.history.clear") return PendingOwner.SearchHistory;
         if (method is "music.lyrics.local.save" or "music.lyrics.local.remove") return PendingOwner.LocalLyrics;

@@ -610,7 +610,9 @@ public static partial class MusicUiTests
             Click(Visuals(footer).OfType<Button>().Single(button =>
                 System.Windows.Automation.AutomationProperties.GetName(button) == "播放队列"));
             Equal(1, requests);
-            Click((Button)footer.FindName("RateButton"));
+            var more = (Button)footer.FindName("MoreButton");
+            Click(more);
+            ((MenuItem)more.ContextMenu.Items[0]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
             var rate = (System.Windows.Controls.Primitives.Popup)footer.FindName("RatePopup");
             True(rate.IsOpen, "page footer popup opens");
             progress.BeginScrub(); progress.UpdateScrub(90);
