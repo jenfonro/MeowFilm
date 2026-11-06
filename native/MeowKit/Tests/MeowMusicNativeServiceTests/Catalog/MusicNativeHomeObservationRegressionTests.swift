@@ -33,11 +33,11 @@ private struct GuestHomeAccountHTTP: MusicAccountHTTPTransport {
 private struct ObservedGuestHome: MusicHomeBrowsing {
     let service: NativeMusicService
     let subscribed: XCTestExpectation
-    func homeSourceSelection() async -> MusicHomeSourceSelection {
-        await service.homeSourceSelection()
+    func homeSourceSelection() async throws -> MusicHomeSourceSelection {
+        try await service.homeSourceSelection()
     }
-    func selectHomeSource(_ source: MusicPublicBrowsePlatform) async throws {
-        try await service.selectHomeSource(source)
+    func selectHomeSource(_ source: MusicPublicBrowsePlatform, ifRevision: Int) async throws -> MusicHomeSourceSelection {
+        try await service.selectHomeSource(source, ifRevision: ifRevision)
     }
     func homeChanges() async -> AsyncStream<Void> {
         let stream = await service.homeChanges()

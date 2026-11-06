@@ -40,6 +40,8 @@ enum MusicModel {
         ("officialSources", .strings(MusicAccountPlatform.allCases.map(\.rawValue))),
         ("lyricsEnabled", .bool(true)), ("showTranslation", .bool(true)), ("position", .obj([("occurrenceId", .null), ("seconds", .n(0))]))]) }
     static var history: MJ { .obj([("schema", .n(1)), ("playlists", .array([])), ("days", .array([]))]) }
+    /// Home/channel catalogue platform. Independent of search and playback source selection.
+    static var catalogSource: MJ { .obj([("schema", .n(1)), ("revision", .n(0)), ("platform", .string("wy"))]) }
     static func norm(_ text: String) -> String { MusicRecordingIdentity.normalize(text) }
     static func hash(_ text: String) -> String { MusicRecordingIdentity.hash(text) }
     static func fingerprint(_ song: MJ) -> String { descriptor(song).fingerprint }

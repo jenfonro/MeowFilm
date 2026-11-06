@@ -4085,9 +4085,11 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         throw MusicServiceError.unsupported
     }
     func homeSourceSelection() async -> MusicHomeSourceSelection {
-        .init(selected: .netease, available: [.netease])
+        .init(selected: .netease, revision: 0, available: [.netease])
     }
-    func selectHomeSource(_ source: MusicPublicBrowsePlatform) async throws {}
+    func selectHomeSource(_ source: MusicPublicBrowsePlatform, ifRevision: Int) async throws -> MusicHomeSourceSelection {
+        .init(selected: .netease, revision: 0, available: [.netease])
+    }
     func restoredHome() async throws -> MusicPublicBrowsePage? { nil }
     func homePage(cursor: String?, refresh: Bool) async throws -> MusicPublicBrowsePage {
         browseCalls += 1

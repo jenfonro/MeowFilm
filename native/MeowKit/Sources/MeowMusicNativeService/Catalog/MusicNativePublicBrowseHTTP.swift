@@ -28,7 +28,8 @@ enum MusicNativePublicBrowseRoutes {
             let album = url.path.range(of: "^/weapi/v1/album/[1-9][0-9]{0,19}$", options: .regularExpression) != nil
             return request.method == "POST" && (weapi.contains(url.path) || album) && url.query == nil
         case "gateway.kugou.com":
-            return request.method == "GET" && ["/v1/search/special", "/pubsongs/v2/get_other_list_file_nofilt"].contains(url.path)
+            return request.method == "GET" && ["/v1/search/special", "/pubsongs/v2/get_other_list_file_nofilt"].contains(url.path) ||
+                MusicNativePublicBrowseKugou.permits(request)
         case "search.kuwo.cn", "nplserver.kuwo.cn":
             return MusicNativePublicBrowseKuwo.permits(request)
         case "jadeite.migu.cn", "c.musicapp.migu.cn", "app.c.nf.migu.cn":

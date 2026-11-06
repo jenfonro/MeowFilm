@@ -156,21 +156,11 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
            channel.kind == .artistActivity || channel.kind == .featured || channel.kind == .vip {
             return try await scopedHomePage(destination, cursor: cursor, refresh: false)
         }
-        let source: MusicPublicBrowsePlatform, sourceRevision: UUID?
-        switch destination {
-        case .daily(let platform):
-            source = .init(accountPlatform: platform); sourceRevision = nil
-            try requirePlatform(source.rawValue)
-        case .channel(let channel, _):
-            source = channel.platform; sourceRevision = nil
-            try requireHomeSource(source)
-        case .home, .featured, .channels:
-            source = try currentHomeSource(); sourceRevision = homeSourceRevision
-        }
-        let key = source.rawValue + ":" + MusicNativePublicBrowseDiscovery.key(destination) +
-            (sourceRevision.map { ":" + $0.uuidString } ?? ""), own = epoch
-        let position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own, now: now())
         if case .daily(let platform) = destination {
+            let source = MusicPublicBrowsePlatform(accountPlatform: platform)
+            try requirePlatform(source.rawValue)
+            let key = source.rawValue + ":" + MusicNativePublicBrowseDiscovery.key(destination), own = epoch
+            let position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own, now: now())
             guard let accounts else { throw MusicServiceError.authRequired }
             let remote = position.remote["cursor"].string
             let page = try await work(label: "publicBrowse") {
@@ -190,8 +180,19 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             }
             return .init(sections: [.init(id: key + ":\(position.offset)", title: "每日推荐", items: items)], cursor: next)
         }
+        // Directory and channel reads belong to the current home source; a
+        // channel from another directory never routes to this provider.
+        if case .channel(let channel, _) = destination { try requireHomeSource(channel.platform) }
+        let source = try currentHomeSource(), sourceRevision = homeSourceRevision
+        if case .channel(let channel, _) = destination {
+            try musicRequire(channel.platform == source, .staleResult)
+        }
+        let key = source.rawValue + ":" + MusicNativePublicBrowseDiscovery.key(destination) +
+            ":" + sourceRevision.uuidString, own = epoch
+        let position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own, now: now())
         let port = publicPlatforms
-        let result = try await work(label: "publicBrowse") {
+        // Source changes cancel these reads with the rest of the home content.
+        let result = try await work(label: "musicHome") {
             try await port.browseDiscovery(destination, source: source, remote: position.remote, offset: position.offset)
         }
         try checkHomeSource(source, revision: sourceRevision, epoch: own)
@@ -201,6 +202,9 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             // A feed remains one section as its cursor advances. Request keys
             // still include the full group/algorithm identity for admission.
             sectionPrefix = MusicNativePublicBrowseDiscovery.key(.channel(channel, tag: "")) + ":"
+        } else if result.stableSections {
+            // Provider pages continue the same sections; the view merges by id.
+            sectionPrefix = key + ":"
         } else { sectionPrefix = key + ":\(position.offset):" }
         let sections = try publicSections(result, prefix: sectionPrefix)
         let next = try result.next.map { remote in

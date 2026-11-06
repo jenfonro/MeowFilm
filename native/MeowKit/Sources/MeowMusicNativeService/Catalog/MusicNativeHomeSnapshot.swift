@@ -66,8 +66,8 @@ enum MusicNativeHomeSnapshot {
         return .init(id: try value["id"].text(200), title: try text(value["title"]), kind: kind,
                      pageCode: try text(value["pageCode"], maximum: 100), platform: source)
     }
-    private static func cleanTrack(_ raw: MusicNativeTrackData) throws -> MJ {
-        try musicRequire(raw.platform == "wy", .invalidResponse)
+    private static func cleanTrack(_ raw: MusicNativeTrackData, source: MusicPublicBrowsePlatform) throws -> MJ {
+        try musicRequire(raw.platform == source.rawValue, .invalidResponse)
         let song = try MusicModel.normalize(raw)
         guard let row = song["sources"].array.first else { throw MusicServiceError.sourceRequired }
         var locator = try MusicModel.locator(MusicModel.sourceData(row))
@@ -78,8 +78,16 @@ enum MusicNativeHomeSnapshot {
         try MusicModel.rejectSecrets(locator)
         return locator
     }
+    /// A collection keeps the native ID form of the snapshot's own source.
+    private static func collectionID(_ value: MJ, source: MusicPublicBrowsePlatform) throws -> String {
+        guard source == .kugou else { return try MusicPlatformProtocol.numericID(value) }
+        let id = value.string
+        try musicRequire(id.range(of: "^[A-Za-z0-9_-]{1,200}$", options: .regularExpression) != nil &&
+                         !id.hasPrefix("id_"), .invalidResponse)
+        return id
+    }
     static func encode(_ page: MusicNativePublicBrowseDiscovery, source: MusicPublicBrowsePlatform, scope: String) throws -> Data {
-        try musicRequire(source == .netease, .unsupported)
+        try musicRequire(source == .netease || source == .kugou, .unsupported)
         try musicRequire(!scope.isEmpty && scope.utf8.count <= 256 && page.sections.count <= 60 &&
                          page.sections.reduce(0, { $0 + $1.items.count }) <= 600, .limit)
         let sections = try page.sections.map { section in
@@ -102,17 +110,17 @@ enum MusicNativeHomeSnapshot {
                         ])
                     }
                     if !item.previewSongs.isEmpty {
-                        value["previewSongs"] = .array(try item.previewSongs.prefix(3).map { try cleanTrack($0) })
+                        value["previewSongs"] = .array(try item.previewSongs.prefix(3).map { try cleanTrack($0, source: source) })
                     }
                     switch item.content {
                     case .collection(let row):
-                        try musicRequire(row.platform == .netease)
+                        try musicRequire(row.platform == source)
                         value["kind"] = .string("collection")
                         value["collection"] = .obj([("id", .string(row.nativeID)), ("kind", .string(row.kind.rawValue)),
                             ("title", .string(row.title)), ("creator", .string(row.creator)),
                             ("artwork", image(row.artwork)), ("count", row.count.map(MJ.n) ?? .null)])
                     case .song(let row):
-                        value["kind"] = .string("song"); value["song"] = try cleanTrack(row)
+                        value["kind"] = .string("song"); value["song"] = try cleanTrack(row, source: source)
                     case .channel(let row):
                         value["kind"] = .string("channel")
                         value["channel"] = Self.channel(row)
@@ -141,7 +149,7 @@ enum MusicNativeHomeSnapshot {
         try musicRequire(root["schema"] == .n(2))
         try MusicModel.rejectSecrets(root)
         guard root["source"].string == source.rawValue, root["scope"].string == scope else { return nil }
-        try musicRequire(source == .netease, .unsupported)
+        try musicRequire(source == .netease || source == .kugou, .unsupported)
         try musicRequire(!scope.isEmpty && scope.utf8.count <= 256 &&
                          root["sections"].isArray && root["sections"].array.count <= 60, .limit)
         var count = 0, ids = Set<String>()
@@ -165,14 +173,14 @@ enum MusicNativeHomeSnapshot {
                     try value.requireFields(["id", "kind", "title", "creator", "artwork", "count"],
                                             required: ["id", "kind", "title", "creator", "artwork", "count"])
                     guard let kind = MusicPublicBrowseCollection.Kind(rawValue: value["kind"].string) else { throw MusicServiceError.invalidResponse }
-                    content = .collection(.init(platform: .netease,
-                        nativeID: try MusicPlatformProtocol.numericID(value["id"]), kind: kind,
+                    content = .collection(.init(platform: source,
+                        nativeID: try collectionID(value["id"], source: source), kind: kind,
                         title: try text(value["title"]), creator: try text(value["creator"]),
                         artwork: MusicNativePublicBrowseSupport.artwork(value["artwork"]),
                         count: value["count"] == .null ? nil : try value["count"].integer(1_000_000)))
                 case "song":
-                    let raw = MusicNativeTrackData(platform: "wy", data: item["song"].bytes)
-                    _ = try cleanTrack(raw); content = .song(raw)
+                    let raw = MusicNativeTrackData(platform: source.rawValue, data: item["song"].bytes)
+                    _ = try cleanTrack(raw, source: source); content = .song(raw)
                 case "channel":
                     content = .channel(try Self.channel(item["channel"], source: source))
                 case "daily": content = .daily
@@ -207,10 +215,10 @@ enum MusicNativeHomeSnapshot {
                 let previews = item["previewSongs"]
                 try musicRequire(previews == .null || previews.isArray && previews.array.count <= 3)
                 let songs = try previews.array.map { value -> MusicNativeTrackData in
-                    let raw = MusicNativeTrackData(platform: "wy", data: value.bytes)
+                    let raw = MusicNativeTrackData(platform: source.rawValue, data: value.bytes)
                     // Only locators and display fields survive restore; no ref,
                     // cursor or playback authority is ever serialized.
-                    return .init(platform: "wy", data: try cleanTrack(raw).bytes)
+                    return .init(platform: source.rawValue, data: try cleanTrack(raw, source: source).bytes)
                 }
                 return .init(id: id, title: try text(item["title"]), subtitle: try text(item["subtitle"]),
                              artwork: MusicNativePublicBrowseSupport.artwork(item["artwork"]), content: content,

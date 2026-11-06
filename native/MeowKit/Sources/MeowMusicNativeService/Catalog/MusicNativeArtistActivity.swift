@@ -36,7 +36,8 @@ extension MusicNativePublicBrowseParser {
         }
         guard !items.isEmpty else { return .init() }
         let title = text(body["title"], .string("你关注的艺人新动向"))
-        let channel = MusicPublicBrowseChannel(id: "artist-activity", title: title, kind: .artistActivity)
+        let channel = MusicPublicBrowseChannel(id: "artist-activity", title: title, kind: .artistActivity,
+                                               platform: .netease)
         var result = MusicNativePublicBrowseDiscovery(sections: [
             .init(id: "artist-activity:works", title: title, items: items, layout: .artistUpdates,
                   avatars: avatars, channel: channel)

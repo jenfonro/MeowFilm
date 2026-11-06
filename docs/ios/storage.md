@@ -22,6 +22,12 @@
 - 一个命名空间只用一个 store 实例。跨进程事务和恶意同进程代码不在契约范围内。
 - 文件沿用系统默认 Data Protection（首次解锁后可读），锁屏后仍可读写。
 
+### 音乐数据源偏好
+
+- `music.library.v1` envelope 的 `records` 新增 `catalogSource` 区，key 为 JSON 字符串 `["meowfilm","music",1,"device","catalogSource"]`。
+- 记录字段封闭：`{"schema":1,"revision":0,"platform":"wy"}`；platform 只允许 `wy`／`kg`，revision 必须为非负 JSON 安全整数。记录缺失时默认网易云、revision 0，读取不写盘；未知字段、非法类型、版本或平台明确返回 `corruptDocument`，保留原文件。
+- 保存使用文档 transaction CAS，并核对该记录独立的 revision；成功切换加一，同值保存不写盘，过期 revision 返回 `staleRevision`。与 playback 的 `settingsRevision` 无关，不重写 library、queue、playback 或 history。
+
 ## 加密文档
 
 `EncryptedDocumentStore` 只保存设备会话等敏感文档。

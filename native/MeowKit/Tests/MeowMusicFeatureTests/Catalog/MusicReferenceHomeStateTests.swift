@@ -176,12 +176,43 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         let selection = MusicChannelSelection(defaults: defaults)
         selection.selectChannel(original)
         selection.restoreChannel(from: [foreign], catalogueLoaded: true)
-        XCTAssertEqual(selection.channel, original)
+        XCTAssertEqual(selection.channel, foreign)
+        XCTAssertEqual(defaults.string(forKey: "music.ui.lastChannel"), original.identity)
         let restored = MusicChannelSelection(defaults: defaults)
         restored.restoreChannel(from: [foreign], catalogueLoaded: false); XCTAssertNil(restored.channel)
         restored.restoreChannel(from: [foreign, original], catalogueLoaded: false)
         XCTAssertEqual(restored.channel, original)
         XCTAssertNotEqual(original.identity, foreign.identity)
+    }
+
+    func testSourceSwitchRetiresMemorySelectionWithoutRewritingRememberedChannel() throws {
+        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let selection = MusicChannelSelection(defaults: defaults)
+        let feature = MusicPublicBrowseChannel(id: "feature", title: "精选", kind: .featured, platform: .kugou)
+        let playlists = MusicPublicBrowseChannel(id: "playlist", title: "歌单广场", kind: .playlists, platform: .kugou)
+        selection.selectChannel(chart)
+        selection.restoreChannel(from: [feature, playlists], catalogueLoaded: false)
+        XCTAssertNil(selection.channel)
+        selection.restoreChannel(from: [feature, playlists], catalogueLoaded: true)
+        XCTAssertEqual(selection.channel, feature)
+        XCTAssertEqual(defaults.string(forKey: "music.ui.lastChannel"), chart.identity)
+        selection.restoreChannel(from: [.init(id: "playlist", title: "歌单", kind: .playlists), chart], catalogueLoaded: true)
+        XCTAssertEqual(selection.channel, chart)
+    }
+
+    func testPublicHomeErrorContextIsSourceNeutralButConcreteRequestsKeepTheirPlatform() {
+        let service = MusicReferenceHomeService()
+        for destination in [MusicPublicBrowseDestination.home, .channels, .featured] {
+            let model = MusicPublicBrowseViewModel(service: service, request: .discovery(destination))
+            XCTAssertEqual(model.errorContext, "音乐内容读取")
+        }
+        let channel = MusicPublicBrowseChannel(id: "playlist", title: "", kind: .playlists, platform: .kugou)
+        let kugou = MusicPublicBrowseViewModel(service: service, request: .discovery(.channel(channel, tag: "")))
+        XCTAssertEqual(kugou.errorContext, "酷狗音乐 · 音乐内容读取")
+        let action = MusicPublicBrowseViewModel(service: service, request: .homeAction(.heartbeat, title: "心动模式"))
+        XCTAssertEqual(action.errorContext, "网易云 · 音乐内容读取")
     }
 
     func testExplicitRefreshReplacesCancelledUnfinishedChannelReadBeforeItUnwinds() async {
