@@ -34,6 +34,7 @@
 - [桌面壳](windows/desktop-shell.md)
 - [影视首页](windows/film-home.md)
 - [影视播放页](windows/film-playback.md)
+- [影视设置、客户端规则与来源管理](windows/film-settings.md)
 - [本地文档与敏感信息保护](windows/protected-storage.md)
 - [公共图像](windows/artwork.md)
 - [系统媒体会话](windows/system-media.md)

@@ -146,9 +146,9 @@ public static class AppLauncher
                 documents = new ProtectedDocumentBridge(store, definition.BridgeNamespaces);
                 runtime = new OnDemandRuntimeClient(async token =>
                 {
-                    // Only a real script operation needs a runtime payload.
-                    // Native pages and business owners do not depend on Node
-                    // installation, integrity checks or process startup.
+                    // App composition starts script restoration after platform
+                    // callbacks are frozen. The shared client coalesces that
+                    // launch with operations; native rules never call this port.
                     var root = Path.Combine(AppContext.BaseDirectory, "runtime");
                     var bundle = await Task.Run(() => RuntimeBundle.Verify(root, definition.Id,
                         definition.RuntimeModules), token).ConfigureAwait(false);

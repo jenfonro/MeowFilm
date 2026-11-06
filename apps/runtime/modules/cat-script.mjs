@@ -60,7 +60,7 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
   const transfers = new SourceTransfers({ clock });
   const lifetime = new AbortController();
   let runtime, closing, closed = false;
-  const get = () => runtime ??= runtimeFactory({ dataRoot });
+  const get = () => runtime ??= runtimeFactory({ dataRoot, clock });
   const methods = {};
   function method(name, allowed, body) {
     methods['cat.script.' + name] = async (input = {}, context = {}) => {
@@ -94,18 +94,39 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
   method('start', [], async () => result(await get().start()));
   method('status', [], async () => result(await get().status()));
   method('refresh', [], async () => result(await get().refresh()));
-  method('install', ['installationId', 'token', 'config', 'version', 'enabled'], async input => {
+  method('install', ['installationId', 'token', 'config', 'version', 'enabled',
+    'name', 'sourceType', 'sourceUrl'], async (input, signal) => {
     const bytes = transfers.take(text(input.token), 'source');
     try {
       return result(await get().install({ installationId: text(input.installationId), source: decode(bytes),
         ...(input.config === undefined ? {} : { config: json(input.config) }),
         ...(input.version === undefined ? {} : { version: text(input.version) }),
-        ...(input.enabled === undefined ? {} : { enabled: input.enabled }) }));
+        ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+        ...(input.name === undefined ? {} : { name: text(input.name) }),
+        ...(input.sourceType === undefined ? {} : { sourceType: text(input.sourceType) }),
+        ...(input.sourceUrl === undefined ? {} : { sourceUrl: input.sourceUrl }) }, { signal }));
     } finally { bytes.fill(0); }
   });
-  method('enable', ['installationId', 'enabled'], async input =>
-    result(await get().setEnabled(text(input.installationId), input.enabled)));
-  method('uninstall', ['installationId'], async input => result(await get().uninstall(text(input.installationId))));
+  method('import', ['installationId', 'name', 'sourceUrl', 'enabled'], async (input, signal) =>
+    result(await get().import({ installationId: text(input.installationId), name: text(input.name),
+      sourceUrl: text(input.sourceUrl), ...(input.enabled === undefined ? {} : { enabled: input.enabled }) }, { signal })));
+  method('edit', ['installationId', 'name', 'sourceUrl'], async (input, signal) =>
+    result(await get().edit({ installationId: text(input.installationId), name: text(input.name),
+      ...(input.sourceUrl === undefined ? {} : { sourceUrl: text(input.sourceUrl) }) }, { signal })));
+  method('update', ['installationId', 'token'], async (input, signal) => {
+    const installationId = text(input.installationId);
+    const bytes = input.token === undefined ? null : transfers.take(text(input.token), 'source');
+    try {
+      return result(await get().update({ installationId,
+        ...(bytes === null ? {} : { source: bytes }) }, { signal }));
+    } finally { bytes?.fill(0); }
+  });
+  method('restart', ['installationId'], async (input, signal) =>
+    result(await get().restart(text(input.installationId), { signal })));
+  method('enable', ['installationId', 'enabled'], async (input, signal) =>
+    result(await get().setEnabled(text(input.installationId), input.enabled, { signal })));
+  method('uninstall', ['installationId'], async (input, signal) =>
+    result(await get().uninstall(text(input.installationId), { signal })));
   method('invoke', ['installationId', 'generation', 'siteId', 'operation', 'payload', 'payloadToken'], async (input, signal) => {
     requireValue(!(input.payload !== undefined && input.payloadToken !== undefined));
     let payload;

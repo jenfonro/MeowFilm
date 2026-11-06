@@ -428,12 +428,13 @@ public static partial class MusicUiTests
                     slot.TranslatePoint(new Point(), root).X > heading.TranslatePoint(new Point(heading.ActualWidth, 0), root).X,
                     "header order is back, settings, category");
                 var areaTabs = (Panel)slot.Content; var area = areaTabs.Children.OfType<RadioButton>().ToArray(); Equal("设置类别", AutomationProperties.GetName(areaTabs));
-                True(area.Select(tab => (string)tab.Content).SequenceEqual(new[] { "音乐", "影视", "小说" }) &&
-                    area[0].IsChecked == true && area.Skip(1).All(tab => tab.IsChecked == false), "category tabs offer music video and books");
+                True(area.Select(tab => (string)tab.Content).SequenceEqual(new[] { "音乐" }) &&
+                    area[0].IsChecked == true, "shared category tabs reflect the supplied modules");
                 var settingsView = (MusicSettingsView)f.Module.SettingsView; var tabs = (Panel)settingsView.FindName("SettingsNavigation");
-                var accent = ((SolidColorBrush)settingsView.FindResource("Settings.Brush.Accent")).Color; var selectedLine = (Border)area[0].Template.FindName("Underline", area[0]);
-                True(area.All(tab => ReferenceEquals(tab.Style, settingsView.FindResource("Settings.Anchor"))) && selectedLine.BorderBrush is SolidColorBrush line && line.Color == accent &&
-                    ((Border)area[1].Template.FindName("Underline", area[1])).BorderBrush is SolidColorBrush { Color.A: 0 }, "header category reuses the settings anchor tabs outside the view");
+                var accent = ((SolidColorBrush)shell.FindResource("MeowFilm.Brush.Accent")).Color; var selectedLine = (Border)area[0].Template.FindName("Underline", area[0]);
+                True(area.All(tab => ReferenceEquals(tab.Style, shell.FindResource("MeowFilm.SettingsArea"))) &&
+                    selectedLine.BorderBrush is SolidColorBrush line && line.Color == accent,
+                    "header category uses the shared shell settings style");
                 double tabsTop = tabs.TranslatePoint(new Point(), root).Y, regionTop = region.TranslatePoint(new Point(), root).Y;
                 True(tabsTop - regionTop < 1, "settings content starts directly below the compact header");
                 foreach (var size in new[] { new Size(1440, 900), new Size(1110, 869), new Size(860, 600) })
@@ -473,15 +474,7 @@ public static partial class MusicUiTests
                     True(!f.Runtime.HasStarted, "ordinary replica settings never activate scripts");
                 }
                 var content = (FrameworkElement)settingsView.FindName("MusicContent");
-                area[1].IsChecked = true; await Drain(); root.UpdateLayout();
-                True(!content.IsVisible && !Visuals(settingsView).OfType<TextBlock>().Any(text => text.IsVisible) && ((ScrollViewer)shell.FindName("SidebarScroll")).IsVisible &&
-                    ((Border)shell.FindName("PlayerFrame")).Visibility == Visibility.Collapsed &&
-                    ReferenceEquals(player, ((ContentControl)shell.FindName("PlayerHost")).Content) &&
-                    heading.IsVisible && slot.IsVisible && area[1].IsChecked == true && area[0].IsChecked == false,
-                    "video settings are an empty page that retains but hides the global player");
-                area[2].IsChecked = true; await Drain(); True(!content.IsVisible && area[1].IsChecked == false, "book settings are an empty page");
-                area[0].IsChecked = true; await Drain(); await Until(() => f.Module.CanEdit); root.UpdateLayout();
-                True(content.IsVisible, "music settings return");
+                True(content.IsVisible, "music content remains owned by the visible module settings");
                 back.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain(); await Until(() => !heading.IsVisible);
                 True(region.Margin == new Thickness(0) && !slot.IsVisible && slot.Content is null,
                     "home keeps the compact shared content gap");

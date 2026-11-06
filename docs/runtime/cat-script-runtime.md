@@ -22,13 +22,49 @@ contract: cat.script.v1
 | `blob.read/release` | 分片读取大型 JSON 结果 |
 | `start/status` | 启动运行器并读取当前设置，或返回当前状态；`start` 不等待各脚本实例就绪 |
 | `refresh` | 重新读取同一设置文件，校验设置结构后按目标实例应用 |
-| `install/enable/uninstall` | 保存源码、更新设置并管理一个 installation |
+| `install` | 使用 staged source token 导入或明确重新导入一个 installation |
+| `import` | 由运行器下载 HTTP(S) 源码并导入或明确重新导入 |
+| `edit` | 修改名称，网络源还可修改下载 URL |
+| `update` | 本地源读取 staged token，网络源读取已保存 URL，更新同一 installation |
+| `restart` | 停止并重新启动一个已启用 installation |
+| `enable/uninstall` | 持久保存启用意图，或卸载一个 installation |
 | `invoke` | 定向调用 installation/generation/site/action |
 | `management.describe/sync` | 探测脚本原生管理协议并同步一个明确 provider |
 
 源码和 JSON 分片均为 64 KiB、连续 offset、规范 Base64 与完整 SHA-256。源码声明长度最多 16 MiB，在 `stage.begin` 提前拒绝；脚本结果不设 8 MiB 上限。未完成 transfer 按活动 token 保留并在超时、显式释放或运行器关闭时回收，不设置并发 token 数量门槛，也不把分片帧大小当作整份源码大小上限。小结果返回 `data` JSON 字符串，大结果返回 `blob` 描述符；调用方校验长度和 SHA-256 后必须释放 token。
 
-源码严格按无 BOM UTF-8 解码。`install` 将实际给定源码原子写入普通文件 `sources/<importhash>.js`，设置的 `sourceHash` 只作为导入时的文件引用和内容标识；不加密源码，不保护其字节不可变，读取时不比较历史 hash 或导入长度。显式重新导入会原子替换该文件，即使设置和导入内容标识未变也重新应用目标实例。不存在旧格式迁移或内联源码回退。
+源码严格按无 BOM UTF-8 解码。`install` 将实际给定源码原子写入普通文件 `sources/<importhash>.js`，设置的 `sourceHash` 只作为导入时的文件引用和内容标识；不加密源码，不保护其字节不可变，读取时不比较历史 hash 或导入长度。显式重新导入会原子替换该文件，即使设置和导入内容标识未变也重新应用目标实例。仅支持下文所列真实旧字段迁移，不提供内联源码回退。
+
+### 安装管理参数与结果
+
+以下是 `cat.script.v1` 的 additive 方法与字段，模块版本仍为 `0.1.0`。未知参数被拒绝；所有方法仍使用原来的结果包装。
+
+| 方法 | 请求字段 | 成功时解码后的结果 |
+| --- | --- | --- |
+| `install` | 必填 `installationId,token`；可选 `config,version,enabled,name,sourceType,sourceUrl` | 一个 instance |
+| `import` | 必填 `installationId,name,sourceUrl`；可选 `enabled` | 一个 instance |
+| `edit` | 必填 `installationId,name`；网络源可选 `sourceUrl` | 一个 instance |
+| `update` | 必填 `installationId`；本地源必填 `token`，网络源不接受 token | 一个 instance |
+| `restart` | `installationId` | 一个 instance |
+| `enable` | `installationId,enabled` | 一个 instance |
+| `uninstall` | `installationId` | `{applied,failures:[{installationId,code}]}` |
+| `start/status` | 空对象 | `{settingsPath,aggregate:{origin,access},instances:[...]}` |
+
+`config` 保持 JSON 字符串输入；`token` 必须来自完成上传的 `source` transfer。`install` 仍要求 token，不接受“省略 token、仅提供 URL”作为下载入口；网络下载使用 `import`。`sourceType` 只允许 `local`、`network`；本地 `sourceUrl` 为 `null`，网络为 HTTP(S) URL 字符串。旧的 `install` 调用可以继续省略新增元数据。新安装缺省名称为 installationId、类型为 local、URL 为 null、config 为 `{}`、version 为 `0.0.0`。
+
+成功包装为 `{ok:true,contract:"cat.script.v1",data:"<JSON>"}`，或 `{ok:true,contract:"cat.script.v1",blob:{token,length,sha256,chunkBytes}}`。失败包装只有 `{ok:false,contract:"cat.script.v1",code:"<错误码>"}`，不附带 instance、sites 或失败快照。客户端在成功或失败后均可调用 `status` 获取权威状态；`install/import/update` 不返回额外 `success`、`changed` 或 `installed` 布尔字段。
+
+新安装缺省 `enabled=true`，取代原来 install 缺省停用的行为；需要只保存源码的旧调用方应显式传 `enabled:false`。同 ID 的 `install/import` 是明确重新导入，保留安装身份、原始 importedAt 和私有卷；省略 enabled 时保留原启用意图，显式 `enabled:false` 则成功后保持停用。省略的 config/version/name 等安装属性保留原值；`import` 明确提交 network 类型、给定名称与 URL。重新导入失败不提交候选名称、来源、URL、配置或启用意图。普通 `update` 不接受这些元数据，不改变安装身份、来源类型或 enabled。
+
+源码先经过 UTF-8、宿主源码字节边界和 CommonJS 语法验证。候选 enabled=true 时，还需停止旧 Worker 并等待其真实退出，再由候选完成 Cat 初始化及能力发现，之后提交源码与设置。候选 enabled=false 时不执行脚本，只验证源码并提交；若是已停用项重新导入或更新，保留最后成功的站点描述，首次停用导入的 sites 为空。其新运行能力要等以后启用成功才确定，导入成功不能代替运行就绪。`edit` 不启动脚本；名称编辑不会改变类型，URL 编辑只适用于已存在的 network 类型。
+
+`update` 内容相同返回 instance 的 `updateState:"unchanged"`、`updateError:null`，不换代、不刷新 updatedAt。内容成功变更返回 `updateState:"updated"`；失败返回错误包装，并在原安装上保存 `updateState:"failed"` 与错误码 `updateError`，保留旧源码、描述及时间。候选运行失败会先停止候选，再恢复原先启用的旧版本，因此失败后 state 可为 ready，而 updateState 仍为 failed；若恢复也失败，运行 state/error 独立报告。普通 `install/import` 的失败返回错误包装并保留原记录，不把它当作一次普通 update 来改写更新状态。
+
+失败恢复的事务范围是源码和安装管理记录；私有卷继续属于同一个 installation，不复制或回滚脚本已经完成的私有数据写入。
+
+`import/update` 的下载由 Node 执行，保留用户提供的完整 URL，复用宿主 HTTP 重定向、解压、源码字节上限及请求超时，不增加域名或安装数量白名单。非 2xx 返回 `HTTP_ERROR`，连接或响应中断为 `NETWORK_ERROR`，超时为 `TIMEOUT`，超源码边界为 `RESOURCE_LIMIT`，非法 UTF-8/BOM 为 `SCRIPT_PROTOCOL_ERROR`；语法或执行失败为 `SCRIPT_EXCEPTION`。这些错误均通过上述失败包装返回。
+
+设置原子替换后若持久同步报告失败，返回 `COMMIT_UNKNOWN`，并按实际文件协调内存状态；已经提交的候选不回滚为旧源码，updateState 也不伪装为 failed。提交后的旧源码清理失败也可能返回错误而候选已经生效。遇到这些错误应读取 status，不能仅凭 RPC 的 ok=false 推断没有提交。
 
 ## 设置文件
 
@@ -54,7 +90,15 @@ contract: cat.script.v1
       "sourceHash": "<sha256>",
       "enabled": true,
       "version": "1.0.0",
-      "config": {}
+      "config": {},
+      "name": "我的猫源",
+      "sourceType": "network",
+      "sourceUrl": "https://example.invalid/cat.js",
+      "importedAt": 1790000000000,
+      "updatedAt": null,
+      "updateState": "idle",
+      "updateError": null,
+      "sites": []
     }
   ]
 }
@@ -62,9 +106,15 @@ contract: cat.script.v1
 
 `port=0` 由系统选择聚合端口。缺省 provider 表示未启用对应拦截。客户端可原子改写该文件后调用 `refresh`；刷新先校验设置结构，设置损坏时不发布部分状态、不覆盖文件，也不替换当前有效运行快照。有效设置只对配置变更、新增、移除或失败的目标实例应用，未变的正常实例不重读源码、不重新启动。provider、映射和聚合端口变更通过设置快照发布，不要求全量重读源码。冷启动设置损坏明确返回存储错误。
 
+安装管理元数据、启用意图和最后成功的 sites 由 Node 持久化；原生客户端不保存第二份安装权威。客户端视频源开关、排序、检测结果和删除标记不进入此文件。普通管理应调用上表方法；`refresh` 只应用磁盘设置，不下载网络源，也不提供 `update` 的候选失败恢复事务。
+
+schema version 保持 1。真实旧记录仅有 `installationId/sourceHash/enabled/version/config` 五字段，读取时补齐 `name=installationId,sourceType="local",sourceUrl=null,importedAt=null,updatedAt=null,updateState="idle",updateError=null,sites=[]`，保留旧 enabled。首次后续保存写入扩展字段，不凭文件 mtime 伪造历史时间。含部分新管理字段的损坏记录不按旧格式猜测补齐；未知来源类型及额外字段仍拒绝。
+
+importedAt 和 updatedAt 均为 epoch 毫秒或 null。新安装成功时记录 importedAt，updatedAt 初始为 null；显示修改时间取 `updatedAt ?? importedAt`。内容成功改变才记录 updatedAt；编辑、无变化、失败、启停和重启不刷新。旧记录的未知 importedAt 保持 null，后续成功内容更新可记录 updatedAt。updateState 只允许 idle/updated/unchanged/failed，updateError 在 failed 时为错误码字符串，其余为 null。首次成功导入为 idle，成功重新导入按内容是否改变为 updated/unchanged。
+
 `start` 完成数据根、设置读取和聚合 server 监听后返回与 `status` 相同的快照，各已启用脚本随后按 `settings.scripts` 顺序在后台逐个启动，不并发、不增加并发设置项。每个目标实例启动时读取一次当前源码，按实际字节检查 16 MiB 上限并解码，不做全量源码预检；禁用实例不读取源码，也无需创建 host revision。源码缺失、非法编码、超限或引擎语法/执行错误只使对应实例失败并列入 `failures`，不阻止聚合入口或其他实例就绪。合法手工编辑即使改变长度，也可在停用后重新启用或进程重启时运行；运行中不监视文件变化。
 
-每个 enabled installation 使用独立 worker thread 运行 CatSession、QuickJS、私有卷访问和 listener；主线程保留 ScriptHost 记录、CatRuntime 网关、设置文件与平台适配器。实例就绪即可调用；尚未启动或正在启动的实例在 `status` 中报告 `starting`，对它的 `invoke`、管理和会话访问立即返回 `STARTING`，不隐藏等待；聚合 HTTP 入口对 `STARTING` 返回 503。禁用实例的调用和管理访问返回 `DISABLED`。安装、启用、刷新和卸载与后台启动共用同一串行队列，可在两个实例启动之间插入；与目标一致的实例不重复启动。更新仍先停旧 generation 再启动新 generation，避免同一实例两代并写私有卷。
+每个 enabled installation 使用独立 worker thread 运行 CatSession、QuickJS、私有卷访问和 listener；主线程保留 ScriptHost 记录、CatRuntime 网关、设置文件与平台适配器。实例就绪即可调用；尚未启动或正在启动的实例在 `status` 中报告 `starting`，对它的 `invoke`、脚本凭据管理和会话访问立即返回 `STARTING`，不隐藏等待；聚合 HTTP 入口对 `STARTING` 返回 503。禁用实例的调用、脚本凭据管理和 restart 返回 `DISABLED`，仍可编辑、更新或卸载。安装管理与后台启动共用同一串行队列，可在两个实例启动之间插入；无变化 update 和重复 enable 不重启健康实例，显式 restart/重新导入只重启所选启用实例。更新先停旧 generation 再启动新 generation，避免同一实例两代并写私有卷。
 
 ## QuickJS 与有限 Node 风格能力
 
@@ -138,7 +188,9 @@ HTTP 请求和 `url.format` 的字段投影由同一份规则驱动，guest 编�
 运行器状态返回：
 
 - 聚合 Cat origin 与受信客户端访问 token；
-- 每个 instance 的 `disabled`／`starting`／`ready`／`failed` 状态；ready instance 另有 generation、sites、当前实际 endpoints 和管理打开 URL。
+- 每个 instance 始终包含 `installationId,generation,state,version,sourceHash,error,sites`，并增加 `name,sourceType,sourceUrl,enabled,importedAt,updatedAt,updateState,updateError`。state 为 `disabled`／`starting`／`ready`／`failed`；enabled 是独立的持久启用意图，不从 state 或更新结果反推。
+- sites 保留 `key/name/api/actions/methods` 及已有 discovery；未就绪或停用时返回最后成功保存的描述，首次尚无成功发现时为空。候选未提交时不发布其 sourceHash/sites；运行中的端口、generation 不作为持久安装或站点主键。
+- 仅 ready instance 另有当前实际 endpoints 和可用的 managementUrl。
 
 聚合入口只处理 `/cat/<installation>/<site>/<operation>` 和 `/proxy/...`。Cat 业务请求必须携带运行器 access header；脚本代理 URL 使用不可猜测路由身份并只允许 GET/HEAD。代理保留状态、Range、必要响应头、取消和流式背压；本实例的 Location、HLS URI 与 MPD BaseURL 才会继续映射。`/website`、`/admin`、配置及运行器内部路径不得借代理暴露。
 
@@ -179,8 +231,8 @@ HTTP 请求和 `url.format` 的字段投影由同一份规则驱动，guest 编�
 
 更新先停止该 installation 的旧 generation，再装载并启动新 generation，避免两个 generation 并发写同一私有卷。若脚本 stop 返回 Promise，运行器在有界清理时限内等待其完成，以便关闭服务并落盘；超时或失败后仍强制回收实例自有资源。停用、卸载和关闭回收 listener、socket、timer、流、fd、代理身份和 guest 内存。
 
-卸载或刷新时脚本从配置移除，实例停止、资源回收后在同一次调用内递归删除 `volumes/<installationId>`，并删除不再被任何 installation 引用的 `sources/<importhash>.js`；更新成功后也清理不再引用的旧源码文件，返回时删除已完成。删除依据设置中的原始文件引用，不使用 host 的实际执行内容摘要；状态中的 `sourceHash` 在已有 host revision 时报告该实际摘要，手工编辑后可与设置引用不同。共享引用仍保留，未知文件不扫描删除。目录身份、普通文件、符号链接和硬链接隔离检查继续保留。同一 installationId 重新安装从空卷开始；若上次删除失败留有残卷，安装时先删除，仍失败则安装失败、不启动。停止、停用、更新、端口变化、进程重启和内存超限重启均保留私有卷。删除失败如实进入 `failures`，实例仍算已卸载，不影响其他实例；删除只作用于已校验的卷目录，不跟随符号链接。运行器启动和冷启动不扫描或清理 `volumes`。
+卸载或刷新时脚本从配置移除，实例停止、资源回收后在同一次调用内递归删除 `volumes/<installationId>`，并删除不再被任何 installation 引用的 `sources/<importhash>.js`；更新成功后也清理不再引用的旧源码文件，返回时删除已完成。删除依据设置中的原始文件引用，不使用 host 的实际执行内容摘要；状态中的 `sourceHash` 在已有 host revision 时报告该实际摘要，手工编辑后可与设置引用不同。共享引用仍保留，未知文件不扫描删除。目录身份、普通文件、符号链接和硬链接隔离检查继续保留。卸载后同一 installationId 再次安装从空卷开始；尚未卸载的同 ID 明确重新导入保留私有卷。若上次删除失败留有残卷，新的安装先删除，仍失败则安装失败、不启动。停止、停用、更新、端口变化、进程重启和内存超限重启均保留私有卷。删除失败如实进入 `failures`，实例仍算已卸载，不影响其他实例；删除只作用于已校验的卷目录，不跟随符号链接。运行器启动和冷启动不扫描或清理 `volumes`。
 
-`refresh`／`uninstall` 在各自变更全部处理完后返回 `applied`／`failures`，`install`／`enable` 在目标实例处理完后返回其状态。关闭时停止尚未开始的启动队列，先向已有及正在初始化的实例发停止，再等待在途事务、真实线程退出和 server 回收，不先等完整初始化截止时间；后台启动失败记入 `failures`，不产生未处理 rejection。
+`refresh`／`uninstall` 在各自变更全部处理完后返回 `applied`／`failures`，其他安装管理方法在目标实例处理完后返回其状态，错误包装见上文。取消管理请求会终止下载与正在初始化的候选；停用/卸载同时取消该安装尚未完成的管理操作，旧异步结果不能再次启用或覆盖它。请求取消可恢复原先启用的旧版本；停用、卸载和关闭不为该恢复重新启动脚本。关闭时停止尚未开始的启动队列，先向已有及正在初始化的实例发停止，再等待在途事务、真实线程退出和 server 回收，不先等完整初始化截止时间；后台启动失败记入 `failures`，不产生未处理 rejection。
 
 主线程每次 `settings.publish` 后按发布顺序向各 worker 推送只读设置快照和实际聚合端口；worker 不持久化或读取第二份设置文件，之后发出的调用使用新快照，调用开始时读取设置快照的语义不变。脚本结果的 mapUrl、本地代理 id 生成和可选 M3U8 元数据增强及变体改写在所属 worker 内完成；主线程转发媒体时的 Location／HLS／MPD 改写只查已登记代理与真实 endpoints 快照，不生成新的代理 id，也不为改写发起同步 RPC。

@@ -205,6 +205,18 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   `scripts/ios-node-mobile.json` and checked during build preparation.
 - This component and its license are not distributed by the Windows packager.
 
+## Native QuickJS-NG — MIT
+
+- Source: https://github.com/quickjs-ng/quickjs, v0.18.0,
+  commit `d7215b0ad3fc2c562e8317fd9bca058fd4863804`.
+- License: `quickjs-native-MIT.txt`; original copyright notices remain in the
+  unmodified engine sources under `native/JavaScript/quickjs`.
+- Source and license hashes: `scripts/quickjs-native.json`.
+- Windows links the engine into `meowfilm_js.dll` through the application's
+  JSON-only C adapter. The upstream command-line interpreter, libc/I/O module
+  and module loader are not included. This client-side engine is independent
+  of the Node script host and is not a replacement for its WASM/asm.js engines.
+
 ## QuickJS / quickjs-emscripten — MIT
 
 - Source: `https://github.com/justjake/quickjs-emscripten`, npm release `0.32.0`;

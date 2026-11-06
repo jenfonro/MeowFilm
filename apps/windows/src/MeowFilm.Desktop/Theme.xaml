@@ -20,6 +20,44 @@
     <FontFamily x:Key="MeowFilm.Font.Icons">Segoe Fluent Icons, Segoe MDL2 Assets, Segoe UI Symbol</FontFamily>
     <BooleanToVisibilityConverter x:Key="MeowFilm.BoolToVisibility" />
 
+    <Style x:Key="MeowFilm.SettingsArea" TargetType="RadioButton">
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="Margin" Value="0,0,32,0" />
+        <Setter Property="Height" Value="44" />
+        <Setter Property="FocusVisualStyle" Value="{DynamicResource MeowFilm.FocusVisual}" />
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Border x:Name="Underline" BorderBrush="Transparent" BorderThickness="0,0,0,2" Padding="0,0,0,2">
+                        <ContentPresenter VerticalAlignment="Center" RecognizesAccessKey="True"
+                                          TextElement.Foreground="{TemplateBinding Foreground}" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}" />
+                            <Setter Property="FontWeight" Value="SemiBold" />
+                            <Setter TargetName="Underline" Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}" />
+                        </Trigger>
+                        <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+                            <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
+                        </Trigger>
+                        <MultiTrigger>
+                            <MultiTrigger.Conditions>
+                                <Condition Property="local:DesktopTheme.IsHighContrast" Value="True" />
+                                <Condition Property="IsChecked" Value="True" />
+                            </MultiTrigger.Conditions>
+                            <Setter TargetName="Underline" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}" />
+                        </MultiTrigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <Style x:Key="MeowFilm.FocusVisual">
         <Setter Property="Control.Template">
             <Setter.Value>

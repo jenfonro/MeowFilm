@@ -1,0 +1,241 @@
+[
+  {
+    "name": "initial database rules do not infer a Chinese season",
+    "setup": "initial",
+    "request": { "section": "episode", "text": "作品 第二季 第三集.mkv" },
+    "expected": { "type": "success", "text": "命中第 1 条：E3", "processedText": "作品 第2季 第3集.mkv", "rewrittenText": "E3" }
+  },
+  {
+    "name": "restored episode rules include explicit season recognition",
+    "setup": "restored",
+    "request": { "section": "episode", "text": "作品 第二季 第三集.mkv" },
+    "expected": { "type": "success", "text": "命中第 1 条：S2E3", "rewrittenText": "S2E3" }
+  },
+  {
+    "name": "fullwidth part and Chinese episode markers are normalized",
+    "setup": "restored",
+    "request": { "section": "episode", "text": "作品 第０２部 第两百零三话.mkv" },
+    "expected": { "type": "success", "text": "命中第 1 条：S2E203", "processedText": "作品 第2部 第203话.mkv" }
+  },
+  {
+    "name": "chapter markers share the reference season normalization",
+    "setup": "restored",
+    "request": { "section": "episode", "text": "作品 第三篇 第十二集.mkv" },
+    "expected": { "type": "success", "text": "命中第 1 条：S3E12" }
+  },
+  {
+    "name": "episode cleaning retains a pure season episode bracket",
+    "setup": "initial",
+    "request": { "section": "episode", "text": "作品 [S01E006] [1080p].mkv" },
+    "expected": { "type": "success", "text": "命中第 1 条：S01E006", "processedText": "作品 [S01E006] .mkv", "previews": ["作品 [S01E006] .mkv", "作品 [S01E006] .mkv", "作品 [S01E006] .mkv", "作品 [S01E006] .mkv", "作品 [S01E006] .mkv", "作品 [S01E006] .mkv"] }
+  },
+  {
+    "name": "initial numeric episode rule",
+    "setup": "initial",
+    "request": { "section": "episode", "text": "003.mkv" },
+    "expected": { "type": "success", "text": "命中第 2 条：E3", "matchedRuleIndex": 2 }
+  },
+  {
+    "name": "movie processing keeps the parenthesized year",
+    "setup": "restored",
+    "request": { "section": "movie", "text": "Hamnet (2025) (1080p WEB-DL).mkv" },
+    "expected": { "type": "success", "text": "命中第 1 条：未设置 replace（无改写）", "processedText": "Hamnet (2025) (1080p WEB-DL).mkv", "matched": true, "rewriteApplied": false, "rewrittenText": null }
+  },
+  {
+    "name": "default movie rejects episode markers",
+    "setup": "restored",
+    "request": { "section": "movie", "text": "Film 2025 S01E02.mkv" },
+    "expected": { "type": "error", "text": "未命中", "matched": false }
+  },
+  {
+    "name": "default movie keeps JavaScript year word boundaries",
+    "setup": "restored",
+    "request": { "section": "movie", "text": "Film_2025.mkv" },
+    "expected": { "type": "error", "text": "未命中" }
+  },
+  {
+    "name": "Chinese adjacent year still has JavaScript word boundaries",
+    "setup": "restored",
+    "request": { "section": "movie", "text": "电影2025.mkv" },
+    "expected": { "type": "success", "text": "命中第 1 条：未设置 replace（无改写）" }
+  },
+  {
+    "name": "episode empty input has the reference prompt",
+    "setup": "empty",
+    "request": { "section": "episode", "text": " \t " },
+    "expected": { "type": "", "text": "请输入文件名" }
+  },
+  {
+    "name": "movie empty input has the reference prompt",
+    "setup": "empty",
+    "request": { "section": "movie", "text": "" },
+    "expected": { "type": "", "text": "请输入文件名" }
+  },
+  {
+    "name": "search empty input has the reference prompt",
+    "setup": "empty",
+    "request": { "section": "search", "text": "" },
+    "expected": { "type": "", "text": "请输入搜索结果标题" }
+  },
+  {
+    "name": "empty episode rules do not use a hidden recognition path",
+    "setup": "empty",
+    "request": { "section": "episode", "text": "S01E02" },
+    "expected": { "type": "error", "text": "无匹配规则", "matched": false }
+  },
+  {
+    "name": "empty movie rules",
+    "setup": "empty",
+    "request": { "section": "movie", "text": "Film (2025).mkv" },
+    "expected": { "type": "error", "text": "无匹配规则" }
+  },
+  {
+    "name": "invalid cleaning and matching rules permit a later episode hit",
+    "setup": "empty",
+    "rules": {
+      "episodeCleanRegexRules": ["[", "^noise "],
+      "episodeRules": [{ "pattern": "[", "replace": "bad" }, { "pattern": "^E(\\d+)$", "replace": "hello" }, { "pattern": ".*", "replace": "E99" }]
+    },
+    "request": { "section": "episode", "text": "noise E2" },
+    "expected": { "type": "success", "text": "命中第 2 条：hello", "matchedRuleIndex": 2, "rewrittenText": "hello", "previews": ["正则无效", "E2"], "errors": [{ "group": "episodeClean", "ruleIndex": 1, "text": "#1 正则无效" }, { "group": "episode", "ruleIndex": 1, "text": "#1 正则无效" }] }
+  },
+  {
+    "name": "invalid movie rule permits a later hit",
+    "setup": "empty",
+    "rules": { "movieRules": [{ "pattern": "[" }, { "pattern": "film", "replace": "movie" }] },
+    "request": { "section": "movie", "text": "Film" },
+    "expected": { "type": "success", "text": "命中第 2 条：movie", "matchedRuleIndex": 2 }
+  },
+  {
+    "name": "matching failures retain reference rule numbers",
+    "setup": "empty",
+    "rules": { "movieRules": [{ "pattern": "[" }, { "pattern": "never" }, { "pattern": "x", "flags": "qq" }] },
+    "request": { "section": "movie", "text": "Film" },
+    "expected": { "type": "error", "text": "未命中（#1 正则无效，#3 正则无效）" }
+  },
+  {
+    "name": "first hit without replace still terminates",
+    "setup": "empty",
+    "rules": { "episodeRules": [{ "pattern": ".*" }, { "pattern": ".*", "replace": "E9" }] },
+    "request": { "section": "episode", "text": "filename" },
+    "expected": { "type": "success", "text": "命中第 1 条：未设置 replace（无改写）", "matched": true, "rewrittenText": null }
+  },
+  {
+    "name": "empty replacement output is a matched failure",
+    "setup": "empty",
+    "rules": { "episodeRules": [{ "pattern": "^(x)?y$", "replace": "$1" }, { "pattern": ".*", "replace": "E9" }] },
+    "request": { "section": "episode", "text": "y" },
+    "expected": { "type": "error", "text": "命中第 1 条，但改写失败", "matched": true, "rewriteApplied": true, "rewrittenText": "" }
+  },
+  {
+    "name": "backslash capture and explicit global flags",
+    "setup": "empty",
+    "rules": { "movieRules": [{ "pattern": "(a)", "replace": "\\1!", "flags": "g" }] },
+    "request": { "section": "movie", "text": "aaa" },
+    "expected": { "type": "success", "text": "命中第 1 条：a!a!a!", "rewrittenText": "a!a!a!" }
+  },
+  {
+    "name": "absent matching flags replace only the first occurrence",
+    "setup": "empty",
+    "rules": { "movieRules": [{ "pattern": "a", "replace": "x" }] },
+    "request": { "section": "movie", "text": "AaA" },
+    "expected": { "type": "success", "text": "命中第 1 条：xaA" }
+  },
+  {
+    "name": "sticky regex state is reset on every process call",
+    "setup": "empty",
+    "rules": { "movieRules": [{ "pattern": "a", "replace": "x", "flags": "y" }] },
+    "request": { "section": "movie", "text": "aa" },
+    "expected": { "type": "success", "text": "命中第 1 条：xa" }
+  },
+  {
+    "name": "movie replacement preserves whitespace",
+    "setup": "empty",
+    "rules": { "movieRules": [{ "pattern": "^.*$", "replace": "  hello  " }] },
+    "request": { "section": "movie", "text": "film" },
+    "expected": { "type": "success", "text": "命中第 1 条：  hello  ", "rewrittenText": "  hello  " }
+  },
+  {
+    "name": "episode replacement normalizes marker whitespace",
+    "setup": "empty",
+    "rules": { "episodeRules": [{ "pattern": "^.*$", "replace": "  第两篇 第１２话  " }] },
+    "request": { "section": "episode", "text": "film" },
+    "expected": { "type": "success", "text": "命中第 1 条：第2篇 第12话", "rewrittenText": "第2篇 第12话" }
+  },
+  {
+    "name": "editing slash syntax directly does not parse it as a new row",
+    "setup": "empty",
+    "rules": { "movieRules": [{ "pattern": "/foo/i", "replace": "bar" }] },
+    "request": { "section": "movie", "text": "FOO" },
+    "expected": { "type": "error", "text": "未命中" }
+  },
+  {
+    "name": "search protects a query trailing number",
+    "setup": "restored",
+    "request": { "section": "search", "text": "作品2", "query": "作品2" },
+    "expected": { "type": "success", "text": "净化后：作品2（聚合Key：作品2）（搜索尾号保护：2）", "processedText": "作品2", "groupKey": "作品2", "trailingDigits": "2", "previews": ["作品2", "作品2", "作品2", "作品2", "作品2", "作品2", "作品2（跳过尾号规则）"] }
+  },
+  {
+    "name": "search without a query removes the title trailing number",
+    "setup": "restored",
+    "request": { "section": "search", "text": "作品2", "query": null },
+    "expected": { "type": "success", "text": "净化后：作品（聚合Key：作品）", "processedText": "作品", "groupKey": "作品", "trailingDigits": "" }
+  },
+  {
+    "name": "query digits protect the trailing rule even for a different title number",
+    "setup": "restored",
+    "request": { "section": "search", "text": "作品3", "query": "作品2" },
+    "expected": { "type": "success", "text": "净化后：作品3（聚合Key：作品3）（搜索尾号保护：2）", "groupKey": "作品3" }
+  },
+  {
+    "name": "fullwidth query digits do not enable ASCII tail protection",
+    "setup": "restored",
+    "request": { "section": "search", "text": "作品2", "query": "作品２" },
+    "expected": { "type": "success", "text": "净化后：作品（聚合Key：作品）", "trailingDigits": "" }
+  },
+  {
+    "name": "default search cleanup and cumulative row previews",
+    "setup": "restored",
+    "request": { "section": "search", "text": "仙逆 年番 更新至123集 (2023)" },
+    "expected": { "type": "success", "text": "净化后：仙逆（聚合Key：仙逆）", "previews": ["仙逆 年番 更新至123集", "仙逆 更新至123集", "仙逆", "仙逆", "仙逆", "仙逆", "仙逆"] }
+  },
+  {
+    "name": "search leaves new-year animation marker intact",
+    "setup": "restored",
+    "request": { "section": "search", "text": "作品 新年番" },
+    "expected": { "type": "success", "text": "净化后：作品 新年番（聚合Key：作品新年番）" }
+  },
+  {
+    "name": "search retains default cleanup with no custom rules",
+    "setup": "empty",
+    "request": { "section": "search", "text": "  A\u200b 👩‍🚀 🇨🇳 - B  " },
+    "expected": { "type": "success", "text": "净化后：A - B（聚合Key：ab）（仅默认清洗）", "processedText": "A - B", "groupKey": "ab" }
+  },
+  {
+    "name": "group key only removes the reference punctuation set",
+    "setup": "empty",
+    "request": { "section": "search", "text": "A(2025) & B- C" },
+    "expected": { "type": "success", "text": "净化后：A(2025) & B- C（聚合Key：a(2025)&bc）（仅默认清洗）", "groupKey": "a(2025)&bc" }
+  },
+  {
+    "name": "any invalid search rule fails while retaining later previews",
+    "setup": "empty",
+    "rules": { "aggregateRegexRules": ["[", "foo", "bar"] },
+    "request": { "section": "search", "text": "foo bar title" },
+    "expected": { "type": "error", "text": "清洗失败（#1 正则无效）", "processedText": "title", "groupKey": "title", "previews": ["正则无效", "bar title", "title"] }
+  },
+  {
+    "name": "cleaning forces global but respects explicit case sensitivity",
+    "setup": "empty",
+    "rules": { "aggregateRegexRules": ["/a/m"] },
+    "request": { "section": "search", "text": "AaAa" },
+    "expected": { "type": "success", "text": "净化后：AA（聚合Key：aa）", "previews": ["AA"] }
+  },
+  {
+    "name": "an empty search output is still successful",
+    "setup": "empty",
+    "rules": { "aggregateRegexRules": [".*"] },
+    "request": { "section": "search", "text": "title" },
+    "expected": { "type": "success", "text": "净化后：", "processedText": "", "groupKey": "" }
+  }
+]

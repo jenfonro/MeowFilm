@@ -1873,7 +1873,7 @@ test('Cat explicit reimport atomically replaces edited bytes even with unchanged
     assert.deepEqual(await runtime.invoke(target), { value: 'imported' });
   });
 
-test('Cat failed atomic reimport preserves the edited file and running generation',
+test('Cat failed atomic reimport preserves the edited file and restores the working revision',
   { timeout: 30000 }, async t => {
     const root = rootFor(t);
     const runtime = createCatRuntime({ dataRoot: root });
@@ -1885,6 +1885,7 @@ test('Cat failed atomic reimport preserves the edited file and running generatio
     const file = sourceFile(root, sourceHash(original));
     writeFileSync(file, edited);
     const generation = runtime.instance('atomic-reimport').generation;
+    const previousWorker = runtime.getSession('atomic-reimport');
     const settings = readFileSync(runtime.settings.path, 'utf8');
     const rename = fs.renameSync;
     fs.renameSync = (from, to) => {
@@ -1900,7 +1901,9 @@ test('Cat failed atomic reimport preserves the edited file and running generatio
     }
     assert.equal(readFileSync(file, 'utf8'), edited);
     assert.equal(readFileSync(runtime.settings.path, 'utf8'), settings);
-    assert.equal(runtime.instance('atomic-reimport').generation, generation);
+    assert.equal(runtime.instance('atomic-reimport').generation, generation + 2);
+    assert.equal(previousWorker.worker, null);
+    assert.equal(runtime.instance('atomic-reimport').sourceHash, sourceHash(original));
     assert.deepEqual(await runtime.invoke({
       installationId: 'atomic-reimport', siteId: 'default', operation: 'home', payload: {},
     }), { value: 'original' });

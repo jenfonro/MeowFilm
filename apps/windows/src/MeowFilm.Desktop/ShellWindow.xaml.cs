@@ -107,6 +107,7 @@ public sealed partial class ShellWindow : Window
         _suppressSelection = true;
         InitializeUnifiedNavigation();
         InitializeHeaderPresentation();
+        InitializeSettingsNavigation();
         PublicNavigationList.ItemsSource = pages.Where(page => page.ShowInSidebar).ToArray();
         PublicNavigationList.Visibility = !pages.Any(page => page.ShowInSidebar) ? Visibility.Collapsed : Visibility.Visible;
         _suppressSelection = false;
