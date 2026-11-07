@@ -1,4 +1,5 @@
 using System;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -44,7 +45,18 @@ public static class SelectedJsonSnapshot
         {
             var data = await SelectedFileSnapshot.ReadAsync(selectedPath, ".json", MaximumBytes, cancellationToken)
                 .ConfigureAwait(false);
-            return new SelectedJsonSnapshotData(data.Bytes, data.Sha256, data.Basename);
+            try
+            {
+                string sha256 = Convert.ToHexStringLower(SHA256.HashData(data.Bytes));
+                cancellationToken.ThrowIfCancellationRequested();
+                return new SelectedJsonSnapshotData(data.Bytes, sha256, data.Basename);
+            }
+            catch (Exception error)
+            {
+                CryptographicOperations.ZeroMemory(data.Bytes);
+                if (error is OperationCanceledException) throw;
+                throw new SelectedJsonSnapshotException(SelectedJsonSnapshotError.ReadFailed);
+            }
         }
         catch (SelectedFileSnapshotException error)
         {

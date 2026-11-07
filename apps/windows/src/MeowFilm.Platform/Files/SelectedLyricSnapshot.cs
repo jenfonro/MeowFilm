@@ -43,8 +43,11 @@ public static class SelectedLyricSnapshot
             if (text.Length > MaximumCharacters) throw new SelectedLyricSnapshotException(SelectedLyricSnapshotError.TooLarge);
             if (text.Length == 0 || text.Any(c => c < 32 && c is not ('\r' or '\n' or '\t')))
                 throw new SelectedLyricSnapshotException(SelectedLyricSnapshotError.InvalidEncoding);
+            string sha256;
+            try { sha256 = Convert.ToHexStringLower(SHA256.HashData(snapshot.Bytes)); }
+            catch { throw new SelectedLyricSnapshotException(SelectedLyricSnapshotError.ReadFailed); }
             cancellationToken.ThrowIfCancellationRequested();
-            return new(text, snapshot.Sha256, snapshot.Basename);
+            return new(text, sha256, snapshot.Basename);
         }
         catch (SelectedFileSnapshotException error)
         { throw new SelectedLyricSnapshotException((SelectedLyricSnapshotError)error.Error); }

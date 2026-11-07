@@ -4,7 +4,12 @@ namespace MeowFilm.Core.Runtime;
 
 public interface IRuntimeClient
 {
+    /// <summary>Returns the validated complete {ok, contract, value|code} HTTP envelope.</summary>
     Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default);
+    /// <summary>Borrows source until the returned task settles, including cancellation;
+    /// returns the validated complete HTTP envelope.</summary>
+    Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+        ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default);
 }
 
 /// <summary>An App-owned script connection; callers never own its lifetime.</summary>

@@ -11,7 +11,7 @@ using Microsoft.Win32.SafeHandles;
 namespace MeowFilm.Platform.Files;
 
 // Internal only: callers cannot choose arbitrary extensions or increase a public bound.
-internal sealed record SelectedFileSnapshotData(byte[] Bytes, string Sha256, string Basename);
+internal sealed record SelectedFileSnapshotData(byte[] Bytes, string Basename);
 internal enum SelectedFileSnapshotError
 {
     InvalidPath, Unavailable, UnsafeFile, TooLarge, InUse, Changed, ReadFailed, IncompleteSnapshot
@@ -179,8 +179,6 @@ internal static class SelectedFileSnapshot
                 // Disable FileStream read-ahead: the EOF probe must request only one extra byte.
                 using var stream = new FileStream(File!, FileAccess.Read, bufferSize: 1, isAsync: false);
                 bytes = ReadFixed(stream, checked((int)Length(Initial.Info)), maximumBytes, cancellation);
-                // Hash before the final metadata checks so those checks bound the whole operation.
-                string sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes));
                 cancellation.ThrowIfCancellationRequested();
                 var after = Information(File!);
                 ValidateFile(File!, after);
@@ -200,7 +198,7 @@ internal static class SelectedFileSnapshot
                     Fail(SelectedFileSnapshotError.Changed);
                 CheckCompanions(cancellation);
                 cancellation.ThrowIfCancellationRequested();
-                var result = new SelectedFileSnapshotData(bytes, sha256, basename);
+                var result = new SelectedFileSnapshotData(bytes, basename);
                 returned = true;
                 return result;
             }

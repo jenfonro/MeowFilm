@@ -37,6 +37,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 
 - 需要 PATH 上的 .NET SDK（10 或更高）、Node.js、npm 与 Git；参考环境为 .NET SDK 10.0.402、Node.js 24.21.0。
 - 原生规则引擎需要 CMake 3.20+ 和 Windows C 编译器（MSVC，或通过标准 CMake 环境选择的工具链）；源码随仓库锁定，普通增量构建自动生成 DLL，不下载依赖或使用预编译来源不明的二进制。
+- 通用脚本宿主的 Node addon 还需要 Python、Perl、NASM 与 MSVC x64 开发环境（`cl`／`nmake` 在 PATH）；首次构建按 `scripts/script-host-native.json` 下载校验依赖，后续复用默认缓存。
 - 随 App 发布的 Node 运行时由 `scripts/windows/node-runtime.json` 锁定，并与 `LICENSES/node-LICENSE.txt` 对应；构建时 PATH 上的 `node.exe` 须与其一致。
 - 默认完整发布目录自带 Node、引擎依赖和 .NET，不要求目标电脑安装开发工具；`-FrameworkDependent` 另需系统 .NET Desktop Runtime。
 
@@ -57,15 +58,15 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `apps/windows/app/` — Windows 应用入口与装配
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约
-  - `MeowFilm.Platform` — 本地文档存储与敏感信息保护、命名管道、子进程、文件授权
+  - `MeowFilm.Platform` — 本地文档存储与敏感信息保护、私密启动管道、HTTP 子进程会话、文件授权
   - `MeowFilm.Desktop` — 窗口、导航、设置入口、主题、通知
   - `MeowFilm.Media` — 媒体播放与自适应流
   - `MeowFilm.SystemMedia` — 系统媒体传输控件
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/windows/tests/` — Windows 原生测试
-- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`entry.mjs` 管理三个模块，契约为 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.2.0。旧 Windows／iOS 启动接入另行迁移，不保留旧运行器协议回退。
-- `apps/windows/runtime/` — 仅 Windows 启动／命名管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
+- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`entry.mjs` 管理三个模块，契约为 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.2.0。Windows 已接入该 HTTP 契约；旧 iOS 启动接入另行迁移，不保留旧运行器协议回退。
+- `apps/windows/runtime/` — 仅 Windows 私密启动／存活管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
 - `packages/script-host/` — 统一实例生命周期；LX 与 portable 来源使用共享原生绑定、逐实例线程／QuickJS Runtime，CatNode 使用逐实例 Node Worker 与原生 Node 能力。
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层
 - `packages/runtime-bridge/` — runtime.http.v1 完整 HTTP 请求／响应、通用双向调用能力、取消与连接生命周期

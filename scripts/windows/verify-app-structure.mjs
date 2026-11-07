@@ -7,15 +7,16 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 const generated = new Set(['bin', 'obj', 'node_modules', '.git']);
 const runtimeTrees = new Map([
   ['apps/runtime', {
-    files: ['bootstrap.mjs', 'modules/music-script.mjs', 'modules/cat-script.mjs', 'modules/source-runtime.mjs'],
+    files: ['bootstrap.mjs', 'entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
+      'modules/music-script.mjs', 'modules/cat-script.mjs', 'modules/source-runtime.mjs'],
     directories: ['modules'],
   }],
   ['apps/windows/runtime', { files: ['bootstrap.mjs', 'entries/aggregate.mjs'], directories: ['entries'] }],
 ]);
 const sharedImports = new Set([
-  'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
+  'node:buffer', 'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
 ]);
-const windowsImports = new Set(['node:net', 'node:path', '@meowfilm/runtime-bridge', '@meowfilm/runtime-bridge/descriptor']);
+const windowsImports = new Set(['node:net', 'node:path', '@meowfilm/runtime-bridge']);
 function fail(message) { throw new Error('Windows App structure: ' + message); }
 function samePath(a, b) {
   return process.platform === 'win32'
@@ -39,6 +40,7 @@ export function verifyAppStructure(directory = root) {
     for (const item of readdirSync(join(directory, rel), { withFileTypes: true })) {
       if (generated.has(item.name)) continue;
       const child = rel + '/' + item.name;
+      if (child === 'packages/script-host/build') continue;
       if (item.isSymbolicLink()) fail('linked source: ' + child);
       if (item.isDirectory()) walk(child);
       else if (item.isFile()) files.push(child);

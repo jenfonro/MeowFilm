@@ -227,7 +227,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     private async Task<JsonElement> CallSettledReceipt(string method, object? parameters = null,
         CancellationToken cancellationToken = default)
     {
-        // Two-phase commands must observe a successful token/commit receipt even
+        // Mutating commands must observe a successful commit receipt even
         // when caller cancellation raced with its delivery. Only an explicit
         // cancelled receipt means the command was not admitted.
         var reply = await application.ExecuteAsync(method, parameters ?? new { }, cancellationToken);

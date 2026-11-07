@@ -24,7 +24,8 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const sources = [
   'NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt', 'KuGouMusicApi-MIT.txt',
   'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt', 'node-LICENSE.txt', 'qr-code-generator-LICENSE.txt',
-  'quickjs-emscripten-LICENSE.txt', 'quickjs-native-MIT.txt', 'Unicode-3.0.txt', 'catpawrunner-MIT.txt',
+  'quickjs-ng-LICENSE.txt', 'openssl-LICENSE.txt', 'zlib-LICENSE.txt',
+  'quickjs-native-MIT.txt', 'Unicode-3.0.txt', 'catpawrunner-MIT.txt',
   'npm-node-compat-BSD-3-Clause.txt', 'npm-node-compat-ISC.txt', 'npm-node-compat-MIT.txt',
 ].map(name => ({ source: `LICENSES/${name}`, path: name }));
 function boundedPath(path) {

@@ -744,6 +744,16 @@ public static class MusicLyricDisplayTests
         internal int Calls, Invocations;
         internal bool AllowScripts;
         internal readonly List<string> Loaded = [];
+        private readonly HashSet<(string Id, long Revision)> candidates = [];
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Check(module == "music" && !source.IsEmpty && Guid.TryParseExact(installationId, "D", out _) && sourceRevision > 0);
+            candidates.Add((installationId, sourceRevision));
+            return Task.FromResult(JsonSerializer.SerializeToElement(new { ok = true, contract = "music.script.v3",
+                value = new { installationId, sourceRevision } }));
+        }
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested(); Calls++;
@@ -757,12 +767,9 @@ public static class MusicLyricDisplayTests
             }
             switch (method)
             {
-                case "music.script.stage.begin": result = new { token = Guid.NewGuid().ToString(), chunkBytes = 65536 }; break;
-                case "music.script.stage.chunk": result = new { next = input.GetProperty("offset").GetInt32() +
-                    Convert.FromBase64String(input.GetProperty("data").GetString()!).Length }; break;
-                case "music.script.stage.abort": result = new { released = true }; break;
                 case "music.script.sources.add":
-                    string id = Guid.NewGuid().ToString();
+                    string id = Id();
+                    Check(candidates.Remove((id, input.GetProperty("sourceRevision").GetInt64())));
                     items[id] = JsonSerializer.SerializeToNode(new { installationId = id, name = "Lyric fixture", version = "1",
                         origin = new { kind = "file" }, enabled = false, executionHash = new string('a', 64), rollbackAvailable = false,
                         sites = new { wy = new { actions = new[] { "lyric" }, qualitys = Array.Empty<string>() } }, check = (object?)null })!.AsObject();
@@ -774,16 +781,15 @@ public static class MusicLyricDisplayTests
                 case "music.script.sources.disable":
                     items[Id()]["enabled"] = false; ready.Remove(Id()); result = new { item = Row(Id()) }; break;
                 case "music.script.sources.update":
+                    Check(candidates.Remove((Id(), input.GetProperty("sourceRevision").GetInt64())));
                     items[Id()]["executionHash"] = new string('b', 64); result = new { item = Row(Id()) }; break;
                 case "music.script.invoke":
                     Check(AllowScripts);
                     if (ready.Add(Id())) Loaded.Add(Id());
-                    Invocations++; result = new { value = "[00:01]SCRIPT_LYRIC" }; break;
+                    Invocations++; result = "[00:01]SCRIPT_LYRIC"; break;
                 default: throw new InvalidOperationException("Unexpected script method: " + method);
             }
-            var reply = JsonSerializer.SerializeToNode(result)!.AsObject();
-            reply["ok"] = true; reply["contract"] = "music.script.v3";
-            return Task.FromResult(JsonSerializer.SerializeToElement(reply));
+            return Task.FromResult(JsonSerializer.SerializeToElement(new { ok = true, contract = "music.script.v3", value = result }));
         }
     }
     private sealed class Dialogs : IMusicDialogs

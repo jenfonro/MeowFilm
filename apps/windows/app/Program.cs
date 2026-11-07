@@ -15,7 +15,7 @@ internal static class Program
         FilmRuleService? pendingRules = null;
         FilmSourceService? pendingSources = null;
         AppLauncher.Run(new(AppIdentity.RuntimeId, AppIdentity.ScriptModules,
-            AppIdentity.NativeNamespaces, [], AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces),
+            AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces),
             (runtime, storage, capabilities) =>
             {
                 playback = new NativePlayback();

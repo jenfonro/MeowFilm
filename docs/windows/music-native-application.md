@@ -38,13 +38,15 @@ IRuntimeClient
 ## 公开 seam
 
 ```csharp
-public interface IMusicApplication : IAsyncDisposable, IScriptPlatformCapabilities
+public interface IMusicApplication : IAsyncDisposable
 {
     Task InitializeAsync(CancellationToken cancellationToken = default);
     Task<JsonElement> ExecuteAsync(
         string method,
         object? parameters = null,
         CancellationToken cancellationToken = default);
+    Task<JsonElement> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
+        string? installationId = null, CancellationToken cancellationToken = default);
     Task PrepareShutdownAsync(CancellationToken cancellationToken = default);
     Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default);
     Task AbortAsync(CancellationToken cancellationToken = default);
@@ -66,7 +68,7 @@ public interface IMusicApplication : IAsyncDisposable, IScriptPlatformCapabiliti
 | `music.official.*` | 原生官方候选／授权／取链 |
 | `music.librarySync.*` | `MusicLibrarySyncService` |
 | `music.lyrics.lookup` | `MusicLyricApplication` |
-| `music.sources.*`、`music.online.resolve/lyrics/cancel/describe`、`music.transfer.*` | `MusicScriptOwner` |
+| `music.sources.*`、`music.online.resolve/lyrics/cancel/describe`、完整字节 `ImportSourceAsync` | `MusicScriptOwner` |
 | 曲库、队列、历史及当前设置 | 同一个 `MusicLibraryOwner`，并经过同一推荐 queue lane |
 
 ## 单一队列 lane

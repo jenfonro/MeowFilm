@@ -2573,11 +2573,8 @@ public static class MusicCatalogTests
                 lx.send(lx.EVENT_NAMES.inited,{status:true,sources:{wy:{name:'合成',type:'music',actions:['musicUrl'],qualitys:['320k']}}});
                 """;
             var bytes = System.Text.Encoding.UTF8.GetBytes(source);
-            var upload = await Rpc("music.transfer.begin", new { kind = "script", basename = "catalog-fixture.js", length = bytes.Length,
-                sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)) });
-            var token = upload.GetProperty("token").GetString()!;
-            await Rpc("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) });
-            var result = await Rpc("music.sources.add", new { token });
+            var result = await Client.ImportSourceAsync(bytes, "catalog-fixture.js");
+            True(result.GetProperty("ok").GetBoolean(), "fixture source import failed: " + result.GetRawText());
             var installationId = result.GetProperty("item").GetProperty("installationId").GetString();
             var enabled = await Rpc("music.sources.enable", new { installationId });
             True(enabled.GetProperty("item").GetProperty("enabled").GetBoolean(), "enabled script participates in catalog playback");

@@ -314,6 +314,9 @@ public static class MusicKgAccountUiTests
     private sealed class NoRuntime : IRuntimeClient
     {
         internal int Calls;
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
+        { Calls++; throw new InvalidOperationException("Native business must not upload script sources"); }
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         { Calls++; throw new InvalidOperationException("Ordinary KG must not start Node"); }
     }

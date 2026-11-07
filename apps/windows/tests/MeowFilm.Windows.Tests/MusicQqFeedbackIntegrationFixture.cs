@@ -141,6 +141,9 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
     internal sealed class RefusingRuntime : IRuntimeSession
     {
         internal int Calls, Disposals;
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
+        { Interlocked.Increment(ref Calls); throw new InvalidOperationException("Native business must not upload script sources"); }
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         { Interlocked.Increment(ref Calls); return Task.FromException<JsonElement>(new InvalidOperationException("Node is forbidden")); }
         public ValueTask DisposeAsync() { Interlocked.Increment(ref Disposals); return ValueTask.CompletedTask; }

@@ -1,13 +1,7 @@
-import { startWindowsAppRuntime, reportWindowsRuntimeStartFailure, windowsScriptDataRoot } from '../bootstrap.mjs';
-import { createMusicScriptModule } from '../../../runtime/modules/music-script.mjs';
-import { createCatScriptModule } from '../../../runtime/modules/cat-script.mjs';
-import { createSourceRuntimeModule } from '../../../runtime/modules/source-runtime.mjs';
+import { startWindowsAppRuntime, reportWindowsRuntimeStartFailure } from '../bootstrap.mjs';
+import { createRuntime } from '../../../runtime/entry.mjs';
 
 // Current wire identity; one App, not a selectable aggregate product.
 await startWindowsAppRuntime({
-  product: 'aggregate', assemble: ({ call }) => [
-    createMusicScriptModule({ dataRoot: windowsScriptDataRoot() }),
-    createCatScriptModule({ dataRoot: windowsScriptDataRoot() }),
-    createSourceRuntimeModule({ call, platform: 'windows' }),
-  ],
+  createRuntime: config => createRuntime({ ...config, source: { platform: 'windows' } }),
 }).catch(reportWindowsRuntimeStartFailure);

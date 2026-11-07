@@ -6,7 +6,6 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using MeowFilm.AppHost;
@@ -18,7 +17,7 @@ namespace MeowFilm.Windows.Tests;
 public static class StorageTests
 {
     private const string Ns = "test.documents.v1", Other = "test.other.v1";
-    private const int Maximum = ProtectedDocumentBridge.MaximumDocumentBytes, Chunk = ProtectedDocumentBridge.ChunkBytes;
+    private const int Maximum = LocalDocumentStore.MaximumDocumentBytes;
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("storage.local.raw-json-edit-length-and-reopen", LocalRoundTrip);
@@ -64,29 +63,6 @@ public static class StorageTests
         string[] invalid = ["", "../escape", "a..b", "a/b", "a\\b", ".hidden", "_hidden", "a:b", "a\0b", "a\n", "中文", new string('a', 129)];
         for (int i = 0; i < invalid.Length; i++)
         { string captured = invalid[i]; yield return new("storage.namespace.invalid-" + i, () => InvalidNamespace(captured)); }
-        yield return new("storage.bridge.exact-methods-configuration", Configuration);
-        yield return new("storage.bridge.maximum-real-dpapi-128-chunks-each-way", BridgeMaximum);
-        yield return new("storage.bridge.empty-and-absent-fingerprints", BridgeEmpty);
-        yield return new("storage.bridge.namespace-denial-before-store", NamespaceDenial);
-        yield return new("storage.bridge.cross-namespace-token-isolation", CrossNamespace);
-        yield return new("storage.bridge.exact-fields-duplicates-version", Shapes);
-        yield return new("storage.bridge.canonical-token-only", Tokens);
-        yield return new("storage.bridge.begin-commit-cas-conflicts", BridgeConflicts);
-        yield return new("storage.bridge.integrity-incomplete-upload", BridgeIntegrity);
-        yield return new("storage.bridge.stable-read-snapshot-offsets", ReadSnapshot);
-        foreach (string variant in new[] { "short", "long", "out-of-order", "whitespace", "padding", "invalid", "oversize", "fraction", "negative", "duplicate" })
-        { string captured = variant; yield return new("storage.bridge.chunk-" + captured, () => BadChunk(captured)); }
-        yield return new("storage.bridge.token-replay-release-lost-begin-ack", TokenReplay);
-        yield return new("storage.bridge.absolute-timeout-active-reclamation", BridgeTimeout);
-        yield return new("storage.bridge.timeout-during-store-read", ReadTimeout);
-        yield return new("storage.bridge.cancel-releases-owned-buffer", BridgeCancellation);
-        yield return new("storage.bridge.close-cancels-inflight-terminal", BridgeClose);
-        yield return new("storage.bridge.lost-commit-ack-no-rollback-no-replay", LostAck);
-        yield return new("storage.bridge.commit-wins-cancel-close-race", CommitWins);
-        yield return new("storage.bridge.transfer-byte-budgets", BridgeBudgets);
-        yield return new("storage.bridge.recent-budget-quarantine-recovers", RecentBudget);
-        yield return new("storage.bridge.queued-methods-retain-serial-store-without-a-pending-quota", QueuedMethods);
-        yield return new("storage.bridge.fixed-errors-no-provider-details", FixedErrors);
     }
 
     private static async Task LocalRoundTrip()
@@ -776,314 +752,7 @@ public static class StorageTests
         await StoreError(() => Task.FromResult(new LocalDocumentStore(fixture.Root, [ns])), DocumentStoreError.InvalidRequest);
         Assert(!Directory.EnumerateFileSystemEntries(fixture.Root).Any());
     }
-    private static async Task Configuration()
-    {
-        var store = new MemoryStore();
-        await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
-        string[] suffixes = ["read.begin", "read.chunk", "write.begin", "write.chunk", "write.commit", "release"];
-        Assert(bridge.Methods.Keys.Order().SequenceEqual(suffixes.Select(s => "platform.documents." + s).Order()));
-        foreach (var options in new[]
-        {
-            new ProtectedDocumentBridgeOptions { MaximumTransfers = 0 }, new ProtectedDocumentBridgeOptions { MaximumTransfers = 9 },
-            new ProtectedDocumentBridgeOptions { MaximumBufferedBytes = Maximum - 1 }, new ProtectedDocumentBridgeOptions { MaximumBufferedBytes = 33 * 1024 * 1024 },
-            new ProtectedDocumentBridgeOptions { MaximumRecentTokens = 3 }, new ProtectedDocumentBridgeOptions { MaximumRecentTokens = 4097 },
-            new ProtectedDocumentBridgeOptions { TransferTimeout = TimeSpan.Zero }, new ProtectedDocumentBridgeOptions { TransferTimeout = TimeSpan.FromSeconds(121) },
-        }) Throws<ArgumentException>(() => new ProtectedDocumentBridge(store, [Ns], options));
-        Throws<DocumentStoreException>(() => new ProtectedDocumentBridge(store, ["../x"]));
-        Throws<DocumentStoreException>(() => new ProtectedDocumentBridge(store, [Ns, Ns]));
-    }
-    private static async Task BridgeMaximum()
-    {
-        using var fixture = new Temp(); await using var store = fixture.Store();
-        await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
-        byte[] data = new byte[Maximum]; data.AsSpan().Fill((byte)'x'); data[0] = (byte)'"'; data[^1] = (byte)'"';
-        string token = NewToken(); await Upload(bridge, token, data, DocumentFingerprint.Missing);
-        var commit = await Call(bridge, "write.commit", token); Success(commit, token, "length", "sha256");
-        Assert(commit.GetProperty("length").GetInt32() == Maximum && commit.GetProperty("sha256").GetString() == Hash(data));
-        string read = NewToken(); var begin = await Call(bridge, "read.begin", read);
-        Success(begin, read, "exists", "length", "sha256", "chunkBytes");
-        Assert(begin.GetProperty("chunkBytes").GetInt32() == Chunk && begin.GetProperty("length").GetInt32() == Maximum);
-        var restored = new byte[Maximum]; int chunks = 0;
-        for (int offset = 0; offset < Maximum; offset += Chunk)
-        {
-            var part = await Call(bridge, "read.chunk", read, new() { ["offset"] = offset });
-            Success(part, read, "offset", "next", "data");
-            Assert(part.GetProperty("offset").GetInt32() == offset && part.GetProperty("next").GetInt32() == offset + Chunk);
-            Assert(Encoding.UTF8.GetByteCount(part.GetRawText()) < 90000);
-            Convert.FromBase64String(part.GetProperty("data").GetString()!).CopyTo(restored, offset); chunks++;
-        }
-        Assert(chunks == 128); Equal(data, restored);
-        Success(await Call(bridge, "release", read), read, "released"); await Empty(bridge);
-        Equal(data, (await store.ReadAsync(Ns)).Data!);
-    }
-    private static async Task BridgeEmpty()
-    {
-        var store = new MemoryStore(); await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
-        string missing = NewToken(); var absent = await Call(bridge, "read.begin", missing);
-        Assert(!absent.GetProperty("exists").GetBoolean() && absent.GetProperty("sha256").ValueKind == JsonValueKind.Null);
-        await Call(bridge, "release", missing);
-        string token = NewToken(); await Upload(bridge, token, [], DocumentFingerprint.Missing);
-        Success(await Call(bridge, "write.commit", token), token, "length", "sha256");
-        string read = NewToken(); var empty = await Call(bridge, "read.begin", read);
-        Assert(empty.GetProperty("exists").GetBoolean() && empty.GetProperty("length").GetInt32() == 0 && empty.GetProperty("sha256").GetString() == Hash([]));
-        Error(await Call(bridge, "read.chunk", read, new() { ["offset"] = 0 }), "INVALID_REQUEST"); await Empty(bridge);
-    }
-    private static async Task NamespaceDenial()
-    {
-        var store = new MemoryStore(); await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
-        foreach (string operation in new[] { "read.begin", "write.commit", "release" })
-            Error(await Call(bridge, operation, NewToken(), ns: Other), "UNAVAILABLE");
-        Error(await Call(bridge, "read.begin", NewToken(), ns: "../escape"), "INVALID_REQUEST");
-        Assert(store.Reads == 0 && store.Writes == 0);
-    }
-    private static async Task CrossNamespace()
-    {
-        var store = new MemoryStore(); await using var bridge = new ProtectedDocumentBridge(store, [Ns, Other]);
-        string token = NewToken(); await Upload(bridge, token, "x"u8.ToArray(), DocumentFingerprint.Missing);
-        foreach (string operation in new[] { "read.begin", "release", "write.commit" })
-            Error(await Call(bridge, operation, token, ns: Other), "TOKEN");
-        Error(await Call(bridge, "write.commit", token, new() { ["extra"] = true }, ns: Other), "INVALID_REQUEST");
-        Success(await Call(bridge, "write.commit", token), token, "length", "sha256");
-        Equal("x"u8.ToArray(), (await store.ReadAsync(Ns)).Data!); Assert((await store.ReadAsync(Other)).Data is null);
-    }
-    private static async Task Shapes()
-    {
-        var store = new MemoryStore(); await using var bridge = new ProtectedDocumentBridge(store, [Ns]); string token = NewToken();
-        Error(await Call(bridge, "read.begin", token, new() { ["extra"] = 1 }), "INVALID_REQUEST");
-        Error(await Call(bridge, "read.begin", token, new() { ["version"] = 2 }), "INVALID_REQUEST");
-        Error(await Raw(bridge, "read.begin", "[]"), "INVALID_REQUEST");
-        Error(await Raw(bridge, "read.begin", "{\"version\":1,\"namespace\":\"" + Ns + "\",\"token\":\"" + token + "\",\"token\":\"" + token + "\"}"), "INVALID_REQUEST");
-        Error(await Raw(bridge, "read.begin", "{\"version\":1,\"token\":\"" + token + "\"}"), "INVALID_REQUEST");
-        Assert(store.Reads == 0); await Upload(bridge, token, "x"u8.ToArray(), DocumentFingerprint.Missing);
-        Error(await Call(bridge, "write.chunk", token, new() { ["offset"] = 0, ["data"] = "eA==", ["extra"] = 1 }), "INVALID_REQUEST");
-        await Empty(bridge); Error(await Call(bridge, "write.commit", token), "TOKEN");
-        Error(await Call(bridge, "write.begin", NewToken(), new() { ["length"] = Maximum + 1, ["sha256"] = Hash([]), ["base"] = Wire(DocumentFingerprint.Missing) }), "INVALID_REQUEST");
-        Error(await Call(bridge, "write.begin", NewToken(), new() { ["length"] = 0, ["sha256"] = Hash([]), ["base"] = new { exists = false, length = 1, sha256 = (string?)null } }), "INVALID_REQUEST");
-    }
-    private static async Task Tokens()
-    {
-        var store = new MemoryStore(); await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
-        foreach (string token in new[] { "x", "", Guid.NewGuid().ToString("N"), "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", NewToken() + "\n" })
-            Error(await Call(bridge, "read.begin", token), "INVALID_REQUEST");
-        Assert(store.Reads == 0);
-    }
-    private static async Task BridgeConflicts()
-    {
-        var store = new MemoryStore(); await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
-        byte[] one = "one"u8.ToArray(), two = "two"u8.ToArray(); var first = await store.WriteAsync(Ns, one, DocumentFingerprint.Missing);
-        Error(await BeginWrite(bridge, NewToken(), two, DocumentFingerprint.Missing), "CONFLICT");
-        string token = NewToken(); await Upload(bridge, token, two, first);
-        byte[] external = "external"u8.ToArray(); await store.WriteAsync(Ns, external, first);
-        Error(await Call(bridge, "write.commit", token), "CONFLICT"); Error(await Call(bridge, "write.commit", token), "TOKEN");
-        Equal(external, (await store.ReadAsync(Ns)).Data!); await Empty(bridge);
-    }
-    private static async Task BridgeIntegrity()
-    {
-        var store = new MemoryStore(); await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
-        string shortToken = NewToken(); await BeginWrite(bridge, shortToken, "not-uploaded"u8.ToArray(), DocumentFingerprint.Missing);
-        Error(await Call(bridge, "write.commit", shortToken), "INTEGRITY");
-        string badHash = NewToken(); await BeginWrite(bridge, badHash, "x"u8.ToArray(), DocumentFingerprint.Missing, Hash("y"u8.ToArray()));
-        await Call(bridge, "write.chunk", badHash, new() { ["offset"] = 0, ["data"] = "eA==" });
-        Error(await Call(bridge, "write.commit", badHash), "INTEGRITY"); Assert(store.Writes == 0); await Empty(bridge);
-    }
-    private static async Task ReadSnapshot()
-    {
-        var store = new MemoryStore(); byte[] original = new byte[Chunk + 1]; original.AsSpan().Fill(42);
-        var fingerprint = await store.WriteAsync(Ns, original, DocumentFingerprint.Missing);
-        await using var bridge = new ProtectedDocumentBridge(store, [Ns]); string token = NewToken(); await Call(bridge, "read.begin", token);
-        await store.WriteAsync(Ns, "changed"u8.ToArray(), fingerprint);
-        var first = await Call(bridge, "read.chunk", token, new() { ["offset"] = 0 });
-        Equal(original[..Chunk], Convert.FromBase64String(first.GetProperty("data").GetString()!));
-        var last = await Call(bridge, "read.chunk", token, new() { ["offset"] = Chunk });
-        Equal([42], Convert.FromBase64String(last.GetProperty("data").GetString()!));
-        Error(await Call(bridge, "read.chunk", token, new() { ["offset"] = Chunk }), "INVALID_REQUEST"); await Empty(bridge);
-    }
-    private static async Task BadChunk(string variant)
-    {
-        var store = new MemoryStore(); await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
-        byte[] data = "xy"u8.ToArray(); string token = NewToken(); await BeginWrite(bridge, token, data, DocumentFingerprint.Missing);
-        object offset = 0; string encoded = Convert.ToBase64String(data);
-        switch (variant)
-        {
-            case "short": encoded = "eA=="; break;
-            case "long": encoded = "eHl6"; break;
-            case "out-of-order": offset = 1; break;
-            case "whitespace": encoded += "\n"; break;
-            case "padding": encoded = "eHl="; break; // Nonzero padding bits with same decoded bytes.
-            case "invalid": encoded = "!!!!"; break;
-            case "oversize": encoded = new string('A', 87385); break;
-            case "fraction": offset = 0.5; break;
-            case "negative": offset = -1; break;
-            case "duplicate": Success(await Call(bridge, "write.chunk", token, new() { ["offset"] = 0, ["data"] = encoded }), token, "offset", "next"); break;
-        }
-        Error(await Call(bridge, "write.chunk", token, new() { ["offset"] = offset, ["data"] = encoded }), "INVALID_REQUEST");
-        Error(await Call(bridge, "write.commit", token), "TOKEN"); Assert(store.Writes == 0); await Empty(bridge);
-    }
-    private static async Task TokenReplay()
-    {
-        var store = new MemoryStore(); await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
-        string unseen = NewToken(); Success(await Call(bridge, "release", unseen), unseen, "released");
-        Error(await Call(bridge, "read.begin", unseen), "TOKEN");
-        string lost = NewToken(); _ = await Call(bridge, "read.begin", lost); // Lost begin ACK.
-        await Call(bridge, "release", lost); await Call(bridge, "release", lost);
-        Error(await Call(bridge, "read.begin", lost), "TOKEN");
-        string live = NewToken(); await Call(bridge, "read.begin", live);
-        Error(await Call(bridge, "read.begin", live), "TOKEN"); await Empty(bridge);
-    }
-    private static async Task BridgeTimeout()
-    {
-        var clock = new ManualTime(); var store = new MemoryStore();
-        await using var bridge = new ProtectedDocumentBridge(store, [Ns], ShortOptions(), clock);
-        byte[] bytes = new byte[Chunk + 1]; string token = NewToken(); await BeginWrite(bridge, token, bytes, DocumentFingerprint.Missing);
-        clock.Advance(TimeSpan.FromMilliseconds(900));
-        Success(await Call(bridge, "write.chunk", token, new() { ["offset"] = 0, ["data"] = Convert.ToBase64String(bytes, 0, Chunk) }), token, "offset", "next");
-        clock.Advance(TimeSpan.FromMilliseconds(101)); Assert(clock.Fired > 0); await Empty(bridge);
-        Error(await Call(bridge, "write.chunk", token, new() { ["offset"] = Chunk, ["data"] = "AA==" }), "TIMEOUT");
-        Error(await Call(bridge, "write.commit", token), "TIMEOUT"); Assert(store.Writes == 0);
-    }
-    private static async Task ReadTimeout()
-    {
-        var clock = new ManualTime(); var started = Signal();
-        var store = new MemoryStore { ReadHook = async (_, ct) => { started.SetResult(); await Task.Delay(Timeout.Infinite, ct); return null!; } };
-        await using var bridge = new ProtectedDocumentBridge(store, [Ns], ShortOptions(), clock);
-        var call = Call(bridge, "read.begin", NewToken()); await started.Task; clock.Advance(TimeSpan.FromSeconds(1));
-        Error(await call.WaitAsync(TimeSpan.FromSeconds(5)), "TIMEOUT"); await Empty(bridge);
-    }
-    private static async Task BridgeCancellation()
-    {
-        var store = new MemoryStore(); await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
-        string token = NewToken(); await BeginWrite(bridge, token, new byte[1], DocumentFingerprint.Missing);
-        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
-        Error(await Call(bridge, "write.chunk", token, new() { ["offset"] = 0, ["data"] = "AA==" }, cancellation: cancelled.Token), "CANCELLED");
-        Success(await Call(bridge, "release", token, cancellation: cancelled.Token), token, "released");
-        Error(await Call(bridge, "write.commit", token), "TOKEN"); await Empty(bridge);
-    }
-    private static async Task BridgeClose()
-    {
-        var started = Signal();
-        var store = new MemoryStore { ReadHook = async (_, ct) => { started.SetResult(); await Task.Delay(Timeout.Infinite, ct); return null!; } };
-        var bridge = new ProtectedDocumentBridge(store, [Ns]); string token = NewToken();
-        var pending = Call(bridge, "read.begin", token); await started.Task;
-        await bridge.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)); Error(await pending, "CLOSED"); await Empty(bridge);
-        Error(await Call(bridge, "read.begin", NewToken()), "CLOSED");
-        Success(await Call(bridge, "release", token), token, "released"); Assert(!store.Disposed); await bridge.DisposeAsync();
-    }
-    private static async Task LostAck()
-    {
-        var store = new MemoryStore(); var old = new ProtectedDocumentBridge(store, [Ns]); string token = NewToken();
-        await Upload(old, token, "committed"u8.ToArray(), DocumentFingerprint.Missing);
-        _ = await Call(old, "write.commit", token); // Client deliberately discards commit ACK.
-        Error(await Call(old, "write.commit", token), "TOKEN"); await Call(old, "release", token); await old.DisposeAsync();
-        await using var next = new ProtectedDocumentBridge(store, [Ns]); Assert(next.Generation != old.Generation);
-        Error(await Call(old, "write.commit", token), "CLOSED"); Error(await Call(next, "write.commit", token), "TOKEN");
-        Equal("committed"u8.ToArray(), (await store.ReadAsync(Ns)).Data!); Assert(store.Writes == 1);
-    }
-    private static async Task CommitWins()
-    {
-        var persisted = Signal(); var acknowledge = Signal(); var store = new MemoryStore();
-        var bridge = new ProtectedDocumentBridge(store, [Ns]); using var cancellation = new CancellationTokenSource(); string token = NewToken();
-        await Upload(bridge, token, "won"u8.ToArray(), DocumentFingerprint.Missing);
-        store.AfterWrite = async () => { persisted.SetResult(); await acknowledge.Task; };
-        var commit = Call(bridge, "write.commit", token, cancellation: cancellation.Token); await persisted.Task;
-        cancellation.Cancel(); var close = bridge.DisposeAsync().AsTask(); acknowledge.SetResult();
-        Success(await commit, token, "length", "sha256"); await close;
-        Equal("won"u8.ToArray(), (await store.ReadAsync(Ns)).Data!); Assert(store.Writes == 1);
-    }
-    private static async Task BridgeBudgets()
-    {
-        var store = new MemoryStore(); await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
-        string[] tokens = Enumerable.Range(0, 4).Select(_ => NewToken()).ToArray();
-        foreach (string token in tokens) Success(await Call(bridge, "read.begin", token), token, "exists", "length", "sha256", "chunkBytes");
-        Error(await Call(bridge, "read.begin", NewToken()), "LIMIT"); foreach (string token in tokens) await Call(bridge, "release", token);
-        byte[] data = new byte[Maximum]; await BeginWrite(bridge, NewToken(), data, DocumentFingerprint.Missing);
-        await BeginWrite(bridge, NewToken(), data, DocumentFingerprint.Missing);
-        int reads = store.Reads; Error(await Call(bridge, "read.begin", NewToken()), "LIMIT"); Assert(store.Reads == reads);
-        Assert((await bridge.GetStateAsync()).ReservedBytes == 16 * 1024 * 1024); await bridge.DisposeAsync(); await Empty(bridge);
-    }
-    private static async Task RecentBudget()
-    {
-        var clock = new ManualTime();
-        await using var bridge = new ProtectedDocumentBridge(new MemoryStore(), [Ns], ShortOptions() with { MaximumRecentTokens = 4 }, clock);
-        for (int i = 0; i < 4; i++) await Call(bridge, "release", NewToken());
-        Error(await Call(bridge, "release", NewToken()), "LIMIT"); Error(await Call(bridge, "read.begin", NewToken()), "LIMIT");
-        Assert((await bridge.GetStateAsync()).RecentTokens == 4); clock.Advance(TimeSpan.FromSeconds(2) + TimeSpan.FromTicks(1));
-        string fresh = NewToken(); Success(await Call(bridge, "read.begin", fresh), fresh, "exists", "length", "sha256", "chunkBytes");
-    }
-    private static async Task QueuedMethods()
-    {
-        var started = Signal(); var release = Signal(); int active = 0, maximum = 0;
-        var store = new MemoryStore { ReadHook = async (_, ct) =>
-        {
-            int current = Interlocked.Increment(ref active); maximum = Math.Max(maximum, current); started.TrySetResult();
-            await release.Task.WaitAsync(ct); Interlocked.Decrement(ref active); return new DocumentSnapshot(null, DocumentFingerprint.Missing);
-        } };
-        await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
-        string one = NewToken(), two = NewToken(); var first = Call(bridge, "read.begin", one); await started.Task;
-        var second = Call(bridge, "read.begin", two);
-        var extra = Enumerable.Range(0, 40).Select(_ => { string token = NewToken(); return (Token: token, Task: Call(bridge, "release", token)); }).ToArray();
-        release.SetResult();
-        Success(await first, one, "exists", "length", "sha256", "chunkBytes"); Success(await second, two, "exists", "length", "sha256", "chunkBytes");
-        foreach (var item in extra) Success(await item.Task, item.Token, "released");
-        Assert(maximum == 1 && store.Reads == 2);
-        Success(await Call(bridge, "release", one), one, "released");
-        Success(await Call(bridge, "release", two), two, "released");
-        await Empty(bridge);
-    }
-    private static async Task FixedErrors()
-    {
-        var store = new MemoryStore { ReadHook = (_, _) => throw new IOException("private-provider-details") };
-        await using var bridge = new ProtectedDocumentBridge(store, [Ns]); var reply = await Call(bridge, "read.begin", NewToken());
-        Error(reply, "STORAGE"); Assert(!reply.GetRawText().Contains("private-provider-details", StringComparison.Ordinal) && !reply.GetRawText().Contains(Ns, StringComparison.Ordinal));
-        await Empty(bridge); store.ReadHook = (_, _) => Task.FromResult(new DocumentSnapshot([1], DocumentFingerprint.Missing));
-        Error(await Call(bridge, "read.begin", NewToken()), "STORAGE"); await Empty(bridge);
-    }
-    private static ProtectedDocumentBridgeOptions ShortOptions() => new() { TransferTimeout = TimeSpan.FromSeconds(1) };
-    private static string NewToken() => Guid.NewGuid().ToString("D");
     private static string Hash(byte[] data) => Convert.ToHexStringLower(SHA256.HashData(data));
-    private static object Wire(DocumentFingerprint value) => new { exists = value.Exists, length = value.Length, sha256 = value.Sha256 };
-    private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private static Task<JsonElement> BeginWrite(ProtectedDocumentBridge bridge, string token, byte[] data,
-        DocumentFingerprint expected, string? hash = null) => Call(bridge, "write.begin", token,
-            new() { ["length"] = data.Length, ["sha256"] = hash ?? Hash(data), ["base"] = Wire(expected) });
-    private static async Task Upload(ProtectedDocumentBridge bridge, string token, byte[] data, DocumentFingerprint expected)
-    {
-        Success(await BeginWrite(bridge, token, data, expected), token, "offset"); int pieces = 0;
-        for (int offset = 0; offset < data.Length; offset += Chunk)
-        {
-            int count = Math.Min(Chunk, data.Length - offset);
-            var reply = await Call(bridge, "write.chunk", token, new() { ["offset"] = offset, ["data"] = Convert.ToBase64String(data, offset, count) });
-            Success(reply, token, "offset", "next");
-            Assert(reply.GetProperty("offset").GetInt32() == offset && reply.GetProperty("next").GetInt32() == offset + count); pieces++;
-        }
-        Assert(pieces == (data.Length + Chunk - 1) / Chunk);
-    }
-    private static async Task<JsonElement> Call(ProtectedDocumentBridge bridge, string method, string token,
-        Dictionary<string, object?>? extra = null, string ns = Ns, CancellationToken cancellation = default)
-    {
-        var fields = new Dictionary<string, object?> { ["version"] = 1, ["namespace"] = ns, ["token"] = token };
-        if (extra is not null) foreach (var pair in extra) fields[pair.Key] = pair.Value;
-        return JsonSerializer.SerializeToElement(await bridge.Methods["platform.documents." + method](JsonSerializer.SerializeToElement(fields), cancellation));
-    }
-    private static async Task<JsonElement> Raw(ProtectedDocumentBridge bridge, string method, string json)
-    {
-        using var document = JsonDocument.Parse(json);
-        return JsonSerializer.SerializeToElement(await bridge.Methods["platform.documents." + method](document.RootElement, CancellationToken.None));
-    }
-    private static void Success(JsonElement value, string token, params string[] fields)
-    {
-        string[] expected = ["version", "ok", "token", .. fields];
-        Assert(value.ValueKind == JsonValueKind.Object && value.EnumerateObject().Select(p => p.Name).Order().SequenceEqual(expected.Order()), "Unexpected success shape.");
-        Assert(value.GetProperty("version").GetInt32() == 1 && value.GetProperty("ok").GetBoolean() && value.GetProperty("token").GetString() == token, "Unsuccessful response.");
-    }
-    private static void Error(JsonElement value, string code)
-    {
-        Assert(value.EnumerateObject().Select(p => p.Name).Order().SequenceEqual(new[] { "code", "ok", "version" }), "Unexpected failure shape.");
-        Assert(value.GetProperty("version").GetInt32() == 1 && !value.GetProperty("ok").GetBoolean() && value.GetProperty("code").GetString() == code, "Unexpected fixed failure code.");
-    }
-    private static async Task Empty(ProtectedDocumentBridge bridge)
-    {
-        var state = await bridge.GetStateAsync(); Assert(state.Reads == 0 && state.Writes == 0 && state.ReservedBytes == 0);
-    }
     private static async Task StoreError(Func<Task> operation, DocumentStoreError error)
     {
         try { await operation(); }
@@ -1095,47 +764,10 @@ public static class StorageTests
         try { await operation(); } catch (OperationCanceledException) { return; }
         throw new InvalidOperationException("Expected cancellation.");
     }
-    private static void Throws<T>(Action operation) where T : Exception
-    {
-        try { operation(); } catch (T) { return; }
-        throw new InvalidOperationException("Expected rejection.");
-    }
     private static void Equal(byte[] expected, byte[] actual) => Assert(expected.AsSpan().SequenceEqual(actual), "Byte comparison failed.");
     private static void Assert(bool condition, string message = "Storage assertion failed.")
     { if (!condition) throw new InvalidOperationException(message); }
 
-    private sealed class MemoryStore : IDocumentStore
-    {
-        private readonly Dictionary<string, byte[]> documents = new(StringComparer.Ordinal);
-        internal Func<string, CancellationToken, Task<DocumentSnapshot>>? ReadHook;
-        internal Func<Task>? AfterWrite;
-        internal int Reads, Writes;
-        internal bool Disposed;
-        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
-        {
-            Reads++; if (ReadHook is not null) return await ReadHook(ns, cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
-            lock (documents)
-            {
-                byte[]? data = documents.TryGetValue(ns, out var current) ? current.ToArray() : null;
-                return new(data, data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data));
-            }
-        }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested(); var next = DocumentFingerprint.FromBytes(data.Span);
-            lock (documents)
-            {
-                var old = documents.TryGetValue(ns, out var current) ? DocumentFingerprint.FromBytes(current) : DocumentFingerprint.Missing;
-                if (old != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-                documents[ns] = data.ToArray(); Writes++;
-            }
-            if (AfterWrite is not null) await AfterWrite(); // Cannot undo an already-won commit.
-            return next;
-        }
-        public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
-    }
     private sealed class Temp : IDisposable
     {
         internal string Base { get; }
@@ -1182,46 +814,6 @@ public static class StorageTests
             if ((attributes & FileAttributes.ReparsePoint) == 0)
                 foreach (string child in Directory.EnumerateFileSystemEntries(path)) Remove(child);
             Directory.Delete(path); // Never follow a junction during cleanup.
-        }
-    }
-    private sealed class ManualTime : TimeProvider
-    {
-        private long ticks;
-        private readonly List<ManualTimer> timers = [];
-        internal int Fired;
-        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
-        public override long GetTimestamp() => Interlocked.Read(ref ticks);
-        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
-        {
-            var timer = new ManualTimer(this, callback, state); lock (timers) timers.Add(timer); timer.Change(dueTime, period); return timer;
-        }
-        internal void Advance(TimeSpan duration)
-        {
-            Interlocked.Add(ref ticks, duration.Ticks); ManualTimer[] ready;
-            lock (timers) ready = timers.Where(t => t.Due is { } due && due <= GetTimestamp()).ToArray();
-            foreach (var timer in ready)
-            {
-                if (timer.Due is null) continue;
-                timer.Due = null; Fired++; timer.Callback(timer.State);
-            }
-        }
-        private sealed class ManualTimer(ManualTime owner, TimerCallback callback, object? state) : ITimer
-        {
-            internal long? Due;
-            internal readonly TimerCallback Callback = callback;
-            internal readonly object? State = state;
-            private bool disposed;
-            public bool Change(TimeSpan dueTime, TimeSpan period)
-            {
-                lock (owner.timers)
-                {
-                    if (disposed) return false;
-                    Assert(period == Timeout.InfiniteTimeSpan);
-                    Due = dueTime == Timeout.InfiniteTimeSpan ? null : owner.GetTimestamp() + dueTime.Ticks; return true;
-                }
-            }
-            public void Dispose() { lock (owner.timers) { disposed = true; Due = null; owner.timers.Remove(this); } }
-            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
         }
     }
     // Real NTFS junction fixture, no external commands/admin symlink privilege.

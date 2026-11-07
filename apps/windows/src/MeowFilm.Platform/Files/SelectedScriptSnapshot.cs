@@ -4,8 +4,8 @@ using System.Threading.Tasks;
 
 namespace MeowFilm.Platform.Files;
 
-/// <summary>Caller-owned original bytes, lowercase SHA-256 and filename only; no local path.</summary>
-public sealed record SelectedScriptSnapshotData(byte[] Bytes, string Sha256, string Basename);
+/// <summary>Caller-owned original bytes and filename only; no local path.</summary>
+public sealed record SelectedScriptSnapshotData(byte[] Bytes, string Basename);
 
 public enum SelectedScriptSnapshotError
 {
@@ -22,7 +22,7 @@ public sealed class SelectedScriptSnapshotException : Exception
 /// <summary>
 /// Snapshots a raw .js file explicitly selected by native UI, never a .jsc plugin.
 /// Does not decode, parse, execute, install or authorize the script. Does not expose Node
-/// filesystem access. Callers still own protocol validation and framed transport.
+/// filesystem access. Callers still own protocol validation and complete HTTP upload.
 /// </summary>
 public static class SelectedScriptSnapshot
 {
@@ -41,7 +41,7 @@ public static class SelectedScriptSnapshot
         {
             var data = await SelectedFileSnapshot.ReadAsync(selectedPath, ".js", MaximumBytes, cancellationToken)
                 .ConfigureAwait(false);
-            return new SelectedScriptSnapshotData(data.Bytes, data.Sha256, data.Basename);
+            return new SelectedScriptSnapshotData(data.Bytes, data.Basename);
         }
         catch (SelectedFileSnapshotException error)
         {

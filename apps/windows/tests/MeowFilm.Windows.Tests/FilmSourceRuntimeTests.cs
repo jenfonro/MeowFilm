@@ -17,6 +17,8 @@ public static class FilmSourceRuntimeTests
     {
         yield return new("native-film-runtime: real Cat probe and deletion survive restart and update until explicit reimport",
             ProbeAndReimport);
+        yield return new("native-film-runtime: complete Cat source and large structured payloads round trip without losing types",
+            LargeStructuredPayload);
         yield return new("native-film-runtime: cold start restores enabled cats and four options without executing disabled scripts",
             ColdStartAndOptions);
         yield return new("native-film-runtime: cancelled update observes rollback and the next probe needs no refresh",
@@ -27,10 +29,69 @@ public static class FilmSourceRuntimeTests
             UpdateStorageFailure);
         yield return new("native-film-runtime: detail script errors retain real search fallback and durable results",
             DetailErrorFallback);
-        yield return new("native-film-runtime: an in-flight Worker memory failure preserves detection until explicit refresh",
-            DetectionMemoryFailure);
+        yield return new("native-film-runtime: an in-flight Worker exit preserves detection until explicit restart without replay",
+            DetectionWorkerExit);
         yield return new("native-film-runtime: failed navigation roots cannot dispatch children or publish valid detection",
             FailedNavigationRoot);
+    }
+
+    private static async Task LargeStructuredPayload()
+    {
+        await WithServiceAsync(NewData(), async (service, runtime, token) =>
+        {
+            const string id = "structured-cat";
+            string name = "完整猫🎬" + new string('文', 70000);
+            string source = """
+                const http = require('http');
+                let server;
+                module.exports.start = () => new Promise(resolve => {
+                  server = http.createServer((request, response) => {
+                    response.setHeader('content-type', 'application/json; charset=utf-8');
+                    const path = request.url.split('?')[0];
+                    if (path === '/config' || path === '/full-config') {
+                      response.end(JSON.stringify({ video: { sites: [{
+                        key: 'echo', name: 'Echo', api: '/api/echo', actions: ['echo'],
+                        methods: { echo: 'POST' }
+                      }] } }));
+                      return;
+                    }
+                    if (request.method !== 'POST' || path !== '/api/echo/echo') {
+                      response.statusCode = 404;
+                      response.end(JSON.stringify({ error: 'unexpected route' }));
+                      return;
+                    }
+                    const chunks = [];
+                    request.on('data', chunk => chunks.push(Buffer.from(chunk)));
+                    request.once('end', () => {
+                      const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                      response.end(JSON.stringify(input));
+                    });
+                  });
+                  server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+                });
+                module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+                """ + "\n//" + new string('中', 70000);
+            await service.StartAsync(token);
+            var installed = await service.ImportLocalAsync(name, source, id, token);
+            Check(installed.CanDetect && installed.Name == name &&
+                installed.Sites.Single().Actions.SequenceEqual(["echo"]),
+                "complete Unicode source upload installs and returns a large structured management value");
+            var payload = JsonSerializer.SerializeToElement(new
+            {
+                id = "片🎬" + new string('界', 70000),
+                page = 2,
+                filter = true,
+                nested = new { values = new object?[] { null, false, 3, "中文" } }
+            });
+            var reply = await runtime.CallAsync("cat.script.invoke", new
+            {
+                installationId = id, generation = installed.Generation,
+                siteId = "echo", operation = "echo", payload
+            }, token);
+            Check(reply.GetProperty("ok").GetBoolean() && reply.GetProperty("contract").GetString() == "cat.script.v2" &&
+                JsonElement.DeepEquals(reply.GetProperty("value"), payload),
+                "real Cat HTTP invocation returns the complete envelope and preserves a large structured payload and its types");
+        });
     }
 
     private static async Task ProbeAndReimport()
@@ -179,8 +240,7 @@ public static class FilmSourceRuntimeTests
                 while (true)
                 {
                     var status = await runtime.CallAsync("cat.script.status", new { }, token);
-                    using var decoded = JsonDocument.Parse(status.GetProperty("data").GetString()!);
-                    var cat = decoded.RootElement.GetProperty("instances")[0];
+                    var cat = status.GetProperty("value").GetProperty("instances")[0];
                     if (cat.GetProperty("state").GetString() == "starting" &&
                         cat.GetProperty("generation").GetInt64() > original.Generation) break;
                     Check(!update.IsCompleted, "candidate must still be pending before cancellation");
@@ -218,8 +278,7 @@ public static class FilmSourceRuntimeTests
             while (true)
             {
                 var status = await runtime.CallAsync("cat.script.status", new { }, token);
-                using var decoded = JsonDocument.Parse(status.GetProperty("data").GetString()!);
-                var cat = decoded.RootElement.GetProperty("instances")[0];
+                var cat = status.GetProperty("value").GetProperty("instances")[0];
                 if (cat.GetProperty("state").GetString() == "starting" &&
                     cat.GetProperty("generation").GetInt64() > original.Generation) break;
                 Check(!update.IsCompleted, "candidate must be pending before its default RPC timeout");
@@ -266,8 +325,7 @@ public static class FilmSourceRuntimeTests
             var current = service.Cats.Single();
             var reply = await runtime.CallAsync("cat.script.status", new { }, token);
             Check(reply.GetProperty("ok").GetBoolean(), "real Node status succeeds after the committed update");
-            using var decoded = JsonDocument.Parse(reply.GetProperty("data").GetString()!);
-            var actual = decoded.RootElement.GetProperty("instances").EnumerateArray()
+            var actual = reply.GetProperty("value").GetProperty("instances").EnumerateArray()
                 .Single(cat => cat.GetProperty("installationId").GetString() == id);
             Check(actual.GetProperty("state").GetString() == "ready" &&
                 actual.GetProperty("generation").GetInt64() > original.Generation &&
@@ -375,23 +433,26 @@ public static class FilmSourceRuntimeTests
         }
     }
 
-    private static async Task DetectionMemoryFailure()
+    private static async Task DetectionWorkerExit()
     {
         string root = NewData();
         IDocumentStore? documents = null;
         await WithServiceAsync(root, async (service, runtime, token) =>
         {
-            const string id = "detection-memory";
-            var key = new FilmSourceKey(id, "memory");
-            string marker = Path.Combine(root, "script-runtime", "volumes", id, "h02-search-count");
+            const string id = "detection-worker-exit";
+            var key = new FilmSourceKey(id, "worker-exit");
+            string marker = Path.Combine(root, "script-runtime", "volumes", id, "search-count");
             await service.StartAsync(token);
-            var installed = await service.ImportLocalAsync("内存失效猫源", MemoryFailureScript, id, token);
+            var installed = await service.ImportLocalAsync("Worker 退出猫源", WorkerExitScript, id, token);
             var baseline = await service.DetectAsync(key, token);
             var saved = await documents!.ReadAsync(FilmSourceService.DocumentNamespace, token);
             var initialEvents = ProbeEvents(root, id);
+            var initialWorker = initialEvents.Single(value => value.GetProperty("kind").GetString() == "worker.start");
+            int initialThreadId = initialWorker.GetProperty("threadId").GetInt32();
             Check(baseline is { Result: "valid", PlaybackResolved: true, MediaPlaybackVerified: false } &&
+                !initialWorker.GetProperty("isMainThread").GetBoolean() && initialThreadId > 0 &&
                 ProbeOperations(initialEvents).SequenceEqual(["home", "category", "detail", "play", "search"]) &&
-                File.ReadAllText(marker) == "1", "the original generation produces a complete valid baseline");
+                File.ReadAllText(marker) == "1", "one real Worker produces the complete valid baseline on the original generation");
 
             FilmSourceDetection? returned = null;
             OperationCanceledException? failure = null;
@@ -401,13 +462,17 @@ public static class FilmSourceRuntimeTests
             var immediate = Video(service, key).Detection;
             var after = await documents.ReadAsync(FilmSourceService.DocumentNamespace, token);
             var failedEvents = ProbeEvents(root, id).Skip(initialEvents.Length).ToArray();
+            var exitAttempt = failedEvents.Single(value => value.GetProperty("kind").GetString() == "worker.exit-attempt");
             Check(!token.IsCancellationRequested &&
-                failedEvents.Count(value => value.GetProperty("kind").GetString() == "allocation.attempt") == 1 &&
-                failedEvents.All(value => value.GetProperty("kind").GetString() != "allocation.unexpected-success") &&
+                exitAttempt.GetProperty("count").GetInt32() == 2 &&
+                exitAttempt.GetProperty("threadId").GetInt32() == initialThreadId &&
+                !failedEvents.Any(value => value.GetProperty("kind").GetString() == "response" &&
+                    value.GetProperty("operation").GetString() == "search") &&
                 File.ReadAllText(marker) == "2" &&
                 ProbeOperations(failedEvents).SequenceEqual(["home", "category", "detail", "play", "search"]),
-                "the uncancelled second probe reaches exactly one real bounded memory failure after play");
+                "the uncancelled second probe reaches one detached rejection after play and receives no search response");
 
+            // Observe terminal failure with a deadline; the delay only paces status polling.
             using var observation = CancellationTokenSource.CreateLinkedTokenSource(token);
             observation.CancelAfter(TimeSpan.FromSeconds(30));
             JsonElement actual;
@@ -415,38 +480,51 @@ public static class FilmSourceRuntimeTests
             {
                 var reply = await runtime.CallAsync("cat.script.status", new { }, observation.Token);
                 Check(reply.GetProperty("ok").GetBoolean(), "direct read-only Cat status succeeds");
-                using var decoded = JsonDocument.Parse(reply.GetProperty("data").GetString()!);
-                actual = decoded.RootElement.GetProperty("instances").EnumerateArray()
+                actual = reply.GetProperty("value").GetProperty("instances").EnumerateArray()
                     .Single(cat => cat.GetProperty("installationId").GetString() == id).Clone();
-                if (actual.GetProperty("state").GetString() == "ready" &&
-                    actual.GetProperty("generation").GetInt64() > installed.Generation) break;
+                Check(actual.GetProperty("generation").GetInt64() == installed.Generation,
+                    "read-only failure observation must never see an automatically restarted generation");
+                if (actual.GetProperty("state").GetString() == "failed") break;
                 await Task.Delay(20, observation.Token);
             } while (true);
-            Check(actual.GetProperty("sourceHash").GetString() == installed.SourceHash &&
+            var observedEvents = ProbeEvents(root, id);
+            Check(runtime.IsConnected && actual.GetProperty("sourceHash").GetString() == installed.SourceHash &&
                 service.Cats.Single().Generation == installed.Generation &&
+                observedEvents.Length == initialEvents.Length + failedEvents.Length &&
+                observedEvents.Count(value => value.GetProperty("kind").GetString() == "worker.start") == 1 &&
+                File.ReadAllText(marker) == "2" &&
                 SameDetection(immediate, Video(service, key).Detection),
-                "same-source autonomous restart does not synchronize or alter the client owner");
+                "the failed Worker neither restarts nor replays while the same Node owner and client snapshot remain intact");
+            Check(returned is null && failure?.InnerException is FilmSourceException { Code: "STALE_SESSION" } &&
+                !token.IsCancellationRequested, "retired Worker invocation fails as lifecycle cancellation, not a new search_error");
+            Check(SameDetection(baseline, immediate) && after.Fingerprint == saved.Fingerprint &&
+                after.Data!.SequenceEqual(saved.Data!), "the retired generation cannot replace the in-memory or durable baseline");
 
-            await service.RefreshAsync(token);
-            int recoveryStart = ProbeEvents(root, id).Length;
+            int recoveryStart = observedEvents.Length;
+            var restarted = await service.RestartCatAsync(id, token);
+            Check(restarted.CanDetect && restarted.Generation > installed.Generation &&
+                restarted.SourceHash == installed.SourceHash && service.Cats.Single().Generation == restarted.Generation &&
+                SameDetection(baseline, Video(service, key).Detection) && File.ReadAllText(marker) == "2" &&
+                !ProbeOperations(ProbeEvents(root, id).Skip(recoveryStart)).Any(),
+                "explicit restart alone restores a new generation without replaying detection or replacing its baseline");
             var recovered = await service.DetectAsync(key, token);
             var recoveryDocument = await documents.ReadAsync(FilmSourceService.DocumentNamespace, token);
             using var recoveryJson = JsonDocument.Parse(recoveryDocument.Data!);
             var recoveryDetection = recoveryJson.RootElement.GetProperty("videos").EnumerateArray().Single()
                 .GetProperty("detection").Deserialize<FilmSourceDetection>(new JsonSerializerOptions(JsonSerializerDefaults.Web));
-            Check(service.Cats.Single().Generation == actual.GetProperty("generation").GetInt64() &&
+            var recoveryEvents = ProbeEvents(root, id).Skip(recoveryStart).ToArray();
+            var recoveryWorker = recoveryEvents.Single(value => value.GetProperty("kind").GetString() == "worker.start");
+            int recoveryThreadId = recoveryWorker.GetProperty("threadId").GetInt32();
+            Check(service.Cats.Single().Generation == restarted.Generation &&
                 recovered is { Result: "valid", PlaybackResolved: true, MediaPlaybackVerified: false } &&
+                !recoveryWorker.GetProperty("isMainThread").GetBoolean() && recoveryThreadId != initialThreadId &&
                 File.ReadAllText(marker) == "3" &&
-                ProbeOperations(ProbeEvents(root, id).Skip(recoveryStart))
-                    .SequenceEqual(["home", "category", "detail", "play", "search"]) &&
-                SameDetection(recovered, recoveryDetection),
-                "explicit refresh restores valid five-stage detection on the new generation");
-            Check(returned is null && failure?.InnerException is FilmSourceException { Code: "STALE_SESSION" } &&
-                !token.IsCancellationRequested, "retired Worker invocation fails as lifecycle cancellation, not a new search_error");
-            Check(SameDetection(baseline, immediate) && after.Fingerprint == saved.Fingerprint &&
-                after.Data!.SequenceEqual(saved.Data!), "the retired generation cannot replace the in-memory or durable baseline");
-            Console.WriteLine($"DETECTION_MEMORY_FAILURE generation={installed.Generation}->{service.Cats.Single().Generation}; " +
-                "allocation=536870912; callerCancelled=false; failure=STALE_SESSION; baselinePreserved=true; refreshRecovery=valid");
+                ProbeOperations(recoveryEvents).SequenceEqual(["home", "category", "detail", "play", "search"]) &&
+                SameDetection(recovered, recoveryDetection) && SameDetection(recovered, Video(service, key).Detection),
+                "explicit restart and a new five-stage probe succeed on a new Worker and persist the same detection");
+            Console.WriteLine($"DETECTION_WORKER_EXIT worker={initialThreadId}->{recoveryThreadId}; " +
+                $"generation={installed.Generation}->{restarted.Generation}; failedGeneration={actual.GetProperty("generation").GetInt64()}; " +
+                "callerCancelled=false; failure=STALE_SESSION; autoRestart=false; replay=false; baselinePreserved=true; restartRecovery=valid");
         }, store => { documents = store; return store; });
     }
 
@@ -521,11 +599,10 @@ public static class FilmSourceRuntimeTests
     {
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
             ?? throw new InvalidOperationException("Run scripts/windows/test.ps1; prepare-test-bundles aggregate inputs are required.");
-        RuntimeModule[] modules = [new("music", "0.8.0"), new("cat", "0.1.0"), new("source", "0.1.0")];
+        RuntimeModule[] modules = [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0")];
         var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         await using var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules,
-            new Dictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>(),
             Path.Combine(root, "script-runtime"), deadline.Token);
         using var process = Process.GetProcessById(runtime.ProcessId);
         _ = process.SafeHandle; // Pin this exact child before shutdown so PID reuse cannot satisfy the assertion.
@@ -541,7 +618,7 @@ public static class FilmSourceRuntimeTests
             await runtime.DisposeAsync();
             await runtime.Completion.WaitAsync(TimeSpan.FromSeconds(5));
             await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
-            Check(process.HasExited && !runtime.IsConnected, "shutdown closes the bridge and actually exits the owned Node process");
+            Check(process.HasExited && !runtime.IsConnected, "shutdown closes the runtime and actually exits the owned Node process");
         }
     }
 
@@ -661,17 +738,19 @@ public static class FilmSourceRuntimeTests
         module.exports.stop = () => { server.closeAllConnections(); server.close(); };
         """;
 
-    // Production memory limit is unchanged. The marker prevents repeated failure
-    // after the host's real autonomous restart of the same private volume.
-    private const string MemoryFailureScript = """
+    // The second search rejects outside the callback return chain to fail this Worker.
+    // The private-volume count permits recovery only after an explicit restart.
+    private const string WorkerExitScript = """
         const http = require('http');
         const fs = require('fs');
-        const marker = '/h02-search-count';
+        const { isMainThread, threadId } = require('worker_threads');
+        const marker = '/search-count';
         let server;
         function audit(value) {
           fs.appendFileSync('/fixture-audit.jsonl', JSON.stringify(value) + '\n');
         }
         module.exports.start = () => {
+          audit({ kind: 'worker.start', isMainThread, threadId });
           server = http.createServer((request, response) => {
             const path = request.url.split('?')[0];
             const reply = (operation, value) => {
@@ -682,17 +761,17 @@ public static class FilmSourceRuntimeTests
             if (path === '/full-config' || path === '/config') {
               response.setHeader('content-type', 'application/json');
               response.end(JSON.stringify({ video: { sites: [{
-                key: 'memory', name: 'Memory', api: '/api/memory',
+                key: 'worker-exit', name: 'Worker exit', api: '/api/worker-exit',
                 actions: ['home', 'category', 'detail', 'play', 'search']
               }] } }));
               return;
             }
-            if (!path.startsWith('/api/memory/')) {
+            if (!path.startsWith('/api/worker-exit/')) {
               response.statusCode = 404;
               response.end();
               return;
             }
-            const operation = path.slice('/api/memory/'.length);
+            const operation = path.slice('/api/worker-exit/'.length);
             audit({ kind: 'request', operation, method: request.method });
             if (operation === 'home')
               return reply(operation, { class: [{ type_id: 'movies', type_name: 'Movies' }] });
@@ -708,10 +787,9 @@ public static class FilmSourceRuntimeTests
               const count = Number(fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : '0') + 1;
               fs.writeFileSync(marker, String(count));
               if (count === 2) {
-                audit({ kind: 'allocation.attempt', count, bytes: 512 * 1024 * 1024 });
-                const bytes = new Uint8Array(512 * 1024 * 1024);
-                audit({ kind: 'allocation.unexpected-success', bytes: bytes.byteLength });
-                return reply(operation, { unexpectedAllocation: bytes.byteLength });
+                audit({ kind: 'worker.exit-attempt', count, threadId });
+                void Promise.reject(new Error('fixture-worker-exit'));
+                return;
               }
               return reply(operation, { list: [], searchCount: count });
             }

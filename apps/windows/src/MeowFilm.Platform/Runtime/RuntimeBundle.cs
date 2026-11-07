@@ -32,7 +32,9 @@ public sealed partial class RuntimeBundle
             if (manifest.GetProperty("schemaVersion").GetInt32() != 1
                 || manifest.GetProperty("status").GetString() != "complete"
                 || manifest.GetProperty("product").GetString() != expectedProduct
-                || manifest.GetProperty("transport").GetString() != "windows-named-pipe-v1") Invalid();
+                || manifest.GetProperty("transport").GetString() != "windows-http-v1"
+                || manifest.GetProperty("assemblyProfile").GetString() != "common-native"
+                || manifest.GetProperty("platform").GetString() != "win32") Invalid();
             var modules = manifest.GetProperty("modules").EnumerateArray().Select(item => item.GetString()).ToArray();
             if (modules.Length != expectedModules.Count || modules.Distinct(StringComparer.Ordinal).Count() != modules.Length
                 || !modules.ToHashSet(StringComparer.Ordinal).SetEquals(expectedModules.Select(item => item.Id))) Invalid();
@@ -52,10 +54,26 @@ public sealed partial class RuntimeBundle
             }
             var entry = manifest.GetProperty("entry").GetString()!;
             if (!names.Contains(entry) || !entry.EndsWith(".mjs", StringComparison.Ordinal)) Invalid();
+            VerifyInventory(root, root, names);
             return new RuntimeBundle(root, SafePath(root, entry), expectedProduct);
         }
         catch (BridgeException) { throw; }
         catch { throw new BridgeException("INVALID_MESSAGE"); }
+    }
+
+    private static void VerifyInventory(string root, string directory, HashSet<string> names)
+    {
+        foreach (var path in Directory.EnumerateFileSystemEntries(directory))
+        {
+            var attributes = File.GetAttributes(path);
+            if ((attributes & FileAttributes.ReparsePoint) != 0) Invalid();
+            if ((attributes & FileAttributes.Directory) != 0) VerifyInventory(root, path, names);
+            else
+            {
+                var relative = Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
+                if (relative != "runtime-manifest.json" && !names.Contains(relative.Normalize())) Invalid();
+            }
+        }
     }
 
     public static string SafePath(string root, string relative)
