@@ -101,12 +101,15 @@ final class MeowfilmAssembly: ObservableObject {
         let filmSettings = FilmSettingsModel(rules: resources.filmRules, sources: resources.filmSourceSettings)
         self.filmSettings = filmSettings
         filmSettings.start()
-        // Configure before publishing any music consumer that could borrow.
-        do { try await resources.scriptSession.configure(handlers: resources.musicScripts.storageHandlers()) }
+        // Both modules own their guest storage inside Node; no reverse handlers.
+        // Configure and start before publishing any music consumer that borrows.
+        do { try await resources.scriptSession.configure(handlers: [:]) }
         catch {
             startupFailed = true
             return
         }
+        guard !closed else { return }
+        await resources.musicScripts.start()
         guard !closed else { return }
         let publicQQ = resources.musicPublicQQ
         self.publicQQ = publicQQ

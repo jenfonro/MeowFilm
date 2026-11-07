@@ -1,5 +1,4 @@
 import Foundation
-import FilmRuleProgram
 import MeowJavaScript
 import MeowStorage
 
@@ -22,13 +21,15 @@ public actor FilmRuleService {
     private var closed = false
     private var closing: Task<Void, Never>?
 
+    /// Injected engines use FilmRuleText's JSON representation for process
+    /// results: scalar strings or exact UInt16 arrays, never lossy replacements.
     public init(engine: any JavaScriptJSONEngine, store: DocumentStore) {
         self.engine = engine
         self.store = store
     }
 
     public init(store: DocumentStore) throws {
-        self.engine = NativeJavaScriptJSONEngine(source: try FilmRuleProgram.load())
+        self.engine = NativeJavaScriptJSONEngine(source: try FilmRuleNativeProgram.load())
         self.store = store
     }
 

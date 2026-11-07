@@ -48,26 +48,26 @@ public struct FilmRuleError: Codable, Equatable, Sendable {
     public let group: String
     /// One-based index in episodeClean, episode, movie or search.
     public let ruleIndex: Int
-    public let text: String
+    public let text: FilmRuleText
 }
 
 public struct FilmRuleResult: Codable, Equatable, Sendable {
     public let section: FilmRuleSection
     /// The shared program returns "", "success" or "error".
     public let type: String
-    public let text: String
-    public let inputText: String
-    public let processedText: String
+    public let text: FilmRuleText
+    public let inputText: FilmRuleText
+    public let processedText: FilmRuleText
     public let matched: Bool
     public let matchedRuleIndex: Int?
     public let rewriteApplied: Bool
     /// nil is no rewrite; an empty string is a failed rewrite.
-    public let rewrittenText: String?
-    public var outputText: String { rewrittenText ?? processedText }
-    public let groupKey: String
-    public let trailingDigits: String
+    public let rewrittenText: FilmRuleText?
+    public var outputText: FilmRuleText { rewrittenText ?? processedText }
+    public let groupKey: FilmRuleText
+    public let trailingDigits: FilmRuleText
     public let errors: [FilmRuleError]
-    public let previews: [String]
+    public let previews: [FilmRuleText]
 }
 
 public enum FilmRuleServiceError: Error, Equatable, Sendable {

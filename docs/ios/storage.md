@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | 曲库、队列、历史、设置（`music.library.v1`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
 | 影视规则与视频映射／选项／删除记录 | 普通文档 | `meowfilm/documents/film.magic-rules.v1`、`film.video-sources.v1`，参与备份 |
-| 脚本目录、源码与私有数据（`music.scripts.v1`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
+| 音乐脚本安装、源码与私有数据 | Node 私有文档 | Application Support 下 `meowfilm/script-runtime/music`，参与备份 |
 | 播放展示、来源发现、首页快照、账号 URL 与副歌点缓存 | 普通文档 | Caches 下 `meowfilm/documents` |
 | 客户端设备会话（`music.client-context.<平台>.v1`）、QQ 设备身份（`music.qq-public.v1`） | 加密文档 | Application Support 下 `meowfilm/encrypted-documents-v1`，排除备份 |
 | 账号凭据（`<bundle>.music.accounts.v1`） | `MeowAccounts` Keychain 凭据 | `afterFirstUnlockThisDeviceOnly`，不同步 |
@@ -22,6 +22,12 @@
 - 命名空间中的未知文件和中断遗留的 stage 不阻塞读写，也不会被自动删除。
 - 一个命名空间只用一个 store 实例。跨进程事务和恶意同进程代码不在契约范围内。
 - 文件沿用系统默认 Data Protection（首次解锁后可读），锁屏后仍可读写。
+
+### 音乐数据源偏好
+
+- `music.library.v1` envelope 的 `records` 新增 `catalogSource` 区，key 为 JSON 字符串 `["meowfilm","music",1,"device","catalogSource"]`。
+- 记录字段封闭：`{"schema":1,"revision":0,"platform":"wy"}`；platform 只允许 `wy`／`kg`，revision 必须为非负 JSON 安全整数。记录缺失时默认网易云、revision 0，读取不写盘；未知字段、非法类型、版本或平台明确返回 `corruptDocument`，保留原文件。
+- 保存使用文档 transaction CAS，并核对该记录独立的 revision；成功切换加一，同值保存不写盘，过期 revision 返回 `staleRevision`。与 playback 的 `settingsRevision` 无关，不重写 library、queue、playback 或 history。
 
 ## 加密文档
 
@@ -61,7 +67,7 @@
 ## 清除本机用户数据
 
 - 设置 → 本机数据 → 清除本机用户数据。二次确认说明不可撤销、清除范围以及需关闭并重新打开 App；取消不产生请求。
-- 确认后只持久写入 Application Support 下独立的 `meowfilm-reset.pending`（排除备份），停止播放、同步、脚本和业务访问，并切换为待重启界面。此时尚未清理；不会强制退出或在原进程热重建服务，前后台切换也不会执行清理。内嵌 Node 每进程只能启动一次。App 等待规则／来源 owner 取消排空、音乐卸载、共享 bridge 和 Node 线程实际结束；仍需新进程才进行删除。
+- 确认后只持久写入 Application Support 下独立的 `meowfilm-reset.pending`（排除备份），停止播放、同步、脚本和业务访问，并切换为待重启界面。此时尚未清理；不会强制退出或在原进程热重建服务，前后台切换也不会执行清理。内嵌 Node 每进程只能启动一次。App 等待规则／来源 owner 取消排空、音乐模块终态、共享 bridge 和 Node 线程实际结束；仍需新进程才进行删除。
 - 下次冷启动由 `MeowfilmLaunchController` 在创建 `MeowfilmAssembly` 前执行清理。清除 Application Support/meowfilm、Caches/meowfilm、Caches/meowfilm.music.audio-cache.v1、临时目录下的 meowfilm（运行器回退位置），以及当前 App UserDefaults domain、App Cookie 与 URL 缓存。
 - Keychain 按稳定产品 ID `dev.meowfilm.aggregate` 下的精确 service 清除：账号凭据、网易云／酷狗客户端设备、QQ 设备，以及旧版曲库、播放展示、来源发现、账号 URL 缓存密钥。只删除本地 data-protection generic-password 项，不枚举整个 access group、不按 class 全删，不先读取或验证旧项保护属性。侧载后的偏好域使用实际 bundle ID，Keychain service 仍使用稳定产品 ID。
 - 不调用云端退出／歌单／收藏删除，不删除 App 外导入原文件、链接目标或其他 service。应用根目录中未知的本地文件也属于重置范围，不尝试解密损坏文档。
@@ -69,12 +75,9 @@
 
 ## 音源文档
 
-`NativeMusicScriptService` 唯一持有普通 `DocumentStore` 命名空间 `music.scripts.v1`，目录、源码和私有数据全部明文存储，不使用 Keychain 或加密文档。安装目录与脚本源码不混入曲库同步：
+公共音乐模块唯一写入 `meowfilm/script-runtime/music`，使用 Node 的 `PrivateDocuments` 保存安装目录、内容寻址源码和请求绑定的 guest KV；格式与隔离规则以[共用 LX 契约](../runtime/music-script-runtime.md#持久化与隔离)为准。数据不混入曲库同步，不使用 Keychain 或加密文档。
 
-- `catalog`：schema 1、revision、安装 UUID、有界头部元数据、源码 SHA-256／字节数、启用状态、上次声明平台及安装时间；上限 1 MiB。
-- `source.<sha256>`：严格 UTF-8 原始脚本字节，相同内容复用；单源 16 MiB。
-- `storage.<installationId>`：按 site／key 的 JSON 值，与当前 grant、installation、generation 绑定。每安装 512 KiB，每 site 64 KiB／64 项，每值 16 KiB、最多 32 sites；这些是私有数据资源边界，与 Windows owner 一致。
-- 文件位于 `documents/music.scripts.v1/<key>.json`，其中 source 文件保存原始源码字节而非 JSON。单文档资源上限为 16 MiB，不限制命名空间文档数与总字节。安装／启停操作串行完成；读取或导入不执行脚本。删除先撤销运行授权并清除私有存储，再删除目录条目与最后一个引用的源码。
+`NativeMusicScriptService` 仅适配 `music.script.v3`，不维护原生脚本 `DocumentStore`、下载器或反向 storage RPC。旧原生脚本数据不读取、迁移、双写或主动删除；用户明确清除本机数据时仍按整个应用数据根清理。
 
 内置官方源开关仍属于 `music.library.v1` 的 playback 记录 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；新建文档显式写入全部启用，已有文档必须包含该数组，空数组全部关闭，不接受缺失、null 或未知平台。写入使用既有 settingsRevision／文档 CAS，不创建第二份设置事实来源。
 

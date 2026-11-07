@@ -49,8 +49,12 @@ internal static class MusicEntryPalette
         var brush = new SolidColorBrush(color); brush.Freeze(); return brush;
     }
 
-    internal static Color Shade(Color source) =>
-        Lab.FromRgb(source.R / 255d, source.G / 255d, source.B / 255d).WithTone(.44, .035);
+    internal static Color TitleShade(Color source)
+    {
+        var color = Lab.FromRgb(source.R / 255d, source.G / 255d, source.B / 255d);
+        // Protect the title using its own backdrop, without lifting dark artwork.
+        return color.WithTone(Math.Min(color.L * .8, .44), .035);
+    }
 
     private readonly record struct Swatch(int Red, int Green, int Blue, int Weight);
 

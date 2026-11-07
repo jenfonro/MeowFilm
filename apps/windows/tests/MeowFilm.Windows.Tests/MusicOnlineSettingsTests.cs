@@ -11,9 +11,9 @@ public static partial class MusicNativeLibraryTests
     public static IEnumerable<TestCase> OnlineSettingsCases()
     {
         yield return new("Native music online settings missing area stays absent on reads and reconciliation", OnlineSettingsMissingArea);
-        yield return new("Native music online settings current reads preserve all state and content across reopen", OnlineSettingsCurrentState);
+        yield return new("Native music online settings current reads preserve active library state across reopen", OnlineSettingsCurrentState);
         yield return new("Native music online settings non-current schema fails every owner entry without writes", OnlineSettingsNonCurrent);
-        yield return new("Native music online settings reject damaged neighboring areas and installation schema three", OnlineSettingsInvalidDocument);
+        yield return new("Native music online settings reject damaged active neighboring areas", OnlineSettingsInvalidDocument);
         yield return new("Native music online settings current schema rejects extra fields and unknown versions", OnlineSettingsInvalidCurrent);
         yield return new("Native music online settings save before commit failure settles without replay", () => OnlineSettingsUnknownCommit(false));
         yield return new("Native music online settings save after commit failure settles without replay", () => OnlineSettingsUnknownCommit(true));
@@ -27,7 +27,7 @@ public static partial class MusicNativeLibraryTests
         O(new { schema = 3, revision, lyrics });
 
     private static byte[] OnlineSettingsDocument(JsonObject settings) =>
-        Document(("online-settings", settings), ("lx-installations", CurrentSources()),
+        Document(("online-settings", settings),
             ("library", CurrentLibraryState()), ("queue", CurrentQueue()), ("history", CurrentHistory()),
             ("native-official-sources", O(new { schema = 1, revision = 4, enabled = new[] { "kg" } })),
             ("[\"lx-data\",\"test-install-a\",\"wy\"]", O(new
@@ -65,7 +65,7 @@ public static partial class MusicNativeLibraryTests
     private static async Task OnlineSettingsMissingArea()
     {
         await using var f = new Fixture();
-        f.Store.Bytes = Document(("library", CurrentLibraryState()), ("lx-installations", CurrentSources()));
+        f.Store.Bytes = Document(("library", CurrentLibraryState()));
         byte[] before = f.Store.Bytes.ToArray();
         var owner = f.Owner();
         CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 0, true);
@@ -86,32 +86,11 @@ public static partial class MusicNativeLibraryTests
         })
         {
             await using var f = new Fixture();
-            byte[] currentBytes = Encoding.UTF8.GetBytes("// current content");
-            byte[] previousBytes = Encoding.UTF8.GetBytes("// previous content");
-            var current = Content(Encoding.UTF8.GetString(currentBytes));
-            var previous = Content(Encoding.UTF8.GetString(previousBytes));
-            var installed = CurrentSources();
-            installed["revision"] = 9;
-            installed["installations"] = new JsonArray(Installation(content: current), Installation("test-install-b", false));
-            installed["installations"]![0]!["previous"] = Installation(content: previous)["current"]!.DeepClone();
-            installed["installations"]![0]!["previous"]!["permissions"]!["storage"] = new JsonArray("read");
-            f.Store.Seed(ContentKey(current.Sha256), currentBytes);
-            f.Store.Seed(ContentKey(previous.Sha256), previousBytes);
-            var original = JsonNode.Parse(OnlineSettingsDocument(CurrentOnlineSettings(lyrics, revision)))!.AsObject();
-            var entries = original["entries"]!.AsArray();
-            entries.Single(e => e!["key"]!.GetValue<string>() == AreaKey("lx-installations"))!["value"] = installed.DeepClone();
-            entries.Add(O(new
-            {
-                key = AreaKey("[\"lx-data\",\"test-install-b\",\"tx\"]"),
-                value = new { schema = 1, values = new[] { new { key = "keep", value = "disabled-private" } } }
-            }));
-            f.Store.Bytes = JsonSerializer.SerializeToUtf8Bytes(original, PersistedJson);
+            f.Store.Bytes = OnlineSettingsDocument(CurrentOnlineSettings(lyrics, revision));
             byte[] before = f.Store.Bytes.ToArray();
             var owner = f.Owner();
 
             await owner.ReconcileAsync();
-            var metadata = await owner.ReadSourceMetadataAsync();
-            Check(JsonNode.DeepEquals(installed, Parsed(metadata.State)));
             CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), revision, lyrics);
             CheckOtherOnlineSettingsAreas(before, f.Store);
             CheckOnlineSettings(E(f.Store.State("online-settings")), revision, lyrics);
@@ -120,25 +99,12 @@ public static partial class MusicNativeLibraryTests
             Check((await Ok(owner, "music.queue.get")).GetProperty("currentId").GetString() == "entry-1");
             Check((await Ok(owner, "music.officialSources.settings.get")).GetProperty("settings")
                 .GetProperty("enabled").EnumerateArray().Select(p => p.GetString()).SequenceEqual(new[] { "kg" }));
-            Check((await owner.ReadScriptValueAsync("test-install-a", "wy", "keep", 9)).GetString() == "private");
-            Check((await owner.ReadSourceScriptDataAsync("test-install-b", 9)).Sites.GetProperty("tx")
-                .GetProperty("values")[0].GetProperty("value").GetString() == "disabled-private");
-            await Throws("PERMISSION_DENIED", async () => await owner.ReadScriptValueAsync("test-install-b", "tx", "keep", 9));
-            var currentContent = await owner.ReadScriptContentAsync(current.Sha256);
-            var previousContent = await owner.ReadScriptContentAsync(previous.Sha256);
-            Check(currentBytes.SequenceEqual(currentContent));
-            Check(previousBytes.SequenceEqual(previousContent));
-            byte[] storedCurrent = (await f.Store.ReadAsync(ContentKey(current.Sha256))).Data!;
-            byte[] storedPrevious = (await f.Store.ReadAsync(ContentKey(previous.Sha256))).Data!;
-            Check(currentBytes.SequenceEqual(storedCurrent));
-            Check(previousBytes.SequenceEqual(storedPrevious));
             Check(f.Store.WriteCalls == 0 && f.Store.Writes == 0 && before.SequenceEqual(f.Store.Bytes!));
 
             await owner.ReconcileAsync();
             await owner.DisposeAsync();
             var reopened = f.Owner();
             CheckOnlineSettings((await Ok(reopened, "music.settings.get")).GetProperty("settings"), revision, lyrics);
-            Check((await reopened.ReadSourceMetadataAsync()).Sha256 == metadata.Sha256);
             Check(f.Store.WriteCalls == 0 && before.SequenceEqual(f.Store.Bytes!));
             if (revision < 9007199254740991)
             {
@@ -157,7 +123,6 @@ public static partial class MusicNativeLibraryTests
         var owner = f.Owner();
         await Error(owner, "music.settings.get", null, code);
         await Error(owner, "music.settings.save", new { ifRevision = 7, lyrics = true }, code);
-        await Throws(code, async () => await owner.ReadSourceMetadataAsync());
         await Throws(code, () => owner.ReconcileAsync());
         Check(f.Store.WriteCalls == 0 && bytes.SequenceEqual(f.Store.Bytes!));
     }
@@ -172,10 +137,8 @@ public static partial class MusicNativeLibraryTests
     {
         foreach (var (area, invalid, code) in new (string, JsonObject, string)[]
         {
-            ("lx-installations", O(new { schema = 3, revision = 1, installations = new[] { Installation() } }), "CORRUPT_STORAGE"),
             ("library", O(new { schema = 1, scope = "local", revision = 1, library = CurrentLibraryState()["library"] }), "CORRUPT_LIBRARY"),
-            ("native-official-sources", O(new { schema = 2, revision = 4, enabled = new[] { "kg" } }), "CORRUPT_STORAGE"),
-            ("[\"lx-data\",\"test-install-a\",\"wy\"]", O(new { schema = 2, values = Array.Empty<object>() }), "CORRUPT_STORAGE")
+            ("native-official-sources", O(new { schema = 2, revision = 4, enabled = new[] { "kg" } }), "CORRUPT_STORAGE")
         })
         {
             var doc = JsonNode.Parse(OnlineSettingsDocument(CurrentOnlineSettings()))!.AsObject();
@@ -225,7 +188,6 @@ public static partial class MusicNativeLibraryTests
         await Error(owner, "music.settings.get", null, "PENDING_WRITE");
         await Error(owner, "music.settings.save", new { ifRevision = 7, lyrics = true }, "PENDING_WRITE");
         await Error(owner, "music.library.create", new { name = "Blocked" }, "PENDING_WRITE");
-        await Throws("COMMIT_UNKNOWN", async () => await owner.ReadSourceMetadataAsync());
         await Throws("COMMIT_UNKNOWN", () => owner.PrepareShutdownAsync());
         f.Store.FailRead = true;
         bool readFailed = false;

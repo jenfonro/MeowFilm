@@ -25,9 +25,9 @@ public static class MusicQualityPolicyTests
         yield return new("quality unknown after CAS is resolved by the next current read without resend", () => Unknown(true));
         yield return new("quality cancellation before CAS never writes", CancelBefore);
         yield return new("quality admitted CAS cancellation drains and returns durable receipt", CancelAdmitted);
-        yield return new("quality auto only same installation and exact recording declared intersection", Intersection);
+        yield return new("quality exact request only addresses the selected installation and recording", Intersection);
         yield return new("quality no recording types or unavailable spatial never invokes LX", Unavailable);
-        yield return new("quality definite miss bounded fallback but manual never changes type", Fallback);
+        yield return new("quality tier ordering skips disabled categories and adapters never downgrade", Fallback);
         yield return new("quality unknown script response denial and malformed media never retry", NoRetry);
         yield return new("quality lyric settings save preserves pending LX and accepted cache signatures", LyricsPreservePlayback);
         yield return new("quality changed policy cancels and physically drains pending LX", PolicyDrain);
@@ -49,10 +49,8 @@ public static class MusicQualityPolicyTests
             MusicQualityPolicy.Priority("sky", p) == 11 && MusicQualityPolicy.Priority("192k", p) == 40);
         p["spatialEnabled"] = new JsonArray("sky");
         Check(!MusicQualityPolicy.Enabled("dolby", p) && MusicQualityPolicy.Enabled("sky", p));
-        var record = QualityFixture.O(new { types = MusicQualityPolicy.LxTypes.Select(type => new { type }) });
-        var caps = QualityFixture.O(new { qualitys = MusicQualityPolicy.LxTypes });
-        Check(MusicQualityPolicy.Select(p, "auto", record, caps, false)
-            .SequenceEqual(["master", "flac24bit", "flac", "320k", "192k", "128k"]));
+        Check(MusicQualityPolicy.Tiers(p).SelectMany(tier => tier.Levels)
+            .SequenceEqual(["master", "sky", "jyeffect", "flac24bit", "flac", "320k", "192k", "128k"]));
         Check(MusicQualityPolicy.Category("madeup") == "");
         return Task.CompletedTask;
     }
@@ -60,12 +58,12 @@ public static class MusicQualityPolicyTests
     {
         await using var f = new QualityFixture();
         var read = await f.Ok("music.quality.settings.get");
-        Check(read.GetProperty("settings").GetProperty("request").GetString() == "320k");
+        Check(read.GetProperty("settings").GetProperty("request").GetString() == "flac");
         Check(f.Store.Writes == 0 && f.Runtime.Calls.Count == 0);
         var before = read;
         await f.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
         read = await f.Ok("music.quality.settings.get");
-        Check(read.GetProperty("settings").GetProperty("request").GetString() == "320k" &&
+        Check(read.GetProperty("settings").GetProperty("request").GetString() == "flac" &&
             !read.GetProperty("onlineSettings").GetProperty("lyrics").GetBoolean());
         Check(read.GetProperty("settings").GetRawText() == before.GetProperty("settings").GetRawText() &&
             read.GetProperty("signature").GetString() == before.GetProperty("signature").GetString(),
@@ -138,7 +136,7 @@ public static class MusicQualityPolicyTests
         await f.Error("music.quality.settings.save", p, "COMMIT_UNKNOWN");
         int writes = f.Store.Writes;
         var read = await f.Ok("music.quality.settings.get");
-        Check(read.GetProperty("settings").GetProperty("request").GetString() == (after ? "auto" : "320k"));
+        Check(read.GetProperty("settings").GetProperty("request").GetString() == (after ? "auto" : "flac"));
         Check(f.Store.Writes == writes);
         await f.Error("music.quality.settings.reconcile", null, "CAPABILITY_UNAVAILABLE");
     }
@@ -167,17 +165,11 @@ public static class MusicQualityPolicyTests
     {
         await using var f = new QualityFixture();
         string one = await f.Install(), two = await f.Install();
-        await f.Ok("music.quality.settings.save", await f.SaveParameters("auto"));
-        var song = QualityFixture.Song("11", ["master", "flac", "128k"]);
-        var reply = await f.Resolve(two, "auto", song);
+        var reply = await f.Resolve(two, "master", QualityFixture.Song("11", ["master", "flac", "128k"]));
         Check(reply.GetProperty("quality").GetString() == "master" &&
             !reply.GetProperty("qualityVerified").GetBoolean() && !reply.GetProperty("playbackVerified").GetBoolean());
         Check(f.Runtime.Invoked.SequenceEqual([two]) && !f.Runtime.Invoked.Contains(one));
         Check(f.Runtime.Qualities.SequenceEqual(["master"]));
-        var p = await f.SaveParameters("auto"); p["qualityOrder"] = LJ.Arr(MusicQualityPolicy.Categories.Reverse());
-        await f.Ok("music.quality.settings.save", p);
-        reply = await f.Resolve(two, "auto", song);
-        Check(reply.GetProperty("quality").GetString() == "128k");
     }
     private static async Task Unavailable()
     {
@@ -186,19 +178,21 @@ public static class MusicQualityPolicyTests
         var p = await f.SaveParameters("auto"); p["qualityEnabled"] = new JsonArray("spatial");
         await f.Ok("music.quality.settings.save", p);
         await f.Error("music.online.resolve", f.Args(id, "auto"), "QUALITY_UNAVAILABLE");
-        await f.Error("music.online.resolve", f.Args(id, "dolby"), "INVALID_REQUEST");
+        await f.Error("music.online.resolve", f.Args(id, "dolby"), "QUALITY_UNAVAILABLE");
         Check(f.Runtime.Invoked.Count == 0);
     }
     private static async Task Fallback()
     {
         await using var f = new QualityFixture(); string id = await f.Install();
-        f.Runtime.Misses.Add("master"); f.Runtime.Misses.Add("flac24bit");
-        var result = await f.Resolve(id, "auto");
-        Check(result.GetProperty("quality").GetString() == "flac" &&
-            f.Runtime.Qualities.SequenceEqual(["master", "flac24bit", "flac"]));
-        f.Runtime.Qualities.Clear();
+        f.Runtime.Misses.Add("master");
         await f.Error("music.online.resolve", f.Args(id, "master"), "MEDIA_UNAVAILABLE");
-        Check(f.Runtime.Qualities.SequenceEqual(["master"]));
+        Check(f.Runtime.Qualities.SequenceEqual(["master"]), "single-source adapter never downgrades on its own");
+        var policy = MusicQualityPolicy.Default();
+        Check(MusicQualityPolicy.Tiers(policy).Select(tier => tier.Category).SequenceEqual(["lossless", "high", "standard"]));
+        policy["qualityEnabled"] = new JsonArray("lossless", "standard");
+        Check(MusicQualityPolicy.Tiers(policy).Select(tier => tier.Category).SequenceEqual(["lossless", "standard"]));
+        Check(MusicQualityPolicy.Exact("lossless", policy)!.Levels.SequenceEqual(["flac"]));
+        Check(MusicQualityPolicy.Exact("high", policy) is null);
     }
     private static async Task NoRetry()
     {
@@ -206,12 +200,11 @@ public static class MusicQualityPolicyTests
         foreach (string code in new[] { "TIMEOUT", "PERMISSION_DENIED", "SCRIPT_EXCEPTION", "COMMIT_UNKNOWN" })
         {
             f.Runtime.Failure = code; f.Runtime.Qualities.Clear();
-            await f.Error("music.online.resolve", f.Args(id, "auto"), code);
+            await f.Error("music.online.resolve", f.Args(id, "master"), code);
             Check(f.Runtime.Qualities.Count == 1);
         }
-        f.Runtime.Failure = null; f.Runtime.Value = JsonSerializer.SerializeToNode(new { url = "https://media.invalid/a", drm = true });
-        f.Runtime.Qualities.Clear();
-        await f.Error("music.online.resolve", f.Args(id, "auto"), "INVALID_MEDIA_CANDIDATE");
+        f.Runtime.Failure = "INVALID_MEDIA_CANDIDATE"; f.Runtime.Qualities.Clear();
+        await f.Error("music.online.resolve", f.Args(id, "master"), "INVALID_MEDIA_CANDIDATE");
         Check(f.Runtime.Qualities.Count == 1);
     }
     private static async Task LyricsPreservePlayback()
@@ -241,7 +234,7 @@ public static class MusicQualityPolicyTests
     {
         await using var f = new QualityFixture(); string id = await f.Install();
         f.Runtime.Hold = true;
-        var request = f.App.ExecuteAsync("music.online.resolve", f.Args(id, "auto"));
+        var request = f.App.ExecuteAsync("music.online.resolve", f.Args(id, "master"));
         await f.Runtime.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await f.Ok("music.quality.settings.save", await f.SaveParameters("128k"));
         await f.Runtime.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -254,7 +247,7 @@ public static class MusicQualityPolicyTests
     {
         await using var f = new QualityFixture(); string id = await f.Install();
         f.Runtime.Hold = true; using var cts = new CancellationTokenSource();
-        var request = f.App.ExecuteAsync("music.online.resolve", f.Args(id, "auto"), cts.Token);
+        var request = f.App.ExecuteAsync("music.online.resolve", f.Args(id, "master"), cts.Token);
         await f.Runtime.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cts.Cancel();
         await f.Runtime.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var close = f.App.PrepareShutdownAsync(); Check(!request.IsCompleted && !close.IsCompleted);
@@ -265,7 +258,7 @@ public static class MusicQualityPolicyTests
     {
         await using var f = new QualityFixture(); string id = await f.Install();
         f.Runtime.Hold = true;
-        var request = f.App.ExecuteAsync("music.online.resolve", f.Args(id, "auto"));
+        var request = f.App.ExecuteAsync("music.online.resolve", f.Args(id, "master"));
         await f.Runtime.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         // Only MusicScriptOwner's real 25s deadline cancels this request.
         await f.Runtime.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(30));
@@ -278,7 +271,7 @@ public static class MusicQualityPolicyTests
     private static async Task Signatures()
     {
         await using var f = new QualityFixture(); string id = await f.Install();
-        var first = await f.Resolve(id, "auto"); var second = await f.Resolve(id, "auto");
+        var first = await f.Resolve(id, "master"); var second = await f.Resolve(id, "master");
         Check(first.GetProperty("qualityCacheSignature").GetString() == second.GetProperty("qualityCacheSignature").GetString());
         var refresh = f.Args(id, "master");
         refresh["qualityPolicySignature"] = first.GetProperty("qualityPolicySignature").GetString();
@@ -287,39 +280,28 @@ public static class MusicQualityPolicyTests
         int calls = f.Runtime.Qualities.Count;
         refresh["song"] = JsonSerializer.SerializeToNode(QualityFixture.Song("11", ["master", "128k"]));
         await f.Error("music.online.resolve", refresh, "QUALITY_CACHE_CHANGED");
-        Check(f.Runtime.Qualities.Count == calls);
+        Check(f.Runtime.Qualities.Count == ++calls);
         await f.Ok("music.quality.settings.save", await f.SaveParameters("master"));
         await f.Error("music.online.resolve", refresh, "QUALITY_POLICY_CHANGED");
         Check(f.Runtime.Qualities.Count == calls);
     }
-    private static Task RecordingEvidence()
+    private static async Task RecordingEvidence()
     {
-        var policy = MusicQualityPolicy.Default();
-        var caps = QualityFixture.O(new { qualitys = MusicQualityPolicy.LxTypes });
-        var missing = new JsonObject();
-        void Reject(JsonObject record, string request, string code, JsonObject? declared = null)
-        {
-            try { MusicQualityPolicy.Select(policy, request, record, declared ?? caps, false); }
-            catch (MusicLibraryException error) { Check(error.Code == code, error.Code); return; }
-            throw new InvalidOperationException("Expected " + code);
-        }
+        await using var f = new QualityFixture(); string id = await f.Install();
+        var song = QualityFixture.O(QualityFixture.Song());
+        foreach (var row in song["sources"]!.AsArray()) row!["musicInfo"]!.AsObject().Remove("types");
+        var missing = JsonSerializer.SerializeToElement(song);
         foreach (string request in MusicQualityPolicy.LxTypes)
-            Check(MusicQualityPolicy.Select(policy, request, missing, caps, false).SequenceEqual([request]));
-        Check(missing.Count == 0, "selection must not manufacture recording metadata");
-        Check(MusicQualityPolicy.Select(policy, "320k", QualityFixture.O(new { qualityKnown = false }), caps, false)
-            .SequenceEqual(["320k"]));
-        Reject(missing, "auto", "QUALITY_UNAVAILABLE");
-        Reject(QualityFixture.O(new { qualityKnown = true }), "320k", "RECORDING_QUALITY_UNAVAILABLE");
-        Reject(QualityFixture.O(new { types = Array.Empty<object>() }), "320k", "RECORDING_QUALITY_UNAVAILABLE");
-        Reject(QualityFixture.O(new { qualityKnown = false, types = Array.Empty<object>() }),
-            "320k", "RECORDING_QUALITY_UNAVAILABLE");
-        var known = QualityFixture.O(new { types = new[] { new { type = "128k" } } });
-        Reject(known, "320k", "RECORDING_QUALITY_UNAVAILABLE");
-        Check(MusicQualityPolicy.Select(policy, "auto", known, caps, false).SequenceEqual(["128k"]));
-        Reject(missing, "320k", "CAPABILITY_UNAVAILABLE", QualityFixture.O(new { qualitys = new[] { "128k" } }));
-        policy["qualityEnabled"] = new JsonArray("standard");
-        Reject(missing, "320k", "QUALITY_DISABLED");
-        return Task.CompletedTask;
+            Check((await f.Resolve(id, request, missing)).GetProperty("quality").GetString() == request);
+        int calls = f.Runtime.Invoked.Count;
+        foreach (var row in song["sources"]!.AsArray()) row!["musicInfo"]!["qualityKnown"] = true;
+        await f.Error("music.online.resolve", f.Args(id, "320k", JsonSerializer.SerializeToElement(song)), "RECORDING_QUALITY_UNAVAILABLE");
+        await f.Error("music.online.resolve", f.Args(id, "320k", QualityFixture.Song("11", [])), "RECORDING_QUALITY_UNAVAILABLE");
+        await f.Error("music.online.resolve", f.Args(id, "320k", QualityFixture.Song("11", ["128k"])), "RECORDING_QUALITY_UNAVAILABLE");
+        Check(f.Runtime.Invoked.Count == calls, "contrary recording evidence prevents invocation");
+        var policy = await f.SaveParameters(); policy["qualityEnabled"] = new JsonArray("standard");
+        await f.Ok("music.quality.settings.save", policy);
+        await f.Error("music.online.resolve", f.Args(id, "320k", missing), "QUALITY_DISABLED");
     }
     private static async Task WyCatalogUnknown()
     {
@@ -327,7 +309,6 @@ public static class MusicQualityPolicyTests
         var wire = new WyCatalogWire();
         await using var runtime = new NativeMusicScriptTestRuntime();
         await using var app = new MusicNativeApplication(store, runtime, wire);
-        runtime.Register(app);
         async Task<JsonElement> Call(string method, object? parameters = null)
         {
             var result = await app.ExecuteAsync(method, parameters);
@@ -354,8 +335,7 @@ public static class MusicQualityPolicyTests
         string token = (await Call("music.transfer.begin", new { kind = "script", basename = "wy-unknown-quality.js",
             length = bytes.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)) })).GetProperty("token").GetString()!;
         await Call("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) });
-        string id = (await Call("music.sources.install", new { token, name = "unknown quality fixture", version = "1",
-            permissions = new { storage = Array.Empty<string>() } }))
+        string id = (await Call("music.sources.add", new { token }))
             .GetProperty("item").GetProperty("installationId").GetString()!;
         await Call("music.sources.enable", new { installationId = id });
         var parameters = new { installationId = id, platform = "wy", quality = "320k", song };
@@ -366,19 +346,19 @@ public static class MusicQualityPolicyTests
         Check(reply.GetProperty("qualityPolicySignature").GetString() ==
             (await Call("music.quality.settings.get")).GetProperty("signature").GetString());
         Check(reply.GetProperty("qualityCacheSignature").GetString()!.Length == 64);
-        int invokes = runtime.Calls.Count(method => method == "music.script.invoke");
+        int invokes = runtime.Calls.Count(method => method == "music.script.resolve");
         Check(invokes == 1);
         QualityFixture.Code(await app.ExecuteAsync("music.online.resolve",
             new { installationId = id, platform = "wy", quality = "auto", song }), "QUALITY_UNAVAILABLE");
-        Check(runtime.Calls.Count(method => method == "music.script.invoke") == invokes, "auto must not guess types");
+        Check(runtime.Calls.Count(method => method == "music.script.resolve") == invokes, "auto must not guess types");
         var known = QualityFixture.O(song);
         foreach (var row in known["sources"]!.AsArray()) row!["musicInfo"]!["qualityKnown"] = true;
         QualityFixture.Code(await app.ExecuteAsync("music.online.resolve",
             new { installationId = id, platform = "wy", quality = "320k", song = known }), "RECORDING_QUALITY_UNAVAILABLE");
-        Check(runtime.Calls.Count(method => method == "music.script.invoke") == invokes,
+        Check(runtime.Calls.Count(method => method == "music.script.resolve") == invokes,
             "qualityKnown:true must survive native normalization and reject before LX");
         QualityFixture.Code(await app.ExecuteAsync("music.online.resolve", parameters), "MEDIA_UNAVAILABLE");
-        Check(runtime.Calls.Count(method => method == "music.script.invoke") == invokes + 1,
+        Check(runtime.Calls.Count(method => method == "music.script.resolve") == invokes + 1,
             "explicit resolver miss must not retry or downgrade");
         Check(wire.Calls == 1 && runtime.Calls.All(method => method.StartsWith("music.script.", StringComparison.Ordinal)));
     }
@@ -446,8 +426,7 @@ internal sealed class QualityFixture : IAsyncDisposable
             length = source.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(source)) });
         string token = stage.GetProperty("token").GetString()!;
         await Ok("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(source) });
-        var installed = await Ok("music.sources.install", new { token, name = "合成音源", version = "1",
-            permissions = new { storage = Array.Empty<string>() } });
+        var installed = await Ok("music.sources.add", new { token });
         string id = installed.GetProperty("item").GetProperty("installationId").GetString()!;
         await Ok("music.sources.enable", new { installationId = id }); return id;
     }
@@ -502,17 +481,20 @@ internal sealed class QualityFixture : IAsyncDisposable
     }
     internal sealed class ScriptRuntime : IRuntimeClient
     {
+        private readonly Dictionary<string, bool> installations = [];
+        private object Item(string id) => new { installationId = id, enabled = installations[id],
+            name = "Quality fixture", version = "1", contentHash = new string('a', 64), executionHash = new string('a', 64),
+            origin = new { kind = "file" }, state = installations[id] ? "ready" : "disabled", generation = 1,
+            rollbackAvailable = false, check = (object?)null,
+            sites = new { wy = new { actions = new[] { "musicUrl" }, qualitys = MusicQualityPolicy.LxTypes } } };
         internal readonly List<string> Calls = [], Invoked = [], Qualities = [];
         internal readonly HashSet<string> Misses = [];
         internal string? Failure;
         internal bool Hold;
-        internal JsonNode? Value = JsonSerializer.SerializeToNode(new { url = "https://media.invalid/quality", headers = new { } });
         internal readonly TaskCompletionSource Entered = Gate(), Cancelled = Gate(), Release = Gate();
-        private long generation;
-        private readonly Dictionary<string, JsonObject> instances = [];
         private static JsonElement Reply(object value)
         {
-            var o = O(value); o["ok"] = true; o["contract"] = "music.script.v2"; return JsonSerializer.SerializeToElement(o);
+            var o = O(value); o["ok"] = true; o["contract"] = "music.script.v3"; return JsonSerializer.SerializeToElement(o);
         }
         public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
@@ -522,25 +504,23 @@ internal sealed class QualityFixture : IAsyncDisposable
                 case "music.script.stage.begin": return Reply(new { token = Guid.NewGuid().ToString(), chunkBytes = 65536 });
                 case "music.script.stage.chunk": return Reply(new { next = p["offset"]!.GetValue<int>() + Convert.FromBase64String(p["data"]!.GetValue<string>()).Length });
                 case "music.script.stage.abort": return Reply(new { released = true });
-                case "music.script.load":
-                    Check(p["permissions"]!.AsObject().Select(field => field.Key).SequenceEqual(["storage"]));
-                    string id = LJ.S(p["installationId"]);
-                    var instance = O(new { installationId = id, revision = LJ.I(p["revision"]), generation = ++generation,
-                        grant = LJ.S(p["grant"]), state = "ready",
-                        capabilities = new { wy = new { actions = new[] { "musicUrl", "lyric" }, qualitys = MusicQualityPolicy.LxTypes } } });
-                    instances[id] = instance; return Reply(new { instance });
-                case "music.script.status": return Reply(new { documentAccess = false, instances = instances.Values.ToArray() });
-                case "music.script.unload": instances.Remove(LJ.S(p["installationId"])); return Reply(new { cleanupComplete = true });
-                case "music.script.invoke":
-                    Invoked.Add(LJ.S(p["installationId"])); string quality = LJ.S(p["payload"]!["quality"]); Qualities.Add(quality);
+                case "music.script.sources.add":
+                    string id = Guid.NewGuid().ToString(); installations[id] = false; return Reply(new { item = Item(id) });
+                case "music.script.sources.enable":
+                    installations[LJ.S(p["installationId"])] = true; return Reply(new { item = Item(LJ.S(p["installationId"])) });
+                case "music.script.sources.list": return Reply(new { items = installations.Keys.Select(Item).ToArray() });
+                case "music.script.resolve":
+                    Invoked.Add(LJ.S(p["installationId"])); string quality = LJ.S(p["quality"]); Qualities.Add(quality);
                     if (Hold)
                     {
                         using var registration = cancellationToken.Register(() => Cancelled.TrySetResult());
                         Entered.TrySetResult(); await Release.Task;
                     }
-                    if (Failure is not null) return JsonSerializer.SerializeToElement(new { ok = false, code = Failure, contract = "music.script.v2" });
-                    return Reply(new { value = Misses.Contains(quality) ? null : Value });
-                default: throw new InvalidOperationException("ordinary business entered Node");
+                    string? error = Failure ?? (Misses.Contains(quality) ? "MEDIA_UNAVAILABLE" : null);
+                    if (error is not null) return JsonSerializer.SerializeToElement(new { ok = false, code = error, contract = "music.script.v3" });
+                    return Reply(new { installationId = LJ.S(p["installationId"]), platform = LJ.S(p["platform"]),
+                        quality, generation = 1, contentHash = new string('a', 64), url = "https://media.invalid/quality", headers = new { } });
+                default: throw new InvalidOperationException("ordinary business entered Node: " + method);
             }
         }
     }

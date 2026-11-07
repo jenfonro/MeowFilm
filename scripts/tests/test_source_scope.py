@@ -57,6 +57,19 @@ class SourceScopeTests(unittest.TestCase):
     def test_current_repository(self):
         self.assertEqual(scope.check(ROOT), [])
 
+    def test_windows_sources_and_tools_are_outside_ios_scope(self):
+        self.write("apps/windows/Unlisted.swift", "import MeowUnknown\n")
+        self.write("scripts/windows/probe.mjs", "import './missing-runtime.mjs';\n")
+        self.write("native/JavaScript/Unlisted.swift", "import MeowUnknown\n")
+        self.assertEqual(scope.check(self.root), [])
+
+    def test_ios_source_link_cannot_import_a_windows_file(self):
+        self.write("apps/windows/Fixture.swift", "import Foundation\n")
+        source = self.root / "native/MeowKit/Sources/MeowUI/Fixture.swift"
+        source.unlink()
+        source.symlink_to(self.root / "apps/windows/Fixture.swift")
+        self.assertTrue(any("Linked source:" in error for error in scope.check(self.root)))
+
     def test_dormant_target_directory_is_not_hidden_by_package_filter(self):
         self.write("native/MeowKit/Sources/Unlisted/Fixture.swift", "")
         self.assertTrue(any("extra=" in e for e in scope.check(self.root)))

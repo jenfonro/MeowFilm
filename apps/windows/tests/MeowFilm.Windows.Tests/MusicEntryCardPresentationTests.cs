@@ -33,6 +33,9 @@ public static class MusicEntryCardPresentationTests
         yield return Case("entry surfaces follow artwork colors and use system colors in high contrast", ColorSurfaces);
         yield return Case("entries without song lists reuse cover-only playlist shading through initialization and rebinding", CoverOnlyHover);
         yield return Case("titles remain above every hover shade with slightly stronger bounded top protection", TitleLayering);
+        yield return Case("resting title protection follows local artwork independently of the footer palette", TitlePaletteIndependence);
+        yield return Case("title protection persists through hover focus leave and rebinding without expanding the footer", TitleProtectionStates);
+        yield return Case("title protection never lifts dark artwork into a lighter band", DarkTitleProtection);
     }
 
     private static TestCase Case(string name, Func<Task> run) =>
@@ -60,8 +63,9 @@ public static class MusicEntryCardPresentationTests
                 Check(PaintContrast(frame, titleBounds, sampleX) > 1.15,
                     $"{model.Presentation} at {scale}x: white title glyphs remain visible with the requested light protection");
                 var header = frame.At(new Point(sampleX, 12));
-                Check(Luminance(header) > Luminance(BrightCover) * .5,
-                    "the title region is lightly protected, not replaced by an opaque dark band");
+                Check(Luminance(header) > Luminance(BrightCover) * .33 &&
+                    Luminance(header) < Luminance(BrightCover) * .38,
+                    "the title region has slightly deeper protection while retaining the bright artwork");
 
                 var lastCover = frame.At(new Point(sampleX, cover.Bottom - 2));
                 var firstFooter = frame.At(new Point(sampleX, cover.Bottom + 2));
@@ -127,7 +131,7 @@ public static class MusicEntryCardPresentationTests
             var foreground = (SolidColorBrush)decorated.Text(model.Title).Foreground;
             Check(foreground.Color == Colors.White, "all entries retain white titles, including bright artwork");
             var shade = (LinearGradientBrush)decorated.TitleShade.Background;
-            Check(shade.GradientStops[0].Color.A is >= 96 and <= 102 &&
+            Check(shade.GradientStops[0].Color.A is >= 138 and <= 144 &&
                 shade.GradientStops[^1].Color.A == 0 && decorated.TitleShade.ActualHeight <= 64,
                 "the bright decoration receives only a light, short title gradient");
             var frame = Capture(decorated.Entry, 1);
@@ -147,7 +151,7 @@ public static class MusicEntryCardPresentationTests
                 "failed decoration falls back to the dark cover palette");
             var shade = (LinearGradientBrush)fallback.TitleShade.Background;
             Check(shade.GradientStops[0].Color.R > shade.GradientStops[0].Color.B &&
-                shade.GradientStops[0].Color.A is >= 48 and <= 60,
+                shade.GradientStops[0].Color.A is >= 90 and <= 102,
                 "the cover fallback keeps the warm image hue with light title protection");
         }
     }
@@ -516,9 +520,104 @@ public static class MusicEntryCardPresentationTests
         using var bright = new Fixture(DailyCard(), 152);
         await bright.Load();
         var shade = (LinearGradientBrush)bright.TitleShade.Background;
-        Check(shade.GradientStops[0].Color.A is >= 96 and <= 102 &&
+        Check(shade.GradientStops[0].Color.A is >= 138 and <= 144 &&
             shade.GradientStops[^1].Color.A == 0 && bright.TitleShade.ActualHeight == 64,
             "bright covers receive slightly more top protection without growing its extent");
+    }
+
+    private static BitmapSource SplitArtwork(Color bottom) => MusicEntryPaletteTests.Image((x, y) =>
+        y >= 16 ? bottom : x >= 24 ? BrightCover : Color.FromRgb(24, 44, 76));
+
+    private static async Task TitlePaletteIndependence()
+    {
+        var snapshots = new List<(BitmapSource Resting, BitmapSource Expanded)>();
+        using var warm = new Fixture(DailyCard(), 160, coverImage: SplitArtwork(Color.FromRgb(210, 145, 95)));
+        using var cool = new Fixture(DailyCard(), 160, coverImage: SplitArtwork(Color.FromRgb(95, 145, 210)));
+        await warm.Load(); await cool.Load();
+        Check(((SolidColorBrush)warm.Surface.Background).Color != ((SolidColorBrush)cool.Surface.Background).Color,
+            "the two covers have genuinely different footer palettes despite sharing their title region");
+        foreach (double scale in new[] { 1d, 1.25d, 1.5d, 2d })
+        {
+            var a = Capture(warm.Entry, scale); var b = Capture(cool.Entry, scale);
+            foreach (double y in new[] { 12d, 24d, 28d, 40d, 56d, 63d })
+            {
+                Check(a.At(new Point(5, y)) == b.At(new Point(5, y)) &&
+                    a.At(new Point(145, y)) == b.At(new Point(145, y)),
+                    "identical title artwork has identical rendered protection regardless of the lower image colors");
+            }
+            var brightPatch = a.At(new Point(145, 28));
+            Check(Luminance(brightPatch) < Luminance(BrightCover) * .65 &&
+                Luminance(brightPatch) > Luminance(BrightCover) * .4,
+                "a local bright patch behind the lower title glyphs is visibly softened, not blacked out");
+            Check(a.At(new Point(145, 72)) == BrightCover && b.At(new Point(145, 72)) == BrightCover,
+                "resting title protection fades out before the image body, without a permanent lower gradient");
+        }
+        foreach (var f in new[] { warm, cool })
+        {
+            var rest = Capture(f.Entry);
+            await f.Expand(true);
+            snapshots.Add((rest.Image, Capture(f.Entry).Image));
+        }
+        if (Environment.GetEnvironmentVariable("MEOWFILM_TEST_ENTRY_CARD_VISUALS") == "1")
+            SaveVisuals(snapshots, "entry-title-shade.png");
+    }
+
+    private static async Task TitleProtectionStates()
+    {
+        var bottom = Color.FromRgb(95, 145, 210);
+        foreach (var model in Cards())
+        {
+            using var f = new Fixture(model, 160, coverImage: SplitArtwork(bottom));
+            await f.Load();
+            var shade = f.TitleShade.Background;
+            var resting = Capture(f.Entry);
+            var headerPoint = new Point(145, 28);
+            var lowerPoint = new Point(5, 100);
+            Check(resting.At(lowerPoint) == bottom && Luminance(resting.At(headerPoint)) < Luminance(BrightCover) * .75,
+                "the initial card protects its title while leaving the lower image untouched");
+            foreach (bool active in new[] { true, false })
+            {
+                await f.Expand(active);
+                Check(f.TitleShade.IsVisible && f.TitleShade.Opacity == 1 &&
+                    ReferenceEquals(shade, f.TitleShade.Background),
+                    "hover changes neither the independent title shade nor its visibility");
+                var frame = Capture(f.Entry);
+                Check(active && (model.CanPlay || model.HasPreview) ?
+                    frame.At(lowerPoint) != bottom : frame.At(lowerPoint) == bottom,
+                    "only interactive lower content follows hover; a static entry retains its cover");
+                if (!active)
+                    Check(frame.At(headerPoint) == resting.At(headerPoint),
+                        "leaving hover restores the same protected title, not an unshaded cover");
+            }
+            Check(f.Open.Focus(), "title-protected entries remain keyboard reachable");
+            await Until(() => CardMotion.GetProgress(f.Surface) >= .999, "focus activates the existing lower shade");
+            Check(f.TitleShade.IsVisible && f.TitleShade.Opacity == 1 && ReferenceEquals(shade, f.TitleShade.Background),
+                "keyboard focus does not own the title protection");
+            Check(f.Root.Focus(), "focus can leave the protected entry");
+            await Until(() => CardMotion.GetProgress(f.Surface) <= .001, "leaving focus retires only hover presentation");
+            Check(Capture(f.Entry).At(headerPoint) == resting.At(headerPoint) && Capture(f.Entry).At(lowerPoint) == bottom,
+                "keyboard focus leaving retains the initial title and lower image pixels");
+            await f.Bind(model.HasPreview ? Cards().Single(card => card.Kind == "fm") : DailyCard());
+            Check(f.TitleShade.IsVisible && f.TitleShade.Opacity == 1 && ReferenceEquals(shade, f.TitleShade.Background) &&
+                Capture(f.Entry).At(headerPoint) == resting.At(headerPoint) && Capture(f.Entry).At(lowerPoint) == bottom,
+                "rebinding between list and cover-only entries cannot retire title protection or expand the lower shade");
+            Check(f.Loader.Addresses.Count == 1 && f.Opens == 0 && f.Plays == 0,
+                "title protection and interaction transitions reuse artwork without business requests");
+        }
+    }
+
+    private static async Task DarkTitleProtection()
+    {
+        foreach (var color in new[] { Colors.Black, Color.FromRgb(24, 44, 76), Color.FromRgb(28, 22, 20) })
+        {
+            using var f = new Fixture(DailyCard(), 160, coverColor: color);
+            await f.Load();
+            var frame = Capture(f.Entry);
+            Check(Luminance(frame.At(new Point(145, 24))) <= Luminance(color) + .0001,
+                "a protective title shade must not brighten a dark backdrop");
+            Check(frame.At(new Point(145, 80)) == color,
+                "dark artwork outside the short title shade remains intact");
+        }
     }
 
     private static async Task ReadOnlyPresentation()

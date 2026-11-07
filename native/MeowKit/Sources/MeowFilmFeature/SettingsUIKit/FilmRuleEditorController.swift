@@ -13,6 +13,7 @@ final class FilmRuleEditorController: FilmSettingsListController, UITextViewDele
     let flags = filmTextField("flags", id: "film.rule.flags")
     private var writing = false
     private var removedFromDraft = false
+    private var finished = false
 
     init(owner: FilmRulesDraft, group: FilmRuleGroup, index: Int?, themeProvider: any PageThemeProviding) {
         self.owner = owner; self.group = group; ruleIndex = index
@@ -33,13 +34,18 @@ final class FilmRuleEditorController: FilmSettingsListController, UITextViewDele
     }
     func textViewDidChange(_ textView: UITextView) { updateDraft() }
     func updateDraft() {
-        guard let ruleIndex else { return }
+        guard !finished, let ruleIndex else { return }
         owner.edit(group, index: ruleIndex, rule: currentRule)
     }
     private var currentRule: FilmMatchRule {
         .init(pattern: pattern.text, replace: replacement.text ?? "", flags: flags.text ?? "")
     }
     override func render() {
+        if finished {
+            sections = []
+            super.render()
+            return
+        }
         if removedFromDraft {
             sections = [.init(title: "", rows: [
                 .init(title: writing ? "保存中" : "保存删除", id: "film.rule.save", enabled: !writing,
@@ -66,7 +72,7 @@ final class FilmRuleEditorController: FilmSettingsListController, UITextViewDele
         sections.append(.init(title: "", rows: actions)); super.render()
     }
     func save() {
-        guard !writing, !owner.busy else { return }
+        guard !finished, !writing, !owner.busy else { return }
         updateDraft(); view.endEditing(true)
         writing = true; render()
         let value = currentRule
@@ -76,9 +82,8 @@ final class FilmRuleEditorController: FilmSettingsListController, UITextViewDele
             do {
                 if ruleIndex == nil {
                     try await owner.add(group, rule: value)
-                    if owner.rules(group).count > count { ruleIndex = count }
                 } else { try await owner.save() }
-                writing = false; render(); notice("已保存")
+                finishEditing()
             } catch {
                 // Add has already joined the shared draft even when persistence fails.
                 if ruleIndex == nil, owner.rules(group).count > count { ruleIndex = count }
@@ -88,13 +93,13 @@ final class FilmRuleEditorController: FilmSettingsListController, UITextViewDele
         }
     }
     func deleteRule() {
-        guard let index = ruleIndex, !writing, !owner.busy else { return }
+        guard !finished, let index = ruleIndex, !writing, !owner.busy else { return }
         writing = true; render()
         Task { [weak self] in
             guard let self else { return }
             do {
                 try await owner.delete(group, index: index)
-                navigationController?.popViewController(animated: true)
+                finishEditing()
             } catch {
                 // Retry commits the complete draft; it must not delete the next row.
                 removedFromDraft = true; writing = false; render()
@@ -107,11 +112,22 @@ final class FilmRuleEditorController: FilmSettingsListController, UITextViewDele
         writing = true; render()
         Task { [weak self] in
             guard let self else { return }
-            do { try await owner.save(); navigationController?.popViewController(animated: true) }
+            do { try await owner.save(); finishEditing() }
             catch {
                 writing = false; render()
                 failure(error, retry: { [weak self] in self?.retryDeletedDraft() })
             }
+        }
+    }
+    private func finishEditing() {
+        // Saving normalizes all groups and can remove this row or earlier rows.
+        // The submitted editor is over; a new editor must use the new snapshot.
+        finished = true; writing = false; ruleIndex = nil
+        pattern.delegate = nil
+        pattern.isEditable = false; replacement.isEnabled = false; flags.isEnabled = false
+        view.endEditing(true); render()
+        if navigationController?.topViewController === self {
+            navigationController?.popViewController(animated: true)
         }
     }
 }

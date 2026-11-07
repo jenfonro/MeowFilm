@@ -45,8 +45,15 @@ public interface IMusicPlaybackRate
     Task<MusicPlaybackRate> SetRateAsync(NativePlaybackScope scope, double rate, CancellationToken token = default);
 }
 
-internal sealed class NativeMusicPlayback(NativePlayback native) : IMusicPlayback, INativePlaybackContinuation, IMusicPlaybackRate
+internal sealed class NativeMusicPlayback(NativePlayback native) : IMusicPlayback, INativePlaybackContinuation,
+    IMusicPlaybackRate, INativePlaybackHandoff
 {
+    public Task PrepareHandoffAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token) =>
+        native.PrepareHandoffAsync(uri, headers, token);
+    public Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token) => native.PrepareReadHandoffAsync(lease, token);
+    public double PreparedHandoffDurationSeconds => native.PreparedHandoffDurationSeconds;
+    public Task CommitHandoffAsync(Action committed, CancellationToken token) => native.CommitHandoffAsync(committed, token);
+    public Task DiscardHandoffAsync() => native.DiscardHandoffAsync();
     public async Task<MusicPlaybackRate?> ReadRateAsync(CancellationToken token = default)
     {
         var tracks = await native.ReadTracksAsync(token);
@@ -65,6 +72,8 @@ internal sealed class NativeMusicPlayback(NativePlayback native) : IMusicPlaybac
     public Task ReopenAsync(NativePlaybackContinuation continuation, Uri uri,
         IReadOnlyDictionary<string, string> headers, CancellationToken token = default) =>
         native.ReopenAsync(continuation, uri, headers, token);
+    public Task ReopenReadAsync(NativePlaybackContinuation continuation, INativeMediaReadLease lease,
+        CancellationToken token = default) => native.ReopenReadAsync(continuation, lease, token);
     public string? OwnerId => native.OwnerId;
     public string? Identity => native.Identity;
     public bool HasMedia => native.HasMedia;

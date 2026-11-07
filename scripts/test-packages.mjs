@@ -1,10 +1,12 @@
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { runTests } from './run-tests.mjs';
+import { discoverWorkspaces } from './verify-dependency-lock.mjs';
 import { windowsRoot } from './windows/working-paths.mjs';
 
-const packages = readdirSync(join(windowsRoot, 'packages'), { withFileTypes: true })
-  .filter(entry => entry.isDirectory()).map(entry => entry.name).sort();
+const packages = [...discoverWorkspaces(windowsRoot,
+  JSON.parse(readFileSync(join(windowsRoot, 'package.json'), 'utf8')))]
+  .sort(([left], [right]) => left.localeCompare(right));
 if (packages.length === 0) throw new Error('No implementation packages discovered');
 function testFiles(directory) {
   if (!existsSync(directory)) return [];
@@ -15,23 +17,22 @@ function testFiles(directory) {
   });
 }
 const failures = [];
-for (const name of packages) {
+for (const [location, manifest] of packages) {
   try {
-    const cwd = resolve(windowsRoot, 'packages', name);
-    const manifest = JSON.parse(readFileSync(resolve(cwd, 'package.json'), 'utf8'));
+    const cwd = resolve(windowsRoot, location);
     if (!manifest.name?.startsWith('@meowfilm/') || !manifest.scripts?.test) {
-      throw new Error(`Package ${name} must have an identity and tests`);
+      throw new Error(`Package ${location} must have an identity and tests`);
     }
     const files = ['test', 'tests'].flatMap(directory => testFiles(resolve(cwd, directory))).sort();
-    if (files.length === 0) throw new Error(`Package ${name} has no test cases`);
+    if (files.length === 0) throw new Error(`Package ${location} has no test cases`);
     console.log(`\n=== ${manifest.name} ===`);
     // Each new package uses the built-in test runner; never execute a reference repo's scripts.
     // Discover test cases explicitly: fixture/support modules must not inflate
     // the executed-test count merely because they live below a test directory.
-    runTests(files, { cwd, name });
+    runTests(files, { cwd, name: manifest.name });
   } catch (error) {
-    failures.push({ name, message: error.message });
-    console.error(`${name}: ${error.message}`);
+    failures.push({ location, message: error.message });
+    console.error(`${location}: ${error.message}`);
   }
 }
 console.log(`\nImplementation packages: ${packages.length}; failed groups: ${failures.length}.`);

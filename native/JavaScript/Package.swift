@@ -7,7 +7,7 @@ let package = Package(
     products: [.library(name: "MeowJavaScript", targets: ["MeowJavaScript"])],
     targets: [
         .target(name: "CMeowJavaScript", path: ".",
-                exclude: ["Sources", "README.md", "CMakeLists.txt"],
+                exclude: ["Sources", "README.md", "CMakeLists.txt", "patches"],
                 sources: ["meowfilm_js.c", "quickjs/quickjs.c", "quickjs/dtoa.c",
                           "quickjs/libregexp.c", "quickjs/libunicode.c"],
                 publicHeadersPath: "include",

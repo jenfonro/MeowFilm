@@ -21,6 +21,10 @@ public static class FilmSourcesTests
         yield return Case("starting failed disabled and missing parents reconcile without empty-list loss", Reconciliation);
         yield return Case("dashboard fixture sends home category detail play search parameters", DetectionContract);
         yield return Case("dashboard fallback matrix distinguishes errors empty data and missing actions", DetectionMatrix);
+        yield return Case("initial detail script errors preserve missing-playback search fallback", DetailErrorFallback);
+        yield return Case("HTTP invocation and navigation failures cannot provide detail playback candidates", DetailFailureBoundaries);
+        yield return Case("failed root navigation skips children and preserves search fallback", FailedNavigationRoot);
+        yield return Case("live resource failures remain stage errors and stale sessions preserve detection", DetectionFailureOwnership);
         yield return Case("detail navigation preserves custom actions payloads and advancing pages", Navigation);
         yield return Case("deleted disabled and replaced generations fence noncooperative late detections", LateResults);
         yield return Case("shutdown preparation drains and resume admits new work without disposal", PrepareAndResume);
@@ -28,8 +32,16 @@ public static class FilmSourcesTests
         yield return Case("source and raw JSON blob transfers verify chunks hashes and cleanup receipts", Transfers);
         yield return Case("cancelled stage and blob receipts are released without publishing results", CancelledTransfers);
         yield return Case("failed local saves do not publish and lost commit receipts reconcile", StorageFailures);
+        yield return Case("post-management local write failures retire old generations and preserve committed user state", ManagementStorageFailures);
+        yield return Case("shutdown drains storage-failure observation while preserving the original storage error", StorageFailureShutdown);
         yield return Case("startup failure is observable and local initialization never contacts Node", StartupFailure);
         yield return Case("explicit refresh recovers a failed host epoch without replaying management", ExplicitRuntimeRecovery);
+        yield return Case("cancelled management retires cached generations and waits for rollback without replay", CancelledManagement);
+        yield return Case("cancelled committed changes reconcile without restoring deleted videos", CancelledCommits);
+        yield return Case("failed or shutdown cancellation reconciliation never authorizes a retired generation", CancelledReconciliationFailure);
+        yield return Case("timed out management observes delayed rollback independently of the page and preserves its error", TimedOutManagement);
+        yield return Case("timed out committed changes reconcile without restoring deleted videos or replaying management", TimedOutCommits);
+        yield return Case("failed or shutdown timeout reconciliation preserves the original error and drains observation", TimedOutReconciliationFailure);
     }
 
     private static async Task LocalState()
@@ -158,6 +170,337 @@ public static class FilmSourcesTests
                 service.Videos.Where(video => video.Key.InstallationId == "b").Select(video => video.Key.SiteKey)
                     .SequenceEqual(["video"]),
                 "committed uninstall clears only the removed parent's tombstones");
+        }
+    }
+
+    private static async Task CancelledManagement()
+    {
+        var runtime = new Runtime(); runtime.Add("a", "video", "deleted");
+        await using var service = new FilmSourceService(runtime, new Store());
+        await service.RefreshAsync();
+        await service.DeleteVideoAsync(new("a", "deleted"));
+        var options = new FilmVideoOptions(false, false, false, true);
+        await service.SaveVideoOptionsAsync(Key("a"), options);
+        var entered = Signal(); var reconciling = Signal(); var release = Signal();
+        using var cancel = new CancellationTokenSource();
+        bool updating = false;
+        int statuses = 0;
+        runtime.OnCall = (operation, _, token) => operation switch
+        {
+            "update" => Update(token),
+            "status" when updating => Status(token),
+            _ => null
+        };
+        async Task<JsonElement> Update(CancellationToken token)
+        {
+            updating = true;
+            runtime.Nodes["a"].State = "starting";
+            runtime.Nodes["a"].Generation = 2;
+            entered.TrySetResult();
+            await Task.Delay(Timeout.Infinite, token);
+            throw new InvalidOperationException("Expected cancellation");
+        }
+        async Task<JsonElement> Status(CancellationToken token)
+        {
+            Check(!token.IsCancellationRequested, "cancelled page token is not used to coordinate Node");
+            if (++statuses == 1)
+                return runtime.Reply(new { instances = runtime.Nodes.Values.Select(node => node.Wire()).ToArray() });
+            reconciling.TrySetResult();
+            await release.Task.WaitAsync(token);
+            var cat = runtime.Nodes["a"];
+            cat.Generation = 3; cat.State = "ready"; cat.UpdateState = "failed"; cat.UpdateError = "CANCELLED";
+            return runtime.Reply(new { instances = runtime.Nodes.Values.Select(node => node.Wire()).ToArray() });
+        }
+        var update = service.UpdateCatAsync("a", FixtureScript, cancel.Token);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancel.Cancel();
+            await reconciling.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!update.IsCompleted && !service.Cats.Single().CanDetect,
+                "cancellation cannot finish or expose an old ready generation before rollback settles");
+            release.TrySetResult();
+            await Cancelled(update);
+            Check(service.Cats.Single().CanDetect && service.Cats.Single().Generation == 3 &&
+                service.Cats.Single().UpdateError == "CANCELLED", "cancellation publishes the actual recovered generation");
+            Check((await service.DetectAsync(Key("a"))).Result == "valid" &&
+                runtime.Invocations.All(call => call.Generation == 3), "next detection works without manual refresh");
+            Check(service.Videos.Count == 1 && service.Videos.Single().Options == options,
+                "rollback synchronization preserves options and the deleted video");
+            Check(runtime.Calls.Count(call => call.Method == "update") == 1 &&
+                !runtime.Calls.Any(call => call.Method is "install" or "import" or "restart" or "refresh"),
+                "cancellation reads status only; no management replay");
+        }
+        finally { release.TrySetResult(); cancel.Cancel(); }
+    }
+
+    private static async Task CancelledCommits()
+    {
+        foreach (string operation in new[] { "install", "uninstall" })
+        {
+            var runtime = new Runtime(); runtime.Add("a", "video", "deleted"); runtime.Add("b");
+            await using var service = new FilmSourceService(runtime, new Store());
+            await service.RefreshAsync();
+            await service.DeleteVideoAsync(new("a", "deleted"));
+            using var cancel = new CancellationTokenSource();
+            runtime.OnCall = (method, _, _) =>
+            {
+                if (method != operation) return null;
+                if (method == "uninstall") runtime.Nodes.Remove("a");
+                else { runtime.Nodes["a"].Generation++; runtime.Nodes["a"].SourceHash = "accepted"; }
+                cancel.Cancel();
+                return Task.FromException<JsonElement>(new OperationCanceledException(cancel.Token));
+            };
+            await Cancelled(operation == "uninstall" ? service.DeleteCatAsync("a", cancel.Token) :
+                service.ImportLocalAsync("再次导入", FixtureScript, "a", cancel.Token));
+            Check(service.Cats.Any(cat => cat.InstallationId == "a") == (operation != "uninstall"),
+                "actual committed uninstall is reflected despite the cancelled receipt");
+            Check(service.Videos.Select(video => video.Key).ToHashSet().SetEquals(operation == "uninstall"
+                ? [Key("b")] : [Key("a"), Key("b")]),
+                "cancelled reimport cannot clear a tombstone; uninstall clears only its own children");
+            Check(runtime.Calls.Count(call => call.Method == operation) == 1, "cancelled commit is not replayed");
+        }
+    }
+
+    private static async Task CancelledReconciliationFailure()
+    {
+        foreach (bool shutdown in new[] { false, true })
+        {
+            var runtime = new Runtime(); runtime.Add("a");
+            await using var service = new FilmSourceService(runtime, new Store());
+            await service.RefreshAsync();
+            var entered = Signal(); var reconciling = Signal();
+            using var cancel = new CancellationTokenSource();
+            runtime.OnCall = (operation, _, token) => operation switch
+            {
+                "update" => Update(token),
+                "status" => Status(token),
+                _ => null
+            };
+            async Task<JsonElement> Update(CancellationToken token)
+            {
+                entered.TrySetResult();
+                await Task.Delay(Timeout.Infinite, token);
+                throw new InvalidOperationException("Expected cancellation");
+            }
+            async Task<JsonElement> Status(CancellationToken token)
+            {
+                reconciling.TrySetResult();
+                if (shutdown) await Task.Delay(Timeout.Infinite, token);
+                throw new BridgeException("CLOSED");
+            }
+            var update = service.UpdateCatAsync("a", FixtureScript, cancel.Token);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancel.Cancel();
+            await reconciling.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            if (shutdown) await service.PrepareShutdownAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await Cancelled(update);
+            Check(!service.Cats.Single().CanDetect && service.Cats.Single().Generation == 0 &&
+                service.RuntimeError is not null, "failed coordination invalidates execution but preserves the list");
+            if (shutdown) service.Resume();
+            await Code(() => service.DetectAsync(Key("a")), "NOT_READY");
+            runtime.OnCall = null;
+            await service.RefreshAsync();
+            Check(service.Cats.Single().CanDetect, "explicit refresh can recover after failed coordination");
+        }
+    }
+
+    private static async Task TimedOutManagement()
+    {
+        foreach (bool bridgeFailure in new[] { true, false })
+        {
+            var runtime = new Runtime(); runtime.Add("a", "video", "deleted");
+            await using var service = new FilmSourceService(runtime, new Store());
+            await service.RefreshAsync();
+            var original = service.Cats.Single();
+            await service.DeleteVideoAsync(new("a", "deleted"));
+            var options = new FilmVideoOptions(false, false, false, true);
+            await service.SaveVideoOptionsAsync(Key("a"), options);
+            var reconciling = Signal(); var release = Signal();
+            using var page = new CancellationTokenSource();
+            var timeout = new BridgeException("TIMEOUT");
+            int statuses = 0;
+            runtime.OnCall = (operation, _, token) => operation switch
+            {
+                "update" => Update(),
+                "status" => Status(token),
+                _ => null
+            };
+            Task<JsonElement> Update()
+            {
+                runtime.Nodes["a"].State = "starting";
+                runtime.Nodes["a"].Generation = 2;
+                return bridgeFailure ? Task.FromException<JsonElement>(timeout) :
+                    Result(new { ok = false, contract = "cat.script.v1", code = "TIMEOUT" });
+            }
+            async Task<JsonElement> Status(CancellationToken token)
+            {
+                if (++statuses == 1)
+                {
+                    Check(service.Cats.Single().Generation == 0 && !service.Cats.Single().CanDetect,
+                        "the cached generation is retired before the first status reply");
+                    return runtime.Reply(new { instances = runtime.Nodes.Values.Select(node => node.Wire()).ToArray() });
+                }
+                reconciling.TrySetResult();
+                await release.Task.WaitAsync(token);
+                Check(!token.IsCancellationRequested, "page cancellation cannot cancel owner observation after TIMEOUT");
+                var cat = runtime.Nodes["a"];
+                cat.Generation = 3; cat.State = "ready"; cat.UpdateState = "failed"; cat.UpdateError = "CANCELLED";
+                return runtime.Reply(new { instances = runtime.Nodes.Values.Select(node => node.Wire()).ToArray() });
+            }
+            var update = service.UpdateCatAsync("a", FixtureScript, page.Token);
+            try
+            {
+                await reconciling.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                page.Cancel();
+                Check(!update.IsCompleted && !service.Cats.Single().CanDetect && service.Cats.Single().Generation == 2,
+                    "TIMEOUT waits for the observed starting generation to settle");
+                await Code(() => service.DetectAsync(Key("a")), "BUSY");
+                release.TrySetResult();
+                if (bridgeFailure) await SameError(update, timeout);
+                else await Code(() => update.WaitAsync(TimeSpan.FromSeconds(5)), "TIMEOUT");
+                var recovered = service.Cats.Single();
+                Check(recovered.CanDetect && recovered.Generation == 3 && recovered.UpdateError == "CANCELLED" &&
+                    recovered.SourceHash == original.SourceHash && recovered.ModifiedAt == original.ModifiedAt &&
+                    service.RuntimeError is null, "timeout publishes the recovered generation and original metadata");
+                Check((await service.DetectAsync(Key("a"))).Result == "valid" &&
+                    runtime.Invocations.All(call => call.Generation == 3), "next detection needs no refresh");
+                Check(service.Videos.Count == 1 && service.Videos.Single().Options == options,
+                    "owner observation preserves the tombstone and all four switches");
+                Check(runtime.Calls.Count(call => call.Method == "update") == 1 &&
+                    runtime.Calls.SkipWhile(call => call.Method != "update").Skip(1)
+                        .All(call => call.Method is "stage.abort" or "status" or "invoke") && runtime.Stages.Count == 0,
+                    "timeout only observes status and cleans the upload; it never replays management");
+            }
+            finally { release.TrySetResult(); page.Cancel(); }
+        }
+    }
+
+    private static async Task TimedOutCommits()
+    {
+        foreach (string operation in new[] { "install", "import", "enable", "uninstall" })
+        {
+            var runtime = new Runtime();
+            runtime.Add("a", "video", "deleted"); runtime.Add("b", "video", "deleted");
+            var store = new Store();
+            await using var service = new FilmSourceService(runtime, store);
+            await service.RefreshAsync();
+            await service.DeleteVideoAsync(new("a", "deleted"));
+            await service.DeleteVideoAsync(new("b", "deleted"));
+            var options = new FilmVideoOptions(false, false, false, true);
+            await service.SaveVideoOptionsAsync(Key("b"), options);
+            var timeout = new BridgeException("TIMEOUT");
+            runtime.OnCall = (method, _, _) =>
+            {
+                if (method != operation) return null;
+                if (method == "uninstall") runtime.Nodes.Remove("a");
+                else
+                {
+                    var cat = runtime.Nodes["a"];
+                    cat.Generation++;
+                    if (method == "enable") { cat.Enabled = false; cat.State = "disabled"; }
+                    else cat.SourceHash = "accepted";
+                }
+                return Task.FromException<JsonElement>(timeout);
+            };
+            int before = runtime.Calls.Count;
+            Task management = operation switch
+            {
+                "install" => service.ImportLocalAsync("再次导入", FixtureScript, "a"),
+                "import" => service.ImportNetworkAsync("再次导入", "https://fixture.invalid/cat.js", "a"),
+                "enable" => service.EnableCatAsync("a", false),
+                _ => service.DeleteCatAsync("a")
+            };
+            await SameError(management, timeout);
+            FilmSourceKey[] expected = operation == "uninstall" ? [Key("b")] : [Key("a"), Key("b")];
+            Check(service.Videos.Select(video => video.Key).ToHashSet().SetEquals(expected) &&
+                service.Videos.Single(video => video.Key == Key("b")).Options == options,
+                "lost reimport receipts never restore tombstones and uninstall affects only its parent");
+            Check(service.Cats.Any(cat => cat.InstallationId == "a") == (operation != "uninstall"),
+                "committed uninstall is reflected despite TIMEOUT");
+            if (operation != "uninstall")
+            {
+                var cat = service.Cats.Single(cat => cat.InstallationId == "a");
+                Check(cat.Generation == 2 && cat.CanDetect == (operation != "enable") &&
+                    cat.Enabled == (operation != "enable"), "committed enable or reimport is read from actual status");
+            }
+            Check(runtime.Calls.Skip(before).Count(call => call.Method == operation) == 1 &&
+                runtime.Calls.SkipWhile(call => call.Method != operation).Skip(1)
+                    .All(call => call.Method is "stage.abort" or "status") && runtime.Stages.Count == 0,
+                "timeout never repeats committed management or leaks staged source");
+            await using var reopened = new FilmSourceService(runtime, store);
+            await reopened.InitializeAsync();
+            Check(reopened.Videos.Select(video => video.Key).ToHashSet().SetEquals(expected),
+                "reconciled parent removal and suppressed videos survive reopening");
+        }
+    }
+
+    private static async Task TimedOutReconciliationFailure()
+    {
+        foreach (string operation in new[] { "update", "uninstall" })
+        foreach (string outcome in new[] { "failure", "prepare", "dispose" })
+        {
+            var runtime = new Runtime(); runtime.Add("a", "video", "deleted");
+            var store = new Store();
+            await using var service = new FilmSourceService(runtime, store);
+            await service.RefreshAsync();
+            await service.DeleteVideoAsync(new("a", "deleted"));
+            var options = new FilmVideoOptions(false, false, false, true);
+            await service.SaveVideoOptionsAsync(Key("a"), options);
+            var reconciling = Signal(); var interrupted = Signal(); var release = Signal(); var settled = Signal();
+            var timeout = new BridgeException("TIMEOUT");
+            runtime.OnCall = (method, _, token) => method == operation ? Task.FromException<JsonElement>(timeout) :
+                method == "status" ? Status(token) : null;
+            async Task<JsonElement> Status(CancellationToken token)
+            {
+                try
+                {
+                    Check(!service.Cats.Single().CanDetect && service.Cats.Single().Generation == 0,
+                        "even a failed status request starts with the old generation retired");
+                    reconciling.TrySetResult();
+                    if (outcome != "failure")
+                    {
+                        try { await Task.Delay(Timeout.Infinite, token); }
+                        catch (OperationCanceledException)
+                        {
+                            interrupted.TrySetResult();
+                            await release.Task; // Model real cleanup that must settle after cancellation.
+                            throw;
+                        }
+                    }
+                    throw new BridgeException("CLOSED");
+                }
+                finally { settled.TrySetResult(); }
+            }
+            Task management = operation == "update" ? service.UpdateCatAsync("a", FixtureScript) : service.DeleteCatAsync("a");
+            try
+            {
+                await reconciling.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                if (outcome != "failure")
+                {
+                    var shutdown = outcome == "prepare" ? service.PrepareShutdownAsync() : service.DisposeAsync().AsTask();
+                    await interrupted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    Check(!shutdown.IsCompleted && !management.IsCompleted,
+                        "shutdown cancels the owner but waits for actual observation cleanup");
+                    release.TrySetResult();
+                    await shutdown.WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                await SameError(management, timeout);
+                Check(settled.Task.IsCompleted && !service.Cats.Single().CanDetect &&
+                    service.Cats.Single().Generation == 0 && service.RuntimeError is not null &&
+                    service.Videos.Count == 1 && service.Videos.Single().Options == options,
+                    "coordination failure keeps the list and options without authorizing the old generation");
+                Check(!runtime.Disposed && !store.Disposed && runtime.Calls.Count(call => call.Method == operation) == 1,
+                    "shutdown owns its observation, not borrowed dependencies or a management replay");
+                if (outcome == "dispose") continue;
+                if (outcome == "prepare") service.Resume();
+                await Code(() => service.DetectAsync(Key("a")), "NOT_READY");
+                runtime.OnCall = null;
+                await service.RefreshAsync();
+                Check(service.Cats.Single().CanDetect && service.Videos.Count == 1,
+                    "explicit recovery after failed coordination remains usable and preserves the tombstone");
+            }
+            finally { release.TrySetResult(); }
         }
     }
 
@@ -389,6 +732,164 @@ public static class FilmSourcesTests
         }
     }
 
+    private static async Task DetailErrorFallback()
+    {
+        foreach (bool withError in new[] { true, false })
+        {
+            var runtime = new Runtime(); runtime.Add("a");
+            runtime.Invoke = (call, _) => call.Operation switch
+            {
+                "home" => Result(new { @class = new[] { new { type_id = "movies" } } }),
+                "category" => Result(new { list = new[] { new { vod_id = "first" } } }),
+                "detail" when call.Payload.GetProperty("id").GetString() == "first" =>
+                    withError ? Result(new { list = Array.Empty<object>(), error = "分类详情原始错误" }) :
+                        Result(new { list = Array.Empty<object>() }),
+                "search" => Result(new { list = new[] { new { vod_id = "searched" } } }),
+                "detail" when call.Payload.GetProperty("id").GetString() == "searched" =>
+                    Result(new { list = new[] { Playable() } }),
+                "play" => Result(new { url = "https://media.invalid/video.mp4" }),
+                _ => throw new InvalidOperationException("Unexpected fallback operation")
+            };
+            var store = new Store();
+            FilmSourceDetection detection;
+            var options = new FilmVideoOptions(false, false, false, true);
+            await using (var service = new FilmSourceService(runtime, store))
+            {
+                await service.RefreshAsync();
+                await service.SaveVideoOptionsAsync(Key("a"), options, order: 500);
+                detection = await service.DetectAsync(Key("a"));
+                Check(runtime.Invocations.Select(call => call.Operation)
+                    .SequenceEqual(["home", "category", "detail", "search", "detail", "play"]),
+                    "both empty-detail responses follow the reference search fallback");
+                Check(detection is { Result: "valid", PlaybackResolved: true, MediaPlaybackVerified: false },
+                    "search playback resolves without claiming media playback");
+                Check(detection.Steps.Any(step => step.Operation == "detail" && step.State == "failed" &&
+                    step.Error == "分类详情原始错误") == withError,
+                    "a script error remains an observable failed detail stage");
+                Check(JsonElement.DeepEquals(Element(service.Videos.Single().Detection!), Element(detection)) &&
+                    service.Videos.Single().Options == options &&
+                    service.Videos.Single().Order == 500, "fallback changes detection, not saved user choices");
+            }
+            await using var reopened = new FilmSourceService(runtime, store);
+            await reopened.InitializeAsync();
+            Check(JsonElement.DeepEquals(Element(reopened.Videos.Single().Detection!), Element(detection)) &&
+                reopened.Videos.Single().Options == options && reopened.Videos.Single().Order == 500,
+                "the complete fallback result and unchanged options survive local reopening");
+        }
+    }
+
+    private static async Task DetailFailureBoundaries()
+    {
+        foreach (string failure in new[] { "http", "nested-http", "invoke", "navigation-error", "navigation-http" })
+        {
+            var runtime = new Runtime(); runtime.Add("a");
+            bool navigation = failure.StartsWith("navigation-", StringComparison.Ordinal);
+            runtime.Invoke = (call, _) => call.Operation switch
+            {
+                "home" => Result(new { }),
+                "category" => Result(new { list = new[] { new { vod_id = "first" } } }),
+                "detail" when navigation && call.Payload.GetProperty("id").GetString() == "first" =>
+                    Result(new { list = new[] { new { vod_id = "child", vod_navigation = new
+                        { action = "detail", payload = new { id = "child" } } } } }),
+                "detail" => failure switch
+                {
+                    "http" or "navigation-http" => Result(new { statusCode = 503, list = new[] { Playable() } }),
+                    "nested-http" => Result(new { error = "script error", data = new { statusCode = 503, list = new[] { Playable() } } }),
+                    "invoke" => Task.FromException<JsonElement>(new FilmSourceException("UPSTREAM_HTTP_ERROR")),
+                    _ => Result(new { error = "navigation failed", list = new[] { Playable() } })
+                },
+                "search" => Result(new { list = Array.Empty<object>() }),
+                "play" => Result(new { url = "https://media.invalid/must-not-play.mp4" }),
+                _ => throw new InvalidOperationException("Unexpected failed detail operation")
+            };
+            await using var service = new FilmSourceService(runtime, new Store());
+            await service.RefreshAsync();
+            var result = await service.DetectAsync(Key("a"));
+            Check(result.Result == "invalid" && !result.PlaybackResolved &&
+                result.Steps.Any(step => step.Operation == "detail" && step.State == "failed"),
+                "failed detail transport or navigation is not successful playback metadata: " + failure);
+            Check(runtime.Invocations.Select(call => call.Operation).SequenceEqual(navigation
+                    ? ["home", "category", "detail", "detail", "search"] : ["home", "category", "detail"]),
+                "HTTP/invoke failure stops initial detail, while an empty navigation tree may only search: " + failure);
+        }
+    }
+
+    private static async Task FailedNavigationRoot()
+    {
+        foreach (bool failed in new[] { true, false })
+        {
+            var runtime = new Runtime(); runtime.Add("a");
+            var root = new Dictionary<string, object>
+            {
+                ["msg"] = "根导航失败",
+                ["list"] = new[] { new { vod_id = "child", vod_navigation = new
+                    { action = "detail", payload = new { id = "child" } } } }
+            };
+            if (failed) root["ok"] = false;
+            runtime.Invoke = (call, _) => call.Operation switch
+            {
+                "home" => Result(new { @class = new[] { new { type_id = "movies" } } }),
+                "category" => Result(new { list = new[] { new { vod_id = "root" } } }),
+                "detail" when call.Payload.GetProperty("id").GetString() == "root" => Result(root),
+                "detail" => Result(new { list = new[] { Playable() } }),
+                "play" => Result(new { url = "https://media.invalid/video.mp4" }),
+                "search" => Result(new { list = Array.Empty<object>() }),
+                _ => throw new InvalidOperationException("Unexpected root navigation operation")
+            };
+            var store = new Store();
+            FilmSourceDetection detection;
+            var options = new FilmVideoOptions(false, false, false, true);
+            await using (var service = new FilmSourceService(runtime, store))
+            {
+                await service.RefreshAsync();
+                await service.SaveVideoOptionsAsync(Key("a"), options, order: 500);
+                detection = await service.DetectAsync(Key("a"));
+                Check(runtime.Invocations.Select(call => call.Operation).SequenceEqual(failed
+                    ? ["home", "category", "detail", "search"]
+                    : ["home", "category", "detail", "detail", "play", "search"]),
+                    "failed root navigation cannot dispatch children or play, while the control can");
+                Check(detection.Result == (failed ? "invalid" : "valid") &&
+                    detection.PlaybackResolved == !failed && !detection.MediaPlaybackVerified,
+                    "the root failure is not made valid by child playback metadata");
+                Check(detection.Steps.Any(step => step.Operation == "detail" && step.State == "failed" &&
+                    step.Error == "根导航失败") == failed, "the failed root remains observable");
+                Check(service.Videos.Single().Options == options && service.Videos.Single().Order == 500,
+                    "root response classification never changes video options");
+            }
+            await using var reopened = new FilmSourceService(runtime, store);
+            await reopened.InitializeAsync();
+            Check(JsonElement.DeepEquals(Element(reopened.Videos.Single().Detection!), Element(detection)) &&
+                reopened.Videos.Single().Options == options && reopened.Videos.Single().Order == 500,
+                "the classified root result and user options survive reopening");
+        }
+    }
+
+    private static async Task DetectionFailureOwnership()
+    {
+        var runtime = new Runtime(); runtime.Add("a");
+        var store = new Store();
+        await using var service = new FilmSourceService(runtime, store);
+        await service.RefreshAsync();
+        var baseline = await service.DetectAsync(Key("a"));
+        var saved = store.Bytes!.ToArray();
+        int writes = store.Writes;
+        runtime.Invoke = (call, _) => call.Operation == "search"
+            ? Task.FromException<JsonElement>(new FilmSourceException("STALE_SESSION")) : DefaultInvoke(call);
+        using var caller = new CancellationTokenSource();
+        await Cancelled(service.DetectAsync(Key("a"), caller.Token));
+        Check(!caller.IsCancellationRequested &&
+            JsonElement.DeepEquals(Element(service.Videos.Single().Detection!), Element(baseline)) &&
+            store.Writes == writes && store.Bytes!.SequenceEqual(saved),
+            "session failure cancels detection without caller cancellation or replacing durable baseline");
+        runtime.Invoke = (call, _) => call.Operation == "search"
+            ? Task.FromException<JsonElement>(new FilmSourceException("RESOURCE_LIMIT")) : DefaultInvoke(call);
+        var liveFailure = await service.DetectAsync(Key("a"), caller.Token);
+        Check(liveFailure.Result == "search_error" && liveFailure.PlaybackResolved &&
+            liveFailure.Steps.Any(step => step.Operation == "search" && step.State == "failed" && step.Error == "RESOURCE_LIMIT") &&
+            JsonElement.DeepEquals(Element(service.Videos.Single().Detection!), Element(liveFailure)),
+            "RESOURCE_LIMIT without lifecycle failure remains an ordinary failed stage, not universal cancellation");
+    }
+
     private static async Task Navigation()
     {
         var runtime = new Runtime(); runtime.Add("a");
@@ -582,6 +1083,135 @@ public static class FilmSourcesTests
         Check(runtime.Calls.Count == calls && corrupt.Writes == 0, "bad local document is reported without replacing it or starting Node");
     }
 
+    private static async Task ManagementStorageFailures()
+    {
+        foreach (bool persistent in new[] { false, true })
+        foreach (string operation in new[] { "update", "enable", "uninstall", "install" })
+        {
+            var runtime = new Runtime();
+            runtime.Add("a", "video", "deleted"); runtime.Add("b", "video", "deleted");
+            var store = new Store();
+            await using var service = new FilmSourceService(runtime, store);
+            await service.RefreshAsync();
+            await service.DeleteVideoAsync(new("a", "deleted"));
+            await service.DeleteVideoAsync(new("b", "deleted"));
+            var options = new FilmVideoOptions(false, false, false, true);
+            await service.SaveVideoOptionsAsync(Key("a"), options, order: 500);
+            byte[] beforeBytes = store.Bytes!.ToArray();
+            var failure = new DocumentStoreException(DocumentStoreError.Storage);
+            store.WriteError = failure;
+            store.FailBefore = true;
+            store.FailAlways = persistent;
+            int calls = runtime.Calls.Count, observations = 0;
+            runtime.OnCall = (method, _, _) =>
+            {
+                if (method == "status" && store.WriteFailures > 0)
+                {
+                    observations++;
+                    Check(service.Cats.All(cat => !cat.CanDetect && cat.Generation == 0),
+                        "local write failure retires cached generations before reading authoritative status");
+                }
+                return null;
+            };
+            Task change = operation switch
+            {
+                "update" => service.UpdateCatAsync("a", FixtureScript),
+                "enable" => service.EnableCatAsync("a", false),
+                "uninstall" => service.DeleteCatAsync("a"),
+                _ => service.ImportLocalAsync("再次导入", FixtureScript, "a")
+            };
+            await SameError(change, failure);
+            Check(observations > 0 && runtime.Calls.Skip(calls).Count(call => call.Method == operation) == 1 &&
+                runtime.Calls.SkipWhile(call => call.Method != operation).Skip(1)
+                    .All(call => call.Method is "stage.abort" or "status") && runtime.Stages.Count == 0,
+                "storage recovery observes status without replaying the committed management command");
+            if (persistent)
+            {
+                Check(service.Cats.All(cat => !cat.CanDetect && cat.Generation == 0) &&
+                    service.RuntimeError is not null && store.Bytes!.SequenceEqual(beforeBytes),
+                    "persistent write failure publishes no new document and never authorizes a retired generation");
+                await Code(() => service.DetectAsync(Key("a")), "NOT_READY");
+            }
+            else if (operation == "uninstall")
+            {
+                Check(service.Cats.Single().InstallationId == "b" &&
+                    service.Videos.Single().Key == Key("b"), "confirmed deletion removes only its parent's mapping");
+            }
+            else
+            {
+                var cat = service.Cats.Single(cat => cat.InstallationId == "a");
+                Check(cat.Generation == runtime.Nodes["a"].Generation &&
+                    cat.SourceHash == runtime.Nodes["a"].SourceHash &&
+                    cat.CanDetect == (operation != "enable") && service.RuntimeError is null,
+                    "a settled local write publishes only the actual runtime generation");
+                if (operation == "enable") await Code(() => service.DetectAsync(Key("a")), "DISABLED");
+                else Check((await service.DetectAsync(Key("a"))).Result == "valid" &&
+                    runtime.Invocations.All(call => call.Generation == cat.Generation),
+                    "the next probe uses the new generation, never the retired one");
+            }
+            FilmSourceKey[] expected = !persistent && operation == "uninstall" ? [Key("b")] : [Key("a"), Key("b")];
+            Check(service.Videos.Select(video => video.Key).ToHashSet().SetEquals(expected),
+                "failed reimport cannot clear either parent's video tombstones");
+            if (expected.Contains(Key("a")))
+                Check(service.Videos.Single(video => video.Key == Key("a")) is { Order: 500 } video &&
+                    video.Options == options, "all persisted user switches and sort order survive the failure");
+            await using var reopened = new FilmSourceService(runtime, store);
+            await reopened.InitializeAsync();
+            Check(reopened.Videos.Select(video => video.Key).ToHashSet().SetEquals(expected) &&
+                reopened.Cats.All(cat => !cat.CanDetect), "the last confirmed local state survives a new owner");
+        }
+    }
+
+    private static async Task StorageFailureShutdown()
+    {
+        foreach (bool dispose in new[] { false, true })
+        {
+            var runtime = new Runtime(); runtime.Add("a", "video", "deleted");
+            var store = new Store();
+            await using var service = new FilmSourceService(runtime, store);
+            await service.RefreshAsync();
+            await service.DeleteVideoAsync(new("a", "deleted"));
+            var options = new FilmVideoOptions(false, false, false, true);
+            await service.SaveVideoOptionsAsync(Key("a"), options);
+            var failure = new DocumentStoreException(DocumentStoreError.Storage);
+            store.WriteError = failure; store.FailBefore = true;
+            var observing = Signal(); var interrupted = Signal(); var release = Signal();
+            runtime.OnCall = (method, _, token) => method == "status" && store.WriteFailures > 0
+                ? Observe(token) : null;
+            async Task<JsonElement> Observe(CancellationToken token)
+            {
+                Check(service.Cats.All(cat => !cat.CanDetect), "storage failure observation revokes detection first");
+                observing.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, token); }
+                catch (OperationCanceledException) { interrupted.TrySetResult(); await release.Task; throw; }
+                throw new InvalidOperationException("Expected owner cancellation");
+            }
+            var change = service.UpdateCatAsync("a", FixtureScript);
+            try
+            {
+                await observing.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var close = dispose ? service.DisposeAsync().AsTask() : service.PrepareShutdownAsync();
+                await interrupted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Check(!close.IsCompleted && !change.IsCompleted, "shutdown waits for real status-request cleanup");
+                release.TrySetResult();
+                await close.WaitAsync(TimeSpan.FromSeconds(5));
+                await SameError(change, failure);
+                Check(service.Cats.All(cat => !cat.CanDetect) && service.Videos.Single().Options == options &&
+                    runtime.Calls.Count(call => call.Method == "update") == 1 && !runtime.Disposed && !store.Disposed,
+                    "shutdown preserves the original storage error, user state and borrowed dependencies");
+                if (!dispose)
+                {
+                    service.Resume();
+                    runtime.OnCall = null;
+                    await service.RefreshAsync();
+                    Check(service.Cats.Single().CanDetect && service.Videos.Count == 1,
+                        "resumed refresh reconciles the new generation without reviving the deleted site");
+                }
+            }
+            finally { release.TrySetResult(); }
+        }
+    }
+
     private static async Task CancelledTransfers()
     {
         var runtime = new Runtime(); runtime.Add("a");
@@ -629,12 +1259,13 @@ public static class FilmSourcesTests
     {
         var session = new Runtime { StartingStatuses = 1 }; session.Add("restored");
         int factories = 0;
-        await using var runtime = new OnDemandRuntimeClient(_ => ++factories == 1
+        await using var runtime = new AppRuntimeClient(_ => ++factories == 1
             ? Task.FromException<IRuntimeSession>(new BridgeException("INTERNAL"))
             : Task.FromResult<IRuntimeSession>(session));
         await using var service = new FilmSourceService(runtime, new Store());
         await service.InitializeAsync();
         Check(factories == 0, "local initialization never enters the runtime factory");
+        runtime.Start();
         try { await service.StartAsync(); throw new InvalidOperationException("Expected factory failure"); }
         catch (BridgeException error) { Check(error.Code == "INTERNAL", "failed factory is observable"); }
         Check(service.RuntimeError is not null && runtime.CanRetry && factories == 1, "first failed epoch is retained");
@@ -693,6 +1324,16 @@ public static class FilmSourcesTests
         catch (OperationCanceledException) { return; }
         throw new InvalidOperationException("Expected cancellation");
     }
+    private static async Task SameError(Task task, Exception expected)
+    {
+        try { await task.WaitAsync(TimeSpan.FromSeconds(5)); }
+        catch (Exception error)
+        {
+            Check(ReferenceEquals(error, expected), "the original management exception must survive reconciliation");
+            return;
+        }
+        throw new InvalidOperationException("Expected " + expected.Message);
+    }
     private sealed record RpcCall(string Method, JsonElement Input);
     private sealed record Invocation(string InstallationId, long Generation, string SiteId, string Operation, JsonElement Payload);
     private sealed record SiteFixture(string Key, string Name, string Api, string[] Actions)
@@ -729,6 +1370,7 @@ public static class FilmSourcesTests
         internal string NextUpdateState = "updated", ImportState = "ready";
         internal string[]? NextSites;
         internal Func<Task>? BeforeInstall;
+        internal Func<string, JsonElement, CancellationToken, Task<JsonElement>?>? OnCall;
         internal Func<string, JsonElement>? Uninstall;
         internal Action? AfterStageBegin, AfterBlobCreated;
         internal int StartingStatuses;
@@ -745,6 +1387,7 @@ public static class FilmSourcesTests
             string operation = method["cat.script.".Length..];
             var input = Element(parameters ?? new { });
             Calls.Add(new(operation, input));
+            if (OnCall?.Invoke(operation, input, cancellationToken) is { } intercepted) return await intercepted;
             if (FailNext == operation)
             {
                 FailNext = null;
@@ -865,7 +1508,7 @@ public static class FilmSourcesTests
             Check(bytes.Length == upload.Length && Convert.ToHexStringLower(SHA256.HashData(bytes)) == upload.Sha256, "upload length/hash");
             Stages.Remove(token); upload.Bytes.Dispose(); return bytes;
         }
-        private JsonElement Reply(object value)
+        internal JsonElement Reply(object value)
         {
             byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(value);
             if (!BlobReplies) return Envelope(new { data = Encoding.UTF8.GetString(bytes) });
@@ -888,8 +1531,9 @@ public static class FilmSourcesTests
     private sealed class Store : IDocumentStore
     {
         internal byte[]? Bytes;
-        internal int Reads, Writes;
-        internal bool FailBefore, FailAfter, Disposed;
+        internal int Reads, Writes, WriteFailures;
+        internal bool FailBefore, FailAfter, FailAlways, Disposed;
+        internal DocumentStoreException? WriteError;
         public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
         {
             Check(documentNamespace == FilmSourceService.DocumentNamespace, "local document namespace");
@@ -902,7 +1546,11 @@ public static class FilmSourcesTests
         {
             Check(documentNamespace == FilmSourceService.DocumentNamespace, "local document namespace");
             cancellationToken.ThrowIfCancellationRequested();
-            if (FailBefore) { FailBefore = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
+            if (FailBefore || FailAlways)
+            {
+                FailBefore = false; WriteFailures++;
+                throw WriteError ?? new DocumentStoreException(DocumentStoreError.Storage);
+            }
             var previous = Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes);
             if (previous != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
             Bytes = data.ToArray(); Writes++;

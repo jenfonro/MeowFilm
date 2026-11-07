@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Scripting;
@@ -23,6 +24,13 @@ public static class FilmRulesTests
         yield return new("film-rules: native engine matches fixed dashboard cases and resets cached expressions", NativeReferenceCases);
         yield return new("film-rules: native defaults full-panel save restart and restore match the dashboard", NativePersistence);
         yield return new("film-rules: native cancellation and timeout stop execution then recover", NativeInterruption);
+        yield return new("film-rules: native cleaning saves match Go whitespace stages and preserve unsaved drafts", NativeSaveWhitespace);
+        yield return new("film-rules: native compilation cancels drains shutdown resumes and disposes", NativeCompilationLifecycle);
+        yield return new("film-rules: native empty episode matching keeps draft and saved cleaning without implicit writes", NativeEmptyEpisodeMatching);
+        yield return new("film-rules: native forward capture prescans cancel drain and time out then recover", NativeForwardCaptureLifecycle);
+        yield return new("film-rules: native global empty replacement cancels drains and times out then recovers", NativeGlobalCleaningLifecycle);
+        yield return new("film-rules: warmed native E3 references cancel drain time out and recover saved rules", NativeReferenceLifecycle);
+        yield return new("film-rules: native forward and backward references agree for draft and saved rules", NativeReferenceDirections);
     }
 
     private static void Check(bool condition, string message)
@@ -452,6 +460,46 @@ public static class FilmRulesTests
         finally { Directory.Delete(root, recursive: true); }
     }
 
+    private static async Task NativeSaveWhitespace()
+    {
+        var store = new MemoryStore();
+        var rows = new[] { "\u0085foo\u0085", "\u0085", "\u0085\ufeffbar\ufeff\u0085",
+            "a\u0085b", "\ufeff\u0085baz\u0085\ufeff", "\u200bkeep\u200b" };
+        var expected = new[] { "foo", "bar", "a\u0085b", "baz", "\u200bkeep\u200b" };
+        var draft = new FilmRuleSet
+        {
+            EpisodeCleanRegexRules = rows, AggregateRegexRules = rows,
+            EpisodeRules = [new("^$", "E1")],
+            MovieRules = [new("\u0085movie\u0085", "\u0085keep\u0085")]
+        };
+        await using (var service = NativeService(store))
+        {
+            await service.InitializeAsync();
+            var request = new FilmRuleRequest(FilmRuleSection.Search, "foo");
+            Check((await service.ProcessAsync(request, draft)).ProcessedText == "foo",
+                "draft cleaning retains NEL before the server save stage");
+            var saved = await service.SaveAsync(draft);
+            Check(saved.EpisodeCleanRegexRules.SequenceEqual(expected) && saved.AggregateRegexRules.SequenceEqual(expected),
+                "both clean groups discard Go whitespace-only rows and decode mixed NEL/BOM correctly");
+            Check(Same(saved.MovieRules, draft.MovieRules), "Go trim does not enter encoded matching-row JSON");
+            using var raw = JsonDocument.Parse(store.Data!);
+            Check(raw.RootElement.GetProperty("aggregateRegexRules")[1].GetString() == "\ufeffbar\ufeff",
+                "Go save keeps BOM; response JS decode removes it without changing stored bytes");
+            Check((await service.ProcessAsync(request)).ProcessedText == "" &&
+                (await service.ProcessAsync(request, draft)).ProcessedText == "foo",
+                "saved processing cleans foo without modifying the caller's unsaved draft");
+            Check((await service.ProcessAsync(new(FilmRuleSection.Episode, "foo"))).ProcessedText == "",
+                "episode cleaning uses the same normalized saved rules");
+            var restored = await service.RestoreDefaultsAsync(FilmRuleSection.Movie, draft);
+            Check(restored.AggregateRegexRules.SequenceEqual(expected), "section restore also uses the save chain");
+        }
+        await using var reopened = NativeService(store);
+        await reopened.InitializeAsync();
+        Check(reopened.GetSavedSnapshot().EpisodeCleanRegexRules.SequenceEqual(expected) &&
+            reopened.GetSavedSnapshot().AggregateRegexRules.SequenceEqual(expected),
+            "normalized nonempty clean rules survive a new native owner");
+    }
+
     private static async Task NativeInterruption()
     {
         await using var service = NativeService(new MemoryStore());
@@ -469,11 +517,228 @@ public static class FilmRulesTests
         await AssertRecovered(service);
     }
 
+    private static async Task NativeEmptyEpisodeMatching()
+    {
+        var store = new MemoryStore();
+        await using var service = NativeService(store);
+        await service.InitializeAsync();
+        var original = service.GetSavedSnapshot();
+        byte[] originalBytes = store.Data!.ToArray();
+        int writes = store.Writes;
+        var rules = new FilmRuleSet { EpisodeCleanRegexRules = [@"^noise\s*"] };
+        var request = new FilmRuleRequest(FilmRuleSection.Episode, "noise E2");
+        var draft = await service.ProcessAsync(request, rules);
+        Check(store.Writes == writes && store.Data!.SequenceEqual(originalBytes) &&
+            Same(service.GetSavedSnapshot(), original), "native draft processing does not save or replace the saved snapshot");
+        var savedRules = await service.SaveAsync(rules);
+        Check(Same(savedRules, rules) && Same(service.GetSavedSnapshot(), rules),
+            "saving the empty matching group preserves all four groups without refilling defaults");
+        byte[] savedBytes = store.Data!.ToArray();
+        var saved = await service.ProcessAsync(request);
+        Check(Same(draft, saved), "empty matching groups yield identical public draft and saved results");
+        foreach (var result in new[] { draft, saved })
+        {
+            Check(result.Type == "error" && result.Text == "无匹配规则" &&
+                !result.Matched && result.MatchedRuleIndex is null &&
+                !result.RewriteApplied && result.RewrittenText is null,
+                "empty matching groups preserve the reference error and no-match/no-rewrite state");
+            Check(result.InputText == "noise E2" && result.ProcessedText == "E2" && result.OutputText == "E2" &&
+                result.Previews.SequenceEqual(["E2"]) && result.Errors.Count == 0,
+                "completed cleaning is exposed by both public text fields and the preview");
+        }
+        var control = await service.ProcessAsync(request, rules with { EpisodeRules = [new("E2")] });
+        Check(control.Matched && control.ProcessedText == "E2" && control.OutputText == "E2" &&
+            control.Previews.SequenceEqual(["E2"]), "nonempty matching control keeps the same cleaned output");
+        Check(store.Writes == writes + 1 && store.Data!.SequenceEqual(savedBytes) &&
+            Same(service.GetSavedSnapshot(), rules),
+            "only the explicit save writes; saved processing and the control draft do not persist or refill defaults");
+    }
+
+    private static Task NativeForwardCaptureLifecycle()
+    {
+        string pattern = string.Concat(Enumerable.Repeat(@"\k<x>", 9999)) +
+            new string('a', 1_048_576) + "(?<x>b)";
+        return NativeFixedWorkLifecycle("forward-capture", new(FilmRuleSection.Movie, "b"),
+            new FilmRuleSet { MovieRules = [new(pattern, "", "i")] });
+    }
+
+    private static Task NativeGlobalCleaningLifecycle() =>
+        NativeFixedWorkLifecycle("global-empty-replacement", new(FilmRuleSection.Episode, new string('a', 1_048_576)),
+            new FilmRuleSet { EpisodeCleanRegexRules = ["(?=a{4096})a"] });
+
+    private static Task NativeReferenceLifecycle()
+    {
+        string pattern = "^(?=(a{1048576}))" + string.Concat(Enumerable.Repeat(@"(?=\1)", 9999));
+        return NativeFixedWorkLifecycle("E3-successful-lookahead-reference", new(FilmRuleSection.Movie, new string('a', 1_048_576)),
+            new FilmRuleSet { MovieRules = [new(pattern, "", "i")] }, new(FilmRuleSection.Movie, "b"));
+    }
+
+    private static async Task NativeReferenceDirections()
+    {
+        var store = new MemoryStore();
+        await using var service = NativeService(store);
+        await service.InitializeAsync();
+        foreach (var (pattern, text, flags, matched) in new[]
+        {
+            (@"^(a)\1$", "aA", "i", true), (@"^(a)\1$", "aA", "u", false),
+            (@"^..(?<=\1(a))$", "Aa", "i", true), (@"^..(?<=\1(a))$", "Aa", "u", false),
+            (@"^(😀)\1$", "😀😀", "u", true), (@"^..(?<=\1(😀))$", "😀😀", "u", true)
+        })
+        {
+            var rules = new FilmRuleSet { MovieRules = [new(pattern, "x", flags)] };
+            var request = new FilmRuleRequest(FilmRuleSection.Movie, text);
+            int writes = store.Writes;
+            var draft = await service.ProcessAsync(request, rules);
+            Check(store.Writes == writes, "reference draft processing does not write");
+            await service.SaveAsync(rules);
+            var saved = await service.ProcessAsync(request);
+            Check(Same(draft, saved), "both reference directions use the identical draft/saved rule path");
+            Check(saved.Matched == matched && saved.Errors.Count == 0 &&
+                saved.RewriteApplied == matched && saved.OutputText == (matched ? "x" : text),
+                "ordinary references preserve case/Unicode matching and replacement semantics");
+            Check(store.Writes == writes + 1, "only the explicit reference rule save writes");
+        }
+    }
+
+    private static async Task NativeFixedWorkLifecycle(string scenario, FilmRuleRequest request, FilmRuleSet rules,
+        FilmRuleRequest? executionWarmup = null)
+    {
+        var store = new MemoryStore();
+        await using var service = NativeService(store);
+        var ordinary = new FilmRuleSet { MovieRules = [new("^b$", "x", "i")] };
+        await service.SaveAsync(ordinary);
+        await AssertOrdinaryMovieRecovered(service);
+        int writes = store.Writes;
+        byte[] savedBytes = store.Data!.ToArray();
+        await WarmExecution();
+        // The production engine keeps its two-second budget; this is only scheduling allowance.
+        var allowance = TimeSpan.FromSeconds(5);
+        using var cancellation = new CancellationTokenSource();
+        var callWatch = Stopwatch.StartNew();
+        var active = service.ProcessAsync(request, rules, cancellation.Token);
+        double setupMilliseconds = callWatch.Elapsed.TotalMilliseconds;
+        await Task.Delay(200);
+        double pendingMilliseconds = callWatch.Elapsed.TotalMilliseconds;
+        Check(!active.IsCompleted, scenario + ": fixed native work is still pending before cancellation");
+        var cancelWatch = Stopwatch.StartNew();
+        cancellation.Cancel();
+        var prepare = service.PrepareShutdownAsync();
+        try
+        {
+            await Task.WhenAll(active, prepare).WaitAsync(allowance);
+            throw new InvalidOperationException(scenario + ": expected native cancellation");
+        }
+        catch (OperationCanceledException) { Check(cancellation.IsCancellationRequested, scenario + ": caller cancellation requested"); }
+        Check(active.IsCanceled && prepare.IsCompletedSuccessfully,
+            scenario + ": both the original call and preparation really settled, not just their waiters");
+        double cancelDrainMilliseconds = cancelWatch.Elapsed.TotalMilliseconds;
+        Check(cancelWatch.Elapsed <= allowance, scenario + ": actual cancellation and drain exceeded five seconds");
+        Console.WriteLine($"EVIDENCE film-rules {scenario} setupMs={setupMilliseconds:F3}; pendingMs={pendingMilliseconds:F3}; " +
+            $"cancelDrainMs={cancelDrainMilliseconds:F3}; call={active.Status}; prepare={prepare.Status}");
+        service.Resume();
+        await AssertOrdinaryMovieRecovered(service);
+        Check(Same(service.GetSavedSnapshot(), ordinary), scenario + ": resume preserves the saved ordinary rule");
+
+        await WarmExecution();
+        var budgetWatch = Stopwatch.StartNew();
+        var budgetCall = service.ProcessAsync(request, rules);
+        try
+        {
+            await budgetCall.WaitAsync(allowance);
+            throw new InvalidOperationException(scenario + ": expected production execution timeout");
+        }
+        catch (JavaScriptEngineException error)
+        {
+            Check(error.Code == "EXECUTION_TIMEOUT", scenario + ": budget interruption must not become invalid-rule output");
+        }
+        Check(budgetCall.IsFaulted && budgetWatch.Elapsed <= allowance,
+            scenario + ": the real budget call must return EXECUTION_TIMEOUT within five seconds without external cancellation");
+        Console.WriteLine($"EVIDENCE film-rules {scenario} budgetMs={budgetWatch.Elapsed.TotalMilliseconds:F3}; " +
+            $"call={budgetCall.Status}; code=EXECUTION_TIMEOUT; callerCancellation=false");
+        await AssertOrdinaryMovieRecovered(service);
+        Check(Same(service.GetSavedSnapshot(), ordinary), scenario + ": budget failure preserves saved rules");
+        Check(store.Writes == writes && store.Data!.SequenceEqual(savedBytes),
+            scenario + ": warmup cancellation budget and recovery never save the draft");
+        await service.DisposeAsync().AsTask().WaitAsync(allowance);
+        Console.WriteLine($"EVIDENCE film-rules {scenario} savedUnchanged=true; disposed=true");
+
+        async Task WarmExecution()
+        {
+            if (executionWarmup is null) return;
+            var warm = await service.ProcessAsync(executionWarmup, rules);
+            Check(!warm.Matched && warm.Errors.Count == 0 && warm.OutputText == executionWarmup.Text,
+                scenario + ": identical draft compiles and caches without a match or rule error");
+            Console.WriteLine($"EVIDENCE film-rules {scenario} warmed=true; matched=false; errors=0");
+        }
+    }
+
+    private static async Task AssertOrdinaryMovieRecovered(FilmRuleService service)
+    {
+        var result = await service.ProcessAsync(new(FilmRuleSection.Movie, "b"));
+        Check(result.Type == "success" && result.Matched && result.OutputText == "x" && result.Errors.Count == 0,
+            "the same public service processes its saved ordinary movie rule after native interruption");
+    }
+
     private static async Task AssertRecovered(FilmRuleService service)
     {
         var result = await service.ProcessAsync(new(FilmRuleSection.Search, "作品2", "作品2"));
         Check(result.Type == "success" && result.GroupKey == "作品2",
             "the same service resumes with its saved rules after an interrupted native call");
+    }
+
+    private static async Task NativeCompilationLifecycle()
+    {
+        await using var service = NativeService(new MemoryStore());
+        await service.InitializeAsync();
+        var request = new FilmRuleRequest(FilmRuleSection.Movie, "b");
+        string literal = new('a', 1_048_576);
+        // A normal rule of the same size remains supported: no text-length cap.
+        var ordinary = await service.ProcessAsync(request, new FilmRuleSet { MovieRules = [new(literal, "x")] });
+        Check(!ordinary.Matched && ordinary.Errors.Count == 0, "large ordinary rules are not rejected");
+        var expensive = new FilmRuleSet { MovieRules = [new("(?<=" + literal + ")b", "x")] };
+        using var cancellation = new CancellationTokenSource();
+        var active = service.ProcessAsync(request, expensive, cancellation.Token);
+        await Task.Delay(100);
+        Check(!active.IsCompleted, "the compile cancellation scenario reached active native work");
+        cancellation.Cancel();
+        var prepare = service.PrepareShutdownAsync();
+        await prepare.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(active.IsCompleted, "preparation drains the real active compile");
+        try { await active; throw new InvalidOperationException("Expected compilation cancellation"); }
+        catch (OperationCanceledException) { }
+        service.Resume();
+        await AssertRecovered(service);
+        try
+        {
+            await service.ProcessAsync(request, expensive).WaitAsync(TimeSpan.FromSeconds(5));
+            throw new InvalidOperationException("Expected compilation timeout");
+        }
+        catch (JavaScriptEngineException error) { Check(error.Code == "EXECUTION_TIMEOUT", "compile errors are not swallowed as invalid rules"); }
+        await AssertRecovered(service);
+        active = service.ProcessAsync(request, expensive);
+        await Task.Delay(100);
+        Check(!active.IsCompleted, "preparation starts while native compilation is active");
+        var queued = service.ProcessAsync(request);
+        await service.PrepareShutdownAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        foreach (var work in new[] { active, queued })
+        {
+            Check(work.IsCompleted, "preparation alone cancels and drains active and queued rules");
+            try { await work; throw new InvalidOperationException("Prepared processing returned success"); }
+            catch (OperationCanceledException) { }
+        }
+        service.Resume();
+        await AssertRecovered(service);
+        active = service.ProcessAsync(request, expensive);
+        await Task.Delay(100);
+        Check(!active.IsCompleted, "the disposal scenario reached active native work");
+        queued = service.ProcessAsync(request);
+        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        foreach (var work in new[] { active, queued })
+        {
+            Check(work.IsCompleted, "disposal drains active and queued rules");
+            try { await work; throw new InvalidOperationException("Disposed processing returned success"); }
+            catch (OperationCanceledException) { }
+        }
     }
 
     private sealed class RecordingEngine(Func<JsonElement, CancellationToken, Task<JsonElement>> handler) : IJavaScriptJsonEngine

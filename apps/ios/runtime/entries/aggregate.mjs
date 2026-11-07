@@ -7,8 +7,8 @@ import { createCatScriptModule } from '../../../runtime/modules/cat-script.mjs';
 // source module: the release-sync asm.js engine has no task-context hook.
 try {
   startIOSAppRuntime({
-    product: 'aggregate', assemble: ({ call, dataRoot }) => [
-      createMusicScriptModule({ call }),
+    product: 'aggregate', assemble: ({ dataRoot }) => [
+      createMusicScriptModule({ dataRoot }),
       createCatScriptModule({ dataRoot: join(dataRoot, 'cat') }),
     ],
   });

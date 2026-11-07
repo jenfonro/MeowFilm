@@ -325,6 +325,7 @@ actor SourcesRuntimeFixture {
     var cats = [SourcesRuntimeFixture.cat("a"), SourcesRuntimeFixture.cat("b")]
     var calls: [String] = []
     private var nextFailures: [String: String] = [:]
+    private var uploadOffset = 0
     func failNext(_ operation: String, code: String) { nextFailures[operation] = code }
     func setCat(_ cat: JSONValue) {
         let id = cat.catField("installationId")
@@ -332,6 +333,7 @@ actor SourcesRuntimeFixture {
         else { cats.append(cat) }
     }
     var invocations: [(String, JSONValue)] = []
+    var invocationSiteKeys: [String] = []
     private var pausedOperation: String?
     private var paused = false
     private var entered: [CheckedContinuation<Void, Never>] = []
@@ -389,6 +391,17 @@ actor SourcesRuntimeFixture {
         let id = params.catField("installationId")?.catText ?? "a"
         let result: JSONValue
         switch operation {
+        case "stage.begin":
+            uploadOffset = 0
+            return .object(["ok": .bool(true), "contract": .string("cat.script.v1"),
+                "token": .string("fixture-upload"), "chunkBytes": .number(65_536)])
+        case "stage.chunk":
+            guard let encoded = params.catField("data")?.catText, let bytes = Data(base64Encoded: encoded),
+                  params.catField("offset")?.catInteger == uploadOffset else { throw FilmSourceError(code: "INVALID_UPLOAD") }
+            uploadOffset += bytes.count
+            return .object(["ok": .bool(true), "contract": .string("cat.script.v1"), "next": .number(Double(uploadOffset))])
+        case "stage.abort":
+            return .object(["ok": .bool(true), "contract": .string("cat.script.v1"), "released": .bool(true)])
         case "status": result = .object(["instances": .array(cats)])
         case "start": result = .object([:])
         case "import", "install", "restart", "edit", "update": result = cats.first { $0.catField("installationId") == .string(id) }!
@@ -399,6 +412,7 @@ actor SourcesRuntimeFixture {
             result = cat
         case "uninstall": cats.removeAll { $0.catField("installationId") == .string(id) }; result = .object([:])
         case "invoke":
+            invocationSiteKeys.append(params.catField("siteId")!.catText!)
             let action = params.catField("operation")!.catText!
             let payload = try CatScriptTransport.parse(Data(params.catField("payload")!.catText!.utf8))
             invocations.append((action, payload))

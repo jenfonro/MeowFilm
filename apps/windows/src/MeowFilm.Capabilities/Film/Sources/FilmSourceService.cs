@@ -174,8 +174,7 @@ public sealed class FilmSourceService : IAsyncDisposable
                 catch (FilmSourceException)
                 {
                     // An error receipt can follow a committed uninstall; status decides what remains.
-                    try { await SynchronizeAsync(null, token).ConfigureAwait(false); }
-                    catch (Exception) when (!token.IsCancellationRequested) { }
+                    await ReconcileManagementFailureAsync(installationId).ConfigureAwait(false);
                     throw;
                 }
                 string? cleanupError = null;
@@ -199,6 +198,11 @@ public sealed class FilmSourceService : IAsyncDisposable
                 }, token).ConfigureAwait(false);
                 await SynchronizeAsync(null, token).ConfigureAwait(false);
                 if (cleanupError is not null) throw new FilmSourceException(cleanupError);
+            }
+            catch (Exception error) when (error is OperationCanceledException or BridgeException or DocumentStoreException)
+            {
+                await ReconcileManagementFailureAsync(installationId).ConfigureAwait(false);
+                throw;
             }
             finally { await EndCatChangeAsync(installationId).ConfigureAwait(false); }
         }, token), cancellationToken);
@@ -294,8 +298,7 @@ public sealed class FilmSourceService : IAsyncDisposable
                     catch (FilmSourceException)
                     {
                         // Failed management may have persisted updateState/updateError in Node.
-                        try { await SynchronizeAsync(null, token).ConfigureAwait(false); }
-                        catch (Exception) when (!token.IsCancellationRequested) { }
+                        await ReconcileManagementFailureAsync(id).ConfigureAwait(false);
                         throw;
                     }
                     FilmCatSource? restored = null;
@@ -313,10 +316,46 @@ public sealed class FilmSourceService : IAsyncDisposable
                     result = FindCat(id);
                     if (reimport && restored is null) throw new FilmSourceException("IMPORT_FAILED", result.Error);
                 }
+                catch (Exception error) when (error is OperationCanceledException or BridgeException or DocumentStoreException)
+                {
+                    await ReconcileManagementFailureAsync(id).ConfigureAwait(false);
+                    throw;
+                }
                 finally { await EndCatChangeAsync(id).ConfigureAwait(false); }
             }, token).ConfigureAwait(false);
             return result!;
         }, cancellationToken);
+    }
+
+    private async Task ReconcileManagementFailureAsync(string id)
+    {
+        // RPC failure or a failed local save can follow a committed Node change.
+        // Retire the cached generation before observing the actual state.
+        await InStateAsync(_ =>
+        {
+            InvalidateCat(id);
+            Volatile.Write(ref snapshot, new Snapshot(Freeze(Cats.Select(cat => cat.InstallationId == id
+                ? cat with { Generation = 0, State = "starting" } : cat)), Videos));
+            return Task.CompletedTask;
+        }, CancellationToken.None).ConfigureAwait(false);
+        using var owner = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, pending.Token);
+        try
+        {
+            do
+            {
+                // Never use a cancelled page token or replay the management call.
+                // Failed management, including its local save, cannot restore tombstones.
+                await SynchronizeAsync(null, owner.Token).ConfigureAwait(false);
+                if (!Cats.Any(cat => cat.InstallationId == id && cat.State == "starting")) return;
+                await Task.Delay(TimeSpan.FromMilliseconds(250), owner.Token).ConfigureAwait(false);
+            } while (true);
+        }
+        catch (Exception error)
+        {
+            // Preserve the original management error, but never retain a ready retired
+            // generation when reconciliation fails or shutdown interrupts it.
+            await ReportRuntimeErrorAsync(error).ConfigureAwait(false);
+        }
     }
 
     private async Task SynchronizeAsync(FilmCatSource? restored, CancellationToken token, IReadOnlySet<FilmSourceKey>? restoreKeys = null)

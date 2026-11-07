@@ -49,10 +49,7 @@ public partial class FilmPlaybackView : UserControl
         if (MetadataPanel is not null)
         {
             MetadataPanel.Height = ActualWidth < 840 ? double.NaN : PlayerFrame.ActualHeight;
-            // Keep the identity and actions in the compact desktop viewport; let the image breathe when stacked.
-            Backdrop.Height = ActualWidth < 840
-                ? Math.Clamp(PlayerFrame.ActualWidth * .55, 220, 340)
-                : Math.Clamp(PlayerFrame.ActualHeight - 220, 80, 240);
+            MetadataOverlay.MinHeight = ActualWidth < 840 ? 300 : PlayerFrame.ActualHeight;
         }
     }
 

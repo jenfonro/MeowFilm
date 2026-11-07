@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { installIOSFailureBoundary, parseIOSLaunchArguments } from '../apps/ios/runtime/bootstrap.mjs';
 import {
@@ -49,7 +50,7 @@ test('an escaped runtime failure closes the runtime once and never exits the hos
   assert.equal(reports, 1);
 });
 
-test('simulated iOS entry serves LX over the native descriptor with request-bound native storage', { timeout: 60000 }, async t => {
+test('simulated iOS entry manages and serves LX over the native descriptor with module-owned storage', { timeout: 60000 }, async t => {
   const runtime = spawnRuntime(t, { entry });
   const storage = nativeStorage();
   const { peer, closed } = connect(runtime, storage.methods);
@@ -57,48 +58,32 @@ test('simulated iOS entry serves LX over the native descriptor with request-boun
   assert.equal(described.product, 'aggregate');
   assert.equal(described.protocol, 1);
   assert.deepEqual(described.modules.map(module => module.id), ['music', 'cat']);
-  assert.ok(described.modules[0].methods.includes('music.script.invoke'));
+  for (const method of ['music.script.sources.list', 'music.script.resolve', 'music.script.invoke'])
+    assert.ok(described.modules[0].methods.includes(method), method);
   assert.equal(described.modules.some(module => module.id === 'source'), false);
 
-  const grant = randomUUID();
-  const instance = okay(await load(peer, { installationId: 'fixture', grant })).instance;
+  const instance = okay(await load(peer)).item;
   assert.equal(instance.state, 'ready');
-  assert.equal(instance.protocol, 'lx');
-  assert.deepEqual(instance.capabilities.tx.actions, ['musicUrl', 'lyric']);
-  assert.deepEqual(instance.capabilities.tx.qualitys, ['128k', '320k']);
-  const invoke = (operation, payload, generation = instance.generation) => peer.call('music.script.invoke', {
-    installationId: 'fixture', revision: 1, generation, siteId: 'tx', operation, payload,
+  assert.equal(instance.name, 'iOS runtime fixture');
+  assert.deepEqual(instance.sites, { tx: { actions: ['musicUrl', 'lyric'], qualitys: ['128k', '320k'] } });
+  const resolve = quality => peer.call('music.script.resolve', {
+    installationId: instance.installationId, platform: 'tx', quality, musicInfo: { songmid: 'm' },
   });
-  assert.equal(okay(await invoke('musicUrl', { type: '320k', musicInfo: { songmid: 'm' } })).value,
-    'http://media.invalid/tx/320k?n=1');
-  assert.equal(okay(await invoke('musicUrl', { type: '128k', musicInfo: { songmid: 'm' } })).value,
-    'http://media.invalid/tx/128k?n=2');
-  assert.deepEqual(okay(await invoke('lyric', { musicInfo: { songmid: 'm' } })).value,
-    { lyric: '[00:00.00]tx', tlyric: '', rlyric: '' });
-  assert.deepEqual(storage.calls.map(call => call.operation), ['get', 'set', 'get', 'set', 'get', 'set']);
-  for (const { message } of storage.calls) {
-    assert.equal(message.grant, grant);
-    assert.equal(message.installationId, 'fixture');
-    assert.equal(message.siteId, 'tx');
-    assert.equal(message.generation, instance.generation);
-    assert.equal(message.key, 'count');
-  }
-  const stale = await invoke('musicUrl', { type: '320k', musicInfo: {} }, instance.generation + 1);
-  assert.deepEqual(stale, { ok: false, contract, code: 'STALE_SOURCE' });
-  const unsupported = await invoke('musicUrl', { type: 'flac', musicInfo: {} });
-  assert.deepEqual(unsupported, { ok: false, contract, code: 'CAPABILITY_UNAVAILABLE' });
-  assert.deepEqual(okay(await peer.call('music.script.unload',
-    { installationId: 'fixture', revision: 1, generation: instance.generation })),
-  { ok: true, contract, unloaded: true, cleanupComplete: true });
-  const retired = await invoke('musicUrl', { type: '320k', musicInfo: {} });
-  assert.deepEqual(retired, { ok: false, contract, code: 'SOURCE_NOT_FOUND' });
-  assert.deepEqual(okay(await peer.call('music.script.status', {})).instances, []);
-
-  // A reload uses a new grant and generation; the retired grant cannot be reused.
-  const next = okay(await load(peer, { installationId: 'fixture', revision: 2, grant: randomUUID() })).instance;
+  assert.equal(okay(await resolve('320k')).url, 'http://media.invalid/tx/320k?n=1');
+  assert.equal(okay(await resolve('128k')).url, 'http://media.invalid/tx/128k?n=2');
+  assert.deepEqual(okay(await peer.call('music.script.invoke', {
+    installationId: instance.installationId, siteId: 'tx', operation: 'lyric', payload: { musicInfo: { songmid: 'm' } },
+  })).value, { lyric: '[00:00.00]tx', tlyric: '', rlyric: '' });
+  assert.deepEqual(storage.calls, []);
+  assert.deepEqual(JSON.parse(readFileSync(join(runtime.area, 'scripts', 'music', 'data',
+    `${instance.installationId}.json`), 'utf8')), { schema: 1, sites: { tx: [{ key: 'count', value: 3 }] } });
+  assert.deepEqual(await resolve('flac'), { ok: false, contract, code: 'CAPABILITY_UNAVAILABLE' });
+  assert.equal(okay(await peer.call('music.script.sources.disable',
+    { installationId: instance.installationId })).item.state, 'disabled');
+  assert.deepEqual(await resolve('320k'), { ok: false, contract, code: 'SOURCE_DISABLED' });
+  const next = okay(await peer.call('music.script.sources.enable', { installationId: instance.installationId })).item;
   assert.ok(next.generation > instance.generation);
-  assert.deepEqual(await load(peer, { installationId: 'fixture', revision: 3, expectedRevision: 2, grant }),
-    { ok: false, contract, code: 'PERMISSION_DENIED' });
+  assert.equal(okay(await resolve('320k')).url, 'http://media.invalid/tx/320k?n=4');
   peer.close();
   await closed;
   const exit = await runtime.exited;

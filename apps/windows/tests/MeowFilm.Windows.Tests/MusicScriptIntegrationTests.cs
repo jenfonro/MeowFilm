@@ -12,21 +12,18 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
+/// <summary>The native adapter over the real packaged runtime: shared management, module-owned
+/// persistence and private storage, native lyric parsing and explicit process recovery.</summary>
 public static class MusicScriptIntegrationTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("Native LX real pipe: two instances use explicit source and isolated storage", TwoInstances);
-        yield return new("Native LX real pipe: failed trial retains prior generation and durable source state", Update);
-        yield return new("Native LX real pipe: restart reads native state without Node then resumes isolated source data", Restart);
-        yield return new("Native LX real pipe: edited saved source runs after reenable and errors stay with its instance", EditedSource);
+        yield return new("Native LX real pipe: two installations resolve directed and keep isolated module storage", TwoInstances);
+        yield return new("Native LX real pipe: a failed update trial keeps the live generation and stored version", Update);
+        yield return new("Native LX real pipe: a restart reads the module catalog and resumes its private data", Restart);
         yield return new("Native LX real pipe: original local lyric protocol is parsed in native code", Lyrics);
-        yield return new("Native LX real pipe: explicit crashed-process recovery preserves native data and rehydrates only selected source", Recover);
-        yield return new("Native LX real pipe: concurrent request contexts preserve site and installation storage across awaits", ConcurrentStorage);
-        yield return new("Native LX real pipe: global storage is absent and completed request contexts cannot borrow storage authority", ScopedStorage);
-        yield return new("Native LX real pipe: response envelope preserves original raw value", RawValue);
-        yield return new("Native LX real pipe: internal transport preserves large arbitrary LX JSON", LargeTransport);
-        yield return new("Native LX real pipe: owner transports legal large recordings and declarations", LargeOwner);
+        yield return new("Native LX real pipe: explicit crashed-process recovery reloads only the requested source", Recover);
+        yield return new("Native LX real pipe: owner transports legal large recordings and source lists", LargeOwner);
     }
     private const string SourceTemplate = """
         const label = __LABEL__;
@@ -37,7 +34,7 @@ public static class MusicScriptIntegrationTests
           return {url:'https://media.invalid/'+label+'/'+count+'.mp3',headers:{Accept:'audio/*'}};
         });
         lx.send(lx.EVENT_NAMES.inited,{sources:{
-          wy:{name:'same-name',type:'music',actions:['musicUrl'],qualitys:['320k']},
+          wy:{name:'same-name',type:'music',actions:['musicUrl','lyric'],qualitys:['320k']},
           local:{name:'local',type:'music',actions:['musicUrl','lyric'],qualitys:[]}
         }});
         """;
@@ -52,35 +49,33 @@ public static class MusicScriptIntegrationTests
     }
     private sealed class Fixture : IAsyncDisposable
     {
+        internal readonly string Path;
         internal readonly LocalDocumentStore Store;
         internal readonly MusicLibraryOwner Library;
-        internal readonly OnDemandRuntimeClient Runtime;
+        internal readonly AppRuntimeClient Runtime;
         internal readonly MusicScriptOwner Owner;
-        internal Func<string, JsonElement, CancellationToken, Task>? BeforeStorage;
         internal NodeRuntime? Child;
         internal Fixture(string path)
         {
-            Store = new(path, ["music.library.v1"], [MusicLibraryOwner.ScriptContentCollection]);
+            Path = path;
+            Store = new(path, ["music.library.v1"], []);
             Library = new(Store);
-            MusicScriptOwner? owner = null;
             Runtime = new(async token =>
             {
                 string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
                     ?? throw new InvalidOperationException("Packaged runtime root required.");
                 string node = Environment.GetEnvironmentVariable("MEOWFILM_TEST_NODE")
                     ?? throw new InvalidOperationException("Verified Node required.");
-                RuntimeModule[] modules = [new("music", "0.7.0"), new("cat", "0.1.0"), new("source", "0.1.0")];
-                var capabilities = owner!.ScriptCapabilities.ToDictionary(pair => pair.Key,
-                    pair => new Func<JsonElement, CancellationToken, Task<object?>>(async (input, cancellationToken) =>
-                    {
-                        if (BeforeStorage is { } before) await before(pair.Key, input, cancellationToken);
-                        return await pair.Value(input, cancellationToken);
-                    }), StringComparer.Ordinal);
-                return Child = await NodeRuntime.StartAsync(node, RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules),
-                    modules, capabilities, Path.Combine(path, "script-runtime"), token);
+                RuntimeModule[] modules = [new("music", "0.8.0"), new("cat", "0.1.0"), new("source", "0.1.0")];
+                return Child = await NodeRuntime.StartAsync(node,
+                    RuntimeBundle.Verify(System.IO.Path.Combine(bundles, "aggregate"), "aggregate", modules),
+                    modules, new Dictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>(),
+                    System.IO.Path.Combine(path, "script-runtime"), token);
             });
-            Owner = owner = new(Library, Runtime);
+            Owner = new(Library, Runtime);
+            Runtime.Start();
         }
+        internal string ModuleData => System.IO.Path.Combine(Path, "script-runtime", "music");
         public async ValueTask DisposeAsync()
         {
             try { await Owner.DisposeAsync(); }
@@ -106,52 +101,34 @@ public static class MusicScriptIntegrationTests
         string token = begin.GetProperty("token").GetString()!;
         await Ok(f, "music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) }); return token;
     }
-    private static async Task<string> Install(Fixture f, string label)
-        => await InstallSource(f, Source(label));
-    private static async Task<string> InstallSource(Fixture f, string source)
+    private static async Task<string> InstallSource(Fixture f, string source, bool enable = true)
     {
-        string token = await Upload(f, source);
-        var result = await Ok(f, "music.sources.install", new { token, name = "Same Name", version = "1",
-            permissions = new { storage = new[] { "read", "write" } } });
-        return result.GetProperty("item").GetProperty("installationId").GetString()!;
+        var result = await Ok(f, "music.sources.add", new { token = await Upload(f, source) });
+        string id = result.GetProperty("item").GetProperty("installationId").GetString()!;
+        if (enable) await Ok(f, "music.sources.enable", new { installationId = id });
+        return id;
     }
     private static async Task<string> Resolve(Fixture f, string id)
     {
         var result = await Ok(f, "music.online.resolve", new { installationId = id, platform = "wy", quality = "320k",
             song = MusicSongFixture.Online("wy", "11", "Track", "Fixture", duration: 180) });
-        Check(!result.GetProperty("playbackVerified").GetBoolean());
+        Check(!result.GetProperty("playbackVerified").GetBoolean() && !result.GetProperty("qualityVerified").GetBoolean());
         return result.GetProperty("url").GetString()!;
     }
-    private static async Task<JsonElement> InvokeRaw(Fixture f, string id, string site, string operation, object payload)
-    {
-        var transport = new MusicScriptTransport(f.Runtime);
-        var status = await transport.CallAsync("status", new { }, default);
-        Check(status.GetProperty("contract").GetString() == "music.script.v2");
-        var instance = status.GetProperty("instances").EnumerateArray().Single(item => item.GetProperty("installationId").GetString() == id);
-        var reply = await transport.CallAsync("invoke", new
-        {
-            installationId = id, revision = instance.GetProperty("revision").GetInt64(),
-            generation = instance.GetProperty("generation").GetInt64(), siteId = site, operation, payload
-        }, default);
-        Check(reply.GetProperty("ok").GetBoolean(), "raw script invocation: " +
-            (reply.TryGetProperty("code", out var code) ? code.GetString() : "missing"));
-        Check(reply.GetProperty("contract").GetString() == "music.script.v2");
-        return reply.GetProperty("value").Clone();
-    }
+    private static JsonNode StoredData(Fixture f, string id) =>
+        JsonNode.Parse(File.ReadAllText(System.IO.Path.Combine(f.ModuleData, "data", id + ".json")))!;
     private static async Task TwoInstances()
     {
         await using var f = new Fixture(Data());
-        string first = await Install(f, "first"), second = await Install(f, "second");
-        Check(!f.Runtime.HasStarted);
-        await Ok(f, "music.sources.enable", new { installationId = first });
-        await Ok(f, "music.sources.enable", new { installationId = second });
+        string first = await InstallSource(f, Source("first")), second = await InstallSource(f, Source("second"));
         Check((await Resolve(f, first)).EndsWith("/first/1.mp3", StringComparison.Ordinal));
         Check((await Resolve(f, second)).EndsWith("/second/1.mp3", StringComparison.Ordinal));
         Check((await Resolve(f, first)).EndsWith("/first/2.mp3", StringComparison.Ordinal));
-        var snapshot = await f.Library.ReadSourceMetadataAsync();
-        long revision = snapshot.State.GetProperty("revision").GetInt64();
-        var stored = await f.Library.ReadScriptValueAsync(second, "wy", "count", revision);
-        Check(stored.GetInt32() == 1);
+        Check(StoredData(f, second)["sites"]!["wy"]![0]!["value"]!.GetValue<int>() == 1, "module-owned private storage");
+        Check(StoredData(f, first)["sites"]!["wy"]![0]!["value"]!.GetValue<int>() == 2);
+        var library = await f.Library.ExecuteAsync("music.library.list");
+        Check(library.GetProperty("ok").GetBoolean() && !File.ReadAllText(System.IO.Path.Combine(f.ModuleData, "catalog.json"))
+            .Contains("media.invalid", StringComparison.Ordinal), "resolved media URLs are never persisted");
         var unavailable = false;
         try { await f.Runtime.CallAsync("music.library.list", new { }); }
         catch (BridgeException e) when (e.Code == "METHOD_UNAVAILABLE") { unavailable = true; }
@@ -159,66 +136,38 @@ public static class MusicScriptIntegrationTests
     }
     private static async Task Update()
     {
-        await using var f = new Fixture(Data()); string id = await Install(f, "original");
-        await Ok(f, "music.sources.enable", new { installationId = id });
+        await using var f = new Fixture(Data()); string id = await InstallSource(f, Source("original"));
         var before = (await Ok(f, "music.sources.detail", new { installationId = id })).GetProperty("item");
-        string token = await Upload(f, "throw new Error('synthetic failure')");
-        var failed = await f.Owner.ExecuteAsync("music.sources.update", new { installationId = id, token, version = "2",
-            permissions = new { storage = new[] { "read", "write" } } });
+        var failed = await f.Owner.ExecuteAsync("music.sources.update",
+            new { installationId = id, token = await Upload(f, "throw new Error('synthetic failure')") });
         Check(!failed.GetProperty("ok").GetBoolean());
         var after = (await Ok(f, "music.sources.detail", new { installationId = id })).GetProperty("item");
-        Check(after.GetProperty("version").GetString() == "1" &&
-            before.GetProperty("generation").GetInt64() == after.GetProperty("generation").GetInt64());
+        Check(after.GetProperty("contentHash").GetString() == before.GetProperty("contentHash").GetString() &&
+            before.GetProperty("generation").GetInt64() == after.GetProperty("generation").GetInt64() &&
+            !after.GetProperty("rollbackAvailable").GetBoolean());
         Check((await Resolve(f, id)).EndsWith("/original/1.mp3", StringComparison.Ordinal));
         await Ok(f, "music.sources.disable", new { installationId = id });
-        var status = await f.Runtime.CallAsync("music.script.status", new { });
-        Check(status.GetProperty("instances").GetArrayLength() == 0);
+        var listed = await Ok(f, "music.sources.list");
+        Check(listed.GetProperty("items")[0].GetProperty("state").GetString() == "disabled");
     }
     private static async Task Restart()
     {
         string root = Data(), id;
         await using (var first = new Fixture(root))
         {
-            id = await Install(first, "restart");
-            await Ok(first, "music.sources.enable", new { installationId = id });
+            id = await InstallSource(first, Source("restart"));
             Check((await Resolve(first, id)).EndsWith("/restart/1.mp3", StringComparison.Ordinal));
         }
         await using var next = new Fixture(root);
-        await Ok(next, "music.sources.list");
-        Check(!next.Runtime.HasStarted);
+        var listed = await Ok(next, "music.sources.list");
+        var item = listed.GetProperty("items")[0];
+        Check(item.GetProperty("installationId").GetString() == id && item.GetProperty("enabled").GetBoolean() &&
+            item.GetProperty("state").GetString() == "idle", "a restart restores facts, never a ready instance");
         Check((await Resolve(next, id)).EndsWith("/restart/2.mp3", StringComparison.Ordinal));
-    }
-    private static async Task EditedSource()
-    {
-        string root = Data(), id, sourceHash;
-        await using (var first = new Fixture(root))
-        {
-            id = await Install(first, "original");
-            sourceHash = (await first.Library.ReadSourceMetadataAsync()).State.GetProperty("installations")[0]
-                .GetProperty("current").GetProperty("sourceHash").GetString()!;
-            await Ok(first, "music.sources.enable", new { installationId = id });
-            Check((await Resolve(first, id)).EndsWith("/original/1.mp3", StringComparison.Ordinal));
-            await Ok(first, "music.sources.disable", new { installationId = id });
-            string file = Directory.EnumerateFiles(root, sourceHash + ".js", SearchOption.AllDirectories).Single();
-            await File.WriteAllTextAsync(file, Source("manually-edited-longer-label"), new UTF8Encoding(false));
-            await Ok(first, "music.sources.enable", new { installationId = id });
-            Check((await Resolve(first, id)).EndsWith("/manually-edited-longer-label/2.mp3", StringComparison.Ordinal));
-        }
-        await using var reopened = new Fixture(root);
-        Check((await Resolve(reopened, id)).EndsWith("/manually-edited-longer-label/3.mp3", StringComparison.Ordinal));
-        await Ok(reopened, "music.sources.disable", new { installationId = id });
-        string sourceFile = Directory.EnumerateFiles(root, sourceHash + ".js", SearchOption.AllDirectories).Single();
-        await File.WriteAllTextAsync(sourceFile, "const broken = ;", new UTF8Encoding(false));
-        var failed = await reopened.Owner.ExecuteAsync("music.sources.enable", new { installationId = id });
-        Check(!failed.GetProperty("ok").GetBoolean() && failed.GetProperty("code").GetString() != "CORRUPT_STORAGE");
-        string other = await Install(reopened, "unaffected");
-        await Ok(reopened, "music.sources.enable", new { installationId = other });
-        Check((await Resolve(reopened, other)).EndsWith("/unaffected/1.mp3", StringComparison.Ordinal));
     }
     private static async Task Lyrics()
     {
-        await using var f = new Fixture(Data()); string id = await Install(f, "lyrics");
-        await Ok(f, "music.sources.enable", new { installationId = id });
+        await using var f = new Fixture(Data()); string id = await InstallSource(f, Source("lyrics"));
         var result = await Ok(f, "music.online.lyrics", new { installationId = id, platform = "local",
             song = MusicSongFixture.Local("local-test", "Fixture local", "Fixture", duration: 120) });
         Check(result.GetProperty("state").GetString() == "ready");
@@ -228,9 +177,7 @@ public static class MusicScriptIntegrationTests
     private static async Task Recover()
     {
         await using var f = new Fixture(Data());
-        string first = await Install(f, "recover"), second = await Install(f, "other");
-        await Ok(f, "music.sources.enable", new { installationId = first });
-        await Ok(f, "music.sources.enable", new { installationId = second });
+        string first = await InstallSource(f, Source("recover")), second = await InstallSource(f, Source("other"));
         Check((await Resolve(f, first)).EndsWith("/recover/1.mp3", StringComparison.Ordinal));
         long generation = f.Runtime.Generation;
         var old = f.Child!;
@@ -241,153 +188,19 @@ public static class MusicScriptIntegrationTests
         Check(local.GetProperty("ok").GetBoolean(), "native library must remain usable after process death");
         var failed = await f.Owner.ExecuteAsync("music.online.resolve", new { installationId = first, platform = "wy", quality = "320k",
             song = MusicSongFixture.Online("wy", "11", "Track") });
-        Check(!failed.GetProperty("ok").GetBoolean() && ReferenceEquals(old, f.Child), "no implicit process or business retry");
+        Check(!failed.GetProperty("ok").GetBoolean() &&
+            failed.GetProperty("code").GetString() == "SCRIPT_RUNTIME_UNAVAILABLE" && ReferenceEquals(old, f.Child),
+            "no implicit process or business retry");
         await f.Runtime.RetryAsync();
         Check(f.Runtime.Generation == generation + 1 && !ReferenceEquals(old, f.Child));
-        var status = await f.Runtime.CallAsync("music.script.status", new { });
-        Check(status.GetProperty("instances").GetArrayLength() == 0, "recovery does not activate all enabled scripts");
-        Check((await Resolve(f, first)).EndsWith("/recover/2.mp3", StringComparison.Ordinal));
-        status = await f.Runtime.CallAsync("music.script.status", new { });
-        Check(status.GetProperty("instances").GetArrayLength() == 1 &&
-            status.GetProperty("instances")[0].GetProperty("installationId").GetString() == first);
+        var listed = await Ok(f, "music.sources.list");
+        Check(listed.GetProperty("items").EnumerateArray().All(item => item.GetProperty("state").GetString() == "idle"),
+            "recovery does not load every enabled source");
+        Check((await Resolve(f, first)).EndsWith("/recover/2.mp3", StringComparison.Ordinal), "private data survives the process");
+        listed = await Ok(f, "music.sources.list");
+        Check(listed.GetProperty("items").EnumerateArray().Count(item => item.GetProperty("state").GetString() == "ready") == 1);
+        _ = second;
     }
-    private static async Task ConcurrentStorage()
-    {
-        const string source = """
-            lx.on('request', async ({source,info}, {storage}) => {
-              await Promise.resolve();
-              await storage.set('same',info.value);
-              await new Promise(resolve=>setTimeout(resolve,1));
-              return {source,value:await storage.get('same'),nil:null,flags:[false,0,'qs']};
-            });
-            lx.send('inited',{sources:{
-              wy:{type:'music',actions:['probe'],qualitys:[]},
-              tx:{type:'music',actions:['probe'],qualitys:[]}
-            }});
-            """;
-        await using var f = new Fixture(Data());
-        string first = await InstallSource(f, source), second = await InstallSource(f, source);
-        await Ok(f, "music.sources.enable", new { installationId = first });
-        await Ok(f, "music.sources.enable", new { installationId = second });
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var calls = new System.Collections.Concurrent.ConcurrentQueue<(string Id, string Site, long Generation, string Value)>();
-        f.BeforeStorage = async (method, input, token) =>
-        {
-            if (method != "platform.musicScript.storage.set") return;
-            calls.Enqueue((input.GetProperty("installationId").GetString()!, input.GetProperty("siteId").GetString()!,
-                input.GetProperty("generation").GetInt64(), input.GetProperty("value").GetString()!));
-            if (calls.Count == 4) entered.TrySetResult();
-            await release.Task.WaitAsync(token);
-        };
-        var targets = new[] { (first, "wy", "first-wy"), (first, "tx", "first-tx"), (second, "wy", "second-wy"), (second, "tx", "second-tx") };
-        var requests = targets.Select(target => InvokeRaw(f, target.Item1, target.Item2, "probe", new { value = target.Item3 })).ToArray();
-        try
-        {
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            Check(requests.All(request => !request.IsCompleted), "both instances and sites must be concurrently awaiting storage");
-            release.TrySetResult();
-            var values = await Task.WhenAll(requests).WaitAsync(TimeSpan.FromSeconds(10));
-            for (int index = 0; index < targets.Length; index++)
-            {
-                Check(values[index].GetProperty("source").GetString() == targets[index].Item2);
-                Check(values[index].GetProperty("value").GetString() == targets[index].Item3);
-                Check(values[index].GetProperty("nil").ValueKind == JsonValueKind.Null &&
-                    !values[index].GetProperty("flags")[0].GetBoolean() && values[index].GetProperty("flags")[1].GetInt32() == 0);
-            }
-            Check(calls.Select(call => (call.Id, call.Site, call.Value)).ToHashSet().SetEquals(targets));
-            Check(calls.All(call => call.Generation > 0));
-            var metadata = await f.Library.ReadSourceMetadataAsync();
-            foreach (var target in targets)
-                Check((await f.Library.ReadScriptValueAsync(target.Item1, target.Item2, "same",
-                    metadata.State.GetProperty("revision").GetInt64())).GetString() == target.Item3);
-        }
-        finally { release.TrySetResult(); }
-    }
-    private static async Task ScopedStorage()
-    {
-        const string source = """
-            const startup=typeof meow.storage === 'undefined';
-            let retired;
-            lx.on('request',async ({info},{storage})=>{
-              const global=typeof meow.storage === 'undefined';
-              const old=retired ? await retired.set('retired','must not persist').then(()=> 'allowed',e=>e.code) : null;
-              await Promise.resolve();
-              await storage.set('active',info.value);
-              retired=storage;
-              return {startup,global,old,active:await storage.get('active')};
-            });
-            lx.send('inited',{sources:{wy:{type:'music',actions:['probe'],qualitys:[]}}});
-            """;
-        await using var f = new Fixture(Data()); string id = await InstallSource(f, source);
-        await Ok(f, "music.sources.enable", new { installationId = id });
-        var first = await InvokeRaw(f, id, "wy", "probe", new { value = "first" });
-        var second = await InvokeRaw(f, id, "wy", "probe", new { value = "second" });
-        Check(first.GetProperty("startup").GetBoolean() && first.GetProperty("global").GetBoolean() &&
-            first.GetProperty("old").ValueKind == JsonValueKind.Null && first.GetProperty("active").GetString() == "first");
-        Check(second.GetProperty("startup").GetBoolean() && second.GetProperty("global").GetBoolean());
-        Check(second.GetProperty("old").GetString() == "PERMISSION_DENIED" && second.GetProperty("active").GetString() == "second");
-        var metadata = await f.Library.ReadSourceMetadataAsync();
-        long revision = metadata.State.GetProperty("revision").GetInt64();
-        foreach (string key in new[] { "startup", "global", "retired" })
-            Check((await f.Library.ReadScriptValueAsync(id, "wy", key, revision)).ValueKind == JsonValueKind.Null);
-    }
-    private static async Task RawValue()
-    {
-        await using var f = new Fixture(Data()); string id = await Install(f, "raw");
-        await Ok(f, "music.sources.enable", new { installationId = id });
-        var value = await InvokeRaw(f, id, "wy", "musicUrl", new { quality = "320k", musicInfo = new { } });
-        Check(value.EnumerateObject().Select(field => field.Name).ToHashSet(StringComparer.Ordinal).SetEquals(["url", "headers"]));
-        Check(value.GetProperty("url").GetString() == "https://media.invalid/raw/1.mp3");
-        Check(value.GetProperty("headers").GetProperty("Accept").GetString() == "audio/*");
-        const string extension = """
-            lx.on('request',async ({action,info})=>{
-              if(action!==info.expectedAction||info.type!=='qs'||info.quality!=='qsvip'||info.query!=='fixture')
-                throw new Error('extension payload changed');
-              return info.value;
-            });
-            lx.send('inited',{sources:{wy:{
-              type:'music',actions:['search','musicSearch','pic'],qualitys:['qs','qsvip']
-            }}});
-            """;
-        string extensionId = await InstallSource(f, extension);
-        await Ok(f, "music.sources.enable", new { installationId = extensionId });
-        foreach (string operation in new[] { "search", "musicSearch", "pic" })
-            foreach (object? expected in new object?[] { null, false, 7, "unchanged", new object?[] { null, "qs", false }, new { found = true, rows = new[] { 1, 2 } } })
-            {
-                var raw = await InvokeRaw(f, extensionId, "wy", operation, new { value = expected, expectedAction = operation, type = "qs", quality = "qsvip", query = "fixture" });
-                Check(System.Text.Json.Nodes.JsonNode.DeepEquals(System.Text.Json.Nodes.JsonNode.Parse(raw.GetRawText()),
-                    JsonSerializer.SerializeToNode(expected)), "raw extension value must retain its original JSON shape");
-            }
-    }
-
-    private static async Task LargeTransport()
-    {
-        const string source = """
-            lx.on('request', async ({info}) => info.value);
-            lx.send('inited',{sources:{wy:{type:'music',actions:['probe'],qualitys:[]}}});
-            """;
-        await using var f = new Fixture(Data());
-        string id = await InstallSource(f, source);
-        await Ok(f, "music.sources.enable", new { installationId = id });
-        var transport = new MusicScriptTransport(f.Runtime);
-        foreach (int size in new[] { 512 * 1024, 512 * 1024 + 1, 1024 * 1024 + 1, 8 * 1024 * 1024 + 1 })
-        {
-            string text = new string('x', size) + "音乐🎵\"\\";
-            var expected = new { text, blob = new { token = "ordinary LX value" },
-                rows = new object?[] { null, false, 0, 1.25, new[] { "qs", "qsvip" } } };
-            var value = await InvokeRaw(f, id, "wy", "probe", new { value = expected });
-            Check(JsonNode.DeepEquals(JsonNode.Parse(value.GetRawText()), JsonSerializer.SerializeToNode(expected)),
-                "large LX value must retain all bytes and JSON types");
-            Check(Convert.ToHexStringLower(SHA256.HashData(BridgeCodec.EncodeJSONValue(value))) ==
-                Convert.ToHexStringLower(SHA256.HashData(BridgeCodec.EncodeJSONValue(expected))));
-        }
-        // A fresh small call remains usable after all result blobs were released.
-        var status = await transport.CallAsync("status", new { }, default);
-        Check(status.GetProperty("instances").GetArrayLength() == 1);
-        Check(!(await InvokeRaw(f, id, "wy", "probe", new { value = false })).GetBoolean());
-    }
-
     private static async Task LargeOwner()
     {
         const string source = """
@@ -398,38 +211,18 @@ public static class MusicScriptIntegrationTests
                 if(info.musicInfo[field] !== 'x'.repeat(4096)) throw Error('recording changed');
               return {url:'https://media.invalid/large.mp3',headers:{'X-Checked':String(fields.length)}};
             });
-            const sources={};
-            for(let site=0;site<32;site++) {
-              const actions=['musicUrl'],qualitys=['320k'];
-              for(let i=1;i<32;i++) {
-                actions.push('action'+String(i).padStart(3,'0')+'a'.repeat(119));
-                qualitys.push('音'.repeat(61)+String(i).padStart(3,'0'));
-              }
-              sources[site===0?'wy':'site'+site]={type:'music',actions,qualitys:site===0?['320k']:qualitys};
-            }
-            lx.send('inited',{sources});
+            lx.send('inited',{sources:{wy:{type:'music',actions:['musicUrl'],qualitys:['320k']}}});
             """;
         await using var f = new Fixture(Data());
         string id = await InstallSource(f, source);
-        var enabled = await Ok(f, "music.sources.enable", new { installationId = id });
-        Check(BridgeCodec.EncodeJSONValue(enabled).Length > 65536, "owner must restore the large load result");
-        Check(enabled.GetProperty("item").GetProperty("capabilities").GetArrayLength() == 32);
-        var cap = enabled.GetProperty("item").GetProperty("capabilities")[0];
-        Check(cap.GetProperty("actions")[31].GetString() == "action031" + new string('a', 119));
-        Check(cap.GetProperty("qualitys").EnumerateArray().Select(value => value.GetString()).SequenceEqual(["320k"]));
-        var extension = enabled.GetProperty("item").GetProperty("capabilities").EnumerateArray()
-            .Single(item => item.GetProperty("platform").GetString() == "site1");
-        Check(extension.GetProperty("qualitys")[31].GetString() == new string('音', 61) + "031");
-
         var native = new JsonObject();
         foreach (string field in new[] { "mid", "id", "songId", "qqSongId", "songType", "type", "copyrightId", "strMediaMid",
             "hash", "albumId", "album_id", "albumMid", "albumAudioId", "mixsongid", "fileid", "fileId", "size" })
             native[field] = new string('x', 4096);
         var song = MusicSongFixture.Online("wy", "selected", "Track", "Fixture", duration: 180, native: native);
         var recordings = song["sources"]!.AsArray();
-        // Distinct same-recording locators are legal; only wy is selected.
-        // This checks the owner's parser above the old persistent JSON budget
-        // while the selected recording itself crosses the control threshold.
+        // Distinct same-recording locators are legal; only wy is selected while the
+        // whole request crosses the control upload threshold.
         for (int index = 0; index < 125; index++)
             recordings.Add(MusicSongFixture.Online("tx", "other-" + index, "Track", "Fixture",
                 duration: 180, native: native)["sources"]![0]!.DeepClone());
@@ -437,12 +230,13 @@ public static class MusicScriptIntegrationTests
         var resolved = await Ok(f, "music.online.resolve", new { installationId = id, platform = "wy", quality = "320k", song });
         Check(resolved.GetProperty("url").GetString() == "https://media.invalid/large.mp3" &&
             resolved.GetProperty("headers").GetProperty("X-Checked").GetString() == "17");
-        // Two legal full declaration sets also exercise the owner's response
-        // path above its former 512 KiB ceiling without inventing capabilities.
-        string second = await InstallSource(f, source);
-        await Ok(f, "music.sources.enable", new { installationId = second });
+        // Long legal header metadata makes the list itself cross the result blob path.
+        string header = "/**\n * @name " + new string('名', 255) + "\n * @description " + new string('述', 1024) +
+            "\n * @author " + new string('作', 1024) + "\n */\n";
+        for (int index = 0; index < 10; index++) await InstallSource(f, header + "// " + index, enable: false);
         var listed = await Ok(f, "music.sources.list");
-        Check(BridgeCodec.EncodeJSONValue(listed).Length > 512 * 1024);
-        Check(listed.GetProperty("items").EnumerateArray().All(item => item.GetProperty("capabilities").GetArrayLength() == 32));
+        Check(BridgeCodec.EncodeJSONValue(listed).Length > 65536 && listed.GetProperty("items").GetArrayLength() == 11,
+            $"list must cross the blob boundary: {BridgeCodec.EncodeJSONValue(listed).Length} bytes");
+        Check(listed.GetProperty("items")[1].GetProperty("description").GetString() == new string('述', 1024));
     }
 }

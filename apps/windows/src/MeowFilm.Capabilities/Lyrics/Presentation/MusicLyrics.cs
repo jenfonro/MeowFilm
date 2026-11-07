@@ -139,6 +139,7 @@ public sealed partial class MusicCapability
     }
     private void NotifyMusicSourcesChanged()
     {
+        Interlocked.Increment(ref selectionSourcesRevision);
         lyricSourcesRevision = checked(lyricSourcesRevision + 1);
         RetireLyrics();
         if (IsLyrics && !stopping) _ = RestoreLyricsAsync();
@@ -337,7 +338,7 @@ public sealed partial class MusicCapability
             if (epoch != playbackEpoch || !Lyrics.Contains(row) || !OwnsCurrent || !playback.HasMedia || !queueSaved) return;
             await playback.SeekAsync(row.Time);
             if (epoch == playbackEpoch && playback.OwnerId == Id && playback.HasMedia && !playback.IsPlaying)
-                await playback.ResumeAsync();
+                await ResumePlaybackAsync();
         });
     }
 }

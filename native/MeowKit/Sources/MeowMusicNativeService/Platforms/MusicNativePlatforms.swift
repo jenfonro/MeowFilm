@@ -26,9 +26,10 @@ enum MusicPlatformProtocol {
         try musicRequire(status == kCCSuccess, .unavailable)
         return Data(("params=" + output.prefix(written).map { String(format: "%02X", $0) }.joined()).utf8)
     }
-    static func kugou(_ params: [String: String]) -> String {
-        let salt = "OIlwieks28dk2k092lksi2UIkp" // Public protocol salt, not an account key.
-        return md5(salt + params.keys.filter { $0 != "signature" }.sorted().map { $0 + "=" + params[$0]! }.joined() + salt)
+    static let kugouSalt = "OIlwieks28dk2k092lksi2UIkp" // Public protocol salt, not an account key.
+    /// POST recipes sign the exact JSON body sent after the sorted query.
+    static func kugou(_ params: [String: String], body: String = "") -> String {
+        md5(kugouSalt + params.keys.filter { $0 != "signature" }.sorted().map { $0 + "=" + params[$0]! }.joined() + body + kugouSalt)
     }
     static func numericID(_ v: MJ, zero: Bool = false) throws -> String {
         let id = v.id
@@ -263,8 +264,9 @@ actor MusicNativePlatforms {
     func kugouSong(_ raw: MJ) throws -> MusicNativeTrackData {
         let audio = raw["audio_info"], album = raw.contains("albuminfo") ? raw["albuminfo"] : raw["album_info"]
         func first(_ values: MJ...) -> MJ { values.first { $0 != .null } ?? .null }
-        let hash = try MusicPlatformProtocol.hashID(first(raw["hash"], raw["FileHash"], audio["hash"]))
-        let full = first(raw["name"], raw["FileName"]).string.replacingOccurrences(of: "\\.(mp3|flac|m4a|wav|ape|ogg|aac|wma)$", with: "", options: [.regularExpression, .caseInsensitive])
+        // Discovery rank rows carry only per-quality audio_info hashes/sizes/durations.
+        let hash = try MusicPlatformProtocol.hashID(first(raw["hash"], raw["FileHash"], audio["hash"], audio["hash_128"]))
+        let full = first(raw["name"], raw["FileName"], raw["filename"]).string.replacingOccurrences(of: "\\.(mp3|flac|m4a|wav|ape|ogg|aac|wma)$", with: "", options: [.regularExpression, .caseInsensitive])
         var parts = full.components(separatedBy: " - ")
         let fallbackSinger = parts.count > 1 ? parts.removeFirst() : ""
         var singer = first(raw["SingerName"], raw["author_name"], .string(fallbackSinger)).string
@@ -282,7 +284,7 @@ actor MusicNativePlatforms {
         try musicRequire(Set(ids).count <= 1, .upstreamInvalid)
         let hashes = [MJ.string(hash), first(raw["hash_320"], raw["HQFileHash"], audio["hash_320"]),
             first(raw["hash_flac"], raw["SQFileHash"], audio["hash_flac"]), first(raw["hash_high"], raw["ResFileHash"], audio["hash_high"])]
-        let sizes = [first(raw["filesize"], raw["FileSize"], audio["filesize"]), first(raw["filesize_320"], raw["HQFileSize"], audio["filesize_320"]),
+        let sizes = [first(raw["filesize"], raw["FileSize"], audio["filesize"], audio["filesize_128"]), first(raw["filesize_320"], raw["HQFileSize"], audio["filesize_320"]),
             first(raw["filesize_flac"], raw["SQFileSize"], audio["filesize_flac"]), first(raw["filesize_high"], raw["ResFileSize"], audio["filesize_high"])]
         var types: [MJ] = [], nativeTypes = MJ.obj()
         for (i, quality) in ["128k", "320k", "flac", "flac24bit"].enumerated() {
@@ -294,13 +296,13 @@ actor MusicNativePlatforms {
         }
         let albumID = first(raw["album_id"], raw["AlbumID"], album["id"])
         let mix = first(raw["mixsongid"], raw["add_mixsongid"], raw["album_audio_id"], raw["MixSongID"])
-        let duration = raw.contains("Duration") ? raw["Duration"].number : first(raw["timelen"], raw["timelength"], audio["timelength"]).number / 1000
-        let albumName = first(raw["AlbumName"], album["name"], album["album_name"], .string(""))
+        let duration = raw.contains("Duration") ? raw["Duration"].number : first(raw["timelen"], raw["timelength"], audio["timelength"], audio["duration_128"]).number / 1000
+        let albumName = first(raw["AlbumName"], album["name"], album["album_name"], raw["album_name"], .string(""))
         let info = MJ.obj([("source", .string("kg")), ("hash", .string(hash)), ("songmid", .string(hash)),
             ("name", .string(title)), ("singer", .string(singer)), ("albumName", albumName),
             ("albumId", .string(albumID == .null || albumID == .string("") ? "0" : try MusicPlatformProtocol.numericID(albumID, zero: true))),
             ("albumAudioId", .string(mix == .null || mix == .string("") ? "0" : try MusicPlatformProtocol.numericID(mix, zero: true))),
-            ("duration", .number(duration)), ("img", first(raw["cover"], raw["Image"], raw["trans_param"]["union_cover"], .string(""))),
+            ("duration", .number(duration)), ("img", first(raw["cover"], raw["Image"], raw["trans_param"]["union_cover"], album["sizable_cover"], .string(""))),
             ("types", .array(types)), ("_types", nativeTypes)])
         return .init(platform: "kg", data: info.bytes)
     }

@@ -37,14 +37,16 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
             sections.append(.init(title: "已选 \(selected.count)", rows: [
                 .init(title: "全选", id: "film.videos.selectAll", enabled: !busy && !detecting, action: { [weak self] in self?.selected = Set(videos.map(\.key)); self?.render() }),
                 .init(title: "取消选择", id: "film.videos.deselectAll", enabled: !busy && !detecting, action: { [weak self] in self?.selected.removeAll(); self?.render() }),
-                .init(title: detecting ? "取消检测" : "检测", id: "film.videos.detect", enabled: !busy && !selected.isEmpty,
+                .init(title: detecting ? "取消检测" : "检测", id: "film.videos.detect", enabled: !busy && (detecting || !selected.isEmpty),
                       action: { [weak self] in self?.detectSelected() }),
                 .init(title: "删除", id: "film.videos.delete", enabled: !busy && !detecting && !selected.isEmpty, action: { [weak self] in
                     guard let self else { return }
                     let keys = videos.filter { self.selected.contains($0.key) }.map(\.key)
                     confirm("删除选中的 \(keys.count) 个视频源？") { [weak self] in
                         guard let self else { return }
-                        perform({ [service] in for key in keys { try await service.deleteVideo(key) } })
+                        deleteBatch(keys, isPresent: { key, snapshot in
+                            snapshot.videos.contains { $0.key == key }
+                        }) { [service] in try await service.deleteVideo($0) }
                     }
                 }),
             ]))

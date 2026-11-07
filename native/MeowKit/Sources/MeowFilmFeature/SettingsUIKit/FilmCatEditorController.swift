@@ -99,6 +99,9 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
         }
     }
     override func pageDidBecomeInactive() {
+        // Accepted saves settle normally, but this editor can no longer hand
+        // the batch to another page or submit its next item.
+        onSaved = nil
         if let reading {
             reading.cancel(); self.reading = nil; busy = false; render()
         }

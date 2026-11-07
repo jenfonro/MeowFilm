@@ -5,12 +5,6 @@ namespace MeowFilm.Capabilities;
 public sealed partial class MusicCapability
 {
     private long officialAccountEpoch;
-    public string CurrentQualityLabel => musicRecovery?.Media?.Receipt is { } receipt &&
-        receipt.TryGetProperty("qualityVerified", out var verified) && verified.ValueKind == JsonValueKind.True
-        ? MusicDto.Text(receipt, "actualQuality") switch {
-            "128k" => "标准", "192k" or "320k" => "高音质", "flac" => "无损", "flac24bit" => "Hi-Res",
-            "master" => "母带", "dolby" => "杜比", "sky" => "环绕声", "vivid" => "臻音", "jyeffect" => "增强", _ => "音质"
-        } : "音质";
     private object OfficialInput(SongRow song, MusicOnlineTarget target, bool initial, bool refresh, bool cacheOnly = false) =>
         new {
             platform = target.Platform, song = target.RecordingSong ?? song.Raw, originSong = song.Raw, sourceKey = target.SourceKey,
@@ -80,6 +74,10 @@ public sealed partial class MusicCapability
         long? expiry = response.GetProperty("expiresAt").ValueKind == JsonValueKind.Number
             ? response.GetProperty("expiresAt").GetInt64() : null;
         MusicDto.Require(expiry is null || expiry > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        var currentPolicy = await QualityCall("music.quality.settings.get", null, token);
+        token.ThrowIfCancellationRequested();
+        if (MusicDto.Text(currentPolicy, "signature") != target.QualityPolicySignature)
+            throw new MusicOperationException("QUALITY_POLICY_CHANGED");
         return new(uri, new Dictionary<string, string>(), target with {
             Generation = MusicDto.Integer(response, "generation"), SourceKey = MusicDto.Text(response, "sourceKey"),
             AccountScope = MusicDto.Text(response, "scope"), Quality = request,
@@ -99,6 +97,9 @@ public sealed partial class MusicCapability
     }
     private void OfficialAccountChanged(string platform)
     {
+        // Account notifications may arrive off-dispatcher. Fence the selection snapshot
+        // even when a script is playing, so its next explicit search uses new authority.
+        Interlocked.Increment(ref selectionSourcesRevision);
         // Automatic preload may currently be planning any official platform,
         // not only the active recording. Retire the whole speculative owner at
         // invalidation time so no stale plan can start a transfer afterward.
@@ -108,13 +109,16 @@ public sealed partial class MusicCapability
             CancelPendingMedia(state, "AUTH_REQUIRED");
         if (state?.Media is null || state.Media.Target is { Official: true } active && active.Platform == platform)
             Interlocked.Increment(ref officialAccountEpoch);
-        if (state?.Media?.Target is not { Official: true } target || target.Platform != platform) return;
+        bool revokeActive = state?.Media?.Target is { Official: true } target && target.Platform == platform;
         // Fence at notification time, before dispatching UI cleanup.
-        try { state.Access.Cancel(); } catch (ObjectDisposedException) { }
+        if (revokeActive)
+            try { state!.Access.Cancel(); } catch (ObjectDisposedException) { }
         if (!Presentation.Dispatcher.HasShutdownStarted)
             _ = Presentation.Dispatcher.InvokeAsync(() =>
             {
-                if (!ReferenceEquals(musicRecovery, state)) return;
+                if (stopping) return;
+                Changed(nameof(CanLoadMoreSources));
+                if (!revokeActive || state is null || !ReferenceEquals(musicRecovery, state)) return;
                 TrackMusicRecovery(StopRevoked());
                 async Task StopRevoked()
                 {

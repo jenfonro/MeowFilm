@@ -109,15 +109,22 @@ public sealed partial class MusicPlatformCatalog
             return Content(c, p.Continuation, "home", "wy:home");
         }, cancellationToken);
     }
-    public Task<JsonElement> ChannelsAsync(MusicChannelsRequest request, CancellationToken cancellationToken = default)
+    public async Task<JsonElement> ChannelsAsync(MusicChannelsRequest request, CancellationToken cancellationToken = default)
     {
         PJ.Require(request is not null); var p = request!;
+        var directory = await ChannelDirectoryAsync(p, cancellationToken);
+        return p.Platform == "wy"
+            ? PJ.Element(PlatformDiscovery.ChannelDirectory(JsonObject.Create(directory)!))
+            : directory;
+    }
+    private Task<JsonElement> ChannelDirectoryAsync(MusicChannelsRequest p, CancellationToken cancellationToken)
+    {
         return RunAsync(p.Platform, "channels", p, p.Refresh, async c =>
         {
             if (c.Platform == "kg") return PlatformKgDiscovery.Directory(await KgTags(c));
             PJ.Require(c.Platform == "wy", "UNSUPPORTED");
-            return PlatformDiscovery.ChannelDirectory(await Directory(c));
-        }, cancellationToken);
+            return await Directory(c);
+        }, cancellationToken, privateCache: p.Platform == "wy");
     }
     public Task<JsonElement> ChannelAsync(MusicChannelRequest request, CancellationToken cancellationToken = default)
     {
@@ -127,7 +134,14 @@ public sealed partial class MusicPlatformCatalog
         {
             if (c.Platform == "kg") return await KgChannel(c, p);
             PJ.Require(c.Platform == "wy", c.Session is null ? "AUTH_REQUIRED" : "UNSUPPORTED");
-            var descriptor = PJ.Array((await Directory(c))["items"]).OfType<JsonObject>().FirstOrDefault(d => PJ.S(d, "id") == p.Id);
+            // Refreshing channel content does not refresh its still-current directory.
+            var directory = await ChannelDirectoryAsync(new("wy"), c.Token);
+            await c.CheckSessionAsync();
+            var client = await clients.AcquireWyAsync(c.Token);
+            c.Guard(); // Adopting a trusted directory update must not hide a replaced identity.
+            c.Client = client;
+            var descriptor = PJ.Array(JsonObject.Create(directory)!["items"])
+                .OfType<JsonObject>().FirstOrDefault(d => PJ.S(d, "id") == p.Id);
             PJ.Require(descriptor is not null, "NOT_FOUND");
             if (p.PageCode is not null) PJ.Require(PJ.S(descriptor, "pageCode") == p.PageCode, "IDENTITY_MISMATCH");
             var target = "wy:channel:" + p.Id;

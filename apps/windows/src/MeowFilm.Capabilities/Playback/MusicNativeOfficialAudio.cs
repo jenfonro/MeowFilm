@@ -30,6 +30,43 @@ public sealed partial class MusicNativeApplication
             library.IsOfficialSourceEnabled(platform) && accounts.IsOfficialCurrent(session);
     }
 
+    /// <summary>Light check of one built-in provider: its fixed sample at standard quality.
+    /// Checking a disabled provider is allowed and changes nothing.</summary>
+    private async Task<JsonElement> CheckOfficialSourceAsync(object? parameters, CancellationToken token)
+    {
+        try
+        {
+            var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
+            LJ.Fields(input, "platform", "platform");
+            string platform = LJ.S(input["platform"]);
+            LJ.Require(platform is "wy" or "tx" or "kg");
+            JsonElement Result(string state, string? code) => JsonSerializer.SerializeToElement(new { ok = true, platform,
+                state, code, quality = "128k", sample = MusicSourceCheckSamples.Identity(platform) });
+            var session = await accounts.AcquireOfficialAsync(platform, true, token).ConfigureAwait(false);
+            if (session is null) return Result("failed", "AUTH_REQUIRED");
+            void Current()
+            {
+                token.ThrowIfCancellationRequested();
+                LJ.Require(accounts.IsOfficialCurrent(session), "AUTH_CHANGED");
+            }
+            try
+            {
+                _ = await officialAudio.ResolveAsync(session, MusicSourceCheckSamples.Recording(platform), ["128k"],
+                    token, Current).ConfigureAwait(false);
+                return Result("ok", null);
+            }
+            catch (MusicPlatformException e) { return Result("failed", e.Code); }
+            catch (MusicAccountException e) { return Result("failed", e.Code); }
+            catch (MusicLibraryException e) when (e.Code != "CANCELLED") { return Result("failed", e.Code); }
+            // Any other failure of the sample request is this check's result, not a crash of the check.
+            catch (Exception e) when (e is not OperationCanceledException) { return Result("failed", "UPSTREAM_ERROR"); }
+        }
+        catch (OperationCanceledException) { return Failed("CANCELLED"); }
+        catch (MusicLibraryException e) { return Failed(e.Code); }
+        catch (MusicAccountException e) { return Failed(e.Code); }
+        catch (JsonException) { return Failed("INVALID_REQUEST"); }
+    }
+
     private async Task<JsonElement> ExecuteOfficialAudioAsync(string method, object? parameters, CancellationToken token)
     {
         MusicPlatformSession? session = null;
@@ -77,7 +114,7 @@ public sealed partial class MusicNativeApplication
             var recording = recordings[0];
             sourceKey = LJ.S(recording["sourceKey"]);
             LJ.Require(!songMatcher.IsExcluded(originSong, sourceKey), "RECORDING_MISMATCH");
-            LJ.Require(request == "auto" || MusicQualityPolicy.RequestTypes.Contains(request), "QUALITY_UNAVAILABLE");
+            LJ.Require(request == "auto" || MusicQualityPolicy.OfficialTypes.Contains(request), "QUALITY_UNAVAILABLE");
             string[] qualities = request == "auto"
                 ? MusicQualityPolicy.RequestTypes.Concat(new[] { "jyeffect", "dolby", "sky", "vivid" })
                     .Where(q => MusicQualityPolicy.Enabled(q, policy.Policy))
@@ -140,13 +177,10 @@ public sealed partial class MusicNativeApplication
                 rights = observed.Entitlements;
                 LJ.Require(observed.Profile.UserId == session.UserId, "IDENTITY_MISMATCH");
             }
+            // Membership never gates a request: the platform's real response decides what plays.
+            // It only bounds an offline license for a complete file.
             bool member = !rights.VerificationDeferred && rights.Membership.Vip == true &&
                 (rights.Membership.ExpiresAt is null || rights.Membership.ExpiresAt > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            if (!member)
-            {
-                LJ.Require(platform == "wy" && qualities.Contains("128k"), "VIP_REQUIRED");
-                qualities = ["128k"];
-            }
             long? licenseExpiresAt = member ? rights.Membership.ExpiresAt : null;
             if (method == "music.official.authorize")
             {
@@ -154,7 +188,7 @@ public sealed partial class MusicNativeApplication
                 // existing locally. Recheck the exact recording with the platform.
                 if (!member)
                     _ = await officialAudio.ResolveAsync(session, NativeMusicSong.SourceData(recording),
-                        qualities, rights, token, Current).ConfigureAwait(false);
+                        qualities, token, Current).ConfigureAwait(false);
                 await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
                 return officialPolicy.Publish(platform, () =>
                 {
@@ -173,11 +207,11 @@ public sealed partial class MusicNativeApplication
             {
                 await sourceCache.InvalidateAsync(session.Scope, songId, token).ConfigureAwait(false);
                 var media = await officialAudio.ResolveAsync(session, NativeMusicSong.SourceData(recording),
-                    qualities, rights, token, Current).ConfigureAwait(false);
+                    qualities, token, Current).ConfigureAwait(false);
                 Current();
                 double expected = LJ.N(song["duration"]);
                 if (expected > 0 && media.Duration > 0 &&
-                    Math.Abs(expected - media.Duration) > Math.Max(3, Math.Min(expected, media.Duration) * .02))
+                    Math.Abs(expected - media.Duration) > 10)
                 {
                     await songMatcher.ExcludeAsync(originSong, sourceKey, token).ConfigureAwait(false);
                     await sourceCache.RejectRecordingAsync(session.Scope, songId, sourceKey, token).ConfigureAwait(false);

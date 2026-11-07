@@ -6,6 +6,7 @@ import MeowUI
 final class FilmCatSourcesViewController: FilmSourcePageController {
     private var selecting = false
     private var selected = Set<String>()
+    private var updateGeneration = UUID()
     override func viewDidLoad() { pageTitle = "猫源"; super.viewDidLoad(); view.accessibilityIdentifier = "film.cats" }
     override func render() {
         let cats = snapshot?.cats ?? []
@@ -58,16 +59,26 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
         if action == 4 {
             confirm("删除选中的 \(cats.count) 个猫源？", message: "关联视频源也将删除。") { [weak self] in
                 guard let self else { return }
-                perform({ [service] in for cat in cats { try await service.deleteCat(cat.installationId) } })
+                deleteBatch(cats, isPresent: { cat, snapshot in
+                    snapshot.cats.contains { $0.installationId == cat.installationId }
+                }) { [service] in try await service.deleteCat($0.installationId) }
             }
         } else if action == 2 {
             update(cats)
+        } else if action == 3 {
+            let restartable = cats.filter(\.canRestart)
+            var completedCount = 0
+            perform({ [service] in
+                while completedCount < restartable.count {
+                    _ = try await service.restartCat(restartable[completedCount].installationId)
+                    // Advance only after the service confirms the complete operation.
+                    completedCount += 1
+                }
+            })
         } else {
             perform({ [service] in
                 for cat in cats {
-                    if action == 3 {
-                        if cat.canRestart { _ = try await service.restartCat(cat.installationId) }
-                    } else { _ = try await service.enableCat(cat.installationId, enabled: action == 0) }
+                    _ = try await service.enableCat(cat.installationId, enabled: action == 0)
                 }
             })
         }
@@ -77,16 +88,24 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
         if first.sourceType == "local" {
             let editor = FilmCatEditorController(service: service, mode: .updateLocal(first), themeProvider: themeProvider)
             editor.onSaved = { [weak self, weak editor] in
-                guard let self else { return }
-                if navigationController?.topViewController === editor { navigationController?.popViewController(animated: false) }
+                guard let self, let editor, editor.isPageActive,
+                      editor.isPageVisible, navigationController?.topViewController === editor else { return }
+                navigationController?.popViewController(animated: false)
                 update(Array(cats.dropFirst()))
             }
             navigationController?.pushViewController(editor, animated: true)
         } else {
+            let generation = updateGeneration
             perform({ [service] in _ = try await service.updateCat(first.installationId, source: nil) },
-                completed: { [weak self] in self?.update(Array(cats.dropFirst())) })
+                completed: { [weak self] in
+                    guard let self, updateGeneration == generation, isPageActive, isPageVisible,
+                          navigationController?.topViewController === self else { return }
+                    update(Array(cats.dropFirst()))
+                })
         }
     }
+    override func pageDidBecomeHidden() { updateGeneration = UUID() }
+    override func pageDidBecomeInactive() { updateGeneration = UUID() }
 }
 
 @MainActor
@@ -123,9 +142,13 @@ final class FilmCatDetailController: FilmSourcePageController {
             .init(title: "删除", id: "film.cat.delete", enabled: !busy, action: { [weak self] in
                 self?.confirm("删除猫源？", message: "关联视频源也将删除。") { [weak self] in
                     guard let self else { return }
-                    perform({ [service] in try await service.deleteCat(cat.installationId) }, completed: { [weak self] in
-                        self?.navigationController?.popViewController(animated: true)
-                    })
+                    deleteBatch([cat], isPresent: { cat, snapshot in
+                        snapshot.cats.contains { $0.installationId == cat.installationId }
+                    }, completed: { [weak self] in
+                        guard let self, isPageActive, isPageVisible,
+                              navigationController?.topViewController === self else { return }
+                        navigationController?.popViewController(animated: true)
+                    }) { [service] in try await service.deleteCat($0.installationId) }
                 }
             }),
         ])]

@@ -9,11 +9,14 @@ namespace MeowFilm.Capabilities.Scripting;
 internal sealed class MusicScriptTransport(IRuntimeClient runtime)
 {
     private const int ChunkBytes = 64 * 1024;
-    private const string Contract = "music.script.v2";
+    internal const string Contract = "music.script.v3";
 
+    /// <summary>Business operations transparently upload large parameters and read back large results;
+    /// stage/control/blob are the transport itself.</summary>
     internal async Task<JsonElement> CallAsync(string operation, object parameters, CancellationToken cancellationToken)
     {
-        if (operation is not ("load" or "unload" or "invoke" or "status"))
+        if (operation.StartsWith("stage.", StringComparison.Ordinal) || operation.StartsWith("control.", StringComparison.Ordinal) ||
+            operation.StartsWith("blob.", StringComparison.Ordinal))
             return await Rpc(operation, parameters, cancellationToken).ConfigureAwait(false);
 
         byte[] bytes = BridgeCodec.EncodeJSONValue(parameters);

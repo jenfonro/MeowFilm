@@ -15,7 +15,7 @@ Windows meowfilm App 的脚本载荷由以下两个阶段生成。打包参数 -
 
 ## 输入闭包
 
-运行 descriptor 为 `music@0.7.0`、`cat@0.1.0`、`source@0.1.0`，响应契约分别为 `music.script.v2`、`cat.script.v1`、`source.runtime.v1`；载荷清单 modules 为 `music, cat, source`，product 保持 aggregate。LX 与 Cat 的大控制数据走 64 KiB 分片；source 控制帧为 1 MiB、源码分片为 64 KiB。三者共用同一 WorkerSession/worker 协议/QuickJS 后端。
+运行 descriptor 为 `music@0.8.0`、`cat@0.1.0`、`source@0.1.0`，响应契约分别为 `music.script.v3`、`cat.script.v1`、`source.runtime.v1`；载荷清单 modules 为 `music, cat, source`，product 保持 aggregate。LX 与 Cat 的大控制数据走 64 KiB 分片；source 控制帧为 1 MiB、源码分片为 64 KiB。三者共用同一 WorkerSession/worker 协议/QuickJS 后端。
 
 ```text
 app/bootstrap.mjs
@@ -69,3 +69,11 @@ SHA-256 105c3bed22d457e43e3d1c3c1c6959fda62a8fe06f0fc8a985303c3a2be72232
 除上述三个 QuickJS 包外，Cat 有限 Node 兼容层还使用锁定的纯 JavaScript 依赖闭包；直接依赖为 `@opentelemetry/api`、`buffer`、`events`、`path-browserify`、`readable-stream`、`supports-color` 和 `util`。其传递依赖按根 lock 实际解析，包内许可原文保留，中央归属见 `LICENSES/NOTICE.md` 和 `npm-node-compat-*.txt`。受审查引擎记录来自实际 registry tarball／安装文件核对；普通 JS 依赖仍执行来源/SRI/manifest/闭包检查，但不冒充独立上游签名。打包本身离线，不重新拉取 tarball。
 
 `scripts/windows/prepare-test-bundles.mjs` 在仓库 tmp 内的显式绝对测试目录调用同一闭包；已存在的 aggregate bundle 不覆盖。回归分别验证真实 release-sync 引擎离线初始化、Windows 入口／管道、v2 请求存储与受控 HTTP 服务访问，不冒充外部脚本验收。外部样本可通过 [验收工具的 `--payload`](../runtime/source-acceptance.md) 指向完整发布 runtime，并由其中的 node.exe 执行，以验证不借用工作区依赖。
+
+## Node 测试范围
+
+`scripts/windows/test-node.ps1 -All` 保留依赖锁、共享包和边界检查，根测试通过 `scripts/test-root.mjs --platform windows` 选择 `tests/windows-*.test.mjs` 与无平台前缀的共享测试，不加载 `tests/ios-*.test.mjs`。`--platform ios` 对称选择 iOS 与共享测试；不传平台或传 `--platform all` 仍执行全部根测试，`npm test` 保持显式仓库共同验证的完整覆盖。
+
+`scripts/test-packages.mjs` 只发现根 `package.json` 声明的 workspaces，并逐包执行其 `test`／`tests` 下的测试。Windows 独有的原生引擎源码检查位于 `tests/windows-native-javascript-source.test.mjs`；无 npm workspace manifest 的 `packages/film-rules` 通过 `tests/windows-film-rules.test.mjs` 执行原有规则测试，两者都进入 Windows 与仓库共同验证。
+
+端侧 wrapper 用例分别位于 `tests/windows-runtime-engine-package.test.mjs`、`tests/ios-runtime-engine-package.test.mjs`，各自夹具只读取本端源码。`tests/runtime-engine-package.test.mjs` 保留共享 packager 的双 profile、引擎和闭包契约，其公共夹具不读取两端 runtime 源码。所有选择继续要求实际执行非空测试集，失败、取消、跳过和 todo 均不能满足门禁。

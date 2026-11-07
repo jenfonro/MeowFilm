@@ -1,6 +1,7 @@
 import XCTest
 import UIKit
 @testable import MeowFilmFeature
+import MeowJSON
 import MeowRuntime
 import MeowStorage
 import MeowUI
@@ -105,6 +106,19 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
             let bytes = try store.read(key: FilmRuleService.documentKey)
             _ = try await service.process(.init(section: .movie, text: "电影"), draft: .init(movieRules: [.init(pattern: "[")]))
             XCTAssertEqual(try store.read(key: FilmRuleService.documentKey), bytes)
+            // Real iOS Foundation + the bundled native program, not a macOS
+            // decoder or RPC double. JS without u can split a surrogate pair.
+            let utf16Rules = FilmRuleSet(movieRules: [.init(pattern: "^.", replace: "x")])
+            let utf16Draft = try await service.process(.init(section: .movie, text: "🎬"), draft: utf16Rules)
+            XCTAssertEqual(utf16Draft.outputText.utf16, [0x78, 0xDFAC])
+            XCTAssertEqual(utf16Draft.outputText.displayString, "x\u{FFFD}")
+            XCTAssertEqual(try store.read(key: FilmRuleService.documentKey), bytes)
+            _ = try await service.save(utf16Rules)
+            let utf16Saved = try await service.process(.init(section: .movie, text: "🎬"))
+            XCTAssertEqual(utf16Saved, utf16Draft)
+            let unicode = try await service.process(.init(section: .movie, text: "🎬"),
+                draft: .init(movieRules: [.init(pattern: "^.", replace: "x", flags: "u")]))
+            XCTAssertEqual(unicode.outputText.utf16, [0x78])
             await service.close()
         } catch { await service.close(); throw error }
     }
@@ -165,6 +179,172 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
             throw error
         }
     }
+
+    func testRealCatPreservesCanonicallyEquivalentSiteIdentities() async throws {
+        let resources = try await hostResources()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try DocumentStore(baseURL: directory, namespace: FilmSourceService.documentNamespace)
+        let transport = CatScriptTransport(connectionProvider: { try await resources.scriptSession.connection() })
+        let service = FilmSourceService(transport: transport, storeFactory: { store })
+        let id = "ios-identity-" + UUID().uuidString.lowercased()
+        let composed = FilmSourceKey(installationId: id, siteKey: "\u{00E9}")
+        let decomposed = FilmSourceKey(installationId: id, siteKey: "e\u{0301}")
+        let source = #"""
+        const http = require('http');
+        let server;
+        module.exports.start = () => new Promise(resolve => {
+          server = http.createServer((request, response) => {
+            response.setHeader('content-type', 'application/json; charset=utf-8');
+            response.end(JSON.stringify({ video: { sites: [
+              { key: '\u00e9', name: 'Composed', api: '/identity/one' },
+              { key: 'e\u0301', name: 'Decomposed', api: '/identity/two' }
+            ] } }));
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+        });
+        module.exports.stop = () => { server?.closeAllConnections(); server?.close(); };
+        """#
+        do {
+            let cat = try await service.importLocal(name: "Identity fixture", source: source, installationId: id)
+            XCTAssertEqual(cat.sites.count, 2, "Real Cat Map accepts both raw keys")
+            var snapshot = await service.snapshot
+            XCTAssertEqual(Set(snapshot.videos.filter { $0.key.installationId == id }.map(\.key)), Set([composed, decomposed]))
+            let options = FilmVideoOptions(enabled: false, homeVisible: false, searchEnabled: false, aggregateImages: true)
+            try await service.saveVideoOptions(decomposed, options: options)
+            try await service.deleteVideo(composed)
+            _ = try await service.restartCat(id)
+            snapshot = await service.snapshot
+            let remaining = snapshot.videos.filter { $0.key.installationId == id }
+            XCTAssertEqual(remaining.map(\.key), [decomposed])
+            XCTAssertEqual(remaining.first?.options, options)
+            XCTAssertEqual(remaining.first?.api, "/identity/two")
+            let rebuilt = FilmSourceService(transport: transport, storeFactory: { store })
+            try await rebuilt.initialize()
+            let persisted = await rebuilt.snapshot
+            let persistedSites = persisted.videos.filter { $0.key.installationId == id }
+            XCTAssertEqual(persistedSites.map(\.key), [decomposed])
+            XCTAssertEqual(persistedSites.first?.key.siteKey.utf8.map { $0 }, [0x65, 0xCC, 0x81])
+            await rebuilt.close()
+            _ = try await service.importLocal(name: "Identity fixture", source: source, installationId: id)
+            snapshot = await service.snapshot
+            XCTAssertEqual(Set(snapshot.videos.filter { $0.key.installationId == id }.map(\.key)), Set([composed, decomposed]))
+            XCTAssertEqual(snapshot.videos.first { $0.key == decomposed }?.options, options)
+            try await service.deleteCat(id)
+            await service.close()
+        } catch {
+            // Clean by the runtime installation ID even if parsing its result
+            // failed before the local owner could publish the installation.
+            _ = try? await transport.call("uninstall", ["installationId": .string(id)])
+            await service.close()
+            throw error
+        }
+    }
+
+    func testRealCatGenerationChangeDuringBlobTransferRejectsOldDetection() async throws {
+        let resources = try await hostResources()
+        let connection = try await resources.scriptSession.connection()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try DocumentStore(baseURL: directory, namespace: FilmSourceService.documentNamespace)
+        let paused = expectation(description: "Real final search blob chunk received")
+        let gate = RealCatBlobGate(connection: connection, paused: { paused.fulfill() })
+        let transport = CatScriptTransport(rpc: { method, params, timeout in
+            try await gate.call(method, params, timeout: timeout)
+        })
+        let raw = CatScriptTransport(connectionProvider: { connection })
+        let service = FilmSourceService(transport: transport, storeFactory: { store })
+        let id = "ios-blob-" + UUID().uuidString.lowercased()
+        let key = FilmSourceKey(installationId: id, siteKey: "fixture")
+        var detection: Task<FilmSourceDetection, Error>?
+        do {
+            let installed = try await service.importLocal(name: "Blob fixture",
+                source: filmCatScript("blob", largeSearchResult: true), installationId: id)
+            let options = FilmVideoOptions(enabled: false, homeVisible: false, searchEnabled: false, aggregateImages: true)
+            try await service.saveVideoOptions(key, options: options, order: -11)
+            let bytes = try store.read(key: FilmSourceService.documentKey)
+            let task = Task { try await service.detect(key) }
+            detection = task
+            await fulfillment(of: [paused], timeout: 15)
+            // Deliberately bypass the owner. This is a real host generation
+            // change, not an OOM experiment or an owner.refresh cancellation.
+            _ = try await raw.call("restart", ["installationId": .string(id)])
+            let status = try await raw.call("status")
+            let instance = try XCTUnwrap(status.catField("instances")?.catArray?.first {
+                $0.catField("installationId") == .string(id)
+            })
+            let generation = try XCTUnwrap(instance.catField("generation")?.catInteger)
+            XCTAssertGreaterThan(Int64(generation), installed.generation)
+            let cached = await service.snapshot
+            XCTAssertEqual(cached.cats.first { $0.installationId == id }?.generation, installed.generation)
+            await gate.release()
+            do { _ = try await task.value; XCTFail("Real old-generation blob must not become a saved detection") }
+            catch { XCTAssertTrue(error is CancellationError, "\(error)") }
+            let after = await service.snapshot
+            XCTAssertEqual(after.cats.first { $0.installationId == id }?.generation, Int64(generation))
+            XCTAssertNil(after.videos.first { $0.key == key }?.detection)
+            XCTAssertEqual(after.videos.first { $0.key == key }?.options, options)
+            let saved = try XCTUnwrap(store.read(key: FilmSourceService.documentKey))
+            // Runtime counters in the source description may change on restart;
+            // compare the durable video fields rather than unrelated Cat metadata.
+            let document = try JSONDecoder().decode(FilmSourceDocument.self, from: saved)
+            let before = try JSONDecoder().decode(FilmSourceDocument.self, from: XCTUnwrap(bytes))
+            XCTAssertEqual(document.videos.first { $0.key == key }?.detection,
+                before.videos.first { $0.key == key }?.detection)
+            XCTAssertEqual(document.videos.first { $0.key == key }?.options, options)
+            let receipt = await gate.receipt
+            XCTAssertGreaterThan(receipt.length, 65_536)
+            XCTAssertTrue(receipt.released)
+            let token = try XCTUnwrap(receipt.token)
+            do {
+                _ = try await raw.call("blob.read", ["token": .string(token), "offset": .number(0)])
+                XCTFail("Released real token must no longer be readable")
+            } catch let error as FilmSourceError { XCTAssertEqual(error.code, "NOT_FOUND") }
+            try await service.deleteCat(id)
+            await service.close()
+        } catch {
+            detection?.cancel()
+            await gate.release()
+            _ = await detection?.result
+            _ = try? await raw.call("uninstall", ["installationId": .string(id)])
+            await service.close()
+            throw error
+        }
+    }
+}
+
+private actor RealCatBlobGate {
+    let connection: RuntimeBridgeConnection
+    let paused: @Sendable () -> Void
+    private var pending: CheckedContinuation<Void, Never>?
+    private var token: String?
+    private var length = 0
+    private var released = false
+    private var open = false
+    var receipt: (token: String?, length: Int, released: Bool) { (token, length, released) }
+
+    init(connection: RuntimeBridgeConnection, paused: @escaping @Sendable () -> Void) {
+        self.connection = connection; self.paused = paused
+    }
+    func release() { open = true; pending?.resume(); pending = nil }
+
+    func call(_ method: String, _ params: JSONValue, timeout: TimeInterval?) async throws -> JSONValue {
+        let result = try await connection.call(method, params, timeout: timeout)
+        if method == "cat.script.invoke", params.catField("operation") == .string("search"),
+           let blob = result.catField("blob") {
+            token = blob.catField("token")?.catText
+            length = blob.catField("length")?.catInteger ?? 0
+        }
+        if let token, params.catField("token") == .string(token) {
+            if method == "cat.script.blob.read", result.catField("next")?.catInteger == length, !open {
+                await withCheckedContinuation { pending = $0; paused() }
+            }
+            if method == "cat.script.blob.release", result.catField("released") == .bool(true) { released = true }
+        }
+        return result
+    }
 }
 
 // Run these classes in two separate xcodebuild invocations. The second checks the
@@ -223,7 +403,7 @@ private let filmColdIDs = ["ios-film-cold-enabled", "ios-film-cold-disabled"]
 
 /// Synthetic Cat HTTP program. Each route validates the actual wire method and
 /// complete payload, including Unicode, punctuation and typed POST fields.
-private func filmCatScript(_ revision: String) -> String {
+private func filmCatScript(_ revision: String, largeSearchResult: Bool = false) -> String {
     // All callers supply fixed test literals, never external JavaScript input.
     """
     const http = require('http'), fs = require('fs');
@@ -263,7 +443,7 @@ private func filmCatScript(_ revision: String) -> String {
       }],
       ['GET ' + API + '/search', input => {
         expect('search', input, { wd: '斗破', page: '1' });
-        return { list: [{ vod_id: VIDEO }] };
+        return { list: [{ vod_id: VIDEO }]\(largeSearchResult ? ", padding: 'x'.repeat(70000)" : "") };
       }]
     ]);
     function json(response, value) {

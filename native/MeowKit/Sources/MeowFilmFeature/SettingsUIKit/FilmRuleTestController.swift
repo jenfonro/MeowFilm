@@ -33,11 +33,11 @@ final class FilmRuleTestController: FilmSettingsListController {
         ]))
         if let result {
             var rows: [FilmSettingsRow] = [
-                .init(title: result.outputText.isEmpty ? "空结果" : result.outputText, id: "film.rule.test.output"),
+                .init(title: result.outputText.isEmpty ? "空结果" : result.outputText.displayString, id: "film.rule.test.output"),
                 .init(title: result.matched ? "已匹配" : "未匹配", id: "film.rule.test.match"),
             ]
-            rows += result.previews.enumerated().map { .init(title: $0.element, id: "film.rule.test.preview.\($0.offset)") }
-            rows += result.errors.enumerated().map { .init(title: $0.element.text, id: "film.rule.test.error.\($0.offset)") }
+            rows += result.previews.enumerated().map { .init(title: $0.element.displayString, id: "film.rule.test.preview.\($0.offset)") }
+            rows += result.errors.enumerated().map { .init(title: $0.element.text.displayString, id: "film.rule.test.error.\($0.offset)") }
             sections.append(.init(title: "结果", rows: rows))
         }
         super.render()

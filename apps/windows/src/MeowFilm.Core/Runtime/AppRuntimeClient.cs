@@ -2,9 +2,10 @@ using System.Text.Json;
 
 namespace MeowFilm.Core.Runtime;
 
-/// <summary>Passive script port. Explicit recovery replaces only a failed transport;
-/// it never replays a business operation or starts scripts during native navigation.</summary>
-public sealed class OnDemandRuntimeClient : IRuntimeClient, IRuntimeRecovery, IAsyncDisposable
+/// <summary>The App's one script runtime connection. The App starts it once after composing
+/// its owners; starting the host executes no script. Explicit recovery replaces only a failed
+/// transport and never replays a business operation.</summary>
+public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeRecovery, IAsyncDisposable
 {
     private sealed class Epoch(long generation)
     {
@@ -22,8 +23,22 @@ public sealed class OnDemandRuntimeClient : IRuntimeClient, IRuntimeRecovery, IA
     private bool closed, recoveryFailed;
     private long generation;
 
-    public OnDemandRuntimeClient(Func<CancellationToken, Task<IRuntimeSession>> factory)
+    public AppRuntimeClient(Func<CancellationToken, Task<IRuntimeSession>> factory)
         => this.factory = factory ?? throw new ArgumentNullException(nameof(factory));
+
+    /// <summary>Begins the single start attempt. Recovery scopes register before this call;
+    /// the result is observed through State and through each request.</summary>
+    public void Start()
+    {
+        Epoch epoch;
+        lock (gate)
+        {
+            if (closed) throw new BridgeException("CLOSED");
+            if (current is not null) throw new BridgeException("INVALID_MESSAGE");
+            current = epoch = NewEpoch();
+        }
+        _ = StartAsync(epoch);
+    }
     public bool HasStarted { get { lock (gate) return current is not null; } }
     public long Generation { get { lock (gate) return current?.Generation ?? 0; } }
     public RuntimeConnectionState State
@@ -59,14 +74,13 @@ public sealed class OnDemandRuntimeClient : IRuntimeClient, IRuntimeRecovery, IA
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!BridgeCodec.ValidMethod(method)) throw new BridgeException("INVALID_MESSAGE");
-        Epoch epoch; bool launch = false;
+        Epoch epoch;
         lock (gate)
         {
-            if (closed || recoveryFailed || recovery is { IsCompleted: false }) throw new BridgeException("CLOSED");
-            if (current is null) { current = NewEpoch(); launch = true; }
+            if (closed || recoveryFailed || recovery is { IsCompleted: false } || current is null)
+                throw new BridgeException("CLOSED");
             epoch = current;
         }
-        if (launch) _ = StartAsync(epoch);
         // A cancelled caller cannot cancel the common factory for other callers.
         var session = await epoch.Start.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested(); CheckCurrent(epoch);

@@ -17,7 +17,7 @@ enum MeowfilmScriptRuntime {
         }
     )
 
-    /// App-owned script data (Cat private volumes), never a script-selected path.
+    /// App-owned script data (music installations and Cat private volumes), never a script-selected path.
     private static var dataDirectory: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)

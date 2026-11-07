@@ -99,6 +99,6 @@ final class FilmRuleReferenceTests: XCTestCase {
     private func assertRecovered(_ service: FilmRuleService) async throws {
         let result = try await service.process(FilmRuleRequest(section: .search, text: "作品2", query: "作品2"))
         XCTAssertEqual(result.type, "success")
-        XCTAssertEqual(result.groupKey, "作品2")
+        XCTAssertEqual(result.groupKey, FilmRuleText("作品2"))
     }
 }

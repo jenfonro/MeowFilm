@@ -2,7 +2,7 @@
 
 meowfilm 的 iPhone 与 Windows 原生客户端：
 - iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供业务、平台、账号、播放、缓存和持久化能力。公共 Node 脚本宿主随 App 启动恢复启用猫源；客户端影视规则静态链接原生 QuickJS，不依赖 Node。
-- Windows：WPF / .NET 原生桌面应用；公共 Node 脚本宿主随 App 启动，恢复已启用的猫源，停用脚本不执行。客户端影视规则内嵌原生 QuickJS，不依赖 Node。
+- Windows：WPF / .NET 原生桌面应用；公共 Node 脚本宿主随 App 启动，影视恢复已启用的猫源，音乐脚本仅在启用、调用或显式检测时执行。原生业务不依赖脚本服务可用；客户端影视规则内嵌原生 QuickJS，不依赖 Node。
 
 ## 命令
 
@@ -48,7 +48,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `Navigation` — 根容器、页面导航与呈现路由
   - `Presentation` — 主页面外壳、页头、底部导航和播放器停靠区
   - `UITests` — 共享 UIKit 组件测试
-  - `RuntimeTests` — 真实 App 宿主的内嵌运行器测试
+  - `RuntimeTests` — 真实 App 宿主的内嵌运行器与页面生命周期测试
   - `runtime` — iOS socketpair bootstrap 与薄 entry
 - `native/MeowKit/` — iOS Swift Package
   - `MeowContracts`、`MeowJSON`、`MeowStorage`、`MeowAccounts`、`MeowPlayback`、`MeowUI`、`MeowRuntime` — 共享能力
@@ -64,7 +64,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/windows/tests/` — Windows 原生测试
-- `apps/runtime/` — 公共脚本传输装配；`modules/{music,cat}-script.mjs` 与 `modules/source-runtime.mjs` 分别拥有 music.script.v2／music@0.7.0、cat.script.v1／cat@0.1.0、source.runtime.v1／source@0.1.0
+- `apps/runtime/` — 公共脚本传输装配；`modules/{music,cat}-script.mjs` 与 `modules/source-runtime.mjs` 分别拥有 music.script.v3／music@0.8.0、cat.script.v1／cat@0.1.0、source.runtime.v1／source@0.1.0
 - `apps/windows/runtime/` — 仅 Windows 启动／命名管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
 - `packages/script-host/` — LX、CatNode 和 portable 来源共用的 WorkerSession／QuickJS 执行、有限 Node 风格能力、平台适配与实例生命周期
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层

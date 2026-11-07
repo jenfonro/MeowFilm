@@ -141,12 +141,31 @@ public struct MusicScriptSourceItem: Sendable, Equatable, Identifiable {
     public let platforms: [MusicPublicBrowsePlatform]
     public let enabled: Bool
     public let state: State
+    public let check: MusicScriptSourceCheck?
     public init(id: String, name: String, version: String, author: String = "", summary: String = "",
                 homepage: String = "", origin: Origin, platforms: [MusicPublicBrowsePlatform],
-                enabled: Bool, state: State) {
+                enabled: Bool, state: State, check: MusicScriptSourceCheck? = nil) {
         self.id = id; self.name = name; self.version = version; self.author = author
         self.summary = summary; self.homepage = homepage; self.origin = origin
-        self.platforms = platforms; self.enabled = enabled; self.state = state
+        self.platforms = platforms; self.enabled = enabled; self.state = state; self.check = check
+    }
+}
+
+/// Shared module health facts; enablement and execution state remain independent.
+public struct MusicScriptSourceCheck: Sendable, Equatable {
+    public let summary: String
+    public let checkedAt: Date
+    public let platforms: [String: String]
+    public init(summary: String, checkedAt: Date, platforms: [String: String]) {
+        self.summary = summary; self.checkedAt = checkedAt; self.platforms = platforms
+    }
+}
+public struct MusicScriptSourceDetail: Sendable {
+    public let item: MusicScriptSourceItem
+    public let networkURL: String?
+    public let rollbackAvailable: Bool
+    public init(item: MusicScriptSourceItem, networkURL: String?, rollbackAvailable: Bool) {
+        self.item = item; self.networkURL = networkURL; self.rollbackAvailable = rollbackAvailable
     }
 }
 

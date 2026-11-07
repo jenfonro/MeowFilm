@@ -32,7 +32,7 @@ public static class MusicOfficialPlaybackScopeTests
             Check(f.Output.ReadOpens == 1 && f.Output.NetworkOpens == 0 &&
                 f.Module.CurrentSource == "QQ 音乐", f.Module.Status);
             Check(f.App.Resolutions.Count == 0 && f.App.Plans.Count == 1 &&
-                !f.App.Plans.Single().GetProperty("discover").GetBoolean());
+                f.App.Completions.Count == 0);
             Check(f.Files.Requests == transfers && f.App.Authorizations == 0,
                 "licensed complete bytes need neither another transfer nor online reauthorization");
             Check(JsonNode.DeepEquals(JsonNode.Parse(f.Module.QueueSurfaceRows.Single().Song.Raw.GetRawText()), song),
@@ -49,17 +49,18 @@ public static class MusicOfficialPlaybackScopeTests
             Check(f.Output.NetworkOpens == 1 && f.Output.LastUri!.AbsoluteUri == LJ.S(receipt["url"]));
             Check(f.App.MediaLookups == 0 && f.App.Resolutions.Count == 1 &&
                 f.App.Resolutions.Single().GetProperty("refresh").ValueKind == JsonValueKind.False);
-            Check(f.App.Plans.Count == 1 && !f.App.Plans.Single().GetProperty("discover").GetBoolean());
+            Check(f.App.Plans.Count == 1 && f.App.Completions.Count == 0);
         });
-        yield return Case("auto plays an enabled known quality without searching unknown higher qualities", async () =>
+        yield return Case("lower-quality official replies do not skip preferred tiers", async () =>
         {
             await using var f = await Scene.Create();
-            f.App.EnabledScript = true;
-            f.App.MediaQuality = "320k"; // Master remains enabled and preferred in the actual policy.
+            await f.SetQuality("auto");
+            f.App.MediaQuality = "320k";
             await f.Play(Song("first"));
-            Check(f.Output.NetworkOpens == 1 && f.Module.CurrentSource == "网易云音乐", f.Module.Status);
-            Check(f.App.Plans.Count == 1 && f.App.Resolutions.Count == 1 && f.App.MediaLookups == 1,
-                "an acceptable known recording completes automatic selection");
+            Check(f.Output.NetworkOpens == 1 && f.Module.CurrentQualityLabel == "高音质", f.Module.Status);
+            Check(f.App.Resolutions.First().GetProperty("quality").GetString() == "master" &&
+                f.App.Completions.Count == 1 && f.App.Resolutions.Count == 2,
+                "known and completed candidates are tried at the preferred tier before accepting their lower reply");
         });
         yield return Case("another usable existing mapping is tried before catalog discovery", async () =>
         {
@@ -80,13 +81,8 @@ public static class MusicOfficialPlaybackScopeTests
                 await f.Play(song);
                 Check(f.Output.NetworkOpens == 1 && f.Module.CurrentSource == "QQ 音乐", f.Module.Status);
                 Check(Platforms(f.App.Resolutions).SequenceEqual(["wy", "tx"]) && f.App.Plans.Count == 2);
-                var local = f.App.Plans[0]; var discovered = f.App.Plans[1];
-                Check(!local.GetProperty("discover").GetBoolean() &&
-                    !local.TryGetProperty("rejectedSourceKeys", out _) && !local.TryGetProperty("refresh", out _));
-                Check(discovered.GetProperty("discover").GetBoolean() &&
-                    !discovered.TryGetProperty("refresh", out _) &&
-                    discovered.GetProperty("rejectedSourceKeys").EnumerateArray()
-                        .Select(item => item.GetString()).SequenceEqual([Key(song, "wy")]));
+                Check(f.App.Completions.Count == 1 && f.App.Completions.Single().GetProperty("platforms")
+                    .EnumerateArray().Any(item => item.GetString() == "tx"), "one shared completion for the missing platform");
                 f.App.Failures.Clear();
                 int plans = f.App.Plans.Count;
                 await f.Replay();
@@ -100,7 +96,7 @@ public static class MusicOfficialPlaybackScopeTests
             f.App.HideKnown = true;
             await f.Play(Song("first"));
             Check(f.Output.NetworkOpens == 1 && f.App.Plans.Count == 2 &&
-                f.App.Plans[1].GetProperty("rejectedSourceKeys").GetArrayLength() == 0 &&
+                f.App.Completions.Count == 1 &&
                 Platforms(f.App.Resolutions).SequenceEqual(["tx"]), f.Module.Status);
         });
         yield return Case("changed quality during known resolution cannot open the stale result or discover", async () =>
@@ -126,7 +122,7 @@ public static class MusicOfficialPlaybackScopeTests
             await play.WaitAsync(TimeSpan.FromSeconds(5));
             Check(f.Output.NetworkOpens == 0 && !f.Output.HasMedia && f.App.Plans.Count == 1);
         });
-        yield return Case("real source search button explicitly refreshes only the current song without changing playback or queue", async () =>
+        yield return Case("opening source list is cache-only and load more keeps playback and queue", async () =>
         {
             await using var f = await Scene.Create(files: true);
             var song = Song("first");
@@ -136,27 +132,22 @@ public static class MusicOfficialPlaybackScopeTests
             string queue = await f.Queue();
             int plans = f.App.Plans.Count, resolutions = f.App.Resolutions.Count, transfers = f.Files.Requests;
             using var surface = new PlayerSurface(f.Module);
-            await surface.OpenQuality();
-            Check(f.App.Plans.Count == plans, "opening quality controls must not trigger source discovery");
+            await surface.OpenQuality(); surface.List();
+            Check(f.App.Plans.Count == plans && f.App.Resolutions.Count == resolutions && f.App.Completions.Count == 0,
+                "opening quality controls and source list never resolves or searches");
             surface.Search();
-            await Until(() => !f.Module.Busy && f.App.Plans.Count == plans + 1);
-            var refresh = f.App.Plans.Last();
-            Check(refresh.GetProperty("discover").GetBoolean() && refresh.GetProperty("refresh").GetBoolean() &&
-                refresh.GetProperty("song").GetProperty("songId").GetString() == LJ.S(song["songId"]));
-            Check(f.Module.CurrentRecordings.Any(row => row.Platform == "tx") &&
-                f.Module.CurrentSource == "网易云音乐" && f.Output.Identity == identity &&
-                f.Output.ReadOpens == 1 && f.Output.NetworkOpens == 0 &&
-                f.App.Resolutions.Count == resolutions && f.Files.Requests == transfers);
-            Check(await f.Queue() == queue, "source search must leave queue occurrences and song snapshots untouched");
-            Check(await f.Files.Cache.ReadInfoAsync("fixture", LJ.S(song["songId"]), Signature("wy"), default) is not null,
-                "source search must retain playable audio");
+            await Until(() => f.Module.CanLoadMoreSources && f.App.Completions.Count == 1);
+            Check(f.Module.SourceChoices.Any(row => row.Platform == "QQ") && f.Module.CurrentSource == "网易云音乐" &&
+                f.Output.Identity == identity && f.Output.ReadOpens == 1 && f.Output.NetworkOpens == 0 && f.Files.Requests == transfers);
+            Check(await f.Queue() == queue, "exploring sources does not mutate the queue");
+            Check(await f.Files.Cache.ReadInfoAsync("fixture", LJ.S(song["songId"]), Signature("wy"), default) is not null);
         });
         yield return Case("closing the real quality popup cancels discovery and discards a noncooperative late reply", async () =>
         {
             await using var f = await Scene.Create();
             await f.Play(Song("first"));
             using var surface = new PlayerSurface(f.Module);
-            await surface.OpenQuality();
+            await surface.OpenQuality(); surface.List();
             f.App.HoldDiscovery = true;
             surface.Search();
             await f.App.DiscoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -165,7 +156,7 @@ public static class MusicOfficialPlaybackScopeTests
             await Until(() => f.App.DiscoveryToken.IsCancellationRequested);
             f.App.DiscoveryRelease.TrySetResult();
             await Until(() => !f.Module.Busy);
-            Check(!f.Module.CurrentRecordings.Any(row => row.Platform == "tx") &&
+            Check(!f.Module.SourceChoices.Any(row => row.Platform == "QQ") &&
                 f.Output.NetworkOpens == 1 && f.Module.CurrentSource == "网易云音乐",
                 "a retired search cannot publish candidates or replace the accepted input");
         });
@@ -175,15 +166,15 @@ public static class MusicOfficialPlaybackScopeTests
             var next = Song("next");
             await f.Play(Song("first"), next);
             f.App.HoldDiscovery = true;
-            var search = f.Module.RefreshCurrentRecordingsAsync();
+            f.Module.OpenSourceChoices();
+            var search = f.Module.LoadMoreSourcesAsync();
             await f.App.DiscoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             var step = f.Module.StepAsync(true);
             Check(f.App.DiscoveryToken.IsCancellationRequested, "changing song must retire the discovery owner");
             f.App.DiscoveryRelease.TrySetResult();
             await Task.WhenAll(search, step).WaitAsync(TimeSpan.FromSeconds(5));
             Check(f.Module.CurrentTitle == LJ.S(next["title"]) && f.Output.NetworkOpens == 2 &&
-                f.Module.CurrentRecordings.All(row => row.SongId == LJ.S(next["songId"])) &&
-                !f.Module.CurrentRecordings.Any(row => row.Platform == "tx"));
+                !f.Module.SourceChoices.Any(row => row.Platform == "QQ"));
         });
         yield return Case("next-song admission cancels known resolution without starting catalog discovery for the retired song", async () =>
         {
@@ -197,7 +188,7 @@ public static class MusicOfficialPlaybackScopeTests
             f.App.ResolutionRelease.TrySetResult();
             await Task.WhenAll(play, step).WaitAsync(TimeSpan.FromSeconds(5));
             Check(f.Output.NetworkOpens == 1 && f.Module.CurrentTitle == "Track next" &&
-                f.App.Plans.All(plan => !plan.GetProperty("discover").GetBoolean()));
+                f.App.Completions.Count == 0);
         });
     }
 
@@ -245,7 +236,7 @@ public static class MusicOfficialPlaybackScopeTests
         {
             var scene = new Scene(files);
             await scene.Module.InitializeAsync(default);
-            await scene.SetQuality("auto");
+            await scene.SetQuality("flac");
             await scene.App.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
             await Until(() => !scene.Module.Busy);
             return scene;
@@ -295,7 +286,7 @@ public static class MusicOfficialPlaybackScopeTests
     private sealed class OfficialApp(MusicNativeApplication inner, MusicPlaybackCacheTests.Fixture files)
         : MusicApplicationForwarder(inner)
     {
-        internal readonly List<JsonElement> Plans = [], Resolutions = [];
+        internal readonly List<JsonElement> Plans = [], Resolutions = [], Completions = [];
         internal readonly Dictionary<string, string> Failures = [];
         internal readonly MusicSourceCache Urls = new(files.Store, files.Clock);
         internal readonly TaskCompletionSource DiscoveryEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -335,7 +326,7 @@ public static class MusicOfficialPlaybackScopeTests
                 ["ok"] = true, ["kind"] = "official", ["platform"] = platform,
                 ["songId"] = song["songId"]!.DeepClone(), ["sourceKey"] = Key(song, platform),
                 ["scope"] = "fixture", ["generation"] = 7, ["quality"] = request == "auto" ? MediaQuality : request,
-                ["requestedQuality"] = request, ["actualQuality"] = "", ["qualityVerified"] = false,
+                ["requestedQuality"] = request, ["actualQuality"] = MediaQuality, ["qualityVerified"] = true,
                 ["playbackVerified"] = false, ["qualityPolicySignature"] = policy.GetProperty("signature").GetString(),
                 ["qualityCacheSignature"] = Signature(platform),
                 ["url"] = new Uri(files.Origin, platform + ".wav").AbsoluteUri,
@@ -348,36 +339,34 @@ public static class MusicOfficialPlaybackScopeTests
             CancellationToken cancellationToken = default)
         {
             var input = Element(parameters ?? new { });
-            if (EnabledScript && method == "music.sources.list")
-                return Element(new { ok = true, revision = 1, items = new[] {
-                    new { installationId = "higher-quality-script", enabled = true, executionHash = new string('a', 64) }
-                } });
+            if (method == "music.sources.list")
+                return Element(new { ok = true, revision = 1, items = EnabledScript ? new object[] {
+                    new { installationId = "higher-quality-script", name = "Script", enabled = true, executionHash = new string('a', 64),
+                        sites = new { wy = new { actions = new[] { "musicUrl" }, qualitys = new[] { "master" } } } }
+                } : [] });
             if (EnabledScript && method is "music.sources.detail" or "music.online.resolve")
                 throw new InvalidOperationException("playable cache or known mapping must not probe scripts");
+            if (method == "music.songs.complete")
+            {
+                Completions.Add(input); DiscoveryToken = cancellationToken; DiscoveryEntered.TrySetResult();
+                if (HoldDiscovery) await DiscoveryRelease.Task;
+                var raw = JsonNode.Parse(input.GetProperty("song").GetRawText())!.AsObject();
+                if (!raw["sources"]!.AsArray().OfType<JsonObject>().Any(row => LJ.S(row["source"]) == "tx"))
+                    raw["sources"]!.AsArray().Add(MusicSongFixture.Online("tx", "Discovered", LJ.S(raw["title"]),
+                        LJ.S(raw["artist"]), LJ.S(raw["album"]), LJ.N(raw["duration"]))["sources"]![0]!.DeepClone());
+                return Element(new { ok = true, song = NativeMusicSong.Normalize(raw) });
+            }
             if (method == "music.official.candidates")
             {
                 Plans.Add(input);
-                bool discover = input.GetProperty("discover").GetBoolean();
                 var raw = JsonNode.Parse(input.GetProperty("song").GetRawText())!.AsObject();
-                if (discover)
-                {
-                    DiscoveryToken = cancellationToken; DiscoveryEntered.TrySetResult();
-                    if (HoldDiscovery) await DiscoveryRelease.Task; // Late reply intentionally ignores cancellation.
-                    var source = MusicSongFixture.Online("tx", "Discovered", LJ.S(raw["title"]),
-                        LJ.S(raw["artist"]), LJ.S(raw["album"]), LJ.N(raw["duration"]))["sources"]![0]!;
-                    if (!raw["sources"]!.AsArray().OfType<JsonObject>().Any(row => LJ.S(row["source"]) == "tx"))
-                        raw["sources"]!.AsArray().Add(source.DeepClone());
-                    raw = NativeMusicSong.Normalize(raw);
-                }
                 var policy = await inner.ExecuteAsync("music.quality.settings.get");
                 return Element(new { ok = true, song = raw,
                     qualityPolicySignature = policy.GetProperty("signature").GetString(),
-                    // Include the failed known candidate again: the caller must not resolve it twice.
                     candidates = raw["sources"]!.AsArray().OfType<JsonObject>()
-                        .Where(row => !(HideKnown && (!discover || LJ.S(row["source"]) == "wy")))
+                        .Where(row => !(HideKnown && LJ.S(row["source"]) == "wy"))
                         .Select(row => new { platform = LJ.S(row["source"]), sourceKey = LJ.S(row["sourceKey"]),
-                            scope = "fixture", generation = 7 }),
-                    authorizationRequired = false, failures = Array.Empty<object>(), hasMore = false });
+                            scope = "fixture", generation = 7 }), authorizationRequired = false });
             }
             if (method == "music.official.cacheContext")
                 return Element(new { ok = true, scope = "fixture", generation = 7,
@@ -392,6 +381,8 @@ public static class MusicOfficialPlaybackScopeTests
                     return Element(new { ok = false, code = "CACHE_MISS" });
                 Resolutions.Add(input);
                 var info = await Receipt(song, platform);
+                info["quality"] = input.GetProperty("quality").GetString();
+                info["requestedQuality"] = info["quality"]!.DeepClone();
                 ResolutionToken = cancellationToken; ResolutionEntered.TrySetResult();
                 if (HoldResolution) await ResolutionRelease.Task; // Exercise post-await account/policy/cancel checks.
                 if (Failures.TryGetValue(platform, out var code)) return Element(new { ok = false, code });
@@ -423,9 +414,10 @@ public static class MusicOfficialPlaybackScopeTests
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             Check(Popup.IsOpen, "actual quality popup must open");
         }
+        internal void List() => ((Button)view.FindName("SourceListButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         internal void Search()
         {
-            var button = (Button)view.FindName("SourceSearchButton");
+            var button = (Button)view.FindName("LoadMoreSourcesButton");
             Check(button.IsVisible && button.IsEnabled, "source search must be a usable UI action");
             button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         }
@@ -435,14 +427,14 @@ public static class MusicOfficialPlaybackScopeTests
             window.Content = null; window.Close();
         }
     }
-    private sealed class Output : IMusicPlayback, INativePlaybackContinuation
+    private sealed class Output : IMusicPlayback, INativePlaybackContinuation, INativePlaybackHandoff
     {
         public string? OwnerId { get; private set; }
         public string? Identity { get; private set; }
         public bool HasMedia { get; private set; }
         public bool IsPlaying { get; private set; }
         public double PositionSeconds => 0;
-        public double DurationSeconds => 100;
+        public double DurationSeconds => 1;
         public int Volume { get; set; } = 50;
         public bool PauseRequested => !IsPlaying;
         public string? LastErrorCode => null;
@@ -481,6 +473,19 @@ public static class MusicOfficialPlaybackScopeTests
         public Task PauseAsync() { IsPlaying = false; return Task.CompletedTask; }
         public Task ResumeAsync() { IsPlaying = HasMedia; return Task.CompletedTask; }
         public Task SeekAsync(double seconds) => Task.CompletedTask;
+        public double PreparedHandoffDurationSeconds => 0;
+        public Task PrepareHandoffAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token) =>
+            throw new InvalidOperationException("exploration must not prepare playback");
+        public Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token) =>
+            throw new InvalidOperationException("exploration must not prepare playback");
+        public async Task ReopenReadAsync(NativePlaybackContinuation continuation, INativeMediaReadLease lease,
+            CancellationToken token = default)
+        {
+            await lease.DisposeAsync();
+            throw new InvalidOperationException("no read continuation during exploration");
+        }
+        public Task CommitHandoffAsync(Action committed, CancellationToken token) => throw new InvalidOperationException("no handoff during exploration");
+        public Task DiscardHandoffAsync() => Task.CompletedTask;
         public NativePlaybackContinuation? CaptureContinuation() => null;
         public Task ReopenAsync(NativePlaybackContinuation continuation, Uri uri,
             IReadOnlyDictionary<string, string> headers, CancellationToken token = default) =>

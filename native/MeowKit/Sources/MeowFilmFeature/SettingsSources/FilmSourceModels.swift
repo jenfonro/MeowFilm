@@ -6,6 +6,26 @@ public struct FilmSourceKey: Codable, Hashable, Sendable {
     public init(installationId: String, siteKey: String) {
         self.installationId = installationId; self.siteKey = siteKey
     }
+
+    // Cat identities use exact protocol strings, not Unicode canonical equivalence.
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.installationId.utf8.elementsEqual(rhs.installationId.utf8) &&
+            lhs.siteKey.utf8.elementsEqual(rhs.siteKey.utf8)
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(installationId.utf8.count)
+        for byte in installationId.utf8 { hasher.combine(byte) }
+        hasher.combine(siteKey.utf8.count)
+        for byte in siteKey.utf8 { hasher.combine(byte) }
+    }
+
+    static func ordered(_ lhs: Self, _ rhs: Self) -> Bool {
+        if !lhs.installationId.utf8.elementsEqual(rhs.installationId.utf8) {
+            return lhs.installationId.utf8.lexicographicallyPrecedes(rhs.installationId.utf8)
+        }
+        return lhs.siteKey.utf8.lexicographicallyPrecedes(rhs.siteKey.utf8)
+    }
 }
 
 public struct FilmSourceSite: Codable, Equatable, Sendable {
@@ -16,6 +36,15 @@ public struct FilmSourceSite: Codable, Equatable, Sendable {
     public let methods: [String: String]
     public init(key: String, name: String, api: String, actions: [String], methods: [String: String]) {
         self.key = key; self.name = name; self.api = api; self.actions = actions; self.methods = methods
+    }
+
+    func identity(installationId: String) -> FilmSourceKey {
+        FilmSourceKey(installationId: installationId, siteKey: key)
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.key.utf8.elementsEqual(rhs.key.utf8) && lhs.name == rhs.name && lhs.api == rhs.api &&
+            lhs.actions == rhs.actions && lhs.methods == rhs.methods
     }
 }
 

@@ -144,6 +144,32 @@
       </StackPanel>
      </Grid>
     </Border>
+    <Border x:Name="ExclusionSection" Style="{StaticResource Settings.Section}">
+     <StackPanel>
+      <Grid Margin="0,0,0,12">
+       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+       <TextBlock Text="错源管理" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
+       <Button x:Name="ExclusionAddButton" Grid.Column="1" Content="添加" Style="{StaticResource Settings.Button}" Click="ExclusionAdd_Click"
+               IsEnabled="{Binding CanEdit}" AutomationProperties.Name="添加错源记录"/>
+      </Grid>
+      <Border Style="{StaticResource Settings.ListSurface}">
+       <ItemsControl ItemsSource="{Binding SourceExclusions}" AutomationProperties.Name="错源记录">
+        <ItemsControl.Style><Style TargetType="ItemsControl"><Style.Triggers><DataTrigger Binding="{Binding HasSourceExclusions}" Value="False"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></ItemsControl.Style>
+        <ItemsControl.ItemTemplate><DataTemplate>
+         <Grid Height="44" Margin="8,0">
+          <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="180"/><ColumnDefinition Width="80"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <TextBlock Text="{Binding SongText}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+          <TextBlock Grid.Column="1" Text="{Binding ProviderName}" Style="{StaticResource Settings.Subtitle}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+          <TextBlock Grid.Column="2" Text="{Binding PlatformName}" Style="{StaticResource Settings.Subtitle}" VerticalAlignment="Center"/>
+          <Button Grid.Column="3" Content="恢复" Style="{StaticResource Settings.QuietButton}" Click="ExclusionRestore_Click" Tag="{Binding}"
+                  IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                  AutomationProperties.Name="{Binding SongText,StringFormat='恢复{0}的音源'}"/>
+         </Grid>
+        </DataTemplate></ItemsControl.ItemTemplate>
+       </ItemsControl>
+      </Border>
+     </StackPanel>
+    </Border>
     <Border x:Name="AppearanceSection" Style="{StaticResource Settings.Section}">
      <Grid>
       <Grid.ColumnDefinitions><ColumnDefinition Style="{StaticResource Settings.LabelColumn}"/><ColumnDefinition Style="{StaticResource Settings.GapColumn}"/><ColumnDefinition/></Grid.ColumnDefinitions>
@@ -184,6 +210,26 @@
    </StackPanel>
   </ScrollViewer>
   <local:MusicSourcesSettingsView x:Name="SourcesPage" Grid.Row="1" Visibility="Collapsed"/>
+  <Popup x:Name="ExclusionPopup" PlacementTarget="{Binding ElementName=ExclusionAddButton}" Placement="Bottom" StaysOpen="False" AllowsTransparency="True">
+   <Border Style="{StaticResource Settings.PopupSurface}" CornerRadius="8" Padding="16" Width="360" KeyboardNavigation.TabNavigation="Cycle">
+    <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="4" Opacity=".13"/></Border.Effect>
+    <StackPanel>
+     <TextBlock Text="添加错源" Style="{StaticResource Settings.PopupTitle}" Margin="0,0,0,12"/>
+     <TextBlock Text="歌曲" Style="{StaticResource Settings.Subtitle}" Margin="0,0,0,6"/>
+     <ComboBox x:Name="ExclusionSong" Style="{StaticResource Settings.ComboBox}" ItemsSource="{Binding ExclusionSongs}" AutomationProperties.Name="歌曲">
+      <ComboBox.ItemTemplate><DataTemplate><TextBlock TextTrimming="CharacterEllipsis"><Run Text="{Binding Name,Mode=OneWay}"/><Run Text="  "/><Run Text="{Binding Detail,Mode=OneWay}"/></TextBlock></DataTemplate></ComboBox.ItemTemplate>
+     </ComboBox>
+     <TextBlock Text="音源" Style="{StaticResource Settings.Subtitle}" Margin="0,12,0,6"/>
+     <ComboBox x:Name="ExclusionProvider" Style="{StaticResource Settings.ComboBox}" ItemsSource="{Binding ExclusionProviders}" DisplayMemberPath="Name" AutomationProperties.Name="音源"/>
+     <TextBlock Text="平台" Style="{StaticResource Settings.Subtitle}" Margin="0,12,0,6"/>
+     <ComboBox x:Name="ExclusionPlatform" Style="{StaticResource Settings.ComboBox}" ItemsSource="{Binding ExclusionPlatforms}" DisplayMemberPath="Name" AutomationProperties.Name="平台"/>
+     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+      <Button Content="取消" Style="{StaticResource Settings.Button32}" Click="ExclusionCancel_Click" Margin="0,0,8,0"/>
+      <Button Content="添加" Style="{StaticResource Settings.PrimaryButton}" Click="ExclusionConfirm_Click"/>
+     </StackPanel>
+    </StackPanel>
+   </Border>
+  </Popup>
   <Popup x:Name="SearchAdvancedPopup" Placement="Custom" StaysOpen="False" AllowsTransparency="True"
          Opened="SearchAdvancedPopup_Opened" Closed="SearchAdvancedPopup_Closed">
    <Grid Width="264" KeyboardNavigation.TabNavigation="Cycle" PreviewKeyDown="SearchAdvancedPopup_KeyDown">

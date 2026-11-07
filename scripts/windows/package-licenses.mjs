@@ -17,13 +17,13 @@ const key = path => process.platform === 'win32' ? path.toLowerCase() : path;
 // Explicit list of the reviewed files in LICENSES. No directory
 // glob copying, inferred licensing or execution of application code.
 const SOURCE = 'LICENSES';
-const FILES = [
+export const licenseFiles = [
   'NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt', 'KuGouMusicApi-MIT.txt',
   'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt', 'node-LICENSE.txt', 'qr-code-generator-LICENSE.txt',
-  'quickjs-emscripten-LICENSE.txt', 'quickjs-native-MIT.txt', 'catpawrunner-MIT.txt',
+  'quickjs-emscripten-LICENSE.txt', 'quickjs-native-MIT.txt', 'Unicode-3.0.txt', 'catpawrunner-MIT.txt',
   'npm-node-compat-BSD-3-Clause.txt', 'npm-node-compat-ISC.txt', 'npm-node-compat-MIT.txt',
 ];
-const INPUTS = FILES.map(name => ({ sourcePath: `${SOURCE}/${name}`, path: name }));
+const INPUTS = licenseFiles.map(name => ({ sourcePath: `${SOURCE}/${name}`, path: name }));
 
 function need(condition, code) {
   if (!condition) throw Object.assign(new Error(code), { code });

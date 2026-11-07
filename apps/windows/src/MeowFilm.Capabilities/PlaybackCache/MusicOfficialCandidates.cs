@@ -34,16 +34,6 @@ internal sealed class MusicOfficialCandidates
         string key = LJ.S(row["sourceKey"]);
         if (candidates.Contains(key)) remembered[key] = LJ.I(info["confirmedAt"]);
     }
-    internal void Discover(JsonObject candidate, string platform)
-    {
-        // The search provider is fixed. Do not import a foreign platform embedded in its response.
-        var normalized = NativeMusicSong.Normalize(candidate);
-        if (!recordings.CanMerge(new(normalized))) return;
-        foreach (var row in (normalized["sources"] as JsonArray ?? []).OfType<JsonObject>())
-            if (LJ.S(row["source"]) == platform) Select(row);
-    }
-    internal bool HasPlatform(string platform) => recordings.Sources.Any(row =>
-        candidates.Contains(LJ.S(row["sourceKey"])) && LJ.S(row["source"]) == platform);
     internal JsonObject Snapshot(IEnumerable<string> platforms)
     {
         var enabled = platforms.ToHashSet(StringComparer.Ordinal);

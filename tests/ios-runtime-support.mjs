@@ -9,7 +9,7 @@ import { assertOwnedPath, temporaryRoot } from '../scripts/windows/working-paths
 
 // Shared by the iOS runtime source and packaged-payload tests; not a test file.
 export const root = fileURLToPath(new URL('../', import.meta.url));
-export const contract = 'music.script.v2';
+export const contract = 'music.script.v3';
 const hash = value => createHash('sha256').update(value).digest('hex');
 
 // Desktop simulation of the iOS backend selection; not iOS device evidence.
@@ -47,16 +47,14 @@ export function connect(runtime, methods = {}) {
   return { peer, closed: done };
 }
 
+/** Tripwire: guest storage belongs to the shared module, never to native documents. */
 export function nativeStorage() {
-  const calls = [], values = new Map();
+  const calls = [];
   const methods = {};
   for (const operation of ['get', 'set', 'delete']) {
     methods[`platform.musicScript.storage.${operation}`] = async message => {
       calls.push({ operation, message });
-      const key = JSON.stringify([message.installationId, message.siteId, message.key]);
-      if (operation === 'set') values.set(key, message.value);
-      if (operation === 'delete') values.delete(key);
-      return { ok: true, value: values.get(key) ?? null };
+      return { ok: false, code: 'PERMISSION_DENIED' };
     };
   }
   return { calls, methods };
@@ -91,9 +89,8 @@ export async function stage(peer) {
   return stage.token;
 }
 
-export async function load(peer, { installationId, revision = 1, expectedRevision = 0, grant = randomUUID() }) {
-  return peer.call('music.script.load', {
-    token: await stage(peer), installationId, revision, expectedRevision, version: '2',
-    config: {}, permissions: { storage: ['read', 'write'] }, grant,
-  });
+/** Import and enable the fixture through the shared management commands. */
+export async function load(peer) {
+  const item = okay(await peer.call('music.script.sources.add', { token: await stage(peer) })).item;
+  return peer.call('music.script.sources.enable', { installationId: item.installationId });
 }

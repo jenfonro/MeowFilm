@@ -7,8 +7,8 @@ import MeowMusicNativeService
 import MeowFilmFeature
 import MeowRuntime
 
-/// Filesystem preparation is off MainActor. The App owns one script session;
-/// music and Cat clients borrow it after the complete reverse-call table is set.
+/// Filesystem preparation is off MainActor. Music and Cat borrow the App's
+/// script session; their installations and private data belong to Node.
 struct MeowfilmResources: Sendable {
     let musicDocument: MusicNativeLibraryDocument
     let musicAccounts: NativeMusicAccountService?
@@ -57,10 +57,7 @@ struct MeowfilmResources: Sendable {
         let connection: @Sendable () async throws -> RuntimeBridgeConnection = {
             try await scriptSession.connection()
         }
-        musicScripts = NativeMusicScriptService(storeFactory: Self.documentFactory(
-            base: libraryRoot, namespace: NativeMusicScriptService.namespace,
-            maximumDocumentBytes: MusicScriptSourceItem.maximumSourceBytes),
-            connection: connection)
+        musicScripts = NativeMusicScriptService(connection: connection)
         filmRules = try FilmRuleService(store: Self.documentFactory(
             base: libraryRoot, namespace: FilmRuleService.documentNamespace)())
         filmSourceSettings = FilmSourceService(transport: CatScriptTransport(connectionProvider: connection),

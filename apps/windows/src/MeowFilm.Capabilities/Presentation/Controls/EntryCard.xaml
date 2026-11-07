@@ -72,7 +72,6 @@
     <Setter Property="Background"><Setter.Value><MultiBinding Converter="{StaticResource EntryTitleShade}">
      <Binding Path="HasTopPalette" ElementName="DecorationLayer"/><Binding Path="TopPaletteBrush" ElementName="DecorationLayer"/>
      <Binding Path="TopPaletteBrush" ElementName="Cover"/>
-     <Binding Path="Background" ElementName="Surface"/>
     </MultiBinding></Setter.Value></Setter>
     <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>

@@ -10,9 +10,10 @@ struct FilmSourceDocument: Codable {
     func validate() throws {
         let ids = Set(cats.map(\.installationId))
         guard version == 1, ids.count == cats.count,
-              cats.allSatisfy({ !$0.installationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-                  ["local", "network"].contains($0.sourceType) &&
-                  Set($0.sites.map(\.key)).count == $0.sites.count && $0.sites.allSatisfy({ !$0.key.isEmpty }) }),
+              cats.allSatisfy({ cat in !cat.installationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                  ["local", "network"].contains(cat.sourceType) &&
+                  Set(cat.sites.map { $0.identity(installationId: cat.installationId) }).count == cat.sites.count &&
+                  cat.sites.allSatisfy({ !$0.key.isEmpty }) }),
               Set(videos.map(\.key)).count == videos.count,
               videos.allSatisfy({ ids.contains($0.key.installationId) && !$0.key.siteKey.isEmpty }),
               deleted.allSatisfy({ ids.contains($0.installationId) }),
@@ -60,7 +61,7 @@ func parseFilmCat(_ value: JSONValue) throws -> FilmCatSource {
               ["idle", "updated", "unchanged", "failed"].contains(cat.updateState),
               cat.generation >= 0, cat.generation <= 9_007_199_254_740_991,
               timestamps.allSatisfy({ $0 >= 0 && $0 <= 9_007_199_254_740_991 }),
-              cat.sites.allSatisfy({ !$0.key.isEmpty }), Set(cat.sites.map(\.key)).count == cat.sites.count else {
+              cat.sites.allSatisfy({ !$0.key.isEmpty }), Set(cat.sites.map { $0.identity(installationId: cat.installationId) }).count == cat.sites.count else {
             throw FilmSourceError(code: "INVALID_RESPONSE")
         }
         return cat

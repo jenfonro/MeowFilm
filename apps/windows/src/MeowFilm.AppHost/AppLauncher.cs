@@ -114,7 +114,7 @@ public static class AppLauncher
         {
             LocalDocumentStore? store = null;
             ProtectedDocumentBridge? documents = null;
-            OnDemandRuntimeClient? runtime = null;
+            AppRuntimeClient? runtime = null;
             ArtworkService? artwork = null;
             var modules = new List<IDesktopModule>();
             IAsyncDisposable? windowAttachment = null;
@@ -144,11 +144,10 @@ public static class AppLauncher
                 store = new LocalDocumentStore(paths.Documents, definition.NativeNamespaces,
                     definition.NativeCollections, definition.ProtectedNamespaces);
                 documents = new ProtectedDocumentBridge(store, definition.BridgeNamespaces);
-                runtime = new OnDemandRuntimeClient(async token =>
+                runtime = new AppRuntimeClient(async token =>
                 {
-                    // App composition starts script restoration after platform
-                    // callbacks are frozen. The shared client coalesces that
-                    // launch with operations; native rules never call this port.
+                    // Native pages and business owners never wait for this start:
+                    // a failed runtime only makes script sources unavailable.
                     var root = Path.Combine(AppContext.BaseDirectory, "runtime");
                     var bundle = await Task.Run(() => RuntimeBundle.Verify(root, definition.Id,
                         definition.RuntimeModules), token).ConfigureAwait(false);
@@ -161,6 +160,8 @@ public static class AppLauncher
                 createModules(runtime, store, modules);
                 ValidateModuleComposition(modules);
                 platformMethods = ComposeScriptCapabilities(documents.Methods, modules.OfType<IScriptPlatformCapabilities>());
+                // The shared runtime starts with the App; starting it executes no script.
+                runtime.Start();
                 var lifecycle = Lifecycle();
                 shell = new ShellWindow(modules, [],
                     lifecycle.CloseAsync, lifecycle.ForceReleaseAsync, lifecycle.CancelShutdownPreparationAsync) { Title = "meowfilm" };

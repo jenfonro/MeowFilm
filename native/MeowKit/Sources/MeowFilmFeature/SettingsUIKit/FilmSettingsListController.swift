@@ -27,6 +27,8 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
     let table = UITableView(frame: .zero, style: .insetGrouped)
     var sections: [FilmSettingsSection] = []
     private var pendingFailure: (String, (() -> Void)?)?
+    private var alertChoices: [String: () -> Void] = [:]
+    private weak var actionAlert: UIAlertController?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -110,17 +112,32 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
     private func presentPendingFailure() {
         guard let (message, retry) = pendingFailure, canPresentPageAlert else { return }
         pendingFailure = nil
-        let alert = UIAlertController(title: "错误", message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        if let retry { alert.addAction(UIAlertAction(title: "重试", style: .default) { _ in retry() }) }
-        present(alert, animated: true)
+        presentActionAlert("错误", message: message, choices: retry.map { [("重试", UIAlertAction.Style.default, $0)] } ?? [])
     }
     func confirm(_ title: String, message: String? = nil, action: @escaping () -> Void) {
+        presentActionAlert(title, message: message, choices: [("确认", .destructive, action)])
+    }
+    func retryNotice(_ title: String, message: String, retry: @escaping () -> Void) {
+        presentActionAlert(title, message: message, choices: [("重试", .default, retry)])
+    }
+    private func presentActionAlert(_ title: String, message: String?,
+                                    choices: [(String, UIAlertAction.Style, () -> Void)]) {
         guard canPresentPageAlert else { return }
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "确认", style: .destructive) { _ in action() })
+        actionAlert = alert
+        alertChoices = ["取消": {}]
+        for (title, _, action) in choices { alertChoices[title] = action }
+        for (title, style) in [("取消", UIAlertAction.Style.cancel)] + choices.map({ ($0.0, $0.1) }) {
+            alert.addAction(UIAlertAction(title: title, style: style) { [weak self] _ in self?.selectAlertChoice(title) })
+        }
         present(alert, animated: true)
+    }
+    // The same choice path serves UIKit actions and component tests. A retry may
+    // fail immediately, so release the previous alert's slot before executing it.
+    func selectAlertChoice(_ title: String) {
+        guard let alert = actionAlert, let action = alertChoices[title] else { return }
+        alertChoices.removeAll(); actionAlert = nil
+        alert.dismiss(animated: true, completion: action)
     }
     func notice(_ title: String, message: String? = nil) {
         guard canPresentPageAlert else { return }

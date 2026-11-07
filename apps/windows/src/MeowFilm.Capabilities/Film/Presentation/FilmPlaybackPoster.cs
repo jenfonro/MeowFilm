@@ -17,7 +17,7 @@ public sealed class FilmPlaybackPoster : Grid
         nameof(Address), typeof(string), typeof(FilmPlaybackPoster),
         new PropertyMetadata("", (value, _) => ((FilmPlaybackPoster)value).UpdateAddress()));
 
-    /// <summary>Backdrop posters fill their frame at the original ratio and fade down into the page.</summary>
+    /// <summary>Backdrop posters fill their host at the original ratio without sizing the foreground.</summary>
     public static readonly DependencyProperty IsBackdropProperty = DependencyProperty.Register(
         nameof(IsBackdrop), typeof(bool), typeof(FilmPlaybackPoster),
         new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsMeasure,
@@ -35,7 +35,6 @@ public sealed class FilmPlaybackPoster : Grid
 
     private readonly Image preview = new() { Stretch = Stretch.UniformToFill };
     private readonly ArtworkImage artwork = new() { ShowRetry = false };
-    private double backdropHeight;
 
     public string Address
     {
@@ -76,9 +75,7 @@ public sealed class FilmPlaybackPoster : Grid
     {
         if (!IsBackdrop)
         {
-            ClearValue(OpacityMaskProperty);
             ClearValue(PaletteBrushPropertyKey);
-            backdropHeight = 0;
             return;
         }
         if (preview.Source is BitmapSource local)
@@ -121,25 +118,6 @@ public sealed class FilmPlaybackPoster : Grid
         preview.Arrange(slot);
         // ArtworkImage owns the decoded catalog size and its UniformToFill crop; no guessed poster ratio.
         artwork.Arrange(new Rect(arrangeSize));
-        if (arrangeSize.Height > 0 && backdropHeight != arrangeSize.Height)
-        {
-            backdropHeight = arrangeSize.Height;
-            OpacityMask = CreateBackdropFade(backdropHeight);
-        }
         return arrangeSize;
-    }
-
-    private static Brush CreateBackdropFade(double height)
-    {
-        // Relative bounds include the cropped image overflow; fade against the visible frame instead.
-        var brush = new LinearGradientBrush
-        {
-            MappingMode = BrushMappingMode.Absolute, StartPoint = new(0, 0), EndPoint = new(0, height)
-        };
-        brush.GradientStops.Add(new(Colors.Black, 0));
-        brush.GradientStops.Add(new(Colors.Black, .5));
-        brush.GradientStops.Add(new(Color.FromArgb(0, 0, 0, 0), 1));
-        brush.Freeze();
-        return brush;
     }
 }

@@ -46,7 +46,21 @@ struct FilmSourceProbe {
     }
 
     private struct Attempt { var ok = false; var missing = false }
-    private struct Candidate: Hashable { let flag: String; let id: String }
+    private struct Candidate: Hashable {
+        let flag: String
+        let id: String
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.flag.utf8.elementsEqual(rhs.flag.utf8) && lhs.id.utf8.elementsEqual(rhs.id.utf8)
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(flag.utf8.count)
+            for byte in flag.utf8 { hasher.combine(byte) }
+            hasher.combine(id.utf8.count)
+            for byte in id.utf8 { hasher.combine(byte) }
+        }
+    }
 
     private mutating func tryPlay(_ items: [JSONValue]) async throws -> Attempt {
         var missing = false
@@ -81,8 +95,8 @@ struct FilmSourceProbe {
         let action: String?
         let payload: JSONValue?
         let previousPage: Int64
-        var ancestors: Set<String>
-        var lists: Set<String>
+        var ancestors: Set<Data>
+        var lists: Set<Data>
     }
 
     private mutating func detailCandidates(_ detail: JSONValue) async throws -> [Candidate] {
@@ -93,7 +107,7 @@ struct FilmSourceProbe {
             return false
         }
         if !hasNavigation { return first.first.map(Self.candidates) ?? [] }
-        var result: [Candidate] = [], seen: Set<String> = []
+        var result: [Candidate] = [], seen: Set<Data> = []
         var queue = [Page(document: detail, action: nil, payload: nil, previousPage: 0, ancestors: [], lists: [])]
         var cursor = 0
         while cursor < queue.count {
@@ -113,7 +127,7 @@ struct FilmSourceProbe {
             }
             for item in list {
                 guard let nav = Self.navigation(item) else { result.append(contentsOf: Self.candidates(item)); continue }
-                let key = nav.action + ":" + (try Self.canonical(nav.payload))
+                let key = try Self.canonical(.array([.string(nav.action), nav.payload]))
                 if page.ancestors.contains(key) {
                     steps.append(.init(nav.action, "failed", "NAVIGATION_CYCLE")); continue
                 }
@@ -128,7 +142,8 @@ struct FilmSourceProbe {
                !list.isEmpty, current > 0, count > current {
                 if payload["pg"] != nil { payload["pg"] = .number(Double(current + 1)) }
                 if payload["page"] != nil || payload["pg"] == nil { payload["page"] = .number(Double(current + 1)) }
-                let body = JSONValue.object(payload), key = action + ":" + (try Self.canonical(.object(payload)))
+                let body = JSONValue.object(payload)
+                let key = try Self.canonical(.array([.string(action), body]))
                 if !seen.insert(key).inserted {
                     steps.append(.init(action, "failed", "NAVIGATION_CYCLE")); continue
                 }
@@ -196,24 +211,37 @@ struct FilmSourceProbe {
     private static func candidates(_ value: JSONValue) -> [Candidate] {
         let from = pick(value, ["vod_play_from", "play_from", "playFrom"])
         let urls = pick(value, ["vod_play_url", "play_url", "playUrl"])
-        let flags = from.isEmpty ? [] : from.components(separatedBy: "$$$")
-        let blocks = urls.isEmpty ? [] : urls.components(separatedBy: "$$$")
+        let flags = from.isEmpty ? [] : literalComponents(from, separator: "$$$")
+        let blocks = urls.isEmpty ? [] : literalComponents(urls, separator: "$$$")
         var result: [Candidate] = [], seen: Set<Candidate> = []
         for i in 0..<max(flags.count, blocks.count) {
             let flag = i < flags.count && !trim(flags[i]).isEmpty ? trim(flags[i]) : "源\(i + 1)"
             let block = i < blocks.count ? trim(blocks[i]) : ""
             if block.isEmpty { continue }
-            let split = flag.contains("|||")
-            let subFlags = split ? flag.components(separatedBy: "|||") : [flag]
-            let subBlocks = split && block.contains("|||") ? block.components(separatedBy: "|||") : [block]
+            let split = flag.range(of: "|||", options: .literal) != nil
+            let subFlags = split ? literalComponents(flag, separator: "|||") : [flag]
+            let subBlocks = split ? literalComponents(block, separator: "|||") : [block]
             for j in 0..<max(subFlags.count, subBlocks.count) {
                 let label = j < subFlags.count && !trim(subFlags[j]).isEmpty ? trim(subFlags[j]) : flag
-                let line = j < subBlocks.count ? trim(subBlocks[j].components(separatedBy: "#")[0]) : ""
-                let id = trim(line.firstIndex(of: "$").map { String(line[line.index(after: $0)...]) } ?? line)
+                let episodes = j < subBlocks.count ? subBlocks[j] : ""
+                let line = trim(episodes.range(of: "#", options: .literal).map { String(episodes[..<$0.lowerBound]) } ?? episodes)
+                let id = trim(line.range(of: "$", options: .literal).map { String(line[$0.upperBound...]) } ?? line)
                 let candidate = Candidate(flag: label, id: id)
                 if !id.isEmpty && seen.insert(candidate).inserted { result.append(candidate) }
             }
         }
+        return result
+    }
+    // Protocol separators are literal scalars, even beside combining marks.
+    // Preserve empty segments and original text, as the reference parser does.
+    private static func literalComponents(_ value: String, separator: String) -> [String] {
+        var result: [String] = []
+        var start = value.startIndex
+        while let range = value.range(of: separator, options: .literal, range: start..<value.endIndex) {
+            result.append(String(value[start..<range.lowerBound]))
+            start = range.upperBound
+        }
+        result.append(String(value[start...]))
         return result
     }
     private static func playURL(_ value: JSONValue) -> String {
@@ -259,8 +287,8 @@ struct FilmSourceProbe {
         return ""
     }
     private static func pageNumber(_ value: JSONValue, _ key: String) -> Int64 { max(0, Int64(pick(value, [key])) ?? 0) }
-    private static func canonical(_ value: JSONValue) throws -> String {
+    private static func canonical(_ value: JSONValue) throws -> Data {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return String(decoding: try encoder.encode(value), as: UTF8.self)
+        return try encoder.encode(value)
     }
 }

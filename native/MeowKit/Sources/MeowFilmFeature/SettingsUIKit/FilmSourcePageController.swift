@@ -41,15 +41,29 @@ class FilmSourcePageController: FilmSettingsListController {
         if empty { return [.init(title: "无来源", id: "film.sources.empty")] }
         return []
     }
+    func deleteBatch<Item>(_ items: [Item],
+                           isPresent: @escaping @MainActor (Item, FilmSourceSnapshot) -> Bool,
+                           completed: (() -> Void)? = nil,
+                           operation: @escaping @MainActor (Item) async throws -> Void) {
+        perform({ [service] in
+            for item in items {
+                // A delete can commit before its following runtime refresh fails.
+                // Keep that error visible, but retry from the owner's committed
+                // snapshot rather than inferring rollback from the thrown error.
+                let current = await service.snapshot
+                if isPresent(item, current) { try await operation(item) }
+            }
+        }, completed: completed)
+    }
     func runtimeRows() -> [FilmSettingsRow] {
         guard let message = snapshot?.runtimeError else { return [] }
         return [.init(title: "运行器不可用", id: "film.sources.runtimeError", enabled: !busy,
             action: { [weak self] in
-                self?.notice("运行器不可用", message: message)
-            }),
-            .init(title: "重试", id: "film.sources.retry", enabled: !busy, action: { [weak self] in
                 guard let self else { return }
-                perform({ [service] in try await service.start() })
+                retryNotice("运行器不可用", message: message) { [weak self] in
+                    guard let self, isPageActive, isPageVisible else { return }
+                    perform({ [service] in try await service.start() })
+                }
             })]
     }
 }

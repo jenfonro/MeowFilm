@@ -88,7 +88,7 @@ private actor TransferFixture {
         var fields: [String: JSONValue] = ["ok": .bool(true), "contract": .string("cat.script.v1")]
         switch operation {
         case "status":
-            if fault == "contract" { fields["contract"] = .string("music.script.v2") }
+            if fault == "contract" { fields["contract"] = .string("music.script.v3") }
             fields["blob"] = .object(["token": .string("receipt"),
                 "length": .number(fault == "length" ? 0 : Double(bytes.count)),
                 "chunkBytes": .number(fault == "chunkBytes" ? 1 : 65_536),

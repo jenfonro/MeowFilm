@@ -1,6 +1,6 @@
 # Reader 书源运行时
 
-Reader adapter 位于 `@meowfilm/source-runtime`，由 `source@0.1.0`／`source.runtime.v1` 管理，与 `music@0.7.0`、`cat@0.1.0` 一同装配。规则包不依赖 Node 或 Windows API；Windows 承载复用 script-host 的同一 WorkerSession、worker 协议与 QuickJS 后端。平台能力和清理语义以[来源 capability ABI](source-capability-abi.md)为唯一来源，不另建运行器。
+Reader adapter 位于 `@meowfilm/source-runtime`，由 `source@0.1.0`／`source.runtime.v1` 管理，与 `music@0.8.0`、`cat@0.1.0` 一同装配。规则包不依赖 Node 或 Windows API；Windows 承载复用 script-host 的同一 WorkerSession、worker 协议与 QuickJS 后端。平台能力和清理语义以[来源 capability ABI](source-capability-abi.md)为唯一来源，不另建运行器。
 
 ## 协议
 

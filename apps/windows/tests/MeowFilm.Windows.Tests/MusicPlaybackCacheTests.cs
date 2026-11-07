@@ -17,6 +17,72 @@ public static class MusicPlaybackCacheTests
 
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("Script complete history keeps provider recording and tier across restart without persisting credentials", async () =>
+        {
+            await using var f = new Fixture();
+            foreach (string provider in new[] { "removed-source", "another-source" })
+                foreach (string quality in new[] { "320k", "flac" })
+                {
+                    string signature = MusicAudioFileCache.ScriptSignature(provider, "wy", "recording", quality);
+                    await f.Cache.StorePlayedAsync("script:" + signature, "song", signature,
+                        f.ScriptInfo(provider, quality), () => true, default);
+                }
+            var restarted = f.NewCache();
+            var history = await restarted.ReadScriptHistoryAsync("song", default);
+            Check(history.Length == 4 && (await restarted.ReadScriptHistoryAsync("another-song", default)).Length == 0);
+            foreach (var info in history)
+            {
+                Check(info.GetProperty("providerName").GetString() == "Saved source name" &&
+                    !info.TryGetProperty("url", out _) && !info.TryGetProperty("headers", out _));
+                await using var lease = await restarted.OpenAsync(info.GetProperty("scope").GetString()!, "song",
+                    info.GetProperty("qualityCacheSignature").GetString()!, default);
+                Check(lease?.Length == f.Bytes.Length);
+            }
+            await restarted.ClearAsync(default);
+            Check((await restarted.ReadScriptHistoryAsync("song", default)).Length == 0);
+        });
+        yield return new("Played script cache waits for cancelled speculative producer without another transfer or lost publication", async () =>
+        {
+            await using var f = new Fixture();
+            using var prepared = f.Cache.Prepare("scope", "next", CacheSignature, f.Info(song: "next"), () => true, default);
+            Check(await prepared.Ready.Task.WaitAsync(TimeSpan.FromSeconds(5)) is not null);
+            string signature = MusicAudioFileCache.ScriptSignature("source", "wy", "recording", "flac");
+            var played = f.Cache.StorePlayedAsync("script:" + signature, "song", signature,
+                f.ScriptInfo("source", "flac"), () => true, default);
+            Check(!played.IsCompleted && f.Requests == 1, "one producer while speculative file awaits its Started event");
+            prepared.Dispose();
+            await Task.WhenAll(prepared.Work, played).WaitAsync(TimeSpan.FromSeconds(5));
+            Check(f.Requests == 2 && (await f.Cache.ReadScriptHistoryAsync("song", default)).Length == 1 &&
+                await f.Cache.OpenAsync("scope", "next", CacheSignature, default) is null,
+                "played history is published after speculative drain, never before playback");
+        });
+        yield return new("Script cache honors media headers and rejects altered provenance", async () =>
+        {
+            await using var f = new Fixture();
+            f.RequiredHeader = "X-Music-Test: cache-token";
+            string signature = MusicAudioFileCache.ScriptSignature("source", "wy", "recording", "flac");
+            var info = f.ScriptInfo("source", "flac");
+            await f.Cache.StorePlayedAsync("script:" + signature, "song", signature, info, () => true, default);
+            Check((await f.Cache.ReadScriptHistoryAsync("song", default)).Length == 1);
+            var raw = JsonNode.Parse(info.GetRawText())!.AsObject();
+            raw["installationId"] = "different-source";
+            await CacheDataError(() => f.Cache.StorePlayedAsync("script:" + signature, "song", signature,
+                JsonSerializer.SerializeToElement(raw), () => true, default));
+            Check((await f.Cache.ReadScriptHistoryAsync("song", default)).Length == 1);
+        });
+        foreach (double expected in new[] { 0d, 1d, 11d, 11.01d })
+            yield return new("Music file duration absolute boundary " + expected, async () =>
+            {
+                await using var f = new Fixture();
+                string signature = MusicAudioFileCache.ScriptSignature("source", "wy", "recording", "flac");
+                var raw = JsonNode.Parse(f.ScriptInfo("source", "flac").GetRawText())!.AsObject();
+                raw["duration"] = expected;
+                var cache = f.NewCache((_, _, _) => Task.FromResult(1d));
+                await cache.StorePlayedAsync("script:" + signature, "song", signature,
+                    JsonSerializer.SerializeToElement(raw), () => true, default);
+                var history = await cache.ReadScriptHistoryAsync("song", default);
+                Check(history.Length == (expected <= 11 ? 1 : 0));
+            });
         yield return new("Music complete file quality reads actual FLAC precision MP3 bitrate and never infers master", () =>
         {
             foreach (var (rate, depth, quality) in new[] { (44100, 16, "flac"), (44100, 24, "flac24bit"), (96000, 16, "flac24bit") })
@@ -408,7 +474,7 @@ public static class MusicPlaybackCacheTests
             foreach (string failure in new[] { "incomplete", "size", "duration", "stale" })
             {
                 await using var f = new Fixture();
-                var cache = failure == "duration" ? f.NewCache((_, _, _) => Task.FromResult(10d)) : f.Cache;
+                var cache = failure == "duration" ? f.NewCache((_, _, _) => Task.FromResult(12d)) : f.Cache;
                 await cache.StorePlayedAsync("account", "song", CacheSignature,
                     f.Info(scope: "account", full: failure != "incomplete", size: failure == "size" ? 50 : null),
                     () => failure != "stale", default);
@@ -437,6 +503,12 @@ public static class MusicPlaybackCacheTests
             await File.WriteAllBytesAsync(path, f.Bytes);
             double duration = await NativeAudioCacheProbe.ValidateAsync(path, 1, default);
             Check(Math.Abs(duration - 1) < .1);
+            Check(Math.Abs(await NativeAudioCacheProbe.ValidateAsync(path, 11, default) - 1) < .1);
+            Check(Math.Abs(await NativeAudioCacheProbe.ValidateAsync(path, 0, default) - 1) < .1);
+            bool rejected = false;
+            try { await NativeAudioCacheProbe.ValidateAsync(path, 11.01, default); }
+            catch (PlaybackException) { rejected = true; }
+            Check(rejected, "decoded duration beyond ten seconds must fail");
         });
     }
     private static async Task<MeowFilm.Platform.Storage.DocumentStoreError> CacheDataError(Func<Task> operation)
@@ -467,6 +539,20 @@ public static class MusicPlaybackCacheTests
         internal MusicAudioFileCache NewCache(Func<string, double, CancellationToken, Task<double>>? validate = null) =>
             new(Root, Store, validate ?? ((_, expected, _) => Task.FromResult(expected)), Clock,
                 NativeHttpMediaOptions.ForLoopbackTests([Origin]));
+        internal string? RequiredHeader;
+        internal JsonElement ScriptInfo(string provider, string quality)
+        {
+            string signature = MusicAudioFileCache.ScriptSignature(provider, "wy", "recording", quality);
+            var raw = JsonNode.Parse(Info().GetRawText())!.AsObject();
+            raw["kind"] = "script"; raw["installationId"] = provider; raw["providerName"] = "Saved source name";
+            raw["sourceKey"] = "recording"; raw["scope"] = "script:" + signature;
+            raw["quality"] = quality; raw["requestedQuality"] = quality;
+            raw["qualityCacheSignature"] = signature;
+            raw["headers"] = new JsonObject { ["X-Music-Test"] = "cache-token" };
+            foreach (string field in new[] { "generation", "qualityPolicySignature", "offlineAllowed", "delivery", "authorizationExpiresAt" })
+                raw.Remove(field);
+            return JsonSerializer.SerializeToElement(raw);
+        }
         internal JsonElement Info(string scope = "scope", string song = "song",
             string? signature = null, bool full = true, long? size = null, long? license = null) =>
             JsonSerializer.SerializeToElement(new
@@ -511,6 +597,11 @@ public static class MusicPlaybackCacheTests
                         if (request.Count >= 4 && request.TakeLast(4).SequenceEqual("\r\n\r\n"u8.ToArray())) break;
                     }
                     Interlocked.Increment(ref Requests);
+                    if (RequiredHeader is not null && !Encoding.ASCII.GetString(request.ToArray()).Contains(RequiredHeader, StringComparison.OrdinalIgnoreCase))
+                    {
+                        await stream.WriteAsync("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(), lifetime.Token);
+                        continue;
+                    }
                     byte[] header = Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {Bytes.Length}\r\nContent-Type: audio/wav\r\nConnection: close\r\n\r\n");
                     await stream.WriteAsync(header, lifetime.Token);
                     await stream.WriteAsync(Bytes, lifetime.Token);
