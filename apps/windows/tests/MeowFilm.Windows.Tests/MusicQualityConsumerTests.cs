@@ -29,6 +29,10 @@ public static class MusicQualityConsumerTests
         await f.Module.InitializeAsync(default); await f.Module.ActivateQualitySettingsAsync();
         await Editable(f.Module);
         Check(f.Module.CanEditQuality && f.Module.QualityCategories.Count == 7 && f.Module.SpatialQualities.Count == 7);
+        Check(f.Module.SpatialQualities.Single(row => row.Key == "sony360").Label == "360全景音频");
+        Check(f.Module.SpatialChoices().All(choice =>
+            choice.Label == f.Module.SpatialQualities.Single(row => row.Key == choice.Key).Label),
+            "spatial submenu uses the same full names as the settings list");
         string first = f.Module.QualityCategories[0].Key;
         await f.Module.MoveQualityAsync(f.Module.QualityCategories[0], f.Module.QualityCategories[1], false);
         await Editable(f.Module);

@@ -8,7 +8,7 @@
  FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
  TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
  UseLayoutRounding="True" SnapsToDevicePixels="True"
- Foreground="{DynamicResource Settings.Brush.Text}" ClipToBounds="True">
+ Foreground="{DynamicResource MeowFilm.Brush.Text}" ClipToBounds="True">
  <UserControl.Resources>
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries>
@@ -59,14 +59,17 @@
       </Ellipse>
       <TextBlock Text="{Binding Name}" FontSize="12" VerticalAlignment="Center">
        <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
-        <Style.Triggers><DataTrigger Binding="{Binding State}" Value="unsupported"><Setter Property="Foreground" Value="{DynamicResource Settings.Brush.Faint}"/></DataTrigger></Style.Triggers>
+        <Style.Triggers>
+         <DataTrigger Binding="{Binding State}" Value="unsupported"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/></DataTrigger>
+         <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
+        </Style.Triggers>
        </Style></TextBlock.Style>
       </TextBlock>
      </StackPanel>
     </Border>
    </DataTemplate>
    <DataTemplate x:Key="Source.Row" DataType="{x:Type local:MusicSourceRow}">
-    <Border Height="64" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource Settings.Brush.Rule}" Padding="10,0">
+    <Border Height="64" Style="{StaticResource Settings.RowDivider}" Padding="10,0">
      <Grid>
       <Grid.ColumnDefinitions>
        <ColumnDefinition Width="36"/><ColumnDefinition Width="64"/><ColumnDefinition MinWidth="140"/><ColumnDefinition Width="56"/>
@@ -141,7 +144,7 @@
            Margin="8,0,0,0" Click="Cancel_Click" IsEnabled="{Binding CanCancelSourceTransfer}"/>
   </Grid>
   <ScrollViewer x:Name="HeaderScroll" Grid.Row="2" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled"
-                HorizontalAlignment="Left" Margin="1,0,0,0" Focusable="False">
+                HorizontalAlignment="Left" Margin="7,0,0,0" Focusable="False">
   <Grid x:Name="SourceHeader" Height="36" Margin="10,0">
    <Grid.ColumnDefinitions>
     <ColumnDefinition Width="36"/><ColumnDefinition Width="64"/><ColumnDefinition MinWidth="140"/><ColumnDefinition Width="56"/>
@@ -157,7 +160,7 @@
    <TextBlock Grid.Column="6" Text="操作" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,8,0"/>
   </Grid>
   </ScrollViewer>
-  <Border Grid.Row="3" ClipToBounds="True" Style="{StaticResource Settings.PopupSurface}">
+  <Border Grid.Row="3" ClipToBounds="True" Style="{StaticResource Settings.ListSurface}" Padding="6">
    <ItemsControl x:Name="SourceList" ItemTemplate="{StaticResource Source.Row}" AutomationProperties.Name="音源列表">
     <ItemsControl.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
     <ItemsControl.Style><Style TargetType="ItemsControl">
@@ -167,7 +170,7 @@
     </Style></ItemsControl.Style>
     <ItemsControl.Template>
      <ControlTemplate TargetType="ItemsControl">
-      <ScrollViewer x:Name="ItemsScroll" CanContentScroll="True" VerticalScrollBarVisibility="Auto"
+      <ScrollViewer x:Name="ItemsScroll" Style="{StaticResource MeowFilm.SettingsScrollViewer}" CanContentScroll="True" VerticalScrollBarVisibility="Auto"
                     HorizontalScrollBarVisibility="Auto" Focusable="False">
        <ItemsPresenter/>
       </ScrollViewer>
@@ -175,7 +178,7 @@
     </ItemsControl.Template>
    </ItemsControl>
   </Border>
-  <Popup x:Name="EditPopup" Placement="Bottom" StaysOpen="False" AllowsTransparency="True">
+  <Popup x:Name="EditPopup" desktop:DialogPlacement.Centered="True" StaysOpen="False" AllowsTransparency="True">
    <Border Style="{StaticResource Settings.PopupSurface}" CornerRadius="8" Padding="16" Width="380" KeyboardNavigation.TabNavigation="Cycle">
     <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="4" Opacity=".13"/></Border.Effect>
     <StackPanel>

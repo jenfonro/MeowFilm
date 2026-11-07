@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
@@ -33,6 +34,7 @@ public static class FilmSettingsUiTests
         yield return Case("rule cancellation and errors cannot publish into a hidden view", RuleLifetime);
         yield return Case("local scripts preserve valid UTF8 bytes and reject invalid UTF8", LocalScriptEncoding);
         yield return Case("cat edits toggles restart and bulk deletion reach the source owner", CatManagement);
+        yield return Case("centered edits survive resize and offset coercion while confirmations retire without saving", PopupLifetime);
         yield return Case("video options radio selection and order survive a new owner", VideoSettings);
         yield return Case("video detection deletion and explicit reimport use the selected installation", VideoActions);
         yield return Case("failed source operations restore switches and notify with retry", SourceFailure);
@@ -50,6 +52,13 @@ public static class FilmSettingsUiTests
     private static async Task DraftTesting()
     {
         await using var scene = await Scene.Create();
+        var ruleEditor = scene.Editor("EpisodeEditor");
+        Check(ruleEditor.Rows.Select(row => row.Number).SequenceEqual(Enumerable.Range(1, ruleEditor.Rows.Count)),
+            "saved rules expose their current sequence numbers");
+        var addRule = (FrameworkElement)ruleEditor.FindName("NewPattern");
+        var rulesList = (FrameworkElement)ruleEditor.FindName("RuleList");
+        Check(addRule.TranslatePoint(new Point(), ruleEditor).Y < rulesList.TranslatePoint(new Point(), ruleEditor).Y,
+            "new rule input precedes the saved rows");
         Check(scene.View.Header is { Title: "设置", SearchVisible: false, SearchEnabled: false, Slot: null },
             "film settings contributes content without category navigation");
         var episode = scene.Editor("EpisodeEditor");
@@ -111,7 +120,27 @@ public static class FilmSettingsUiTests
         Click(rowDelete); await scene.AcceptPopup();
         Check(editor.Rows.Count == count - 1, "confirmed deletion saves the new full snapshot");
         scene.Editor("SearchEditor").Rows[0].Pattern = "search-unsaved";
-        Click(Button(scene.View, "恢复列表净化默认规则")); await scene.AcceptPopup();
+        var restore = Button(scene.View, "恢复列表净化默认规则");
+        DesktopTheme.SetIsHighContrast(scene.View, true); scene.View.UpdateLayout();
+        var restoreText = Visuals(restore).OfType<TextBlock>().Single();
+        Check(((SolidColorBrush)restore.Foreground).Color == SystemColors.WindowTextColor &&
+            ((SolidColorBrush)restoreText.Foreground).Color == SystemColors.WindowTextColor, "restore normal text uses system window foreground");
+        var hoverKey = (DependencyPropertyKey)typeof(UIElement).GetField("IsMouseOverPropertyKey",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
+        restore.SetValue(hoverKey, true); scene.View.UpdateLayout();
+        Check(((SolidColorBrush)restore.Background).Color == SystemColors.HighlightColor &&
+            ((SolidColorBrush)restoreText.Foreground).Color == SystemColors.HighlightTextColor, "restore hovered text matches its system highlight background");
+        restore.SetValue(hoverKey, false);
+        restore.IsEnabled = false; scene.View.UpdateLayout();
+        Check(((SolidColorBrush)restore.Foreground).Color == SystemColors.GrayTextColor &&
+            ((SolidColorBrush)restoreText.Foreground).Color == SystemColors.GrayTextColor, "disabled restore text uses system gray foreground");
+        restore.ClearValue(UIElement.IsEnabledProperty);
+        Click(restore); await Drain();
+        Check(scene.Element<Popup>("ActionPopup").IsOpen, "restore still requires confirmation");
+        Click(scene.Element<Button>("PopupCancel")); await Drain();
+        Check(scene.Editor("SearchEditor").Rows[0].Pattern == "search-unsaved" &&
+            scene.Rules.GetSavedSnapshot().EpisodeCleanRegexRules.SequenceEqual(["clean-draft"]), "cancelled restore preserves drafts and saved rules");
+        Click(restore); await scene.AcceptPopup();
         var restored = scene.Rules.GetSavedSnapshot();
         Check(restored.EpisodeCleanRegexRules.SequenceEqual(["restored-clean"]) &&
             restored.EpisodeRules[0].Pattern == "restored-episode" &&
@@ -260,6 +289,99 @@ public static class FilmSettingsUiTests
         }
     }
 
+    private static async Task PopupLifetime()
+    {
+        await using var scene = await Scene.Create(19);
+        scene.Window.Left = 80; scene.Window.Top = 60;
+        scene.Window.Width = 1100; scene.Window.Height = 430;
+        await scene.Select("cats");
+        var grid = scene.Element<DataGrid>("CatsGrid");
+        var scroll = Visuals(grid).OfType<ScrollViewer>().First();
+        var row = scene.View.CatRows.Last();
+        string id = row.Source.InstallationId;
+        var popup = scene.Element<Popup>("ActionPopup");
+        int edits = scene.Runtime.Calls.Count(call => call.Method == "cat.script.edit");
+        int writes = scene.Store.Writes;
+        await OpenEdit();
+        scene.Box("CatNameBox").Text = "保留的猫源草稿";
+        scene.Box("CatUrlBox").Text = "https://fixture.invalid/retained.js";
+        double offset = scroll.VerticalOffset;
+        Check(offset > 0, "the editor opens from the visible bottom row of an overflowing table");
+        scene.Window.Width = 1000;
+        scene.Window.UpdateLayout(); await Drain();
+        AssertDraft();
+        scene.Window.Height = 820;
+        scene.Window.UpdateLayout(); await Drain();
+        Check(scroll.VerticalOffset < offset, "height growth actually coerces the bottom table offset");
+        AssertDraft();
+        Check(scene.Runtime.Calls.Count(call => call.Method == "cat.script.edit") == edits &&
+            scene.Store.Writes == writes, "resizing does not save the editor");
+        await scene.AcceptPopup();
+        var saved = scene.Runtime.Calls.Where(call => call.Method == "cat.script.edit").Skip(edits).ToArray();
+        Check(saved.Length == 1 && saved[0].Parameters.GetProperty("installationId").GetString() == id &&
+            saved[0].Parameters.GetProperty("name").GetString() == "保留的猫源草稿" &&
+            saved[0].Parameters.GetProperty("sourceUrl").GetString() == "https://fixture.invalid/retained.js" &&
+            scene.Sources.Cats.Single(cat => cat.InstallationId == id).Name == "保留的猫源草稿",
+            "the retained action saves exactly once to the original installation");
+        Check(!popup.IsOpen, "saving closes the retained editor");
+        edits++;
+        writes = scene.Store.Writes;
+        await OpenEdit();
+        scene.Box("CatNameBox").Text = "切页放弃";
+        await scene.Select("rules");
+        Check(!popup.IsOpen, "switching categories retires the edit");
+
+        var restore = Button(scene.View, "恢复列表净化默认规则");
+        string original = scene.Editor("EpisodeCleanEditor").Rows[0].Pattern;
+        int restores = scene.Engine.Requests.Count(request => request.GetProperty("operation").GetString() == "restore");
+        Click(restore); await Drain();
+        scene.Window.Width = 1050; scene.Window.Height = 650;
+        scene.Window.UpdateLayout(); await Drain();
+        AssertCentered();
+        Click(scene.Element<Button>("PopupCancel")); await Drain();
+        Check(!popup.IsOpen && scene.Editor("EpisodeCleanEditor").Rows[0].Pattern == original &&
+            scene.Engine.Requests.Count(request => request.GetProperty("operation").GetString() == "restore") == restores &&
+            scene.Store.Writes == writes, "resized restore confirmation can be cancelled without changing rules or writing");
+
+        await scene.Select("cats");
+        await OpenEdit();
+        scene.Box("CatNameBox").Text = "隐藏放弃";
+        scene.View.Visibility = Visibility.Collapsed; await Drain();
+        Check(!popup.IsOpen, "hiding the view retires its editor");
+        scene.View.Visibility = Visibility.Visible;
+        await Until(() => !scene.View.SourcesBusy); await Drain();
+        await OpenEdit();
+        scene.Box("CatNameBox").Text = "卸载放弃";
+        scene.Window.Content = null; await Drain();
+        Check(!popup.IsOpen && scene.Runtime.Calls.Count(call => call.Method == "cat.script.edit") == edits &&
+            scene.Store.Writes == writes &&
+            scene.Sources.Cats.Single(cat => cat.InstallationId == id).Name == "保留的猫源草稿",
+            "category changes hiding and unloading do not save abandoned drafts");
+
+        async Task OpenEdit()
+        {
+            var current = scene.View.CatRows.Single(value => value.Source.InstallationId == id);
+            Click(await Cell<Button>(grid, current, 7, button => Equals(button.Content, "编辑")));
+            await Drain();
+            Check(popup.IsOpen, "the actual cat row opens its editor");
+        }
+        void AssertDraft()
+        {
+            AssertCentered();
+            Check(scene.Box("CatNameBox").Text == "保留的猫源草稿" &&
+                scene.Box("CatUrlBox").Text == "https://fixture.invalid/retained.js",
+                "width and height changes preserve both edit fields");
+        }
+        void AssertCentered()
+        {
+            Check(popup.IsOpen, "a viewport change does not cancel the centered popup");
+            var surface = scene.Element<Border>("PopupSurface");
+            var actual = surface.PointToScreen(new(surface.ActualWidth / 2, surface.ActualHeight / 2));
+            var expected = scene.View.PointToScreen(new(scene.View.ActualWidth / 2, scene.View.ActualHeight / 2));
+            Check((actual - expected).Length < 3, "the actual popup remains centered on window content");
+        }
+    }
+
     private static async Task CatManagement()
     {
         await using var scene = await Scene.Create();
@@ -390,10 +512,38 @@ public static class FilmSettingsUiTests
                     var scroll = scene.Element<ScrollViewer>("RulesScroller");
                     Check(scroll.ViewportHeight > 100 && scroll.ScrollableHeight > 0 && scroll.ScrollableWidth == 0,
                         "rule sections scroll inside the available height at either window size");
+                    var sections = scene.Element<StackPanel>("RuleSections").Children.OfType<Border>().ToArray();
+                    Check(sections.Length == 3 && sections.All(section => section.BorderThickness.Bottom == 1), "all settings sections use a shared divider");
+                    foreach (var section in sections)
+                    {
+                        var content = (StackPanel)section.Child;
+                        var header = (DockPanel)content.Children[0];
+                        var title = header.Children.OfType<TextBlock>().Single();
+                        var text = new FormattedText(title.Text, CultureInfo.CurrentCulture, title.FlowDirection,
+                            new Typeface(title.FontFamily, title.FontStyle, title.FontWeight, title.FontStretch),
+                            title.FontSize, title.Foreground, VisualTreeHelper.GetDpi(title).PixelsPerDip);
+                        Check(title.TextWrapping == TextWrapping.NoWrap && title.ActualWidth + .5 >= text.WidthIncludingTrailingWhitespace,
+                            "section titles are complete on one line: " + title.Text);
+                        var fields = (FrameworkElement)content.Children[1];
+                        var headingBounds = new Rect(header.TranslatePoint(new Point(), content), header.RenderSize);
+                        var contentBounds = new Rect(fields.TranslatePoint(new Point(), content), fields.RenderSize);
+                        Check(headingBounds.Bottom <= contentBounds.Top && contentBounds.Top - headingBounds.Bottom <= 9 &&
+                            Math.Abs(headingBounds.Left - contentBounds.Left) < 1 && Math.Abs(contentBounds.Width - content.ActualWidth) < 1,
+                            "every rule section has a compact top heading and full-width fields");
+                    }
+                    var savedRow = Visuals(scene.Editor("EpisodeCleanEditor")).OfType<Border>()
+                        .First(border => border.Style == scene.Editor("EpisodeCleanEditor").FindResource("Settings.RuleSurface"));
+                    Check(savedRow.CornerRadius == new CornerRadius(10) && savedRow.BorderThickness == new Thickness(1) &&
+                        ((SolidColorBrush)savedRow.BorderBrush).Color == Color.FromArgb(217, 203, 213, 225), "saved rules use the server row outline");
+                    Check(Button(scene.View, "恢复搜索列表净化默认规则").Style == scene.View.FindResource("Settings.DangerButton"),
+                        "restore is styled as a destructive action and keeps its confirmation");
                 }
                 else
                 {
                     var grid = scene.Element<DataGrid>(page == "cats" ? "CatsGrid" : "VideosGrid");
+                    Check(grid.Parent is Border card && card.Style == scene.View.FindResource("Settings.ListSurface") &&
+                        card.CornerRadius == new CornerRadius(10) && grid.BorderThickness == new Thickness(0),
+                        "source lists reuse the shared rounded card rather than a second square frame");
                     var scroll = Visuals(grid).OfType<ScrollViewer>().First();
                     // DataGrid's virtualizing panel reports ViewportHeight in rows,
                     // not DIP. Measure the actual viewport against the 56-DIP row.

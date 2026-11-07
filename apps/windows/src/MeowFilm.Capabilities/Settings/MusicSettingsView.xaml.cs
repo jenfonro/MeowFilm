@@ -2,7 +2,6 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using MeowFilm.Capabilities.Library;
@@ -16,19 +15,19 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     private readonly Border[] sections;
     private string searchAdvancedKind = "songs";
     private bool updatingNavigation;
+    private long exclusionRequest;
 
     public MusicSettingsView(MusicCapability module)
     {
         this.module = module;
         InitializeComponent();
         DataContext = module;
-        // Right-aligned below its button; the arrow sits over the button.
-        SearchAdvancedPopup.CustomPopupPlacementCallback = (popup, target, _) =>
-            [new(new Point(target.Width - popup.Width, target.Height + 4), PopupPrimaryAxis.Horizontal)];
         anchors = SettingsNavigation.Children.OfType<RadioButton>().ToArray();
-        sections = [AccountsSection, SearchSection, QualitySection, CacheSection, AppearanceSection, MetadataSection];
+        sections = [AccountsSection, SearchSection, QualitySection, MetadataSection];
         Loaded += View_Loaded;
         Unloaded += View_Unloaded;
+        ExclusionAddButton.IsVisibleChanged += (_, e) => { if (e.NewValue is false) RetireExclusionPopup(); };
+        ExclusionAddButton.Unloaded += (_, _) => RetireExclusionPopup();
         IsVisibleChanged += async (_, _) =>
         {
             if (!IsVisible) { AccountsPanel.CloseTransientPopups(); SearchAdvancedPopup.IsOpen = false; }
@@ -47,13 +46,13 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     private async void View_Unloaded(object sender, RoutedEventArgs e)
     {
         AccountsPanel.CloseTransientPopups();
+        SearchAdvancedPopup.IsOpen = false;
         await module.DeactivateSettingsAsync();
     }
     private Task UpdateActivation() => IsLoaded && IsVisible
         ? module.ActivateSettingsAsync() : module.DeactivateSettingsAsync();
     private void View_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        AccountsPanel?.CloseTransientPopups();
         UpdateLayoutMetrics();
     }
     private void UpdateLayoutMetrics()
@@ -91,9 +90,8 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         int selected = 0;
         for (int index = 0; index < sections.Length; index++)
             if (sections[index].TranslatePoint(new Point(), SectionsStack).Y <= SettingsScroller.VerticalOffset + 1) selected = index;
-        int anchorIndex = selected switch { 0 => 0, 1 => 1, 2 or 3 => 2, 4 => 3, _ => 4 };
         updatingNavigation = true;
-        try { anchors[anchorIndex].IsChecked = true; anchors[anchorIndex].BringIntoView(); }
+        try { anchors[selected].IsChecked = true; anchors[selected].BringIntoView(); }
         finally { updatingNavigation = false; }
     }
     private void Settings_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
@@ -101,18 +99,24 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         if (e.Delta == 0 || !SettingsScroller.IsVisible) return;
         for (DependencyObject? current = e.OriginalSource as DependencyObject; current is not null;
              current = current is Visual ? VisualTreeHelper.GetParent(current) : LogicalTreeHelper.GetParent(current))
-            if (current is ComboBox { IsDropDownOpen: true }) return;
+            if (current is ComboBox { IsDropDownOpen: true } || ReferenceEquals(current, ExclusionList)) return;
         double distance = SystemParameters.WheelScrollLines < 0 ? SettingsScroller.ViewportHeight :
             SystemParameters.WheelScrollLines * 16d;
         SettingsScroller.ScrollToVerticalOffset(SettingsScroller.VerticalOffset - e.Delta / 120d * distance);
         e.Handled = true;
     }
-    private async void ClearPlaybackCache_Click(object sender, RoutedEventArgs e) => await module.ClearPlaybackCacheAsync();
     private async void ExclusionAdd_Click(object sender, RoutedEventArgs e)
     {
+        long request = ++exclusionRequest;
         ExclusionSong.SelectedItem = ExclusionProvider.SelectedItem = ExclusionPlatform.SelectedItem = null;
         await module.PrepareSourceExclusionFormAsync();
-        if (IsLoaded) ExclusionPopup.IsOpen = true;
+        if (request == exclusionRequest && ExclusionAddButton.IsLoaded && ExclusionAddButton.IsVisible)
+        { ExclusionPopup.IsOpen = true; ExclusionSong.Focus(); }
+    }
+    private void RetireExclusionPopup()
+    {
+        exclusionRequest++;
+        ExclusionPopup.IsOpen = false;
     }
     private void ExclusionCancel_Click(object sender, RoutedEventArgs e) => ExclusionPopup.IsOpen = false;
     private async void ExclusionConfirm_Click(object sender, RoutedEventArgs e)
@@ -181,24 +185,6 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     {
         if (!IsLoaded || sender is not ComboBox { SelectedItem: string value } || value == module.PlaybackQualityRequest) return;
         await module.SetPlaybackQualityRequestAsync(value);
-    }
-    private async void CatalogSource_Changed(object sender, SelectionChangedEventArgs e)
-    {
-        if (!IsLoaded || !IsVisible ||
-            sender is not ComboBox { SelectedValue: string platform } picker ||
-            platform == module.CatalogSourcePlatform) return;
-        await module.SetCatalogSourceAsync(platform);
-        picker.GetBindingExpression(ComboBox.SelectedValueProperty)?.UpdateTarget();
-    }
-    private async void CatalogSourceRetry_Click(object sender, RoutedEventArgs e)
-    {
-        if (IsLoaded && IsVisible) await module.ReadCatalogSourceSettingsAsync();
-    }
-    private async void Appearance_Changed(object sender, SelectionChangedEventArgs e)
-    {
-        if (!IsLoaded || sender is not ComboBox { Tag: string setting, SelectedValue: string value }) return;
-        string current = setting switch { "playlistView" => module.AppearancePlaylistView, "colorMode" => module.AppearanceColorMode, "colorPalette" => module.AppearanceColorPalette, _ => value };
-        if (current != value) await module.SetAppearanceAsync(setting, value);
     }
     private async void Priority_Move(object sender, SettingsPriorityMoveEventArgs e)
     {

@@ -13,7 +13,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigationSource
+public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigationSource, IDesktopGeneralSettingsSource
 {
     private readonly IMusicApplication application;
     private readonly IMusicPlayback playback;
@@ -87,6 +87,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     public ObservableCollection<ArchivedPlaylist> Archives { get; } = [];
     public FrameworkElement View => Presentation.Page;
     public FrameworkElement SettingsView => Presentation.Settings;
+    public FrameworkElement AppearanceSettingsView => Presentation.Appearance;
+    public FrameworkElement HomeSourceSettingsView => Presentation.HomeSourceSettings;
+    public FrameworkElement CacheSettingsView => Presentation.CacheSettings;
     public FrameworkElement PlayerView => Presentation.Player;
     public System.Windows.Media.Brush PlayerBackground => Presentation.PlayerBackground;
     public System.Windows.Media.Brush PlayerProgressBrush => Presentation.PlayerProgress;
@@ -910,6 +913,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         Exception? settingsFailure = null;
         try { await DeactivateSettingsAsync(); }
         catch (Exception error) { settingsFailure = error; }
+        try { await DeactivateCatalogSourceSettingsAsync(); }
+        catch (Exception error) { settingsFailure ??= error; }
         try { await vipPage.PrepareShutdownAsync(); }
         catch (Exception error) { settingsFailure ??= error; }
         await Task.WhenAll(commandTail, accountSettlement, Task.WhenAll(eventWrites.ToArray()),
@@ -949,6 +954,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         RetireCatalogSession(); // Never revive private visual cache or a prepared playlist token.
         SubscribePlayback();
         preparation = null; resumption = null; stopping = false;
+        try { await EnsureCatalogSourceSettingsAsync(lifetime.Token); }
+        catch { /* The source setting publishes its retry notice without blocking shutdown cancellation. */ }
         ResumeRecommendations();
         await RecommendationCommand("music.recommendations.get", new { });
         if (playback is IMusicPlaybackRate && current is { } surviving && OwnsCurrent && playback.HasMedia)

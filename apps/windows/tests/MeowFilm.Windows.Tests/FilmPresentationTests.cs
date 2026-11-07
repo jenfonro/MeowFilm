@@ -331,6 +331,12 @@ public static class FilmPresentationTests
                 playback.Background is SolidColorBrush { Color.A: 0 } &&
                 Visuals(playback).OfType<FilmPlaybackView>().Single().DataContext == module.Playback,
                 "playback route presents its selected film through the native page");
+            var playerPage = Visuals(playback).OfType<FilmPlaybackView>().Single();
+            var playerGround = playerPage.Background;
+            window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.Background("#FF0000");
+            Check(playerGround is SolidColorBrush { Color.A: 255 } &&
+                ReferenceEquals(playerPage.Background, playerGround),
+                "film playback keeps its own opaque ground when the program theme changes");
             var playbackText = Visuals(playback).OfType<TextBlock>().Where(text => !string.IsNullOrWhiteSpace(text.Text)).ToArray();
             Check(playbackText.Length > 0 && playbackText.All(text =>
                 TextOptions.GetTextFormattingMode(text) == TextFormattingMode.Display &&

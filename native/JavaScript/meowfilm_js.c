@@ -4,12 +4,6 @@
 #include "include/meowfilm_js.h"
 #include "quickjs.h"
 
-#if defined(_WIN32)
-#define MF_EXPORT __declspec(dllexport)
-#else
-#define MF_EXPORT __attribute__((visibility("default")))
-#endif
-
 struct mf_engine {
     JSRuntime *runtime;
     JSContext *context;

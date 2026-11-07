@@ -67,9 +67,6 @@ public sealed partial class MusicCapability
     {
         token.ThrowIfCancellationRequested();
         var searchHistory = ActivateSearchHistoryAsync(SearchHistorySurface.Settings);
-        try { await EnsureCatalogSourceSettingsAsync(token); }
-        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch { /* Keep the restore failure in the source notice and allow an explicit retry. */ }
         await ActivatePlatformSettingsAsync(token);
         token.ThrowIfCancellationRequested();
 
@@ -83,16 +80,6 @@ public sealed partial class MusicCapability
         {
             try { await ReadMetadataSettings(lifetime.Token); }
             catch { }
-            token.ThrowIfCancellationRequested();
-        }
-        if (!appearanceLoaded)
-        {
-            try { await ReadAppearance(lifetime.Token); }
-            catch
-            {
-                appearanceStatus = "外观设置不可用";
-                AppearanceBindings();
-            }
             token.ThrowIfCancellationRequested();
         }
         if (!qualityLoaded)
@@ -111,7 +98,6 @@ public sealed partial class MusicCapability
         {
             () => DeactivateSearchHistoryAsync(SearchHistorySurface.Settings),
             DeactivateQualityAsync,
-            DeactivateCatalogSourceSettingsAsync,
             () => LibrarySync.DeactivateAsync(),
             DeactivateAccountDetailsAsync
         })

@@ -14,7 +14,7 @@
  </UserControl.Resources>
  <UserControl.Style><Style TargetType="UserControl">
   <Setter Property="Background" Value="{DynamicResource Settings.Brush.Ground}"/>
-  <Setter Property="Foreground" Value="{DynamicResource Settings.Brush.Text}"/>
+  <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
   <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
@@ -22,7 +22,7 @@
  </Style></UserControl.Style>
  <Grid x:Name="ContentFrame" Margin="32,0,32,16" local:SettingsLayout.Mode="Sections">
   <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition/></Grid.RowDefinitions>
-  <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource Settings.Brush.Border}">
+  <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource MeowFilm.Brush.Border}">
    <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
     <StackPanel x:Name="SettingsNavigation" Orientation="Horizontal" AutomationProperties.Name="影视设置分类">
      <RadioButton Content="魔法匹配" Tag="rules" GroupName="FilmSettingsSection" IsChecked="True" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="魔法匹配"/>
@@ -34,18 +34,25 @@
   <Grid x:Name="RulesPage" Grid.Row="1">
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+    <StackPanel.Style><Style TargetType="StackPanel">
+     <Setter Property="Visibility" Value="Collapsed"/>
+     <Style.Triggers>
+      <DataTrigger Binding="{Binding RulesBusy}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+      <DataTrigger Binding="{Binding RulesFailed}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+     </Style.Triggers>
+    </Style></StackPanel.Style>
     <TextBlock Text="正在处理规则…" VerticalAlignment="Center" Visibility="{Binding RulesBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
     <Button Content="重试" Click="RulesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding RulesFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{Binding RulesIdle}" AutomationProperties.Name="重新读取魔法规则"/>
     <Button Content="取消" Click="RulesCancel_Click" Margin="8,0,0,0" Style="{StaticResource Settings.QuietButton}" Visibility="{Binding RulesBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="取消规则操作"/>
    </StackPanel>
    <ScrollViewer x:Name="RulesScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
-                 Style="{StaticResource Capability.OverlayScrollViewer}" AutomationProperties.Name="魔法匹配设置">
+                 Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="魔法匹配设置">
     <StackPanel x:Name="RuleSections" Margin="0,0,12,0" IsEnabled="{Binding CanEditRules}" Visibility="{Binding RulesLoaded,Converter={StaticResource MeowFilm.BoolToVisibility}}">
      <Border Style="{StaticResource Settings.Section}">
       <StackPanel>
-       <DockPanel Margin="0,0,0,12">
-        <Button DockPanel.Dock="Right" Content="恢复默认规则" Tag="Episode" Click="RestoreRules_Click" Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="恢复列表净化默认规则"/>
-        <TextBlock Text="列表净化设置" Style="{StaticResource Settings.SectionTitle}"/>
+       <DockPanel Margin="0,0,0,8">
+        <Button DockPanel.Dock="Right" Content="恢复默认规则" Tag="Episode" Click="RestoreRules_Click" Style="{StaticResource Settings.DangerButton}" AutomationProperties.Name="恢复列表净化默认规则"/>
+        <TextBlock Text="列表净化设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
        </DockPanel>
        <local:FilmSettingsRuleEditor x:Name="EpisodeCleanEditor" Title="剧集列表净化规则" Tag="episodeClean"/>
        <local:FilmSettingsRuleEditor x:Name="EpisodeEditor" Title="集数匹配规则" Tag="episode" HasReplacement="True"/>
@@ -59,9 +66,9 @@
      </Border>
      <Border Style="{StaticResource Settings.Section}">
       <StackPanel>
-       <DockPanel Margin="0,0,0,12">
-        <Button DockPanel.Dock="Right" Content="恢复默认规则" Tag="Movie" Click="RestoreRules_Click" Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="恢复电影匹配默认规则"/>
-        <TextBlock Text="电影匹配设置" Style="{StaticResource Settings.SectionTitle}"/>
+       <DockPanel Margin="0,0,0,8">
+        <Button DockPanel.Dock="Right" Content="恢复默认规则" Tag="Movie" Click="RestoreRules_Click" Style="{StaticResource Settings.DangerButton}" AutomationProperties.Name="恢复电影匹配默认规则"/>
+        <TextBlock Text="电影匹配设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
        </DockPanel>
        <local:FilmSettingsRuleEditor x:Name="MovieEditor" Title="电影匹配规则" Tag="movie" HasReplacement="True"/>
        <TextBlock Text="文件名" Margin="0,0,0,8"/>
@@ -74,9 +81,9 @@
      </Border>
      <Border Style="{StaticResource Settings.Section}">
       <StackPanel>
-       <DockPanel Margin="0,0,0,12">
-        <Button DockPanel.Dock="Right" Content="恢复默认规则" Tag="Search" Click="RestoreRules_Click" Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="恢复搜索列表净化默认规则"/>
-        <TextBlock Text="搜索列表净化设置" Style="{StaticResource Settings.SectionTitle}"/>
+       <DockPanel Margin="0,0,0,8">
+        <Button DockPanel.Dock="Right" Content="恢复默认规则" Tag="Search" Click="RestoreRules_Click" Style="{StaticResource Settings.DangerButton}" AutomationProperties.Name="恢复搜索列表净化默认规则"/>
+        <TextBlock Text="搜索列表净化设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
        </DockPanel>
        <local:FilmSettingsRuleEditor x:Name="SearchEditor" Title="搜索列表净化规则" Tag="search"/>
        <TextBlock Text="搜索词（可空）" Margin="0,0,0,8"/>
@@ -106,6 +113,7 @@
     <Button Content="重试" Click="RefreshSources_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding SourcesFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{Binding SourcesIdle}" AutomationProperties.Name="重试猫源读取"/>
    </StackPanel>
    <Grid Grid.Row="2">
+    <Border Style="{StaticResource Settings.ListSurface}">
     <DataGrid x:Name="CatsGrid" Style="{StaticResource FilmSettings.Grid}" ItemsSource="{Binding CatRows}" FrozenColumnCount="3" IsEnabled="{Binding CanEditSources}" AutomationProperties.Name="猫源列表">
      <DataGrid.Columns>
       <DataGridTemplateColumn Width="38">
@@ -130,6 +138,7 @@
       </DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
      </DataGrid.Columns>
     </DataGrid>
+    </Border>
     <TextBlock Text="暂无猫源" VerticalAlignment="Center" HorizontalAlignment="Center" IsHitTestVisible="False" Visibility="{Binding CatsEmpty,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
    </Grid>
   </Grid>
@@ -146,6 +155,7 @@
     <Button Content="重试" Click="RefreshSources_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding SourcesFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{Binding SourcesIdle}" AutomationProperties.Name="重试视频源读取"/>
    </StackPanel>
    <Grid Grid.Row="2">
+    <Border Style="{StaticResource Settings.ListSurface}">
     <DataGrid x:Name="VideosGrid" Style="{StaticResource FilmSettings.Grid}" ItemsSource="{Binding VideoRows}" FrozenColumnCount="2" IsEnabled="{Binding CanEditSources}" AutomationProperties.Name="视频源列表">
      <DataGrid.Columns>
       <DataGridTemplateColumn Width="38">
@@ -179,11 +189,12 @@
       </DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
      </DataGrid.Columns>
     </DataGrid>
+    </Border>
     <TextBlock Text="暂无视频源" VerticalAlignment="Center" HorizontalAlignment="Center" IsHitTestVisible="False" Visibility="{Binding VideosEmpty,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
    </Grid>
   </Grid>
   <desktop:NoticeOutlet x:Name="Notices"/>
-  <Popup x:Name="ActionPopup" PlacementTarget="{Binding ElementName=Root}" Placement="Center"
+  <Popup x:Name="ActionPopup" PlacementTarget="{Binding ElementName=Root}" desktop:DialogPlacement.Centered="True"
          StaysOpen="False" AllowsTransparency="True" Opened="ActionPopup_Opened" Closed="ActionPopup_Closed">
    <Border x:Name="PopupSurface" Width="360" Padding="20" Style="{StaticResource Settings.PopupSurface}">
     <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="4" Opacity=".13"/></Border.Effect>

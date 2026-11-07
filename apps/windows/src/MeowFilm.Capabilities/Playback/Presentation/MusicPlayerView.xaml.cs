@@ -13,11 +13,13 @@ public partial class MusicPlayerView : UserControl
 {
     private readonly MusicCapability module;
     private string? scrubKey;
+    private int qualityRequest;
     public MusicPlayerView(MusicCapability module, bool showArtwork = true)
     {
         InitializeComponent();
         if (!showArtwork) { MetadataPanel.Children.Remove(ArtworkButton); ArtworkButton.Content = null; }
         this.module = module; DataContext = module;
+        QualityMenu.DataContext = module;
         Progress.ScrubStarted += (_, _) => BeginProgress();
         Progress.ScrubCancelled += (_, _) => RestoreProgress();
         Progress.ScrubCommitted += async (_, _) =>
@@ -27,6 +29,7 @@ public partial class MusicPlayerView : UserControl
             if (key is not null && key == module.PlaybackPresentationKey) await module.SeekAsync(position);
         };
         Loaded += (_, _) => { module.PropertyChanged -= OnPlaybackChanged; module.PropertyChanged += OnPlaybackChanged; };
+        IsVisibleChanged += (_, _) => { if (!IsVisible) Deactivate(); };
         Unloaded += (_, _) =>
         {
             module.PropertyChanged -= OnPlaybackChanged;
@@ -36,8 +39,9 @@ public partial class MusicPlayerView : UserControl
     }
     internal void Deactivate()
     {
-        SpatialPopup.IsOpen = false;
-        QualityPopup.IsOpen = false;
+        qualityRequest++;
+        QualityMenu.IsOpen = false;
+        SourcePopup.IsOpen = false;
         PlaylistPopup.IsOpen = false;
         VolumePopup.IsOpen = false;
         RatePopup.IsOpen = false;
@@ -72,90 +76,77 @@ public partial class MusicPlayerView : UserControl
     }
     private async void Quality_Click(object sender, RoutedEventArgs e)
     {
-        if (QualityPopup.IsOpen) { QualityPopup.IsOpen = false; return; }
-        await module.ActivateQualitySettingsAsync();
-        ShowQualityMenu();
-        QualityPopup.IsOpen = true;
+        if (QualityMenu.IsOpen) { QualityMenu.IsOpen = false; return; }
+        await OpenQualityMenuAsync();
     }
-    /// <summary>Quality choices of the current playback; spatial levels form the right-hand submenu.</summary>
+    private async void Quality_ContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        e.Handled = true;
+        if (!QualityMenu.IsOpen) await OpenQualityMenuAsync();
+    }
+    private async Task OpenQualityMenuAsync()
+    {
+        int request = ++qualityRequest;
+        await module.ActivateQualitySettingsAsync();
+        if (request != qualityRequest || !IsLoaded || !IsVisible || !module.HasQualityButton) return;
+        ShowQualityMenu();
+        QualityMenu.PlacementTarget = QualityButton;
+        QualityMenu.IsOpen = true;
+    }
     private void ShowQualityMenu()
     {
-        SourcePanel.Visibility = Visibility.Collapsed;
-        QualityMenu.Visibility = Visibility.Visible;
-        Fill(QualityItems, module.QualityChoices());
+        while (QualityMenu.Items.Count > 2) QualityMenu.Items.RemoveAt(QualityMenu.Items.Count - 1);
+        foreach (var choice in module.QualityChoices()) QualityMenu.Items.Add(QualityItem(choice));
         var spatial = module.SpatialChoices();
-        Fill(SpatialItems, spatial);
-        SpatialButton.Visibility = spatial.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        SpatialButton.Tag = spatial.Any(choice => choice.Current) ? "current" : null;
-    }
-    private void Fill(Panel panel, IReadOnlyList<MusicQualityChoice> choices)
-    {
-        panel.Children.Clear();
-        foreach (var choice in choices)
+        if (spatial.Count == 0) return;
+        var submenu = new MenuItem
         {
-            var item = new Button
-            {
-                Content = choice.Current ? choice.Label + "  ✓" : choice.Label, Tag = choice.Key,
-                HorizontalContentAlignment = HorizontalAlignment.Left, Padding = new(10, 7, 10, 7), FontSize = 13,
-                FontFamily = SystemFonts.MessageFontFamily, IsEnabled = module.CanSwitchSource
-            };
-            AutomationProperties.SetName(item, choice.Label);
-            item.Click += QualityChoice_Click;
-            panel.Children.Add(item);
-        }
+            Header = MusicQualityLabels.Name("spatial"), IsChecked = spatial.Any(choice => choice.Current),
+            Style = (Style)FindResource("Player.QualityMenuItem")
+        };
+        AutomationProperties.SetName(submenu, MusicQualityLabels.Name("spatial"));
+        foreach (var choice in spatial) submenu.Items.Add(QualityItem(choice));
+        QualityMenu.Items.Add(submenu);
+    }
+    private MenuItem QualityItem(MusicQualityChoice choice)
+    {
+        var item = new MenuItem { Header = choice.Label, Tag = choice.Key, IsChecked = choice.Current,
+            Style = (Style)FindResource("Player.QualityMenuItem") };
+        item.SetBinding(IsEnabledProperty, new Binding(nameof(MusicCapability.CanSwitchSource)) { Source = module });
+        AutomationProperties.SetName(item, choice.Label);
+        item.Click += QualityChoice_Click;
+        return item;
     }
     private async void QualityChoice_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button { Tag: string key }) return;
-        SpatialPopup.IsOpen = false;
-        QualityPopup.IsOpen = false;
+        if (sender is not MenuItem { Tag: string key }) return;
+        QualityMenu.IsOpen = false;
         await module.SwitchQualityAsync(key);
-    }
-    private void Spatial_Click(object sender, RoutedEventArgs e) => OpenSpatial(focus: true);
-    private void Spatial_MouseEnter(object sender, MouseEventArgs e) => OpenSpatial(focus: false);
-    private void Spatial_KeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key != Key.Right) return;
-        e.Handled = true;
-        OpenSpatial(focus: true);
-    }
-    private void OpenSpatial(bool focus)
-    {
-        if (SpatialItems.Children.Count == 0) return;
-        SpatialPopup.IsOpen = true;
-        if (focus && SpatialItems.Children[0] is Button first)
-            Dispatcher.BeginInvoke(() => first.Focus(), System.Windows.Threading.DispatcherPriority.Input);
-    }
-    private void SpatialItems_KeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key is not (Key.Left or Key.Escape)) return;
-        e.Handled = true;
-        SpatialPopup.IsOpen = false;
-        SpatialButton.Focus();
-    }
-    private void SpatialPopup_MouseLeave(object sender, MouseEventArgs e)
-    {
-        if (!SpatialButton.IsMouseOver) SpatialPopup.IsOpen = false;
     }
     private void SourceList_Click(object sender, RoutedEventArgs e)
     {
-        SpatialPopup.IsOpen = false;
+        if (!module.CanSwitchSource) return;
+        QualityMenu.IsOpen = false;
         module.OpenSourceChoices();
-        QualityMenu.Visibility = Visibility.Collapsed;
-        SourcePanel.Visibility = Visibility.Visible;
+        SourcePopup.IsOpen = true;
+        CloseSourcesButton.Focus();
     }
-    private void SourceBack_Click(object sender, RoutedEventArgs e) => ShowQualityMenu();
     private async void LoadMoreSources_Click(object sender, RoutedEventArgs e) => await module.LoadMoreSourcesAsync();
     private async void SourceChoice_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: MusicSourceChoice choice }) return;
-        QualityPopup.IsOpen = false;
+        SourcePopup.IsOpen = false;
         await module.SelectSourceChoiceAsync(choice);
     }
-    private async void Quality_Closed(object? sender, EventArgs e)
+    private void CloseSources_Click(object sender, RoutedEventArgs e) => SourcePopup.IsOpen = false;
+    private void SourcePopup_Closed(object? sender, EventArgs e)
     {
-        SpatialPopup.IsOpen = false;
         module.CloseSourceChoices();
+        if (IsLoaded && IsVisible) QualityButton.Focus();
+    }
+    private async void Quality_Closed(object? sender, RoutedEventArgs e)
+    {
+        qualityRequest++;
         await module.DeactivateQualityAsync();
     }
     /// <summary>The "more" menu: playback rate (its own panel) and "wrong source".</summary>
@@ -186,6 +177,8 @@ public partial class MusicPlayerView : UserControl
     private async void RateReset_Click(object sender, RoutedEventArgs e) => await module.ChangePlaybackRateAsync(1);
     private void OnPlaybackChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (SourcePopup.IsOpen && !module.HasSourceChoices) SourcePopup.IsOpen = false;
+        if (!module.HasQualityButton) QualityMenu.IsOpen = false;
         if (scrubKey is not null && (scrubKey != module.PlaybackPresentationKey || !module.CanSeek))
         { Progress.CancelScrub(); RestoreProgress(); }
     }

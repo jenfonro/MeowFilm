@@ -244,6 +244,10 @@ music.lyrics.parse
 music.online.song
 ```
 
+## Windows 外观值
+
+`native-appearance` 保持 schema 1、revision CAS 及原字段：`playlistView` 为 grid/list，`playerTheme` 为 starlight，`colorMode` 为 song/fixed；`colorPalette` 接受既有预设键或严格不透明 `#RRGGBB`（UI提交统一大写）。读取旧预设不会重写数据，自定义颜色沿原外观保存/权威重读路径消费。本次不保证旧客户端能读取新的自定义值，不增加迁移或双写。程序背景主题不属于音乐库，见[桌面接线](desktop-shell.md)。
+
 ## CAS、取消与关闭
 
 - 所有持久写入在同一 owner gate 内对完整 envelope 执行 CAS。

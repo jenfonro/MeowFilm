@@ -13,6 +13,9 @@ internal sealed class MusicPresentation
     private readonly MusicCapability module;
     private MusicView? page;
     private MusicSettingsView? settings;
+    private MusicAppearanceView? appearance;
+    private MusicHomeSourceSettingsView? homeSourceSettings;
+    private MusicCacheSettingsView? cacheSettings;
     private MusicPlayerView? player;
     private MusicPlayerDetailView? detail;
     private MusicQueueView? queue;
@@ -31,6 +34,9 @@ internal sealed class MusicPresentation
     internal Dispatcher Dispatcher { get; }
     internal MusicView Page => page ??= new(module);
     internal MusicSettingsView Settings => settings ??= new(module);
+    internal MusicAppearanceView Appearance => appearance ??= new(module);
+    internal MusicHomeSourceSettingsView HomeSourceSettings => homeSourceSettings ??= new(module);
+    internal MusicCacheSettingsView CacheSettings => cacheSettings ??= new(module);
     internal MusicPlayerView Player => player ??= new(module);
     internal MusicPlayerDetailView Detail => detail ??= new(module);
     internal MusicQueueView Queue => queue ??= new(module);

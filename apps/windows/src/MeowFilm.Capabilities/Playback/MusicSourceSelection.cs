@@ -40,10 +40,11 @@ public sealed partial class MusicCapability
         "standard" => "标准", "high" => "高音质", "lossless" => "无损", "hires" => "Hi-Res", "master" => "母带",
         "spatial" => "空间", "enhanced" => "增强", _ => "音质未知"
     };
-    private static string LevelName(string level) => level switch
-    {
-        "dolby" => "杜比全景声", "sky" => "沉浸环绕声", "vivid" => "臻音全景声", _ => QualityName(level)
-    };
+    private static string LevelName(string level) => MusicQualityLabels.Name(
+        MusicQualityPolicy.Spatial.Contains(level) ? level : MusicQualityPolicy.Category(level));
+    public string CurrentSourceQuality => musicRecovery?.Media is { Target: not null } media && QualityVerified(media)
+        ? LevelName(EffectiveLevel(media)) : "音质未知";
+    public bool IsLoadingSources => sourceExpansion is not null;
     /// <summary>Enabled categories, best first; spatial is offered through its own levels.</summary>
     public IReadOnlyList<MusicQualityChoice> QualityChoices()
     {
@@ -51,7 +52,7 @@ public sealed partial class MusicCapability
         string? level = musicRecovery?.Media is { Target: not null } media ? EffectiveLevel(media) : null;
         return new[] { "master", "hires", "lossless", "high", "standard", "enhanced" }
             .Where(category => MusicQualityPolicy.Exact(category, policy) is not null)
-            .Select(category => new MusicQualityChoice(category, QualityName(category),
+            .Select(category => new MusicQualityChoice(category, MusicQualityLabels.Name(category),
                 level is not null && MusicQualityPolicy.Category(level) == category)).ToArray();
     }
     public IReadOnlyList<MusicQualityChoice> SpatialChoices()
@@ -115,7 +116,7 @@ public sealed partial class MusicCapability
         sourceExpansion?.Cancel();
         sourceExpansion = null;
         SourceChoices.Clear();
-        Changed(nameof(HasSourceChoices)); Changed(nameof(CanLoadMoreSources));
+        Changed(nameof(HasSourceChoices)); Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources));
     }
     /// <summary>Explores the next automatic tier: every queued source of it, cache first.</summary>
     public Task LoadMoreSourcesAsync()
@@ -123,7 +124,7 @@ public sealed partial class MusicCapability
         if (!CanLoadMoreSources || musicRecovery is not { Session: not null } state) return Task.CompletedTask;
         var request = CancellationTokenSource.CreateLinkedTokenSource(state.Token);
         sourceExpansion = request;
-        Changed(nameof(CanLoadMoreSources));
+        Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources));
         var work = Run();
         eventWrites.Add(work); _ = Observe();
         return work;
@@ -138,7 +139,7 @@ public sealed partial class MusicCapability
                 if (ReferenceEquals(sourceExpansion, request)) sourceExpansion = null;
                 request.Dispose();
                 if (ReferenceEquals(musicRecovery, state) && SourceChoices.Count > 0) UpdateSourceChoices();
-                Changed(nameof(CanLoadMoreSources));
+                Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources));
             }
         }
     }

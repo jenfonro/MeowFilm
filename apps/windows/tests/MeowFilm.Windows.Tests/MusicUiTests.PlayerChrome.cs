@@ -714,7 +714,7 @@ public static partial class MusicUiTests
                         Visuals(play).Contains(hit), "window chrome does not intercept the page footer");
                     Render(root, (int)size.Width, (int)size.Height);
                     DesktopTheme.SetIsHighContrast(grid, false); root.UpdateLayout();
-                    Equal(Color.FromRgb(252, 59, 90), ((SolidColorBrush)play.Background).Color);
+                    Equal(Color.FromRgb(34, 197, 94), ((SolidColorBrush)play.Background).Color);
                     True(ReferenceEquals(f.Module.PlayerBackground, detail.Background), "player page root owns the cover backdrop");
                     True(footer.Background is null, "page footer paints no backdrop of its own");
                     TextBlock Title(FrameworkElement owner) => Visuals(owner).OfType<TextBlock>().First(block => block.Text == f.Module.CurrentTitle);

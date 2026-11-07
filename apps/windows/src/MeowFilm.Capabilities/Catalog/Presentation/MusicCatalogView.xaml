@@ -300,7 +300,7 @@
     </Button>
    </DataTemplate>
   <Style x:Key="Catalog.SearchPlaylistList" TargetType="ListBox">
-   <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Window}"/>
+   <Setter Property="Background" Value="Transparent"/>
    <Setter Property="BorderThickness" Value="0"/>
    <Setter Property="Padding" Value="0"/>
    <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/>
@@ -588,7 +588,7 @@
    </ListBox>
    <ScrollViewer x:Name="CatalogScroll" local:MusicCatalogSurface.IsLanding="True" Visibility="{Binding IsChannelLanding,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" ScrollChanged="CatalogScroll_Changed" PreviewMouseWheel="CatalogScroll_Wheel" PreviewKeyDown="CatalogScroll_Key">
    <ScrollViewer.Style><Style TargetType="ScrollViewer" BasedOn="{StaticResource Capability.OverlayScrollViewer}">
-    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Window}"/>
+    <Setter Property="Background" Value="Transparent"/>
     <Style.Triggers>
      <DataTrigger Binding="{Binding IsChannelDirectory}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
      <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger>

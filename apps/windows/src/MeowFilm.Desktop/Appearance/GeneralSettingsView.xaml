@@ -1,0 +1,52 @@
+<UserControl x:Class="MeowFilm.Desktop.GeneralSettingsView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="clr-namespace:MeowFilm.Desktop"
+ UseLayoutRounding="True" SnapsToDevicePixels="True" FontSize="14"
+ FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
+ Loaded="View_Loaded">
+ <UserControl.Resources>
+  <ResourceDictionary><ResourceDictionary.MergedDictionaries>
+   <ResourceDictionary Source="/MeowFilm.Desktop;component/Theme.xaml"/>
+   <ResourceDictionary Source="/MeowFilm.Desktop;component/SettingsScrollChrome.xaml"/>
+  </ResourceDictionary.MergedDictionaries></ResourceDictionary>
+ </UserControl.Resources>
+ <UserControl.Style><Style TargetType="UserControl">
+  <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+  <Style.Triggers><Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+   <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+  </Trigger></Style.Triggers>
+ </Style></UserControl.Style>
+ <Grid Margin="32,0,32,12">
+  <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition/></Grid.RowDefinitions>
+  <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource MeowFilm.Brush.Border}">
+   <StackPanel x:Name="Areas" Orientation="Horizontal">
+    <RadioButton Content="外观" Tag="appearance" IsChecked="True" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>
+    <RadioButton Content="首页数据源" Tag="sources" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>
+    <RadioButton Content="缓存控制" Tag="cache" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>
+   </StackPanel>
+  </Border>
+  <ScrollViewer x:Name="SettingsScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="通用设置">
+   <Grid Margin="0,0,12,0">
+    <StackPanel x:Name="AppearancePage">
+    <Border Style="{StaticResource MeowFilm.SettingsSection}">
+     <StackPanel>
+      <TextBlock Text="主题颜色" Style="{StaticResource MeowFilm.SettingsSectionTitle}" Margin="0,0,0,8"/>
+      <local:ColorSelection x:Name="ThemeSelection" Label="主题颜色" Value="{Binding ThemeColor,Mode=OneWay}"
+                            IsEnabled="{Binding CanEdit}" ValueCommitted="Theme_Committed"/>
+      <Button Content="重新读取" HorizontalAlignment="Left" Style="{StaticResource MeowFilm.QuietButton}" Click="Reload_Click">
+       <Button.Visibility><Binding Path="Status" Converter="{x:Static local:GeneralSettingsView.StatusVisibility}"/></Button.Visibility>
+      </Button>
+      <local:NoticeOutlet Message="{Binding Status}"/>
+     </StackPanel>
+    </Border>
+    <StackPanel x:Name="AppearanceContributions"/>
+    </StackPanel>
+    <StackPanel x:Name="HomeSourceContributions" Visibility="Collapsed"/>
+    <StackPanel x:Name="CacheContributions" Visibility="Collapsed"/>
+   </Grid>
+  </ScrollViewer>
+ </Grid>
+</UserControl>
