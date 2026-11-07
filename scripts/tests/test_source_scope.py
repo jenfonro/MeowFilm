@@ -124,6 +124,27 @@ class SourceScopeTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         self.assertTrue(any("Dependency cycle" in e for e in scope.check(self.root)))
 
+    def test_only_the_declared_local_native_engine_product_is_admitted(self):
+        path = self.root / "native/MeowKit/Package.swift"
+        original = path.read_text()
+        updated = original.replace('.target(name: "MeowJSON", dependencies: [])',
+            '.target(name: "MeowJSON", dependencies: [.product(name: "MeowJavaScript", package: "javascript")])')
+        path.write_text('.package(path: "../JavaScript")\n' + updated)
+        self.write("native/MeowKit/Sources/MeowJSON/Fixture.swift", "import MeowJavaScript\n")
+        self.assertEqual(scope.check(self.root), [])
+        path.write_text('.package(path: "../Foreign")\n' + updated)
+        self.assertTrue(any("Unapproved" in error for error in scope.check(self.root)))
+
+    def test_local_rule_resource_is_an_explicit_dependency(self):
+        path = self.root / "native/MeowKit/Package.swift"
+        text = path.read_text().replace('.target(name: "MeowMusicPlatform", dependencies: [])',
+            '.target(name: "MeowMusicPlatform", dependencies: [.product(name: "FilmRuleProgram", package: "film-rules")])')
+        path.write_text('.package(path: "../../packages/film-rules")\n' + text)
+        self.write("native/MeowKit/Sources/MeowMusicPlatform/Fixture.swift", "import FilmRuleProgram\n")
+        self.assertEqual(scope.check(self.root), [])
+        self.write("native/MeowKit/Sources/MeowUI/Fixture.swift", "import FilmRuleProgram\n")
+        self.assertTrue(any("Undeclared imports for MeowUI" in error for error in scope.check(self.root)))
+
 
 
 if __name__ == "__main__":

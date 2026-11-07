@@ -15,6 +15,7 @@
 | `qr-code-generator-LICENSE.txt` | QR Code generator |
 | `quickjs-emscripten-LICENSE.txt` | QuickJS 与 quickjs-emscripten 的原始 MIT／版权声明，随受信 release-sync 引擎发布 |
 | `quickjs-native-MIT.txt` | 客户端内嵌 QuickJS-NG 的 MIT／版权声明，源码独立锁定于 `scripts/quickjs-native.json` |
+| `Unicode-3.0.txt` | 同一原生引擎 Unicode 表的完整 Unicode License V3／版权声明，由原始表头提取并独立锁定 |
 | `catpawrunner-MIT.txt` | Cat 兼容实现所参考 catpawrunner 的 MIT 正文 |
 | `npm-node-compat-MIT.txt` | 有限 Node 兼容依赖闭包中的 MIT 原始版权与许可文本 |
 | `npm-node-compat-BSD-3-Clause.txt`、`npm-node-compat-ISC.txt` | 对应传递依赖的原始许可文本 |
@@ -38,3 +39,5 @@ libVLC、.NET 及其他传递组件的发行义务需单独核对。清单中的
 只读取固定清单中的本仓库文件，不递归发现。拒绝不安全/相对/UNC/设备路径、链接/重解析/硬链接、空/过大来源、缺失文件及目录冒充文件。每次检查文件身份、读取前后内容和长度；输出是构建暂存中新建的目录，最终随整个构建覆盖安装。
 
 源根与显式 outputRoot 各自有边界，输出不能跳出 outputRoot。输出目录与文件独占创建并重新核对完整 inventory/hash。错误使用固定 code。
+
+客户端原生 QuickJS-NG 的派生源码、补丁与中央许可由 `scripts/quickjs-native.json` 单独锁定。iOS 静态链接该源码并由 Xcode 资源阶段携带 `quickjs-native-MIT.txt` 和 `Unicode-3.0.txt`；`prepare-ios-runtime.py` 与定向 Swift 测试入口核验其哈希及 Unicode 表头声明，不放宽脚本载荷的 native/WASM 策略。

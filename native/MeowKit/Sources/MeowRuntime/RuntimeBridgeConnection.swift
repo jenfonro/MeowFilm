@@ -23,6 +23,8 @@ public final class RuntimeBridgeConnection: @unchecked Sendable {
     private var pending: [Int: Pending] = [:]
     private var active: [Int: Task<Void, Never>] = [:]
     private var observers: [@Sendable () -> Void] = []
+    private var descriptorClosed = false
+    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
 
     private struct Pending {
         var continuation: CheckedContinuation<JSONValue, Error>?
@@ -121,11 +123,41 @@ public final class RuntimeBridgeConnection: @unchecked Sendable {
             else { entry.outcome = .failure(RuntimeBridgeError.closed); pending[id] = entry }
         }
         let tasks = Array(active.values), callbacks = observers
-        active.removeAll(); observers.removeAll()
+        observers.removeAll()
         lock.unlock()
         for continuation in resumed { continuation.resume(throwing: RuntimeBridgeError.closed) }
         for task in tasks { task.cancel() }
         for callback in callbacks { callback() }
+    }
+
+    /// Closes admission, then waits for the reader/writer descriptor and every
+    /// admitted reverse handler to finish. Call from the owner, not a handler.
+    public func closeAndWait() async {
+        close()
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if descriptorClosed && active.isEmpty {
+                lock.unlock(); continuation.resume()
+            } else {
+                drainWaiters.append(continuation); lock.unlock()
+            }
+        }
+    }
+
+    private func finishDescriptorClose() {
+        lock.lock()
+        descriptorClosed = true
+        let waiters = takeDrainWaiters()
+        lock.unlock()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Called under lock. Closed handlers remain owned until their real exit.
+    private func takeDrainWaiters() -> [CheckedContinuation<Void, Never>] {
+        guard descriptorClosed && active.isEmpty else { return [] }
+        let waiters = drainWaiters
+        drainWaiters.removeAll()
+        return waiters
     }
 
     // MARK: Outbound calls
@@ -175,7 +207,8 @@ public final class RuntimeBridgeConnection: @unchecked Sendable {
             return
         }
         queuedBytes += frame.count
-        lock.unlock()
+        // Register the writer before close can enqueue its descriptor barrier.
+        // An admitted frame must not land behind that barrier.
         writer.async { [self] in
             lock.lock()
             let open = !closed
@@ -188,6 +221,7 @@ public final class RuntimeBridgeConnection: @unchecked Sendable {
                 close()
             }
         }
+        lock.unlock()
     }
 
     private func writeAll(_ data: Data) -> Bool {
@@ -217,7 +251,10 @@ public final class RuntimeBridgeConnection: @unchecked Sendable {
         }
         close()
         // Every write queued before close has already observed `closed`.
-        writer.async { [descriptor] in _ = Darwin.close(descriptor) }
+        writer.async { [self] in
+            _ = Darwin.close(descriptor)
+            finishDescriptorClose()
+        }
     }
 
     private func readExactly(_ buffer: inout [UInt8]) -> Bool {
@@ -277,8 +314,10 @@ public final class RuntimeBridgeConnection: @unchecked Sendable {
     private func respond(_ id: Int, _ kind: RuntimeBridgeFrame.Kind) {
         lock.lock()
         let owned = active.removeValue(forKey: id) != nil
+        let waiters = takeDrainWaiters()
         lock.unlock()
         if owned { reply(id, kind) }
+        for waiter in waiters { waiter.resume() }
     }
 
     private func reply(_ id: Int, _ kind: RuntimeBridgeFrame.Kind) {
@@ -306,4 +345,7 @@ public final class RuntimeBridgeConnection: @unchecked Sendable {
 /// A closed connection is final for this process.
 public protocol RuntimeBridgeLaunching: Sendable {
     func connect(handlers: [String: RuntimeBridgeConnection.Handler]) async throws -> RuntimeBridgeConnection
+    /// Called after connect has settled and its connection has closed. Returns
+    /// only after the launched executor exits; cancellation is not an exit.
+    func waitForExit() async
 }

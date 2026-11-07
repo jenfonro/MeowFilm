@@ -219,7 +219,9 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   is `native/JavaScript/patches/regexp-compile-interrupt.patch`.
 - Upstream, patched-source, patch and license hashes: `scripts/quickjs-native.json`.
 - Windows links the engine into `meowfilm_js.dll` through the application's
-  JSON-only C adapter. The upstream command-line interpreter, libc/I/O module
+  JSON-only C adapter; iOS statically links the same source through the local
+  `MeowJavaScript` Swift package and bundles `quickjs-native-MIT.txt`.
+  The upstream command-line interpreter, libc/I/O module
   and module loader are not included. This client-side engine is independent
   of the Node script host and is not a replacement for its WASM/asm.js engines.
 
@@ -227,13 +229,14 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
 
 - Source: `libunicode-table.h` in the same QuickJS-NG commit
   `d7215b0ad3fc2c562e8317fd9bca058fd4863804`, included by `libunicode.c`
-  and compiled into the Windows `meowfilm_js.dll`.
+  and compiled into the Windows `meowfilm_js.dll` and the iOS static engine.
 - Copyright © 1991-2026 Unicode, Inc.
 - License: `Unicode-3.0.txt` is the complete original copyright and permission
   notice extracted from that table's header, without the C comment delimiters.
   The table and this license are hash-pinned in `scripts/quickjs-native.json`;
   source verification also checks that the standalone notice matches the header.
 - The Windows license package includes this notice and its manifest entry.
+  The iOS App also bundles `Unicode-3.0.txt` as a resource.
   Node's separate ICU declaration does not replace this native-table attribution.
 
 ## QuickJS / quickjs-emscripten — MIT

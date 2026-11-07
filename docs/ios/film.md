@@ -1,6 +1,6 @@
 # iOS 影视
 
-`MeowFilmFeature` 持有影视目录模型、豆瓣适配、首页状态、收藏和 UIKit 页面。App 在 `MeowfilmAssembly.filmSources` 装配数据源，在协调器中负责详情导航与实际视频呈现；影视不依赖音乐业务模块。页面请求遵守[共同契约](../common/pages/data-requests.md)。
+`MeowFilmFeature` 持有影视目录模型、豆瓣适配、首页状态、收藏和 UIKit 页面。App 在 `MeowfilmAssembly.filmSources` 装配数据源，在协调器中负责详情导航与实际视频呈现；影视不依赖音乐业务模块。页面请求遵守[共同契约](../common/pages/data-requests.md)。规则、猫源和视频源设置见[影视设置](film-settings.md)；管理清单目前不接入首页或搜索消费者。
 
 ## 首页和数据源
 
