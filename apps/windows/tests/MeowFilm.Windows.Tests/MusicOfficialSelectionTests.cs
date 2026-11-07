@@ -414,10 +414,13 @@ public static class MusicOfficialSelectionTests
     private sealed class NoRuntime : IRuntimeClient
     {
         internal int Calls;
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
+        { Calls++; throw new InvalidOperationException("Native business must not upload script sources"); }
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
             if (method == "music.script.sources.list")
-                return Task.FromResult(JsonSerializer.SerializeToElement(new { ok = true, contract = "music.script.v3", items = Array.Empty<object>() }));
+                return Task.FromResult(JsonSerializer.SerializeToElement(new { ok = true, contract = "music.script.v3", value = new { items = Array.Empty<object>() } }));
             Calls++; throw new InvalidOperationException("Official selection invoked a script");
         }
     }

@@ -1,8 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
-using System.Diagnostics;
 using System.IO;
-using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
@@ -10,6 +8,7 @@ using System.Windows.Controls;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Platform.Runtime;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -69,9 +68,7 @@ public static partial class MusicUiTests
             await f.Module.RefreshLyricsAsync();
             Equal("当前音源不提供歌词", f.Module.LyricStatus); Equal(0, f.Module.Lyrics.Count);
             f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
-            True(f.Calls.Log.Where(call => call.Method.StartsWith("music.transfer.", StringComparison.Ordinal))
-                .All(call => !call.Parameters.GetRawText().Contains(JsonSerializer.Serialize(f.Dialogs.ScriptPath).Trim('"'),
-                    StringComparison.Ordinal)), "no script pathname RPC");
+            Equal(Path.GetFileName(f.Dialogs.ScriptPath), f.Runtime.Uploads.Single().Basename);
             var requests = f.Calls.Log.Where(call => call.Method == "music.online.resolve").ToArray();
             Equal(source.InstallationId, requests.Single().Parameters.GetProperty("installationId").GetString());
             await f.Module.SetSourceEnabledAsync(ScriptRow(f), false); await Until(() => f.Module.CanEdit);
@@ -112,7 +109,7 @@ public static partial class MusicUiTests
             Equal("CANCELLED", cancelled.GetProperty("code").GetString());
             Equal(0, f.Playback.Opens.Count);
         });
-        yield return Case("JS update failure preserves source, safe multi-chunk update and explicit rollback", async () =>
+        yield return Case("JS update failure preserves source, complete source update and explicit rollback", async () =>
         {
             await using var f = await Fixture.Create(); await SetupOnline(f);
             var before = ScriptRow(f);
@@ -124,7 +121,12 @@ public static partial class MusicUiTests
             File.WriteAllText(f.Dialogs.ScriptPath!, TestScript("'https://media.invalid/updated'", version: "2") +
                 "/*" + new string('x', 40000) + "*/", new UTF8Encoding(false));
             await f.Module.UpdateSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
-            True(f.Calls.Count("music.transfer.chunk") >= 5, "multiple owned byte chunks");
+            var uploaded = f.Runtime.Uploads.Last();
+            True(uploaded.Bytes.SequenceEqual(File.ReadAllBytes(f.Dialogs.ScriptPath!)), "the update sends the complete selected snapshot once");
+            Equal(3, f.Runtime.Uploads.Count);
+            var committed = f.Runtime.Requests.Last(request => request.Method == "music.script.sources.update").Parameters;
+            Equal(uploaded.InstallationId, committed.GetProperty("installationId").GetString());
+            Equal(uploaded.SourceRevision, committed.GetProperty("sourceRevision").GetInt64());
             Equal("2", ScriptRow(f).Version);
             f.Dialogs.Confirmation = false;
             await f.Module.RollbackSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
@@ -148,9 +150,9 @@ public static partial class MusicUiTests
             File.WriteAllText(path, TestScript(version: "2"), new UTF8Encoding(false));
             await f.Module.UpdateSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
             Equal("2", ScriptRow(f).Version);
-            var update = f.Calls.Last("music.sources.update");
+            var update = f.Runtime.Requests.Last(request => request.Method == "music.script.sources.update").Parameters;
             True(update.EnumerateObject().Select(field => field.Name).OrderBy(name => name, StringComparer.Ordinal)
-                .SequenceEqual(["installationId", "token"]), "an update carries only the target and its staged file");
+                .SequenceEqual(["installationId", "sourceRevision"]), "an update selects the exact complete source candidate");
             await f.Module.RemoveSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
             Equal(1, ScriptRows(f).Length);
             f.Dialogs.Confirmation = true;
@@ -338,7 +340,7 @@ public static partial class MusicUiTests
 }
 
 /// <summary>
-/// Executes only the checked-in LX script-only module. The App starts its runtime with the
+/// Executes authored LX sources through the packaged runtime. The App starts its runtime with the
 /// App; this fixture process starts at the first script call so tests can observe that native
 /// business never needs it. It offers no reverse methods. Authored fixture scripts are the only
 /// executed sources.
@@ -358,58 +360,30 @@ internal sealed class NativeMusicScriptTestRuntime : IRuntimeClient, IAsyncDispo
         if (!method.StartsWith("music.script.", StringComparison.Ordinal))
             throw new InvalidOperationException("Ordinary music business must remain native");
         lock (gate) if (!runtime.HasStarted) runtime.Start();
-        Calls.Enqueue(method); return runtime.CallAsync(method, parameters, cancellationToken);
+        Calls.Enqueue(method); Requests.Enqueue((method, JsonSerializer.SerializeToElement(parameters ?? new { })));
+        return runtime.CallAsync(method, parameters, cancellationToken);
+    }
+    public System.Collections.Concurrent.ConcurrentQueue<(string Method, JsonElement Parameters)> Requests { get; } = new();
+    public System.Collections.Concurrent.ConcurrentQueue<(string InstallationId, long SourceRevision, string? Basename, byte[] Bytes)> Uploads { get; } = new();
+    public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+        ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
+    {
+        if (module != "music") throw new InvalidOperationException("Only authored music sources may be uploaded");
+        lock (gate) if (!runtime.HasStarted) runtime.Start();
+        Uploads.Enqueue((installationId, sourceRevision, basename, source.ToArray()));
+        return runtime.UploadSourceAsync(module, installationId, sourceRevision, source, basename, cancellationToken);
     }
     private async Task<IRuntimeSession> StartAsync(CancellationToken token)
     {
-        var root = new DirectoryInfo(TestWorkspace.SourceRoot);
-        var node = Environment.GetEnvironmentVariable("MEOWFILM_TEST_NODE") ?? throw new InvalidOperationException("Pinned Node required for authored LX execution");
-        var pipeName = "meowfilm-" + Guid.NewGuid().ToString("D");
-        var session = Guid.NewGuid().ToString("D");
-        var pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        var entry = Path.Combine(root.FullName, "apps/windows/tests/fixtures/music-script-runtime.mjs");
-        var info = new ProcessStartInfo(node) { WorkingDirectory = root.FullName, UseShellExecute = false, CreateNoWindow = true,
-            RedirectStandardOutput = true, RedirectStandardError = true };
+        string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
+            ?? throw new InvalidOperationException("Packaged runtime root required.");
+        string node = Environment.GetEnvironmentVariable("MEOWFILM_TEST_NODE")
+            ?? throw new InvalidOperationException("Verified Node required.");
+        RuntimeModule[] modules = [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0")];
         Directory.CreateDirectory(dataRoot);
-        info.Environment["MEOWFILM_SCRIPT_DATA_ROOT"] = dataRoot;
-        foreach (var arg in new[] { entry, "--meow-pipe", pipeName, "--meow-session", session })
-            info.ArgumentList.Add(arg);
-        Process? child = null;
-        try
-        {
-            child = Process.Start(info) ?? throw new InvalidOperationException("Authored script test runtime failed");
-            var output = child.StandardOutput.ReadToEndAsync(); var errors = child.StandardError.ReadToEndAsync();
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(10));
-            await pipe.WaitForConnectionAsync(timeout.Token).ConfigureAwait(false);
-            return new ScriptSession(child, new BridgePeer(pipe, session,
-                new Dictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>()), output, errors);
-        }
-        catch
-        {
-            pipe.Dispose();
-            if (child is not null)
-            {
-                if (!child.HasExited) child.Kill(entireProcessTree: true);
-                await child.WaitForExitAsync().ConfigureAwait(false); child.Dispose();
-            }
-            throw;
-        }
+        return await NodeRuntime.StartAsync(node,
+            RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules),
+            modules, dataRoot, token).ConfigureAwait(false);
     }
     public async ValueTask DisposeAsync() { DisposeCalls++; await runtime.DisposeAsync(); }
-    private sealed class ScriptSession(Process child, BridgePeer peer, Task<string> output, Task<string> errors) : IRuntimeSession
-    {
-        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-            => peer.CallAsync(method, parameters ?? new { }, cancellationToken);
-        public async ValueTask DisposeAsync()
-        {
-            await peer.DisposeAsync();
-            try { await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
-            catch (TimeoutException) { child.Kill(entireProcessTree: true); await child.WaitForExitAsync(); }
-            var code = child.ExitCode; child.Dispose();
-            if ((await output).Length > 0 || (await errors).Length > 0 || code != 0)
-                throw new InvalidOperationException("Script-only fixture exited with diagnostics");
-        }
-    }
 }

@@ -259,15 +259,11 @@ public sealed partial class MusicCapability
                 var snapshot = await SelectedScriptSnapshot.ReadAsync(path, request.Token);
                 try
                 {
-                    string transfer = await UploadScript(snapshot.Bytes, snapshot.Sha256, snapshot.Basename, request.Token);
-                    try
-                    {
-                        object parameters = update is null ? new { token = transfer }
-                            : new { installationId = update.InstallationId, token = transfer };
-                        await CallSettledReceipt(update is null ? "music.sources.add" : "music.sources.update",
-                            parameters, request.Token);
-                    }
-                    finally { try { await CallSettledReceipt("music.transfer.cancel", new { token = transfer }); } catch { } }
+                    var reply = await application.ImportSourceAsync(snapshot.Bytes, snapshot.Basename,
+                        update?.InstallationId, request.Token);
+                    try { ValidateReply(update is null ? "music.sources.add" : "music.sources.update", reply); }
+                    catch (MusicOperationException error) when (error.Code == "CANCELLED" && request.IsCancellationRequested)
+                    { throw new OperationCanceledException(request.Token); }
                 }
                 finally { CryptographicOperations.ZeroMemory(snapshot.Bytes); }
             }
@@ -279,38 +275,6 @@ public sealed partial class MusicCapability
             await ReloadSources(lifetime.Token);
         }
     });
-    private async Task<string> UploadScript(byte[] bytes, string hash, string basename, CancellationToken token)
-    {
-        if (bytes.Length < 1 || bytes.Length > SelectedScriptSnapshot.MaximumBytes)
-            throw new MusicOperationException("LIMIT");
-        if (!StringComparer.Ordinal.Equals(hash, Convert.ToHexStringLower(SHA256.HashData(bytes))))
-            throw new MusicOperationException("SCRIPT_INTEGRITY");
-        var begin = await CallSettledReceipt("music.transfer.begin", new
-        {
-            kind = "script", length = bytes.Length, sha256 = hash, basename
-        }, token);
-        var transfer = MusicDto.Text(begin, "token");
-        try
-        {
-            var chunkBytes = MusicDto.Count(begin, "chunkBytes");
-            MusicDto.Require(chunkBytes is > 0 and <= 16 * 1024);
-            for (int offset = 0; offset < bytes.Length;)
-            {
-                token.ThrowIfCancellationRequested();
-                var count = Math.Min(chunkBytes, bytes.Length - offset);
-                var reply = await CallSettledReceipt("music.transfer.chunk", new { token = transfer, offset,
-                    data = Convert.ToBase64String(bytes, offset, count) }, token);
-                MusicDto.Require(MusicDto.Integer(reply, "next") == offset + count);
-                offset += count;
-            }
-            token.ThrowIfCancellationRequested(); return transfer;
-        }
-        catch
-        {
-            try { await CallSettledReceipt("music.transfer.cancel", new { token = transfer }); } catch { }
-            throw;
-        }
-    }
     private CancellationTokenSource BeginSourceTransfer()
     {
         sourceTransfer?.Cancel();

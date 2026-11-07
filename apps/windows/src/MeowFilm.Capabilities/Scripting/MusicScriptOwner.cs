@@ -1,5 +1,3 @@
-using System.Globalization;
-using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -21,8 +19,6 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         "rollback", "enable", "disable", "remove", "check"];
     private readonly MusicLibraryOwner library;
     private readonly IRuntimeClient runtime;
-    private readonly MusicScriptTransport scriptTransport;
-    private readonly MusicNativeTransfers transfers;
     private readonly CancellationTokenSource lifetime = new();
     private readonly object activityGate = new();
     private readonly HashSet<CancellationTokenSource> operations = [];
@@ -31,12 +27,10 @@ public sealed class MusicScriptOwner : IAsyncDisposable
     private TaskCompletionSource drained = Complete();
     private Task? preparation, disposal;
 
-    public MusicScriptOwner(MusicLibraryOwner library, IRuntimeClient runtime, TimeProvider? clock = null)
+    public MusicScriptOwner(MusicLibraryOwner library, IRuntimeClient runtime)
     {
         this.library = library ?? throw new ArgumentNullException(nameof(library));
         this.runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
-        scriptTransport = new(runtime);
-        transfers = new(clock ?? TimeProvider.System);
     }
     private static TaskCompletionSource Complete() { var result = new TaskCompletionSource(); result.SetResult(); return result; }
     private static JsonObject Parse(object? value)
@@ -95,9 +89,7 @@ public sealed class MusicScriptOwner : IAsyncDisposable
             var input = Parse(parameters);
             operation = Admit(cancellationToken);
             var token = operation.Token;
-            if (method == "music.transfer.begin") return Okay(transfers.Begin(input));
-            if (method == "music.transfer.chunk") return Okay(transfers.Chunk(input));
-            if (method == "music.transfer.cancel") return Okay(transfers.Cancel(input));
+            token.ThrowIfCancellationRequested();
             if (method == "music.online.song") return Okay(Song(input));
             if (method == "music.online.resolve") return Okay(await ResolveAsync(input, token).ConfigureAwait(false));
             if (method == "music.online.lyrics") return Okay(await LyricsAsync(input, token).ConfigureAwait(false));
@@ -110,59 +102,42 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         finally { if (operation is not null) Finish(operation); }
     }
 
-    private async Task<JsonObject> SourcesAsync(string command, JsonObject p, CancellationToken token)
+    /// <summary>Imports one caller-owned selected-file snapshot, or updates the specified
+    /// installation. Borrows source until the task settles, including cancellation.
+    /// The runtime owns the complete candidate and installation facts.</summary>
+    public async Task<JsonElement> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
+        string? installationId = null, CancellationToken cancellationToken = default)
+    {
+        CancellationTokenSource? operation = null;
+        try
+        {
+            operation = Admit(cancellationToken);
+            var token = operation.Token;
+            token.ThrowIfCancellationRequested();
+            string id = installationId ?? Guid.NewGuid().ToString("D");
+            long sourceRevision = RuntimeSourceRevision.Next();
+            ScriptValue(await runtime.UploadSourceAsync("music", id, sourceRevision, source, basename, token)
+                .ConfigureAwait(false));
+            token.ThrowIfCancellationRequested();
+            return Okay(await ScriptAsync(installationId is null ? "sources.add" : "sources.update",
+                new { installationId = id, sourceRevision }, token).ConfigureAwait(false));
+        }
+        catch (Exception error) { return Fail(Code(error)); }
+        finally { if (operation is not null) Finish(operation); }
+    }
+
+    private Task<JsonObject> SourcesAsync(string command, JsonObject p, CancellationToken token)
     {
         switch (command)
         {
             case "list": LJ.Fields(p, ""); break;
             case "download": LJ.Fields(p, "url", "url"); LJ.Text(p["url"], 2048); break;
             case "edit": LJ.Fields(p, "installationId name url", "installationId"); break;
-            case "add": LJ.Fields(p, "token", "token"); break;
-            case "update": LJ.Fields(p, "installationId token", "installationId"); break;
+            case "add": LJ.Fields(p, "installationId sourceRevision", "installationId sourceRevision"); break;
+            case "update": LJ.Fields(p, "installationId sourceRevision", "installationId"); break;
             default: LJ.Fields(p, "installationId", "installationId"); break;
         }
-        if (p["token"] is not null)
-        {
-            // A native selected-file snapshot becomes one staged module upload.
-            using var snapshot = transfers.Take(LJ.Text(p["token"], 80), "script");
-            string stage = await StageAsync(snapshot, token).ConfigureAwait(false);
-            try
-            {
-                p["token"] = stage;
-                return await ScriptAsync("sources." + command, p, token).ConfigureAwait(false);
-            }
-            finally { await ReleaseStageAsync(stage).ConfigureAwait(false); }
-        }
-        return await ScriptAsync("sources." + command, p, token).ConfigureAwait(false);
-    }
-    private async Task<string> StageAsync(MusicNativeTransfers.Snapshot snapshot, CancellationToken token)
-    {
-        var begin = await ScriptAsync("stage.begin", new { basename = snapshot.Basename,
-            length = snapshot.Bytes.Length, sha256 = snapshot.Hash }, token).ConfigureAwait(false);
-        string stage = LJ.Text(begin["token"]);
-        try
-        {
-            int chunkBytes = (int)LJ.I(begin["chunkBytes"], 1, 65536);
-            for (int offset = 0; offset < snapshot.Bytes.Length;)
-            {
-                int count = Math.Min(chunkBytes, snapshot.Bytes.Length - offset);
-                var result = await ScriptAsync("stage.chunk", new { token = stage, offset,
-                    data = Convert.ToBase64String(snapshot.Bytes, offset, count) }, token).ConfigureAwait(false);
-                LJ.Require(LJ.I(result["next"]) == offset + count, "INVALID_RESPONSE");
-                offset += count;
-            }
-            return stage;
-        }
-        catch { await ReleaseStageAsync(stage).ConfigureAwait(false); throw; }
-    }
-    private async Task ReleaseStageAsync(string stage)
-    {
-        try
-        {
-            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-            await ScriptAsync("stage.abort", new { token = stage }, cleanup.Token).ConfigureAwait(false);
-        }
-        catch { /* A staged buffer expires in the module; it grants nothing. */ }
+        return ScriptAsync("sources." + command, p, token);
     }
 
     private static JsonObject Song(JsonObject p)
@@ -238,16 +213,14 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         using var timed = CancellationTokenSource.CreateLinkedTokenSource(external, deadline.Token);
         try
         {
-            var result = await ScriptAsync("invoke", new { installationId = id, siteId = platform, operation = "lyric",
+            var raw = await ScriptValueAsync("invoke", new { installationId = id, siteId = platform, operation = "lyric",
                 payload = new JsonObject { ["musicInfo"] = ScriptInfo(selected.Data) } }, timed.Token).ConfigureAwait(false);
-            var raw = result["value"];
             LJ.Require(raw is JsonValue v && v.TryGetValue<string>(out _) ||
                 raw is JsonObject o && o["lyric"] is JsonValue l && l.TryGetValue<string>(out _), "INVALID_LYRIC_RESPONSE");
             string text = raw is JsonValue ? LJ.S(raw) : LJ.S(raw?["lyric"]);
             string translation = raw is JsonObject lyricsResult ? LJ.S(lyricsResult["tlyric"]) : "";
             var lines = MusicLyricTiming.Parse(text, translation, LJ.N(song["duration"]));
-            return LJ.Obj(("state", lines.GetArrayLength() > 0 ? "ready" : "none"),
-                ("generation", result["generation"]), ("lines", lines));
+            return LJ.Obj(("state", lines.GetArrayLength() > 0 ? "ready" : "none"), ("lines", lines));
         }
         catch (Exception error) when (deadline.IsCancellationRequested && !external.IsCancellationRequested &&
             Code(error) == "CANCELLED")
@@ -275,13 +248,19 @@ public sealed class MusicScriptOwner : IAsyncDisposable
     }
 
     private async Task<JsonObject> ScriptAsync(string operation, object parameters, CancellationToken token)
+        => LJ.Object(await ScriptValueAsync(operation, parameters, token).ConfigureAwait(false));
+
+    private async Task<JsonNode?> ScriptValueAsync(string operation, object parameters, CancellationToken token)
     {
-        var reply = await scriptTransport.CallAsync(operation, parameters, token).ConfigureAwait(false);
-        var value = LJ.Object(JsonNode.Parse(reply.GetRawText(), documentOptions: new() { MaxDepth = 67 }));
-        LJ.Require(LJ.IsBool(value["ok"]) && LJ.S(value["contract"]) == MusicScriptTransport.Contract, "INVALID_RESPONSE");
-        if (!LJ.B(value["ok"])) throw new MusicLibraryException(LJ.Text(value["code"]));
-        value.Remove("ok"); value.Remove("contract");
-        return value;
+        var value = ScriptValue(await runtime.CallAsync("music.script." + operation, parameters, token).ConfigureAwait(false));
+        return JsonNode.Parse(value.GetRawText(), documentOptions: new() { MaxDepth = 67 });
+    }
+
+    private static JsonElement ScriptValue(JsonElement reply)
+    {
+        if (!reply.GetProperty("ok").GetBoolean())
+            throw new MusicLibraryException(reply.GetProperty("code").GetString()!);
+        return reply.GetProperty("value");
     }
 
     public Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
@@ -316,12 +295,8 @@ public sealed class MusicScriptOwner : IAsyncDisposable
             closed = true; lifetime.Cancel();
             foreach (var operation in operations.ToArray()) operation.Cancel();
         }
-        Exception? failure = null;
         try { await PrepareShutdownAsync().ConfigureAwait(false); }
-        catch (Exception error) { failure = error; }
-        try { transfers.Dispose(); }
-        catch (Exception error) { failure ??= error; }
-        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
+        finally { lifetime.Dispose(); }
         // The App owns the runtime; its shutdown closes the shared module and every instance.
     }
 }

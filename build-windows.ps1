@@ -5,3 +5,4 @@ param(
 
 $ErrorActionPreference = 'Stop'
 & (Join-Path $PSScriptRoot 'scripts\windows\build.ps1') @PSBoundParameters
+exit $LASTEXITCODE

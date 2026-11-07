@@ -1,6 +1,5 @@
 using System.Net;
 using System.Net.Http;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -332,11 +331,9 @@ public static class MusicQualityPolicyTests
             }});
             """;
         byte[] bytes = Encoding.UTF8.GetBytes(source);
-        string token = (await Call("music.transfer.begin", new { kind = "script", basename = "wy-unknown-quality.js",
-            length = bytes.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)) })).GetProperty("token").GetString()!;
-        await Call("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) });
-        string id = (await Call("music.sources.add", new { token }))
-            .GetProperty("item").GetProperty("installationId").GetString()!;
+        var installed = await app.ImportSourceAsync(bytes, "wy-unknown-quality.js");
+        Check(installed.GetProperty("ok").GetBoolean(), installed.GetRawText());
+        string id = installed.GetProperty("item").GetProperty("installationId").GetString()!;
         await Call("music.sources.enable", new { installationId = id });
         var parameters = new { installationId = id, platform = "wy", quality = "320k", song };
         var reply = await Call("music.online.resolve", parameters);
@@ -422,11 +419,8 @@ internal sealed class QualityFixture : IAsyncDisposable
     internal async Task<string> Install()
     {
         byte[] source = Encoding.UTF8.GetBytes("// authored synthetic script protocol fixture");
-        var stage = await Ok("music.transfer.begin", new { kind = "script", basename = "quality.js",
-            length = source.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(source)) });
-        string token = stage.GetProperty("token").GetString()!;
-        await Ok("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(source) });
-        var installed = await Ok("music.sources.add", new { token });
+        var installed = await App.ImportSourceAsync(source, "quality.js");
+        if (!installed.GetProperty("ok").GetBoolean()) throw new InvalidOperationException(installed.GetRawText());
         string id = installed.GetProperty("item").GetProperty("installationId").GetString()!;
         await Ok("music.sources.enable", new { installationId = id }); return id;
     }
@@ -492,20 +486,26 @@ internal sealed class QualityFixture : IAsyncDisposable
         internal string? Failure;
         internal bool Hold;
         internal readonly TaskCompletionSource Entered = Gate(), Cancelled = Gate(), Release = Gate();
-        private static JsonElement Reply(object value)
+        private static JsonElement Reply(object value) => JsonSerializer.SerializeToElement(new { ok = true, contract = "music.script.v3", value });
+        private readonly HashSet<(string Id, long Revision)> candidates = [];
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
         {
-            var o = O(value); o["ok"] = true; o["contract"] = "music.script.v3"; return JsonSerializer.SerializeToElement(o);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (module != "music" || source.IsEmpty || !Guid.TryParseExact(installationId, "D", out _) || sourceRevision <= 0)
+                throw new InvalidOperationException("Invalid source candidate");
+            candidates.Add((installationId, sourceRevision));
+            return Task.FromResult(Reply(new { installationId, sourceRevision }));
         }
         public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested(); Calls.Add(method); var p = O(parameters ?? new { });
             switch (method)
             {
-                case "music.script.stage.begin": return Reply(new { token = Guid.NewGuid().ToString(), chunkBytes = 65536 });
-                case "music.script.stage.chunk": return Reply(new { next = p["offset"]!.GetValue<int>() + Convert.FromBase64String(p["data"]!.GetValue<string>()).Length });
-                case "music.script.stage.abort": return Reply(new { released = true });
                 case "music.script.sources.add":
-                    string id = Guid.NewGuid().ToString(); installations[id] = false; return Reply(new { item = Item(id) });
+                    string id = LJ.S(p["installationId"]);
+                    if (!candidates.Remove((id, LJ.I(p["sourceRevision"])))) throw new InvalidOperationException("Missing exact candidate");
+                    installations[id] = false; return Reply(new { item = Item(id) });
                 case "music.script.sources.enable":
                     installations[LJ.S(p["installationId"])] = true; return Reply(new { item = Item(LJ.S(p["installationId"])) });
                 case "music.script.sources.list": return Reply(new { items = installations.Keys.Select(Item).ToArray() });

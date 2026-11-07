@@ -1,6 +1,4 @@
 using System.IO;
-using System.Collections.ObjectModel;
-using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using MeowFilm.Core.Runtime;
@@ -12,7 +10,7 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.AppHost;
 
 public sealed record AppDefinition(string Id, IReadOnlyList<RuntimeModule> RuntimeModules,
-    IReadOnlyList<string> NativeNamespaces, IReadOnlyList<string> BridgeNamespaces,
+    IReadOnlyList<string> NativeNamespaces,
     IReadOnlyList<string>? NativeCollections = null, IReadOnlyList<string>? ProtectedNamespaces = null);
 
 public static class AppLauncher
@@ -113,7 +111,6 @@ public static class AppLauncher
         async Task<StartupOutcome> StartCoreAsync(CancellationToken cancellationToken)
         {
             LocalDocumentStore? store = null;
-            ProtectedDocumentBridge? documents = null;
             AppRuntimeClient? runtime = null;
             ArtworkService? artwork = null;
             AppAppearance? appearance = null;
@@ -121,7 +118,6 @@ public static class AppLauncher
             IAsyncDisposable? windowAttachment = null;
             ShellWindow? shell = null;
             AppShutdown? shutdown = null;
-            IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>? platformMethods = null;
             AppShutdown Lifecycle()
             {
                 // Cleanup must not be prevented by malformed assembly output.
@@ -134,7 +130,6 @@ public static class AppLauncher
                     new(() => artwork?.DisposeAsync() ?? ValueTask.CompletedTask),
                     new(() => disposeResources?.Invoke() ?? ValueTask.CompletedTask),
                     new(() => runtime?.DisposeAsync() ?? ValueTask.CompletedTask, InterruptsPendingOperations: true),
-                    new(() => documents?.DisposeAsync() ?? ValueTask.CompletedTask),
                     new(() => store?.DisposeAsync() ?? ValueTask.CompletedTask)
                 ], sharedParticipants: appearance is null ? [] : [appearance]);
             }
@@ -144,7 +139,6 @@ public static class AppLauncher
                 Directory.CreateDirectory(paths.Documents);
                 store = new LocalDocumentStore(paths.Documents, definition.NativeNamespaces,
                     definition.NativeCollections, definition.ProtectedNamespaces);
-                documents = new ProtectedDocumentBridge(store, definition.BridgeNamespaces);
                 runtime = new AppRuntimeClient(async token =>
                 {
                     // Native pages and business owners never wait for this start:
@@ -154,15 +148,13 @@ public static class AppLauncher
                         definition.RuntimeModules), token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
                     return await NodeRuntime.StartAsync(Path.Combine(root, "node.exe"), bundle,
-                        definition.RuntimeModules, platformMethods ?? throw new BridgeException("INVALID_MESSAGE"),
-                        paths.ScriptRuntime, token).ConfigureAwait(false);
+                        definition.RuntimeModules, paths.ScriptRuntime, token).ConfigureAwait(false);
                 });
                 cancellationToken.ThrowIfCancellationRequested();
                 createModules(runtime, store, modules);
                 appearance = new AppAppearance(store);
                 await appearance.LoadAsync();
                 ValidateModuleComposition(modules);
-                platformMethods = ComposeScriptCapabilities(documents.Methods, modules.OfType<IScriptPlatformCapabilities>());
                 // The shared runtime starts with the App; starting it executes no script.
                 runtime.Start();
                 var lifecycle = Lifecycle();
@@ -206,30 +198,4 @@ public static class AppLauncher
             throw new InvalidOperationException("APP_COMPOSITION_INVALID");
     }
 
-    /// <summary>One immutable, explicitly assembled reverse-call table per App.</summary>
-    public static IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> ComposeScriptCapabilities(
-        IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> platform,
-        IEnumerable<IScriptPlatformCapabilities> modules)
-    {
-        ArgumentNullException.ThrowIfNull(platform);
-        ArgumentNullException.ThrowIfNull(modules);
-        var methods = new Dictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>(StringComparer.Ordinal);
-        Add(platform);
-        foreach (var module in modules)
-        {
-            if (module is null) throw new InvalidOperationException("SCRIPT_CAPABILITY_COLLISION");
-            Add(module.ScriptCapabilities ?? throw new InvalidOperationException("SCRIPT_CAPABILITY_COLLISION"));
-        }
-        return new ReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>(methods);
-
-        void Add(IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> source)
-        {
-            foreach (var pair in source)
-            {
-                if (!BridgeCodec.ValidMethod(pair.Key) || !pair.Key.StartsWith("platform.", StringComparison.Ordinal) ||
-                    pair.Value is null || methods.Count >= 64 || !methods.TryAdd(pair.Key, pair.Value))
-                    throw new InvalidOperationException("SCRIPT_CAPABILITY_COLLISION");
-            }
-        }
-    }
 }

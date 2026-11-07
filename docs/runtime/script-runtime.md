@@ -27,7 +27,7 @@ packages/runtime-bridge/
 | `cat@0.2.0` | `cat.script.v2` | CatNode、HTTP 服务、direct Spider、私有卷和管理同步 |
 | `source@0.2.0` | `source.runtime.v2` | Legado、异次元、轻悦时光、独立 CatVod Spider |
 
-Windows/iOS 当前平台 launcher、旧 bridge 版本和分片消费者本轮未迁移，属于后续接入范围；通用运行器不保留旧 wire 或旧引擎。不能将独立入口可用等同于 Windows/iOS 应用可合并或已验证，也不据此声明 Android 已接入。
+Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)；iOS 旧接入仍待独立迁移。通用运行器不保留旧 wire 或旧引擎，独立入口通过不等于所有平台 App 已验证，也不据此声明 Android 已接入。
 
 ## 三类执行所有者
 
@@ -93,10 +93,10 @@ Cat 真实 Buffer/流/密钥对象按 Node 语义工作，资源按请求或实�
 
 ## 构建、发布与验证边界
 
-公共构建输入见 `scripts/script-host-native.json`，构建入口为 `scripts/quickjs/build-native.mjs`；公共打包 `scripts/package-runtime.mjs` 仅支持 `common-native`，manifest 的 entry 为 `app/entry.mjs`、status 为 complete 时表示打包完成。闭包含公共 8 个 app 文件、三 workspace 包、规则 SDK、Cat 依赖和精确受信原生扩展。平台 wrapper 不在本轮改造范围，旧 profile 不提供兼容后端。
+公共构建输入见 `scripts/script-host-native.json`，构建入口为 `scripts/quickjs/build-native.mjs`；公共打包 `scripts/package-runtime.mjs` 仅支持 `common-native`，manifest 的 entry 为 `app/entry.mjs`、status 为 complete 时表示打包完成。闭包含公共 8 个 app 文件、三 workspace 包、规则 SDK、Cat 依赖和精确受信原生扩展。Windows wrapper 在公共产物上增加私密启动包装；iOS wrapper 待独立迁移。旧 profile 不提供兼容后端。
 
 构建成功、原生可加载、合成行为测试、清理/取消验证、真实第三方联网动作和同机性能测量是不同证据。main 整合前的定档 `b2ec723` 已在 Linux arm64／Node 24.21.0 上完成原生／SDK 增量构建；受影响的 33 个测试文件、740 个不同用例结合定向复验均通过，包含真实独立 payload 的三协议启动。首轮仅三个新增 Cat 夹具遗漏实例标准流基线，修正为完整对象身份及实际关闭检查后，三例复验通过；产品输入未变，其余通过结果复用。这些是定档证据，不代替本次管理功能与 HTTP 接线整合后的定向验证。
 
 本次整合 main `17b97e2` 后，在同一环境完成最终 native／SDK 增量构建；20 个相关测试文件的 495 个不同用例结合定向复验通过，无 skip。覆盖音乐/Cat 管理、完整 HTTP 与 64/65 层、源码下载的真实取消/关闭、独立推进、私有 KV、验收 CLI、打包边界和实际三协议 payload。首轮六项失败分别修复了 LX 存储控制包装重复计深及四处测试夹具/预期不匹配；复验另有一项 HTTP 取消用例偶发失败，同输入精确重跑通过，未修改该断言，原失败日志保留。详细测试迁移、输入适用范围及不确定点见任务交付记录。
 
-返修前另有 30 条完整请求链路及 LX/Cat/source 同步 JS、显式算法的六组独立推进时序证据；本次没有重跑整套性能测量，不将历史测量冒充新产物实测。Windows/iOS 旧接入本轮未迁移，真实第三方脚本和外部来源验收未覆盖；这些结果不代表全平台、平台应用验证或可发布。外部验收和脱敏报告规则见 [来源动态验收](source-acceptance.md)；逐次结果保存在任务证据中。
+返修前另有 30 条完整请求链路及 LX/Cat/source 同步 JS、显式算法的六组独立推进时序证据；本次没有重跑整套性能测量，不将历史测量冒充新产物实测。以上是通用重构阶段的历史验证，当时未迁移 Windows/iOS 接入；Windows 后续接入与验证边界见平台文档。真实第三方脚本和外部来源验收未覆盖，这些历史结果不代表全平台、平台应用验证或可发布。外部验收和脱敏报告规则见 [来源动态验收](source-acceptance.md)；逐次结果保存在任务证据中。

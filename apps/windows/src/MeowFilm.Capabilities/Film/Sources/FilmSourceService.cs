@@ -103,11 +103,14 @@ public sealed class FilmSourceService : IAsyncDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentException.ThrowIfNullOrWhiteSpace(source);
         string id = installationId ?? Guid.NewGuid().ToString("N");
-        return ManageAsync(id, token => transport.WithSourceAsync(source, (upload, ct) =>
-            transport.CallAsync("install", new
+        return ManageAsync(id, async token =>
+        {
+            long sourceRevision = await transport.UploadSourceAsync(id, source, token).ConfigureAwait(false);
+            return await transport.CallAsync("install", new
             {
-                installationId = id, token = upload, name, sourceType = "local", sourceUrl = (string?)null, enabled = true
-            }, ct), token), reimport: true, cancellationToken);
+                installationId = id, sourceRevision, name, sourceType = "local", sourceUrl = (string?)null, enabled = true
+            }, token).ConfigureAwait(false);
+        }, reimport: true, cancellationToken);
     }
 
     public Task<FilmCatSource> ImportNetworkAsync(string name, string sourceUrl, string? installationId = null,
@@ -132,17 +135,17 @@ public sealed class FilmSourceService : IAsyncDisposable
     }
 
     public Task<FilmCatSource> UpdateCatAsync(string installationId, string? source = null,
-        CancellationToken cancellationToken = default) => ManageAsync(installationId, token =>
+        CancellationToken cancellationToken = default) => ManageAsync(installationId, async token =>
     {
         var cat = FindCat(installationId);
         if (cat.SourceType == "local")
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(source);
-            return transport.WithSourceAsync(source, (upload, ct) =>
-                transport.CallAsync("update", new { installationId, token = upload }, ct), token);
+            long sourceRevision = await transport.UploadSourceAsync(installationId, source, token).ConfigureAwait(false);
+            return await transport.CallAsync("update", new { installationId, sourceRevision }, token).ConfigureAwait(false);
         }
         if (source is not null) throw new ArgumentException("Network updates use the saved URL.", nameof(source));
-        return transport.CallAsync("update", new { installationId }, token);
+        return await transport.CallAsync("update", new { installationId }, token).ConfigureAwait(false);
     }, false, cancellationToken);
 
     public Task<FilmCatSource> RestartCatAsync(string installationId, CancellationToken cancellationToken = default) =>

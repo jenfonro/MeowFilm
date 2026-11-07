@@ -28,6 +28,10 @@ public interface IMusicApplication : IAsyncDisposable,
     Task InitializeAsync(CancellationToken cancellationToken = default);
     Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
         CancellationToken cancellationToken = default);
+    /// <summary>Borrows the complete selected bytes until the returned task settles,
+    /// including cancellation; the runtime owns the installation.</summary>
+    Task<JsonElement> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
+        string? installationId = null, CancellationToken cancellationToken = default);
     Task PrepareShutdownAsync(CancellationToken cancellationToken = default);
     Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default);
     Task AbortAsync(CancellationToken cancellationToken = default);
@@ -235,8 +239,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
                 return result;
             }
             if (method.StartsWith("music.sources.", StringComparison.Ordinal) ||
-                method.StartsWith("music.online.", StringComparison.Ordinal) ||
-                method.StartsWith("music.transfer.", StringComparison.Ordinal))
+                method.StartsWith("music.online.", StringComparison.Ordinal))
             {
                 bool changesSource = method.StartsWith("music.sources.", StringComparison.Ordinal) &&
                     method is not ("music.sources.list" or "music.sources.detail" or "music.sources.check" or "music.sources.edit");
@@ -260,6 +263,28 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         }
         catch (OperationCanceledException) { return Failed("CANCELLED"); }
         catch (MusicPlatformException error) { return Failed(error.Code); }
+        finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
+    }
+
+    public async Task<JsonElement> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
+        string? installationId = null, CancellationToken cancellationToken = default)
+    {
+        CancellationToken generation;
+        lock (gate)
+        {
+            if (stopping) return Failed("CLOSED");
+            if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            generation = lifetime.Token;
+        }
+        try
+        {
+            using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
+            request.Token.ThrowIfCancellationRequested();
+            lyrics.Invalidate();
+            try { return await scripts.ImportSourceAsync(source, basename, installationId, request.Token).ConfigureAwait(false); }
+            finally { lyrics.Invalidate(); }
+        }
+        catch (OperationCanceledException) { return Failed("CANCELLED"); }
         finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
     }
 

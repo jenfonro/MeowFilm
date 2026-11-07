@@ -1,6 +1,5 @@
 using System.IO;
 using System.Diagnostics;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -18,12 +17,12 @@ public static class MusicScriptIntegrationTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("Native LX real pipe: two installations resolve directed and keep isolated module storage", TwoInstances);
-        yield return new("Native LX real pipe: a failed update trial keeps the live generation and stored version", Update);
-        yield return new("Native LX real pipe: a restart reads the module catalog and resumes its private data", Restart);
-        yield return new("Native LX real pipe: original local lyric protocol is parsed in native code", Lyrics);
-        yield return new("Native LX real pipe: explicit crashed-process recovery reloads only the requested source", Recover);
-        yield return new("Native LX real pipe: owner transports legal large recordings and source lists", LargeOwner);
+        yield return new("Native LX real HTTP: two installations resolve directed and keep isolated module storage", TwoInstances);
+        yield return new("Native LX real HTTP: a failed update trial keeps the live generation and stored version", Update);
+        yield return new("Native LX real HTTP: a restart reads the module catalog and resumes its private data", Restart);
+        yield return new("Native LX real HTTP: original local lyric protocol is parsed in native code", Lyrics);
+        yield return new("Native LX real HTTP: explicit crashed-process recovery reloads only the requested source", Recover);
+        yield return new("Native LX real HTTP: owner transports legal large recordings and source lists", LargeOwner);
     }
     private const string SourceTemplate = """
         const label = __LABEL__;
@@ -66,10 +65,10 @@ public static class MusicScriptIntegrationTests
                     ?? throw new InvalidOperationException("Packaged runtime root required.");
                 string node = Environment.GetEnvironmentVariable("MEOWFILM_TEST_NODE")
                     ?? throw new InvalidOperationException("Verified Node required.");
-                RuntimeModule[] modules = [new("music", "0.8.0"), new("cat", "0.1.0"), new("source", "0.1.0")];
+                RuntimeModule[] modules = [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0")];
                 return Child = await NodeRuntime.StartAsync(node,
                     RuntimeBundle.Verify(System.IO.Path.Combine(bundles, "aggregate"), "aggregate", modules),
-                    modules, new Dictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>(),
+                    modules,
                     System.IO.Path.Combine(path, "script-runtime"), token);
             });
             Owner = new(Library, Runtime);
@@ -93,17 +92,10 @@ public static class MusicScriptIntegrationTests
         Check(result.GetProperty("ok").GetBoolean(), method + ":" + result.GetRawText());
         return result;
     }
-    private static async Task<string> Upload(Fixture f, string text)
-    {
-        byte[] bytes = Encoding.UTF8.GetBytes(text);
-        var begin = await Ok(f, "music.transfer.begin", new { kind = "script", length = bytes.Length,
-            sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)), basename = "fixture.js" });
-        string token = begin.GetProperty("token").GetString()!;
-        await Ok(f, "music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) }); return token;
-    }
     private static async Task<string> InstallSource(Fixture f, string source, bool enable = true)
     {
-        var result = await Ok(f, "music.sources.add", new { token = await Upload(f, source) });
+        var result = await f.Owner.ImportSourceAsync(Encoding.UTF8.GetBytes(source), "fixture.js");
+        Check(result.GetProperty("ok").GetBoolean(), result.GetRawText());
         string id = result.GetProperty("item").GetProperty("installationId").GetString()!;
         if (enable) await Ok(f, "music.sources.enable", new { installationId = id });
         return id;
@@ -138,8 +130,8 @@ public static class MusicScriptIntegrationTests
     {
         await using var f = new Fixture(Data()); string id = await InstallSource(f, Source("original"));
         var before = (await Ok(f, "music.sources.detail", new { installationId = id })).GetProperty("item");
-        var failed = await f.Owner.ExecuteAsync("music.sources.update",
-            new { installationId = id, token = await Upload(f, "throw new Error('synthetic failure')") });
+        var failed = await f.Owner.ImportSourceAsync(Encoding.UTF8.GetBytes("throw new Error('synthetic failure')"),
+            "fixture.js", id);
         Check(!failed.GetProperty("ok").GetBoolean());
         var after = (await Ok(f, "music.sources.detail", new { installationId = id })).GetProperty("item");
         Check(after.GetProperty("contentHash").GetString() == before.GetProperty("contentHash").GetString() &&
@@ -222,7 +214,7 @@ public static class MusicScriptIntegrationTests
         var song = MusicSongFixture.Online("wy", "selected", "Track", "Fixture", duration: 180, native: native);
         var recordings = song["sources"]!.AsArray();
         // Distinct same-recording locators are legal; only wy is selected while the
-        // whole request crosses the control upload threshold.
+        // whole native request retains all recordings.
         for (int index = 0; index < 125; index++)
             recordings.Add(MusicSongFixture.Online("tx", "other-" + index, "Track", "Fixture",
                 duration: 180, native: native)["sources"]![0]!.DeepClone());
@@ -230,13 +222,13 @@ public static class MusicScriptIntegrationTests
         var resolved = await Ok(f, "music.online.resolve", new { installationId = id, platform = "wy", quality = "320k", song });
         Check(resolved.GetProperty("url").GetString() == "https://media.invalid/large.mp3" &&
             resolved.GetProperty("headers").GetProperty("X-Checked").GetString() == "17");
-        // Long legal header metadata makes the list itself cross the result blob path.
+        // Long legal header metadata produces a complete response larger than 64 KiB.
         string header = "/**\n * @name " + new string('名', 255) + "\n * @description " + new string('述', 1024) +
             "\n * @author " + new string('作', 1024) + "\n */\n";
         for (int index = 0; index < 10; index++) await InstallSource(f, header + "// " + index, enable: false);
         var listed = await Ok(f, "music.sources.list");
         Check(BridgeCodec.EncodeJSONValue(listed).Length > 65536 && listed.GetProperty("items").GetArrayLength() == 11,
-            $"list must cross the blob boundary: {BridgeCodec.EncodeJSONValue(listed).Length} bytes");
+            $"complete list size: {BridgeCodec.EncodeJSONValue(listed).Length} bytes");
         Check(listed.GetProperty("items")[1].GetProperty("description").GetString() == new string('述', 1024));
     }
 }

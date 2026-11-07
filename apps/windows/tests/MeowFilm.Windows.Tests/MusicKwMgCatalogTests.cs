@@ -649,11 +649,7 @@ public static class MusicKwMgCatalogTests
         var runtime = new Runtime(platform);
         await using var scripts = new MusicScriptOwner(library, runtime);
         var bytes = Encoding.UTF8.GetBytes("// synthetic source: never evaluated");
-        var upload = Ok(await scripts.ExecuteAsync("music.transfer.begin", new { kind = "script", length = bytes.Length,
-            sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)), basename = "fixture.js" }));
-        string token = S(upload, "token");
-        Ok(await scripts.ExecuteAsync("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) }));
-        var installed = Ok(await scripts.ExecuteAsync("music.sources.add", new { token }));
+        var installed = Ok(await scripts.ImportSourceAsync(bytes, "fixture.js"));
         var installationId = S(installed.GetProperty("item"), "installationId");
         Ok(await scripts.ExecuteAsync("music.sources.enable", new { installationId }));
         if (platform == "kw")
@@ -693,7 +689,16 @@ public static class MusicKwMgCatalogTests
     {
         internal JsonElement? Payload;
         private static JsonElement Reply(object value)
-        { var obj = O(value); obj["ok"] = true; obj["contract"] = "music.script.v3"; return E(obj); }
+        => E(new { ok = true, contract = "music.script.v3", value });
+        private readonly HashSet<(string Id, long Revision)> candidates = [];
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Check(module == "music" && !source.IsEmpty && Guid.TryParseExact(installationId, "D", out _) && sourceRevision > 0);
+            candidates.Add((installationId, sourceRevision));
+            return Task.FromResult(Reply(new { installationId, sourceRevision }));
+        }
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -701,10 +706,9 @@ public static class MusicKwMgCatalogTests
             JsonElement result;
             switch (method)
             {
-                case "music.script.stage.begin": result = Reply(new { token = Guid.NewGuid().ToString("D"), chunkBytes = 65536 }); break;
-                case "music.script.stage.chunk": result = Reply(new { next = N(p, "offset") + Convert.FromBase64String(S(p, "data")).Length }); break;
-                case "music.script.stage.abort": result = Reply(new { released = true }); break;
-                case "music.script.sources.add": result = Reply(new { item = new { installationId = Guid.NewGuid().ToString() } }); break;
+                case "music.script.sources.add":
+                    Check(candidates.Remove((S(p, "installationId"), p.GetProperty("sourceRevision").GetInt64())));
+                    result = Reply(new { item = new { installationId = S(p, "installationId") } }); break;
                 case "music.script.sources.enable": result = Reply(new { item = new { installationId = S(p, "installationId"), enabled = true } }); break;
                 case "music.script.resolve":
                     Check(S(p, "platform") == platform);

@@ -7,12 +7,14 @@ namespace MeowFilm.Core.Runtime;
 /// transport and never replays a business operation.</summary>
 public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeRecovery, IAsyncDisposable
 {
-    private sealed class Epoch(long generation)
+    private sealed class Epoch
     {
-        internal readonly long Generation = generation;
+        internal readonly long Generation;
         internal readonly CancellationTokenSource Cancellation = new();
+        internal readonly CancellationToken Token;
         internal readonly TaskCompletionSource<IRuntimeSession> Start = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal Task? Retirement;
+        internal Epoch(long generation) { Generation = generation; Token = Cancellation.Token; }
     }
     private readonly Func<CancellationToken, Task<IRuntimeSession>> factory;
     private readonly CancellationTokenSource lifetime = new();
@@ -69,11 +71,23 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeRecovery, IAsyncD
             scopes.Add(scope);
         }
     }
-    public async Task<JsonElement> CallAsync(string method, object? parameters = null,
+    public Task<JsonElement> CallAsync(string method, object? parameters = null,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!BridgeCodec.ValidMethod(method)) throw new BridgeException("INVALID_MESSAGE");
+        if (!RuntimeHttpProtocol.ValidMethod(method)) throw new BridgeException("INVALID_MESSAGE");
+        return ExecuteAsync((session, token) => session.CallAsync(method, parameters, token), cancellationToken);
+    }
+    public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+        ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ExecuteAsync((session, token) => session.UploadSourceAsync(module, installationId,
+            sourceRevision, source, basename, token), cancellationToken, waitForCompletion: true);
+    }
+    private async Task<JsonElement> ExecuteAsync(Func<IRuntimeSession, CancellationToken, Task<JsonElement>> invoke,
+        CancellationToken cancellationToken, bool waitForCompletion = false)
+    {
         Epoch epoch;
         lock (gate)
         {
@@ -82,13 +96,25 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeRecovery, IAsyncD
             epoch = current;
         }
         // A cancelled caller cannot cancel the common factory for other callers.
-        var session = await epoch.Start.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested(); CheckCurrent(epoch);
-        var operation = session.CallAsync(method, parameters, cancellationToken);
-        Observe(operation);
-        var result = await operation.WaitAsync(cancellationToken).ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested(); CheckCurrent(epoch);
-        return result;
+        using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, epoch.Token);
+        try
+        {
+            var session = await epoch.Start.Task.WaitAsync(request.Token).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested(); CheckCurrent(epoch);
+            var operation = invoke(session, request.Token);
+            Observe(operation);
+            // Upload borrows caller-owned bytes until its actual sender settles.
+            // Cancelling only the wait would let callers clear an in-use buffer.
+            var result = waitForCompletion ? await operation.ConfigureAwait(false) :
+                await operation.WaitAsync(request.Token).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested(); CheckCurrent(epoch);
+            return result;
+        }
+        catch
+        {
+            cancellationToken.ThrowIfCancellationRequested(); CheckCurrent(epoch);
+            throw;
+        }
     }
     private Epoch NewEpoch()
     {

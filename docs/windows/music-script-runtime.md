@@ -1,20 +1,19 @@
 # Windows 音源脚本接入
 
-App 装配后显式启动 `AppRuntimeClient` → 唯一 Node / 命名管道 → Windows 薄 entry → 公共 music 模块 → script-host。
+App 装配后显式启动 `AppRuntimeClient` → 唯一 Node / HTTP 会话 → Windows 薄 entry → 公共 music 模块 → script-host。
 启动不执行用户脚本，不检测；脚本服务失败不阻塞原生目录、曲库、账号和官方播放。
-握手校验 `music@0.8.0`、`cat@0.1.0`、`source@0.1.0`，音乐响应为 `music.script.v3`。
+握手校验 `music@0.8.0`、`cat@0.2.0`、`source@0.2.0`，音乐响应为 `music.script.v3`。
 
 ## 薄适配
 
-`MusicScriptOwner` 将 `music.sources.*` 转发到公共模块。文件选择留在 Windows：原生快照经 `music.transfer.*`
-校验后转成 JS `stage.*`，之后使用 `sources.add/update`。原生不持有脚本目录、源码 collection、下载器或 guest KV writer。
+`MusicScriptOwner` 将 `music.sources.*` 转发到公共模块。文件选择留在 Windows：原生已选文件快照经 `ImportSourceAsync` 完整上传原始字节，明确 installationId/sourceRevision，随后调用 `sources.add/update`；不再有传输 token、分片、Base64 或传输摘要。原生不持有脚本目录、源码 collection、下载器或 guest KV writer。
 网络地址、编辑、更新、回退、启停、删除和检测均由[公共模块](../runtime/music-script-runtime.md)实现。
 旧文件保留原样，不读取、不迁移、不清理。
 
 `music.online.resolve` 只做一次指定 installation × platform × recording × quality 取链；校验录音质量反证、策略签名和刷新内容身份。
 缺失平台由[统一选源会话](music-official-selection.md)通过 `music.songs.complete` 补搜一次，不由每个脚本重复搜。
 `music.online.lyrics` 使用 `invoke(lyric)`，原生负责歌词开关及解析，不改变官方歌词流程。
-`MusicScriptTransport` 透明处理 64 KiB 分片及结果 blob；音频字节不经过 Node 或管道。
+普通调用直接处理 HTTP 信封的 `value`；歌词 invoke 的 value 就是脚本结果，不再套安装身份包装。音频字节不经过脚本控制接口。上传取消后仍等待实际发送任务结束，才归还并清理选中文件快照。
 
 ## 管理界面
 

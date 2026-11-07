@@ -1,6 +1,6 @@
 # Runtime HTTP v1
 
-`@meowfilm/runtime-bridge@0.2.0` 提供标准 Node `http` client/server、严格 JSON 和 HTTP 请求生命周期；业务路由由 `apps/runtime` 装配。通用运行器已切换契约，Windows/iOS 的旧启动及调用接入本轮未迁移，不能据此声明平台应用兼容。
+`@meowfilm/runtime-bridge@0.2.0` 提供标准 Node `http` client/server、严格 JSON 和 HTTP 请求生命周期；业务路由由 `apps/runtime` 装配。Windows 的私密启动和 HTTP 消费者见[Windows 接入](../windows/app-runtime.md)；iOS 旧启动及调用接入仍待独立迁移，公共契约通过不代表全平台应用验证。
 
 ## 会话与公共入口
 

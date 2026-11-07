@@ -10,6 +10,7 @@ catch { throw 'Another Windows build is using this checkout. Wait for it to fini
 Push-Location $WindowsAppRoot
 try {
     & (Join-Path $PSScriptRoot 'bootstrap.ps1')
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     . (Join-Path $PSScriptRoot 'environment.ps1')
     . (Join-Path $PSScriptRoot 'install.ps1')
     $NodeRuntime = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'node-runtime.json') -Raw | ConvertFrom-Json
@@ -17,9 +18,9 @@ try {
     $Project = Join-Path $WindowsAppRoot 'app\MeowFilm.Windows.App.csproj'
     if (-not (Test-Path -LiteralPath $Project -PathType Leaf)) { throw 'The native Windows App entry is missing.' }
     & $WindowsNode (Join-Path $PSScriptRoot 'verify-app-structure.mjs')
-    if ($LASTEXITCODE -ne 0) { throw 'Single-App source/identity/resource boundary check failed.' }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $InputHash = & $WindowsNode (Join-Path $PSScriptRoot 'input-fingerprint.mjs')
-    if ($LASTEXITCODE -ne 0) { throw 'Input inventory failed.' }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # The shipped Node runtime is product content bound to LICENSES/node-LICENSE.txt.
     if ((Get-FileHash -LiteralPath $WindowsNode -Algorithm SHA256).Hash.ToLowerInvariant() -ne $NodeRuntime.sha256) {
         throw "The bundled Node runtime is locked to the official win-x64 node.exe v$($NodeRuntime.version); put it first on PATH."
@@ -27,7 +28,7 @@ try {
     $SelfContained = (-not $FrameworkDependent).ToString().ToLowerInvariant()
     $Rid = 'win-x64'
     & $WindowsDotnet restore $Project --locked-mode --configfile $WindowsNuGetConfig --runtime $Rid "-p:SelfContained=$SelfContained" -p:TargetLatestRuntimePatch=true -p:ExcludeRestorePackageImports=true
-    if ($LASTEXITCODE -ne 0) { throw 'Locked Windows App restore failed.' }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $Output = Assert-WindowsPath -Owner $WindowsTmpRoot -Path (Join-Path $WindowsTmpRoot 'publish')
     if (Test-Path -LiteralPath $Output) { Remove-Item -LiteralPath $Output -Recurse -Force }
     New-WindowsDirectory $Output | Out-Null
@@ -38,10 +39,10 @@ try {
         "--self-contained" $SelfContained -p:TargetLatestRuntimePatch=true `
         -p:VlcWindowsX64Enabled=true -p:VlcWindowsX86Enabled=false -p:VlcWindowsArm64Enabled=false `
         --output $Output --nologo -nodeReuse:false
-    if ($LASTEXITCODE -ne 0) { throw 'Windows compilation/local packaging failed.' }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $Runtime = Join-Path $Output 'runtime'
     & $WindowsNode (Join-Path $PSScriptRoot 'package-runtime.mjs') --product $DataIdentity --output $Runtime
-    if ($LASTEXITCODE -ne 0) { throw 'Runtime packaging failed.' }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Copy-Item -LiteralPath $WindowsNode -Destination (Join-Path $Runtime 'node.exe')
     $NodeLicense = Join-Path $WindowsRoot 'LICENSES\node-LICENSE.txt'
     if ((Get-FileHash -LiteralPath $NodeLicense -Algorithm SHA256).Hash.ToLowerInvariant() -ne $NodeRuntime.licenseSha256) {
@@ -50,7 +51,7 @@ try {
     Copy-Item -LiteralPath $NodeLicense -Destination (Join-Path $Runtime 'node-LICENSE.txt')
     $Licenses = Join-Path $Output 'licenses'
     & $WindowsNode (Join-Path $PSScriptRoot 'package-licenses.mjs') --output $Licenses
-    if ($LASTEXITCODE -ne 0) { throw 'License packaging failed.' }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $LicensesHash = (Get-FileHash -LiteralPath (Join-Path $Licenses 'licenses-manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant()
     $ManifestPath = Join-Path $Runtime 'runtime-manifest.json'
     $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
@@ -62,7 +63,7 @@ try {
     $Manifest | Add-Member -NotePropertyName node -NotePropertyValue $NodeRuntime
     [System.IO.File]::WriteAllText($ManifestPath, ($Manifest | ConvertTo-Json -Depth 50) + "`n", [System.Text.UTF8Encoding]::new($false))
     & $WindowsNode (Join-Path $PSScriptRoot 'verify-projects.mjs') --build $Output --identity $DataIdentity $Configuration
-    if ($LASTEXITCODE -ne 0) { throw 'Published native dependency closure verification failed.' }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if (-not $FrameworkDependent -and
         (-not (Test-Path -LiteralPath (Join-Path $Output 'coreclr.dll')) -or
          -not (Test-Path -LiteralPath (Join-Path $Output 'PresentationFramework.dll')))) {
@@ -76,7 +77,8 @@ try {
         throw 'Published desktop runtime frameworks are incomplete or use different versions.'
     }
     $FinalHash = & $WindowsNode (Join-Path $PSScriptRoot 'input-fingerprint.mjs')
-    if ($LASTEXITCODE -ne 0 -or $FinalHash -ne $InputHash) { throw 'Code inputs changed during this build; output is not a stable candidate.' }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($FinalHash -ne $InputHash) { throw 'Code inputs changed during this build; output is not a stable candidate.' }
     $Result = [ordered]@{
         schemaVersion = 1; application = 'meowfilm'; dataIdentity = $DataIdentity; configuration = $Configuration
         sdk = (& $WindowsDotnet --version); node = $NodeRuntime.version
