@@ -8,7 +8,53 @@ import {
 } from '../src/index.js';
 import { SourceHttpClient } from '../src/http.js';
 
-const encoded = value => bytesToBase64(new TextEncoder().encode(value));
+const encoded = value => new TextEncoder().encode(value);
+
+test('capability JSON business values accept 64 levels while control fields do not consume depth', async () => {
+  const nested = (depth, objects = false, leaf = null) => {
+    let value = leaf;
+    for (let index = 0; index < depth; index++) value = objects ? { child: value } : [value];
+    return value;
+  };
+  const cycle = []; cycle.push(cycle);
+  const values = [];
+  let returned;
+  const client = createCapabilityClient({
+    invoke(name, input) {
+      if (name === 'storage.get') return returned;
+      assert.equal(name, 'storage.set');
+      values.push(input.value);
+      return input.value;
+    },
+  });
+  const input = { version: hostApiVersion, profile: 'depth:storage', key: 'key' };
+  for (const objects of [false, true]) {
+    const value = nested(64, objects);
+    assert.deepEqual(await client.call('storage.set', { ...input, value }), value);
+    assert.deepEqual(values.at(-1), value);
+    assert.notEqual(values.at(-1), value, 'input must be snapshotted');
+    returned = value;
+    assert.deepEqual(await client.call('storage.get', input), value);
+  }
+  const special = {
+    ['__proto__']: { value: 1 }, constructor: { prototype: 'data' },
+  };
+  const shared = { left: special, right: special };
+  assert.deepEqual(await client.call('storage.set', { ...input, value: shared }), shared);
+  const count = values.length;
+  for (const value of [
+    nested(65), nested(65, true), { ok: true, value: nested(64) }, cycle,
+    '\ud800', { ['\ud800']: 1 }, Infinity, Number.MAX_SAFE_INTEGER + 1, 1n,
+    undefined, new Uint8Array([1]), new ArrayBuffer(1),
+  ]) {
+    await assert.rejects(client.call('storage.set', { ...input, value }), { code: 'INVALID_ARGUMENT' });
+    assert.equal(values.length, count, 'invalid input must not reach the owner');
+    returned = value;
+    await assert.rejects(client.call('storage.get', input), { code: 'INVALID_RESPONSE' });
+  }
+  returned = nested(64);
+  assert.deepEqual(await client.call('storage.get', input), returned);
+});
 
 test('Base64 codec preserves arbitrary bytes and rejects non-canonical input', () => {
   const bytes = Uint8Array.from([0, 1, 2, 127, 128, 254, 255]);
@@ -22,7 +68,6 @@ test('Base64 codec preserves arbitrary bytes and rejects non-canonical input', (
 test('capability ABI normalizes HTTP envelopes and validates returned bytes', async () => {
   const calls = [];
   const client = createCapabilityClient({
-    maximumBytes: 64,
     async invoke(name, input, context) {
       calls.push({ name, input, context });
       return {
@@ -153,7 +198,7 @@ test('source HTTP uses the effective Content-Type for both headers and body enco
       const request = calls.at(-1);
       assert.equal(request.method, 'POST');
       assert.deepEqual(request.headers, { 'content-type': [scenario.type] });
-      assert.equal(new TextDecoder().decode(base64ToBytes(request.body)), scenario.body);
+      assert.equal(new TextDecoder().decode(request.body), scenario.body);
       assert.equal(response.statusCode, 200);
       assert.equal(response.data, 'ok');
     });
@@ -167,13 +212,13 @@ test('source HTTP uses the effective Content-Type for both headers and body enco
   assert.equal(calls.length, beforeInvalid);
 });
 
-test('cookie, text and AES arguments are bounded before reaching a host adapter', async () => {
+test('cookie and AES retain their format contracts while text has no byte quota', async () => {
   const calls = [];
   const client = createCapabilityClient({
-    maximumBytes: 32,
     invoke(name, input) {
       calls.push({ name, input });
       if (name === 'crypto.aes') return input.data;
+      if (name === 'encoding.encode') return encoded(input.text);
       return true;
     },
   });
@@ -183,16 +228,16 @@ test('cookie, text and AES arguments are bounded before reaching a host adapter'
     url: 'https://fixture.invalid/',
     values: Array.from({ length: 65 }, (_, index) => `k${index}=v`),
   }), { code: 'INVALID_ARGUMENT' });
-  await assert.rejects(client.call('encoding.encode', {
+  assert.deepEqual(await client.call('encoding.encode', {
     version: hostApiVersion,
     encoding: 'gbk',
     text: '中文'.repeat(10),
-  }), { code: 'INVALID_ARGUMENT' });
+  }), encoded('中文'.repeat(10)));
 
-  const key = bytesToBase64(Uint8Array.from({ length: 16 }, (_, index) => index));
-  const iv = bytesToBase64(Uint8Array.from({ length: 16 }, (_, index) => 15 - index));
+  const key = Uint8Array.from({ length: 16 }, (_, index) => index);
+  const iv = Uint8Array.from({ length: 16 }, (_, index) => 15 - index);
   const data = encoded('payload');
-  assert.equal(await client.call('crypto.aes', {
+  assert.deepEqual(await client.call('crypto.aes', {
     version: hostApiVersion,
     operation: 'encrypt',
     algorithm: 'aes-128-cbc',
@@ -241,4 +286,52 @@ test('capability completion is fenced by cancellation', async () => {
   controller.abort();
   release();
   await assert.rejects(result, { code: 'CANCELLED' });
+});
+
+test('ABI2 snapshots byte subviews before yielding and rejects non-byte envelopes', async () => {
+  const input = Uint8Array.from({ length: 260 }, (_, index) => (index - 2) & 255);
+  const expected = input.slice(2, 258);
+  let release;
+  const barrier = new Promise(resolve => { release = resolve; });
+  const client = createCapabilityClient({
+    async invoke(name, captured) {
+      await barrier;
+      assert.equal(name, 'http.request');
+      assert.deepEqual(captured.body, expected);
+      return {
+        version: hostApiVersion, status: 200, url: captured.url, body: captured.body,
+      };
+    },
+  });
+  const pending = client.call('http.request', {
+    version: hostApiVersion, url: 'https://bytes.invalid/', body: input.subarray(2, 258),
+  });
+  input.fill(0);
+  release();
+  assert.deepEqual((await pending).body, expected);
+  for (const body of ['AA==', [0], { type: 'Buffer', data: [0] }]) {
+    await assert.rejects(client.call('http.request', {
+      version: hostApiVersion, url: 'https://bytes.invalid/', body,
+    }), { code: 'INVALID_ARGUMENT' });
+  }
+  const invalid = createCapabilityClient({
+    invoke: () => ({ version: hostApiVersion, status: 200, url: 'https://bytes.invalid/', body: 'AA==' }),
+  });
+  await assert.rejects(invalid.call('http.request', {
+    version: hostApiVersion, url: 'https://bytes.invalid/',
+  }), { code: 'INVALID_RESPONSE' });
+});
+
+test('HTTP bodies remain independent of DOM parsing budgets', async () => {
+  const data = 'x'.repeat(8 * 1024 * 1024 + 1);
+  const client = createCapabilityClient({
+    invoke: (_name, input) => ({
+      version: hostApiVersion, status: 200, url: input.url, body: encoded(data),
+    }),
+  });
+  const http = new SourceHttpClient({
+    capabilities: client, profile: 'source:body:1',
+    scope: { installationId: 'body', generation: 1, protocol: 'qysg', siteId: 'source' },
+  });
+  assert.equal((await http.request({ url: 'https://bytes.invalid/' })).data, data);
 });

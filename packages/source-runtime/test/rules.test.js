@@ -18,7 +18,7 @@ test('DOM parsing and mutations enforce the configured node budget', () => {
   const registry = new DocumentRegistry({
     maximumDocuments: 1,
     maximumNodes: 16,
-    maximumBytes: 256,
+    maximumParseBytes: 256,
   });
   const { rootId } = registry.parse('<div id="root">ok</div>');
   const [{ nodeId }] = registry.operation('query', { nodeId: rootId, selector: '#root' });
@@ -68,12 +68,31 @@ test('DOM parsing and mutations enforce the configured node budget', () => {
   const bytes = new DocumentRegistry({
     maximumDocuments: 1,
     maximumNodes: 64,
-    maximumBytes: 128,
+    maximumParseBytes: 128,
   });
   assert.throws(() => bytes.parse(`<div>${'x'.repeat(256)}</div>`), {
     code: 'RESOURCE_LIMIT',
   });
   bytes.close();
+});
+
+test('rule parsing uses its explicit parse budget and does not silently restore the default', async () => {
+  const text = 'x'.repeat(8 * 1024 * 1024 + 1);
+  const markup = `<p>${text}</p>`;
+  assert.throws(() => parseMarkup(markup), { code: 'RESOURCE_LIMIT' });
+  const context = {
+    maximumNodes: 16,
+    maximumParseBytes: 256 * 1024 * 1024,
+    evaluateScript() { assert.fail('A static DOM rule must not evaluate JavaScript'); },
+  };
+  assert.equal(readStaticRuleString('p@text', markup, context), text);
+  assert.equal(await readRuleString('p@text', markup, context), text);
+  assert.throws(() => readStaticRuleString('p@text', '<p>large</p>', {
+    maximumParseBytes: 8,
+  }), { code: 'RESOURCE_LIMIT' });
+  await assert.rejects(readRuleString('p@text', '<p>large</p>', {
+    ...context, maximumParseBytes: 8,
+  }), { code: 'RESOURCE_LIMIT' });
 });
 
 test('DOM rules cover legacy selectors, slices, attributes and XPath', () => {
@@ -104,7 +123,7 @@ test('DOM node identity survives queries and traversal without consuming more ha
   const registry = new DocumentRegistry({
     maximumDocuments: 1,
     maximumNodes: 8,
-    maximumBytes: 64,
+    maximumParseBytes: 64,
   });
   const markup = '<div><a></a><a></a></div>';
   const { documentId, rootId } = registry.parse(markup);
@@ -154,7 +173,7 @@ test('DOM release and close restore node and byte budgets while real growth stay
   const nodeBudget = new DocumentRegistry({
     maximumDocuments: 2,
     maximumNodes: 5,
-    maximumBytes: 1024,
+    maximumParseBytes: 1024,
   });
   const first = nodeBudget.parse(markup);
   const [parent] = nodeBudget.operation('query', { nodeId: first.rootId, selector: 'div' });
@@ -179,7 +198,7 @@ test('DOM release and close restore node and byte budgets while real growth stay
   const byteBudget = new DocumentRegistry({
     maximumDocuments: 2,
     maximumNodes: 64,
-    maximumBytes: 64,
+    maximumParseBytes: 64,
   });
   const value = byteBudget.parse('<p>small</p>');
   const [{ nodeId }] = byteBudget.operation('query', { nodeId: value.rootId, selector: 'p' });
@@ -290,6 +309,59 @@ test('script transformation propagates await through local callers and rejects u
     `[1].map(() => java.get('https://fixture.invalid'))`,
     { asyncRoots: ['java'], asyncMethods: ['get'] },
   ), { code: 'UNSUPPORTED_SCRIPT_ASYNC' });
+});
+
+test('script transformation preserves Promise receivers and chain ordering for host and local calls', async () => {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  for (const receiver of ['java.ajax', 'read', 'read?.']) {
+    for (const member of ['.then', '["then"]', '?.then']) {
+      const script = transformCapabilityScript(`
+        function read(value) { return java.ajax(value); }
+        const trace = [];
+        const chain = ${receiver}('ok')${member}(value => {
+          trace.push('then'); return value + ':then';
+        }).finally(() => trace.push('finally'));
+        trace.push('created');
+        const value = await chain;
+        return { value, trace };
+      `);
+      assert.deepEqual(await new AsyncFunction('java', script)({ ajax: async value => value }), {
+        value: 'ok:then', trace: ['created', 'then', 'finally'],
+      }, `${receiver}${member}`);
+    }
+    for (const [chain, trace] of [
+      [`.catch(error => { trace.push(error.message); return 'recovered'; })
+        .finally(() => trace.push('finally'))`, ['created', 'failed', 'finally']],
+      [`['finally'](() => trace.push('finally'))
+        ['catch'](error => { trace.push(error.message); return 'recovered'; })`,
+      ['created', 'finally', 'failed']],
+    ]) {
+      const script = transformCapabilityScript(`
+        async function read(value) { return await java.ajax(value); }
+        const trace = [];
+        const chain = ${receiver}('fail')${chain};
+        trace.push('created');
+        const value = await chain;
+        return { value, trace };
+      `);
+      assert.deepEqual(await new AsyncFunction('java', script)({
+        async ajax() { throw new Error('failed'); },
+      }), { value: 'recovered', trace }, `${receiver}${chain}`);
+    }
+  }
+});
+
+test('script transformation still rejects host-dependent Promise chains in synchronous Array callbacks', () => {
+  for (const receiver of ['java.ajax', 'read']) {
+    for (const chain of ['then', 'catch', 'finally']) {
+      for (const method of ['map', 'filter', 'some', 'forEach']) {
+        assert.throws(() => transformCapabilityScript(`
+          function read(value) { return java.ajax(value); }
+          [1].${method}(value => ${receiver}(value).${chain}(result => result))
+        `), { code: 'UNSUPPORTED_SCRIPT_ASYNC' }, `${receiver}.${chain} in ${method}`);
+      }
+    }
+  }
 });
 
 test('script transformation rejects host-dependent named and variable Array callbacks', () => {

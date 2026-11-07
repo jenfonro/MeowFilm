@@ -1,19 +1,25 @@
-import { createCatRuntime, SourceTransfers, ScriptHostError } from '@meowfilm/script-host';
+import { createCatRuntime, ScriptHostError } from '@meowfilm/script-host';
+import { validateJSONValue } from '@meowfilm/runtime-bridge';
+import { SourceCandidates } from './source-candidates.mjs';
+import { contracts } from '../contracts.mjs';
 
-export const catScriptContract = 'cat.script.v1';
-const object = value => value && typeof value === 'object' && !Array.isArray(value);
+export const catScriptContract = contracts.cat.contract;
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const requireValue = condition => { if (!condition) throw new ScriptHostError('INVALID_ARGUMENT'); };
-const text = value => { requireValue(typeof value === 'string' && value.length > 0); return value; };
-const json = value => {
-  try { return JSON.parse(text(value)); } catch { throw new ScriptHostError('INVALID_ARGUMENT'); }
+const identifier = value => { requireValue(typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$(?![\s\S])/.test(value)); return value; };
+const integer = value => requireValue(Number.isSafeInteger(value) && value > 0);
+const name = value => requireValue(typeof value === 'string' && value.trim().length > 0);
+const sourceURL = value => {
+  name(value);
+  let url;
+  try { url = new URL(value); } catch { requireValue(false); }
+  requireValue(['http:', 'https:'].includes(url.protocol));
 };
-const decode = bytes => {
-  try {
-    const source = bytes.toString('utf8');
-    requireValue(!source.startsWith('\uFEFF') && source.trim().length > 0 &&
-      Buffer.from(source).equals(bytes)); return source;
-  } catch { throw new ScriptHostError('SCRIPT_PROTOCOL_ERROR'); }
-};
+const snapshot = value => { validateJSONValue(value); return structuredClone(value); };
+const failure = error => ({ ok: false, contract: catScriptContract,
+  code: error instanceof ScriptHostError && contracts.cat.codes.has(error.code) ? error.code : 'SCRIPT_EXCEPTION' });
+const success = value => { validateJSONValue(value ?? null); return { ok: true, contract: catScriptContract, value: value ?? null }; };
+
 function linkedSignal(external, lifetime) {
   if (!external) return { signal: lifetime, release() {} };
   const controller = new AbortController();
@@ -52,109 +58,157 @@ function linkedSignal(external, lifetime) {
   return { signal: controller.signal, release };
 }
 
-/** Passive protocol owner. Data-root selection and process/pipe ownership stay
- * in the platform. Arbitrary Cat JSON is a string/blob on the scalar-key wire,
- * never an ASCII-key-normalized substitute for the original Cat result. */
-export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRuntime, clock = Date.now } = {}) {
+/** Passive Cat protocol owner; the caller owns its data-root and session. */
+export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRuntime, clock } = {}) {
   requireValue(typeof dataRoot === 'string' && typeof runtimeFactory === 'function');
-  const transfers = new SourceTransfers({ clock });
+  const sources = new SourceCandidates({ module: 'cat', fail: code => new ScriptHostError(code) });
   const lifetime = new AbortController();
+  const pending = new Set();
   let runtime, closing, closed = false;
   const get = () => runtime ??= runtimeFactory({ dataRoot, clock });
   const methods = {};
-  function method(name, allowed, body) {
-    methods['cat.script.' + name] = async (input = {}, context = {}) => {
-      try {
-        if (closed) throw new ScriptHostError('HOST_CLOSED');
-        requireValue(object(input) && Object.keys(input).every(key => allowed.includes(key)));
-        if (context.signal?.aborted) throw new ScriptHostError('CANCELLED');
-        const captured = structuredClone(input);
-        const linked = linkedSignal(context.signal, lifetime.signal);
-        let value, failure;
+  function method(name, allowed, required, body) {
+    methods['cat.script.' + name] = (input = {}, context = {}) => {
+      const task = (async () => {
         try {
-          if (linked.signal.aborted) throw new ScriptHostError('CANCELLED');
-          value = await body(captured, linked.signal);
-          if (linked.signal.aborted) throw new ScriptHostError('CANCELLED');
-        } catch (error) { failure = error; }
-        try { linked.release(); } catch (error) { failure ??= error; }
-        if (failure) throw failure;
-        return { ok: true, contract: catScriptContract, ...value };
-      } catch (error) {
-        return { ok: false, contract: catScriptContract,
-          code: error instanceof ScriptHostError ? error.code : 'SCRIPT_EXCEPTION' };
-      }
+          if (closed) throw new ScriptHostError('HOST_CLOSED');
+          requireValue(object(input) && Object.keys(input).every(key => allowed.includes(key)) &&
+            required.every(key => Object.hasOwn(input, key)));
+          if (context.signal?.aborted) throw new ScriptHostError('CANCELLED');
+          let captured;
+          try { captured = snapshot(input); } catch { throw new ScriptHostError('INVALID_ARGUMENT'); }
+          const linked = linkedSignal(context.signal, lifetime.signal);
+          let value, error;
+          try {
+            if (linked.signal.aborted) throw new ScriptHostError('CANCELLED');
+            value = await body(captured, linked.signal);
+            if (linked.signal.aborted) throw new ScriptHostError('CANCELLED');
+          } catch (failure) { error = failure; }
+          try { linked.release(); } catch (failure) { error ??= failure; }
+          if (error) throw error;
+          return success(value);
+        } catch (error) { return failure(error); }
+      })();
+      pending.add(task);
+      task.finally(() => pending.delete(task)).catch(() => {});
+      return task;
     };
   }
-  const result = value => transfers.result(value);
-  method('stage.begin', ['length', 'sha256', 'kind'], input => transfers.begin(input));
-  method('stage.chunk', ['token', 'offset', 'data'], input => transfers.chunk(input));
-  method('stage.abort', ['token'], input => { transfers.release(text(input.token)); return { released: true }; });
-  method('blob.read', ['token', 'offset'], input => transfers.read(input));
-  method('blob.release', ['token'], input => { transfers.release(text(input.token)); return { released: true }; });
-  method('start', [], async () => result(await get().start()));
-  method('status', [], async () => result(await get().status()));
-  method('refresh', [], async () => result(await get().refresh()));
-  method('install', ['installationId', 'token', 'config', 'version', 'enabled',
-    'name', 'sourceType', 'sourceUrl'], async (input, signal) => {
-    const bytes = transfers.take(text(input.token), 'source');
+  method('start', [], [], (_input, signal) => get().start({ signal }));
+  method('status', [], [], () => get().status());
+  method('refresh', [], [], (_input, signal) => get().refresh({ signal }));
+  method('install', ['installationId', 'sourceRevision', 'config', 'version', 'enabled',
+    'name', 'sourceType', 'sourceUrl'],
+    ['installationId', 'sourceRevision'], async (input, signal) => {
+      identifier(input.installationId);
+      integer(input.sourceRevision);
+      requireValue(input.config === undefined || object(input.config));
+      requireValue(input.version === undefined || typeof input.version === 'string' && input.version.length > 0 && input.version.length <= 128);
+      requireValue(input.enabled === undefined || typeof input.enabled === 'boolean');
+      if (input.name !== undefined) name(input.name);
+      requireValue(input.sourceType === undefined || ['local', 'network'].includes(input.sourceType));
+      if (input.sourceUrl !== undefined && input.sourceUrl !== null) sourceURL(input.sourceUrl);
+      if (input.sourceType !== undefined || input.sourceUrl !== undefined) {
+        const previous = (await get().status()).instances.find(item => item.installationId === input.installationId);
+        const type = input.sourceType ?? previous?.sourceType ?? 'local';
+        const url = input.sourceUrl === undefined ? previous?.sourceUrl ?? null : input.sourceUrl;
+        if (type === 'network') sourceURL(url);
+        else requireValue(url === null);
+      }
+      if (signal.aborted) throw new ScriptHostError('CANCELLED');
+      const uploaded = sources.take(input.installationId, input.sourceRevision);
+      try {
+        const { sourceRevision, ...spec } = input;
+        const result = await get().install({ ...spec, source: uploaded.source,
+          contentHash: uploaded.contentHash }, { signal });
+        if (signal.aborted) throw new ScriptHostError('CANCELLED');
+        sources.finish(uploaded, true);
+        return result;
+      } catch (error) { sources.finish(uploaded); throw error; }
+    });
+  method('import', ['installationId', 'name', 'sourceUrl', 'enabled'],
+    ['installationId', 'name', 'sourceUrl'], (input, signal) => {
+      identifier(input.installationId); name(input.name); sourceURL(input.sourceUrl);
+      requireValue(input.enabled === undefined || typeof input.enabled === 'boolean');
+      return get().import(input, { signal });
+    });
+  method('edit', ['installationId', 'name', 'sourceUrl'], ['installationId', 'name'], (input, signal) => {
+    identifier(input.installationId); name(input.name);
+    if (input.sourceUrl !== undefined) sourceURL(input.sourceUrl);
+    return get().edit(input, { signal });
+  });
+  method('update', ['installationId', 'sourceRevision'], ['installationId'], async (input, signal) => {
+    identifier(input.installationId);
+    if (input.sourceRevision !== undefined) integer(input.sourceRevision);
+    const previous = (await get().status()).instances.find(item => item.installationId === input.installationId);
+    if (!previous || previous.sourceHash === null) throw new ScriptHostError('NOT_FOUND');
+    requireValue(previous.sourceType === 'local'
+      ? input.sourceRevision !== undefined : input.sourceRevision === undefined);
+    if (signal.aborted) throw new ScriptHostError('CANCELLED');
+    if (input.sourceRevision === undefined) return get().update(input, { signal });
+    const uploaded = sources.take(input.installationId, input.sourceRevision);
     try {
-      return result(await get().install({ installationId: text(input.installationId), source: decode(bytes),
-        ...(input.config === undefined ? {} : { config: json(input.config) }),
-        ...(input.version === undefined ? {} : { version: text(input.version) }),
-        ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
-        ...(input.name === undefined ? {} : { name: text(input.name) }),
-        ...(input.sourceType === undefined ? {} : { sourceType: text(input.sourceType) }),
-        ...(input.sourceUrl === undefined ? {} : { sourceUrl: input.sourceUrl }) }, { signal }));
-    } finally { bytes.fill(0); }
+      const result = await get().update({ installationId: input.installationId,
+        source: uploaded.source, contentHash: uploaded.contentHash }, { signal });
+      sources.finish(uploaded, true);
+      return result;
+    } catch (error) { sources.finish(uploaded); throw error; }
   });
-  method('import', ['installationId', 'name', 'sourceUrl', 'enabled'], async (input, signal) =>
-    result(await get().import({ installationId: text(input.installationId), name: text(input.name),
-      sourceUrl: text(input.sourceUrl), ...(input.enabled === undefined ? {} : { enabled: input.enabled }) }, { signal })));
-  method('edit', ['installationId', 'name', 'sourceUrl'], async (input, signal) =>
-    result(await get().edit({ installationId: text(input.installationId), name: text(input.name),
-      ...(input.sourceUrl === undefined ? {} : { sourceUrl: text(input.sourceUrl) }) }, { signal })));
-  method('update', ['installationId', 'token'], async (input, signal) => {
-    const installationId = text(input.installationId);
-    const bytes = input.token === undefined ? null : transfers.take(text(input.token), 'source');
+  method('restart', ['installationId'], ['installationId'], (input, signal) => {
+    identifier(input.installationId);
+    return get().restart(input.installationId, { signal });
+  });
+  // CatRuntime owns the installation transaction and its pre-queue stop.
+  // An extra module tail would hide that stop behind the blocked initializer.
+  method('enable', ['installationId', 'enabled'], ['installationId', 'enabled'], (input, signal) => {
+    identifier(input.installationId);
+    requireValue(typeof input.enabled === 'boolean');
+    return get().setEnabled(input.installationId, input.enabled, { signal });
+  });
+  method('uninstall', ['installationId'], ['installationId'], async (input, signal) => {
+    identifier(input.installationId);
+    try { return await get().uninstall(input.installationId, { signal }); }
+    finally { sources.remove(input.installationId); }
+  });
+  method('invoke', ['installationId', 'generation', 'siteId', 'operation', 'payload'],
+    ['installationId', 'siteId', 'operation'], (input, signal) => {
+      identifier(input.installationId); identifier(input.operation);
+      requireValue(typeof input.siteId === 'string' && input.siteId.length > 0 &&
+        input.siteId.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(input.siteId));
+      if (input.generation !== undefined) integer(input.generation);
+      requireValue(input.payload === undefined || object(input.payload));
+      return get().invoke({ ...input, payload: input.payload ?? {} }, { signal });
+    });
+  method('management.describe', ['installationId', 'generation'], ['installationId'], (input, signal) => {
+    identifier(input.installationId);
+    if (input.generation !== undefined) integer(input.generation);
+    return get().management(input.installationId, input.generation, { signal });
+  });
+  method('management.sync', ['installationId', 'generation', 'provider', 'credentials'],
+    ['installationId', 'provider', 'credentials'], (input, signal) => {
+      identifier(input.installationId); identifier(input.provider);
+      if (input.generation !== undefined) integer(input.generation);
+      requireValue(object(input.credentials));
+      return get().sync(input.installationId, input.generation,
+        { provider: input.provider, credentials: input.credentials }, { signal });
+    });
+  async function upload(input, bytes, { signal } = {}) {
     try {
-      return result(await get().update({ installationId,
-        ...(bytes === null ? {} : { source: bytes }) }, { signal }));
-    } finally { bytes?.fill(0); }
-  });
-  method('restart', ['installationId'], async (input, signal) =>
-    result(await get().restart(text(input.installationId), { signal })));
-  method('enable', ['installationId', 'enabled'], async (input, signal) =>
-    result(await get().setEnabled(text(input.installationId), input.enabled, { signal })));
-  method('uninstall', ['installationId'], async (input, signal) =>
-    result(await get().uninstall(text(input.installationId), { signal })));
-  method('invoke', ['installationId', 'generation', 'siteId', 'operation', 'payload', 'payloadToken'], async (input, signal) => {
-    requireValue(!(input.payload !== undefined && input.payloadToken !== undefined));
-    let payload;
-    if (input.payloadToken !== undefined) {
-      const bytes = transfers.take(input.payloadToken, 'json');
-      try { payload = json(decode(bytes)); } finally { bytes.fill(0); }
-    } else payload = input.payload === undefined ? {} : json(input.payload);
-    return result(await get().invoke({ installationId: text(input.installationId), generation: input.generation,
-      siteId: text(input.siteId), operation: text(input.operation), payload }, { signal }));
-  });
-  method('management.describe', ['installationId', 'generation'], async input =>
-    result(await get().management(text(input.installationId), input.generation)));
-  method('management.sync', ['installationId', 'generation', 'provider', 'credentials'], async input =>
-    result(await get().sync(text(input.installationId), input.generation,
-      { provider: text(input.provider), credentials: json(input.credentials) })));
-  async function close() {
-    if (closing) return closing;
-    const current = runtime;
-    closed = true;
-    closing = (async () => {
-      let failure;
-      try { lifetime.abort(); } catch (error) { failure ??= error; }
-      try { transfers.close(); } catch (error) { failure ??= error; }
-      try { await current?.close(); } catch (error) { failure ??= error; }
-      if (runtime === current) runtime = undefined;
-      if (failure) throw failure;
-    })();
-    return closing;
+      if (closed) throw new ScriptHostError('HOST_CLOSED');
+      return success(sources.put(input, bytes, signal));
+    } catch (error) { return failure(error); }
   }
-  return { id: 'cat', version: '0.1.0', methods, close };
+  function close() {
+    return closing ??= (async () => {
+      closed = true;
+      let error;
+      try { lifetime.abort(); } catch (failure) { error ??= failure; }
+      sources.close();
+      try { await runtime?.close(); } catch (failure) { error ??= failure; }
+      await Promise.allSettled([...pending]);
+      runtime = undefined;
+      if (error) throw error;
+    })();
+  }
+  return { id: 'cat', version: contracts.cat.version, contract: catScriptContract, methods, upload, close };
 }

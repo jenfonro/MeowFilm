@@ -14,6 +14,11 @@
   "scripts": {
     "test": "node scripts/verify-dependency-lock.mjs && node scripts/test-packages.mjs && node scripts/test-root.mjs && node scripts/verify-boundaries.mjs",
     "test:packages": "node scripts/test-packages.mjs",
-    "verify:boundaries": "node scripts/verify-boundaries.mjs"
+    "verify:boundaries": "node scripts/verify-boundaries.mjs",
+    "build:runtime": "node scripts/quickjs/build-native.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "node-gyp": "11.5.0"
   }
 }

@@ -1,18 +1,18 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  createScriptHost, createNodeNetwork, PrivateDocuments, ScriptHostError, SCRIPT_LIMITS, SourceTransfers,
+  createScriptHost, createNodeNetwork, createSourceDownload, PrivateDocuments, ScriptHostError, SCRIPT_LIMITS,
 } from '@meowfilm/script-host';
-import { BridgeError, encodeJSONValue, decodeJSONValue } from '@meowfilm/runtime-bridge';
+import { BridgeError, validateJSONValue } from '@meowfilm/runtime-bridge';
+import { contracts } from '../contracts.mjs';
+import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
 
-export const musicScriptContract = 'music.script.v3';
+export const musicScriptContract = contracts.music.contract;
 /** Platforms an LX source can resolve for the native music catalog. */
 export const musicPlatforms = Object.freeze(['wy', 'tx', 'kw', 'kg', 'mg']);
-const chunkBytes = 64 * 1024;
-const stageTTL = 300000;
 const downloadTimeout = 30000;
 const checkTimeout = 15000;
 const codes = new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SCRIPT_INTEGRITY',
-  'SCRIPT_ENCODING', 'STAGE_NOT_FOUND', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED',
+  'SCRIPT_ENCODING', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED',
   'CAPABILITY_UNAVAILABLE', 'PERMISSION_DENIED', 'TIMEOUT', 'SCRIPT_CLEANUP', 'SCRIPT_FAILURE',
   'SCRIPT_PROTOCOL_ERROR', 'NETWORK_ERROR', 'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'STORAGE_ERROR',
   'CORRUPT_STORAGE', 'ROLLBACK_UNAVAILABLE', 'INVALID_SOURCE_URL', 'SOURCE_DOWNLOAD_FAILED',
@@ -59,11 +59,7 @@ function text(value, max = 128) {
 function installation(value) {
   requireValue(typeof value === 'string' && uuidPattern.test(value));
 }
-function snapshot(value) {
-  const bytes = encodeJSONValue(value);
-  try { return decodeJSONValue(bytes); }
-  finally { bytes.fill(0); }
-}
+function snapshot(value) { validateJSONValue(value); return structuredClone(value); }
 const plainText = (value, max, empty = true) => typeof value === 'string' &&
   (empty || value.length > 0) && scalars(value) <= max && !control.test(value);
 // Object ordering is not a content change; array ordering remains meaningful.
@@ -130,10 +126,12 @@ function validOrigin(value) {
 const validList = (value, max) => Array.isArray(value) && value.length <= 32 &&
   value.every(item => plainText(item, max, false)) && new Set(value).size === value.length;
 function validDeclared(value) {
-  return shape(value, ['contentHash', 'sites']) && hashPattern.test(value.contentHash) && object(value.sites) &&
-    Object.entries(value.sites).every(([site, capability]) => musicPlatforms.includes(site) &&
-      shape(capability, ['actions', 'qualitys']) && validList(capability.actions, 128) &&
-      validList(capability.qualitys, 64));
+  if (!shape(value, ['contentHash', 'capabilities']) || !hashPattern.test(value.contentHash) ||
+      !object(value.capabilities)) return false;
+  try { validateJSONValue(value.capabilities); } catch { return false; }
+  return Object.entries(value.capabilities).every(([site, capability]) => sitePattern.test(site) &&
+    object(capability) && validList(capability.actions, 128) &&
+    (capability.qualitys === undefined || validList(capability.qualitys, 64)));
 }
 function validCheck(value) {
   return shape(value, ['contentHash', 'checkedAt', 'failure', 'sites']) && hashPattern.test(value.contentHash) &&
@@ -167,10 +165,8 @@ function validData(value) {
       typeof entry.key === 'string' && entry.key.length > 0 && entry.key.length <= 256) &&
     new Set(values.map(entry => entry.key)).size === values.length);
 }
-function encodedLength(value) {
-  const bytes = encodeJSONValue(value);
-  try { return bytes.length; } finally { bytes.fill(0); }
-}
+// Internal document wrappers do not consume the guest value's JSON depth budget.
+const encodedLength = value => Buffer.byteLength(JSON.stringify(value));
 function errorCode(error) {
   if (error instanceof Failure) return error.code;
   if (error instanceof BridgeError) return 'INVALID_REQUEST';
@@ -180,7 +176,7 @@ function errorCode(error) {
     NOT_FOUND: 'SOURCE_NOT_FOUND', ALREADY_EXISTS: 'STALE_SOURCE',
     CAPABILITY_UNAVAILABLE: 'CAPABILITY_UNAVAILABLE', PERMISSION_DENIED: 'PERMISSION_DENIED',
     RESOURCE_LIMIT: 'LIMIT', NETWORK_ERROR: 'NETWORK_ERROR', STORAGE_ERROR: 'STORAGE_ERROR',
-    STORAGE_CONFLICT: 'STORAGE_ERROR', CORRUPT_STORAGE: 'CORRUPT_STORAGE',
+    STORAGE_CONFLICT: 'STORAGE_ERROR', CORRUPT_STORAGE: 'CORRUPT_STORAGE', SCRIPT_CLEANUP: 'SCRIPT_CLEANUP',
     UPSTREAM_HTTP_ERROR: 'UPSTREAM_HTTP', HTTP_ERROR: 'UPSTREAM_HTTP', INVALID_JSON: 'UPSTREAM_FORMAT',
     SCRIPT_PROTOCOL_ERROR: 'SCRIPT_PROTOCOL_ERROR', ROLLBACK_UNAVAILABLE: 'ROLLBACK_UNAVAILABLE',
   })[error.code] ?? 'SCRIPT_FAILURE';
@@ -253,15 +249,6 @@ function lxInfo(musicInfo) {
   }
   return info;
 }
-function abortable(promise, signal) {
-  if (signal.aborted) return Promise.reject(new ScriptHostError('CANCELLED'));
-  return new Promise((resolve, reject) => {
-    const abort = () => reject(new ScriptHostError('CANCELLED'));
-    signal.addEventListener('abort', abort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort)).catch(() => {});
-  });
-}
-
 /**
  * Shared LX music source management and execution. This module is the only
  * writer of `<dataRoot>/music`: installation facts, immutable source files,
@@ -271,7 +258,7 @@ function abortable(promise, signal) {
  */
 export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHost,
   network = createNodeNetwork(),
-  download = createNodeNetwork({ maxResponseBytes: SCRIPT_LIMITS.maxSourceBytes, maxRedirects: 0 }),
+  download = createSourceDownload({ maxSourceBytes: SCRIPT_LIMITS.maxSourceBytes, maxRedirects: 0 }),
   clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   requireValue(typeof dataRoot === 'string' && typeof hostFactory === 'function' &&
     typeof network === 'function' && typeof download === 'function' && typeof clock === 'function' &&
@@ -279,20 +266,20 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   let documents;
   try { documents = new PrivateDocuments(dataRoot, 'music'); }
   catch { throw new Failure('INVALID_REQUEST'); }
-  const stages = new Map(), locks = new Map(), failures = new Map(), temporaryUse = new Map();
-  const adapterTasks = new Set();
-  const transfers = new SourceTransfers({ clock, setTimer, clearTimer });
+  const failures = new Map(), temporaryUse = new Map(), observations = new Map();
+  const adapterTasks = new Set(), proposals = new Map(), active = new Map(), retirements = new Map();
+  const sources = new SourceCandidates({ module: 'music', fail: code => new Failure(code) });
+  const operations = new InstallationOperations();
   const lifetime = new AbortController();
-  let closed = false, closing, tail = Promise.resolve(), cached = null;
-  let stageTimer, stageFailure;
-  function track(promise) {
-    adapterTasks.add(promise);
-    promise.finally(() => adapterTasks.delete(promise)).catch(() => {});
+  let closed = false, closing, cached = null;
+  function track(input, promise, kind = 'network') {
+    const task = { installationId: input.installationId, generation: input.generation, kind, promise };
+    adapterTasks.add(task);
+    promise.finally(() => adapterTasks.delete(task)).catch(() => {});
     return promise;
   }
-  // Track actual adapter completion, not merely a cancelled Promise.race.
   const host = hostFactory({
-    network: input => track(Promise.resolve().then(() => network(input))),
+    network: input => track(input.scope, Promise.resolve().then(() => network(input))),
     storage: Object.fromEntries(['get', 'set', 'delete'].map(operation =>
       [operation, input => storage(operation, input)])),
   });
@@ -300,69 +287,45 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     requireValue(!closed, 'CLOSED');
     requireValue(!signal?.aborted, 'CANCELLED');
   }
-  function serialize(body) {
-    const result = tail.then(body);
-    tail = result.catch(() => {});
-    return result;
-  }
-  /** One lifecycle owner per installation: load, replacement, unload and check cleanup. */
-  function locked(id, body) {
-    const result = (locks.get(id) ?? Promise.resolve()).then(body);
-    const settled = result.catch(() => {});
-    locks.set(id, settled);
-    settled.then(() => { if (locks.get(id) === settled) locks.delete(id); });
-    return result;
-  }
   const live = id => host.list().find(record => record.installationId === id);
-  function clearStageTimer() {
-    const timer = stageTimer;
-    stageTimer = undefined;
-    if (timer === undefined) return;
-    try { clearTimer(timer); }
-    catch (error) { stageFailure ??= error; }
+  function retire(id) {
+    const existing = retirements.get(id);
+    if (existing) return existing;
+    if (!live(id)) return Promise.resolve();
+    const result = Promise.resolve(host.uninstall(id));
+    retirements.set(id, result);
+    result.finally(() => { if (retirements.get(id) === result) retirements.delete(id); }).catch(() => {});
+    return result;
   }
-  function scheduleStages() {
-    clearStageTimer();
-    if (closed || !stages.size) return;
-    let expiresAt = Infinity;
-    for (const stage of stages.values()) expiresAt = Math.min(expiresAt, stage.expiresAt);
-    const timer = setTimer(expireStages, Math.max(1, expiresAt - clock()));
-    stageTimer = timer;
-    try { timer?.unref?.(); } catch { /* An active timer still owns expiry. */ }
+  function cleanup(id, keepGeneration) {
+    requireValue(!host.stats().cleanupIssues.some(issue => issue.installationId === id) &&
+      ![...adapterTasks].some(task => task.installationId === id && task.kind === 'network' &&
+        task.generation !== keepGeneration), 'SCRIPT_CLEANUP');
   }
-  function expireStages() {
-    if (closed) return;
-    try { sweep(); }
-    catch (error) {
-      stageFailure ??= error;
-      for (const token of [...stages.keys()]) release(token, false);
-    }
+  // Admission targets the captured operation/initializer, never a future successor.
+  function interrupt(id) {
+    const stop = host.captureInitialization(id);
+    const owner = active.get(id);
+    if (owner) { owner.superseded = true; owner.controller.abort(); }
+    stop?.();
   }
-  function release(token, reschedule = true) {
-    const stage = stages.get(token);
-    if (stage) { for (const bytes of stage.chunks) bytes.fill(0); stages.delete(token); }
-    if (reschedule) scheduleStages();
+  function locked(id, signal, body) {
+    return operations.run(id, async () => {
+      guard(signal);
+      const owner = { controller: new AbortController(), superseded: false };
+      active.set(id, owner);
+      const scoped = AbortSignal.any([signal, owner.controller.signal]);
+      try {
+        const value = await body(scoped);
+        guard(scoped);
+        return value;
+      } catch (error) {
+        if (owner.superseded && !signal.aborted && !closed && errorCode(error) !== 'SCRIPT_CLEANUP')
+          throw new Failure('STALE_SOURCE');
+        throw error;
+      } finally { if (active.get(id) === owner) active.delete(id); }
+    });
   }
-  function sweep() {
-    for (const [token, stage] of stages)
-      if (stage.expiresAt <= clock()) release(token, false);
-    scheduleStages();
-  }
-  function staged(token) {
-    text(token); sweep();
-    const stage = stages.get(token);
-    requireValue(stage, 'STAGE_NOT_FOUND');
-    return stage;
-  }
-  /** A complete, hash-verified staged file. The caller zeroes the returned bytes. */
-  function stagedBytes(token) {
-    const stage = staged(token);
-    requireValue(stage.offset === stage.length, 'SCRIPT_INTEGRITY');
-    const bytes = Buffer.concat(stage.chunks);
-    if (digest(bytes) !== stage.hash) { bytes.fill(0); throw new Failure('SCRIPT_INTEGRITY'); }
-    return { bytes, basename: stage.basename };
-  }
-
   function catalog() {
     if (cached) return cached;
     const bytes = documents.read('catalog.json');
@@ -402,7 +365,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   /** Source files no installation references any more. An orphan grants nothing. */
   function collect() {
     try {
-      const referenced = new Set();
+      const referenced = new Set([...proposals.keys()].map(hash => `sources/${hash}.js`));
       for (const item of catalog().installations)
         for (const version of [item.current, item.previous])
           if (version) referenced.add(`sources/${version.contentHash}.js`);
@@ -410,16 +373,23 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         if (!referenced.has(name)) documents.remove(name);
     } catch { /* The next completed management command retries collection. */ }
   }
-  function prepare(bytes, basename) {
+  function prepare(bytes, basename, trustedHash) {
     requireValue(bytes.length > 0, 'SCRIPT_ENCODING');
     requireValue(bytes.length <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
     const header = describe(decode(bytes), basename);
-    const contentHash = digest(bytes), name = `sources/${contentHash}.js`;
+    const contentHash = trustedHash ?? digest(bytes), name = `sources/${contentHash}.js`;
     const existing = documents.read(name);
     try { if (!existing?.equals(bytes)) documents.write(name, bytes); }
     finally { existing?.fill(0); }
+    proposals.set(contentHash, (proposals.get(contentHash) ?? 0) + 1);
     return { name: header.name, version: { contentHash, bytes: bytes.length, version: header.version,
       author: header.author, description: header.description, homepage: header.homepage } };
+  }
+  function releaseSource(version) {
+    const count = proposals.get(version.contentHash);
+    if (count > 1) proposals.set(version.contentHash, count - 1);
+    else proposals.delete(version.contentHash);
+    collect();
   }
   function readSource(version) {
     const bytes = documents.read(`sources/${version.contentHash}.js`);
@@ -429,24 +399,32 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       return decode(bytes);
     } finally { bytes.fill(0); }
   }
-  async function fetchSource(url, signal) {
+  async function fetchSource(url, signal, id) {
     const timeout = new AbortController();
     const timer = setTimer(() => timeout.abort(), downloadTimeout);
     try { timer?.unref?.(); } catch { /* The active timer still bounds the download. */ }
     let response;
     try {
-      response = await download({ url, options: { followRedirect: false },
-        signal: AbortSignal.any([signal, timeout.signal]), validateURL: sourceURL });
+      response = await track({ installationId: id }, Promise.resolve().then(() => download({
+        url, options: { followRedirect: false },
+        signal: AbortSignal.any([signal, timeout.signal]), validateURL: sourceURL,
+      })), 'download');
+      guard(signal);
+      requireValue(!timeout.signal.aborted, 'TIMEOUT');
     } catch (error) {
+      response?.body?.fill?.(0);
       if (signal.aborted) throw new Failure('CANCELLED');
       if (timeout.signal.aborted) throw new Failure('TIMEOUT');
       if (error instanceof ScriptHostError && error.code === 'RESOURCE_LIMIT') throw new Failure('LIMIT');
       throw new Failure('SOURCE_DOWNLOAD_FAILED');
     } finally { clearTimer(timer); }
-    requireValue(!(response?.statusCode >= 300 && response.statusCode < 400), 'SOURCE_REDIRECT');
-    requireValue(response?.statusCode === 200 && Buffer.isBuffer(response.body) && response.body.length > 0,
-      'SOURCE_DOWNLOAD_FAILED');
-    return response.body;
+    try {
+      requireValue(!(response?.statusCode >= 300 && response.statusCode < 400), 'SOURCE_REDIRECT');
+      requireValue(response?.statusCode === 200 && Buffer.isBuffer(response.body) && response.body.length > 0,
+        'SOURCE_DOWNLOAD_FAILED');
+      requireValue(response.body.length <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
+      return response.body;
+    } catch (error) { response?.body?.fill?.(0); throw error; }
   }
 
   const dataName = id => `data/${id}.json`;
@@ -458,10 +436,20 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     catch { throw new Failure('CORRUPT_STORAGE'); }
     finally { bytes.fill(0); }
     requireValue(validData(value), 'CORRUPT_STORAGE');
+    try {
+      for (const entries of Object.values(value.sites)) {
+        for (const entry of entries) {
+          validateJSONValue(entry.value);
+          requireValue(encodedLength(entry.value) <= 16384, 'CORRUPT_STORAGE');
+        }
+        requireValue(encodedLength(entries) <= 65536, 'CORRUPT_STORAGE');
+      }
+      requireValue(encodedLength(value) <= 512 * 1024, 'CORRUPT_STORAGE');
+    } catch { throw new Failure('CORRUPT_STORAGE'); }
     return value;
   }
   /** Request-bound guest storage of the current generation's declared sites only. */
-  function storage(operation, input) {
+  async function storage(operation, input) {
     try {
       requireValue(object(input) && typeof input.installationId === 'string' &&
         uuidPattern.test(input.installationId) && Number.isSafeInteger(input.generation) && input.generation > 0 &&
@@ -473,12 +461,12 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       requireValue(record?.state === 'ready' && record.generation === input.generation, 'STALE_SOURCE');
       requireValue(Object.hasOwn(record.capabilities, input.siteId), 'PERMISSION_DENIED');
       const data = readData(input.installationId);
-      const values = data.sites[input.siteId] ?? [];
+      const values = Object.hasOwn(data.sites, input.siteId) ? data.sites[input.siteId] : [];
       if (operation === 'get') return values.find(entry => entry.key === input.key)?.value ?? null;
       const next = values.filter(entry => entry.key !== input.key);
       if (operation === 'set') {
         let size;
-        try { size = encodedLength(input.value); } catch { throw new Failure('INVALID_REQUEST'); }
+        try { validateJSONValue(input.value); size = encodedLength(input.value); } catch { throw new Failure('INVALID_REQUEST'); }
         requireValue(size <= 16384, 'LIMIT');
         next.push({ key: input.key, value: input.value });
       }
@@ -498,57 +486,70 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   }
 
   function declaredOf(record) {
+    return { contentHash: record.contentHash, capabilities: snapshot(record.capabilities) };
+  }
+  function platformSites(capabilities) {
     const sites = {};
     for (const platform of musicPlatforms) {
-      const capability = record.capabilities[platform];
-      if (capability) sites[platform] = { actions: [...capability.actions], qualitys: [...capability.qualitys] };
+      const capability = capabilities[platform];
+      if (capability) sites[platform] = { actions: [...capability.actions], qualitys: [...(capability.qualitys ?? [])] };
     }
-    return { contentHash: record.contentHash, sites };
+    return sites;
   }
-  /** Caller holds the installation lock. Returns the ready host record of item.current. */
-  async function ensureLoaded(item, signal) {
+  /** Cold startup is lazy; only an explicit management command may retry a failed owner. */
+  async function ensureLoaded(item, signal, explicit = false) {
     const current = live(item.id);
     if (current?.state === 'ready' && current.contentHash === item.current.contentHash) return current;
+    const failed = failures.get(item.id);
+    if (!explicit) {
+      requireValue(!current, 'SOURCE_DISABLED');
+      if (failed?.contentHash === item.current.contentHash) throw new Failure(failed.code);
+    }
     try {
       guard(signal);
+      cleanup(item.id, current?.generation);
       const spec = { installationId: item.id, protocol: 'lx', enabled: true, source: readSource(item.current),
-        version: item.current.version, config: {}, permissions: { storage: ['read', 'write'] } };
-      if (current?.state === 'ready') await host.update(item.id, spec);
+        contentHash: item.current.contentHash, version: item.current.version,
+        config: {}, permissions: { storage: ['read', 'write'] } };
+      if (current?.state === 'ready') await host.update(item.id, spec, { signal });
       else {
-        if (current) await host.uninstall(item.id);
-        await host.install(spec);
+        if (current) await retire(item.id);
+        cleanup(item.id);
+        await host.install(spec, { signal });
       }
       guard(signal);
       const next = live(item.id);
       requireValue(next?.state === 'ready' && next.contentHash === item.current.contentHash &&
         next.version === item.current.version && next.protocol === 'lx', 'SCRIPT_INTEGRITY');
+      cleanup(item.id, next.generation);
       failures.delete(item.id);
       return next;
     } catch (error) {
       if (!closed) {
-        const code = errorCode(error);
-        if (!['CANCELLED', 'CLOSED'].includes(code))
-          failures.set(item.id, { contentHash: item.current.contentHash, code });
-        // A failed replacement trial keeps the exact previous generation; anything
-        // else that no longer matches the catalog is retired, never left half-live.
-        const remaining = live(item.id);
         const owner = catalog().installations.find(entry => entry.id === item.id);
-        if (remaining && (remaining.state !== 'ready' || remaining.contentHash !== owner?.current.contentHash ||
-            !owner.enabled && !temporaryUse.has(item.id)))
-          try { await host.uninstall(item.id); } catch { /* The next load or close reports cleanup. */ }
+        const remaining = live(item.id);
+        const retained = current?.state === 'ready' && remaining?.state === 'ready' &&
+          remaining.generation === current.generation && remaining.contentHash === owner?.current.contentHash;
+        if (!retained) {
+          observations.delete(item.id);
+          // Keep a failure marker even after physical retirement: absence is not a cold start.
+          failures.set(item.id, { contentHash: owner?.current.contentHash ?? item.current.contentHash,
+            code: errorCode(error) });
+          if (remaining) await retire(item.id);
+        }
+        cleanup(item.id, retained ? remaining.generation : undefined);
       }
       throw error;
     }
   }
   function remember(item, record) {
     const declared = declaredOf(record);
-    try {
-      edit(item.id, target => {
-        if (target.current.contentHash !== record.contentHash ||
-            canonical(target.declared) === canonical(declared)) return false;
-        target.declared = declared;
-      });
-    } catch { /* The live declaration still authorizes this run; display facts retry on the next load. */ }
+    edit(item.id, target => {
+      if (target.current.contentHash !== record.contentHash ||
+          canonical(target.declared) === canonical(declared)) return false;
+      target.declared = declared;
+    });
+    observations.set(item.id, host.observe(item.id));
   }
   function summary(check) {
     if (check.failure) return 'abnormal';
@@ -557,10 +558,13 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     return passed === 0 ? 'abnormal' : passed === sites.length ? 'normal' : 'partial';
   }
   function view(item, full = false) {
-    const record = live(item.id);
+    const record = observations.get(item.id)?.() ?? live(item.id);
     const ready = item.enabled && record?.state === 'ready' && record.contentHash === item.current.contentHash;
     const failure = failures.get(item.id);
-    const failed = failure?.contentHash === item.current.contentHash ? failure.code : null;
+    const failed = record?.state === 'failed' ? errorCode(new ScriptHostError(record.lastFailure ?? 'DISABLED'))
+      : failure?.contentHash === item.current.contentHash ? failure.code : null;
+    const capabilities = record?.contentHash === item.current.contentHash && record.state === 'ready'
+      ? record.capabilities : item.declared?.contentHash === item.current.contentHash ? item.declared.capabilities : null;
     const check = item.check?.contentHash === item.current.contentHash ? item.check : null;
     const result = {
       installationId: item.id, name: item.name, version: item.current.version,
@@ -568,15 +572,15 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       origin: item.origin.kind === 'network'
         ? { kind: 'network', host: new URL(item.origin.url).hostname } : { kind: 'file' },
       enabled: item.enabled,
-      state: !item.enabled ? 'disabled' : ready ? 'ready' : failed ? 'failed' : 'idle',
+      state: !item.enabled ? 'disabled' : ready ? 'ready' : failed ? 'failed' : active.has(item.id) ? 'starting' : 'idle',
       generation: ready ? record.generation : 0,
       contentHash: item.current.contentHash,
       executionHash: digest(canonical({ id: item.id, contentHash: item.current.contentHash,
         version: item.current.version })),
       rollbackAvailable: item.previous !== null,
       // null: never declared for this content. Execution re-checks the live declaration.
-      sites: ready ? declaredOf(record).sites
-        : item.declared?.contentHash === item.current.contentHash ? item.declared.sites : null,
+      capabilities,
+      sites: capabilities === null ? null : platformSites(capabilities),
       check: check && { checkedAt: check.checkedAt, failure: check.failure, summary: summary(check),
         sites: check.sites },
       lastFailure: item.enabled ? failed : null,
@@ -584,48 +588,57 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     if (full && item.origin.kind === 'network') result.origin.url = item.origin.url;
     return result;
   }
+  /** Caller owns this installation's operation; catalog publication is synchronous. */
   async function replace(id, current, previous, signal) {
-    return locked(id, async () => {
-      guard(signal);
-      const item = find(id);
-      if (item.current.contentHash === current.contentHash) return { item: view(item) };
-      const candidate = { ...item, current, previous };
-      let record = null;
-      try {
-        if (item.enabled) record = await ensureLoaded(candidate, signal);
-        edit(id, target => {
-          Object.assign(target, { current, previous, declared: record ? declaredOf(record) : null, check: null });
-        });
-      } catch (error) {
-        if (record) try { await host.uninstall(id); } catch { /* Reconciled by the next load. */ }
-        collect();
-        throw error;
+    guard(signal);
+    const item = find(id);
+    if (item.current.contentHash === current.contentHash) return { item: view(item) };
+    const candidate = { ...item, current, previous };
+    let record;
+    try {
+      if (item.enabled) record = await ensureLoaded(candidate, signal, true);
+      else if (live(id)) {
+        temporaryUse.delete(id); observations.delete(id);
+        await retire(id);
+        cleanup(id);
       }
-      failures.delete(id);
-      collect();
-      return { item: view(find(id)) };
-    });
+      guard(signal);
+      edit(id, target => {
+        Object.assign(target, { current, previous, declared: record ? declaredOf(record) : null, check: null });
+      });
+      if (record) observations.set(id, host.observe(id));
+    } catch (error) {
+      if (record && !closed) {
+        observations.delete(id);
+        failures.set(id, { contentHash: item.current.contentHash, code: errorCode(error) });
+        await retire(id);
+        cleanup(id);
+      }
+      throw error;
+    }
+    failures.delete(id);
+    return { item: view(find(id)) };
   }
   async function run(id, siteId, operation, payload, signal, accept) {
-    const record = await locked(id, async () => {
-      guard(signal);
+    const record = await locked(id, signal, async scoped => {
       const item = find(id);
       requireValue(item.enabled, 'SOURCE_DISABLED');
-      const loaded = await ensureLoaded(item, signal);
+      const loaded = await ensureLoaded(item, scoped);
       remember(item, loaded);
       return loaded;
     });
     const value = await host.invoke({ installationId: id, generation: record.generation, siteId,
       operation, payload }, { signal });
     guard(signal);
-    const now = live(id);
-    requireValue(now?.state === 'ready' && now.generation === record.generation, 'STALE_SOURCE');
-    return { installationId: id, generation: record.generation, contentHash: record.contentHash,
-      ...accept(value ?? null) };
+    const now = live(id), item = find(id);
+    requireValue(item.enabled && now?.state === 'ready' && now.generation === record.generation &&
+      item.current.contentHash === record.contentHash, 'STALE_SOURCE');
+    return accept(value ?? null, record);
   }
-  function releaseTemporary(id) {
-    const uses = temporaryUse.get(id) ?? 0;
-    if (uses > 1) { temporaryUse.set(id, uses - 1); return false; }
+  function releaseTemporary(id, generation) {
+    const use = temporaryUse.get(id);
+    if (use?.generation !== generation) return false;
+    if (use.count > 1) { use.count--; return false; }
     return temporaryUse.delete(id);
   }
   /** Light check: one public sample per declared platform, its basic declared quality,
@@ -633,16 +646,28 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   async function check(id, signal) {
     let loaded;
     try {
-      loaded = await locked(id, async () => {
-        guard(signal);
+      loaded = await locked(id, signal, async scoped => {
+        guard(scoped);
         const item = find(id);
-        const record = await ensureLoaded(item, signal);
-        if (!item.enabled) temporaryUse.set(id, (temporaryUse.get(id) ?? 0) + 1);
+        const record = await ensureLoaded(item, scoped);
+        try { remember(item, record); }
+        catch (error) {
+          if (!item.enabled && !temporaryUse.has(id)) {
+            await retire(id);
+            cleanup(id);
+          }
+          throw error;
+        }
+        if (!item.enabled) {
+          const use = temporaryUse.get(id);
+          temporaryUse.set(id, { generation: record.generation,
+            count: use?.generation === record.generation ? use.count + 1 : 1 });
+        }
         return { item, record };
       });
     } catch (error) {
       const code = errorCode(error);
-      if (['CANCELLED', 'CLOSED', 'SOURCE_NOT_FOUND', 'CORRUPT_STORAGE', 'STORAGE_ERROR'].includes(code)) throw error;
+      if (['CANCELLED', 'CLOSED', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'CORRUPT_STORAGE', 'STORAGE_ERROR', 'SCRIPT_CLEANUP'].includes(code)) throw error;
       const item = find(id);
       const outcome = { contentHash: item.current.contentHash, checkedAt: clock(), failure: code, sites: {} };
       edit(id, target => {
@@ -674,11 +699,14 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         }
       }));
     } finally {
-      if (!closed) await locked(id, async () => {
+      if (!closed) await operations.run(id, async () => {
         const now = live(id);
         const owner = catalog().installations.find(entry => entry.id === id);
-        if (releaseTemporary(id) && now && !owner?.enabled)
-          try { await host.uninstall(id); } catch { /* Reported by the next load or close. */ }
+        if (releaseTemporary(id, record.generation) && now?.generation === record.generation && !owner?.enabled) {
+          observations.delete(id);
+          await retire(id);
+          cleanup(id);
+        }
         // Another lifecycle command replaced this generation: its results are not this content's facts.
         if (results) requireValue(now?.state === 'ready' && now.generation === record.generation, 'STALE_SOURCE');
       });
@@ -692,90 +720,45 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     });
     return { item: view(find(item.id)) };
   }
-  async function stagedOrFetched(params, origin, signal) {
-    if (origin.kind === 'network') {
-      requireValue(params.token === undefined);
-      return { bytes: await fetchSource(origin.url, signal), basename: sourceBasename(origin.url), url: origin.url };
-    }
-    requireValue(typeof params.token === 'string');
-    return null;
-  }
-
-  function success(value, blob = false) {
-    const reply = { ok: true, contract: musicScriptContract, ...value };
-    const bytes = encodeJSONValue(reply);
-    if (blob) {
-      try {
-        const result = transfers.result(bytes, { inline: decodeJSONValue });
-        return Object.hasOwn(result, 'blob') ? { ok: true, contract: musicScriptContract, ...result } : result;
-      } catch (error) { bytes.fill(0); throw error; }
-    }
-    try { return decodeJSONValue(bytes); }
-    finally { bytes.fill(0); }
+  function success(value) {
+    validateJSONValue(value);
+    return { ok: true, contract: musicScriptContract, value };
   }
   const failure = error => ({ ok: false, contract: musicScriptContract, code: errorCode(error) });
-  function method(allowed, required, body, { blob = false, transfer = false,
-    envelope = false } = {}) {
+  function business(allowed, required, body) {
     return async (parameters = {}, context = {}) => {
-      let token, result;
       try {
-        if (transfer && object(parameters)) {
-          const descriptor = Object.getOwnPropertyDescriptor(parameters, 'token');
-          if (typeof descriptor?.value === 'string') token = descriptor.value;
-        }
         requireValue(object(context));
         const { signal } = context;
         requireValue(signal === undefined || signal instanceof AbortSignal);
         guard(signal); fields(parameters, allowed, required);
         const captured = snapshot(parameters);
-        const active = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
-        result = await body(captured, active);
-        guard(active);
-        return envelope ? result : success(result, blob);
+        const scoped = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
+        const result = await body(captured, scoped);
+        guard(scoped);
+        return success(result);
       } catch (error) {
-        if (transfer) {
-          try {
-            transfers.release(token);
-            if (!token && typeof result?.token === 'string') transfers.release(result.token);
-            if (envelope && typeof result?.blob?.token === 'string') transfers.release(result.blob.token);
-          } catch { return failure(new Failure('SCRIPT_CLEANUP')); }
-        }
-        // Work cancelled by module shutdown reports the shutdown, not a caller cancellation.
         return failure(closed && errorCode(error) === 'CANCELLED' ? new Failure('CLOSED') : error);
       }
     };
   }
-  const business = (allowed, required, body) => method(allowed, required, body, { blob: true });
-  function transferred(body) {
-    try { return body(); }
-    catch (error) {
-      if (error instanceof ScriptHostError) {
-        if (error.code === 'NOT_FOUND') throw new Failure('STAGE_NOT_FOUND');
-        if (['INVALID_ARGUMENT', 'SCRIPT_PROTOCOL_ERROR'].includes(error.code))
-          throw new Failure('SCRIPT_INTEGRITY');
-      }
-      throw error;
-    }
+  async function upload(input, bytes, { signal } = {}) {
+    try { guard(signal); installation(input?.installationId); return success(sources.put(input, bytes, signal)); }
+    catch (error) { return failure(error); }
   }
   async function shutdown() {
     if (closing) return closing;
-    closed = true; lifetime.abort();
-    clearStageTimer();
-    for (const token of stages.keys()) release(token, false);
+    closed = true; lifetime.abort(); sources.close();
     closing = (async () => {
-      let result, cleanupFailure = stageFailure;
-      try { transfers.close(); }
-      catch (error) { cleanupFailure ??= error; }
-      try { result = await host.close(); }
-      catch (error) { cleanupFailure ??= error; }
+      let result, cleanupFailure;
+      try { result = await host.close(); } catch (error) { cleanupFailure = error; }
       finally {
-        await tail;
-        await Promise.allSettled([...locks.values()]);
-        locks.clear(); failures.clear(); temporaryUse.clear();
+        await operations.drain();
+        // Downloads have no guest session to drain them; wait for the actual adapter.
+        await Promise.allSettled([...adapterTasks].filter(task => task.kind === 'download').map(task => task.promise));
+        failures.clear(); temporaryUse.clear(); observations.clear();
       }
-      stageFailure = null;
-      if (cleanupFailure) throw new Failure('SCRIPT_CLEANUP');
-      requireValue(result.cleanupComplete && adapterTasks.size === 0, 'SCRIPT_CLEANUP');
+      requireValue(!cleanupFailure && result?.cleanupComplete && adapterTasks.size === 0, 'SCRIPT_CLEANUP');
       return { closed: true, cleanupComplete: true };
     })();
     return closing;
@@ -783,78 +766,15 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   async function close() {
     try { return success(await shutdown()); } catch (error) { return failure(error); }
   }
-  const operations = ['sources.list', 'sources.detail', 'sources.add', 'sources.download', 'sources.edit',
-    'sources.update', 'sources.rollback', 'sources.enable', 'sources.disable', 'sources.remove',
-    'sources.check', 'resolve', 'invoke'];
+  function add(id, prepared, origin) {
+    commit(next => {
+      requireValue(!next.installations.some(item => item.id === id), 'STALE_SOURCE');
+      next.installations.push({ id, name: prepared.name, origin, enabled: false,
+        current: prepared.version, previous: null, declared: null, check: null });
+    });
+    return { item: view(find(id)) };
+  }
   const methods = {
-    'music.script.stage.begin': method(['basename', 'length', 'sha256'], undefined, params => {
-      sweep();
-      text(params.basename, 255);
-      requireValue(!/[\\/:*?"<>|]/.test(params.basename) && params.basename.toLowerCase().endsWith('.js'));
-      integer(params.length, 1);
-      requireValue(params.length <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
-      requireValue(typeof params.sha256 === 'string' && hashPattern.test(params.sha256));
-      const token = randomUUID();
-      stages.set(token, { chunks: [], length: params.length, basename: params.basename,
-        hash: params.sha256, offset: 0, expiresAt: clock() + stageTTL });
-      try { scheduleStages(); }
-      catch (error) { release(token, false); throw error; }
-      return { token, chunkBytes };
-    }),
-    'music.script.stage.chunk': method(['token', 'offset', 'data'], undefined, params => {
-      const stage = staged(params.token);
-      integer(params.offset); requireValue(params.offset === stage.offset, 'SCRIPT_INTEGRITY');
-      requireValue(typeof params.data === 'string' && params.data.length <= Math.ceil(chunkBytes / 3) * 4, 'LIMIT');
-      const bytes = Buffer.from(params.data, 'base64');
-      let retained = false;
-      try {
-        requireValue(bytes.length > 0 && bytes.length <= chunkBytes && bytes.toString('base64') === params.data &&
-          stage.offset + bytes.length <= stage.length, 'SCRIPT_INTEGRITY');
-        const previousExpires = stage.expiresAt;
-        stage.chunks.push(bytes); retained = true; stage.offset += bytes.length;
-        stage.expiresAt = clock() + stageTTL;
-        try { scheduleStages(); }
-        catch (error) {
-          stage.chunks.pop();
-          stage.offset -= bytes.length;
-          stage.expiresAt = previousExpires;
-          retained = false;
-          throw error;
-        }
-        return { next: stage.offset };
-      } finally { if (!retained) bytes.fill(0); }
-    }),
-    'music.script.stage.abort': method(['token'], undefined, params => {
-      text(params.token); release(params.token); return { released: true };
-    }),
-    'music.script.control.begin': method(['length', 'sha256'], undefined, params => {
-      integer(params.length, 1);
-      requireValue(typeof params.sha256 === 'string' && hashPattern.test(params.sha256));
-      return transfers.begin({ ...params, kind: 'json' });
-    }, { transfer: true }),
-    'music.script.control.chunk': method(['token', 'offset', 'data'], undefined, params => {
-      text(params.token); integer(params.offset);
-      return transferred(() => transfers.chunk(params));
-    }, { transfer: true }),
-    'music.script.control.abort': method(['token'], undefined, params => {
-      text(params.token); transfers.release(params.token); return { released: true };
-    }, { transfer: true }),
-    'music.script.control.call': method(['operation', 'token'], undefined, async (params, signal) => {
-      text(params.token);
-      requireValue(operations.includes(params.operation));
-      const bytes = transferred(() => transfers.take(params.token, 'json'));
-      let input;
-      try { input = decodeJSONValue(bytes); }
-      finally { bytes.fill(0); }
-      return methods[`music.script.${params.operation}`](input, { signal });
-    }, { transfer: true, envelope: true }),
-    'music.script.blob.read': method(['token', 'offset'], undefined, params => {
-      text(params.token); integer(params.offset);
-      return transferred(() => transfers.read(params));
-    }, { transfer: true }),
-    'music.script.blob.release': method(['token'], undefined, params => {
-      text(params.token); transfers.release(params.token); return { released: true };
-    }, { transfer: true }),
     'music.script.sources.list': business([], undefined, () => {
       const value = catalog();
       return { revision: value.revision, items: value.installations.map(item => view(item)) };
@@ -863,135 +783,150 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       installation(params.installationId);
       return { item: view(find(params.installationId), true) };
     }),
-    'music.script.sources.add': business(['token'], undefined, (params, signal) => serialize(() => {
-      guard(signal);
-      const { bytes, basename } = stagedBytes(params.token);
-      try {
-        const prepared = prepare(bytes, basename);
-        release(params.token);
-        const id = randomUUID();
-        commit(next => {
-          next.installations.push({ id, name: prepared.name, origin: { kind: 'file' }, enabled: false,
-            current: prepared.version, previous: null, declared: null, check: null });
-        });
-        collect();
-        return { item: view(find(id)) };
-      } finally { bytes.fill(0); }
-    })),
-    'music.script.sources.download': business(['url'], undefined, async (params, signal) => {
-      guard(signal);
-      const url = sourceURL(params.url);
-      const bytes = await fetchSource(url, signal);
-      try {
-        return await serialize(() => {
-          guard(signal);
-          const prepared = prepare(bytes, sourceBasename(url));
-          const id = randomUUID();
-          commit(next => {
-            next.installations.push({ id, name: prepared.name, origin: { kind: 'network', url }, enabled: false,
-              current: prepared.version, previous: null, declared: null, check: null });
-          });
-          collect();
-          return { item: view(find(id)) };
-        });
-      } finally { bytes.fill(0); }
+    'music.script.sources.add': business(['installationId', 'sourceRevision'], undefined, (params, signal) => {
+      installation(params.installationId); integer(params.sourceRevision, 1);
+      return locked(params.installationId, signal, scoped => {
+        guard(scoped);
+        requireValue(!catalog().installations.some(item => item.id === params.installationId), 'STALE_SOURCE');
+        const input = sources.take(params.installationId, params.sourceRevision);
+        const bytes = Buffer.from(input.source);
+        let prepared, published = false;
+        try {
+          prepared = prepare(bytes, input.basename, input.contentHash);
+          const result = add(params.installationId, prepared, { kind: 'file' });
+          published = true;
+          return result;
+        } finally {
+          bytes.fill(0); sources.finish(input, published);
+          if (prepared) releaseSource(prepared.version);
+        }
+      });
     }),
-    'music.script.sources.edit': business(['installationId', 'name', 'url'], ['installationId'],
-      (params, signal) => serialize(() => {
+    'music.script.sources.download': business(['url'], undefined, async (params, signal) => {
+      const url = sourceURL(params.url), id = randomUUID();
+      const bytes = await fetchSource(url, signal, id);
+      let prepared;
+      try {
         guard(signal);
-        installation(params.installationId);
-        requireValue(params.name !== undefined || params.url !== undefined);
-        const item = find(params.installationId);
-        if (params.name !== undefined) text(params.name, 255);
-        const url = params.url === undefined ? undefined : sourceURL(params.url);
-        requireValue(url === undefined || item.origin.kind === 'network');
-        edit(item.id, target => {
+        prepared = prepare(bytes, sourceBasename(url));
+        return add(id, prepared, { kind: 'network', url });
+      } finally { bytes.fill(0); if (prepared) releaseSource(prepared.version); }
+    }),
+    'music.script.sources.edit': business(['installationId', 'name', 'url'], ['installationId'], (params, signal) => {
+      installation(params.installationId);
+      requireValue(params.name !== undefined || params.url !== undefined);
+      if (params.name !== undefined) text(params.name, 255);
+      const url = params.url === undefined ? undefined : sourceURL(params.url);
+      requireValue(url === undefined || find(params.installationId).origin.kind === 'network');
+      return locked(params.installationId, signal, () => {
+        edit(params.installationId, target => {
           if (params.name !== undefined) target.name = params.name.trim();
           if (url !== undefined) target.origin = { kind: 'network', url };
         });
-        return { item: view(find(item.id), true) };
-      })),
-    'music.script.sources.update': business(['installationId', 'token'], ['installationId'],
-      async (params, signal) => {
-        guard(signal);
-        installation(params.installationId);
-        const fetched = await stagedOrFetched(params, find(params.installationId).origin, signal);
-        try {
-          return await serialize(async () => {
-            guard(signal);
-            const item = find(params.installationId);
-            requireValue(item.origin.kind === (fetched ? 'network' : 'file'));
-            requireValue(!fetched || item.origin.url === fetched.url, 'STALE_SOURCE');
-            const input = fetched ?? stagedBytes(params.token);
-            let prepared;
-            try { prepared = prepare(input.bytes, input.basename); }
-            finally { if (!fetched) input.bytes.fill(0); }
-            if (!fetched) release(params.token);
-            return replace(item.id, prepared.version, item.current, signal);
-          });
-        } finally { fetched?.bytes.fill(0); }
-      }),
-    'music.script.sources.rollback': business(['installationId'], undefined, (params, signal) => {
+        return { item: view(find(params.installationId), true) };
+      });
+    }),
+    'music.script.sources.update': business(['installationId', 'sourceRevision'], ['installationId'], (params, signal) => {
       installation(params.installationId);
-      return serialize(() => {
-        guard(signal);
+      const admitted = find(params.installationId);
+      if (admitted.origin.kind === 'file') {
+        integer(params.sourceRevision, 1);
+        sources.peek(params.installationId, params.sourceRevision);
+      } else requireValue(params.sourceRevision === undefined);
+      interrupt(params.installationId);
+      return locked(params.installationId, signal, async scoped => {
+        const item = find(params.installationId);
+        let input, bytes, prepared, published = false;
+        try {
+          if (item.origin.kind === 'network') bytes = await fetchSource(item.origin.url, scoped, item.id);
+          else {
+            input = sources.take(item.id, params.sourceRevision);
+            bytes = Buffer.from(input.source);
+          }
+          guard(scoped);
+          prepared = prepare(bytes, input?.basename ?? sourceBasename(item.origin.url), input?.contentHash);
+          const result = await replace(item.id, prepared.version, item.current, scoped);
+          published = true;
+          return result;
+        } finally {
+          bytes?.fill(0);
+          if (input) sources.finish(input, published);
+          if (prepared) releaseSource(prepared.version);
+        }
+      });
+    }),
+    'music.script.sources.rollback': business(['installationId'], undefined, (params, signal) => {
+      installation(params.installationId); requireValue(find(params.installationId).previous, 'ROLLBACK_UNAVAILABLE');
+      interrupt(params.installationId);
+      return locked(params.installationId, signal, scoped => {
         const item = find(params.installationId);
         requireValue(item.previous, 'ROLLBACK_UNAVAILABLE');
-        return replace(item.id, item.previous, item.current, signal);
+        return replace(item.id, item.previous, item.current, scoped);
       });
     }),
     'music.script.sources.enable': business(['installationId'], undefined, (params, signal) => {
-      installation(params.installationId);
-      return serialize(() => locked(params.installationId, async () => {
-        guard(signal);
+      installation(params.installationId); find(params.installationId);
+      return locked(params.installationId, signal, async scoped => {
         const item = find(params.installationId);
-        const record = await ensureLoaded(item, signal);
-        temporaryUse.delete(item.id);
+        const record = await ensureLoaded(item, scoped, true);
         try {
+          guard(scoped);
           edit(item.id, target => {
             const declared = declaredOf(record);
             if (target.enabled && canonical(target.declared) === canonical(declared)) return false;
             target.enabled = true; target.declared = declared;
           });
+          observations.set(item.id, host.observe(item.id));
+          temporaryUse.delete(item.id);
         } catch (error) {
-          if (!item.enabled) try { await host.uninstall(item.id); } catch { /* Reconciled by the next load. */ }
+          if (!item.enabled) {
+            observations.delete(item.id);
+            await retire(item.id);
+            cleanup(item.id);
+          }
           throw error;
         }
         return { item: view(find(item.id)) };
-      }));
+      });
     }),
     'music.script.sources.disable': business(['installationId'], undefined, (params, signal) => {
       installation(params.installationId);
-      return serialize(() => locked(params.installationId, async () => {
-        guard(signal);
+      const admitted = find(params.installationId);
+      interrupt(params.installationId);
+      if (admitted.enabled) failures.set(admitted.id, { contentHash: admitted.current.contentHash, code: 'SOURCE_DISABLED' });
+      const retiring = retire(params.installationId);
+      retiring.catch(() => {});
+      return locked(params.installationId, signal, async () => {
         const item = find(params.installationId);
-        let cleanup = false;
-        temporaryUse.delete(item.id);
-        if (live(item.id)) try { await host.uninstall(item.id); } catch { cleanup = true; }
-        edit(item.id, target => {
-          if (!target.enabled) return false;
-          target.enabled = false;
-        });
-        requireValue(!cleanup && !live(item.id), 'SCRIPT_CLEANUP');
+        sources.remove(item.id); temporaryUse.delete(item.id); observations.delete(item.id);
+        let cleanupFailure;
+        try { await retiring; await retire(item.id); } catch (error) { cleanupFailure = error; }
+        edit(item.id, target => { if (!target.enabled) return false; target.enabled = false; });
+        requireValue(!cleanupFailure && !live(item.id), 'SCRIPT_CLEANUP');
+        cleanup(item.id);
+        failures.delete(item.id);
         return { item: view(find(item.id)) };
-      }));
+      });
     }),
     'music.script.sources.remove': business(['installationId'], undefined, (params, signal) => {
       installation(params.installationId);
-      return serialize(() => locked(params.installationId, async () => {
-        guard(signal);
+      const admitted = find(params.installationId);
+      interrupt(params.installationId);
+      if (admitted.enabled) failures.set(admitted.id, { contentHash: admitted.current.contentHash, code: 'SOURCE_DISABLED' });
+      const retiring = retire(params.installationId);
+      retiring.catch(() => {});
+      return locked(params.installationId, signal, async () => {
         const item = find(params.installationId);
-        let cleanup = false;
-        temporaryUse.delete(item.id);
-        if (live(item.id)) try { await host.uninstall(item.id); } catch { cleanup = true; }
-        // Private data goes first: a removed installation never leaves it behind.
+        sources.remove(item.id); temporaryUse.delete(item.id); observations.delete(item.id);
+        let cleanupFailure;
+        try { await retiring; await retire(item.id); } catch (error) { cleanupFailure = error; }
         documents.remove(dataName(item.id));
         commit(next => { next.installations = next.installations.filter(entry => entry.id !== item.id); });
-        failures.delete(item.id);
-        collect();
-        requireValue(!cleanup && !live(item.id), 'SCRIPT_CLEANUP');
+        failures.delete(item.id); collect();
+        requireValue(!cleanupFailure && !live(item.id), 'SCRIPT_CLEANUP');
+        cleanup(item.id);
         return { removed: true };
-      }));
+      });
     }),
     'music.script.sources.check': business(['installationId'], undefined, (params, signal) => {
       installation(params.installationId);
@@ -1005,10 +940,12 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         const expected = { installationId: params.installationId, siteKey: params.platform,
           requestedQuality: params.quality };
         return run(params.installationId, params.platform, 'musicUrl',
-          { type: params.quality, musicInfo: lxInfo(params.musicInfo) }, signal,
-          value => ({ platform: params.platform, quality: params.quality, ...mediaCandidate(value, clock, expected, params.musicInfo.duration) }));
+          { type: params.quality, musicInfo: lxInfo(params.musicInfo) }, signal, (value, record) => ({
+            installationId: params.installationId, generation: record.generation, contentHash: record.contentHash,
+            platform: params.platform, quality: params.quality,
+            ...mediaCandidate(value, clock, expected, params.musicInfo.duration),
+          }));
       }),
-    // Any other declared action (lyric, extensions); the value stays raw for its consumer.
     'music.script.invoke': business(['installationId', 'siteId', 'operation', 'payload'], undefined,
       (params, signal) => {
         installation(params.installationId);
@@ -1016,12 +953,11 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
           typeof params.operation === 'string' && sitePattern.test(params.operation) && object(params.payload));
         const payload = object(params.payload.musicInfo)
           ? { ...params.payload, musicInfo: lxInfo(params.payload.musicInfo) } : params.payload;
-        return run(params.installationId, params.siteId, params.operation, payload, signal,
-          value => ({ siteId: params.siteId, value }));
+        return run(params.installationId, params.siteId, params.operation, payload, signal, value => value);
       }),
     'music.script.close': async (params = {}) => {
       try { fields(params, []); return await close(); } catch (error) { return failure(error); }
     },
   };
-  return { id: 'music', version: '0.8.0', methods, close };
+  return { id: 'music', version: contracts.music.version, contract: musicScriptContract, methods, upload, close };
 }

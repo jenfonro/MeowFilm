@@ -117,6 +117,9 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   file('apps/runtime/modules/music-script.mjs', sourceCode);
   file('apps/runtime/modules/cat-script.mjs', sourceCode);
   file('apps/runtime/modules/source-runtime.mjs', sourceCode);
+  for (const path of ['entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs']) {
+    file(`apps/runtime/${path}`, sourceCode);
+  }
   function saveLock() { write(root, 'package-lock.json', lock); }
   function update(location, changes, updateLock = true) {
     const manifest = { ...readJSON(join(root, location, 'package.json')), ...changes };
@@ -163,16 +166,19 @@ test('interpreted workspace files still reject unsupported negative rules', asyn
   await fails(f, 'UNSAFE_PATH');
 });
 
-test('one App packaging stages only the script dependency closure with exact hashes', async () => {
+test('common runtime packaging stages only the script dependency closure with exact hashes', async () => {
   const f = fixture(), manifest = await f.pack();
   assert.equal(manifest.product, 'aggregate');
   assert.deepEqual(manifest.modules, ['music', 'cat', 'source']);
   assert.equal(manifest.schemaVersion, 1);
-  assert.equal(manifest.status, 'platform-pending');
-  assert.equal(manifest.entry, 'app/windows/entries/aggregate.mjs');
+  assert.equal(manifest.status, 'complete');
+  assert.equal(manifest.assemblyProfile, 'common-native');
+  assert.equal(manifest.entry, 'app/entry.mjs');
   assert.match(manifest.integrityScope, /not an upstream signature/);
   assert.deepEqual(manifest.files.filter(f => f.path.startsWith('app/')).map(f => f.path),
-    ['app/bootstrap.mjs', 'app/modules/cat-script.mjs', 'app/modules/music-script.mjs', 'app/modules/source-runtime.mjs']);
+    ['app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/entry.mjs',
+      'app/modules/cat-script.mjs', 'app/modules/music-script.mjs',
+      'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs']);
   assert.deepEqual(manifest.dependencies.map(p => p.path).sort(), [
     'node_modules/@meowfilm/runtime-bridge', 'node_modules/@meowfilm/script-host',
     'node_modules/@meowfilm/source-runtime',
@@ -276,7 +282,7 @@ test('missing required bootstrap leaves an explicit failed payload', async () =>
 for (const [module, file] of [
   ['music', 'music-script.mjs'], ['cat', 'cat-script.mjs'], ['source', 'source-runtime.mjs'],
 ]) {
-  test(`missing shared ${module} module cannot leave a platform-pending assembly`, async () => {
+  test(`missing shared ${module} module cannot leave a complete runtime`, async () => {
     await fails(fixture({ omitFiles: [`apps/runtime/modules/${file}`] }), 'MISSING_SOURCE');
   });
 }
@@ -290,7 +296,7 @@ test('unlisted shared helpers are rejected rather than silently omitted', async 
 test('shared runtime packaging accepts ordinary method names named import', async () => {
   const f = fixture();
   f.file('apps/runtime/modules/cat-script.mjs', `${sourceCode}\nconst methods = { 'import': () => null };\nmethods.import('installationId');\n`);
-  assert.equal((await packageRuntime({ root: f.root, product: 'aggregate', output: f.output() })).status, 'platform-pending');
+  assert.equal((await f.pack('aggregate')).status, 'complete');
 });
 
 for (const specifier of ['../../windows/runtime/bootstrap.mjs', 'node:net', '@meowfilm/script-host/src/host.js']) {
@@ -551,11 +557,11 @@ for (const extension of ['node', 'NODE', 'dylib', 'wasm']) {
   });
 }
 
-test('the task-context WASM path alone cannot grant a workspace binary exception', async () => {
-  const f = fixture(), path = 'packages/script-host/src/quickjs/emscripten-module.wasm';
-  f.file(path, readFileSync(join(repository, path)));
+test('the native artifact path alone cannot grant a workspace binary exception', async () => {
+  const f = fixture(), path = 'packages/script-host/build/Release/script_host_native.node';
+  f.file(path, Buffer.from('unreviewed artifact'));
   await fails(f, 'NATIVE_PAYLOAD');
-  assert.equal(existsSync(join(f.output(), 'node_modules/@meowfilm/script-host/src/quickjs/emscripten-module.wasm')), false);
+  assert.equal(existsSync(join(f.output(), 'node_modules/@meowfilm/script-host/build/Release/script_host_native.node')), false);
 });
 
 test('an installed optional native peer is rejected, not silently treated as absent', async () => {
@@ -607,7 +613,7 @@ test('CLI uses its own repository root and never imports fixture business code',
   const run = spawnSync(process.execPath, [join(f.root, 'scripts/package-runtime.mjs'),
     '--product', 'aggregate', '--output', output], { cwd: f.area, encoding: 'utf8', timeout: 20_000 });
   assert.equal(run.status, 0, run.stderr);
-  assert.equal(JSON.parse(run.stdout).status, 'platform-pending');
+  assert.equal(JSON.parse(run.stdout).status, 'complete');
   assert.equal(readJSON(join(output, 'runtime-manifest.json')).product, 'aggregate');
   const invalid = spawnSync(process.execPath, [join(f.root, 'scripts/package-runtime.mjs'),
     '--product', 'aggregate', '--product', 'aggregate', '--output', f.output('not-created')],

@@ -74,6 +74,7 @@ test('shared runtime may use its own modules and data-only builtins', t => {
   const f = fixture(t);
   f.write('apps/runtime/bootstrap.mjs', "import './modules/music-script.mjs';");
   f.write('apps/runtime/modules/music-script.mjs', "import { createHash } from 'node:crypto';");
+  f.write('apps/runtime/modules/source-candidates.mjs', "import { isUtf8 } from 'node:buffer';");
   assert.deepEqual(verifyBoundaries(f.root), { packages: 2 });
 });
 

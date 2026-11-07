@@ -1,323 +1,189 @@
-import { SourceRuntimeError } from '@meowfilm/source-runtime';
-import { clone, deferred, fault, requireValue, safeError } from './errors.js';
-import { QuickJSEngine } from './quickjs-engine.js';
-import { portableRealmSource } from './portable-realm.js';
-import { ResourceScope } from './scope.js';
-import { createUtilities } from './utilities.js';
+import { sourceFault, sourceSafeError } from '@meowfilm/source-runtime';
 
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  promise.catch(() => {});
+  return { promise, resolve, reject };
+}
+
+// Runs inside the trusted source Context. Guest calls cross only to the other
+// Context of this Runtime; no Node objects enter either Context.
 export class PortableSandbox {
-  static async create(options) {
-    const sandbox = new PortableSandbox(options);
-    await sandbox.start();
-    return sandbox;
-  }
-
-  constructor({ onCapability, onSync, onDiagnostic, onFailure, limits, wasmModule }) {
-    requireValue(typeof onCapability === 'function' && typeof onSync === 'function');
-    requireValue(onDiagnostic === undefined || typeof onDiagnostic === 'function');
-    this.onCapability = onCapability;
-    this.onSync = onSync;
-    this.onDiagnostic = onDiagnostic;
-    this.onFailure = onFailure;
-    this.wasmModule = wasmModule;
-    this.limits = limits;
-    this.root = new ResourceScope();
-    this.startup = new ResourceScope(this.root.signal, limits.initTimeoutMs);
+  constructor({ onCapability, onSync, guest, taskContext, limits, signal }) {
+    Object.assign(this, { onCapability, onSync, guest, taskContext, limits });
+    this.startupSignal = signal;
     this.ready = deferred();
     this.tasks = new Map();
     this.adapterTasks = new Set();
     this.capabilityTasks = new Set();
-    this.callbacks = new Map();
-    this.timers = new Map();
-    this.nextId = 0;
     this.live = true;
     this.activated = false;
     this.capabilities = {};
-    this.utils = createUtilities(limits.maxMemoryBytes);
-  }
-
-  async start() {
-    try {
-      this.engine = await QuickJSEngine.create({
-        source: portableRealmSource,
-        limits: this.limits,
-        wasmModule: this.wasmModule,
-        bridge: (operation, args) => this.bridge(operation, args),
-      });
-      return this;
-    } catch (error) {
-      if (error.memoryLimitExceeded) this.fail(error);
-      throw error;
-    }
   }
 
   assertLive() {
-    if (!this.live) throw fault('STALE_SESSION');
+    if (!this.live) throw sourceFault('STALE_SESSION');
   }
 
-  call(name, args, scope = this.root) {
+  async load(kind, source, metadata) {
     this.assertLive();
-    scope.assertOpen();
-    try { return this.engine.call(name, args); }
-    catch (error) {
-      if (this.engine.memoryLimitExceeded) this.fail(error);
-      throw error;
-    }
+    await this.guest('load', [kind, source, metadata]);
+    this.capabilities = await this.ready.promise;
+    this.guest('releaseTask', [0]);
+    return this.capabilities;
   }
 
-  fail(error) {
-    if (!this.live) return;
-    if (this.engine?.memoryLimitExceeded) error.memoryLimitExceeded = true;
-    this.close(safeError(error));
-    try { this.onFailure?.(error); } catch {}
+  activate() { this.assertLive(); this.activated = true; }
+
+  cancel(id, reason) {
+    const task = this.tasks.get(id);
+    if (!task) return;
+    this.tasks.delete(id);
+    task.result.reject(reason);
+    this.guest('releaseTask', [id]);
+    return task.context.invocationId;
   }
 
-  load(kind, source, metadata) {
-    requireValue(typeof kind === 'string' && typeof source === 'string' &&
-      metadata && typeof metadata === 'object');
-    this.call('load', [kind, source, JSON.stringify(metadata)]);
-    let timer;
-    return Promise.race([
-      this.ready.promise,
-      new Promise((_resolve, reject) => {
-        timer = setTimeout(() => reject(fault('TIMEOUT')), this.limits.initTimeoutMs);
-      }),
-    ]).catch(error => {
-      this.close(safeError(error));
-      throw error;
-    }).finally(() => clearTimeout(timer));
-  }
-
-  activate() {
+  context(id) {
     this.assertLive();
-    this.activated = true;
-  }
-
-  taskContext(id) {
-    if (id === 0) {
-      this.startup.assertOpen();
-      return { scope: this.startup, context: Object.freeze({ startup: true }) };
+    if (id !== this.taskContext()) throw sourceFault('STALE_SESSION');
+    if (id === 0 && !this.initialized) {
+      if (this.startupSignal?.aborted) throw sourceSafeError(this.startupSignal.reason, 'CANCELLED');
+      return { context: { startup: true }, signal: this.startupSignal };
     }
     const task = this.tasks.get(id);
-    if (!task) throw fault('STALE_SESSION');
+    if (!task || task.signal?.aborted) throw sourceFault('STALE_SESSION');
     return task;
   }
 
-  track(promise) {
+  track(promise, capability = false) {
     this.adapterTasks.add(promise);
-    promise.finally(() => this.adapterTasks.delete(promise)).catch(() => {});
+    if (capability) this.capabilityTasks.add(promise);
+    promise.finally(() => {
+      this.adapterTasks.delete(promise);
+      this.capabilityTasks.delete(promise);
+    }).catch(() => {});
     return promise;
   }
 
-  bridge(operation, args) {
-    if (operation === 'callbackDone') {
-      if (!this.callbacks.get(args[0])?.repeat) this.forgetCallback(args[0]);
-      return;
-    }
-    if (operation === 'callbackFailure') {
-      const callback = this.callbacks.get(args[0]);
-      if (callback) callback.scope.close(fault(args[1]));
-      return;
-    }
-    if (operation === 'clearTimer') return this.clearTimer(args[0]);
-    if (operation === 'result') {
-      const task = this.tasks.get(args[0]);
-      if (!task || task.scope.signal.aborted) return;
-      if (args[1]) task.result.resolve(clone(args[2] ?? null));
-      else {
-        const error = fault(args[2] === 'MEMORY_LIMIT' ? 'RESOURCE_LIMIT' : args[2]);
-        task.result.reject(error);
-        if (args[2] === 'MEMORY_LIMIT') {
-          this.engine.memoryLimitExceeded = true;
-          this.fail(error);
-        }
-      }
-      return;
-    }
-    if (operation === 'ready') {
-      requireValue(!this.initialized && args[0] && Array.isArray(args[0].actions),
-        'SCRIPT_PROTOCOL_ERROR');
-      requireValue(args[0].actions.every(action =>
-        typeof action === 'string' && /^[A-Za-z][A-Za-z0-9._-]{0,127}$/.test(action)) &&
-        new Set(args[0].actions).size === args[0].actions.length, 'SCRIPT_PROTOCOL_ERROR');
-      this.capabilities = clone(args[0]);
-      this.initialized = true;
-      this.ready.resolve(this.capabilities);
-      this.startup.close(fault('STALE_SESSION'));
-      return;
-    }
-    if (operation === 'startupFailure') {
-      const error = fault(args[0] === 'MEMORY_LIMIT' ? 'RESOURCE_LIMIT' : args[0]);
-      if (args[0] === 'MEMORY_LIMIT') {
-        this.engine.memoryLimitExceeded = true;
-        error.memoryLimitExceeded = true;
-      }
-      this.ready.reject(error);
-      if (error.memoryLimitExceeded) this.fail(error);
-      else this.close(error);
-      return;
-    }
-    this.assertLive();
+  bridge(operation, ...args) {
     switch (operation) {
-      case 'maxBytes': return this.limits.maxMemoryBytes;
-      case 'util': return this.utils(...args);
+      case 'ready':
+        this.initialized = true;
+        this.ready.resolve(args[0]);
+        return null;
+      case 'startupFailure':
+        this.ready.reject(sourceFault(args[0]));
+        return null;
+      case 'result': {
+        const task = this.tasks.get(args[0]);
+        if (!task || task.signal?.aborted) return null;
+        if (args[1]) task.result.resolve(args[2] ?? null);
+        else task.result.reject(sourceFault(args[2]));
+        return null;
+      }
       case 'sync': {
-        const { scope, context } = this.taskContext(args[0]);
-        scope.assertOpen();
-        return clone(this.onSync(args[1], clone(args[2] ?? {}), {
-          ...context, signal: scope.signal,
-        }) ?? null);
+        const [id, name, keys, ...values] = args;
+        const task = this.context(id);
+        const input = Object.fromEntries(keys.map((key, index) => [key, values[index]]));
+        return this.onSync(name, input, {
+          ...task.context, signal: task.signal,
+        }) ?? null;
       }
-      case 'capability': return this.capability(...args);
-      case 'timer': return this.timer(...args);
-      default: throw fault('UNSUPPORTED_OPTION');
+      case 'capability': {
+        const [id, callbackId, name, ...parameters] = args;
+        const task = this.context(id);
+        // Only this private call record is unpacked; each business value was
+        // independently checked at the native argument boundary.
+        const input = name === 'bridge.call'
+          ? { name: parameters[0], args: parameters.slice(1) }
+          : Object.fromEntries(parameters[0].map((key, index) => [key, parameters[index + 1]]));
+        const promise = this.track(Promise.resolve().then(() => {
+          this.context(id);
+          return this.onCapability(name, input, { ...task.context, signal: task.signal });
+        }), true);
+        promise.then(
+          value => this.settle(id, callbackId, true, value ?? null),
+          error => this.settle(id, callbackId, false, sourceSafeError(error, 'CAPABILITY_UNAVAILABLE').code),
+        ).catch(() => {});
+        return null;
+      }
+      case 'callbackDone': return null;
+      case 'callbackFailure': {
+        const task = this.tasks.get(this.taskContext());
+        task?.result.reject(sourceFault(args[1]));
+        return null;
+      }
+      default: throw sourceFault('UNSUPPORTED_OPTION');
     }
   }
 
-  capability(taskId, callbackId, name, input) {
-    const { scope, context } = this.taskContext(taskId);
-    scope.assertOpen();
-    requireValue(Number.isSafeInteger(callbackId) && callbackId > 0 &&
-      !this.callbacks.has(callbackId) && !this.timers.has(callbackId) &&
-      typeof name === 'string' && input && typeof input === 'object');
-    const detach = scope.add(() => this.forgetCallback(callbackId));
-    this.callbacks.set(callbackId, { scope, detach, repeat: false, kind: 'capability' });
-    const task = this.track(Promise.resolve().then(() => {
-      scope.assertOpen();
-      return this.onCapability(name, clone(input), {
-        ...context, signal: scope.signal,
-      });
-    }));
-    this.capabilityTasks.add(task);
-    task.finally(() => this.capabilityTasks.delete(task)).catch(() => {});
-    scope.race(task).then(
-      value => this.settle(callbackId, { ok: true, value: clone(value ?? null) }, scope),
-      error => this.settle(callbackId, { ok: false, code: error instanceof SourceRuntimeError
-        ? error.code : safeError(error, 'CAPABILITY_UNAVAILABLE').code }, scope),
-    ).catch(() => {});
-  }
-
-  settle(id, payload, scope) {
-    if (!this.live || scope.signal.aborted) return;
-    try { this.call('settle', [id, JSON.stringify(payload)], scope); }
-    catch (error) { scope.close(safeError(error)); }
-  }
-
-  timer(taskId, id, delay = 0, repeat = false) {
-    requireValue(Number.isSafeInteger(id) && id > 0 && !this.callbacks.has(id));
-    const { scope } = this.taskContext(taskId);
-    const detach = scope.add(() => this.clearTimer(id));
-    this.callbacks.set(id, { scope, detach, repeat, kind: 'timer' });
-    const run = () => {
-      if (!repeat) this.clearTimer(id, true);
-      if (!this.live || scope.signal.aborted) return;
-      try { this.call('callback', [id], scope); }
-      catch (error) { scope.close(safeError(error)); }
-    };
-    const milliseconds = Math.max(1, Math.min(Number(delay) || 0, 2 ** 31 - 1));
-    const handle = repeat ? setInterval(run, milliseconds) : setTimeout(run, milliseconds);
-    this.timers.set(id, { handle, detach });
-  }
-
-  clearTimer(id, firing = false) {
-    const timer = this.timers.get(id);
-    if (!timer) return;
-    clearTimeout(timer.handle);
-    clearInterval(timer.handle);
-    timer.detach();
-    this.timers.delete(id);
-    if (!firing) this.forgetCallback(id);
-  }
-
-  forgetCallback(id) {
-    const callback = this.callbacks.get(id);
-    if (!callback) return;
-    callback.detach();
-    this.callbacks.delete(id);
-    if (this.live && !this.engine?.closing) {
-      queueMicrotask(() => {
-        try { this.call('forget', [id], callback.scope); }
-        catch { /* The owning scope/session is already retiring. */ }
-      });
-    }
-  }
-
-  async execute(method, args, {
-    signal, timeoutMs = this.limits.requestTimeoutMs, context = {},
-  } = {}) {
-    this.assertLive();
-    requireValue(this.activated, 'PERMISSION_DENIED');
-    requireValue(Number.isSafeInteger(timeoutMs) && timeoutMs > 0 &&
-      timeoutMs <= this.limits.requestTimeoutMs);
-    const scope = new ResourceScope(this.root.signal, timeoutMs);
-    const id = ++this.nextId;
-    const result = deferred();
-    this.tasks.set(id, { scope, result, context: Object.freeze(clone(context)) });
-    let detach = () => {};
+  settle(id, callbackId, ok, value) {
+    if (!this.live || (id === 0 ? this.initialized : !this.tasks.has(id))) return;
     try {
-      if (signal) {
-        const abort = () => scope.close(fault('CANCELLED'));
-        if (signal.aborted) abort();
-        else {
-          signal.addEventListener('abort', abort, { once: true });
-          detach = () => signal.removeEventListener('abort', abort);
-        }
-      }
-      scope.assertOpen();
-      this.call(method, [id, ...args], scope);
-      return clone(await scope.race(result.promise));
-    } catch (error) { throw safeError(error); }
-    finally {
-      detach();
-      if (this.live && !this.root.signal.aborted) {
-        try { this.call('releaseTask', [id], this.root); }
-        catch { /* Closing the owning session releases the whole guest heap. */ }
-      }
-      scope.close();
+      this.context(id);
+      this.guest('settle', [callbackId, ok, value]);
+    } catch { /* Retired task results cannot recreate guest callbacks. */ }
+  }
+
+  async execute(method, args, { signal, context = {} } = {}) {
+    this.assertLive();
+    if (!this.activated) throw sourceFault('PERMISSION_DENIED');
+    const id = this.taskContext();
+    if (this.tasks.has(id)) throw sourceFault('SCRIPT_PROTOCOL_ERROR');
+    const result = deferred();
+    this.tasks.set(id, { context, signal, result });
+    const abort = () => result.reject(sourceSafeError(signal.reason, 'CANCELLED'));
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    try {
+      this.context(id);
+      await this.guest(method, [id, ...args]);
+      return await result.promise;
+    } finally {
+      signal?.removeEventListener('abort', abort);
       this.tasks.delete(id);
+      this.guest('releaseTask', [id]);
     }
   }
 
-  invoke(action, payload, options = {}) {
-    return this.execute('invoke', [action, JSON.stringify(payload ?? {})], options);
+  invoke(action, payload, options) {
+    return this.execute('invoke', [action, payload ?? {}], options);
   }
 
-  evaluate(source, bindings, options = {}) {
-    return this.execute('evaluate', [source, JSON.stringify(bindings ?? {})], options);
+  evaluate(source, bindings, options) {
+    return this.execute('evaluate', [source, bindings ?? {}], options);
   }
 
   async drain() {
-    const deadline = Date.now() + this.limits.cleanupTimeoutMs;
-    while (this.adapterTasks.size && Date.now() < deadline) {
-      let timer;
-      try {
-        await Promise.race([
-          Promise.allSettled([...this.adapterTasks]),
-          new Promise(resolve => {
-            timer = setTimeout(resolve, Math.max(1, deadline - Date.now()));
-          }),
-        ]);
-      } finally { clearTimeout(timer); }
-    }
+    if (!this.adapterTasks.size) return;
+    let timer;
+    try {
+      await Promise.race([
+        Promise.allSettled([...this.adapterTasks]),
+        new Promise(resolve => { timer = setTimeout(resolve, this.limits.cleanupTimeoutMs); }),
+      ]);
+    } finally { clearTimeout(timer); }
   }
 
-  close(reason = fault('STALE_SESSION')) {
+  close(reason = sourceFault('STALE_SESSION')) {
     if (!this.live) return;
     this.live = false;
     this.activated = false;
     this.ready.reject(reason);
-    this.startup.close(reason);
-    this.root.close(reason);
-    for (const id of this.timers.keys()) this.clearTimer(id);
-    this.callbacks.clear();
-    this.engine?.close();
+    for (const [id, task] of this.tasks) {
+      task.result.reject(reason);
+      this.guest('releaseTask', [id]);
+    }
+    this.guest('releaseTask', [0]);
   }
 
   stats() {
     return {
       live: this.live,
       invocations: this.tasks.size,
-      timers: this.timers.size,
+      timers: this.live ? this.guest('timerCount', []) : 0,
       networkRequests: this.capabilityTasks.size,
       pendingAdapterTasks: this.adapterTasks.size,
     };

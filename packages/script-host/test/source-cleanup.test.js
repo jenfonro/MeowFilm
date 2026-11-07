@@ -58,7 +58,7 @@ function setup(t, { rollback, close }) {
 }
 
 for (const refusal of [false, 'throw']) {
-  test(`portable Worker close retries virtual rollback ${refusal}`, { timeout: 15000 }, async t => {
+  test(`portable native close retries virtual rollback ${refusal}`, { timeout: 15000 }, async t => {
     const debt = refusal === false ? 'route-2' : 'route-1';
     const confirmed = debt === 'route-1' ? 'route-2' : 'route-1';
     const { host, owner, calls, close } = setup(t, {
@@ -97,7 +97,7 @@ for (const refusal of [false, 'throw']) {
   });
 }
 
-test('portable Worker close reports virtual rollback debts that still fail', { timeout: 15000 }, async t => {
+test('portable native close reports virtual rollback debts that still fail', { timeout: 15000 }, async t => {
   const { host, owner, calls, close } = setup(t, {
     rollback: { 'route-1': false, 'route-2': 'throw' },
     close: { 'route-1': false, 'route-2': 'throw' },
@@ -124,4 +124,60 @@ test('portable Worker close reports virtual rollback debts that still fail', { t
   assert.equal(host.stats().pendingAdapterTasks, 0);
   await assert.rejects(close(), { code: 'CAPABILITY_UNAVAILABLE' });
   assert.equal(calls.length, 6);
+});
+
+test('native cleanup deadlines do not hide unfinished virtual unregistration', { timeout: 15000 }, async t => {
+  const owner = createNodeSourceCapabilities({
+    network: async () => assert.fail('virtual routes must not use the network'),
+  });
+  let release;
+  const waiting = new Promise(resolve => { release = resolve; });
+  let cleanupSignal;
+  let session;
+  const adapter = createPortableSourceAdapter({
+    capabilities: createCapabilityClient({
+      async invoke(name, input, context) {
+        if (name === 'virtual.unregister') {
+          cleanupSignal = context.signal;
+          await waiting;
+        }
+        return owner.invoke(name, input, context);
+      },
+    }),
+  });
+  const host = createScriptHost({
+    adapters: { cat: input => { session = adapter(input); return session; } },
+    limits: { cleanupTimeoutMs: 100 },
+  });
+  t.after(async () => {
+    release();
+    try { await host.close(); } catch {}
+    await session?.whenAdaptersIdle();
+    await owner.releaseProfiles('source:cleanup-deadline:');
+  });
+  const instance = await host.install({
+    installationId: 'cleanup-deadline', protocol: 'cat', enabled: true,
+    source: `export default {
+      playerContent() {
+        return { url: js2Proxy(false, 0, 'fixture', 'https://media.invalid/one', {}) };
+      }
+    };`,
+  });
+  await host.invoke({
+    installationId: instance.installationId, generation: instance.generation,
+    siteId: 'source', operation: 'play', payload: {},
+  });
+  await assert.rejects(host.close(), error => {
+    // The rules' unregister deadline and the native call deadline share the
+    // same budget; either must report failure, never cleanupComplete:true.
+    assert.ok(['CAPABILITY_UNAVAILABLE', 'SCRIPT_CLEANUP'].includes(error.code));
+    assert.equal(session.stats().cleanupError, error.code);
+    return true;
+  });
+  assert.equal(session.stats().native.threadCount, 0);
+  assert.equal(cleanupSignal.aborted, true);
+  assert.equal(session.stats().pendingAdapterTasks, 1);
+  release();
+  await session.whenAdaptersIdle();
+  assert.equal(session.stats().pendingAdapterTasks, 0);
 });

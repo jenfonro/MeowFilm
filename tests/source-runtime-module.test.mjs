@@ -1,8 +1,13 @@
 import test from 'node:test';
+import { moduleHttp } from './runtime-http-fixture.mjs';
+import { deferred, until } from '../packages/runtime-bridge/test/http-fixture.js';
+import { serverFor } from '../packages/script-host/test/http-fixture.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createSourceRuntimeModule, sourceRuntimeContract } from '../apps/runtime/modules/source-runtime.mjs';
-import { createNodeSourceCapabilities, createScriptHost } from '@meowfilm/script-host';
+import {
+  createNodeNetwork, createNodeSourceCapabilities, createScriptHost, ScriptHostError,
+} from '@meowfilm/script-host';
 
 const fixtureSource = {
   bookSourceName: 'Fixture',
@@ -32,22 +37,20 @@ function setup(t, { owner: suppliedOwner, hostFactory } = {}) {
   });
   const owner = suppliedOwner ?? createNodeSourceCapabilities({ network });
   const module = createSourceRuntimeModule({
-    call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
     network,
     capabilityOwner: owner,
     hostFactory,
     platform: 'test',
   });
   t.after(() => module.close());
-  const rpc = (name, params = {}, context) =>
-    module.methods[`source.runtime.${name}`](params, context);
+  const rpc = moduleHttp(t, module);
   return { module, rpc, owner };
 }
 
 function okay(reply) {
   assert.equal(reply.ok, true, JSON.stringify(reply));
   assert.equal(reply.contract, sourceRuntimeContract);
-  return reply;
+  return reply.value;
 }
 
 function denied(reply, code) {
@@ -56,21 +59,10 @@ function denied(reply, code) {
   assert.equal(reply.code, code);
 }
 
-async function upload(rpc, value, basename = 'source.json') {
+async function upload(rpc, value, basename = 'source.json', installationId = 'fixture', sourceRevision = 1) {
   const bytes = Buffer.from(typeof value === 'string' ? value : `${JSON.stringify(value)}\n`);
-  const begun = okay(await rpc('stage.begin', {
-    basename,
-    length: bytes.length,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-  }));
-  for (let offset = 0; offset < bytes.length; offset += begun.chunkBytes) {
-    okay(await rpc('stage.chunk', {
-      token: begun.token,
-      offset,
-      data: bytes.subarray(offset, offset + begun.chunkBytes).toString('base64'),
-    }));
-  }
-  return begun.token;
+  okay(await rpc.upload(installationId, sourceRevision, bytes, { basename }));
+  return sourceRevision;
 }
 
 async function load(rpc, {
@@ -81,9 +73,9 @@ async function load(rpc, {
   protocol = 'legado',
   basename = protocol === 'cat' ? 'source.js' : 'source.json',
 } = {}) {
-  const token = await upload(rpc, source, basename);
+  const sourceRevision = await upload(rpc, source, basename, installationId, revision);
   return okay(await rpc('load', {
-    token,
+    sourceRevision,
     installationId,
     revision,
     expectedRevision,
@@ -93,7 +85,245 @@ async function load(rpc, {
   })).instance;
 }
 
-test('source RPC stages, loads, invokes, reports and unloads a source instance', async t => {
+async function catLifecycleHttp(t, heldPaths) {
+  const gates = new Map(heldPaths.map(path => [path, deferred()]));
+  const upstream = await serverFor(t, (request, response) => {
+    const closed = deferred();
+    response.once('close', closed.resolve);
+    const gate = gates.get(request.url);
+    if (gate) gate.resolve({ response, closed: closed.promise });
+    else response.end('ok');
+  });
+  const network = createNodeNetwork(), networkCalls = [], sessions = new Map(), admissions = new Map();
+  const key = (installationId, action, payload) => JSON.stringify([installationId, action, payload]);
+  let host;
+  const { module, rpc } = setup(t, {
+    owner: createNodeSourceCapabilities({ network: input => {
+      networkCalls.push({ ...input, path: new URL(input.url).pathname });
+      return network(input);
+    } }),
+    hostFactory: options => {
+      const adapter = options.adapters.cat;
+      host = createScriptHost({ ...options, adapters: { ...options.adapters,
+        cat: input => {
+          const session = adapter(input);
+          sessions.set(input.installationId, session);
+          return session;
+        },
+      } });
+      const invoke = host.invoke.bind(host);
+      host.invoke = (target, options) => {
+        const result = invoke(target, options);
+        const ticket = admissions.get(key(target.installationId, target.operation, target.payload));
+        if (ticket) {
+          admissions.delete(key(target.installationId, target.operation, target.payload));
+          // The real native invoke is already queued. A following core command
+          // acknowledges that admission before the test releases the HTTP gate.
+          sessions.get(target.installationId).engine.call('stats')
+            .then(ticket.admitted.resolve, ticket.admitted.reject);
+          result.then(ticket.finished.resolve, ticket.finished.resolve);
+        }
+        return result;
+      };
+      return host;
+    },
+  });
+  const source = `
+    const origin = ${JSON.stringify(upstream.socketOrigin)};
+    export default {
+      async init(ext) {
+        const attempt = this.inits = (this.inits || 0) + 1;
+        const response = await req(origin + '/init/' + attempt);
+        if (response.content === 'fail') throw new Error('init failed');
+        await req(origin + '/init-complete/' + attempt);
+        this.ready = attempt;
+        return { attempt, ext };
+      },
+      async searchContent(keyword) {
+        await req(origin + '/search/' + encodeURIComponent(keyword));
+        if (keyword === 'slow') await req(origin + '/slow');
+        return { keyword, inits: this.inits, ready: this.ready, destroys: this.destroys || 0 };
+      },
+      async destroy() {
+        await req(origin + '/destroy');
+        this.ready = 0;
+        return { destroys: this.destroys = (this.destroys || 0) + 1 };
+      }
+    };
+  `;
+  const identity = ({ installationId, revision, generation }) => ({ installationId, revision, generation });
+  const request = (instance, action, payload = {}, options) => {
+    const ticket = { admitted: deferred(), finished: deferred() };
+    admissions.set(key(instance.installationId, action, payload), ticket);
+    return {
+      result: rpc('invoke', { ...identity(instance), action, payload }, options),
+      admitted: ticket.admitted.promise,
+      finished: ticket.finished.promise,
+    };
+  };
+  const exited = async session => {
+    await session.engine.exited;
+    await session.whenAdaptersIdle();
+    for (const field of ['threadCount', 'runtimeCount', 'contextCount']) {
+      assert.equal(session.engine.stats()[field], 0, field);
+    }
+    assert.equal(session.stats().pendingAdapterTasks, 0);
+  };
+  const close = async () => {
+    okay(await module.close());
+    for (const session of sessions.values()) await exited(session);
+    assert.equal(host.stats().liveSessions, 0);
+    assert.equal(host.stats().pendingAdapterTasks, 0);
+  };
+  return { rpc, host, sessions, source, identity, request, networkCalls, gates, exited, close };
+}
+
+test('CatVod HTTP shares asynchronous init while preserving request scopes, action overlap and independent installations',
+  { timeout: 15000 }, async t => {
+    const fixture = await catLifecycleHttp(t, ['/init/1', '/slow']);
+    const { rpc, source, request, gates, networkCalls, identity, sessions, host } = fixture;
+    const instance = await load(rpc, { protocol: 'cat', source });
+    const other = await load(rpc, { installationId: 'other', protocol: 'cat', source: catSource });
+    const a = request(instance, 'search', { keyword: 'A' });
+    const init = await gates.get('/init/1').promise;
+    const b = request(instance, 'search', { keyword: 'B' });
+    assert.ok((await b.admitted).pendingAdapterTasks >= 2, 'B reached the rule owner while init was pending');
+    assert.equal(okay(await request(other, 'search', { keyword: 'independent' }).result)
+      .list[0].vod_name, 'independent');
+    assert.deepEqual(networkCalls.map(call => call.path), ['/init/1']);
+    init.response.end('ok');
+    for (const [call, keyword] of [[a, 'A'], [b, 'B']]) {
+      assert.deepEqual(okay(await call.result), { keyword, inits: 1, ready: 1, destroys: 0 });
+    }
+    const initScope = networkCalls.find(call => call.path === '/init/1').scope;
+    const aScope = networkCalls.find(call => call.path === '/search/A').scope;
+    const bScope = networkCalls.find(call => call.path === '/search/B').scope;
+    assert.equal(initScope.requestId, aScope.requestId);
+    assert.notEqual(aScope.requestId, bScope.requestId);
+    for (const scope of [initScope, aScope, bScope]) {
+      assert.equal(scope.installationId, instance.installationId);
+      assert.equal(scope.generation, instance.generation);
+    }
+
+    const slow = request(instance, 'search', { keyword: 'slow' });
+    const slowIO = await gates.get('/slow').promise;
+    assert.deepEqual(okay(await request(instance, 'search', { keyword: 'fast' }).result),
+      { keyword: 'fast', inits: 1, ready: 1, destroys: 0 });
+    slowIO.response.end('ok');
+    assert.deepEqual(okay(await slow.result), { keyword: 'slow', inits: 1, ready: 1, destroys: 0 });
+    assert.equal(host.get(instance.installationId).generation, instance.generation);
+
+    const retired = sessions.get(instance.installationId);
+    okay(await rpc('unload', identity(instance)));
+    await fixture.exited(retired);
+    assert.equal(host.cleanupPending(instance.installationId), 0);
+    const successor = await load(rpc, { protocol: 'cat', source: catSource, revision: 2, expectedRevision: 0 });
+    assert.ok(successor.generation > instance.generation);
+    denied(await rpc('invoke', { ...identity(instance), action: 'search', payload: { keyword: 'stale' } }),
+      'STALE_SOURCE');
+    assert.equal(okay(await request(successor, 'search', { keyword: 'successor' }).result)
+      .list[0].vod_name, 'successor');
+    assert.equal(okay(await request(other, 'search', { keyword: 'still-independent' }).result)
+      .list[0].vod_name, 'still-independent');
+    await fixture.close();
+  });
+
+test('CatVod HTTP cancellation of an admitted init waiter does not cancel the init owner',
+  { timeout: 15000 }, async t => {
+    const fixture = await catLifecycleHttp(t, ['/init/1']);
+    const { rpc, source, request, gates, networkCalls, sessions, host } = fixture;
+    const instance = await load(rpc, { protocol: 'cat', source });
+    const a = request(instance, 'search', { keyword: 'A' });
+    const init = await gates.get('/init/1').promise;
+    const controller = new AbortController();
+    const b = request(instance, 'search', { keyword: 'B' }, { signal: controller.signal });
+    assert.ok((await b.admitted).pendingAdapterTasks >= 2);
+    controller.abort();
+    denied(await b.result, 'CANCELLED');
+    await b.finished;
+    await sessions.get(instance.installationId).engine.call('stats');
+    assert.equal(networkCalls[0].signal.aborted, false);
+    const c = request(instance, 'search', { keyword: 'C' });
+    await c.admitted;
+    init.response.end('ok');
+    assert.deepEqual(okay(await a.result), { keyword: 'A', inits: 1, ready: 1, destroys: 0 });
+    assert.deepEqual(okay(await c.result), { keyword: 'C', inits: 1, ready: 1, destroys: 0 });
+    assert.equal(networkCalls.some(call => call.path === '/search/B'), false);
+    assert.equal(networkCalls.filter(call => call.path.startsWith('/init/')).length, 1);
+    assert.equal(host.get(instance.installationId).generation, instance.generation);
+    await fixture.close();
+  });
+
+for (const ending of ['failure', 'cancel']) {
+  test(`CatVod HTTP ${ending} of the init owner lets its admitted waiter retry under its own scope`,
+    { timeout: 15000 }, async t => {
+      const fixture = await catLifecycleHttp(t, ['/init/1', '/init/2']);
+      const { rpc, source, request, gates, networkCalls, host } = fixture;
+      const instance = await load(rpc, { protocol: 'cat', source });
+      const controller = new AbortController();
+      const a = request(instance, 'search', { keyword: 'A' }, { signal: controller.signal });
+      const first = await gates.get('/init/1').promise;
+      const b = request(instance, 'search', { keyword: 'B' });
+      assert.ok((await b.admitted).pendingAdapterTasks >= 2);
+      if (ending === 'failure') first.response.end('fail');
+      else controller.abort();
+      denied(await a.result, ending === 'failure' ? 'SOURCE_FAILURE' : 'CANCELLED');
+      await a.finished;
+      await first.closed;
+      const retry = await gates.get('/init/2').promise;
+      const firstCall = networkCalls.find(call => call.path === '/init/1');
+      const retryCall = networkCalls.find(call => call.path === '/init/2');
+      assert.notEqual(firstCall.scope.requestId, retryCall.scope.requestId);
+      assert.equal(retryCall.scope.generation, instance.generation);
+      assert.equal(retryCall.signal.aborted, false);
+      if (ending === 'cancel') assert.equal(firstCall.signal.aborted, true);
+      retry.response.end('ok');
+      assert.deepEqual(okay(await b.result), { keyword: 'B', inits: 2, ready: 2, destroys: 0 });
+      assert.equal(networkCalls.find(call => call.path === '/search/B').scope.requestId,
+        retryCall.scope.requestId);
+      assert.equal(networkCalls.some(call => call.path === '/search/A'), false);
+      assert.equal(networkCalls.some(call => call.path === '/init-complete/1'), false,
+        'the failed or retired init must not continue under B');
+      assert.deepEqual(okay(await request(instance, 'search', { keyword: 'after-retry' }).result),
+        { keyword: 'after-retry', inits: 2, ready: 2, destroys: 0 });
+      assert.equal(host.get(instance.installationId).generation, instance.generation);
+      await fixture.close();
+    });
+}
+
+test('CatVod HTTP explicit init and destroy remain ordered before the next automatic initialization',
+  { timeout: 15000 }, async t => {
+    const fixture = await catLifecycleHttp(t, ['/init/2', '/destroy', '/init/3']);
+    const { rpc, source, request, gates, networkCalls, host } = fixture;
+    const instance = await load(rpc, { protocol: 'cat', source });
+    assert.deepEqual(okay(await request(instance, 'search', { keyword: 'initial' }).result),
+      { keyword: 'initial', inits: 1, ready: 1, destroys: 0 });
+    const explicit = request(instance, 'init', { ext: { explicit: true } });
+    const init = await gates.get('/init/2').promise;
+    const destroy = request(instance, 'destroy');
+    await destroy.admitted;
+    const next = request(instance, 'search', { keyword: 'after-destroy' });
+    await next.admitted;
+    assert.equal(networkCalls.some(call => ['/destroy', '/init/3'].includes(call.path)), false);
+    init.response.end('ok');
+    assert.deepEqual(okay(await explicit.result), { attempt: 2, ext: { explicit: true } });
+    const destroying = await gates.get('/destroy').promise;
+    assert.equal(networkCalls.some(call => call.path === '/init/3'), false);
+    destroying.response.end('ok');
+    assert.deepEqual(okay(await destroy.result), { destroys: 1 });
+    const reinitializing = await gates.get('/init/3').promise;
+    reinitializing.response.end('ok');
+    assert.deepEqual(okay(await next.result), { keyword: 'after-destroy', inits: 3, ready: 3, destroys: 1 });
+    const lifecycle = networkCalls.filter(call => call.path.startsWith('/init/') || call.path === '/destroy');
+    assert.deepEqual(lifecycle.map(call => call.path), ['/init/1', '/init/2', '/destroy', '/init/3']);
+    assert.equal(new Set(lifecycle.map(call => call.scope.requestId)).size, 4);
+    assert.equal(networkCalls.find(call => call.path === '/search/after-destroy').scope.requestId,
+      lifecycle.at(-1).scope.requestId);
+    assert.equal(host.get(instance.installationId).generation, instance.generation);
+    await fixture.close();
+  });
+
+test('source HTTP uploads, loads, invokes, reports and unloads a source instance', async t => {
   const { rpc } = setup(t);
   const instance = await load(rpc);
   assert.deepEqual(instance.capabilities, {
@@ -109,7 +339,7 @@ test('source RPC stages, loads, invokes, reports and unloads a source instance',
     generation: instance.generation,
     action: 'search',
     payload: { keyword: 'fixture', page: 1 },
-  })).value;
+  }));
   assert.equal(result.books[0].name, 'Result');
   assert.equal(result.books[0].bookUrl, 'https://books.invalid/book/1');
   assert.deepEqual(okay(await rpc('status')).instances, [instance]);
@@ -118,8 +348,6 @@ test('source RPC stages, loads, invokes, reports and unloads a source instance',
     revision: instance.revision,
     generation: instance.generation,
   })), {
-    ok: true,
-    contract: sourceRuntimeContract,
     unloaded: true,
     cleanupComplete: true,
   });
@@ -135,9 +363,9 @@ test('source RPC auto-detects raw HTML, Cat JS and JSON-string-wrapped HTML', as
     ['raw-cat', 'source.js', catSource, 'cat'],
   ];
   for (const [installationId, basename, source, protocol] of cases) {
-    const token = await upload(rpc, source, basename);
+    const sourceRevision = await upload(rpc, source, basename, installationId, 1);
     const instance = okay(await rpc('load', {
-      token,
+      sourceRevision,
       installationId,
       revision: 1,
       expectedRevision: 0,
@@ -151,6 +379,190 @@ test('source RPC auto-detects raw HTML, Cat JS and JSON-string-wrapped HTML', as
       revision: 1,
       generation: instance.generation,
     }));
+  }
+});
+
+for (const protocol of ['legado', 'qysg']) {
+  test(`${protocol} image HTTP results preserve byte bodies and keep JSON validation strict`, async t => {
+    let internal;
+    const { rpc } = setup(t, {
+      owner: createNodeSourceCapabilities({ network: () => assert.fail('image decoding is local') }),
+      hostFactory: options => {
+        const host = createScriptHost(options), invoke = host.invoke.bind(host);
+        host.invoke = async (...args) => {
+          internal = await invoke(...args);
+          return internal;
+        };
+        return host;
+      },
+    });
+    const decode = protocol === 'legado'
+      ? 'java.base64DecodeToByteArray(result)' : 'Buffer.from(result, "base64")';
+    const script = `
+      if (result === 'text') return 'plain-image';
+      if (result === 'view') return new Uint8Array([9, 0, 255, 65, 9]).subarray(1, 4);
+      if (result === 'nested') return { nested: new Uint8Array([0, 255, 65]) };
+      if (result === 'bigint') return 1n;
+      return ${decode};
+    `;
+    const source = {
+      bookSourceName: 'Image bytes', bookSourceUrl: 'https://books.invalid/',
+      ...(protocol === 'legado' ? { coverDecodeJs: script }
+        : { html: `<script>function imagedecrypt(url, result) { ${script} }</script>` }),
+    };
+    const instance = await load(rpc, { source, protocol });
+    const image = body => rpc('invoke', {
+      installationId: instance.installationId, revision: instance.revision,
+      generation: instance.generation, action: 'image',
+      payload: { url: 'https://books.invalid/cover', body },
+    });
+    for (const body of ['AP9B', 'view']) {
+      assert.deepEqual(okay(await image(body)), {
+        url: 'https://books.invalid/cover', body: { type: 'Buffer', data: [0, 255, 65] },
+      });
+      assert.ok(internal.body instanceof Uint8Array, 'the internal ABI still returns typed bytes');
+      assert.deepEqual([...internal.body], [0, 255, 65]);
+    }
+    assert.deepEqual(okay(await image('text')), {
+      url: 'https://books.invalid/cover', body: 'plain-image',
+    });
+    denied(await image('nested'), 'INVALID_REQUEST');
+    denied(await image('bigint'), 'SOURCE_FAILURE');
+    assert.deepEqual(okay(await image('AP9B')).body, { type: 'Buffer', data: [0, 255, 65] });
+  });
+}
+
+test('Legado HTTP rules preserve explicit Promise chains, recovery, finally and await propagation', async t => {
+  const owner = createNodeSourceCapabilities({ network: async input => {
+    if (input.url.endsWith('/fail')) throw new ScriptHostError('NETWORK_ERROR');
+    return { statusCode: 200, statusMessage: 'OK', headers: {}, body: 'ok', url: input.url };
+  } });
+  const { rpc } = setup(t, { owner });
+  const instance = await load(rpc, { source: {
+    bookSourceName: 'Promise chains', bookSourceUrl: 'https://books.invalid/',
+    coverDecodeJs: `
+      const trace = [];
+      async function read(path) {
+        trace.push('read');
+        return await java.ajax('https://books.invalid/' + path);
+      }
+      async function run() {
+        if (result === 'then') return read('ok')
+          .then(value => { trace.push('then'); return value; })
+          .finally(() => trace.push('finally')).then(value => ({ value, trace }));
+        if (result === 'catch') return read('fail')
+          .catch(error => { trace.push(error.code); return 'recovered'; })
+          .finally(() => trace.push('finally')).then(value => ({ value, trace }));
+        if (result === 'finally') return read('fail')
+          .finally(() => trace.push('finally'))
+          .catch(error => { trace.push(error.code); return { value: 'recovered', trace }; });
+        if (result === 'await') {
+          const value = await read('ok'); trace.push('await'); return { value, trace };
+        }
+        if (result === 'sync') {
+          const value = read('ok'); trace.push('sync'); return { value, trace };
+        }
+        return java.ajax('https://books.invalid/ok')
+          .then(value => { trace.push('then'); return { value, trace }; });
+      }
+      run()
+    `,
+  } });
+  for (const [mode, value, trace] of [
+    ['then', 'ok', ['read', 'then', 'finally']],
+    ['catch', 'recovered', ['read', 'NETWORK_ERROR', 'finally']],
+    ['finally', 'recovered', ['read', 'finally', 'NETWORK_ERROR']],
+    ['await', 'ok', ['read', 'await']],
+    ['sync', 'ok', ['read', 'sync']],
+    ['direct', 'ok', ['then']],
+  ]) {
+    assert.deepEqual(okay(await rpc('invoke', {
+      installationId: instance.installationId, revision: instance.revision,
+      generation: instance.generation, action: 'image', payload: { body: mode },
+    })).body, { value, trace }, mode);
+  }
+});
+
+test('Legado HTTP rules still reject host-dependent Promise chains in Array callbacks', async t => {
+  const { rpc } = setup(t, {
+    owner: createNodeSourceCapabilities({ network: () => assert.fail('unsafe callbacks must not execute') }),
+  });
+  const instance = await load(rpc, { source: {
+    bookSourceName: 'Unsafe callback', bookSourceUrl: 'https://books.invalid/',
+    coverDecodeJs: `
+      function read() { return java.ajax('https://books.invalid/'); }
+      [1].map(() => read().then(value => value))
+    `,
+  } });
+  denied(await rpc('invoke', {
+    installationId: instance.installationId, revision: instance.revision,
+    generation: instance.generation, action: 'image', payload: {},
+  }), 'UNSUPPORTED_RULE');
+});
+
+test('QYSG HTTP list actions reject malformed and non-list results while preserving arrays and wrappers', async t => {
+  const { rpc } = setup(t, {
+    owner: createNodeSourceCapabilities({ network: () => assert.fail('list fixtures are local') }),
+  });
+  const instance = await load(rpc, { protocol: 'qysg', source: {
+    bookSourceName: 'List contracts', bookSourceUrl: 'https://books.invalid/',
+    html: `<script>
+      let current;
+      function imagedecrypt(url, value) { current = value.value; return ''; }
+      function search() { return current; }
+      function getfinds() { return current; }
+      function find() { return current; }
+      function chapter() { return current; }
+      function content() { return current; }
+    </script>`,
+  } });
+  const invoke = (action, payload = {}) => rpc('invoke', {
+    installationId: instance.installationId, revision: instance.revision,
+    generation: instance.generation, action, payload,
+  });
+  const select = async value => { okay(await invoke('image', { body: { value } })); };
+  for (const [action, key] of [
+    ['search', 'books'], ['exploreKinds', 'kinds'], ['explore', 'books'], ['toc', 'chapters'],
+  ]) {
+    for (const value of ['[{"name":', '{"list":[', 'not a list', 7, false, null, {}, { [key]: {} }]) {
+      await select(value);
+      denied(await invoke(action), 'SOURCE_FAILURE');
+    }
+    for (const value of [[], '[]', { [key]: [] }, { list: [] },
+      JSON.stringify({ [key]: [] }), '{"list":[]}']) {
+      await select(value);
+      assert.deepEqual(okay(await invoke(action))[key], [], `${action}: ${JSON.stringify(value)}`);
+    }
+    const item = action === 'exploreKinds' ? { title: 'Kind', url: '/find' }
+      : action === 'toc' ? { name: 'Chapter', chapterUrl: '/chapter' }
+        : { name: 'Book', bookUrl: '/book' };
+    for (const wrapper of [key, 'list']) {
+      await select(JSON.stringify({ [wrapper]: [item] }));
+      const items = okay(await invoke(action))[key];
+      assert.equal(items.length, 1);
+      if (action === 'exploreKinds') {
+        assert.equal(items[0].title, 'Kind');
+        assert.equal(items[0].url, '/find');
+      } else if (action === 'toc') {
+        assert.equal(items[0].name, 'Chapter');
+        assert.equal(items[0].chapterUrl, 'https://books.invalid/chapter');
+      } else {
+        assert.equal(items[0].name, 'Book');
+        assert.equal(items[0].bookUrl, 'https://books.invalid/book');
+      }
+    }
+  }
+  for (const value of ['ordinary chapter text', '[{"name":']) {
+    await select(value);
+    assert.deepEqual(okay(await invoke('content')), { content: value });
+  }
+  const cat = await load(rpc, { installationId: 'plain-cat', protocol: 'cat',
+    source: 'export default { searchContent(keyword) { return keyword; } };' });
+  for (const keyword of ['ordinary CatVod text', '[{"name":']) {
+    assert.equal(okay(await rpc('invoke', {
+      installationId: cat.installationId, revision: cat.revision, generation: cat.generation,
+      action: 'search', payload: { keyword },
+    })), keyword);
   }
 });
 
@@ -198,7 +610,6 @@ test('source owner receives trusted generation scope and a source-domain profile
 
 test('external source owners must implement profile cleanup', () => {
   assert.throws(() => createSourceRuntimeModule({
-    call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
     network: async () => ({}),
     capabilityOwner: { invoke() {} },
   }), { code: 'INVALID_REQUEST' });
@@ -206,7 +617,6 @@ test('external source owners must implement profile cleanup', () => {
 
 test('source close reports host shutdown failures as cleanup failures', async () => {
   const module = createSourceRuntimeModule({
-    call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
     network: async () => ({}),
     hostFactory: () => ({
       list: () => [],
@@ -220,7 +630,6 @@ for (const hostFailure of ['throw', 'incomplete']) {
   test(`source direct and RPC close preserve the ${hostFailure} cleanup failure and run once`, async () => {
     let closes = 0;
     const module = createSourceRuntimeModule({
-      call: async () => assert.fail('close must not make outbound RPC calls'),
       network: async () => assert.fail('close must not use the network'),
       hostFactory: () => ({
         list: () => [],
@@ -266,7 +675,7 @@ test('source profile cleanup debt remains tracked until close retries it', async
   };
   const { module, rpc } = setup(t, { owner });
   denied(await rpc('load', {
-    token: await upload(rpc, fixtureSource),
+    sourceRevision: await upload(rpc, fixtureSource, 'source.json', 'cleanup-debt'),
     installationId: 'cleanup-debt',
     revision: 1,
     expectedRevision: 0,
@@ -326,7 +735,7 @@ test('failed route cleanup removes the retired RPC binding and keeps other insta
   assert.deepEqual(okay(await rpc('status')).instances, [healthy]);
   assert.deepEqual(okay(await rpc('invoke', {
     ...identity(healthy), action: 'search', payload: { keyword: 'still-live' },
-  })).value, { list: [{ vod_id: 'still-live', vod_name: 'still-live' }] });
+  })), { list: [{ vod_id: 'still-live', vod_name: 'still-live' }] });
   denied(await rpc('invoke', {
     ...identity(retired), action: 'play', payload: {},
   }), 'SOURCE_NOT_FOUND');
@@ -378,7 +787,7 @@ test('failed unload profile release keeps cleanup debt without keeping a live RP
     action: 'search', payload: { keyword: 'profile-debt' },
   }));
   const stored = () => base.invoke('storage.get', {
-    version: 1, profile: `source:retired:${retired.generation}:storage`, key: 'retained',
+    version: 2, profile: `source:retired:${retired.generation}:storage`, key: 'retained',
   });
   assert.equal(await stored(), 'profile-debt');
   denied(await rpc('unload', {
@@ -389,7 +798,7 @@ test('failed unload profile release keeps cleanup debt without keeping a live RP
   assert.equal(okay(await rpc('invoke', {
     installationId: healthy.installationId, revision: healthy.revision, generation: healthy.generation,
     action: 'search', payload: { keyword: 'still-live' },
-  })).value.list[0].vod_name, 'still-live');
+  })).list[0].vod_name, 'still-live');
   assert.equal(releases.filter(value =>
     value.prefix === 'source:retired:' && value.except === '').length, 1);
   assert.equal(await stored(), 'profile-debt');
@@ -469,7 +878,7 @@ test('unloaded source physical work remains tracked independently of healthy RPC
     ({ installationId, revision, generation });
   assert.equal(okay(await rpc('invoke', {
     ...identity(retired), action: 'search', payload: {},
-  })).value.list[0].vod_name, 'CANCELLED');
+  })).list[0].vod_name, 'CANCELLED');
   assert.equal(host.stats().pendingAdapterTasks, 1);
   denied(await rpc('unload', identity(retired)), 'SOURCE_CLEANUP');
   assert.deepEqual(host.list().map(value => value.installationId), ['healthy']);
@@ -478,7 +887,7 @@ test('unloaded source physical work remains tracked independently of healthy RPC
   assert.deepEqual(okay(await rpc('status')).instances, [healthy]);
   assert.equal(okay(await rpc('invoke', {
     ...identity(healthy), action: 'search', payload: { keyword: 'still-live' },
-  })).value.list[0].vod_name, 'still-live');
+  })).list[0].vod_name, 'still-live');
 
   releaseNetwork(response);
   await retiredSession.whenAdaptersIdle();
@@ -491,9 +900,9 @@ test('unloaded source physical work remains tracked independently of healthy RPC
 test('a failed candidate keeps the exact live revision and generation', async t => {
   const { rpc } = setup(t);
   const old = await load(rpc);
-  const token = await upload(rpc, 'export default {', 'broken.js');
+  const sourceRevision = await upload(rpc, 'export default {', 'broken.js', old.installationId, 2);
   const failed = await rpc('load', {
-    token,
+    sourceRevision,
     installationId: old.installationId,
     revision: 2,
     expectedRevision: 1,
@@ -513,8 +922,336 @@ test('a failed candidate keeps the exact live revision and generation', async t 
     generation: current.generation,
     action: 'search',
     payload: { keyword: 'still-live' },
-  })).value.books[0].name, 'Result');
+  })).books[0].name, 'Result');
 });
+
+for (const phase of ['install', 'update']) {
+  test(`HTTP abort during real source ${phase} initialization never publishes or replaces the old generation`, async t => {
+    const entered = deferred();
+    let host;
+    const owner = createNodeSourceCapabilities({ network: input => new Promise((resolve, reject) => {
+      entered.resolve(input);
+      const abort = () => reject(new ScriptHostError('CANCELLED'));
+      if (input.signal.aborted) abort();
+      else input.signal.addEventListener('abort', abort, { once: true });
+    }) });
+    const { rpc } = setup(t, { owner,
+      hostFactory: options => host = createScriptHost(options) });
+    const old = phase === 'update' ? await load(rpc, { protocol: 'cat', source: catSource }) : null;
+    const revision = old ? 2 : 1;
+    const sourceRevision = await upload(rpc, {
+      bookSourceName: 'Pending remote HTML', bookSourceUrl: 'https://books.invalid/',
+      html: 'https://books.invalid/initialization',
+    }, 'source.json', 'fixture', revision);
+    const params = { installationId: 'fixture', sourceRevision, revision,
+      expectedRevision: old ? 1 : 0, protocol: 'qysg' };
+    const controller = new AbortController();
+    const pending = rpc('load', params, { signal: controller.signal });
+    const network = await entered.promise;
+    controller.abort();
+    denied(await pending, 'CANCELLED');
+    await until(() => network.signal.aborted && rpc.transport.runtime.state.active === 0);
+    assert.deepEqual(okay(await rpc('status')).instances, old ? [old] : []);
+    assert.equal(host.stats().pendingAdapterTasks, 0);
+    denied(await rpc('load', params), 'SOURCE_NOT_FOUND');
+    if (old) {
+      assert.equal(okay(await rpc('invoke', { installationId: old.installationId,
+        revision: old.revision, generation: old.generation, action: 'search',
+        payload: { keyword: 'still-live' } })).list[0].vod_name, 'still-live');
+    } else assert.equal(host.stats().installations, 0);
+  });
+}
+
+for (const [phase, operation] of [['install', 'load'], ['update', 'load'], ['update', 'unload']]) {
+  test(`valid HTTP ${operation} stops the real source ${phase} initializer before its installation tail`,
+    { timeout: 15000 }, async t => {
+      const entered = deferred();
+      let captures = 0;
+      const owner = createNodeSourceCapabilities({ network: input => new Promise((_resolve, reject) => {
+        entered.resolve(input);
+        input.signal.addEventListener('abort', () => reject(new ScriptHostError('CANCELLED')), { once: true });
+      }) });
+      const { rpc } = setup(t, { owner, hostFactory: options => {
+        const host = createScriptHost(options), capture = host.captureInitialization.bind(host);
+        host.captureInitialization = id => { captures++; return capture(id); };
+        return host;
+      } });
+      const b = await load(rpc, { installationId: 'b', protocol: 'cat', source: catSource });
+      const old = phase === 'update' ? await load(rpc, { protocol: 'cat', source: catSource }) : null;
+      const sourceRevision = await upload(rpc, {
+        bookSourceName: 'Pending remote HTML', bookSourceUrl: 'https://books.invalid/',
+        html: 'https://books.invalid/init-gate',
+      }, 'source.json', 'fixture', old ? 2 : 1);
+      const controller = new AbortController();
+      const trial = rpc('load', { installationId: 'fixture', sourceRevision,
+        revision: old ? 2 : 1, expectedRevision: old ? 1 : 0, protocol: 'qysg' },
+      { signal: controller.signal });
+      const network = await entered.promise;
+      const next = { installationId: 'fixture', revision: old ? 3 : 2,
+        expectedRevision: old ? 1 : 0, protocol: 'cat',
+        sourceRevision: await upload(rpc, catSource, 'source.js', 'fixture', old ? 3 : 2) };
+      denied(await rpc('load', { ...next, version: 1 }), 'INVALID_REQUEST');
+      const before = captures;
+      const stale = rpc('load', { ...next, expectedRevision: 99 });
+      await until(() => captures > before);
+      const staleUnload = old ? rpc('unload', { installationId: old.installationId,
+        revision: old.revision, generation: old.generation + 100 }) : null;
+      if (staleUnload) await until(() => rpc.transport.runtime.state.active === 3);
+      assert.equal(network.signal.aborted, false, 'stale CAS must not stop or consume a candidate');
+      assert.deepEqual(okay(await rpc('status')).instances, old ? [b, old] : [b]);
+      const invokeB = () => rpc('invoke', { installationId: 'b', revision: b.revision,
+        generation: b.generation, action: 'search', payload: { keyword: 'independent' } });
+      assert.equal(okay(await invokeB()).list[0].vod_name, 'independent');
+      const managing = operation === 'load' ? rpc('load', next) : rpc('unload', {
+        installationId: old.installationId, revision: old.revision, generation: old.generation,
+      });
+      await until(() => network.signal.aborted);
+      assert.equal(controller.signal.aborted, false);
+      denied(await trial, 'STALE_SOURCE');
+      denied(await stale, 'STALE_SOURCE');
+      if (staleUnload) denied(await staleUnload, 'STALE_SOURCE');
+      const result = okay(await managing);
+      assert.equal(okay(await invokeB()).list[0].vod_name, 'independent');
+      if (operation === 'load') {
+        assert.equal(result.instance.revision, next.revision);
+        controller.abort();
+        assert.equal(okay(await rpc('invoke', { installationId: 'fixture', revision: next.revision,
+          generation: result.instance.generation, action: 'search',
+          payload: { keyword: 'successor' } })).list[0].vod_name, 'successor');
+      } else assert.equal(result.cleanupComplete, true);
+    });
+}
+
+test('valid HTTP unload stops the first source initializer before its installation tail',
+  { timeout: 15000 }, async t => {
+    const entered = deferred(), gate = deferred();
+    const admitted = { staleRevision: deferred(), staleGeneration: deferred(), valid: deferred() };
+    const loadController = new AbortController(), unloadController = new AbortController();
+    let released = false, captures = 0, host, candidate;
+    const release = () => { released = true; gate.resolve(); };
+    t.after(() => { release(); loadController.abort(); unloadController.abort(); });
+    const owner = createNodeSourceCapabilities({ network: async input => {
+      const aborted = deferred();
+      const abort = () => aborted.reject(new ScriptHostError('CANCELLED'));
+      input.signal.addEventListener('abort', abort, { once: true });
+      if (input.signal.aborted) abort();
+      entered.resolve(input);
+      try {
+        await Promise.race([gate.promise, aborted.promise]);
+        return { statusCode: 200, statusMessage: 'OK', headers: {}, url: input.url,
+          body: '<script>function search() { return []; }</script>' };
+      } finally { input.signal.removeEventListener('abort', abort); }
+    } });
+    const module = createSourceRuntimeModule({
+      capabilityOwner: owner, platform: 'test',
+      hostFactory: options => {
+        const factory = options.adapters.qysg;
+        host = createScriptHost({ ...options, adapters: { ...options.adapters,
+          qysg: input => candidate = factory(input),
+        } });
+        const capture = host.captureInitialization.bind(host);
+        host.captureInitialization = id => {
+          const stop = capture(id);
+          if (id === 'fixture') captures++;
+          return stop;
+        };
+        return host;
+      },
+    });
+    t.after(() => module.close());
+    const unload = module.methods['source.runtime.unload'];
+    module.methods['source.runtime.unload'] = (params, context) => {
+      const result = unload(params, context);
+      const key = params.revision !== 1 ? 'staleRevision'
+        : params.generation !== undefined ? 'staleGeneration' : 'valid';
+      admitted[key].resolve();
+      return result;
+    };
+    const rpc = moduleHttp(t, module);
+    const b = await load(rpc, { installationId: 'b', protocol: 'cat',
+      source: 'let count = 0; export default { searchContent() { return { count: ++count }; } };' });
+    const invokeB = () => rpc('invoke', { installationId: 'b', revision: b.revision,
+      generation: b.generation, action: 'search', payload: {} });
+    const sourceRevision = await upload(rpc, {
+      bookSourceName: 'First initializer', bookSourceUrl: 'https://books.invalid/',
+      html: 'https://books.invalid/init-gate',
+    });
+    const loading = rpc('load', { installationId: 'fixture', sourceRevision,
+      revision: 1, expectedRevision: 0, protocol: 'qysg' }, { signal: loadController.signal });
+    const network = await entered.promise;
+    assert.ok(candidate.engine);
+    const before = captures;
+    const staleRevision = rpc('unload', { installationId: 'fixture', revision: 99 });
+    await admitted.staleRevision.promise;
+    const staleGeneration = rpc('unload', {
+      installationId: 'fixture', revision: 1, generation: candidate.generation + 100,
+    });
+    await admitted.staleGeneration.promise;
+    assert.equal(captures, before, 'stale unloads must not capture the initializer');
+    assert.equal(network.signal.aborted, false);
+    assert.deepEqual(okay(await rpc('status')).instances, [b]);
+    const unloading = rpc('unload', { installationId: 'fixture', revision: 1 },
+      { signal: unloadController.signal });
+    await admitted.valid.promise;
+    await until(() => network.signal.aborted);
+    assert.ok(captures > before, 'the real unload handler captured the initializer');
+    assert.equal(released, false, 'unload does not wait for the initialization barrier');
+    assert.equal(loadController.signal.aborted, false, 'the original load request did not cancel it');
+    assert.equal(candidate.lifecycle.signal.aborted, true);
+    assert.equal(okay(await invokeB()).count, 1);
+    await candidate.engine.exited;
+    await candidate.whenAdaptersIdle();
+    for (const key of ['threadCount', 'runtimeCount', 'contextCount']) {
+      assert.equal(candidate.engine.stats()[key], 0, key);
+    }
+    assert.equal((await loading).ok, false);
+    await unloading; // Cleanup, not a new final unload response-code contract.
+    denied(await staleRevision, 'STALE_SOURCE');
+    denied(await staleGeneration, 'STALE_SOURCE');
+    assert.deepEqual(okay(await rpc('status')).instances, [b]);
+    assert.equal(host.cleanupPending('fixture'), 0);
+    assert.equal(host.stats().pendingAdapterTasks, 0);
+    const successorRevision = await upload(rpc, catSource, 'source.js', 'fixture', 2);
+    const successor = okay(await rpc('load', { installationId: 'fixture',
+      sourceRevision: successorRevision, revision: 1, expectedRevision: 0, protocol: 'cat' })).instance;
+    assert.ok(successor.generation > candidate.generation);
+    loadController.abort();
+    unloadController.abort();
+    assert.equal(okay(await rpc('invoke', {
+      installationId: 'fixture', revision: 1, generation: successor.generation,
+      action: 'search', payload: { keyword: 'successor' },
+    })).list[0].vod_name, 'successor');
+    assert.equal(okay(await invokeB()).count, 2);
+    okay(await module.close());
+    assert.equal(host.stats().installations, 0);
+    assert.equal(host.stats().liveSessions, 0);
+    assert.equal(host.stats().pendingAdapterTasks, 0);
+  });
+
+test('an HTTP unload admitted for an unpublished source cannot remove a queued same-revision successor',
+  { timeout: 15000 }, async t => {
+    const entered = deferred(), cleaning = deferred(), release = deferred(), admitted = deferred();
+    t.after(() => release.resolve());
+    let host, held = false;
+    const base = createNodeSourceCapabilities({ network: input => new Promise((_resolve, reject) => {
+      const abort = () => reject(new ScriptHostError('CANCELLED'));
+      input.signal.addEventListener('abort', abort, { once: true });
+      if (input.signal.aborted) abort();
+      entered.resolve(input);
+    }) });
+    const module = createSourceRuntimeModule({
+      platform: 'test',
+      capabilityOwner: {
+        invoke: (...args) => base.invoke(...args),
+        async releaseProfiles(prefix, except) {
+          await base.releaseProfiles(prefix, except);
+          if (prefix === 'source:fixture:' && except === '' && !held) {
+            held = true; cleaning.resolve(); await release.promise;
+          }
+        },
+      },
+      hostFactory: options => host = createScriptHost(options),
+    });
+    t.after(() => module.close());
+    const unload = module.methods['source.runtime.unload'];
+    module.methods['source.runtime.unload'] = (params, context) => {
+      const result = unload(params, context);
+      admitted.resolve();
+      return result;
+    };
+    const rpc = moduleHttp(t, module);
+    const sourceRevision = await upload(rpc, {
+      bookSourceName: 'Replaced initializer', bookSourceUrl: 'https://books.invalid/',
+      html: 'https://books.invalid/init-gate',
+    });
+    const loading = rpc('load', { installationId: 'fixture', sourceRevision,
+      revision: 1, expectedRevision: 0, protocol: 'qysg' });
+    const network = await entered.promise;
+    const candidate = host.initializingSessions().find(session => session.installationId === 'fixture');
+    const nextRevision = await upload(rpc, catSource, 'source.js', 'fixture', 2);
+    const replacing = rpc('load', { installationId: 'fixture', sourceRevision: nextRevision,
+      revision: 1, expectedRevision: 0, protocol: 'cat' });
+    await cleaning.promise; // The real failed candidate is stopped; its transaction still owns the tail.
+    assert.equal(network.signal.aborted, true);
+    await candidate.engine.exited;
+    assert.equal(candidate.engine.stats().threadCount, 0);
+    const unloading = rpc('unload', { installationId: 'fixture', revision: 1 });
+    await admitted.promise; // Original handler ran after the successor was queued, before cleanup released.
+    release.resolve();
+    assert.equal((await loading).ok, false);
+    const successor = okay(await replacing).instance;
+    denied(await unloading, 'STALE_SOURCE');
+    assert.deepEqual(okay(await rpc('status')).instances, [successor]);
+    assert.equal(okay(await rpc('invoke', {
+      installationId: 'fixture', revision: 1, generation: successor.generation,
+      action: 'search', payload: { keyword: 'still-current' },
+    })).list[0].vod_name, 'still-current');
+    okay(await module.close());
+    assert.equal(host.stats().installations, 0);
+    assert.equal(host.stats().pendingAdapterTasks, 0);
+  });
+
+for (const change of ['source', 'metadata']) {
+  test(`source status is read-only during ${change} update A cleanup while B remains callable`,
+    { timeout: 15000 }, async t => {
+      const entered = deferred(), release = deferred(), releases = [];
+      t.after(() => release.resolve());
+      const base = createNodeSourceCapabilities({ network: () => assert.fail('unexpected network') });
+      let host;
+      const { rpc } = setup(t, {
+        owner: {
+          invoke: (...args) => base.invoke(...args),
+          async releaseProfiles(prefix, except) {
+            releases.push({ prefix, except });
+            await base.releaseProfiles(prefix, except);
+          },
+        },
+        hostFactory: options => {
+          const adapters = Object.fromEntries(Object.entries(options.adapters).map(([protocol, factory]) =>
+            [protocol, input => {
+              const session = factory(input), stop = session.stop.bind(session);
+              if (input.installationId === 'a' && input.generation === 1) {
+                let stopping;
+                session.stop = (...args) => stopping ??= (async () => {
+                  await stop(...args); entered.resolve(); await release.promise;
+                })();
+              }
+              return session;
+            }]));
+          return host = createScriptHost({ ...options, adapters });
+        },
+      });
+      const a = await load(rpc, { installationId: 'a', protocol: 'cat', source: catSource });
+      const b = await load(rpc, { installationId: 'b', protocol: 'cat', source: catSource });
+      const releaseOffset = releases.length;
+      const sourceRevision = await upload(rpc, change === 'source'
+        ? catSource.replace('vod_name: keyword', 'vod_name: "new-" + keyword') : catSource,
+      'source.js', 'a', 2);
+      const updating = rpc('load', { installationId: 'a', sourceRevision, revision: 2, expectedRevision: 1,
+        protocol: 'cat', version: '1.0.0', metadata: { label: 'new' } });
+      await entered.promise;
+      assert.ok(host.get('a').generation > a.generation);
+      assert.equal(host.get('a').state, 'ready');
+      assert.equal(host.get('a').contentHash === a.contentHash, change === 'metadata');
+      for (let i = 0; i < 2; i++) {
+        assert.deepEqual(okay(await rpc('status')).instances, [{ ...a, state: 'failed' }, b]);
+        assert.deepEqual(releases.slice(releaseOffset), [], 'status cannot retire or publish any profile');
+      }
+      assert.equal(okay(await rpc('invoke', { installationId: 'b', revision: b.revision,
+        generation: b.generation, action: 'search', payload: { keyword: 'independent' } })).list[0].vod_name,
+      'independent');
+      assert.deepEqual(releases.slice(releaseOffset), []);
+      release.resolve();
+      const next = okay(await updating).instance;
+      assert.deepEqual(okay(await rpc('status')).instances, [next, b]);
+      assert.deepEqual(releases.slice(releaseOffset), [{
+        prefix: 'source:a:', except: `source:a:${next.generation}`,
+      }]);
+      assert.equal(okay(await rpc('invoke', { installationId: 'a', revision: 2,
+        generation: next.generation, action: 'search', payload: { keyword: 'ready' } })).list[0].vod_name,
+      change === 'source' ? 'new-ready' : 'ready');
+    });
+}
 
 test('post-publication cleanup failure rolls back to the old source with a fresh generation', async t => {
   const network = async input => ({
@@ -542,9 +1279,9 @@ test('post-publication cleanup failure rolls back to the old source with a fresh
   const { rpc } = setup(t, { owner });
   const old = await load(rpc);
   failNextRelease = true;
-  const token = await upload(rpc, catSource, 'candidate.js');
+  const sourceRevision = await upload(rpc, catSource, 'candidate.js', old.installationId, 2);
   denied(await rpc('load', {
-    token,
+    sourceRevision,
     installationId: old.installationId,
     revision: 2,
     expectedRevision: 1,
@@ -562,7 +1299,7 @@ test('post-publication cleanup failure rolls back to the old source with a fresh
     generation: recovered.generation,
     action: 'search',
     payload: { keyword: 'rollback' },
-  })).value.books[0].name, 'Stable');
+  })).books[0].name, 'Stable');
   assert.ok(releases.some(value =>
     value.except === `source:${old.installationId}:${recovered.generation}`));
 });
@@ -602,8 +1339,6 @@ test('profile generations are released on update, unload and shutdown', async t 
   const closing = await load(rpc, { installationId: 'closing' });
   const closed = okay(await module.close());
   assert.deepEqual(closed, {
-    ok: true,
-    contract: sourceRuntimeContract,
     closed: true,
     cleanupComplete: true,
   });
@@ -621,28 +1356,12 @@ test('profile generations are released on update, unload and shutdown', async t 
   okay(await module.close());
 });
 
-test('RPC validates staged integrity, stale identities and cancellation without exposing diagnostics', async t => {
+test('HTTP validates complete source encoding, identities and cancellation without diagnostics', async t => {
   const { rpc } = setup(t);
   const html = Buffer.from('<script>function search(){ return []; }</script>');
-  const htmlStage = okay(await rpc('stage.begin', {
-    basename: 'source.htm',
-    length: html.length,
-    sha256: createHash('sha256').update(html).digest('hex'),
-  }));
-  okay(await rpc('stage.abort', { token: htmlStage.token }));
-  const bytes = Buffer.from('{}');
-  const begun = okay(await rpc('stage.begin', {
-    basename: 'source.json',
-    length: bytes.length,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-  }));
-  denied(await rpc('stage.chunk', {
-    token: begun.token,
-    offset: 1,
-    data: bytes.toString('base64'),
-  }), 'SOURCE_INTEGRITY');
-  okay(await rpc('stage.abort', { token: begun.token }));
-
+  okay(await rpc.upload('html', 1, html, { basename: 'source.htm' }));
+  denied(await rpc.upload('bad', 1, Buffer.from([0xff]), { basename: 'source.json' }), 'SOURCE_ENCODING');
+  denied(await rpc.upload('html', 1, Buffer.from('{}'), { basename: 'source.htm' }), 'SOURCE_INTEGRITY');
   const instance = await load(rpc);
   denied(await rpc('invoke', {
     installationId: instance.installationId,
@@ -656,13 +1375,18 @@ test('RPC validates staged integrity, stale identities and cancellation without 
   denied(await rpc('status', {}, { signal: controller.signal }), 'CANCELLED');
 });
 
-function mockSourceRuntime(t, { clock, setTimer, clearTimer } = {}) {
+function mockSourceRuntime(t) {
   const records = new Map();
   const installations = [];
   const invocations = [];
   const releases = [];
   const host = {
     list: () => [...records.values()].map(value => structuredClone(value)),
+    captureInitialization: () => null,
+    observe(id) {
+      const record = records.get(id);
+      return () => structuredClone(record);
+    },
     stats: () => ({ cleanupIssues: [] }),
     cleanupPending: () => 0,
     async install(spec) {
@@ -686,6 +1410,7 @@ function mockSourceRuntime(t, { clock, setTimer, clearTimer } = {}) {
       records.set(spec.installationId, record);
       return structuredClone(record);
     },
+    async update(_id, spec) { return this.install(spec); },
     async invoke(target) {
       invocations.push(structuredClone(target));
       return { keyword: target.payload.keyword };
@@ -697,7 +1422,6 @@ function mockSourceRuntime(t, { clock, setTimer, clearTimer } = {}) {
     },
   };
   const module = createSourceRuntimeModule({
-    call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
     hostFactory: () => host,
     network: async () => { throw new Error('mock host must not execute guest network'); },
     capabilityOwner: {
@@ -705,41 +1429,26 @@ function mockSourceRuntime(t, { clock, setTimer, clearTimer } = {}) {
       async releaseProfiles(prefix, except) { releases.push({ prefix, except }); },
     },
     platform: 'test',
-    clock, setTimer, clearTimer,
   });
   t.after(() => module.close());
-  const rpc = (name, params = {}) => module.methods[`source.runtime.${name}`](params);
+  const rpc = moduleHttp(t, module);
   return { module, rpc, records, installations, invocations, releases };
 }
 
-test('R5 source staging accepts exactly 16 MiB and rejects the next byte', async t => {
+test('R5 source HTTP accepts exactly 16 MiB and rejects the next byte', async t => {
   const { rpc } = mockSourceRuntime(t);
-  const params = { basename: 'source.js', length: 16 * 1024 * 1024, sha256: '0'.repeat(64) };
-  const stage = okay(await rpc('stage.begin', params));
-  assert.equal(stage.chunkBytes, 64 * 1024);
-  denied(await rpc('stage.begin', { ...params, length: params.length + 1 }), 'LIMIT');
-  okay(await rpc('stage.abort', { token: stage.token }));
+  const bytes = Buffer.alloc(16 * 1024 * 1024, 0x61);
+  assert.equal(okay(await rpc.upload('large', 1, bytes, { basename: 'source.js' })).sourceBytes, bytes.length);
+  denied(await rpc.upload('large', 2, Buffer.concat([bytes, Buffer.from('a')]), { basename: 'source.js' }), 'LIMIT');
 });
 
-test('R5 source staging retains more than four simultaneous uploads', async t => {
-  const { rpc } = mockSourceRuntime(t);
-  const bytes = Buffer.from('{}');
-  const params = {
-    basename: 'source.json',
-    length: bytes.length,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-  };
-  const stages = [];
-  for (let index = 0; index < 6; index++) {
-    stages.push(okay(await rpc('stage.begin', params)).token);
-  }
-  assert.equal(new Set(stages).size, 6);
-  for (const token of stages) {
-    assert.equal(okay(await rpc('stage.chunk', {
-      token, offset: 0, data: bytes.toString('base64'),
-    })).next, bytes.length);
-    okay(await rpc('stage.abort', { token }));
-  }
+test('R5 source HTTP retains more than four independent complete candidates', async t => {
+  const { rpc, installations } = mockSourceRuntime(t);
+  for (let i = 0; i < 6; i++) await upload(rpc, catSource, 'source.js', `upload-${i}`);
+  for (let i = 0; i < 6; i++) okay(await rpc('load', {
+    installationId: `upload-${i}`, sourceRevision: 1, revision: 1, expectedRevision: 0, protocol: 'cat',
+  }));
+  assert.equal(installations.length, 6);
 });
 
 test('R5 source module installs more than 32 instances', async t => {
@@ -756,65 +1465,7 @@ test('R5 source module installs more than 32 instances', async t => {
     [...ids].sort());
 });
 
-test('R5 staged uploads share one active TTL timer, renew on valid chunks and cancel it on close', async t => {
-  let now = 0;
-  const timers = new Map();
-  const { module, rpc } = mockSourceRuntime(t, {
-    clock: () => now,
-    setTimer(callback, delay) {
-      const handle = { unref() {} };
-      timers.set(handle, { callback, due: now + delay });
-      return handle;
-    },
-    clearTimer(handle) { timers.delete(handle); },
-  });
-  const fireDue = () => {
-    for (const [handle, timer] of [...timers]) {
-      if (timer.due <= now) {
-        timers.delete(handle);
-        timer.callback();
-      }
-    }
-  };
-  const bytes = Buffer.from('{}');
-  const params = {
-    basename: 'source.json',
-    length: bytes.length,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-  };
-  const first = okay(await rpc('stage.begin', params)).token;
-  const second = okay(await rpc('stage.begin', params)).token;
-  assert.equal(timers.size, 1);
-  assert.equal([...timers.values()][0].due, 300000);
-  now = 299999;
-  assert.equal(okay(await rpc('stage.chunk', {
-    token: first, offset: 0, data: Buffer.from('{').toString('base64'),
-  })).next, 1);
-  assert.equal(timers.size, 1);
-  now = 300000;
-  fireDue();
-  assert.equal(timers.size, 1, 'only the renewed upload should retain an expiry timer');
-  denied(await rpc('stage.chunk', {
-    token: second, offset: 0, data: bytes.toString('base64'),
-  }), 'STAGE_NOT_FOUND');
-  assert.equal(okay(await rpc('stage.chunk', {
-    token: first, offset: 1, data: Buffer.from('}').toString('base64'),
-  })).next, 2);
-  assert.equal(timers.size, 1);
-  now = 600000;
-  fireDue();
-  assert.equal(timers.size, 0, 'expiry must release the final stage without another RPC');
-  denied(await rpc('stage.chunk', {
-    token: first, offset: 0, data: bytes.toString('base64'),
-  }), 'STAGE_NOT_FOUND');
-  okay(await rpc('stage.begin', params));
-  assert.equal(timers.size, 1);
-  okay(await module.close());
-  assert.equal(timers.size, 0);
-  denied(await rpc('stage.begin', params), 'CLOSED');
-});
-
-test('source status adopts a same-revision restart, rejects the old generation and keeps only the new profiles', async t => {
+test('source status reads a same-revision restart without publishing or retiring profiles; invocation reconciles it', async t => {
   const { rpc, records, invocations, releases } = mockSourceRuntime(t);
   const first = await load(rpc, { protocol: 'cat', source: catSource });
   const nextGeneration = first.generation + 1;
@@ -824,10 +1475,9 @@ test('source status adopts a same-revision restart, rejects the old generation a
   const releaseOffset = releases.length;
   const current = okay(await rpc('status')).instances[0];
   assert.deepEqual(current, { ...first, generation: nextGeneration });
-  assert.deepEqual(releases.slice(releaseOffset), [{
-    prefix: `source:${first.installationId}:`,
-    except: `source:${first.installationId}:${nextGeneration}`,
-  }]);
+  assert.deepEqual(releases.slice(releaseOffset), []);
+  assert.deepEqual(okay(await rpc('status')).instances, [current]);
+  assert.deepEqual(releases.slice(releaseOffset), []);
   const params = {
     installationId: first.installationId,
     revision: first.revision,
@@ -839,10 +1489,14 @@ test('source status adopts a same-revision restart, rejects the old generation a
   assert.equal(invocations.length, 0);
   assert.deepEqual(okay(await rpc('invoke', {
     ...params, generation: nextGeneration,
-  })).value, { keyword: 'current' });
+  })), { keyword: 'current' });
   assert.equal(invocations.length, 1);
   assert.equal(invocations[0].generation, nextGeneration);
   assert.equal(releases.length, releaseOffset + 1);
+  assert.deepEqual(releases[releaseOffset], {
+    prefix: `source:${first.installationId}:`,
+    except: `source:${first.installationId}:${nextGeneration}`,
+  });
 });
 
 for (const method of ['load', 'invoke', 'unload']) {
@@ -867,7 +1521,7 @@ for (const method of ['load', 'invoke', 'unload']) {
         generation: nextGeneration,
         action: 'search',
         payload: { keyword: 'direct' },
-      })).value, { keyword: 'direct' });
+      })), { keyword: 'direct' });
       assert.equal(invocations.length, 1);
       assert.equal(invocations[0].generation, nextGeneration);
     } else {
@@ -910,7 +1564,7 @@ for (const [field, value] of [
     }), 'SOURCE_CLEANUP');
     denied(await rpc('unload', identity), 'SOURCE_CLEANUP');
     denied(await rpc('load', {
-      token: await upload(rpc, catSource, 'source.js'),
+      sourceRevision: await upload(rpc, catSource, 'source.js'),
       installationId: first.installationId,
       revision: first.revision,
       expectedRevision: first.revision,
@@ -924,3 +1578,35 @@ for (const [field, value] of [
     assert.equal(releases.length, releaseOffset);
   });
 }
+
+test('source CAS and field rejection retain a complete candidate; exact revisions never follow the latest', async t => {
+  const { rpc, installations } = mockSourceRuntime(t);
+  await load(rpc, { protocol: 'cat', source: catSource });
+  await upload(rpc, catSource, 'source.js', 'fixture', 5);
+  const next = { installationId: 'fixture', sourceRevision: 5, revision: 5, expectedRevision: 1, protocol: 'cat' };
+  denied(await rpc('load', { ...next, expectedRevision: 4 }), 'STALE_SOURCE');
+  denied(await rpc('load', { ...next, contentHash: '0'.repeat(64) }), 'INVALID_REQUEST');
+  denied(await rpc('load', { ...next, metadata: { text: 'x'.repeat(32768) } }), 'LIMIT');
+  assert.equal(installations.length, 1);
+  // The deterministic owner supports update through the same installation surface.
+  const uploaded = await rpc.upload('another', 1, Buffer.from(catSource), { basename: 'source.js' });
+  assert.equal(uploaded.ok, true);
+  denied(await rpc.upload('another', 1, Buffer.from('different'), { basename: 'source.js' }), 'SOURCE_INTEGRITY');
+  await upload(rpc, catSource, 'source.js', 'another', 2);
+  denied(await rpc('load', { installationId: 'another', sourceRevision: 1, revision: 1, expectedRevision: 0 }), 'SOURCE_NOT_FOUND');
+  const installed = okay(await rpc('load', { installationId: 'another', sourceRevision: 2, revision: 2, expectedRevision: 0, protocol: 'cat' })).instance;
+  assert.equal(installed.revision, 2);
+  assert.equal(okay(await rpc('load', next)).instance.revision, 5);
+});
+
+test('source equal revisions retain canonical definition and metadata identity without restarting', async t => {
+  const { rpc, installations } = mockSourceRuntime(t);
+  const first = await load(rpc);
+  const reordered = Object.fromEntries(Object.entries(fixtureSource).reverse());
+  reordered.ruleSearch = Object.fromEntries(Object.entries(reordered.ruleSearch).reverse());
+  await upload(rpc, reordered, 'source.json', 'fixture', 2);
+  const equal = okay(await rpc('load', { installationId: 'fixture', sourceRevision: 2,
+    revision: 1, expectedRevision: 1, protocol: 'legado', metadata: {} })).instance;
+  assert.deepEqual(equal, first);
+  assert.equal(installations.length, 1);
+});

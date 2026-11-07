@@ -1,9 +1,8 @@
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { randomBytes } from 'node:crypto';
-import { LXSession } from './lx-session.js';
-import { QuickJSEngine } from './quickjs-engine.js';
-import { nodeRealmSource } from './node-realm.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createNodeRealm } from './node-realm.js';
 import { NodeCapabilities } from './node-capabilities.js';
 import { ScriptServices, scriptAccessHeader } from './script-services.js';
 import { PanInterceptor } from './pan-interceptor.js';
@@ -38,11 +37,27 @@ function guardClientRequestErrors(client) {
   return state;
 }
 
-export class CatSession extends LXSession {
+export class CatSession {
+  #cleanupScope = null;
+
   constructor({ dataRoot, settings, aggregate, onNetwork, onActivate, onStop,
     onEndpointsChanged, ...input }) {
     // Timeout values come from ScriptHost's single per-protocol definition.
-    super(input);
+    const { installationId, generation, revision, network, onDiagnostic, onScriptError,
+      onFailure, limits } = input;
+    Object.assign(this, { installationId, generation, revision, network, onDiagnostic,
+      onScriptError, onFailure, limits });
+    this.live = true;
+    this.activated = false;
+    this.ready = deferred();
+    this.root = new ResourceScope();
+    this.scriptResources = new ResourceScope(this.root.signal);
+    this.contextScope = new AsyncLocalStorage();
+    this.invocations = new Map();
+    this.timers = new Map();
+    this.adapterTasks = new Set();
+    this.nextId = 0;
+    this.alert = null;
     requireValue(typeof dataRoot === 'string', 'CAPABILITY_UNAVAILABLE');
     requireValue(onNetwork === undefined || typeof onNetwork === 'function');
     requireValue(onActivate === undefined || typeof onActivate === 'function');
@@ -63,7 +78,7 @@ export class CatSession extends LXSession {
     this.proxyMappings = new Map();
     this.pendingProxies = new Set();
     this.stopNotified = false;
-    this.guestStopped = deferred();
+
   }
   applySettings(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return;
@@ -78,19 +93,14 @@ export class CatSession extends LXSession {
     const timeout = setTimeout(() => this.fail(fault('TIMEOUT')), this.limits.initTimeoutMs);
     try {
       const port = await this.services.prepare();
-      this.engine = await QuickJSEngine.create({ source: nodeRealmSource, limits: this.limits,
-        wasmModule: this.wasmModule,
-        bridge: (operation, args, frames, outFrames) => {
-          try { return this.bridge(operation, args, frames, outFrames); }
-          catch (error) { this.bridgeDiagnostic(operation, args, error); throw error; }
-        } });
-      if (!this.live) { this.engine.close(); throw fault('STALE_SESSION'); }
-      this.contextScope.run(this.root, () => this.engine.call('catBoot', [this.revision.source,
-        JSON.stringify({ config: this.revision.config, env: {
+      this.realm = createNodeRealm(this, this.node);
+      if (!this.live) throw fault('STALE_SESSION');
+      this.contextScope.run(this.root, () => this.realm.boot(this.revision.source,
+        { config: this.revision.config, env: {
           PORT: String(port), DEV_HTTP_PORT: String(port), HTTP_PORT: String(port),
           HOST: '127.0.0.1', CATVOD_DISABLE_AUTOSTART: '1',
           NODE_PATH: '/', CATPAW_DIST_AUTH: '0', CATPAW_CUSTOM_SPIDER_ENABLED: '0',
-        }, port })]));
+        }, port })).catch(error => this.fail(error));
       await this.ready.promise;
       await this.root.race(this.services.started.promise);
       const { config, origin: configOrigin } = await this.readConfig();
@@ -122,7 +132,7 @@ export class CatSession extends LXSession {
         this.capabilities[site.key] = { actions: [], methods: {}, discovery: 'opaque-http',
           api: actual.pathname, name: site.name ?? site.key };
       }
-      const discovered = this.engine.callJSON('catDescribe', [JSON.stringify([...this.sites])]);
+      const discovered = this.realm.describe([...this.sites]);
       requireValue(Array.isArray(discovered) && discovered.length <= this.sites.size,
         'SCRIPT_PROTOCOL_ERROR');
       const described = new Set();
@@ -159,18 +169,79 @@ export class CatSession extends LXSession {
     } finally { clearTimeout(timeout); }
   }
 
-  bridge(operation, input, frames = [], outFrames = []) {
-    if (operation === 'node') return this.node.bridge(input, frames, outFrames);
-    if (operation === 'catReady') { this.ready.resolve(); return null; }
-    if (operation === 'catStopped') { this.guestStopped.resolve(); return null; }
-    if (operation === 'nodeCallbackError') {
-      const memory = input[0] === 'MEMORY_LIMIT';
-      if (memory && this.engine) this.engine.memoryLimitExceeded = true;
-      this.callbackFailed(fault(memory ? 'RESOURCE_LIMIT' : input[0]),
-        this.scope(), this.callbackFailureScope);
-      return null;
+  scope() { return this.contextScope.getStore() ?? this.root; }
+  resourceScope() { return this.scriptResources; }
+  isCleanupScope(scope) {
+    return Boolean(scope && scope === this.#cleanupScope && !scope.signal.aborted);
+  }
+  assertLive() {
+    if (!this.live) throw fault('STALE_SESSION');
+    this.root.assertOpen();
+  }
+  scopeIdentity(scope = this.scope()) {
+    return Object.freeze({ installationId: this.installationId, generation: this.generation,
+      siteId: scope?.siteId ?? null, requestId: scope?.requestId ?? null });
+  }
+  trackAdapter(input) {
+    const task = Promise.resolve(input);
+    this.adapterTasks.add(task);
+    const done = () => this.adapterTasks.delete(task);
+    task.then(done, done);
+    return task;
+  }
+  async waitForAdapters() {
+    // Check after dispatch, so completion callbacks can register their actual
+    // follow-up I/O before the owner is declared idle.
+    do {
+      await Promise.allSettled([...this.adapterTasks]);
+      await new Promise(resolve => setImmediate(resolve));
+    } while (this.adapterTasks.size);
+  }
+  adapterRetirement() {
+    return { installationId: this.installationId, generation: this.generation,
+      idle: this.waitForAdapters(), pendingAdapterTasks: () => this.adapterTasks.size };
+  }
+  whenAdaptersIdle() { return this.waitForAdapters(); }
+  async drainAdapters() {
+    let timer;
+    try {
+      await Promise.race([this.waitForAdapters(), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(fault('TIMEOUT')), this.limits.cleanupTimeoutMs);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+  runCallback(callback, receiver, args, scope = this.scope()) {
+    if (!this.live && !this.isCleanupScope(scope)) return;
+    return this.contextScope.run(scope ?? this.root, () => {
+      try {
+        const result = Reflect.apply(callback, receiver, args);
+        if (result && typeof result.then === 'function')
+          Promise.resolve(result).catch(error => this.callbackFailed(error, scope));
+        return result;
+      } catch (error) { this.callbackFailed(error, scope); }
+    });
+  }
+  diagnose(error, scope = this.scope()) {
+    const event = Object.freeze({ ...this.scopeIdentity(scope), ...describeScriptError(error) });
+    try { this.onDiagnostic?.(event); } catch {}
+    if (typeof error?.message === 'string') {
+      try { this.onScriptError?.(Object.freeze({ ...event, message: error.message })); } catch {}
     }
-    return super.bridge(operation, input);
+  }
+  emitScriptDiagnostic(diagnostic, scope, message) {
+    const event = Object.freeze({ ...this.scopeIdentity(scope), ...diagnostic });
+    try { this.onDiagnostic?.(event); } catch {}
+    if (typeof message === 'string') {
+      try { this.onScriptError?.(Object.freeze({ ...event, message })); } catch {}
+    }
+  }
+  fail(error) {
+    if (!this.live || this.failure) return;
+    const ready = this.activated;
+    this.failure = safeError(error);
+    this.ready.reject(this.failure);
+    this.stop(this.failure);
+    try { this.onFailure?.(this.failure, Object.freeze({ ready })); } catch {}
   }
 
   storageWritten(scope = this.scope()) {
@@ -222,8 +293,6 @@ export class CatSession extends LXSession {
       if (signal.aborted) abort();
       else signal.addEventListener('abort', abort, { once: true });
     }
-    const previousFailure = this.callbackFailureScope;
-    this.callbackFailureScope = scope;
     try {
       const value = await this.read(path, payload, scope, method, origin);
       if (requireWrite && successfulManagement(value)) {
@@ -232,55 +301,16 @@ export class CatSession extends LXSession {
       return value;
     } finally {
       try { signal?.removeEventListener('abort', abort); } catch { /* Scope close remains authoritative. */ }
-      this.callbackFailureScope = previousFailure;
       scope.close();
     }
   }
 
-  nativeCallback(id, value, scope, receiver = { $: 'undefined' }, fresh = false,
-    failureScope = null, frames = []) {
-    if (!this.live || scope.signal.aborted) return { $: 'undefined' };
-    const previousFailure = this.callbackFailureScope;
-    // Guest code keeps the invocation's metadata context while the callback
-    // runs; native resources it creates remain session-owned.
-    const ambient = this.contextScope.getStore();
-    const metadata = failureScope ?? (ambient && !ambient.signal.aborted && ambient !== this.root &&
-      ambient !== this.resourceScope() ? ambient : scope);
-    let result;
-    this.callbackFailureScope = failureScope;
-    try {
-      result = this.contextScope.run(metadata, () =>
-        this.engine.callJSONFrames('nativeCallback', [String(id), JSON.stringify(value),
-          JSON.stringify(receiver), fresh ? '1' : '0'], frames));
-    } finally { this.callbackFailureScope = previousFailure; }
-    const answer = result?.value;
-    requireValue(answer && Number.isSafeInteger(answer.context) && answer.context >= 0 &&
-      Object.hasOwn(answer, 'value'), 'SCRIPT_EXCEPTION');
-    this.node.retainContext(answer.context, scope);
-    // Continuations created by this callback keep its attribution metadata;
-    // the lease above still gives native resources the session's ownership.
-    if (fresh && failureScope && answer.context > 0)
-      this.node.observeContext(answer.context, failureScope);
-    queueMicrotask(() => {
-      if (this.live) {
-        // Pending guest continuations keep this turn's attribution metadata;
-        // native resources they create are still owned by the session.
-        try { this.contextScope.run(metadata, () => this.engine.pump()); }
-        catch (error) { this.callbackFailed(error, this.resourceScope(), failureScope); }
-      }
-    });
-    return { value: answer.value, frames: result.frames };
-  }
-
   callbackFailed(error, scope, failureScope = null) {
-    if (!this.live) return;
-    const failure = safeError(error);
-    // Only heap exhaustion fails the instance. Other resource-limit callback
-    // failures close their request or remain background diagnostics.
-    if (failure.code === 'MEMORY_LIMIT' || this.engine?.memoryLimitExceeded) {
-      this.fail(fault('RESOURCE_LIMIT'));
+    if (!this.live) {
+      if (this.isCleanupScope(scope)) scope.close(safeError(error));
       return;
     }
+    const failure = safeError(error);
     const diagnostic = target => {
       try {
         this.onDiagnostic?.(Object.freeze({ ...this.scopeIdentity(target),
@@ -357,11 +387,6 @@ export class CatSession extends LXSession {
       const data = chunk => {
         if (settled) return;
         length += chunk.length;
-        if (length > this.limits.maxMemoryBytes) {
-          finish(false, fault('RESOURCE_LIMIT'));
-          try { response.destroy(); } catch { /* Cleanup reports any remaining owned resource. */ }
-          return;
-        }
         chunks.push(Buffer.from(chunk));
       };
       const responseFailed = error => finish(false, safeError(error, 'NETWORK_ERROR'));
@@ -468,9 +493,6 @@ export class CatSession extends LXSession {
     }
     try { token?.release(); } catch (error) { failed(error); }
     try { raw?.fill(0); } catch (error) { failed(error); }
-    // A guest heap overrun fails the session and tears down its transport;
-    // report the limit rather than the resulting socket error.
-    if (failure && this.engine?.memoryLimitExceeded) failure = fault('RESOURCE_LIMIT');
     if (failure) throw failure;
     return value;
   }
@@ -525,11 +547,6 @@ export class CatSession extends LXSession {
         const data = chunk => {
           if (settled) return;
           length += chunk.length;
-          if (length > this.limits.maxMemoryBytes) {
-            finish(false, fault('RESOURCE_LIMIT'));
-            try { response.destroy(); } catch { /* Request ownership cleanup still follows. */ }
-            return;
-          }
           chunks.push(Buffer.from(chunk));
         };
         const responseFailed = error => finish(false, safeError(error, 'NETWORK_ERROR'));
@@ -540,7 +557,7 @@ export class CatSession extends LXSession {
           else {
             let combined;
             try {
-              combined = Buffer.concat(chunks);
+              combined = Buffer.concat(chunks, length);
               finish(true, combined.toString('utf8'));
             } catch (error) { finish(false, safeError(error, 'SERVICE_ERROR')); }
             finally { combined?.fill(0); }
@@ -712,7 +729,8 @@ export class CatSession extends LXSession {
   }
 
   activate() {
-    super.activate();
+    this.assertLive();
+    this.activated = true;
     try { this.onActivate?.(this); }
     catch { /* Lifecycle observation cannot change activation. */ }
   }
@@ -757,15 +775,20 @@ export class CatSession extends LXSession {
   }
   endpoint() { return clone(this.services.endpoint()); }
   stats() {
-    return { ...super.stats(), networkRequests: this.nativeRequests.size + this.networks.size,
+    return { live: this.live, timers: this.timers.size, invocations: this.invocations.size,
+      pendingAdapterTasks: this.adapterTasks.size, networkRequests: this.nativeRequests.size,
       listeners: [...this.services.listeners].filter(server => server.listening).length,
-      nativeHandles: this.node.handles.size,
-      cleanupError: this.cleanupError };
+      sockets: this.node.networkResources.size + this.services.connections.size,
+      streams: this.node.streams.size + this.node.volume.streams.size,
+      webResources: this.node.webResources.size, descriptors: this.node.volume.descriptors.size,
+      memory: process.memoryUsage(), cleanupError: this.cleanupError };
   }
   stop(reason = fault('STALE_SESSION')) {
     if (this.stopping) return this.stopping;
-    this.stopping = this.stopOwned(reason);
-    this.stopping.catch(() => {});
+    // Publish the stop owner before destroy/abort can synchronously reenter it.
+    const stopping = deferred();
+    this.stopping = stopping.promise;
+    this.stopOwned(reason).then(stopping.resolve, stopping.reject);
     return this.stopping;
   }
   async stopOwned(reason) {
@@ -775,37 +798,50 @@ export class CatSession extends LXSession {
       cleanupFailure ??= failure;
       this.cleanupError ??= failure.code;
     };
+    const wasLive = this.live;
+    this.live = false;
     this.activated = false;
-    if (this.live && this.engine && !this.engine.closed) {
-      let timer;
+    this.ready.reject(reason);
+    // Start real I/O cancellation before a cooperative stop hook waits for
+    // close. Keep the root/volume open until that hook has flushed its writes.
+    try { this.services.beginStop(); }
+    catch (error) { failed(error); }
+    this.node.webPipeAbort.abort(fault('CANCELLED'));
+    for (const socket of this.node.networkResources) {
+      try { if (!socket.destroyed) socket.destroy(); } catch (error) { failed(error); }
+    }
+    if (wasLive && this.realm) {
+      const scope = new ResourceScope(this.root.signal, this.limits.cleanupTimeoutMs);
+      this.#cleanupScope = scope;
       try {
-        this.contextScope.run(this.root, () =>
-          this.engine.call('catStop', []));
-        await Promise.race([
-          this.guestStopped.promise,
-          new Promise(resolve => { timer = setTimeout(resolve, this.limits.cleanupTimeoutMs); }),
-        ]);
-      } catch { /* Forced owned-resource cleanup follows. */ }
+        await scope.race(this.contextScope.run(scope, () => this.realm.stop()));
+      } catch (error) { failed(error); }
       finally {
-        try { clearTimeout(timer); } catch (error) { failed(error); }
+        this.#cleanupScope = null;
+        scope.close(reason);
       }
     }
-    if (this.live) {
-      this.live = false;
-      this.ready.reject(reason);
-      try { this.root.close(reason); }
-      catch (error) { failed(error); }
-      try { this.callbacks.clear(); }
-      catch (error) { failed(error); }
-    }
+    try { this.root.close(reason); }
+    catch (error) { failed(error); }
     for (const request of this.nativeRequests) {
-      try { request.destroy(); }
+      try { if (!request.destroyed) request.destroy(); }
       catch (error) { failed(error); }
     }
     try { await this.node.close(); }
     catch (error) { failed(error); }
-    try { this.engine?.close(); }
+    let timer;
+    try {
+      await Promise.race([this.waitForAdapters(), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(fault('TIMEOUT')), this.limits.cleanupTimeoutMs);
+      })]);
+    } catch (error) { failed(error); }
+    finally { clearTimeout(timer); }
+    // Terminal native callbacks can fail after node.close has already succeeded.
+    // Collect their errors after physical adapter completion, without awaiting guest promises.
+    if (this.node.failure) failed(this.node.failure);
+    try { this.realm?.close(); }
     catch (error) { failed(error); }
+    this.realm = null;
     if (!this.stopNotified) {
       this.stopNotified = true;
       try { this.onStop?.(this); }

@@ -3,9 +3,8 @@ import { fault, safeError } from './errors.js';
 export const WORKER_PROTOCOL_VERSION = 1;
 
 const requestMethods = new Set(['start', 'activate', 'invoke', 'stop',
-  'stats', 'probe', 'network', 'storage.get',
-  'storage.set', 'storage.delete', 'management.detect', 'management.sync',
-  'enhanceM3U8', 'capability']);
+  'stats', 'probe', 'network', 'management.detect', 'management.sync',
+  'enhanceM3U8']);
 const eventNames = new Set(['activated', 'endpoints', 'capabilities', 'alert',
   'failure', 'diagnostic', 'scriptError', 'network', 'stopped', 'stats', 'settings']);
 
@@ -29,21 +28,20 @@ export function cancel(id, code = 'CANCELLED') {
   return { version: WORKER_PROTOCOL_VERSION, kind: 'cancel', id, code };
 }
 
-export function response(id, value = null, frames = [], transfer = []) {
+export function response(id, value = null) {
   if (!Number.isSafeInteger(id) || id < 1) throw fault('INVALID_ARGUMENT');
-  return { version: WORKER_PROTOCOL_VERSION, kind: 'response', id, ok: true, value, frames, transfer };
+  return { version: WORKER_PROTOCOL_VERSION, kind: 'response', id, ok: true, value };
 }
 
 export function failure(id, error) {
   if (!Number.isSafeInteger(id) || id < 1) throw fault('INVALID_ARGUMENT');
   const safe = safeError(error);
   return { version: WORKER_PROTOCOL_VERSION, kind: 'response', id, ok: false, code: safe.code,
-    ...(Number.isInteger(safe.statusCode) ? { statusCode: safe.statusCode } : {}),
-    ...(error?.memoryLimitExceeded || safe.memoryLimitExceeded ? { memoryLimitExceeded: true } : {}) };
+    ...(Number.isInteger(safe.statusCode) ? { statusCode: safe.statusCode } : {}) };
 }
 
-export function event(name, value = null, frames = [], transfer = []) {
-  return { version: WORKER_PROTOCOL_VERSION, kind: 'event', event: assertEvent(name), value, frames, transfer };
+export function event(name, value = null) {
+  return { version: WORKER_PROTOCOL_VERSION, kind: 'event', event: assertEvent(name), value };
 }
 
 export function validateMessage(message) {
@@ -67,12 +65,10 @@ export function validateMessage(message) {
       throw fault('SCRIPT_PROTOCOL_ERROR');
     }
     if (!message.ok && typeof message.code !== 'string') throw fault('SCRIPT_PROTOCOL_ERROR');
-    if (message.frames !== undefined && !Array.isArray(message.frames)) throw fault('SCRIPT_PROTOCOL_ERROR');
     return message;
   }
   if (message.kind === 'event') {
     assertEvent(message.event);
-    if (message.frames !== undefined && !Array.isArray(message.frames)) throw fault('SCRIPT_PROTOCOL_ERROR');
     return message;
   }
   throw fault('SCRIPT_PROTOCOL_ERROR');
@@ -81,6 +77,5 @@ export function validateMessage(message) {
 export function errorFromResponse(message) {
   const error = fault(message.code);
   if (Number.isInteger(message.statusCode)) error.statusCode = message.statusCode;
-  if (message.memoryLimitExceeded) error.memoryLimitExceeded = true;
   return error;
 }

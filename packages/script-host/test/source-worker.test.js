@@ -1,13 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import {
+  createNodeNetwork,
   createNodeSourceCapabilities,
   createPortableSourceAdapter,
   createScriptHost,
 } from '../src/index.js';
 import { createCapabilityClient } from '@meowfilm/source-runtime';
 import { createSourceRuntimeModule, sourceRuntimeContract } from '../../../apps/runtime/modules/source-runtime.mjs';
+import { moduleHttp } from '../../../tests/runtime-http-fixture.mjs';
 
 function deferred() {
   let resolve;
@@ -76,14 +79,12 @@ function sourceHost(t, { network = async input => response(input), limits, diagn
 }
 
 const source = `
-  let retained;
   export default {
     async searchContent(keyword) {
       if (keyword === 'block') {
         await req('https://fixture.invalid/entered');
         while (true) {}
       }
-      if (keyword === 'oom') retained = new Uint8Array(64 * 1024 * 1024);
       return { list: [{ vod_id: keyword, vod_name: keyword }] };
     }
   };
@@ -105,6 +106,136 @@ const target = (installationId, keyword = 'normal') => ({
 });
 const result = keyword => ({ list: [{ vod_id: keyword, vod_name: keyword }] });
 
+const awaitingSource = url => `
+  let current = 'initial';
+  export default {
+    async searchContent(keyword) {
+      if (keyword === 'A') {
+        const reply = await req(${JSON.stringify(url)});
+        current = reply.content;
+        await local.set('latest', current);
+      } else if (keyword === 'B') {
+        current = 'B';
+        await local.set('latest', current);
+      }
+      return { current, stored: await local.get('latest') };
+    }
+  };
+`;
+
+test('R4 a pending source HTTP timeout keeps the same owner ready and B usable',
+  { timeout: 30000 }, async t => {
+    const entered = deferred(), closed = deferred(), requested = deferred();
+    const server = createServer((request, response) => {
+      response.once('close', () => closed.resolve());
+      entered.resolve(request.url);
+      // Keep the real response pending until the client's cancellation closes it.
+    });
+    t.after(() => new Promise(resolve => {
+      server.close(resolve);
+      server.closeAllConnections();
+    }));
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const url = `http://127.0.0.1:${server.address().port}/slow`;
+    const network = createNodeNetwork();
+    const diagnostics = [];
+    const { host, sessions } = sourceHost(t, {
+      diagnostics,
+      network: input => {
+        requested.resolve(input);
+        return network(input);
+      },
+      limits: { initTimeoutMs: 10000, requestTimeoutMs: 60000, cleanupTimeoutMs: 1000 },
+    });
+    const instance = await host.install(spec('a', awaitingSource(url)));
+    const session = sessions[0], engine = session.engine;
+    let exited = false;
+    engine.exited.then(() => { exited = true; });
+    const timedOut = assert.rejects(host.invoke(target('a', 'A'), { timeoutMs: 1000 }),
+      { code: 'TIMEOUT' });
+    const input = await within(requested.promise, 'A did not enter the network adapter');
+    assert.equal(await within(entered.promise, 'A did not reach the HTTP server'), '/slow');
+    assert.equal(input.scope.generation, instance.generation);
+    await within(timedOut, 'pending HTTP did not time out');
+    assert.equal(input.signal.aborted, true);
+    assert.equal(input.signal.reason.code, 'TIMEOUT');
+    await within(closed.promise, 'timed-out HTTP did not physically close');
+    await within(session.whenAdaptersIdle(), 'cancelled HTTP adapter did not settle');
+    assert.equal(host.get('a').generation, instance.generation);
+    assert.equal(host.get('a').state, 'ready');
+    assert.equal(host.get('a').lastFailure, null);
+    assert.deepEqual(await host.invoke(target('a', 'B')), { current: 'B', stored: 'B' });
+    await session.drain();
+    const rules = await engine.call('stats');
+    assert.equal(rules.invocations, 0, 'the expired rule invocation must be retired');
+    assert.equal(rules.pendingAdapterTasks, 0);
+    const native = await engine.stats({ refresh: true });
+    assert.equal(native.threadCount, 1);
+    assert.equal(native.runtimeCount, 1);
+    assert.equal(native.contextCount, 2);
+    assert.equal(exited, false);
+    assert.equal(sessions.length, 1, 'a pending timeout must not replace the owner');
+    assert.equal(session.engine, engine);
+    assert.equal(host.stats().activeRequests, 0);
+    assert.equal(host.stats().pendingAdapterTasks, 0);
+    assert.deepEqual(diagnostics.filter(event => event.operation === 'native.unresponsive'), []);
+  });
+
+test('R4 a pending source timeout retains physical I/O debt and rejects late results after B',
+  { timeout: 30000 }, async t => {
+    const entered = deferred(), physical = deferred();
+    const diagnostics = [];
+    const { host, sessions } = sourceHost(t, {
+      diagnostics,
+      network: async input => {
+        entered.resolve(input);
+        await physical.promise;
+        return response(input, 'late-A');
+      },
+      limits: { initTimeoutMs: 10000, requestTimeoutMs: 60000, cleanupTimeoutMs: 1000 },
+    });
+    const instance = await host.install(spec('a', awaitingSource('https://fixture.invalid/late')));
+    const session = sessions[0];
+    const timedOut = assert.rejects(host.invoke(target('a', 'A'), { timeoutMs: 1000 }),
+      { code: 'TIMEOUT' });
+    try {
+      const input = await within(entered.promise, 'A did not enter the delayed physical adapter');
+      await within(timedOut, 'A timeout waited for physical I/O');
+      assert.equal(input.signal.aborted, true);
+      assert.equal(input.signal.reason.code, 'TIMEOUT');
+      assert.equal(host.get('a').generation, instance.generation);
+      assert.equal(host.get('a').state, 'ready');
+      assert.equal(host.get('a').lastFailure, null);
+      assert.equal(host.stats().activeRequests, 0);
+      assert.equal(host.stats().pendingAdapterTasks, 1);
+      assert.equal(session.stats().pendingAdapterTasks, 1);
+      const retirement = session.adapterRetirement();
+      let idle = false;
+      retirement.idle.then(() => { idle = true; });
+      assert.deepEqual(await host.invoke(target('a', 'B')), { current: 'B', stored: 'B' });
+      assert.equal((await session.engine.call('stats')).invocations, 0);
+      assert.equal(idle, false, 'logical timeout must not report physical completion');
+      assert.equal(retirement.pendingAdapterTasks(), 1);
+      physical.resolve();
+      await within(retirement.idle, 'physical adapter did not retire after its actual settlement');
+      await session.drain();
+      assert.equal(retirement.pendingAdapterTasks(), 0);
+      assert.equal(session.stats().pendingAdapterTasks, 0);
+      assert.equal(host.stats().pendingAdapterTasks, 0);
+      assert.deepEqual(await host.invoke(target('a', 'after-late-result')),
+        { current: 'B', stored: 'B' }, 'late A must not overwrite B in guest state or storage');
+      assert.equal(host.get('a').generation, instance.generation);
+      assert.equal(host.get('a').state, 'ready');
+      assert.equal(host.get('a').lastFailure, null);
+      assert.equal(sessions.length, 1);
+      assert.deepEqual(diagnostics.filter(event => event.operation === 'native.unresponsive'), []);
+    } finally {
+      physical.resolve();
+      await within(session.whenAdaptersIdle(), 'released physical adapter did not settle');
+    }
+  });
+
 test('R4 a stuck source invocation leaves the main thread and B responsive, fails only A and can be enabled',
   { timeout: 30000 }, async t => {
     const entered = deferred();
@@ -119,7 +250,7 @@ test('R4 a stuck source invocation leaves the main thread and B responsive, fail
     });
     const a = await host.install(spec('a'));
     const b = await host.install(spec('b'));
-    const worker = sessions.find(value => value.installationId === 'a').worker;
+    const engine = sessions.find(value => value.installationId === 'a').engine;
     let settled = false;
     const invocation = host.invoke(target('a', 'block'), { timeoutMs: 2000 });
     invocation.then(() => { settled = true; }, () => { settled = true; });
@@ -132,11 +263,16 @@ test('R4 a stuck source invocation leaves the main thread and B responsive, fail
     assert.deepEqual(await host.invoke(target('b')), result('normal'));
     assert.equal(settled, false, 'B must answer while A is still stuck');
     await timedOut;
-    await waitFor(() => host.get('a').state === 'failed' && worker.threadId === -1,
-      'expired source worker did not fail and physically exit');
+    await waitFor(() => host.get('a').state === 'failed' && engine.stats().threadCount === 0,
+      'expired source native thread did not fail and physically exit');
+    const exit = await within(engine.exited, 'interrupted source did not report its real exit');
+    assert.equal(exit.code, 'TIMEOUT');
+    assert.equal(exit.threadCount, 0);
+    assert.equal(exit.runtimeCount, 0);
+    assert.equal(exit.contextCount, 0);
     assert.equal(host.get('a').lastFailure, 'TIMEOUT');
     assert.equal(host.get('a').generation, a.generation);
-    assert.deepEqual(diagnostics.filter(event => event.operation === 'worker.unresponsive').map(event => ({
+    assert.deepEqual(diagnostics.filter(event => event.operation === 'native.unresponsive').map(event => ({
       installationId: event.installationId, code: event.code, phase: event.phase,
     })), [{ installationId: 'a', code: 'TIMEOUT', phase: 'running' }]);
     assert.deepEqual(await host.invoke(target('b', 'after-timeout')), result('after-timeout'));
@@ -144,7 +280,6 @@ test('R4 a stuck source invocation leaves the main thread and B responsive, fail
     assert.equal(host.get('b').state, 'ready');
     assert.equal(host.get('a').state, 'failed');
     assert.equal(sessions.filter(value => value.installationId === 'a').length, 1);
-    assert.equal(diagnostics.filter(event => event.operation === 'memory.restart').length, 0);
     const recovered = await host.enable('a');
     assert.equal(recovered.state, 'ready');
     assert.ok(recovered.generation > a.generation);
@@ -152,7 +287,7 @@ test('R4 a stuck source invocation leaves the main thread and B responsive, fail
     assert.deepEqual(await host.invoke(target('a')), result('normal'));
   });
 
-test('R4 a stuck source initialization leaves B responsive and is probed and terminated without automatic restart',
+test('R4 a stuck source initialization leaves B responsive and is interrupted and stopped without automatic restart',
   { timeout: 30000 }, async t => {
     const entered = deferred();
     const diagnostics = [];
@@ -171,7 +306,7 @@ test('R4 a stuck source initialization leaves B responsive and is probed and ter
     installing.then(() => { settled = true; }, () => { settled = true; });
     const timedOut = assert.rejects(installing, { code: 'TIMEOUT' });
     await within(entered.promise, 'source initialization did not reach the capability owner');
-    const worker = sessions.find(value => value.installationId === 'a').worker;
+    const engine = sessions.find(value => value.installationId === 'a').engine;
     await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(await host.invoke(target('b')), result('normal'));
     assert.equal(settled, false, 'B must answer before A initialization times out');
@@ -179,8 +314,8 @@ test('R4 a stuck source initialization leaves B responsive and is probed and ter
     const failed = host.get('a');
     assert.equal(failed.state, 'failed');
     assert.equal(failed.lastFailure, 'TIMEOUT');
-    assert.equal(worker.threadId, -1);
-    assert.deepEqual(diagnostics.filter(event => event.operation === 'worker.unresponsive').map(event => ({
+    assert.equal(engine.stats().threadCount, 0);
+    assert.deepEqual(diagnostics.filter(event => event.operation === 'native.unresponsive').map(event => ({
       installationId: event.installationId, code: event.code, phase: event.phase,
     })), [{ installationId: 'a', code: 'TIMEOUT', phase: 'initialization' }]);
     assert.deepEqual(await host.invoke(target('b', 'still-live')), result('still-live'));
@@ -196,7 +331,7 @@ test('R4 a stuck source initialization leaves B responsive and is probed and ter
   });
 
 for (const phase of ['initialization', 'invocation']) {
-  test(`R4 close cancels stuck source ${phase} and waits for the real worker exit`,
+  test(`R4 close cancels stuck source ${phase} and waits for the real native thread exit`,
     { timeout: 30000 }, async t => {
       const entered = deferred();
       const { host, sessions } = sourceHost(t, {
@@ -214,14 +349,14 @@ for (const phase of ['initialization', 'invocation']) {
       }
       const cancelled = assert.rejects(pending, { code: 'STALE_SESSION' });
       await within(entered.promise, `source ${phase} did not enter its capability`);
-      const worker = sessions[0].worker;
-      assert.ok(worker && worker.threadId !== -1);
+      const engine = sessions[0].engine;
+      assert.ok(engine && engine.stats().threadCount === 1);
       let exited = false;
-      worker.once('exit', () => { exited = true; });
+      engine.exited.then(() => { exited = true; });
       await new Promise(resolve => setImmediate(resolve));
       const closed = await within(host.close(), 'close waited for the 60s guest deadline', 3000);
-      assert.equal(exited, true, 'close must not resolve before the real worker exit event');
-      assert.equal(worker.threadId, -1);
+      assert.equal(exited, true, 'close must not resolve before the real native thread exit event');
+      assert.equal(engine.stats().threadCount, 0);
       await cancelled;
       assert.equal(closed.installations, 0);
       assert.equal(closed.liveSessions, 0);
@@ -247,11 +382,11 @@ test('R4/R6 closing a source does not count non-cooperative capability I/O as ph
     await host.install(spec('a'));
     const cancelled = assert.rejects(host.invoke(target('a', 'block')), { code: 'STALE_SESSION' });
     const input = await within(entered.promise, 'physical source network operation did not enter');
-    const worker = sessions[0].worker;
+    const engine = sessions[0].engine;
     try {
       const closed = await within(host.close(), 'close waited for non-cooperative capability I/O', 3000);
       await cancelled;
-      assert.equal(worker.threadId, -1);
+      assert.equal(engine.stats().threadCount, 0);
       assert.equal(input.signal.aborted, true);
       assert.equal(closed.cleanupComplete, false);
       assert.ok(closed.pendingAdapterTasks > 0, 'unsettled platform I/O must remain cleanup debt');
@@ -263,88 +398,8 @@ test('R4/R6 closing a source does not count non-cooperative capability I/O as ph
     assert.equal(sessions[0].stats().pendingAdapterTasks, 0);
   });
 
-test('R4 a ready source OOM fails only A and restarts the same revision exactly once',
-  { timeout: 30000 }, async t => {
-    const diagnostics = [];
-    const { host, sessions } = sourceHost(t, {
-      diagnostics,
-      limits: {
-        maxMemoryBytes: 16 * 1024 * 1024,
-        initTimeoutMs: 10000, requestTimeoutMs: 10000, cleanupTimeoutMs: 100,
-      },
-    });
-    const a = await host.install(spec('a'));
-    const b = await host.install(spec('b'));
-    assert.deepEqual(await host.invoke(target('a')), result('normal'));
-    await assert.rejects(host.invoke(target('a', 'oom')), { code: 'RESOURCE_LIMIT' });
-    await waitFor(() => host.get('a').state === 'ready' &&
-      host.get('a').generation > a.generation, 'ready source OOM did not restart');
-    const restarted = host.get('a');
-    assert.equal(restarted.enabled, true);
-    assert.equal(restarted.contentHash, a.contentHash);
-    assert.equal(restarted.version, a.version);
-    assert.equal(restarted.protocol, a.protocol);
-    assert.equal(diagnostics.filter(event => event.operation === 'memory.restart' &&
-      event.installationId === 'a' && event.code === 'RESOURCE_LIMIT').length, 1);
-    assert.deepEqual(await host.invoke(target('a', 'after-restart')), result('after-restart'));
-    assert.deepEqual(await host.invoke(target('b')), result('normal'));
-    const worker = sessions.find(value => value.installationId === 'a' &&
-      value.generation === restarted.generation).worker;
-    await assert.rejects(host.invoke(target('a', 'oom')), { code: 'RESOURCE_LIMIT' });
-    await waitFor(() => host.get('a').state === 'failed' && worker.threadId === -1,
-      'second source OOM did not leave its worker failed and exited');
-    assert.deepEqual(await host.invoke(target('b', 'after-second-oom')), result('after-second-oom'));
-    assert.equal(host.get('b').state, 'ready');
-    assert.equal(host.get('b').generation, b.generation);
-    assert.equal(host.get('a').lastFailure, 'RESOURCE_LIMIT');
-    assert.equal(host.get('a').generation, restarted.generation);
-    assert.equal(host.get('a').state, 'failed');
-    assert.equal(diagnostics.filter(event => event.operation === 'memory.restart').length, 1);
-    assert.equal(sessions.filter(value => value.installationId === 'a').length, 2);
-    await assert.rejects(host.invoke(target('a')), { code: 'DISABLED' });
-  });
-
-test('R4 source initialization OOM stays enabled and failed without restarting, exits its worker and leaves B usable',
-  { timeout: 30000 }, async t => {
-    const diagnostics = [];
-    const { host, sessions } = sourceHost(t, {
-      diagnostics,
-      limits: {
-        maxMemoryBytes: 16 * 1024 * 1024,
-        initTimeoutMs: 10000, requestTimeoutMs: 10000, cleanupTimeoutMs: 100,
-      },
-    });
-    const b = await host.install(spec('b'));
-    const installing = host.install(spec('a', `
-      const allocation = new Uint8Array(64 * 1024 * 1024);
-      ${source}
-    `));
-    const failed = assert.rejects(installing, { code: 'RESOURCE_LIMIT' });
-    await waitFor(() => sessions.some(value => value.installationId === 'a'),
-      'initializing source did not create a session');
-    const session = sessions.find(value => value.installationId === 'a');
-    await waitFor(() => session.worker !== null || session.exitCode !== null,
-      'initializing source did not create a real worker');
-    const worker = session.worker;
-    await failed;
-    assert.equal(host.get('a').enabled, true);
-    assert.equal(host.get('a').state, 'failed');
-    assert.equal(host.get('a').lastFailure, 'RESOURCE_LIMIT');
-    const generation = host.get('a').generation;
-    if (worker) assert.equal(worker.threadId, -1);
-    else assert.notEqual(session.exitCode, null, 'the real worker exit must have been observed');
-    assert.deepEqual(await host.invoke(target('b', 'after-init-oom')), result('after-init-oom'));
-    assert.equal(host.get('b').state, 'ready');
-    assert.equal(host.get('b').generation, b.generation);
-    assert.equal(host.get('a').generation, generation);
-    assert.equal(host.get('a').state, 'failed');
-    assert.equal(sessions.filter(value => value.installationId === 'a').length, 1);
-    assert.equal(diagnostics.filter(event => event.operation === 'memory.restart').length, 0);
-    await assert.rejects(host.invoke(target('a')), { code: 'DISABLED' });
-  });
-
 for (const failure of ['false', 'throw']) {
-  test(`R4/R6 virtual.unregister returning ${failure} remains observable through worker stop, host cleanup and module unload`,
+  test(`R4/R6 virtual.unregister returning ${failure} remains observable through native stop, host cleanup and module unload`,
     { timeout: 30000 }, async t => {
       const owner = createNodeSourceCapabilities({ network: async input => response(input) });
       const unregisters = [];
@@ -382,7 +437,7 @@ for (const failure of ['false', 'throw']) {
         },
       });
       t.after(() => module.close());
-      const rpc = (name, params = {}) => module.methods[`source.runtime.${name}`](params);
+      const rpc = moduleHttp(t, module);
       const bytes = Buffer.from(`
         export default {
           async playerContent() {
@@ -393,19 +448,11 @@ for (const failure of ['false', 'throw']) {
           }
         };
       `);
-      const begun = await rpc('stage.begin', {
-        basename: 'source.js',
-        length: bytes.length,
-        sha256: createHash('sha256').update(bytes).digest('hex'),
-      });
-      assert.equal(begun.ok, true, JSON.stringify(begun));
-      const chunk = await rpc('stage.chunk', {
-        token: begun.token, offset: 0, data: bytes.toString('base64'),
-      });
-      assert.equal(chunk.ok, true, JSON.stringify(chunk));
-      assert.equal(chunk.next, bytes.length);
+      const uploaded = await rpc.upload('route-cleanup', 1, bytes, { basename: 'source.js' });
+      assert.equal(uploaded.ok, true, JSON.stringify(uploaded));
+      assert.equal(uploaded.contract, sourceRuntimeContract);
       const loaded = await rpc('load', {
-        token: begun.token,
+        sourceRevision: 1,
         installationId: 'route-cleanup',
         revision: 1,
         expectedRevision: 0,
@@ -414,7 +461,8 @@ for (const failure of ['false', 'throw']) {
         metadata: {},
       });
       assert.equal(loaded.ok, true, JSON.stringify(loaded));
-      const { installationId, revision, generation } = loaded.instance;
+      assert.equal(loaded.contract, sourceRuntimeContract);
+      const { installationId, revision, generation } = loaded.value.instance;
       const identity = { installationId, revision, generation };
       const played = await rpc('invoke', { ...identity, action: 'play', payload: {} });
       assert.equal(played.ok, true, JSON.stringify(played));
@@ -424,13 +472,13 @@ for (const failure of ['false', 'throw']) {
       const route = decodeURIComponent(url.pathname.slice(1));
       assert.equal(profile, `source:${installationId}:${generation}`);
       assert.equal(owner.resolveVirtual(profile, route).url, 'https://media.invalid/video');
-      const worker = sessions[0].worker;
-      assert.ok(worker && worker.threadId !== -1);
+      const engine = sessions[0].engine;
+      assert.ok(engine && engine.stats().threadCount === 1);
       const unloaded = await rpc('unload', identity);
       assert.equal(unloaded.ok, false, JSON.stringify(unloaded));
       assert.equal(unloaded.contract, sourceRuntimeContract);
       assert.equal(unloaded.code, 'SOURCE_CLEANUP');
-      assert.equal(worker.threadId, -1, 'a cleanup error must not leave the worker running');
+      assert.equal(engine.stats().threadCount, 0, 'a cleanup error must not leave the native thread running');
       assert.equal(unregisters.length, 1);
       assert.equal(unregisters[0].input.profile, profile);
       assert.equal(unregisters[0].input.route, route);

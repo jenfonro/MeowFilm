@@ -1,16 +1,15 @@
-import { createNodeNetwork } from './node-network.js';
+import { createSourceDownload } from './source-download.js';
 import { catSourceURL } from './cat-settings.js';
 import { requireValue } from './errors.js';
 import { ResourceScope } from './scope.js';
 
-/** Management downloads use the existing HTTP transport and source byte bound,
- * including its redirect/decompression handling, without a domain allowlist. */
+/** Cat source downloads retain their redirect, encoding and source-size contract. */
 export async function downloadCatSource(url, { signal, maxSourceBytes, timeoutMs }) {
   catSourceURL(url);
   const scope = new ResourceScope(signal, timeoutMs);
   try {
     scope.assertOpen();
-    const response = await createNodeNetwork({ maxResponseBytes: maxSourceBytes })({
+    const response = await createSourceDownload({ maxSourceBytes })({
       url, options: {}, signal: scope.signal, validateURL: catSourceURL,
     });
     scope.assertOpen();

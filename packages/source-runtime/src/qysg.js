@@ -54,7 +54,7 @@ function listValue(value, keys = []) {
   if (parsed && typeof parsed === 'object') {
     for (const key of keys) if (Array.isArray(parsed[key])) return parsed[key];
   }
-  return [];
+  throw sourceFault('SCRIPT_PROTOCOL_ERROR');
 }
 
 function absolute(value, base) {
@@ -63,7 +63,7 @@ function absolute(value, base) {
   catch { return String(value); }
 }
 
-function bookValue(value, source, maximumNodes, baseUrl) {
+function bookValue(value, source, maximumNodes, baseUrl, maximumParseBytes) {
   const parsed = parseValue(value);
   const input = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   const book = normalizeBook({
@@ -71,7 +71,7 @@ function bookValue(value, source, maximumNodes, baseUrl) {
     bookUrl: input.bookUrl ?? input.url,
     tocUrl: input.tocUrl ?? input.bookUrl ?? input.url,
     latestChapterTitle: input.latestChapterTitle ?? input.lastChapter,
-  }, source, maximumNodes);
+  }, source, maximumNodes, maximumParseBytes);
   book.bookUrl = absolute(book.bookUrl, baseUrl);
   book.tocUrl = absolute(book.tocUrl, baseUrl);
   book.coverUrl = absolute(book.coverUrl, baseUrl);
@@ -92,8 +92,8 @@ function chapterValue(value, index, baseUrl) {
   };
 }
 
-function sourceProgram(html, maximumNodes) {
-  const document = parseMarkup(html, maximumNodes);
+function sourceProgram(html, maximumNodes, maximumParseBytes) {
+  const document = parseMarkup(html, maximumNodes, maximumParseBytes);
   const scripts = [...document.querySelectorAll('script')];
   const records = scripts.map(script => ({
     source: script.getAttribute('src') ?? '',
@@ -177,7 +177,7 @@ export class QysgAdapter {
       const code = String(value);
       if (!code.trim()) return;
       scriptBytes += textEncoder.encode(code).length;
-      sourceRequire(scriptBytes <= this.limits.maximumBytes, 'RESOURCE_LIMIT');
+      sourceRequire(scriptBytes <= this.limits.maximumParseBytes, 'RESOURCE_LIMIT');
       chunks.push(code);
     };
     const records = program.records;
@@ -207,7 +207,7 @@ export class QysgAdapter {
     }
     sourceRequire(chunks.length > 0, emptyCode);
     const code = chunks.join('\n;\n');
-    sourceRequire(textEncoder.encode(code).length <= this.limits.maximumBytes,
+    sourceRequire(textEncoder.encode(code).length <= this.limits.maximumParseBytes,
       'RESOURCE_LIMIT');
     return code;
   }
@@ -215,10 +215,10 @@ export class QysgAdapter {
   async sourceDefinition() {
     const configured = String(this.source.html ?? '');
     sourceRequire(configured.length > 0);
-    sourceRequire(textEncoder.encode(configured).length <= this.limits.maximumBytes,
+    sourceRequire(textEncoder.encode(configured).length <= this.limits.maximumParseBytes,
       'RESOURCE_LIMIT');
     if (/<script\b/i.test(configured)) {
-      const program = sourceProgram(configured, this.limits.maximumNodes);
+      const program = sourceProgram(configured, this.limits.maximumNodes, this.limits.maximumParseBytes);
       const baseUrl = String(this.source.bookSourceUrl ?? '').trim();
       return { program, baseUrl, code: await this.prepareProgram(program, baseUrl) };
     }
@@ -238,9 +238,9 @@ export class QysgAdapter {
         }
         sourceRequire(typeof response.data === 'string' && /<script\b/i.test(response.data),
           'INVALID_RESPONSE');
-        sourceRequire(textEncoder.encode(response.data).length <= this.limits.maximumBytes,
+        sourceRequire(textEncoder.encode(response.data).length <= this.limits.maximumParseBytes,
           'RESOURCE_LIMIT');
-        const program = sourceProgram(response.data, this.limits.maximumNodes);
+        const program = sourceProgram(response.data, this.limits.maximumNodes, this.limits.maximumParseBytes);
         sourceRequire(executableProgram(program.records), 'INVALID_RESPONSE');
         const code = await this.prepareProgram(program, response.url, 'INVALID_RESPONSE');
         return { program, baseUrl: response.url, code };
@@ -287,7 +287,7 @@ export class QysgAdapter {
     const baseUrl = absolute(payload.baseUrl, this.baseUrl) || this.baseUrl;
     return {
       books: listValue(value, ['books', 'list'])
-        .map(item => bookValue(item, this.source, this.limits.maximumNodes, baseUrl)),
+        .map(item => bookValue(item, this.source, this.limits.maximumNodes, baseUrl, this.limits.maximumParseBytes)),
       page: Number(payload.page ?? 1),
     };
   }
@@ -313,7 +313,7 @@ export class QysgAdapter {
     const baseUrl = absolute(payload.url ?? payload.baseUrl, this.baseUrl) || this.baseUrl;
     return {
       books: listValue(value, ['books', 'list'])
-        .map(item => bookValue(item, this.source, this.limits.maximumNodes, baseUrl)),
+        .map(item => bookValue(item, this.source, this.limits.maximumNodes, baseUrl, this.limits.maximumParseBytes)),
       page: Number(payload.page ?? 1),
     };
   }
@@ -322,7 +322,7 @@ export class QysgAdapter {
     const value = await this.guest('info', payload, invocation);
     const baseUrl = absolute(payload.bookUrl ?? payload.url ?? payload.book?.bookUrl ??
       payload.baseUrl, this.baseUrl) || this.baseUrl;
-    return { book: bookValue(value, this.source, this.limits.maximumNodes, baseUrl) };
+    return { book: bookValue(value, this.source, this.limits.maximumNodes, baseUrl, this.limits.maximumParseBytes) };
   }
 
   async toc(payload, invocation) {

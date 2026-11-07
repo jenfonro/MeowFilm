@@ -180,9 +180,10 @@ public song metadata mapper):
 Adapted portions:
 
 - Cat startup and service compatibility were informed by `src/util/onlineRuntime.js`, but
-  were rewritten for the QuickJS guest, finite Node-style capability bridge, installation
-  private volume and per-instance loopback listener. The original unrestricted host
-  `require`, `fs`, `process`, child process and VM execution path is not copied.
+  were rewritten for directly executed Node Worker scripts, a controlled module
+  interface, installation private volume and per-instance loopback listener. The
+  original unrestricted host `require`, `fs`, `process` and child-process path is
+  not copied. A Worker or vm context is not a malicious-code security sandbox.
 - Management protocol discovery and field mapping in `cat-management.js` adapt the route
   families represented by `src/plugins/api/onlineScriptAdapters.js`; requests go directly
   to the selected installation's current managed endpoint.
@@ -223,7 +224,7 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   `MeowJavaScript` Swift package and bundles `quickjs-native-MIT.txt`.
   The upstream command-line interpreter, libc/I/O module
   and module loader are not included. This client-side engine is independent
-  of the Node script host and is not a replacement for its WASM/asm.js engines.
+  of the Node script host and does not replace its native script-execution engine.
 
 ### Native Unicode tables — Unicode License V3
 
@@ -239,56 +240,72 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   The iOS App also bundles `Unicode-3.0.txt` as a resource.
   Node's separate ICU declaration does not replace this native-table attribution.
 
-## QuickJS / quickjs-emscripten — MIT
+## QuickJS-NG — MIT
 
-- Source: `https://github.com/justjake/quickjs-emscripten`, npm release `0.32.0`;
-  registry release gitHead `df4efb9ef2cb25c417ecb57986da462d11b244ed`.
-- Bundled packages: `quickjs-emscripten-core`, `@jitl/quickjs-ffi-types` and the
-  platform-selected `@jitl/quickjs-wasmfile-release-sync` (Windows) or
-  `@jitl/quickjs-asmjs-mjs-release-sync` (iOS), all `0.32.0`.
-- quickjs-emscripten Copyright (c) 2019-2024 Jake Teton-Landis.
-- QuickJS Copyright (c) 2017-2021 Fabrice Bellard and Charlie Gordon.
-- License: `quickjs-emscripten-LICENSE.txt`, copied byte-for-byte from the
-  release-sync package's combined original LICENSE. Each packaged npm dependency
-  also retains its own original LICENSE.
+- Source: `https://github.com/quickjs-ng/quickjs`, version `0.14.0`, commit
+  `3c051980ab7e783dfbfb1c70c014ce5e05ecf24c`.
+- License: `quickjs-ng-LICENSE.txt`, unchanged upstream text and copyrights.
+- The common runtime compiles QuickJS as a native library in the Node-API 8
+  extension `script_host_native.node`. One library serves independent script
+  runtimes and native execution threads; no WebAssembly or asm.js engine is shipped.
+- `packages/script-host/native/task-context.patch` preserves task identity across
+  Promise reactions, native await, generators, finalizers and scheduled jobs. It
+  independently retains and restores async-generator execution ownership, so
+  queued requests use their own cancellation control without replacing authority.
+  The existing cancellation cleanup window is unchanged. It
+  does not introduce a script memory quota or change the upstream license.
+- `packages/script-host/native/bigint-uintn.patch`, applied after that patch,
+  corrects the upstream `BigInt.asUintN` unsigned truncation and sign extension
+  for short and multi-limb integers, including limb-width boundaries. It preserves
+  coercion order, `BigInt.asIntN` semantics and the existing allocation boundary;
+  the upstream license and copyrights remain unchanged.
+- `packages/script-host/native/utf16-cstring.patch`, applied after the two patches
+  above, corrects upstream UTF-16 CString ownership for non-normal wide strings.
+  Slices and indirect storage are copied into an owned normal string before
+  returning data to the paired free API; normal wide strings retain their
+  zero-copy path. The upstream license and copyrights remain unchanged.
+- `packages/script-host/native/arraybuffer-ownership.patch`, applied last,
+  corrects ArrayBuffer detach and transfer ownership for externally backed
+  buffers. Detaching consumes the release callback once; transfers preserve
+  bytes without reallocating externally owned memory and detach the original
+  only after successful allocation. Ordinary inbound buffers keep their existing
+  backing path. The upstream license and copyrights remain unchanged.
 
-The unmodified release-sync `dist/emscripten-module.wasm` is the only permitted
-script-engine binary. Its exact package manifest, registry URL/integrity, license,
-length and SHA-256 are pinned in `scripts/quickjs-runtime.json`; no debug/asyncify
-engine variant or upstream reference script is bundled. The iOS pure-JavaScript
-asmjs variant comes from the same upstream release and gitHead; its manifest,
-registry URL/integrity, license and executable JavaScript hashes are also pinned
-there. It does not provide all of WebAssembly's fault/trap guarantees.
+## OpenSSL — Apache-2.0
 
-### Task-context derivation — revision 1
+- Source: `https://github.com/openssl/openssl`, version `3.5.9`, commit
+  `45e844fa2a14ec92d146bd8f5778ac130b6625fb`.
+- License: `openssl-LICENSE.txt`, unchanged upstream license text.
+- Only libcrypto is linked for script-requested algorithms on native execution
+  threads; libssl and the OpenSSL command-line program are not packaged.
 
-For task-context revision 1, the single-upstream-binary rule above is extended
-by exactly one reviewed derived WASM exception:
-`packages/script-host/src/quickjs/emscripten-module.wasm`, with its matching
-`emscripten-module.mjs` loader in the same directory. This pair derives from the
-same quickjs-emscripten `0.32.0` source at
-`df4efb9ef2cb25c417ecb57986da462d11b244ed`, built with Emscripten `5.0.1`.
-The upstream source archive SHA-256 is
-`b6f342ad8e18bcff29ab4e78467d6e33c53c9e1a47986e58b91a1462beb31a8e`.
+## zlib — zlib license
 
-The local modifications in `scripts/quickjs/task-context.patch` propagate task
-identity through Promise reactions and queued jobs. Reproduction is described
-by `scripts/quickjs/build.py`; the patch, build script and generated pair are
-pinned in `scripts/quickjs-runtime.json`. The existing upstream copyrights and
-combined MIT license above also apply to the derived portions; the original
-license text is unchanged and is redistributed as
-`quickjs-emscripten-LICENSE.txt` and in the release-sync npm package's `LICENSE`.
-The three npm packages and their registry identities remain unmodified.
+- Source: `https://github.com/madler/zlib`, version `1.3.1`, commit
+  `51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf`.
+- License: `zlib-LICENSE.txt`, unchanged upstream license text.
+- Explicit script compression operations use the native library on the owning
+  execution thread. Ordinary client requests do not run these algorithms.
+
+All three native source archives, licenses, the ordered patches, build tools and
+artifact locations are pinned in `scripts/script-host-native.json`. Reproduce with
+`scripts/quickjs/build-native.mjs`; the build receipt records source/SDK inputs,
+ABI, platform, architecture and artifact hashes. The common packager verifies
+that inventory without building, fetching or changing the lock.
+
+The historical `quickjs-emscripten-LICENSE.txt` is retained for platform consumers
+that have not yet migrated. It is not a dependency or backend of the new common
+runtime. Windows/iOS packaging migration is separate from this runtime change.
 
 ## Node compatibility npm dependencies
 
-The Cat finite Node-style bridge bundles the exact dependency closure recorded in
+The controlled Cat Node interface bundles the exact dependency closure recorded in
 `package-lock.json`. Each packaged npm directory retains its own original license file.
-The direct non-engine packages are `@opentelemetry/api` 1.9.0, `acorn` 8.15.0, `buffer` 6.0.3,
-`events` 3.3.0, `path-browserify` 1.0.1, `readable-stream` 4.7.0,
-`supports-color` 8.1.1 and `util` 0.12.5.
+Its direct JavaScript packages are `@opentelemetry/api` 1.9.0, `acorn` 8.15.0
+and `supports-color` 8.1.1. Buffer, events, path, stream and util use Node's
+native objects rather than the previous browser compatibility packages.
 
-Acorn parses constant route declarations inside the QuickJS guest only when a
+Acorn parses constant route declarations in the Cat Worker only when a
 script does not expose framework route registration. It does not execute source.
 
 - Apache-2.0 package text: `Apache-2.0.txt`.
@@ -307,6 +324,20 @@ copied into the application's protocol adapters.
 - `fontoxpath` 3.34.0 — MIT.
 - `linkedom` 0.18.14 — ISC.
 - `iconv-lite` 0.6.3 — MIT.
+- `buffer` 6.0.3 — MIT, only for the pure-JavaScript encoding/URL SDK, not Cat.
+- `string_decoder` 1.3.0 — MIT, Copyright Node.js contributors; source:
+  `https://github.com/nodejs/string_decoder`. Its dependency `safe-buffer` 5.2.1
+  is MIT, Copyright (c) Feross Aboukhadijeh; source:
+  `https://github.com/feross/safe-buffer`. These unmodified pure-JavaScript
+  packages support iconv-lite decoding inside the source SDK, using npm `buffer`
+  rather than Node builtins. Exact versions and registry integrity are recorded
+  in `package-lock.json`. License texts are already included in
+  `npm-node-compat-MIT.txt`; the common payload also preserves both packages'
+  original `LICENSE` files.
+- `whatwg-url` 14.2.0 and `tr46` 5.1.1 — MIT, Copyright (c) Sebastian Mayr;
+  `webidl-conversions` 7.0.0 — BSD-2-Clause, Copyright (c) 2014 Domenic Denicola;
+  `punycode` 2.3.1 — MIT. Their original license texts remain in the packaged
+  dependency directories and apply to their code bundled into `source-sdk.js`.
 - Transitive closure: `@acemir/cssom` 0.9.32 (MIT), `boolbase` 2.0.0 (ISC),
   `css-select` 7.0.0 (BSD-2-Clause), `css-what` 8.0.0 (BSD-2-Clause),
   `dom-serializer` 3.1.1 and 2.0.0 (MIT), `domelementtype` 3.0.0 and
@@ -316,6 +347,11 @@ copied into the application's protocol adapters.
   `htmlparser2` 10.1.0 (MIT), `nth-check` 3.0.1 (BSD-2-Clause),
   `prsc` 4.0.0 (MIT), `safer-buffer` 2.1.2 (MIT), `uhyphen` 0.2.0 (ISC),
   `whynot` 5.0.0 (MIT), and `xspattern` 3.1.0 (MIT).
+
+`node-gyp` 11.5.0 (MIT) and `esbuild` 0.28.1 (MIT) are locked build tools.
+They and their executable/development dependencies are not in the runtime payload.
+The neutral SDK bundle keeps upstream legal comments and the payload retains
+the original dependency license files.
 
 ## QR Code generator — MIT
 

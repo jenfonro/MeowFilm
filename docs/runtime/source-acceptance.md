@@ -1,12 +1,12 @@
 # 外部 LX/Cat/Reader 来源动态验收
 
-`scripts/accept-sources.mjs` 是仓库验收工具，不是产品运行入口。它通过公共模块在 QuickJS 中执行原始外部来源，不复制到源码／发布目录，不回退到 Node VM。
+`scripts/accept-sources.mjs` 是仓库验收工具，不是产品运行入口。它经真实回环 HTTP 调用公共模块执行原始外部来源，不复制到仓库源码／发布目录。LX 使用每实例 native 线程的 1 Runtime/1 Context，source 使用 1 Runtime/2 Context；CatNode 使用独立 Node Worker 直接执行，不经过 QuickJS。
 
 | 入口 | 公共契约 | 运行路径 |
 | --- | --- | --- |
-| `--kind lx`（默认） | `music.script.v3`／`music@0.8.0` | main LX 运行器 |
-| `--kind cat` | `cat.script.v1`／`cat@0.1.0` | main Cat Node、私有卷及服务能力 |
-| `--kind source` | `source.runtime.v1`／`source@0.1.0` | `scripts/accept-reader-sources.mjs`，Reader 规则与 portable CatVod Spider adapter |
+| `--kind lx`（默认） | `music.script.v3`／`music@0.8.0` | native LX 运行器 |
+| `--kind cat` | `cat.script.v2`／`cat@0.2.0` | Node Worker、私有卷及服务能力 |
+| `--kind source` | `source.runtime.v2`／`source@0.2.0` | `scripts/accept-reader-sources.mjs`，Reader 规则与 portable CatVod Spider adapter |
 
 `--kind cat` 与 `--kind source --protocol cat` 是不同输入契约。前者使用真实 Cat Node 路径；后者使用 portable Spider 的 `homeContent/searchContent/detailContent/playerContent` 等接口，不接收 Node `require`／服务脚本，也不自动回退到 LX。
 
@@ -29,7 +29,7 @@ node scripts/accept-sources.mjs --kind source --scripts <文件或目录绝对�
 - 不制造其他平台的 ID，不以网络歌曲替代 `local` 输入，不将缺少输入写成已执行。特殊平台／扩展动作需要调用方提供其实际协议数据。
 - `--probe-media` 对 LX `musicUrl` 或 Cat `play` 返回的 HTTP(S) URL 发起有界字节探测；它不下载完整媒体，不证明整首播放或所有画质可用。
 - `--output` 必须是仓库 `tmp/` 内的绝对路径；默认报告为 `tmp/test-results/script-sources/acceptance.json`，运行中滚动替换。
-- Cat 每份脚本使用独立临时 dataRoot；关闭运行器后递归清理。源码通过 64 KiB 分片安装，声明长度超过 16 MiB 时在暂存入口拒绝；大结果通过 `blob.read` 校验长度/SHA-256 后释放，不把整份源码或结果塞进单个 bridge 帧。
+- 音乐/Cat 每份脚本使用独立临时 dataRoot；关闭运行器后递归清理。源码一次 raw PUT 登记完整候选，再以 sourceRevision 一次 JSON POST 导入/安装；源码仍为 1 至 16 MiB。调用和结果均直接 JSON/value，无大小分流、分片、Base64、TTL 或普通字节配额。中断上传不替换完整候选，前置字段/身份失败不消费，取入操作失败释放；原始源码和 source 规范化执行内容的身份不混淆。
 
 ## Reader 与 portable CatVod
 
@@ -71,23 +71,30 @@ Reader 的 `--probe-media` 同样要求 `--live`，只对 portable CatVod `play`
 
 ## 发布闭包
 
-```powershell
-& .\build\windows\runtime\node.exe scripts/accept-sources.mjs `
-  --kind <lx|cat|source> --scripts <绝对路径> --records <JSON 绝对路径> `
-  --payload <build/windows/runtime 的绝对路径> --live --probe-media
+```sh
+node scripts/accept-sources.mjs \
+  --kind <lx|cat|source> --scripts <绝对路径> --records <JSON绝对路径> \
+  --payload <common-native payload绝对路径> --live --probe-media
 ```
 
-`--payload` 从 complete manifest 中定位公共模块，并拒绝该模块解析到 payload 外的文件依赖。验收工具仍由仓库提供，不随应用发布。Windows 管道／原生回调另由真实管道集成测试覆盖，不能用本工具的进程内调用替代。
+`--payload` 从 complete manifest 定位公共模块，要求真实使用的 HTTP bootstrap/client/contracts、完整候选 owner、runtime-bridge 和业务包入口都在 manifest 中；拒绝任何依赖解析到 payload 外。验收工具仍由仓库提供，不随应用发布。每次验收会话在内存生成独立身份，调用与源码路径和产品同为 HTTP；不新增密钥 CLI、反向存储 listener 或持久化凭据。音乐安装和 KV 使用验收会话自己的临时数据根，不读取用户安装目录。
 
-Reader 的 manifest 要求以下条目，不要求同时加载 music/Cat Node 模块：
+Reader 所需公共入口为：
 
 ```text
 app/modules/source-runtime.mjs
+app/bootstrap.mjs
+app/client.mjs
+app/contracts.mjs
+app/modules/source-candidates.mjs
+node_modules/@meowfilm/runtime-bridge/src/index.js
 node_modules/@meowfilm/script-host/src/index.js
 node_modules/@meowfilm/source-runtime/src/index.js
 ```
 
-LX 沿用 `music@0.8.0` 的透明分片：大控制参数与结果按 64 KiB 字节块传输，原生桥接 1 MiB 物理帧边界不变，见 [LX 传输契约](music-script-runtime.md#控制数据传输)。
+Reader 不需要同时实例化 music/CatNode。LX/CatNode 对应替换业务模块入口，使用相同 HTTP 装配。整个公共 payload 仅支持 `common-native`，入口 `app/entry.mjs`；native 固定来源与构建见 `scripts/script-host-native.json`、`scripts/quickjs/build-native.mjs`。本轮不改 Windows/iOS launcher、旧管道或嵌入式接入，也不能把公共 Node HTTP 验收称作平台应用验证。通用构建与夹具回归已通过（见[通用验证范围](script-runtime.md#构建发布与验证边界)）；真实外部来源验收未覆盖，不能据此宣称真实来源通过。
+
+普通数据采用 ABI2 typed bytes 跨 native 边界；显式 Base64 算法仍可用，但工具不对正文自动编码/压缩/摘要。maximumParseBytes 仅限制 DOM/规则解析，不限制普通 HTTP、存储状态或会话内存；不存在单实例内存配额或 OOM 自动重启。
 
 ## 报告与退出条件
 
@@ -128,7 +135,7 @@ Reader 保留原 schema 2、`runtime`、`protocolOverride`、`rows` 和汇总字
 | `account_region_configuration_required` | 账号、地区、API key、登录或 Web 交互配置不足 |
 | `host_capability_missing` | 必需宿主能力／权限缺失，优先于同时出现的上游错误 |
 | `engine_incompatible` | 来源语法、规则、guest SDK 不兼容或尚不能归因的错误；必须继续定位 |
-| `runtime_limit` | 实际超时、内存或其他资源边界 |
+| `runtime_limit` | 实际超时或保留的输入／解析边界 |
 | `cleanup_failure` | 卸载、关闭、profile、虚拟路由或物理任务回收失败 |
 | `not_exercised` | 无真实动作输入且无法从前序结果推导 |
 

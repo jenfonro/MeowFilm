@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createCipheriv, publicEncrypt, generateKeyPairSync, constants } from 'node:crypto';
-import { createScriptHost, SCRIPT_LIMITS } from '../src/index.js';
+import { createScriptHost, SCRIPT_LIMITS, ScriptHostError } from '../src/index.js';
 import { lxScript, target, deferred, turn, memoryStorage } from './fixtures.js';
 
 async function waitFor(predicate, message, timeoutMs = 3000) {
@@ -37,10 +37,133 @@ test('host validates options and storage permissions', async t => {
   assert.equal((await host.invoke(target())).action, 'musicUrl');
 });
 
+test('cancelled installation admission never creates an execution owner', t => {
+  let created = 0;
+  const host = hostFor(t, { adapters: { lx: () => { created++; } } });
+  assert.throws(() => host.install({ installationId: 'cancelled', source: 'fixture', enabled: true },
+    { signal: AbortSignal.abort() }), { code: 'CANCELLED' });
+  assert.equal(created, 0);
+  assert.equal(host.list().length, 0);
+});
+
+test('installation cancellation stops the exact pending owner and preserves a previous generation on update',
+  async t => {
+    const owners = [], entered = deferred();
+    const host = hostFor(t, { adapters: { lx: input => {
+      const startup = deferred();
+      const session = {
+        ...input, live: true, activated: false, capabilities: {},
+        async start() {
+          if (input.revision.source === 'candidate') {
+            entered.resolve();
+            await startup.promise;
+          }
+        },
+        activate() { this.activated = true; },
+        invoke() { return input.revision.source; },
+        async stop() {
+          if (!this.live) return;
+          this.live = false;
+          this.activated = false;
+          startup.reject(new ScriptHostError('CANCELLED'));
+        },
+        async drainAdapters() {},
+        stats() { return { live: this.live, timers: 0, invocations: 0,
+          networkRequests: 0, pendingAdapterTasks: 0 }; },
+      };
+      startup.promise.catch(() => {});
+      owners.push(session);
+      return session;
+    } } });
+    const before = await host.install({ installationId: 'same', source: 'original', enabled: true });
+    const controller = new AbortController();
+    const updating = host.update('same', { source: 'candidate' }, { signal: controller.signal });
+    await entered.promise;
+    controller.abort();
+    await assert.rejects(updating, { code: 'CANCELLED' });
+    assert.equal(owners[0].live, true);
+    assert.equal(owners[1].live, false);
+    assert.equal(host.get('same').generation, before.generation);
+    assert.equal(host.get('same').contentHash, before.contentHash);
+    assert.equal(await host.invoke(target('same')), 'original');
+    assert.equal(host.stats().liveSessions, 1);
+  });
+
+test('captured initialization stop and late request abort cannot stop a successor with the same installation ID',
+  async t => {
+    const owners = [], gates = new Map();
+    const host = hostFor(t, { adapters: { lx: input => {
+      const gate = deferred();
+      gates.set(input.revision.source, gate);
+      const session = {
+        ...input, live: true, capabilities: {},
+        start: () => gate.promise,
+        activate() {},
+        invoke: () => input.revision.source,
+        async stop() { this.live = false; gate.reject(new ScriptHostError('STALE_SESSION')); },
+        async drainAdapters() {},
+        stats() { return { live: this.live, timers: 0, networkRequests: 0,
+          invocations: 0, pendingAdapterTasks: 0 }; },
+      };
+      owners.push(session);
+      return session;
+    } } });
+    const controller = new AbortController();
+    const first = host.install({ installationId: 'same', source: 'first', enabled: true },
+      { signal: controller.signal });
+    const rejected = assert.rejects(first, { code: 'STALE_SESSION' });
+    await waitFor(() => owners.length === 1, 'first owner missing');
+    const stopFirst = host.captureInitialization('same');
+    assert.equal(typeof stopFirst, 'function');
+    stopFirst();
+    await rejected;
+    await host.uninstall('same');
+    const second = host.install({ installationId: 'same', source: 'second', enabled: true });
+    await waitFor(() => owners.length === 2, 'successor missing');
+    stopFirst();
+    controller.abort();
+    await turn();
+    assert.equal(owners[1].live, true);
+    assert.deepEqual(host.initializingSessions(), [owners[1]]);
+    gates.get('second').resolve();
+    const ready = await second;
+    assert.ok(ready.generation > owners[0].generation);
+    assert.equal(await host.invoke(target('same')), 'second');
+  });
+
+test('generation-bound observation reads the actual old owner while update awaits its cleanup',
+  async t => {
+    const retired = deferred(), release = deferred();
+    t.after(() => release.resolve());
+    const host = hostFor(t, { adapters: { lx: input => ({
+      ...input, live: true, capabilities: { source: input.revision.source },
+      async start() {}, activate() {}, invoke: () => input.revision.source,
+      async stop() {
+        this.live = false;
+        if (input.revision.source === 'old') { retired.resolve(); await release.promise; }
+      },
+      async drainAdapters() {},
+      stats() { return { live: this.live, timers: 0, networkRequests: 0,
+        invocations: 0, pendingAdapterTasks: 0 }; },
+    }) } });
+    const old = await host.install({ installationId: 'a', source: 'old', enabled: true, version: '1' });
+    const observe = host.observe('a');
+    const updating = host.update('a', { source: 'new', version: '2' });
+    await retired.promise;
+    assert.equal(host.get('a').state, 'ready');
+    assert.ok(host.get('a').generation > old.generation);
+    assert.deepEqual(observe(), { ...old, state: 'failed',
+      resources: { ...old.resources, live: false } });
+    release.resolve();
+    const next = await updating;
+    assert.equal(host.observe('a')().generation, next.generation);
+    assert.equal(observe().generation, old.generation);
+    assert.equal(observe().contentHash, old.contentHash);
+  });
+
 test('host applies shared script limits and protocol-specific timeout defaults', async t => {
   const host = hostFor(t);
   assert.equal(host.limits.maxSourceBytes, 16 * 1024 * 1024);
-  assert.equal(host.limits.maxMemoryBytes, SCRIPT_LIMITS.maxMemoryBytes);
   assert.equal(host.limits.maxStackBytes, 256 * 1024);
   assert.equal(host.limits.initTimeoutMs, 5000);
   assert.equal(host.limits.requestTimeoutMs, 60000);
@@ -159,7 +282,7 @@ for (const [name, source, code] of [
   });
 }
 
-test('an unresponsive synchronous handler times out, fails its worker and can be re-enabled', async t => {
+test('an unresponsive synchronous handler times out, fails its native owner and can be re-enabled', async t => {
   const diagnostics = [];
   const host = createScriptHost({ limits: { cleanupTimeoutMs: 20, requestTimeoutMs: 60000 },
     onDiagnostic: event => diagnostics.push(event) });
@@ -184,12 +307,12 @@ test('an unresponsive synchronous handler times out, fails its worker and can be
     'the synchronous handler did not enter its loop');
   await timedOut;
   await waitFor(() => host.get('a').state === 'failed',
-    'an unresponsive worker was not marked failed');
+    'an unresponsive native owner was not marked failed');
   assert.equal(host.get('a').lastFailure, 'TIMEOUT');
   await waitFor(() => diagnostics.some(event =>
-    event.installationId === 'a' && event.operation === 'worker.unresponsive' &&
+    event.installationId === 'a' && event.operation === 'native.unresponsive' &&
     event.code === 'TIMEOUT' && event.phase === 'running'),
-  'missing running worker.unresponsive diagnostic');
+  'missing running native.unresponsive diagnostic');
   const failure = host.get('a');
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(host.get('a').state, 'failed');
@@ -258,16 +381,17 @@ test('non-HTTP input is rejected before injected network access', async t => {
   assert.equal(calls, 0);
 });
 
-test('request cancellation keeps session-owned network work; late completion cannot call old callbacks', async t => {
+test('request cancellation keeps session-owned network work; its callback completes once without reviving the invocation', async t => {
   const started = deferred(), response = deferred();
   let outbound;
   const host = hostFor(t, { network: request => { outbound = request; started.resolve(); return response.promise; } });
   await host.install({ installationId: 'a', enabled: true,
     permissions: {},
-    source: lxScript({ setup: 'let callbacks = 0;', handler: `async ({info}) => {
-      if (info.musicInfo.probe) return callbacks;
+    source: lxScript({ setup: `let callbacks = 0, finishCallback;
+      const callbackDone = new Promise(resolve => { finishCallback = resolve; });`, handler: `async ({info}) => {
+      if (info.musicInfo.probe) { await callbackDone; return callbacks; }
       return new Promise((resolve,reject)=>lx.request('https://fixture.invalid/x',{},
-        (e,r,b)=>{callbacks++;e?reject(e):resolve(b)}));
+        (e,r,b)=>{callbacks++;e?reject(e):resolve(b);finishCallback();}));
     }` }) });
   const controller = new AbortController();
   const request = host.invoke(target(), { signal: controller.signal });
@@ -275,14 +399,13 @@ test('request cancellation keeps session-owned network work; late completion can
   await started.promise;
   controller.abort();
   await rejected;
-  // Request cancellation terminates the transport, while the session-owned
+  // Request cancellation ends this invocation, while the session-owned
   // network task keeps its own lifetime until the adapter settles.
   assert.equal(outbound.signal.aborted, false);
   await waitFor(() => host.stats().networkRequests === 1,
     'the live network request did not reach the worker snapshot');
   assert.equal(host.stats().networkRequests, 1);
   response.resolve({ statusCode: 200, body: 'too late' });
-  await turn();
   // The late response may settle the session-owned callback, but the cancelled
   // request's result must not become a successful invocation.
   assert.equal(await host.invoke(target('a', 'kw', { probe: true })), 1);

@@ -3,80 +3,80 @@ import * as net from 'node:net';
 import * as tls from 'node:tls';
 import * as zlib from 'node:zlib';
 import * as url from 'node:url';
-import * as types from 'node:util/types';
+import * as os from 'node:os';
+import stream from 'node:stream';
+import streamPromises from 'node:stream/promises';
+import * as web from 'node:stream/web';
+import * as http2 from 'node:http2';
+import * as buffer from 'node:buffer';
+import * as util from 'node:util';
+import * as events from 'node:events';
+import * as asyncHooks from 'node:async_hooks';
+import * as diagnostics from 'node:diagnostics_channel';
+import * as querystring from 'node:querystring';
+import * as assert from 'node:assert';
+import * as worker from 'node:worker_threads';
+import * as timers from 'node:timers';
 import { StringDecoder } from 'node:string_decoder';
 import { performance } from 'node:perf_hooks';
-import * as webStreams from 'node:stream/web';
-import * as http2 from 'node:http2';
-import { Blob, File, INSPECT_MAX_BYTES, SlowBuffer, atob, btoa, constants as bufferConstants,
-  isAscii, isUtf8, kMaxLength, kStringMaxLength, resolveObjectURL, transcode } from 'node:buffer';
-import { TextEncoder, TextDecoder } from 'node:util';
 import { createRequire } from 'node:module';
 import { readFileSync, realpathSync, lstatSync } from 'node:fs';
-import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
-import { deferred, fault, requireValue } from './errors.js';
+import { dirname, extname, isAbsolute, relative, resolve, sep, posix } from 'node:path';
+import { fault, requireValue } from './errors.js';
 import { PrivateVolume } from './private-volume.js';
-import { nativeRoles, nativeSymbols, nativeConstructorRoles, classifyNative,
-  httpRequestOptionNames, projectFields, projectHttpRequestOptions,
-  pipeReadableRoles, pipeWritableRoles } from './native-roles.js';
+import { NativeResources } from './cat-resources.js';
 import { dnsFacade, isLoopbackHost } from './network-boundary.js';
 import { afterCloseDispatch, closeResource, guardDetachedEmitter } from './resource-close.js';
 
 const require = createRequire(import.meta.url);
-const guestPackages = new Set(['acorn', 'buffer', 'events', 'util', 'path-browserify',
-  'readable-stream', 'supports-color', '@opentelemetry/api']);
-const packageEntries = new Map([['buffer', 'buffer/'], ['events', 'events/'], ['util', 'util/']]);
+const sdkPackages = new Set(['acorn', 'supports-color', '@opentelemetry/api']);
 const packageNameFor = specifier => {
   const parts = specifier.split('/');
-  const packageSegments = specifier.startsWith('@') ? 2 : 1;
-  requireValue(parts.length >= packageSegments &&
+  requireValue(parts.length >= (specifier.startsWith('@') ? 2 : 1) &&
     parts.every(part => part.length > 0 && part !== '.' && part !== '..') &&
     !/[\u0000-\u001f\u007f]/.test(specifier), 'UNSUPPORTED_DEPENDENCY');
-  return parts.slice(0, packageSegments).join('/');
+  return parts.slice(0, specifier.startsWith('@') ? 2 : 1).join('/');
 };
-const nodeCodes = new Set(['ENOENT', 'EEXIST', 'EBADF', 'EINVAL', 'EISDIR', 'ENOTDIR',
-  'ENOTEMPTY', 'EPERM', 'EACCES', 'EIO', 'ENOSPC', 'ECONNRESET', 'ECONNREFUSED',
-  'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'EADDRINUSE', 'ERR_SERVER_ALREADY_LISTEN',
-  'ERR_SERVER_NOT_RUNNING', 'ERR_STREAM_DESTROYED', 'ERR_STREAM_PREMATURE_CLOSE', 'ERR_INVALID_ARG_TYPE',
-  'ERR_INVALID_ARG_VALUE', 'ERR_INVALID_URL', 'ERR_INVALID_PROTOCOL', 'ERR_OUT_OF_RANGE', 'ERR_CANCELED',
-  'ERR_HTTP_HEADERS_SENT', 'ERR_HTTP_INVALID_HEADER_VALUE', 'ERR_INVALID_HTTP_TOKEN',
-  'ERR_HTTP_INVALID_STATUS_CODE', 'ERR_INVALID_CHAR', 'ERR_UNESCAPED_CHARACTERS',
-  'ERR_CRYPTO_INVALID_KEYLEN', 'ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY', 'Z_DATA_ERROR', 'Z_BUF_ERROR']);
-const urlFormatFields = [...nativeRoles.legacyUrl.fields];
-const urlFormatOptions = ['auth', 'fragment', 'search', 'unicode'];
-const protocolCodes = new Set(['PERMISSION_DENIED', 'UNSUPPORTED_DEPENDENCY', 'STALE_SESSION',
-  'RESOURCE_LIMIT', 'NETWORK_ERROR', 'UNMAPPED_LOCAL_URL', 'CAPABILITY_UNAVAILABLE',
-  'SERVICE_EXISTS', 'SERVICE_CLOSED', 'TIMEOUT', 'CANCELLED']);
-const guestErrorCodes = new Set([...nodeCodes, ...protocolCodes]);
-const constructors = new Set(Object.keys(nativeConstructorRoles));
-const returns = { createHash: 'hash', createHmac: 'hash', createCipheriv: 'cipher',
-  createDecipheriv: 'cipher', createSign: 'sign', createVerify: 'sign', connectHttp2: 'http2Session' };
-const destroyOnRelease = new Set(['stream', 'hash', 'cipher', 'sign', 'http2Stream']);
-const resourceRoles = new Set(['server', 'request', 'response', 'incoming', 'socket',
-  'tlsSocket', 'stream', 'http2Session', 'http2Stream', 'fileHandle', 'agent']);
-const networkOwner = Symbol('node-network-owner');
-const ignoreError = () => {};
-const select = (module, names) => Object.fromEntries(names.filter(name => name in module)
-  .map(name => [name, module[name]]));
 const inside = (root, file) => {
   const delta = relative(root, file);
   return delta !== '..' && !delta.startsWith('..' + sep) && !isAbsolute(delta);
 };
+const ignoreError = () => {};
+
 const ignoredCleanupError = error =>
   ['ERR_INVALID_STATE', 'ERR_STREAM_DESTROYED', 'ERR_STREAM_PREMATURE_CLOSE',
     'NETWORK_ERROR', 'ERR_CANCELED', 'CANCELLED']
     .includes(error?.code) || error?.name === 'AbortError';
+const readableLocked = Object.getOwnPropertyDescriptor(web.ReadableStream.prototype, 'locked').get;
+const writableLocked = Object.getOwnPropertyDescriptor(web.WritableStream.prototype, 'locked').get;
+const signalAborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get;
 
-function cleanupWebHandle(role, value) {
+function webPipeOptions(options) {
+  if (options != null && !['object', 'function'].includes(typeof options))
+    throw Object.assign(new TypeError('Invalid pipe options'), { code: 'ERR_INVALID_ARG_TYPE' });
+  const preventAbort = options?.preventAbort, preventCancel = options?.preventCancel;
+  const preventClose = options?.preventClose, signal = options?.signal;
+  if (signal !== undefined) signalAborted.call(signal);
+  return { preventAbort: Boolean(preventAbort), preventCancel: Boolean(preventCancel),
+    preventClose: Boolean(preventClose), signal };
+}
+
+function closeWebResource(role, value) {
   try {
-    if (role === 'readableWeb')
-      return value.locked ? Promise.resolve() : cleanupWebHandle('reader', value.getReader());
-    if (role === 'writableWeb')
-      return value.locked ? Promise.resolve() : cleanupWebHandle('writer', value.getWriter());
+    if (role === 'readableWeb') {
+      if (value.locked) throw fault('SCRIPT_CLEANUP');
+      return closeWebResource('reader',
+        web.ReadableStream.prototype.getReader.call(value));
+    }
+    if (role === 'writableWeb') {
+      if (value.locked) throw fault('SCRIPT_CLEANUP');
+      return closeWebResource('writer',
+        web.WritableStream.prototype.getWriter.call(value));
+    }
     if (['transformWeb', 'compressionWeb', 'decompressionWeb',
       'textEncoderStream', 'textDecoderStream'].includes(role))
-      return Promise.allSettled([cleanupWebHandle('readableWeb', value.readable),
-        cleanupWebHandle('writableWeb', value.writable)]).then(results => {
+      return Promise.allSettled([closeWebResource('readableWeb', value.readable),
+        closeWebResource('writableWeb', value.writable)]).then(results => {
         const failed = results.find(result => result.status === 'rejected');
         if (failed) throw failed.reason;
       });
@@ -105,24 +105,26 @@ function cleanupWebHandle(role, value) {
       return false;
     }
   };
+  let released = false;
+  const releaseOnce = () => { if (!released) released = releaseLock(); };
   const attempt = (operation, release = false) => {
     let task;
     try { task = operation(); } catch (error) {
       failed(error);
-      if (release) releaseLock();
+      if (release) releaseOnce();
       return;
     }
     tasks.push(Promise.resolve(task).then(
-      () => { if (release) releaseLock(); },
-      error => { failed(error); if (release) releaseLock(); },
+      () => { if (release) releaseOnce(); },
+      error => { failed(error); if (release) releaseOnce(); },
     ));
   };
   if (role === 'reader') {
     attempt(() => value.cancel(reason), true);
-    releaseLock();
+    releaseOnce();
   } else if (role === 'writer') {
     attempt(() => value.abort(reason), true);
-    releaseLock();
+    releaseOnce();
   } else if (role === 'iterator' && typeof value.return === 'function') {
     attempt(() => value.return());
   }
@@ -130,584 +132,900 @@ function cleanupWebHandle(role, value) {
     if (failure) throw failure;
   });
 }
-/** The bridge names finite capabilities. Native methods are registered with a
- * role and receiver, never selected by traversing prototypes or Function.
- * The guest can reflect on its own wrappers, not on native internals. */
+/** Native Node values stay in the Cat Worker. Only resources with a real
+ * lifecycle are registered; ordinary values and keys use Node ownership. */
 export class NodeCapabilities {
   constructor(session, services, dataRoot) {
     this.session = session;
     this.services = services;
     this.volume = new PrivateVolume(dataRoot, session.installationId,
       scope => session.storageWritten(scope), session.revision.source,
-      () => session.callbackFailureScope ?? session.scope(),
-      session.limits.cleanupTimeoutMs, () => this.ownerScope());
-    this.handles = new Map();
-    this.reverse = new WeakMap();
-    this.tags = this.volume.roles;
-    this.callbacks = new Map();
-    this.callbackFinalizer = new FinalizationRegistry(receipt => {
-      if (this.closing || !this.callbacks || this.callbacks.get(receipt.id) !== receipt) return;
-      this.releaseCallbacks([receipt.id]);
-    });
-    this.callbackReverse = new WeakMap();
-    this.callbackReturns = new Map();
-    this.requestContexts = new WeakMap();
-    // Guest contexts created by a request callback keep that request's
-    // metadata for later continuation turns. Resource ownership still uses
-    // the session's script scope.
-    this.contextMetadata = new Map();
+      () => session.scope(), session.limits.cleanupTimeoutMs, () => session.resourceScope());
     this.sources = new Map();
     this.networkResources = new Set();
-    this.networkCleanup = new Map();
-    this.cleanupTracker = { tasks: new Set(), failure: null, active: true };
-    this.cleanupTasks = this.cleanupTracker.tasks;
-    this.scopeLeases = new WeakMap();
-    this.contextLeases = new Map();
-    this.promiseLeases = new Map();
-    this.pendingGuestRelease = {
-      handles: new Set(), callbacks: new Set(), contexts: new Set(), promises: new Set(),
-      forgetContexts: new Set(), collectHandles: new Set(),
-    };
-    this.releaseScheduled = false;
-    this.started = performance.now();
+    this.streams = new NativeResources();
+    this.webResources = new NativeResources();
+    this.webPipes = new Map();
+    this.webPipeAbort = new AbortController();
+    this.webTees = new WeakMap();
+    this.webTeeBranches = new WeakMap();
+    this.webObserved = new WeakSet();
+    this.bodyObserved = new WeakSet();
+    this.blobObserved = new WeakSet();
+    this.resourceCleanup = new NativeResources();
+    this.emitters = new WeakSet();
+    this.completionCallbacks = new WeakSet();
+    this.failure = null;
     this.fs = this.volume.facade();
+    for (const [name, method] of Object.entries(this.fs)) {
+      if (typeof method !== 'function') continue;
+      this.fs[name] = (...args) => {
+        const scope = session.scope();
+        if (typeof args.at(-1) === 'function') {
+          const callback = args.pop();
+          args.push((...values) => session.runCallback(callback, undefined, values, scope));
+        }
+        const value = method(...args);
+        if (/^create(?:Read|Write)Stream$/.test(name)) this.observeEmitter(value);
+        return value;
+      };
+    }
+    this.fs.realpath.native = this.fs.realpath;
+    this.fs.realpathSync.native = this.fs.realpathSync;
+    this.timers = this.timerModule();
+    this.process = this.processModule();
+    // Keep the CommonJS constructor and its own statics separate from Node's singleton.
+    const streams = function Stream(...args) {
+      return new.target ? Reflect.construct(stream, args, new.target) :
+        Reflect.apply(stream, this, args);
+    };
+    Object.setPrototypeOf(streams, Object.getPrototypeOf(stream));
+    Object.defineProperties(streams, Object.getOwnPropertyDescriptors(stream));
+    streams.Stream = streams;
+    for (const name of ['pipeline', 'finished']) {
+      const method = stream[name], owner = this;
+      const managed = function(...args) {
+        const index = name === 'pipeline' ? args.length - 1 : args.length === 2 ? 1 : 2;
+        if (typeof args[index] === 'function')
+          args[index] = owner.completionCallback(args[index]);
+        return Reflect.apply(method, this, args);
+      };
+      Object.defineProperty(managed, util.promisify.custom,
+        Object.getOwnPropertyDescriptor(method, util.promisify.custom));
+      streams[name] = managed;
+    }
+    const wrapStream = Native => {
+      const owner = this;
+      function Managed(...args) {
+        if (!new.target && this instanceof Native) {
+          Reflect.apply(Native, this, args);
+          return owner.ownStream(this);
+        }
+        return owner.ownStream(Reflect.construct(Native, args,
+          new.target && new.target !== Managed ? new.target : Native));
+      }
+      Object.setPrototypeOf(Managed, Native);
+      Managed.prototype = Native.prototype;
+      // Writable's native check also recognizes Duplex without making every
+      // Writable subclass an instanceof match for an unrelated Duplex.
+      if (Object.hasOwn(Native, Symbol.hasInstance))
+        Object.defineProperty(Managed, Symbol.hasInstance, {
+          value(value) {
+            return Reflect.apply(Native[Symbol.hasInstance],
+              this === Managed ? Native : this, [value]);
+          },
+        });
+      return Managed;
+    };
+    // Stream itself is an EventEmitter base, not a destroyable I/O resource.
+    for (const name of ['Readable', 'Writable', 'Duplex', 'Transform', 'PassThrough'])
+      streams[name] = wrapStream(stream[name]);
+    for (const name of ['from', 'fromWeb', 'fromIterable', 'wrap']) {
+      if (typeof stream.Readable[name] === 'function')
+        streams.Readable[name] = (...args) => this.ownStream(stream.Readable[name](...args));
+    }
+    streams.Readable.toWeb = (...args) => this.ownWeb(stream.Readable.toWeb(...args), 'readableWeb');
+    streams.Writable.fromWeb = (...args) => this.ownStream(stream.Writable.fromWeb(...args));
+    streams.Writable.toWeb = (...args) => this.ownWeb(stream.Writable.toWeb(...args), 'writableWeb');
+    streams.Duplex.from = (...args) => this.ownStream(stream.Duplex.from(...args));
+    streams.Duplex.fromWeb = (...args) => this.ownStream(stream.Duplex.fromWeb(...args));
+    streams.Duplex.toWeb = (...args) => {
+      const pair = stream.Duplex.toWeb(...args);
+      this.ownWeb(pair.readable, 'readableWeb');
+      this.ownWeb(pair.writable, 'writableWeb');
+      return pair;
+    };
+    const zlibs = { ...zlib };
+    for (const name of ['Gzip', 'Gunzip', 'Deflate', 'Inflate', 'DeflateRaw', 'InflateRaw',
+      'Unzip', 'BrotliCompress', 'BrotliDecompress', 'ZstdCompress', 'ZstdDecompress'])
+      if (typeof zlib[name] === 'function') zlibs[name] = wrapStream(zlib[name]);
+    for (const key of Object.keys(zlib)) if (/^create/.test(key) && typeof zlib[key] === 'function')
+      zlibs[key] = (...args) => this.ownStream(zlib[key](...args));
+    for (const name of ['gzip', 'gunzip', 'deflate', 'inflate', 'deflateRaw', 'inflateRaw',
+      'unzip', 'brotliCompress', 'brotliDecompress', 'zstdCompress', 'zstdDecompress'])
+      if (typeof zlib[name] === 'function')
+        zlibs[name] = (...args) => this.nativeCall(zlib[name], zlib, args);
+    const cryptos = { ...crypto };
+    for (const name of ['randomBytes', 'randomFill', 'pbkdf2', 'scrypt', 'generateKey',
+      'generateKeyPair', 'generatePrime', 'checkPrime', 'sign', 'verify'])
+      cryptos[name] = (...args) => this.nativeCall(crypto[name], crypto, args);
+    const subtleMethods = new Map();
+    const subtle = new Proxy(crypto.subtle, { get: (target, name) => {
+      const value = Reflect.get(target, name, target);
+      if (typeof value !== 'function') return value;
+      if (!subtleMethods.has(name)) subtleMethods.set(name, (...args) => {
+        this.ownerScope().assertOpen();
+        return this.session.trackAdapter(Reflect.apply(value, target, args));
+      });
+      return subtleMethods.get(name);
+    } });
+    cryptos.subtle = subtle;
+    cryptos.webcrypto = new Proxy(crypto.webcrypto, { get: (target, name) => {
+      if (name === 'subtle') return subtle;
+      const value = Reflect.get(target, name, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    for (const [name, terminal, type] of [['createHash', 'digest', 'Hash'], ['createHmac', 'digest', 'Hmac'],
+      ['createCipheriv', 'final', 'Cipheriv'], ['createDecipheriv', 'final', 'Decipheriv'],
+      ['createSign', 'sign', 'Sign'], ['createVerify', 'verify', 'Verify']]) {
+      cryptos[name] = (...args) => this.ownCryptoStream(crypto[name](...args), terminal);
+      const Native = crypto[type], owner = this;
+      function Managed(...args) {
+        return owner.ownCryptoStream(Reflect.construct(Native, args,
+          new.target && new.target !== Managed ? new.target : Native), terminal);
+      }
+      Object.setPrototypeOf(Managed, Native); Managed.prototype = Native.prototype;
+      cryptos[type] = Managed;
+    }
+    const webs = { ...web };
+    for (const [key, role] of Object.entries({ ReadableStream: 'readableWeb',
+      WritableStream: 'writableWeb', TransformStream: 'transformWeb',
+      CompressionStream: 'compressionWeb', DecompressionStream: 'decompressionWeb',
+      TextEncoderStream: 'textEncoderStream', TextDecoderStream: 'textDecoderStream' })) {
+      const Native = web[key], owner = this;
+      function Managed(...args) {
+        let value, ended = false;
+        const finished = () => {
+          ended = true;
+          if (value) owner.forgetWeb(value);
+        };
+        if (['ReadableStream', 'WritableStream'].includes(key) && args[0]) {
+          const underlying = args[0], input = Object.create(underlying);
+          for (const method of ['pull', 'write'])
+            if (typeof underlying[method] === 'function')
+              input[method] = (...input) => underlying[method].apply(underlying, input);
+          if (key === 'ReadableStream') input.start = controller => {
+            for (const method of ['close', 'error']) {
+              const original = controller[method];
+              controller[method] = (...input) => {
+                const result = original.apply(controller, input); finished(); return result;
+              };
+            }
+            return underlying.start?.call(underlying, controller);
+          };
+          for (const method of key === 'WritableStream' ? ['close', 'abort'] : ['cancel']) {
+            input[method] = (...input) => {
+              const result = underlying[method]?.apply(underlying, input);
+              Promise.resolve(result).then(finished, () => {});
+              return result;
+            };
+          }
+          args[0] = input;
+        }
+        value = owner.ownWeb(Reflect.construct(Native, args,
+          new.target && new.target !== Managed ? new.target : Native), role);
+        if (ended) finished();
+        return value;
+      }
+      Object.setPrototypeOf(Managed, Native);
+      Managed.prototype = Native.prototype;
+      webs[key] = Managed;
+    }
+    const channels = new Map(), channelStores = new Map(), channelViews = new WeakMap();
+    const managedChannel = channel => {
+      if (channelViews.has(channel)) return channelViews.get(channel);
+      const subscribe = callback => {
+        this.ownerScope().assertOpen();
+        if (typeof callback !== 'function') return channel.subscribe(callback);
+        const scope = session.scope();
+        function listener(...args) { return session.runCallback(callback, this, args, scope); }
+        channel.subscribe(listener);
+        const subscriptions = channels.get(channel) ?? [];
+        subscriptions.push({ callback, listener });
+        channels.set(channel, subscriptions);
+      };
+      const unsubscribe = callback => {
+        const subscriptions = channels.get(channel);
+        const index = subscriptions?.findIndex(entry => entry.callback === callback) ?? -1;
+        if (index < 0) return false;
+        const removed = channel.unsubscribe(subscriptions[index].listener);
+        subscriptions.splice(index, 1);
+        if (!subscriptions.length) channels.delete(channel);
+        return removed;
+      };
+      const bindStore = (store, transform) => {
+        this.ownerScope().assertOpen();
+        const scope = session.scope();
+        const callback = typeof transform === 'function' ? function(...args) {
+          return session.runCallback(transform, this, args, scope);
+        } : transform;
+        const result = channel.bindStore(store, callback);
+        const stores = channelStores.get(channel) ?? new Set();
+        stores.add(store);
+        channelStores.set(channel, stores);
+        return result;
+      };
+      const unbindStore = store => {
+        const removed = channel.unbindStore(store);
+        const stores = channelStores.get(channel);
+        stores?.delete(store);
+        if (!stores?.size) channelStores.delete(channel);
+        return removed;
+      };
+      const value = new Proxy(channel, { get(target, name, receiver) {
+        if (name === 'subscribe') return subscribe;
+        if (name === 'unsubscribe') return unsubscribe;
+        if (name === 'bindStore') return bindStore;
+        if (name === 'unbindStore') return unbindStore;
+        // Node switches a Channel's prototype when its subscriber count changes.
+        return Reflect.get(target, name, receiver);
+      } });
+      channelViews.set(channel, value);
+      channelViews.set(value, value);
+      return value;
+    };
+    const channel = name => managedChannel(diagnostics.channel(name));
+    const managedTracing = tracing =>
+      diagnostics.tracingChannel(Object.fromEntries(
+        ['start', 'end', 'asyncStart', 'asyncEnd', 'error']
+          .map(name => [name, managedChannel(tracing[name])])));
+    const diagnosticModule = { ...diagnostics, channel,
+      subscribe: (name, callback) => channel(name).subscribe(callback),
+      unsubscribe: (name, callback) => channel(name).unsubscribe(callback),
+      tracingChannel: (...args) => managedTracing(diagnostics.tracingChannel(...args)),
+      Channel: function(...args) { return managedChannel(new diagnostics.Channel(...args)); },
+    };
+    Object.setPrototypeOf(diagnosticModule.Channel, diagnostics.Channel);
+    diagnosticModule.Channel.prototype = diagnostics.Channel.prototype;
+    this.subscriptions = channels;
+    this.channelStores = channelStores;
+    const owner = this;
+    const wrap = (Native, observe) => {
+      function Managed(...args) {
+        return observe(Reflect.construct(Native, args,
+          new.target && new.target !== Managed ? new.target : Native));
+      }
+      Object.setPrototypeOf(Managed, Native);
+      Managed.prototype = Native.prototype;
+      return Managed;
+    };
+    this.web = {
+      Request: wrap(Request, value => owner.ownBody(value)),
+      Response: wrap(Response, value => owner.ownBody(value)),
+      Blob: wrap(buffer.Blob, value => owner.ownBlob(value)),
+      File: wrap(buffer.File, value => owner.ownBlob(value)),
+    };
+    for (const name of ['json', 'redirect', 'error'])
+      this.web.Response[name] = (...args) => this.ownBody(Response[name](...args));
     this.builtins = {
       fs: this.fs, 'fs/promises': this.fs.promises,
-      crypto: select(crypto, ['constants', 'webcrypto', 'createHash', 'createHmac', 'createCipheriv',
-        'createDecipheriv', 'createSign', 'createVerify', 'createPublicKey', 'createPrivateKey',
-        'createSecretKey', 'publicEncrypt', 'publicDecrypt', 'privateEncrypt', 'privateDecrypt',
-        'getRandomValues', 'randomBytes', 'randomFillSync', 'randomFill', 'randomInt', 'randomUUID',
-        'timingSafeEqual', 'pbkdf2', 'pbkdf2Sync', 'scrypt', 'scryptSync', 'hkdf', 'hkdfSync',
-        'getHashes', 'getCiphers', 'getCurves', 'generateKeyPair', 'generateKeyPairSync',
-        'sign', 'verify', 'diffieHellman', 'createECDH', 'X509Certificate']),
-      zlib: select(zlib, ['constants', 'gzip', 'gzipSync', 'gunzip', 'gunzipSync',
-        'deflate', 'deflateSync', 'inflate', 'inflateSync', 'deflateRaw', 'deflateRawSync',
-        'inflateRaw', 'inflateRawSync', 'unzip', 'unzipSync', 'brotliCompress',
-        'brotliCompressSync', 'brotliDecompress', 'brotliDecompressSync',
-        'createGzip', 'createGunzip', 'createDeflate', 'createInflate', 'createDeflateRaw',
-        'createInflateRaw', 'createUnzip', 'createBrotliCompress', 'createBrotliDecompress']),
-      url: { ...select(url, ['URL', 'URLSearchParams', 'parse', 'format', 'resolve',
-        'domainToASCII', 'domainToUnicode', 'urlToHttpOptions']),
-        fileURLToPath: value => {
-          const input = new URL(value);
-          requireValue(input.protocol === 'file:' && !input.host, 'PERMISSION_DENIED');
-          this.volume.path(decodeURIComponent(input.pathname), { missing: true });
-          return decodeURIComponent(input.pathname);
-        },
-        pathToFileURL: value => {
-          this.volume.path(value, { missing: true });
-          return new URL('file://' + (value.startsWith('/') ? value : '/' + value));
-        } },
-      'util/types': types, string_decoder: { StringDecoder },
-      encoding: { TextEncoder, TextDecoder }, bufferExtra: {
-        Blob, File, INSPECT_MAX_BYTES, SlowBuffer, atob, btoa, constants: bufferConstants,
-        isAscii, isUtf8, kMaxLength, kStringMaxLength, resolveObjectURL, transcode,
-      },
-      'stream/web': select(webStreams, ['ReadableStream', 'WritableStream', 'TransformStream',
-        'CompressionStream', 'DecompressionStream', 'TextEncoderStream', 'TextDecoderStream',
-        'ByteLengthQueuingStrategy', 'CountQueuingStrategy']),
+      buffer: { ...buffer, Blob: this.web.Blob, File: this.web.File },
+      crypto: cryptos, zlib: zlibs, events: events.default,
+      util, 'util/types': util.types, string_decoder: { StringDecoder },
+      stream: streams, 'stream/promises': streamPromises, 'stream/web': webs,
+      'readable-stream': streams, 'readable-stream/lib/stream.js': streams,
+      path: posix, 'path-browserify': posix, process: this.process,
+      async_hooks: asyncHooks, diagnostics_channel: diagnosticModule, querystring,
+      assert: assert.default, 'assert/strict': assert.strict,
+      timers: this.timers, 'timers/promises': this.promiseTimers(),
+      url: { ...url, fileURLToPath: value => {
+        const input = new URL(value);
+        requireValue(input.protocol === 'file:' && !input.host, 'PERMISSION_DENIED');
+        this.volume.path(decodeURIComponent(input.pathname), { missing: true });
+        return decodeURIComponent(input.pathname);
+      }, pathToFileURL: value => {
+        this.volume.path(value, { missing: true });
+        return new URL('file://' + posix.resolve('/', value));
+      } },
+      http: services.http, https: services.https,
+      net: this.netFacade(net), tls: this.netFacade(tls),
       http2: { constants: http2.constants,
         connect: (input, options = {}, callback) => {
+          requireValue(!this.services.stopping, 'SERVICE_CLOSED');
           requireValue(this.session.network === undefined, 'CAPABILITY_UNAVAILABLE');
-          const target = this.services.outboundURL(input);
+          if (typeof options === 'function') { callback = options; options = {}; }
+          requireValue(!options.createConnection && options.socketPath === undefined &&
+            options.fd === undefined && !options.path, 'PERMISSION_DENIED');
           const local = this.services.mapLocal(String(input)) !== null;
-          requireValue(!options.createConnection && !options.socketPath && !options.path, 'PERMISSION_DENIED');
-          const client = http2.connect(target, {
-            ...this.services.tlsOptions(options, { client: true, local }),
-          }, callback);
-          this.tags.set(client, 'http2Session');
+          const client = http2.connect(this.services.outboundURL(input),
+            this.services.tlsOptions(options, { client: true, local }));
+          const request = client.request;
+          client.request = (...args) => this.ownNetwork(request.apply(client, args));
+          const owner = this;
+          for (const name of ['ping', 'settings']) {
+            const method = client[name];
+            client[name] = function(...args) {
+              const index = name === 'ping' && typeof args[0] === 'function' ? 0 : 1;
+              if (typeof args[index] === 'function')
+                args[index] = owner.completionCallback(args[index]);
+              return Reflect.apply(method, this, args);
+            };
+          }
           this.ownNetwork(client);
+          if (typeof callback === 'function') client.once('connect', callback);
           return client;
         },
         getDefaultSettings: http2.getDefaultSettings, getPackedSettings: http2.getPackedSettings,
         getUnpackedSettings: http2.getUnpackedSettings },
-      dns: dnsFacade({ adapter: typeof this.session.network === 'function' }),
-      http: services.http, https: services.https,
-      net: this.netFacade(net), tls: this.netFacade(tls),
-      os: {
-        // These describe the virtual POSIX volume, not the host computer.
-        // Memory reports the per-script limit and current guest heap use.
-        platform: () => 'linux', type: () => 'ScriptHost', release: () => '1',
-        arch: () => 'wasm32', endianness: () => 'LE', homedir: () => '/',
-        tmpdir: () => '/tmp', hostname: () => 'script', availableParallelism: () => 1,
-        machine: () => 'wasm32', uptime: () => (performance.now() - this.started) / 1000,
-        totalmem: () => this.session.limits.maxMemoryBytes,
-        freemem: () => Math.max(0, this.session.limits.maxMemoryBytes -
-          (this.session.engine?.memoryUsage().heapUsed ?? 0)),
-        loadavg: () => [0, 0, 0],
-        cpus: () => [{ model: 'ScriptHost Virtual CPU', speed: 0,
-          times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 } }],
-        networkInterfaces: () => ({ lo: [
-          { address: '127.0.0.1', netmask: '255.0.0.0', family: 'IPv4',
-            mac: '00:00:00:00:00:00', internal: true, cidr: '127.0.0.1/8' },
-          { address: '::1', netmask: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
-            family: 'IPv6', scopeid: 0, mac: '00:00:00:00:00:00', internal: true, cidr: '::1/128' },
-        ] }),
-        userInfo: () => ({ uid: 0, gid: 0, username: 'script', homedir: '/', shell: null }),
-        devNull: '/dev/null', EOL: '\n', constants: {},
-      },
-      perf_hooks: { performance: { now: () => performance.now() - this.started,
-        timeOrigin: Date.now() - (performance.now() - this.started) } },
-      tty: { isatty: () => false },
-      worker_threads: { isMainThread: true, threadId: 0, workerData: null, parentPort: null },
+      dns: dnsFacade({ adapter: typeof session.network === 'function' }),
+      os: { ...os, homedir: () => '/', tmpdir: () => '/tmp',
+        userInfo: options => ({ ...os.userInfo(options), homedir: '/', shell: null }) },
+      perf_hooks: { performance }, tty: { isatty: () => false },
+      worker_threads: { isMainThread: worker.isMainThread, threadId: worker.threadId,
+        workerData: null, parentPort: null },
+      constants: { ...this.fs.constants, ...crypto.constants, ...zlib.constants },
     };
     this.builtins['dns/promises'] = this.builtins.dns.promises;
-    this.builtins.crypto.webcrypto = { subtle: {
-      __proto__: null,
-      ...Object.fromEntries([
-      'encrypt', 'decrypt', 'sign', 'verify', 'digest', 'generateKey', 'deriveKey', 'deriveBits',
-      'importKey', 'exportKey', 'wrapKey', 'unwrapKey',
-      ].map(key => [key, crypto.webcrypto.subtle[key].bind(crypto.webcrypto.subtle)])),
-    },
-    getRandomValues: value => crypto.webcrypto.getRandomValues(value), randomUUID: crypto.randomUUID };
-    this.builtins.constants = { ...this.fs.constants, ...crypto.constants, ...zlib.constants };
-  }
-
-  ownerScope() {
-    // Module evaluation runs inside the session root and owns its values for
-    // the session lifetime. Request and background-callback work belongs to
-    // the script resources, so it keeps running after its request ends.
-    const scope = this.session.scope();
-    return scope === this.session.root
-      ? scope : this.session.resourceScope?.() ?? scope;
-  }
-
-  lease(scope = this.ownerScope()) {
-    scope.assertOpen();
-    let lease = this.scopeLeases.get(scope);
-    if (lease) return lease;
-    lease = { scope, handles: new Set(), callbacks: new Set(),
-      contexts: new Set(), promises: new Set() };
-    this.scopeLeases.set(scope, lease);
-    try { scope.add(() => this.releaseLease(scope, lease)); }
-    catch (error) {
-      this.scopeLeases.delete(scope);
-      throw error;
-    }
-    return lease;
-  }
-
-  retain(receipt, scope, bucket) {
-    const lease = this.lease(scope);
-    if (!receipt.leases.has(lease)) {
-      receipt.leases.add(lease);
-      lease[bucket].add(receipt.id);
-    }
-    return receipt;
-  }
-
-  retainHandle(receipt, scope = this.ownerScope()) {
-    scope = receipt.boundScope ?? scope;
-    if (scope === this.session.root) receipt.persistent = true;
-    const owner = receipt.persistent ? this.session.root
-      : receipt.boundScope ? receipt.boundScope
-        : scope === this.session.root ? scope
-        : this.session.resourceScope?.() ?? scope;
-    return this.retain(receipt, owner, 'handles');
-  }
-
-  retainCallback(receipt, scope = this.ownerScope()) {
-    return this.retain(receipt, scope, 'callbacks');
-  }
-
-  releaseCallbacks(ids) {
-    const released = [];
-    for (const id of ids) {
-      const receipt = this.callbacks.get(id);
-      if (!receipt) continue;
-      this.callbackFinalizer?.unregister(receipt);
-      for (const lease of receipt.leases) lease.callbacks.delete(id);
-      receipt.leases.clear();
-      this.callbacks.delete(id);
-      const callback = receipt.ref.deref();
-      if (callback) this.callbackReverse.delete(callback);
-      released.push(id);
-    }
-    if (released.length) this.queueGuestRelease({ callbacks: released });
-  }
-
-  disposeHandle(receipt) {
-    this.releaseMethodReceipts(receipt);
-    try { receipt.naturalRelease?.(); } catch (error) { this.cleanupTracker.failure ??= error; }
-    receipt.naturalRelease = null;
-    if (receipt.value && ['object', 'function'].includes(typeof receipt.value))
-      this.reverse.delete(receipt.value);
-    try {
-      const handled = this.volume.release(receipt.value) || this.releaseNativeHandle(receipt);
-      if (!handled && destroyOnRelease.has(receipt.role) &&
-        typeof receipt.value?.destroy === 'function' && !receipt.value.destroyed) {
-        receipt.value.destroy();
-      }
-      return null;
-    } catch (error) {
-      this.cleanupTracker.failure ??= error;
-      return error;
+    for (const name of Object.keys(this.builtins.dns.promises)) {
+      const method = this.builtins.dns[name], promise = this.builtins.dns.promises[name];
+      this.builtins.dns[name] = (...args) => this.nativeCall(method, undefined, args);
+      this.builtins.dns.promises[name] = (...args) => {
+        this.ownerScope().assertOpen();
+        return this.session.trackAdapter(promise(...args));
+      };
     }
   }
 
-  releaseHandle(receipt) {
-    if (!receipt || this.handles.get(receipt.id) !== receipt) return false;
-    this.releaseMethodReceipts(receipt);
-    for (const lease of receipt.leases) lease.handles.delete(receipt.id);
-    receipt.leases.clear();
-    this.handles.delete(receipt.id);
-    this.disposeHandle(receipt);
-    this.queueGuestRelease({ handles: [receipt.id] });
-    return true;
+  ownerScope() { return this.session.resourceScope(); }
+
+  nativeCall(method, receiver, args) {
+    this.ownerScope().assertOpen();
+    if (typeof args.at(-1) !== 'function') return Reflect.apply(method, receiver, args);
+    const callback = this.completionCallback(args.pop()), session = this.session;
+    let complete;
+    const settled = new Promise(resolve => { complete = resolve; });
+    session.trackAdapter(settled);
+    args.push(function(...values) {
+      try { return Reflect.apply(callback, this, values); }
+      finally { complete(); }
+    });
+    try { return Reflect.apply(method, receiver, args); }
+    catch (error) { complete(); throw error; }
   }
 
-  releaseMethodReceipts(receipt) {
-    if (!receipt.methods) return;
-    const methods = [...receipt.methods.values()];
-    receipt.methods.clear();
-    for (const method of methods) {
-      const child = this.handles.get(method.id);
-      if (child) this.releaseHandle(child);
-    }
-  }
-
-  releaseGuestHandles(ids) {
-    for (const id of new Set(ids)) {
-      const receipt = this.handles.get(id);
-      if (!receipt) continue;
-      if (receipt.terminal) {
-        this.releaseHandle(receipt);
-        continue;
-      }
-      if (receipt.persistent || resourceRoles.has(receipt.role)) continue;
-      this.releaseMethodReceipts(receipt);
-      for (const lease of receipt.leases) lease.handles.delete(id);
-      receipt.leases.clear();
-      this.handles.delete(id);
-      if (receipt.value && ['object', 'function'].includes(typeof receipt.value))
-        this.reverse.delete(receipt.value);
-    }
-  }
-
-  retireClosedHandle(receipt) {
-    if (this.handles.get(receipt.id) !== receipt) return;
-    // Closing the native transport does not revoke a script's object. Keep
-    // terminal stream state and methods until its guest proxy becomes
-    // unreachable; actual I/O ownership is released by services/volume close.
-    // Inbound transports remain subject to their explicit request scope.
-    if (receipt.boundScope || receipt.role === 'server' || !resourceRoles.has(receipt.role)) {
-      this.releaseHandle(receipt);
-      return;
-    }
-    receipt.terminal = true;
-    try { receipt.naturalRelease?.(); } catch (error) { this.cleanupTracker.failure ??= error; }
-    receipt.naturalRelease = null;
-    this.queueGuestRelease({ collectHandles: [receipt.id] });
-  }
-
-  bindNaturalRelease(receipt) {
-    if (receipt.naturalRelease) return;
-    const value = receipt.value;
-    if (!value || typeof value !== 'object') return;
-    const closeRoles = new Set(['server', 'request', 'response', 'incoming', 'socket', 'tlsSocket',
-      'stream', 'http2Session', 'http2Stream', 'hash', 'cipher', 'sign']);
-    // A server request stays available to the guest until its response ends;
-    // its close event only marks the request body as consumed. Client
-    // responses (which carry `req`) are complete when they close.
-    const serverRequest = receipt.role === 'incoming' && !value.req;
-    let detach = null;
-    if (!serverRequest && closeRoles.has(receipt.role) && typeof value.emit === 'function') {
-      // Retire after the close dispatch, not while an emitter is still
-      // delivering its final event; a synchronous destroy can truncate
-      // pending stream delivery to the other side of a pipe.
-      try { detach = afterCloseDispatch(value, () => queueMicrotask(() =>
-        this.retireClosedHandle(receipt))); }
-      catch (error) { this.cleanupTracker.failure ??= error; }
-    }
-    // A guest ServerResponse completes at finish and does not auto-destroy, so
-    // no close event follows to retire its handle.
-    if (receipt.role === 'response' && typeof value.once === 'function') {
-      const finished = () => queueMicrotask(() => {
-        const request = value.req && this.reverse.get(value.req);
-        const requestReceipt = request && this.handles.get(request);
-        this.releaseHandle(receipt);
-        if (requestReceipt) this.releaseHandle(requestReceipt);
-      });
+  completionCallback(callback) {
+    if (this.completionCallbacks.has(callback)) return callback;
+    const owner = new WeakRef(this), scope = this.session.scope();
+    const completion = function(...args) {
+      const node = owner.deref(), session = node?.session;
+      if (!session) return;
+      if (session.live || session.isCleanupScope?.(scope))
+        return session.runCallback(callback, this, args, scope);
+      // Like terminal event listeners, native completions must settle existing
+      // I/O during stop, without inheriting a stop hook's permission scope.
       try {
-        value.once('finish', finished);
-        const closeDetach = detach;
-        detach = () => {
-          try { value.off('finish', finished); } catch { /* The response is gone. */ }
-          closeDetach?.();
-        };
-      } catch (error) { this.cleanupTracker.failure ??= error; }
-    }
-    if (detach) receipt.naturalRelease = detach;
-    if (!serverRequest && closeRoles.has(receipt.role) && value.closed === true)
-      queueMicrotask(() => this.retireClosedHandle(receipt));
-  }
-
-  naturalReleaseFromInvocation(receipt, key) {
-    const released = receipt.role === 'fileHandle' && key === 'close' ||
-      receipt.role === 'agent' && key === 'destroy';
-    if (released) queueMicrotask(() => this.releaseHandle(receipt));
-  }
-
-  observeContext(id, scope) {
-    if (!Number.isSafeInteger(id) || id <= 0 || !scope) return;
-    this.contextMetadata.set(id, scope);
-    let ids = this.requestContexts.get(scope);
-    if (!ids) { ids = new Set(); this.requestContexts.set(scope, ids); }
-    ids.add(id);
-  }
-
-  forgetContext(id) {
-    this.contextMetadata.delete(id);
-    const receipt = this.contextLeases.get(id);
-    if (!receipt) return;
-    for (const lease of receipt.leases) lease.contexts.delete(id);
-    receipt.leases.clear();
-    this.contextLeases.delete(id);
-    this.queueGuestRelease({ forgetContexts: [id] });
-  }
-
-  forgetRequestContexts(scope) {
-    const ids = this.requestContexts.get(scope);
-    if (!ids) return;
-    this.requestContexts.delete(scope);
-    for (const id of ids) this.forgetContext(id);
-  }
-
-  activeContextScope(id) {
-    const receipt = this.contextLeases.get(id);
-    if (!receipt) return null;
-    return [...receipt.leases].map(lease => lease.scope)
-      .find(scope => !scope.signal.aborted) ?? null;
-  }
-
-  retainContext(id, scope = this.ownerScope()) {
-    if (!Number.isSafeInteger(id) || id <= 0) return;
-    if (scope.signal.aborted) {
-      if (!this.activeContextScope(id)) this.queueGuestRelease({ contexts: [id] });
-      return;
-    }
-    let receipt = this.contextLeases.get(id);
-    if (!receipt) {
-      receipt = { id, leases: new Set() };
-      this.contextLeases.set(id, receipt);
-    }
-    this.retain(receipt, scope, 'contexts');
-  }
-
-  scopeForContext(id, origin = 0) {
-    if (!Number.isSafeInteger(id) || id <= 0) {
-      // Native async/await continuations do not invoke the patched
-      // Promise.prototype.then. They are pumped inside the originating host
-      // execution scope. Module evaluation is pumped inside the session root
-      // and owns its values; guest callbacks are pumped inside script
-      // resources and keep running after their creating request ends.
-      const scope = this.ownerScope();
-      scope.assertOpen();
-      return scope;
-    }
-    const active = this.activeContextScope(id) ||
-      (Number.isSafeInteger(origin) && origin > 0 ? this.activeContextScope(origin) : null);
-    if (active) {
-      this.retainContext(id, active);
-      return active;
-    }
-    const retired = value => Number.isSafeInteger(value) && value > 0 &&
-      (this.contextLeases.has(value) || this.pendingGuestRelease.contexts.has(value));
-    requireValue(!retired(id) && !retired(origin), 'CANCELLED');
-    const scope = this.ownerScope();
-    scope.assertOpen();
-    return scope;
-  }
-
-  metadataScope(id, fallback) {
-    const scope = this.contextMetadata.get(id);
-    return scope && !scope.signal.aborted ? scope : fallback;
-  }
-
-  retainPromise(id, scope = this.ownerScope()) {
-    const receipt = { id, leases: new Set() };
-    this.promiseLeases.set(id, receipt);
-    try { this.retain(receipt, scope, 'promises'); }
-    catch (error) {
-      for (const lease of receipt.leases) lease.promises.delete(id);
-      receipt.leases.clear();
-      this.promiseLeases.delete(id);
-      throw error;
-    }
-  }
-
-  completePromise(id) {
-    const receipt = this.promiseLeases.get(id);
-    if (!receipt) return;
-    for (const lease of receipt.leases) lease.promises.delete(id);
-    this.promiseLeases.delete(id);
-  }
-
-  abandonPromise(id) {
-    if (!this.promiseLeases.has(id)) return;
-    this.completePromise(id);
-    this.queueGuestRelease({ promises: [id] });
-  }
-
-  releaseLease(scope, lease) {
-    if (this.scopeLeases.get(scope) !== lease) return;
-    this.scopeLeases.delete(scope);
-    const released = { handles: [], callbacks: [], contexts: [], promises: [] };
-    for (const id of lease.handles) {
-      const receipt = this.handles.get(id);
-      if (!receipt) continue;
-      receipt.leases.delete(lease);
-      if (receipt.leases.size) continue;
-      this.handles.delete(id);
-      this.disposeHandle(receipt);
-      released.handles.push(id);
-    }
-    for (const id of lease.callbacks) {
-      const receipt = this.callbacks.get(id);
-      if (!receipt) continue;
-      receipt.leases.delete(lease);
-      if (receipt.leases.size) continue;
-      this.callbacks.delete(id);
-      this.callbackFinalizer?.unregister(receipt);
-      const callback = receipt.ref.deref();
-      if (callback) this.callbackReverse.delete(callback);
-      released.callbacks.push(id);
-    }
-    for (const id of lease.contexts) {
-      const receipt = this.contextLeases.get(id);
-      if (!receipt) continue;
-      receipt.leases.delete(lease);
-      if (receipt.leases.size) continue;
-      this.contextLeases.delete(id);
-      this.contextMetadata.delete(id);
-      released.contexts.push(id);
-    }
-    for (const id of lease.promises) {
-      const receipt = this.promiseLeases.get(id);
-      if (!receipt) continue;
-      receipt.leases.delete(lease);
-      if (receipt.leases.size) continue;
-      this.promiseLeases.delete(id);
-      released.promises.push(id);
-    }
-    this.queueGuestRelease(released);
-  }
-
-  trackCleanup(task) {
-    const tracked = Promise.resolve(task);
-    const state = this.cleanupTracker;
-    state.tasks.add(tracked);
-    const settled = error => {
-      state.tasks.delete(tracked);
-      if (error && state.active) state.failure ??= error;
+        const invoke = () => Reflect.apply(callback, this, args);
+        const result = session.contextScope
+          ? session.contextScope.run(scope ?? session.root, invoke) : invoke();
+        if (result?.then) Promise.resolve(result).catch(error => { node.failure ??= error || fault('SERVICE_ERROR'); });
+        return result;
+      } catch (error) { node.failure ??= error || fault('SERVICE_ERROR'); }
     };
-    tracked.then(() => settled(), settled);
-    this.session.trackAdapter(tracked);
+    this.completionCallbacks.add(completion);
+    return completion;
   }
 
-  releaseNativeHandle(receipt) {
-    if (!['readableWeb', 'writableWeb', 'transformWeb', 'compressionWeb',
-      'decompressionWeb', 'textEncoderStream', 'textDecoderStream',
-      'reader', 'writer', 'iterator'].includes(receipt.role)) return false;
-    this.trackCleanup(cleanupWebHandle(receipt.role, receipt.value));
-    return true;
-  }
-
-  queueGuestRelease(released) {
-    let added = false;
-    for (const key of Object.keys(this.pendingGuestRelease)) {
-      for (const id of released[key] ?? []) {
-        this.pendingGuestRelease[key].add(id);
-        added = true;
+  /** Keep actual EventEmitter registration/removal semantics, while attributing
+   * user callbacks (including rejected async handlers) to their request. */
+  observeEmitter(emitter) {
+    if (!emitter || this.emitters.has(emitter) || typeof emitter.on !== 'function') return emitter;
+    this.emitters.add(emitter);
+    const owner = new WeakRef(this);
+    const add = emitter.on, prepend = emitter.prependListener ?? add;
+    const guestListeners = new WeakSet();
+    const remove = emitter.removeListener;
+    const register = (event, callback, once, first) => {
+      requireValue(typeof callback === 'function', 'INVALID_ARGUMENT');
+      const session = owner.deref()?.session;
+      const scope = session?.scope();
+      function listener(...args) {
+        if (once) this.removeListener(event, listener);
+        const node = owner.deref(), session = node?.session;
+        if (!session) return;
+        if (!session.live && !session.isCleanupScope?.(scope)) {
+          // Native completion listeners are also attached during shutdown.
+          // Terminal dispatch must finish before ownership is released.
+          if (['close', 'finish', 'end', 'error'].includes(event)) {
+            try {
+              // A terminal listener may settle existing I/O, but must not
+              // inherit a stop hook's scope and revive ordinary background work.
+              const invoke = () => Reflect.apply(callback, this, args);
+              const result = session.contextScope
+                ? session.contextScope.run(scope ?? session.root, invoke) : invoke();
+              if (result?.then) Promise.resolve(result).catch(error => { node.failure ??= error || fault('SERVICE_ERROR'); });
+              return result;
+            } catch (error) { node.failure ??= error || fault('SERVICE_ERROR'); }
+          }
+          return;
+        }
+        const inbound = node.services?.requestScope?.(args[0]);
+        return session.runCallback(callback, this, args, inbound ?? scope);
       }
-    }
-    if (!added) return;
-    this.scheduleGuestRelease();
-  }
-
-  scheduleGuestRelease() {
-    if (this.releaseScheduled) return;
-    this.releaseScheduled = true;
-    queueMicrotask(() => this.flushGuestRelease());
-  }
-
-  takeReleased(values, count = 2048) {
-    // This only frames lifecycle notifications across the JSON control
-    // boundary. Remaining receipts are scheduled immediately; nothing is
-    // rejected or retained as a resource quota.
-    const result = [];
-    for (const value of values) {
-      values.delete(value);
-      result.push(value);
-      if (result.length === count) break;
-    }
-    return result;
-  }
-
-  flushGuestRelease() {
-    this.releaseScheduled = false;
-    const session = this.session;
-    const engine = session?.engine;
-    if (!session || !session.live || session.root.signal.aborted || !engine ||
-      engine.closed || engine.closing) {
-      for (const values of Object.values(this.pendingGuestRelease)) values.clear();
-      return;
-    }
-    const packet = Object.fromEntries(Object.entries(this.pendingGuestRelease)
-      .map(([key, values]) => [key, this.takeReleased(values)]));
-    if (!Object.values(packet).some(values => values.length)) return;
-    try {
-      session.contextScope.run(session.root, () =>
-        engine.callUnpumped('nativeReleased', [JSON.stringify(packet)]));
-    } catch (error) {
-      for (const values of Object.values(this.pendingGuestRelease)) values.clear();
-      session.callbackFailed(error, session.root);
-      return;
-    }
-    if (Object.values(this.pendingGuestRelease).some(values => values.size))
-      this.scheduleGuestRelease();
-  }
-
-  ownNetwork(socket) {
-    const resources = this.networkResources;
-    const cleanups = this.networkCleanup;
-    const cleanupState = this.cleanupTracker;
-    resources.add(socket);
-    const scope = this.ownerScope();
-    const state = { active: true, detach: null };
-    const closed = () => {
-      if (!state.active) return;
-      state.active = false;
-      try { socket.off?.('close', closed); } catch (error) { cleanupState.failure ??= error; }
-      try { socket.off?.('error', ignoreError); } catch (error) { cleanupState.failure ??= error; }
-      const detach = state.detach;
-      state.detach = null;
-      try { detach?.(); } catch (error) { cleanupState.failure ??= error; }
-      resources.delete(socket);
-      cleanups.delete(socket);
-      try { delete socket[networkOwner]; } catch (error) { cleanupState.failure ??= error; }
+      listener.listener = callback;
+      guestListeners.add(listener);
+      (first ? prepend : add).call(emitter, event, listener);
+      return emitter;
     };
-    cleanups.set(socket, closed);
+    emitter.on = emitter.addListener = (event, fn) => register(event, fn, false, false);
+    emitter.once = (event, fn) => register(event, fn, true, false);
+    emitter.prependListener = (event, fn) => register(event, fn, false, true);
+    emitter.prependOnceListener = (event, fn) => register(event, fn, true, true);
+    // Writable, Socket and HTTP OutgoingMessage deliver these callbacks
+    // directly, not through their finish/error EventEmitter listeners.
+    for (const name of ['write', 'end']) {
+      const method = emitter[name];
+      if (typeof method !== 'function') continue;
+      emitter[name] = function(...args) {
+        const index = name === 'end' && typeof args[0] === 'function' ? 0
+          : typeof args[1] === 'function' ? 1 : 2;
+        const node = owner.deref();
+        if (node && typeof args[index] === 'function')
+          args[index] = node.completionCallback(args[index]);
+        return Reflect.apply(method, this, args);
+      };
+    }
+    emitter.removeAllListeners = function(event) {
+      const names = arguments.length ? [event] :
+        [...this.eventNames().filter(name => name !== 'removeListener'), 'removeListener'];
+      for (const name of names)
+        for (const listener of this.rawListeners(name).reverse())
+          if (guestListeners.has(listener)) remove.call(this, name, listener);
+      return this;
+    };
+    if (typeof emitter.pipe === 'function' && typeof emitter.unpipe === 'function') {
+      const pipe = emitter.pipe, unpipe = emitter.unpipe, connections = new Map();
+      emitter.pipe = function(destination, options) {
+        const release = () => {
+          this.off('close', closed); this.off('end', release);
+          destination.off('close', release); destination.off('finish', release);
+          destination.off('unpipe', unpiped);
+          connections.delete(destination);
+        };
+        const closed = () => {
+          if (!this.readableEnded && !destination.destroyed)
+            destination.destroy(Object.assign(new Error('Premature close'),
+              { code: 'ERR_STREAM_PREMATURE_CLOSE' }));
+          release();
+        };
+        const unpiped = source => { if (source === this) release(); };
+        connections.get(destination)?.();
+        connections.set(destination, release);
+        add.call(this, 'close', closed); add.call(this, 'end', release);
+        events.EventEmitter.prototype.on.call(destination, 'close', release);
+        events.EventEmitter.prototype.on.call(destination, 'finish', release);
+        events.EventEmitter.prototype.on.call(destination, 'unpipe', unpiped);
+        try { return pipe.call(this, destination, options); }
+        catch (error) { release(); throw error; }
+      };
+      emitter.unpipe = function(destination) {
+        const result = unpipe.call(this, destination);
+        if (destination) connections.get(destination)?.();
+        else for (const release of [...connections.values()]) release();
+        return result;
+      };
+    }
+    return emitter;
+  }
+
+  ownResource(resource, bucket) {
+    if (!resource || this.resourceCleanup.has(resource)) return resource;
+    this.ownerScope().assertOpen();
+    bucket.add(resource);
+    const cleanups = this.resourceCleanup;
+    const owner = new WeakRef(this);
+    const reference = new WeakRef(resource);
+    let detach, detachClosed, active = true, stopping = false;
+    const stop = () => {
+      if (stopping) return;
+      stopping = true;
+      const value = reference.deref();
+      if (value && !value.destroyed) value.destroy();
+    };
+    const release = () => {
+      if (!active) return;
+      active = false;
+      let failure;
+      const resource = reference.deref();
+      try { detachClosed?.(); } catch (error) { failure ??= error; }
+      detachClosed = null;
+      try { resource?.off('error', ignoreError); } catch (error) { failure ??= error; }
+      try { detach?.(); } catch (error) { failure ??= error; }
+      detach = null;
+      if (resource) { bucket.delete(resource); cleanups.delete(resource); }
+      if (failure) { const node = owner.deref(); if (node) node.failure ??= failure; }
+    };
+    release.stop = stop;
+    cleanups.set(resource, release, release);
     try {
-      socket.on?.('error', ignoreError);
-      socket.once?.('close', closed);
-      Object.defineProperty(socket, networkOwner, {
-        configurable: true, value: { resources, cleanups },
+      resource.on('error', ignoreError);
+      // Run retirement after all terminal listeners, even when script code
+      // removes listeners. The dispatch adapter also holds only a WeakRef.
+      detachClosed = afterCloseDispatch(resource, release);
+      detach = this.ownerScope().add(() => {
+        try { stop(); } catch (error) { this.failure ??= error; }
       });
-      state.detach = scope.add(() => {
-        try { if (!socket.destroyed) socket.destroy(); } catch {}
-      });
-      scope.assertOpen?.();
+      this.observeEmitter(resource);
+      if (resource.closed) release();
     } catch (error) {
-      try { if (!socket.destroyed) socket.destroy(); } catch {}
-      try { closed(); } catch {}
-      let closedNow = false;
-      try { closedNow = Boolean(socket.closed); } catch {}
-      if (!closedNow) guardDetachedEmitter(socket);
+      try { stop(); } catch {}
+      release();
+      if (!resource.closed) guardDetachedEmitter(resource);
       throw error;
     }
-    try { if (socket.closed) closed(); } catch {}
-    return socket;
+    return resource;
+  }
+  ownNetwork(value) { return this.ownResource(value, this.networkResources); }
+  ownStream(value) { return this.ownResource(value, this.streams); }
+
+  ownCryptoStream(value, terminal) {
+    this.ownStream(value);
+    const finish = value[terminal], owner = this;
+    value[terminal] = function(...input) {
+      const result = finish.apply(this, input);
+      owner.resourceCleanup.get(this)?.();
+      return result;
+    };
+    if (typeof value.copy === 'function') {
+      const copy = value.copy;
+      value.copy = function(...input) {
+        return owner.ownCryptoStream(copy.apply(this, input), terminal);
+      };
+    }
+    return value;
+  }
+
+  ownBlob(value) {
+    if (!value || this.blobObserved.has(value)) return value;
+    this.blobObserved.add(value);
+    const owner = new WeakRef(this), slice = value.slice, stream = value.stream;
+    value.slice = function(...args) {
+      const result = slice.apply(this, args);
+      return owner.deref()?.ownBlob(result) ?? result;
+    };
+    value.stream = function(...args) {
+      const result = stream.apply(this, args);
+      return owner.deref()?.ownWeb(result, 'readableWeb') ?? result;
+    };
+    return value;
+  }
+
+  ownBody(value) {
+    if (!value || this.bodyObserved.has(value)) return value;
+    this.bodyObserved.add(value);
+    if (value.body) this.ownWeb(value.body, 'readableWeb');
+    const owner = new WeakRef(this), clone = value.clone;
+    value.clone = function(...args) {
+      const previous = this.body;
+      const result = clone.apply(this, args), node = owner.deref();
+      if (previous && previous !== this.body) node?.webResources.delete(previous);
+      if (this.body) node?.ownWeb(this.body, 'readableWeb');
+      return node?.ownBody(result) ?? result;
+    };
+    for (const name of ['arrayBuffer', 'bytes', 'text', 'json', 'blob', 'formData']) {
+      if (typeof value[name] !== 'function') continue;
+      const method = value[name];
+      value[name] = function(...args) {
+        const body = this.body;
+        return method.apply(this, args).then(result => {
+          const node = owner.deref();
+          if (body) node?.forgetWeb(body);
+          if (name === 'blob') return node?.ownBlob(result) ?? result;
+          if (name === 'formData')
+            for (const part of result.values()) if (part instanceof buffer.Blob) node?.ownBlob(part);
+          return result;
+        }, error => {
+          if (body) owner.deref()?.forgetWeb(body);
+          throw error;
+        });
+      };
+    }
+    return value;
+  }
+
+  forgetWeb(value) {
+    // Native tee keeps its internal reader locked even after termination.
+    // Only the branches' real cleanup may retire that reader's ownership.
+    if (!this.webTees.has(value)) this.webResources.delete(value);
+  }
+
+  ownWebTee(source, branches) {
+    this.webTees.set(source, branches.map(branch => {
+      const state = { reference: new WeakRef(branch), pending: new Set() };
+      this.webTeeBranches.set(branch, state);
+      this.ownWeb(branch, 'readableWeb');
+      return state;
+    }));
+    this.webResources.set(source, 'readableWeb');
+  }
+
+  trackTeeTask(value, task) {
+    const branch = this.webTeeBranches.get(value);
+    if (!branch) return;
+    // closed/releaseLock and a repeated cancel can finish before the original
+    // cancel does. Observe its settlement without replacing its public result;
+    // cleanup calls still propagate their own errors through closeWeb.
+    const pending = Promise.resolve(task).then(ignoreError, ignoreError);
+    branch.pending.add(pending);
+    pending.then(() => branch.pending.delete(pending));
+  }
+
+  ownWeb(value, role) {
+    if (!value || this.webResources.has(value)) return value;
+    this.ownerScope().assertOpen();
+    this.webResources.set(value, role);
+    if (this.webObserved.has(value)) return value;
+    this.webObserved.add(value);
+    const owner = new WeakRef(this);
+    const reference = new WeakRef(value);
+    const forget = () => {
+      const value = reference.deref();
+      if (value) owner.deref()?.forgetWeb(value);
+    };
+    if (['reader', 'writer'].includes(role)) {
+      const release = value.releaseLock;
+      value.releaseLock = function(...args) {
+        const result = release.apply(this, args); forget(); return result;
+      };
+      // A locked but closed stream still needs its reader/writer released on stop.
+      value.closed?.catch(() => {});
+    }
+    for (const [key, resultRole] of [['getReader', 'reader'], ['getWriter', 'writer']]) {
+      if (typeof value[key] !== 'function') continue;
+      const method = value[key];
+      value[key] = function(...args) {
+        const node = owner.deref();
+        const result = method.apply(this, args);
+        const branch = node?.webTeeBranches.get(this);
+        if (branch) node.webTeeBranches.set(result, branch);
+        result.closed.then(forget, forget);
+        return node ? node.ownWeb(result, resultRole) : result;
+      };
+    }
+    for (const key of ['cancel', 'abort', 'close', 'return']) if (typeof value[key] === 'function') {
+      const method = value[key];
+      value[key] = function(...args) {
+        const result = method.apply(this, args);
+        owner.deref()?.trackTeeTask(this, result);
+        if (!['reader', 'writer'].includes(role)) Promise.resolve(result).then(forget, () => {});
+        return result;
+      };
+    }
+    if (typeof value.pipeTo === 'function') {
+      value.pipeTo = function(destination, options) {
+        try {
+          readableLocked.call(this); writableLocked.call(destination);
+          return owner.deref().pipeWeb(this, destination, webPipeOptions(options));
+        } catch (error) { return Promise.reject(error); }
+      };
+      value.pipeThrough = function(transform, options) {
+        readableLocked.call(this);
+        const readable = transform?.readable;
+        readableLocked.call(readable);
+        const writable = transform?.writable;
+        writableLocked.call(writable);
+        const settings = webPipeOptions(options);
+        if (readableLocked.call(this) || writableLocked.call(writable))
+          throw Object.assign(new TypeError('The stream is locked'), { code: 'ERR_INVALID_STATE' });
+        const node = owner.deref();
+        node.pipeWeb(this, writable, settings).catch(() => {});
+        return node.ownWeb(readable, 'readableWeb');
+      };
+    }
+    for (const key of ['tee', 'values']) {
+      if (typeof value[key] !== 'function') continue;
+      const method = value[key];
+      value[key] = function(...args) {
+        const result = method.apply(this, args), node = owner.deref();
+        if (key === 'tee') {
+          node?.ownWebTee(this, result);
+        } else {
+          const branch = node?.webTeeBranches.get(this);
+          if (branch) node.webTeeBranches.set(result, branch);
+          node?.ownWeb(result, 'iterator');
+          const next = result.next, finish = result.return;
+          result.next = async (...args) => {
+            const step = await next.apply(result, args);
+            if (step.done) { forget(); node?.webResources.delete(result); }
+            return step;
+          };
+          result.return = async (...args) => {
+            try { return await finish.apply(result, args); }
+            finally { forget(); node?.webResources.delete(result); }
+          };
+        }
+        return result;
+      };
+    }
+    if (role === 'readableWeb') value[Symbol.asyncIterator] = value.values;
+    if (value.readable) this.ownWeb(value.readable, 'readableWeb');
+    if (value.writable) this.ownWeb(value.writable, 'writableWeb');
+    if (value.readable || value.writable) this.webResources.delete(value);
+    return value;
+  }
+
+  pipeWeb(source, destination, options) {
+    this.ownerScope().assertOpen();
+    if (this.webPipeAbort.signal.aborted) throw this.webPipeAbort.signal.reason;
+    const signal = AbortSignal.any([this.ownerScope().signal, this.webPipeAbort.signal,
+      ...(options.signal === undefined ? [] : [options.signal])]);
+    this.ownWeb(source, 'readableWeb');
+    this.ownWeb(destination, 'writableWeb');
+    const task = web.ReadableStream.prototype.pipeTo.call(source, destination, { ...options, signal });
+    this.trackTeeTask(source, task);
+    this.webPipes.set(task, signal);
+    task.then(() => {
+      this.webPipes.delete(task);
+      this.forgetWeb(source);
+      if (!options.preventClose) this.webResources.delete(destination);
+    }, error => {
+      this.webPipes.delete(task);
+      if (this.webPipeAbort.signal.aborted && error !== signal.reason && !ignoredCleanupError(error))
+        this.failure ??= error;
+    });
+    return task;
+  }
+
+  async closeWeb() {
+    this.webPipeAbort.abort(fault('CANCELLED'));
+    const locked = [...this.webResources].filter(([, role]) =>
+      ['reader', 'writer', 'iterator'].includes(role));
+    const closing = new Map();
+    const close = (resource, role) => {
+      if (closing.has(resource)) return closing.get(resource);
+      const tee = this.webTees.get(resource);
+      const task = tee ? Promise.allSettled(tee.map(async branch => {
+        const value = branch.reference.deref();
+        // Start every unlocked leaf before waiting: native branch cancellation
+        // waits for its sibling. Recheck locked leaves after their tracked
+        // reader/iterator/pipe tasks settle; an unowned lock still fails cleanup.
+        const cleanup = value && (!readableLocked.call(value) || this.webTees.has(value))
+          ? close(value, 'readableWeb') : null;
+        const results = await Promise.allSettled([...branch.pending, ...(cleanup ? [cleanup] : [])]);
+        const failed = results.find(result => result.status === 'rejected');
+        if (failed) throw failed.reason;
+        if (value && !cleanup) await close(value, 'readableWeb');
+      })).then(results => {
+        const failed = results.find(result => result.status === 'rejected');
+        if (failed) throw failed.reason;
+      }) : closeWebResource(role, resource);
+      const result = task.then(() => {
+        this.webResources.delete(resource);
+        if (tee) this.webTees.delete(resource);
+      });
+      this.trackTeeTask(resource, result);
+      closing.set(resource, result);
+      return result;
+    };
+    const tasks = [...this.webPipes].map(([task, signal]) => task.catch(error => {
+      if (error !== signal.reason && !ignoredCleanupError(error)) throw error;
+    }));
+    tasks.push(...locked.map(([resource, role]) => close(resource, role)));
+    tasks.push(...[...this.webResources].filter(([resource]) => this.webTees.has(resource))
+      .map(([resource, role]) => close(resource, role)));
+    const results = await Promise.allSettled(tasks);
+    const remaining = await Promise.allSettled([...this.webResources]
+      .filter(([, role]) => !['reader', 'writer', 'iterator'].includes(role))
+      .map(([resource, role]) => close(resource, role)));
+    const failed = [...results, ...remaining].find(result => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  }
+
+  timerModule() {
+    const active = this.session.timers;
+    const states = new WeakMap();
+    const schedule = (name, fn, delay, args) => {
+      this.ownerScope().assertOpen();
+      requireValue(typeof fn === 'function', 'INVALID_ARGUMENT');
+      const session = this.session, scope = session.scope();
+      let timer;
+      const callback = () => {
+        if (name !== 'setInterval') active.delete(timer);
+        session.runCallback(fn, timer, args, scope);
+      };
+      timer = name === 'setImmediate' ? timers.setImmediate(callback) : timers[name](callback, delay);
+      const nativeClear = name === 'setImmediate' ? timers.clearImmediate : timers.clearTimeout;
+      const state = { cancelled: false };
+      const cancel = () => {
+        state.cancelled = true;
+        nativeClear(timer);
+        active.delete(timer);
+      };
+      state.cancel = cancel;
+      states.set(timer, state);
+      if (typeof timer.refresh === 'function') {
+        const refresh = timer.refresh, owner = this;
+        Object.defineProperty(timer, 'refresh', { configurable: true, writable: true, value() {
+          owner.ownerScope().assertOpen();
+          const result = refresh.call(this);
+          const state = states.get(this);
+          if (state && !state.cancelled) active.set(this, state.cancel);
+          return result;
+        } });
+      }
+      for (const name of ['close', Symbol.dispose]) {
+        const method = timer[name];
+        if (typeof method !== 'function') continue;
+        Object.defineProperty(timer, name, { configurable: true, writable: true, value() {
+          const result = method.call(this);
+          const state = states.get(this);
+          if (state) { state.cancelled = true; active.delete(this); }
+          return result;
+        } });
+      }
+      active.set(timer, cancel);
+      return timer;
+    };
+    const clear = value => {
+      const state = value && typeof value === 'object' ? states.get(value) : null;
+      if (state) { state.cancel(); return; }
+      const entry = active.has(value) ? value : [...active.keys()].find(timer => Number(timer) === value);
+      if (!entry) return;
+      active.get(entry)(entry); active.delete(entry);
+    };
+    return { setTimeout: (fn, delay, ...args) => schedule('setTimeout', fn, delay, args),
+      setInterval: (fn, delay, ...args) => schedule('setInterval', fn, delay, args),
+      setImmediate: (fn, ...args) => schedule('setImmediate', fn, 0, args),
+      clearTimeout: clear, clearInterval: clear, clearImmediate: clear };
+  }
+
+  promiseTimers() {
+    const wait = (name, delay, value, options = {}) => new Promise((resolve, reject) => {
+      let timer;
+      const finish = (callback, value) => {
+        this.timers.clearTimeout(timer);
+        options.signal?.removeEventListener('abort', abort);
+        callback(value);
+      };
+      const abort = () => finish(reject, options.signal.reason ?? fault('CANCELLED'));
+      timer = name === 'setImmediate' ? this.timers.setImmediate(() => finish(resolve, value))
+        : this.timers.setTimeout(() => finish(resolve, value), delay);
+      if (options.ref === false) timer.unref();
+      if (options.signal?.aborted) abort();
+      else options.signal?.addEventListener('abort', abort, { once: true });
+    });
+    return { setTimeout: (ms, value, options) => wait('setTimeout', ms, value, options),
+      setImmediate: (value, options) => wait('setImmediate', 0, value, options) };
+  }
+
+  processModule() {
+    const projected = new events.EventEmitter();
+    Object.defineProperty(projected, Symbol.toStringTag, { value: 'process' });
+    Object.assign(projected, { env: {}, argv: ['node', '/source.js'], execArgv: [],
+      version: process.version, versions: { ...process.versions }, platform: process.platform,
+      arch: process.arch, pid: process.pid, ppid: process.ppid, exitCode: 0, title: 'script',
+      cwd: () => '/', execPath: '/node', getuid: () => process.getuid?.() ?? 0,
+      chdir: () => { throw fault('PERMISSION_DENIED'); },
+      exit: () => { throw fault('PERMISSION_DENIED'); },
+      binding: () => { throw fault('PERMISSION_DENIED'); },
+      memoryUsage: process.memoryUsage.bind(process), cpuUsage: process.cpuUsage.bind(process),
+      uptime: process.uptime.bind(process), hrtime: process.hrtime.bind(process),
+      nextTick: (fn, ...args) => {
+        const session = this.session, scope = session.scope();
+        process.nextTick(() => session.runCallback(fn, undefined, args, scope));
+      },
+      emitWarning: warning => projected.emit('warning', typeof warning === 'string' ? new Error(warning) : warning),
+      _rawDebug: () => {},
+    });
+    projected.hrtime.bigint = process.hrtime.bigint.bind(process.hrtime);
+    projected.memoryUsage.rss = process.memoryUsage.rss.bind(process.memoryUsage);
+    projected.stdin = new stream.Readable({ read() { this.push(null); } });
+    projected.stdout = new stream.Writable({ write(_chunk, _encoding, done) { done(); } });
+    projected.stderr = new stream.Writable({ write(_chunk, _encoding, done) { done(); } });
+    for (const [index, value] of [projected.stdin, projected.stdout, projected.stderr].entries()) {
+      Object.assign(value, { fd: index, isTTY: false, ref() { return this; }, unref() { return this; } });
+      this.ownStream(value);
+    }
+    return this.observeEmitter(projected);
   }
 
   netFacade(native) {
@@ -719,7 +1037,7 @@ export class NodeCapabilities {
         if (native === tls && args[0] && typeof args[0] === 'object')
           Object.assign(options, args.shift());
       }
-      requireValue(!options.path && options.fd === undefined && !options.socket &&
+      requireValue(!options.path && options.socketPath === undefined && options.fd === undefined && !options.socket &&
         !options.createConnection && !options.lookup &&
         Number.isInteger(Number(options.port)), 'PERMISSION_DENIED');
       const mapped = this.services.connection(options, native === tls);
@@ -731,23 +1049,28 @@ export class NodeCapabilities {
           : {}),
         host: mapped.host, port: mapped.port,
         ...(mapped.lookup ? { lookup: mapped.lookup } : {}) };
+      const callback = typeof args.at(-1) === 'function' ? args.pop() : null;
       const socket = native === tls ? tls.connect(clean, ...args) : net.connect(clean, ...args);
       this.ownNetwork(socket);
+      if (callback) socket.once(native === tls ? 'secureConnect' : 'connect', callback);
       if (mapped.meowLocal) this.services.trustSocket(socket);
       return socket;
     };
     const createServer = (...args) => {
       requireValue(native === net, 'UNSUPPORTED_DEPENDENCY');
       const server = this.services.probe(...args);
-      this.tags.set(server, 'server');
       return server;
     };
     const Server = function(...args) { return createServer(...args); };
+    Object.defineProperty(Server, Symbol.hasInstance, {
+      value: value => this.services.probes.has(value) || value?.owner === this.services,
+    });
     return { connect, createConnection: connect, isIP: net.isIP,
       isIPv4: net.isIPv4, isIPv6: net.isIPv6,
       ...(native === net ? { Server, createServer } : {}),
       ...(native === tls ? { rootCertificates: tls.rootCertificates, DEFAULT_MIN_VERSION: 'TLSv1.2' } : {}) };
   }
+
 
   source(specifier, parent = null) {
     requireValue(typeof specifier === 'string' && (typeof parent === 'string' || parent === null));
@@ -756,15 +1079,14 @@ export class NodeCapabilities {
     const bare = !specifier.startsWith('.');
     requireValue(!specifier.startsWith('/') && !specifier.includes('\\'), 'UNSUPPORTED_DEPENDENCY');
     const packageName = bare ? packageNameFor(specifier) : null;
-    if (!base) requireValue(guestPackages.has(specifier) ||
-      specifier === 'readable-stream/lib/stream.js', 'UNSUPPORTED_DEPENDENCY');
+    if (!base) requireValue(sdkPackages.has(specifier), 'UNSUPPORTED_DEPENDENCY');
     else if (bare) {
       requireValue(base.packageName === packageName || Object.hasOwn(base.dependencies, packageName) ||
-        guestPackages.has(specifier), 'UNSUPPORTED_DEPENDENCY');
+        sdkPackages.has(specifier), 'UNSUPPORTED_DEPENDENCY');
     }
     let file;
     try {
-      file = require.resolve(packageEntries.get(specifier) ?? specifier,
+      file = require.resolve(specifier,
         base ? { paths: [dirname(base.file)] } : undefined);
     }
     catch { throw fault('UNSUPPORTED_DEPENDENCY'); }
@@ -803,673 +1125,54 @@ export class NodeCapabilities {
     return { id, source: readFileSync(file, 'utf8'), json: extname(file) === '.json' };
   }
 
-  callable(fn, receiver, name, construct = false, hint, scope = this.ownerScope()) {
-    const id = crypto.randomUUID();
-    const argumentFields = ['request', 'get'].includes(name) &&
-      [this.builtins.http, this.builtins.https].includes(receiver)
-      ? { kind: 'http', fields: httpRequestOptionNames }
-      : name === 'format' && receiver === this.builtins.url
-        ? { kind: 'urlFormat', fields: urlFormatFields,
-          options: urlFormatOptions } : null;
-    const receipt = { id, fn, receiver, name, construct, hint, role: 'callable',
-      argumentFields, persistent: scope === this.session.root, leases: new Set(),
-      boundScope: scope?.ownsTransport ? scope : null };
-    this.handles.set(id, receipt);
-    try { this.retainHandle(receipt, scope); }
-    catch (error) {
-      this.handles.delete(id);
-      throw error;
-    }
-    return { $: 'handle', id, callable: true, name, ...(argumentFields ? { argumentFields } : {}) };
-  }
-
-  moduleValue(value, seen = new Set(), scope = this.session.root, frames = []) {
-    if (typeof value === 'function')
-      return this.callable(value, undefined, value.name, constructors.has(value.name), undefined, scope);
-    if (!value || typeof value !== 'object' || Array.isArray(value))
-      return this.encode(value, new Set(), undefined, scope, frames);
-    if (classifyNative(value, this.tags))
-      return this.encode(value, new Set(), undefined, scope, frames);
-    requireValue(!seen.has(value), 'PERMISSION_DENIED');
-    seen.add(value);
-    const fields = Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
-      typeof item === 'function'
-        ? this.callable(item, value, key, constructors.has(key), returns[key], scope)
-        : this.moduleValue(item, seen, scope, frames)]));
-    seen.delete(value);
-    return { $: 'object', value: fields };
-  }
-
-  encode(value, seen = new Set(), hint, scope = this.ownerScope(), frames = []) {
-    if (value === undefined) return { $: 'undefined' };
-    if (typeof value === 'bigint') return { $: 'bigint', value: String(value) };
-    if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) return value;
-    if (value instanceof Error) return { $: 'error', code: guestErrorCodes.has(value.code) ? value.code :
-      value instanceof Error && value.name === 'AbortError' ? 'CANCELLED' : 'SCRIPT_EXCEPTION' };
-    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
-      const frame = frames.length;
-      frames.push(Buffer.from(value instanceof ArrayBuffer ? new Uint8Array(value)
-        : new Uint8Array(value.buffer, value.byteOffset, value.byteLength)));
-      return { $: 'bytes', frame };
-    }
-    if (value instanceof Date) return { $: 'date', value: value.toISOString() };
-    if (value instanceof crypto.KeyObject) {
-      const data = value.export(value.type === 'secret' ? undefined
-        : { format: 'der', type: value.type === 'private' ? 'pkcs8' : 'spki' });
-      try {
-        return { $: 'key', type: value.type, data: data.toString('base64'),
-          fields: this.encode({
-            type: value.type, asymmetricKeyType: value.asymmetricKeyType,
-            asymmetricKeyDetails: value.asymmetricKeyDetails, symmetricKeySize: value.symmetricKeySize,
-          }, new Set(), undefined, scope, frames) };
-      } finally { data.fill(0); }
-    }
-    if (this.callbackReverse.has(value)) return { $: 'guestCallback', id: this.callbackReverse.get(value) };
-    if (typeof value?.then === 'function') {
-      const id = crypto.randomUUID(), context = this.context;
-      this.retainPromise(id, scope);
-      const ownerRef = new WeakRef(this);
-      const completion = {
-        active: true, scope, context, hint, detach: null,
-        settle(ok, result) {
-          if (!this.active) return;
-          this.active = false;
-          const activeScope = this.scope;
-          const selectedContext = this.context;
-          const selectedHint = this.hint;
-          const detach = this.detach;
-          this.scope = null; this.context = 0; this.hint = undefined; this.detach = null;
-          const owner = ownerRef.deref();
-          let detachFailure;
-          try { detach?.(); } catch (error) { detachFailure = error; }
-          if (!owner) return;
-          if (!activeScope || activeScope.signal.aborted || !owner.session?.live) {
-            owner.completePromise(id);
-            return;
-          }
-          try {
-            owner.settlePromise(id, ok, result, activeScope, selectedContext,
-              ok ? selectedHint : undefined);
-          } catch (error) {
-            owner.abandonPromise(id);
-            if (owner.session.live) owner.session.callbackFailed(error, activeScope);
-            return;
-          }
-          if (detachFailure && owner.session?.live)
-            owner.session.callbackFailed(detachFailure, activeScope);
-        },
-      };
-      try {
-        completion.detach = scope.add(() => {
-          completion.active = false;
-          completion.scope = null; completion.context = 0;
-          completion.hint = undefined; completion.detach = null;
-        });
-        const task = Promise.resolve(value).then(
-          result => completion.settle(true, result),
-          error => completion.settle(false, error),
-        );
-        this.session.trackAdapter(task);
-      } catch (error) {
-        completion.active = false;
-        completion.scope = null; completion.context = 0; completion.hint = undefined;
-        const detach = completion.detach;
-        completion.detach = null;
-        try { detach?.(); } catch {}
-        this.completePromise(id);
-        throw error;
-      }
-      return { $: 'promise', id };
-    }
-    let role = hint ?? classifyNative(value, this.tags);
-    if (role) {
-      requireValue(Object.hasOwn(nativeRoles, role), 'PERMISSION_DENIED');
-      this.tags.set(value, role);
-      let id = this.reverse.get(value);
-      let receipt = id && this.handles.get(id);
-      let created = false;
-      if (!receipt) {
-        id = crypto.randomUUID();
-        receipt = { id, value, role, methods: new Map(),
-          persistent: scope === this.session.root, leases: new Set(),
-          boundScope: scope?.ownsTransport ? scope : null };
-        this.reverse.set(value, id);
-        this.handles.set(id, receipt);
-        created = true;
-      }
-      if (created) this.bindNaturalRelease(receipt);
-      try { this.retainHandle(receipt, receipt.persistent ? this.session.root : scope); }
-      catch (error) {
-        if (created) {
-          this.reverse.delete(value);
-          this.handles.delete(id);
-        }
-        throw error;
-      }
-      return { $: 'handle', id, role, callable: false };
-    }
-    requireValue(typeof value !== 'function' && !seen.has(value), 'PERMISSION_DENIED');
-    const proto = Object.getPrototypeOf(value);
-    requireValue(Array.isArray(value) || proto === Object.prototype || proto === null, 'PERMISSION_DENIED');
-    seen.add(value);
-    const result = Array.isArray(value) ? value.map(item => this.encode(item, seen, undefined, scope, frames))
-      : { $: 'object', value: Object.fromEntries(Object.entries(value)
-        .map(([key, item]) => [key, this.encode(item, seen, undefined, scope, frames)])) };
-    seen.delete(value);
-    return result;
-  }
-
-  decode(value, scope = this.ownerScope(), frames = []) {
-    if (value === null || typeof value !== 'object') return value;
-    if (Array.isArray(value)) return value.map(item => this.decode(item, scope, frames));
-    switch (value.$) {
-      case 'undefined': return undefined;
-      case 'bigint': return BigInt(value.value);
-      case 'bytes':
-        requireValue(Number.isSafeInteger(value.frame) && value.frame >= 0 &&
-          value.frame < frames.length, 'SCRIPT_EXCEPTION');
-        return Buffer.from(frames[value.frame]);
-      case 'date': return new Date(value.value);
-      case 'error': return Object.assign(new Error('Guest callback failed'), { code: value.code });
-      case 'key': {
-        requireValue(['secret', 'private', 'public'].includes(value.type) &&
-          typeof value.data === 'string', 'INVALID_ARGUMENT');
-        const data = Buffer.from(value.data, 'base64');
-        try {
-          return value.type === 'secret' ? crypto.createSecretKey(data)
-            : value.type === 'private' ? crypto.createPrivateKey({ key: data, format: 'der', type: 'pkcs8' })
-              : crypto.createPublicKey({ key: data, format: 'der', type: 'spki' });
-        } finally { data.fill(0); }
-      }
-      case 'handle': {
-        const receipt = this.handles.get(value.id);
-        requireValue(receipt && receipt.role !== 'callable', 'PERMISSION_DENIED');
-        this.retainHandle(receipt, scope);
-        return receipt.value;
-      }
-      case 'callback': {
-        requireValue(Number.isSafeInteger(value.id) && value.id > 0, 'INVALID_ARGUMENT');
-        requireValue(Number.isSafeInteger(value.context) && value.context >= 0, 'INVALID_ARGUMENT');
-        // A release queued for the guest may not have been flushed yet. This
-        // callback is live again, so revoke that stale release notification.
-        this.pendingGuestRelease.callbacks.delete(value.id);
-        let receipt = this.callbacks.get(value.id);
-        let callback = receipt?.ref.deref();
-        if (!receipt || !callback) {
-          if (receipt) {
-            this.callbackFinalizer?.unregister(receipt);
-            // Detach the stale receipt from leases too. Otherwise a later
-            // lease close would look the id up and release the new receipt.
-            for (const lease of receipt.leases) lease.callbacks.delete(value.id);
-            receipt.leases.clear();
-            this.callbacks.delete(value.id);
-          }
-          const ownerRef = new WeakRef(this);
-          receipt = { id: value.id, context: value.context, ref: null, leases: new Set() };
-          callback = function(...args) {
-            const owner = ownerRef.deref();
-            if (!owner) return;
-            const session = owner.session, services = owner.services;
-            if (!session?.live || !services ||
-              owner.callbacks.get(receipt.id) !== receipt) return;
-            let active, requestScope;
-            try {
-              requestScope = args.map(argument => services.requestScope(argument))
-                .find(Boolean);
-              const contextScope = requestScope ??
-                owner.metadataScope(receipt.context, null);
-              // Guest callback execution keeps the request's metadata context;
-              // native resources created by it remain session-owned.
-              // A cancelled request must still deliver its cleanup callbacks;
-              // those continue under the live session ownership scope.
-              active = owner.session.resourceScope?.() ?? owner.ownerScope();
-              if (owner.session !== session || owner.services !== services || !session.live ||
-                owner.callbacks.get(receipt.id) !== receipt ||
-                !active || active.signal.aborted) return;
-              // Only known instance-owned receivers cross. Never globalThis,
-              // arbitrary library callback contexts, or a host prototype.
-              const frames = [];
-              const receiver = owner.reverse.has(this) || classifyNative(this, owner.tags)
-                ? owner.encode(this, new Set(), undefined,
-                  services.requestScope(this) ?? active, frames) : { $: 'undefined' };
-              // Only real inbound request arguments belong to its transport.
-              // An outbound response may arrive in that request's metadata
-              // context without becoming one of its revocable handles.
-              const argumentScope = requestScope ?? active;
-              const result = session.nativeCallback(receipt.id,
-                owner.encode(args, new Set(), undefined, argumentScope, frames), active, receiver,
-                Boolean(requestScope), contextScope && !contextScope.signal.aborted
-                  ? contextScope : null, frames);
-              const callbackResult = result && Object.hasOwn(result, 'frames')
-                ? result.value : result;
-              if (callbackResult?.$ === 'callbackPromise') {
-                const pending = deferred();
-                pending.scope = active;
-                owner.callbackReturns.set(callbackResult.id, pending);
-                let detach;
-                try {
-                  detach = pending.scope.add(() => {
-                    if (owner.callbackReturns.get(callbackResult.id) === pending)
-                      owner.callbackReturns.delete(callbackResult.id);
-                    pending.reject(fault('CANCELLED'));
-                  });
-                } catch (error) {
-                  if (owner.callbackReturns.get(callbackResult.id) === pending)
-                    owner.callbackReturns.delete(callbackResult.id);
-                  pending.reject(fault('CANCELLED'));
-                  throw error;
-                }
-                pending.promise.finally(detach).catch(() => {});
-                return pending.promise;
-              }
-              return owner.decode(callbackResult, owner.session.resourceScope?.() ?? active,
-                result?.frames ?? []);
-            } catch (error) {
-              if (session.live) session.callbackFailed(error, active ?? session.root,
-                requestScope ?? null);
-              return undefined;
-            }
-          };
-          receipt.ref = new WeakRef(callback);
-          this.callbacks.set(value.id, receipt);
-          this.callbackReverse.set(callback, value.id);
-          this.callbackFinalizer?.register(callback, receipt, receipt);
-        }
-        requireValue(receipt.context === value.context, 'INVALID_ARGUMENT');
-        this.retainCallback(receipt, scope);
-        this.retainContext(receipt.context, scope);
-        return callback;
-      }
-      case 'object': return Object.fromEntries(Object.entries(value.value)
-        .map(([key, item]) => [key, this.decode(item, scope, frames)]));
-      default: throw fault('INVALID_ARGUMENT');
-    }
-  }
-
-  settle(id, value, scope, context, frames = []) {
-    try {
-      if (!this.session.live || scope.signal.aborted) {
-        this.abandonPromise(id);
-        return;
-      }
-      this.session.call('nativeSettled', [id, JSON.stringify(value), String(context ?? 0)], scope,
-        frames);
-      this.completePromise(id);
-    } catch (error) {
-      this.abandonPromise(id);
-      throw error;
-    }
-  }
-
-  settlePromise(id, ok, value, scope, context, hint) {
-    if (!this.session.live || scope.signal.aborted) {
-      this.abandonPromise(id);
-      return;
-    }
-    const frames = [];
-    this.settle(id, { ok, value: this.encode(value, new Set(), ok ? hint : undefined, scope,
-      frames) }, scope, context, frames);
-  }
-
-  member(receipt, key, scope = this.ownerScope(), frames = []) {
-    const rules = nativeRoles[receipt.role];
-    requireValue(typeof key === 'string' && rules &&
-      (rules.fields.has(key) || rules.methods.has(key)), 'PERMISSION_DENIED');
-    const actual = nativeSymbols.get(key) ?? key;
-    const owner = receipt.boundScope ?? (receipt.persistent ? this.session.root : scope);
-    if (rules.methods.has(key)) {
-      if (typeof receipt.value[actual] !== 'function')
-        return this.encode(undefined, new Set(), undefined, owner, frames);
-      let method = receipt.methods.get(key);
-      let methodReceipt = method && this.handles.get(method.id);
-      if (!methodReceipt) {
-        method = this.callable((...args) => this.invoke(receipt, key, args),
-          undefined, key, false, undefined, owner);
-        receipt.methods.set(key, method);
-        methodReceipt = this.handles.get(method.id);
-      }
-      this.retainHandle(methodReceipt, owner);
-      return method;
-    }
-    return this.encode(receipt.value[actual], new Set(), undefined, owner, frames);
-  }
-
-  invoke(receipt, key, args) {
-    const rules = nativeRoles[receipt.role];
-    requireValue(rules?.methods.has(key), 'PERMISSION_DENIED');
-    if (receipt.role === 'http2Session' && key === 'request') {
-      requireValue(!args[1]?.createConnection, 'PERMISSION_DENIED');
-      const result = receipt.value.request(...args);
-      this.tags.set(result, 'http2Stream'); return result;
-    }
-    const actual = nativeSymbols.get(key) ?? key;
-    if (receipt.role === 'readableWeb' && ['pipeTo', 'pipeThrough'].includes(key)) {
-      const scope = this.ownerScope();
-      const controller = new AbortController();
-      const lifecycle = { detach: null };
-      const cancel = () => {
-        lifecycle.detach = null;
-        controller.abort(fault('CANCELLED'));
-      };
-      lifecycle.detach = scope.add(cancel);
-      const complete = () => {
-        const detach = lifecycle.detach;
-        lifecycle.detach = null;
-        detach?.();
-      };
-      const options = args[1] && typeof args[1] === 'object' ? { ...args[1] } : {};
-      try {
-        if (key === 'pipeThrough') {
-          const transform = args[0];
-          requireValue(transform?.readable instanceof webStreams.ReadableStream &&
-            transform?.writable instanceof webStreams.WritableStream, 'INVALID_ARGUMENT');
-          const task = receipt.value.pipeTo(transform.writable,
-            { ...options, signal: controller.signal });
-          const owned = Promise.resolve(task).finally(complete);
-          this.session.trackAdapter(owned.catch(() => {}));
-          return transform.readable;
-        }
-        const result = receipt.value.pipeTo(args[0], { ...options, signal: controller.signal });
-        Promise.resolve(result).finally(complete).catch(() => {});
-        return result;
-      } catch (error) {
-        complete();
-        throw error;
-      }
-    }
-    let result;
-    if (key === 'removeAllListeners') {
-      // Guest removal only drops guest callbacks. Host ownership guards must
-      // survive until the resource closes.
-      const events = args.length ? [args[0]]
-        : typeof receipt.value.eventNames === 'function' ? receipt.value.eventNames() : [];
-      for (const event of events) {
-        const listeners = typeof receipt.value.listeners === 'function'
-          ? receipt.value.listeners(event) : [];
-        for (const listener of listeners) {
-          if (this.callbackReverse.has(listener))
-            receipt.value.removeListener?.(event, listener);
-        }
-      }
-      result = receipt.value;
-    } else result = Reflect.apply(receipt.value[actual], receipt.value, args);
-    if (receipt.role === 'tlsSocket' && ['getPeerCertificate', 'getCertificate'].includes(key)) {
-      const seen = new Set();
-      for (let certificate = result; certificate && typeof certificate === 'object' &&
-        !seen.has(certificate); certificate = certificate.issuerCertificate) {
-        seen.add(certificate);
-        this.tags.set(certificate, 'certificate');
-      }
-    }
-    this.naturalReleaseFromInvocation(receipt, key);
-    if (['entries', 'keys', 'values', '@@iterator', '@@asyncIterator'].includes(key) && result &&
-      typeof result.next === 'function') this.tags.set(result, 'iterator');
-    if (key === 'copy' && receipt.role === 'hash') this.tags.set(result, 'hash');
-    return result;
-  }
-
-  pipeStream(receipt, args) {
-    // Guest Readable.pipe(Writable) can stay entirely on the host when both
-    // endpoints are registered native streams. A guest data listener makes
-    // that unsafe because it would stop receiving its own chunks, so leave
-    // that case to the per-chunk fallback.
-    requireValue(Array.isArray(args) && args.length === 1, 'INVALID_ARGUMENT');
-    const target = this.reverse.get(args[0]);
-    const targetReceipt = target && this.handles.get(target);
-    requireValue(pipeReadableRoles.has(receipt.role) && pipeWritableRoles.has(targetReceipt?.role) &&
-      typeof receipt.value?.pipe === 'function' &&
-      typeof targetReceipt.value?.write === 'function' &&
-      typeof targetReceipt.value?.end === 'function' &&
-      receipt.value !== targetReceipt.value, 'PERMISSION_DENIED');
-    if ((receipt.value.listenerCount?.('data') ?? 0) > 0) return false;
-    receipt.value.pipe(targetReceipt.value);
-    return true;
-  }
-
-  unpipeStream(receipt, args) {
-    requireValue(Array.isArray(args) && args.length === 1, 'INVALID_ARGUMENT');
-    const target = this.reverse.get(args[0]);
-    const targetReceipt = target && this.handles.get(target);
-    const targets = receipt.value?._readableState?.pipes;
-    if (!targetReceipt || !pipeReadableRoles.has(receipt.role) ||
-      !pipeWritableRoles.has(targetReceipt.role) ||
-      !Array.isArray(targets) || !targets.includes(targetReceipt.value)) return true;
-    try { receipt.value.unpipe(targetReceipt.value); } catch { /* Destination already closed. */ }
-    return true;
-  }
-
-  bridge(input, frames = [], outFrames = []) {
-    const previous = this.context;
-    try {
-      this.context = Number.isSafeInteger(input.context) && input.context > 0 ? input.context : 0;
-      if (input.operation === 'callbackDone') {
-        const receipt = this.callbackReturns.get(input.id);
-        if (!receipt || receipt.scope.signal.aborted) return { ok: true, value: null };
-        return this.session.contextScope.run(receipt.scope, () =>
-          this.bridgeScoped(input, receipt.scope, frames, outFrames));
-      }
-      const scope = this.scopeForContext(this.context, input.originContext);
-      // The ambient context carries request metadata for the services facade,
-      // while the lease scope keeps native resources session-owned. A pump or
-      // module turn runs under the session's coarse scopes; the guest context
-      // still names the request whose metadata the operation must observe.
-      const ambient = this.session.contextScope.getStore();
-      const metadata = ambient && !ambient.signal.aborted && ambient !== this.session.root &&
-        ambient !== this.session.resourceScope?.()
-        ? ambient : this.metadataScope(this.context, scope);
-      return this.session.contextScope.run(metadata, () =>
-        this.bridgeScoped(input, scope, frames, outFrames));
-    } catch (error) {
-      return this.bridgeFailure(input, error);
-    } finally { this.context = previous; }
-  }
-
-  bridgeScoped(input, scope, frames = [], outFrames = []) {
-    this.session.assertLive();
-    const { operation } = input;
-    if (operation === 'context') {
-      this.retainContext(this.context, scope);
-      return { ok: true, value: null };
-    }
-    if (operation === 'requestId') return { ok: true, value: scope.requestId ?? 0 };
-    if (operation === 'module') {
-      requireValue(Object.hasOwn(this.builtins, input.name), 'UNSUPPORTED_DEPENDENCY');
-      this.moduleCache ??= new Map();
-      if (!this.moduleCache.has(input.name)) {
-        const frames = [];
-        this.moduleCache.set(input.name, { frames, value: this.moduleValue(
-          this.builtins[input.name], new Set(), this.session.root, frames) });
-      }
-      const cached = this.moduleCache.get(input.name);
-      outFrames.push(...cached.frames);
-      return { ok: true, value: cached.value };
-    }
-    if (operation === 'source') return { ok: true, value: this.source(input.name, input.parent ?? null) };
-    if (operation === 'memory') return { ok: true, value: this.session.engine.memoryUsage() };
-    if (operation === 'uptime') return { ok: true, value: (performance.now() - this.started) / 1000 };
-    if (operation === 'callbackDone') {
-      const receipt = this.callbackReturns.get(input.id);
-      if (receipt) {
-        this.callbackReturns.delete(input.id);
-        if (input.ok) receipt.resolve(this.decode(input.value, scope, frames));
-        else receipt.reject(fault('SCRIPT_EXCEPTION'));
-      }
-      return { ok: true, value: null };
-    }
-    if (operation === 'releaseCallbacks') {
-      requireValue(Array.isArray(input.ids) &&
-        input.ids.every(id => Number.isSafeInteger(id) && id > 0), 'INVALID_ARGUMENT');
-      this.releaseCallbacks(input.ids);
-      return { ok: true, value: null };
-    }
-    if (operation === 'releaseHandles') {
-      requireValue(Array.isArray(input.ids) &&
-        input.ids.every(id => typeof id === 'string' && id.length > 0 && id.length <= 128),
-      'INVALID_ARGUMENT');
-      this.releaseGuestHandles(input.ids);
-      return { ok: true, value: null };
-    }
-    if (operation === 'key') {
-      requireValue(['export', 'equals'].includes(input.method), 'PERMISSION_DENIED');
-      const key = this.decode(input.key, scope, frames),
-        args = this.decode(input.args, scope, frames);
-      requireValue(key instanceof crypto.KeyObject && Array.isArray(args), 'INVALID_ARGUMENT');
-      const result = Reflect.apply(key[input.method], key, args);
-      try {
-        return { ok: true, value: this.encode(result, new Set(), undefined, scope, outFrames) };
-      } finally { if (Buffer.isBuffer(result)) result.fill(0); }
-    }
-    const receipt = this.handles.get(input.id);
-    if (!receipt && input.operation === 'invoke' && input.key === 'unpipeTo')
-      return { ok: true, value: true };
-    requireValue(receipt, 'PERMISSION_DENIED');
-    this.retainHandle(receipt, scope);
-    if (operation === 'get') return { ok: true,
-      value: this.member(receipt, input.key, scope, outFrames) };
-    if (operation === 'keys') {
-      const rules = nativeRoles[receipt.role];
-      requireValue(rules, 'PERMISSION_DENIED');
-      return { ok: true, value: [...rules.fields, ...rules.methods].filter(key => !key.startsWith('@@')) };
-    }
-    if (operation === 'set') {
-      requireValue(nativeRoles[receipt.role]?.writable.has(input.key), 'PERMISSION_DENIED');
-      receipt.value[input.key] = this.decode(input.value, scope, frames);
-      return { ok: true, value: true };
-    }
-    let encoded = input.args;
-    if (receipt.argumentFields && Array.isArray(encoded)) {
-      // The guest projects before encoding so ignored library metadata cannot
-      // allocate callbacks. Recheck the same consuming API boundary here.
-      const { kind, fields, options } = receipt.argumentFields;
-      encoded = encoded.map((arg, index) => {
-        if (arg?.$ !== 'object') return arg;
-        const value = Object.fromEntries(Object.entries(arg.value));
-        return { $: 'object', value: kind === 'http'
-          ? projectHttpRequestOptions(value, agent => agent === false ||
-            agent?.$ === 'handle' && this.handles.get(agent.id)?.role === 'agent')
-          : index === 0 ? projectFields(value, fields) : projectFields(value, options) };
-      });
-    }
-    if (operation === 'invoke' && input.key === 'unpipeTo') {
-      // Cleanup is idempotent: the native stream may already have retired its
-      // receipt and unregistered its pipe after finish/close.
-      const target = input.args?.[0];
-      const targetReceipt = target?.$ === 'handle' && this.handles.get(target.id);
-      return { ok: true, value: pipeWritableRoles.has(targetReceipt?.role)
-        ? this.unpipeStream(receipt, [targetReceipt.value]) : true };
-    }
-    const args = this.decode(encoded, scope, frames);
-    requireValue(Array.isArray(args), 'INVALID_ARGUMENT');
-    let value;
-    if (operation === 'invoke' && input.key === 'pipeTo' && receipt.role !== 'readableWeb') {
-      // These are internal guest stream-wiring operations, not public native
-      // fields. Both endpoints must already be registered stream handles.
-      value = this.pipeStream(receipt, args);
-    } else if (operation === 'invoke') value = this.invoke(receipt, input.key, args);
-    else {
-      requireValue(['call', 'construct'].includes(operation) && receipt.role === 'callable', 'PERMISSION_DENIED');
-      requireValue(operation !== 'construct' || receipt.construct, 'PERMISSION_DENIED');
-      value = operation === 'construct' ? Reflect.construct(receipt.fn, args)
-        : Reflect.apply(receipt.fn, receipt.receiver, args);
-      if (receipt.hint && value && typeof value === 'object') this.tags.set(value, receipt.hint);
-    }
-    return { ok: true, value: this.encode(value, new Set(), undefined, scope, outFrames),
-      updates: args.flatMap((arg, index) => Buffer.isBuffer(arg)
-        ? [{ index, value: this.encode(arg, new Set(), undefined, scope, outFrames) }] : []) };
-  }
-
-  bridgeFailure(input, error) {
-    const code = guestErrorCodes.has(error.code) ? error.code : 'SCRIPT_EXCEPTION';
-    const callable = ['call', 'construct'].includes(input.operation)
-      ? this.handles.get(input.id)?.name : null;
-    const dependency = ['module', 'source'].includes(input.operation) &&
-      typeof input.name === 'string' && /^@?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(input.name)
-      ? input.name : null;
-    const expectedProbe = code === 'PERMISSION_DENIED' && ['get', 'set'].includes(input.operation);
-    if (!expectedProbe && this.session.onDiagnostic) try {
-      const scope = this.activeContextScope(input.context) ||
-        this.activeContextScope(input.originContext) || this.ownerScope();
-      this.session.onDiagnostic?.({ ...this.session.scopeIdentity(scope),
-      kind: 'ScriptHostError', reason: 'host',
-      operation: 'node.' + String(input.operation), code,
-      ...(dependency ? { dependency } : {}),
-      ...(typeof input.key === 'string' && /^[A-Za-z_$][\w$]{0,63}$/.test(input.key)
-        ? { member: input.key }
-        : typeof callable === 'string' && /^[A-Za-z_$][\w$]{0,63}$/.test(callable)
-          ? { member: callable } : {}) }); } catch {}
-    return { ok: false, value: { $: 'error', code } };
-  }
-
-  async close() {
+  close() {
     if (this.closing) return this.closing;
-    this.closing = (async () => {
-      const cleanupState = this.cleanupTracker;
-      let failure = cleanupState.failure;
-      // Normal teardown has already disposed retired receipts. Direct close
-      // disposes only still-owned handles, never retries a failed retirement.
-      for (const receipt of this.handles.values()) {
-        for (const lease of receipt.leases) lease.handles.delete(receipt.id);
-        receipt.leases.clear();
-        this.handles.delete(receipt.id);
-        const handleFailure = this.disposeHandle(receipt);
-        failure ??= handleFailure;
-      }
-      failure ??= cleanupState.failure;
-      const resources = [...this.networkResources];
-      const resourceOwners = this.networkResources;
-      const resourceCleanups = this.networkCleanup;
-      const results = await Promise.all(resources.map(resource => closeResource(resource, {
-        stop: () => {
-          if (!resource.destroyed) resource.destroy();
-        },
-        release: () => resourceCleanups.get(resource)?.(),
-        timeoutMs: this.session.limits.cleanupTimeoutMs,
-        closed: value => value.closed,
-      })));
-      for (const result of results) failure ??= result.error?.code === 'TIMEOUT'
-        ? fault('TIMEOUT') : result.error;
-      this.networkResources = new Set();
-      this.networkCleanup = new Map();
-      resourceOwners.clear();
-      resourceCleanups.clear();
-      failure ??= cleanupState.failure;
-      const cleanup = [...cleanupState.tasks];
-      if (cleanup.length) {
-        let cleanupTimer;
-        const settled = await Promise.race([
-          Promise.allSettled(cleanup),
-          new Promise(resolve => {
-            cleanupTimer = setTimeout(() => resolve(null), this.session.limits.cleanupTimeoutMs);
-          }),
-        ]);
-        clearTimeout(cleanupTimer);
-        if (!settled) failure ??= fault('TIMEOUT');
-        else {
-          const rejected = settled.find(result => result.status === 'rejected');
-          if (rejected) failure ??= rejected.reason;
-        }
-      }
-      failure ??= cleanupState.failure;
-      cleanupState.active = false;
-      cleanupState.tasks.clear();
-      cleanupState.failure = null;
-      for (const receipt of this.callbackReturns.values()) receipt.reject(fault('STALE_SESSION'));
-      this.callbackReturns.clear(); this.callbacks.clear(); this.handles.clear();
-      this.contextLeases.clear(); this.promiseLeases.clear();
-      this.requestContexts = new WeakMap();
-      for (const values of Object.values(this.pendingGuestRelease)) values.clear();
-      this.sources.clear(); this.moduleCache?.clear();
-      this.callbackFinalizer = null;
-      this.reverse = new WeakMap(); this.callbackReverse = new WeakMap();
-      this.scopeLeases = new WeakMap();
-      try { await this.services.close(); } catch (error) { failure ??= error; }
-      try { await this.volume.close(); } catch (error) { failure ??= error; }
-      this.fs = null;
-      this.builtins = Object.create(null);
-      this.tags = new WeakMap();
-      this.session = null; this.services = null; this.volume = null;
-      if (failure) throw failure;
-    })();
+    this.closing = this.closeOwned();
+    this.closing.catch(() => {});
     return this.closing;
+  }
+  async closeOwned() {
+    let failure = this.failure;
+    for (const [timer, clear] of this.session.timers) {
+      try { clear(timer); } catch (error) { failure ??= error; }
+    }
+    this.session.timers.clear();
+    for (const [channel, subscriptions] of this.subscriptions)
+      for (const { listener } of subscriptions) {
+        try { channel.unsubscribe(listener); } catch (error) { failure ??= error; }
+      }
+    this.subscriptions.clear();
+    for (const [channel, stores] of this.channelStores)
+      for (const store of stores) {
+        try { channel.unbindStore(store); } catch (error) { failure ??= error; }
+      }
+    this.channelStores.clear();
+    const tasks = [...this.resourceCleanup.keys()].map(resource => closeResource(resource, {
+      stop: () => this.resourceCleanup.get(resource)?.stop(),
+      release: () => this.resourceCleanup.get(resource)?.(),
+      timeoutMs: this.session.limits.cleanupTimeoutMs,
+      closed: value => {
+        if (!value.closed) return false;
+        if (!this.resourceCleanup.has(value)) return true;
+        // Node marks closed before dispatch. Only an explicitly silent native
+        // stream has no forthcoming close event to wait for.
+        const readable = value._readableState, writable = value._writableState;
+        return Boolean((readable || writable) && !readable?.emitClose && !writable?.emitClose);
+      },
+    }).then(result => { if (result.error) throw result.error; }));
+    tasks.push(this.services.close(), this.volume.close());
+    tasks.push(this.closeWeb());
+    let timer;
+    const results = await Promise.race([Promise.allSettled(tasks), new Promise(resolve => {
+      timer = setTimeout(() => resolve(null), this.session.limits.cleanupTimeoutMs);
+    })]);
+    clearTimeout(timer);
+    if (!results) failure ??= fault('TIMEOUT');
+    else for (const result of results) if (result.status === 'rejected') failure ??= result.reason;
+    failure ??= this.failure;
+    this.sources.clear();
+    this.process.removeAllListeners();
+    this.builtins = Object.create(null);
+    if (failure) throw failure;
   }
 }

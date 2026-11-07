@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
+import { once } from 'node:events';
 import { createScriptHost, createCatRuntime } from '../src/index.js';
-import { WorkerSession } from '../src/worker-session.js';
-import { lxScript, target } from './fixtures.js';
+import { NativeSession } from '../src/native-session.js';
+import { lxScript, target, deferred } from './fixtures.js';
 import { serverFor } from './http-fixture.js';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, watch } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -42,20 +43,20 @@ function requestURL(url, options = {}) {
   });
 }
 
-function hostCapturingWorkers() {
+function hostCapturingNativeSessions() {
   const sessions = new Map();
   return {
     sessions,
     factory(input) {
-      const session = new WorkerSession(input);
+      const session = new NativeSession(input);
       sessions.set(input.installationId, session);
       return session;
     },
   };
 }
 
-function lxAlertEntered(workers, installationId) {
-  return () => workers.sessions.get(installationId)?.alert?.log;
+function lxAlertEntered(owners, installationId) {
+  return () => owners.sessions.get(installationId)?.alert?.log;
 }
 
 function lxSourceWithAlert({ alert, handler = 'async () => "ok"', setup = '' }) {
@@ -281,9 +282,9 @@ function assertPortReleased(port) {
 
 test('B22 a stuck LX initialization does not delay another instance',
   { timeout: 15000 }, async t => {
-    const workers = hostCapturingWorkers();
+    const owners = hostCapturingNativeSessions();
     const host = createScriptHost({
-      adapters: { lx: workers.factory },
+      adapters: { lx: owners.factory },
       limits: { initTimeoutMs: 60000, cleanupTimeoutMs: 100, requestTimeoutMs: 60000 },
     });
     t.after(() => host.close().catch(() => {}));
@@ -295,24 +296,24 @@ test('B22 a stuck LX initialization does not delay another instance',
     stuck.catch(() => {});
     let settled = false;
     stuck.finally(() => { settled = true; }).catch(() => {});
-    await waitFor(lxAlertEntered(workers, 'a'),
+    await waitFor(lxAlertEntered(owners, 'a'),
       'stuck LX initialization did not enter its loop');
     const started = performance.now();
     const value = await host.invoke(target('b'));
     assertUnder1s(started, 'healthy invoke');
     assert.equal(value.action, 'musicUrl');
     await assertCatAvailable();
-    assert.equal(workers.sessions.get('a').alert.log, 'init-entered');
-    assert.equal(workers.sessions.get('a').live, true);
-    assert.equal(workers.sessions.get('a').failure, null);
+    assert.equal(owners.sessions.get('a').alert.log, 'init-entered');
+    assert.equal(owners.sessions.get('a').live, true);
+    assert.equal(owners.sessions.get('a').failure, null);
     assert.equal(settled, false);
   });
 
 test('B22 a stuck LX invocation does not delay another instance',
   { timeout: 15000 }, async t => {
-    const workers = hostCapturingWorkers();
+    const owners = hostCapturingNativeSessions();
     const host = createScriptHost({
-      adapters: { lx: workers.factory },
+      adapters: { lx: owners.factory },
       limits: { initTimeoutMs: 10000, cleanupTimeoutMs: 100, requestTimeoutMs: 60000 },
     });
     t.after(() => host.close().catch(() => {}));
@@ -321,24 +322,24 @@ test('B22 a stuck LX invocation does not delay another instance',
     await host.install({ installationId: 'b', enabled: true, source: lxScript() });
     const pending = host.invoke(target('a', 'kw', { stuck: true }), { timeoutMs: 60000 });
     pending.catch(() => {});
-    await waitFor(lxAlertEntered(workers, 'a'),
+    await waitFor(lxAlertEntered(owners, 'a'),
       'stuck LX invocation did not enter its loop');
     const started = performance.now();
     const value = await host.invoke(target('b'));
     assertUnder1s(started, 'healthy invoke');
     assert.equal(value.action, 'musicUrl');
     await assertCatAvailable();
-    assert.equal(workers.sessions.get('a').alert.log, 'invoke-entered');
-    assert.equal(workers.sessions.get('a').live, true);
-    assert.equal(workers.sessions.get('a').failure, null);
+    assert.equal(owners.sessions.get('a').alert.log, 'invoke-entered');
+    assert.equal(owners.sessions.get('a').live, true);
+    assert.equal(owners.sessions.get('a').failure, null);
     assert.equal(host.get('a').state, 'ready');
   });
 
 test('B22 a stuck LX background timer does not delay another instance',
   { timeout: 15000 }, async t => {
-    const workers = hostCapturingWorkers();
+    const owners = hostCapturingNativeSessions();
     const host = createScriptHost({
-      adapters: { lx: workers.factory },
+      adapters: { lx: owners.factory },
       limits: { initTimeoutMs: 10000, cleanupTimeoutMs: 100, requestTimeoutMs: 60000 },
     });
     t.after(() => host.close().catch(() => {}));
@@ -346,16 +347,16 @@ test('B22 a stuck LX background timer does not delay another instance',
     await host.install({ installationId: 'a', enabled: true, source: lxTimerStuckSource('timer-entered') });
     await host.install({ installationId: 'b', enabled: true, source: lxScript() });
     assert.equal(await host.invoke(target('a', 'kw', { arm: true })), 'armed');
-    await waitFor(lxAlertEntered(workers, 'a'),
+    await waitFor(lxAlertEntered(owners, 'a'),
       'background LX timer did not enter its loop');
     const started = performance.now();
     const value = await host.invoke(target('b'));
     assertUnder1s(started, 'healthy invoke');
     assert.equal(value.action, 'musicUrl');
     await assertCatAvailable();
-    assert.equal(workers.sessions.get('a').alert.log, 'timer-entered');
-    assert.equal(workers.sessions.get('a').live, true);
-    assert.equal(workers.sessions.get('a').failure, null);
+    assert.equal(owners.sessions.get('a').alert.log, 'timer-entered');
+    assert.equal(owners.sessions.get('a').live, true);
+    assert.equal(owners.sessions.get('a').failure, null);
     assert.equal(host.get('a').state, 'ready');
   });
 
@@ -475,12 +476,12 @@ test('B22 a stuck Cat background timer does not delay another instance, invoke, 
     assert.equal(runtime.instance('stuck').state, 'ready');
   });
 
-test('B23 an expired LX invocation probes, terminates and can be re-enabled',
+test('B23 an expired LX invocation interrupts its native thread and can be re-enabled',
   { timeout: 15000 }, async t => {
     const diagnostics = [];
-    const workers = hostCapturingWorkers();
+    const owners = hostCapturingNativeSessions();
     const host = createScriptHost({
-      adapters: { lx: workers.factory },
+      adapters: { lx: owners.factory },
       limits: { requestTimeoutMs: 150, cleanupTimeoutMs: 50, initTimeoutMs: 1000 },
       onDiagnostic: event => diagnostics.push(event),
     });
@@ -491,17 +492,17 @@ test('B23 an expired LX invocation probes, terminates and can be re-enabled',
     });
     const timedOut = assert.rejects(host.invoke(target('a', 'kw', { stuck: true })),
       { code: 'TIMEOUT' });
-    await waitFor(lxAlertEntered(workers, 'a'), 'expired LX invocation did not enter its loop');
-    assert.equal(workers.sessions.get('a').alert.log, 'invoke-entered');
+    await waitFor(lxAlertEntered(owners, 'a'), 'expired LX invocation did not enter its loop');
+    assert.equal(owners.sessions.get('a').alert.log, 'invoke-entered');
     await timedOut;
     await waitFor(() => host.get('a').state === 'failed',
-      'timed out LX worker did not become failed');
+      'timed out LX native owner did not become failed');
     const failed = host.get('a');
     assert.equal(failed.lastFailure, 'TIMEOUT');
     assert.equal(failed.generation, installed.generation);
     await waitFor(() => diagnostics.some(event =>
-      event.operation === 'worker.unresponsive' && event.code === 'TIMEOUT'),
-    'missing worker.unresponsive diagnostic');
+      event.operation === 'native.unresponsive' && event.code === 'TIMEOUT'),
+    'missing native.unresponsive diagnostic');
     await new Promise(resolve => setTimeout(resolve, 200));
     assert.equal(host.get('a').state, 'failed');
     assert.equal(host.get('a').generation, installed.generation);
@@ -513,9 +514,9 @@ test('B23 an expired LX invocation probes, terminates and can be re-enabled',
 test('B23 an expired LX invocation reports the unresponsive operation once',
   { timeout: 15000 }, async t => {
     const diagnostics = [];
-    const workers = hostCapturingWorkers();
+    const owners = hostCapturingNativeSessions();
     const host = createScriptHost({
-      adapters: { lx: workers.factory },
+      adapters: { lx: owners.factory },
       limits: { requestTimeoutMs: 100, cleanupTimeoutMs: 50, initTimeoutMs: 1000 },
       onDiagnostic: event => diagnostics.push(event),
     });
@@ -524,30 +525,30 @@ test('B23 an expired LX invocation reports the unresponsive operation once',
       source: lxInvokeStuckSource('invoke-entered') });
     const timedOut = assert.rejects(host.invoke(target('a', 'kw', { stuck: true })),
       { code: 'TIMEOUT' });
-    await waitFor(lxAlertEntered(workers, 'a'), 'expired LX invocation did not enter its loop');
-    assert.equal(workers.sessions.get('a').alert.log, 'invoke-entered');
+    await waitFor(lxAlertEntered(owners, 'a'), 'expired LX invocation did not enter its loop');
+    assert.equal(owners.sessions.get('a').alert.log, 'invoke-entered');
     await timedOut;
     await waitFor(() => host.get('a').state === 'failed', 'stuck invocation did not fail');
     await waitFor(() => {
       const events = diagnostics.filter(event =>
-        event.operation === 'worker.unresponsive' && event.code === 'TIMEOUT');
+        event.operation === 'native.unresponsive' && event.code === 'TIMEOUT');
       return events.length === 1 && events[0].installationId === 'a' &&
         events[0].phase === 'running';
-    }, 'missing exactly one running worker.unresponsive diagnostic');
+    }, 'missing exactly one running native.unresponsive diagnostic');
     await new Promise(resolve => setTimeout(resolve, 150));
     assert.equal(diagnostics.filter(event =>
-      event.operation === 'worker.unresponsive').length, 1);
+      event.operation === 'native.unresponsive').length, 1);
     assert.equal(host.stats().liveSessions, 0);
     assert.equal((await host.enable('a')).state, 'ready');
     assert.equal(await host.invoke(target('a')), 'ok');
   });
 
-test('B23 a stuck LX initialization probes, terminates and can be retried',
+test('B23 a stuck LX initialization interrupts its native thread and can be retried',
   { timeout: 15000 }, async t => {
     const diagnostics = [];
-    const workers = hostCapturingWorkers();
+    const owners = hostCapturingNativeSessions();
     const host = createScriptHost({
-      adapters: { lx: workers.factory },
+      adapters: { lx: owners.factory },
       limits: { initTimeoutMs: 1000, cleanupTimeoutMs: 50, requestTimeoutMs: 60000 },
       onDiagnostic: event => diagnostics.push(event),
     });
@@ -557,13 +558,13 @@ test('B23 a stuck LX initialization probes, terminates and can be retried',
       source: lxSourceWithAlert({ alert: 'init-entered',
         setup: 'if (meow.config.stuck) { signal(); while (true) {} }' }),
     }), { code: 'TIMEOUT' });
-    await waitFor(lxAlertEntered(workers, 'a'), 'stuck LX initialization did not enter its loop');
-    assert.equal(workers.sessions.get('a').alert.log, 'init-entered');
+    await waitFor(lxAlertEntered(owners, 'a'), 'stuck LX initialization did not enter its loop');
+    assert.equal(owners.sessions.get('a').alert.log, 'init-entered');
     await timedOut;
     await waitFor(() => diagnostics.some(event =>
-      event.operation === 'worker.unresponsive' && event.code === 'TIMEOUT' &&
+      event.operation === 'native.unresponsive' && event.code === 'TIMEOUT' &&
       event.phase === 'initialization'),
-    'missing initialization worker.unresponsive diagnostic');
+    'missing initialization native.unresponsive diagnostic');
     assert.equal(host.get('a').lastFailure, 'TIMEOUT');
     assert.equal(host.get('a').state, 'failed');
     await host.update('a', { source: lxScript({ handler: 'async () => "recovered"' }), config: {} });
@@ -604,6 +605,213 @@ test('B23 an expired Cat invocation fails the worker without affecting another i
     assert.equal((await runtime.setEnabled('stuck', true)).state, 'ready');
     assert.deepEqual(await runtime.invoke({ installationId: 'stuck', siteId: 'site',
       operation: 'home', payload: {} }), { from: 'stuck' });
+  });
+
+for (const operation of ['describe', 'sync']) for (const ending of ['timeout', 'abort', 'normal']) {
+  test(`Cat management ${operation} ${ending} controls its own Worker without a later lifecycle request`,
+    { timeout: 30000 }, async t => {
+      const root = catRootFor(t), diagnostics = [];
+      const runtime = createCatRuntime({ dataRoot: root,
+        limits: { initTimeoutMs: 10000, cleanupTimeoutMs: 100,
+          requestTimeoutMs: ending === 'timeout' ? 150 : ending === 'normal' ? 2000 : 60000 },
+        onDiagnostic: event => diagnostics.push(event) });
+      t.after(() => runtime.close().catch(() => {}));
+      const installed = await runtime.install({ installationId: 'managed', enabled: true,
+        source: catSource({ beforeBody: `
+          if (request.url === '/website/api/credentials') {
+            fs.writeFileSync('/management-entered.txt', 'entered');
+            ${ending === 'normal'
+              ? 'const end = Date.now() + 600; while (Date.now() < end) {}'
+              : 'while (true) {}'}
+            response.end(JSON.stringify({code:0,data:{quark:{cookie:''}}}));
+            return;
+          }
+          if (request.url === '/website/api/credential/quark/cookie' && request.method === 'PUT') {
+            fs.writeFileSync('/credentials.json', JSON.stringify({cookie:input.value}));
+            response.end(JSON.stringify({code:0}));
+            return;
+          }
+        ` }) });
+      const healthy = await runtime.install({ installationId: 'healthy', enabled: true,
+        source: 'let count=0; module.exports={home(){return {count:++count}}};' });
+      const invokeHealthy = () => runtime.invoke({
+        installationId: 'healthy', siteId: 'default', operation: 'home', payload: {},
+      });
+      assert.deepEqual(await invokeHealthy(), { count: 1 });
+      const session = runtime.sessions.get('managed'), worker = session.worker, thread = worker.threadId;
+      const healthySession = runtime.sessions.get('healthy'), healthyThread = healthySession.worker.threadId;
+      const port = Number(new URL(session.endpoint().origin).port);
+      const marker = join(root, 'volumes', 'managed', 'management-entered.txt');
+      const entered = deferred(), failed = deferred();
+      const watcher = watch(join(root, 'volumes', 'managed'), (_event, filename) => {
+        if (String(filename) === 'management-entered.txt' &&
+            existsSync(marker) && readFileSync(marker, 'utf8') === 'entered') entered.resolve();
+      });
+      t.after(() => watcher.close());
+      const onFailure = session.input.onFailure;
+      session.input.onFailure = (...args) => { onFailure(...args); failed.resolve(); };
+      const exited = ending === 'normal' ? null : once(worker, 'exit', { signal: t.signal });
+      exited?.catch(() => {});
+      const controller = new AbortController();
+      let settled = false;
+      const started = performance.now();
+      const pending = (operation === 'describe'
+        ? runtime.management('managed', installed.generation, { signal: controller.signal })
+        : runtime.sync('managed', installed.generation,
+          { provider: 'quark', credentials: { cookie: 'fixture' } }, { signal: controller.signal }))
+        .then(value => { settled = true; return { value }; },
+          error => { settled = true; return { code: error.code }; });
+      await entered.promise;
+      watcher.close();
+      assert.equal(settled, false, 'the management handler must enter before its caller is retired');
+      assert.equal(worker.threadId, thread);
+      const interrupted = performance.now();
+      if (ending === 'abort') controller.abort();
+      assert.deepEqual(await invokeHealthy(), { count: 2 });
+      const outcome = await pending;
+      if (ending === 'normal') {
+        assert.deepEqual(outcome, { value: operation === 'describe'
+          ? { protocol: 'website-api-v1', fields: { quark: ['cookie'] } }
+          : { status: 'saved', protocol: 'website-api-v1' } });
+        assert.ok(performance.now() - started >= 600);
+        assert.equal(session.limits.cleanupTimeoutMs, 100);
+        assert.equal(worker.threadId, thread);
+        assert.equal(runtime.instance('managed').generation, installed.generation);
+        assert.equal(runtime.instance('managed').state, 'ready');
+        assert.deepEqual(diagnostics.filter(event => event.operation === 'worker.unresponsive'), []);
+        if (operation === 'sync')
+          assert.deepEqual(JSON.parse(readFileSync(join(root, 'volumes', 'managed', 'credentials.json'), 'utf8')),
+            { cookie: 'fixture' });
+      } else {
+        const code = ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
+        assert.deepEqual(outcome, { code });
+        // Only management's own interruption may retire A: no extra invoke,
+        // stop, disable or close of A precedes this real exit observation.
+        await exited;
+        await failed.promise;
+        assertUnder1s(ending === 'timeout' ? started : interrupted, 'management Worker exit');
+        assert.equal(worker.threadId, -1);
+        assert.equal(session.worker, null);
+        assert.equal(session.live, false);
+        assert.equal(runtime.instance('managed').state, 'failed');
+        assert.equal(runtime.instance('managed').error, code);
+        assert.equal(runtime.instance('managed').generation, installed.generation);
+        assert.equal(existsSync(join(root, 'volumes', 'managed', 'credentials.json')), false);
+        const rebound = await assertPortReleased(port);
+        t.after(() => new Promise(resolve => rebound.close(resolve)));
+        assert.deepEqual(diagnostics.filter(event => event.operation === 'worker.unresponsive')
+          .map(({ installationId, code, phase }) => ({ installationId, code, phase })),
+        [{ installationId: 'managed', code, phase: 'running' }]);
+      }
+      assert.deepEqual(await invokeHealthy(), { count: 3 });
+      assert.equal(runtime.instance('healthy').generation, healthy.generation);
+      assert.equal(runtime.instance('healthy').state, 'ready');
+      assert.equal(runtime.sessions.get('healthy'), healthySession);
+      assert.equal(healthySession.worker.threadId, healthyThread);
+    });
+}
+
+for (const [kind, loop] of [
+  ['synchronous loop', 'while (true) {}'],
+  ['infinite microtasks', 'const spin = () => Promise.resolve().then(spin); spin();'],
+]) {
+  test(`a cancelled Cat ${kind} exits without another timeout or lifecycle request`,
+    { timeout: 30000 }, async t => {
+      const diagnostics = [], networkEvents = [];
+      const signalServer = await serverFor(t, (_request, response) => response.end('entered'));
+      const runtime = createCatRuntime({ dataRoot: catRootFor(t),
+        limits: { requestTimeoutMs: 60000, cleanupTimeoutMs: 100, initTimeoutMs: 10000 },
+        onNetwork: event => networkEvents.push(event),
+        onDiagnostic: event => diagnostics.push(event) });
+      t.after(() => runtime.close().catch(() => {}));
+      await runtime.install({ installationId: 'stuck', enabled: true, source: catSource({
+        route: `if (input.stuck) {
+          http.get(${JSON.stringify(signalServer.socketOrigin + '/cancel-entered')}, signalResponse => {
+            signalResponse.resume();
+            ${loop}
+          }).once('error', () => {});
+          return;
+        }
+        return { from: 'stuck' };`,
+      }) });
+      const healthy = await runtime.install({ installationId: 'healthy', enabled: true,
+        source: healthyCatSource() });
+      const session = runtime.sessions.get('stuck'), worker = session.worker;
+      const healthyWorker = runtime.sessions.get('healthy').worker;
+      const healthyThread = healthyWorker.threadId;
+      const port = Number(new URL(session.endpoint().origin).port);
+      const enteredFrom = networkEvents.length;
+      const controller = new AbortController();
+      const cancelled = assert.rejects(runtime.invoke({ installationId: 'stuck', siteId: 'site',
+        operation: 'home', payload: { stuck: true } }, { signal: controller.signal }),
+      { code: 'CANCELLED' });
+      await waitFor(catEntered(networkEvents, 'stuck', enteredFrom),
+        'Cat did not enter the cancellation fixture');
+      const started = performance.now();
+      controller.abort();
+      await cancelled;
+      // No extra invoke, stats RPC, stop, or disable is used to retire A.
+      await waitFor(() => worker.threadId === -1, 'cancelled Cat did not physically exit');
+      assertUnder1s(started, 'cancelled Cat exit');
+      await waitFor(() => runtime.instance('stuck').state === 'failed',
+        'cancelled unresponsive Cat did not report failure');
+      assert.equal(runtime.instance('stuck').error, 'CANCELLED');
+      assert.equal(session.worker, null);
+      const rebound = await assertPortReleased(port);
+      t.after(() => new Promise(resolve => rebound.close(resolve)));
+      assert.deepEqual(diagnostics.filter(event => event.operation === 'worker.unresponsive')
+        .map(({ installationId, code, phase }) => ({ installationId, code, phase })),
+      [{ installationId: 'stuck', code: 'CANCELLED', phase: 'running' }]);
+      assert.deepEqual(await runtime.invoke({ installationId: 'healthy', siteId: 'site',
+        operation: 'home', payload: {} }), { from: 'healthy' });
+      assert.equal(runtime.instance('healthy').generation, healthy.generation);
+      assert.equal(healthyWorker.threadId, healthyThread);
+    });
+}
+
+test('cooperative Cat cancellation keeps its Worker and a retired signal cannot stop a successor',
+  { timeout: 30000 }, async t => {
+    const diagnostics = [], networkEvents = [];
+    const signalServer = await serverFor(t, (_request, response) => response.end('entered'));
+    const source = catSource({
+      route: `if (input.wait) {
+        http.get(${JSON.stringify(signalServer.socketOrigin + '/waiting')}, reply => reply.resume())
+          .once('error', () => {});
+        return;
+      }
+      return { from: 'cooperative' };`,
+    });
+    const runtime = createCatRuntime({ dataRoot: catRootFor(t),
+      limits: { requestTimeoutMs: 60000, cleanupTimeoutMs: 100, initTimeoutMs: 10000 },
+      onNetwork: event => networkEvents.push(event),
+      onDiagnostic: event => diagnostics.push(event) });
+    t.after(() => runtime.close().catch(() => {}));
+    const installed = await runtime.install({ installationId: 'a', enabled: true, source });
+    const worker = runtime.sessions.get('a').worker, thread = worker.threadId;
+    const enteredFrom = networkEvents.length, controller = new AbortController();
+    const cancelled = assert.rejects(runtime.invoke({ installationId: 'a', siteId: 'site',
+      operation: 'home', payload: { wait: true } }, { signal: controller.signal }),
+    { code: 'CANCELLED' });
+    await waitFor(catEntered(networkEvents, 'a', enteredFrom), 'Cat did not enter its I/O wait');
+    controller.abort();
+    await cancelled;
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(worker.threadId, thread);
+    assert.equal(runtime.instance('a').generation, installed.generation);
+    assert.equal(runtime.instance('a').state, 'ready');
+    const retired = new AbortController();
+    assert.deepEqual(await runtime.invoke({ installationId: 'a', siteId: 'site',
+      operation: 'home', payload: {} }, { signal: retired.signal }), { from: 'cooperative' });
+    const updated = await runtime.install({ installationId: 'a', enabled: true, source, version: '2' });
+    const successor = runtime.sessions.get('a').worker, successorThread = successor.threadId;
+    assert.ok(updated.generation > installed.generation);
+    retired.abort();
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(successor.threadId, successorThread);
+    assert.equal(runtime.instance('a').generation, updated.generation);
+    assert.deepEqual(await runtime.invoke({ installationId: 'a', siteId: 'site',
+      operation: 'home', payload: {} }), { from: 'cooperative' });
+    assert.deepEqual(diagnostics.filter(event => event.operation === 'worker.unresponsive'), []);
   });
 
 test('B23 a stuck Cat initialization probes and terminates only its worker',
@@ -752,10 +960,10 @@ test('B24 closing a runtime with a stuck Cat initialization does not wait for in
     t.after(() => new Promise(resolve => rebound.close(resolve)));
   });
 
-async function prepareStuckLXWithWorkers(t) {
-  const workers = hostCapturingWorkers();
+async function prepareStuckLXWithOwners(t) {
+  const owners = hostCapturingNativeSessions();
   const host = createScriptHost({
-    adapters: { lx: workers.factory },
+    adapters: { lx: owners.factory },
     limits: { initTimeoutMs: 10000, cleanupTimeoutMs: 100, requestTimeoutMs: 60000 },
   });
   t.after(() => host.close().catch(() => {}));
@@ -763,18 +971,18 @@ async function prepareStuckLXWithWorkers(t) {
     source: lxInvokeStuckSource('entered') });
   const pending = host.invoke(target('a', 'kw', { stuck: true }), { timeoutMs: 60000 });
   pending.catch(() => {});
-  await waitFor(lxAlertEntered(workers, 'a'),
+  await waitFor(lxAlertEntered(owners, 'a'),
     'stuck LX invocation did not enter its loop');
-  assert.equal(workers.sessions.get('a').alert.log, 'entered');
-  assert.equal(workers.sessions.get('a').live, true);
-  assert.equal(workers.sessions.get('a').failure, null);
+  assert.equal(owners.sessions.get('a').alert.log, 'entered');
+  assert.equal(owners.sessions.get('a').live, true);
+  assert.equal(owners.sessions.get('a').failure, null);
   assert.equal(host.get('a').state, 'ready');
-  return { host, workers };
+  return { host, owners };
 }
 
 test('B24 disabling a stuck LX invocation completes within the cleanup budget',
   { timeout: 15000 }, async t => {
-    const { host } = await prepareStuckLXWithWorkers(t);
+    const { host } = await prepareStuckLXWithOwners(t);
     const started = performance.now();
     const disabled = await host.disable('a');
     const elapsed = performance.now() - started;
@@ -785,7 +993,7 @@ test('B24 disabling a stuck LX invocation completes within the cleanup budget',
 
 test('B24 updating a stuck LX invocation completes within the cleanup budget',
   { timeout: 15000 }, async t => {
-    const { host } = await prepareStuckLXWithWorkers(t);
+    const { host } = await prepareStuckLXWithOwners(t);
     const started = performance.now();
     const updated = await host.update('a', {
       source: lxScript({ handler: 'async () => "updated"' }), config: {},
@@ -798,7 +1006,7 @@ test('B24 updating a stuck LX invocation completes within the cleanup budget',
 
 test('B24 uninstalling a stuck LX invocation completes within the cleanup budget',
   { timeout: 15000 }, async t => {
-    const { host } = await prepareStuckLXWithWorkers(t);
+    const { host } = await prepareStuckLXWithOwners(t);
     const started = performance.now();
     await host.uninstall('a');
     const elapsed = performance.now() - started;
@@ -809,7 +1017,7 @@ test('B24 uninstalling a stuck LX invocation completes within the cleanup budget
 
 test('B24 closing a host with a stuck LX invocation completes within the cleanup budget',
   { timeout: 15000 }, async t => {
-    const { host } = await prepareStuckLXWithWorkers(t);
+    const { host } = await prepareStuckLXWithOwners(t);
     const started = performance.now();
     const result = await host.close();
     const elapsed = performance.now() - started;
@@ -819,19 +1027,19 @@ test('B24 closing a host with a stuck LX invocation completes within the cleanup
 
 test('B24 closing a host with a stuck LX initialization does not wait for the initialization deadline',
   { timeout: 15000 }, async t => {
-    const workers = hostCapturingWorkers();
+    const owners = hostCapturingNativeSessions();
     const host = createScriptHost({
-      adapters: { lx: workers.factory },
+      adapters: { lx: owners.factory },
       limits: { initTimeoutMs: 60000, cleanupTimeoutMs: 100, requestTimeoutMs: 60000 },
     });
     const stuck = host.install({ installationId: 'a', enabled: true,
       source: lxInitStuckSource('entered') });
     stuck.catch(() => {});
-    await waitFor(lxAlertEntered(workers, 'a'),
+    await waitFor(lxAlertEntered(owners, 'a'),
       'stuck LX initialization did not enter its loop');
-    assert.equal(workers.sessions.get('a').alert.log, 'entered');
-    assert.equal(workers.sessions.get('a').live, true);
-    assert.equal(workers.sessions.get('a').failure, null);
+    assert.equal(owners.sessions.get('a').alert.log, 'entered');
+    assert.equal(owners.sessions.get('a').live, true);
+    assert.equal(owners.sessions.get('a').failure, null);
     const started = performance.now();
     const result = await host.close();
     const elapsed = performance.now() - started;
@@ -839,12 +1047,12 @@ test('B24 closing a host with a stuck LX initialization does not wait for the in
     assert.equal(result.liveSessions, 0);
   });
 
-test('B25 a real worker exit fails only the affected host instance',
+test('B25 a reported native thread exit fails only the affected LX instance',
   { timeout: 15000 }, async t => {
     const diagnostics = [];
-    const workers = hostCapturingWorkers();
+    const owners = hostCapturingNativeSessions();
     const host = createScriptHost({
-      adapters: { lx: workers.factory },
+      adapters: { lx: owners.factory },
       onDiagnostic: event => diagnostics.push(event),
     });
     t.after(() => host.close().catch(() => {}));
@@ -860,17 +1068,17 @@ test('B25 a real worker exit fails only the affected host instance',
         }`,
       }) });
     const installedB = await host.install({ installationId: 'b', enabled: true, source: lxScript() });
-    const session = workers.sessions.get('a');
-    assert.ok(session instanceof WorkerSession);
+    const session = owners.sessions.get('a');
+    assert.ok(session instanceof NativeSession);
     assert.equal(session.installationId, 'a');
     assert.equal(session.generation, installedA.generation);
     assert.equal((await host.invoke(target('a'))).action, 'musicUrl');
     const pending = host.invoke(target('a', 'kw', { hold: true }),
       { signal: new AbortController().signal });
     pending.catch(() => {});
-    await waitFor(lxAlertEntered(workers, 'a'), 'pending LX invocation did not enter');
+    await waitFor(lxAlertEntered(owners, 'a'), 'pending LX invocation did not enter');
     assert.equal(session.alert.log, 'pending-entered');
-    await session.worker.terminate();
+    await session.engine.stop('SCRIPT_EXCEPTION');
     await assert.rejects(pending, { code: 'SCRIPT_EXCEPTION' });
     await waitFor(() => host.get('a').state === 'failed', 'affected instance did not fail');
     assert.equal(host.get('a').lastFailure, 'SCRIPT_EXCEPTION');
@@ -878,58 +1086,139 @@ test('B25 a real worker exit fails only the affected host instance',
     assert.equal(host.get('b').state, 'ready');
     assert.equal((await host.invoke(target('b'))).action, 'musicUrl');
     const exits = diagnostics.filter(event => event.installationId === 'a' &&
-      event.generation === installedA.generation && event.operation === 'worker.exit' &&
+      event.generation === installedA.generation && event.operation === 'native.exit' &&
       event.code === 'SCRIPT_EXCEPTION');
     assert.equal(exits.length, 1);
     assert.equal(diagnostics.some(event => event.installationId === 'b' &&
-      event.operation === 'worker.exit'), false);
+      event.operation === 'native.exit'), false);
     assert.equal(installedB.state, 'ready');
     assert.equal(session.live, false);
   });
 
-test('B26 a ready LX instance that exceeds memory restarts once with RESOURCE_LIMIT',
+test('B25 a real Cat Worker exit fails its pending call and leaves another instance available',
   { timeout: 30000 }, async t => {
-    const diagnostics = [];
-    const host = createScriptHost({
-      limits: { maxMemoryBytes: 2 * 1024 * 1024 },
-      onDiagnostic: event => diagnostics.push(event),
-    });
-    t.after(() => host.close());
-    const installed = await host.install({
-      installationId: 'a', enabled: true, source: lxScript({
-        setup: 'let retained;',
-        handler: `async ({info}) => {
-          if (info.musicInfo.allocate) retained = new Uint8Array(32 * 1024 * 1024);
-          return 7;
-        }`,
-      }),
-    });
-    await assert.rejects(host.invoke(target('a', 'kw', { allocate: true })),
-      { code: 'RESOURCE_LIMIT' });
-    await waitFor(() => host.get('a').state === 'ready' &&
-      host.get('a').generation > installed.generation,
-    'memory-limited LX instance did not restart');
-    assert.equal(diagnostics.filter(event => event.operation === 'memory.restart').length, 1);
-    assert.equal(await host.invoke(target('a')), 7);
+    const networkEvents = [], diagnostics = [];
+    const signalServer = await serverFor(t, (_request, response) => response.end('entered'));
+    const runtime = createCatRuntime({ dataRoot: catRootFor(t),
+      onNetwork: event => networkEvents.push(event),
+      onDiagnostic: event => diagnostics.push(event) });
+    t.after(() => runtime.close().catch(() => {}));
+    await runtime.install({ installationId: 'a', enabled: true,
+      source: stuckCatInvocationSource(signalServer.socketOrigin) });
+    await runtime.install({ installationId: 'b', enabled: true, source: healthyCatSource() });
+    const session = runtime.sessions.get('a');
+    assert.ok(session.worker);
+    const resources = ['listeners', 'sockets', 'streams', 'webResources', 'descriptors'];
+    for (const key of resources) assert.equal(typeof session.stats()[key], 'number', key);
+    assert.ok(session.stats().memory.heapUsed > 0);
+    const enteredFrom = networkEvents.length;
+    const pending = assert.rejects(runtime.invoke({ installationId: 'a', siteId: 'site',
+      operation: 'home', payload: { stuck: true } }), { code: 'STALE_SESSION' });
+    await waitFor(catEntered(networkEvents, 'a', enteredFrom), 'Cat invocation did not enter its worker loop');
+    await session.worker.terminate();
+    await pending;
+    await waitFor(() => runtime.instance('a').state === 'failed', 'Cat worker exit was not published');
+    assert.equal(runtime.instance('b').state, 'ready');
+    assert.deepEqual(await runtime.invoke({ installationId: 'b', siteId: 'site',
+      operation: 'home', payload: {} }), { from: 'healthy' });
+    assert.equal(diagnostics.filter(event => event.installationId === 'a' &&
+      event.operation === 'worker.exit' && event.code === 'SCRIPT_EXCEPTION').length, 1);
+    assert.equal(diagnostics.some(event => event.installationId === 'b' &&
+      event.operation === 'worker.exit'), false);
+    assert.equal(session.live, false);
+    for (const key of resources) assert.equal(session.stats()[key], 0, key);
+    assert.equal(Object.hasOwn(session.stats(), 'memory'), false);
   });
 
-test('B26 an LX initialization memory failure stays failed without restart',
+test('REV-1A Cat Worker keeps CommonJS stream identity and closes the same retained resources',
   { timeout: 30000 }, async t => {
-    const diagnostics = [];
-    const host = createScriptHost({
-      limits: { maxMemoryBytes: 2 * 1024 * 1024 },
-      onDiagnostic: event => diagnostics.push(event),
-    });
-    t.after(() => host.close());
-    await assert.rejects(host.install({
-      installationId: 'a', enabled: true,
-      source: lxScript({ setup: 'const retained = new Uint8Array(32 * 1024 * 1024);' }),
-    }), { code: 'RESOURCE_LIMIT' });
-    assert.equal(host.get('a').enabled, true);
-    assert.equal(host.get('a').state, 'failed');
-    assert.equal(host.get('a').lastFailure, 'RESOURCE_LIMIT');
-    assert.equal(diagnostics.filter(event => event.operation === 'memory.restart').length, 0);
-    assert.equal(host.stats().liveSessions, 0);
+    const root = catRootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    const source = `
+      const Stream = require('stream'), fs = require('fs');
+      const { inherits } = require('util');
+      const { isMainThread } = require('worker_threads');
+      class Child extends Stream {}
+      function Legacy() { Stream.call(this); }
+      inherits(Legacy, Stream);
+      class Retained extends Stream.PassThrough {}
+      const held = [], closes = [], closed = [];
+      let calls = 0;
+      module.exports.probe = async () => {
+        if (!held.length) {
+          held.push(new Retained(), Stream.Readable({ read() {} }),
+            new Stream.Writable({ write(_chunk, _encoding, done) { done(); } }));
+          held.forEach((value, index) => {
+            closes.push(0);
+            closed.push(new Promise(resolve => {
+              value.once('close', () => { closes[index]++; resolve(); });
+            }));
+          });
+        }
+        const legacy = new Legacy();
+        let emitted;
+        legacy.once('value', value => { emitted = value; });
+        legacy.emit('value', 'worker');
+        const chunks = [];
+        await Stream.promises.pipeline(Stream.Readable.from(['worker-', 'stream']),
+          new Stream.Writable({ write(chunk, _encoding, done) {
+            chunks.push(Buffer.from(chunk)); done();
+          } }));
+        return { calls: ++calls, worker: !isMainThread, type: typeof Stream,
+          constructed: new Stream() instanceof Stream,
+          inherited: new Child() instanceof Stream,
+          legacy: legacy instanceof Stream && emitted === 'worker',
+          aliases: Stream.Stream === Stream && require('node:stream') === Stream &&
+            require('readable-stream') === Stream &&
+            require('readable-stream/lib/stream.js') === Stream,
+          types: held[0] instanceof Retained && held[0] instanceof Stream &&
+            held[0] instanceof Stream.Readable && held[0] instanceof Stream.Writable &&
+            held[0] instanceof Stream.Duplex && held[0] instanceof Stream.Transform &&
+            held[0] instanceof Stream.PassThrough,
+          promises: Stream.promises === require('stream/promises'),
+          text: Buffer.concat(chunks).toString(),
+          held: held.map((value, index) => ({
+            destroyed: value.destroyed, closed: value.closed, closes: closes[index],
+          })) };
+      };
+      module.exports.stop = async () => {
+        held.forEach(value => value.destroy());
+        await Promise.all(closed);
+        fs.writeFileSync('/stream-close.json', JSON.stringify(held.map((value, index) => ({
+          destroyed: value.destroyed, closed: value.closed, closes: closes[index],
+        }))));
+      };
+    `;
+    await runtime.install({ installationId: 'streams', enabled: true, source });
+    await runtime.install({ installationId: 'healthy', enabled: true, source: healthyCatSource() });
+    const session = runtime.sessions.get('streams'), worker = session.worker;
+    assert.ok(worker);
+    session.stats();
+    await session.statsRequest;
+    const baselineStreams = session.statsSnapshot.streams;
+    const expected = { worker: true, type: 'function', constructed: true, inherited: true,
+      legacy: true, aliases: true, types: true, promises: true, text: 'worker-stream',
+      held: Array.from({ length: 3 }, () => ({ destroyed: false, closed: false, closes: 0 })) };
+    for (let calls = 1; calls <= 2; calls++) {
+      assert.deepEqual(await runtime.invoke({ installationId: 'streams', siteId: 'default',
+        operation: 'probe', payload: {} }), { calls, ...expected });
+      assert.equal(runtime.sessions.get('streams'), session);
+      assert.equal(session.worker, worker);
+      session.stats();
+      await session.statsRequest;
+      assert.equal(session.statsSnapshot.streams - baselineStreams, expected.held.length);
+    }
+    const exited = new Promise(resolve => worker.once('exit', resolve));
+    await runtime.setEnabled('streams', false);
+    assert.equal(await exited, 0);
+    assert.deepEqual(JSON.parse(readFileSync(join(root, 'volumes', 'streams', 'stream-close.json'),
+      'utf8')), Array.from({ length: 3 }, () => ({ destroyed: true, closed: true, closes: 1 })));
+    assert.equal(session.live, false);
+    assert.equal(session.cleanupError, null);
+    assert.equal(session.stats().streams, 0);
+    assert.deepEqual(await runtime.invoke({ installationId: 'healthy', siteId: 'site',
+      operation: 'home', payload: {} }), { from: 'healthy' });
   });
 
 test('B27 a long synchronous LX computation has no single-execution deadline',
@@ -957,7 +1246,7 @@ test('B27 a long synchronous LX computation has no single-execution deadline',
     assert.ok(value.elapsed < 10000, `synchronous work ran ${value.elapsed}ms`);
   });
 
-test('B28 the public LX host contract remains available after worker isolation',
+test('B28 the public LX host contract remains available with native thread isolation',
   { timeout: 15000 }, async t => {
     const host = createScriptHost();
     t.after(() => host.close());

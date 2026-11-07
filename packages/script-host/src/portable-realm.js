@@ -1,19 +1,23 @@
 /**
- * Generic portable guest SDK. Protocol code receives only JSON values, bounded
+ * Generic portable guest SDK. Protocol code receives typed values, scoped
  * synchronous helpers and asynchronous host capabilities.
  */
 export const portableRealmSource = String.raw`
 (() => {
   'use strict';
-  const bridge = globalThis.__meowBridge;
-  delete globalThis.__meowBridge;
+  const bridge = globalThis.__meowCore;
+  const native = globalThis.__meowNative;
+  const nativeSetTimeout = globalThis.setTimeout;
+  const nativeSetInterval = globalThis.setInterval;
+  const nativeClearTimeout = globalThis.clearTimeout;
+  const nativeClearInterval = globalThis.clearInterval;
+  for (const name of ['__meowCore','__meowNative','__meowHost','__meowHostArgs','__meowEmit','__meowGuest',
+    'setTimeout','setInterval','clearTimeout','clearInterval']) {
+    delete globalThis[name];
+  }
   const taskContext = globalThis.__meowTaskContext;
   delete globalThis.__meowTaskContext;
   const parse = JSON.parse.bind(JSON);
-  const stringify = JSON.stringify.bind(JSON);
-  const setPrototypeOf = Object.setPrototypeOf;
-  const isView = ArrayBuffer.isView;
-  const arrayFrom = Array.from.bind(Array);
   const apply = Reflect.apply;
   const promiseThen = Promise.prototype.then;
   const then = (promise, fulfilled, rejected) =>
@@ -23,6 +27,7 @@ export const portableRealmSource = String.raw`
   const trustedErrors = new WeakMap();
   let nextId = 0, protocol = '', exportsObject = null, realm;
   const documentRoots = new Map();
+  const taskBindings = new Map();
   const startupPromises = new Set();
 
   const error = code => {
@@ -36,21 +41,63 @@ export const portableRealmSource = String.raw`
     const trusted = trustedErrors.get(value);
     if (trusted) return trusted;
     try {
-      return value && value.name === 'InternalError' && /out of memory|allocation failed/i.test(value.message)
-        ? 'MEMORY_LIMIT' : value && value.name === 'InternalError' && /stack overflow/i.test(value.message)
-          ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION';
+      return value && (value.name === 'InternalError' && /stack overflow/i.test(value.message) ||
+        value.name === 'RangeError' && value.message === 'Maximum call stack size exceeded')
+        ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION';
     } catch (_) { return 'SCRIPT_EXCEPTION'; }
   };
-  const call = (operation, ...args) => {
-    setPrototypeOf(args, null);
-    const response = parse(bridge(operation, stringify(args, (_key, value) =>
-      isView(value) ? arrayFrom(value) : value)));
-    if (!response.ok) throw error(response.code);
-    return response.value;
+  const transfer = (value, result = false) => {
+    const seen = new Set(), frames = [];
+    const visit = (input, depth) => {
+      if (depth > 64) throw error('INVALID_ARGUMENT');
+      if (result && input instanceof NodeHandle) {
+        return { __meowMarkup:input.outerHTML, __meowNodeType:input.nodeType };
+      }
+      if (input === undefined || input === null) return null;
+      if (input instanceof ArrayBuffer) return new Uint8Array(input);
+      if (ArrayBuffer.isView(input)) {
+        return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+      }
+      if (typeof input !== 'object') {
+        if (result && typeof input === 'bigint') throw error('SCRIPT_EXCEPTION');
+        return input;
+      }
+      if (seen.has(input)) throw error(result ? 'SCRIPT_EXCEPTION' : 'INVALID_ARGUMENT');
+      const values = result && input instanceof MiniQuery ? input.toArray()
+        : result && input instanceof JsoupSelection ? input.__values : input;
+      const array = Array.isArray(values);
+      const output = array ? new Array(values.length) : Object.create(null);
+      seen.add(input);
+      frames.push({ input, values, output, array, depth, index:0,
+        entries:array ? null : Object.entries(values), length:array ? values.length : 0 });
+      return output;
+    };
+    const output = visit(value, 0);
+    while (frames.length) {
+      const frame = frames[frames.length - 1];
+      if (frame.index === (frame.array ? frame.length : frame.entries.length)) {
+        seen.delete(frame.input); frames.pop(); continue;
+      }
+      const index = frame.index++;
+      if (frame.array && !(index in frame.values)) continue;
+      const [key, child] = frame.array ? [index, frame.values[index]] : frame.entries[index];
+      if (!frame.array && (child === undefined || result && typeof child === 'function')) continue;
+      frame.output[key] = visit(child, frame.depth + 1);
+    }
+    return output;
   };
-  const maxBytes = call('maxBytes');
+  const call = (operation, ...args) => {
+    try {
+      if (operation === 'util') {
+        return args[0] === 'encode' || args[0] === 'decode'
+          ? bridge('utility', args) : native(args[0], args[1]);
+      }
+      return bridge('bridge', [operation, ...args.map(value => transfer(value))]);
+    }
+    catch (failure) { throw error(failure?.code || 'SCRIPT_EXCEPTION'); }
+  };
   const size = value => {
-    if (!Number.isSafeInteger(value) || value < 0 || value > maxBytes) throw error('RESOURCE_LIMIT');
+    if (!Number.isSafeInteger(value) || value < 0) throw error('INVALID_ARGUMENT');
     return value;
   };
 
@@ -157,7 +204,9 @@ export const portableRealmSource = String.raw`
   };
   const sync = (taskId, name, input = {}) => {
     assertTask(taskId);
-    return call('sync', taskId, name, input);
+    const entries = Object.entries(input).filter(([, value]) => value !== undefined);
+    return call('sync', taskId, name, entries.map(([key]) => key),
+      ...entries.map(([, value]) => value));
   };
   const decodeQuery = value => {
     try { return decodeURIComponent(String(value).replace(/\+/g, ' ')); }
@@ -287,7 +336,13 @@ export const portableRealmSource = String.raw`
       pending.set(id, { resolve, reject, taskId });
       try {
         assertTask(taskId);
-        call('capability', taskId, id, name, input);
+        if (name === 'bridge.call') {
+          call('capability', taskId, id, name, input.name, ...input.args);
+        } else {
+          const entries = Object.entries(input).filter(([, value]) => value !== undefined);
+          call('capability', taskId, id, name, entries.map(([key]) => key),
+            ...entries.map(([, value]) => value));
+        }
       }
       catch (failure) { pending.delete(id); reject(failure); }
     });
@@ -302,17 +357,22 @@ export const portableRealmSource = String.raw`
     if (typeof fn !== 'function') throw error('INVALID_ARGUMENT');
     const id = ++nextId;
     const taskId = taskContext();
-    callbacks.set(id, { fn, repeat, args, taskId });
-    try { call('timer', taskId, id, delay || 0, repeat); }
-    catch (failure) { callbacks.delete(id); throw failure; }
+    // Validate admission before registering a real native timer.
+    sync(taskId, 'legado.runtimeInfo');
+    const run = () => realm.callback(id);
+    const handle = (repeat ? nativeSetInterval : nativeSetTimeout)(run, delay || 0);
+    callbacks.set(id, { fn, repeat, args, taskId, handle });
     return id;
+  };
+  const clearTimer = id => {
+    const item = callbacks.get(id);
+    if (!item) return;
+    (item.repeat ? nativeClearInterval : nativeClearTimeout)(item.handle);
+    callbacks.delete(id);
   };
   globalThis.setTimeout = (fn, delay, ...args) => timer(fn, delay, false, args);
   globalThis.setInterval = (fn, delay, ...args) => timer(fn, delay, true, args);
-  globalThis.clearTimeout = globalThis.clearInterval = id => {
-    callbacks.delete(id);
-    call('clearTimer', id);
-  };
+  globalThis.clearTimeout = globalThis.clearInterval = clearTimer;
   globalThis.queueMicrotask = fn => Promise.resolve().then(fn);
   globalThis.console = Object.freeze(Object.fromEntries(
     ['log','info','warn','error','debug','trace','group','groupCollapsed','groupEnd','clear','table','dir',
@@ -980,7 +1040,7 @@ export const portableRealmSource = String.raw`
     url:String(value?.url ?? ''),
     body() { return String(value?.data ?? value?.body ?? ''); },
     getBody() { return this.body(); },
-    bodyBytes() { return ScriptBuffer.from(value?.bodyBase64 ?? '', 'base64'); },
+    bodyBytes() { return ScriptBuffer.from(value?.body ?? []); },
     callTime() { return Number(value?.callTime ?? 0); },
     toString() { return this.body(); },
   });
@@ -1102,8 +1162,8 @@ export const portableRealmSource = String.raw`
     async json() { return parse(await this.text()); }
     async arrayBuffer() {
       this.bodyUsed = true;
-      const bytes = this.__value.bodyBase64
-        ? ScriptBuffer.from(String(this.__value.bodyBase64), 'base64')
+      const bytes = this.__value.body instanceof Uint8Array
+        ? ScriptBuffer.from(this.__value.body)
         : ScriptBuffer.from(String(this.__value.data ?? this.__value.content ?? this.__value.body ?? ''));
       return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     }
@@ -1138,7 +1198,7 @@ export const portableRealmSource = String.raw`
         headers.set('content-type', 'application/x-www-form-urlencoded;charset=UTF-8');
       }
     } else if (rawBody instanceof ArrayBuffer || ArrayBuffer.isView(rawBody)) {
-      body = { __meowBodyBase64:byteView(rawBody).toString('base64') };
+      body = byteView(rawBody);
     } else {
       body = typeof rawBody === 'string' ? rawBody : String(rawBody ?? '');
     }
@@ -1312,10 +1372,8 @@ export const portableRealmSource = String.raw`
       });
       const type = String(options.type ?? '').toLowerCase();
       if (type === 'hex' || type === 'base64') {
-        const raw = String(response?.bodyBase64 ?? response?.body ?? '');
-        const data = type === 'hex'
-          ? ScriptBuffer.from(raw, 'base64').toString('hex') : raw;
-        return makeResponse({ ...response, data, body:data });
+        const data = ScriptBuffer.from(response?.body ?? []).toString(type);
+        return makeResponse({ ...response, data });
       }
       return makeResponse(response);
     };
@@ -1775,58 +1833,51 @@ export const portableRealmSource = String.raw`
     return { ...dom, window, callHandler };
   }
 
-  function normalizeResult(value, seen = new Set()) {
-    if (value instanceof NodeHandle) {
-      return {
-        __meowMarkup:value.outerHTML,
-        __meowNodeType:value.nodeType,
-      };
-    }
-    if (value && typeof value === 'object') {
-      if (value instanceof ScriptBuffer) return value.toJSON();
-      if (seen.has(value)) throw error('SCRIPT_EXCEPTION');
-      seen.add(value);
-      try {
-        const values = value instanceof MiniQuery ? value.toArray()
-          : value instanceof JsoupSelection ? value.__values : value;
-        if (Array.isArray(values)) return values.map(child => normalizeResult(child, seen));
-        const output = {};
-        for (const [key, child] of Object.entries(values)) {
-          if (typeof child !== 'function') output[key] = normalizeResult(child, seen);
-        }
-        return output;
-      } finally {
-        seen.delete(value);
-      }
-    }
-    if (typeof value === 'bigint') throw error('SCRIPT_EXCEPTION');
-    return value;
-  }
-
   function publishResult(id, value) {
-    try { call('result', id, true, normalizeResult(value)); }
-    catch (failure) { call('result', id, false, errorCode(failure)); }
+    let result;
+    try { result = transfer(value, true); }
+    catch (failure) { call('result', id, false, errorCode(failure)); return; }
+    // Result normalization already produced a data tree. Only the native
+    // boundary still needs to validate its scalars and snapshot byte leaves.
+    try { bridge('bridge', ['result', id, true, result]); }
+    catch (failure) { call('result', id, false, failure?.code || 'SCRIPT_EXCEPTION'); }
   }
 
   function hydrateValue(taskId, value) {
-    if (Array.isArray(value)) return value.map(child => hydrateValue(taskId, child));
-    if (value && typeof value === 'object') {
-      const keys = Object.keys(value);
-      const encodedNode = typeof value.__meowMarkup === 'string' &&
-        keys.every(key => key === '__meowMarkup' || key === '__meowNodeType');
-      if (encodedNode) {
-        const parsed = sync(taskId, 'dom.parse', { html:value.__meowMarkup });
-        const root = new NodeHandle(taskId, parsed.rootId);
-        if (Number.isInteger(value.__meowNodeType) && value.__meowNodeType !== 9) {
-          return root.childNodes.find(node => node.nodeType === value.__meowNodeType) ?? root;
+    const frames = [];
+    const visit = input => {
+      if (input instanceof Uint8Array) return ScriptBuffer.from(input);
+      if (!input || typeof input !== 'object') return input;
+      const array = Array.isArray(input);
+      if (!array) {
+        const keys = Object.keys(input);
+        if (typeof input.__meowMarkup === 'string' &&
+            keys.every(key => key === '__meowMarkup' || key === '__meowNodeType')) {
+          const parsed = sync(taskId, 'dom.parse', { html:input.__meowMarkup });
+          const root = new NodeHandle(taskId, parsed.rootId);
+          if (Number.isInteger(input.__meowNodeType) && input.__meowNodeType !== 9) {
+            return root.childNodes.find(node => node.nodeType === input.__meowNodeType) ?? root;
+          }
+          return root;
         }
-        return root;
       }
-      const output = {};
-      for (const [key, child] of Object.entries(value)) output[key] = hydrateValue(taskId, child);
+      const output = array ? new Array(input.length) : Object.create(null);
+      frames.push({ input, output, array, index:0,
+        entries:array ? null : Object.entries(input), length:array ? input.length : 0 });
       return output;
+    };
+    const output = visit(value);
+    while (frames.length) {
+      const frame = frames[frames.length - 1];
+      if (frame.index === (frame.array ? frame.length : frame.entries.length)) {
+        frames.pop(); continue;
+      }
+      const index = frame.index++;
+      if (frame.array && !(index in frame.input)) continue;
+      const [key, child] = frame.array ? [index, frame.input[index]] : frame.entries[index];
+      frame.output[key] = visit(child);
     }
-    return value;
+    return output;
   }
 
   function compileProtocol(source, names, metadata) {
@@ -1963,10 +2014,9 @@ export const portableRealmSource = String.raw`
       if (value && typeof value.then === 'function') then(Promise.resolve(value),
         undefined, failure => call('startupFailure', errorCode(failure)));
     },
-    load(kind, source, metadataJSON) {
+    load(kind, source, metadata) {
       try {
         protocol = kind;
-        const metadata = parse(metadataJSON);
         if (kind === 'cat') installCatScope();
         if (kind === 'qysg' && !('toc' in globalThis)) globalThis.toc = undefined;
         exportsObject = kind === 'legado'
@@ -2021,16 +2071,16 @@ export const portableRealmSource = String.raw`
         call('startupFailure', errorCode(failure));
       }
     },
-    invoke(id, action, payloadJSON) {
+    invoke(id, action, payload) {
       runTask(id, () => then(then(Promise.resolve(), () =>
-        dispatchProtocol(action, parse(payloadJSON))),
+        dispatchProtocol(action, payload)),
         value => publishResult(id, value),
         failure => call('result', id, false, errorCode(failure)),
       ));
     },
-    evaluate(id, source, bindingsJSON) {
+    evaluate(id, source, inputBindings) {
       runTask(id, () => then(then(Promise.resolve(), async () => {
-        const bindings = hydrateValue(id, parse(bindingsJSON));
+        const bindings = hydrateValue(id, inputBindings);
         const dom = createDomScope();
         const built = createJava(id, bindings, dom);
         const scope = Object.assign(Object.create(null), bindings, built, {
@@ -2042,33 +2092,41 @@ export const portableRealmSource = String.raw`
         const names = ['java','cookie','cache','source','book','chapter','org','Jsoup',
           'result','baseUrl','key','page','Packages','Java','JavaImporter',
           'importClass','importPackage'];
-        const previous = new Map(names.map(name => [name, {
-          own:Object.prototype.hasOwnProperty.call(globalThis, name),
-          value:globalThis[name],
-        }]));
-        for (const name of names) if (name in scope) globalThis[name] = scope[name];
+        taskBindings.set(id, scope);
+        for (const name of names) {
+          if (Object.getOwnPropertyDescriptor(globalThis, name)?.get) continue;
+          Object.defineProperty(globalThis, name, {
+            configurable:true,
+            get() {
+              const current = taskBindings.get(taskContext());
+              if (!current) throw error('STALE_SESSION');
+              return current[name];
+            },
+            set(value) {
+              const current = taskBindings.get(taskContext());
+              if (!current) throw error('STALE_SESSION');
+              current[name] = value;
+            },
+          });
+        }
         try {
           const fn = new AsyncFunction('scope', 'with(scope){\n' + source + '\n}');
           return await fn.call(scope, scope);
         } finally {
-          for (const [name, state] of previous) {
-            if (state.own) globalThis[name] = state.value;
-            else delete globalThis[name];
-          }
+          taskBindings.delete(id);
         }
       }),
         value => publishResult(id, value),
         failure => call('result', id, false, errorCode(failure)),
       ));
     },
-    settle(id, payloadJSON) {
+    settle(id, ok, value) {
       const item = pending.get(id);
       if (!item) return;
       pending.delete(id);
-      const value = parse(payloadJSON);
       runTask(item.taskId, () => {
-        if (value.ok) item.resolve(hydrateValue(item.taskId, value.value));
-        else item.reject(error(value.code));
+        if (ok) item.resolve(hydrateValue(item.taskId, value));
+        else item.reject(error(value));
       });
       call('callbackDone', id);
     },
@@ -2081,11 +2139,13 @@ export const portableRealmSource = String.raw`
         failure => call('callbackFailure', id, errorCode(failure)),
       ));
     },
-    forget(id) { pending.delete(id); callbacks.delete(id); },
+    forget(id) { pending.delete(id); clearTimer(id); },
+    timerCount() { return callbacks.size; },
     releaseTask(id) {
       documentRoots.delete(id);
+      taskBindings.delete(id);
       for (const [key, item] of pending) if (item.taskId === id) pending.delete(key);
-      for (const [key, item] of callbacks) if (item.taskId === id) callbacks.delete(key);
+      for (const [key, item] of callbacks) if (item.taskId === id) clearTimer(key);
     },
   });
 })()

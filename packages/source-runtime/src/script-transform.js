@@ -60,6 +60,16 @@ function isChained(node, parentByNode) {
   return parent?.type === 'MemberExpression' && parent.object === current;
 }
 
+function isPromiseReceiver(node, parentByNode) {
+  let current = node, parent = parentByNode.get(current);
+  while (parent?.type === 'ChainExpression') {
+    current = parent;
+    parent = parentByNode.get(current);
+  }
+  return parent?.type === 'MemberExpression' && parent.object === current &&
+    ['then', 'catch', 'finally'].includes(propertyName(parent));
+}
+
 function asyncCall(node, options) {
   if (node.type !== 'CallExpression') return false;
   let callee = node.callee;
@@ -285,9 +295,6 @@ export function transformCapabilityScript(source, {
     changed = false;
     for (const call of calls) {
       if (!requiresAwait(call.callee)) continue;
-      const parent = parentByNode.get(call);
-      if (parent?.type === 'CallExpression' && parent.callee?.type === 'MemberExpression' &&
-          parent.callee.object === call && ['then', 'catch', 'finally'].includes(propertyName(parent.callee))) continue;
       const owner = ownerByNode.get(call);
       if (owner && !asyncFunctions.has(owner)) { asyncFunctions.add(owner); changed = true; }
       awaitedCalls.add(call);
@@ -320,7 +327,7 @@ export function transformCapabilityScript(source, {
   const insertions = [];
   for (const fn of asyncFunctions) insertions.push(insertionTextForFunction(fn, parentByNode, working));
   for (const call of awaitedCalls) {
-    if (!isAlreadyAwaited(call, parentByNode)) {
+    if (!isAlreadyAwaited(call, parentByNode) && !isPromiseReceiver(call, parentByNode)) {
       if (isChained(call, parentByNode)) {
         insertions.push({ position: call.start, text: '(await ', priority: 10 });
         insertions.push({ position: call.end, text: ')', priority: 0 });

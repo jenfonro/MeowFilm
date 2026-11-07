@@ -1,5 +1,5 @@
 import { parse } from 'acorn';
-import { sourceFault, sourceObject, sourceRequire } from './errors.js';
+import { sourceFault, sourceObject, sourceRequire, sourceSafeError } from './errors.js';
 
 const actions = Object.freeze([
   'init',
@@ -137,6 +137,7 @@ export class CatAdapter {
     Object.assign(this, { source, kernel });
     this.actions = Object.freeze([]);
     this.initialized = false;
+    this.lifecycleTail = null;
   }
 
   async start() {
@@ -153,24 +154,44 @@ export class CatAdapter {
     return parseValue(await this.kernel.invokeGuest(action, payload, invocation));
   }
 
+  runLifecycle(action, payload, invocation, automatic = false) {
+    // Ordinary guest actions never join this lifecycle-only tail.
+    const prior = this.lifecycleTail;
+    const task = (async () => {
+      if (prior) {
+        // A failed owner does not lend its error or identity to its successor.
+        try { await prior; } catch {}
+      }
+      if (invocation.signal.aborted) throw sourceSafeError(invocation.signal.reason, 'CANCELLED');
+      if (automatic && this.initialized) return;
+      const value = automatic && !this.available.has('init')
+        ? undefined : await this.guest(action, payload, invocation);
+      // A cancelled owner may settle late; it must not commit lifecycle state.
+      if (invocation.signal.aborted) throw sourceSafeError(invocation.signal.reason, 'CANCELLED');
+      this.initialized = action !== 'destroy';
+      return value;
+    })();
+    this.lifecycleTail = task;
+    const clear = () => {
+      if (this.lifecycleTail === task) this.lifecycleTail = null;
+    };
+    task.then(clear, clear);
+    return task;
+  }
+
   async ensureInitialized(payload, invocation) {
-    if (this.initialized) return;
-    if (this.available.has('init')) {
-      await this.guest('init', {
-        ext: this.source.ext ?? this.source.config ?? payload.ext ?? {},
-      }, invocation);
-    }
-    this.initialized = true;
+    if (this.initialized && !this.lifecycleTail) return;
+    await this.runLifecycle('init', {
+      ext: this.source.ext ?? this.source.config ?? payload.ext ?? {},
+    }, invocation, true);
   }
 
   async invoke(action, payload, invocation) {
     sourceObject(payload);
-    if (action === 'init') {
-      const value = await this.guest('init', payload, invocation);
-      this.initialized = true;
-      return value;
+    if (action === 'init' || action === 'destroy') {
+      return this.runLifecycle(action, payload, invocation);
     }
-    if (action !== 'destroy') await this.ensureInitialized(payload, invocation);
+    await this.ensureInitialized(payload, invocation);
     if (action === 'proxy') {
       const requested = String(payload.url ?? payload.route ?? '');
       const route = this.kernel.resolveVirtual(requested);
@@ -179,8 +200,6 @@ export class CatAdapter {
         throw sourceFault('VIRTUAL_ROUTE_NOT_FOUND');
       }
     }
-    const value = await this.guest(action, payload, invocation);
-    if (action === 'destroy') this.initialized = false;
-    return value;
+    return this.guest(action, payload, invocation);
   }
 }

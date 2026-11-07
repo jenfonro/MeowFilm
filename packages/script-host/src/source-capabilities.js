@@ -1,11 +1,6 @@
 import { fault, requireValue, safeError } from './errors.js';
 import { createNodeNetwork } from './node-network.js';
-import {
-  createCipheriv, createDecipheriv, createHash, createHmac, randomBytes,
-} from 'node:crypto';
-import iconv from 'iconv-lite';
-
-const version = 1;
+const version = 2;
 const obviousPublicCookieDomains = new Set([
   'com', 'net', 'org', 'edu', 'gov', 'mil', 'int',
   'co.uk', 'org.uk', 'ac.uk',
@@ -13,39 +8,6 @@ const obviousPublicCookieDomains = new Set([
   'com.au', 'net.au', 'org.au',
   'co.jp', 'ne.jp', 'or.jp',
 ]);
-const defaultStateLimits = Object.freeze({
-  storageBytes: 64 * 1024 * 1024,
-  storageProfileBytes: 8 * 1024 * 1024,
-  cookieBytes: 16 * 1024 * 1024,
-  virtualBytes: 16 * 1024 * 1024,
-});
-
-function jsonBytes(value) {
-  let json;
-  try { json = JSON.stringify(value); }
-  catch { throw fault('INVALID_ARGUMENT'); }
-  requireValue(typeof json === 'string');
-  return Buffer.byteLength(json);
-}
-
-function normalizeStateLimits(value = {}) {
-  requireValue(value && typeof value === 'object' && !Array.isArray(value) &&
-    Object.keys(value).every(key => Object.hasOwn(defaultStateLimits, key)));
-  const limits = { ...defaultStateLimits, ...value };
-  for (const amount of Object.values(limits)) {
-    requireValue(Number.isSafeInteger(amount) && amount > 0);
-  }
-  requireValue(limits.storageProfileBytes <= limits.storageBytes);
-  return limits;
-}
-
-function base64(value) {
-  requireValue(typeof value === 'string');
-  const bytes = Buffer.from(value, 'base64');
-  requireValue(bytes.toString('base64') === value);
-  return bytes;
-}
-
 function headerObject(value) {
   requireValue(value && typeof value === 'object' && !Array.isArray(value));
   const result = {};
@@ -87,24 +49,16 @@ function pathMatches(pathname, path) {
 class ScopedCookieJar {
   #profiles = new Map();
   #sequence = 0;
-  #bytes = 0;
-
-  constructor(maximumBytes) {
-    requireValue(Number.isSafeInteger(maximumBytes) && maximumBytes > 0);
-    this.maximumBytes = maximumBytes;
-  }
 
   #delete(map, key) {
     const value = map.get(key);
     if (!value) return false;
-    this.#bytes -= value.bytes;
     return map.delete(key);
   }
 
   #drop(name) {
     const map = this.#profiles.get(name);
     if (!map) return;
-    for (const value of map.values()) this.#bytes -= value.bytes;
     this.#profiles.delete(name);
   }
 
@@ -185,15 +139,10 @@ class ScopedCookieJar {
       const key = JSON.stringify([domain, path, name]);
       if (expires !== null && expires <= Date.now()) this.#delete(map, key);
       else {
-        const bytes = jsonBytes({ name, value, domain, hostOnly, path, secure, expires });
-        const previous = map.get(key);
-        requireValue(this.#bytes - (previous?.bytes ?? 0) + bytes <= this.maximumBytes,
-          'RESOURCE_LIMIT');
         map.set(key, {
           name, value, domain, hostOnly, path, secure, expires,
-          sequence: ++this.#sequence, bytes,
+          sequence: ++this.#sequence,
         });
-        this.#bytes += bytes - (previous?.bytes ?? 0);
       }
     }
   }
@@ -222,48 +171,23 @@ class ScopedCookieJar {
   }
 }
 
-function memoryStorage({ maximumBytes, maximumProfileBytes }) {
+function memoryStorage() {
   const profiles = new Map();
-  let bytes = 0;
   const map = profile => {
-    if (!profiles.has(profile)) profiles.set(profile, { values: new Map(), bytes: 0 });
+    if (!profiles.has(profile)) profiles.set(profile, new Map());
     return profiles.get(profile);
   };
   return {
-    get: ({ profile, key }) => {
-      const entry = map(profile).values.get(key);
-      return entry ? structuredClone(entry.value) : null;
-    },
+    get: ({ profile, key }) => structuredClone(map(profile).get(key) ?? null),
     set: ({ profile, key, value }) => {
-      const bucket = map(profile);
-      const captured = structuredClone(value);
-      const size = Buffer.byteLength(String(key)) + jsonBytes(captured);
-      const previous = bucket.values.get(key);
-      const nextProfileBytes = bucket.bytes - (previous?.bytes ?? 0) + size;
-      const nextBytes = bytes - (previous?.bytes ?? 0) + size;
-      requireValue(nextProfileBytes <= maximumProfileBytes && nextBytes <= maximumBytes,
-        'RESOURCE_LIMIT');
-      bucket.values.set(key, { value: captured, bytes: size });
-      bucket.bytes = nextProfileBytes;
-      bytes = nextBytes;
+      map(profile).set(key, structuredClone(value));
       return true;
     },
-    delete: ({ profile, key }) => {
-      const bucket = map(profile);
-      const previous = bucket.values.get(key);
-      if (!previous) return false;
-      bucket.values.delete(key);
-      bucket.bytes -= previous.bytes;
-      bytes -= previous.bytes;
-      return true;
-    },
+    delete: ({ profile, key }) => map(profile).delete(key),
     releaseProfiles(prefix, except = '') {
       for (const name of profiles.keys()) {
         const kept = except && (name === except || name.startsWith(`${except}:`));
-        if (name.startsWith(prefix) && !kept) {
-          bytes -= profiles.get(name).bytes;
-          profiles.delete(name);
-        }
+        if (name.startsWith(prefix) && !kept) profiles.delete(name);
       }
     },
   };
@@ -300,29 +224,23 @@ function requestDeadline(parent, timeoutMs) {
 }
 
 /**
- * Windows' current host adapter. It is protocol-neutral and can be replaced by
- * Android/iOS native implementations of the same ABI.
+ * Shared asynchronous I/O and profile owner. Encoding and crypto execute in
+ * the source's native runtime before reaching this adapter.
  */
 export function createNodeSourceCapabilities({
   network = createNodeNetwork(),
   storage,
   web,
   onDiagnostic,
-  stateLimits,
 } = {}) {
-  const limits = normalizeStateLimits(stateLimits);
-  storage ??= memoryStorage({
-    maximumBytes: limits.storageBytes,
-    maximumProfileBytes: limits.storageProfileBytes,
-  });
+  storage ??= memoryStorage();
   requireValue(typeof network === 'function');
   requireValue(storage && ['get', 'set', 'delete', 'releaseProfiles']
     .every(name => typeof storage[name] === 'function'));
   requireValue(web === undefined || typeof web === 'function');
   requireValue(onDiagnostic === undefined || typeof onDiagnostic === 'function');
-  const cookies = new ScopedCookieJar(limits.cookieBytes);
+  const cookies = new ScopedCookieJar();
   const virtual = new Map();
-  let virtualBytes = 0;
   const redirects = new Set([301, 302, 303, 307, 308]);
   const validateURL = value => {
     const url = new URL(value);
@@ -335,7 +253,8 @@ export function createNodeSourceCapabilities({
     try {
       let url = validateURL(input.url);
       let method = input.method;
-      let body = input.body ? base64(input.body) : undefined;
+      requireValue(input.body === undefined || input.body instanceof Uint8Array);
+      let body = input.body === undefined ? undefined : Buffer.from(input.body);
       let headers = headerObject(input.headers);
       for (let hop = 0; ; hop++) {
         const outbound = { ...headers };
@@ -373,7 +292,7 @@ export function createNodeSourceCapabilities({
             statusText: response.statusMessage ?? '',
             headers: outputHeaders,
             url: responseUrl,
-            body: Buffer.from(response.body ?? []).toString('base64'),
+            body: Buffer.from(response.body ?? []),
           };
         }
         requireValue(hop < input.redirects, 'RESOURCE_LIMIT');
@@ -416,41 +335,13 @@ export function createNodeSourceCapabilities({
           case 'storage.get': return await storage.get({ ...input, signal: activeSignal, scope });
           case 'storage.set': return await storage.set({ ...input, signal: activeSignal, scope });
           case 'storage.delete': return await storage.delete({ ...input, signal: activeSignal, scope });
-          case 'encoding.encode':
-            requireValue(iconv.encodingExists(input.encoding), 'UNSUPPORTED_OPTION');
-            return iconv.encode(input.text, input.encoding).toString('base64');
-          case 'encoding.decode':
-            requireValue(iconv.encodingExists(input.encoding), 'UNSUPPORTED_OPTION');
-            return iconv.decode(base64(input.body), input.encoding);
-          case 'crypto.digest':
-            return createHash(input.algorithm).update(base64(input.data)).digest('base64');
-          case 'crypto.hmac':
-            return createHmac(input.algorithm, base64(input.key))
-              .update(base64(input.data)).digest('base64');
-          case 'crypto.random':
-            return randomBytes(input.length).toString('base64');
-          case 'crypto.aes': {
-            const operation = input.operation === 'encrypt' ? createCipheriv : createDecipheriv;
-            const iv = input.algorithm.endsWith('-ecb') ? null : base64(input.iv);
-            try {
-              const cipher = operation(input.algorithm, base64(input.key), iv);
-              return Buffer.concat([
-                cipher.update(base64(input.data)), cipher.final(),
-              ]).toString('base64');
-            } catch { throw fault('UNSUPPORTED_CRYPTO'); }
-          }
           case 'web.interact':
             if (!web) throw fault('CAPABILITY_UNAVAILABLE');
             return await web({ ...input, signal: activeSignal, scope });
           case 'virtual.register': {
             const key = JSON.stringify([input.profile, input.route]);
             const metadata = structuredClone(input.metadata);
-            const bytes = Buffer.byteLength(key) + jsonBytes(metadata);
-            const previous = virtual.get(key);
-            requireValue(virtualBytes - (previous?.bytes ?? 0) + bytes <= limits.virtualBytes,
-              'RESOURCE_LIMIT');
-            virtual.set(key, { metadata, bytes });
-            virtualBytes += bytes - (previous?.bytes ?? 0);
+            virtual.set(key, { metadata });
             return { url: `meow-source://${encodeURIComponent(input.profile)}/${encodeURIComponent(input.route)}` };
           }
           case 'virtual.unregister': {
@@ -458,7 +349,6 @@ export function createNodeSourceCapabilities({
             const previous = virtual.get(key);
             if (!previous) return false;
             virtual.delete(key);
-            virtualBytes -= previous.bytes;
             return true;
           }
           default: throw fault('CAPABILITY_UNAVAILABLE');
@@ -483,7 +373,6 @@ export function createNodeSourceCapabilities({
         const [profile] = JSON.parse(key);
         const kept = except && (profile === except || profile.startsWith(`${except}:`));
         if (profile.startsWith(prefix) && !kept) {
-          virtualBytes -= virtual.get(key).bytes;
           virtual.delete(key);
         }
       }

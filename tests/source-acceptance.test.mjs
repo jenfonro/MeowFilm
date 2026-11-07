@@ -4,9 +4,9 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { temporaryRoot, assertOwnedPath } from '../scripts/windows/working-paths.mjs';
 import { classifyGuestMessage, classifySourceFailure, sourceDiagnosticObservers } from '../scripts/source-acceptance-diagnostics.mjs';
 import { describeScriptError } from '../packages/script-host/src/script-diagnostic.js';
+const temporaryRoot = join(process.cwd(), 'tmp/test-results');
 
 test('source diagnostics classify known configuration and data errors without retaining text', () => {
   for (const [message, reason] of [
@@ -103,7 +103,7 @@ test('source JSON error attribution needs request evidence and cannot conceal ho
 function area(t) {
   mkdirSync(temporaryRoot, { recursive: true });
   const directory = mkdtempSync(join(temporaryRoot, 'source-acceptance-'));
-  t.after(() => { assertOwnedPath(temporaryRoot, directory); rmSync(directory, { recursive: true }); });
+  t.after(() => rmSync(directory, { recursive: true }));
   return { directory, output: join(directory, 'report.json') };
 }
 

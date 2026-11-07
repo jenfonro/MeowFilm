@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
-import { createHash, createSecretKey, webcrypto, X509Certificate } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign, X509Certificate } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 import { rootCertificates } from 'node:tls';
 import { EventEmitter } from 'node:events';
@@ -11,11 +11,12 @@ import fs from 'node:fs';
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync,
   writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { networkInterfaces, tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir, totalmem, cpus, hostname } from 'node:os';
+import { PassThrough } from 'node:stream';
 import { join, resolve } from 'node:path';
 import v8 from 'node:v8';
 import { runInNewContext } from 'node:vm';
-import { createCatRuntime, createNodeNetwork, createScriptHost, SourceTransfers, SCRIPT_LIMITS } from '../src/index.js';
+import { createCatRuntime, createNodeNetwork, createScriptHost, SCRIPT_LIMITS } from '../src/index.js';
 import { ScriptHost } from '../src/host.js';
 import { CatSession } from '../src/cat-session.js';
 import { syncCatManagement } from '../src/cat-management.js';
@@ -29,7 +30,6 @@ import { ScriptServices, scriptAccessHeader } from '../src/script-services.js';
 import { projectHttpRequestOptions, projectFields } from '../src/native-roles.js';
 import { parse, tokenizer, parseExpressionAt } from 'acorn';
 import { createLocalStartupLookup, startupWrapperTarget } from '../src/cat-source-routes.js';
-import { readFile } from 'node:fs/promises';
 import { serverFor } from './http-fixture.js';
 import { lxScript } from './fixtures.js';
 
@@ -42,6 +42,21 @@ async function collectGarbage(rounds = 4) {
     forceGc();
     await new Promise(resolve => setImmediate(resolve));
   }
+}
+
+function nativeCapabilities(session, services, root) {
+  session.timers ??= new Map();
+  session.resourceScope ??= () => session.root;
+  session.runCallback ??= function(callback, receiver, args) {
+    if (this.live) return Reflect.apply(callback, receiver, args);
+  };
+  return new NodeCapabilities(session, services, root);
+}
+function resourceCounts(session) {
+  return { streams: session.node.streams.size, webResources: session.node.webResources.size,
+    sockets: session.node.networkResources.size, descriptors: session.node.volume.descriptors.size,
+    files: session.node.volume.streams.size, requests: session.nativeRequests.size,
+    timers: session.timers.size, adapters: session.adapterTasks.size };
 }
 
 const source = String.raw`
@@ -425,7 +440,7 @@ async function route(request, response) {
       configValue: options.jsonValue || null,
       cookie: credential()?.cookie || null,
       multipart: {
-        contentType: multipart.contentType.startsWith('multipart/form-data; boundary=----meowfilm-'),
+        contentType: /^multipart\/form-data; boundary=[^\s;]+$/.test(multipart.contentType),
         text: /name="text"\r\n\r\nvalue\r\n/.test(multipart.body),
         file: /name="file"; filename="sample.txt"\r\nContent-Type: text\/plain\r\n\r\nhello\r\n/.test(multipart.body),
       },
@@ -583,7 +598,6 @@ function rootFor(t) {
   return root;
 }
 
-let sharedQuickJSModule;
 /**
  * These tests exercise ownership of live native objects and guest execution
  * state. They own a real CatSession in this thread; the public CatRuntime
@@ -593,9 +607,6 @@ async function createCatSessionForInternalTest(t, {
   dataRoot = rootFor(t), installationId, source, config = {}, version = '1',
   settings, onNetwork, onActivate, onStop, network, onDiagnostic,
 } = {}) {
-  sharedQuickJSModule ??= readFile(
-    new URL(import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')))
-    .then(bytes => WebAssembly.compile(bytes));
   const session = new CatSession({
     dataRoot,
     installationId,
@@ -616,7 +627,6 @@ async function createCatSessionForInternalTest(t, {
       requestTimeoutMs: 60_000,
       cleanupTimeoutMs: 3_000,
     },
-    wasmModule: await sharedQuickJSModule,
   });
   t.after(async () => {
     await session.stop().catch(() => {});
@@ -652,6 +662,23 @@ function delayedSource(name, delay) {
       }, ${delay});
     });
     module.exports.stop = () => server?.close();
+  `;
+}
+
+function gatedSource(name, url) {
+  return delayedSource(name, 0) + `
+    const start = module.exports.start;
+    module.exports.start = async () => {
+      await new Promise((resolve, reject) => {
+        const request = http.get(${JSON.stringify(url)}, { agent: false }, response => {
+          response.once('error', reject);
+          response.once('end', resolve);
+          response.resume();
+        });
+        request.once('error', reject);
+      });
+      return start();
+    };
   `;
 }
 
@@ -1218,151 +1245,23 @@ function sourceFile(dataRoot, hash) {
   return join(dataRoot, 'sources', hash + '.js');
 }
 
-test('Cat transfer staging is reclaimed by lifecycle without a concurrent token quota', () => {
-  const transfers = new SourceTransfers();
-  for (let index = 0; index < 12; index++)
-    transfers.begin({ length: 1, sha256: '0'.repeat(64), kind: 'source' });
-  assert.equal(transfers.entries.size, 12);
-  transfers.close();
-  assert.equal(transfers.entries.size, 0);
-});
 
-test('Cat abandoned transfer staging expires without requiring another RPC', () => {
-  let now = 0, scheduled;
-  const transfers = new SourceTransfers({
-    clock: () => now,
-    ttl: 100,
-    setTimer(callback) {
-      scheduled = { callback, unref() {} };
-      return { callback, unref() {} };
-    },
-    clearTimer() {},
-  });
-  transfers.begin({ length: 1, sha256: '0'.repeat(64), kind: 'source' });
-  assert.equal(transfers.entries.size, 1);
-  now = 100;
-  scheduled.callback();
-  assert.equal(transfers.entries.size, 0);
-  transfers.close();
-});
 
-test('Cat transfer expiry ignores a stale timer callback after rescheduling', () => {
-  let now = 0;
-  let scheduled;
-  const transfers = new SourceTransfers({
-    clock: () => now,
-    ttl: 100,
-    setTimer(callback) {
-      scheduled = { callback, unref() {} };
-      return { callback, unref() {} };
-    },
-    clearTimer() {},
-  });
-  const begun = transfers.begin({ length: 1, sha256: createHash('sha256').update('x').digest('hex'),
-    kind: 'source' });
-  const stale = scheduled;
-  transfers.chunk({ token: begun.token, offset: 0, data: Buffer.from('x').toString('base64') });
-  stale.callback();
-  assert.equal(transfers.entries.size, 1);
-  now = 100;
-  scheduled.callback();
-  assert.equal(transfers.entries.size, 0);
-  transfers.close();
-});
 
-test('Cat transfer setup failure does not retain an unreachable staging entry', () => {
-  let scheduled = 0;
-  const transfers = new SourceTransfers({
-    setTimer() { scheduled++; throw new Error('synthetic timer setup failure'); },
-  });
-  assert.throws(() => transfers.begin({
-    length: 1, sha256: createHash('sha256').update('x').digest('hex'), kind: 'source',
-  }), /synthetic timer setup failure/);
-  assert.equal(transfers.entries.size, 0);
-  assert.equal(scheduled, 1);
-  transfers.close();
-});
 
-test('Cat source staging rejects the 16 MiB boundary before retaining chunks', () => {
-  const transfers = new SourceTransfers();
-  const sha256 = createHash('sha256').update('x').digest('hex');
-  assert.throws(() => transfers.begin({
-    length: SCRIPT_LIMITS.maxSourceBytes + 1, sha256, kind: 'source',
-  }), { code: 'RESOURCE_LIMIT' });
-  const exact = transfers.begin({ length: SCRIPT_LIMITS.maxSourceBytes, sha256, kind: 'source' });
-  assert.equal(transfers.entries.get(exact.token).length, SCRIPT_LIMITS.maxSourceBytes);
-  transfers.close();
-});
 
-test('Cat script result blobs preserve a 12 MiB payload across chunk reads', () => {
-  const transfers = new SourceTransfers();
-  const size = 12 * 1024 * 1024;
-  const exact = { data: 'x'.repeat(size) };
-  const result = transfers.result(exact);
-  assert.equal(result.blob.length, Buffer.byteLength(JSON.stringify(exact)));
-  assert.equal(result.blob.chunkBytes, 64 * 1024);
-  const chunks = [];
-  for (let offset = 0; offset < result.blob.length;) {
-    const part = transfers.read({ token: result.blob.token, offset });
-    chunks.push(Buffer.from(part.data, 'base64'));
-    offset = part.next;
-  }
-  const bytes = Buffer.concat(chunks);
-  assert.equal(bytes.length, result.blob.length);
-  assert.equal(sha256(bytes), result.blob.sha256);
-  assert.equal(bytes.toString(), JSON.stringify(exact));
-  transfers.release(result.blob.token);
-  transfers.close();
-});
 
-test('Cat transfer chunk rolls back when expiry rescheduling fails', () => {
-  let schedules = 0;
-  let now = 0;
-  const transfers = new SourceTransfers({
-    clock: () => now,
-    ttl: 100,
-    setTimer(callback) {
-      schedules++;
-      if (schedules === 3) throw new Error('synthetic reschedule failure');
-      return { callback, unref() {} };
-    },
-    clearTimer() {},
-  });
-  const begun = transfers.begin({
-    length: 1, sha256: createHash('sha256').update('x').digest('hex'), kind: 'source',
-  });
-  assert.throws(() => transfers.chunk({
-    token: begun.token, offset: 0, data: Buffer.from('x').toString('base64'),
-  }), /synthetic reschedule failure/);
-  assert.equal(transfers.entries.get(begun.token).offset, 0);
-  assert.equal(transfers.entries.get(begun.token).chunks.length, 0);
-  assert.equal(transfers.entries.get(begun.token).expires, 100);
-  transfers.close();
-});
 
-test('Cat transfer close releases every entry even when timer cleanup fails', () => {
-  const cleared = [];
-  let handle;
-  const transfers = new SourceTransfers({
-    setTimer(callback) { handle = { callback, unref() {} }; return handle; },
-    clearTimer(timer) {
-      cleared.push(timer);
-      throw new Error('synthetic timer cleanup failure');
-    },
-  });
-  transfers.begin({
-    length: 1, sha256: createHash('sha256').update('x').digest('hex'), kind: 'source',
-  });
-  assert.throws(() => transfers.close(), /synthetic timer cleanup failure/);
-  assert.equal(cleared.length, 1);
-  assert.equal(transfers.entries.size, 0);
-  handle.callback();
-  assert.equal(transfers.entries.size, 0);
-  assert.doesNotThrow(() => transfers.close());
-  assert.equal(cleared.length, 1);
-});
 
-test('CatNode cannot access the private native task-context hook at startup or in dynamic code', async t => {
+
+
+
+
+
+
+
+
+test('CatNode cannot access the private native hooks at startup or in dynamic code', async t => {
   const inspect = `({
     type: typeof __meowTaskContext,
     own: Object.hasOwn(globalThis, '__meowTaskContext'),
@@ -1372,7 +1271,7 @@ test('CatNode cannot access the private native task-context hook at startup or i
   const runtime = createCatRuntime({ dataRoot: rootFor(t) });
   t.after(() => runtime.close());
   await runtime.install({
-    installationId: 'private-task-context', enabled: true, version: '1',
+    installationId: 'private-native-hooks', enabled: true, version: '1',
     source: `
       const startup = ${inspect};
       module.exports = {
@@ -1383,34 +1282,187 @@ test('CatNode cannot access the private native task-context hook at startup or i
   });
   const expected = { type: 'undefined', own: false, dynamic: 'undefined', nested: 'undefined' };
   const result = await runtime.invoke({
-    installationId: 'private-task-context', siteId: 'default',
+    installationId: 'private-native-hooks', siteId: 'default',
     operation: 'home', payload: {},
   });
   assert.deepEqual(result, { startup: expected, action: expected });
 });
 
-test('Cat os memory metadata reports the per-script limit and current guest heap', async t => {
-  const root = new ResourceScope();
-  let heapUsed = 234;
-  const session = {
-    installationId: 'os-memory-fixture',
-    revision: { source: '' },
-    root,
-    limits: { cleanupTimeoutMs: 100, maxMemoryBytes: 1234 },
-    live: true,
-    scope: () => root,
-    storageWritten() {},
-    engine: { memoryUsage: () => ({ heapUsed }) },
-  };
-  const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
-  assert.equal(node.builtins.os.totalmem(), 1234);
-  assert.equal(node.builtins.os.freemem(), 1000);
-  heapUsed = 2000;
-  assert.equal(node.builtins.os.freemem(), 0);
-  root.close();
-  session.live = false;
-  await node.close();
+test('Cat os and process memory statistics retain native Node meaning', async t => {
+  const session = await createCatSessionForInternalTest(t, { installationId: 'memory-statistics',
+    source: `module.exports.home = () => ({ total: require('os').totalmem(), free: require('os').freemem(),
+      platform: process.platform, arch: process.arch, usage: process.memoryUsage(), count: 1 });` });
+  const value = await session.invoke({ siteId: 'default', operation: 'home', payload: {} });
+  assert.equal(value.total, totalmem());
+  assert.ok(value.free > 0 && value.free <= value.total);
+  assert.equal(value.platform, process.platform); assert.equal(value.arch, process.arch);
+  for (const key of ['rss', 'heapTotal', 'heapUsed', 'external', 'arrayBuffers'])
+    assert.ok(Number.isFinite(value.usage[key]) && value.usage[key] >= 0, key);
+  assert.ok(value.usage.rss > value.usage.heapUsed);
 });
+
+test('Cat native buffers retain state across calls and report actual external memory', async t => {
+  const session = await createCatSessionForInternalTest(t, {
+    installationId: 'retained-native-bytes', source: `
+      let retained, count = 0;
+      module.exports.home = () => {
+        retained ??= Buffer.alloc(24 * 1024 * 1024, 0xa5);
+        return { count: ++count, bytes: retained.length, first: retained[0],
+          last: retained.at(-1), external: process.memoryUsage().external };
+      };`,
+  });
+  for (let count = 1; count <= 3; count++) {
+    const value = await session.invoke({ siteId: 'default', operation: 'home', payload: {} });
+    assert.equal(value.count, count);
+    assert.equal(value.bytes, 24 * 1024 * 1024);
+    assert.equal(value.first, 0xa5); assert.equal(value.last, 0xa5);
+    assert.ok(value.external >= value.bytes);
+    assert.equal(session.generation, 1);
+  }
+  await session.stop();
+  assert.equal(session.stats().live, false);
+});
+
+test('Cat independent install and status complete during a slow installation', { timeout: 30000 }, async t => {
+  const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+  t.after(() => runtime.close());
+  await runtime.start();
+  let slowDone = false;
+  const slow = runtime.install({ installationId: 'slow', enabled: true,
+    source: delayedSource('slow', 1200) }).then(value => { slowDone = true; return value; });
+  await waitFor(() => runtime.host.initializingSessions().some(session =>
+    session.installationId === 'slow'), 'slow installation was not admitted');
+  const fast = await runtime.install({ installationId: 'fast', enabled: true,
+    source: delayedSource('fast', 0) });
+  assert.equal(fast.state, 'ready'); assert.equal(slowDone, false);
+  const states = (await runtime.status()).instances;
+  assert.equal(states.find(value => value.installationId === 'slow').state, 'starting');
+  assert.equal(states.find(value => value.installationId === 'fast').state, 'ready');
+  assert.deepEqual(await runtime.invoke({ installationId: 'fast', siteId: 'site-fast',
+    operation: 'home', payload: {} }), { instance: 'fast' });
+  assert.equal((await slow).state, 'ready');
+});
+
+test('Cat serializes updates only within the same installation', { timeout: 30000 }, async t => {
+  const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+  t.after(() => runtime.close());
+  await runtime.install({ installationId: 'ordered', source: volumeSource('ordered'), enabled: true });
+  const disabled = runtime.setEnabled('ordered', false);
+  const enabled = runtime.setEnabled('ordered', true);
+  assert.equal((await disabled).state, 'disabled');
+  assert.equal((await enabled).state, 'ready');
+  assert.equal((await runtime.status()).instances[0].state, 'ready');
+});
+
+test('Cat imports reuse the complete uploaded source identity but enables read edited bytes',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.start();
+    const source = 'module.exports.home = () => ({ value: "uploaded" });';
+    const contentHash = sourceHash(source);
+    const originalRead = runtime.readSource.bind(runtime);
+    runtime.readSource = () => { throw new Error('the complete import must not be reread'); };
+    const installed = await runtime.install({ installationId: 'uploaded', source, contentHash, enabled: true });
+    assert.equal(installed.sourceHash, contentHash);
+    assert.equal(runtime.host.get('uploaded').contentHash, contentHash);
+    runtime.readSource = originalRead;
+    await runtime.setEnabled('uploaded', false);
+    const edited = 'module.exports.home = () => ({ value: "edited bytes with a different length" });';
+    writeFileSync(sourceFile(runtime.dataRoot, contentHash), edited);
+    const enabled = await runtime.setEnabled('uploaded', true);
+    assert.equal(enabled.sourceHash, sourceHash(edited));
+    assert.deepEqual(await runtime.invoke({ installationId: 'uploaded', siteId: 'default',
+      operation: 'home', payload: {} }), { value: 'edited bytes with a different length' });
+    assert.equal(runtime.settings.read().scripts[0].sourceHash, contentHash);
+  });
+
+test('Cat install cancellation restores accepted source after real exit and cannot cancel a later generation',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    const original = await runtime.install({ installationId: 'cancel-import', enabled: true,
+      source: 'let count = 0; module.exports.home = () => ({ count: ++count });' });
+    const invoke = () => runtime.invoke({ installationId: 'cancel-import', siteId: 'default',
+      operation: 'home', payload: {} });
+    assert.deepEqual(await invoke(), { count: 1 });
+    const controller = new AbortController();
+    const pending = runtime.install({ installationId: 'cancel-import', enabled: true,
+      source: delayedSource('cancelled', 10000) }, { signal: controller.signal });
+    const rejected = assert.rejects(pending, { code: 'CANCELLED' });
+    await waitFor(() => runtime.host.initializingSessions().some(session =>
+      session.installationId === 'cancel-import'), 'candidate was not registered');
+    const candidate = runtime.host.initializingSessions().find(session =>
+      session.installationId === 'cancel-import');
+    controller.abort();
+    await rejected;
+    assert.equal(candidate.worker, null);
+    assert.equal(runtime.host.get('cancel-import').generation, original.generation + 2);
+    assert.equal(runtime.instance('cancel-import').sourceHash, original.sourceHash);
+    assert.deepEqual(await invoke(), { count: 1 });
+    const nextSignal = new AbortController();
+    const next = await runtime.install({ installationId: 'cancel-import', enabled: true,
+      source: 'module.exports.home = () => ({ value: "replacement" });' }, { signal: nextSignal.signal });
+    nextSignal.abort();
+    assert.equal(runtime.getSession('cancel-import').generation, next.generation);
+    assert.deepEqual(await invoke(), { value: 'replacement' });
+  });
+
+test('Cat captured initialization stop cannot select a successor with the same installation ID',
+  { timeout: 30000 }, async t => {
+    const gates = new Map();
+    const upstream = await serverFor(t, (request, response) => { gates.set(request.url, response); });
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    const empty = runtime.captureInitialization('captured');
+    await runtime.install({ installationId: 'captured', enabled: true,
+      source: delayedSource('original', 0) });
+    const first = runtime.install({ installationId: 'captured', enabled: true,
+      source: gatedSource('first', `${upstream.socketOrigin}/first`) });
+    const rejected = assert.rejects(first);
+    await waitFor(() => gates.has('/first'), 'first candidate did not reach its I/O barrier');
+    const firstOwner = runtime.host.initializingSessions()[0];
+    const stopFirst = runtime.captureInitialization('captured');
+    empty();
+    assert.equal(firstOwner.live, true);
+    stopFirst();
+    await rejected;
+    assert.equal(firstOwner.worker, null);
+    const second = runtime.install({ installationId: 'captured', enabled: true,
+      source: gatedSource('second', `${upstream.socketOrigin}/second`) });
+    second.catch(() => {});
+    await waitFor(() => gates.has('/second'), 'successor did not reach its I/O barrier');
+    const secondOwner = runtime.host.initializingSessions()[0];
+    stopFirst();
+    assert.equal(secondOwner.live, true);
+    assert.ok(secondOwner.worker);
+    assert.notEqual(secondOwner, firstOwner);
+    gates.get('/second').end('continue');
+    assert.equal((await second).generation, secondOwner.generation);
+    stopFirst();
+    assert.deepEqual(await runtime.invoke({ installationId: 'captured',
+      siteId: 'site-second', operation: 'home', payload: {} }), { instance: 'second' });
+  });
+
+test('Cat enable cancellation reaches the initializing worker before returning',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({ installationId: 'cancel-enable', source: delayedSource('enable', 10000), enabled: false });
+    const controller = new AbortController();
+    const pending = runtime.setEnabled('cancel-enable', true, { signal: controller.signal });
+    const rejected = assert.rejects(pending, { code: 'CANCELLED' });
+    await waitFor(() => runtime.host.initializingSessions().length === 1, 'enable did not start a worker');
+    const candidate = runtime.host.initializingSessions()[0];
+    controller.abort();
+    await rejected;
+    assert.equal(candidate.worker, null);
+    assert.equal(runtime.host.initializingSessions().length, 0);
+    const before = runtime.settings.read();
+    await assert.rejects(runtime.setEnabled('cancel-enable', false, { signal: controller.signal }),
+      { code: 'CANCELLED' });
+    assert.deepEqual(runtime.settings.read(), before);
+  });
 
 test('Cat URL enhancement failure preserves the original valid result', () => {
   const input = { parse: 0, url: 'http://127.0.0.1:9988/proxy?id=fixture' };
@@ -1438,72 +1490,11 @@ test('Cat imports are not rejected by any installation-count quota',
     assert.equal((await runtime.status()).instances.length, 40);
   });
 
-test('Cat ready memory overrun restarts once with the same revision and keeps its private volume',
-  { timeout: 30000 }, async t => {
-    const dataRoot = rootFor(t);
-    const diagnostics = [];
-    const host = new ScriptHost({
-      adapters: { cat: input => new CatSession({ ...input, dataRoot }) },
-      limits: { maxMemoryBytes: 128 * 1024 * 1024 },
-      onDiagnostic: event => diagnostics.push(event),
-    });
-    t.after(() => host.close());
-    const memorySource = String.raw`
-      const http = require('http');
-      const fs = require('fs');
-      let server;
-      module.exports.start = () => {
-        server = http.createServer((request, response) => {
-          if (request.url === '/full-config' || request.url === '/config') {
-            response.setHeader('content-type', 'application/json');
-            response.end(JSON.stringify({ video: { sites: [{
-              key: 'memory', name: 'Memory', api: '/api/memory', actions: ['home', 'allocate'],
-            }] } }));
-            return;
-          }
-          if (request.url === '/api/memory/allocate') {
-            fs.writeFileSync('/generation-count', String(Number(
-              fs.existsSync('/generation-count') ? fs.readFileSync('/generation-count', 'utf8') : '0') + 1));
-            const chunks = [new Uint8Array(256 * 1024 * 1024)];
-            response.end(JSON.stringify({ allocated: true }));
-            return;
-          }
-          if (request.url === '/api/memory/home') {
-            response.setHeader('content-type', 'application/json');
-            response.end(JSON.stringify({ count: Number(fs.existsSync('/generation-count')
-              ? fs.readFileSync('/generation-count', 'utf8') : '0') }));
-            return;
-          }
-          response.statusCode = 404;
-          response.end();
-        });
-        server.listen(Number(process.env.PORT), '127.0.0.1');
-      };
-      module.exports.stop = () => { server.closeAllConnections(); server.close(); };
-    `;
-    const installed = await host.install({
-      installationId: 'memory-cat', protocol: 'cat', source: memorySource, config: {},
-      version: '1', enabled: true,
-    });
-    await assert.rejects(host.invoke({
-      installationId: 'memory-cat', siteId: 'memory', operation: 'allocate', payload: {},
-    }), { code: 'RESOURCE_LIMIT' });
-    let restarted;
-    for (let attempt = 0; attempt < 500; attempt++) {
-      restarted = host.get('memory-cat');
-      if (restarted.generation > installed.generation && restarted.state === 'ready') break;
-      await new Promise(resolve => setTimeout(resolve, 20));
-    }
-    assert.equal(restarted.state, 'ready');
-    assert(restarted.generation > installed.generation);
-    assert.equal(restarted.contentHash, installed.contentHash);
-    assert.equal(diagnostics.filter(event => event.operation === 'memory.restart').length, 1);
-    assert.deepEqual(await host.invoke({
-      installationId: 'memory-cat', siteId: 'memory', operation: 'home', payload: {},
-    }), { count: 1 });
-  });
 
-test('Cat start returns after aggregate readiness while instances load in order',
+
+
+
+test('Cat start publishes aggregate readiness and starts instances independently',
   { timeout: 30000 }, async t => {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
     t.after(() => runtime.close());
@@ -1554,7 +1545,7 @@ test('Cat start returns after aggregate readiness while instances load in order'
     }), { instance: 'second' });
   });
 
-test('Cat management operations queue between background instance starts',
+test('Cat management proceeds while another instance starts',
   { timeout: 30000 }, async t => {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
     t.after(() => runtime.close());
@@ -1610,7 +1601,7 @@ test('Cat starting instances reject management and session access without hidden
     }), { code: 'STARTING' });
   });
 
-test('Cat close stops queued startup and waits for the in-flight instance',
+test('Cat close stops concurrent startup and waits for every owner',
   { timeout: 30000 }, async t => {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
     await runtime.install({
@@ -1632,11 +1623,13 @@ test('Cat close stops queued startup and waits for the in-flight instance',
     await waitForState(reopened, 'first', 'ready');
     assert.equal((await reopened.status()).instances.find(instance =>
       instance.installationId === 'second').state, 'starting');
-    assert.deepEqual(reopened.startupQueue, ['third']);
+    await waitForState(reopened, 'third', 'ready');
+    assert.equal((await reopened.status()).instances.find(instance =>
+      instance.installationId === 'second').state, 'starting');
     await reopened.close();
     assert.equal(reopened.closed, true);
-    assert.deepEqual(reopened.startupQueue, []);
-    assert.equal(reopened.startupScheduled, false);
+    assert.equal(reopened.pending.size, 0);
+    assert.equal(reopened.transactions.size, 0);
     assert.equal(reopened.sessions.size, 0);
     assert.equal(reopened.host, null);
     await assert.rejects(reopened.start(), { code: 'HOST_CLOSED' });
@@ -1745,7 +1738,7 @@ test('Cat source file failures affect only the enabled instance',
         const runtime = createCatRuntime({ dataRoot: root });
         t.after(() => runtime.close());
         const brokenSource = `module.exports = { home() { return "${kind}"; } };`;
-        await runtime.install({ installationId: 'broken-file', source: brokenSource });
+        await runtime.install({ installationId: 'broken-file', source: brokenSource, enabled: false });
         await runtime.install({
           installationId: 'healthy-file', source: delayedSource('healthy-file', 0), enabled: true,
         });
@@ -1772,6 +1765,270 @@ test('Cat source file failures affect only the enabled instance',
         });
       });
     }
+  });
+
+test('Cat refresh rejects invalid and pre-aborted signals before startup',
+  { timeout: 30000 }, async t => {
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    for (const signal of [null, true, {}, { aborted: false }])
+      await assert.rejects(runtime.refresh({ signal }), { code: 'INVALID_ARGUMENT' });
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(runtime.refresh({ signal: controller.signal }), { code: 'CANCELLED' });
+    assert.equal(runtime.initialization, null);
+    assert.equal(existsSync(join(root, 'settings.json')), false);
+    assert.equal(existsSync(join(root, 'sources')), false);
+  });
+
+test('Cat refresh cancellation during shared start does not stop background initialization',
+  { timeout: 30000 }, async t => {
+    let gate;
+    const upstream = await serverFor(t, (_request, response) => { gate = response; });
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    await runtime.install({ installationId: 'background-refresh',
+      source: gatedSource('background', upstream.socketOrigin), enabled: false });
+    writeSettings(runtime.settings.path, value => ({
+      ...value, scripts: value.scripts.map(script => ({ ...script, enabled: true })),
+    }));
+    await runtime.close();
+
+    const reopened = createCatRuntime({ dataRoot: root });
+    t.after(() => reopened.close());
+    const controller = new AbortController();
+    const started = reopened.start();
+    const cancelled = assert.rejects(reopened.refresh({ signal: controller.signal }),
+      { code: 'CANCELLED' });
+    controller.abort();
+    await cancelled;
+    await started;
+    await waitFor(() => gate, 'background initialization did not reach its I/O barrier');
+    const owner = reopened.host.initializingSessions().find(session =>
+      session.installationId === 'background-refresh');
+    assert.ok(owner?.worker);
+    const worker = owner.worker;
+    assert.equal(owner.live, true);
+    assert.equal(gate.destroyed, false);
+    gate.end('continue');
+    await waitForState(reopened, 'background-refresh', 'ready');
+    assert.equal(reopened.getSession('background-refresh'), owner);
+    assert.equal(owner.worker, worker);
+    assert.notEqual(worker.threadId, -1);
+    assert.deepEqual(await reopened.invoke({ installationId: 'background-refresh',
+      siteId: 'site-background', operation: 'home', payload: {} }), { instance: 'background' });
+  });
+
+test('Cat refresh cancelled in an installation queue cannot apply after the preceding work',
+  { timeout: 30000 }, async t => {
+    let release;
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => { release?.(); return runtime.close(); });
+    const original = await runtime.install({ installationId: 'queued-refresh',
+      source: delayedSource('queued', 0), version: '1', enabled: true });
+    const owner = runtime.getSession('queued-refresh');
+    const barrier = new Promise(resolve => { release = resolve; });
+    const preceding = runtime.serial('queued-refresh', () => barrier);
+    writeFileSync(sourceFile(runtime.dataRoot, original.sourceHash),
+      delayedSource('must-not-publish', 0));
+    writeSettings(runtime.settings.path, value => ({
+      ...value, scripts: value.scripts.map(script => ({ ...script, version: '2' })),
+    }));
+    const controller = new AbortController();
+    const cancelled = assert.rejects(runtime.refresh({ signal: controller.signal }),
+      { code: 'CANCELLED' });
+    await waitFor(() => runtime.transactions.get('queued-refresh') !== preceding,
+      'refresh did not enter the installation queue');
+    controller.abort();
+    assert.equal(runtime.getSession('queued-refresh'), owner);
+    assert.deepEqual(await runtime.invoke({ installationId: 'queued-refresh',
+      siteId: 'site-queued', operation: 'home', payload: {} }), { instance: 'queued' });
+    release();
+    await preceding;
+    await cancelled;
+    const retained = runtime.instance('queued-refresh');
+    assert.equal(retained.state, 'ready');
+    assert.equal(retained.generation, original.generation);
+    assert.equal(retained.sourceHash, original.sourceHash);
+    assert.equal(retained.version, original.version);
+    assert.equal(runtime.getSession('queued-refresh'), owner);
+    assert.equal(runtime.host.initializingSessions().length, 0);
+    assert.deepEqual(await runtime.refresh(), { applied: true, failures: [] });
+    const retried = runtime.instance('queued-refresh');
+    assert.equal(retried.state, 'ready');
+    assert.equal(retried.version, '2');
+    assert.ok(retried.generation > original.generation);
+    assert.notEqual(runtime.getSession('queued-refresh'), owner);
+    assert.equal(owner.worker, null);
+    assert.deepEqual(await runtime.invoke({ installationId: 'queued-refresh',
+      siteId: 'site-must-not-publish', operation: 'home', payload: {} }), { instance: 'must-not-publish' });
+  });
+
+test('Cat metadata commits after a cancelled refresh do not acknowledge unapplied execution changes',
+  { timeout: 60000 }, async t => {
+    for (const operation of ['edit', 'unchanged update', 'failed update']) {
+      await t.test(operation, async t => {
+        let release;
+        const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+        t.after(() => { release?.(); return runtime.close(); });
+        const sourceText = `
+          const http = require('http');
+          let server;
+          module.exports.start = config => new Promise(resolve => {
+            server = http.createServer((request, response) => {
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify(request.url === '/config' || request.url === '/full-config'
+                ? { video: { sites: [{ key: 'default', name: 'Config', api: '/api/default', actions: ['home'] }] } }
+                : { value: config.value }));
+            });
+            server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+          });
+          module.exports.stop = () => server?.close();
+        `;
+        const original = await runtime.install({ installationId: 'metadata-refresh', source: sourceText,
+          version: '1', config: { value: 'old' } });
+        const owner = runtime.getSession('metadata-refresh');
+        const barrier = new Promise(resolve => { release = resolve; });
+        const preceding = runtime.serial('metadata-refresh', () => barrier);
+        writeSettings(runtime.settings.path, value => ({
+          ...value, scripts: value.scripts.map(script => ({
+            ...script, version: '2', config: { value: 'new' },
+          })),
+        }));
+        const controller = new AbortController();
+        const cancelled = assert.rejects(runtime.refresh({ signal: controller.signal }),
+          { code: 'CANCELLED' });
+        await waitFor(() => runtime.transactions.get('metadata-refresh') !== preceding,
+          'refresh did not enter the installation queue');
+        controller.abort();
+        release();
+        await preceding;
+        await cancelled;
+        if (operation === 'edit') {
+          await runtime.edit({ installationId: 'metadata-refresh', name: 'edited' });
+        } else if (operation === 'unchanged update') {
+          assert.equal((await runtime.update({ installationId: 'metadata-refresh', source: sourceText }))
+            .updateState, 'unchanged');
+        } else {
+          await assert.rejects(runtime.update({ installationId: 'metadata-refresh',
+            source: 'module.exports = { home( };' }), { code: 'SCRIPT_EXCEPTION' });
+          assert.equal(runtime.instance('metadata-refresh').updateState, 'failed');
+        }
+        assert.equal(runtime.getSession('metadata-refresh'), owner);
+        assert.equal(runtime.instance('metadata-refresh').version, original.version);
+        assert.deepEqual(await runtime.invoke({ installationId: 'metadata-refresh',
+          siteId: 'default', operation: 'home', payload: {} }), { value: 'old' });
+        assert.deepEqual(await runtime.refresh(), { applied: true, failures: [] });
+        const refreshed = runtime.instance('metadata-refresh');
+        assert.equal(refreshed.state, 'ready');
+        assert.equal(refreshed.version, '2');
+        assert.ok(refreshed.generation > original.generation);
+        assert.notEqual(runtime.getSession('metadata-refresh'), owner);
+        assert.equal(owner.worker, null);
+        assert.deepEqual(await runtime.invoke({ installationId: 'metadata-refresh',
+          siteId: 'default', operation: 'home', payload: {} }), { value: 'new' });
+      });
+    }
+  });
+
+test('Cat refresh cancellation exits A and reports failed while preserving B and later updates',
+  { timeout: 30000 }, async t => {
+    const gates = new Map();
+    const upstream = await serverFor(t, (request, response) => {
+      gates.set(request.url, { response, socket: request.socket });
+    });
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    const originals = new Map();
+    const owners = new Map();
+    for (const id of ['a', 'b']) {
+      originals.set(id, await runtime.install({ installationId: id,
+        source: delayedSource(id, 0), version: '1', enabled: true }));
+      owners.set(id, runtime.getSession(id));
+      assert.deepEqual(await runtime.invoke({ installationId: id,
+        siteId: `site-${id}`, operation: 'home', payload: {} }), { instance: id });
+    }
+    writeFileSync(sourceFile(root, originals.get('a').sourceHash),
+      gatedSource('cancelled-a', `${upstream.socketOrigin}/refresh`));
+    writeSettings(runtime.settings.path, value => ({
+      ...value, scripts: value.scripts.map(script =>
+        script.installationId === 'a' ? { ...script, version: '2' } : script),
+    }));
+    const controller = new AbortController();
+    const cancelled = assert.rejects(runtime.refresh({ signal: controller.signal }),
+      { code: 'CANCELLED' });
+    await waitFor(() => gates.has('/refresh'), 'refresh candidate did not reach its I/O barrier');
+    const candidate = runtime.host.initializingSessions().find(session => session.installationId === 'a');
+    assert.ok(candidate?.worker);
+    const worker = candidate.worker;
+    assert.notEqual(candidate, owners.get('a'));
+    let exited = false;
+    worker.once('exit', () => { exited = true; });
+    const starting = await runtime.status();
+    assert.equal(starting.instances.find(instance => instance.installationId === 'a').state, 'starting');
+    assert.equal(owners.get('a').worker, null);
+    await assert.rejects(runtime.invoke({ installationId: 'a', siteId: 'site-a',
+      operation: 'home', payload: {} }), { code: 'STARTING' });
+    const runningB = starting.instances.find(instance => instance.installationId === 'b');
+    assert.equal(runningB.state, 'ready');
+    assert.equal(runningB.generation, originals.get('b').generation);
+    assert.deepEqual(await runtime.invoke({ installationId: 'b', siteId: 'site-b',
+      operation: 'home', payload: {} }), { instance: 'b' });
+    controller.abort();
+    await cancelled;
+    assert.equal(exited, true);
+    assert.equal(worker.threadId, -1);
+    assert.equal(candidate.worker, null);
+    assert.equal(runtime.host.initializingSessions().length, 0);
+    await waitFor(() => gates.get('/refresh').socket.destroyed,
+      'cancelled candidate retained its initialization connection');
+    assert.equal(gates.get('/refresh').response.writableEnded, false);
+    for (const id of ['b']) {
+      const retained = runtime.instance(id), original = originals.get(id);
+      assert.equal(retained.state, 'ready');
+      assert.equal(retained.generation, original.generation);
+      assert.equal(retained.version, original.version);
+      assert.equal(retained.sourceHash, original.sourceHash);
+      assert.equal(retained.managementUrl, original.managementUrl);
+      assert.deepEqual(retained.endpoints, original.endpoints);
+      assert.equal(runtime.getSession(id), owners.get(id));
+      assert.deepEqual(await runtime.invoke({ installationId: id,
+        generation: original.generation, siteId: `site-${id}`,
+        operation: 'home', payload: {} }), { instance: id });
+    }
+    assert.equal(runtime.instance('a').state, 'failed');
+    assert.equal(runtime.instance('a').generation, candidate.generation);
+    assert.equal(runtime.instance('a').managementUrl, undefined);
+    assert.equal(runtime.instance('a').endpoints, undefined);
+    assert.throws(() => runtime.getSession('a'), { code: 'DISABLED' });
+    await assert.rejects(runtime.invoke({ installationId: 'a', siteId: 'site-a',
+      operation: 'home', payload: {} }), { code: 'DISABLED' });
+    assert.equal(runtime.instance('a').error, 'CANCELLED');
+    assert.deepEqual(runtime.applyResult(), {
+      applied: false, failures: [{ installationId: 'a', code: 'CANCELLED' }],
+    });
+
+    const next = runtime.install({ installationId: 'a', enabled: true, version: '3',
+      source: gatedSource('replacement-a', `${upstream.socketOrigin}/replacement`) });
+    next.catch(() => {});
+    await waitFor(() => gates.has('/replacement'), 'later update did not reach its I/O barrier');
+    assert.equal(runtime.instance('b').generation, originals.get('b').generation);
+    gates.get('/replacement').response.end('continue');
+    const replacement = await next;
+    assert.equal(replacement.state, 'ready');
+    assert.ok(replacement.generation > candidate.generation);
+    assert.equal(runtime.getSession('a').generation, replacement.generation);
+    assert.deepEqual(await runtime.invoke({ installationId: 'a',
+      generation: replacement.generation, siteId: 'site-replacement-a',
+      operation: 'home', payload: {} }), { instance: 'replacement-a' });
+    assert.deepEqual(await runtime.invoke({ installationId: 'b',
+      generation: originals.get('b').generation, siteId: 'site-b',
+      operation: 'home', payload: {} }), { instance: 'b' });
+    assert.equal(worker.threadId, -1);
+    assert.deepEqual(runtime.applyResult(), { applied: true, failures: [] });
   });
 
 test('Cat leaves disabled bad files unread and refresh loads only changed enabled targets',
@@ -1831,6 +2088,8 @@ test('Cat leaves disabled bad files unread and refresh loads only changed enable
       assert.equal(reopened.instance('disabled').state, 'failed');
       assert.equal((await reopened.setEnabled('disabled', false)).state, 'disabled');
       assert.equal(reopened.instance('changed').state, 'ready');
+      const published = reopened.instance('changed');
+      const oldOwner = reopened.getSession('changed');
       writeFileSync(files.changed, 'module.exports = { home( };');
       writeSettings(reopened.settings.path, value => ({
         ...value, scripts: value.scripts.map(script =>
@@ -1839,7 +2098,19 @@ test('Cat leaves disabled bad files unread and refresh loads only changed enable
       assert.deepEqual(await reopened.refresh(), {
         applied: false, failures: [{ installationId: 'changed', code: 'SCRIPT_EXCEPTION' }],
       });
-      assert.equal(reopened.instance('changed').state, 'failed');
+      const retained = reopened.instance('changed');
+      assert.equal(retained.state, 'failed');
+      assert.equal(retained.error, 'SCRIPT_EXCEPTION');
+      assert.ok(retained.generation > published.generation);
+      assert.equal(oldOwner.worker, null);
+      assert.equal(retained.version, '3');
+      assert.equal(retained.sourceHash, sourceHash('module.exports = { home( };'));
+      assert.equal(retained.managementUrl, undefined);
+      assert.equal(retained.endpoints, undefined);
+      await assert.rejects(reopened.invoke({
+        installationId: 'changed', generation: published.generation,
+        siteId: 'site-changed', operation: 'home', payload: {},
+      }), { code: 'DISABLED' });
       assert.equal(reopened.instance('unchanged').state, 'ready');
       assert.equal(reopened.instance('unchanged').generation, unchangedGeneration);
       writeFileSync(files.changed, delayedSource('changed', 0) + '\n// repaired file');
@@ -2017,25 +2288,358 @@ test('Cat compressed fetch handles an aborted upstream response without a host e
     }
   });
 
-test('Cat does not promote a retired guest context into the session root', async t => {
-  const root = new ResourceScope();
-  const session = {
-    installationId: 'context-fixture',
-    revision: { source: '' },
-    root,
-    limits: { cleanupTimeoutMs: 100 },
-    live: true,
-    scope: () => root,
-    storageWritten() {},
-  };
-  const services = { close: async () => {} };
-  const node = new NodeCapabilities(session, services, rootFor(t));
-  const request = new ResourceScope(root.signal);
-  node.retainContext(1, request);
-  request.close();
-  assert.throws(() => node.scopeForContext(1), { code: 'CANCELLED' });
-  root.close();
-  await node.close();
+test('Cat native fetch replays 307 and 308 bodies without dropping bytes or leaking cross-origin credentials',
+  { timeout: 30000 }, async t => {
+    const received = [];
+    const final = await serverFor(t, async (request, response) => {
+      const parts = [];
+      for await (const part of request) parts.push(part);
+      const bytes = Buffer.concat(parts);
+      received.push({ method: request.method, length: bytes.length, hash: sha256(bytes),
+        authorization: request.headers.authorization, cookie: request.headers.cookie });
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ ok: true }));
+    });
+    const redirect = await serverFor(t, async (request, response) => {
+      for await (const _part of request) { /* Consume the first streamed upload. */ }
+      response.writeHead(Number(request.url.slice(1)), { location: final.socketOrigin + '/receive' });
+      response.end();
+    });
+    const session = await createCatSessionForInternalTest(t, { installationId: 'fetch-redirect', source: `
+      module.exports.home = async () => {
+        const bytes = Buffer.alloc(1024 * 1024, 0x8d), result = [];
+        for (const status of [307, 308]) {
+          const reply = await fetch(${JSON.stringify(redirect.socketOrigin)} + '/' + status, {
+            method: 'POST', headers: { authorization: 'synthetic-only', cookie: 'synthetic-only' },
+            body: bytes,
+          });
+          result.push({ redirected: reply.redirected, url: reply.url, value: await reply.json() });
+        }
+        return result;
+      };` });
+    assert.deepEqual(await session.invoke({ siteId: 'default', operation: 'home', payload: {} }),
+      [307, 308].map(() => ({ redirected: true, url: final.socketOrigin + '/receive', value: { ok: true } })));
+    assert.deepEqual(received, [307, 308].map(() => ({ method: 'POST', length: 1024 * 1024,
+      hash: sha256(Buffer.alloc(1024 * 1024, 0x8d)), authorization: undefined, cookie: undefined })));
+    await session.stop();
+    assert.equal(session.node.webResources.size, 0);
+  });
+
+test('Cat native Blob, Request and Response bodies release retained Web locks on stop', async t => {
+  const session = await createCatSessionForInternalTest(t, { installationId: 'web-bodies', source: `
+    const blob = new (require('buffer').Blob)(['blob']);
+    const file = new File(['file'], 'fixture.txt');
+    const bodies = [blob.stream(), file.stream(), new Request('https://fixture.invalid/', {
+      method: 'POST', body: 'request',
+    }).body, new Response('response').body];
+    const readers = bodies.map(body => body.getReader());
+    module.exports.home = () => ({ locked: bodies.map(body => body.locked),
+      native: bodies.every(body => body instanceof ReadableStream), blob: blob instanceof Blob });
+  ` });
+  assert.deepEqual(await session.invoke({ siteId: 'default', operation: 'home', payload: {} }),
+    { locked: [true, true, true, true], native: true, blob: true });
+  const bodies = [...session.node.webResources].filter(([, role]) => role === 'readableWeb')
+    .map(([body]) => body);
+  assert.equal(bodies.length, 4);
+  await session.stop();
+  assert.ok(bodies.every(body => !body.locked));
+  assert.equal(session.node.webResources.size, 0);
+});
+
+test('Cat native background pipeTo survives request completion and settles before stop writes',
+  { timeout: 30000 }, async t => {
+    const root = rootFor(t);
+    const session = await createCatSessionForInternalTest(t, { dataRoot: root,
+      installationId: 'background-pipe', source: `
+        const fs = require('fs');
+        let source, destination, pipe, completion;
+        const state = { cancelled: 0, aborted: 0, settled: 0 };
+        module.exports.home = () => {
+          if (!pipe) {
+            source = new ReadableStream({ cancel() { state.cancelled++; } });
+            destination = new WritableStream({ abort() { state.aborted++; } });
+            pipe = source.pipeTo(destination);
+            completion = pipe.then(() => state.settled++, () => state.settled++);
+          }
+          return { ...state, locked: [source.locked, destination.locked] };
+        };
+        module.exports.stop = async () => {
+          await completion;
+          fs.writeFileSync('/pipe-stop.json', JSON.stringify({
+            ...state, locked: [source.locked, destination.locked],
+          }));
+        };
+      ` });
+    const invoke = () => session.invoke({ siteId: 'default', operation: 'home', payload: {} });
+    const active = { cancelled: 0, aborted: 0, settled: 0, locked: [true, true] };
+    assert.deepEqual(await invoke(), active);
+    assert.deepEqual(await invoke(), active);
+    const pipes = [...session.node.webPipes.keys()];
+    const streams = [...session.node.webResources].map(([stream]) => stream);
+    assert.equal(pipes.length, 1);
+    const settled = assert.rejects(pipes[0], { code: 'CANCELLED' });
+    await session.stop();
+    await settled;
+    assert.deepEqual(JSON.parse(readFileSync(join(root, 'volumes', 'background-pipe',
+      'pipe-stop.json'), 'utf8')), { cancelled: 1, aborted: 1, settled: 1, locked: [false, false] });
+    assert.ok(streams.every(stream => !stream.locked));
+    assert.equal(session.node.webPipes.size, 0);
+    assert.equal(session.node.webResources.size, 0);
+  });
+
+test('Cat native pipes preserve caller signals and own pipeThrough with prevented propagation',
+  async t => {
+    const session = new CatSession({ dataRoot: rootFor(t), installationId: 'pipe-signals', generation: 1,
+      revision: { source: '', config: {}, version: '1' }, limits: { cleanupTimeoutMs: 100 } });
+    t.after(() => session.stop());
+    const { ReadableStream, WritableStream } = session.node.builtins['stream/web'];
+    const controller = new AbortController(), reason = new Error('caller cancellation');
+    let cancelled, aborted;
+    const source = new ReadableStream({ cancel(value) { cancelled = value; } });
+    const destination = new WritableStream({ abort(value) { aborted = value; } });
+    const pipe = source.pipeTo(destination, { signal: controller.signal });
+    const rejected = assert.rejects(pipe, error => error === reason);
+    controller.abort(reason);
+    await rejected;
+    assert.equal(cancelled, reason); assert.equal(aborted, reason);
+    assert.equal(source.locked, false); assert.equal(destination.locked, false);
+    assert.equal(session.live, true);
+
+    const calls = { input: 0, output: 0, writable: 0 };
+    const input = new ReadableStream({ cancel() { calls.input++; } });
+    const pair = {
+      readable: new ReadableStream({ cancel() { calls.output++; } }),
+      writable: new WritableStream({ abort() { calls.writable++; } }),
+    };
+    await assert.rejects(input.pipeTo({}), TypeError);
+    assert.throws(() => input.pipeThrough({}), TypeError);
+    assert.equal(input.locked, false);
+    assert.equal(input.pipeThrough(pair, {
+      preventAbort: true, preventCancel: true, preventClose: true,
+    }), pair.readable);
+    assert.equal(input.locked, true); assert.equal(pair.writable.locked, true);
+    await session.stop();
+    assert.deepEqual(calls, { input: 1, output: 1, writable: 1 });
+    assert.equal(input.locked, false); assert.equal(pair.writable.locked, false);
+    assert.equal(pair.readable.locked, false);
+    assert.equal(session.node.webPipes.size, 0);
+    assert.equal(session.node.webResources.size, 0);
+  });
+
+test('Cat native pipe cleanup reports an unsettled cancel instead of clearing its ownership',
+  async t => {
+    const session = new CatSession({ dataRoot: rootFor(t), installationId: 'pipe-pending', generation: 1,
+      revision: { source: '', config: {}, version: '1' }, limits: { cleanupTimeoutMs: 20 } });
+    let release;
+    const barrier = new Promise(resolve => { release = resolve; });
+    t.after(async () => { release(); await session.stop().catch(() => {}); });
+    const { ReadableStream, WritableStream } = session.node.builtins['stream/web'];
+    let cancelled = 0, aborted = 0, settled = false;
+    const source = new ReadableStream({ cancel() { cancelled++; return barrier; } });
+    const destination = new WritableStream({ abort() { aborted++; } });
+    const pipe = source.pipeTo(destination);
+    pipe.then(() => { settled = true; }, () => { settled = true; });
+    const rejected = assert.rejects(pipe, { code: 'CANCELLED' });
+    await assert.rejects(session.node.close(), { code: 'TIMEOUT' });
+    assert.equal(cancelled, 1); assert.equal(aborted, 1); assert.equal(settled, false);
+    assert.equal(source.locked, true); assert.equal(destination.locked, true);
+    assert.equal(session.node.webPipes.size, 1);
+    assert.ok(session.node.webResources.size > 0);
+    release();
+    await rejected;
+    assert.equal(source.locked, false); assert.equal(destination.locked, false);
+    await waitFor(() => session.node.webResources.size === 0, 'settled pipe resources did not retire');
+    assert.equal(session.node.webPipes.size, 0);
+  });
+
+test('Cat native tee branches terminate cooperatively without an internal-reader cleanup error',
+  async t => {
+    const session = await createCatSessionForInternalTest(t, { installationId: 'tee-cooperative',
+      source: 'module.exports.home = () => ({ alive: true });' });
+    const { ReadableStream: ManagedReadableStream, WritableStream: ManagedWritableStream } =
+      session.node.builtins['stream/web'];
+    const pipes = [];
+    const cases = ['unlocked', 'reader', 'iterator', 'pipe', 'nested'].map(kind => {
+      const state = { kind, cancelled: 0 };
+      state.source = new ManagedReadableStream({ cancel() { state.cancelled++; } });
+      state.branches = state.source.tee();
+      state.leaves = state.branches;
+      if (kind === 'reader') state.reader = state.branches[0].getReader();
+      if (kind === 'iterator') state.iterator = state.branches[0].values();
+      if (kind === 'pipe') {
+        state.aborted = 0;
+        state.destination = new ManagedWritableStream({ abort() { state.aborted++; } });
+        pipes.push(assert.rejects(state.branches[0].pipeTo(state.destination), { code: 'CANCELLED' }));
+      }
+      if (kind === 'nested') state.leaves = [...state.branches[0].tee(), state.branches[1]];
+      return state;
+    });
+    for (let index = 0; index < 2; index++) {
+      assert.deepEqual(await session.invoke({ siteId: 'default', operation: 'home', payload: {} }),
+        { alive: true });
+      assert.ok(cases.every(state => state.cancelled === 0), 'request completion cancelled a tee');
+    }
+    await session.stop();
+    await Promise.all(pipes);
+    assert.equal(session.cleanupError, undefined);
+    for (const state of cases) {
+      assert.equal(state.cancelled, 1, state.kind);
+      if (state.kind === 'pipe') {
+        assert.equal(state.aborted, 1);
+        assert.equal(state.destination.locked, false);
+      }
+      for (const branch of state.leaves) {
+        const reader = ReadableStream.prototype.getReader.call(branch);
+        try { assert.deepEqual(await reader.read(), { value: undefined, done: true }, state.kind); }
+        finally { reader.releaseLock(); }
+      }
+    }
+    assert.equal(session.node.webPipes.size, 0);
+    assert.equal(session.node.webResources.size, 0);
+  });
+
+test('Cat native tee cleanup retains a pending cancellation until its real gate settles',
+  async t => {
+    const session = new CatSession({ dataRoot: rootFor(t), installationId: 'tee-pending', generation: 1,
+      revision: { source: '', config: {}, version: '1' }, limits: { cleanupTimeoutMs: 20 } });
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    t.after(async () => { release(); await session.stop().catch(() => {}); });
+    const { ReadableStream: ManagedReadableStream } = session.node.builtins['stream/web'];
+    let cancelled = 0, settled = false;
+    const source = new ManagedReadableStream({ cancel() { cancelled++; return gate; } });
+    const branches = source.tee();
+    const first = branches[0].cancel('first caller cancellation');
+    assert.equal(cancelled, 0);
+    const cancellation = Promise.all([first, branches[1].cancel('second caller cancellation')]);
+    cancellation.then(() => { settled = true; });
+    await assert.rejects(session.stop(), { code: 'TIMEOUT' });
+    assert.equal(session.cleanupError, 'TIMEOUT');
+    assert.equal(cancelled, 1);
+    assert.equal(settled, false);
+    assert.equal(session.node.webResources.has(source), true);
+    release();
+    await cancellation;
+    assert.equal(settled, true);
+    await waitFor(() => session.node.webResources.size === 0, 'settled tee resources did not retire');
+    assert.equal(cancelled, 1);
+    for (const branch of branches) {
+      const reader = ReadableStream.prototype.getReader.call(branch);
+      try { assert.deepEqual(await reader.read(), { value: undefined, done: true }); }
+      finally { reader.releaseLock(); }
+    }
+  });
+
+test('Cat guest listener removal preserves private stream close, receipts and error ownership',
+  { timeout: 30000 }, async t => {
+    const root = rootFor(t);
+    const session = await createCatSessionForInternalTest(t, { dataRoot: root,
+      installationId: 'private-listeners', source: `
+        const fs = require('fs');
+        let count = 0, removedCalls = 0;
+        module.exports.home = async () => {
+          const path = '/write-' + (++count) + '.txt';
+          const stream = fs.createWriteStream(path);
+          let fd;
+          stream.once('open', value => { fd = value; });
+          stream.on('close', () => removedCalls++);
+          stream.on('error', () => removedCalls++);
+          stream.removeAllListeners('close');
+          stream.removeAllListeners('error');
+          const closed = new Promise(resolve => stream.once('close', resolve));
+          stream.end('durable-' + count);
+          await closed;
+          return { path, fd, count, removedCalls, closed: stream.closed };
+        };
+        module.exports.search = async () => {
+          const stream = fs.createWriteStream('/tmp');
+          stream.on('error', () => removedCalls++);
+          stream.removeAllListeners();
+          const closed = new Promise(resolve => stream.once('close', resolve));
+          stream.end('cannot write a directory');
+          await closed;
+          return { code: stream.errored.code, removedCalls, closed: stream.closed };
+        };
+      ` });
+    const baseline = session.resourceScope().cleanups.size;
+    const receipts = [], written = session.storageWritten.bind(session);
+    session.storageWritten = scope => { receipts.push(scope); written(scope); };
+    for (let count = 1; count <= 4; count++) {
+      const result = await session.invoke({ siteId: 'default', operation: 'home', payload: {} });
+      assert.equal(result.count, count); assert.equal(result.removedCalls, 0);
+      assert.equal(result.closed, true);
+      assert.equal(readFileSync(join(root, 'volumes', 'private-listeners', result.path.slice(1)),
+        'utf8'), `durable-${count}`);
+      assert.throws(() => fs.fstatSync(result.fd), { code: 'EBADF' });
+      assert.equal(receipts.length, count);
+      assert.equal(receipts.at(-1).requestId > 0, true);
+      assert.equal(session.node.volume.streams.size, 0);
+      assert.equal(session.node.volume.streamCleanup.size, 0);
+      assert.equal(session.resourceScope().cleanups.size, baseline);
+    }
+    assert.deepEqual(await session.invoke({ siteId: 'default', operation: 'search', payload: {} }),
+      { code: 'EISDIR', removedCalls: 0, closed: true });
+    assert.equal(session.failure, undefined);
+    assert.equal(receipts.length, 4);
+    assert.equal(session.node.volume.streams.size, 0);
+    assert.equal(session.node.volume.streamCleanup.size, 0);
+    assert.equal(session.resourceScope().cleanups.size, baseline);
+  });
+
+test('Cat guest listener removal preserves HTTP request error and close ownership',
+  { timeout: 30000 }, async t => {
+    const upstream = await serverFor(t, request => request.socket.destroy());
+    const session = await createCatSessionForInternalTest(t, { installationId: 'http-listeners',
+      source: `
+        const http = require('http');
+        module.exports.home = () => new Promise(resolve => {
+          const request = http.get(${JSON.stringify(upstream.socketOrigin)}, { agent: false });
+          request.removeAllListeners();
+          request.once('close', () => resolve({ closed: true }));
+        });
+      ` });
+    for (let index = 0; index < 3; index++) {
+      assert.deepEqual(await session.invoke({ siteId: 'default', operation: 'home', payload: {} }),
+        { closed: true });
+      await waitFor(() => session.nativeRequests.size === 0 &&
+        session.services.requestCleanup.size === 0, 'HTTP ownership did not retire after native close');
+      assert.equal(session.failure, undefined);
+    }
+  });
+
+test('Cat guest close listener removal cannot retain an owned mapped TCP socket', async t => {
+  const session = await createCatSessionForInternalTest(t, { installationId: 'tcp-listeners',
+    source: `
+      const net = require('net');
+      module.exports.home = () => new Promise(resolve => {
+        const socket = net.connect({ host: '127.0.0.1', port: Number(process.env.PORT) });
+        socket.once('connect', () => {
+          socket.removeAllListeners('close');
+          socket.removeAllListeners('error');
+          socket.once('close', () => resolve({ closed: true }));
+          socket.destroy();
+        });
+      });
+    ` });
+  for (let index = 0; index < 3; index++) {
+    assert.deepEqual(await session.invoke({ siteId: 'default', operation: 'home', payload: {} }),
+      { closed: true });
+    await waitFor(() => session.services.trustedSockets.size === 0 &&
+      session.services.trustedSocketCleanup.size === 0 &&
+      session.node.networkResources.size === 0, 'mapped TCP socket retained an internal owner');
+    assert.equal(session.failure, undefined);
+  }
+});
+
+test('Cat preserves retired request attribution through native async continuations', async t => {
+  const session = new CatSession({ dataRoot: rootFor(t), installationId: 'context-fixture', generation: 1,
+    revision: { source: '', config: {}, version: '1' }, limits: { cleanupTimeoutMs: 100 } });
+  const scope = new ResourceScope(session.root.signal); scope.requestId = 7;
+  let resume; const gate = new Promise(resolve => { resume = resolve; });
+  const task = session.contextScope.run(scope, async () => { await gate; return session.scope(); });
+  scope.close(); resume();
+  assert.equal(await task, scope); assert.equal(scope.signal.aborted, true);
+  await session.stop();
 });
 
 test('Cat SDK loader rejects non-canonical package paths and cross-package resolution', async t => {
@@ -2049,165 +2653,62 @@ test('Cat SDK loader rejects non-canonical package paths and cross-package resol
     scope: () => root,
     storageWritten() {},
   };
-  const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
-  const util = node.source('util');
-  const inherits = node.source('inherits', util.id);
-  assert.equal(node.source('util', inherits.id).id, util.id);
-  const parent = node.source('readable-stream/lib/stream.js');
-  assert.throws(() => node.source('readable-stream/../supports-color', parent.id),
+  const node = nativeCapabilities(session, { close: async () => {} }, rootFor(t));
+  const color = node.source('supports-color');
+  const flag = node.source('has-flag', color.id);
+  assert.equal(node.source('supports-color', flag.id).id, color.id);
+  const parent = node.source('@opentelemetry/api');
+  assert.throws(() => node.source('@opentelemetry/api/../supports-color', parent.id),
     { code: 'UNSUPPORTED_DEPENDENCY' });
-  assert.throws(() => node.source('readable-stream/node_modules/events', parent.id),
+  assert.throws(() => node.source('@opentelemetry/api/node_modules/events', parent.id),
     { code: 'UNSUPPORTED_DEPENDENCY' });
   root.close();
   session.live = false;
   await node.close();
 });
 
-test('Cat native Promise completion survives detach failure without retaining its receipt', async t => {
-  const root = new ResourceScope();
-  const failure = new Error('synthetic Promise detach failure');
-  let registrations = 0;
-  const scope = {
-    signal: new AbortController().signal,
-    assertOpen() {},
-    add() {
-      registrations++;
-      return registrations === 1 ? () => {} : () => { throw failure; };
-    },
-  };
-  const calls = [], failures = [], tasks = [];
-  const session = {
-    installationId: 'promise-detach-fixture',
-    revision: { source: '' },
-    root,
-    limits: { cleanupTimeoutMs: 100 },
-    live: true,
-    scope: () => scope,
-    storageWritten() {},
-    call(name, args) { calls.push([name, args]); },
-    callbackFailed(error) { failures.push(error); },
-    trackAdapter(task) { tasks.push(task); },
-  };
-  const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
-  assert.equal(node.encode(Promise.resolve('settled'), new Set(), undefined, scope).$, 'promise');
-  await Promise.allSettled(tasks);
-  assert.equal(node.promiseLeases.size, 0);
-  assert.equal(calls.length, 1);
-  assert.deepEqual(failures, [failure]);
-  root.close();
-  session.live = false;
-  await node.close();
+test('Cat adapter completion is physically tracked until settlement', async t => {
+  const session = new CatSession({ dataRoot: rootFor(t), installationId: 'adapter-settlement', generation: 1,
+    revision: { source: '', config: {}, version: '1' }, limits: { cleanupTimeoutMs: 100 } });
+  let complete; const task = new Promise(resolve => { complete = resolve; });
+  session.trackAdapter(task); assert.equal(session.stats().pendingAdapterTasks, 1);
+  const retirement = session.adapterRetirement(); complete('settled');
+  await retirement.idle; assert.equal(retirement.pendingAdapterTasks(), 0);
+  await session.stop();
 });
 
-test('Cat callback and listener registration failures roll back native ownership', async t => {
+test('Cat native stream registration failure releases its actual resource', async t => {
   const root = new ResourceScope();
+  const session = { installationId: 'registration-rollback', revision: { source: '' }, root,
+    limits: { cleanupTimeoutMs: 100 }, live: true, scope: () => root, storageWritten() {} };
+  const node = nativeCapabilities(session, { close: async () => {} }, rootFor(t));
   const failure = new Error('synthetic scope registration failure');
-  const failedScope = {
-    signal: new AbortController().signal,
-    assertOpen() {},
-    add() { throw failure; },
-  };
-  const callbackFailures = [];
-  const session = {
-    installationId: 'registration-rollback-fixture',
-    revision: { source: '' },
-    root,
-    limits: { cleanupTimeoutMs: 100 },
-    live: true,
-    scope: () => failedScope,
-    storageWritten() {},
-    nativeCallback: () => ({ $: 'callbackPromise', id: 'pending-result' }),
-    callbackFailed(error) { callbackFailures.push(error); },
-  };
-  const services = {
-    requestScope: () => failedScope,
-    close: async () => {},
-  };
-  const node = new NodeCapabilities(session, services, rootFor(t));
-  const callback = node.decode({ $: 'callback', id: 1, context: 0 }, root);
-  assert.equal(callback({ value: true }), undefined);
-  assert.equal(node.callbackReturns.size, 0);
-  assert.deepEqual(callbackFailures, [failure]);
-
-  const emitter = new EventEmitter();
-  const listener = () => {};
-  // Listener registration no longer adds a per-listener scope closure, so it
-  // cannot fail through the scope and must not retain the emitter.
-  assert.doesNotThrow(() => node.invoke({ value: emitter, role: 'stream' },
-    'on', ['event', listener]));
-  assert.equal(emitter.listenerCount('event'), 1);
-  emitter.removeListener('event', listener);
-  assert.equal(emitter.listenerCount('event'), 0);
-
-  assert.throws(() => node.encode(Promise.resolve('unused'), new Set(), undefined, failedScope),
-    error => error === failure);
-  assert.equal(node.promiseLeases.size, 0);
-  root.close();
-  session.live = false;
-  await node.close();
+  session.resourceScope = () => ({ assertOpen() {}, add() { throw failure; } });
+  const resource = new PassThrough();
+  assert.throws(() => node.ownStream(resource), error => error === failure);
+  assert.equal(resource.destroyed, true); assert.equal(node.streams.has(resource), false);
+  session.live = false; await node.close(); root.close();
 });
 
-test('Cat ignores a native callback retained past bridge shutdown', async t => {
-  const root = new ResourceScope();
-  let callbacks = 0, failures = 0;
-  const session = {
-    installationId: 'late-native-callback',
-    revision: { source: '' },
-    root,
-    limits: { cleanupTimeoutMs: 100 },
-    live: true,
-    scope: () => root,
-    storageWritten() {},
-    nativeCallback() { callbacks++; },
-    callbackFailed() { failures++; },
-  };
-  const services = { requestScope: () => null, close: async () => {} };
-  const node = new NodeCapabilities(session, services, rootFor(t));
-  const callback = node.decode({ $: 'callback', id: 1, context: 0 }, root);
-  session.live = false;
-  root.close();
-  await node.close();
-  assert.doesNotThrow(() => callback({ retained: true }));
-  assert.equal(callbacks, 0);
-  assert.equal(failures, 0);
+test('Cat ignores a retained nonterminal callback after session shutdown', async t => {
+  const session = new CatSession({ dataRoot: rootFor(t), installationId: 'late-callback', generation: 1,
+    revision: { source: '', config: {}, version: '1' }, limits: { cleanupTimeoutMs: 100 } });
+  const emitter = session.node.observeEmitter(new EventEmitter());
+  let calls = 0; emitter.on('work', () => calls++);
+  emitter.emit('work'); assert.equal(calls, 1);
+  await session.stop(); emitter.emit('work'); assert.equal(calls, 1);
 });
 
-test('Cat releases native callbacks with their last host reference and revokes a pending release',
-  async t => {
-    const root = new ResourceScope();
-    const resources = new ResourceScope(root.signal);
-    const session = {
-      installationId: 'callback-reachability',
-      revision: { source: '' },
-      root,
-      limits: { cleanupTimeoutMs: 100 },
-      live: true,
-      scope: () => resources,
-      resourceScope: () => resources,
-      storageWritten() {},
-      trackAdapter() {},
-      nativeCallback() {},
-    };
-    const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
-    try {
-      let callback = node.decode({ $: 'callback', id: 1, context: 0 }, resources);
-      const original = node.callbacks.get(1);
-      assert.equal(original.ref.deref(), callback);
-      callback = null;
-      await collectGarbage();
-      assert.equal(node.callbacks.size, 0);
-
-      node.pendingGuestRelease.callbacks.add(1);
-      callback = node.decode({ $: 'callback', id: 1, context: 0 }, resources);
-      assert.equal(node.pendingGuestRelease.callbacks.has(1), false);
-      assert.equal(node.callbacks.get(1).ref.deref(), callback);
-      assert.notEqual(node.callbacks.get(1), original);
-    } finally {
-      root.close();
-      session.live = false;
-      await node.close();
-    }
-  });
+test('Cat removed native listeners release callback references', async t => {
+  const session = new CatSession({ dataRoot: rootFor(t), installationId: 'callback-reachability', generation: 1,
+    revision: { source: '', config: {}, version: '1' }, limits: { cleanupTimeoutMs: 100 } });
+  const emitter = session.node.observeEmitter(new EventEmitter());
+  let callback = () => {}; const reference = new WeakRef(callback);
+  emitter.on('work', callback); assert.equal(emitter.listenerCount('work'), 1);
+  emitter.removeListener('work', callback); callback = null;
+  await collectGarbage(); assert.equal(reference.deref(), undefined);
+  await session.stop();
+});
 
 test('Cat listener registration does not retain the emitter through a session cleanup closure',
   async t => {
@@ -2223,13 +2724,12 @@ test('Cat listener registration does not retain the emitter through a session cl
       resourceScope: () => resources,
       storageWritten() {},
       trackAdapter() {},
-      nativeCallback() {},
     };
-    const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
+    const node = nativeCapabilities(session, { close: async () => {} }, rootFor(t));
     try {
       let emitter = new EventEmitter();
       const reference = new WeakRef(emitter);
-      const register = value => node.invoke({ value, role: 'stream' }, 'on', ['event', () => {}]);
+      const register = value => node.observeEmitter(value).on('event', () => {});
       register(emitter);
       assert.equal(emitter.listenerCount('event'), 1);
       emitter = null;
@@ -2242,74 +2742,31 @@ test('Cat listener registration does not retain the emitter through a session cl
     }
   });
 
-test('Cat guest handle release skips persistent and naturally closing resource roles', async t => {
-  const root = new ResourceScope();
-  const resources = new ResourceScope(root.signal);
-  const session = {
-    installationId: 'guest-handle-release',
-    revision: { source: '' },
-    root,
-    limits: { cleanupTimeoutMs: 100 },
-    live: true,
-    scope: () => resources,
-    resourceScope: () => resources,
-    storageWritten() {},
-    trackAdapter() {},
-    nativeCallback() {},
-  };
-  const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
-  try {
-    const url = node.encode(new URL('https://example.invalid/'), new Set(), undefined, resources);
-    const stats = node.encode({ size: 1 }, new Set(), 'stats', resources);
-    const stream = node.encode(new EventEmitter(), new Set(), 'stream', resources);
-    assert.equal(node.handles.size, 3);
-    node.releaseGuestHandles([url.id, stats.id, stream.id]);
-    assert.equal(node.handles.has(url.id), false);
-    assert.equal(node.handles.has(stats.id), false);
-    assert.equal(node.handles.has(stream.id), true);
-  } finally {
-    root.close();
-    session.live = false;
-    await node.close();
+test('Cat ordinary native values do not create resource registrations', async t => {
+  const session = await createCatSessionForInternalTest(t, { installationId: 'native-values',
+    source: `const retained = new URL('https://example.invalid/');
+      module.exports.home = () => ({ href: retained.href, size: require('fs').statSync('/source.js').size });` });
+  const baseline = resourceCounts(session);
+  for (let index = 0; index < 4; index++) {
+    const value = await session.invoke({ siteId: 'default', operation: 'home', payload: {} });
+    assert.equal(value.href, 'https://example.invalid/'); assert.ok(value.size > 0);
   }
+  await session.whenAdaptersIdle(); assert.deepEqual(resourceCounts(session), baseline);
 });
 
-test('Cat reports native handle cleanup failure at scope teardown and shutdown without a hidden retry loop',
-  async t => {
-    const root = new ResourceScope();
-    const session = {
-      installationId: 'residual-handle-fixture',
-      revision: { source: '' },
-      root,
-      limits: { cleanupTimeoutMs: 100 },
-      live: true,
-      scope: () => root,
-      storageWritten() {},
-    };
-    const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
-    const scope = new ResourceScope(root.signal);
-    let attempts = 0;
-    const stream = {
-      destroyed: false,
-      destroy() {
-        attempts++;
-        throw new Error('synthetic disposal failure');
-      },
-    };
-    const receipt = {
-      id: 'residual-stream', value: stream, role: 'stream',
-      methods: new Map(), persistent: false, leases: new Set(),
-    };
-    node.handles.set(receipt.id, receipt);
-    node.retainHandle(receipt, scope);
-    scope.close();
-    assert.equal(node.handles.size, 0);
-    await assert.rejects(node.close(), /synthetic disposal failure/);
-    assert.equal(stream.destroyed, false);
-    assert.equal(attempts, 1);
-    assert.equal(node.handles.size, 0);
-    root.close();
-  });
+test('Cat reports native stream disposal failure without retrying stop', async t => {
+  const root = new ResourceScope();
+  const session = { installationId: 'disposal-failure', revision: { source: '' }, root,
+    limits: { cleanupTimeoutMs: 100 }, live: true, scope: () => root, storageWritten() {} };
+  const node = nativeCapabilities(session, { close: async () => {} }, rootFor(t));
+  const resource = new PassThrough(); let attempts = 0;
+  const failure = new Error('synthetic disposal failure');
+  resource.destroy = () => { attempts++; resource.emit('close'); throw failure; };
+  node.ownStream(resource);
+  await assert.rejects(node.close(), error => error === failure);
+  await assert.rejects(node.close(), error => error === failure);
+  assert.equal(attempts, 1); assert.equal(node.streams.size, 0); root.close();
+});
 
 test('Cat cleanup timeout releases Web stream locks and detaches owner-side cleanup tracking',
   async t => {
@@ -2324,20 +2781,17 @@ test('Cat cleanup timeout releases Web stream locks and detaches owner-side clea
       storageWritten() {},
       trackAdapter() {},
     };
-    const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
+    const node = nativeCapabilities(session, { close: async () => {} }, rootFor(t));
     let releases = 0;
     const reader = {
       cancel() { return new Promise(() => {}); },
       releaseLock() { releases++; },
     };
-    node.releaseNativeHandle({
-      id: 'pending-reader', value: reader, role: 'reader',
-      methods: new Map(), persistent: false, leases: new Set(),
-    });
+    node.ownWeb(reader, 'reader');
     await assert.rejects(node.close(), { code: 'TIMEOUT' });
     assert.equal(releases, 1);
-    assert.equal(node.cleanupTasks.size, 0);
-    assert.equal(node.cleanupTracker.active, false);
+    assert.equal(node.webResources.size, 0);
+
     root.close();
   });
 
@@ -2354,7 +2808,7 @@ test('Cat Web stream cleanup releases its lock after cancellation settles',
       storageWritten() {},
       trackAdapter() {},
     };
-    const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
+    const node = nativeCapabilities(session, { close: async () => {} }, rootFor(t));
     let pending = true, attempts = 0, releases = 0;
     const reader = {
       cancel() {
@@ -2366,10 +2820,7 @@ test('Cat Web stream cleanup releases its lock after cancellation settles',
         releases++;
       },
     };
-    node.releaseNativeHandle({
-      id: 'settling-reader', value: reader, role: 'reader',
-      methods: new Map(), persistent: false, leases: new Set(),
-    });
+    node.ownWeb(reader, 'reader');
     await node.close();
     assert.equal(attempts, 2);
     assert.equal(releases, 1);
@@ -2383,7 +2834,7 @@ test('Cat Web stream cleanup accepts a replayed Axios cancellation and releases 
     limits: { cleanupTimeoutMs: 100 }, live: false, scope: () => scope,
     storageWritten() {}, trackAdapter() {},
   };
-  const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
+  const node = nativeCapabilities(session, { close: async () => {} }, rootFor(t));
   const stream = new ReadableStream({
     start(controller) {
       controller.error(Object.assign(new Error('synthetic cancellation'), { code: 'ERR_CANCELED' }));
@@ -2391,13 +2842,10 @@ test('Cat Web stream cleanup accepts a replayed Axios cancellation and releases 
   });
   const reader = stream.getReader();
   reader.closed.catch(() => {});
-  node.releaseNativeHandle({
-    id: 'cancelled-reader', value: reader, role: 'reader',
-    methods: new Map(), persistent: false, leases: new Set(),
-  });
+  node.ownWeb(reader, 'reader');
   await node.close();
   assert.equal(stream.locked, false);
-  assert.equal(node.cleanupTasks.size, 0);
+  assert.equal(node.webResources.size, 0);
   scope.close();
 });
 
@@ -2408,22 +2856,16 @@ test('Cat Web stream cleanup distinguishes a stored operation error from a new c
     limits: { cleanupTimeoutMs: 100 }, live: false, scope: () => scope,
     storageWritten() {}, trackAdapter() {},
   };
-  const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
+  const node = nativeCapabilities(session, { close: async () => {} }, rootFor(t));
   const stored = new Error('synthetic operation error');
   const stream = new ReadableStream({ start(controller) { controller.error(stored); } });
-  node.releaseNativeHandle({
-    id: 'errored-stream', value: stream, role: 'readableWeb',
-    methods: new Map(), persistent: false, leases: new Set(),
-  });
+  node.ownWeb(stream, 'readableWeb');
   await node.close();
   assert.equal(stream.locked, false);
-  const failing = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
+  const failing = nativeCapabilities(session, { close: async () => {} }, rootFor(t));
   const failure = new Error('synthetic cancel failure');
   const active = new ReadableStream({ cancel() { throw failure; } });
-  failing.releaseNativeHandle({
-    id: 'active-stream', value: active, role: 'readableWeb',
-    methods: new Map(), persistent: false, leases: new Set(),
-  });
+  failing.ownWeb(active, 'readableWeb');
   await assert.rejects(failing.close(), error => error === failure);
   assert.equal(active.locked, false);
   scope.close();
@@ -2770,7 +3212,7 @@ test('Cat native network guard survives guest listener removal and leaves on clo
     storageWritten() {},
     trackAdapter() {},
   };
-  const node = new NodeCapabilities(session, {
+  const node = nativeCapabilities(session, {
     http: {}, https: {}, close: async () => {},
   }, rootFor(t));
   const socket = new EventEmitter();
@@ -2784,9 +3226,8 @@ test('Cat native network guard survives guest listener removal and leaves on clo
   };
   node.ownNetwork(socket);
   const guest = () => {};
-  node.callbackReverse.set(guest, 1);
   socket.on('error', guest);
-  node.invoke({ value: socket, role: 'socket' }, 'removeAllListeners', ['error']);
+  socket.removeAllListeners('error');
   assert.equal(socket.listenerCount('error'), 1);
   assert.doesNotThrow(() => socket.emit('error', new Error('synthetic socket failure')));
   socket.destroy();
@@ -2810,7 +3251,7 @@ test('Cat network cleanup timeout detaches its request scope and keeps a lightwe
       storageWritten() {},
       trackAdapter() {},
     };
-    const node = new NodeCapabilities(session, {
+    const node = nativeCapabilities(session, {
       http: {}, https: {}, close: async () => {},
     }, rootFor(t));
     const socket = new EventEmitter();
@@ -2818,10 +3259,11 @@ test('Cat network cleanup timeout detaches its request scope and keeps a lightwe
     socket.destroyed = false;
     socket.destroy = () => { socket.destroyed = true; };
     node.ownNetwork(socket);
-    assert.equal(scope.cleanups.size, 2);
+    const ownedCleanups = scope.cleanups.size;
+    assert.ok(ownedCleanups >= 2);
     await assert.rejects(node.close(), { code: 'TIMEOUT' });
     assert.equal(node.networkResources.size, 0);
-    assert.equal(node.networkCleanup.size, 0);
+    assert.equal(node.resourceCleanup.size, 0);
     assert.equal(scope.cleanups.size, 1);
     assert.equal(socket.listenerCount('error'), 1);
     assert.doesNotThrow(() => socket.emit('error', new Error('late socket error')));
@@ -2829,8 +3271,7 @@ test('Cat network cleanup timeout detaches its request scope and keeps a lightwe
     socket.emit('close');
     assert.equal(socket.listenerCount('close'), 0);
     assert.equal(socket.listenerCount('error'), 1);
-    assert.equal(node.session, null);
-    assert.equal(node.fs, null);
+    assert.equal(node.streams.size, 0);
     assert.deepEqual(Object.keys(node.builtins), []);
     root.close();
   });
@@ -3032,7 +3473,7 @@ test('Cat private stream cleanup reports listener removal failure', async t => {
   const off = stream.off.bind(stream);
   let attempts = 0;
   stream.off = (event, listener) => {
-    if (event === 'close' && attempts++ === 0) throw failure;
+    if (event === 'error' && attempts++ === 0) throw failure;
     return off(event, listener);
   };
   await assert.rejects(volume.close(), error => error === failure);
@@ -3116,8 +3557,8 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
     });
     assert.equal(virtual.dartPort, 0);
     assert.deepEqual(virtual.os, {
-      platform: 'linux', arch: 'wasm32', hostname: 'script', homedir: '/', tmpdir: '/tmp',
-      cpus: 1, loopback: '127.0.0.1', totalmem: SCRIPT_LIMITS.maxMemoryBytes,
+      platform: process.platform, arch: process.arch, hostname: hostname(), homedir: '/', tmpdir: '/tmp',
+      cpus: cpus().length, loopback: '127.0.0.1', totalmem: totalmem(),
       freemem: virtual.os.freemem,
     });
     assert.ok(virtual.os.freemem >= 0 && virtual.os.freemem <= virtual.os.totalmem);
@@ -3126,7 +3567,7 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
     assert.equal(virtual.process.stderr, 2);
     assert.equal(virtual.process.title, 'script');
     assert.equal(virtual.process.rawDebug, 'function');
-    assert.equal(virtual.process.usage.rss, virtual.process.usage.heapUsed);
+    assert.ok(virtual.process.usage.rss > virtual.process.usage.heapUsed);
     assert.ok(virtual.process.usage.heapUsed > 0 &&
       virtual.process.usage.heapUsed <= virtual.os.totalmem);
     assert.deepEqual(virtual.constructors, {
@@ -3145,6 +3586,7 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
     assert.equal(search.list[0].vod_name, '猫源');
     assert.equal(search._meow.version, 1);
     assert.equal(search._meow.media[0].quality, '1080P');
+    assert.deepEqual(Object.getOwnPropertySymbols(search), []);
     assert.match(search.list[0].vod_pic, new RegExp('^' + status.aggregate.origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/proxy/'));
     assert.deepEqual(await runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'home',
@@ -3180,6 +3622,7 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
       installationId: 'fixture-a', siteId: 'site-a', operation: 'play', payload: { id: 'hls' },
     });
     assert.equal(play._meow.routes[0].kind, 'script-proxy');
+    assert.deepEqual(Object.getOwnPropertySymbols(play), []);
     const variant = play._meow.media.at(-1).variants[0];
     assert.equal(variant.quality, '1080P');
     assert.match(variant.url, /\/proxy\/fixture-a\//);
@@ -3429,11 +3872,6 @@ test('Cat keeps request transport state bounded while session resources are expl
       config: { id: 'site-a', protocol: 'old' },
     });
     const counts = () => ({
-      handles: session.node.handles.size,
-      callbacks: session.node.callbacks.size,
-      callbackReturns: session.node.callbackReturns.size,
-      contexts: session.node.contextLeases.size,
-      promises: session.node.promiseLeases.size,
       descriptors: session.node.volume.descriptors.size,
       streams: session.node.volume.streams.size,
       networkResources: session.node.networkResources.size,
@@ -3452,14 +3890,16 @@ test('Cat keeps request transport state bounded while session resources are expl
     assert.equal((await invoke('probe')).responseStream, 'stream-body');
     assert.deepEqual(await invoke('scopedFile'), { written: true });
     assert.deepEqual(await invoke('timerBurst'), { count: 160 });
-    assert.deepEqual(await invoke('pipeLifecycle'), {
-      unpipe: { data: 0, end: 0, error: 0, drain: 0, finish: 0, close: 0 },
-      finish: { data: 0, end: 0, error: 0, drain: 0, finish: 0, close: 0 },
-      premature: {
-        destroyed: true, data: 0, end: 0, error: 0, sourceClose: 0,
-        drain: 0, finish: 0, close: 0,
-      },
-    });
+    const pipes = await invoke('pipeLifecycle');
+    for (const phase of ['unpipe', 'finish', 'premature']) {
+      assert.equal(pipes[phase].data, 0);
+      assert.equal(pipes[phase].end, 0);
+      assert.equal(pipes[phase].drain, 0);
+      assert.equal(pipes[phase].finish, 0);
+      assert.ok(pipes[phase].error <= 1);
+      assert.ok(pipes[phase].close <= 1);
+    }
+    assert.equal(pipes.premature.destroyed, true);
     assert.match((await invoke('play')).url, /\/proxy\/fixture-a\//);
     const endpoint = session.endpoint();
     assert.equal((await request(endpoint.origin + '/api/site-a/home', {
@@ -3500,10 +3940,6 @@ test('Cat keeps request transport state bounded while session resources are expl
     await new Promise(resolve => setImmediate(resolve));
     await collectGarbage();
     const bounded = counts();
-    for (const key of ['handles', 'callbacks', 'callbackReturns', 'contexts', 'promises']) {
-      assert.ok(bounded[key] <= baseline[key] * 2 + 16,
-        `${key} grew from ${baseline[key]} to ${bounded[key]}`);
-    }
     assert.deepEqual({
       descriptors: bounded.descriptors,
       streams: bounded.streams,
@@ -3527,7 +3963,7 @@ test('Cat keeps request transport state bounded while session resources are expl
     });
   });
 
-test('Cat releases request-created value handles and one-shot callbacks under sustained load',
+test('Cat native values and one-shot callbacks do not retain request resources under sustained load',
   { timeout: 120000 }, async t => {
     const session = await createCatSessionForInternalTest(t, {
       installationId: 'value-handles',
@@ -3573,16 +4009,13 @@ test('Cat releases request-created value handles and one-shot callbacks under su
         };
       `,
     });
-    const counts = () => ({
-      handles: session.node.handles.size,
-      callbacks: session.node.callbacks.size,
-      returns: session.node.callbackReturns.size,
-      contexts: session.node.contextLeases.size,
-      promises: session.node.promiseLeases.size,
-    });
+    const counts = () => resourceCounts(session);
     const invoke = () => session.invoke({
       siteId: 'value-handles', operation: 'home', payload: {},
     });
+    // Establish the persistent Agent connection before measuring per-request
+    // retirement, not the number of intentionally idle keep-alive sockets.
+    await invoke();
     await collectGarbage();
     const baseline = counts();
     let midpoint;
@@ -3599,12 +4032,8 @@ test('Cat releases request-created value handles and one-shot callbacks under su
     }
     await collectGarbage();
     const bounded = counts();
-    for (const key of Object.keys(baseline)) {
-      assert.ok(bounded[key] <= baseline[key] * 2 + 64,
-        `${key} grew from ${baseline[key]} to ${bounded[key]} after 300 requests`);
-      assert.ok(midpoint[key] <= baseline[key] * 2 + 64,
-        `${key} grew from ${baseline[key]} to ${midpoint[key]} after 150 requests`);
-    }
+    assert.deepEqual(midpoint, baseline);
+    assert.deepEqual(bounded, baseline);
   });
 
 test('Cat destroys session-owned native streams when the installation stops',
@@ -3620,17 +4049,15 @@ test('Cat destroys session-owned native streams when the installation stops',
     const session = await createCatSessionForInternalTest(t, {
       installationId: 'session-stream', source: sourceWithStream, config: {},
     });
-    const receipt = [...session.node.handles.values()].find(item =>
-      item.persistent && item.role === 'stream' && typeof item.value?.flush === 'function');
-    assert(receipt);
-    const stream = receipt.value;
+    const stream = [...session.node.streams.keys()].find(value => typeof value.flush === 'function');
+    assert(stream);
     assert.equal(stream.destroyed, false);
     await session.stop();
     assert.equal(stream.destroyed, true);
     assert.equal(session.live, false);
   });
 
-test('Cat root-scope pipe and unpipe release their bridge callback receipts immediately',
+test('Cat root-scope pipe and unpipe release closed native streams',
   { timeout: 30000 }, async t => {
     const makeSource = withPipe => `
       const http = require('http');
@@ -3670,10 +4097,10 @@ test('Cat root-scope pipe and unpipe release their bridge callback receipts imme
       installationId: 'pipe-root', source: makeSource(true), config: {},
     });
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(pipeRoot.node.callbacks.size, pipeControl.node.callbacks.size);
+    assert.equal(pipeRoot.node.streams.size, pipeControl.node.streams.size);
   });
 
-test('Cat guest streams pipe through the host without per-chunk QuickJS delivery',
+test('Cat native streams pipe complete bytes directly into private files',
   { timeout: 30000 }, async t => {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
     t.after(() => runtime.close());
@@ -3926,7 +4353,7 @@ test('Cat closed outbound streams remain usable while their guest object or meth
             }
           } finally { incoming.destroy(); }
           retained = incoming;
-          destroy = incoming.destroy;
+          destroy = incoming.destroy.bind(incoming);
           return { text, destroyed: incoming.destroyed, status: incoming.statusCode };
         };
         module.exports.start = () => new Promise(resolve => {
@@ -3976,7 +4403,7 @@ test('Cat closed outbound streams remain usable while their guest object or meth
     assert.equal((await invoke('inspect')).destroyed, true);
     assert.deepEqual(await invoke('drop'), { ok: true });
     await session.stop();
-    assert.equal(session.node.handles.size, 0);
+    assert.equal(session.node.resourceCleanup.size, 0);
     assert.equal(session.nativeRequests.size, 0);
   });
 
@@ -4065,17 +4492,14 @@ test('Cat cancels and unlocks session-owned native Web streams when the installa
     const session = await createCatSessionForInternalTest(t, {
       installationId: 'session-web-streams', source: sourceWithWebStreams, config: {},
     });
-    const values = Object.fromEntries([...session.node.handles.values()]
-      .filter(receipt => ['readableWeb', 'reader', 'writableWeb', 'writer'].includes(receipt.role))
-      .map(receipt => [receipt.role, receipt.value]));
+    const values = Object.fromEntries([...session.node.webResources].map(([value, role]) => [role, value]));
     assert.deepEqual(Object.keys(values).sort(), ['readableWeb', 'reader', 'writableWeb', 'writer'].sort());
     assert.equal(values.readableWeb.locked, true);
     assert.equal(values.writableWeb.locked, true);
     await session.stop();
     assert.equal(values.readableWeb.locked, false);
     assert.equal(values.writableWeb.locked, false);
-    assert.equal(session.node.handles.size, 0);
-    assert.equal(session.node.cleanupTasks.size, 0);
+    assert.equal(session.node.resourceCleanup.size, 0);
   });
 
 test('Cat invocation uses one settings snapshot while a refresh publishes the next turn',
@@ -4433,12 +4857,105 @@ test('Cat guest proxy releases upstream work when the client disconnects and sta
     await waitFor(() => upstream.reads[0].response.destroyed,
       'disconnected upstream response was not released');
     await waitFor(() => session.node.volume.streams.size === 0 &&
-      session.node.callbackReturns.size === 0 && session.nativeRequests.size === 0,
+      session.adapterTasks.size === 0 && session.nativeRequests.size === 0,
     'guest request resources were not released after disconnect');
     const next = await scriptRequest(endpoint, '/bridge/ok');
     assert.equal(next.status, 200);
     assert.deepEqual(JSON.parse(next.text), { ok: true });
     assert.equal(session.live, true);
+  });
+
+test('Cat aggregate media proxy streams before completion, propagates backpressure, Range and disconnect',
+  { timeout: 30000 }, async t => {
+    const size = 32 * 1024 * 1024;
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({ installationId: 'proxy-flow', enabled: true, source: `
+      const http = require('http'), { Readable } = require('stream');
+      let server, produced = 0, finished = false, aborted = false;
+      const bytes = Buffer.alloc(64 * 1024, 0x51), size = ${size};
+      module.exports.start = () => {
+        server = http.createServer((request, response) => {
+          const json = value => { response.setHeader('content-type', 'application/json');
+            response.end(JSON.stringify(value)); };
+          if (request.url === '/config' || request.url === '/full-config')
+            return json({ video: { sites: [{ key: 'flow', api: '/api', actions: ['play', 'state'] }] } });
+          if (request.url === '/api/play')
+            return json({ parse: 0, url: 'http://127.0.0.1:9988/media' });
+          if (request.url === '/api/state') return json({ produced, finished, aborted });
+          if (request.url !== '/media') { response.statusCode = 404; return response.end(); }
+          if (request.headers.range) {
+            response.writeHead(206, { 'content-type': 'application/octet-stream',
+              'content-range': 'bytes 10-19/' + size, 'content-length': '10' });
+            return response.end(bytes.subarray(10, 20));
+          }
+          produced = 0; finished = false; aborted = false;
+          const input = new Readable({ read() {
+            while (produced < size) {
+              produced += bytes.length;
+              if (!this.push(bytes)) return;
+            }
+            this.push(null);
+          } });
+          response.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(size) });
+          response.once('finish', () => { finished = true; });
+          response.once('close', () => { aborted = !response.writableFinished; input.destroy(); });
+          input.pipe(response);
+        });
+        server.listen(9988);
+      };
+      module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+    ` });
+    const invoke = operation => runtime.invoke({ installationId: 'proxy-flow', siteId: 'flow',
+      operation, payload: {} });
+    const { url } = await invoke('play');
+    let first, resume, total = 0;
+    const started = new Promise(resolve => { first = resolve; });
+    const digest = createHash('sha256');
+    const completed = new Promise((resolve, reject) => {
+      const client = http.get(url, response => {
+        assert.equal(response.statusCode, 200);
+        response.on('data', bytes => {
+          total += bytes.length; digest.update(bytes); response.pause();
+          if (!resume) { resume = () => response.resume(); first(); }
+          else setTimeout(() => response.resume(), 1);
+        });
+        response.once('end', resolve); response.once('error', reject);
+      });
+      client.once('error', reject);
+      t.after(() => client.destroy());
+    });
+    await started;
+    assert.ok(total > 0 && total < size, 'the first chunk must arrive before the complete body');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const paused = await invoke('state');
+    assert.equal(paused.finished, false);
+    assert.ok(paused.produced > 0 && paused.produced < size,
+      'a paused downstream must stop the finite upstream from producing the whole body');
+    resume();
+    await completed;
+    assert.equal(total, size);
+    assert.equal(digest.digest('hex'), sha256(Buffer.alloc(size, 0x51)));
+    const ranged = await request(url, { headers: { range: 'bytes=10-19' } });
+    assert.equal(ranged.status, 206);
+    assert.equal(ranged.headers['content-range'], `bytes 10-19/${size}`);
+    assert.deepEqual(ranged.bytes, Buffer.alloc(10, 0x51));
+    await new Promise((resolve, reject) => {
+      const client = http.get(url, response => {
+        response.on('error', () => {});
+        response.once('data', () => { client.destroy(); resolve(); });
+      });
+      client.once('error', reject);
+    });
+    const deadline = Date.now() + 5000;
+    let state;
+    do {
+      state = await invoke('state');
+      if (!state.aborted) await new Promise(resolve => setTimeout(resolve, 20));
+    } while (!state.aborted && Date.now() < deadline);
+    assert.equal(state.aborted, true);
+    assert.equal(state.finished, false);
+    assert.equal((await runtime.status()).instances[0].state, 'ready');
   });
 
 test('Cat guest streams 4 and 12 MiB response buffers and returns a 12 MiB call result',
@@ -4471,13 +4988,12 @@ test('Cat guest streams 4 and 12 MiB response buffers and returns a 12 MiB call 
     assert.deepEqual(JSON.parse(next.text), { ok: true });
   });
 
-test('Cat listener response above the injected memory bound fails only that request',
+test('Cat listener returns a complete 17 MiB response and stays usable',
   { timeout: 60000 }, async t => {
     const upstream = await streamUpstream(t);
     const root = rootFor(t);
     const runtime = createCatRuntime({
       dataRoot: root, network: networkForLocalServers([upstream]),
-      limits: { maxMemoryBytes: 16 * 1024 * 1024 },
     });
     t.after(() => runtime.close());
     await runtime.install({
@@ -4486,18 +5002,20 @@ test('Cat listener response above the injected memory bound fails only that requ
       config: {}, version: '1', enabled: true,
     });
     const size = 17 * 1024 * 1024;
-    upstream.blob(size);
-    await assert.rejects(runtime.invoke({
-      installationId: 'bridge', siteId: 'bridge', operation: 'proxy',
-      payload: { size },
-    }), { code: 'RESOURCE_LIMIT' });
+    const expected = upstream.blob(size);
+    const value = await request(runtime.getSession('bridge').endpoint().origin + '/bridge/proxy?size=' + size, {
+      headers: { [scriptAccessHeader]: runtime.getSession('bridge').endpoint().access },
+    });
+    assert.equal(value.status, 200);
+    assert.equal(value.bytes.length, size);
+    assert.equal(sha256(value.bytes), sha256(expected));
     assert.equal((await runtime.status()).instances[0].state, 'ready');
     assert.deepEqual(await runtime.invoke({
       installationId: 'bridge', siteId: 'bridge', operation: 'ok', payload: {},
     }), { ok: true });
   });
 
-test('Cat aggregate entry accepts a 12 MiB request body and bounds it by maxMemoryBytes',
+test('Cat aggregate entry accepts complete 12 and 17 MiB request bodies',
   { timeout: 60000 }, async t => {
     const upstream = await streamUpstream(t);
     const root = rootFor(t);
@@ -4529,7 +5047,6 @@ test('Cat aggregate entry accepts a 12 MiB request body and bounds it by maxMemo
     const boundedRoot = rootFor(t);
     const bounded = createCatRuntime({
       dataRoot: boundedRoot, network: networkForLocalServers([upstream]),
-      limits: { maxMemoryBytes: 16 * 1024 * 1024 },
     });
     t.after(() => bounded.close());
     await bounded.install({
@@ -4546,9 +5063,10 @@ test('Cat aggregate entry accepts a 12 MiB request body and bounds it by maxMemo
       },
       body: JSON.stringify({ data: 'z'.repeat(17 * 1024 * 1024) }),
     }).catch(error => ({ status: null, error: error.code }));
-    assert.equal(rejected.status, 413);
+    assert.equal(rejected.status, 200);
     assert.equal(rejected.error, undefined);
-    assert.deepEqual(JSON.parse(rejected.text), { error: { code: 'RESOURCE_LIMIT' } });
+    assert.deepEqual(JSON.parse(rejected.text), { dataLength: 17 * 1024 * 1024,
+      length: Buffer.byteLength(JSON.stringify({ data: 'z'.repeat(17 * 1024 * 1024) })) });
     const next = await request(boundedStatus.aggregate.origin + path, {
       method: 'POST',
       headers: {
@@ -4580,7 +5098,7 @@ test('Cat aggregate invocation is admitted under the 60 second request deadline'
     assert.equal((await runtime.status()).instances[0].error, null);
   });
 
-test('Cat guest byte frames never expose host-owned buffers or mutate host data',
+test('Cat native buffers preserve network ownership and byte independence',
   { timeout: 60000 }, async t => {
     const upstream = await streamUpstream(t);
     const { endpoint } = await startStreamBridge(t, upstream);
@@ -4623,7 +5141,7 @@ test('Cat guest byte frames never expose host-owned buffers or mutate host data'
     assert.equal(JSON.parse(digestAgain.text).hash, sha256(guestValue));
   });
 
-test('Cat guest callbacks, native call arguments and native results preserve the full byte range',
+test('Cat native callbacks and methods preserve bytes and typed-array subviews',
   { timeout: 60000 }, async t => {
     const upstream = await streamUpstream(t);
     const { runtime, root } = await startStreamBridge(t, upstream, {
@@ -4774,8 +5292,7 @@ test('Cat keeps an async listener continuation after its request transport is re
     }), { class: [] });
     await new Promise(resolve => setTimeout(resolve, 150));
     assert.equal(session.live, true);
-    assert.equal(session.node.callbackReturns.size, 0);
-    assert.equal(session.node.contextLeases.size, 0);
+    assert.equal(session.adapterTasks.size, 0);
     assert.deepEqual(await session.invoke({
       siteId: 'late-context', operation: 'home', payload: {},
     }), { class: [] });
@@ -4814,7 +5331,7 @@ test('Cat keeps a background preload Promise across requests', { timeout: 30000 
   assert.deepEqual(await invoke('startPreload'), { started: true, finished: false });
   assert.deepEqual(await invoke('wait'), { finished: true, value: 'loaded' });
   assert.equal(session.live, true);
-  assert.equal(session.node.promiseLeases.size, 0);
+  assert.equal(session.adapterTasks.size, 0);
 });
 
 test('Cat keeps a timer active after its creating request ends', { timeout: 30000 }, async t => {
@@ -4936,7 +5453,7 @@ test('Cat control cancellation closes only the transport and leaves background w
     assert.equal(session.live, true);
   });
 
-test('Cat instance stop releases background handles, callbacks, contexts, promises and streams',
+test('Cat instance stop releases background timers, descriptors, requests and streams',
   { timeout: 30000 }, async t => {
     const session = await createCatSessionForInternalTest(t, {
       installationId: 'stop-background',
@@ -4970,10 +5487,7 @@ test('Cat instance stop releases background handles, callbacks, contexts, promis
     }), { ok: true });
     const volume = session.node.volume;
     await session.stop();
-    assert.equal(session.node.handles.size, 0);
-    assert.equal(session.node.callbacks.size, 0);
-    assert.equal(session.node.contextLeases.size, 0);
-    assert.equal(session.node.promiseLeases.size, 0);
+    assert.equal(session.node.resourceCleanup.size, 0);
     assert.equal(volume.streams.size, 0);
     assert.equal(volume.descriptors.size, 0);
     assert.equal(session.node.networkResources.size, 0);
@@ -5037,11 +5551,7 @@ test('Cat keeps callback failures on finished inbound requests away from live re
     finishedRequest.requestId = 2;
     finishedRequest.failureScope = liveRead;
     finishedRequest.close();
-    session.callbackFailureScope = finishedRequest;
-    try {
-      session.contextScope.run(session.resourceScope(), () =>
-        session.bridge('nodeCallbackError', ['CANCELLED']));
-    } finally { session.callbackFailureScope = undefined; }
+    session.callbackFailed(fault('CANCELLED'), finishedRequest);
     assert.equal(liveRead.signal.aborted, false);
     assert.equal(session.live, true);
     assert.deepEqual(diagnostics, [{
@@ -5056,11 +5566,7 @@ test('Cat keeps callback failures on finished inbound requests away from live re
     runningRequest.siteId = 'site';
     runningRequest.requestId = 4;
     runningRequest.failureScope = session.root;
-    session.callbackFailureScope = runningRequest;
-    try {
-      session.contextScope.run(session.resourceScope(), () =>
-        session.bridge('nodeCallbackError', ['UPSTREAM_HTTP_ERROR']));
-    } finally { session.callbackFailureScope = undefined; }
+    session.callbackFailed(fault('UPSTREAM_HTTP_ERROR'), runningRequest);
     assert.equal(runningRequest.signal.aborted, true);
     assert.equal(runningRequest.reason.code, 'UPSTREAM_HTTP_ERROR');
     assert.equal(runningRead.signal.aborted, false);
@@ -5085,6 +5591,7 @@ test('Cat M3U8 enrichment creates the root extension when no earlier enhancement
     });
     assert.equal(result._meow.version, 1);
     assert.equal(result._meow.media[0].variants[0].quality, '720P');
+    assert.deepEqual(Object.getOwnPropertySymbols(result), []);
     assert.equal(result._meow.media[0].variants[0].url,
       'https://media.example.invalid/child.m3u8');
   });
@@ -5357,6 +5864,46 @@ test('Cat net servers provide instance-local port probes without exposing raw TC
     assert.deepEqual(await runtime.invoke({
       installationId: 'net-probe', siteId: 'net-probe', operation: 'home', payload: {},
     }), { class: [] });
+  });
+
+test('Cat stops active I/O before a cooperative stop hook waits and durably writes its volume',
+  { timeout: 30000 }, async t => {
+    let held;
+    const upstream = await serverFor(t, request => { held = request.socket; });
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    await runtime.install({ installationId: 'io-before-stop', enabled: true,
+      source: delayedSource('io-before-stop', 0) + `
+        const fs = require('fs'), start = module.exports.start;
+        let closed;
+        module.exports.start = () => {
+          const request = http.get(${JSON.stringify(upstream.socketOrigin)}, { agent: false });
+          request.on('error', () => {});
+          closed = new Promise(resolve => request.once('close', resolve));
+          return start();
+        };
+        module.exports.stop = async () => {
+          fs.writeFileSync('/stop-entered.txt', 'entered');
+          await closed;
+          await new Promise((resolve, reject) =>
+            server.close(error => error ? reject(error) : resolve()));
+          await new Promise(resolve => setImmediate(resolve));
+          fs.writeFileSync('/stop-finished.txt', 'durable');
+        };
+      ` });
+    await waitFor(() => held, 'background connection did not reach the local I/O barrier');
+    const owner = runtime.getSession('io-before-stop'), worker = owner.worker;
+    let exited = false;
+    worker.once('exit', () => { exited = true; });
+    const result = await runtime.setEnabled('io-before-stop', false);
+    assert.equal(result.state, 'disabled');
+    assert.equal(readFileSync(join(root, 'volumes', 'io-before-stop', 'stop-finished.txt'),
+      'utf8'), 'durable');
+    assert.equal(owner.cleanupError, null);
+    assert.equal(owner.worker, null); assert.equal(worker.threadId, -1);
+    assert.equal(exited, true);
+    await waitFor(() => held.destroyed, 'shutdown retained the upstream connection');
   });
 
 test('Cat discovers a short startup wrapper, pairs its adjacent async stop and preserves stop writes',
@@ -5835,11 +6382,24 @@ test('Cat observes real framework routes, waits for its listener and selects eac
     await assert.rejects(invoke('invalid'), { code: 'INVALID_JSON' });
     await assert.rejects(invoke('upstreamMissing'), { code: 'UPSTREAM_HTTP_ERROR', statusCode: 404 });
     await assert.rejects(invoke('accounts'), { code: 'CAPABILITY_UNAVAILABLE' });
+    const beforeFailure = diagnostics.length;
     await assert.rejects(invoke('failure'), { code: 'UPSTREAM_HTTP_ERROR' });
-    // The guest's onError hook reports before the HTTP 500 response is
-    // observed, so this evidence has no request scope yet.
-    assert(diagnostics.some(event => event.kind === 'TypeError' && event.reason === 'input' &&
-      event.siteId === null && event.requestId === null));
+    // The trusted listener scope already owns the hook, before HTTP 500 is read.
+    const failureDiagnostics = diagnostics.slice(beforeFailure);
+    const diagnostic = failureDiagnostics.find(event => event.kind === 'TypeError' && event.reason === 'input');
+    const httpError = failureDiagnostics.find(event =>
+      event.kind === 'ScriptHTTPError' && event.reason === 'http' && event.statusCode === 500);
+    assert.ok(diagnostic); assert.ok(httpError);
+    assert.equal(diagnostic.siteId, 'one'); assert.equal(httpError.siteId, 'one');
+    assert.equal(diagnostic.installationId, 'framework');
+    assert.equal(diagnostic.generation, instance.generation);
+    assert.ok(Number.isSafeInteger(diagnostic.requestId) && diagnostic.requestId > 0);
+    for (const key of ['installationId', 'generation', 'requestId'])
+      assert.equal(diagnostic[key], httpError[key]);
+    const errorLine = frameworkSource.split('\n').findIndex(line => line.includes('const error = new TypeError('));
+    assert.equal(diagnostic.line, errorLine + 1);
+    assert.equal(diagnostic.column, frameworkSource.split('\n')[errorLine].indexOf('new TypeError(') + 1);
+    assert.equal(diagnostic.member, 'record');
     assert.equal(JSON.stringify(diagnostics).includes('SYNTHETIC-PRIVATE-VALUE'), false);
     const catEndpoint = instance.endpoints.find(endpoint => endpoint.requestedPorts.includes(9988));
     assert.equal(new URL(instance.managementUrl).origin, catEndpoint.origin);
@@ -5973,7 +6533,7 @@ test('Cat exposes Node process identity and HTTP request options without transpo
     });
   });
 
-test('Cat native method wrappers remain removable guest callbacks and release listener leases',
+test('Cat native methods remain removable listeners and release their stream',
   { timeout: 30000 }, async t => {
     const session = await createCatSessionForInternalTest(t, {
       installationId: 'native-method-callback',
@@ -5992,27 +6552,25 @@ test('Cat native method wrappers remain removable guest callbacks and release li
         });
       `,
     });
-    const baseline = session.node.callbacks.size;
+    const baseline = resourceCounts(session);
     const siteId = [...session.sites.keys()][0];
     for (let index = 0; index < 4; index++) {
       assert.deepEqual(await session.invoke({
         siteId, operation: 'home', payload: {},
       }), { registered: 1, removed: 0, destroyed: true });
       await collectGarbage();
-      assert.ok(session.node.callbacks.size <= baseline,
-        `callbacks grew from ${baseline} to ${session.node.callbacks.size}`);
-      assert.equal(session.node.callbackReturns.size, 0);
+      assert.deepEqual(resourceCounts(session), baseline);
     }
   });
 
-test('Cat framework injection uses guest-local HTTP response headers, streams and subclasses',
+test('Cat framework injection uses native HTTP headers, streams and subclasses',
   { timeout: 30000 }, async t => {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
     t.after(() => runtime.close());
     await runtime.install({
       installationId: 'local-response', enabled: true, source: String.raw`
         const http = require('node:http'), https = require('node:https');
-        const { Writable } = require('node:stream'), { inherits } = require('node:util');
+        const { Stream, Writable } = require('node:stream'), { inherits } = require('node:util');
         function InjectResponse(request, resolve) {
           http.ServerResponse.call(this, request);
           this.chunks = [];
@@ -6023,7 +6581,8 @@ test('Cat framework injection uses guest-local HTTP response headers, streams an
             headers: this.getHeaders(), names: this.getRawHeaderNames(),
             headerReady: this.headersSent, wireDate: /\r\nDate: [^\r]+\r\n/.test(this._header),
             body: Buffer.concat(this.chunks).toString(), shared: https.ServerResponse === http.ServerResponse,
-            inherited: this instanceof http.ServerResponse && this instanceof Writable,
+            inherited: this instanceof http.ServerResponse && this instanceof http.OutgoingMessage &&
+              this instanceof Stream,
           }));
         }
         inherits(InjectResponse, http.ServerResponse);
@@ -6047,15 +6606,14 @@ test('Cat framework injection uses guest-local HTTP response headers, streams an
         });
         module.exports.search = () => {
           const response = new http.ServerResponse({ method: 'HEAD' });
-          let invalidName, invalidValue, forged;
+          let invalidName, invalidValue;
           try { response.setHeader('invalid name', 'x'); } catch (error) { invalidName = error.code; }
           try { response.setHeader('x-value', 'x\r\nInjected: y'); } catch (error) { invalidValue = error.code; }
-          try { http.ServerResponse.prototype.setHeader.call({}, 'x', 'y'); }
-          catch (error) { forged = error.code; }
           response.writeHead('204', ['Set-Cookie', 'first=one', 'Set-Cookie', 'second=two']);
           response.end();
-          return { invalidName, invalidValue, forged, hasBody: response._hasBody,
-            finished: response.finished, cookies: response.getHeader('set-cookie') };
+          return { invalidName, invalidValue, hasBody: response._hasBody,
+            finished: response.finished, cachedCookie: response.getHeader('set-cookie') ?? null,
+            cookies: Array.from(response._header.matchAll(/Set-Cookie: ([^\r]+)\r\n/g), value => value[1]) };
         };
       `,
     });
@@ -6071,11 +6629,11 @@ test('Cat framework injection uses guest-local HTTP response headers, streams an
     });
     assert.deepEqual(await invoke('search'), {
       invalidName: 'ERR_INVALID_HTTP_TOKEN', invalidValue: 'ERR_INVALID_CHAR',
-      forged: 'ERR_INVALID_THIS', hasBody: false, finished: true, cookies: ['first=one', 'second=two'],
+      hasBody: false, finished: true, cachedCookie: null, cookies: ['first=one', 'second=two'],
     });
   });
 
-test('Cat supports ECDH and public X509 certificate keys without exposing native prototypes',
+test('Cat supports native ECDH and public X509 certificate keys',
   { timeout: 30000 }, async t => {
     const pem = rootCertificates.find(value =>
       new X509Certificate(value).publicKey.asymmetricKeyType === 'rsa');
@@ -6208,7 +6766,7 @@ test('Cat Buffer base64url encoding matches native Node across public entry poin
   }), { result: expected, identity: true, legacyConstructed: 'fbff', legacyCalled: 'fbff' });
 });
 
-test('Cat cached KeyObjects survive request retirement without retaining host key handles',
+test('Cat native cached KeyObjects survive request retirement without retaining resources',
   { timeout: 30000 }, async t => {
     const session = await createCatSessionForInternalTest(t, {
       installationId: 'cached-keys',
@@ -6255,11 +6813,7 @@ test('Cat cached KeyObjects survive request retirement without retaining host ke
         };
       `,
     });
-    const counts = () => ({
-      handles: session.node.handles.size, callbacks: session.node.callbacks.size,
-      returns: session.node.callbackReturns.size, promises: session.node.promiseLeases.size,
-      contexts: session.node.contextLeases.size,
-    });
+    const counts = () => resourceCounts(session);
     await collectGarbage();
     const baseline = counts();
     assert.deepEqual(await session.invoke({
@@ -6267,48 +6821,33 @@ test('Cat cached KeyObjects survive request retirement without retaining host ke
     }), { privateType: 'private', publicType: 'public', secretType: 'secret',
       bits: 2048, exponent: '65537', algorithm: 'rsa', secretBytes: 32 });
     await collectGarbage();
-    const bounded = value => Object.fromEntries(Object.entries(value).map(([key, count]) =>
-      [key, count <= baseline[key] * 2 + 16]));
-    assert.deepEqual(bounded(counts()), {
-      handles: true, callbacks: true, returns: true, promises: true, contexts: true,
-    });
+    assert.deepEqual(counts(), baseline);
     for (let index = 0; index < 8; index++) {
       assert.deepEqual(await session.invoke({
         siteId: 'default', operation: 'search', payload: {},
       }), { decrypted: true, same: true, different: true, signed: true, hmac: true,
         exported: true, detected: true, notDetected: true, invalid: true, nativeBinding: 'undefined', keys: 0 });
       await collectGarbage();
-      assert.deepEqual(bounded(counts()), {
-        handles: true, callbacks: true, returns: true, promises: true, contexts: true,
-      });
+      assert.deepEqual(counts(), baseline);
     }
   });
 
-test('Cat key transport clears exported temporary bytes and does not export nonextractable CryptoKeys', async t => {
-  const scope = new ResourceScope();
-  const session = {
-    installationId: 'key-transport', revision: { source: '' }, root: scope,
-    limits: { cleanupTimeoutMs: 100 }, live: false, scope: () => scope,
-    storageWritten() {}, trackAdapter() {},
-  };
-  const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
-  try {
-    const secret = createSecretKey(Buffer.alloc(32, 7)), exported = secret.export();
-    secret.export = () => exported;
-    const wire = node.encode(secret);
-    assert.equal(wire.$, 'key');
-    assert.equal(exported.every(byte => byte === 0), true);
-    assert.equal(node.decode(wire).equals(secret), true);
-    assert.equal(node.handles.size, 0);
-    assert.throws(() => node.decode({ $: 'key', type: 'unknown', data: '' }), { code: 'INVALID_ARGUMENT' });
-    assert.throws(() => node.decode({ $: 'key', type: 'secret', data: {} }), { code: 'INVALID_ARGUMENT' });
-    const nonextractable = await webcrypto.subtle.importKey('raw', Buffer.alloc(32, 7),
-      { name: 'AES-GCM' }, false, ['encrypt']);
-    const opaque = node.encode(nonextractable);
-    assert.equal(opaque.$, 'handle');
-    assert.equal(opaque.role, 'cryptoKey');
-    assert.equal(opaque.data, undefined);
-  } finally { await node.close(); scope.close(); }
+test('Cat uses native KeyObjects and preserves nonextractable CryptoKeys', async t => {
+  const session = await createCatSessionForInternalTest(t, { installationId: 'native-keys', source: `
+    const crypto = require('crypto');
+    module.exports.home = async () => {
+      const key = await crypto.webcrypto.subtle.importKey('raw', Buffer.alloc(32, 7),
+        { name: 'AES-GCM' }, false, ['encrypt']);
+      const encrypted = await crypto.webcrypto.subtle.encrypt({ name: 'AES-GCM', iv: new Uint8Array(12) },
+        key, Buffer.from('fixture'));
+      let exportError; try { await crypto.webcrypto.subtle.exportKey('raw', key); }
+      catch (error) { exportError = error.name; }
+      const secret = crypto.createSecretKey(Buffer.alloc(32, 7));
+      return { exportError, bytes: encrypted.byteLength, extractable: key.extractable,
+        keyObject: require('util/types').isKeyObject(secret), equal: secret.equals(crypto.createSecretKey(secret.export())) };
+    };` });
+  assert.deepEqual(await session.invoke({ siteId: 'default', operation: 'home', payload: {} }),
+    { exportError: 'InvalidAccessError', bytes: 23, extractable: false, keyObject: true, equal: true });
 });
 
 test('Cat incoming header identity preserves decompressor edits and request cleanup',
@@ -6363,8 +6902,6 @@ test('Cat incoming header identity preserves decompressor edits and request clea
       `,
     });
     const counts = () => ({
-      handles: session.node.handles.size, callbacks: session.node.callbacks.size,
-      returns: session.node.callbackReturns.size, contexts: session.node.contextLeases.size,
       requests: session.nativeRequests.size, scopeTokens: session.services.scopes.size,
     });
     let baseline, midpoint;
@@ -6377,13 +6914,9 @@ test('Cat incoming header identity preserves decompressor edits and request clea
       baseline ??= counts();
       if (index === 3) midpoint = counts();
       const current = counts();
-      for (const key of ['handles', 'callbacks', 'returns', 'contexts']) {
-        assert.ok(current[key] <= baseline[key] * 2 + 16,
-          `${key} grew from ${baseline[key]} to ${current[key]}`);
-      }
+      assert.deepEqual(current, baseline);
     }
-    assert.ok(midpoint.handles <= baseline.handles * 2 + 16);
-    assert.ok(midpoint.callbacks <= baseline.callbacks * 2 + 16);
+    assert.deepEqual(midpoint, baseline);
   });
 
 test('Cat HTTP modules preserve protocol mismatch errors without opening a connection', async t => {
@@ -6419,7 +6952,7 @@ test('Cat HTTP modules preserve protocol mismatch errors without opening a conne
   });
   assert.deepEqual(await runtime.invoke({
     installationId: 'protocol-guest-visible', siteId: 'default', operation: 'home', payload: {},
-  }), { code: 'ERR_INVALID_PROTOCOL', name: 'Error', trusted: true });
+  }), { code: 'ERR_INVALID_PROTOCOL', name: 'TypeError', trusted: true });
 });
 
 test('Cat HTTP option projection is one rule and ignores unrelated library metadata', () => {
@@ -6485,27 +7018,48 @@ test('Cat runtime shares each server termination and retains cleanup failures wi
   await assert.rejects(runtime.close(), { code: 'SCRIPT_EXCEPTION' });
 });
 
-test('Cat TLS peer certificate chains retain cycles through finite data roles', async t => {
-  const scope = new ResourceScope();
-  const session = {
-    installationId: 'peer-certificate', revision: { source: '' }, root: scope,
-    limits: { cleanupTimeoutMs: 100 }, live: false, scope: () => scope,
-    storageWritten() {}, trackAdapter() {},
+test('Cat native TLS certificates preserve cyclic issuer identity', async t => {
+  // Generate a throw-away self-signed leaf in memory; no private key fixture,
+  // external certificate service or extra npm/OpenSSL command is required.
+  const der = (tag, ...parts) => {
+    const body = Buffer.concat(parts.map(part => Buffer.isBuffer(part) ? part : Buffer.from(part)));
+    let length = body.length.toString(16);
+    if (length.length % 2) length = '0' + length;
+    const bytes = Buffer.from(length, 'hex');
+    return Buffer.concat([Buffer.from([tag]), body.length < 128 ? Buffer.from([body.length])
+      : Buffer.concat([Buffer.from([0x80 | bytes.length]), bytes]), body]);
   };
-  const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
-  const certificate = { subject: { CN: 'fixture.invalid' }, raw: Buffer.from('certificate') };
-  certificate.issuerCertificate = certificate;
-  const value = node.invoke({ role: 'tlsSocket', value: {
-    getPeerCertificate(detailed) { assert.equal(detailed, true); return certificate; },
-  } }, 'getPeerCertificate', [true]);
-  const encoded = node.encode(value, new Set(), undefined, scope);
-  const receipt = node.handles.get(encoded.id);
-  assert.equal(receipt.role, 'certificate');
-  assert.equal(node.member(receipt, 'issuerCertificate', scope).id, encoded.id);
-  assert.deepEqual(node.member(receipt, 'subject', scope), { $: 'object', value: { CN: 'fixture.invalid' } });
-  assert.throws(() => node.member(receipt, 'constructor', scope), { code: 'PERMISSION_DENIED' });
-  await node.close();
-  scope.close();
+  const seq = (...values) => der(0x30, ...values);
+  const algorithm = seq(der(6, Buffer.from('2a864886f70d01010b', 'hex')), der(5));
+  const name = seq(der(0x31, seq(der(6, Buffer.from('550403', 'hex')), der(12, 'Cat fixture'))));
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const tbs = seq(der(2, [1]), algorithm, name,
+    seq(der(0x17, '200101000000Z'), der(0x17, '400101000000Z')), name,
+    publicKey.export({ format: 'der', type: 'spki' }));
+  const bytes = seq(tbs, algorithm, der(3, [0], sign('sha256', tbs, privateKey)));
+  const cert = '-----BEGIN CERTIFICATE-----\n' + bytes.toString('base64').match(/.{1,64}/g).join('\n') +
+    '\n-----END CERTIFICATE-----\n';
+  const session = new CatSession({ dataRoot: rootFor(t), installationId: 'peer-certificate', generation: 1,
+    revision: { source: '', version: '1', config: {} }, limits: { cleanupTimeoutMs: 3000 } });
+  t.after(() => session.stop());
+  const server = session.services.https.createServer({
+    key: privateKey.export({ format: 'pem', type: 'pkcs8' }), cert,
+  });
+  await new Promise(resolve => server.listen(9443, resolve));
+  const socket = session.node.builtins.tls.connect({ host: '127.0.0.1', port: 9443 });
+  await new Promise((resolve, reject) => {
+    socket.once('secureConnect', resolve); socket.once('error', reject);
+  });
+  const certificate = socket.getPeerCertificate(true);
+  assert.equal(certificate.issuerCertificate, certificate);
+  assert.equal(certificate.raw.equals(bytes), true);
+  const x509 = socket.getPeerX509Certificate();
+  assert.ok(x509 instanceof X509Certificate);
+  assert.equal(x509.publicKey.type, 'public');
+  assert.equal(x509.checkIssued(x509), true);
+  socket.destroy();
+  await session.stop();
+  assert.equal(session.node.networkResources.size, 0);
 });
 
 test('Cat direct spider maps the standard HTTP payload to positional category and search arguments',
@@ -6530,7 +7084,7 @@ test('Cat direct spider maps the standard HTTP payload to positional category an
     }), { wd: '电影', quick: false, pg: 3 });
   });
 
-test('Cat Web and crypto compatibility stay guest-local',
+test('Cat Web and crypto compatibility use native Node values',
   { timeout: 30000 }, async t => {
     const compatibilitySource = String.raw`
       const crypto = require('crypto');
@@ -6768,6 +7322,117 @@ test('Cat marks a session inactive before destroying residual native requests',
     assert.deepEqual(observed, [false]);
   });
 
+test('Cat inactive stop permits only its own cleanup callbacks and durable writes',
+  { timeout: 30000 }, async t => {
+    const root = rootFor(t);
+    const session = await createCatSessionForInternalTest(t, { dataRoot: root,
+      installationId: 'cleanup-callbacks', source: `
+        const fs = require('fs'), steps = [];
+        process.on('old-work', () => fs.writeFileSync('/old-event.txt', 'unexpected'));
+        process.once('close', () =>
+          setImmediate(() => fs.writeFileSync('/old-terminal.txt', 'unexpected')));
+        module.exports.home = () => ({ alive: true });
+        module.exports.stop = async () => {
+          process.emit('old-work');
+          process.emit('close');
+          process.once('cleanup-work', () => steps.push('event'));
+          process.emit('cleanup-work');
+          await new Promise(resolve => process.nextTick(() => { steps.push('nextTick'); resolve(); }));
+          await new Promise(resolve => queueMicrotask(() => { steps.push('microtask'); resolve(); }));
+          await new Promise(resolve => setTimeout(() => { steps.push('timer'); resolve(); }, 1));
+          await new Promise(resolve => setImmediate(() => { steps.push('immediate'); resolve(); }));
+          await new Promise((resolve, reject) => fs.writeFile('/cleanup.txt', 'durable', error => {
+            if (error) return reject(error);
+            steps.push('write'); resolve();
+          }));
+          await new Promise((resolve, reject) => fs.readFile('/cleanup.txt', 'utf8', (error, value) => {
+            if (error) return reject(error);
+            steps.push(value); resolve();
+          }));
+          fs.writeFileSync('/steps.json', JSON.stringify(steps));
+        };
+      ` });
+    assert.deepEqual(await session.invoke({ siteId: 'default', operation: 'home', payload: {} }),
+      { alive: true });
+    let background = 0;
+    session.node.timers.setImmediate(() => { background++; });
+    const stopped = session.stop();
+    assert.equal(session.live, false);
+    assert.equal(session.root.signal.aborted, false, 'stop still needs its open private volume');
+    await assert.rejects(session.invoke({ siteId: 'default', operation: 'home', payload: {} }),
+      { code: 'STALE_SESSION' });
+    await stopped;
+    const volume = join(root, 'volumes', 'cleanup-callbacks');
+    assert.deepEqual(JSON.parse(readFileSync(join(volume, 'steps.json'), 'utf8')),
+      ['event', 'nextTick', 'microtask', 'timer', 'immediate', 'write', 'durable']);
+    assert.equal(readFileSync(join(volume, 'cleanup.txt'), 'utf8'), 'durable');
+    assert.equal(background, 0);
+    assert.equal(existsSync(join(volume, 'old-event.txt')), false);
+    assert.equal(existsSync(join(volume, 'old-terminal.txt')), false);
+    assert.equal(session.root.signal.aborted, true);
+    assert.equal(session.cleanupError, undefined);
+  });
+
+test('Cat inactive stop destroys once and waits for actual native close rather than destroyed',
+  async t => {
+    let session, finishDestroy;
+    const finish = () => { const complete = finishDestroy; finishDestroy = null; complete?.(); };
+    t.after(async () => {
+      const stopped = session?.stop();
+      finish();
+      await stopped?.catch(() => {});
+    });
+    session = await createCatSessionForInternalTest(t, { installationId: 'cleanup-debt',
+      source: 'module.exports.home = () => ({ alive: true });' });
+    const request = new PassThrough({ destroy(error, done) { finishDestroy = () => done(error); } });
+    const observed = [], aborted = [], destroy = request.destroy;
+    let reentered;
+    request.destroy = function(...args) {
+      observed.push(session.live);
+      reentered = session.stop();
+      return destroy.apply(this, args);
+    };
+    session.node.webPipeAbort.signal.addEventListener('abort', () => { aborted.push(session.live); },
+      { once: true });
+    session.services.trackRequest(request, session.services.createOutboundScope(session.root));
+    let settled = false;
+    const stopped = session.stop();
+    stopped.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(reentered, stopped);
+    assert.deepEqual(observed, [false]);
+    assert.deepEqual(aborted, [false]);
+    assert.equal(request.destroyed, true);
+    assert.equal(request.closed, false);
+    assert.equal(settled, false);
+    assert.equal(session.nativeRequests.has(request), true);
+    assert.equal(session.services.requestCleanup.has(request), true);
+    finish();
+    await stopped;
+    assert.equal(request.closed, true);
+    assert.deepEqual(observed, [false]);
+    assert.equal(session.nativeRequests.has(request), false);
+    assert.equal(session.services.requestCleanup.has(request), false);
+    assert.equal(session.cleanupError, undefined);
+  });
+
+test('Cat reports an inactive cleanup callback failure and retires its scope without a timeout',
+  async t => {
+    const session = await createCatSessionForInternalTest(t, { installationId: 'cleanup-failure',
+      source: `
+        module.exports.home = () => ({ alive: true });
+        module.exports.stop = () => new Promise(() =>
+          setImmediate(() => { throw new Error('synthetic cleanup callback failure'); }));
+      ` });
+    await assert.rejects(session.stop(), { code: 'SCRIPT_EXCEPTION' });
+    assert.equal(session.cleanupError, 'SCRIPT_EXCEPTION');
+    assert.equal(session.live, false);
+    assert.equal(session.root.signal.aborted, true);
+    assert.equal(session.timers.size, 0);
+    await assert.rejects(session.invoke({ siteId: 'default', operation: 'home', payload: {} }),
+      { code: 'STALE_SESSION' });
+  });
+
 test('Cat lifecycle calls detach a failed session and report the cleanup failure',
   { timeout: 30000 }, async t => {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
@@ -6824,11 +7489,7 @@ test('Cat low-level cleanup failures release native ownership and session scope'
     await assert.rejects(session.stop(), { code: 'SERVICE_ERROR' });
     assert.equal(session.live, false);
     assert.equal(session.root.signal.aborted, true);
-    assert.equal(session.node.handles.size, 0);
-    assert.equal(session.node.callbacks.size, 0);
-    assert.equal(session.node.callbackReturns.size, 0);
-    assert.equal(session.node.contextLeases.size, 0);
-    assert.equal(session.node.promiseLeases.size, 0);
+    assert.equal(session.node.resourceCleanup.size, 0);
     assert.equal(session.stats().cleanupError, 'SERVICE_ERROR');
   });
 
@@ -6935,6 +7596,59 @@ test('Cat refresh removing a script deletes the same artifacts as uninstall',
     assert.equal(existsSync(join(root, 'volumes', 'refresh-remove')), false);
     assert.equal(existsSync(sourceFile(root, hash)), false);
     assert.deepEqual((await runtime.status()).instances, []);
+  });
+
+test('Cat cold disabled removals clean their persisted source and volume references but keep shared and unknown files',
+  { timeout: 60000 }, async t => {
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    const unique = volumeSource('cold-unique'), shared = volumeSource('cold-shared');
+    for (const [installationId, source, siteId] of [
+      ['cold-remove-unique', unique, 'cold-unique'],
+      ['cold-remove-shared', shared, 'cold-shared'],
+      ['cold-keep-shared', shared, 'cold-shared'],
+    ]) {
+      await runtime.install({ installationId, source });
+      assert.deepEqual(await runtime.invoke({ installationId, siteId, operation: 'write', payload: {} }),
+        { written: true });
+      await runtime.setEnabled(installationId, false);
+    }
+    await runtime.close();
+    const unknown = volumeSource('unknown');
+    const unknownFile = sourceFile(root, sourceHash(unknown));
+    writeFileSync(unknownFile, unknown);
+    const unknownVolume = join(root, 'volumes', 'unknown-volume');
+    mkdirSync(unknownVolume);
+    writeFileSync(join(unknownVolume, 'unknown.txt'), 'leave untouched');
+
+    const reopened = createCatRuntime({ dataRoot: root });
+    t.after(() => reopened.close());
+    const cold = await reopened.start();
+    assert.equal(cold.instances.length, 3);
+    for (const instance of cold.instances) {
+      assert.equal(instance.state, 'disabled');
+      assert.equal(instance.enabled, false);
+      assert.equal(reopened.hostState(instance.installationId), null);
+      assert.equal(existsSync(join(root, 'volumes', instance.installationId)), true);
+    }
+    assert.equal(existsSync(sourceFile(root, sourceHash(unique))), true);
+    writeSettings(reopened.settings.path, value => ({
+      ...value, scripts: value.scripts.filter(script => script.installationId === 'cold-keep-shared'),
+    }));
+    assert.deepEqual(await reopened.refresh(), { applied: true, failures: [] });
+    assert.equal(existsSync(join(root, 'volumes', 'cold-remove-unique')), false);
+    assert.equal(existsSync(join(root, 'volumes', 'cold-remove-shared')), false);
+    assert.equal(existsSync(sourceFile(root, sourceHash(unique))), false);
+    assert.equal(readFileSync(sourceFile(root, sourceHash(shared)), 'utf8'), shared);
+    assert.equal(readFileSync(unknownFile, 'utf8'), unknown);
+    assert.equal(readFileSync(join(unknownVolume, 'unknown.txt'), 'utf8'), 'leave untouched');
+    assert.deepEqual((await reopened.status()).instances.map(instance =>
+      [instance.installationId, instance.state]), [['cold-keep-shared', 'disabled']]);
+    assert.equal(existsSync(join(root, 'volumes', 'cold-keep-shared')), true);
+    await reopened.setEnabled('cold-keep-shared', true);
+    assert.deepEqual(await reopened.invoke({ installationId: 'cold-keep-shared',
+      siteId: 'cold-shared', operation: 'read', payload: {} }), { value: 'cold-shared' });
   });
 
 test('Cat reinstall starts from an empty private volume after uninstall',

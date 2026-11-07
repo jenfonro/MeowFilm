@@ -3,20 +3,23 @@ import { fault } from './errors.js';
 const ignoreError = () => {};
 const closeDispatches = new WeakMap();
 
-/** Retire native event owners only after every close listener has run.
+/** Retire native event owners only after every completion listener has run.
  * A listener cannot provide this ordering: later listeners may hold leases
  * that retirement removes. The per-emitter adapter is removed with its owner. */
-export function afterCloseDispatch(target, completed) {
+export function afterCloseDispatch(target, completed, closeEvent = 'close') {
+  const name = typeof closeEvent === 'symbol' ? closeEvent : String(closeEvent);
   let state = closeDispatches.get(target);
   if (!state) {
+    const reference = new WeakRef(target);
     const descriptor = Object.getOwnPropertyDescriptor(target, 'emit');
     const emit = target.emit;
-    state = { callbacks: new Set(), descriptor, dispatch: null };
+    state = { callbacks: new Map(), reference, descriptor, dispatch: null };
     state.dispatch = function(event, ...args) {
       try { return Reflect.apply(emit, this, [event, ...args]); }
       finally {
-        if (event === 'close' && this === target)
-          for (const callback of [...state.callbacks]) callback();
+        const callbacks = state.callbacks.get(typeof event === 'symbol' ? event : String(event));
+        if (callbacks && this === reference.deref())
+          for (const callback of [...callbacks]) callback();
       }
     };
     Object.defineProperty(target, 'emit', {
@@ -24,13 +27,18 @@ export function afterCloseDispatch(target, completed) {
     });
     closeDispatches.set(target, state);
   }
-  state.callbacks.add(completed);
+  let callbacks = state.callbacks.get(name);
+  if (!callbacks) state.callbacks.set(name, callbacks = new Set());
+  callbacks.add(completed);
   let active = true;
   return () => {
     if (!active) return;
     active = false;
-    state.callbacks.delete(completed);
+    callbacks.delete(completed);
+    if (!callbacks.size) state.callbacks.delete(name);
     if (state.callbacks.size) return;
+    const target = state.reference.deref();
+    if (!target) return;
     closeDispatches.delete(target);
     if (target.emit !== state.dispatch) return;
     if (state.descriptor) Object.defineProperty(target, 'emit', state.descriptor);
@@ -48,17 +56,16 @@ export function closeResource(target, { stop, release, timeoutMs = 3000,
   closeEvent = 'close', closed = value => value.closed } = {}) {
   if (!target) return Promise.resolve({ complete: true, error: null, timedOut: false, guarded: false });
   let error = null, done = false, timer, stopping = false, closeObserved = false;
-  const canObserve = typeof target.once === 'function';
-  let closeAttached = false, errorAttached = false;
+  const canObserve = typeof target.emit === 'function';
+  let detachClosed = null, errorAttached = false;
   let resolve;
   const promise = new Promise(complete => { resolve = complete; });
   const finish = (complete, timedOut = false) => {
     if (done) return;
     done = true;
     clearTimeout(timer);
-    if (closeAttached) {
-      try { target.off?.(closeEvent, observed); } catch (failure) { error ??= failure; }
-    }
+    try { detachClosed?.(); } catch (failure) { error ??= failure; }
+    detachClosed = null;
     try { release?.(); } catch (failure) { error ??= failure; }
     if (errorAttached) {
       try { target.off?.('error', ignoreError); } catch (failure) { error ??= failure; }
@@ -83,13 +90,15 @@ export function closeResource(target, { stop, release, timeoutMs = 3000,
     try { target.on('error', ignoreError); errorAttached = true; } catch (failure) { error ??= failure; }
   }
   if (canObserve && closeEvent) {
-    try { target.once(closeEvent, observed); closeAttached = true; } catch (failure) { error ??= failure; }
+    // This host barrier must not enter a managed emitter's guest listener set.
+    try { detachClosed = afterCloseDispatch(target, observed, closeEvent); }
+    catch (failure) { error ??= failure; }
   }
   stopping = true;
   try { stop?.(); } catch (failure) { error ??= failure; }
   stopping = false;
   if (closeObserved) finish(true);
-  else if (!closeAttached) {
+  else if (!detachClosed) {
     try { if (closed(target)) finish(true); } catch (failure) { error ??= failure; }
   }
   if (!done) timer = setTimeout(() => {

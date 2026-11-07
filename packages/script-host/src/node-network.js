@@ -1,9 +1,9 @@
 import http from 'node:http';
 import https from 'node:https';
 import { randomBytes } from 'node:crypto';
-import { gunzipSync, inflateSync, brotliDecompressSync } from 'node:zlib';
+import { gunzip, inflate, brotliDecompress } from 'node:zlib';
+import { promisify } from 'node:util';
 import { fault, requireValue, safeError } from './errors.js';
-import { SCRIPT_LIMITS } from './host.js';
 
 const knownOptions = new Set([
   'method', 'headers', 'body', 'form', 'formData', 'timeout', 'json', 'encoding', 'follow_max', 'followRedirect', 'retry',
@@ -14,6 +14,7 @@ const forbiddenHeaders = new Set([
   'proxy-authorization', 'proxy-connection', 'te',
 ]);
 const redirects = new Set([301, 302, 303, 307, 308]);
+const decompressors = { gzip: promisify(gunzip), deflate: promisify(inflate), br: promisify(brotliDecompress) };
 
 function buffer(value) {
   if (typeof value === 'string') return Buffer.from(value);
@@ -23,7 +24,7 @@ function buffer(value) {
   throw fault('INVALID_ARGUMENT');
 }
 
-function prepare(options, limit) {
+function prepare(options) {
   requireValue(Object.keys(options).every(key => knownOptions.has(key)), 'UNSUPPORTED_OPTION');
   const method = String(options.method ?? 'GET').toUpperCase();
   requireValue(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'].includes(method));
@@ -58,11 +59,8 @@ function prepare(options, limit) {
     requireValue(options.formData && typeof options.formData === 'object' && !Array.isArray(options.formData));
     const boundary = `meowfilm-${randomBytes(16).toString('hex')}`;
     const chunks = [];
-    let length = 0;
     const append = chunk => {
       const b = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
-      length += b.length;
-      requireValue(length <= limit, 'RESOURCE_LIMIT');
       chunks.push(b);
     };
     const quote = text => {
@@ -89,46 +87,48 @@ function prepare(options, limit) {
     headers['content-type'] = `multipart/form-data; boundary=${boundary}`;
   }
   if (body) {
-    requireValue(body.length <= limit, 'RESOURCE_LIMIT');
     headers['content-length'] = String(body.length);
   }
   return { method, headers, body };
 }
 
-function requestOnce(url, { method, headers, body }, signal, limit, follow) {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) { reject(signal.reason ?? fault('CANCELLED')); return; }
-    const transport = url.protocol === 'https:' ? https : http;
-    const request = transport.request(url, { method, headers, signal, agent: false }, response => {
-      if (follow && redirects.has(response.statusCode) && response.headers.location) {
-        response.destroy(); // No redirect body buffering before validating the next URL.
-        resolve({ statusCode: response.statusCode, headers: response.headers, body: Buffer.alloc(0) });
-        return;
-      }
-      const chunks = [];
-      let bytes = 0;
-      response.on('data', chunk => {
-        bytes += chunk.length;
-        if (bytes > limit) {
-          // destroy emits "aborted" before "error" on some Node versions.
-          const error = fault('RESOURCE_LIMIT');
-          reject(error);
-          response.destroy(error);
+async function requestOnce(url, { method, headers, body }, signal, follow) {
+  if (signal.aborted) throw signal.reason ?? fault('CANCELLED');
+  const resources = [], closing = [];
+  const own = resource => {
+    resources.push(resource);
+    closing.push(new Promise(resolve => resource.once('close', resolve)));
+    return resource;
+  };
+  try {
+    return await new Promise((resolve, reject) => {
+      const transport = url.protocol === 'https:' ? https : http;
+      const request = own(transport.request(url, { method, headers, signal, agent: false }, response => {
+        own(response);
+        response.on('error', reject);
+        response.once('aborted', () => reject(signal.aborted
+          ? signal.reason ?? fault('CANCELLED') : fault('NETWORK_ERROR')));
+        if (follow && redirects.has(response.statusCode) && response.headers.location) {
+          // Finally closes this hop without collecting a redirect body.
+          resolve({ statusCode: response.statusCode, headers: response.headers, body: Buffer.alloc(0) });
+          return;
         }
-        else chunks.push(chunk);
-      });
-      response.once('error', reject);
-      response.once('aborted', () => reject(signal.aborted
-        ? signal.reason ?? fault('CANCELLED') : fault('NETWORK_ERROR')));
-      response.once('end', () => resolve({
-        statusCode: response.statusCode, statusMessage: response.statusMessage,
-        headers: response.headers, body: Buffer.concat(chunks),
+        const chunks = [];
+        response.on('data', chunk => chunks.push(chunk));
+        response.once('end', () => resolve({
+          statusCode: response.statusCode, statusMessage: response.statusMessage,
+          headers: response.headers, body: Buffer.concat(chunks),
+        }));
       }));
+      request.once('socket', socket => own(socket));
+      request.on('error', error => reject(signal.aborted
+        ? signal.reason ?? fault('CANCELLED') : error));
+      request.end(body);
     });
-    request.once('error', error => reject(signal.aborted
-      ? signal.reason ?? fault('CANCELLED') : error));
-    request.end(body);
-  });
+  } finally {
+    for (const resource of resources) resource.destroy();
+    await Promise.all(closing);
+  }
 }
 
 /**
@@ -136,9 +136,9 @@ function requestOnce(url, { method, headers, body }, signal, limit, follow) {
  * Validate HTTP(S) on every redirect and never forward credentials cross-origin.
  */
 export function createNodeNetwork({
-  maxResponseBytes = SCRIPT_LIMITS.maxMemoryBytes, maxRedirects = 5,
+  maxRedirects = 5, ...unsupported
 } = {}) {
-  requireValue(Number.isSafeInteger(maxResponseBytes) && maxResponseBytes > 0);
+  requireValue(Object.keys(unsupported).length === 0);
   requireValue(Number.isSafeInteger(maxRedirects) && maxRedirects >= 0 && maxRedirects <= 10);
   return async ({ url: input, options = {}, signal, validateURL }) => {
     requireValue(signal && typeof validateURL === 'function');
@@ -146,12 +146,12 @@ export function createNodeNetwork({
     const requestedFollow = options.followRedirect === false ? 0 : options.follow_max ?? maxRedirects;
     requireValue(Number.isSafeInteger(requestedFollow) && requestedFollow >= 0);
     const follow = Math.min(requestedFollow, maxRedirects);
-    let request = prepare(options, maxResponseBytes);
+    let request = prepare(options);
     let url = new URL(validateURL(input));
     try {
       for (let hop = 0; ; hop++) {
         if (signal.aborted) throw signal.reason ?? fault('CANCELLED');
-        const response = await requestOnce(url, request, signal, maxResponseBytes, follow > 0);
+        const response = await requestOnce(url, request, signal, follow > 0);
         if (follow > 0 && redirects.has(response.statusCode) && response.headers.location) {
           requireValue(hop < follow, 'RESOURCE_LIMIT');
           const next = new URL(validateURL(new URL(response.headers.location, url).href));
@@ -170,18 +170,21 @@ export function createNodeNetwork({
           continue;
         }
         const encoding = String(response.headers['content-encoding'] ?? 'identity').toLowerCase();
-        const decompressor = { gzip: gunzipSync, deflate: inflateSync, br: brotliDecompressSync }[encoding];
+        const decompressor = Object.hasOwn(decompressors, encoding) ? decompressors[encoding] : undefined;
         if (encoding !== 'identity') {
           requireValue(decompressor, 'UNSUPPORTED_OPTION');
-          try { response.body = decompressor(response.body, { maxOutputLength: maxResponseBytes }); }
+          try { response.body = await decompressor(response.body); }
           catch (error) {
-            throw fault(error.code === 'ERR_BUFFER_TOO_LARGE' ? 'RESOURCE_LIMIT' : 'NETWORK_ERROR');
+            throw fault('NETWORK_ERROR');
           }
           delete response.headers['content-encoding'];
           delete response.headers['content-length'];
         }
+        if (signal.aborted) throw signal.reason ?? fault('CANCELLED');
         return { ...response, url: url.href };
       }
-    } catch (e) { throw safeError(e, 'NETWORK_ERROR'); }
+    } catch (e) {
+      throw signal.aborted ? safeError(signal.reason, 'CANCELLED') : safeError(e, 'NETWORK_ERROR');
+    }
   };
 }

@@ -1,5 +1,5 @@
 import {
-  bytesToBase64, decodeHttpBody, encodeText, hostApiVersion,
+  decodeHttpBody, encodeText, hostApiVersion,
 } from './capabilities.js';
 import {
   sourceFault, sourceIdentifier, sourceObject, sourceRequire,
@@ -96,14 +96,12 @@ export function trustedCapabilityContext(scope, context = {}) {
 }
 
 export class SourceHttpClient {
-  constructor({ capabilities, profile, scope, maximumBytes = 8 * 1024 * 1024 }) {
+  constructor({ capabilities, profile, scope }) {
     sourceRequire(capabilities?.version === hostApiVersion && typeof capabilities.call === 'function');
     sourceRequire(typeof profile === 'string' && profile.length > 0);
-    sourceRequire(Number.isSafeInteger(maximumBytes) && maximumBytes > 0);
     this.capabilities = capabilities;
     this.profile = profile;
     this.scope = normalizeCapabilityScope(scope);
-    this.maximumBytes = maximumBytes;
   }
 
   async request(input, context = {}) {
@@ -136,13 +134,12 @@ export class SourceHttpClient {
         String(body), this.capabilities, input.charset ?? 'utf-8', trustedContext,
       );
     }
-    sourceRequire(bytes.length <= this.maximumBytes, 'RESOURCE_LIMIT');
     const response = await this.capabilities.call('http.request', {
       version: hostApiVersion,
       url: normalizeUrl(input.url, input.baseUrl),
       method,
       headers,
-      body: bytesToBase64(bytes),
+      body: bytes,
       timeoutMs: Math.max(1, Math.min(Math.trunc(input.timeoutMs ?? input.timeout ?? 15000), 120000)),
       redirects: input.followRedirects === false || input.followRedirect === false
         ? 0 : Math.max(0, Math.min(Math.trunc(input.redirects ?? input.follow_max ?? 5), 10)),
@@ -158,7 +155,6 @@ export class SourceHttpClient {
       headers: response.headers,
       url: response.url,
       body: response.body,
-      bodyBase64: response.body,
       data,
       encoding,
     };

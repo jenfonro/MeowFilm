@@ -330,3 +330,140 @@ test('private files reject guest fd and fs injection without taking host ownersh
     assert.equal(fs.readFileSync(path('data'), 'utf8'), 'unchanged');
   } finally { fs.closeSync(fd); }
 });
+
+test('native private streams keep relative paths and close their actual descriptor', async t => {
+  const { api, path } = fixture(t);
+  api.mkdirSync('relative');
+  const output = api.createWriteStream('relative/native.bin');
+  const closed = new Promise((resolve, reject) => {
+    output.once('error', reject);
+    output.once('close', resolve);
+  });
+  output.end(Buffer.from([0, 255, 17, 128]));
+  assert.equal(output.path, 'relative/native.bin');
+  await closed;
+  assert.equal(output.closed, true);
+  assert.deepEqual(fs.readFileSync(path('relative/native.bin')), Buffer.from([0, 255, 17, 128]));
+  const input = api.createReadStream('relative/native.bin');
+  const chunks = [];
+  for await (const chunk of input) chunks.push(chunk);
+  assert.deepEqual(Buffer.concat(chunks), Buffer.from([0, 255, 17, 128]));
+  assert.equal(input.path, 'relative/native.bin');
+  assert.equal(input.closed, true);
+});
+
+test('private native stream fd mutation cannot select or close a volume-external descriptor', async t => {
+  const { volume, api, path } = fixture(t);
+  const sentinel = join(volume.root, '..', 'external-sentinel.txt');
+  fs.writeFileSync(sentinel, 'OUTSIDE');
+  for (const kind of ['read', 'write']) {
+    api.writeFileSync('/inside.txt', 'INSIDE');
+    const outside = fs.openSync(sentinel, 'r+');
+    let owned, assignment, redefinition, detached, chunks = [];
+    try {
+      const stream = kind === 'write' ? api.createWriteStream('/inside.txt')
+        : api.createReadStream('/inside.txt');
+      const completion = closed(stream), errors = [];
+      stream.on('error', error => errors.push(error));
+      stream.once('open', fd => {
+        owned = fd;
+        try { stream.fd = outside; } catch (error) { assignment = error.code; }
+        try { Object.defineProperty(stream, 'fd', { value: outside }); }
+        catch (error) { redefinition = error.name; }
+        try { stream.fd = null; } catch (error) { detached = error.code; }
+        if (kind === 'write') stream.end('OWNED');
+      });
+      if (kind === 'read') stream.on('data', chunk => chunks.push(chunk));
+      await completion;
+      assert.equal(assignment, 'EPERM'); assert.equal(redefinition, 'TypeError');
+      assert.equal(detached, 'EPERM');
+      assert.deepEqual(errors, []);
+      assert.equal(fs.readFileSync(sentinel, 'utf8'), 'OUTSIDE');
+      assert.equal(fs.fstatSync(outside).size, 7);
+      assertClosed(owned);
+      assert.equal(stream.fd, null);
+      assert.equal(fs.readFileSync(path('inside.txt'), 'utf8'), kind === 'write' ? 'OWNED' : 'INSIDE');
+      if (kind === 'read') assert.equal(Buffer.concat(chunks).toString(), 'INSIDE');
+      assert.equal(volume.streams.size, 0); assert.equal(volume.streamCleanup.size, 0);
+    } finally {
+      for (const fd of [owned, outside]) {
+        if (fd === undefined) continue;
+        try { fs.closeSync(fd); } catch (error) { if (error.code !== 'EBADF') throw error; }
+      }
+    }
+  }
+});
+
+test('private volume close survives cross-stream listener removal and releases only after real dispatch',
+  { timeout: 30000 }, async t => {
+    const { volume, api, path } = fixture(t);
+    fs.writeFileSync(path('x'), 'X');
+    fs.writeFileSync(path('y'), 'Y');
+    const x = api.createReadStream('/x'), y = api.createReadStream('/y');
+    const opened = value => new Promise((resolve, reject) => {
+      value.once('open', resolve);
+      value.once('error', reject);
+    });
+    const [xFd, yFd] = await Promise.all([opened(x), opened(y)]);
+    const originalClose = fs.close;
+    let releaseY, yCloseCalls = 0;
+    const restore = replaceFS({
+      close(fd, callback) {
+        if (fd !== yFd) return originalClose(fd, callback);
+        yCloseCalls++;
+        releaseY = () => {
+          releaseY = null;
+          originalClose(fd, callback);
+        };
+      },
+    });
+    const owned = value => volume.streams.has(value) && volume.streamCleanup.has(value);
+    let guestY = 0, rawX = 0, rawY = 0, settled = false, removal;
+    const observations = [];
+    const removed = () => { guestY++; };
+    y.on('close', removed);
+    x.on('close', () => {
+      rawX++;
+      observations.push({ name: 'x', owned: owned(x) });
+      removal = { yOwned: owned(y), yClosed: y.closed, settled, yCloseCalls,
+        returned: y.removeAllListeners('close') === y,
+        removed: !y.listeners('close').includes(removed) };
+      // A fresh public observer is deliberate; the removed callback stays gone.
+      // The underlying fs.close is only delayed, never replaced with fake completion.
+      y.on('close', () => {
+        rawY++;
+        observations.push({ name: 'y', owned: owned(y), xOwned: owned(x) });
+      });
+      releaseY?.();
+    });
+    let closing;
+    try {
+      closing = volume.close().then(() => { settled = true; });
+      assert.equal(settled, false);
+      assert.equal(owned(x), true);
+      assert.equal(owned(y), true);
+      assert.equal(y.closed, false);
+      assert.equal(fs.fstatSync(yFd).size, 1);
+      await closing;
+      assert.deepEqual({ rawX, rawY, guestY, settled, yCloseCalls },
+        { rawX: 1, rawY: 1, guestY: 0, settled: true, yCloseCalls: 1 });
+      assert.deepEqual(removal, { yOwned: true, yClosed: false, settled: false,
+        yCloseCalls: 1, returned: true, removed: true });
+      assert.deepEqual(observations, [
+        { name: 'x', owned: true }, { name: 'y', owned: true, xOwned: false },
+      ]);
+      assertClosed(xFd);
+      assertClosed(yFd);
+      for (const value of [x, y]) {
+        assert.equal(value.closed, true);
+        assert.equal(owned(value), false);
+        assert.equal(Object.hasOwn(value, 'emit'), false);
+      }
+      assert.equal(volume.streams.size, 0);
+      assert.equal(volume.streamCleanup.size, 0);
+      assert.equal(volume.failure, null);
+    } finally {
+      releaseY?.();
+      try { await closing; } finally { restore(); }
+    }
+  });

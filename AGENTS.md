@@ -64,11 +64,11 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/windows/tests/` — Windows 原生测试
-- `apps/runtime/` — 公共脚本传输装配；`modules/{music,cat}-script.mjs` 与 `modules/source-runtime.mjs` 分别拥有 music.script.v3／music@0.8.0、cat.script.v1／cat@0.1.0、source.runtime.v1／source@0.1.0
+- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`entry.mjs` 管理三个模块，契约为 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.2.0。旧 Windows／iOS 启动接入另行迁移，不保留旧运行器协议回退。
 - `apps/windows/runtime/` — 仅 Windows 启动／命名管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
-- `packages/script-host/` — LX、CatNode 和 portable 来源共用的 WorkerSession／QuickJS 执行、有限 Node 风格能力、平台适配与实例生命周期
+- `packages/script-host/` — 统一实例生命周期；LX 与 portable 来源使用共享原生绑定、逐实例线程／QuickJS Runtime，CatNode 使用逐实例 Node Worker 与原生 Node 能力。
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层
-- `packages/runtime-bridge/` — 有界双向 RPC、取消与连接生命周期
+- `packages/runtime-bridge/` — runtime.http.v1 完整 HTTP 请求／响应、通用双向调用能力、取消与连接生命周期
 - `scripts/` — iOS 工程生成、结构检查、测试、构建打包与发布，`scripts/tests/` 为脚本测试；Node 共用工具
 - `scripts/windows/` — Windows 构建、测试、打包与结构检查
 - `tests/` — Node 测试
@@ -95,6 +95,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 | 平台与外部适配 | 系统能力、外部协议与契约实现 | 平台细节不扩散到业务核心，不替业务层决定策略 |
 
 - 每项职责有明确所有者；模块间通过最小公开契约协作，明确输入、输出、生命周期和错误语义。
+- 运行器拥有脚本安装、源码、网络来源地址及私有数据；客户端可持有供原生界面读取的列表／检测快照，不形成第二安装事实源或反向脚本存储 owner。脚本执行内存不做快照持久化；未来缓存需求不预建实现。
 - 公共脚本层不依赖 Windows 源码或启动／管道实现。LX 请求特权存储绑定显式 `context.storage`，不以 ambient 异步上下文授予全局／startup／background 权限。CatNode 的公开网络不使用域名授权名单，也不按公网、私网或链路本地分类拒绝目标；实例已登记回环端口仍映射到实际端点，`socketPath`／fd 属于文件／IPC 隔离继续拒绝；文件只映射安装实例私有卷。source-runtime 规则包不依赖 Node，平台能力通过[来源 capability ABI](docs/runtime/source-capability-abi.md)注入；各输入契约的能力边界不得互相冒充，Node 兼容层不因此具备无 Node 承载能力。
 - 依赖显式且单向，不形成循环依赖或隐式初始化顺序。不用全局事件总线、服务定位器、无边界单例或跨模块直接读写绕过契约。
 - 新增能力前先检查现有实现。公共抽取以通用语义、稳定契约和实际使用为依据；共享层提供机制，业务层决定策略，不给共享实现堆叠业务分支。
@@ -129,7 +130,8 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 
 - 按风险覆盖实际受影响的契约与消费者：编译、静态检查、单元、组件或集成测试；必要时覆盖失败、取消、恢复和资源释放路径。
 - 可机械核对的目录、依赖和契约约束接入 `scripts`（Windows 为 `scripts/windows`）中的现有检查。
-- 脚本宿主引擎仅按 `scripts/quickjs-runtime.json` 的受审查 release-sync 包及任务上下文派生产物、精确版本／路径、根锁、源码补丁／构建输入及真实文件／许可哈希放行；Windows 固定任务上下文派生 WASM，iOS 固定原版 release-sync asmjs，不按运行失败自动降级。客户端原生规则引擎单独按 `scripts/quickjs-native.json` 锁定源码与许可，通过 `native/JavaScript` 薄 C ABI 构建；该例外不放宽脚本包的 native/WASM 策略。其他 native/WASM 仍拒绝，不全局放行二进制或在打包中安装／修锁。
+- 通用运行器原生引擎仅按 `scripts/script-host-native.json` 的精确来源、版本、ABI／架构、补丁、根锁、构建输入及文件／许可哈希放行；用 `node scripts/quickjs/build-native.mjs` 构建，再由 `scripts/package-runtime.mjs --product aggregate --profile common-native --output <absolute-directory>` 复制受信产物。无 WASM／asm.js 回退；其他 native/WASM 仍拒绝，打包不安装／修锁。平台包装尚未迁移时，不将通用运行器通过表述为平台 App 通过。
+- 客户端影视规则引擎独立按 `scripts/quickjs-native.json` 锁定源码与许可，通过 `native/JavaScript` 薄 C ABI 构建；不属于 Node 脚本宿主闭包，也不放宽通用打包的二进制策略。
 - 长期测试验证现行行为与契约；删除／重构后的旧实现及引用清理检查只做当次验证，通过后移除，不堆入长期测试。功能、安全、取消与资源释放等有效回归保留。
 - 编译成功、测试替身和真实业务验证分别记录，不互相冒充；不为刷绿删除有效断言、隐藏失败或用空测试集代替验证。
 - 外部脚本由 `scripts/accept-sources.mjs` 按实际声明动作验收；未归因、宿主缺失能力、资源超限或清理失败不能因初始化成功而放行。报告只保留脱敏结构和固定分类，见 `docs/runtime/source-acceptance.md`。

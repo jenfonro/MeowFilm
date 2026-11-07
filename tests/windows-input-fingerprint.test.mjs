@@ -12,7 +12,7 @@ test('Windows input inventory covers shared packaging, locked configuration and 
     'scripts/quickjs-native.json', 'native/JavaScript/CMakeLists.txt',
     'native/JavaScript/meowfilm_js.c', 'native/JavaScript/quickjs/quickjs.c',
     'packages/film-rules/film-rules.js', 'LICENSES/quickjs-native-MIT.txt',
-    'scripts/quickjs/task-context.patch', 'scripts/quickjs/build.py',
+    'scripts/quickjs/task-context.patch', 'scripts/quickjs/memory-accounting.patch', 'scripts/quickjs/build.py',
     'packages/script-host/src/quickjs/emscripten-module.mjs',
     'packages/script-host/src/quickjs/emscripten-module.wasm',
     'apps/runtime/modules/cat-script.mjs',

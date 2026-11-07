@@ -47,6 +47,18 @@ function gate() {
   const promise = new Promise(yes => { resolve = yes; });
   return { promise, resolve };
 }
+function managementQueued(t, runtime, installationId) {
+  const queued = gate(), serial = runtime.serial;
+  const observed = t.mock.method(runtime, 'serial', function (id, body) {
+    const pending = serial.call(this, id, body);
+    if (id === installationId) {
+      observed.mock.restore();
+      queued.resolve();
+    }
+    return pending;
+  });
+  return queued.promise;
+}
 const waitingSource = url => `
   const http = require('http');
   module.exports.start = () => new Promise((resolve, reject) => {
@@ -56,6 +68,27 @@ const waitingSource = url => `
     });
     request.on('error', reject);
   });
+`;
+const managedSource = (url = null) => `
+  const http = require('http');
+  let server, options, count = 0;
+  module.exports.start = async config => {
+    options = config;
+    if (${JSON.stringify(url)}) await new Promise((resolve, reject) => {
+      const request = http.get(${JSON.stringify(url)}, response => {
+        response.on('end', resolve); response.resume();
+      });
+      request.on('error', reject);
+    });
+    server = http.createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify(request.url === '/config' || request.url === '/full-config'
+        ? { video: { sites: [{ key: 'default', name: 'Managed', api: '/api/default', actions: ['home'] }] } }
+        : { owner: options.id, count: ++count }));
+    });
+    await new Promise(resolve => server.listen(Number(process.env.PORT), '127.0.0.1', resolve));
+  };
+  module.exports.stop = () => server?.close();
 `;
 
 test('Cat management persists local identity and only successful changed content advances updatedAt',
@@ -343,6 +376,75 @@ test('Cat candidate activation hides uncommitted state and cannot overlap worker
     assert.deepEqual(await runtime.invoke(target('isolated')), { value: 'accepted update' });
   });
 
+test('Cat same-content update preempts a pending candidate and restores a callable owner without blocking B',
+  { timeout: 30000 }, async t => {
+    const entered = gate();
+    const { url } = await serverFor(t, () => entered.resolve());
+    let now = 1000;
+    const runtime = runtimeFor(t, { clock: () => now });
+    const originalSource = 'let count = 0; module.exports.home = () => ({ value: "S", count: ++count });';
+    const original = await runtime.install({ installationId: 'a', source: originalSource });
+    const owner = runtime.getSession('a'), oldWorker = owner.worker;
+    const b = await runtime.install({ installationId: 'b',
+      source: 'let count = 0; module.exports.home = () => ({ count: ++count });' });
+    const bOwner = runtime.getSession('b'), bWorker = bOwner.worker;
+    assert.deepEqual(await runtime.invoke(target('a')), { value: 'S', count: 1 });
+    assert.deepEqual(await runtime.invoke(target('b')), { count: 1 });
+    const workers = [owner], previousOwners = [];
+    const create = runtime.workerSession.bind(runtime);
+    runtime.workerSession = input => {
+      if (input.installationId !== 'a') return create(input);
+      previousOwners.push(workers.map(worker => ({
+        worker: worker.worker, live: worker.live, pending: worker.adapterTasks.size,
+      })));
+      const worker = create(input);
+      workers.push(worker);
+      return worker;
+    };
+
+    const candidateSource = waitingSource(url);
+    const replaced = assert.rejects(runtime.update({ installationId: 'a', source: candidateSource }),
+      { code: 'STALE_SESSION' });
+    await entered.promise;
+    const candidate = runtime.host.initializingSessions().find(session => session.installationId === 'a');
+    assert.ok(candidate?.worker);
+    const candidateWorker = candidate.worker, exited = once(candidateWorker, 'exit');
+    assert.equal(runtime.instance('a').state, 'starting');
+    assert.equal(owner.worker, null);
+    assert.equal(oldWorker.threadId, -1);
+    assert.deepEqual(await runtime.invoke(target('b')), { count: 2 });
+
+    now = 2000;
+    const restored = await runtime.update({ installationId: 'a', source: originalSource });
+    await replaced;
+    await exited;
+    assert.equal(candidateWorker.threadId, -1);
+    assert.equal(candidate.worker, null);
+    assert.equal(candidate.live, false);
+    assert.equal(candidate.adapterTasks.size, 0);
+    assert.deepEqual(previousOwners, [
+      [{ worker: null, live: false, pending: 0 }],
+      [{ worker: null, live: false, pending: 0 }, { worker: null, live: false, pending: 0 }],
+    ]);
+    assert.equal(restored.state, 'ready');
+    assert.equal(restored.enabled, true);
+    assert.ok(restored.generation > original.generation);
+    assert.equal(restored.sourceHash, original.sourceHash);
+    assert.equal(restored.importedAt, original.importedAt);
+    assert.equal(restored.updatedAt, original.updatedAt);
+    assert.equal(restored.updateState, 'unchanged');
+    assert.equal(restored.updateError, null);
+    assert.deepEqual(await runtime.invoke(target('a')), { value: 'S', count: 1 });
+    assert.deepEqual(await runtime.invoke(target('a')), { value: 'S', count: 2 });
+    assert.equal(readFileSync(join(runtime.dataRoot, 'sources', original.sourceHash + '.js'), 'utf8'),
+      originalSource);
+    assert.equal(existsSync(join(runtime.dataRoot, 'sources', digest(candidateSource) + '.js')), false);
+    assert.equal(runtime.getSession('b'), bOwner);
+    assert.equal(bOwner.worker, bWorker);
+    assert.equal(runtime.instance('b').generation, b.generation);
+    assert.deepEqual(await runtime.invoke(target('b')), { count: 3 });
+  });
+
 for (const operation of ['cancel', 'disable', 'uninstall', 'close']) {
   test(`Cat ${operation} during candidate startup stops the worker and keeps only accepted source recoverable`,
     { timeout: 30000 }, async t => {
@@ -426,10 +528,12 @@ for (const operation of ['disable', 'uninstall']) {
             throw fault('STORAGE_ERROR');
           return save(() => candidate);
         };
+        const queued = managementQueued(t, runtime, 'retained');
         const following = operation === 'disable'
           ? runtime.setEnabled('retained', false, { signal: controller.signal })
           : runtime.uninstall('retained', { signal: controller.signal });
         const rejected = assert.rejects(following, { code: failure === 'cancel' ? 'CANCELLED' : 'STORAGE_ERROR' });
+        await queued;
         if (failure === 'cancel') controller.abort();
         release.resolve();
         await Promise.all([updating, rejected]);
@@ -575,13 +679,16 @@ for (const operation of ['cancel', 'disable-cancel', 'uninstall-cancel',
             return save(() => next);
           };
           const controller = new AbortController();
+          const queued = managementQueued(t, runtime, 'restoring');
           following = followingOperation === 'disable'
             ? runtime.setEnabled('restoring', false, { signal: controller.signal })
             : runtime.uninstall('restoring', { signal: controller.signal });
           following.catch(() => {});
-          // Let the public request enter and queue behind rollback before
-          // cancelling it; it must not stop the already restoring generation.
-          await new Promise(resolve => setImmediate(resolve));
+          // Admission has cancelled the predecessor and reserved this transaction.
+          // Its independent recovery still owns the actual HTTP startup gate.
+          await queued;
+          assert.equal(recovering.live, true);
+          assert.ok(recovering.worker);
           if (outcome === 'cancel') controller.abort();
         }
         if (operation !== 'close') fixture.release();
@@ -650,6 +757,37 @@ test('Cat enable reconciles a disabled host even when the durable intent is alre
     assert.deepEqual(await runtime.invoke(target('intent')), { value: 'accepted' });
   });
 
+for (const operation of ['disable', 'refresh']) {
+  test(`Cat ${operation} reconciles an enabled host with unchanged disabled durable intent`,
+    { timeout: 30000 }, async t => {
+      const runtime = runtimeFor(t);
+      await runtime.install({ installationId: 'intent', source: source('accepted') });
+      await runtime.setEnabled('intent', false);
+      const before = disk(runtime);
+      await runtime.host.enable('intent');
+      assert.equal(runtime.host.get('intent').enabled, true);
+      assert.deepEqual(await runtime.host.invoke(target('intent')), { value: 'accepted' });
+      assert.equal(runtime.instance('intent').enabled, false);
+      const session = [...runtime.workers].find(worker => worker.live);
+      const worker = session.worker;
+      assert.ok(worker.threadId > 0);
+      if (operation === 'disable') {
+        const disabled = await runtime.setEnabled('intent', false);
+        assert.equal(disabled.enabled, false);
+        assert.equal(disabled.state, 'disabled');
+      } else assert.deepEqual(await runtime.refresh(), { applied: true, failures: [] });
+      assert.deepEqual(disk(runtime), before);
+      assert.equal(runtime.host.get('intent').enabled, false);
+      assert.equal(runtime.instance('intent').state, 'disabled');
+      assert.equal(worker.threadId, -1);
+      assert.equal(session.worker, null);
+      assert.equal(session.live, false);
+      await assert.rejects(runtime.invoke(target('intent')), { code: 'DISABLED' });
+      assert.equal((await runtime.setEnabled('intent', true)).state, 'ready');
+      assert.deepEqual(await runtime.invoke(target('intent')), { value: 'accepted' });
+    });
+}
+
 test('Cat failed settings commit restores source and old runtime; an already committed save is reconciled',
   { timeout: 30000 }, async t => {
     let now = 10;
@@ -686,6 +824,10 @@ test('Cat failed settings commit restores source and old runtime; an already com
     assert.deepEqual(await runtime.invoke(target('commit')), { value: 'committed' });
     assert.deepEqual(readdirSync(join(runtime.dataRoot, 'sources')), [digest(source('committed')) + '.js']);
     runtime.settings.save = save;
+    const committed = runtime.instance('commit'), committedOwner = runtime.getSession('commit');
+    assert.deepEqual(await runtime.refresh(), { applied: true, failures: [] });
+    assert.equal(runtime.instance('commit').generation, committed.generation);
+    assert.equal(runtime.getSession('commit'), committedOwner);
     await runtime.uninstall('commit');
     assert.deepEqual(readdirSync(join(runtime.dataRoot, 'sources')), []);
   });
@@ -737,4 +879,264 @@ test('Cat legacy settings migrate only real old fields; new metadata rejects par
     const current = disk(runtime);
     current.scripts[0].sourceType = 'builtin';
     assert.throws(() => validateCatSettings(current), { code: 'INVALID_ARGUMENT' });
+  });
+
+test('Cat accepted Buffer and syntax update failures retain the real owner and persist the update error',
+  { timeout: 30000 }, async t => {
+    const runtime = runtimeFor(t);
+    const installed = await runtime.install({ installationId: 'preflight',
+      source: 'let count = 0; module.exports.home = () => ({ count: ++count });' });
+    const owner = runtime.getSession('preflight');
+    assert.deepEqual(await runtime.invoke(target('preflight')), { count: 1 });
+    let count = 1;
+    for (const [source, code] of [
+      [Buffer.from([0xff]), 'SCRIPT_PROTOCOL_ERROR'],
+      [Buffer.from('\uFEFFmodule.exports = {};'), 'SCRIPT_PROTOCOL_ERROR'],
+      ['module.exports = { home( };', 'SCRIPT_EXCEPTION'],
+    ]) {
+      await assert.rejects(runtime.update({ installationId: 'preflight', source }), { code });
+      const current = runtime.instance('preflight');
+      assert.equal(current.state, 'ready');
+      assert.equal(current.generation, installed.generation);
+      assert.equal(current.sourceHash, installed.sourceHash);
+      assert.equal(current.updatedAt, null);
+      assert.equal(current.updateState, 'failed');
+      assert.equal(current.updateError, code);
+      assert.equal(runtime.getSession('preflight'), owner);
+      assert.deepEqual(await runtime.invoke(target('preflight')), { count: ++count });
+    }
+  });
+
+for (const outcome of ['failure', 'cancel', 'close']) {
+  test(`Cat first install ${outcome} exposes starting without publishing or retaining the candidate`,
+    { timeout: 30000 }, async t => {
+      const entered = gate(), disconnected = gate();
+      const { url } = await serverFor(t, (_request, response) => {
+        response.on('close', disconnected.resolve);
+        entered.resolve(response);
+      });
+      const runtime = runtimeFor(t);
+      const controller = new AbortController();
+      const pending = runtime.install({ installationId: 'first', source: waitingSource(url) },
+        { signal: controller.signal });
+      const rejected = assert.rejects(pending, { code: outcome === 'cancel' ? 'CANCELLED'
+        : outcome === 'close' ? 'HOST_CLOSED' : 'SCRIPT_EXCEPTION' });
+      const response = await entered.promise;
+      const candidate = runtime.host.initializingSessions()[0];
+      const starting = (await runtime.status()).instances[0];
+      assert.equal(starting.state, 'starting');
+      assert.equal(starting.sourceHash, null);
+      assert.deepEqual(starting.sites, []);
+      assert.deepEqual(disk(runtime).scripts, []);
+      assert.deepEqual(readdirSync(join(runtime.dataRoot, 'sources')), []);
+      if (outcome === 'cancel') controller.abort();
+      else if (outcome === 'close') await runtime.close();
+      else response.end('reject');
+      await rejected;
+      await disconnected.promise;
+      assert.equal(candidate.worker, null);
+      const remaining = outcome === 'close' ? runtimeFor(t, { dataRoot: runtime.dataRoot }) : runtime;
+      assert.deepEqual((await remaining.status()).instances, []);
+      assert.deepEqual(disk(runtime).scripts, []);
+      assert.deepEqual(readdirSync(join(runtime.dataRoot, 'sources')), []);
+      assert.equal(existsSync(join(runtime.dataRoot, 'volumes', 'first')), false);
+      await assert.rejects(remaining.setEnabled('first', false), { code: 'NOT_FOUND' });
+      assert.deepEqual(await remaining.uninstall('first'), { applied: true, failures: [] });
+      const next = await remaining.install({ installationId: 'first', source: source('accepted') });
+      controller.abort();
+      assert.equal(remaining.instance('first').generation, next.generation);
+      assert.deepEqual(await remaining.invoke(target('first')), { value: 'accepted' });
+    });
+}
+
+for (const phase of ['download', 'activation']) {
+  test(`Cat ${phase} permits independent management and preserves interleaved settings commits`,
+    { timeout: 30000 }, async t => {
+      const entered = gate(), release = gate();
+      let held = false;
+      const { url } = await serverFor(t, async (_request, response) => {
+        if (!held) { response.end(source('old-a')); return; }
+        entered.resolve(response);
+        await release.promise;
+        response.end(phase === 'download' ? source('new-a') : 'reject');
+      });
+      t.after(() => release.resolve());
+      const runtime = runtimeFor(t);
+      const a = phase === 'download'
+        ? await runtime.import({ installationId: 'a', name: 'A', sourceUrl: url })
+        : await runtime.install({ installationId: 'a', name: 'A', source: source('old-a'), config: { id: 'A' } });
+      const bSource = managedSource();
+      await runtime.install({ installationId: 'b', name: 'B', source: bSource, config: { id: 'B' } });
+      held = true;
+      const changing = phase === 'download'
+        ? runtime.update({ installationId: 'a' })
+        : runtime.install({ installationId: 'a', name: 'uncommitted A',
+          source: waitingSource(url), config: { id: 'candidate-A' } });
+      const settled = phase === 'download' ? changing : assert.rejects(changing, { code: 'SCRIPT_EXCEPTION' });
+      await entered.promise;
+      let done = false;
+      settled.then(() => { done = true; }, () => { done = true; });
+      const candidates = runtime.host.initializingSessions().filter(worker => worker.installationId === 'a');
+      if (phase === 'activation') {
+        assert.equal(candidates.length, 1);
+        assert.equal((await runtime.status()).instances.find(item => item.installationId === 'a').state, 'starting');
+      } else assert.deepEqual(await runtime.invoke(target('a')), { value: 'old-a' });
+
+      const edited = await runtime.edit({ installationId: 'b', name: 'B edited during A' });
+      const unchanged = await runtime.update({ installationId: 'b', source: bSource });
+      assert.equal(unchanged.generation, edited.generation);
+      const changed = await runtime.update({ installationId: 'b', source: bSource + '\n// accepted B update' });
+      const restarted = await runtime.restart('b');
+      assert.ok(restarted.generation > changed.generation);
+      const bOwner = runtime.getSession('b');
+      assert.deepEqual(await runtime.invoke(target('b')), { count: 1, owner: 'B' });
+      assert.equal(runtime.instance('b').generation, restarted.generation);
+      await runtime.install({ installationId: 'c', source: source('independent-c'), config: { id: 'C' } });
+      assert.equal(done, false, 'independent management must finish before A leaves its I/O barrier');
+      const before = disk(runtime).scripts.find(item => item.installationId === 'b');
+      assert.deepEqual(before.config, { id: 'B' });
+      assert.deepEqual(before.sites, restarted.sites);
+      release.resolve();
+      await settled;
+      assert.deepEqual(disk(runtime).scripts.find(item => item.installationId === 'b'), before);
+      assert.equal(runtime.getSession('b'), bOwner);
+      assert.equal(runtime.instance('b').generation, restarted.generation);
+      assert.deepEqual(await runtime.invoke(target('b')), { count: 2, owner: 'B' });
+      assert.deepEqual(await runtime.invoke(target('c')), { value: 'independent-c' });
+      assert.deepEqual(await runtime.invoke(target('a')), { value: phase === 'download' ? 'new-a' : 'old-a' });
+      if (phase === 'activation') {
+        assert.equal(candidates[0].worker, null);
+        assert.equal(runtime.instance('a').sourceHash, a.sourceHash);
+        assert.deepEqual(disk(runtime).scripts.find(item => item.installationId === 'a').config, { id: 'A' });
+      }
+    });
+}
+
+test('Cat settings CAS rejects an external same-installation edit without overwriting other installations',
+  { timeout: 30000 }, async t => {
+    const entered = gate(), release = gate();
+    const { url } = await serverFor(t, async (_request, response) => {
+      entered.resolve();
+      await release.promise;
+      response.end('continue');
+    });
+    t.after(() => release.resolve());
+    const runtime = runtimeFor(t);
+    const original = await runtime.install({ installationId: 'a', name: 'original', source: source('old-a') });
+    await runtime.install({ installationId: 'b', name: 'B', source: source('B') });
+    const candidateSource = managedSource(url);
+    const pending = runtime.update({ installationId: 'a', source: candidateSource });
+    const rejected = assert.rejects(pending, { code: 'STORAGE_CONFLICT' });
+    await entered.promise;
+    const candidate = runtime.host.initializingSessions().find(worker => worker.installationId === 'a');
+    const changed = disk(runtime);
+    changed.scripts.find(item => item.installationId === 'a').name = 'external edit';
+    writeFileSync(runtime.settings.path, JSON.stringify(changed));
+    await runtime.edit({ installationId: 'b', name: 'committed B' });
+    const b = disk(runtime).scripts.find(item => item.installationId === 'b');
+    release.resolve();
+    await rejected;
+    assert.equal(candidate.worker, null);
+    const after = disk(runtime);
+    assert.equal(after.scripts.find(item => item.installationId === 'a').name, 'external edit');
+    assert.equal(after.scripts.find(item => item.installationId === 'a').sourceHash, original.sourceHash);
+    assert.deepEqual(after.scripts.find(item => item.installationId === 'b'), b);
+    assert.deepEqual(await runtime.invoke(target('a')), { value: 'old-a' });
+    assert.deepEqual(await runtime.invoke(target('b')), { value: 'B' });
+    assert.equal(existsSync(join(runtime.dataRoot, 'sources', digest(candidateSource) + '.js')), false);
+  });
+
+test('Cat rejected replacement preflight cannot stop an initialization already owning the private volume',
+  { timeout: 30000 }, async t => {
+    for (const kind of ['encoding', 'syntax', 'download']) {
+      await t.test(kind, async t => {
+        const entered = gate(), release = gate(), downloaded = gate();
+        const { url } = await serverFor(t, async (request, response) => {
+          if (request.url === '/bad') {
+            response.writeHead(503);
+            response.end('unavailable', downloaded.resolve);
+            return;
+          }
+          entered.resolve();
+          await release.promise;
+          response.end('continue');
+        });
+        t.after(() => release.resolve());
+        const runtime = runtimeFor(t);
+        const original = await runtime.install({ installationId: 'a', source: managedSource(url),
+          config: { id: 'original' }, enabled: false });
+        const enabling = runtime.setEnabled('a', true);
+        await entered.promise;
+        const owner = runtime.host.initializingSessions()[0];
+        const pending = kind === 'download'
+          ? runtime.import({ installationId: 'a', name: 'unaccepted', sourceUrl: url + '/bad' })
+          : runtime.update({ installationId: 'a',
+            source: kind === 'encoding' ? Buffer.from([0xff]) : 'module.exports = { home( };' });
+        const rejected = assert.rejects(pending, { code: kind === 'download' ? 'HTTP_ERROR'
+          : kind === 'encoding' ? 'SCRIPT_PROTOCOL_ERROR' : 'SCRIPT_EXCEPTION' });
+        if (kind === 'download') await downloaded.promise;
+        // The earlier initializer remains live until its actual HTTP gate opens.
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(owner.live, true);
+        assert.ok(owner.worker);
+        assert.equal(runtime.instance('a').state, 'starting');
+        release.resolve();
+        const enabled = await enabling;
+        await rejected;
+        assert.equal(runtime.getSession('a'), owner);
+        assert.equal(runtime.instance('a').generation, enabled.generation);
+        assert.equal(runtime.instance('a').sourceHash, original.sourceHash);
+        assert.deepEqual(await runtime.invoke(target('a')), { owner: 'original', count: 1 });
+      });
+    }
+  });
+
+test('Cat replacement waits for real worker exit and adapter drain while another installation stays callable',
+  { timeout: 30000 }, async t => {
+    const entered = gate(), aborted = gate(), release = gate();
+    t.after(() => release.resolve({ statusCode: 200, headers: {}, body: 'released' }));
+    const runtime = runtimeFor(t, { network: input => {
+      entered.resolve(input);
+      input.signal.addEventListener('abort', aborted.resolve, { once: true });
+      return release.promise;
+    } });
+    await runtime.install({ installationId: 'a', source: `
+      module.exports.home = () => {
+        require('http').get('http://fixture.invalid/held', response => response.resume()).on('error', () => {});
+        return { started: true };
+      };
+    ` });
+    const b = await runtime.install({ installationId: 'b',
+      source: 'let count = 0; module.exports.home = () => ({ count: ++count });' });
+    const bOwner = runtime.getSession('b'), owner = runtime.getSession('a');
+    assert.deepEqual(await runtime.invoke(target('a')), { started: true });
+    const input = await entered.promise;
+    const exited = once(owner.worker, 'exit');
+    const creating = [], create = runtime.workerSession.bind(runtime);
+    runtime.workerSession = input => {
+      if (input.installationId === 'a') creating.push({
+        oldWorker: owner.worker, pending: owner.adapterTasks.size,
+      });
+      return create(input);
+    };
+    let done = false;
+    const replacement = runtime.update({ installationId: 'a', source: source('replacement') });
+    replacement.then(() => { done = true; }, () => { done = true; });
+    await aborted.promise;
+    await exited;
+    await owner.stopping;
+    assert.equal(input.signal.aborted, true);
+    assert.equal(owner.worker, null);
+    assert.equal(owner.adapterTasks.size, 1);
+    assert.equal(done, false);
+    assert.deepEqual(creating, []);
+    assert.equal(runtime.instance('a').state, 'starting');
+    assert.deepEqual(await runtime.invoke(target('b')), { count: 1 });
+    release.resolve({ statusCode: 200, headers: {}, body: 'released' });
+    await replacement;
+    assert.deepEqual(creating, [{ oldWorker: null, pending: 0 }]);
+    assert.equal(runtime.getSession('b'), bOwner);
+    assert.equal(runtime.instance('b').generation, b.generation);
+    assert.deepEqual(await runtime.invoke(target('b')), { count: 2 });
+    assert.deepEqual(await runtime.invoke(target('a')), { value: 'replacement' });
   });
