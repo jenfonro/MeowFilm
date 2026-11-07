@@ -10,7 +10,7 @@ public sealed record SystemPlaybackState(string? OwnerId, string? Identity, stri
     bool CanNext = false, bool CanPrevious = false, SystemPlaybackKind Kind = SystemPlaybackKind.Audio);
 public sealed record SystemPlaybackOwner(string Id,
     Func<CancellationToken, Task>? Next = null, Func<CancellationToken, Task>? Previous = null,
-    SystemPlaybackKind Kind = SystemPlaybackKind.Audio);
+    SystemPlaybackKind Kind = SystemPlaybackKind.Audio, Func<CancellationToken, Task>? Play = null);
 
 /// <summary>Product injects its one shared player, not a second playback engine.</summary>
 public interface ISystemPlayback : INotifyPropertyChanged

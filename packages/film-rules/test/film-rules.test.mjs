@@ -51,6 +51,36 @@ test('initialization seeds only empty groups; saving empty groups does not immed
   assert.equal(invoke({ operation: 'initialize', document: reopened.document }).changed, false);
 });
 
+test('empty episode matching keeps cleaned results for drafts and saved rules', () => {
+  const process = createProgram();
+  const rules = { ...empty(), episodeCleanRegexRules: [String.raw`^noise\s*`] };
+  const before = JSON.stringify(rules);
+  const request = { section: 'episode', text: 'noise E2' };
+  const draft = process({ operation: 'process', request, rules });
+  const saved = process({ operation: 'save', rules });
+  assert.deepEqual(saved.rules, rules);
+  assert.deepEqual(saved.document, rules);
+  const savedResult = process({ operation: 'process', request, rules: saved.rules });
+  const expected = {
+    section: 'episode', type: 'error', text: '无匹配规则', inputText: 'noise E2', processedText: 'E2',
+    matched: false, matchedRuleIndex: null, rewriteApplied: false, rewrittenText: null,
+    groupKey: '', trailingDigits: '', errors: [], previews: ['E2']
+  };
+  for (const result of [draft, savedResult]) {
+    assert.deepEqual(result, expected);
+    // FilmRuleResult.OutputText uses the same null-coalescing selection.
+    assert.equal(result.rewrittenText ?? result.processedText, 'E2');
+  }
+  const control = process({ operation: 'process', request, rules: {
+    ...rules, episodeRules: [{ pattern: 'E2', replace: '', flags: '' }]
+  } });
+  assert.equal(control.matched, true);
+  assert.equal(control.processedText, 'E2');
+  assert.equal(control.rewrittenText ?? control.processedText, 'E2');
+  assert.deepEqual(control.previews, ['E2']);
+  assert.equal(JSON.stringify(rules), before);
+});
+
 test('restoring one section saves edits in every other section', () => {
   const draft = {
     episodeCleanRegexRules: ['  custom clean  ', ''],
@@ -103,6 +133,28 @@ test('processing does not mutate rules and changed content invalidates cached ex
   assert.equal(invoke({ operation: 'process', request, rules }).text, '未命中');
   rules.movieRules[0] = { pattern: 'a', replace: 'z', flags: '' };
   assert.equal(invoke({ operation: 'process', request, rules }).rewrittenText, 'zaa');
+});
+
+test('saved clean rules follow page trim then Go TrimSpace then response decode, without changing drafts', () => {
+  const rows = ['\u0085foo\u0085', '\u0085', '\u0085\ufeffbar\ufeff\u0085',
+    'a\u0085b', '\ufeff\u0085baz\u0085\ufeff', '\u200bkeep\u200b'];
+  const draft = { ...empty(), episodeCleanRegexRules: rows, aggregateRegexRules: rows,
+    movieRules: [{ pattern: '\u0085movie\u0085', replace: '\u0085keep\u0085', flags: '' }] };
+  const before = JSON.stringify(draft);
+  const request = { section: 'search', text: 'foo' };
+  assert.equal(invoke({ operation: 'process', rules: draft, request }).processedText, 'foo');
+  const saved = invoke({ operation: 'save', rules: draft });
+  const documentRows = ['foo', '\ufeffbar\ufeff', 'a\u0085b', 'baz', '\u200bkeep\u200b'];
+  const decodedRows = ['foo', 'bar', 'a\u0085b', 'baz', '\u200bkeep\u200b'];
+  for (const group of ['episodeCleanRegexRules', 'aggregateRegexRules']) {
+    assert.deepEqual(saved.document[group], documentRows);
+    assert.deepEqual(saved.rules[group], decodedRows);
+    assert.deepEqual(invoke({ operation: 'initialize', document: saved.document }).rules[group], decodedRows);
+  }
+  assert.deepEqual(saved.rules.movieRules, draft.movieRules);
+  assert.equal(invoke({ operation: 'process', rules: saved.rules, request }).processedText, '');
+  assert.deepEqual(invoke({ operation: 'restore', section: 'movie', rules: draft }).document.aggregateRegexRules, documentRows);
+  assert.equal(JSON.stringify(draft), before);
 });
 
 test('stored matching rows decode the reference JSON and literal forms', () => {

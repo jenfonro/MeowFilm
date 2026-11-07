@@ -43,7 +43,8 @@ public sealed partial class NativePlayback
     }
 
     private async Task OpenReadCoreAsync(string ownerId, string identity, ReadLeaseMediaInput input,
-        string title, CancellationToken token)
+        string title, CancellationToken token, NativePlaybackContinuation? continuation = null,
+        CancellationToken preparationToken = default)
     {
         ThrowIfDisposed();
         if (_releaseFaulted) throw Error(PlaybackError.ReleaseFailed);
@@ -51,24 +52,37 @@ public sealed partial class NativePlayback
         token.ThrowIfCancellationRequested();
         input.Validate(); // Invalid capability/extent leaves existing playback intact.
         token.ThrowIfCancellationRequested();
-        var generation = BeginReplacement();
-        // The capability owner may replace an authorized cached input with a freshly
-        // resolved HTTP input. The lease still owns its bytes; this capability
-        // only preserves logical position and intent, never grants URL rights.
-        _continuationAuthority = CancellationTokenSource.CreateLinkedTokenSource(token);
-        _continuable = true;
-        Set(ref _pauseRequested, false, nameof(PauseRequested));
-        using var opening = CancellationTokenSource.CreateLinkedTokenSource(token);
+        long generation;
+        if (continuation is null)
+        {
+            generation = BeginReplacement();
+            _continuationAuthority = CancellationTokenSource.CreateLinkedTokenSource(token);
+            _continuable = true;
+            Set(ref _pauseRequested, false, nameof(PauseRequested));
+        }
+        else
+        {
+            _opening?.Cancel(); _session?.Invalidate();
+            generation = ++_generation;
+        }
+        using var opening = CancellationTokenSource.CreateLinkedTokenSource(token, preparationToken);
         _opening = opening;
         input.AttachOpening(opening.Token);
         bool transferred = false;
         string? failure = null;
+        Task? continuationReady = null;
         await _commands.WaitAsync();
         try
         {
             CheckReadRequest();
             await RetireAsync();
-            ClearState();
+            if (continuation is null) ClearState();
+            else
+            {
+                Set(ref _tracks, null, nameof(Tracks));
+                Set(ref _videoOutput, null, nameof(ObservedVideoOutput));
+                Set(ref _lastErrorCode, null, nameof(LastErrorCode));
+            }
             CheckReadRequest();
             await Task.Run(input.PrepareAsync); // No synchronous stream work on WPF's dispatcher.
             CheckReadRequest();
@@ -81,6 +95,13 @@ public sealed partial class NativePlayback
             try { created = await Task.Run(() => CreateSession(generation, null, null, input, input.Adaptive)); }
             catch { throw Error(PlaybackError.OpenFailed); }
             _session = created;
+            if (continuation is not null || _pauseRequested)
+            {
+                created.Media.AddOption(":start-paused");
+                created.ContinuationPosition = continuation?.PositionSeconds ?? 0;
+                created.ContinuationReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                continuationReady = created.ContinuationReady.Task;
+            }
             transferred = true;
             created.Attach(this);
             _view.SetPlayer(created.Player);
@@ -136,9 +157,20 @@ public sealed partial class NativePlayback
             throw Error(failure);
         }
 
+        if (continuationReady is not null)
+        {
+            try { await continuationReady.WaitAsync(TimeSpan.FromSeconds(12), opening.Token); }
+            catch (Exception error)
+            {
+                if (_session is { } session && session.Generation == generation)
+                    await FinishSessionAsync(session, error is PlaybackException known ? known.Code : PlaybackError.OpenFailed);
+                throw;
+            }
+        }
+
         void CheckReadRequest()
         {
-            CheckRequest(generation, token);
+            CheckRequest(generation, opening.Token);
             input.ThrowIfFaulted();
         }
     }

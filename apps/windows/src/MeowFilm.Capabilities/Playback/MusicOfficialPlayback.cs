@@ -97,6 +97,9 @@ public sealed partial class MusicCapability
     }
     private void OfficialAccountChanged(string platform)
     {
+        // Account notifications may arrive off-dispatcher. Fence the selection snapshot
+        // even when a script is playing, so its next explicit search uses new authority.
+        Interlocked.Increment(ref selectionSourcesRevision);
         // Automatic preload may currently be planning any official platform,
         // not only the active recording. Retire the whole speculative owner at
         // invalidation time so no stale plan can start a transfer afterward.
@@ -106,13 +109,16 @@ public sealed partial class MusicCapability
             CancelPendingMedia(state, "AUTH_REQUIRED");
         if (state?.Media is null || state.Media.Target is { Official: true } active && active.Platform == platform)
             Interlocked.Increment(ref officialAccountEpoch);
-        if (state?.Media?.Target is not { Official: true } target || target.Platform != platform) return;
+        bool revokeActive = state?.Media?.Target is { Official: true } target && target.Platform == platform;
         // Fence at notification time, before dispatching UI cleanup.
-        try { state.Access.Cancel(); } catch (ObjectDisposedException) { }
+        if (revokeActive)
+            try { state!.Access.Cancel(); } catch (ObjectDisposedException) { }
         if (!Presentation.Dispatcher.HasShutdownStarted)
             _ = Presentation.Dispatcher.InvokeAsync(() =>
             {
-                if (!ReferenceEquals(musicRecovery, state)) return;
+                if (stopping) return;
+                Changed(nameof(CanLoadMoreSources));
+                if (!revokeActive || state is null || !ReferenceEquals(musicRecovery, state)) return;
                 TrackMusicRecovery(StopRevoked());
                 async Task StopRevoked()
                 {

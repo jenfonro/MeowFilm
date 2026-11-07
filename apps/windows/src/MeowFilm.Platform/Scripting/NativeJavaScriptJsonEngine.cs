@@ -106,23 +106,33 @@ public sealed class NativeJavaScriptJsonEngine : IJavaScriptJsonEngine
                     Marshal.Copy(output, bytes, 0, bytes.Length);
                     using var document = JsonDocument.Parse(bytes);
                     ThrowIfCancelled();
-                    work.Completion.TrySetResult(document.RootElement.Clone());
+                    var result = document.RootElement.Clone();
+                    FreeOutput();
+                    work.Completion.TrySetResult(result);
                 }
                 catch (OperationCanceledException)
                 {
-                    work.Completion.TrySetCanceled(current.IsCancellationRequested ? current : lifetime.Token);
                     Reset();
+                    FreeOutput();
+                    work.Completion.TrySetCanceled(current.IsCancellationRequested ? current : lifetime.Token);
                 }
                 catch (Exception error)
                 {
+                    Reset();
+                    FreeOutput();
                     work.Completion.TrySetException(error is JavaScriptEngineException ? error :
                         new JavaScriptEngineException(error is DllNotFoundException or EntryPointNotFoundException
                             or BadImageFormatException ? "ENGINE_UNAVAILABLE" : "EXECUTION_FAILED"));
-                    Reset();
                 }
                 finally
                 {
+                    FreeOutput();
+                }
+
+                void FreeOutput()
+                {
                     if (output != 0) Native.Free(output);
+                    output = 0;
                 }
             }
         }

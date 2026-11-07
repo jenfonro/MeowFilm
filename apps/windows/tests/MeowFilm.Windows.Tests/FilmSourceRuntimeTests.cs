@@ -19,6 +19,18 @@ public static class FilmSourceRuntimeTests
             ProbeAndReimport);
         yield return new("native-film-runtime: cold start restores enabled cats and four options without executing disabled scripts",
             ColdStartAndOptions);
+        yield return new("native-film-runtime: cancelled update observes rollback and the next probe needs no refresh",
+            CancelledUpdate);
+        yield return new("native-film-runtime: default RPC timeout observes rollback and the next probe needs no refresh",
+            TimedOutUpdate);
+        yield return new("native-film-runtime: a committed update followed by local storage failure never exposes a retired generation",
+            UpdateStorageFailure);
+        yield return new("native-film-runtime: detail script errors retain real search fallback and durable results",
+            DetailErrorFallback);
+        yield return new("native-film-runtime: an in-flight Worker memory failure preserves detection until explicit refresh",
+            DetectionMemoryFailure);
+        yield return new("native-film-runtime: failed navigation roots cannot dispatch children or publish valid detection",
+            FailedNavigationRoot);
     }
 
     private static async Task ProbeAndReimport()
@@ -26,7 +38,7 @@ public static class FilmSourceRuntimeTests
         string root = NewData();
         var key = new FilmSourceKey("probe-cat", SiteKey);
         string original = Script("original"), updated = Script("updated");
-        await WithServiceAsync(root, async (service, token) =>
+        await WithServiceAsync(root, async (service, _, token) =>
         {
             await service.StartAsync(token);
             Check(service.Cats.Count == 0 && service.Videos.Count == 0, "dedicated data root starts empty");
@@ -54,7 +66,7 @@ public static class FilmSourceRuntimeTests
             Check(service.Videos.Count == 0, "status synchronization preserves the deletion");
         });
 
-        await WithServiceAsync(root, async (service, token) =>
+        await WithServiceAsync(root, async (service, _, token) =>
         {
             await service.InitializeAsync(token);
             Check(service.Cats.Single().InstallationId == key.InstallationId && service.Videos.Count == 0,
@@ -88,7 +100,7 @@ public static class FilmSourceRuntimeTests
         var disabledOptions = new FilmVideoOptions(true, false, true, true);
         string source = Script("lifecycle", auditStarts: true);
         long disabledCheckedAt = 0;
-        await WithServiceAsync(root, async (service, token) =>
+        await WithServiceAsync(root, async (service, _, token) =>
         {
             await service.StartAsync(token);
             await service.ImportLocalAsync("启用猫", source, enabled.InstallationId, token);
@@ -118,7 +130,7 @@ public static class FilmSourceRuntimeTests
             await ExpectCode("DISABLED", () => service.RestartCatAsync(disabled.InstallationId, token));
         });
 
-        await WithServiceAsync(root, async (service, token) =>
+        await WithServiceAsync(root, async (service, _, token) =>
         {
             await service.InitializeAsync(token);
             AssertOptions(service, enabled, enabledOptions, disabled, disabledOptions);
@@ -147,6 +159,310 @@ public static class FilmSourceRuntimeTests
             AssertOptions(service, enabled, enabledOptions, disabled, disabledOptions);
         });
     }
+
+    private static async Task CancelledUpdate()
+    {
+        await WithServiceAsync(NewData(), async (service, runtime, token) =>
+        {
+            const string id = "cancelled-update";
+            var key = new FilmSourceKey(id, SiteKey);
+            await service.StartAsync(token);
+            var original = await service.ImportLocalAsync("可恢复猫源", Script("accepted"), id, token);
+            AssertDetection(await service.DetectAsync(key, token));
+            var options = new FilmVideoOptions(false, false, false, true);
+            await service.SaveVideoOptionsAsync(key, options, cancellationToken: token);
+            using var cancel = CancellationTokenSource.CreateLinkedTokenSource(token);
+            var update = service.UpdateCatAsync(id, "module.exports.start = () => new Promise(() => {});", cancel.Token);
+            try
+            {
+                // Observe the actual candidate generation, not a guessed delay.
+                while (true)
+                {
+                    var status = await runtime.CallAsync("cat.script.status", new { }, token);
+                    using var decoded = JsonDocument.Parse(status.GetProperty("data").GetString()!);
+                    var cat = decoded.RootElement.GetProperty("instances")[0];
+                    if (cat.GetProperty("state").GetString() == "starting" &&
+                        cat.GetProperty("generation").GetInt64() > original.Generation) break;
+                    Check(!update.IsCompleted, "candidate must still be pending before cancellation");
+                    await Task.Delay(20, token);
+                }
+                cancel.Cancel();
+                try { await update; throw new InvalidOperationException("Expected cancelled update"); }
+                catch (OperationCanceledException) { }
+                var recovered = service.Cats.Single();
+                Check(recovered.CanDetect && recovered.Generation > original.Generation &&
+                    recovered.SourceHash == original.SourceHash && recovered.ModifiedAt == original.ModifiedAt &&
+                    recovered.UpdateState == "failed" && recovered.UpdateError == "CANCELLED",
+                    "service observes actual rollback before returning cancellation");
+                Check(Video(service, key).Options == options, "cancellation preserves all local switches");
+                AssertDetection(await service.DetectAsync(key, token));
+            }
+            finally { cancel.Cancel(); }
+        });
+    }
+
+    private static async Task TimedOutUpdate()
+    {
+        await WithServiceAsync(NewData(), async (service, runtime, token) =>
+        {
+            const string id = "timed-out-update";
+            var key = new FilmSourceKey(id, SiteKey);
+            await service.StartAsync(token);
+            var original = await service.ImportLocalAsync("超时恢复猫源", Script("accepted"), id, token);
+            AssertDetection(await service.DetectAsync(key, token));
+            var options = new FilmVideoOptions(false, false, false, true);
+            await service.SaveVideoOptionsAsync(key, options, cancellationToken: token);
+            var elapsed = Stopwatch.StartNew();
+            // Use NodeRuntime's real default RPC deadline; no synthetic timeout or manual cancellation.
+            var update = service.UpdateCatAsync(id, "module.exports.start = () => new Promise(() => {});", token);
+            while (true)
+            {
+                var status = await runtime.CallAsync("cat.script.status", new { }, token);
+                using var decoded = JsonDocument.Parse(status.GetProperty("data").GetString()!);
+                var cat = decoded.RootElement.GetProperty("instances")[0];
+                if (cat.GetProperty("state").GetString() == "starting" &&
+                    cat.GetProperty("generation").GetInt64() > original.Generation) break;
+                Check(!update.IsCompleted, "candidate must be pending before its default RPC timeout");
+                await Task.Delay(20, token);
+            }
+            try { await update; throw new InvalidOperationException("Expected RPC timeout"); }
+            catch (BridgeException error) { Check(error.Code == "TIMEOUT", "the caller retains BridgeException(TIMEOUT)"); }
+            Check(!token.IsCancellationRequested, "the test deadline did not cause cancellation");
+            var recovered = service.Cats.Single();
+            Check(recovered.CanDetect && recovered.Generation > original.Generation &&
+                recovered.SourceHash == original.SourceHash && recovered.ModifiedAt == original.ModifiedAt &&
+                recovered.UpdateState == "failed" && recovered.UpdateError == "CANCELLED" &&
+                service.RuntimeError is null, "owner observes Node rollback before returning the original timeout");
+            Check(Video(service, key).Options == options, "RPC timeout preserves all local switches");
+            AssertSite(Video(service, key), "accepted");
+            AssertDetection(await service.DetectAsync(key, token));
+            Console.WriteLine($"RPC_TIMEOUT_ROLLBACK elapsedMs={elapsed.ElapsedMilliseconds}; " +
+                $"generation={original.Generation}->{recovered.Generation}; stages=home,category,detail,play,search; refresh=false");
+        });
+    }
+
+    private static async Task UpdateStorageFailure()
+    {
+        FailNextWriteStore? faults = null;
+        await WithServiceAsync(NewData(), async (service, runtime, token) =>
+        {
+            const string id = "storage-update";
+            var key = new FilmSourceKey(id, SiteKey);
+            await service.StartAsync(token);
+            var original = await service.ImportLocalAsync("存储恢复猫源", Script("accepted"), id, token);
+            AssertDetection(await service.DetectAsync(key, token));
+            var options = new FilmVideoOptions(false, false, false, true);
+            await service.SaveVideoOptionsAsync(key, options, order: 500, cancellationToken: token);
+            faults!.FailNext = true;
+            try
+            {
+                await service.UpdateCatAsync(id, Script("updated"), token);
+                throw new InvalidOperationException("Expected storage failure");
+            }
+            catch (DocumentStoreException error)
+            {
+                Check(ReferenceEquals(error, faults.Failure), "the original local storage error survives status coordination");
+            }
+            var current = service.Cats.Single();
+            var reply = await runtime.CallAsync("cat.script.status", new { }, token);
+            Check(reply.GetProperty("ok").GetBoolean(), "real Node status succeeds after the committed update");
+            using var decoded = JsonDocument.Parse(reply.GetProperty("data").GetString()!);
+            var actual = decoded.RootElement.GetProperty("instances").EnumerateArray()
+                .Single(cat => cat.GetProperty("installationId").GetString() == id);
+            Check(actual.GetProperty("state").GetString() == "ready" &&
+                actual.GetProperty("generation").GetInt64() > original.Generation &&
+                actual.GetProperty("sourceHash").GetString() != original.SourceHash,
+                "the write fault happened after Node committed a working new version");
+            Check(current.CanDetect && current.Generation == actual.GetProperty("generation").GetInt64() &&
+                current.SourceHash == actual.GetProperty("sourceHash").GetString() && service.RuntimeError is null,
+                "the public snapshot never advertises a retired generation after the storage error");
+            Check(Video(service, key).Options == options && Video(service, key).Order == 500,
+                "status coordination preserves the four committed switches and ordering");
+            AssertSite(Video(service, key), "updated");
+            AssertDetection(await service.DetectAsync(key, token));
+            await service.RefreshAsync(token);
+            AssertDetection(await service.DetectAsync(key, token));
+            Check(faults.Failures == 1, "exactly one write-before-forward failure was injected");
+            Console.WriteLine($"LOCAL_STORAGE_UPDATE generation={original.Generation}->{current.Generation}; " +
+                "injected=1; error=Storage; staleReady=false; stages=home,category,detail,play,search; nextProbeRefresh=false");
+        }, inner => faults = new FailNextWriteStore(inner));
+    }
+
+    private static async Task DetailErrorFallback()
+    {
+        foreach (bool withError in new[] { true, false })
+        {
+            string root = NewData();
+            IDocumentStore? documents = null;
+            await WithServiceAsync(root, async (service, _, token) =>
+            {
+                const string id = "detail-fallback";
+                var key = new FilmSourceKey(id, "fallback");
+                await service.StartAsync(token);
+                await service.ImportLocalAsync("详情回退猫源", DetailFallbackScript(withError), id, token);
+                Check(ProbeEvents(root, id).Length == 0, "discovery does not probe business actions");
+                var options = new FilmVideoOptions(false, false, false, true);
+                await service.SaveVideoOptionsAsync(key, options, order: 500, cancellationToken: token);
+                var result = await service.DetectAsync(key, token);
+                var events = ProbeEvents(root, id);
+                Check(ProbeOperations(events).SequenceEqual(["home", "category", "detail", "search", "detail", "play"]),
+                    "HTTP200 empty detail with or without a script error follows real search/detail/play");
+                var firstDetail = events.First(value => value.GetProperty("kind").GetString() == "response" &&
+                    value.GetProperty("operation").GetString() == "detail");
+                Check(firstDetail.GetProperty("statusCode").GetInt32() == 200 &&
+                    firstDetail.GetProperty("value").GetProperty("list").GetArrayLength() == 0 &&
+                    firstDetail.GetProperty("value").TryGetProperty("error", out var message) == withError &&
+                    (!withError || message.GetString() == "分类详情原始错误"),
+                    "the guest returns the fixed empty-detail response and the control only removes error");
+                Check(result is { Result: "valid", PlaybackResolved: true, MediaPlaybackVerified: false } &&
+                    result.Steps.Any(step => step.Operation == "detail" && step.State == "failed" &&
+                        step.Error == "分类详情原始错误") == withError,
+                    "fallback is valid while retaining the original failed detail stage");
+                var stored = await documents!.ReadAsync(FilmSourceService.DocumentNamespace, token);
+                using var parsed = JsonDocument.Parse(stored.Data!);
+                var durable = parsed.RootElement.GetProperty("videos").EnumerateArray().Single()
+                    .GetProperty("detection").Deserialize<FilmSourceDetection>(new JsonSerializerOptions(JsonSerializerDefaults.Web));
+                Check(SameDetection(result, durable) && SameDetection(result, Video(service, key).Detection) &&
+                    Video(service, key).Options == options && Video(service, key).Order == 500,
+                    "the real local document stores the same detection without changing saved user options");
+                Console.WriteLine($"DETAIL_ERROR_FALLBACK error={withError}; result={result.Result}; " +
+                    "stages=home,category,detail,search,detail,play; mediaPlaybackVerified=false; durable=true");
+            }, store => { documents = store; return store; });
+        }
+    }
+
+    private static async Task FailedNavigationRoot()
+    {
+        foreach (bool failed in new[] { true, false })
+        {
+            string root = NewData();
+            IDocumentStore? documents = null;
+            await WithServiceAsync(root, async (service, _, token) =>
+            {
+                const string id = "navigation-root";
+                var key = new FilmSourceKey(id, "navigation");
+                await service.StartAsync(token);
+                await service.ImportLocalAsync("导航根错误猫源", NavigationRootScript(failed), id, token);
+                Check(ProbeEvents(root, id).Length == 0, "discovery does not dispatch navigation or play");
+                var options = new FilmVideoOptions(false, false, false, true);
+                await service.SaveVideoOptionsAsync(key, options, order: 500, cancellationToken: token);
+                var result = await service.DetectAsync(key, token);
+                string[] expected = failed ? ["home", "category", "detail", "search"]
+                    : ["home", "category", "detail", "detail", "play", "search"];
+                var events = ProbeEvents(root, id);
+                Check(ProbeOperations(events).SequenceEqual(expected),
+                    "the failed navigation root skips child detail and play but still reaches search");
+                var rootResponse = events.First(value => value.GetProperty("kind").GetString() == "response" &&
+                    value.GetProperty("operation").GetString() == "detail");
+                Check(rootResponse.GetProperty("statusCode").GetInt32() == 200 &&
+                    rootResponse.GetProperty("value").TryGetProperty("ok", out var ok) == failed &&
+                    (!failed || ok.ValueKind == JsonValueKind.False),
+                    "the control removes only the root ok:false from a successful HTTP response");
+                Check(result.Result == (failed ? "invalid" : "valid") && result.PlaybackResolved == !failed &&
+                    !result.MediaPlaybackVerified && result.Steps.Any(step => step.Operation == "detail" &&
+                        step.State == "failed" && step.Error == "根导航失败") == failed,
+                    "failed root navigation cannot be made valid by a reachable child");
+                var stored = await documents!.ReadAsync(FilmSourceService.DocumentNamespace, token);
+                using var parsed = JsonDocument.Parse(stored.Data!);
+                var durable = parsed.RootElement.GetProperty("videos").EnumerateArray().Single()
+                    .GetProperty("detection").Deserialize<FilmSourceDetection>(new JsonSerializerOptions(JsonSerializerDefaults.Web));
+                Check(SameDetection(result, durable) && SameDetection(result, Video(service, key).Detection) &&
+                    Video(service, key).Options == options && Video(service, key).Order == 500,
+                    "root classification is durable and leaves all user settings unchanged");
+                Console.WriteLine($"NAVIGATION_ROOT_FAILURE failed={failed}; result={result.Result}; " +
+                    $"stages={string.Join(',', expected)}; durable=true; optionsUnchanged=true");
+            }, store => { documents = store; return store; });
+        }
+    }
+
+    private static async Task DetectionMemoryFailure()
+    {
+        string root = NewData();
+        IDocumentStore? documents = null;
+        await WithServiceAsync(root, async (service, runtime, token) =>
+        {
+            const string id = "detection-memory";
+            var key = new FilmSourceKey(id, "memory");
+            string marker = Path.Combine(root, "script-runtime", "volumes", id, "h02-search-count");
+            await service.StartAsync(token);
+            var installed = await service.ImportLocalAsync("内存失效猫源", MemoryFailureScript, id, token);
+            var baseline = await service.DetectAsync(key, token);
+            var saved = await documents!.ReadAsync(FilmSourceService.DocumentNamespace, token);
+            var initialEvents = ProbeEvents(root, id);
+            Check(baseline is { Result: "valid", PlaybackResolved: true, MediaPlaybackVerified: false } &&
+                ProbeOperations(initialEvents).SequenceEqual(["home", "category", "detail", "play", "search"]) &&
+                File.ReadAllText(marker) == "1", "the original generation produces a complete valid baseline");
+
+            FilmSourceDetection? returned = null;
+            OperationCanceledException? failure = null;
+            try { returned = await service.DetectAsync(key, token); }
+            catch (OperationCanceledException error) { failure = error; }
+            // Do not refresh or issue management while observing the failed call.
+            var immediate = Video(service, key).Detection;
+            var after = await documents.ReadAsync(FilmSourceService.DocumentNamespace, token);
+            var failedEvents = ProbeEvents(root, id).Skip(initialEvents.Length).ToArray();
+            Check(!token.IsCancellationRequested &&
+                failedEvents.Count(value => value.GetProperty("kind").GetString() == "allocation.attempt") == 1 &&
+                failedEvents.All(value => value.GetProperty("kind").GetString() != "allocation.unexpected-success") &&
+                File.ReadAllText(marker) == "2" &&
+                ProbeOperations(failedEvents).SequenceEqual(["home", "category", "detail", "play", "search"]),
+                "the uncancelled second probe reaches exactly one real bounded memory failure after play");
+
+            using var observation = CancellationTokenSource.CreateLinkedTokenSource(token);
+            observation.CancelAfter(TimeSpan.FromSeconds(30));
+            JsonElement actual;
+            do
+            {
+                var reply = await runtime.CallAsync("cat.script.status", new { }, observation.Token);
+                Check(reply.GetProperty("ok").GetBoolean(), "direct read-only Cat status succeeds");
+                using var decoded = JsonDocument.Parse(reply.GetProperty("data").GetString()!);
+                actual = decoded.RootElement.GetProperty("instances").EnumerateArray()
+                    .Single(cat => cat.GetProperty("installationId").GetString() == id).Clone();
+                if (actual.GetProperty("state").GetString() == "ready" &&
+                    actual.GetProperty("generation").GetInt64() > installed.Generation) break;
+                await Task.Delay(20, observation.Token);
+            } while (true);
+            Check(actual.GetProperty("sourceHash").GetString() == installed.SourceHash &&
+                service.Cats.Single().Generation == installed.Generation &&
+                SameDetection(immediate, Video(service, key).Detection),
+                "same-source autonomous restart does not synchronize or alter the client owner");
+
+            await service.RefreshAsync(token);
+            int recoveryStart = ProbeEvents(root, id).Length;
+            var recovered = await service.DetectAsync(key, token);
+            var recoveryDocument = await documents.ReadAsync(FilmSourceService.DocumentNamespace, token);
+            using var recoveryJson = JsonDocument.Parse(recoveryDocument.Data!);
+            var recoveryDetection = recoveryJson.RootElement.GetProperty("videos").EnumerateArray().Single()
+                .GetProperty("detection").Deserialize<FilmSourceDetection>(new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            Check(service.Cats.Single().Generation == actual.GetProperty("generation").GetInt64() &&
+                recovered is { Result: "valid", PlaybackResolved: true, MediaPlaybackVerified: false } &&
+                File.ReadAllText(marker) == "3" &&
+                ProbeOperations(ProbeEvents(root, id).Skip(recoveryStart))
+                    .SequenceEqual(["home", "category", "detail", "play", "search"]) &&
+                SameDetection(recovered, recoveryDetection),
+                "explicit refresh restores valid five-stage detection on the new generation");
+            Check(returned is null && failure?.InnerException is FilmSourceException { Code: "STALE_SESSION" } &&
+                !token.IsCancellationRequested, "retired Worker invocation fails as lifecycle cancellation, not a new search_error");
+            Check(SameDetection(baseline, immediate) && after.Fingerprint == saved.Fingerprint &&
+                after.Data!.SequenceEqual(saved.Data!), "the retired generation cannot replace the in-memory or durable baseline");
+            Console.WriteLine($"DETECTION_MEMORY_FAILURE generation={installed.Generation}->{service.Cats.Single().Generation}; " +
+                "allocation=536870912; callerCancelled=false; failure=STALE_SESSION; baselinePreserved=true; refreshRecovery=valid");
+        }, store => { documents = store; return store; });
+    }
+
+    private static JsonElement[] ProbeEvents(string root, string id)
+    {
+        string file = Path.Combine(root, "script-runtime", "volumes", id, "fixture-audit.jsonl");
+        return File.Exists(file) ? File.ReadAllLines(file).Where(line => line.Length > 0)
+            .Select(line => JsonSerializer.Deserialize<JsonElement>(line)).ToArray() : [];
+    }
+
+    private static IEnumerable<string?> ProbeOperations(IEnumerable<JsonElement> events) =>
+        events.Where(value => value.GetProperty("kind").GetString() == "request")
+            .Select(value => value.GetProperty("operation").GetString());
+
+    private static bool SameDetection(FilmSourceDetection? expected, FilmSourceDetection? actual) =>
+        JsonElement.DeepEquals(JsonSerializer.SerializeToElement(expected), JsonSerializer.SerializeToElement(actual));
 
     private static FilmVideoSource Video(FilmSourceService service, FilmSourceKey key) =>
         service.Videos.Single(video => video.Key == key);
@@ -200,7 +516,8 @@ public static class FilmSourceRuntimeTests
         return root;
     }
 
-    private static async Task WithServiceAsync(string root, Func<FilmSourceService, CancellationToken, Task> run)
+    private static async Task WithServiceAsync(string root, Func<FilmSourceService, NodeRuntime, CancellationToken, Task> run,
+        Func<IDocumentStore, IDocumentStore>? decorateStore = null)
     {
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
             ?? throw new InvalidOperationException("Run scripts/windows/test.ps1; prepare-test-bundles aggregate inputs are required.");
@@ -216,8 +533,8 @@ public static class FilmSourceRuntimeTests
         {
             Check(runtime.IsConnected && !process.HasExited, "the aggregate Node process is connected");
             await using var store = new LocalDocumentStore(Path.Combine(root, "documents"), [FilmSourceService.DocumentNamespace]);
-            await using var service = new FilmSourceService(runtime, store);
-            await run(service, deadline.Token);
+            await using var service = new FilmSourceService(runtime, decorateStore?.Invoke(store) ?? store);
+            await run(service, runtime, deadline.Token);
         }
         finally
         {
@@ -227,6 +544,184 @@ public static class FilmSourceRuntimeTests
             Check(process.HasExited && !runtime.IsConnected, "shutdown closes the bridge and actually exits the owned Node process");
         }
     }
+
+    private sealed class FailNextWriteStore(IDocumentStore inner) : IDocumentStore
+    {
+        internal readonly DocumentStoreException Failure = new(DocumentStoreError.Storage);
+        internal bool FailNext;
+        internal int Failures;
+        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default) =>
+            inner.ReadAsync(documentNamespace, cancellationToken);
+        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
+            DocumentFingerprint expected, CancellationToken cancellationToken = default)
+        {
+            if (FailNext) { FailNext = false; Failures++; throw Failure; }
+            return inner.WriteAsync(documentNamespace, data, expected, cancellationToken);
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask; // The fixture owns the real store.
+    }
+
+    // The only control difference is removal of error from the first HTTP200 detail.
+    private static string DetailFallbackScript(bool withError) => $$"""
+        const http = require('http');
+        const fs = require('fs');
+        const API = '/api/fallback';
+        const firstDetail = {{(withError ? """{"list":[],"error":"分类详情原始错误"}""" : """{"list":[]}""")}};
+        let server;
+        function audit(value) {
+          fs.appendFileSync('/fixture-audit.jsonl', JSON.stringify(value) + '\n');
+        }
+        module.exports.start = () => {
+          server = http.createServer((request, response) => {
+            const url = new URL(request.url, 'http://127.0.0.1');
+            const reply = (operation, value) => {
+              audit({ kind: 'response', operation, statusCode: response.statusCode, value });
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify(value));
+            };
+            if (url.pathname === '/full-config' || url.pathname === '/config') {
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify({ video: { sites: [{
+                key: 'fallback', name: 'Fallback', api: API,
+                actions: ['home', 'category', 'detail', 'play', 'search']
+              }] } }));
+              return;
+            }
+            if (!url.pathname.startsWith(API + '/')) {
+              response.statusCode = 404;
+              response.end();
+              return;
+            }
+            const operation = url.pathname.slice(API.length + 1);
+            const chunks = [];
+            request.on('data', chunk => chunks.push(Buffer.from(chunk)));
+            request.once('end', () => {
+              const text = Buffer.concat(chunks).toString('utf8');
+              const input = request.method === 'GET'
+                ? Object.fromEntries(url.searchParams) : text ? JSON.parse(text) : {};
+              audit({ kind: 'request', operation, method: request.method, input });
+              if (operation === 'home')
+                return reply(operation, { class: [{ type_id: 'movies', type_name: 'Movies' }] });
+              if (operation === 'category')
+                return reply(operation, { list: [{ vod_id: 'first' }] });
+              if (operation === 'detail' && input.id === 'first')
+                return reply(operation, firstDetail);
+              if (operation === 'search')
+                return reply(operation, { list: [{ vod_id: 'searched' }] });
+              if (operation === 'detail' && input.id === 'searched')
+                return reply(operation, { list: [{
+                  vod_id: 'searched', vod_play_from: 'direct', vod_play_url: '1$working-id'
+                }] });
+              if (operation === 'play')
+                return reply(operation, { parse: 0, url: 'https://media.invalid/video.mp4' });
+              response.statusCode = 400;
+              return reply(operation, { error: 'unexpected controlled input' });
+            });
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1');
+        };
+        module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+        """;
+
+    private static string NavigationRootScript(bool failed) => $$"""
+        const http = require('http'), fs = require('fs');
+        const root = {
+          {{(failed ? "ok: false," : "")}} msg: '根导航失败',
+          list: [{ vod_id: 'child', vod_navigation: { action: 'detail', payload: { id: 'child' } } }]
+        };
+        let server;
+        const audit = value => fs.appendFileSync('/fixture-audit.jsonl', JSON.stringify(value) + '\n');
+        module.exports.start = () => {
+          server = http.createServer((request, response) => {
+            const path = request.url.split('?')[0];
+            response.setHeader('content-type', 'application/json');
+            if (path === '/config' || path === '/full-config')
+              return response.end(JSON.stringify({ video: { sites: [{
+                key: 'navigation', api: '/api/navigation', actions: ['home', 'category', 'detail', 'play', 'search']
+              }] } }));
+            const operation = path.slice('/api/navigation/'.length), chunks = [];
+            request.on('data', chunk => chunks.push(Buffer.from(chunk)));
+            request.once('end', () => {
+              const text = Buffer.concat(chunks).toString('utf8'), input = text ? JSON.parse(text) : {};
+              audit({ kind: 'request', operation, input });
+              const value = operation === 'home' ? { class: [{ type_id: 'movies' }] } :
+                operation === 'category' ? { list: [{ vod_id: 'root' }] } :
+                operation === 'detail' && input.id === 'root' ? root :
+                operation === 'detail' && input.id === 'child' ? { list: [{
+                  vod_id: 'leaf', vod_play_from: 'direct', vod_play_url: '1$working-id'
+                }] } :
+                operation === 'play' ? { url: 'https://media.invalid/video.mp4' } :
+                operation === 'search' ? { list: [] } : { error: 'unexpected controlled input' };
+              audit({ kind: 'response', operation, statusCode: response.statusCode, value });
+              response.end(JSON.stringify(value));
+            });
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1');
+        };
+        module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+        """;
+
+    // Production memory limit is unchanged. The marker prevents repeated failure
+    // after the host's real autonomous restart of the same private volume.
+    private const string MemoryFailureScript = """
+        const http = require('http');
+        const fs = require('fs');
+        const marker = '/h02-search-count';
+        let server;
+        function audit(value) {
+          fs.appendFileSync('/fixture-audit.jsonl', JSON.stringify(value) + '\n');
+        }
+        module.exports.start = () => {
+          server = http.createServer((request, response) => {
+            const path = request.url.split('?')[0];
+            const reply = (operation, value) => {
+              audit({ kind: 'response', operation, statusCode: response.statusCode, value });
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify(value));
+            };
+            if (path === '/full-config' || path === '/config') {
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify({ video: { sites: [{
+                key: 'memory', name: 'Memory', api: '/api/memory',
+                actions: ['home', 'category', 'detail', 'play', 'search']
+              }] } }));
+              return;
+            }
+            if (!path.startsWith('/api/memory/')) {
+              response.statusCode = 404;
+              response.end();
+              return;
+            }
+            const operation = path.slice('/api/memory/'.length);
+            audit({ kind: 'request', operation, method: request.method });
+            if (operation === 'home')
+              return reply(operation, { class: [{ type_id: 'movies', type_name: 'Movies' }] });
+            if (operation === 'category')
+              return reply(operation, { list: [{ vod_id: 'v' }] });
+            if (operation === 'detail')
+              return reply(operation, { list: [{
+                vod_id: 'v', vod_play_from: 'direct', vod_play_url: '1$working-id'
+              }] });
+            if (operation === 'play')
+              return reply(operation, { parse: 0, url: 'https://media.invalid/video.mp4' });
+            if (operation === 'search') {
+              const count = Number(fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : '0') + 1;
+              fs.writeFileSync(marker, String(count));
+              if (count === 2) {
+                audit({ kind: 'allocation.attempt', count, bytes: 512 * 1024 * 1024 });
+                const bytes = new Uint8Array(512 * 1024 * 1024);
+                audit({ kind: 'allocation.unexpected-success', bytes: bytes.byteLength });
+                return reply(operation, { unexpectedAllocation: bytes.byteLength });
+              }
+              return reply(operation, { list: [], searchCount: count });
+            }
+            response.statusCode = 400;
+            return reply(operation, { error: 'unexpected controlled input' });
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1');
+        };
+        module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+        """;
 
     // A CatNode HTTP script: returned IDs drive subsequent requests, and invalid wire inputs throw in the guest.
     // GET search checks encoded Unicode query values; POST category/detail/play check typed JSON payloads.

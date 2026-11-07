@@ -4,9 +4,11 @@ import MeowStorage
 import MeowMusicFeature
 import MeowMusicPlatform
 import MeowMusicNativeService
+import MeowFilmFeature
+import MeowRuntime
 
-/// Filesystem preparation is off MainActor. Script storage and source management
-/// belong to the shared runtime, which App assembly starts independently.
+/// Filesystem preparation is off MainActor. Music and Cat borrow the App's
+/// script session; their installations and private data belong to Node.
 struct MeowfilmResources: Sendable {
     let musicDocument: MusicNativeLibraryDocument
     let musicAccounts: NativeMusicAccountService?
@@ -18,6 +20,9 @@ struct MeowfilmResources: Sendable {
     let musicPublicQQ: NativeMusicQQPublicService
     let musicClients: NativeMusicClientService
     let musicScripts: NativeMusicScriptService
+    let scriptSession: RuntimeBridgeSession
+    let filmRules: FilmRuleService
+    let filmSourceSettings: FilmSourceService
 
     init() throws {
         // A sideloading host may rewrite the installed bundle identifier while
@@ -47,7 +52,16 @@ struct MeowfilmResources: Sendable {
             maximumDocumentBytes: 4 * 1024 * 1024))
         musicHomeSnapshot = MusicNativeHomeSnapshotDocument(storeFactory: Self.documentFactory(
             base: cacheRoot, namespace: MusicNativeHomeSnapshotDocument.namespace))
-        musicScripts = MeowfilmScriptRuntime.musicScripts
+        let scriptSession = RuntimeBridgeSession(launcher: MeowfilmScriptRuntime.launcher)
+        self.scriptSession = scriptSession
+        let connection: @Sendable () async throws -> RuntimeBridgeConnection = {
+            try await scriptSession.connection()
+        }
+        musicScripts = NativeMusicScriptService(connection: connection)
+        filmRules = try FilmRuleService(store: Self.documentFactory(
+            base: libraryRoot, namespace: FilmRuleService.documentNamespace)())
+        filmSourceSettings = FilmSourceService(transport: CatScriptTransport(connectionProvider: connection),
+            storeFactory: Self.documentFactory(base: libraryRoot, namespace: FilmSourceService.documentNamespace))
         let protectedRoot = root.appendingPathComponent("encrypted-documents-v1", isDirectory: true)
         musicClients = NativeMusicClientService(storeFactory: { platform in
             try Self.protectedDocumentFactory(base: protectedRoot,

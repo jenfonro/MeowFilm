@@ -110,6 +110,14 @@
     return rows.map((it) => String(it || '').trim()).filter(Boolean);
   }
 
+  function storedRows(rows) {
+    // Go strings.TrimSpace in the dashboard handler and DB, after the page's
+    // JS trim. NEL is Go whitespace; BOM is not. Do not merge the two stages.
+    return rows.map((row) => row.replace(
+      /^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g,
+      '')).filter(Boolean);
+  }
+
   function readDocument(document) {
     return {
       episodeCleanRegexRules: cleanRows(document.episodeCleanRegexRules),
@@ -127,6 +135,7 @@
       movieRules: rules.movieRules.map(normalizeMagicRuleRow).map(encodeEpisodeRule).filter(Boolean),
       aggregateRegexRules: cleanRows(rules.aggregateRegexRules)
     };
+    for (const group of GROUPS) document[group] = storedRows(document[group]);
     return { document, rules: readDocument(document) };
   }
 
@@ -292,6 +301,7 @@
     // Previews are independent computed rows on the reference page, including
     // when the test input or the matching-rule array is empty.
     const cleaned = episode ? cleanEpisode(result.inputText, rules.episodeCleanRegexRules, result) : result.inputText;
+    result.processedText = cleaned;
     if (!result.inputText) {
       result.text = '请输入文件名';
       return result;
@@ -302,7 +312,6 @@
       result.text = '无匹配规则';
       return result;
     }
-    result.processedText = cleaned;
     const failures = [];
     const cache = groupCache(request.section, rows);
     for (let index = 0; index < rows.length; index += 1) {

@@ -107,6 +107,10 @@ def main():
     parser.add_argument("--node", default=os.environ.get("MEOWFILM_BUILD_NODE", "node"),
                         help="Node 24 executable used only as a build tool")
     options = parser.parse_args()
+    # The client rules engine is native and separately locked; this does not
+    # loosen the embedded script payload's asm.js/native-module policy.
+    subprocess.run([options.node, str(ROOT / "scripts/verify-native-javascript.mjs")],
+                   check=True, cwd=ROOT)
     pinned = policy()
     framework = node_mobile(pinned)
     runtime = payload(options.node)

@@ -256,7 +256,7 @@ public sealed partial class MusicCapability
                 if (sameMedia)
                 {
                     epoch = playbackEpoch;
-                    if (!playback.IsPlaying) await playback.ResumeAsync();
+                    if (!playback.IsPlaying) await ResumePlaybackAsync();
                 }
                 else await StartCurrent(token, selection.Automatic, Current, value => epoch = value, selection.Feedback);
             }

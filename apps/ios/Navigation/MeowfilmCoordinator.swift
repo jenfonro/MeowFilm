@@ -34,7 +34,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
 
     func start() {
         navigation.setViewControllers([
-            MeowfilmStartupViewController(themeProvider: assembly.appearance)
+            startupPage()
         ], animated: false)
         navigation.willShowPage = { [weak self] page, animated in
             guard let self else { return }
@@ -59,7 +59,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         }.store(in: &observations)
         assembly.$startupFailed.receive(on: RunLoop.main).sink { [weak self] failed in
             guard let self, failed, self.main == nil else { return }
-            let page = MeowfilmStartupViewController(themeProvider: self.assembly.appearance)
+            let page = self.startupPage()
             page.message = "本地数据不可用"
             self.navigation.setViewControllers([page], animated: false)
         }.store(in: &observations)
@@ -85,10 +85,34 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     func showSettings() {
-        guard let model = assembly.music else { return }
-        navigation.pushViewController(MusicSettingsViewController(
-            model: model, appearance: assembly.appearance, router: self, resetUserData: resetUserData
-        ), animated: true)
+        let page = MeowfilmSettingsViewController(themeProvider: assembly.appearance)
+        page.openMusic = { [weak self, weak page] in
+            guard let self else { return }
+            guard let model = assembly.music else {
+                page?.showError("音乐设置暂不可用")
+                return
+            }
+            navigation.pushViewController(MusicSettingsViewController(
+                model: model, appearance: assembly.appearance, router: self, resetUserData: resetUserData
+            ), animated: true)
+        }
+        page.openFilm = { [weak self, weak page] in
+            guard let self else { return }
+            guard let settings = assembly.filmSettings else {
+                page?.showError("影视设置暂不可用")
+                return
+            }
+            navigation.pushViewController(FilmSettingsViewController(
+                model: settings, themeProvider: assembly.appearance
+            ), animated: true)
+        }
+        navigation.pushViewController(page, animated: true)
+    }
+
+    private func startupPage() -> MeowfilmStartupViewController {
+        let page = MeowfilmStartupViewController(themeProvider: assembly.appearance)
+        page.openSettings = { [weak self] in self?.showSettings() }
+        return page
     }
 
     func showPublicBrowse(_ request: MusicPublicBrowseRequest, title: String) {
@@ -217,7 +241,8 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         surface.onPresent = { [weak self] destination in self?.showPlayer(destination) }
         self.surface = surface
         root.install(surface: surface)
-        navigation.setViewControllers([page], animated: false)
+        let retainedSettings = navigation.viewControllers.dropFirst()
+        navigation.setViewControllers([page] + retainedSettings, animated: false)
         accessGeneration = model.accountAccessGeneration
         model.accessChanges.receive(on: RunLoop.main).sink { [weak self, weak model] in
             guard let self, let model else { return }
@@ -264,9 +289,14 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
 @MainActor
 private final class MeowfilmStartupViewController: PageViewController {
     var message: String?
+    var openSettings: (() -> Void)?
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        let settings = PageHeaderTextButton(title: "设置") { [weak self] in self?.openSettings?() }
+        settings.accessibilityIdentifier = "startup.settings"
+        pageHeader.setTrailing([settings])
+        pageHeader.applyTheme(theme)
         view.accessibilityLabel = message ?? "加载中"
         guard let message else { return }
         let label = UILabel()

@@ -7,6 +7,7 @@ import MeowMusicPlatform
 import MeowMusicNativeService
 import MeowFilmFeature
 import MeowUI
+import MeowRuntime
 
 /// Music services are admitted once per process and revoked only on shutdown.
 /// Documents, credentials and device sessions stay readable after first unlock,
@@ -24,9 +25,13 @@ final class MeowfilmAssembly: ObservableObject {
         try await filmHTTP.readArtwork($0)
     }
     @Published private(set) var music: MusicViewModel?
+    @Published private(set) var filmSettings: FilmSettingsModel?
     @Published private(set) var startupFailed = false
-    private var resources: MeowfilmResources?
+    @Published private(set) var shutdownError: String?
+    private(set) var resources: MeowfilmResources?
     private var startup: Task<Void, Never>?
+    private var scriptStartup: Task<Void, Never>?
+    private var stopping: Task<Void, Never>?
     private var accessTask: Task<Void, Never>?
     private var loading: Task<Void, Never>?
     private var closed = false
@@ -71,9 +76,11 @@ final class MeowfilmAssembly: ObservableObject {
         startup = Task.detached(priority: .userInitiated) { [weak self] in
             do {
                 let resources = try MeowfilmResources()
-                await resources.musicScripts.start()
-                guard !Task.isCancelled else { await resources.musicScripts.close(); return }
-                await self?.install(resources)
+                guard !Task.isCancelled, let self else {
+                    await Self.closeSettings(resources)
+                    return
+                }
+                await self.install(resources)
             } catch {
                 await self?.failedStartup()
             }
@@ -85,9 +92,25 @@ final class MeowfilmAssembly: ObservableObject {
         startupFailed = true
     }
 
-    private func install(_ resources: MeowfilmResources) {
-        guard !closed, self.resources == nil else { return }
+    private func install(_ resources: MeowfilmResources) async {
+        guard !closed, self.resources == nil else {
+            await Self.closeSettings(resources)
+            return
+        }
         self.resources = resources
+        let filmSettings = FilmSettingsModel(rules: resources.filmRules, sources: resources.filmSourceSettings)
+        self.filmSettings = filmSettings
+        filmSettings.start()
+        // Both modules own their guest storage inside Node; no reverse handlers.
+        // Configure and start before publishing any music consumer that borrows.
+        do { try await resources.scriptSession.configure(handlers: [:]) }
+        catch {
+            startupFailed = true
+            return
+        }
+        guard !closed else { return }
+        await resources.musicScripts.start()
+        guard !closed else { return }
         let publicQQ = resources.musicPublicQQ
         self.publicQQ = publicQQ
         let service = NativeMusicService(
@@ -110,6 +133,12 @@ final class MeowfilmAssembly: ObservableObject {
         })
         bindPlayback(model)
         admit(resources)
+        scriptStartup = Task {
+            // The source owner publishes a failed startup in its observable
+            // snapshot. Local rules are initialized independently by their model.
+            do { try await resources.filmSourceSettings.start() }
+            catch { /* Source state owns the user-visible failure and retry. */ }
+        }
     }
 
     /// The model stays unavailable until every owner acknowledges the single grant.
@@ -190,8 +219,9 @@ final class MeowfilmAssembly: ObservableObject {
         guard !closed else { return }
         closed = true
         music?.setAvailable(false)
+        filmSettings?.close()
         automaticSync?.stop()
-        startup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
+        startup?.cancel(); scriptStartup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
         service?.revokeAccess(generation: musicAccessGeneration)
         publicQQ?.revokeAccess(generation: musicAccessGeneration)
         resources?.musicClients.close()
@@ -202,30 +232,64 @@ final class MeowfilmAssembly: ObservableObject {
         // Deliver terminal media facts before closing the same business owner.
         playback.stop()
         let model = music, service = service, publicQQ = publicQQ
-        let resources = resources, pendingAccess = accessTask, lease = lease
-        Task {
+        let resources = resources, pendingAccess = accessTask, pendingScripts = scriptStartup, lease = lease
+        let pendingStartup = startup
+        stopping = Task { [weak self] in
+            await pendingStartup?.value
+            if let resources {
+                async let rules: Void = resources.filmRules.close()
+                async let sources: Void = resources.filmSourceSettings.close()
+                _ = await (rules, sources)
+            }
+            await pendingScripts?.value
             await pendingAccess?.value
             await model?.close()
             await service?.close()
             await publicQQ?.close()
-            await resources?.musicScripts.close()
+            do { try await resources?.musicScripts.close() }
+            catch { self?.shutdownError = error.localizedDescription }
+            await resources?.scriptSession.close()
             lease?.cancel()
             await resources?.musicAccountGate?.close()
         }
     }
 
+    func waitForStartup() async {
+        await startup?.value
+        await scriptStartup?.value
+    }
+
+    func waitForShutdown() async { await stopping?.value }
+
+    /// Resources produced after cancellation still belong to this start attempt.
+    /// No service may survive just because its install was never published.
+    private nonisolated static func closeSettings(_ resources: MeowfilmResources) async {
+        await resources.filmRules.close()
+        await resources.filmSourceSettings.close()
+        try? await resources.musicScripts.close()
+        await resources.scriptSession.close()
+    }
+
     deinit {
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
-        startup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
+        startup?.cancel(); scriptStartup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
         let service = service, publicQQ = publicQQ, resources = resources, pendingAccess = accessTask
+        let pendingScripts = scriptStartup, stopping = stopping
         service?.revokeAccess(generation: musicAccessGeneration)
         publicQQ?.revokeAccess(generation: musicAccessGeneration)
         resources?.musicClients.close()
         Task {
+            if let stopping { await stopping.value; return }
+            if let resources {
+                await resources.filmRules.close()
+                await resources.filmSourceSettings.close()
+            }
+            await pendingScripts?.value
             await pendingAccess?.value
             await service?.close()
             await publicQQ?.close()
-            await resources?.musicScripts.close()
+            try? await resources?.musicScripts.close()
+            await resources?.scriptSession.close()
             await resources?.musicAccountGate?.close()
         }
     }

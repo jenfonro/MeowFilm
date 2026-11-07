@@ -68,10 +68,6 @@ public partial class FilmSettingsRuleEditor : UserControl
         if (e.PropertyName is nameof(FilmSettingsRuleRow.Pattern) or nameof(FilmSettingsRuleRow.Replace))
             DraftChanged?.Invoke(this, EventArgs.Empty);
     }
-    private void NewPattern_Changed(object sender, TextChangedEventArgs e)
-    {
-        if (AddButton is not null) AddButton.IsEnabled = !string.IsNullOrWhiteSpace(NewPattern.Text);
-    }
     private void Add_Click(object sender, RoutedEventArgs e) => Raise(FilmSettingsRuleAction.Add, sender);
     private void Save_Click(object sender, RoutedEventArgs e) => Raise(FilmSettingsRuleAction.Save, sender);
     private void Delete_Click(object sender, RoutedEventArgs e) => Raise(FilmSettingsRuleAction.Delete, sender);

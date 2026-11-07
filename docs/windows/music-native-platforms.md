@@ -87,6 +87,7 @@ Invalidate
 - 歌单卡片保留平台、原生 ID、名称、封面、数量、创建者和可用动作。个人目录额外返回绑定当前账号的 locator；locator 不是凭据或可转移授权。
 - 酷狗公开歌单使用真实全局 ID：搜索响应 `gid` 与详情响应 `global_collection_id` 对应同一身份；两字段同时出现须一致。`specialid`、个人 `listid` 或 LX `id_*` 不替代全局 ID。搜索 `img`／`song_count` 和详情 `pic` 直接归一到当前卡片字段，详情分页仍请求 `global_collection_id` 并核对响应身份。成员分页允许后续页缺少 `list_info`，此时以 `data.count` 为总量，名称和封面为空；分页 snapshot 只绑定平台、scope、请求 ID 和总量，不包含名称、版本或当前页内容。`list_info` 存在时，其 `global_collection_id` 若出现须等于请求 ID；其 `count` 与 `data.count` 同时出现时必须一致，缺少 `count` 时使用 `data.count`。
 - `ChannelsAsync` 发布中性描述符 `id/name/kind=channel/placement/available/pageCode`；`placement` 为 `primary|more`，各组沿响应数组顺序展示。网易专属 ID、上游种类与分组名单只存在于平台适配器，页面不据其筛选。
+- 网易云频道目录由同一原生读取操作持有，目录展示、首次默认频道、直接打开频道及续页共用有效目录和在途读取，不各自重读目录。匿名及已登录结果均按当前账号/客户端身份隔离，沿用下文的目录内存缓存期限和容量；目录刷新重读目录，频道内容刷新只刷新该频道内容，未失效的目录仍复用。目录请求确认的客户端更新用于后续内容请求，账号失效、客户端重载和关闭仍保留原有检查。
 - 酷狗首页由 `/v2/special_recommend`（`specialrec.service.kugou.com` router）、`newsong_publish` 和 `/ocean/v6/rank/list` 组成；续页只读推荐歌单。歌单以 `has_next` 推进，默认推荐可能多于请求页长，不按页长截断或伪造总量。
 - 酷狗分类直接读取 `/pubsongs/v1/get_tags_by_type` 的组与标签；主栏为精选、歌单广场、排行榜、新歌，更多为有标签的 `category-{tag_id}` 组。歌单广场默认推荐，分类组默认首标签；continuation 绑定会话 scope、平台目标、页码与所选标签，换标签从第一页开始。
 - 酷狗榜单摘要只使用目录附带的 `songinfo`，没有 hash 的摘要不是可播歌曲。卡片动作是 `channel`，身份为 `rank-{rankid}`，`pageCode=rank_cid`；打开后核对当前榜单身份，以固定 `kg-tid:369` 请求 `/openapi/kmr/v2/rank/audio`，分页绑定 `rank_cid` 与 total，不走公开歌单读取。榜单录音使用 `audio_info.hash_128`，新歌使用 `hash`，毫秒时长统一转为秒。

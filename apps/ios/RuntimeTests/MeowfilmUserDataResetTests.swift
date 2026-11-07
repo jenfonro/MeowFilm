@@ -4,6 +4,24 @@ import Security
 @testable import Meowfilm
 
 final class MeowfilmUserDataResetTests: XCTestCase {
+    func testFilmDocumentsAndScriptRuntimeAreErasedOnlyAfterColdLaunch() throws {
+        let f = try ResetFixture()
+        defer { f.dispose() }
+        let paths = ["documents/film.magic-rules.v1/rules.json",
+                     "documents/film.video-sources.v1/catalog.json",
+                     "script-runtime/cat/fixture.json"]
+            .map { f.support.appendingPathComponent("meowfilm/" + $0) }
+        for path in paths {
+            try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("synthetic".utf8).write(to: path)
+        }
+        try f.store().request()
+        XCTAssertTrue(paths.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        try f.store().completePendingReset()
+        XCTAssertTrue(paths.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+        XCTAssertEqual(try String(contentsOf: f.external), "original")
+    }
+
     func testNoRequestDoesNotTouchFilesPreferencesOrKeychain() throws {
         let f = try ResetFixture()
         defer { f.dispose() }

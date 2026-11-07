@@ -211,7 +211,7 @@ public sealed partial class MusicNativeApplication
                 Current();
                 double expected = LJ.N(song["duration"]);
                 if (expected > 0 && media.Duration > 0 &&
-                    Math.Abs(expected - media.Duration) > Math.Max(3, Math.Min(expected, media.Duration) * .02))
+                    Math.Abs(expected - media.Duration) > 10)
                 {
                     await songMatcher.ExcludeAsync(originSong, sourceKey, token).ConfigureAwait(false);
                     await sourceCache.RejectRecordingAsync(session.Scope, songId, sourceKey, token).ConfigureAwait(false);
