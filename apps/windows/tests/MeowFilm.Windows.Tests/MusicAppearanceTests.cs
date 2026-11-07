@@ -3,10 +3,13 @@ using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Desktop;
+using MeowFilm.AppHost;
 using static MeowFilm.Windows.Tests.QualityFixture;
 
 namespace MeowFilm.Windows.Tests;
@@ -25,18 +28,20 @@ public static class MusicAppearanceTests
             long revision = 0;
             foreach (var palette in MusicAppearancePalette.Options)
                 await f.Ok("music.appearance.save", Draft(revision++, palette.Key));
+            await f.Ok("music.appearance.save", Draft(revision++, "#12ABEF"));
             await using var reopened = new MusicLibraryOwner(f.Store);
             var restored = await reopened.ExecuteAsync("music.appearance.get");
             Check(restored.GetProperty("ok").GetBoolean() &&
                 restored.GetProperty("settings").GetProperty("revision").GetInt64() == revision);
-            Check(restored.GetProperty("settings").GetProperty("colorPalette").GetString() == "sky");
+            Check(restored.GetProperty("settings").GetProperty("colorPalette").GetString() == "#12ABEF");
             Check(f.Runtime.Calls.Count == 0);
         });
         yield return new("Music appearance invalid stale and cancelled writes preserve current settings", async () =>
         {
             await using var f = new QualityFixture();
             foreach (var bad in new[] { ("playlistView", "unknown"), ("colorMode", "unknown"),
-                ("colorPalette", "unknown"), ("playerTheme", "downloaded-script") })
+                ("colorPalette", "unknown"), ("colorPalette", "#123"), ("colorPalette", "#FF112233"),
+                ("colorPalette", "#11223Z"), ("playerTheme", "downloaded-script") })
             {
                 var request = Draft(); request[bad.Item1] = bad.Item2;
                 await f.Error("music.appearance.save", request, "INVALID_REQUEST");
@@ -91,6 +96,8 @@ public static class MusicAppearanceTests
             () => MusicQualityConsumerTests.Sta(ImmediateConsumer));
         yield return new("Music appearance consumer resolves ambiguous writes internally and restores authority after a failed write",
             () => MusicQualityConsumerTests.Sta(AutomaticRecoveryConsumer));
+        yield return new("Music appearance reload button reads newer authority after a revision conflict without replaying saves",
+            () => MusicQualityConsumerTests.Sta(ReloadAfterConflict));
     }
 
     private static JsonObject Draft(long revision = 0, string palette = "mint") =>
@@ -115,13 +122,12 @@ public static class MusicAppearanceTests
         {
             await module.InitializeAsync(default); await Ready(module);
             Check(output.Volume == 100 && !module.PlaylistListView);
-            var settings = module.SettingsView;
+            var settings = module.AppearanceSettingsView;
             settings.Measure(new Size(1100, 1000));
             settings.Arrange(new Rect(0, 0, 1100, 1000)); settings.UpdateLayout();
             var mode = Visuals(settings).OfType<ComboBox>()
                 .Single(control => AutomationProperties.GetName(control) == "播放器配色");
-            var palette = Visuals(settings).OfType<ComboBox>()
-                .Single(control => AutomationProperties.GetName(control) == "固定配色");
+            var palette = Visuals(settings).OfType<ColorPicker>().Single();
             Check(!palette.IsEnabled && (string?)mode.SelectedValue == "song");
 
             int writes = f.Store.Writes;
@@ -139,6 +145,13 @@ public static class MusicAppearanceTests
             Check(module.PlayerBackground is GradientBrush actual &&
                 actual.GradientStops[0].Color == expected.GradientStops[0].Color,
                 "player overlay consumes the current fixed palette");
+            await module.SetAppearanceAsync("colorPalette", "#21ABCD"); await Ready(module);
+            expected = (GradientBrush)MusicPlayerArtwork.Backdrop(MusicAppearancePalette.Brush("#21ABCD"));
+            Check(module.AppearanceColorPalette == "#21ABCD" && module.PlayerBackground is GradientBrush custom &&
+                custom.GradientStops[0].Color == expected.GradientStops[0].Color,
+                "custom fixed color reaches the existing player composition");
+            // Restore the existing preset so the original restart preference assertion remains covered.
+            await module.SetAppearanceAsync("colorPalette", "mint"); await Ready(module);
             module.Volume = 37; await module.SaveVolumeAsync();
             Check((await f.Ok("music.device.settings.get")).GetProperty("settings").GetProperty("volume").GetInt32() == 37);
             module.CatalogSections.Add(new("列表", [new("one", "合成歌单", "艺人", "", "playlist", "wy")]));
@@ -147,6 +160,13 @@ public static class MusicAppearanceTests
             Check(module.PlaylistListView && module.CatalogSections.Count == 1,
                 "list preference publishes the current collection presentation");
             Check(output.Opens == 0 && f.Runtime.Calls.Count == 0);
+
+            await using var appearance = new AppAppearance(f.Store);
+            await appearance.LoadAsync();
+            var general = new GeneralSettingsView(appearance, [module]);
+            var preview = new Border { Background = AppearanceColors.DefaultBackground, Child = general };
+            GeneralAppearanceTests.SavePreview(preview, "general-wide", 900, 720);
+            GeneralAppearanceTests.SavePreview(preview, "general-narrow", 600, 720);
 
             await module.DisposeAsync();
             await using var next = new QualityFixture(f.Store);
@@ -188,6 +208,51 @@ public static class MusicAppearanceTests
                 "failed CAS restores the sole durable value and reports failure");
         }
         finally { await module.AbortAsync(); }
+    }
+
+    private static async Task ReloadAfterConflict()
+    {
+        await using var f = new QualityFixture();
+        var module = new MusicCapability(f.App, f.Store, new Output());
+        var settings = module.AppearanceSettingsView;
+        var window = GeneralAppearanceTests.Window(settings);
+        try
+        {
+            await module.InitializeAsync(default); await Ready(module);
+            window.Show();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await Ready(module);
+            var reload = Visuals(settings).OfType<Button>()
+                .Single(button => Equals(button.Content, "重新读取"));
+            var palette = Visuals(settings).OfType<ColorSelection>().Single();
+
+            await f.Ok("music.appearance.save", Draft(0, "mint"));
+            int writes = f.Store.Writes;
+            await module.SetAppearanceAsync("colorPalette", "rose"); await Ready(module);
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(module.AppearanceColorPalette == "mint" && palette.Value == "mint" &&
+                module.AppearanceStatus == "外观设置已更新" && reload.IsVisible && reload.IsEnabled,
+                "revision conflict reads the authority and exposes the actual reload button");
+            Check(f.Store.Writes == writes, "revision conflict does not replay the rejected draft");
+
+            await f.Ok("music.appearance.save", Draft(1, "sky"));
+            writes = f.Store.Writes;
+            Check(module.AppearanceColorPalette == "mint", "the newer authority has not yet been read");
+            reload.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            await Ready(module);
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(module.AppearanceColorPalette == "sky" && palette.Value == "sky" &&
+                module.AppearanceStatus.Length == 0 && !reload.IsVisible,
+                "explicit reload reads the latest saved value and clears the conflict notice");
+            Check(f.Store.Writes == writes, "reload performs no save");
+            Check((await f.Ok("music.appearance.get")).GetProperty("settings")
+                .GetProperty("revision").GetInt64() == 2, "reload leaves the authority revision unchanged");
+        }
+        finally
+        {
+            window.Close();
+            await module.AbortAsync();
+        }
     }
 
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)

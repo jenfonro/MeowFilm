@@ -22,6 +22,174 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SettingsReplicaCases()
     {
+        yield return Case("wrong source dialog does not reopen from a retired request after returning to settings", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await f.Rpc("music.queue.replace", new { songs = new[] { MusicSongFixture.Online("wy", "LateForm") }, index = 0 });
+            await f.Module.ActivateSettingsAsync();
+            var view = (MusicSettingsView)f.Module.SettingsView;
+            using var mount = new ReplicaMount(view); await Drain(); await Until(() => !f.Module.Busy);
+            ReplicaAnchors(view)[2].IsChecked = true; await Drain();
+            var button = (Button)view.FindName("ExclusionAddButton");
+            var popup = (Popup)view.FindName("ExclusionPopup");
+            var queue = (await f.Rpc("music.queue.get", new { offset = 0, limit = 100 })).GetRawText();
+            int opened = 0;
+            popup.Opened += (_, _) => opened++;
+            foreach (string retirement in new[] { "hidden", "unloaded", "sources" })
+            {
+                var pending = f.Calls.HoldNext("music.queue.get");
+                Click(button); await pending.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                try
+                {
+                    True(!popup.IsOpen, "the held form read has not opened a dialog");
+                    switch (retirement)
+                    {
+                        case "hidden":
+                            view.Visibility = Visibility.Collapsed; await Drain();
+                            True(!button.IsVisible, "hiding settings retires the form entry");
+                            view.Visibility = Visibility.Visible;
+                            break;
+                        case "unloaded":
+                            mount.Window.Content = null; await Drain();
+                            True(!button.IsLoaded, "unloading settings retires the form entry");
+                            mount.Window.Content = view;
+                            break;
+                        default:
+                            ReplicaAnchors(view)[^1].IsChecked = true; await Drain();
+                            True(view.IsVisible && !button.IsVisible, "source management retires the form without hiding the outer view");
+                            ReplicaAnchors(view)[2].IsChecked = true;
+                            break;
+                    }
+                    await Drain();
+                    True(button.IsLoaded && button.IsVisible, "the original settings entry is visible again before the late reply");
+                }
+                finally { pending.Release(); }
+                await Until(() => !f.Module.Busy);
+                True(!popup.IsOpen && opened == 0, "a retired " + retirement + " request must not reopen the dialog");
+                Equal(0, f.Calls.Count("music.sourceExclusions.add"));
+                Equal(queue, (await f.Rpc("music.queue.get", new { offset = 0, limit = 100 })).GetRawText());
+            }
+
+            Click(button); await Until(() => popup.IsOpen);
+            Equal(1, opened);
+            Click(Visuals(popup.Child).OfType<Button>().Single(control => Equals(control.Content, "取消")));
+            await Drain();
+            True(!popup.IsOpen, "a fresh form still cancels normally");
+            Equal(0, f.Calls.Count("music.sourceExclusions.add"));
+            Click(button); await Until(() => popup.IsOpen);
+            var song = (ComboBox)view.FindName("ExclusionSong");
+            var provider = (ComboBox)view.FindName("ExclusionProvider");
+            var platform = (ComboBox)view.FindName("ExclusionPlatform");
+            song.SelectedIndex = 0;
+            provider.SelectedItem = provider.Items.Cast<MusicExclusionOption>().Single(option => option.Key == "official");
+            platform.SelectedItem = platform.Items.Cast<MusicExclusionOption>().Single(option => option.Key == "wy");
+            string songId = ((MusicExclusionOption)song.SelectedItem).Key;
+            Click(Visuals(popup.Child).OfType<Button>().Single(control => Equals(control.Content, "添加")));
+            await Until(() => !f.Module.Busy && f.Module.SourceExclusions.Count == 1);
+            True(!popup.IsOpen && opened == 2, "a fresh confirmed form closes after a single add");
+            Equal(1, f.Calls.Count("music.sourceExclusions.add"));
+            Equal(songId, f.Module.SourceExclusions.Single().SongId);
+            Equal(queue, (await f.Rpc("music.queue.get", new { offset = 0, limit = 100 })).GetRawText());
+        });
+        yield return Case("wrong source list keeps its viewport and restores rows without growing the page", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await f.Module.ActivateSettingsAsync();
+            var view = (MusicSettingsView)f.Module.SettingsView;
+            using var mount = new ReplicaMount(view); await Drain();
+            var list = (ItemsControl)view.FindName("ExclusionList");
+            var viewport = (Grid)list.Parent;
+            Equal(264d, viewport.ActualHeight);
+            foreach (int width in new[] { 1248, 600 })
+            {
+                mount.Window.Width = width; mount.Window.UpdateLayout(); await Drain();
+                var section = (Border)view.FindName("ExclusionSection");
+                var heading = (FrameworkElement)((Button)view.FindName("ExclusionAddButton")).Parent;
+                var card = (Border)viewport.Parent;
+                double headingBottom = heading.TranslatePoint(new Point(0, heading.ActualHeight), section).Y;
+                double cardTop = card.TranslatePoint(new Point(), section).Y;
+                True(Math.Abs(cardTop - headingBottom - 8d) < .5,
+                    "wrong source heading and card keep the required 8 DIP gap at width " + width);
+                Equal(264d, viewport.ActualHeight);
+            }
+            for (int i = 0; i < 30; i++)
+                await f.Rpc("music.sourceExclusions.add", new
+                {
+                    songId = "fixture:" + i, provider = "official", platform = "wy",
+                    providerName = "网易云音乐", title = "错源歌曲 " + i, artist = "测试艺人"
+                });
+            await f.Module.RefreshSourceExclusionsAsync(); view.UpdateLayout(); await Drain();
+            Equal(264d, viewport.ActualHeight);
+            Equal(30, list.Items.Count);
+            var scroll = Visuals(list).OfType<ScrollViewer>().First();
+            True(scroll.ScrollableHeight > 0, "many exclusions scroll within their own fixed viewport");
+            scroll.ScrollToEnd(); view.UpdateLayout(); await Drain();
+            True(scroll.VerticalOffset > 0 && list.ItemContainerGenerator.ContainerFromIndex(29) is not null,
+                "the final record is reachable without restricting record count");
+            await f.Module.RestoreSourceExclusionAsync(f.Module.SourceExclusions[^1]);
+            await Drain(); view.UpdateLayout();
+            Equal(29, list.Items.Count); Equal(264d, viewport.ActualHeight);
+        });
+        yield return Case("settings dropdown content follows normal highlighted and disabled foregrounds without changing values", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await f.Rpc("music.queue.replace", new { songs = new[] { MusicSongFixture.Online("wy", "Dropdown") }, index = 0 });
+            await f.Module.ActivateSettingsAsync();
+            var view = (MusicSettingsView)f.Module.SettingsView;
+            using var mount = new ReplicaMount(view); await Drain(); await Until(() => !f.Module.Busy);
+            ReplicaAnchors(view)[2].IsChecked = true; await Drain();
+            var quality = Visuals(view).OfType<ComboBox>().Single(control => AutomationProperties.GetName(control) == "起播目标音质");
+            var labels = new Dictionary<string, string>
+            {
+                ["auto"] = "自动", ["128k"] = "128 kbps", ["192k"] = "192 kbps", ["320k"] = "320 kbps",
+                ["flac"] = "无损", ["flac24bit"] = "高解析度", ["master"] = "母带"
+            };
+            await CheckContent(quality, item => labels[(string)item]);
+            Click((Button)view.FindName("ExclusionAddButton"));
+            var popup = (Popup)view.FindName("ExclusionPopup");
+            await Until(() => popup.IsOpen); await Drain();
+            var song = (ComboBox)view.FindName("ExclusionSong");
+            song.SelectedIndex = 0; await Drain();
+            await CheckContent(song, item =>
+            {
+                var option = (MusicExclusionOption)item;
+                return option.Name + "  " + option.Detail;
+            });
+            popup.IsOpen = false;
+
+            async Task CheckContent(ComboBox picker, Func<object, string> label)
+            {
+                object selected = picker.SelectedItem;
+                DesktopTheme.SetIsHighContrast(view, false);
+                picker.IsDropDownOpen = true; await Drain(); picker.UpdateLayout();
+                var items = picker.Items.Cast<object>().Select((item, index) =>
+                    ((ComboBoxItem)picker.ItemContainerGenerator.ContainerFromIndex(index), label(item))).ToArray();
+                foreach (var (container, expected) in items)
+                {
+                    var text = Visuals(container).OfType<TextBlock>().Single();
+                    Equal(expected, new TextRange(text.ContentStart, text.ContentEnd).Text);
+                    Equal(((SolidColorBrush)picker.FindResource("MeowFilm.Brush.Text")).Color, ((SolidColorBrush)text.Foreground).Color);
+                }
+                DesktopTheme.SetIsHighContrast(view, true); await Drain();
+                var current = items[0].Item1;
+                var actualText = Visuals(current).OfType<TextBlock>().Single();
+                SimulateFocus(current, UIElement.IsMouseOverProperty, true); await Drain();
+                Equal(SystemColors.HighlightColor, ((SolidColorBrush)current.Background).Color);
+                Equal(SystemColors.HighlightTextColor, ((SolidColorBrush)actualText.Foreground).Color);
+                SimulateFocus(current, UIElement.IsMouseOverProperty, false);
+                picker.IsDropDownOpen = false; await Drain();
+                var closedText = Visuals(picker).OfType<TextBlock>().Single();
+                Equal(label(selected), new TextRange(closedText.ContentStart, closedText.ContentEnd).Text);
+                Equal(SystemColors.WindowTextColor, ((SolidColorBrush)closedText.Foreground).Color);
+                picker.SetCurrentValue(UIElement.IsEnabledProperty, false); await Drain();
+                Equal(SystemColors.GrayTextColor, ((SolidColorBrush)closedText.Foreground).Color);
+                DesktopTheme.SetIsHighContrast(view, false); await Drain();
+                Equal(((SolidColorBrush)picker.FindResource("MeowFilm.Brush.Disabled")).Color, ((SolidColorBrush)closedText.Foreground).Color);
+                Equal(label(selected), new TextRange(closedText.ContentStart, closedText.ContentEnd).Text); Equal(selected, picker.SelectedItem);
+                picker.SetCurrentValue(UIElement.IsEnabledProperty, true);
+                picker.GetBindingExpression(UIElement.IsEnabledProperty)?.UpdateTarget();
+            }
+        });
         yield return Case("shared settings layout follows container breakpoints and retires resize on unload or disable", async () =>
         {
             var sections = new Grid { Width = 1100, Height = 80, HorizontalAlignment = HorizontalAlignment.Left };
@@ -32,28 +200,26 @@ public static partial class MusicUiTests
             SettingsLayout.SetMode(sections, SettingsLayoutMode.Sections);
             SettingsLayout.SetMode(pair, SettingsLayoutMode.Pair);
             using var mount = new ReplicaMount(host);
-            void CheckLayout(bool compact, bool narrow, bool stacked)
+            void CheckLayout(bool narrow, bool stacked)
             {
-                Equal(compact, SettingsLayout.GetIsCompact(sections));
-                Equal(compact, SettingsLayout.GetIsCompact(sectionChild));
                 Equal(narrow, SettingsLayout.GetIsNarrow(sections));
                 Equal(narrow, SettingsLayout.GetIsNarrow(sectionChild));
                 Equal(stacked, SettingsLayout.GetIsStacked(pair));
                 Equal(stacked, SettingsLayout.GetIsStacked(pairChild));
             }
-            await Drain(); mount.Window.UpdateLayout(); CheckLayout(false, false, false);
+            await Drain(); mount.Window.UpdateLayout(); CheckLayout(false, false);
             foreach (var size in new[]
             {
-                (Sections: 1099d, Pair: 543d, Compact: true, Narrow: false, Stacked: true),
-                (Sections: 640d, Pair: 544d, Compact: true, Narrow: false, Stacked: false),
-                (Sections: 639d, Pair: 545d, Compact: true, Narrow: true, Stacked: false),
-                (Sections: 1100d, Pair: 544d, Compact: false, Narrow: false, Stacked: false)
+                (Sections: 1099d, Pair: 543d, Narrow: false, Stacked: true),
+                (Sections: 640d, Pair: 544d, Narrow: false, Stacked: false),
+                (Sections: 639d, Pair: 545d, Narrow: true, Stacked: false),
+                (Sections: 1100d, Pair: 544d, Narrow: false, Stacked: false)
             })
             {
                 sections.Width = size.Sections; pair.Width = size.Pair;
                 mount.Window.UpdateLayout(); await Drain();
                 Equal(size.Sections, sections.ActualWidth); Equal(size.Pair, pair.ActualWidth);
-                CheckLayout(size.Compact, size.Narrow, size.Stacked);
+                CheckLayout(size.Narrow, size.Stacked);
             }
             for (int cycle = 0; cycle < 2; cycle++)
             {
@@ -63,31 +229,31 @@ public static partial class MusicUiTests
                 sections.Width = 500; pair.Width = 400;
                 unmounted.Measure(new Size(1248, 820)); unmounted.Arrange(new Rect(0, 0, 1248, 820)); unmounted.UpdateLayout(); await Drain();
                 Equal(500d, sections.ActualWidth); Equal(400d, pair.ActualWidth);
-                CheckLayout(false, false, false);
+                CheckLayout(false, false);
                 True(!sections.IsLoaded && !pair.IsLoaded, "measuring detached content does not reactivate the behavior");
                 unmounted.Child = null;
                 mount.Window.Content = host; mount.Window.UpdateLayout(); await Drain();
                 True(sections.IsLoaded && pair.IsLoaded, "the same layout containers are reloaded");
-                CheckLayout(true, true, true);
+                CheckLayout(true, true);
                 sections.Width = 1100; pair.Width = 544;
-                mount.Window.UpdateLayout(); await Drain(); CheckLayout(false, false, false);
+                mount.Window.UpdateLayout(); await Drain(); CheckLayout(false, false);
             }
             sections.Width = 500; pair.Width = 400;
-            mount.Window.UpdateLayout(); await Drain(); CheckLayout(true, true, true);
+            mount.Window.UpdateLayout(); await Drain(); CheckLayout(true, true);
             SettingsLayout.SetMode(sections, SettingsLayoutMode.None);
             SettingsLayout.SetMode(pair, SettingsLayoutMode.None);
-            CheckLayout(false, false, false);
+            CheckLayout(false, false);
             sections.Width = 501; pair.Width = 401;
-            mount.Window.UpdateLayout(); await Drain(); CheckLayout(false, false, false);
+            mount.Window.UpdateLayout(); await Drain(); CheckLayout(false, false);
             SettingsLayout.SetMode(sections, SettingsLayoutMode.Sections);
             SettingsLayout.SetMode(pair, SettingsLayoutMode.Pair);
-            CheckLayout(true, true, true);
+            CheckLayout(true, true);
         });
         yield return Case("replica catalog source saves only its authority and preserves search audio sources queue and media", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
-            await f.Module.ActivateSettingsAsync();
-            var view = (MusicSettingsView)f.Module.SettingsView; using var mount = new ReplicaMount(view);
+
+            var view = (MusicHomeSourceSettingsView)f.Module.HomeSourceSettingsView; using var mount = new ReplicaMount(view);
             await Until(() => f.Module.CanEditCatalogSource);
             var picker = (ComboBox)view.FindName("CatalogSourcePicker");
             Equal("音乐数据源", AutomationProperties.GetName(picker));
@@ -120,10 +286,28 @@ public static partial class MusicUiTests
             Equal(identity, f.Playback.Identity); Equal(opens, f.Playback.Opens.Count);
             True(f.Playback.HasMedia && !f.Runtime.HasStarted, "source selection neither replaces media nor starts scripts");
         });
+        yield return Case("general source hiding and shutdown drain an admitted save before accepting its receipt", async () =>
+        {
+            await using var f = await Fixture.Create();
+            var view = (MusicHomeSourceSettingsView)f.Module.HomeSourceSettingsView;
+            using var mount = new ReplicaMount(view); await Drain(); await Until(() => f.Module.CanEditCatalogSource);
+            var picker = (ComboBox)view.FindName("CatalogSourcePicker");
+            var held = f.Calls.HoldNext("music.catalogSource.settings.save");
+            picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg"); await held.Arrived.Task;
+            view.Visibility = Visibility.Collapsed; await Drain();
+            True(!f.Module.CanEditCatalogSource, "hidden source still owns its admitted write until actual completion");
+            var shutdown = f.Module.PrepareShutdownAsync(); await Drain();
+            True(!shutdown.IsCompleted, "App close waits for the same source owner outside music settings");
+            held.Release(); await shutdown;
+            Equal("kg", f.Module.CatalogSourcePlatform);
+            Equal(1, f.Calls.Count("music.catalogSource.settings.save"));
+            var settings = await f.Store.ReadAsync("music.library.v1");
+            True(settings.Data is not null, "the confirmed source receipt is durable");
+        });
         yield return Case("replica catalog source rejected and unknown saves use notices rollback and authoritative readback", async () =>
         {
-            await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
-            var view = (MusicSettingsView)f.Module.SettingsView; using var mount = new ReplicaMount(view);
+            await using var f = await Fixture.Create();
+            var view = (MusicHomeSourceSettingsView)f.Module.HomeSourceSettingsView; using var mount = new ReplicaMount(view);
             var notices = new List<string>();
             mount.Window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, notice) => notices.Add(notice.Message)));
             await Until(() => f.Module.CanEditCatalogSource);
@@ -143,10 +327,10 @@ public static partial class MusicUiTests
             True(!f.Module.HasCatalogSourceError, "unknown receipt is successful only after a matching authoritative read");
             Equal(2, f.Calls.Count("music.catalogSource.settings.save"));
         });
-        yield return Case("replica catalog source failed reads expose retry and remain inside narrow account layout", async () =>
+        yield return Case("replica catalog source failed reads expose retry and remain inside narrow general layout", async () =>
         {
-            await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
-            var view = (MusicSettingsView)f.Module.SettingsView; using var mount = new ReplicaMount(view);
+            await using var f = await Fixture.Create();
+            var view = (MusicHomeSourceSettingsView)f.Module.HomeSourceSettingsView; using var mount = new ReplicaMount(view);
             await Until(() => f.Module.CanEditCatalogSource);
             f.Calls.FailNext("music.catalogSource.settings.get", "STORAGE_UNAVAILABLE");
             await f.Module.ReadCatalogSourceSettingsAsync(); await Drain();
@@ -156,13 +340,13 @@ public static partial class MusicUiTests
             foreach (int width in new[] { 1248, 908, 600 })
             {
                 mount.Window.Width = width; mount.Window.UpdateLayout(); await Drain();
-                var section = (Border)view.FindName("AccountsSection");
+                var section = (Border)view.FindName("HomeSourceSection");
                 var label = Visuals(section).OfType<TextBlock>().Single(text => text.Text == "音乐数据源");
                 var text = new Rect(label.TranslatePoint(new Point(), section), label.RenderSize);
                 var choice = new Rect(picker.TranslatePoint(new Point(), section), picker.RenderSize);
                 var action = new Rect(retry.TranslatePoint(new Point(), section), retry.RenderSize);
-                True(text.Right <= choice.Left && choice.Right <= action.Left && action.Right <= section.ActualWidth,
-                    "source label picker and retry remain separate and within the account section");
+                True(text.Bottom <= choice.Top && choice.Right <= action.Left && action.Right <= section.ActualWidth,
+                    "source label picker and retry remain separate and within the general section");
             }
             int reads = f.Calls.Count("music.catalogSource.settings.get");
             retry.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
@@ -170,12 +354,13 @@ public static partial class MusicUiTests
             Equal(reads + 1, f.Calls.Count("music.catalogSource.settings.get"));
             Equal("wy", picker.SelectedValue); Equal(0, f.Calls.Count("music.catalogSource.settings.save"));
         });
-        yield return Case("replica hidden unloaded and nonmusic source controls cannot save", async () =>
+        yield return Case("replica hidden unloaded and inactive general source controls cannot save", async () =>
         {
-            await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
-            var view = (MusicSettingsView)f.Module.SettingsView;
+            await using var f = await Fixture.Create();
+            var view = (MusicHomeSourceSettingsView)f.Module.HomeSourceSettingsView;
             var film = new SettingsNavigationTests.Module("film", "影视");
-            var shell = new ShellWindow([f.Module, film], () => Task.CompletedTask)
+            await using var appearance = new MeowFilm.AppHost.AppAppearance(f.Store);
+            var shell = new ShellWindow([f.Module, film], [], () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance)
             {
                 Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
             };
@@ -183,6 +368,13 @@ public static partial class MusicUiTests
             {
                 shell.Show(); await Drain();
                 ((Button)shell.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                await Drain();
+                var header = (DesktopPageHeader)shell.FindName("PageHeaderHost");
+                var slot = (ContentControl)header.FindName("LeadingSlot");
+                var areas = ((Panel)slot.Content).Children.OfType<RadioButton>().ToArray();
+                areas[0].IsChecked = true; await Drain();
+                var general = Visuals(shell).OfType<GeneralSettingsView>().Single();
+                ((Panel)general.FindName("Areas")).Children.OfType<RadioButton>().Single(tab => Equals(tab.Tag, "sources")).IsChecked = true;
                 await Drain(); await Until(() => view.IsVisible && f.Module.CanEditCatalogSource);
                 var picker = (ComboBox)view.FindName("CatalogSourcePicker");
                 int saves = f.Calls.Count("music.catalogSource.settings.save");
@@ -191,25 +383,22 @@ public static partial class MusicUiTests
                 Equal(saves, f.Calls.Count("music.catalogSource.settings.save"));
                 view.Visibility = Visibility.Visible; await Drain();
                 picker.GetBindingExpression(ComboBox.SelectedValueProperty)!.UpdateTarget();
-                var header = (DesktopPageHeader)shell.FindName("PageHeaderHost");
-                var slot = (ContentControl)header.FindName("LeadingSlot");
-                var areas = ((Panel)slot.Content).Children.OfType<RadioButton>().ToArray();
-                areas[1].IsChecked = true; await Drain();
+                areas[2].IsChecked = true; await Drain();
                 True(film.SettingsView.IsVisible && !view.IsVisible, "the shared shell owns nonmusic settings navigation");
                 picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg"); await Drain();
                 Equal(saves, f.Calls.Count("music.catalogSource.settings.save"));
                 areas[0].IsChecked = true; await Drain();
                 await Until(() => view.IsVisible && f.Module.CanEditCatalogSource);
                 picker.GetBindingExpression(ComboBox.SelectedValueProperty)!.UpdateTarget();
-                Visuals(shell).OfType<ContentControl>().Single(host => ReferenceEquals(host.Content, view)).Content = null;
-                await Drain(); True(!view.IsLoaded, "the music settings controls are actually unloaded");
+                ((Panel)general.FindName("HomeSourceContributions")).Children.Remove(view);
+                await Drain(); True(!view.IsLoaded, "the general source controls are actually unloaded");
                 picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg"); await Drain();
                 Equal(saves, f.Calls.Count("music.catalogSource.settings.save"));
                 Equal("wy", f.Module.CatalogSourcePlatform);
             }
             finally { shell.Close(); await shell.ShutdownCompletion; }
         });
-        yield return Case("replica settings keep six reference anchors and continuous groups with an independent source page", async () =>
+        yield return Case("replica settings keep music anchors and continuous groups with an independent source page", async () =>
         {
             await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
             var view = (MusicSettingsView)f.Module.SettingsView;
@@ -227,7 +416,7 @@ public static partial class MusicUiTests
                 TextOptions.GetTextRenderingMode(text) == TextRenderingMode.Auto),
                 "actual settings labels and values use Display and Auto");
             var anchors = ReplicaAnchors(view);
-            True(anchors.Select(anchor => (string)anchor.Content).SequenceEqual(new[] { "账号与平台", "搜索", "音质与缓存", "外观", "歌词与封面", "音源" }), "latest v2 section names");
+            True(anchors.Select(anchor => (string)anchor.Content).SequenceEqual(new[] { "账号与平台", "搜索", "音质", "歌词与封面", "音源" }), "latest v2 section names");
             int calls = f.Calls.Log.Count;
             var scroll = (ScrollViewer)view.FindName("SettingsScroller");
             for (int index = 0; index < anchors.Length - 1; index++)
@@ -263,12 +452,15 @@ public static partial class MusicUiTests
                 var content = (Grid)view.FindName("MusicContent");
                 True(Math.Abs(content.ActualWidth - (view.ActualWidth - 64)) < .5 / VisualTreeHelper.GetDpi(view).DpiScaleX,
                     "the responsive container keeps both 32 DIP page margins at the current DPI");
-                Equal(width < 1164, SettingsLayout.GetIsCompact(content));
-                Equal(width < 704, SettingsLayout.GetIsNarrow(content));
-                var accountGrid = (Grid)((Border)view.FindName("AccountsSection")).Child;
-                Equal(width < 704 ? 0d : width < 1164 ? 88d : 112d, accountGrid.ColumnDefinitions[0].ActualWidth);
-                Equal(width < 704 ? 0d : width < 1164 ? 24d : 32d, accountGrid.ColumnDefinitions[1].ActualWidth);
-                Equal(width < 704 ? 1 : 3, ((UniformGrid)view.FindName("AppearanceFields")).Columns);
+                var accountSection = (Border)view.FindName("AccountsSection");
+                var accountPanel = (StackPanel)accountSection.Child;
+                var accountTitle = accountPanel.Children.OfType<TextBlock>().Single();
+                var accounts = (MusicAccountsView)view.FindName("AccountsPanel");
+                var titleBounds = new Rect(accountTitle.TranslatePoint(new Point(), accountSection), accountTitle.RenderSize);
+                var accountBounds = new Rect(accounts.TranslatePoint(new Point(), accountSection), accounts.RenderSize);
+                True(Math.Abs(titleBounds.Left - accountBounds.Left) < .5 && accountBounds.Top >= titleBounds.Bottom &&
+                    accountBounds.Top - titleBounds.Bottom <= 9 && Math.Abs(accountBounds.Width - accountSection.ActualWidth) < 1,
+                    "at every width the account heading is above a full-width table with a compact gap");
                 var priority = (SettingsPriorityList)view.FindName("QualityPriorities");
                 var list = (ListBox)priority.FindName("PriorityItems");
                 Equal(7, list.Items.Count);
@@ -286,7 +478,6 @@ public static partial class MusicUiTests
                 list.SelectedIndex = 2; view.UpdateLayout();
                 var selected = (ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(2);
                 Equal(((SolidColorBrush)view.FindResource("Settings.Brush.Selected")).Color, ((SolidColorBrush)selected.Background).Color);
-                True(priority.CanMoveUp && priority.CanMoveDown, "selected row owns both toolbar moves");
                 var snapshot = SettingsReorderDrag.Snapshot(selected);
                 var pixels = new byte[snapshot.PixelWidth * snapshot.PixelHeight * 4];
                 snapshot.CopyPixels(pixels, snapshot.PixelWidth * 4, 0);
@@ -317,22 +508,26 @@ public static partial class MusicUiTests
                 }
             }
         });
-        yield return Case("replica priority toolbar clamps first last and unselected rows and saves once", async () =>
+        yield return Case("replica priority handle commands clamp first last rows and save once", async () =>
         {
             await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
             var view = (MusicSettingsView)f.Module.SettingsView; using var mount = new ReplicaMount(view);
             await Drain(); await Until(() => !f.Module.Busy);
             var priority = (SettingsPriorityList)view.FindName("QualityPriorities"); var list = (ListBox)priority.FindName("PriorityItems");
-            var up = (Button)priority.FindName("MoveUpButton"); var down = (Button)priority.FindName("MoveDownButton");
-            True(!priority.CanMoveUp && !priority.CanMoveDown && !up.IsEnabled && !down.IsEnabled, "unselected list has no toolbar move");
-            list.SelectedIndex = 0; True(!priority.CanMoveUp && priority.CanMoveDown, "first row can only move down");
+            Thumb Grip(int index) => Visuals((ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(index)).OfType<Thumb>().Single();
+            var first = Grip(0);
+            True(!ComponentCommands.MoveUp.CanExecute(null, first) && ComponentCommands.MoveDown.CanExecute(null, first), "first handle can only move down");
+            True(first.InputBindings.OfType<KeyBinding>().Any(binding => binding.Key == Key.Down && binding.Modifiers == ModifierKeys.Alt && binding.Command == ComponentCommands.MoveDown), "Alt+Down reaches the native command without input injection");
             int writes = f.Calls.Count("music.quality.settings.save"); var source = f.Module.QualityCategories[0];
-            down.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Until(() => f.Module.CanEditQuality && f.Module.QualityCategories[1] == source);
+            ComponentCommands.MoveUp.Execute(null, first); Equal(writes, f.Calls.Count("music.quality.settings.save"));
+            ComponentCommands.MoveDown.Execute(null, first); await Until(() => f.Module.CanEditQuality && f.Module.QualityCategories[1] == source);
             Equal(writes + 1, f.Calls.Count("music.quality.settings.save"));
-            list.SelectedIndex = list.Items.Count - 1; True(priority.CanMoveUp && !priority.CanMoveDown, "last row can only move up");
-            up.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Until(() => f.Module.CanEditQuality);
+            var last = Grip(list.Items.Count - 1);
+            True(ComponentCommands.MoveUp.CanExecute(null, last) && !ComponentCommands.MoveDown.CanExecute(null, last), "last handle can only move up");
+            ComponentCommands.MoveDown.Execute(null, last); Equal(writes + 1, f.Calls.Count("music.quality.settings.save"));
+            ComponentCommands.MoveUp.Execute(null, last); await Until(() => f.Module.CanEditQuality);
             Equal(writes + 2, f.Calls.Count("music.quality.settings.save"));
-            True(!f.Runtime.HasStarted, "toolbar uses the native quality owner");
+            True(!f.Runtime.HasStarted, "keyboard ordering uses the native quality owner");
         });
         yield return Case("replica captured priority gestures slide neighbours without a marker and commit one native move", async () =>
         {
@@ -352,7 +547,7 @@ public static partial class MusicUiTests
                 var drop = target.TranslatePoint(new Point(60, target.ActualHeight - 2), scroll); int writes = f.Calls.Count(item.Item2);
                 priority.Drag.Begin(grip, list, grip.TranslatePoint(new Point(18, 18), scroll)); priority.Drag.Update(drop);
                 True(priority.IsDragging && priority.Drag.DestinationIndex == to, "drag tracks the lifted row centre");
-                True(!priority.CanMoveUp && !priority.CanMoveDown, "drag disables toolbar");
+                True(!ComponentCommands.MoveUp.CanExecute(null, grip) && !ComponentCommands.MoveDown.CanExecute(null, grip), "drag disables keyboard reordering");
                 Equal(0d, ((ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(from)).Opacity);
                 var shift = ((TransformGroup)target.RenderTransform).Children.OfType<TranslateTransform>().Single();
                 Equal(-target.ActualHeight, (double)shift.GetAnimationBaseValue(TranslateTransform.YProperty));
@@ -409,14 +604,14 @@ public static partial class MusicUiTests
             priority.Drag.Update(clippedDrop); priority.CompleteDrag(clippedDrop, false);
             Equal(writes, f.Calls.Count("music.quality.settings.save")); True(!priority.IsDragging && source.Opacity == 1, "outer viewport clipping fences the final drop");
             list.SelectedIndex = 2;
-            var down = (Button)priority.FindName("MoveDownButton"); var toggle = Visuals(source).OfType<CheckBox>().Single();
+            var toggle = Visuals(source).OfType<CheckBox>().Single();
             view.Visibility = Visibility.Collapsed; await Drain();
-            down.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
-            Equal(writes, f.Calls.Count("music.quality.settings.save")); True(!priority.CanMoveUp && !priority.CanMoveDown, "hidden controls cannot submit");
+            ComponentCommands.MoveDown.Execute(null, grip); toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+            Equal(writes, f.Calls.Count("music.quality.settings.save")); True(!ComponentCommands.MoveDown.CanExecute(null, grip), "hidden controls cannot submit");
             view.Visibility = Visibility.Visible; await Drain();
             mount.Window.Content = null; await Drain();
-            down.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
-            Equal(writes, f.Calls.Count("music.quality.settings.save")); True(!priority.CanMoveUp && !priority.CanMoveDown, "unloaded controls cannot submit");
+            ComponentCommands.MoveDown.Execute(null, grip); toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+            Equal(writes, f.Calls.Count("music.quality.settings.save")); True(!ComponentCommands.MoveDown.CanExecute(null, grip), "unloaded controls cannot submit");
         });
         yield return Case("replica settings remain within shell content and retain the hidden global player", async () =>
         {
@@ -471,9 +666,8 @@ public static partial class MusicUiTests
                         "settings remain inside the shell while the player footer is hidden");
                     if (size.Width == 860)
                     {
-                        True(SettingsLayout.GetIsNarrow((Grid)view.FindName("MusicContent")), "sidebar-reduced content uses stacked section labels");
                         var accountSection = (Border)view.FindName("AccountsSection");
-                        var accountLabel = ((Grid)accountSection.Child).Children.OfType<TextBlock>().Single(text => text.Text == "账号");
+                        var accountLabel = ((StackPanel)accountSection.Child).Children.OfType<TextBlock>().Single(text => text.Text == "账号");
                         var accounts = (MusicAccountsView)view.FindName("AccountsPanel");
                         True(accounts.TranslatePoint(new Point(), accountSection).Y >=
                             accountLabel.TranslatePoint(new Point(0, accountLabel.ActualHeight), accountSection).Y,
@@ -544,7 +738,7 @@ public static partial class MusicUiTests
             {
                 var button = Visuals(view).OfType<Button>().Single(b => AutomationProperties.GetName(b) == label);
                 button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
-                True(popup.IsOpen && ReferenceEquals(popup.PlacementTarget, button), "advanced bubble opens below its button");
+                True(popup.IsOpen && DialogPlacement.GetCentered(popup), "advanced settings open as a window-centered dialog");
                 ((TextBox)view.FindName("SearchPagesBox")).Text = pages.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 ((TextBox)view.FindName("SearchConcurrencyBox")).Text = concurrency.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 popup.IsOpen = false; await Drain(); await Until(() => !f.Module.Busy && f.Module.CanEditSearchPreferences);
@@ -577,7 +771,7 @@ public static partial class MusicUiTests
                 Wheel(row, UIElement.PreviewMouseWheelEvent); Wheel(row, UIElement.MouseWheelEvent);
                 True(scroll.VerticalOffset > 0, "ordinary settings rows pass the wheel to the page");
             }
-            var picker = Visuals(view).OfType<ComboBox>().Single(control => AutomationProperties.GetName(control) == "播放请求音质");
+            var picker = Visuals(view).OfType<ComboBox>().Single(control => AutomationProperties.GetName(control) == "起播目标音质");
             scroll.ScrollToVerticalOffset(0); view.UpdateLayout(); picker.IsDropDownOpen = true; await Drain();
             Wheel(picker, UIElement.PreviewMouseWheelEvent); Equal(0d, scroll.VerticalOffset);
             picker.IsDropDownOpen = false; await Drain();
@@ -605,24 +799,30 @@ public static partial class MusicUiTests
             await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
             var view = (MusicSettingsView)f.Module.SettingsView;
             Render(view, 600, 760); await Drain(); view.UpdateLayout();
-            var cache = (Border)view.FindName("CacheSection");
+            var cacheView = f.Module.CacheSettingsView;
+            Render(cacheView, 600, 240); await Drain();
+            var cache = (Border)cacheView.FindName("CacheSection");
             var label = Visuals(cache).OfType<TextBlock>().Single(text => text.Text == "播放缓存");
             var clear = Visuals(cache).OfType<Button>().Single(button => Equals(button.Content, "清空播放缓存"));
             True(clear.TranslatePoint(new Point(), cache).Y >= label.TranslatePoint(new Point(0, label.ActualHeight), cache).Y,
                 "narrow cache control is below its section label");
-            var fields = (UniformGrid)view.FindName("AppearanceFields"); Equal(1, fields.Columns);
-            var pickers = Visuals(fields).OfType<ComboBox>().ToArray(); Equal(3, pickers.Length);
-            for (int index = 1; index < pickers.Length; index++)
-                True(pickers[index].TranslatePoint(new Point(), fields).Y >
-                    pickers[index - 1].TranslatePoint(new Point(0, pickers[index - 1].ActualHeight), fields).Y + 16,
-                    "stacked appearance controls retain field spacing");
+            var appearance = f.Module.AppearanceSettingsView;
+            Render(appearance, 600, 700); await Drain();
+            var pickers = Visuals(appearance).OfType<ComboBox>().ToArray(); Equal(3, pickers.Length);
+            var mode = pickers.Single(picker => AutomationProperties.GetName(picker) == "播放器配色");
+            var color = pickers.Single(picker => AutomationProperties.GetName(picker) == "播放器固定配色");
+            var playlist = pickers.Single(picker => AutomationProperties.GetName(picker) == "歌单样式");
+            True(color.TranslatePoint(new Point(), appearance).Y >
+                mode.TranslatePoint(new Point(0, mode.ActualHeight), appearance).Y + 16 &&
+                playlist.TranslatePoint(new Point(), appearance).Y > color.TranslatePoint(new Point(0, color.ActualHeight), appearance).Y + 16,
+                "mode, preset dropdown and playlist retain separate labeled rows at narrow width");
         });
         yield return Case("replica native keyboard anchors and high contrast preserve current semantics", async () =>
         {
             await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync(); var view = (MusicSettingsView)f.Module.SettingsView;
             using var mount = new ReplicaMount(view); await Drain(); await Until(() => !f.Module.Busy);
             var anchors = ReplicaAnchors(view); True(anchors[0].Focus(), "anchor has real native focus");
-            foreach (var step in new[] { (Key.End, 5), (Key.Home, 0), (Key.Right, 1), (Key.Left, 0) })
+            foreach (var step in new[] { (Key.End, 4), (Key.Home, 0), (Key.Right, 1), (Key.Left, 0) })
             {
                 var input = new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(view)!, 0, step.Item1) { RoutedEvent = Keyboard.PreviewKeyDownEvent };
                 ((UIElement)Keyboard.FocusedElement).RaiseEvent(input); await Drain(); mount.Window.UpdateLayout();
@@ -630,7 +830,7 @@ public static partial class MusicUiTests
             }
             DesktopTheme.SetIsHighContrast(view, true); view.UpdateLayout();
             Equal(SystemColors.WindowColor, ((SolidColorBrush)view.Background).Color);
-            var picker = Visuals(view).OfType<ComboBox>().Single(control => AutomationProperties.GetName(control) == "播放请求音质");
+            var picker = Visuals(view).OfType<ComboBox>().Single(control => AutomationProperties.GetName(control) == "起播目标音质");
             SimulateFocus(picker, UIElement.IsKeyboardFocusWithinProperty, true); view.UpdateLayout();
             Equal(SystemColors.HighlightColor, ((SolidColorBrush)picker.BorderBrush).Color);
             var priority = (SettingsPriorityList)view.FindName("QualityPriorities");
@@ -643,6 +843,88 @@ public static partial class MusicUiTests
             Equal(SystemColors.HighlightTextColor, ((SolidColorBrush)bars.Stroke).Color);
             True(bars.Data.Bounds.Width > bars.Data.Bounds.Height, "grip draws three horizontal bars");
         });
+        yield return Case("general data source and cache areas retain their owners without opening music settings", async () =>
+        {
+            await using var f = await Fixture.Create(withPlaybackCache: true);
+            await using var appearance = new MeowFilm.AppHost.AppAppearance(f.Store);
+            var general = new GeneralSettingsView(appearance, [f.Module]);
+            using var mount = new ReplicaMount(general); await Drain(); await Until(() => !f.Module.Busy);
+            var tabs = ((Panel)general.FindName("Areas")).Children.OfType<RadioButton>().ToArray();
+            True(tabs.Select(tab => (string)tab.Content).SequenceEqual(new[] { "外观", "首页数据源", "缓存控制" }), "general areas match their contents");
+            int qualityReads = f.Calls.Count("music.quality.settings.get");
+            int sourceReads = f.Calls.Count("music.catalogSource.settings.get");
+            tabs[1].IsChecked = true; await Drain();
+            True(f.Module.HomeSourceSettingsView.IsVisible && !f.Module.AppearanceSettingsView.IsVisible, "source controls only mount in their own area");
+            Equal(sourceReads, f.Calls.Count("music.catalogSource.settings.get"));
+            tabs[2].IsChecked = true; await Drain();
+            var cache = f.Module.CacheSettingsView;
+            var clear = Visuals(cache).OfType<Button>().Single(button => Equals(button.Content, "清空播放缓存"));
+            True(clear.IsEnabled && cache.IsVisible && !f.Module.HomeSourceSettingsView.IsVisible, "cache control belongs to General cache area");
+            f.Dialogs.Confirmation = false;
+            clear.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Until(() => !f.Module.Busy);
+            True((await f.Store.ReadAsync(MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache.Namespace)).Data is null, "cancelled confirmation does not create cache metadata");
+            f.Dialogs.Confirmation = true;
+            clear.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Until(() => !f.Module.Busy);
+            True((await f.Store.ReadAsync(MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache.Namespace)).Data is not null, "confirmed action reaches the actual isolated cache owner");
+            Equal("播放缓存已清空", f.Module.Status);
+            Equal(qualityReads, f.Calls.Count("music.quality.settings.get"));
+            True(!f.Runtime.HasStarted && !f.Module.SettingsView.IsLoaded, "General does not activate music accounts sources or scripts");
+            foreach (int width in new[] { 900, 600 })
+            {
+                mount.Window.Width = width; mount.Window.UpdateLayout(); await Drain();
+                foreach (int area in new[] { 1, 2 })
+                {
+                    tabs[area].IsChecked = true; await Drain();
+                    CaptureSettings(general, $"general-area-{area}-{width}.png");
+                }
+            }
+        });
+        yield return Case("settings switches keep green on state and menus highlight the pointed option only", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
+            var view = (MusicSettingsView)f.Module.SettingsView; using var mount = new ReplicaMount(view);
+            await Drain(); await Until(() => !f.Module.Busy);
+            foreach (string name in new[] { "SongPriorities", "PlaylistPriorities", "QualityPriorities", "SpatialPriorities", "MetadataPriorities", "ArtworkPriorities" })
+            {
+                var priority = (SettingsPriorityList)view.FindName(name);
+                var list = (ListBox)priority.FindName("PriorityItems");
+                var row = (ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(1);
+                var toggle = Visuals(row).OfType<CheckBox>().Single(); var grip = Visuals(row).OfType<Thumb>().Single();
+                True(grip.TranslatePoint(new Point(), row).X >= toggle.TranslatePoint(new Point(toggle.ActualWidth, 0), row).X,
+                    "drag handle follows the switch on " + name);
+                var track = (Border)toggle.Template.FindName("Track", toggle);
+                Equal(Color.FromRgb(34, 197, 94), ((SolidColorBrush)track.Background).Color);
+                toggle.IsEnabled = false;
+                Equal(Color.FromRgb(34, 197, 94), ((SolidColorBrush)track.Background).Color);
+                toggle.IsEnabled = true;
+                var line = (Border)row.Template.FindName("Line", row);
+                True(line.IsVisible && line.BorderThickness.Bottom == 1, "every adjacent priority row has a separator");
+                list.SelectedIndex = 1; SimulateFocus(row, UIElement.IsMouseOverProperty, true);
+                True(line.IsVisible, "hover and selection do not erase row separators");
+                SimulateFocus(row, UIElement.IsMouseOverProperty, false);
+            }
+            var surface = new StackPanel();
+            surface.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = new Uri("/MeowFilm.Capabilities;component/Settings/SettingsTheme.xaml", UriKind.Relative) });
+            var on = new CheckBox { IsChecked = true, Style = (Style)surface.FindResource("Settings.Switch") };
+            var off = new CheckBox { IsChecked = false, Style = on.Style };
+            var selected = new ComboBoxItem { Content = "网易云音乐", IsSelected = true, Style = (Style)surface.FindResource("MeowFilm.SettingsComboItem") };
+            var hovered = new ComboBoxItem { Content = "酷狗音乐", Style = selected.Style };
+            surface.Children.Add(on); surface.Children.Add(off); surface.Children.Add(selected); surface.Children.Add(hovered);
+            mount.Window.Content = surface; await Drain(); surface.UpdateLayout();
+            var offTrack = (Border)off.Template.FindName("Track", off);
+            True(((SolidColorBrush)offTrack.Background).Color != Color.FromRgb(34, 197, 94), "off is visually distinct from on");
+            var rest = ((SolidColorBrush)selected.Background).Color;
+            Equal((byte)0, rest.A);
+            SimulateFocus(hovered, UIElement.IsMouseOverProperty, true);
+            Equal(((SolidColorBrush)surface.FindResource("MeowFilm.Brush.AccentSoft")).Color, ((SolidColorBrush)hovered.Background).Color);
+            Equal(rest, ((SolidColorBrush)selected.Background).Color);
+            SimulateFocus(hovered, UIElement.IsMouseOverProperty, false); Equal(rest, ((SolidColorBrush)hovered.Background).Color);
+            GeneralAppearanceTests.SavePreview(surface, "settings-states", 260, 180);
+            DesktopTheme.SetIsHighContrast(surface, true); surface.UpdateLayout();
+            Equal(SystemColors.HighlightColor, ((SolidColorBrush)((Border)on.Template.FindName("Track", on)).Background).Color);
+            SimulateFocus(hovered, UIElement.IsMouseOverProperty, true);
+            Equal(SystemColors.HighlightColor, ((SolidColorBrush)hovered.Background).Color);
+        });
         yield return Case("replica screenshot states use real owner data and official resources without remote reads", async () =>
         {
             await using var f = await DetailsScene.Create(); await f.Module.ActivateSettingsAsync(); var view = (MusicSettingsView)f.Module.SettingsView;
@@ -650,7 +932,7 @@ public static partial class MusicUiTests
             foreach (int width in new[] { 1248, 908, 600 })
             {
                 mount.Window.Width = width; mount.Window.UpdateLayout(); await Drain();
-                foreach (var target in new[] { (0, "accounts"), (1, "search"), (2, "quality"), (3, "appearance"), (4, "metadata") })
+                foreach (var target in new[] { (0, "accounts"), (1, "search"), (2, "quality"), (3, "metadata") })
                 {
                     ReplicaAnchors(view)[target.Item1].IsChecked = true; await Drain(); view.UpdateLayout();
                     CaptureSettings(view, "replica-" + target.Item2 + "-" + width + ".png");

@@ -9,9 +9,6 @@ public static class SettingsLayout
     public static readonly DependencyProperty ModeProperty = DependencyProperty.RegisterAttached(
         "Mode", typeof(SettingsLayoutMode), typeof(SettingsLayout),
         new PropertyMetadata(SettingsLayoutMode.None, ModeChanged));
-    public static readonly DependencyProperty IsCompactProperty = DependencyProperty.RegisterAttached(
-        "IsCompact", typeof(bool), typeof(SettingsLayout),
-        new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.Inherits));
     public static readonly DependencyProperty IsNarrowProperty = DependencyProperty.RegisterAttached(
         "IsNarrow", typeof(bool), typeof(SettingsLayout),
         new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.Inherits));
@@ -21,8 +18,6 @@ public static class SettingsLayout
 
     public static SettingsLayoutMode GetMode(DependencyObject element) => (SettingsLayoutMode)element.GetValue(ModeProperty);
     public static void SetMode(DependencyObject element, SettingsLayoutMode value) => element.SetValue(ModeProperty, value);
-    public static bool GetIsCompact(DependencyObject element) => (bool)element.GetValue(IsCompactProperty);
-    public static void SetIsCompact(DependencyObject element, bool value) => element.SetValue(IsCompactProperty, value);
     public static bool GetIsNarrow(DependencyObject element) => (bool)element.GetValue(IsNarrowProperty);
     public static void SetIsNarrow(DependencyObject element, bool value) => element.SetValue(IsNarrowProperty, value);
     public static bool GetIsStacked(DependencyObject element) => (bool)element.GetValue(IsStackedProperty);
@@ -37,7 +32,6 @@ public static class SettingsLayout
         switch ((SettingsLayoutMode)e.OldValue)
         {
             case SettingsLayoutMode.Sections:
-                element.ClearValue(IsCompactProperty);
                 element.ClearValue(IsNarrowProperty);
                 break;
             case SettingsLayoutMode.Pair:
@@ -74,7 +68,6 @@ public static class SettingsLayout
         switch (GetMode(element))
         {
             case SettingsLayoutMode.Sections:
-                SetIsCompact(element, width < 1100);
                 SetIsNarrow(element, width < 640);
                 break;
             case SettingsLayoutMode.Pair:

@@ -31,35 +31,10 @@
    </Style>
   </ResourceDictionary>
  </UserControl.Resources>
- <StackPanel Margin="0,0,0,20">
+ <StackPanel Margin="0,0,0,12">
   <TextBlock Text="{Binding Title,ElementName=Root}" FontWeight="SemiBold" Margin="0,0,0,8"/>
-  <ItemsControl x:Name="RuleList" ItemsSource="{Binding Rows,ElementName=Root}" AutomationProperties.Name="{Binding Title,ElementName=Root}">
-   <ItemsControl.ItemTemplate><DataTemplate>
-    <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource Settings.Brush.Rule}" Padding="0,8">
-     <StackPanel>
-      <Grid>
-       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Rule.ReplaceColumn}"/><ColumnDefinition Width="108"/></Grid.ColumnDefinitions>
-       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-       <TextBox Text="{Binding Pattern,UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource Rule.Pattern}" AutomationProperties.Name="{Binding PatternLabel}"/>
-       <TextBox Text="{Binding Replace,UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource Rule.Replace}" AutomationProperties.Name="{Binding ReplaceLabel}"/>
-       <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top">
-        <Button Content="保存" Style="{StaticResource Settings.QuietButton}" Click="Save_Click" AutomationProperties.Name="{Binding SaveLabel}"/>
-        <Button Content="删除" Style="{StaticResource Settings.DangerButton}" Click="Delete_Click" AutomationProperties.Name="{Binding DeleteLabel}"/>
-       </StackPanel>
-      </Grid>
-      <TextBlock Text="{Binding Preview}" Style="{StaticResource Rule.Preview}"/>
-     </StackPanel>
-    </Border>
-   </DataTemplate></ItemsControl.ItemTemplate>
-  </ItemsControl>
-  <TextBlock Text="暂无规则" Margin="0,8">
-   <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Subtitle}">
-    <Setter Property="Visibility" Value="Collapsed"/>
-    <Style.Triggers><DataTrigger Binding="{Binding Rows.Count,ElementName=Root}" Value="0"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
-   </Style></TextBlock.Style>
-  </TextBlock>
-  <Grid Margin="0,12,0,0">
-   <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Rule.ReplaceColumn}"/><ColumnDefinition Width="108"/></Grid.ColumnDefinitions>
+  <Grid Margin="0,0,0,12">
+   <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Rule.ReplaceColumn}"/><ColumnDefinition Width="124"/></Grid.ColumnDefinitions>
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
    <TextBlock Text="新正则" Style="{StaticResource Settings.Subtitle}" Margin="0,0,0,6"/>
    <TextBlock Text="替换" Grid.Column="1" Margin="8,0,0,6">
@@ -79,7 +54,36 @@
     </Style></TextBox.Style>
    </TextBox>
    <Button x:Name="AddButton" Content="添加" Grid.Row="1" Grid.Column="2" HorizontalAlignment="Right"
-           Style="{StaticResource Settings.Button}" Click="Add_Click" AutomationProperties.Name="{Binding Title,ElementName=Root,StringFormat='添加{0}'}"/>
+           Style="{StaticResource Settings.PrimaryButton}" Click="Add_Click" AutomationProperties.Name="{Binding Title,ElementName=Root,StringFormat='添加{0}'}"/>
   </Grid>
+  <ItemsControl x:Name="RuleList" ItemsSource="{Binding Rows,ElementName=Root}" AutomationProperties.Name="{Binding Title,ElementName=Root}">
+   <ItemsControl.ItemTemplate><DataTemplate>
+    <Border Style="{StaticResource Settings.RuleSurface}" Margin="0,0,0,8">
+     <DockPanel>
+      <TextBlock Text="{Binding Number,StringFormat={}{0}.}" Width="24" Margin="0,8,8,0" VerticalAlignment="Top" TextAlignment="Right" Style="{StaticResource Settings.Subtitle}"/>
+     <StackPanel>
+      <Grid>
+       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Rule.ReplaceColumn}"/><ColumnDefinition Width="124"/></Grid.ColumnDefinitions>
+       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+       <TextBox Text="{Binding Pattern,UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource Rule.Pattern}" AutomationProperties.Name="{Binding PatternLabel}"/>
+       <TextBox Text="{Binding Replace,UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource Rule.Replace}" AutomationProperties.Name="{Binding ReplaceLabel}"/>
+       <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top">
+        <Button Content="保存" Style="{StaticResource Settings.PrimaryButton}" Click="Save_Click" AutomationProperties.Name="{Binding SaveLabel}"/>
+        <Button Content="删除" Margin="8,0,0,0" Style="{StaticResource Settings.DangerButton}" Click="Delete_Click" AutomationProperties.Name="{Binding DeleteLabel}"/>
+       </StackPanel>
+      </Grid>
+      <TextBlock Text="{Binding Preview}" Style="{StaticResource Rule.Preview}"/>
+     </StackPanel>
+     </DockPanel>
+    </Border>
+   </DataTemplate></ItemsControl.ItemTemplate>
+  </ItemsControl>
+  <TextBlock Text="暂无规则" Margin="0,8">
+   <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Subtitle}">
+    <Setter Property="Visibility" Value="Collapsed"/>
+    <Style.Triggers><DataTrigger Binding="{Binding Rows.Count,ElementName=Root}" Value="0"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+   </Style></TextBlock.Style>
+  </TextBlock>
+
  </StackPanel>
 </UserControl>

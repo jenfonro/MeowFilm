@@ -43,7 +43,6 @@ internal sealed class SettingsReorderDrag
 
     internal bool IsActive => grip is not null;
     internal int DestinationIndex => destination;
-    internal event Action? StateChanged;
 
     internal void Begin(Thumb handle, ListBox owner, Point position)
     {
@@ -76,7 +75,6 @@ internal sealed class SettingsReorderDrag
                 break;
             }
         SystemParameters.StaticPropertyChanged += SystemParametersChanged;
-        StateChanged?.Invoke();
     }
 
     internal void Update(Point position)
@@ -232,7 +230,6 @@ internal sealed class SettingsReorderDrag
         if (preview is not null) layer?.Remove(preview);
         grip = null; list = null; sourceContainer = null; source = null;
         rows = []; rowBounds = []; scroller = null; moved = false; destination = -1; layer = null; preview = null;
-        StateChanged?.Invoke();
     }
 
     private sealed class PriorityDragAdorner : Adorner
@@ -254,7 +251,7 @@ internal sealed class SettingsReorderDrag
             card = new()
             {
                 Background = background, BorderBrush = contrast ? SystemColors.WindowTextBrush :
-                    (Brush)list.FindResource("Settings.Brush.Control"),
+                    (Brush)list.FindResource("MeowFilm.Brush.Border"),
                 BorderThickness = new(1), CornerRadius = new(6), Height = Math.Max(1, sourceRow.ActualHeight),
                 Width = Math.Max(1, Math.Min(sourceRow.ActualWidth, viewport.ActualWidth)),
                 Child = new Image { Source = snapshot, Stretch = Stretch.Fill },

@@ -42,7 +42,7 @@ public sealed partial class MusicCapability
         CatalogSourceBindings();
     }
 
-    private Task EnsureCatalogSourceSettingsAsync(CancellationToken token)
+    internal Task EnsureCatalogSourceSettingsAsync(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         if (catalogSourceLoaded) return Task.CompletedTask;
@@ -154,7 +154,7 @@ public sealed partial class MusicCapability
         });
     }
 
-    private async Task DeactivateCatalogSourceSettingsAsync()
+    internal async Task DeactivateCatalogSourceSettingsAsync()
     {
         catalogSourceSaveCancellation?.Cancel();
         await catalogSourceWork;

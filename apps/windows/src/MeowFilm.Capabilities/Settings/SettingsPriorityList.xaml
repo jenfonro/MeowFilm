@@ -3,7 +3,11 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
- x:Name="Root" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14">
+ x:Name="Root" Focusable="True" IsTabStop="False" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14">
+ <UserControl.CommandBindings>
+  <CommandBinding Command="ComponentCommands.MoveUp" CanExecute="Move_CanExecute" Executed="Move_Executed"/>
+  <CommandBinding Command="ComponentCommands.MoveDown" CanExecute="Move_CanExecute" Executed="Move_Executed"/>
+ </UserControl.CommandBindings>
  <UserControl.Resources>
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries>
@@ -12,50 +16,36 @@
   </ResourceDictionary>
  </UserControl.Resources>
  <StackPanel>
-  <Grid x:Name="Toolbar" Margin="0,0,14,10" MinHeight="36" SizeChanged="Toolbar_SizeChanged">
-   <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="48"/></Grid.ColumnDefinitions>
-   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-   <TextBlock Text="{Binding Title,ElementName=Root}" VerticalAlignment="Center" FontSize="14"/>
-   <Border x:Name="MoveGroup" Grid.Column="1" CornerRadius="6" BorderThickness="1"
-           BorderBrush="{DynamicResource Settings.Brush.Control}" Background="{DynamicResource MeowFilm.Brush.Surface}">
-    <StackPanel Orientation="Horizontal">
-     <Button x:Name="MoveUpButton" Content="↑ 上移" Tag="-1" Click="Move_Click"
-             Style="{StaticResource Settings.QuietButton}" MinWidth="68" Height="30" MinHeight="30" FontSize="12"
-             IsEnabled="{Binding CanMoveUp,ElementName=Root}" AutomationProperties.Name="{Binding Title,ElementName=Root,StringFormat={}{0}上移}"/>
-     <Border BorderThickness="1,0,0,0" BorderBrush="{DynamicResource Settings.Brush.Border}">
-      <Button x:Name="MoveDownButton" Content="↓ 下移" Tag="1" Click="Move_Click"
-              Style="{StaticResource Settings.QuietButton}" MinWidth="68" Height="30" MinHeight="30" FontSize="12"
-              IsEnabled="{Binding CanMoveDown,ElementName=Root}" AutomationProperties.Name="{Binding Title,ElementName=Root,StringFormat={}{0}下移}"/>
-     </Border>
-    </StackPanel>
-   </Border>
-   <TextBlock x:Name="EnabledTitle" Grid.Column="2" Text="启用" Style="{StaticResource Settings.Subtitle}"
-              HorizontalAlignment="Right" VerticalAlignment="Center"/>
-  </Grid>
+  <TextBlock Text="{Binding Title,ElementName=Root}" FontSize="14" Margin="0,0,0,12"/>
   <Border x:Name="ListSurface" Style="{StaticResource Settings.ListSurface}">
    <AdornerDecorator>
      <ListBox x:Name="PriorityItems" Style="{StaticResource Settings.List}" ItemContainerStyle="{StaticResource Settings.ListItem}"
               ItemsSource="{Binding ItemsSource,ElementName=Root}" IsEnabled="{Binding CanEdit,ElementName=Root}"
-              SelectionChanged="List_SelectionChanged" AutomationProperties.Name="{Binding Title,ElementName=Root}">
+              AutomationProperties.Name="{Binding Title,ElementName=Root}">
       <ListBox.ItemTemplate>
        <DataTemplate>
         <Grid Height="50">
          <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="36"/><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="48"/>
+          <ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="48"/><ColumnDefinition Width="36"/>
          </Grid.ColumnDefinitions>
-         <Thumb Style="{StaticResource Settings.Grip}" DragStarted="Grip_Started" DragDelta="Grip_Delta" DragCompleted="Grip_Completed"
-                PreviewKeyDown="Grip_KeyDown" AutomationProperties.Name="{Binding Label,StringFormat={}{0}排序}"/>
-         <Image Grid.Column="1" Style="{StaticResource Settings.PlatformLogo}" Margin="0,0,10,0"
+         <Thumb Grid.Column="3" Style="{StaticResource Settings.Grip}" DragStarted="Grip_Started" DragDelta="Grip_Delta" DragCompleted="Grip_Completed"
+                PreviewKeyDown="Grip_KeyDown" AutomationProperties.Name="{Binding Label,StringFormat={}{0}排序}">
+          <Thumb.InputBindings>
+           <KeyBinding Key="Up" Modifiers="Alt" Command="ComponentCommands.MoveUp"/>
+           <KeyBinding Key="Down" Modifiers="Alt" Command="ComponentCommands.MoveDown"/>
+          </Thumb.InputBindings>
+         </Thumb>
+         <Image Grid.Column="0" Style="{StaticResource Settings.PlatformLogo}" Margin="0,0,10,0"
                 Visibility="{Binding ShowLogos,ElementName=Root,Converter={StaticResource MeowFilm.BoolToVisibility}}"
                 AutomationProperties.Name="{Binding Label,StringFormat={}{0}标志}"/>
-         <TextBlock Grid.Column="2" Text="{Binding Label}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis">
+         <TextBlock Grid.Column="1" Text="{Binding Label}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis">
           <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
            <Style.Triggers><DataTrigger Binding="{Binding IsSelected,RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
             <Setter Property="Foreground" Value="{Binding Foreground,RelativeSource={RelativeSource AncestorType=ListBoxItem}}"/>
            </DataTrigger></Style.Triggers>
           </Style></TextBlock.Style>
          </TextBlock>
-         <CheckBox Grid.Column="3" HorizontalAlignment="Right" VerticalAlignment="Center" IsChecked="{Binding Enabled,Mode=OneWay}"
+         <CheckBox Grid.Column="2" HorizontalAlignment="Center" VerticalAlignment="Center" IsChecked="{Binding Enabled,Mode=OneWay}"
                    Style="{StaticResource Settings.Switch}" Tag="{Binding}" Click="Enabled_Click"
                    AutomationProperties.Name="{Binding Label,StringFormat={}{0}启用}"/>
         </Grid>

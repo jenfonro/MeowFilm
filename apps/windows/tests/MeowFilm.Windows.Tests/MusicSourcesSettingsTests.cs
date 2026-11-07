@@ -3,7 +3,9 @@ using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Media;
 using MeowFilm.Capabilities;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -32,6 +34,48 @@ public static partial class MusicUiTests
             True(f.Module.SourceExclusions.Single().SongId == songs[^1]["songId"]!.GetValue<string>(),
                 "a song beyond the first two pages is selectable by its real identity");
             True(!f.Module.HasCurrent, "manual exclusion never begins playback");
+        });
+        yield return Case("source inputs and platform labels retain text and system foregrounds across enabled and high contrast states", async () =>
+        {
+            await using var f = await Fixture.Create();
+            var settings = (MusicSettingsView)f.Module.SettingsView;
+            using var mount = new ReplicaMount(settings);
+            ReplicaAnchors(settings)[^1].IsChecked = true;
+            await Until(() => f.Calls.Count("music.officialSources.settings.get") > 0 && f.Module.CanEditScripts);
+            await Drain();
+            var sources = (MusicSourcesSettingsView)settings.FindName("SourcesPage");
+            var input = (TextBox)sources.FindName("NetworkAddress");
+            var enabledBinding = input.GetBindingExpression(UIElement.IsEnabledProperty);
+            True(enabledBinding is not null, "the real input retains its business availability binding");
+            const string address = "https://example.invalid/source.js";
+            input.Text = address;
+            var row = f.Module.Sources.Single(item => item.Platform == "tx");
+            var states = row.Platforms.Select(item => item.State).ToArray();
+            True(row.Platforms.Any(item => item.State == "unsupported") && row.Platforms.Any(item => item.State != "unsupported"),
+                "the built-in row supplies both supported and unsupported real platform cells");
+            foreach (bool highContrast in new[] { false, true, false })
+            {
+                DesktopTheme.SetIsHighContrast(settings, highContrast);
+                foreach (bool enabled in new[] { true, false, true })
+                {
+                    // Exercise inherited control state without replacing the input binding or simulating owner work.
+                    sources.IsEnabled = enabled; sources.UpdateLayout(); await Drain();
+                    Equal(enabled, input.IsEnabled);
+                    Equal(address, input.Text);
+                    True(ReferenceEquals(enabledBinding, input.GetBindingExpression(UIElement.IsEnabledProperty)), "state changes preserve the original binding");
+                    var expected = highContrast ? (enabled ? SystemColors.WindowTextBrush : SystemColors.GrayTextBrush) :
+                        (Brush)input.FindResource(enabled ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Disabled");
+                    Equal(((SolidColorBrush)expected).Color, ((SolidColorBrush)input.Foreground).Color);
+                    foreach (var platform in row.Platforms)
+                    {
+                        var text = Visuals(sources).OfType<TextBlock>().Single(element => ReferenceEquals(element.DataContext, platform) && element.Text == platform.Name);
+                        var foreground = highContrast ? SystemColors.WindowTextBrush :
+                            (Brush)text.FindResource(platform.State == "unsupported" ? "MeowFilm.Brush.Muted" : "MeowFilm.Brush.Text");
+                        Equal(((SolidColorBrush)foreground).Color, ((SolidColorBrush)text.Foreground).Color);
+                    }
+                    True(states.SequenceEqual(row.Platforms.Select(item => item.State)), "visual state never changes platform support facts");
+                }
+            }
         });
         yield return Case("source settings table lists built-in and script rows with type, health and fixed actions", async () =>
         {
@@ -185,6 +229,59 @@ public static partial class MusicUiTests
             stale.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
             Equal(0, f.Calls.Count("music.sources.remove"));
             Equal(9, f.Module.Sources.Count);
+        });
+
+        yield return Case("source edit survives resize offset coercion and retains its session until hidden or unloaded", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await InstallSettingsSources(f, 6);
+            var settings = (MusicSettingsView)f.Module.SettingsView;
+            using var mount = new ReplicaMount(settings);
+            mount.Window.Left = 80; mount.Window.Top = 60;
+            mount.Window.Width = 1100; mount.Window.Height = 430;
+            ReplicaAnchors(settings)[^1].IsChecked = true;
+            await Until(() => f.Module.CanEdit); await Drain();
+            var view = (MusicSourcesSettingsView)settings.FindName("SourcesPage");
+            var list = (ItemsControl)view.FindName("SourceList");
+            var scroll = (ScrollViewer)list.Template.FindName("ItemsScroll", list);
+            var popup = (Popup)view.FindName("EditPopup");
+            var name = (TextBox)view.FindName("EditName");
+            await OpenLast();
+            name.Text = "缩放后保存";
+            double oldOffset = scroll.VerticalOffset;
+            True(oldOffset > 0, "editing begins at the bottom of an overflowing source list");
+            int writes = f.Calls.Count("music.sources.edit");
+            mount.Window.Width = 1000; mount.Window.Height = 820;
+            mount.Window.UpdateLayout(); await Drain();
+            True(scroll.VerticalOffset < oldOffset, "growing the viewport actually coerces the old bottom offset");
+            True(popup.IsOpen && name.Text == "缩放后保存", "resize and its scroll change retain the open editor and draft");
+            Equal(writes, f.Calls.Count("music.sources.edit"));
+            var surface = (FrameworkElement)popup.Child;
+            var actual = surface.PointToScreen(new(surface.ActualWidth / 2, surface.ActualHeight / 2));
+            var expected = settings.PointToScreen(new(settings.ActualWidth / 2, settings.ActualHeight / 2));
+            True((actual - expected).Length < 3, "the actual editor popup remains centered on window content after resize");
+            Click((Button)view.FindName("EditSave"));
+            await Until(() => f.Module.CanEdit && f.Module.Sources.Last().Name == "缩放后保存");
+            Equal(writes + 1, f.Calls.Count("music.sources.edit"));
+            True(!popup.IsOpen, "saving the retained edit session closes the editor");
+            await OpenLast(); name.Text = "隐藏时放弃";
+            ReplicaAnchors(settings)[0].IsChecked = true; await Drain();
+            True(!popup.IsOpen, "hiding the source page closes the editor");
+            ReplicaAnchors(settings)[^1].IsChecked = true;
+            await Until(() => f.Module.CanEdit); await Drain();
+            await OpenLast();
+            Equal("缩放后保存", name.Text);
+            mount.Window.Content = null; await Drain();
+            True(!popup.IsOpen, "unloading the source page closes the editor");
+            Equal(writes + 1, f.Calls.Count("music.sources.edit"));
+
+            async Task OpenLast()
+            {
+                scroll.ScrollToEnd(); view.UpdateLayout(); await Drain();
+                var row = f.Module.Sources.Last();
+                Click(Visuals(view).OfType<Button>().Single(button => ReferenceEquals(button.DataContext, row) && Equals(button.Content, "编辑")));
+                await Drain(); True(popup.IsOpen, "the real source edit action opens its editor");
+            }
         });
 
         yield return Case("source settings import local files in order and reject a non-HTTPS address before any request", async () =>

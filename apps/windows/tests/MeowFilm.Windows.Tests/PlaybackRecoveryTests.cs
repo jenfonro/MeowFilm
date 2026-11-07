@@ -1530,6 +1530,39 @@ public static class PlaybackRecoveryTests
 
     private static IEnumerable<TestCase> SourceLifecycleRegressionCases()
     {
+        foreach (bool paused in new[] { false, true })
+            yield return Test("source lifecycle completed cache publishes current quality without another playback event " + paused, async () =>
+            {
+                await using var f = await ControlledMusicFixture.Create(playbackCache: true, official: false,
+                    scripts: [new("quality-publication", quality: "flac")], qualityRequest: "flac");
+                f.HoldValidation = true;
+                await f.Play();
+                await f.ValidationEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                if (paused) await f.Module.TogglePlaybackAsync();
+                f.Module.OpenSourceChoices();
+                var currentQuality = new System.Windows.Controls.TextBlock();
+                currentQuality.SetBinding(System.Windows.Controls.TextBlock.TextProperty,
+                    new System.Windows.Data.Binding(nameof(MusicCapability.CurrentSourceQuality)) { Source = f.Module });
+                await Dispatcher.Yield(DispatcherPriority.DataBind);
+                Check(currentQuality.Text == "音质未知", "unverified media is not presented as confirmed quality");
+                string? identity = f.Output.Identity;
+                int resolves = f.App.Resolutions.Count, opens = f.Output.NetworkOpens, playbackEvents = 0;
+                void Observe(object? sender, PropertyChangedEventArgs e) => playbackEvents++;
+                f.Output.PropertyChanged += Observe;
+                try
+                {
+                    f.ValidationRelease.TrySetResult();
+                    await Until(() => f.Module.CurrentSourceQuality == "无损", "native cache evidence reaches the authority");
+                    await Dispatcher.Yield(DispatcherPriority.DataBind);
+                    Check(currentQuality.Text == "无损" && f.Module.CurrentQualityLabel == "无损" &&
+                        f.Module.SourceChoices.Any(row => row.Provider == "quality-publication" && row.Quality == "无损"),
+                        "the existing source header binding and candidate agree with the accepted cache evidence");
+                    Check(playbackEvents == 0 && f.Output.Identity == identity && f.Output.IsPlaying == !paused &&
+                        f.App.Resolutions.Count == resolves && f.Output.NetworkOpens == opens,
+                        "quality publication needs no later playback event, reopen, new parsing or pause change");
+                }
+                finally { f.Output.PropertyChanged -= Observe; }
+            });
         yield return Test("source lifecycle automatic refresh uses its lower receipt only after preferred tier exhaustion", async () =>
         {
             await using var f = await ControlledMusicFixture.Create(qualityRequest: "flac", officialQuality: "flac");

@@ -64,7 +64,7 @@ public sealed partial class MusicCapability
                     foreach (var attempt in session.Attempts.Values.Where(attempt => ReferenceEquals(attempt.Media, accepted)))
                         attempt.Media = state.Media;
                 if (SourceChoices.Count > 0) UpdateSourceChoices();
-                Changed(nameof(CurrentQualityLabel));
+                PlaybackSourceBindings();
             }
         }
         Task Touch() => audioFileCache.TouchAsync(identity.Scope, state.Song.Id,

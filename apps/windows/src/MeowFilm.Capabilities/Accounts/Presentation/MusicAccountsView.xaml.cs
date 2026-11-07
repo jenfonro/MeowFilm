@@ -3,7 +3,6 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -39,8 +38,6 @@ public partial class MusicAccountsView : UserControl
     {
         AccountTableRows = new(tableRows);
         InitializeComponent();
-        LogoutPopup.CustomPopupPlacementCallback = (popup, target, _) =>
-            [new(new Point(target.Width - popup.Width, target.Height + 8), PopupPrimaryAxis.Horizontal)];
         Loaded += (_, _) => Attach();
         Unloaded += (_, _) => Detach();
         IsVisibleChanged += (_, _) => VisibilityChanged();
@@ -259,8 +256,6 @@ public partial class MusicAccountsView : UserControl
         if (Owner?.ShowAccountSms != true) return;
         QrPanel.Visibility = Visibility.Collapsed;
         SmsPanel.Visibility = Visibility.Visible;
-        QrModeButton.Background = System.Windows.Media.Brushes.Transparent;
-        SmsModeButton.Background = FindResource("MeowFilm.Brush.Surface") as System.Windows.Media.Brush;
         StopPolling();
         RefreshSmsCountdown();
         SmsPhoneInput.Focus();
@@ -270,8 +265,6 @@ public partial class MusicAccountsView : UserControl
     {
         QrPanel.Visibility = Visibility.Visible;
         SmsPanel.Visibility = Visibility.Collapsed;
-        QrModeButton.Background = FindResource("MeowFilm.Brush.Surface") as System.Windows.Media.Brush;
-        SmsModeButton.Background = System.Windows.Media.Brushes.Transparent;
         StopSmsCountdown();
         RefreshPolling();
     }

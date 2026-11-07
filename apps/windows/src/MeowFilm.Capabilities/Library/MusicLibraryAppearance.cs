@@ -18,7 +18,7 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(LJ.S(value["playlistView"]) is "grid" or "list" &&
             LJ.S(value["playerTheme"]) == "starlight" &&
             LJ.S(value["colorMode"]) is "song" or "fixed" &&
-            MusicAppearancePalette.Options.Any(p => p.Key == LJ.S(value["colorPalette"])));
+            MusicAppearancePalette.IsValid(LJ.S(value["colorPalette"])));
     }
 
     private Task<(JsonObject Result, bool Mutate)> AppearanceCommand(

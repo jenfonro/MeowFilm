@@ -33,7 +33,6 @@ public partial class MusicSourcesSettingsView : UserControl
                 SourceHeader.Margin.Left - SourceHeader.Margin.Right);
             HeaderScroll.Width = body.ViewportWidth;
             HeaderScroll.ScrollToHorizontalOffset(body.HorizontalOffset);
-            if (e.VerticalChange != 0) CloseEdit();
         }));
     }
 
@@ -69,7 +68,6 @@ public partial class MusicSourcesSettingsView : UserControl
     private void View_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (!initialized) return;
-        CloseEdit();
         bool shortLayout = e.NewSize.Height < 450;
         ManagementContent.Margin = shortLayout ? new(12, 8, 12, 8) : new(28, 24, 28, 20);
         SourceTitleRow.Margin = new(0, 0, 0, shortLayout ? 8 : 18);
@@ -142,7 +140,7 @@ public partial class MusicSourcesSettingsView : UserControl
         EditAddressPanel.Visibility = network ? Visibility.Visible : Visibility.Collapsed;
         EditAddress.IsEnabled = !network;
         EditRollback.IsEnabled = row.RollbackAvailable;
-        EditPopup.PlacementTarget = anchor;
+        EditPopup.PlacementTarget = this;
         EditPopup.IsOpen = true;
         EditName.Focus();
         if (!network) return;
