@@ -94,6 +94,46 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         attach("05-home-restored")
     }
 
+    func testFilmCategoryFiltersOpenDetailAndPreserveSelectionOnReturn() {
+        XCTAssertTrue(app.buttons["app.primary.film"].waitForExistence(timeout: 30))
+        app.buttons["app.primary.film"].tap()
+        let more = app.buttons["film.home.more.movie"]
+        XCTAssertTrue(more.waitForExistence(timeout: 30))
+        more.tap()
+        XCTAssertTrue(app.otherElements["film.category.movie"].waitForExistence(timeout: 5))
+        let grid = app.collectionViews["film.category.grid"]
+        XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 30))
+        attach("44-film-category")
+        let expand = app.buttons["film.category.category.tags.toggle"]
+        if expand.exists { expand.tap() }
+        let best = app.buttons["film.category.category.tag.豆瓣高分"]
+        XCTAssertTrue(best.isHittable)
+        best.tap()
+        waitSelected(best)
+        let japan = app.buttons["film.category.area.tag.日本"]
+        XCTAssertTrue(japan.isHittable)
+        japan.tap()
+        waitSelected(japan)
+        let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
+                                               object: app.activityIndicators["film.category.loading"])
+        XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 30), .completed)
+        let poster = grid.cells.firstMatch
+        XCTAssertTrue(poster.waitForExistence(timeout: 30))
+        let title = poster.label
+        let identifier = poster.identifier
+        attach("45-film-category-filtered")
+        poster.tap()
+        XCTAssertTrue(app.otherElements["film.detail"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["film.detail.title"].label, title)
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(grid.cells[identifier].waitForExistence(timeout: 5))
+        XCTAssertTrue(best.isSelected)
+        XCTAssertTrue(japan.isSelected)
+        attach("46-film-category-returned")
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(more.waitForExistence(timeout: 5))
+    }
+
     func testFilmHomeOpensDetailAndKeepsItsSnapshot() {
         XCTAssertTrue(app.buttons["app.primary.film"].waitForExistence(timeout: 30))
         app.buttons["app.primary.film"].tap()

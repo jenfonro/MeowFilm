@@ -27,6 +27,18 @@ public final class FilmHomeModel: ObservableObject {
         self.sourceByID = Dictionary(uniqueKeysWithValues: zip(descriptors.map(\.id), sources))
     }
 
+    public func categoryModel(sectionID: String) -> FilmCategoryModel? {
+        guard let selectedSourceID,
+              let source = sourceByID[selectedSourceID] as? any FilmCategorySource,
+              let category = source.categories.first(where: { $0.rawValue == sectionID }) else { return nil }
+        return FilmCategoryModel(category: category, source: source)
+    }
+
+    func supportsCategory(sectionID: String) -> Bool {
+        guard let selectedSourceID, let source = sourceByID[selectedSourceID] as? any FilmCategorySource else { return false }
+        return source.categories.contains { $0.rawValue == sectionID }
+    }
+
     @discardableResult
     public func loadIfNeeded() -> Task<Void, Never>? {
         guard !isClosed else { return nil }

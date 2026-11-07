@@ -187,6 +187,13 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                                                   images: self.assembly.filmImages,
                                                   themeProvider: appearance)
                 page.onSelectItem = { [weak self] in self?.showFilm($0) }
+                page.onSelectCategory = { [weak self] model in
+                    guard let self else { return }
+                    let category = FilmCategoryViewController(model: model, images: self.assembly.filmImages,
+                                                               themeProvider: appearance)
+                    category.onSelectItem = { [weak self] in self?.showFilm($0) }
+                    self.navigation.pushViewController(category, animated: true)
+                }
                 return page
             },
             { [weak self] in

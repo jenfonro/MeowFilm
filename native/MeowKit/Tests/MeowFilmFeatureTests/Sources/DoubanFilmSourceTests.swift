@@ -130,6 +130,45 @@ final class DoubanFilmSourceTests: XCTestCase {
         }
     }
 
+    func testCategoryUsesBothMovieFiltersAndKeepsFullPagesAndRawOffsets() async throws {
+        let url = DoubanFilmSource.categoryURL(.movie, filters: ["category": "豆瓣高分", "area": "日本"], offset: 24)
+        let query = Dictionary(uniqueKeysWithValues: URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.map {
+            ($0.name, $0.value!)
+        })
+        XCTAssertEqual(query, ["category": "豆瓣高分", "type": "日本", "start": "24", "limit": "24"])
+        var rows: [[String: Any]] = (0..<23).map { ["id": $0, "title": "影片 \($0)"] }
+        rows.append(["id": 0, "title": "重复影片"])
+        let stub = FilmHTTPStub(url: url, status: 200, bodyChunks: [try JSONSerialization.data(withJSONObject: ["items": rows])])
+        defer { stub.close() }
+        let source = DoubanFilmSource(http: FilmHTTP(configuration: FilmHTTPStub.configuration()))
+        let page = try await source.loadCategory(.movie, filters: ["category": "豆瓣高分", "area": "日本"], offset: 24)
+        XCTAssertEqual(page.items.count, 23, "Category results must not be truncated to the home preview's 12 cards.")
+        XCTAssertEqual(page.nextOffset, 48, "Duplicate or invalid rows still consume an upstream offset.")
+    }
+
+    func testCategoryRoutesKeepExistingAnimeSourceAndShortPageEndsPagination() async throws {
+        let definitions: [(FilmCategory, [String: String], String, String)] = [
+            (.tv, ["area": "tv_japanese"], "tv", "tv_japanese"),
+            (.tv, ["category": "tv_documentary", "area": "tv_japanese"], "tv", "tv_documentary"),
+            (.anime, [:], "tv", "tv_animation"),
+            (.show, ["area": "show_foreign"], "show", "show_foreign")
+        ]
+        for (category, filters, expectedCategory, expectedType) in definitions {
+            let url = DoubanFilmSource.categoryURL(category, filters: filters, offset: 0)
+            let query = Dictionary(uniqueKeysWithValues: URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.map {
+                ($0.name, $0.value!)
+            })
+            XCTAssertEqual(query["category"], expectedCategory)
+            XCTAssertEqual(query["type"], expectedType)
+            let stub = FilmHTTPStub(url: url, status: 200, bodyChunks: [Data(#"{"items":[]}"#.utf8)])
+            let source = DoubanFilmSource(http: FilmHTTP(configuration: FilmHTTPStub.configuration()))
+            let page = try await source.loadCategory(category, filters: filters, offset: 0)
+            XCTAssertTrue(page.items.isEmpty)
+            XCTAssertNil(page.nextOffset)
+            stub.close()
+        }
+    }
+
     private func address(kind: String, category: String, type: String) -> URL {
         var parts = URLComponents(string: "https://m.douban.com/rexxar/api/v2/subject/recent_hot/" + kind)!
         parts.queryItems = [URLQueryItem(name: "start", value: "0"), URLQueryItem(name: "limit", value: "12"),

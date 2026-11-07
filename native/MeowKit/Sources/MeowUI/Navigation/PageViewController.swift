@@ -304,9 +304,26 @@ open class PageViewController: UIViewController {
 
     @discardableResult
     public func showError(_ message: String?, acknowledged: (() -> Void)? = nil) -> Bool {
+        presentError(message, retry: nil, acknowledged: acknowledged)
+    }
+
+    @discardableResult
+    public func showRetryableError(_ message: String?, retry: @escaping () -> Void) -> Bool {
+        presentError(message, retry: retry, acknowledged: nil)
+    }
+
+    private func presentError(_ message: String?, retry: (() -> Void)?, acknowledged: (() -> Void)?) -> Bool {
         guard let message, !message.isEmpty, canPresentPageAlert else { return false }
         let alert = UIAlertController(title: "错误", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "确定", style: .cancel) { _ in acknowledged?() })
+        if let retry {
+            alert.addAction(UIAlertAction(title: "重试", style: .default) { [weak self, weak alert] _ in
+                alert?.dismiss(animated: true) { [weak self] in
+                    guard self?.isPageActive == true else { return }
+                    retry()
+                }
+            })
+        }
         present(alert, animated: true)
         return true
     }

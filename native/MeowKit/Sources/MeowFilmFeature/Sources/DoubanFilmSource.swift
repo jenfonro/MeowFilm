@@ -1,8 +1,9 @@
 import CoreFoundation
 import Foundation
 
-public struct DoubanFilmSource: FilmSource {
+public struct DoubanFilmSource: FilmCategorySource {
     public let descriptor = FilmSourceDescriptor(id: "douban", title: "豆瓣")
+    public let categories = FilmCategory.allCases
     private let http: FilmHTTP
 
     public init() {
@@ -21,7 +22,7 @@ public struct DoubanFilmSource: FilmSource {
                     let bytes = try await http.readHome(section.url)
                     try Task.checkCancellation()
                     let items = try Self.parse(bytes, sourceID: descriptor.id)
-                    return (index, FilmHomeSection(id: section.id, title: section.title, items: items))
+                    return (index, FilmHomeSection(id: section.id, title: section.title, items: Array(items.prefix(12))))
                 }
             }
             var sections: [Int: FilmHomeSection] = [:]
@@ -33,7 +34,48 @@ public struct DoubanFilmSource: FilmSource {
         }
     }
 
+    public func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int) async throws -> FilmCategoryPage {
+        let url = Self.categoryURL(category, filters: filters, offset: offset)
+        let bytes = try await http.readHome(url)
+        try Task.checkCancellation()
+        let rows = try Self.rows(bytes)
+        let items = Self.parseRows(rows, sourceID: descriptor.id)
+        let count = rows.count
+        return FilmCategoryPage(items: items, nextOffset: count < 24 ? nil : offset + count)
+    }
+
+    static func categoryURL(_ category: FilmCategory, filters: [String: String], offset: Int) -> URL {
+        let values = category.defaultFilters.merging(filters) { _, new in new }
+        let kind = category == .movie ? "movie" : "tv"
+        let requestCategory: String
+        let type: String
+        switch category {
+        case .movie:
+            requestCategory = values["category"]!
+            type = values["area"]!
+        case .tv:
+            requestCategory = "tv"
+            type = values["category"] == "tv" ? values["area"]! : values["category"]!
+        case .anime:
+            requestCategory = "tv"
+            type = "tv_animation"
+        case .show:
+            requestCategory = "show"
+            type = values["area"]!
+        }
+        var parts = URLComponents(string: "https://m.douban.com/rexxar/api/v2/subject/recent_hot/" + kind)!
+        parts.queryItems = [URLQueryItem(name: "start", value: String(offset)),
+                            URLQueryItem(name: "limit", value: "24"),
+                            URLQueryItem(name: "category", value: requestCategory),
+                            URLQueryItem(name: "type", value: type)]
+        return parts.url!
+    }
+
     static func parse(_ bytes: Data, sourceID: String = "douban") throws -> [FilmItem] {
+        parseRows(try rows(bytes), sourceID: sourceID)
+    }
+
+    private static func rows(_ bytes: Data) throws -> [Any] {
         let root: Any
         do {
             root = try JSONSerialization.jsonObject(with: bytes)
@@ -43,10 +85,13 @@ public struct DoubanFilmSource: FilmSource {
         guard let object = root as? [String: Any], let rows = object["items"] as? [Any] else {
             throw FilmHomeError.invalidResponse
         }
+        return rows
+    }
+
+    private static func parseRows(_ rows: [Any], sourceID: String) -> [FilmItem] {
         var items: [FilmItem] = []
         var identities = Set<String>()
         for row in rows {
-            guard items.count < 12 else { break }
             guard let row = row as? [String: Any] else { continue }
             let title = text(row["title"])
             let id = scalar(row["id"])
