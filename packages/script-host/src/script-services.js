@@ -42,15 +42,14 @@ const listenHost = value => value === undefined || value === null || value === '
 const socketError = code => Object.assign(new Error(code), { code });
 
 class PortProbeServer extends EventEmitter {
-  constructor(owner, options = {}, listener) {
+  constructor(owner, options = {}) {
     super();
     requireValue(options && typeof options === 'object' && !Array.isArray(options), 'INVALID_ARGUMENT');
-    requireValue(listener === undefined || typeof listener === 'function', 'INVALID_ARGUMENT');
     this.owner = owner;
+    this.session = new WeakRef(owner.session);
     this.listening = false;
     this.timeout = 0;
     this.port = null;
-    if (listener) this.on('connection', listener);
   }
 
   listen(...args) {
@@ -73,10 +72,10 @@ class PortProbeServer extends EventEmitter {
     }
     this.port = port;
     this.listening = true;
+    if (callback) this.once('listening', callback);
     queueMicrotask(() => {
       if (!this.listening || this.port !== port) return;
       this.emit('listening');
-      callback?.call(this);
     });
     return this;
   }
@@ -84,16 +83,19 @@ class PortProbeServer extends EventEmitter {
   close(callback) {
     requireValue(callback === undefined || typeof callback === 'function', 'INVALID_ARGUMENT');
     if (!this.listening) {
-      if (typeof callback === 'function')
-        queueMicrotask(() => callback(socketError('ERR_SERVER_NOT_RUNNING')));
+      if (typeof callback === 'function') {
+        const session = this.session.deref(), scope = session?.scope();
+        queueMicrotask(() => session?.runCallback(callback, undefined,
+          [socketError('ERR_SERVER_NOT_RUNNING')], scope));
+      }
       return this;
     }
+    if (callback) this.once('close', callback);
     this.owner?.releaseProbe(this);
     this.listening = false;
     this.port = null;
     queueMicrotask(() => {
       this.emit('close');
-      callback?.call(this);
     });
     return this;
   }
@@ -106,7 +108,8 @@ class PortProbeServer extends EventEmitter {
 
   getConnections(callback) {
     requireValue(typeof callback === 'function', 'INVALID_ARGUMENT');
-    queueMicrotask(() => callback(null, 0));
+    const session = this.session.deref(), scope = session?.scope();
+    queueMicrotask(() => session?.runCallback(callback, undefined, [null, 0], scope));
     return this;
   }
 
@@ -181,10 +184,16 @@ export class ScriptServices {
   server(native, secure, options = {}) {
     const creationScope = this.session.resourceScope?.() ?? this.session.scope();
     const ownerState = { owner: this, creationScope };
+    let closeDispatching = false;
     creationScope.assertOpen?.();
     const Parent = native.Server;
     class ManagedServer extends Parent {
       emit(event, ...args) {
+        if (event === 'close') {
+          closeDispatching = true;
+          try { return super.emit(event, ...args); }
+          finally { closeDispatching = false; closed(); }
+        }
         const owner = ownerState.owner;
         if (!owner) {
           if (event === 'request' || ['upgrade', 'connect'].includes(event)) {
@@ -205,6 +214,12 @@ export class ScriptServices {
           return owner.session.contextScope.run(scope, () => super.emit(event, ...args));
         }
         return super.emit(event, ...args);
+      }
+      close(...args) {
+        const closing = this.meowClosing;
+        this.meowClosing = true;
+        try { return super.close(...args); }
+        catch (error) { this.meowClosing = closing; throw error; }
       }
       listen(...args) {
         const owner = ownerState.owner;
@@ -229,12 +244,9 @@ export class ScriptServices {
         if (this === owner.primary && this.listening) {
           requireValue(!this.meowStarted, 'SERVICE_EXISTS');
           this.meowStarted = true;
+          if (callback) this.once('listening', callback);
           queueMicrotask(() => {
             this.emit('listening');
-            if (callback) {
-              if (owner.session.runCallback) owner.session.runCallback(callback, this, [], creationScope);
-              else callback.call(this);
-            }
             if (this === owner.main) owner.started.resolve();
             owner.session?.endpointsChanged?.();
           });
@@ -242,15 +254,13 @@ export class ScriptServices {
         }
         this.meowStarted = true;
         try {
+          if (callback) this.once('listening', callback);
           return Parent.prototype.listen.call(this, 0, '127.0.0.1', () => {
-            if (callback) {
-              if (owner.session.runCallback) owner.session.runCallback(callback, this, [], creationScope);
-              else callback.call(this);
-            }
             if (this === owner.main) owner.started.resolve();
             owner.session?.endpointsChanged?.();
           });
         } catch (error) {
+          if (callback) this.removeListener('listening', callback);
           this.meowStarted = false;
           if (port !== 0 && owner.aliases.get(port) === this) owner.aliases.delete(port);
           if (owner.main === this) owner.main = null;
@@ -261,6 +271,7 @@ export class ScriptServices {
     const server = new ManagedServer(this.serverOptions(options, secure));
     server.meowSecure = secure;
     server.meowReleased = false;
+    server.meowClosing = false;
     try {
       Object.defineProperty(server, resourceOwner, {
         configurable: true, value: this,
@@ -320,6 +331,7 @@ export class ScriptServices {
         state.detach = scope.add(() => {
           if (!socket.destroyed) socket.destroy();
         });
+        session.node?.observeEmitter(socket);
         if (socket.closed) close();
       } catch {
         try { if (!socket.destroyed) socket.destroy(); } catch {}
@@ -330,16 +342,18 @@ export class ScriptServices {
     const failed = () => {
       if (ownerState.owner?.session?.live) ownerState.owner.session.fail(fault('SERVICE_ERROR'));
     };
+    const secured = socket => ownerState.owner?.session.node?.observeEmitter(socket);
     let released = false;
     const closed = () => {
-      if (released) return;
+      // Reentrant cleanup cannot retire ownership during terminal dispatch.
+      if (released || closeDispatching) return;
       released = true;
       const owner = ownerState.owner;
       ownerState.owner = null;
       ownerState.creationScope = null;
       server.meowReleased = true;
       for (const [event, listener] of [
-        ['connection', connected], ['error', failed], ['close', closed],
+        ['connection', connected], ['secureConnection', secured], ['error', failed],
       ]) try { server.off(event, listener); } catch (error) { if (owner) owner.cleanupState.error ??= error; }
       try { server[scopeCleanup]?.(); } catch (error) { if (owner) owner.cleanupState.error ??= error; }
       try { server[scopeCleanup] = null; } catch (error) { if (owner) owner.cleanupState.error ??= error; }
@@ -356,14 +370,14 @@ export class ScriptServices {
     this.serverCleanup.set(server, closed);
     try {
       server.on('connection', connected);
+      if (secure) server.on('secureConnection', secured);
       server.on('error', failed);
-      server.once('close', closed);
       if (creationScope !== this.session.root) {
         const detach = creationScope.add(() => {
-          if (server.listening) {
+          if (server.listening || server.meowStarted || server === this.primary) {
             try { server.closeAllConnections?.(); } catch {}
-            try { server.close(); } catch {}
-          } else this.serverCleanup.get(server)?.();
+            try { if (!server.meowClosing) server.close(); } catch {}
+          } else if (!server.meowClosing) this.serverCleanup.get(server)?.();
         });
         if (!released) server[scopeCleanup] = detach;
         else detach();
@@ -380,7 +394,9 @@ export class ScriptServices {
     requireValue(!this.stopping, 'SERVICE_CLOSED');
     const listener = args.find(value => typeof value === 'function');
     const options = args.find(value => value && typeof value === 'object') ?? {};
-    const server = new PortProbeServer(this, options, listener);
+    const server = new PortProbeServer(this, options);
+    this.session.node?.observeEmitter(server);
+    if (listener) server.on('connection', listener);
     const scope = this.session.resourceScope?.() ?? this.session.scope();
     scope.assertOpen?.();
     try {
@@ -483,8 +499,9 @@ export class ScriptServices {
           owner.session.network === undefined, 'CAPABILITY_UNAVAILABLE');
         const clean = { ...options, host: mapped.host, port: mapped.port,
           ...(secure ? owner.tlsOptions(options, { client: true, local: Boolean(mapped.meowLocal) }) : {}) };
-        const socket = connect.call(this, clean, callback);
+        const socket = connect.call(this, clean, secure ? callback : undefined);
         owner.session.node?.ownNetwork(socket);
+        if (!secure && typeof callback === 'function') socket.once('connect', callback);
         return socket;
       };
       const destroy = agent.destroy.bind(agent);
@@ -662,12 +679,13 @@ export class ScriptServices {
     const requests = session.nativeRequests;
     const cleanups = this.requestCleanup;
     const failures = this.cleanupState;
-    const state = { active: true, detach: () => {} };
+    const state = { active: true, detach: () => {}, detachClosed: null };
     const release = () => {
       if (!state.active) return;
       state.active = false;
-      for (const [event, listener] of [['close', release], ['error', ignoreError]])
-        try { client.off?.(event, listener); } catch (error) { failures.error ??= error; }
+      try { state.detachClosed?.(); } catch (error) { failures.error ??= error; }
+      state.detachClosed = null;
+      try { client.off?.('error', ignoreError); } catch (error) { failures.error ??= error; }
       const detach = state.detach;
       state.detach = null;
       try { detach?.(); } catch (error) { failures.error ??= error; }
@@ -679,7 +697,7 @@ export class ScriptServices {
     cleanups.set(client, release);
     try {
       client.on?.('error', ignoreError);
-      client.once?.('close', release);
+      state.detachClosed = afterCloseDispatch(client, release);
       Object.defineProperty(client, resourceOwner, {
         configurable: true, value: this,
       });
@@ -703,13 +721,16 @@ export class ScriptServices {
     const failures = this.cleanupState;
     const networkId = ++this.nextNetworkId;
     const state = {
-      active: true, detach: () => {}, owner: this, context, callback, scopeToken,
+      active: true, detach: () => {}, detachClosed: null, owner: this, context, callback, scopeToken,
     };
     const release = () => {
       if (!state.active) return;
       state.active = false;
+      try { state.detachClosed?.(); } catch (error) { failures.error ??= error; }
+      state.detachClosed = null;
       for (const [event, listener] of [
-        ['close', release], ['response', responded], ['error', failed], ['error', ignoreError],
+        ['response', responded], ['socket', connected],
+        ['error', failed], ['error', ignoreError],
       ]) try { client.off?.(event, listener); } catch (error) { failures.error ??= error; }
       const detach = state.detach;
       const token = state.scopeToken;
@@ -748,11 +769,12 @@ export class ScriptServices {
         scope: session.scopeIdentity(state.context),
       });
     };
+    const connected = socket => state.owner?.session.node?.observeEmitter(socket);
     requests.add(client);
     cleanups.set(client, release);
     try {
       client.on('error', ignoreError);
-      client.once('close', release);
+      state.detachClosed = afterCloseDispatch(client, release);
       Object.defineProperty(client, resourceOwner, {
         configurable: true, value: this,
       });
@@ -761,6 +783,8 @@ export class ScriptServices {
       });
       client.once('response', responded);
       client.once('error', failed);
+      client.once('socket', connected);
+      if (client.socket) connected(client.socket);
       state.detach = context.add(() => { if (!client.destroyed) client.destroy(); });
       context.assertOpen?.();
       if (client.closed) release();
@@ -768,6 +792,7 @@ export class ScriptServices {
     } catch (error) {
       try { client.off?.('response', responded); } catch {}
       try { client.off?.('error', failed); } catch {}
+      try { client.off?.('socket', connected); } catch {}
       try { if (!client.destroyed) client.destroy(); } catch {}
       try { release(); } catch {}
       try {
@@ -839,18 +864,19 @@ export class ScriptServices {
     const cleanups = this.trustedSocketCleanup;
     const failures = this.cleanupState;
     sockets.add(socket);
-    const state = { active: true };
+    const state = { active: true, detachClosed: null };
     const release = () => {
       if (!state.active) return;
       state.active = false;
-      try { socket.off?.('close', release); } catch (error) { failures.error ??= error; }
+      try { state.detachClosed?.(); } catch (error) { failures.error ??= error; }
+      state.detachClosed = null;
       sockets.delete(socket);
       cleanups.delete(socket);
       try { delete socket[resourceOwner]; } catch (error) { failures.error ??= error; }
     };
     cleanups.set(socket, release);
     try {
-      EventEmitter.prototype.on.call(socket, 'close', release);
+      state.detachClosed = afterCloseDispatch(socket, release);
       Object.defineProperty(socket, resourceOwner, {
         configurable: true, value: this,
       });
@@ -1111,7 +1137,9 @@ export class ScriptServices {
     };
     for (const request of requests) add(request, () => {
       if (!request.destroyed && typeof request.destroy === 'function') request.destroy();
-    }, () => this.requestCleanup.get(request)?.(), { closed: value => value.closed });
+    }, () => this.requestCleanup.get(request)?.(), {
+      closed: value => value.closed && !this.requestCleanup.has(value),
+    });
     for (const agent of [...this.agents]) {
       let state, failure;
       try { state = agent[agentOwner]; } catch (error) { failure ??= error; }
@@ -1128,21 +1156,30 @@ export class ScriptServices {
         const scope = socket[ownerScope];
         if (scope && !scope.signal.aborted) scope.close(fault('SERVICE_CLOSED'));
         if (!socket.destroyed) socket.destroy();
-      }, () => this.connectionCleanup.get(socket)?.(), { closed: value => value.closed });
+      }, () => this.connectionCleanup.get(socket)?.(), {
+        closed: value => value.closed && !this.connectionCleanup.has(value),
+      });
     }
     for (const socket of trustedSockets) add(socket, () => {
       if (!socket.destroyed) socket.destroy();
-    }, () => this.trustedSocketCleanup.get(socket)?.(), { closed: value => value.closed });
+    }, () => this.trustedSocketCleanup.get(socket)?.(), {
+      closed: value => value.closed && !this.trustedSocketCleanup.has(value),
+    });
     for (const server of probes) add(server, () => server.close(ignoreError),
       () => this.releaseProbe(server));
-    for (const server of listeners) add(server, () => {
-      let failure;
-      try { server.closeAllConnections?.(); } catch (error) { failure = error; }
-      try { server.close(ignoreError); } catch (error) {
-        if (error?.code !== 'ERR_SERVER_NOT_RUNNING') failure ??= error;
-      }
-      if (failure) throw failure;
-    }, () => this.serverCleanup.get(server)?.(), { closed: value => !value.listening });
+    for (const server of listeners) {
+      add(server, () => {
+        let failure;
+        try { server.closeAllConnections?.(); } catch (error) { failure = error; }
+        try { if (!server.meowClosing) server.close(ignoreError); } catch (error) {
+          if (error?.code !== 'ERR_SERVER_NOT_RUNNING') failure ??= error;
+        }
+        if (failure) throw failure;
+      }, () => this.serverCleanup.get(server)?.(), {
+        closed: () => server.meowReleased ||
+          (!server.listening && !server.meowClosing && !server.meowStarted && server !== this.primary),
+      });
+    }
     const results = await Promise.all(waits);
     for (const result of results) {
       if (result.error && result.error.code === 'TIMEOUT') failure ??= fault('TIMEOUT');
@@ -1193,7 +1230,8 @@ class AdapterRequest extends Writable {
   flushHeaders() {}
   setTimeout(delay, callback) {
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => { this.emit('timeout'); callback?.(); }, delay);
+    if (callback) this.once('timeout', callback);
+    this.timer = setTimeout(() => this.emit('timeout'), delay);
     return this;
   }
   setNoDelay() { return this; }

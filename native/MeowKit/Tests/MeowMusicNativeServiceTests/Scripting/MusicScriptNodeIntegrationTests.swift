@@ -13,7 +13,6 @@ private actor MusicScriptNodeLauncher: RuntimeBridgeLaunching {
     let root: URL
     let dataRoot: URL
     var exit: Task<Int32, Never>?
-    var connection: RuntimeBridgeConnection?
     init(dataRoot: URL) throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
@@ -57,11 +56,10 @@ private actor MusicScriptNodeLauncher: RuntimeBridgeLaunching {
             return status
         }
         let connection = try RuntimeBridgeConnection(descriptor: fds[0], session: session, handlers: handlers, timeout: 30)
-        self.connection = connection
         return connection
     }
-    func finish() async -> Int32 {
-        connection?.close()
+    func waitForExit() async { _ = await exit?.value }
+    func exitStatus() async -> Int32 {
         return await exit?.value ?? -1
     }
 }
@@ -70,7 +68,9 @@ final class MusicScriptNodeIntegrationTests: XCTestCase {
     func testNativeOwnerLoadsInvokesPersistsStorageAndUnloadsThroughTheRealIOSRuntimeEntry() async throws {
         let documents = try MusicScriptTestDocuments(); defer { documents.remove() }
         let launcher = try MusicScriptNodeLauncher(dataRoot: documents.root.appendingPathComponent("runtime"))
-        let service = documents.owner(launcher)
+        let session = RuntimeBridgeSession(launcher: launcher)
+        try await session.configure(handlers: [:])
+        let service = NativeMusicScriptService(connection: { try await session.connection() })
         await service.start()
         do {
             let item = try await service.importScriptSource(musicScriptFixture, fileName: "fixture.js")
@@ -95,11 +95,24 @@ final class MusicScriptNodeIntegrationTests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: documents.root
                 .appendingPathComponent("runtime/music/data/" + item.id + ".json").path))
             let remaining = try await service.sources(); XCTAssertTrue(remaining.isEmpty)
-            await service.close()
-            let exit = await launcher.finish(); XCTAssertEqual(exit, 0)
+            let active = try await service.importScriptSource(musicScriptFixture, fileName: "active-at-close.js")
+            let activeItem = try await service.setScriptSourceEnabled(active.id, enabled: true)
+            XCTAssertTrue(activeItem.enabled); XCTAssertEqual(activeItem.state, .ready)
+            let live = try await service.sources()
+            XCTAssertEqual(live.map(\.installationID), [active.id])
+            XCTAssertGreaterThan(try XCTUnwrap(live.first).generation, 0)
+            let connection = try await session.connection()
+            try await service.close()
+            try await service.close()
+            let shared = try await session.connection()
+            XCTAssertTrue(connection === shared)
+            try await scriptAssertCatAvailable(shared)
+            await session.close()
+            XCTAssertTrue(connection.isClosed)
+            let exit = await launcher.exitStatus(); XCTAssertEqual(exit, 0)
         } catch {
-            await service.close()
-            _ = await launcher.finish()
+            try? await service.close()
+            await session.close()
             throw error
         }
     }

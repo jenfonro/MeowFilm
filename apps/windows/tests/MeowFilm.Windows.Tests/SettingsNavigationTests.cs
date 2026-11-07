@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
@@ -69,7 +70,9 @@ public static class SettingsNavigationTests
     {
         var music = new Module("music", "音乐");
         var film = new Module("film", "影视");
-        var shell = new ShellWindow([music, film], () => Task.CompletedTask)
+        await using var appearance = new AppAppearance(new QualityFixture.DocumentStore());
+        await appearance.LoadAsync();
+        var shell = new ShellWindow([music, film], [], () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance)
         {
             Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
         };
@@ -82,20 +85,31 @@ public static class SettingsNavigationTests
             var header = (DesktopPageHeader)shell.FindName("PageHeaderHost");
             var slot = (ContentControl)header.FindName("LeadingSlot");
             var tabs = ((Panel)slot.Content).Children.OfType<RadioButton>().ToArray();
-            Check(tabs.Select(tab => tab.Content).SequenceEqual(new[] { "音乐", "影视" }));
+            Check(tabs.Select(tab => tab.Content).SequenceEqual(new[] { "通用", "音乐", "影视" }));
+            Check(tabs[0].IsChecked == true && !music.SettingsView.IsVisible && !film.SettingsView.IsVisible);
+            Check(film.Initializations == 0);
+            tabs[1].IsChecked = true;
+            await Drain();
             Check(music.SettingsView.IsVisible && !film.SettingsView.IsVisible);
             ((TextBox)music.SettingsView).Text = "未保存草稿";
             int navigations = music.Navigations;
-            tabs[1].IsChecked = true;
+            tabs[2].IsChecked = true;
             await Drain();
             Check(film.SettingsView.IsVisible && !music.SettingsView.IsVisible && film.Initializations == 1);
             ((TextBox)film.SettingsView).Text = "影视草稿";
-            tabs[0].IsChecked = true;
-            await Drain();
-            Check(music.SettingsView.IsVisible && ((TextBox)music.SettingsView).Text == "未保存草稿");
             tabs[1].IsChecked = true;
             await Drain();
+            Check(music.SettingsView.IsVisible && ((TextBox)music.SettingsView).Text == "未保存草稿");
+            tabs[2].IsChecked = true;
+            await Drain();
             Check(((TextBox)film.SettingsView).Text == "影视草稿" && film.Initializations == 1);
+            tabs[0].IsChecked = true;
+            await Drain();
+            Check(!film.SettingsView.IsVisible && !music.SettingsView.IsVisible);
+            var before = shell.Background;
+            await appearance.SaveAsync("#A0D0C0");
+            Check(!ReferenceEquals(shell.Background, before));
+            GeneralAppearanceTests.SavePreview((FrameworkElement)shell.Content, "general-shell", 1110, 820);
             ((Button)shell.FindName("BackButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
             await Drain();
             Check(music.View.IsVisible && !film.SettingsView.IsVisible && !music.SettingsView.IsVisible);

@@ -605,6 +605,8 @@ test('pre-cancelled HTTP requests do not upload or enable and cancelled network 
   const controller = new AbortController();
   const pending = rpc('invoke', request(item, 'kw', { wait: true, padding: 'x'.repeat(65536) }), { signal: controller.signal });
   await entered.promise; controller.abort(); denied(await pending, 'CANCELLED');
+  // Client cancellation is local; wait for the server handler and LX invocation to release their scopes.
+  await until(() => rpc.transport.runtime.state.active === 0 && host().stats().activeRequests === 0);
   release.resolve(); await until(() => host().stats().pendingAdapterTasks === 0);
   assert.equal(signal.aborted, true);
   assert.equal(await value(rpc, item), null);

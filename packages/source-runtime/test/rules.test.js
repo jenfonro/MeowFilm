@@ -311,6 +311,59 @@ test('script transformation propagates await through local callers and rejects u
   ), { code: 'UNSUPPORTED_SCRIPT_ASYNC' });
 });
 
+test('script transformation preserves Promise receivers and chain ordering for host and local calls', async () => {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  for (const receiver of ['java.ajax', 'read', 'read?.']) {
+    for (const member of ['.then', '["then"]', '?.then']) {
+      const script = transformCapabilityScript(`
+        function read(value) { return java.ajax(value); }
+        const trace = [];
+        const chain = ${receiver}('ok')${member}(value => {
+          trace.push('then'); return value + ':then';
+        }).finally(() => trace.push('finally'));
+        trace.push('created');
+        const value = await chain;
+        return { value, trace };
+      `);
+      assert.deepEqual(await new AsyncFunction('java', script)({ ajax: async value => value }), {
+        value: 'ok:then', trace: ['created', 'then', 'finally'],
+      }, `${receiver}${member}`);
+    }
+    for (const [chain, trace] of [
+      [`.catch(error => { trace.push(error.message); return 'recovered'; })
+        .finally(() => trace.push('finally'))`, ['created', 'failed', 'finally']],
+      [`['finally'](() => trace.push('finally'))
+        ['catch'](error => { trace.push(error.message); return 'recovered'; })`,
+      ['created', 'finally', 'failed']],
+    ]) {
+      const script = transformCapabilityScript(`
+        async function read(value) { return await java.ajax(value); }
+        const trace = [];
+        const chain = ${receiver}('fail')${chain};
+        trace.push('created');
+        const value = await chain;
+        return { value, trace };
+      `);
+      assert.deepEqual(await new AsyncFunction('java', script)({
+        async ajax() { throw new Error('failed'); },
+      }), { value: 'recovered', trace }, `${receiver}${chain}`);
+    }
+  }
+});
+
+test('script transformation still rejects host-dependent Promise chains in synchronous Array callbacks', () => {
+  for (const receiver of ['java.ajax', 'read']) {
+    for (const chain of ['then', 'catch', 'finally']) {
+      for (const method of ['map', 'filter', 'some', 'forEach']) {
+        assert.throws(() => transformCapabilityScript(`
+          function read(value) { return java.ajax(value); }
+          [1].${method}(value => ${receiver}(value).${chain}(result => result))
+        `), { code: 'UNSUPPORTED_SCRIPT_ASYNC' }, `${receiver}.${chain} in ${method}`);
+      }
+    }
+  }
+});
+
 test('script transformation rejects host-dependent named and variable Array callbacks', () => {
   const declarations = [
     'function keep(id) { return java.ajax(String(id)) === "yes"; }',

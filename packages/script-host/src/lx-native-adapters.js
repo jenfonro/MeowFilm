@@ -177,14 +177,25 @@ export class LXAdapterOwner {
     return url.href;
   }
 
-  async hostCall(operation, input, scopeId) {
+  async hostCall(operation, input, scopeId, { signal }) {
+    if (operation === 'request') {
+      try {
+        this.assertLive();
+        return await this.request(input);
+      } catch (error) {
+        const safe = safeError(error, 'NETWORK_ERROR');
+        this.hostDiagnostic(operation, safe, input?.scopeId ?? scopeId);
+        // A rejected native host call constructs an Error in the I/O's
+        // session scope. Send only data; the trusted LX callback wraps it.
+        return safe.code;
+      }
+    }
     this.assertLive();
     try {
-      if (operation === 'request') return await this.request(input);
       if (operation === 'storage') {
         const [storageScope, action, key, value] = input;
         input = { scopeId: storageScope, operation: action, key, value };
-        return await this.storageCall(input);
+        return await this.storageCall(input, signal);
       }
       if (operation === 'abortRequest') {
         this.networks.get(input)?.close(fault('CANCELLED'));
@@ -192,9 +203,8 @@ export class LXAdapterOwner {
       }
       throw fault('UNSUPPORTED_OPTION');
     } catch (error) {
-      const safe = safeError(error, operation === 'request' ? 'NETWORK_ERROR' : 'SCRIPT_EXCEPTION');
-      this.hostDiagnostic(operation, safe,
-        operation === 'storage' || operation === 'request' ? input.scopeId : scopeId);
+      const safe = safeError(error, 'SCRIPT_EXCEPTION');
+      this.hostDiagnostic(operation, safe, operation === 'storage' ? input.scopeId : scopeId);
       throw safe;
     }
   }
@@ -232,7 +242,7 @@ export class LXAdapterOwner {
     }
   }
 
-  async storageCall({ scopeId, operation, key, value }) {
+  async storageCall({ scopeId, operation, key, value }, capabilitySignal) {
     const scope = this.invocations.get(scopeId);
     // Authority comes only from the explicit context captured by dispatch.
     requireValue(this.activated && scope && !scope.signal.aborted, 'PERMISSION_DENIED');
@@ -241,12 +251,13 @@ export class LXAdapterOwner {
       'PERMISSION_DENIED');
     requireValue(typeof this.storage?.[operation] === 'function', 'PERMISSION_DENIED');
     requireValue(typeof key === 'string' && key.length > 0 && key.length <= 256);
-    const signal = scope.signal, session = new WeakRef(this);
+    // Native revocation precedes finite guest cleanup and invocation settlement.
+    const signal = AbortSignal.any([scope.signal, capabilitySignal]), session = new WeakRef(this);
     const input = { ...this.scopeIdentity(scope), associationId: scope.associationId, key, signal,
       isCurrent: () => Boolean(session.deref()?.live && !signal.aborted) };
     if (operation === 'set') input.value = value;
     const task = this.trackAdapter(Promise.resolve().then(() => {
-      scope.assertOpen();
+      signal.throwIfAborted();
       return this.storage[operation](input);
     }));
     try { return (await scope.race(task)) ?? null; }

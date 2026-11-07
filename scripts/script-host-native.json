@@ -43,17 +43,22 @@
   "patches": [
     {
       "path": "packages/script-host/native/task-context.patch",
-      "sha256": "d1998ccfb73364405f2c6b2824d035b1dee15db2b880869856fe0a0f0d16e7fa",
+      "sha256": "6c9ade2fb66269687e611335eb9687118ca13fa38f6a56ba5d473021fd6befc3",
       "source": "quickjs"
     },
     {
       "path": "packages/script-host/native/bigint-uintn.patch",
-      "sha256": "1fa50dca54580b2315a87fe3fca0cdfa6568b380174ebd97a99fe8b406e641f5",
+      "sha256": "9026dc5bab68769c5b7a4df9b34de1d52ff203d6753e67e2f6981fb490950d48",
       "source": "quickjs"
     },
     {
       "path": "packages/script-host/native/utf16-cstring.patch",
-      "sha256": "7219fcd43242d9975128a5943d1bd69dc1398d65c3e38fbb628b71238f8c08d6",
+      "sha256": "ccace5f2e994d402f2c89f6de14fcd1d3c558c36c7a52f9c507da1b7da5d8623",
+      "source": "quickjs"
+    },
+    {
+      "path": "packages/script-host/native/arraybuffer-ownership.patch",
+      "sha256": "518087171385a613eb5e171d17b27497d0d92205a5388ea25a8932ada63dfb35",
       "source": "quickjs"
     }
   ],

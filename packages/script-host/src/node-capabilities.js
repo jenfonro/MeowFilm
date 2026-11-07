@@ -26,7 +26,7 @@ import { fault, requireValue } from './errors.js';
 import { PrivateVolume } from './private-volume.js';
 import { NativeResources } from './cat-resources.js';
 import { dnsFacade, isLoopbackHost } from './network-boundary.js';
-import { closeResource, guardDetachedEmitter } from './resource-close.js';
+import { afterCloseDispatch, closeResource, guardDetachedEmitter } from './resource-close.js';
 
 const require = createRequire(import.meta.url);
 const sdkPackages = new Set(['acorn', 'supports-color', '@opentelemetry/api']);
@@ -154,6 +154,7 @@ export class NodeCapabilities {
     this.blobObserved = new WeakSet();
     this.resourceCleanup = new NativeResources();
     this.emitters = new WeakSet();
+    this.completionCallbacks = new WeakSet();
     this.failure = null;
     this.fs = this.volume.facade();
     for (const [name, method] of Object.entries(this.fs)) {
@@ -181,6 +182,18 @@ export class NodeCapabilities {
     Object.setPrototypeOf(streams, Object.getPrototypeOf(stream));
     Object.defineProperties(streams, Object.getOwnPropertyDescriptors(stream));
     streams.Stream = streams;
+    for (const name of ['pipeline', 'finished']) {
+      const method = stream[name], owner = this;
+      const managed = function(...args) {
+        const index = name === 'pipeline' ? args.length - 1 : args.length === 2 ? 1 : 2;
+        if (typeof args[index] === 'function')
+          args[index] = owner.completionCallback(args[index]);
+        return Reflect.apply(method, this, args);
+      };
+      Object.defineProperty(managed, util.promisify.custom,
+        Object.getOwnPropertyDescriptor(method, util.promisify.custom));
+      streams[name] = managed;
+    }
     const wrapStream = Native => {
       const owner = this;
       function Managed(...args) {
@@ -308,19 +321,74 @@ export class NodeCapabilities {
       Managed.prototype = Native.prototype;
       webs[key] = Managed;
     }
-    const channels = new Map();
-    const diagnosticModule = { ...diagnostics,
-      subscribe: (name, callback) => {
-        diagnostics.subscribe(name, callback);
-        const subscriptions = channels.get(name) ?? new Set();
-        subscriptions.add(callback); channels.set(name, subscriptions);
-      },
-      unsubscribe: (name, callback) => {
-        channels.get(name)?.delete(callback);
-        return diagnostics.unsubscribe(name, callback);
-      },
+    const channels = new Map(), channelStores = new Map(), channelViews = new WeakMap();
+    const managedChannel = channel => {
+      if (channelViews.has(channel)) return channelViews.get(channel);
+      const subscribe = callback => {
+        this.ownerScope().assertOpen();
+        if (typeof callback !== 'function') return channel.subscribe(callback);
+        const scope = session.scope();
+        function listener(...args) { return session.runCallback(callback, this, args, scope); }
+        channel.subscribe(listener);
+        const subscriptions = channels.get(channel) ?? [];
+        subscriptions.push({ callback, listener });
+        channels.set(channel, subscriptions);
+      };
+      const unsubscribe = callback => {
+        const subscriptions = channels.get(channel);
+        const index = subscriptions?.findIndex(entry => entry.callback === callback) ?? -1;
+        if (index < 0) return false;
+        const removed = channel.unsubscribe(subscriptions[index].listener);
+        subscriptions.splice(index, 1);
+        if (!subscriptions.length) channels.delete(channel);
+        return removed;
+      };
+      const bindStore = (store, transform) => {
+        this.ownerScope().assertOpen();
+        const scope = session.scope();
+        const callback = typeof transform === 'function' ? function(...args) {
+          return session.runCallback(transform, this, args, scope);
+        } : transform;
+        const result = channel.bindStore(store, callback);
+        const stores = channelStores.get(channel) ?? new Set();
+        stores.add(store);
+        channelStores.set(channel, stores);
+        return result;
+      };
+      const unbindStore = store => {
+        const removed = channel.unbindStore(store);
+        const stores = channelStores.get(channel);
+        stores?.delete(store);
+        if (!stores?.size) channelStores.delete(channel);
+        return removed;
+      };
+      const value = new Proxy(channel, { get(target, name, receiver) {
+        if (name === 'subscribe') return subscribe;
+        if (name === 'unsubscribe') return unsubscribe;
+        if (name === 'bindStore') return bindStore;
+        if (name === 'unbindStore') return unbindStore;
+        // Node switches a Channel's prototype when its subscriber count changes.
+        return Reflect.get(target, name, receiver);
+      } });
+      channelViews.set(channel, value);
+      channelViews.set(value, value);
+      return value;
     };
+    const channel = name => managedChannel(diagnostics.channel(name));
+    const managedTracing = tracing =>
+      diagnostics.tracingChannel(Object.fromEntries(
+        ['start', 'end', 'asyncStart', 'asyncEnd', 'error']
+          .map(name => [name, managedChannel(tracing[name])])));
+    const diagnosticModule = { ...diagnostics, channel,
+      subscribe: (name, callback) => channel(name).subscribe(callback),
+      unsubscribe: (name, callback) => channel(name).unsubscribe(callback),
+      tracingChannel: (...args) => managedTracing(diagnostics.tracingChannel(...args)),
+      Channel: function(...args) { return managedChannel(new diagnostics.Channel(...args)); },
+    };
+    Object.setPrototypeOf(diagnosticModule.Channel, diagnostics.Channel);
+    diagnosticModule.Channel.prototype = diagnostics.Channel.prototype;
     this.subscriptions = channels;
+    this.channelStores = channelStores;
     const owner = this;
     const wrap = (Native, observe) => {
       function Managed(...args) {
@@ -365,14 +433,27 @@ export class NodeCapabilities {
         connect: (input, options = {}, callback) => {
           requireValue(!this.services.stopping, 'SERVICE_CLOSED');
           requireValue(this.session.network === undefined, 'CAPABILITY_UNAVAILABLE');
+          if (typeof options === 'function') { callback = options; options = {}; }
           requireValue(!options.createConnection && options.socketPath === undefined &&
             options.fd === undefined && !options.path, 'PERMISSION_DENIED');
           const local = this.services.mapLocal(String(input)) !== null;
           const client = http2.connect(this.services.outboundURL(input),
-            this.services.tlsOptions(options, { client: true, local }), callback);
+            this.services.tlsOptions(options, { client: true, local }));
           const request = client.request;
           client.request = (...args) => this.ownNetwork(request.apply(client, args));
-          return this.ownNetwork(client);
+          const owner = this;
+          for (const name of ['ping', 'settings']) {
+            const method = client[name];
+            client[name] = function(...args) {
+              const index = name === 'ping' && typeof args[0] === 'function' ? 0 : 1;
+              if (typeof args[index] === 'function')
+                args[index] = owner.completionCallback(args[index]);
+              return Reflect.apply(method, this, args);
+            };
+          }
+          this.ownNetwork(client);
+          if (typeof callback === 'function') client.once('connect', callback);
+          return client;
         },
         getDefaultSettings: http2.getDefaultSettings, getPackedSettings: http2.getPackedSettings,
         getUnpackedSettings: http2.getUnpackedSettings },
@@ -400,16 +481,38 @@ export class NodeCapabilities {
   nativeCall(method, receiver, args) {
     this.ownerScope().assertOpen();
     if (typeof args.at(-1) !== 'function') return Reflect.apply(method, receiver, args);
-    const callback = args.pop(), session = this.session, scope = session.scope();
+    const callback = this.completionCallback(args.pop()), session = this.session;
     let complete;
     const settled = new Promise(resolve => { complete = resolve; });
     session.trackAdapter(settled);
     args.push(function(...values) {
-      try { return session.runCallback(callback, this, values, scope); }
+      try { return Reflect.apply(callback, this, values); }
       finally { complete(); }
     });
     try { return Reflect.apply(method, receiver, args); }
     catch (error) { complete(); throw error; }
+  }
+
+  completionCallback(callback) {
+    if (this.completionCallbacks.has(callback)) return callback;
+    const owner = new WeakRef(this), scope = this.session.scope();
+    const completion = function(...args) {
+      const node = owner.deref(), session = node?.session;
+      if (!session) return;
+      if (session.live || session.isCleanupScope?.(scope))
+        return session.runCallback(callback, this, args, scope);
+      // Like terminal event listeners, native completions must settle existing
+      // I/O during stop, without inheriting a stop hook's permission scope.
+      try {
+        const invoke = () => Reflect.apply(callback, this, args);
+        const result = session.contextScope
+          ? session.contextScope.run(scope ?? session.root, invoke) : invoke();
+        if (result?.then) Promise.resolve(result).catch(error => { node.failure ??= error || fault('SERVICE_ERROR'); });
+        return result;
+      } catch (error) { node.failure ??= error || fault('SERVICE_ERROR'); }
+    };
+    this.completionCallbacks.add(completion);
+    return completion;
   }
 
   /** Keep actual EventEmitter registration/removal semantics, while attributing
@@ -439,9 +542,9 @@ export class NodeCapabilities {
               const invoke = () => Reflect.apply(callback, this, args);
               const result = session.contextScope
                 ? session.contextScope.run(scope ?? session.root, invoke) : invoke();
-              if (result?.then) Promise.resolve(result).catch(error => { node.failure ??= error; });
+              if (result?.then) Promise.resolve(result).catch(error => { node.failure ??= error || fault('SERVICE_ERROR'); });
               return result;
-            } catch (error) { node.failure ??= error; }
+            } catch (error) { node.failure ??= error || fault('SERVICE_ERROR'); }
           }
           return;
         }
@@ -457,6 +560,20 @@ export class NodeCapabilities {
     emitter.once = (event, fn) => register(event, fn, true, false);
     emitter.prependListener = (event, fn) => register(event, fn, false, true);
     emitter.prependOnceListener = (event, fn) => register(event, fn, true, true);
+    // Writable, Socket and HTTP OutgoingMessage deliver these callbacks
+    // directly, not through their finish/error EventEmitter listeners.
+    for (const name of ['write', 'end']) {
+      const method = emitter[name];
+      if (typeof method !== 'function') continue;
+      emitter[name] = function(...args) {
+        const index = name === 'end' && typeof args[0] === 'function' ? 0
+          : typeof args[1] === 'function' ? 1 : 2;
+        const node = owner.deref();
+        if (node && typeof args[index] === 'function')
+          args[index] = node.completionCallback(args[index]);
+        return Reflect.apply(method, this, args);
+      };
+    }
     emitter.removeAllListeners = function(event) {
       const names = arguments.length ? [event] :
         [...this.eventNames().filter(name => name !== 'removeListener'), 'removeListener'];
@@ -507,13 +624,7 @@ export class NodeCapabilities {
     const cleanups = this.resourceCleanup;
     const owner = new WeakRef(this);
     const reference = new WeakRef(resource);
-    let detach, active = true, stopping = false;
-    const descriptor = Object.getOwnPropertyDescriptor(resource, 'emit');
-    const emit = resource.emit;
-    function dispatch(event, ...args) {
-      try { return Reflect.apply(emit, this, [event, ...args]); }
-      finally { if (event === 'close' && this === reference.deref()) release(); }
-    }
+    let detach, detachClosed, active = true, stopping = false;
     const stop = () => {
       if (stopping) return;
       stopping = true;
@@ -525,12 +636,8 @@ export class NodeCapabilities {
       active = false;
       let failure;
       const resource = reference.deref();
-      try {
-        if (resource?.emit === dispatch) {
-          if (descriptor) Object.defineProperty(resource, 'emit', descriptor);
-          else delete resource.emit;
-        }
-      } catch (error) { failure ??= error; }
+      try { detachClosed?.(); } catch (error) { failure ??= error; }
+      detachClosed = null;
       try { resource?.off('error', ignoreError); } catch (error) { failure ??= error; }
       try { detach?.(); } catch (error) { failure ??= error; }
       detach = null;
@@ -542,10 +649,8 @@ export class NodeCapabilities {
     try {
       resource.on('error', ignoreError);
       // Run retirement after all terminal listeners, even when script code
-      // removes listeners. Only the WeakRef above points at the stream.
-      Object.defineProperty(resource, 'emit', {
-        configurable: true, writable: true, value: dispatch,
-      });
+      // removes listeners. The dispatch adapter also holds only a WeakRef.
+      detachClosed = afterCloseDispatch(resource, release);
       detach = this.ownerScope().add(() => {
         try { stop(); } catch (error) { this.failure ??= error; }
       });
@@ -817,6 +922,7 @@ export class NodeCapabilities {
 
   timerModule() {
     const active = this.session.timers;
+    const states = new WeakMap();
     const schedule = (name, fn, delay, args) => {
       this.ownerScope().assertOpen();
       requireValue(typeof fn === 'function', 'INVALID_ARGUMENT');
@@ -827,10 +933,41 @@ export class NodeCapabilities {
         session.runCallback(fn, timer, args, scope);
       };
       timer = name === 'setImmediate' ? timers.setImmediate(callback) : timers[name](callback, delay);
-      active.set(timer, name === 'setImmediate' ? timers.clearImmediate : timers.clearTimeout);
+      const nativeClear = name === 'setImmediate' ? timers.clearImmediate : timers.clearTimeout;
+      const state = { cancelled: false };
+      const cancel = () => {
+        state.cancelled = true;
+        nativeClear(timer);
+        active.delete(timer);
+      };
+      state.cancel = cancel;
+      states.set(timer, state);
+      if (typeof timer.refresh === 'function') {
+        const refresh = timer.refresh, owner = this;
+        Object.defineProperty(timer, 'refresh', { configurable: true, writable: true, value() {
+          owner.ownerScope().assertOpen();
+          const result = refresh.call(this);
+          const state = states.get(this);
+          if (state && !state.cancelled) active.set(this, state.cancel);
+          return result;
+        } });
+      }
+      for (const name of ['close', Symbol.dispose]) {
+        const method = timer[name];
+        if (typeof method !== 'function') continue;
+        Object.defineProperty(timer, name, { configurable: true, writable: true, value() {
+          const result = method.call(this);
+          const state = states.get(this);
+          if (state) { state.cancelled = true; active.delete(this); }
+          return result;
+        } });
+      }
+      active.set(timer, cancel);
       return timer;
     };
     const clear = value => {
+      const state = value && typeof value === 'object' ? states.get(value) : null;
+      if (state) { state.cancel(); return; }
       const entry = active.has(value) ? value : [...active.keys()].find(timer => Number(timer) === value);
       if (!entry) return;
       active.get(entry)(entry); active.delete(entry);
@@ -912,12 +1049,10 @@ export class NodeCapabilities {
           : {}),
         host: mapped.host, port: mapped.port,
         ...(mapped.lookup ? { lookup: mapped.lookup } : {}) };
-      if (typeof args.at(-1) === 'function') {
-        const callback = args.pop(), session = this.session, scope = session.scope();
-        args.push(function(...values) { return session.runCallback(callback, this, values, scope); });
-      }
+      const callback = typeof args.at(-1) === 'function' ? args.pop() : null;
       const socket = native === tls ? tls.connect(clean, ...args) : net.connect(clean, ...args);
       this.ownNetwork(socket);
+      if (callback) socket.once(native === tls ? 'secureConnect' : 'connect', callback);
       if (mapped.meowLocal) this.services.trustSocket(socket);
       return socket;
     };
@@ -1002,15 +1137,28 @@ export class NodeCapabilities {
       try { clear(timer); } catch (error) { failure ??= error; }
     }
     this.session.timers.clear();
-    for (const [name, callbacks] of this.subscriptions)
-      for (const callback of callbacks) {
-        try { diagnostics.unsubscribe(name, callback); } catch (error) { failure ??= error; }
+    for (const [channel, subscriptions] of this.subscriptions)
+      for (const { listener } of subscriptions) {
+        try { channel.unsubscribe(listener); } catch (error) { failure ??= error; }
       }
     this.subscriptions.clear();
+    for (const [channel, stores] of this.channelStores)
+      for (const store of stores) {
+        try { channel.unbindStore(store); } catch (error) { failure ??= error; }
+      }
+    this.channelStores.clear();
     const tasks = [...this.resourceCleanup.keys()].map(resource => closeResource(resource, {
       stop: () => this.resourceCleanup.get(resource)?.stop(),
       release: () => this.resourceCleanup.get(resource)?.(),
-      timeoutMs: this.session.limits.cleanupTimeoutMs, closed: value => value.closed,
+      timeoutMs: this.session.limits.cleanupTimeoutMs,
+      closed: value => {
+        if (!value.closed) return false;
+        if (!this.resourceCleanup.has(value)) return true;
+        // Node marks closed before dispatch. Only an explicitly silent native
+        // stream has no forthcoming close event to wait for.
+        const readable = value._readableState, writable = value._writableState;
+        return Boolean((readable || writable) && !readable?.emitClose && !writable?.emitClose);
+      },
     }).then(result => { if (result.error) throw result.error; }));
     tasks.push(this.services.close(), this.volume.close());
     tasks.push(this.closeWeb());

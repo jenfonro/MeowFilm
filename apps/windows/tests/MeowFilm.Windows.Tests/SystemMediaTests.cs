@@ -11,6 +11,7 @@ public static class SystemMediaTests
     {
         yield return new("system-media.metadata-and-owner-capabilities", () => Sta(Metadata));
         yield return new("system-media.commands-route-to-one-player", () => Sta(Commands));
+        yield return new("system-media.owner-play-is-authoritative-without-native-fallback", () => Sta(OwnerPlay));
         yield return new("system-media.queue-only-explicit-owner", () => Sta(QueueOwner));
         yield return new("system-media.stale-command-after-owner-change", () => Sta(Stale));
         yield return new("system-media.stale-command-before-dispatch", () => Sta(StaleDispatch));
@@ -52,6 +53,16 @@ public static class SystemMediaTests
         backend.Request(SystemPlaybackCommand.Next); backend.Request(SystemPlaybackCommand.Previous);
         await Pump();
         Check(next == 1 && previous == 1 && other == 0 && player.Calls.Count == 0);
+    }
+    private static async Task OwnerPlay()
+    {
+        var player = new Player(); var backend = new Backend(); int requested = 0;
+        await using var session = new SystemMediaSession(player, backend,
+            [new("audio", Play: _ => { requested++; return Task.CompletedTask; })]);
+        backend.Request(SystemPlaybackCommand.Play); await Pump();
+        Check(requested == 1 && player.Calls.Count == 0);
+        backend.Request(SystemPlaybackCommand.Pause); await Pump();
+        Check(player.Calls.SequenceEqual(["pause"]));
     }
     private static async Task Stale()
     {

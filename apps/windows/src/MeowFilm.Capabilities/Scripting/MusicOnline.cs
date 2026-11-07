@@ -12,6 +12,7 @@ public sealed partial class MusicCapability
     private MusicRecordingRow? selectedRecording;
     private readonly Dictionary<string, string> recordingChoices = [];
     private readonly Dictionary<string, string> recordingPlatforms = [];
+    private readonly HashSet<string> explicitRecordings = [];
     public ObservableCollection<MusicLyricRow> Lyrics { get; } = [];
     public ObservableCollection<MusicRecordingRow> RecordingCandidates { get; } = [];
     public bool HasRecordingCandidates => RecordingCandidates.Count > 0;
@@ -25,6 +26,7 @@ public sealed partial class MusicCapability
             if (value is not null)
             {
                 RememberRecording(value);
+                explicitRecordings.Add(value.SongId);
             }
             Changed();
         }

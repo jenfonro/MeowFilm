@@ -243,6 +243,41 @@ test('musicUrl results are checked once for playback: empty, malformed, restrict
   assert.equal(okay(await media({ case: 'interval', duration: 245.9 })).url, 'https://media.invalid/04:05');
 });
 
+test('resolve uses a fixed inclusive ten-second duration tolerance in both directions over HTTP', async t => {
+  const { rpc } = setup(t);
+  const item = await enabled(rpc, fixture({ handler: `async ({info}) => info.musicInfo.candidate` }));
+  const url = 'https://media.invalid/duration';
+  const media = (duration, candidateDuration) => resolve(rpc, item, 'kw', {
+    duration, candidate: { url, duration: candidateDuration },
+  });
+  for (const [duration, candidateDuration] of [[180, 188], [188, 180], [180, 190], [190, 180]]) {
+    assert.deepEqual(okay(await media(duration, candidateDuration)), {
+      installationId: item.installationId, generation: item.generation, contentHash: item.contentHash,
+      platform: 'kw', quality: '320k', url, headers: {}, expiresAt: null,
+    });
+  }
+  for (const [duration, candidateDuration] of [[180, 190.01], [190.01, 180], [600, 611], [611, 600]])
+    denied(await media(duration, candidateDuration), 'RECORDING_MISMATCH');
+});
+
+test('resolve does not infer a duration mismatch when either duration is unknown over HTTP', async t => {
+  const { rpc } = setup(t);
+  const item = await enabled(rpc, fixture({ handler: `async ({info}) => info.musicInfo.candidate` }));
+  const url = 'https://media.invalid/unknown-duration';
+  const media = (musicInfo, candidate) => resolve(rpc, item, 'kw', {
+    ...musicInfo, candidate: { url, ...candidate },
+  });
+  for (const unknown of [{}, { duration: 0 }, { duration: null }]) {
+    for (const [musicInfo, candidate] of [[unknown, { duration: 180 }], [{ duration: 180 }, unknown]]) {
+      assert.deepEqual(okay(await media(musicInfo, candidate)), {
+        installationId: item.installationId, generation: item.generation, contentHash: item.contentHash,
+        platform: 'kw', quality: '320k', url, headers: {}, expiresAt: null,
+      });
+    }
+  }
+  denied(await media({ duration: 180 }, { duration: -1 }), 'INVALID_MEDIA_CANDIDATE');
+});
+
 test('a failed directed invocation never falls through to another installation', async t => {
   const { rpc } = setup(t);
   const bad = await enabled(rpc, fixture({ handler: `async () => { throw Error('private'); }` }));

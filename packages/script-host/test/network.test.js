@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { gzipSync } from 'node:zlib';
+import http from 'node:http';
+import { gzipSync, deflateSync, brotliCompressSync } from 'node:zlib';
 import { createNodeNetwork, createScriptHost } from '../src/index.js';
 import { lxScript, target, deferred } from './fixtures.js';
 import { serverFor } from './http-fixture.js';
@@ -253,4 +254,127 @@ test('restricted headers and unsupported request options fail before I/O', async
     await assert.rejects(host.invoke(target()), { code });
   }
   assert.equal(contacts, 0);
+});
+
+function observeRequests(t, beforeRequest = () => {}, onResponse = () => {}) {
+  const requests = [];
+  const original = http.request;
+  t.mock.method(http, 'request', function(...args) {
+    beforeRequest(requests);
+    const request = Reflect.apply(original, this, args), resources = [];
+    const own = (kind, stream) => {
+      const resource = { kind, stream, closed: false };
+      resources.push(resource);
+      stream.once('close', () => { resource.closed = true; });
+    };
+    own('request', request);
+    request.once('socket', socket => own('socket', socket));
+    request.prependOnceListener('response', response => {
+      own('response', response);
+      onResponse(response);
+    });
+    requests.push(resources);
+    return request;
+  });
+  return requests;
+}
+
+function assertRequestsClosed(requests) {
+  assert.ok(requests.length > 0);
+  for (const resources of requests) {
+    assert.deepEqual(resources.map(value => value.kind).sort(), ['request', 'response', 'socket']);
+    for (const { kind, stream, closed } of resources) {
+      assert.equal(closed, true, `${kind} close must precede adapter settlement`);
+      assert.equal(stream.destroyed, true, `${kind} must have released its transport`);
+    }
+  }
+}
+
+test('complete network adapter settles only after its request, response and socket close', async t => {
+  const requests = observeRequests(t);
+  const body = Buffer.from([0, 255, 65]);
+  const server = await serverFor(t, (_req, res) => res.end(body));
+  const result = await createNodeNetwork()({ url: server.socketOrigin,
+    signal: new AbortController().signal, validateURL: value => value });
+  assert.deepEqual(result.body, body);
+  assert.equal(result.statusCode, 200);
+  assertRequestsClosed(requests);
+});
+
+test('redirect adapter closes an unfinished hop before opening the next request', async t => {
+  const requests = observeRequests(t, previous => {
+    if (previous.length) assertRequestsClosed(previous);
+  });
+  const server = await serverFor(t, (req, res) => {
+    if (req.url === '/redirect') {
+      res.writeHead(302, { location: '/target' });
+      res.flushHeaders(); // This body never ends; following must not collect it.
+    } else res.end('target');
+  });
+  const result = await createNodeNetwork()({ url: server.socketOrigin + '/redirect',
+    signal: new AbortController().signal, validateURL: value => value });
+  assert.equal(result.body.toString(), 'target');
+  assert.equal(requests.length, 2);
+  assertRequestsClosed(requests);
+});
+
+for (const scenario of ['abort', 'truncated']) {
+  test(`${scenario} network response closes every transport before rejecting`, async t => {
+    const entered = deferred(), release = deferred();
+    // A received chunk proves this is cancellation/failure after headers, not
+    // cancellation before a connection exists.
+    const requests = observeRequests(t, undefined, response => {
+      response.once('data', () => entered.resolve());
+    });
+    const controller = new AbortController();
+    const server = await serverFor(t, (_req, res) => {
+      res.writeHead(200, { 'content-length': 100 });
+      res.write('partial');
+      release.promise.then(() => res.destroy());
+    });
+    t.after(() => release.resolve());
+    const failure = assert.rejects(createNodeNetwork()({ url: server.socketOrigin,
+      signal: controller.signal, validateURL: value => value }),
+    { code: scenario === 'abort' ? 'CANCELLED' : 'NETWORK_ERROR' });
+    await entered.promise;
+    if (scenario === 'abort') controller.abort();
+    else release.resolve();
+    await failure;
+    assertRequestsClosed(requests);
+  });
+}
+
+test('network decoding accepts only own encoding names and closes on rejection', async t => {
+  const requests = observeRequests(t);
+  const body = Buffer.from([0, 255, 65]);
+  const encoders = { gzip: gzipSync, deflate: deflateSync, br: brotliCompressSync };
+  const server = await serverFor(t, (req, res) => {
+    const encoding = req.url.slice(1);
+    res.setHeader('content-encoding', encoding);
+    res.end(Object.hasOwn(encoders, encoding) ? encoders[encoding](body) : body);
+  });
+  const network = createNodeNetwork();
+  for (const encoding of ['identity', 'gzip', 'deflate', 'br', 'constructor', '__proto__', 'x-unknown']) {
+    const operation = network({ url: `${server.socketOrigin}/${encoding}`,
+      signal: new AbortController().signal, validateURL: value => value });
+    if (encoding === 'identity' || Object.hasOwn(encoders, encoding)) {
+      const result = await operation;
+      assert.deepEqual(result.body, body);
+      assert.equal(result.headers['content-encoding'], encoding === 'identity' ? encoding : undefined);
+    } else await assert.rejects(operation, { code: 'UNSUPPORTED_OPTION' });
+    assertRequestsClosed(requests);
+  }
+});
+
+test('LX callbacks receive the unsupported encoding error without a false decoded response', async t => {
+  const server = await serverFor(t, (req, res) => {
+    res.setHeader('content-encoding', req.url.slice(1));
+    res.end('unchanged');
+  });
+  const host = await networkHost(t, [server], `async ({info}) => new Promise(resolve =>
+    lx.request(${JSON.stringify(server.origin)}+'/'+info.musicInfo.encoding,{},
+      (error,response,body)=>resolve({code:error?.code??null,response,body})))`);
+  for (const encoding of ['constructor', '__proto__', 'x-unknown'])
+    assert.deepEqual(await host.invoke(target('a', 'kw', { encoding })),
+      { code: 'UNSUPPORTED_OPTION', response: null, body: null });
 });

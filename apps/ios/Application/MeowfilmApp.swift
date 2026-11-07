@@ -26,6 +26,7 @@ final class MeowfilmAppDelegate: UIResponder, UIApplicationDelegate {
 
     func requestUserDataReset() async throws {
         try await launch.requestReset { [weak self] in self?.assembly?.shutdown() }
+        await assembly?.waitForShutdown()
     }
 
     func application(

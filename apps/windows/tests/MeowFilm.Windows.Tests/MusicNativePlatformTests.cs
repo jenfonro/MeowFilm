@@ -20,6 +20,7 @@ public static partial class MusicNativePlatformTests
     public static IEnumerable<TestCase> Cases()
     {
         foreach (var test in ChartCases()) yield return test;
+        foreach (var test in ChannelDirectoryCases()) yield return test;
         yield return Case("platform response uses the last JSON field at every object without stripping provider metadata", async () =>
         {
             using var http = MusicPlatformHttp.CreateWithHandler(new Handler((_, _) => Task.FromResult(

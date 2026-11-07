@@ -178,8 +178,11 @@ int Engine::Interrupt(JSRuntime* runtime, void* opaque) {
 }
 bool Engine::ShouldInterrupt() {
   if (interrupted) return true;
+  auto* owner = JS_GetHostExecutionOwner(runtime);
+  auto* executing = TaskControl(owner);
   if (executing && executing->ExecutionActive() && executing->Status() &&
       Now() - executing->CancellationTime() >= cleanupTimeoutMs) {
+    interruptedTask = JS_DupHostTaskContext(owner);
     interrupted = executing;
     return true;
   }
@@ -210,17 +213,14 @@ bool Engine::HasPendingExecution(Control* control) {
   }, control);
 }
 void Engine::BeginExecution(JSHostTaskContext* task) {
-  JSHostTaskContext* previous = executionTask;
-  executionTask = JS_DupHostTaskContext(task);
-  JS_FreeHostTaskContext(runtime, previous);
-  auto* control = TaskControl(task);
-  executing = control;
   interrupted = nullptr;
+  JS_SetHostExecutionOwner(runtime, task);
   JS_SetHostExecutionContext(runtime, task);
 }
 void Engine::EndExecution() {
-  executing = nullptr; interrupted = nullptr; completingHost = false; JS_SetHostExecutionContext(runtime, nullptr);
-  JS_FreeHostTaskContext(runtime, executionTask); executionTask = nullptr;
+  interrupted = nullptr; completingHost = false; JS_SetHostExecutionContext(runtime, nullptr);
+  JS_SetHostExecutionOwner(runtime, nullptr);
+  JS_FreeHostTaskContext(runtime, interruptedTask); interruptedTask = nullptr;
 }
 void Engine::Failure(Control* control, const std::string& code) {
   if (stopping.load()) return;
@@ -242,6 +242,7 @@ void Engine::Initialize() {
   Check(runtime != nullptr, "RESOURCE_LIMIT"); snapshot.runtimeCount = 1;
   JS_SetMaxStackSize(runtime, static_cast<size_t>(spec.Get("maxStackBytes").Integer()));
   JS_SetInterruptHandler(runtime, Interrupt, this);
+  JS_SetHostExecutionOwnerSelector(runtime, JobExecutionTask);
   auto* initTask = NewTask(runtime, initialization);
   TaskScope scope(runtime, initTask); JS_FreeHostTaskContext(runtime, initTask);
   BeginExecution(JS_GetHostTaskContext(runtime));
@@ -322,13 +323,16 @@ void Engine::Execute(Command command) {
       // Resolving cloned arrays can enter an inherited `then` getter. Do not
       // preflight CheckCancelled: a data-only completion is not a script turn.
       try {
-        QValue value(host.ctx, command.ok ? ToQuick(host.ctx, command.value)
+        bool ok = command.ok;
+        QValue value(host.ctx, ok ? ToQuick(host.ctx, command.value)
           : QError(host.ctx, SafeCode(command.value.Text()) ? command.value.Text() : "SCRIPT_EXCEPTION"));
-        QValue result(host.ctx, JS_Call(host.ctx, command.ok ? host.resolve : host.reject,
+        if (JS_IsException(value.value)) { value.value = JS_GetException(host.ctx); ok = false; }
+        QValue result(host.ctx, JS_Call(host.ctx, ok ? host.resolve : host.reject,
           JS_UNDEFINED, 1, &value.value));
         if (JS_IsException(result.value)) { QValue ignored(host.ctx, JS_GetException(host.ctx)); }
       } catch (const std::exception& error) {
         QValue value(host.ctx, QError(host.ctx, dynamic_cast<const Fault*>(&error) ? error.what() : "RESOURCE_LIMIT"));
+        if (JS_IsException(value.value)) value.value = JS_GetException(host.ctx);
         QValue result(host.ctx, JS_Call(host.ctx, host.reject, JS_UNDEFINED, 1, &value.value));
         if (JS_IsException(result.value)) { QValue ignored(host.ctx, JS_GetException(host.ctx)); }
       }
@@ -402,9 +406,16 @@ void Engine::Poll() {
     Host host = entry->second; entry = hosts.erase(entry);
     {
       TaskScope scope(runtime, host.task);
+      // JS_NewError can enter Error.prepareStackTrace even with own data fields.
+      // Retain the cancelled request's existing cleanup control for that script.
+      BeginExecution(host.task);
+      completingHost = true;  // A data-only rejection is not a script turn.
       QValue error(host.ctx, QError(host.ctx, "STALE_SESSION"));
+      if (JS_IsException(error.value)) error.value = JS_GetException(host.ctx);
       QValue result(host.ctx, JS_Call(host.ctx, host.reject, JS_UNDEFINED, 1, &error.value));
       if (JS_IsException(result.value)) { QValue ignored(host.ctx, JS_GetException(host.ctx)); }
+      if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
+      EndExecution();
     }
     JS_FreeValue(host.ctx, host.resolve); JS_FreeValue(host.ctx, host.reject);
     JS_FreeHostTaskContext(runtime, host.task);
@@ -425,15 +436,20 @@ void Engine::Poll() {
     TaskScope scope(runtime, call.task);
     BeginExecution(call.task);
     QValue result(call.ctx, JS_PromiseResult(call.ctx, call.promise));
+    Value value;
+    std::string code;
     try {
       if (state == JS_PROMISE_REJECTED) {
         JS_Throw(call.ctx, JS_DupValue(call.ctx, result.value));
-        FinishCall(current, {}, CurrentError(call.ctx));
-      } else FinishCall(current, FromQuick(call.ctx, result.value), "");
+        code = CurrentError(call.ctx);
+      } else value = FromQuick(call.ctx, result.value);
     } catch (const std::exception& error) {
-      if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
-      FinishCall(current, {}, dynamic_cast<const Fault*>(&error) ? error.what() : "RESOURCE_LIMIT");
+      code = dynamic_cast<const Fault*>(&error) ? error.what() : "RESOURCE_LIMIT";
     }
+    // Reading a rejection's properties can enter script even when safe error
+    // extraction absorbs its exception. Retain its actual owner through failure.
+    if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
+    FinishCall(current, std::move(value), code);
     EndExecution();
   }
 }
@@ -657,10 +673,12 @@ JSValue Engine::CrossResult(JSContext* ctx, JSValueConst, int argc, JSValueConst
       JS_Throw(ctx, JS_DupValue(ctx, argc ? argv[0] : JS_UNDEFINED));
       value.value = QError(destination, ExceptionCode(ctx));
     } else value.value = ToQuick(destination, FromQuick(ctx, argc ? argv[0] : JS_UNDEFINED));
+    if (JS_IsException(value.value)) { value.value = JS_GetException(destination); rejected = 1; }
     QValue result(destination, JS_Call(destination, data[rejected ? 1 : 0], JS_UNDEFINED, 1, &value.value));
     if (JS_IsException(result.value)) { QValue ignored(destination, JS_GetException(destination)); }
   } catch (const std::exception& error) {
     QValue value(destination, QError(destination, dynamic_cast<const Fault*>(&error) ? error.what() : "RESOURCE_LIMIT"));
+    if (JS_IsException(value.value)) value.value = JS_GetException(destination);
     QValue result(destination, JS_Call(destination, data[1], JS_UNDEFINED, 1, &value.value));
     if (JS_IsException(result.value)) { QValue ignored(destination, JS_GetException(destination)); }
   }
@@ -691,6 +709,7 @@ JSValue Engine::Bridge(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
           [&engine] { engine.CheckCancelled(); }));
       }
       case 3: {
+        if (argc > 1) Check(JS_IsFunction(ctx, argv[1]));
         auto* task = JS_GetHostTaskContext(engine.runtime); auto* control = TaskControl(task);
         if (argc > 0) {
           uint64_t id = FromQuick(ctx, argv[0]).Integer();
@@ -718,8 +737,25 @@ JSValue Engine::Bridge(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
             JS_SetHostTaskContext(engine.runtime, replacement); JS_FreeHostTaskContext(engine.runtime, replacement);
             control = TaskControl(JS_GetHostTaskContext(engine.runtime));
           }
-          JS_SetHostExecutionContext(engine.runtime, id == 0
-            ? JS_GetHostTaskContext(engine.runtime) : engine.executionTask);
+          auto* execution = id == 0
+            ? JS_GetHostTaskContext(engine.runtime) : JS_GetHostExecutionOwner(engine.runtime);
+          JS_SetHostExecutionContext(engine.runtime, execution);
+          if (argc > 1) {
+            // Only a trusted callback boundary selects a new execution owner.
+            // Ordinary scope switches above must not replace that owner.
+            TaskScope scope(engine.runtime, JS_GetHostTaskContext(engine.runtime));
+            auto* previousOwner = JS_DupHostTaskContext(JS_GetHostExecutionOwner(engine.runtime));
+            auto* previousExecution = JS_DupHostTaskContext(execution);
+            auto* owner = JobExecutionTask(JS_GetHostTaskContext(engine.runtime), previousOwner);
+            JS_SetHostExecutionOwner(engine.runtime, owner);
+            JS_SetHostExecutionContext(engine.runtime, owner);
+            JSValue result = JS_Call(ctx, argv[1], JS_UNDEFINED, 0, nullptr);
+            JS_SetHostExecutionOwner(engine.runtime, previousOwner);
+            JS_SetHostExecutionContext(engine.runtime, previousExecution);
+            JS_FreeHostTaskContext(engine.runtime, previousOwner);
+            JS_FreeHostTaskContext(engine.runtime, previousExecution);
+            return result;
+          }
         }
         return JS_NewFloat64(ctx, control ? control->scope : 0);
       }
@@ -737,8 +773,14 @@ JSValue Engine::Bridge(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
         }
         return JS_UNDEFINED;
     }
-  } catch (const Fault& error) { return JS_Throw(ctx, QError(ctx, error.what())); }
-  catch (...) { return JS_Throw(ctx, QError(ctx, "RESOURCE_LIMIT")); }
-  return JS_Throw(ctx, QError(ctx, "UNSUPPORTED_OPTION"));
+  } catch (const Fault& error) {
+    JSValue value = QError(ctx, error.what());
+    return JS_IsException(value) ? value : JS_Throw(ctx, value);
+  } catch (...) {
+    JSValue value = QError(ctx, "RESOURCE_LIMIT");
+    return JS_IsException(value) ? value : JS_Throw(ctx, value);
+  }
+  JSValue value = QError(ctx, "UNSUPPORTED_OPTION");
+  return JS_IsException(value) ? value : JS_Throw(ctx, value);
 }
 }  // namespace meow

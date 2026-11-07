@@ -92,30 +92,43 @@ function prepare(options) {
   return { method, headers, body };
 }
 
-function requestOnce(url, { method, headers, body }, signal, follow) {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) { reject(signal.reason ?? fault('CANCELLED')); return; }
-    const transport = url.protocol === 'https:' ? https : http;
-    const request = transport.request(url, { method, headers, signal, agent: false }, response => {
-      if (follow && redirects.has(response.statusCode) && response.headers.location) {
-        response.destroy(); // No redirect body buffering before validating the next URL.
-        resolve({ statusCode: response.statusCode, headers: response.headers, body: Buffer.alloc(0) });
-        return;
-      }
-      const chunks = [];
-      response.on('data', chunk => chunks.push(chunk));
-      response.once('error', reject);
-      response.once('aborted', () => reject(signal.aborted
-        ? signal.reason ?? fault('CANCELLED') : fault('NETWORK_ERROR')));
-      response.once('end', () => resolve({
-        statusCode: response.statusCode, statusMessage: response.statusMessage,
-        headers: response.headers, body: Buffer.concat(chunks),
+async function requestOnce(url, { method, headers, body }, signal, follow) {
+  if (signal.aborted) throw signal.reason ?? fault('CANCELLED');
+  const resources = [], closing = [];
+  const own = resource => {
+    resources.push(resource);
+    closing.push(new Promise(resolve => resource.once('close', resolve)));
+    return resource;
+  };
+  try {
+    return await new Promise((resolve, reject) => {
+      const transport = url.protocol === 'https:' ? https : http;
+      const request = own(transport.request(url, { method, headers, signal, agent: false }, response => {
+        own(response);
+        response.on('error', reject);
+        response.once('aborted', () => reject(signal.aborted
+          ? signal.reason ?? fault('CANCELLED') : fault('NETWORK_ERROR')));
+        if (follow && redirects.has(response.statusCode) && response.headers.location) {
+          // Finally closes this hop without collecting a redirect body.
+          resolve({ statusCode: response.statusCode, headers: response.headers, body: Buffer.alloc(0) });
+          return;
+        }
+        const chunks = [];
+        response.on('data', chunk => chunks.push(chunk));
+        response.once('end', () => resolve({
+          statusCode: response.statusCode, statusMessage: response.statusMessage,
+          headers: response.headers, body: Buffer.concat(chunks),
+        }));
       }));
+      request.once('socket', socket => own(socket));
+      request.on('error', error => reject(signal.aborted
+        ? signal.reason ?? fault('CANCELLED') : error));
+      request.end(body);
     });
-    request.once('error', error => reject(signal.aborted
-      ? signal.reason ?? fault('CANCELLED') : error));
-    request.end(body);
-  });
+  } finally {
+    for (const resource of resources) resource.destroy();
+    await Promise.all(closing);
+  }
 }
 
 /**
@@ -157,7 +170,7 @@ export function createNodeNetwork({
           continue;
         }
         const encoding = String(response.headers['content-encoding'] ?? 'identity').toLowerCase();
-        const decompressor = decompressors[encoding];
+        const decompressor = Object.hasOwn(decompressors, encoding) ? decompressors[encoding] : undefined;
         if (encoding !== 'identity') {
           requireValue(decompressor, 'UNSUPPORTED_OPTION');
           try { response.body = await decompressor(response.body); }
@@ -170,6 +183,8 @@ export function createNodeNetwork({
         if (signal.aborted) throw signal.reason ?? fault('CANCELLED');
         return { ...response, url: url.href };
       }
-    } catch (e) { throw safeError(e, 'NETWORK_ERROR'); }
+    } catch (e) {
+      throw signal.aborted ? safeError(signal.reason, 'CANCELLED') : safeError(e, 'NETWORK_ERROR');
+    }
   };
 }

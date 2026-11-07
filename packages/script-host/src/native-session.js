@@ -18,7 +18,7 @@ export class NativeSession extends LXAdapterOwner {
         source: realmSource, maxStackBytes: this.limits.maxStackBytes,
         timeoutMs: this.limits.initTimeoutMs, signal: initialization.signal,
         cleanupTimeoutMs: this.limits.cleanupTimeoutMs,
-        onHostCall: (operation, input, scope) => this.hostCall(operation, input, scope),
+        onHostCall: (...args) => this.hostCall(...args),
         onEvent: (name, value, scope) => this.event(name, value, scope),
       });
       this.engine.exited.then(() => {

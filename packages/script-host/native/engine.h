@@ -90,9 +90,8 @@ class Engine : public std::enable_shared_from_this<Engine> {
   std::atomic<Control*> admissionWatch{nullptr};  // controls owns published pointers; only the owner retires them.
   std::map<uint64_t, std::weak_ptr<Control>> scopes;
   std::shared_ptr<Control> initialization;
-  Control* executing = nullptr;  // Owner thread only, distinct from capability identity.
-  JSHostTaskContext* executionTask = nullptr;
-  Control* interrupted = nullptr;  // executionTask/controls retains the cause until EndExecution.
+  JSHostTaskContext* interruptedTask = nullptr;  // Retains a generator owner after its frame unwinds.
+  Control* interrupted = nullptr;  // interruptedTask/controls retains the cause until EndExecution.
   bool completingHost = false;
   int64_t cleanupTimeoutMs;
   std::string stopReason = "STALE_SESSION";

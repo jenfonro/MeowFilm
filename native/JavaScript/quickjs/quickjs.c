@@ -49329,7 +49329,10 @@ static JSValue js_compile_regexp(JSContext *ctx, JSValueConst pattern,
                                   sizeof(error_msg), str, len, re_flags, ctx);
     JS_FreeCString(ctx, str);
     if (!re_bytecode_buf) {
-        JS_ThrowSyntaxError(ctx, "%s", error_msg);
+        if (re_bytecode_len == LRE_RET_TIMEOUT)
+            JS_ThrowInterrupted(ctx);
+        else
+            JS_ThrowSyntaxError(ctx, "%s", error_msg);
         return JS_EXCEPTION;
     }
 
@@ -50058,6 +50061,10 @@ static JSValue JS_RegExpDelete(JSContext *ctx, JSValueConst this_val, JSValue ar
         if (last_index > str->len)
             break;
 
+        /* Each match starts a fresh regexp counter and can do substantial
+           work below its threshold. Poll the owning replacement loop too. */
+        if (__js_poll_interrupts(ctx))
+            goto fail;
         ret = lre_exec(capture, re_bytecode,
                        str_buf, last_index, str->len, shift, ctx);
         if (ret != 1) {

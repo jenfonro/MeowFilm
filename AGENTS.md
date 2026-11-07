@@ -1,7 +1,7 @@
 # AGENTS.md
 
 meowfilm 的 iPhone 与 Windows 原生客户端：
-- iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供业务、平台、账号、播放、缓存和持久化能力。
+- iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供业务、平台、账号、播放、缓存和持久化能力。公共 Node 脚本宿主随 App 启动恢复启用猫源；客户端影视规则静态链接原生 QuickJS，不依赖 Node。
 - Windows：WPF / .NET 原生桌面应用；公共 Node 脚本宿主随 App 启动，影视恢复已启用的猫源，音乐脚本仅在启用、调用或显式检测时执行。原生业务不依赖脚本服务可用；客户端影视规则内嵌原生 QuickJS，不依赖 Node。
 
 ## 命令
@@ -48,12 +48,12 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `Navigation` — 根容器、页面导航与呈现路由
   - `Presentation` — 主页面外壳、页头、底部导航和播放器停靠区
   - `UITests` — 共享 UIKit 组件测试
-  - `RuntimeTests` — 真实 App 宿主的内嵌运行器测试
+  - `RuntimeTests` — 真实 App 宿主的内嵌运行器与页面生命周期测试
   - `runtime` — iOS socketpair bootstrap 与薄 entry
 - `native/MeowKit/` — iOS Swift Package
   - `MeowContracts`、`MeowJSON`、`MeowStorage`、`MeowAccounts`、`MeowPlayback`、`MeowUI`、`MeowRuntime` — 共享能力
   - `MeowMusicFeature`、`MeowMusicPlatform`、`MeowMusicNativeService` — 音乐界面、平台和原生业务
-  - `MeowFilmFeature` — 影视数据源、首页、详情和收藏
+  - `MeowFilmFeature` — 影视数据源、首页、详情、收藏、规则设置与来源管理
 - `apps/windows/app/` — Windows 应用入口与装配
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约

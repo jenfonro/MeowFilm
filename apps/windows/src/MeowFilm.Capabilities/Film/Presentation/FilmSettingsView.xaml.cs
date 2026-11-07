@@ -31,12 +31,6 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
             editor.DraftChanged += (_, _) => InvalidateRuleResults();
         }
         initialized = true;
-        AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler((_, e) =>
-        {
-            if ((e.VerticalChange != 0 || e.HorizontalChange != 0) && e.OriginalSource is DependencyObject source &&
-                (ReferenceEquals(source, RulesScroller) || CatsGrid.IsAncestorOf(source) || VideosGrid.IsAncestorOf(source)))
-                ClosePopup();
-        }));
     }
 
     public DesktopHeaderContribution Header => new("设置", SearchVisible: false, SearchEnabled: false);
@@ -114,9 +108,9 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private void View_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (!initialized) return;
-        ClosePopup();
         ContentFrame.Margin = e.NewSize.Width < 700 || e.NewSize.Height < 450
             ? new(16, 0, 16, 8) : new(32, 0, 32, 16);
+        if (ActionPopup.IsOpen) UpdatePopupSize();
     }
 
     private void OpenPopup(FrameworkElement anchor, string title, string message, string accept,
@@ -146,9 +140,14 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         AutomationProperties.SetName(PopupAccept, title + "：" + accept);
         AutomationProperties.SetName(PopupCancel, title + "：取消");
         AutomationProperties.SetName(PopupSurface, title);
+        UpdatePopupSize();
+        ActionPopup.IsOpen = true;
+    }
+
+    private void UpdatePopupSize()
+    {
         PopupSurface.Width = Math.Min(400, Math.Max(240, ActualWidth - 32));
         PopupScroller.MaxHeight = Math.Max(100, ActualHeight - 64);
-        ActionPopup.IsOpen = true;
     }
 
     private sealed record ImportChoice(string? InstallationId, string Name);

@@ -57,4 +57,6 @@ X-Meow-Request-Id: <UUID>
 
 业务已受理后的成功和失败均为 HTTP 200。未进入业务的坏格式 400、访问拒绝 401/403、未知路由 404、不支持 Content-Type 415、源码超限 413。公共错误 contract 为 `runtime.http.v1`，code 限 `INVALID_REQUEST/METHOD_NOT_FOUND/PERMISSION_DENIED/CLOSED/CANCELLED/TIMEOUT/INVALID_RESPONSE`；业务安全码见各模块契约。未知业务错误映射为模块未分类失败，不输出底层异常、源码、凭据或供应方正文。
 
+通用 handler 抛出的未知值（包括 `null`／`undefined`）返回 `INVALID_RESPONSE`；错误响应本身写入失败则关闭该交换，不等待未发送的响应。正常响应背压仍由原请求持有至完成或连接关闭。
+
 客户端严格检查响应 contract、请求 ID、信封和允许的 code；截断/断连为 CLOSED，坏响应为 INVALID_RESPONSE，无重试或降级。最终集成构建与定向行为验证范围见[运行器验证边界](script-runtime.md#构建发布与验证边界)，契约描述本身不替代验证结果。

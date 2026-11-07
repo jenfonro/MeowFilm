@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { encodeJSONValue } from '../src/index.js';
+import http from 'node:http';
+import { BridgeError, HTTP_PROTOCOL, encodeJSONValue } from '../src/index.js';
 import { pair, rawRequest, deferred, until } from './http-fixture.js';
 
 for (const direction of ['forward', 'reverse']) {
@@ -45,4 +46,47 @@ test('encoder rejects unpaired UTF-16 values and keys while preserving legal Uni
     assert.throws(() => encodeJSONValue(value), { code: 'INVALID_REQUEST' });
   }
   assert.equal(encodeJSONValue({ 'é': 1, 'e\u0301': 2 }).toString(), '{"é":1,"é":2}');
+});
+
+test('arbitrary handler rejection values return redacted failures and release their HTTP owners', async t => {
+  const failures = [new Error('PRIVATE-provider-secret'), null, undefined, 'PRIVATE-provider-secret',
+    0, false, 1n, Symbol('PRIVATE-provider-secret')];
+  const { call, client, server } = await pair(t, input => {
+    if (typeof input === 'number') throw failures[input];
+    if (input === 'known') throw new BridgeError('TIMEOUT');
+    return input;
+  });
+  for (let i = 0; i < failures.length; i++) {
+    assert.deepEqual(await call(i, { timeout: 1000 }),
+      { ok: false, contract: HTTP_PROTOCOL, code: 'INVALID_RESPONSE' });
+    await until(() => server.state.active === 0);
+    assert.equal(client.state.pending, 0);
+  }
+  assert.deepEqual(await call('known'), { ok: false, contract: HTTP_PROTOCOL, code: 'TIMEOUT' });
+  assert.equal((await call('alive')).value, 'alive');
+  await Promise.all([client.close(), server.close()]);
+  assert.equal(server.state.active, 0);
+  assert.equal(client.state.pending, 0);
+});
+
+test('failed error response writes close the exchange instead of waiting for an unsent response', async t => {
+  const original = http.ServerResponse.prototype.end;
+  let failWrite = true;
+  t.mock.method(http.ServerResponse.prototype, 'end', function (...args) {
+    if (failWrite) {
+      failWrite = false;
+      throw new Error('controlled response write failure');
+    }
+    return Reflect.apply(original, this, args);
+  });
+  const { call, client, server } = await pair(t, input => {
+    if (input === 'fail') throw null;
+    return input;
+  });
+  await assert.rejects(call('fail', { timeout: 1000 }), { code: 'CLOSED' });
+  await until(() => server.state.active === 0);
+  assert.equal(client.state.pending, 0);
+  assert.equal((await call('alive')).value, 'alive');
+  await Promise.all([client.close(), server.close()]);
+  assert.equal(server.state.active, 0);
 });

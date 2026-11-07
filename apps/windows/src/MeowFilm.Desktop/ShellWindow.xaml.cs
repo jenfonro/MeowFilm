@@ -56,11 +56,13 @@ public sealed partial class ShellWindow : Window
         : this(modules, [], shutdown, null, null, timeProvider) { }
 
     public ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
-        Func<Task> shutdown, Func<Task> forceShutdown, Func<Task>? cancelShutdown = null)
-        : this(modules, pages, shutdown, forceShutdown, cancelShutdown, TimeProvider.System) { }
+        Func<Task> shutdown, Func<Task> forceShutdown, Func<Task>? cancelShutdown = null,
+        IDesktopAppearance? appearance = null)
+        : this(modules, pages, shutdown, forceShutdown, cancelShutdown, TimeProvider.System, appearance) { }
 
     internal ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
-        Func<Task> shutdown, Func<Task>? forceShutdown, Func<Task>? cancelShutdown, TimeProvider timeProvider)
+        Func<Task> shutdown, Func<Task>? forceShutdown, Func<Task>? cancelShutdown, TimeProvider timeProvider,
+        IDesktopAppearance? appearance = null)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
         _timeProvider = timeProvider;
@@ -83,6 +85,7 @@ public sealed partial class ShellWindow : Window
         _cancelShutdown = cancelShutdown;
         _shutdown = shutdown;
         InitializeComponent();
+        InitializeGeneralSettings(appearance);
         AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, e) =>
         {
             Notices.Show(e.Outlet, e.Message);
@@ -207,7 +210,7 @@ public sealed partial class ShellWindow : Window
         session.Mounted = true;
     }
 
-    private static void RefreshSuppliedViews(ModuleSession session)
+    private void RefreshSuppliedViews(ModuleSession session)
     {
         var main = session.Module.View ?? throw new InvalidOperationException();
         var settings = session.Module.SettingsView ?? throw new InvalidOperationException();
@@ -216,11 +219,11 @@ public sealed partial class ShellWindow : Window
             throw new InvalidOperationException();
         ValidateView(main, session.MainHost);
         ValidateView(settings, session.SettingsHost);
-        if (session.IsSettingsOpen)
+        if (session.IsSettingsOpen && !_generalSettingsOpen)
         {
             if (!ReferenceEquals(session.SettingsHost.Content, settings)) session.SettingsHost.Content = settings;
         }
-        else
+        else if (!session.IsSettingsOpen)
         {
             if (!ReferenceEquals(session.MainHost.Content, main)) session.MainHost.Content = main;
         }
@@ -255,8 +258,10 @@ public sealed partial class ShellWindow : Window
             var selected = ReferenceEquals(session, current);
             session.Surface.Visibility = selected && _currentPage is null ? Visibility.Visible : Visibility.Collapsed;
             session.MainHost.Visibility = session.IsSettingsOpen ? Visibility.Collapsed : Visibility.Visible;
-            session.SettingsHost.Visibility = session.IsSettingsOpen ? Visibility.Visible : Visibility.Collapsed;
+            session.SettingsHost.Visibility = session.IsSettingsOpen && !_generalSettingsOpen ? Visibility.Visible : Visibility.Collapsed;
         }
+        _generalSettingsHost.Visibility = _currentPage is null && current.IsSettingsOpen && _generalSettingsOpen
+            ? Visibility.Visible : Visibility.Collapsed;
         ApplyPlayerPresentation(current);
         ApplyModuleAccent(current);
         ApplyHeaderPresentation(current);
@@ -444,15 +449,16 @@ public sealed partial class ShellWindow : Window
         if (current.MainHost.IsKeyboardFocusWithin) current.ContentFocus = Keyboard.FocusedElement;
         _settingsReturn = current;
         current.IsSettingsOpen = true;
+        _generalSettingsOpen = _generalSettingsHost.Content is not null;
         _retryPlan = null;
         SetStatus();
         ApplyPresentation();
         QueueUi(() =>
         {
             if (ReferenceEquals(_current, current) && current.IsSettingsOpen)
-                current.SettingsHost.MoveFocus(new(FocusNavigationDirection.First));
+                (_generalSettingsOpen ? _generalSettingsHost : current.SettingsHost).MoveFocus(new(FocusNavigationDirection.First));
         });
-        if (!current.Initialized) await RunRequestAsync(new(current));
+        if (!_generalSettingsOpen && !current.Initialized) await RunRequestAsync(new(current));
     });
 
     private void OnBackClick(object sender, RoutedEventArgs e) => RunUiAction(GoBackAsync);
@@ -474,6 +480,7 @@ public sealed partial class ShellWindow : Window
             CancelActive();
             RetireHeaderPresentation();
             current.IsSettingsOpen = false;
+            _generalSettingsOpen = false;
             var restore = _settingsReturn ?? current;
             _settingsReturn = null;
             PreparePresentation(restore);

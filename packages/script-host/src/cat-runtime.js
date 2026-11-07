@@ -369,11 +369,11 @@ export class CatRuntime {
     await this.configureGateway();
     requireValue(!this.closed, 'HOST_CLOSED');
     requireValue(!signal?.aborted, 'CANCELLED');
-    const ids = only ?? new Set([...previous.map(spec => spec.installationId),
+    const ids = only ?? new Set([...this.applied.keys(), ...previous.map(spec => spec.installationId),
       ...next.scripts.map(spec => spec.installationId)]);
     const applyOne = async installationId => {
       const spec = next.scripts.find(value => value.installationId === installationId);
-      const old = this.applied.get(installationId) ?? previous.find(value => value.installationId === installationId);
+      const old = this.applied.get(installationId);
       const state = this.hostState(installationId);
       if (!spec) {
         let failure;
@@ -399,8 +399,12 @@ export class CatRuntime {
         if (failure) throw failure;
         return;
       }
-      if (old && (!spec.enabled || state) && sameExecution(old, spec) &&
-        !this.failures.has(installationId) && state?.state !== 'failed') return;
+      if (old && (state ? state.enabled === spec.enabled : !spec.enabled) &&
+        (!spec.enabled || state?.state === 'ready') && sameExecution(old, spec) &&
+        !this.failures.has(installationId) && state?.state !== 'failed') {
+        this.applied.set(installationId, spec);
+        return;
+      }
       await this.applyChange({ spec, existing: Boolean(state), signal });
       if (old && old.sourceHash !== spec.sourceHash && !this.failures.has(installationId) &&
         !this.settings.read().scripts.some(value => value.sourceHash === old.sourceHash)) {
@@ -497,9 +501,16 @@ export class CatRuntime {
         this.captureInitialization(id)();
       }
     }
-    const ids = [...new Set([...previousSettings.keys(), ...diskScripts.keys()])]
-      .filter(id => !same(previousSettings.get(id), diskScripts.get(id)) ||
-        this.failures.has(id) || this.hostState(id)?.state === 'failed');
+    // Publishing settings also updates gateway/worker snapshots. It does not
+    // establish that a queued installation change has run.
+    const ids = [...new Set([...this.applied.keys(), ...previousSettings.keys(), ...diskScripts.keys()])]
+      .filter(id => {
+        const spec = diskScripts.get(id);
+        if (!same(this.applied.get(id), spec) || this.failures.has(id)) return true;
+        const state = this.hostState(id);
+        return state?.state === 'failed' || state && state.enabled !== spec?.enabled ||
+          spec?.enabled && state?.state !== 'ready';
+      });
     await this.configureGateway();
     requireValue(!signal?.aborted, 'CANCELLED');
     const results = await Promise.allSettled(ids.map(id => this.manage(id, signal, async task => {
@@ -563,16 +574,19 @@ export class CatRuntime {
     const cancel = () => scope.close(fault('CANCELLED'));
     const previous = [...this.managementTasks].filter(task => task.installationId === installationId);
     const stop = this.captureInitialization(installationId);
+    const preserveRecovery = replacement === 'CANCELLED';
     const preempt = () => {
       scope.assertOpen();
       if (!replacement) return;
       for (const task of previous) {
         if (!this.managementTasks.has(task)) continue;
-        task.restore = false;
+        if (!preserveRecovery) task.restore = false;
         task.scope.close(fault(replacement));
-        task.recovery?.close(fault(replacement));
+        if (!preserveRecovery) task.recovery?.close(fault(replacement));
       }
-      stop();
+      // Queued disable/uninstall has not committed a new enabled intent.
+      // The candidate's own signal cancels it; its independent rollback must finish.
+      if (!preserveRecovery || !this.replacements.has(installationId)) stop();
     };
     const task = { installationId, scope, restore: true };
     this.managementTasks.add(task);
@@ -620,7 +634,9 @@ export class CatRuntime {
       failure = error;
     }
     this.settings.publish(next);
-    this.applied.set(spec.installationId, spec);
+    // A metadata commit cannot acknowledge execution changes awaiting refresh.
+    if (sameExecution(this.applied.get(spec.installationId), spec))
+      this.applied.set(spec.installationId, spec);
     this.publishSettingsSnapshot(next);
     if (failure) throw failure;
     return next;
@@ -763,7 +779,7 @@ export class CatRuntime {
       try { previousSource = decodeSource(previousBytes); } catch { /* An invalid old file can still be replaced. */ }
     }
     const changed = Boolean(previous && previousSource !== source);
-    if (update && !changed) {
+    if (update && !changed && (!spec.enabled || this.hostState(installationId)?.state === 'ready')) {
       this.saveSpec(previous, { ...previous, updateState: 'unchanged', updateError: null });
       return this.instance(installationId);
     }
@@ -839,7 +855,10 @@ export class CatRuntime {
       }
       failure = task.scope.signal.aborted ? task.scope.reason : error;
     } finally {
-      if (committed) this.failures.delete(installationId);
+      if (committed) {
+        this.applied.set(installationId, spec);
+        this.failures.delete(installationId);
+      }
       this.settled.add(installationId);
       this.replacements.delete(installationId);
       this.candidateSpecs.delete(installationId);
@@ -949,11 +968,18 @@ export class CatRuntime {
     return session;
   }
   async invoke(target, options) {
+    const signal = options?.signal;
     await this.start();
-    requireValue(this.settings.value.scripts.find(script =>
-      script.installationId === target.installationId)?.enabled !== false, 'DISABLED');
-    requireValue(!this.starting(target.installationId), 'STARTING');
-    const result = await this.host.invoke(target, options);
+    const session = this.getSession(target.installationId, target.generation);
+    const assertCurrent = () => {
+      requireValue(!signal?.aborted, 'CANCELLED');
+      requireValue(!this.closed, 'HOST_CLOSED');
+      requireValue(session.live && this.sessions.get(session.installationId) === session, 'STALE_SESSION');
+    };
+    let result;
+    // Both successful and failed receipts must still belong to this session.
+    try { result = await this.host.invoke(target, options); }
+    finally { assertCurrent(); }
     const owned = Boolean(result && typeof result === 'object' && result[ownedExtension]);
     // Ownership is trusted control data, never part of the public JSON value.
     if (result && typeof result === 'object') delete result[ownedExtension];
@@ -962,21 +988,24 @@ export class CatRuntime {
       result._meow && !owned) return result;
     // Optional metadata enhancement is never a playback/provider parser.
     try {
-      const enhanced = await this.getSession(target.installationId, target.generation)
-        .request('enhanceM3U8', {
-          value: result, owned,
-        }, { timeoutMs: 3000 });
-      if (enhanced && typeof enhanced === 'object') delete enhanced[ownedExtension];
-      return enhanced;
-    } catch { return result; }
+      result = await session.request('enhanceM3U8', {
+        value: result, owned,
+      }, { signal, timeoutMs: 3000 });
+    } catch (error) {
+      if (error?.code === 'CANCELLED') throw error;
+    } finally { assertCurrent(); }
+    if (result && typeof result === 'object') delete result[ownedExtension];
+    return result;
   }
-  async management(installationId, generation) {
+  async management(installationId, generation, { signal } = {}) {
     await this.start();
-    return this.getSession(installationId, generation).request('management.detect', {});
+    return this.getSession(installationId, generation).request('management.detect', {},
+      { signal, phase: 'invocation' });
   }
-  async sync(installationId, generation, input) {
+  async sync(installationId, generation, input, { signal } = {}) {
     await this.start();
-    return this.getSession(installationId, generation).request('management.sync', { input });
+    return this.getSession(installationId, generation).request('management.sync', { input },
+      { signal, phase: 'invocation' });
   }
   async status() {
     await this.start();

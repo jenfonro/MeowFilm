@@ -13,7 +13,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigationSource
+public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigationSource, IDesktopGeneralSettingsSource
 {
     private readonly IMusicApplication application;
     private readonly IMusicPlayback playback;
@@ -87,6 +87,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     public ObservableCollection<ArchivedPlaylist> Archives { get; } = [];
     public FrameworkElement View => Presentation.Page;
     public FrameworkElement SettingsView => Presentation.Settings;
+    public FrameworkElement AppearanceSettingsView => Presentation.Appearance;
+    public FrameworkElement HomeSourceSettingsView => Presentation.HomeSourceSettings;
+    public FrameworkElement CacheSettingsView => Presentation.CacheSettings;
     public FrameworkElement PlayerView => Presentation.Player;
     public System.Windows.Media.Brush PlayerBackground => Presentation.PlayerBackground;
     public System.Windows.Media.Brush PlayerProgressBrush => Presentation.PlayerProgress;
@@ -158,7 +161,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     public string CurrentAlbum => current?.Album ?? "";
     public string CurrentSource => musicRecovery?.Media?.Target is { Official: true } official
         ? official.Platform switch { "wy" => "网易云音乐", "tx" => "QQ 音乐", "kg" => "酷狗音乐", _ => "" }
-        : playbackInstallation is not null ? Sources.FirstOrDefault(s => s.InstallationId == playbackInstallation)?.Label ?? "JS 音源"
+        : playbackInstallation is not null ? Sources.FirstOrDefault(s => s.InstallationId == playbackInstallation)?.Label ??
+            (musicRecovery?.Media?.Target?.ProviderName is { Length: > 0 } name ? name : "JS 音源")
         : current is { IsOnline: false } ? "本地音乐" : "";
     public bool IsPlaying => OwnsCurrent && playback.IsPlaying;
     public bool HasCurrent => current is not null;
@@ -555,8 +559,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             playback is INativePlaybackContinuation intent && (playback.HasMedia || musicRecovery?.Recovering == true))
         {
             // Admission is synchronous: a queued/awaiting resolver cannot delay Pause.
+            if (intent.PauseRequested && CurrentPlaybackExcluded) return ResumePlaybackAsync();
             if (!intent.PauseRequested) ObserveExplicitRecommendationPause();
-            var command = intent.PauseRequested ? playback.ResumeAsync() : playback.PauseAsync();
+            var command = intent.PauseRequested ? ResumePlaybackAsync() : playback.PauseAsync();
             return RunAsync(() => command);
         }
         onlineCancellation?.Cancel();
@@ -565,10 +570,21 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             if (current is null || !queueSaved) return;
             if (playback.OwnerId == Id && playback.Identity == current.EntryId && playback.HasMedia)
             {
-                if (playback.IsPlaying) await playback.PauseAsync(); else await playback.ResumeAsync();
+                if (playback.IsPlaying) await playback.PauseAsync(); else await ResumePlaybackAsync();
             }
             else await StartCurrent(lifetime.Token);
         });
+    }
+    private bool CurrentPlaybackExcluded =>
+        musicRecovery is { Session: { } session, Media.Target: { } target } && session.Excluded(target);
+    /// <summary>Every resume entry, including system Play, keeps durable wrong-source exclusions.</summary>
+    public Task ResumePlaybackAsync()
+    {
+        if (stopping || !OwnsCurrent) return Task.CompletedTask;
+        if (CurrentPlaybackExcluded)
+            return Notify("当前音源已排除，请切换音源或在错源管理中恢复");
+        // Keep admission synchronous: a Pause during an awaiting operation must still win.
+        return playback.ResumeAsync();
     }
     public Task StepAsync(bool next, string reason = "manual")
     {
@@ -897,6 +913,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         Exception? settingsFailure = null;
         try { await DeactivateSettingsAsync(); }
         catch (Exception error) { settingsFailure = error; }
+        try { await DeactivateCatalogSourceSettingsAsync(); }
+        catch (Exception error) { settingsFailure ??= error; }
         try { await vipPage.PrepareShutdownAsync(); }
         catch (Exception error) { settingsFailure ??= error; }
         await Task.WhenAll(commandTail, accountSettlement, Task.WhenAll(eventWrites.ToArray()),
@@ -936,6 +954,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         RetireCatalogSession(); // Never revive private visual cache or a prepared playlist token.
         SubscribePlayback();
         preparation = null; resumption = null; stopping = false;
+        try { await EnsureCatalogSourceSettingsAsync(lifetime.Token); }
+        catch { /* The source setting publishes its retry notice without blocking shutdown cancellation. */ }
         ResumeRecommendations();
         await RecommendationCommand("music.recommendations.get", new { });
         if (playback is IMusicPlaybackRate && current is { } surviving && OwnsCurrent && playback.HasMedia)

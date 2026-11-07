@@ -66,7 +66,8 @@ export function createFetch(node) {
       discardReplay();
       body = incoming;
       const encoding = String(incoming.headers['content-encoding'] ?? '').toLowerCase();
-      const decoder = { gzip: 'createGunzip', 'x-gzip': 'createGunzip', deflate: 'createInflate', br: 'createBrotliDecompress' }[encoding];
+      const decoder = { __proto__: null, gzip: 'createGunzip', 'x-gzip': 'createGunzip',
+        deflate: 'createInflate', br: 'createBrotliDecompress' }[encoding];
       if (decoder && request.method !== 'HEAD' && ![204, 304].includes(incoming.statusCode)) {
         body = node.builtins.zlib[decoder]();
         pipeline(incoming, body).catch(error => body.destroy(error));

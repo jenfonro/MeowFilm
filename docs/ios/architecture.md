@@ -31,8 +31,10 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `MeowRuntime` | 协议 1 帧与专用 JSON 校验、双向 fd RPC／取消／关闭与单次内嵌启动机制 | JSON |
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Contracts、JSON、Accounts、Storage |
-| `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排、音源持久化及脚本 owner | Contracts、JSON、Feature、Runtime、Storage |
-| `MeowFilmFeature` | 影视数据源、首页、详情与收藏，见[影视能力](film.md) | UI |
+| `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、JSON、Feature、Runtime、Storage |
+| `MeowFilmFeature` | 影视页面、规则及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | UI、JSON、Storage、Runtime、MeowJavaScript、FilmRuleProgram |
+| `native/JavaScript` | 锁源 QuickJS 原生 C ABI 与后台 Swift JSON 引擎 | 无业务依赖 |
+| `packages/film-rules` | 同一份规则 JS 的 SwiftPM 资源包 | 无原生业务依赖 |
 
 共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。
 
@@ -78,6 +80,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 - 页面跳转由路由显式调用，不通过业务状态标志触发。
 - 上层呈现通过视图层级阻挡下层触摸。
 - 资源活跃、页面可见及浮层呈现时机分别管理；待处理的错误在页面稳定出现或导航／呈现转场完成后处理，不因此重新加载业务。
+- `PageViewController.showError` 保留单“确定”及确认回调；需要显式恢复的页面使用 `showRetryableError`，在同一错误浮层内提供“重试”，等待浮层退出后调用业务动作，已失效页面不再重试。
 
 ## 页面加载与刷新
 

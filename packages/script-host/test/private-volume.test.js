@@ -393,3 +393,77 @@ test('private native stream fd mutation cannot select or close a volume-external
     }
   }
 });
+
+test('private volume close survives cross-stream listener removal and releases only after real dispatch',
+  { timeout: 30000 }, async t => {
+    const { volume, api, path } = fixture(t);
+    fs.writeFileSync(path('x'), 'X');
+    fs.writeFileSync(path('y'), 'Y');
+    const x = api.createReadStream('/x'), y = api.createReadStream('/y');
+    const opened = value => new Promise((resolve, reject) => {
+      value.once('open', resolve);
+      value.once('error', reject);
+    });
+    const [xFd, yFd] = await Promise.all([opened(x), opened(y)]);
+    const originalClose = fs.close;
+    let releaseY, yCloseCalls = 0;
+    const restore = replaceFS({
+      close(fd, callback) {
+        if (fd !== yFd) return originalClose(fd, callback);
+        yCloseCalls++;
+        releaseY = () => {
+          releaseY = null;
+          originalClose(fd, callback);
+        };
+      },
+    });
+    const owned = value => volume.streams.has(value) && volume.streamCleanup.has(value);
+    let guestY = 0, rawX = 0, rawY = 0, settled = false, removal;
+    const observations = [];
+    const removed = () => { guestY++; };
+    y.on('close', removed);
+    x.on('close', () => {
+      rawX++;
+      observations.push({ name: 'x', owned: owned(x) });
+      removal = { yOwned: owned(y), yClosed: y.closed, settled, yCloseCalls,
+        returned: y.removeAllListeners('close') === y,
+        removed: !y.listeners('close').includes(removed) };
+      // A fresh public observer is deliberate; the removed callback stays gone.
+      // The underlying fs.close is only delayed, never replaced with fake completion.
+      y.on('close', () => {
+        rawY++;
+        observations.push({ name: 'y', owned: owned(y), xOwned: owned(x) });
+      });
+      releaseY?.();
+    });
+    let closing;
+    try {
+      closing = volume.close().then(() => { settled = true; });
+      assert.equal(settled, false);
+      assert.equal(owned(x), true);
+      assert.equal(owned(y), true);
+      assert.equal(y.closed, false);
+      assert.equal(fs.fstatSync(yFd).size, 1);
+      await closing;
+      assert.deepEqual({ rawX, rawY, guestY, settled, yCloseCalls },
+        { rawX: 1, rawY: 1, guestY: 0, settled: true, yCloseCalls: 1 });
+      assert.deepEqual(removal, { yOwned: true, yClosed: false, settled: false,
+        yCloseCalls: 1, returned: true, removed: true });
+      assert.deepEqual(observations, [
+        { name: 'x', owned: true }, { name: 'y', owned: true, xOwned: false },
+      ]);
+      assertClosed(xFd);
+      assertClosed(yFd);
+      for (const value of [x, y]) {
+        assert.equal(value.closed, true);
+        assert.equal(owned(value), false);
+        assert.equal(Object.hasOwn(value, 'emit'), false);
+      }
+      assert.equal(volume.streams.size, 0);
+      assert.equal(volume.streamCleanup.size, 0);
+      assert.equal(volume.failure, null);
+    } finally {
+      releaseY?.();
+      try { await closing; } finally { restore(); }
+    }
+  });

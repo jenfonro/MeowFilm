@@ -836,6 +836,9 @@ export class CatSession {
       })]);
     } catch (error) { failed(error); }
     finally { clearTimeout(timer); }
+    // Terminal native callbacks can fail after node.close has already succeeded.
+    // Collect their errors after physical adapter completion, without awaiting guest promises.
+    if (this.node.failure) failed(this.node.failure);
     try { this.realm?.close(); }
     catch (error) { failed(error); }
     this.realm = null;

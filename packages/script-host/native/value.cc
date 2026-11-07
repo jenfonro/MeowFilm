@@ -129,11 +129,17 @@ std::string ExceptionCode(JSContext* ctx) {
   return "SCRIPT_EXCEPTION";
 }
 JSValue QError(JSContext* ctx, const std::string& code) {
-  JSValue error = JS_NewError(ctx);
-  if (JS_IsException(error)) return error;
-  JS_SetPropertyStr(ctx, error, "code", JS_NewStringLen(ctx, code.data(), code.size()));
-  JS_SetPropertyStr(ctx, error, "message", JS_NewStringLen(ctx, code.data(), code.size()));
-  return error;
+  QValue error(ctx, JS_NewError(ctx));
+  if (JS_IsException(error.value)) return error.Release();
+  QValue text(ctx, JS_NewStringLen(ctx, code.data(), code.size()));
+  if (JS_IsException(text.value)) return text.Release();
+  if (JS_DefinePropertyValueStr(ctx, error.value, "code", JS_DupValue(ctx, text.value),
+      JS_PROP_C_W_E | JS_PROP_THROW) < 0)
+    return JS_HasException(ctx) ? JS_EXCEPTION : JS_ThrowOutOfMemory(ctx);
+  if (JS_DefinePropertyValueStr(ctx, error.value, "message", text.Release(),
+      JS_PROP_C_W_E | JS_PROP_THROW) < 0)
+    return JS_HasException(ctx) ? JS_EXCEPTION : JS_ThrowOutOfMemory(ctx);
+  return error.Release();
 }
 JSValue QCheck(JSContext* ctx, JSValue value) {
   if (JS_IsException(value)) throw Fault(ExceptionCode(ctx));
@@ -270,12 +276,14 @@ Value FromQuick(JSContext* ctx, JSValueConst v, unsigned depth) {
   Check(JS_IsObject(v) && !JS_IsFunction(ctx, v) && !JS_IsPromise(v));
   if (JS_IsArrayBuffer(v)) {
     size_t n; auto* p = JS_GetArrayBuffer(ctx, &n, v);
+    if (!p && JS_HasException(ctx)) throw Fault(ExceptionCode(ctx));
     return CopyBytes(p, n);
   }
   if (JS_GetTypedArrayType(v) >= 0) {
     size_t offset, length, width;
     QValue buffer(ctx, QCheck(ctx, JS_GetTypedArrayBuffer(ctx, v, &offset, &length, &width)));
     size_t n; auto* p = JS_GetArrayBuffer(ctx, &n, buffer.value);
+    if (!p && JS_HasException(ctx)) throw Fault(ExceptionCode(ctx));
     Check(offset <= n && length <= n - offset);
     return CopyBytes(p ? p + offset : p, length);
   }
@@ -345,7 +353,8 @@ JSValue ToQuick(JSContext* ctx, const Value& v) {
     case Value::Array: {
       QValue out(ctx, QCheck(ctx, JS_NewArray(ctx)));
       for (size_t i = 0; i < v.array.size(); ++i)
-        if (JS_SetPropertyUint32(ctx, out.value, static_cast<uint32_t>(i), ToQuick(ctx, v.array[i])) < 0)
+        if (JS_DefinePropertyValueUint32(ctx, out.value, static_cast<uint32_t>(i),
+            ToQuick(ctx, v.array[i]), JS_PROP_C_W_E) < 0)
           throw Fault(ExceptionCode(ctx));
       return out.Release();
     }

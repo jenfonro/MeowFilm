@@ -113,10 +113,14 @@ public sealed partial class MusicCapability
     }
     private void PublishOfficialSources(JsonElement value)
     {
-        officialSourcesRevision = MusicDto.Integer(value, "revision");
-        officialSourcesLoaded = true;
-        officialEnabled = value.GetProperty("enabled").EnumerateArray().Select(item => item.GetString()!)
+        long revision = MusicDto.Integer(value, "revision");
+        var enabled = value.GetProperty("enabled").EnumerateArray().Select(item => item.GetString()!)
             .ToHashSet(StringComparer.Ordinal);
+        bool changed = officialSourcesRevision != revision || !officialEnabled.SetEquals(enabled);
+        officialSourcesRevision = revision;
+        officialSourcesLoaded = true;
+        officialEnabled = enabled;
+        if (changed) { NotifyMusicSourcesChanged(); CancelMusicPreload(); }
         SourceBindings();
     }
 
@@ -179,14 +183,13 @@ public sealed partial class MusicCapability
             finally { NotifyMusicSourcesChanged(); await ReloadSources(lifetime.Token); }
         });
     }
-    /// <summary>Content or enablement changes retire playback that uses this installation.</summary>
+    /// <summary>Content or enablement changes revoke new parsing, not already accepted historical media.</summary>
     private async Task BeforeSourceChange(string installation, bool retire)
     {
         NotifyMusicSourcesChanged();
         CancelMusicPreload();
         if (!retire) return;
-        if (playbackInstallation == installation) await StopOwnedPlayback();
-        else await RevokeChangedMusicSource(installation);
+        await RevokeChangedMusicSource(installation);
     }
 
     /// <summary>Full management details of one script source, for its edit surface.</summary>

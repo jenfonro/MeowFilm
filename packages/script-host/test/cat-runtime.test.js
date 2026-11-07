@@ -1855,6 +1855,82 @@ test('Cat refresh cancelled in an installation queue cannot apply after the prec
     assert.equal(retained.version, original.version);
     assert.equal(runtime.getSession('queued-refresh'), owner);
     assert.equal(runtime.host.initializingSessions().length, 0);
+    assert.deepEqual(await runtime.refresh(), { applied: true, failures: [] });
+    const retried = runtime.instance('queued-refresh');
+    assert.equal(retried.state, 'ready');
+    assert.equal(retried.version, '2');
+    assert.ok(retried.generation > original.generation);
+    assert.notEqual(runtime.getSession('queued-refresh'), owner);
+    assert.equal(owner.worker, null);
+    assert.deepEqual(await runtime.invoke({ installationId: 'queued-refresh',
+      siteId: 'site-must-not-publish', operation: 'home', payload: {} }), { instance: 'must-not-publish' });
+  });
+
+test('Cat metadata commits after a cancelled refresh do not acknowledge unapplied execution changes',
+  { timeout: 60000 }, async t => {
+    for (const operation of ['edit', 'unchanged update', 'failed update']) {
+      await t.test(operation, async t => {
+        let release;
+        const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+        t.after(() => { release?.(); return runtime.close(); });
+        const sourceText = `
+          const http = require('http');
+          let server;
+          module.exports.start = config => new Promise(resolve => {
+            server = http.createServer((request, response) => {
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify(request.url === '/config' || request.url === '/full-config'
+                ? { video: { sites: [{ key: 'default', name: 'Config', api: '/api/default', actions: ['home'] }] } }
+                : { value: config.value }));
+            });
+            server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+          });
+          module.exports.stop = () => server?.close();
+        `;
+        const original = await runtime.install({ installationId: 'metadata-refresh', source: sourceText,
+          version: '1', config: { value: 'old' } });
+        const owner = runtime.getSession('metadata-refresh');
+        const barrier = new Promise(resolve => { release = resolve; });
+        const preceding = runtime.serial('metadata-refresh', () => barrier);
+        writeSettings(runtime.settings.path, value => ({
+          ...value, scripts: value.scripts.map(script => ({
+            ...script, version: '2', config: { value: 'new' },
+          })),
+        }));
+        const controller = new AbortController();
+        const cancelled = assert.rejects(runtime.refresh({ signal: controller.signal }),
+          { code: 'CANCELLED' });
+        await waitFor(() => runtime.transactions.get('metadata-refresh') !== preceding,
+          'refresh did not enter the installation queue');
+        controller.abort();
+        release();
+        await preceding;
+        await cancelled;
+        if (operation === 'edit') {
+          await runtime.edit({ installationId: 'metadata-refresh', name: 'edited' });
+        } else if (operation === 'unchanged update') {
+          assert.equal((await runtime.update({ installationId: 'metadata-refresh', source: sourceText }))
+            .updateState, 'unchanged');
+        } else {
+          await assert.rejects(runtime.update({ installationId: 'metadata-refresh',
+            source: 'module.exports = { home( };' }), { code: 'SCRIPT_EXCEPTION' });
+          assert.equal(runtime.instance('metadata-refresh').updateState, 'failed');
+        }
+        assert.equal(runtime.getSession('metadata-refresh'), owner);
+        assert.equal(runtime.instance('metadata-refresh').version, original.version);
+        assert.deepEqual(await runtime.invoke({ installationId: 'metadata-refresh',
+          siteId: 'default', operation: 'home', payload: {} }), { value: 'old' });
+        assert.deepEqual(await runtime.refresh(), { applied: true, failures: [] });
+        const refreshed = runtime.instance('metadata-refresh');
+        assert.equal(refreshed.state, 'ready');
+        assert.equal(refreshed.version, '2');
+        assert.ok(refreshed.generation > original.generation);
+        assert.notEqual(runtime.getSession('metadata-refresh'), owner);
+        assert.equal(owner.worker, null);
+        assert.deepEqual(await runtime.invoke({ installationId: 'metadata-refresh',
+          siteId: 'default', operation: 'home', payload: {} }), { value: 'new' });
+      });
+    }
   });
 
 test('Cat refresh cancellation exits A and reports failed while preserving B and later updates',
@@ -3397,7 +3473,7 @@ test('Cat private stream cleanup reports listener removal failure', async t => {
   const off = stream.off.bind(stream);
   let attempts = 0;
   stream.off = (event, listener) => {
-    if (event === 'close' && attempts++ === 0) throw failure;
+    if (event === 'error' && attempts++ === 0) throw failure;
     return off(event, listener);
   };
   await assert.rejects(volume.close(), error => error === failure);
@@ -7520,6 +7596,59 @@ test('Cat refresh removing a script deletes the same artifacts as uninstall',
     assert.equal(existsSync(join(root, 'volumes', 'refresh-remove')), false);
     assert.equal(existsSync(sourceFile(root, hash)), false);
     assert.deepEqual((await runtime.status()).instances, []);
+  });
+
+test('Cat cold disabled removals clean their persisted source and volume references but keep shared and unknown files',
+  { timeout: 60000 }, async t => {
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    const unique = volumeSource('cold-unique'), shared = volumeSource('cold-shared');
+    for (const [installationId, source, siteId] of [
+      ['cold-remove-unique', unique, 'cold-unique'],
+      ['cold-remove-shared', shared, 'cold-shared'],
+      ['cold-keep-shared', shared, 'cold-shared'],
+    ]) {
+      await runtime.install({ installationId, source });
+      assert.deepEqual(await runtime.invoke({ installationId, siteId, operation: 'write', payload: {} }),
+        { written: true });
+      await runtime.setEnabled(installationId, false);
+    }
+    await runtime.close();
+    const unknown = volumeSource('unknown');
+    const unknownFile = sourceFile(root, sourceHash(unknown));
+    writeFileSync(unknownFile, unknown);
+    const unknownVolume = join(root, 'volumes', 'unknown-volume');
+    mkdirSync(unknownVolume);
+    writeFileSync(join(unknownVolume, 'unknown.txt'), 'leave untouched');
+
+    const reopened = createCatRuntime({ dataRoot: root });
+    t.after(() => reopened.close());
+    const cold = await reopened.start();
+    assert.equal(cold.instances.length, 3);
+    for (const instance of cold.instances) {
+      assert.equal(instance.state, 'disabled');
+      assert.equal(instance.enabled, false);
+      assert.equal(reopened.hostState(instance.installationId), null);
+      assert.equal(existsSync(join(root, 'volumes', instance.installationId)), true);
+    }
+    assert.equal(existsSync(sourceFile(root, sourceHash(unique))), true);
+    writeSettings(reopened.settings.path, value => ({
+      ...value, scripts: value.scripts.filter(script => script.installationId === 'cold-keep-shared'),
+    }));
+    assert.deepEqual(await reopened.refresh(), { applied: true, failures: [] });
+    assert.equal(existsSync(join(root, 'volumes', 'cold-remove-unique')), false);
+    assert.equal(existsSync(join(root, 'volumes', 'cold-remove-shared')), false);
+    assert.equal(existsSync(sourceFile(root, sourceHash(unique))), false);
+    assert.equal(readFileSync(sourceFile(root, sourceHash(shared)), 'utf8'), shared);
+    assert.equal(readFileSync(unknownFile, 'utf8'), unknown);
+    assert.equal(readFileSync(join(unknownVolume, 'unknown.txt'), 'utf8'), 'leave untouched');
+    assert.deepEqual((await reopened.status()).instances.map(instance =>
+      [instance.installationId, instance.state]), [['cold-keep-shared', 'disabled']]);
+    assert.equal(existsSync(join(root, 'volumes', 'cold-keep-shared')), true);
+    await reopened.setEnabled('cold-keep-shared', true);
+    assert.deepEqual(await reopened.invoke({ installationId: 'cold-keep-shared',
+      siteId: 'cold-shared', operation: 'read', payload: {} }), { value: 'cold-shared' });
   });
 
 test('Cat reinstall starts from an empty private volume after uninstall',

@@ -1,6 +1,6 @@
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -55847,7 +55847,9 @@
+@@ -55882,7 +55882,9 @@
      if (bits == 0) {
          JS_FreeValue(ctx, a);
          res = __JS_NewShortBigInt(ctx, 0);
@@ -11,7 +11,7 @@
          /* fast case */
          if (bits >= JS_SHORT_BIG_INT_BITS) {
              res = a;
-@@ -55864,28 +55866,44 @@
+@@ -55899,28 +55901,44 @@
              res = __JS_NewShortBigInt(ctx, v);
          }
      } else {

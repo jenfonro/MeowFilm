@@ -7,6 +7,33 @@ namespace MeowFilm.Desktop;
 
 public sealed partial class ShellWindow
 {
+    private readonly ContentControl _generalSettingsHost = new()
+    {
+        Visibility = Visibility.Collapsed, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+        VerticalContentAlignment = VerticalAlignment.Stretch
+    };
+    private bool _generalSettingsOpen;
+    private void InitializeGeneralSettings(IDesktopAppearance? appearance)
+    {
+        if (appearance is null) return;
+        _generalSettingsHost.Content = new GeneralSettingsView(appearance,
+            _sessions.Select(session => session.Module).OfType<IDesktopGeneralSettingsSource>());
+        ContentDeck.Children.Add(_generalSettingsHost);
+        string? appliedColor = null;
+        void Apply()
+        {
+            if (appliedColor == appearance.ThemeColor) return;
+            Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.Background(appearance.ThemeColor);
+            appliedColor = appearance.ThemeColor;
+        }
+        System.ComponentModel.PropertyChangedEventHandler handler = (_, e) =>
+        {
+            if (e.PropertyName == nameof(IDesktopAppearance.ThemeColor)) Apply();
+        };
+        Apply();
+        appearance.PropertyChanged += handler;
+        Closed += (_, _) => appearance.PropertyChanged -= handler;
+    }
     private readonly StackPanel _settingsTabs = new()
     {
         Orientation = Orientation.Horizontal,
@@ -18,6 +45,24 @@ public sealed partial class ShellWindow
     private void InitializeSettingsNavigation()
     {
         AutomationProperties.SetName(_settingsTabs, "设置类别");
+        if (_generalSettingsHost.Content is not null)
+        {
+            var general = new RadioButton
+            {
+                Content = "通用", GroupName = "SettingsArea",
+                Style = (Style)FindResource("MeowFilm.SettingsArea")
+            };
+            AutomationProperties.SetName(general, "通用设置");
+            general.Checked += (_, _) =>
+            {
+                if (_updatingSettingsTabs || _isClosing || _current is not { IsSettingsOpen: true }) return;
+                CancelActive();
+                _generalSettingsOpen = true;
+                ApplyPresentation();
+                _generalSettingsHost.MoveFocus(new(FocusNavigationDirection.First));
+            };
+            _settingsTabs.Children.Add(general);
+        }
         foreach (var session in _sessions)
         {
             var tab = new RadioButton
@@ -43,7 +88,7 @@ public sealed partial class ShellWindow
         try
         {
             foreach (var tab in _settingsTabs.Children.OfType<RadioButton>())
-                tab.IsChecked = ReferenceEquals(tab.Tag, current);
+                tab.IsChecked = _generalSettingsOpen ? tab.Tag is null : ReferenceEquals(tab.Tag, current);
         }
         finally { _updatingSettingsTabs = false; }
     }
@@ -51,8 +96,9 @@ public sealed partial class ShellWindow
     private async Task SwitchSettingsAsync(ModuleSession target)
     {
         if (_isClosing || _current is not { IsSettingsOpen: true } current ||
-            ReferenceEquals(current, target)) return;
+            (ReferenceEquals(current, target) && !_generalSettingsOpen)) return;
         CancelActive();
+        _generalSettingsOpen = false;
         current.IsSettingsOpen = false;
         target.IsSettingsOpen = true;
         // Keep _settingsReturn: Back returns to the original content, not to

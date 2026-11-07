@@ -5,13 +5,14 @@ import MeowUI
 
 @MainActor
 public final class FilmHomeViewController: PageViewController, UICollectionViewDelegate {
+    public var onSelectCategory: ((FilmCategoryModel) -> Void)?
     public var onSelectItem: ((FilmItem) -> Void)?
     public var sourceSwitcherView: UIView { sourceButton }
     private let model: FilmHomeModel
     private let images: ArtworkImages
     private let sourceButton = UIButton(type: .system)
     private let activity = UIActivityIndicatorView(style: .medium)
-    private let status = UILabel(), retry = UIButton(type: .system)
+    private let status = UILabel()
     private let stateView = UIStackView()
     private var sections: [FilmHomeSection] = []
     private var items: [Row: FilmItem] = [:]
@@ -64,7 +65,7 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
             guard let self, self.sections.indices.contains(path.section) else { return nil }
             let header = view.dequeueReusableSupplementaryView(ofKind: kind,
                 withReuseIdentifier: FilmSectionHeader.reuseIdentifier, for: path)
-            (header as? FilmSectionHeader)?.configure(title: self.sections[path.section].title, theme: self.theme)
+            self.configureHeader(header, section: self.sections[path.section])
             return header
         }
         collection.refreshControl = UIRefreshControl()
@@ -82,15 +83,12 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
         stateView.alignment = .center
         stateView.spacing = 12
         status.font = .systemFont(ofSize: 15)
-        retry.setTitle("重试", for: .normal)
-        retry.addAction(UIAction { [weak self] _ in self?.model.refresh() }, for: .touchUpInside)
-        for item in [activity, status, retry] { stateView.addArrangedSubview(item) }
+        for item in [activity, status] { stateView.addArrangedSubview(item) }
         view.addSubview(stateView)
         stateView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             stateView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             stateView.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerYAnchor),
-            retry.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
         ])
         observe(model) { [weak self] in self?.render() }
         render()
@@ -111,18 +109,30 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
         sourceButton.tintColor = UIColor(theme.ink)
         status.textColor = UIColor(theme.muted)
         activity.color = UIColor(theme.muted)
-        retry.tintColor = UIColor(theme.accent)
         guard dataSource != nil else { return }
         var snapshot = dataSource.snapshot()
         snapshot.reconfigureItems(snapshot.itemIdentifiers)
-        dataSource.apply(snapshot, animatingDifferences: false)
-        for header in collection.visibleSupplementaryViews(ofKind: UICollectionView.elementKindSectionHeader) {
-            guard let index = collection.indexPathsForVisibleSupplementaryElements(
-                ofKind: UICollectionView.elementKindSectionHeader).first(where: {
-                    collection.supplementaryView(forElementKind: UICollectionView.elementKindSectionHeader, at: $0) === header
-                }), sections.indices.contains(index.section) else { continue }
-            (header as? FilmSectionHeader)?.configure(title: sections[index.section].title, theme: theme)
+        dataSource.apply(snapshot, animatingDifferences: false) { [weak self] in self?.updateVisibleHeaders() }
+    }
+
+    private func updateVisibleHeaders() {
+        let identifiers = dataSource.snapshot().sectionIdentifiers
+        for path in collection.indexPathsForVisibleSupplementaryElements(ofKind: UICollectionView.elementKindSectionHeader) {
+            guard identifiers.indices.contains(path.section),
+                  let section = sections.first(where: { $0.id == identifiers[path.section] }),
+                  let header = collection.supplementaryView(
+                    forElementKind: UICollectionView.elementKindSectionHeader, at: path) else { continue }
+            configureHeader(header, section: section)
         }
+    }
+
+    private func configureHeader(_ header: UICollectionReusableView, section: FilmHomeSection) {
+        let action: (() -> Void)? = model.supportsCategory(sectionID: section.id) ? { [weak self] in
+            guard let self, let category = self.model.categoryModel(sectionID: section.id) else { return }
+            self.onSelectCategory?(category)
+        } : nil
+        (header as? FilmSectionHeader)?.configure(title: section.title, theme: theme,
+                                                 sectionID: section.id, onMore: action)
     }
 
     private func configureSourceButton() {
@@ -171,14 +181,13 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
             snapshot.reconfigureItems(snapshot.itemIdentifiers.filter {
                 dataSource.snapshot().indexOfItem($0) != nil
             })
-            dataSource.apply(snapshot, animatingDifferences: false)
+            dataSource.apply(snapshot, animatingDifferences: false) { [weak self] in self?.updateVisibleHeaders() }
             collection.collectionViewLayout.invalidateLayout()
             if switchedSource { collection.setContentOffset(.zero, animated: false) }
         }
         stateView.isHidden = !sections.isEmpty
         status.text = model.isLoading ? nil : model.error == nil ? "暂无影片" : "加载失败"
         status.isHidden = model.isLoading
-        retry.isHidden = model.isLoading || model.error == nil
         if model.isLoading { activity.startAnimating() }
         else {
             activity.stopAnimating()
@@ -190,7 +199,9 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
 
     private func presentError() {
         guard let error = model.error, shownError != error else { return }
-        if showError(error.localizedDescription) { shownError = error }
+        if showRetryableError(error.localizedDescription, retry: { [weak self] in
+            self?.model.refresh()
+        }) { shownError = error }
     }
 
     private func makeLayout() -> UICollectionViewLayout {

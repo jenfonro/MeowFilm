@@ -23,6 +23,10 @@
 
 返回字符串若是 JSON 对象或数组会解析为结构化值；其他返回值按 JSON 边界透传。BigInt、循环结构或抛错 getter 明确报 `SCRIPT_EXCEPTION`，不等待动作超时。
 
+首次普通动作会自动初始化 Spider；并发首动作等待同一次成功初始化，然后以各自请求身份执行。等待者取消不会取消另一请求拥有的初始化；初始化拥有者失败或取消后，仍有效的后继动作可用自己的身份重试，旧请求的迟到完成不能提交初始化状态。
+
+显式 `init` 仍每次真实调用 Spider，成功 `destroy` 后下一普通动作重新自动初始化。adapter 只按调用顺序协调这些生命周期操作，不串行化普通动作：一个动作等待 I/O 时，同实例的其他普通动作及其他安装仍可独立推进。
+
 ## Guest SDK
 
 QuickJS realm 提供受限 `Buffer`、URL、定时器、HTTP helper、作用域存储、DOM helper 和 CryptoJS 常用摘要/HMAC/AES/DES 子集。Cat 源先以 Acorn AST 识别并改写真实模块语法；注释或字符串中的 `require(`、`process.`、`import(` 不会误报。真实静态/动态 import、外部 re-export、`import.meta`、`require(...)` 和 Node/Deno/Bun 成员调用明确拒绝。

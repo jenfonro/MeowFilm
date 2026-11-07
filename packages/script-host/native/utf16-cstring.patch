@@ -1,6 +1,6 @@
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -4653,12 +4653,16 @@
+@@ -4673,12 +4673,16 @@
      if (JS_IsException(v))
          goto fail;
      p = JS_VALUE_GET_STRING(v);

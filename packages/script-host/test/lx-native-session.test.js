@@ -154,6 +154,87 @@ test('LX retirement reports physical storage I/O debt after native thread exit a
   assert.equal(host.cleanupPending('a'), 0);
 });
 
+for (const ending of ['timeout', 'cancellation']) {
+  test(`LX ${ending} fences asynchronous storage at native revocation without dropping physical work`,
+    { timeout: 15000 }, async t => {
+      const entered = deferred(), release = deferred(), resumed = deferred(), finished = deferred();
+      const revoked = deferred(), controller = new AbortController();
+      let operation, writes = 0, invocationSettled = false;
+      const { host, sessions } = capturingHost({ storage: { async set(input) {
+        operation = input; entered.resolve();
+        await release.promise;
+        if (!input.signal.aborted && input.isCurrent()) writes++;
+        resumed.resolve();
+        // An adapter that ignores cancellation remains physical work until this settles.
+        await finished.promise;
+      } } });
+      t.after(async () => { release.resolve(); finished.resolve(); await host.close(); });
+      const a = await host.install({
+        installationId: 'a', enabled: true, permissions: { storage: ['write'] },
+        source: lxScript({ setup: 'let tailSteps=0, calls=0;', handler: `async ({info},{storage}) => {
+          if (!info.musicInfo.hold) return {calls:++calls,tailSteps};
+          try { await storage.set('key','forbidden'); }
+          catch {
+            for(let i=0;i<128;i++) { await Promise.resolve(); tailSteps++; }
+          }
+          return 'obsolete';
+        }` }),
+      });
+      const b = await host.install({ installationId: 'b', enabled: true,
+        source: lxScript({ setup: 'let calls=0;', handler: 'async()=>++calls' }) });
+      assert.equal(await host.invoke(target('b')), 1);
+      const session = sessions[0], engine = session.engine;
+      assert.equal(session.limits.cleanupTimeoutMs, 100);
+      const receive = engine.receive;
+      let storageId, observed = false;
+      engine.receive = function (message) {
+        const result = receive.call(this, message);
+        if (message.type === 'host' && message.name === 'storage') storageId = message.id;
+        if (!observed && operation && (
+          message.type === 'cancelHost' && message.id === storageId ||
+          message.type === 'cancelScope' && message.scope === operation.requestId
+        )) {
+          observed = true;
+          // Observe the public adapter authority after the real notification was processed.
+          revoked.resolve({
+            code: message.code, aborted: operation.signal.aborted, current: operation.isCurrent(),
+            invocationSettled, pendingAdapterTasks: session.adapterTasks.size,
+          });
+          release.resolve();
+        }
+        return result;
+      };
+      const code = ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
+      const pending = assert.rejects(host.invoke(target('a', 'kw', { hold: true }), {
+        signal: controller.signal, ...(ending === 'timeout' ? { timeoutMs: 100 } : {}),
+      }).finally(() => { invocationSettled = true; }), { code });
+      await entered.promise;
+      assert.equal(await host.invoke(target('b')), 2);
+      if (ending === 'cancellation') controller.abort();
+      const snapshot = await revoked.promise;
+      await resumed.promise;
+      await pending;
+      assert.equal(snapshot.code, code);
+      assert.equal(snapshot.aborted, true);
+      assert.equal(snapshot.current, false);
+      if (ending === 'timeout') assert.equal(snapshot.invocationSettled, false);
+      assert.equal(snapshot.pendingAdapterTasks, 1);
+      assert.equal(operation.signal.aborted, true);
+      assert.equal(operation.isCurrent(), false);
+      assert.equal(writes, 0);
+      assert.equal(host.stats().pendingAdapterTasks, 1);
+      finished.resolve();
+      await session.whenAdaptersIdle();
+      assert.equal(host.stats().pendingAdapterTasks, 0);
+      assert.deepEqual(await host.invoke(target('a')), { calls: 1, tailSteps: 128 });
+      assert.equal(host.get('a').generation, a.generation);
+      assert.equal(host.get('a').state, 'ready');
+      assert.equal(await host.invoke(target('b')), 3);
+      assert.equal(host.get('b').generation, b.generation);
+      assert.equal(host.get('b').state, 'ready');
+    });
+}
+
 test('LX explicit storage context stays private across native await and completed contexts remain denied', async t => {
   const calls = [];
   const host = createScriptHost({ storage: { get(input) { calls.push(input.siteId); return input.siteId; } } });
@@ -194,6 +275,226 @@ test('LX session-owned callbacks keep the original invocation deadline after tas
       event.operation === 'native.unresponsive' && event.code === 'TIMEOUT').length, 1);
     assert.equal(await host.invoke(target('b')), 7);
   });
+
+// L3: use public LX callbacks and finite work, not private task/owner hooks.
+for (const [kind, schedule] of [
+  ['timer', 'setTimeout(run,1);'],
+  ['network', `lx.request('https://fixture.invalid/callback',{},error=>error?reject(error):run());`],
+  ['microtask', 'queueMicrotask(run);'],
+]) for (const ending of ['timeout', 'abort', 'complete']) {
+  test(`LX active ${kind} callback keeps invocation execution control on ${ending}`,
+    { timeout: 15000 }, async t => {
+      const entered = deferred(), networkEntered = deferred(), releaseNetwork = deferred(), natural = deferred();
+      const controller = new AbortController(), failures = [], diagnostics = [];
+      let naturalCompletions = 0, cancelledAt;
+      const { host, sessions } = capturingHost({
+        onDiagnostic: event => diagnostics.push(event),
+        network: input => {
+          if (input.url === 'https://fixture.invalid/callback') {
+            networkEntered.resolve(input);
+            return releaseNetwork.promise;
+          }
+          assert.equal(input.url, 'https://fixture.invalid/natural-completion');
+          naturalCompletions++;
+          natural.resolve();
+          return { statusCode: 200, body: 'observed' };
+        },
+      });
+      t.after(async () => {
+        releaseNetwork.resolve({ statusCode: 200, body: 'released' });
+        await host.close();
+      });
+      const a = await host.install({ installationId: 'a', enabled: true, source: lxScript({
+        setup: 'let callbacks=0;',
+        handler: `async ({info}) => {
+          if (info.musicInfo.probe) return callbacks;
+          return new Promise((resolve,reject) => {
+            const run = () => {
+              callbacks++;
+              const started=Date.now();
+              lx.send('updateAlert',{log:JSON.stringify({kind:${JSON.stringify(kind)},started})});
+              while(Date.now()-started<600) {}
+              lx.request('https://fixture.invalid/natural-completion',{},()=>{});
+              resolve({callbacks,elapsed:Date.now()-started});
+            };
+            ${schedule}
+          });
+        }`,
+      }) });
+      const b = await host.install({ installationId: 'b', enabled: true,
+        source: lxScript({ setup: 'let calls=0;', handler: 'async()=>++calls' }) });
+      const session = sessions[0], engine = session.engine;
+      assert.equal(session.limits.cleanupTimeoutMs, 100);
+      const onEvent = engine.onEvent;
+      engine.onEvent = (name, value, scope) => {
+        onEvent(name, value, scope);
+        if (name === 'send' && value.event === 'updateAlert') {
+          entered.resolve(JSON.parse(value.data.log));
+          if (ending === 'abort') { cancelledAt = Date.now(); controller.abort(); }
+        }
+        if (name === 'failure') failures.push({ code: value.code, at: Date.now() });
+      };
+      await withoutBackgroundFallbackStop(engine, async () => {
+        assert.equal(await host.invoke(target('b')), 1);
+        const admittedAt = Date.now();
+        const outcome = host.invoke(target('a'), {
+          signal: controller.signal,
+          ...(ending === 'timeout' ? { timeoutMs: 150 } : ending === 'complete' ? { timeoutMs: 2000 } : {}),
+        }).then(value => ({ value }), error => ({ code: error.code }));
+        if (kind === 'network') {
+          const input = await networkEntered.promise;
+          assert.equal(input.signal.aborted, false);
+          releaseNetwork.resolve({ statusCode: 200, body: 'released' });
+        }
+        const marker = await entered.promise;
+        assert.equal(marker.kind, kind);
+        assert.ok(Number.isSafeInteger(marker.started));
+        assert.equal(await host.invoke(target('b')), 2);
+        if (ending === 'complete') {
+          const result = await outcome;
+          assert.equal(result.value?.callbacks, 1);
+          assert.ok(result.value.elapsed >= 600, 'normal callbacks may exceed the cleanup window');
+          await natural.promise;
+          await session.whenAdaptersIdle();
+          assert.equal(naturalCompletions, 1);
+          assert.deepEqual(failures, []);
+          assert.equal(await host.invoke(target('a', 'kw', { probe: true })), 1);
+          assert.equal(host.get('a').state, 'ready');
+          assert.equal(host.get('a').generation, a.generation);
+          assert.equal(engine.stats().threadCount, 1);
+        } else {
+          const code = ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
+          assert.deepEqual(await outcome, { code });
+          const exit = await Promise.race([
+            engine.exited,
+            natural.promise.then(() => { throw Error('callback reached its finite natural completion before owner exit'); }),
+          ]);
+          const exitedAt = Date.now();
+          t.diagnostic(JSON.stringify({ kind, ending, admittedAt, enteredAt: marker.started,
+            cancelledAt, failures, exitedAt, naturalCompletions }));
+          assert.equal(exit.code, code);
+          assert.equal(exit.stopped, true);
+          for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+            'hostCalls', 'timers', 'jobsPending']) assert.equal(exit[key], 0, key);
+          assert.equal(failures.length, 1);
+          assert.equal(failures[0].code, code);
+          assert.ok(failures[0].at - marker.started < 600, 'the request must interrupt before natural completion');
+          assert.ok(exitedAt - marker.started < 600, 'logical cancellation alone is not actual owner exit');
+          assert.equal(naturalCompletions, 0);
+          assert.equal(session.live, false);
+          assert.equal(host.get('a').state, 'failed');
+          assert.equal(host.get('a').generation, a.generation);
+          assert.equal(diagnostics.filter(event => event.installationId === 'a' &&
+            event.operation === 'native.unresponsive' && event.code === code).length, 1);
+        }
+        assert.equal(await host.invoke(target('b')), 3);
+        assert.equal(host.get('b').state, 'ready');
+        assert.equal(host.get('b').generation, b.generation);
+        assert.equal(sessions.length, 2, 'callback control must not silently replace an owner');
+        assert.equal(host.stats().pendingAdapterTasks, 0);
+      });
+    });
+}
+
+for (const kind of ['timer', 'network']) for (const ending of ['completed', 'cancelled']) {
+  test(`LX ${ending} request retains its ${kind} callback without borrowing a new storage context`,
+    { timeout: 15000 }, async t => {
+      const armed = deferred(), networkEntered = deferred(), releaseNetwork = deferred(), currentWritten = deferred();
+      const controller = new AbortController(), storageCalls = [];
+      let stored = null;
+      const { host, sessions } = capturingHost({
+        network: input => {
+          assert.equal(kind, 'network');
+          networkEntered.resolve(input);
+          return releaseNetwork.promise;
+        },
+        storage: {
+          set(input) {
+            storageCalls.push(['set', input.siteId, input.value]);
+            assert.equal(input.signal.aborted, false);
+            assert.equal(input.isCurrent(), true);
+            stored = input.value;
+            if (input.value === 'current') currentWritten.resolve(input);
+          },
+          get(input) {
+            storageCalls.push(['get', input.siteId]);
+            assert.equal(input.isCurrent(), true);
+            return stored;
+          },
+        },
+      });
+      t.after(async () => {
+        releaseNetwork.resolve({ statusCode: 200, body: 'released' });
+        await host.close();
+      });
+      const a = await host.install({ installationId: 'a', enabled: true, permissions: { storage: ['read', 'write'] },
+        source: lxScript({
+          setup: `let releaseTimer=false, callbacks=0, oldCode, finishLate;
+            const lateDone=new Promise(resolve=>{finishLate=resolve;});`,
+          handler: `async ({info},{storage}) => {
+            if (info.musicInfo.arm) {
+              const finish=async error=>{
+                callbacks++;
+                if (error) oldCode=error.code;
+                else {
+                  try { await storage.set('key','old'); oldCode='wrote'; }
+                  catch(failure) { oldCode=failure.code; }
+                }
+                finishLate();
+              };
+              // Release from the newer invocation, not from an elapsed-time guess.
+              ${kind === 'timer' ? `const timer=setInterval(()=>{
+                if (!releaseTimer) return;
+                clearInterval(timer);
+                return finish();
+              },1);` : `lx.request('https://fixture.invalid/late',{},finish);`}
+              lx.send('updateAlert',{log:'armed'});
+              ${ending === 'cancelled' ? 'return new Promise(()=>{});' : "return 'armed';"}
+            }
+            await storage.set('key','current');
+            releaseTimer=true;
+            await lateDone;
+            return {callbacks,old:oldCode,value:await storage.get('key')};
+          }`,
+        }) });
+      const session = sessions[0], engine = session.engine;
+      assert.equal(session.limits.cleanupTimeoutMs, 100);
+      const onEvent = engine.onEvent;
+      engine.onEvent = (name, value, scope) => {
+        onEvent(name, value, scope);
+        if (name === 'send' && value.event === 'updateAlert') armed.resolve();
+      };
+      await withoutBackgroundFallbackStop(engine, async () => {
+        const old = host.invoke(target('a', 'kw', { arm: true }), { signal: controller.signal })
+          .then(value => ({ value }), error => ({ code: error.code }));
+        await armed.promise;
+        const outbound = kind === 'network' ? await networkEntered.promise : null;
+        if (ending === 'cancelled') controller.abort();
+        assert.deepEqual(await old, ending === 'cancelled' ? { code: 'CANCELLED' } : { value: 'armed' });
+        if (outbound) {
+          assert.equal(outbound.signal.aborted, false);
+          assert.equal(host.stats().networkRequests, 1);
+          assert.equal(host.stats().pendingAdapterTasks, 1);
+        }
+        const current = host.invoke(target('a', 'tx'))
+          .then(value => ({ value }), error => ({ code: error.code }));
+        const context = await currentWritten.promise;
+        assert.equal(context.isCurrent(), true);
+        releaseNetwork.resolve({ statusCode: 200, body: 'released' });
+        assert.deepEqual(await current, {
+          value: { callbacks: 1, old: 'PERMISSION_DENIED', value: 'current' },
+        });
+        await session.whenAdaptersIdle();
+        assert.equal(context.isCurrent(), false);
+        assert.deepEqual(storageCalls, [['set', 'tx', 'current'], ['get', 'tx']]);
+        assert.equal(host.get('a').state, 'ready');
+        assert.equal(host.get('a').generation, a.generation);
+        assert.equal(sessions.length, 1);
+        assert.equal(host.stats().pendingAdapterTasks, 0);
+        assert.equal((await engine.stats({ refresh: true })).timers, 0);
+      });
+    });
+}
 
 test('LX startup failure retires its native owner while another initialized instance retains state', async t => {
   const { host, sessions } = capturingHost();
@@ -413,3 +714,193 @@ lx.send('inited', {status:true,sources:{
   assert.equal(session.live, false);
   assert.deepEqual(host.list(), []);
 });
+
+// L10: completion enters guest code before the user's callback, including in
+// byte normalization and error constructors. Exercise those public surfaces.
+for (const stage of ['bytes', 'decode', 'host-error', 'sync-host-error', 'json-error',
+  'immediate-abort', 'launched-abort']) for (const ending of ['timeout', 'abort', 'complete']) {
+  test(`LX network ${stage} completion keeps invocation execution control on ${ending}`,
+    { timeout: 15000 }, async t => {
+      const entered = deferred(), networkEntered = deferred(), releaseNetwork = deferred(), natural = deferred();
+      const adapterAborted = deferred(), controller = new AbortController(), failures = [], diagnostics = [];
+      const errorCode = {
+        'host-error': 'NETWORK_ERROR', 'sync-host-error': 'INVALID_ARGUMENT', 'json-error': 'INVALID_JSON',
+        'immediate-abort': 'CANCELLED', 'launched-abort': 'CANCELLED',
+      }[stage] ?? null;
+      const noNetwork = stage === 'sync-host-error' || stage === 'immediate-abort';
+      const decoded = { text: '中文🎵\0', values: [0, 255, 128] };
+      const raw = Buffer.from(stage === 'json-error' ? '{broken' : JSON.stringify(decoded));
+      const response = { statusCode: 200, headers: { 'x-fixture': 'completion' }, body: raw };
+      let requests = 0, naturalCompletions = 0, cancelledAt;
+      const { host, sessions } = capturingHost({
+        onDiagnostic: event => diagnostics.push(event),
+        network: input => {
+          if (input.url === 'https://fixture.invalid/natural-completion') {
+            naturalCompletions++;
+            natural.resolve();
+            return { statusCode: 200, body: 'observed' };
+          }
+          if (input.url === 'https://fixture.invalid/abort-ready') {
+            assert.equal(stage, 'launched-abort');
+            // The guest may abort only after the original physical adapter entered.
+            return networkEntered.promise.then(() => ({ statusCode: 200, body: '' }));
+          }
+          assert.equal(input.url, 'https://fixture.invalid/response');
+          assert.equal(noNetwork, false);
+          assert.equal(input.signal.aborted, false);
+          requests++;
+          networkEntered.resolve(input);
+          if (stage === 'launched-abort') input.signal.addEventListener('abort', () => {
+            adapterAborted.resolve(input.signal.reason);
+            releaseNetwork.resolve(response);
+          }, { once: true });
+          return releaseNetwork.promise.then(value => {
+            if (stage === 'host-error') throw fault('NETWORK_ERROR');
+            return value;
+          });
+        },
+      });
+      t.after(async () => {
+        releaseNetwork.resolve(response);
+        await host.close();
+      });
+      const a = await host.install({ installationId: 'a', enabled: true, source: lxScript({
+        setup: 'let callbacks=0, entries=0, wrappers=0, elapsed=0;',
+        handler: `async ({info}) => {
+          if (info.musicInfo.probe) return {callbacks,entries,wrappers};
+          const run = () => {
+            if (entries) return;
+            entries++;
+            const started=Date.now();
+            lx.send('updateAlert',{log:JSON.stringify({stage:${JSON.stringify(stage)},started,callbacks})});
+            while(Date.now()-started<600) {}
+            elapsed=Date.now()-started;
+            lx.request('https://fixture.invalid/natural-completion',{encoding:null},()=>{});
+          };
+          ${stage === 'bytes' ? `
+            const isView=ArrayBuffer.isView;
+            ArrayBuffer.isView=value=>{run(); return isView(value);};
+          ` : stage === 'decode' ? `
+            const toString=Buffer.prototype.toString;
+            Buffer.prototype.toString=function(...args){run(); return toString.apply(this,args);};
+          ` : `
+            const OriginalError=Error;
+            globalThis.Error=function(message){
+              if (message===${JSON.stringify(errorCode)}) { wrappers++; run(); }
+              return new OriginalError(message);
+            };
+            Error.prototype=OriginalError.prototype;
+          `}
+          return new Promise((resolve,reject) => {
+            const abort=lx.request('https://fixture.invalid/response',
+              ${stage === 'json-error' ? '{json:true}' : stage === 'sync-host-error'
+                ? "{headers:{'x-invalid':()=>{}}}" : '{}'},
+              (failure,response,body) => {
+                callbacks++;
+                resolve({
+                  callbacks,entries,wrappers,elapsed,
+                  failure:failure?{code:failure.code,name:failure.name,message:failure.message}:null,
+                  response:response?{
+                    statusCode:response.statusCode,header:response.headers['x-fixture'],
+                    rawHex:Buffer.from(response.raw||response.body).toString('hex'),
+                    bodyAlias:response.body===body,buffer:Buffer.isBuffer(response.raw),
+                  }:null,
+                  body,
+                });
+              });
+            ${stage === 'immediate-abort' ? 'abort(); abort();' : stage === 'launched-abort' ? `
+              lx.request('https://fixture.invalid/abort-ready',{encoding:null},failure=>{
+                if (failure) reject(failure);
+                else { abort(); abort(); }
+              });
+            ` : ''}
+          });
+        }`,
+      }) });
+      const b = await host.install({ installationId: 'b', enabled: true,
+        source: lxScript({ setup: 'let calls=0;', handler: 'async()=>++calls' }) });
+      const session = sessions[0], engine = session.engine;
+      assert.equal(session.limits.cleanupTimeoutMs, 100);
+      const onEvent = engine.onEvent;
+      engine.onEvent = (name, value, scope) => {
+        onEvent(name, value, scope);
+        if (name === 'send' && value.event === 'updateAlert') {
+          entered.resolve(JSON.parse(value.data.log));
+          if (ending === 'abort') { cancelledAt = Date.now(); controller.abort(); }
+        }
+        if (name === 'failure') failures.push({ code: value.code, at: Date.now() });
+      };
+      await withoutBackgroundFallbackStop(engine, async () => {
+        assert.equal(await host.invoke(target('b')), 1);
+        const admittedAt = Date.now();
+        const outcome = host.invoke(target('a'), {
+          signal: controller.signal,
+          ...(ending === 'timeout' ? { timeoutMs: 150 } : ending === 'complete' ? { timeoutMs: 2000 } : {}),
+        }).then(value => ({ value }), error => ({ code: error.code }));
+        if (!noNetwork) {
+          await networkEntered.promise;
+          if (stage !== 'launched-abort') releaseNetwork.resolve(response);
+        }
+        const marker = await entered.promise;
+        assert.equal(marker.stage, stage);
+        assert.ok(Number.isSafeInteger(marker.started));
+        assert.equal(marker.callbacks, 0, 'the controlled work must precede the user callback');
+        assert.equal(await host.invoke(target('b')), 2);
+        if (stage === 'launched-abort')
+          assert.equal((await adapterAborted.promise).code, 'CANCELLED');
+        if (ending === 'complete') {
+          const result = await outcome;
+          assert.ok(result.value?.elapsed >= 600, 'normal completion may exceed the cleanup window');
+          assert.deepEqual(result.value, {
+            callbacks: 1, entries: 1, wrappers: errorCode ? 1 : 0, elapsed: result.value.elapsed,
+            failure: errorCode ? { code: errorCode, name: errorCode === 'CANCELLED' ? 'AbortError' : 'Error',
+              message: errorCode } : null,
+            response: !errorCode || stage === 'json-error' ? {
+              statusCode: 200, header: 'completion', rawHex: raw.toString('hex'),
+              bodyAlias: !errorCode, buffer: !errorCode,
+            } : null,
+            body: errorCode ? null : decoded,
+          });
+          await natural.promise;
+          await session.whenAdaptersIdle();
+          assert.equal(naturalCompletions, 1);
+          assert.deepEqual(failures, []);
+          assert.deepEqual(await host.invoke(target('a', 'kw', { probe: true })),
+            { callbacks: 1, entries: 1, wrappers: errorCode ? 1 : 0 });
+          assert.equal(host.get('a').state, 'ready');
+          assert.equal(host.get('a').generation, a.generation);
+          assert.equal(engine.stats().threadCount, 1);
+        } else {
+          const code = ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
+          assert.deepEqual(await outcome, { code });
+          const exit = await Promise.race([
+            engine.exited,
+            natural.promise.then(() => { throw Error('completion reached its finite end before owner exit'); }),
+          ]);
+          const exitedAt = Date.now();
+          t.diagnostic(JSON.stringify({ stage, ending, admittedAt, enteredAt: marker.started,
+            cancelledAt, failures, exitedAt, naturalCompletions }));
+          assert.equal(exit.code, code);
+          assert.equal(exit.stopped, true);
+          for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+            'hostCalls', 'timers', 'jobsPending']) assert.equal(exit[key], 0, key);
+          assert.equal(failures.length, 1);
+          assert.equal(failures[0].code, code);
+          assert.ok(failures[0].at - marker.started < 600, 'completion must interrupt before its finite end');
+          assert.ok(exitedAt - marker.started < 600, 'logical cancellation alone is not actual owner exit');
+          assert.equal(naturalCompletions, 0);
+          assert.equal(session.live, false);
+          assert.equal(host.get('a').state, 'failed');
+          assert.equal(host.get('a').generation, a.generation);
+          assert.equal(diagnostics.filter(event => event.installationId === 'a' &&
+            event.operation === 'native.unresponsive' && event.code === code).length, 1);
+        }
+        assert.equal(requests, noNetwork ? 0 : 1);
+        assert.equal(await host.invoke(target('b')), 3);
+        assert.equal(host.get('b').state, 'ready');
+        assert.equal(host.get('b').generation, b.generation);
+        assert.equal(sessions.length, 2, 'completion control must not silently replace an owner');
+        assert.equal(host.stats().pendingAdapterTasks, 0);
+      });
+    });
+}

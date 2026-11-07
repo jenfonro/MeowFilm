@@ -1,12 +1,15 @@
 import Foundation
 import MeowJSON
 import MeowMusicFeature
+import MeowRuntime
 import XCTest
 @testable import MeowMusicNativeService
 
 final class NativeMusicScriptServiceTests: XCTestCase {
     func testExplicitStartupIsSharedAndDoesNotExecuteScripts() async throws {
-        let runtime = MusicScriptTestRuntime(), service = NativeMusicScriptService(launcher: runtime)
+        let runtime = MusicScriptTestRuntime(), session = RuntimeBridgeSession(launcher: runtime)
+        try await session.configure(handlers: [:])
+        let service = NativeMusicScriptService(connection: { try await session.connection() })
         await scriptExpectFailure(.scriptRuntimeUnavailable) { try await service.scriptSources() }
         await service.start(); await service.start()
         let items = try await service.scriptSources()
@@ -14,10 +17,21 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         let metrics = await runtime.metrics()
         XCTAssertEqual(metrics.connects, 1); XCTAssertEqual(metrics.calls, ["runtime.describe", "sources.list"])
         let handlers = await runtime.reverseHandlers; XCTAssertTrue(handlers.isEmpty)
-        await service.close(); await runtime.close()
+        let connection = try await session.connection()
+        try await scriptAssertCatAvailable(connection)
+        try await service.close()
+        let shared = try await session.connection()
+        XCTAssertTrue(connection === shared)
+        try await scriptAssertCatAvailable(shared)
+        let after = await runtime.metrics()
+        XCTAssertEqual(after.connects, 1)
+        XCTAssertEqual(after.calls.filter { $0 == "close" }.count, 1)
+        await session.close(); await runtime.close()
     }
     func testImportStagesThenUsesSharedManagementWithoutNativeStorage() async throws {
-        let runtime = MusicScriptTestRuntime(), service = NativeMusicScriptService(launcher: runtime)
+        let runtime = MusicScriptTestRuntime(), session = RuntimeBridgeSession(launcher: runtime)
+        try await session.configure(handlers: [:])
+        let service = NativeMusicScriptService(connection: { try await session.connection() })
         await service.start()
         let bytes = Data(repeating: 65, count: 128 * 1024 + 1)
         let item = try await service.importScriptSource(bytes, fileName: "selected.js")
@@ -29,10 +43,12 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         XCTAssertTrue(calls.contains { $0.0 == "sources.add" }); XCTAssertFalse(calls.contains { $0.0 == "sources.enable" })
         let stages = await runtime.stages; XCTAssertTrue(stages.isEmpty)
         let listed = try await service.scriptSources(); XCTAssertEqual(listed, [item])
-        await service.close(); await runtime.close()
+        try await service.close(); await session.close(); await runtime.close()
     }
     func testSingleQualityResolvePreservesHeadersExpiryAndFencesDisabledOrOldGeneration() async throws {
-        let runtime = MusicScriptTestRuntime(), service = NativeMusicScriptService(launcher: runtime)
+        let runtime = MusicScriptTestRuntime(), session = RuntimeBridgeSession(launcher: runtime)
+        try await session.configure(handlers: [:])
+        let service = NativeMusicScriptService(connection: { try await session.connection() })
         await service.start()
         let item = try await service.importScriptSource(musicScriptFixture, fileName: "source.js")
         _ = try await service.setScriptSourceEnabled(item.id, enabled: true)
@@ -50,10 +66,12 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         _ = try await service.setScriptSourceEnabled(item.id, enabled: true)
         await scriptExpectFailure(.sourceUnavailable) { try await service.resolve(request: request) }
         let metrics = await runtime.metrics(); XCTAssertEqual(metrics.calls.filter { $0 == "resolve" }.count, 1)
-        await service.close(); await runtime.close()
+        try await service.close(); await session.close(); await runtime.close()
     }
     func testAllManagementOperationsForwardToTheSharedOwner() async throws {
-        let runtime = MusicScriptTestRuntime(), service = NativeMusicScriptService(launcher: runtime)
+        let runtime = MusicScriptTestRuntime(), session = RuntimeBridgeSession(launcher: runtime)
+        try await session.configure(handlers: [:])
+        let service = NativeMusicScriptService(connection: { try await session.connection() })
         await service.start()
         let item = try await service.downloadScriptSource(from: URL(string: "https://source.invalid/source.js")!)
         _ = try await service.editScriptSource(item.id, name: "Renamed", networkURL: "https://source.invalid/new.js")
@@ -67,10 +85,12 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         for name in ["download", "edit", "update", "rollback", "check", "detail", "remove"] {
             XCTAssertTrue(methods.contains("sources." + name))
         }
-        await service.close(); await runtime.close()
+        try await service.close(); await session.close(); await runtime.close()
     }
     func testStorageFailuresAndHostFailureAreNotEmptySourceLists() async throws {
-        let runtime = MusicScriptTestRuntime(), service = NativeMusicScriptService(launcher: runtime)
+        let runtime = MusicScriptTestRuntime(), session = RuntimeBridgeSession(launcher: runtime)
+        try await session.configure(handlers: [:])
+        let service = NativeMusicScriptService(connection: { try await session.connection() })
         await service.start()
         await runtime.fail("CORRUPT_STORAGE")
         await scriptExpectFailure(.corruptDocument) { try await service.scriptSources() }
@@ -80,6 +100,7 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         await scriptExpectFailure(.scriptRuntimeUnavailable) { try await service.sources() }
         await service.start()
         let connects = await runtime.metrics().connects; XCTAssertEqual(connects, 1)
-        await service.close()
+        await scriptExpectFailure(.scriptCleanupFailed) { try await service.close() }
+        await session.close()
     }
 }

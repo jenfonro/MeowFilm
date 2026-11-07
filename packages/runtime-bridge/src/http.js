@@ -140,11 +140,13 @@ export function createHttpServer({ sessionId, key, resolve: resolveRoute, onClos
             send(route.status?.(result) ?? 200, result);
           } catch (error) {
             if (controller.signal.aborted) return;
-            if (error.sourceLimit) send(413, { ok: false, contract: route.contract, code: route.limitCode });
-            else send(!admitted && error.code === 'INVALID_REQUEST' ? 400 : 200,
-              failed(admitted && error.code === 'INVALID_REQUEST' ? 'INVALID_RESPONSE'
+            if (error?.sourceLimit) send(413, { ok: false, contract: route.contract, code: route.limitCode });
+            else send(!admitted && error?.code === 'INVALID_REQUEST' ? 400 : 200,
+              failed(admitted && error?.code === 'INVALID_REQUEST' ? 'INVALID_RESPONSE'
                 : error instanceof BridgeError ? error.code : 'INVALID_RESPONSE'));
           } finally {
+            // A failed error response has no pending finish to wait for.
+            if (!response.writableEnded && !response.destroyed) response.destroy();
             // Response backpressure has physical ownership after the handler returns.
             if (!response.writableFinished && !response.destroyed) await new Promise(done => {
               const finish = () => { response.off('finish', finish); response.off('close', finish); done(); };

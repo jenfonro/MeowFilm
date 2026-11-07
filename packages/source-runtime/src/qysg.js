@@ -54,7 +54,7 @@ function listValue(value, keys = []) {
   if (parsed && typeof parsed === 'object') {
     for (const key of keys) if (Array.isArray(parsed[key])) return parsed[key];
   }
-  return [];
+  throw sourceFault('SCRIPT_PROTOCOL_ERROR');
 }
 
 function absolute(value, base) {

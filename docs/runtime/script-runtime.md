@@ -49,6 +49,8 @@ LX/source 用户脚本不能直接获得 Node 对象、任意宿主 callable、�
 
 Promise reaction、原生 await、异步迭代和清理回调保留登记任务身份。旧 A 延续由 B 唤醒时仍属于 A，不能借 B 的能力。私有任务入口在 SDK 初始化捕获后、用户代码执行前移除；不包装公开 Promise.then、不增添微任务或改变标准排队顺序。LX 特权存储始终使用显式请求 context，不由 ambient task identity 授权。
 
+异步生成器排队请求独立保存执行 owner，切换请求时同步切换取消与截止控制，不以权限身份替代执行控制；既有取消收尾时限不变。跨环境数组复制定义自身数据元素，不触发继承 setter；业务 JSON 和内部 typed bytes 契约不变。
+
 源码上限 16 MiB、QuickJS 栈边界以及 Reader 解析预算是独立输入/引擎/解析契约。运行器已删除 `maxMemoryBytes`、引擎内存额度、派生宿主 body/算法/state 配额、耗尽标记及内存超限自动重启；没有 Infinity、极大值或 nullable 开关伪装保留。普通网络体、ABI bytes、JSON 和变量不套 Reader 解析额度。可报告分配失败、取消、超时和资源释放仍需处理，不保证系统 OOM 仅影响单实例。
 
 保留真实内存观测：原生 QuickJS 使用实际引擎统计，Cat 使用 Node/V8 的含义，RSS 是进程级值；重叠统计不可相加。不将旧配额减 heap 伪装为 `os.freemem()`，也不把取消额度当作性能优化证据。

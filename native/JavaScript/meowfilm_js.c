@@ -1,23 +1,17 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "include/meowfilm_js.h"
 #include "quickjs.h"
 
-#if defined(_WIN32)
-#define MF_EXPORT __declspec(dllexport)
-#else
-#define MF_EXPORT __attribute__((visibility("default")))
-#endif
-
-typedef int (*mf_interrupt)(void *);
-typedef struct {
+struct mf_engine {
     JSRuntime *runtime;
     JSContext *context;
     JSValue function;
     mf_interrupt interrupt;
     void *opaque;
     int interrupted;
-} mf_engine;
+};
 
 static int interrupt_handler(JSContext *context, void *opaque)
 {

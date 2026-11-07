@@ -122,62 +122,7 @@
    </MultiTrigger>
   </Style.Triggers>
  </Style>
- <Style TargetType="ComboBox">
-  <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-  <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Surface}"/>
-  <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
-  <Setter Property="BorderThickness" Value="1"/>
-  <Setter Property="MinHeight" Value="38"/>
-  <Setter Property="Padding" Value="12,8"/>
-  <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
-  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBox">
-   <Grid>
-    <ToggleButton Focusable="False" IsChecked="{Binding IsDropDownOpen,RelativeSource={RelativeSource TemplatedParent},Mode=TwoWay}"
-     Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
-     <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
-      <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8"/>
-     </ControlTemplate></ToggleButton.Template>
-    </ToggleButton>
-    <Grid IsHitTestVisible="False" Margin="{TemplateBinding Padding}">
-     <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="20"/></Grid.ColumnDefinitions>
-     <ContentPresenter Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
-      ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}" VerticalAlignment="Center"/>
-     <Path x:Name="Arrow" Grid.Column="1" Data="M 0,0 L 4.5,4.5 L 9,0" Width="9" Height="5" Stretch="None" StrokeThickness="1.4"
-      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{TemplateBinding Foreground}"
-      HorizontalAlignment="Right" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5"/>
-    </Grid>
-    <Popup x:Name="PART_Popup" Placement="Bottom" VerticalOffset="4" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True"
-     Focusable="False" PopupAnimation="Fade">
-     <Border x:Name="DropDown" Margin="0,0,10,10" MinWidth="{Binding ActualWidth,RelativeSource={RelativeSource TemplatedParent}}"
-      Background="{TemplateBinding Background}" BorderBrush="{DynamicResource MeowFilm.Brush.Border}" BorderThickness="1"
-      CornerRadius="8" Padding="4">
-      <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="3" Opacity=".12"/></Border.Effect>
-      <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto"><ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/></ScrollViewer>
-     </Border>
-    </Popup>
-   </Grid>
-   <ControlTemplate.Triggers>
-    <Trigger Property="IsDropDownOpen" Value="True"><Setter TargetName="Arrow" Property="RenderTransform"><Setter.Value><RotateTransform Angle="180"/></Setter.Value></Setter></Trigger>
-    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter TargetName="DropDown" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
-   </ControlTemplate.Triggers>
-  </ControlTemplate></Setter.Value></Setter>
-  <Style.Triggers>
-   <Trigger Property="IsMouseOver" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Muted}"/></Trigger>
-   <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Focus}"/><Setter Property="BorderThickness" Value="2"/></Trigger>
-   <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Disabled}"/><Setter Property="Opacity" Value="0.7"/></Trigger>
-   <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
-    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-   </Trigger>
-   <MultiTrigger><MultiTrigger.Conditions>
-    <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsKeyboardFocusWithin" Value="True"/>
-   </MultiTrigger.Conditions><Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
-   <MultiTrigger><MultiTrigger.Conditions>
-    <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsEnabled" Value="False"/>
-   </MultiTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/></MultiTrigger>
-  </Style.Triggers>
- </Style>
+ <Style TargetType="ComboBox" BasedOn="{StaticResource MeowFilm.ComboBox}"/>
  <Style x:Key="Capability.Track" TargetType="RepeatButton">
   <Setter Property="Focusable" Value="False"/>
   <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Muted}"/>

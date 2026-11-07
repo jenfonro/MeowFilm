@@ -129,11 +129,12 @@ export function createNodeRealm(session, node) {
       path.includes('\\')||path.includes('$'+'{'))return;
     const clean=path.split(/[?#]/,1)[0].replace(/\/+$/,'')||'/';
     const known=routes.get(clean)||new Set();
-    for(const method of [].concat(methods||'POST')){
+    for(const method of [].concat(methods??[])){
       const value=String(method).toUpperCase();
       if(httpMethods.includes(value))known.add(value);
     }
-    if(known.size)routes.set(clean,known);
+    // An empty set records a path without inventing a registered method.
+    if(known.size||methods===undefined)routes.set(clean,known);
   };
   const captureBootSource=source=>{
     if(booting&&typeof source==='string')bootSources.add(source);
@@ -235,19 +236,19 @@ export function createNodeRealm(session, node) {
         const application=bootApplications.find(app=>{
           try{return applicationRoutes.has(app)&&app.server.address()?.port===port;}catch{return false;}
         });
-        const declared=Array.isArray(site.actions)&&site.actions.every(actionName);
-        if(!application&&!declared)sourceRoutes();
+        if(!application)sourceRoutes();
         const routes=application?applicationRoutes.get(application).routes:bootRoutePaths;
         const methods={};
         for(const [path,available]of routes){
           const action=routeAction(path,base);
           if(!actionName(action)||blockedAction(action))continue;
-          methods[action]=httpMethods.find(method=>available.has(method));
+          methods[action]=httpMethods.find(method=>available.has(method)||method===methods[action]);
         }
         if(!application)for(const pattern of bootPatternRoutes)
           for(const action of pattern.actions)
-            if(actionName(action)&&!blockedAction(action)&&pattern.regex.test(base+'/'+action))
-              methods[action]??=pattern.method;
+            if(actionName(action)&&!blockedAction(action)&&pattern.regex.test(base+'/'+action)&&
+              !Object.hasOwn(methods,action))methods[action]=undefined;
+        const declared=Array.isArray(site.actions)&&site.actions.every(actionName);
         const actions=declared?[...new Set(site.actions)]:Object.keys(methods);
         return [key,{actions,methods:Object.fromEntries(actions.map(action=>
           [action,methods[action]||'POST'])),discovery:declared?'declared':application?

@@ -11,6 +11,8 @@ APPLICATION_DIRECTORIES = ("Application", "Composition", "Navigation", "Presenta
 NODE_MOBILE_FRAMEWORK = "../../.cache/nodejs-mobile/ios/NodeMobile.xcframework"
 RUNTIME_PAYLOAD = "../../.cache/ios-runtime/Runtime"
 NODE_MOBILE_LICENSE = "../../LICENSES/nodejs-mobile-LICENSE.txt"
+NATIVE_JAVASCRIPT_LICENSE = "../../LICENSES/quickjs-native-MIT.txt"
+NATIVE_UNICODE_LICENSE = "../../LICENSES/Unicode-3.0.txt"
 
 
 def source_paths(root, directories):
@@ -74,6 +76,8 @@ def generate():
     ids.update({key: identifier(f"{product}:{key}") for key in [
         "nodeFramework", "nodeFrameworkLink", "nodeFrameworkEmbed", "embedFrameworks",
         "runtimePayload", "runtimePayloadBuild", "nodeLicense", "nodeLicenseBuild",
+        "javascriptLicense", "javascriptLicenseBuild",
+        "unicodeLicense", "unicodeLicenseBuild",
         "runtimeTests", "runtimeTestGroup", "runtimeTestTarget", "runtimeTestSources",
         "runtimeTestConfigs", "runtimeTestDebug", "runtimeTestRelease", "runtimeTestDependency", "runtimeTestProxy",
     ]})
@@ -107,10 +111,14 @@ def generate():
     obj("runtimePayload", f'isa = PBXFileReference; lastKnownFileType = folder; name = Runtime; path = {quoted(RUNTIME_PAYLOAD)}; sourceTree = "<group>";')
     obj("runtimePayloadBuild", f"isa = PBXBuildFile; fileRef = {ids['runtimePayload']};")
     obj("nodeLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = nodejs-mobile-LICENSE.txt; path = {quoted(NODE_MOBILE_LICENSE)}; sourceTree = "<group>";')
+    obj("javascriptLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = quickjs-native-MIT.txt; path = {quoted(NATIVE_JAVASCRIPT_LICENSE)}; sourceTree = "<group>";')
+    obj("javascriptLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['javascriptLicense']};")
+    obj("unicodeLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = Unicode-3.0.txt; path = {quoted(NATIVE_UNICODE_LICENSE)}; sourceTree = "<group>";')
+    obj("unicodeLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['unicodeLicense']};")
     obj("nodeLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['nodeLicense']};")
     obj("app", f'isa = PBXFileReference; explicitFileType = wrapper.application; path = {name}.app; sourceTree = BUILT_PRODUCTS_DIR;')
     obj("productsGroup", f'isa = PBXGroup; children = ({ids["app"]}, {ids["uiTests"]}, {ids["runtimeTests"]},); name = Products; sourceTree = "<group>";')
-    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + [ids["assets"], ids["nodeFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["uiTestGroup"], ids["runtimeTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
+    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + [ids["assets"], ids["nodeFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["javascriptLicense"], ids["unicodeLicense"], ids["uiTestGroup"], ids["runtimeTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
     obj("sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = {seq(app_builds)}; runOnlyForDeploymentPostprocessing = 0;')
     package_ids, framework_ids = [], []
     for library in libraries:
@@ -121,7 +129,7 @@ def generate():
         objects.append(f"\t\t{dependency_id} = {{ isa = XCSwiftPackageProductDependency; package = {ids['package']}; productName = {library}; }};")
         objects.append(f"\t\t{build_id} = {{ isa = PBXBuildFile; productRef = {dependency_id}; }};")
     obj("frameworks", f"isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = {seq(framework_ids + [ids['nodeFrameworkLink']])}; runOnlyForDeploymentPostprocessing = 0;")
-    obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({ids["assetsBuild"]}, {ids["runtimePayloadBuild"]}, {ids["nodeLicenseBuild"]},); runOnlyForDeploymentPostprocessing = 0;')
+    obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({ids["assetsBuild"]}, {ids["runtimePayloadBuild"]}, {ids["nodeLicenseBuild"]}, {ids["javascriptLicenseBuild"]}, {ids["unicodeLicenseBuild"]},); runOnlyForDeploymentPostprocessing = 0;')
     obj("package", 'isa = XCLocalSwiftPackageReference; relativePath = ../../native/MeowKit;')
     common_project = "CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0;"
     conditions = "FEATURE_MUSIC"
@@ -153,8 +161,8 @@ def generate():
         "application-identifier": "$(PRODUCT_BUNDLE_IDENTIFIER)",
         "get-task-allow": True,
     }, sort_keys=False))
-    product_directory = "MeowfilmNative"
-    build_directory = f'CONFIGURATION_BUILD_DIR = "$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/{product_directory}"; '
+    # Use Xcode's shared products directory, including SwiftPM resource bundles.
+    # A target-only output override makes Xcode copy those from a nonexistent path.
     target_settings = (
         f'PRODUCT_BUNDLE_IDENTIFIER = {bundle_identifier}; PRODUCT_NAME = {name}; INFOPLIST_FILE = {info_file}; '
         'GENERATE_INFOPLIST_FILE = NO; TARGETED_DEVICE_FAMILY = 1; '
@@ -163,7 +171,6 @@ def generate():
         f'"CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]" = {simulator_entitlements}; '
         'ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; '
         'LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; '
-        f'{build_directory}'
     )
     # Swift Package modules remain in Xcode's shared products directory.
     target_settings += (
@@ -198,7 +205,7 @@ def generate():
         'CODE_SIGN_STYLE = Automatic; '
         'SWIFT_INCLUDE_PATHS = ("$(inherited)", "$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)",); '
         'LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks"; '
-        f'TEST_TARGET_NAME = {name}; {build_directory}'
+        f'TEST_TARGET_NAME = {name}; '
     )
     for config in ["Debug", "Release"]:
         optimization = "-Onone" if config == "Debug" else "-O"
@@ -223,7 +230,6 @@ def generate():
         'SWIFT_INCLUDE_PATHS = ("$(inherited)", "$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)",); '
         'FRAMEWORK_SEARCH_PATHS = ("$(inherited)", "$(BUILT_PRODUCTS_DIR)",); '
         'LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks"; '
-        f'{build_directory}'
     )
     for config in ["Debug", "Release"]:
         optimization = "-Onone" if config == "Debug" else "-O"

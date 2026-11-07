@@ -30,9 +30,13 @@ image
 
 动作输入和前一动作结果由应用显式传递；运行时不保存全局“当前书”。搜索、详情、目录和正文结果使用统一书籍、章节和正文结构，URL 按响应最终地址和来源地址归一。当前范围是底层规则和结果契约，不包含阅读 UI、书架、阅读进度或其他平台客户端接入。
 
+Legado 图片规则与轻悦时光 `imagedecrypt` 返回的字节在内部 ABI 中保持 `Uint8Array`；仅公开 HTTP 的 `image` 结果 `body` 投影为既有 Buffer JSON，例如 `{type:"Buffer",data:[0,255,65]}`。字符串 body 原样保留，不递归转换其他字段或调用任意 `toJSON`，非法非 JSON 结果仍明确失败。
+
+轻悦时光 `search`／`exploreKinds`／`explore`／`toc` 必须返回数组或既有列表 wrapper（`books`／`kinds`／`chapters`／`list`）。合法空数组和 JSON 字符串包装继续支持；畸形 JSON 或非列表值报 `SCRIPT_PROTOCOL_ERROR`（公开 `SOURCE_FAILURE`），不能伪装成成功空列表。正文等非列表动作及 CatVod 普通字符串语义不变。
+
 ## 规则与脚本
 
-公共层实现 HTML/CSS、XPath、JSONPath、正则、切片、属性、`@put`／`@get`、变量、请求模板、Header、字符集和阶段上下文。正则匹配接替换时使用匹配文本，未替换时保留匹配结构。Legado 外观同步的宿主调用通过 AST 转换为异步 capability 调用；无法安全传播 `await` 的回调（含命名函数／函数变量传入同步 Array 方法）、构造器或其他结构返回 `UNSUPPORTED_SCRIPT_ASYNC`，不返回 Promise 真值或空值冒充兼容。
+公共层实现 HTML/CSS、XPath、JSONPath、正则、切片、属性、`@put`／`@get`、变量、请求模板、Header、字符集和阶段上下文。正则匹配接替换时使用匹配文本，未替换时保留匹配结构。Legado 外观同步的宿主调用通过 AST 转换为异步 capability 调用；显式 `read().then/catch/finally` 的接收者保持 Promise，不改写为 `(await read()).then/catch/finally`，原显式 await 和同步外观调用继续传播。无法安全传播 `await` 的回调（含命名函数／函数变量传入同步 Array 方法，即使内部使用显式 Promise 链）、构造器或其他结构返回 `UNSUPPORTED_SCRIPT_ASYNC`，不返回 Promise 真值或空值冒充兼容。
 
 受限 `java`／`Packages` 只提供已审计的兼容对象，例如请求、Cookie、缓存、规则、URL 和 Jsoup 子集；常见 URL 后缀请求选项、`java.setContent`、Cookie 方法、Jsoup base URL／`abs:` 属性、Elements 深克隆及 `Jsoup.connect(...).execute().body()` 的异步转换在该边界内实现。它们不映射真实 JVM 类。JAR、DEX、Rhino ClassShutter、任意反射和文件路径均不支持。
 
@@ -68,11 +72,13 @@ load 必填 `installationId,sourceRevision,revision,expectedRevision`；protocol
 
 加载使用 installation、revision、expectedRevision 做 CAS，调用与卸载核对 generation；候选失败保留原实例，发布后清理失败触发回滚或明确 `SOURCE_CLEANUP`。开发版不提供旧数据迁移或旧契约兼容层。
 
+首次 load 尚未发布 binding 时，同 revision 且省略 generation 的合法 unload 会先捕获并停止真实初始化 owner，再等待同安装事务。过期 revision/generation 不得抢占候选；针对该候选的排队卸载和迟到取消不得触及同 ID 的继任者。首次候选已被取消并清理后，unload 不保证成功返回；以撤权与实际资源退出为准。
+
 卸载清理失败仍报告 `SOURCE_CLEANUP`；host 已移除的实例不再保留 RPC binding，其他实例的状态与调用不受影响。退休 profile 和物理任务的清理债务独立保留，不因 binding 删除冒充完成。应用关闭同时检查模块抛错与失败信封，仍等待全部模块清理，并以公共 `INVALID_RESPONSE` 报告失败；重复关闭复用同一结果。
 
 每个实例的原生 Runtime、两个 Context、profile、DOM registry、变量和虚拟路由独立。源码 16 MiB 与 QuickJS 栈边界保留；移除脚本内存配额、普通响应/state 累计配额与 OOM 自动重启。初始化/请求默认 60 秒、清理 3 秒，不设单段同步时限或固定实例/并发/timer/网络/profile 数量。主控可取消卡死执行并等待真实原生线程退出。
 
-初始化整体受同一截止信号约束，候选 HTML 和外部脚本请求按实际 I/O 所有权登记。动作串行维护本实例阶段语义，其他安装及 status 不等待慢实例。HTTP abort/未完成 response close fence 结果，正常 finish 不取消完成工作。Reader DOM 文档/节点/字符串、分页、HTML 候选、外部脚本及规则解析预算保留；`maximumParseBytes` 只用于解析，不限制普通 HTTP body、变量、Cookie、storage 或路由状态。
+初始化整体受同一截止信号约束，候选 HTML 和外部脚本请求按实际 I/O 所有权登记。同一安装的管理事务有序执行；动作可在 await 等待期间交错推进，各自保留请求身份、阶段上下文和取消 fence；不同安装可独立推进，status 不等待慢实例。HTTP abort/未完成 response close fence 结果，正常 finish 不取消完成工作。Reader DOM 文档/节点/字符串、分页、HTML 候选、外部脚本及规则解析预算保留；`maximumParseBytes` 只用于解析，不限制普通 HTTP body、变量、Cookie、storage 或路由状态。
 
 Windows/iOS 旧接入本轮未迁移，不用旧后端或 wire 兼容路径掩盖；通用原生构建与定向回归已通过，适用环境及未覆盖项见[通用验证范围](script-runtime.md#构建发布与验证边界)。
 

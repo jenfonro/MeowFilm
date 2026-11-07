@@ -11,14 +11,7 @@ public sealed class MusicQualityRow(string key, bool enabled) : INotifyPropertyC
     private bool isEnabled = enabled;
     public string Key { get; } = key;
     public bool Enabled => isEnabled;
-    public string Label => Key switch
-    {
-        "master" => "母带", "spatial" => "空间／全景", "enhanced" => "平台增强", "hires" => "高解析度",
-        "lossless" => "无损", "high" => "高音质", "standard" => "标准",
-        "dolby" => "杜比全景声", "dts_x" => "DTS:X", "sony360" => "Sony 360 Reality Audio",
-        "sky" => "沉浸环绕声", "vivid" => "臻音全景声", "qq_atmos" => "臻品全景声",
-        "viper_atmos" => "蝰蛇全景声", _ => Key
-    };
+    public string Label => MusicQualityLabels.Name(Key);
     internal void Apply(bool value)
     {
         if (isEnabled == value) return;

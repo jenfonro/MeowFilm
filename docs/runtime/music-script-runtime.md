@@ -36,7 +36,7 @@ Content-Type: application/octet-stream
 
 `invoke` 的 HTTP `value` 就是脚本结果，包括普通 `blob`、`token`、`value` 字段；不再包一层安装身份。调用选择当前启用内容，执行前捕获 generation，返回前核对未退休。客户端不传外部 CAS、grant、config 或 permissions；旧 load/unload/status 与手工分片接口不提供兼容路径。
 
-`resolve` 的 `value` 包含 installationId、generation、contentHash、platform、quality、url、headers、expiresAt。URL 必须为 HTTP(S)，拒绝凭据 URL、试听/加密标志、禁止请求头、过期时间及相反目标身份。正时长与已知录音时长相差超过 `max(3s,较短×2%)` 时返回 `RECORDING_MISMATCH`；未知时长不判错。不补搜、不换源、不降级；请求音质不代表已实测音质。
+`resolve` 的 `value` 包含 installationId、generation、contentHash、platform、quality、url、headers、expiresAt。URL 必须为 HTTP(S)，拒绝凭据 URL、试听/加密标志、禁止请求头、过期时间及相反目标身份。候选与已知录音时长均为正数时，绝对差不超过10秒通过时长校验，超过10秒返回 `RECORDING_MISMATCH`；任一时长未知时不判录音不匹配。不补搜、不换源、不降级；请求音质不代表已实测音质。
 
 公开请求与业务结果遵守64层 JSON 契约，65层拒绝；控制信封和内部 KV 文档包装不占用业务值深度。完整 JSON 不设独立总字节上限，不使用应用层 stage/control/blob、Base64 分片或 TTL 暂存。
 
@@ -66,12 +66,14 @@ KV 保留持久化数据边界：每值16 KiB，每 site 最多64键/64 KiB，�
 
 冷启动只恢复目录，启用来源在首次 invoke/resolve/check 时惰性加载。同进程失败的 owner 或失败恢复记录不会被普通调用静默重建；列表报告 failed，可由显式 enable 或更新重试。正常实例不闲置回收、不自动重启，运行变量自然保留。
 
-取消立即封闭权限与结果；网络任务仍登记到实际完成。关闭先终止真实 owner，再排空安装事务与源码下载；清理不能确认时报告 `SCRIPT_CLEANUP`。停用/删除后旧 generation 的结果和 KV 操作不能发布。
+取消或请求到期立即封闭权限与结果；异步存储适配器的 `signal/isCurrent` 随真实 capability 撤权失效，不等待调用结算。有限尾链仍沿既有清理时限收尾，网络任务仍登记到实际完成。关闭先终止真实 owner，再排空安装事务与源码下载；清理不能确认时报告 `SCRIPT_CLEANUP`。停用/删除后旧 generation 的结果和 KV 操作不能发布。
 
 ## 网络与承载
 
 源码下载默认使用 `createSourceDownload({maxSourceBytes:SCRIPT_LIMITS.maxSourceBytes,maxRedirects:0})`。保留 HTTPS `.js` URL、无凭据/fragment、拒绝重定向、只接受200、30秒期限。源码实际传输及显式解压都受16 MiB边界约束；取消等待 request/response/socket/解压流的真实完成。
 
 普通 guest 网络仍使用 `createNodeNetwork`，只验证 HTTP(S) 语法，不设域名或私网授权名单，不继承源码下载字节边界。LX request 的回调、字节和取消语义保持；followRedirect=false 禁止跳转，true 与 follow_max 遵守既有重定向上限，retry 不启动宿主重放。
+
+LX timer、microtask 和 request 回调的调用、返回值吸收及同步／异步异常分类均受活跃来源的原执行控制；正常回调异常只诊断，退休来源的晚回调保留 session 语义且不能重新取得存储权限。网络 I/O 仍由 session 持有，失败跨线程只传安全分类，进入可信回调后才构造公开 Error；成功响应不额外包装或复制字节。
 
 LX 使用逐实例原生线程及 QuickJS Runtime，脚本宿主来源策略为 [`scripts/script-host-native.json`](../../scripts/script-host-native.json)。客户端影视规则的独立 QuickJS 策略不属于本模块。其他来源的 [capability ABI](source-capability-abi.md) 是独立输入契约，不互换 site/action/quality 或数据权限。生命周期边界见[共用核心](script-runtime.md)，外部脚本验收见[动态验收](source-acceptance.md)。

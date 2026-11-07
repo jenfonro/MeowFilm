@@ -54,7 +54,7 @@ internal sealed class FilmSourceProbe(CatScriptTransport transport, FilmCatSourc
             {
                 string id = Pick(video, "vod_id", "vodId", "id", "ID");
                 if (id.Length == 0) { Empty("detail", "MISSING_VIDEO_ID"); continue; }
-                var detail = await CallAsync("detail", new { id, vod_id = id }).ConfigureAwait(false);
+                var detail = await CallAsync("detail", new { id, vod_id = id }, initialDetail: true).ConfigureAwait(false);
                 if (detail is null) continue;
                 candidates = await DetailCandidatesAsync(detail.Value).ConfigureAwait(false);
                 if (candidates.Count == 0)
@@ -98,6 +98,10 @@ internal sealed class FilmSourceProbe(CatScriptTransport transport, FilmCatSourc
         while (queue.TryDequeue(out var page))
         {
             cancellation.ThrowIfCancellationRequested();
+            // Initial detail errors remain available for search fallback, but
+            // the reference navigation walker never traverses an ok:false document.
+            // CallAsync already recorded the failed response.
+            if (Property(page.Document, "ok").ValueKind == JsonValueKind.False) continue;
             var list = Property(page.Document, "list");
             if (list.ValueKind != JsonValueKind.Array)
             {
@@ -162,7 +166,7 @@ internal sealed class FilmSourceProbe(CatScriptTransport transport, FilmCatSourc
         return candidates.Distinct().ToList();
     }
 
-    private async Task<JsonElement?> CallAsync(string operation, object payload)
+    private async Task<JsonElement?> CallAsync(string operation, object payload, bool initialDetail = false)
     {
         cancellation.ThrowIfCancellationRequested();
         if (!site.Actions.Contains(operation, StringComparer.Ordinal))
@@ -180,6 +184,7 @@ internal sealed class FilmSourceProbe(CatScriptTransport transport, FilmCatSourc
                 steps.Add(new(operation, "failed", "INVALID_RESPONSE"));
                 return null;
             }
+            bool scriptFailure = false;
             foreach (var response in new[] { value, Property(value, "data") })
             {
                 var status = Property(response, "statusCode");
@@ -190,10 +195,14 @@ internal sealed class FilmSourceProbe(CatScriptTransport transport, FilmCatSourc
                     string message = Pick(response, "message", "msg", "error");
                     steps.Add(new(operation, "failed", message.Length > 0 ? message :
                         httpFailure ? "HTTP_" + status.GetRawText() : "SCRIPT_ERROR"));
-                    return null;
+                    // The reference's first detail read keeps HTTP-success bodies,
+                    // including script errors, for playback-metadata/search fallback.
+                    // Navigation requests (even action "detail") remain strict.
+                    if (httpFailure || !initialDetail) return null;
+                    scriptFailure = true;
                 }
             }
-            steps.Add(new(operation, "success"));
+            if (!scriptFailure) steps.Add(new(operation, "success"));
             return value;
         }
         catch (OperationCanceledException) { throw; }

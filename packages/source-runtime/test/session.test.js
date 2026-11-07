@@ -671,6 +671,40 @@ test('QYSG normalizes result URLs against the final page and action URLs', async
   }
 });
 
+test('QYSG list contracts report protocol errors without changing non-list string actions', async t => {
+  let value;
+  const session = new SourceSession({
+    installationId: 'qysg-list-contracts',
+    source: { bookSourceName: 'Lists', bookSourceUrl: 'https://books.invalid/',
+      html: '<script>function search() { return []; }</script>' },
+    protocol: 'qysg',
+    capabilities: capabilitiesFor({}),
+    createSandbox: sandboxFactory({
+      actions: ['search', 'getfinds', 'find', 'chapter', 'content'],
+      invoke: async () => value,
+    }),
+  });
+  t.after(() => session.close());
+  await session.start();
+  session.activate();
+  for (const [action, key] of [
+    ['search', 'books'], ['exploreKinds', 'kinds'], ['explore', 'books'], ['toc', 'chapters'],
+  ]) {
+    for (value of [undefined, null, false, 7, '', 'plain text', '[1,', '{"list":',
+      {}, { [key]: {} }, { list: '[]' }]) {
+      await assert.rejects(session.invoke(action, {}), { code: 'SCRIPT_PROTOCOL_ERROR' },
+        `${action}: ${String(value)}`);
+    }
+    for (value of [[], '[]', { [key]: [] }, { list: [] },
+      JSON.stringify({ [key]: [] }), '{"list":[]}']) {
+      assert.deepEqual((await session.invoke(action, {}))[key], []);
+    }
+  }
+  for (value of ['plain chapter text', '[1,']) {
+    assert.deepEqual(await session.invoke('content', {}), { content: value });
+  }
+});
+
 test('QYSG external script HTTP failures retain the upstream HTTP error', async () => {
   const session = new SourceSession({
     installationId: 'qysg-script-http-failure',

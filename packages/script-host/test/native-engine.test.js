@@ -490,6 +490,77 @@ test('native object outputs retain ordinary nested prototypes and safe own speci
   verify(events[0].value);
 });
 
+for (const contexts of ['single', 'dual']) {
+  test(`native array copies define own data elements without inherited setters (${contexts} Context)`, { timeout }, async t => {
+    const hostPrototype = Object.getOwnPropertyDescriptors(Array.prototype);
+    const methods = `(() => {
+      let setterCalls = 0;
+      function inspect(value) {
+        return { value, length: value.length, own0: Object.hasOwn(value, '0'),
+          descriptor0: Object.getOwnPropertyDescriptor(value, '0') ?? null, setterCalls };
+      }
+      return {
+        poison() {
+          for (const key of ['0', '2']) Object.defineProperty(Array.prototype, key, {
+            configurable: true, set(value) { setterCalls++; },
+          });
+          return true;
+        },
+        inspect,
+        async later(value) { await Promise.resolve(); return inspect(value); },
+        async completion() { return inspect(await __meowHost('array', null)); },
+        core(value) { return inspect(__meowCore('echoCore', [value])); },
+        setterCalls() { return setterCalls; },
+      };
+    })()`;
+    let completion;
+    const engine = await create(t, {
+      source: contexts === 'single' ? methods : `(() => {
+        const core = ${methods};
+        return {
+          poison() { core.poison(); return __meowGuest('poison', []); },
+          inspect(value) { return __meowGuest('inspect', [value]); },
+          later(value) { return __meowGuest('later', [value]); },
+          completion() { return __meowGuest('completion', []); },
+          core(value) { return __meowGuest('core', [value]); },
+          echoCore(value) { return value; },
+          setterCalls() { return core.setterCalls(); },
+        };
+      })()`,
+      ...(contexts === 'dual' ? { guestSource: methods, guestHelpers: ['echoCore'] } : {}),
+      onHostCall(name, value) {
+        assert.equal(name, 'array'); assert.equal(value, null);
+        return completion;
+      },
+    });
+    function expected(value) {
+      return { value, length: value.length, own0: value.length !== 0,
+        descriptor0: value.length ? {
+          value: value[0], writable: true, enumerable: true, configurable: true,
+        } : null, setterCalls: 0 };
+    }
+    assert.deepEqual(await engine.call('inspect', [[7]]), expected([7]));
+    assert.equal(await engine.call('poison'), true);
+    const samples = [
+      { input: [7], value: [7] },
+      { input: [], value: [] },
+      { input: [, 7, undefined], value: [null, 7, null] },
+      { input: [null, false, 7, 'a\0😀'], value: [null, false, 7, 'a\0😀'] },
+      { input: [[7], { nested: [true] }, Buffer.from([0, 255, 65])],
+        value: [[7], { nested: [true] }, Buffer.from([0, 255, 65])] },
+    ];
+    for (const { input, value } of samples) {
+      assert.deepEqual(await engine.call('inspect', [input]), expected(value));
+      assert.deepEqual(await engine.call('later', [input]), expected(value));
+      completion = input;
+      assert.deepEqual(await engine.call('completion'), expected(value));
+      if (contexts === 'dual') assert.deepEqual(await engine.call('core', [input]), expected(value));
+    }
+    assert.equal(await engine.call('setterCalls'), 0);
+    assert.deepEqual(Object.getOwnPropertyDescriptors(Array.prototype), hostPrototype);
+  });
+}
+
 test('core and guest share one Runtime with cloned async values and allowlisted synchronous reentry', { timeout }, async t => {
   const engine = await create(t, {
     source: `(() => {
@@ -563,6 +634,131 @@ test('native Promise/await, generators, finalizers and timers preserve registrat
   assert.equal(events.length, 1); assert.equal(events[0].name, 'final');
   assert.equal(events[0].scope, 301); assert.equal(events[0].value.scope, 301);
 });
+
+// REV-2 R1: only finite work; a natural completion is a failure, not cancellation evidence.
+for (const contexts of ['single', 'dual']) for (const ending of ['timeout', 'abort']) {
+  for (const registration of ['active', 'other-active', 'retired']) {
+    test(`queued generator ${registration} task uses its caller's ${ending} before finite completion (${contexts} Context)`,
+      { timeout }, async t => {
+        const controller = new AbortController(), oldController = new AbortController();
+        const events = [], hosts = [];
+        let didWait, didQueue, didEnter, enteredAt, cancelledAt, failedAt;
+        const waiting = new Promise(resolve => { didWait = resolve; });
+        const queued = new Promise(resolve => { didQueue = resolve; });
+        const entered = new Promise(resolve => { didEnter = resolve; });
+        const source = `(() => {
+          let openGate, resumeOld, late;
+          const gate = new Promise(resolve => { openGate = resolve; });
+          const generator = (async function* () {
+            __meowEmit('head-waiting', null);
+            await gate;
+            yield 1;
+            const scope = __meowTaskContext();
+            __meowTaskContext(0);
+            __meowTaskContext(scope);
+            let authority = 'current';
+            if (scope === 71) {
+              try { __meowHost('forbidden', null); authority = 'unsafe'; }
+              catch (error) { authority = error.code; }
+            }
+            const start = Date.now();
+            __meowEmit('tail-entered', { scope, authority });
+            while (Date.now() - start < 600) {}
+            __meowEmit('tail-natural-completion', { elapsed: Date.now() - start });
+            return 2;
+          })();
+          function queue() {
+            const result = generator.next();
+            __meowEmit('tail-queued', null);
+            return result;
+          }
+          return {
+            old() {
+              late = new Promise(resolve => { resumeOld = resolve; }).then(queue);
+              return new Promise(() => {});
+            },
+            head() { return generator.next(); },
+            tail(registration) {
+              if (registration === 'retired') { resumeOld(); return late; }
+              if (registration === 'other-active') __meowTaskContext(101);
+              try { return queue(); }
+              finally { if (registration === 'other-active') __meowTaskContext(202); }
+            },
+            open() { openGate(); return true; },
+          };
+        })()`;
+        const other = await create(t, {
+          source: '(() => { let n = 0; return { next() { return ++n; } }; })()',
+        });
+        const engine = await create(t, {
+          source: contexts === 'single' ? source : `({
+            old() { return __meowGuest('old', []); },
+            head() { return __meowGuest('head', []); },
+            tail(registration) { return __meowGuest('tail', [registration]); },
+            open() { return __meowGuest('open', []); },
+          })`,
+          ...(contexts === 'dual' ? { guestSource: source } : {}),
+          // Keep the existing default cleanupTimeoutMs (100ms).
+          onHostCall(name, value, scope) { hosts.push({ name, value, scope }); return null; },
+          onEvent(name, value, scope) {
+            events.push({ name, value, scope });
+            if (name === 'head-waiting') didWait();
+            if (name === 'tail-queued') didQueue();
+            if (name === 'tail-entered') {
+              enteredAt = Date.now();
+              didEnter();
+              if (ending === 'abort') { cancelledAt = Date.now(); controller.abort(); }
+            }
+            if (name === 'failure') failedAt = Date.now();
+          },
+        });
+        await withoutFallbackStop(engine, async () => {
+          if (registration === 'retired') {
+            const old = assert.rejects(engine.call('old', [], {
+              scope: 71, signal: oldController.signal,
+            }), { code: 'CANCELLED' });
+            await engine.stats({ refresh: true });
+            oldController.abort();
+            await old;
+            assert.equal(engine.stats().stopped, false);
+          }
+          assert.equal(await other.call('next'), 1);
+          const head = engine.call('head', [], { scope: 101, timeoutMs: 10_000 })
+            .then(value => ({ value }), error => ({ code: error.code }));
+          await waiting;
+          const code = ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
+          const tail = assert.rejects(engine.call('tail', [registration], {
+            scope: 202, signal: controller.signal, timeoutMs: ending === 'timeout' ? 150 : 2_000,
+          }), { code });
+          await queued;
+          assert.equal(await engine.call('open', [], { scope: 303, timeoutMs: 10_000 }), true);
+          await entered;
+          assert.equal(await other.call('next'), 2);
+          await tail;
+          const exit = await engine.exited;
+          await head;
+          const scope = registration === 'retired' ? 71 : registration === 'other-active' ? 101 : 202;
+          assert.deepEqual(events, [
+            { name: 'head-waiting', value: null, scope: 101 },
+            { name: 'tail-queued', value: null, scope },
+            { name: 'tail-entered', value: {
+              scope, authority: registration === 'retired' ? 'STALE_SESSION' : 'current',
+            }, scope },
+            { name: 'failure', value: { code }, scope: 202 },
+          ]);
+          assert.ok(failedAt - enteredAt < 600, 'B must interrupt before the finite computation completes');
+          if (ending === 'abort') assert.ok(failedAt - cancelledAt >= 95,
+            'B retains the existing 100ms cleanup window');
+          assert.deepEqual(hosts, []);
+          assert.equal(exit.code, code); assert.equal(exit.stopped, true);
+          for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+            'hostCalls', 'timers', 'jobsPending']) assert.equal(exit[key], 0, key);
+          assert.equal(await other.call('next'), 3);
+          assert.equal(other.stats().stopped, false);
+        });
+      });
+  }
+}
 
 test('interrupts cancel synchronous JS, infinite jobs and initialization while other owners progress', { timeout }, async t => {
   const events = [];
@@ -1517,4 +1713,697 @@ for (const contexts of ['single', 'dual']) {
       for (const key of ['threadCount', 'runtimeCount', 'contextCount']) assert.equal(exit[key], 0, key);
     });
   });
+}
+
+// REVIEW-3 L3: trusted callback entry is distinct from a permission-only scope switch.
+for (const contexts of ['single', 'dual']) for (const ending of ['timeout', 'abort']) {
+  for (const boundary of ['entry', 'return', 'throw']) {
+    test(`trusted callback ${boundary} preserves the right execution control on ${ending} (${contexts} Context)`,
+      { timeout }, async t => {
+        const controller = new AbortController(), events = [];
+        let didWait, didEnter, enteredAt, cancelledAt, failedAt;
+        const waiting = new Promise(resolve => { didWait = resolve; });
+        const entered = new Promise(resolve => { didEnter = resolve; });
+        const source = `(() => {
+          function compute(stage, state) {
+            const started = Date.now();
+            __meowEmit('entered', { stage, state, started, scope: __meowTaskContext() });
+            while (Date.now() - started < 600) {}
+            __meowEmit('natural-completion', { stage, elapsed: Date.now() - started });
+            return 'natural-completion';
+          }
+          return {
+            hold() {
+              __meowEmit('waiting', null);
+              return new Promise(() => {});
+            },
+            run(boundary) {
+              const previous = __meowTaskContext();
+              let settlement, selected;
+              try {
+                const value = __meowTaskContext(101, () => {
+                  if (boundary === 'entry') return compute('callback', null);
+                  const nested = __meowTaskContext(202, () => {
+                    const scope = __meowTaskContext();
+                    __meowTaskContext(0);
+                    return scope;
+                  });
+                  if (boundary === 'throw') throw new Error(String(nested));
+                  return nested;
+                });
+                settlement = { value };
+              } catch (error) { settlement = { message: error.message }; }
+              finally {
+                selected = __meowTaskContext();
+                __meowTaskContext(previous);
+              }
+              if (boundary === 'entry') return settlement;
+              const restored = __meowTaskContext();
+              // A remains active, but this ordinary authority switch must not take B's owner.
+              __meowTaskContext(101);
+              return compute('outer', { selected, restored, settlement });
+            },
+          };
+        })()`;
+        const other = await create(t, {
+          source: '(() => { let n = 0; return { next() { return ++n; } }; })()',
+        });
+        const engine = await create(t, {
+          source: contexts === 'single' ? source : `({
+            hold() { return __meowGuest('hold', []); },
+            run(boundary) { return __meowGuest('run', [boundary]); },
+          })`,
+          ...(contexts === 'dual' ? { guestSource: source } : {}),
+          onEvent(name, value, scope) {
+            events.push({ name, value, scope });
+            if (name === 'waiting') didWait();
+            if (name === 'entered') {
+              enteredAt = value.started;
+              didEnter();
+              if (ending === 'abort') { cancelledAt = Date.now(); controller.abort(); }
+            }
+            if (name === 'failure') failedAt = Date.now();
+          },
+        });
+        await withoutFallbackStop(engine, async () => {
+          const code = ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
+          const selectedOwner = boundary === 'entry';
+          const controlled = { signal: controller.signal, timeoutMs: ending === 'timeout' ? 150 : 0 };
+          assert.equal(await other.call('next'), 1);
+          const held = assert.rejects(engine.call('hold', [], {
+            scope: 101, ...(selectedOwner ? controlled : { timeoutMs: 10_000 }),
+          }), { code });
+          await waiting;
+          await engine.stats({ refresh: true });
+          const running = assert.rejects(engine.call('run', [boundary], {
+            scope: 202, ...(selectedOwner ? { timeoutMs: 10_000 } : controlled),
+          }), { code });
+          await entered;
+          assert.equal(await other.call('next'), 2);
+          await Promise.all([held, running]);
+          const exit = await engine.exited;
+          const exitedAt = Date.now();
+          const state = selectedOwner ? null : {
+            selected: 101, restored: 202,
+            settlement: boundary === 'throw' ? { message: '202' } : { value: 202 },
+          };
+          assert.deepEqual(events, [
+            { name: 'waiting', value: null, scope: 101 },
+            { name: 'entered', value: {
+              stage: selectedOwner ? 'callback' : 'outer', state, started: enteredAt, scope: 101,
+            }, scope: 101 },
+            { name: 'failure', value: { code }, scope: selectedOwner ? 101 : 202 },
+          ]);
+          assert.ok(failedAt - enteredAt < 600, 'the actual owner interrupts before natural completion');
+          assert.ok(exitedAt - enteredAt < 600, 'logical rejection alone is not actual owner exit');
+          if (ending === 'abort') assert.ok(failedAt - cancelledAt >= 95,
+            'the existing 100ms cleanup window remains available');
+          t.diagnostic(JSON.stringify({ contexts, ending, boundary, enteredAt, cancelledAt, failedAt, exitedAt }));
+          assert.equal(exit.code, code); assert.equal(exit.stopped, true);
+          for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+            'hostCalls', 'timers', 'jobsPending']) assert.equal(exit[key], 0, key);
+          assert.equal(await other.call('next'), 3);
+          assert.equal(other.stats().stopped, false);
+        });
+      });
+  }
+}
+
+// REVIEW-3 L4: only the synthetic QuickJS contexts have altered Error prototypes.
+for (const contexts of ['single', 'dual']) {
+  const methods = `(() => {
+    let setterCalls = 0, count = 0;
+    function inspect(error) {
+      return { error: error instanceof Error,
+        code: Object.getOwnPropertyDescriptor(error, 'code') ?? null,
+        message: Object.getOwnPropertyDescriptor(error, 'message') ?? null, setterCalls };
+    }
+    function inspectFailure(error) {
+      return { typeError: error instanceof TypeError, name: error.name,
+        ownCode: Object.hasOwn(error, 'code'), setterCalls };
+    }
+    return {
+      inspect, inspectFailure,
+      armFailure() {
+        Error.prepareStackTrace = error => {
+          Error.prepareStackTrace = undefined;
+          Object.defineProperty(error, 'message', { value: 'fixed-message' });
+          return '';
+        };
+        return true;
+      },
+      armBlockingStack() {
+        Error.prepareStackTrace = () => {
+          Error.prepareStackTrace = undefined;
+          const started = Date.now();
+          __meowEmit('stack-entered', { started, scope: __meowTaskContext() });
+          while (Date.now() - started < 600) {}
+          __meowEmit('stack-natural-completion', { elapsed: Date.now() - started });
+          return '';
+        };
+        return true;
+      },
+      poison() {
+        for (const key of ['code', 'message']) Object.defineProperty(Error.prototype, key, {
+          configurable: true, set(value) { setterCalls++; },
+        });
+        return true;
+      },
+      bridge(failure) {
+        try { __meowNative('unsupported-error-fixture', []); return null; }
+        catch (error) { return failure ? inspectFailure(error) : inspect(error); }
+      },
+      uncaught() { return __meowNative('unsupported-error-fixture', []); },
+      async host(kind, failure) {
+        try { await __meowHost('fail', kind); return null; }
+        catch (error) { return failure ? inspectFailure(error) : inspect(error); }
+      },
+      async cross(kind) {
+        if (kind === 'rejected') return await __meowHost('fail', 'safe');
+        await Promise.resolve();
+        return () => {};
+      },
+      async idle(failure) {
+        try { await __meowHost('held', null); }
+        catch (error) { __meowEmit('idle-rejected', failure ? inspectFailure(error) : inspect(error)); }
+        await Promise.resolve();
+        await Promise.resolve();
+        __meowEmit('idle-tail', { scope: __meowTaskContext() });
+        return 'tail-finished';
+      },
+      setterCalls() { return setterCalls; },
+      counters() { return { core: setterCalls, guest: null }; },
+      ping() { return ++count; },
+    };
+  })()`;
+  const options = {
+    source: contexts === 'single' ? methods : `(() => {
+      const core = ${methods};
+      return {
+        poison() { core.poison(); return __meowGuest('poison', []); },
+        armFailure() { return __meowGuest('armFailure', []); },
+        armBlockingStack() { return __meowGuest('armBlockingStack', []); },
+        armCoreFailure() { return core.armFailure(); },
+        bridge(failure) { return __meowGuest('bridge', [failure]); },
+        host(kind, failure) { return __meowGuest('host', [kind, failure]); },
+        idle(failure) { return __meowGuest('idle', [failure]); },
+        ping() { return __meowGuest('ping', []); },
+        counters() { return { core: core.setterCalls(), guest: __meowGuest('setterCalls', []) }; },
+        async cross(kind, failure) {
+          try { await __meowGuest('cross', [kind]); return null; }
+          catch (error) { return failure ? core.inspectFailure(error) : core.inspect(error); }
+        },
+        syncCross(failure) {
+          try { __meowGuest('uncaught', []); return null; }
+          catch (error) { return failure ? core.inspectFailure(error) : core.inspect(error); }
+        },
+      };
+    })()`,
+    ...(contexts === 'dual' ? { guestSource: methods } : {}),
+  };
+  const expected = code => ({
+    error: true,
+    code: { value: code, writable: true, enumerable: true, configurable: true },
+    message: { value: code, writable: true, enumerable: true, configurable: true },
+    setterCalls: 0,
+  });
+
+  const definitionFailure = { typeError: true, name: 'TypeError', ownCode: false, setterCalls: 0 };
+
+  test(`native safe errors own their fields without inherited setters (${contexts} Context)`, { timeout }, async t => {
+    const hostPrototype = Object.getOwnPropertyDescriptors(Error.prototype);
+    const engine = await create(t, {
+      ...options,
+      onHostCall(name, kind) {
+        assert.equal(name, 'fail');
+        throw Object.assign(new Error('host-private-detail'), {
+          code: kind === 'safe' ? 'CAPABILITY_UNAVAILABLE' : 'unsafe host detail',
+        });
+      },
+    });
+    for (const poisoned of [false, true]) {
+      if (poisoned) assert.equal(await engine.call('poison'), true);
+      assert.deepEqual(await engine.call('bridge'), expected('UNSUPPORTED_OPTION'));
+      assert.deepEqual(await engine.call('host', ['safe']), expected('CAPABILITY_UNAVAILABLE'));
+      assert.deepEqual(await engine.call('host', ['unsafe']), expected('SCRIPT_EXCEPTION'));
+      if (contexts === 'dual') {
+        assert.deepEqual(await engine.call('syncCross'), expected('UNSUPPORTED_OPTION'));
+        assert.deepEqual(await engine.call('cross', ['rejected']), expected('CAPABILITY_UNAVAILABLE'));
+        assert.deepEqual(await engine.call('cross', ['invalid-result']), expected('INVALID_ARGUMENT'));
+      }
+      assert.deepEqual(await engine.call('counters'), { core: 0, guest: contexts === 'dual' ? 0 : null });
+      assert.equal(await engine.call('ping'), poisoned ? 2 : 1);
+      const stats = await engine.stats({ refresh: true });
+      assert.equal(stats.contextCount, contexts === 'dual' ? 2 : 1);
+      assert.equal(stats.threadCount, 1); assert.equal(stats.activeCalls, 0);
+      assert.equal(stats.hostCalls, 0); assert.equal(stats.stopped, false);
+    }
+    assert.deepEqual(Object.getOwnPropertyDescriptors(Error.prototype), hostPrototype);
+    const exit = await engine.stop();
+    assert.equal(exit.stopped, true);
+    for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+      'hostCalls', 'timers', 'jobsPending']) assert.equal(exit[key], 0, key);
+    assert.equal(engine.hostTasks.size, 0); assert.equal(engine.hostControllers.size, 0);
+  });
+
+  test(`native error definition failures propagate the actual exception (${contexts} Context)`, { timeout }, async t => {
+    const engine = await create(t, {
+      ...options,
+      onHostCall(name, kind) {
+        assert.equal(name, 'fail'); assert.equal(kind, 'safe');
+        throw Object.assign(new Error('host-private-detail'), { code: 'CAPABILITY_UNAVAILABLE' });
+      },
+    });
+    assert.equal(await engine.call('poison'), true);
+    assert.equal(await engine.call('armFailure'), true);
+    assert.deepEqual(await engine.call('bridge', [true]), definitionFailure);
+    assert.equal(await engine.call('armFailure'), true);
+    assert.deepEqual(await engine.call('host', ['safe', true]), definitionFailure);
+    if (contexts === 'dual') {
+      assert.equal(await engine.call('armCoreFailure'), true);
+      assert.deepEqual(await engine.call('syncCross', [true]), definitionFailure);
+      for (const kind of ['rejected', 'invalid-result']) {
+        assert.equal(await engine.call('armCoreFailure'), true);
+        assert.deepEqual(await engine.call('cross', [kind, true]), definitionFailure);
+      }
+    }
+    assert.deepEqual(await engine.call('bridge'), expected('UNSUPPORTED_OPTION'));
+    assert.deepEqual(await engine.call('counters'), { core: 0, guest: contexts === 'dual' ? 0 : null });
+    assert.equal(await engine.call('ping'), 1);
+    const exit = await engine.stop();
+    assert.equal(exit.stopped, true);
+    for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+      'hostCalls', 'timers', 'jobsPending']) assert.equal(exit[key], 0, key);
+    assert.equal(engine.hostTasks.size, 0); assert.equal(engine.hostControllers.size, 0);
+  });
+
+  for (const ending of ['timeout', 'abort']) {
+    test(`idle host ${ending} keeps stack formatting under the cancelled owner's cleanup (${contexts} Context)`,
+      { timeout }, async t => {
+        const controller = new AbortController(), events = [];
+        let release, didStart, didEnter, hostSignal, enteredAt, cancelledAt, failedAt;
+        const physical = new Promise(resolve => { release = resolve; });
+        const started = new Promise(resolve => { didStart = resolve; });
+        const entered = new Promise(resolve => { didEnter = resolve; });
+        const other = await create(t, {
+          source: '(() => { let n = 0; return { next() { return ++n; } }; })()',
+        });
+        const engine = await create(t, {
+          ...options,
+          onHostCall(name, value, scope, { signal }) {
+            assert.equal(name, 'held'); assert.equal(value, null); assert.equal(scope, 712);
+            hostSignal = signal;
+            signal.addEventListener('abort', () => { cancelledAt = Date.now(); }, { once: true });
+            didStart(); return physical;
+          },
+          onEvent(name, value, scope) {
+            events.push({ name, value, scope });
+            if (name === 'stack-entered') { enteredAt = value.started; didEnter(); }
+            if (name === 'failure') failedAt = Date.now();
+          },
+        });
+        await withoutFallbackStop(engine, async () => {
+          try {
+            assert.equal(await other.call('next'), 1);
+            assert.equal(await engine.call('poison'), true);
+            assert.equal(await engine.call('armBlockingStack'), true);
+            const code = ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
+            const rejected = assert.rejects(engine.call('idle', [], {
+              scope: 712, signal: controller.signal, timeoutMs: ending === 'timeout' ? 150 : 0,
+            }), { code });
+            await started;
+            const before = await engine.stats({ refresh: true });
+            assert.equal(before.activeCalls, 1); assert.equal(before.hostCalls, 1);
+            assert.equal(before.timers, 0); assert.equal(before.jobsPending, 0);
+            assert.equal(hostSignal.aborted, false);
+            if (ending === 'abort') controller.abort();
+            await entered;
+            assert.equal(hostSignal.aborted, true);
+            assert.equal(hostSignal.reason.code, code);
+            assert.equal(await other.call('next'), 2);
+            // A natural completion on a broken implementation must fail instead of awaiting exit forever.
+            const exit = await Promise.race([
+              engine.exited,
+              rejected.then(() => {
+                assert.ok(events.some(event => event.name === 'failure'),
+                  'stack formatting must be interrupted, not settle after its finite natural completion');
+                return engine.exited;
+              }),
+            ]);
+            await rejected;
+            const exitedAt = Date.now();
+            assert.deepEqual(events, [
+              { name: 'stack-entered', value: { started: enteredAt, scope: 712 }, scope: 712 },
+              { name: 'failure', value: { code }, scope: 712 },
+            ]);
+            assert.ok(failedAt - enteredAt < 600, 'stack formatting uses the existing cleanup interruption');
+            assert.ok(exitedAt - enteredAt < 600, 'the actual thread exits before finite natural completion');
+            t.diagnostic(JSON.stringify({ contexts, ending, enteredAt, cancelledAt, failedAt, exitedAt }));
+            assert.equal(exit.code, code); assert.equal(exit.stopped, true);
+            for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+              'hostCalls', 'timers', 'jobsPending']) assert.equal(exit[key], 0, key);
+            assert.equal(engine.hostTasks.size, 1, 'native exit cannot erase the physical host task');
+            release('late-physical-completion');
+            await engine.stop();
+            assert.equal(engine.hostTasks.size, 0); assert.equal(engine.hostControllers.size, 0);
+            assert.equal(await other.call('next'), 3);
+            assert.equal(other.stats().stopped, false);
+          } finally { release('test-cleanup'); }
+        });
+      });
+  }
+
+  for (const ending of ['timeout', 'abort']) for (const construction of ['safe-fields', 'definition-failure']) {
+    test(`idle host ${ending} drains finite cleanup with ${construction} (${contexts} Context)`,
+      { timeout }, async t => {
+        const hostPrototype = Object.getOwnPropertyDescriptors(Error.prototype);
+        const controller = new AbortController(), events = [];
+        let release, didStart, didTail, hostSignal;
+        const physical = new Promise(resolve => { release = resolve; });
+        const started = new Promise(resolve => { didStart = resolve; });
+        const tail = new Promise(resolve => { didTail = resolve; });
+        const engine = await create(t, {
+          ...options,
+          onHostCall(name, value, scope, { signal }) {
+            assert.equal(name, 'held'); assert.equal(value, null); assert.equal(scope, 711);
+            hostSignal = signal; didStart();
+            return physical;
+          },
+          onEvent(name, value, scope) {
+            events.push({ name, value, scope });
+            if (name === 'idle-tail') didTail();
+          },
+        });
+        await withoutFallbackStop(engine, async () => {
+          try {
+            assert.equal(await engine.call('poison'), true);
+            const failure = construction === 'definition-failure';
+            if (failure) assert.equal(await engine.call('armFailure'), true);
+            const code = ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
+            const rejected = assert.rejects(engine.call('idle', [failure], {
+              scope: 711, signal: controller.signal, timeoutMs: ending === 'timeout' ? 150 : 0,
+            }), { code });
+            await started;
+            const before = await engine.stats({ refresh: true });
+            assert.equal(before.activeCalls, 1); assert.equal(before.hostCalls, 1);
+            assert.equal(before.timers, 0); assert.equal(before.jobsPending, 0);
+            assert.equal(hostSignal.aborted, false);
+            if (ending === 'abort') controller.abort();
+            // No rescue native command after the idle barrier: cancellation must wake and drain it.
+            await Promise.all([rejected, tail]);
+            assert.deepEqual(events, [
+              { name: 'idle-rejected', value: failure ? definitionFailure : expected('STALE_SESSION'), scope: 711 },
+              { name: 'idle-tail', value: { scope: 711 }, scope: 711 },
+            ]);
+            assert.equal(hostSignal.aborted, true);
+            assert.equal(hostSignal.reason.code, code);
+            const cancelled = await engine.stats({ refresh: true });
+            assert.equal(cancelled.stopped, false); assert.equal(cancelled.threadCount, 1);
+            assert.equal(cancelled.hostCalls, 0); assert.equal(cancelled.activeCalls, 0);
+            assert.equal(cancelled.jobsPending, 0);
+            assert.equal(engine.hostTasks.size, 1, 'logical rejection does not erase physical host work');
+            assert.equal(engine.hostControllers.size, 1);
+            assert.deepEqual(await engine.call('counters'), { core: 0, guest: contexts === 'dual' ? 0 : null });
+            assert.equal(await engine.call('ping'), 1);
+            release('late-physical-completion');
+            await Promise.allSettled([...engine.hostTasks]);
+            assert.equal(engine.hostTasks.size, 0); assert.equal(engine.hostControllers.size, 0);
+            const drained = await engine.stats({ refresh: true });
+            assert.equal(drained.hostCalls, 0); assert.equal(drained.activeCalls, 0);
+            assert.equal(drained.timers, 0); assert.equal(drained.jobsPending, 0);
+            assert.equal(await engine.call('ping'), 2);
+            assert.deepEqual(Object.getOwnPropertyDescriptors(Error.prototype), hostPrototype);
+            const exit = await engine.stop();
+            assert.equal(exit.stopped, true);
+            for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+              'hostCalls', 'timers', 'jobsPending']) assert.equal(exit[key], 0, key);
+          } finally { release('test-cleanup'); }
+        });
+      });
+  }
+}
+
+// REVIEW-3 L12: the top-level rejection is inspected by Poll, not a Promise reaction.
+for (const contexts of ['single', 'dual']) {
+  const options = {
+    source: `(() => {
+      let count = 0;
+      return {
+        async reject(field, finite = false) {
+          const scope = __meowTaskContext();
+          ${contexts === 'dual' ? `
+            if (__meowGuest('scope', []) !== scope) throw new Error('cross-context scope');
+          ` : ''}
+          const rejection = { name: 'Error', message: 'rejected-value' };
+          Object.defineProperty(rejection, field, {
+            get() {
+              const started = Date.now();
+              __meowEmit('rejection-getter-entered', { field, started, scope: __meowTaskContext() });
+              if (finite) {
+                let fence = 'MISSING_FENCE';
+                while (Date.now() - started < 600) {
+                  try { __meowNative('random', [0]); }
+                  catch (error) { fence = error.code; break; }
+                }
+                __meowEmit('rejection-getter-finished', { fence, scope: __meowTaskContext() });
+              } else {
+                while (Date.now() - started < 600) {}
+                __meowEmit('rejection-getter-natural-completion', {
+                  field, elapsed: Date.now() - started, scope: __meowTaskContext(),
+                });
+              }
+              return field === 'code' ? 'CAPABILITY_UNAVAILABLE'
+                : field === 'name' ? 'Error' : 'rejected-value';
+            },
+          });
+          // No host operation or registered reaction can supply another path to Failure.
+          throw rejection;
+        },
+        ping() { return ++count; },
+      };
+    })()`,
+    ...(contexts === 'dual' ? { guestSource: '({ scope() { return __meowTaskContext(); } })' } : {}),
+  };
+
+  for (const field of ['code', 'name', 'message']) for (const ending of ['timeout', 'abort', 'normal']) {
+    test(`top-level rejection ${field} getter honors ${ending} without another runnable task (${contexts} Context)`,
+      { timeout }, async t => {
+        const controller = new AbortController(), events = [], hosts = [];
+        let didEnter, enteredAt, cancelledAt, failedAt;
+        const entered = new Promise(resolve => { didEnter = resolve; });
+        const other = await create(t, {
+          source: '(() => { let count = 0; return { next() { return ++count; } }; })()',
+        });
+        const engine = await create(t, {
+          ...options,
+          onHostCall(name) { hosts.push(name); throw new Error('unexpected host operation'); },
+          onEvent(name, value, scope) {
+            events.push({ name, value, scope });
+            if (name === 'rejection-getter-entered') {
+              enteredAt = value.started;
+              didEnter();
+              if (ending === 'abort') { cancelledAt = Date.now(); controller.abort(); }
+            }
+            if (name === 'failure') failedAt = Date.now();
+          },
+        });
+        await withoutFallbackStop(engine, async () => {
+          const before = await engine.stats({ refresh: true });
+          for (const key of ['activeCalls', 'hostCalls', 'timers', 'jobsPending']) assert.equal(before[key], 0, key);
+          assert.equal(before.contextCount, contexts === 'dual' ? 2 : 1);
+          assert.equal(await other.call('next'), 1);
+          const expectedCode = ending === 'normal'
+            ? field === 'code' ? 'CAPABILITY_UNAVAILABLE' : 'SCRIPT_EXCEPTION'
+            : ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
+          const admittedAt = Date.now();
+          const rejected = assert.rejects(engine.call('reject', [field], {
+            scope: 721, signal: controller.signal, timeoutMs: ending === 'timeout' ? 150 : 0,
+          }), { code: expectedCode });
+          await entered;
+          assert.equal(await other.call('next'), 2);
+          assert.equal(events.some(event => event.name === 'rejection-getter-natural-completion'), false,
+            'the other owner progresses before this getter naturally completes');
+          await rejected;
+          assert.deepEqual(hosts, []);
+          assert.deepEqual(events[0], {
+            name: 'rejection-getter-entered', value: { field, started: enteredAt, scope: 721 }, scope: 721,
+          });
+          if (ending === 'normal') {
+            assert.equal(events.length, 2);
+            assert.equal(events[1].name, 'rejection-getter-natural-completion');
+            assert.equal(events[1].value.field, field);
+            assert.equal(events[1].scope, 721); assert.equal(events[1].value.scope, 721);
+            assert.ok(events[1].value.elapsed >= 600, 'an uncancelled getter has no cleanup-derived deadline');
+            assert.equal(await engine.call('ping'), 1);
+            const current = await engine.stats({ refresh: true });
+            for (const key of ['activeCalls', 'hostCalls', 'timers', 'jobsPending']) assert.equal(current[key], 0, key);
+            assert.equal(current.stopped, false); assert.equal(current.threadCount, 1);
+          } else {
+            assert.deepEqual(events.slice(1), [
+              { name: 'failure', value: { code: expectedCode }, scope: 721 },
+            ], 'a safe fallback result must not swallow the actual interruption');
+            const exit = await engine.exited;
+            const exitedAt = Date.now();
+            assert.ok(failedAt - enteredAt < 600, 'failure precedes natural getter completion');
+            assert.ok(exitedAt - enteredAt < 600, 'logical rejection is not a substitute for real exit');
+            if (ending === 'abort') assert.ok(failedAt - cancelledAt >= 95,
+              'the existing 100ms cleanup window remains available');
+            assert.equal(exit.code, expectedCode); assert.equal(exit.stopped, true);
+            for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+              'hostCalls', 'timers', 'jobsPending']) assert.equal(exit[key], 0, key);
+            t.diagnostic(JSON.stringify({ contexts, field, ending, admittedAt, enteredAt,
+              cancelledAt, failedAt, exitedAt }));
+          }
+          const exit = await engine.stop();
+          assert.equal(exit.stopped, true);
+          for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+            'hostCalls', 'timers', 'jobsPending']) assert.equal(exit[key], 0, key);
+          assert.equal(engine.hostTasks.size, 0); assert.equal(engine.hostControllers.size, 0);
+          assert.equal(await other.call('next'), 3);
+          assert.equal(other.stats().stopped, false);
+        });
+      });
+  }
+
+  for (const ending of ['timeout', 'abort']) {
+    test(`top-level rejection getter retains finite ${ending} cleanup and its owner (${contexts} Context)`,
+      { timeout }, async t => {
+        const controller = new AbortController(), events = [], hosts = [];
+        let didEnter, enteredAt;
+        const entered = new Promise(resolve => { didEnter = resolve; });
+        const other = await create(t, {
+          source: '(() => { let count = 0; return { next() { return ++count; } }; })()',
+        });
+        const engine = await create(t, {
+          ...options,
+          onHostCall(name) { hosts.push(name); throw new Error('unexpected host operation'); },
+          onEvent(name, value, scope) {
+            events.push({ name, value, scope });
+            if (name === 'rejection-getter-entered') {
+              enteredAt = value.started; didEnter();
+              if (ending === 'abort') controller.abort();
+            }
+          },
+        });
+        await withoutFallbackStop(engine, async () => {
+          assert.equal(await other.call('next'), 1);
+          const rejected = assert.rejects(engine.call('reject', ['code', true], {
+            scope: 722, signal: controller.signal, timeoutMs: ending === 'timeout' ? 150 : 0,
+          }), { code: ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED' });
+          await entered;
+          assert.equal(await other.call('next'), 2);
+          await rejected;
+          assert.deepEqual(events, [
+            { name: 'rejection-getter-entered', value: { field: 'code', started: enteredAt, scope: 722 }, scope: 722 },
+            { name: 'rejection-getter-finished', value: { fence: 'STALE_SESSION', scope: 722 }, scope: 722 },
+          ]);
+          assert.deepEqual(hosts, []);
+          const stats = await engine.stats({ refresh: true });
+          for (const key of ['activeCalls', 'hostCalls', 'timers', 'jobsPending']) assert.equal(stats[key], 0, key);
+          assert.equal(stats.stopped, false); assert.equal(stats.threadCount, 1);
+          assert.equal(stats.runtimeCount, 1); assert.equal(stats.contextCount, contexts === 'dual' ? 2 : 1);
+          assert.equal(await engine.call('ping'), 1);
+          assert.equal(await other.call('next'), 3);
+          const exit = await engine.stop();
+          for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+            'hostCalls', 'timers', 'jobsPending']) assert.equal(exit[key], 0, key);
+          assert.equal(exit.stopped, true);
+          assert.equal(engine.hostTasks.size, 0); assert.equal(engine.hostControllers.size, 0);
+        });
+      });
+  }
+}
+
+// REVIEW-3 L13: only guest-owned buffers are detached; external backing belongs to L11's separate suite.
+for (const contexts of ['single', 'dual']) for (const kind of ['buffer', 'view']) {
+  test(`detached ${kind} fails at byte conversion boundaries without poisoning later calls (${contexts} Context)`,
+    { timeout }, async t => {
+      const events = [], hosts = [];
+      const methods = `(() => {
+        let count = 0;
+        function bytes(kind, size, detached) {
+          const buffer = new ArrayBuffer(size);
+          if (size) new Uint8Array(buffer).set([7, 11, 13]);
+          const value = kind === 'buffer' ? buffer : new Uint8Array(buffer, size ? 1 : 0, size ? 1 : 0);
+          if (detached) buffer.transfer();
+          return value;
+        }
+        return {
+          run(kind, size, route, detached) {
+            const value = bytes(kind, size, detached);
+            if (route === 'later') return Promise.resolve(value);
+            if (route === 'host') return __meowHost('bytes', value);
+            if (route === 'host-args') return __meowHostArgs('bytesArgs', ['payload', value]);
+            if (route === 'event') { __meowEmit('bytes', value); return null; }
+            if (route === 'native') return __meowNative('md5', [value]);
+            if (route === 'core') return __meowCore('echoCore', [value]);
+            return value;
+          },
+          recover(kind, size) {
+            let code = 'MISSING_ERROR';
+            try { __meowEmit('invalid-bytes', bytes(kind, size, true)); }
+            catch (error) { code = error.code; }
+            return { code, digest: __meowNative('md5', [new Uint8Array(0)]) };
+          },
+          freshFailure() { return __meowNative('unsupported-byte-fixture', []); },
+          ping() { return ++count; },
+        };
+      })()`;
+      const engine = await create(t, {
+        source: contexts === 'single' ? methods : `({
+          run(...args) { return __meowGuest('run', args); },
+          recover(...args) { return __meowGuest('recover', args); },
+          freshFailure() { return __meowGuest('freshFailure', []); },
+          ping() { return __meowGuest('ping', []); },
+          echoCore(value) { return value; },
+        })`,
+        ...(contexts === 'dual' ? { guestSource: methods, guestHelpers: ['echoCore'] } : {}),
+        onHostCall(name, input, scope) {
+          hosts.push({ name, input, scope });
+          return name === 'bytesArgs' ? input[1] : input;
+        },
+        onEvent(name, value, scope) { events.push({ name, value, scope }); },
+      });
+      const routes = ['return', 'later', 'host', 'host-args', 'event', 'native',
+        ...(contexts === 'dual' ? ['core'] : [])];
+      let count = 0;
+      for (const size of [0, 3]) for (const route of routes) {
+        const label = `${kind}/${size}/${route}`;
+        const hostCount = hosts.length, eventCount = events.length;
+        await assert.rejects(engine.call('run', [kind, size, route, true], { scope: 731 }),
+          { code: 'SCRIPT_EXCEPTION' }, label);
+        assert.equal(hosts.length, hostCount, `${label}: invalid bytes must not reach the host`);
+        assert.equal(events.length, eventCount, `${label}: invalid bytes must not become an event`);
+        assert.equal(await engine.call('ping'), ++count, `${label}: the owner remains usable`);
+        // The same route must still accept a real empty buffer and a valid subview.
+        const expected = Buffer.from(size ? kind === 'buffer' ? [7, 11, 13] : [11] : []);
+        const result = await engine.call('run', [kind, size, route, false], { scope: 731 });
+        assert.deepEqual(result, route === 'event' ? null : route === 'native'
+          ? createHash('md5').update(expected).digest('hex') : expected, label);
+        assert.deepEqual(hosts.slice(hostCount), route === 'host'
+          ? [{ name: 'bytes', input: expected, scope: 731 }]
+          : route === 'host-args' ? [{ name: 'bytesArgs', input: ['payload', expected], scope: 731 }] : []);
+        assert.deepEqual(events.slice(eventCount), route === 'event'
+          ? [{ name: 'bytes', value: expected, scope: 731 }] : []);
+        await assert.rejects(engine.call('freshFailure'), { code: 'UNSUPPORTED_OPTION' },
+          `${label}: a later failure keeps its own code`);
+      }
+      for (const size of [0, 3]) {
+        const eventCount = events.length;
+        assert.deepEqual(await engine.call('recover', [kind, size], { scope: 731 }), {
+          code: 'SCRIPT_EXCEPTION', digest: createHash('md5').update(Buffer.alloc(0)).digest('hex'),
+        }, 'catching a conversion failure leaves subsequent native work usable in the same turn');
+        assert.equal(events.length, eventCount);
+      }
+      const stats = await engine.stats({ refresh: true });
+      for (const key of ['activeCalls', 'hostCalls', 'timers', 'jobsPending']) assert.equal(stats[key], 0, key);
+      assert.equal(stats.threadCount, 1); assert.equal(stats.runtimeCount, 1);
+      assert.equal(stats.contextCount, contexts === 'dual' ? 2 : 1); assert.equal(stats.stopped, false);
+      assert.equal(await engine.call('ping'), ++count);
+      const exit = await engine.stop();
+      assert.equal(exit.stopped, true);
+      for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+        'hostCalls', 'timers', 'jobsPending']) assert.equal(exit[key], 0, key);
+      assert.equal(engine.hostTasks.size, 0); assert.equal(engine.hostControllers.size, 0);
+    });
 }

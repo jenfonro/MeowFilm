@@ -295,9 +295,21 @@ for (const name of ['quickjs', 'openssl', 'zlib']) {
   });
 }
 
+for (const change of ['omitted', 'reordered', 'unreviewed']) {
+  test(`native policy rejects an ${change} ownership patch`, async t => {
+    const f = fixture(t), patches = f.policy.patches;
+    if (change === 'omitted') patches.pop();
+    else if (change === 'reordered') [patches[2], patches[3]] = [patches[3], patches[2]];
+    else patches[3].path = 'packages/script-host/native/unreviewed.patch';
+    f.write(policyPath, f.policy);
+    await rejected(f, 'INVALID_NATIVE_POLICY');
+  });
+}
+
 for (const path of ['packages/script-host/binding.gyp', 'scripts/quickjs/build-native.mjs',
   'scripts/quickjs/build-source-sdk.mjs', 'packages/script-host/native/task-context.patch',
-  'packages/script-host/native/bigint-uintn.patch', 'packages/script-host/native/utf16-cstring.patch']) {
+  'packages/script-host/native/bigint-uintn.patch', 'packages/script-host/native/utf16-cstring.patch',
+  'packages/script-host/native/arraybuffer-ownership.patch']) {
   test(`changed build input requires a new valid build: ${path}`, async t => {
     const f = fixture(t);
     f.write(path, Buffer.concat([readFileSync(join(f.root, path)), Buffer.from('\nchanged\n')]));

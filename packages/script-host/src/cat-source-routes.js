@@ -83,7 +83,7 @@ export function discoverSourceRoutes(source, parse) {
     ? node.computed ? node.property.type === 'Literal' ? node.property.value : null : node.property.name
     : null;
   const requestPath = node => ['url', 'pathname'].includes(member(node));
-  const record = (path, method = 'POST') => {
+  const record = (path, method) => {
     if (typeof path === 'string' && path.startsWith('/') && !path.startsWith('//'))
       paths.push([path, method]);
   };
@@ -113,7 +113,7 @@ export function discoverSourceRoutes(source, parse) {
       if (regex?.pattern.startsWith('^') && regex.pattern.endsWith('$')) {
         const tail = regex.pattern.match(/\((?:\?:)?([A-Za-z][\w-]*(?:\|[A-Za-z][\w-]*)*)\)\$$/);
         if (tail) patterns.push({ source: regex.pattern, flags: regex.flags.replace(/[gy]/g, ''),
-          actions: tail[1].split('|'), method: 'POST' });
+          actions: tail[1].split('|') });
       }
     } else if (node.type === 'NewExpression' && node.callee.type === 'Identifier' &&
       node.callee.name === 'Map' && node.arguments[0]?.type === 'ArrayExpression') {

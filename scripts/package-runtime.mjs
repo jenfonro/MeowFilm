@@ -165,8 +165,9 @@ function trustedNative(root, inputs) {
   check(policy.schemaVersion === 1 && policy.abi === 1 && policy.napi === 8
     && isObject(policy.sources) && Object.keys(policy.sources).length === 3
     && isDeepStrictEqual(policy.artifact, { path: NATIVE_ARTIFACT, manifest: NATIVE_RECEIPT })
-    && Array.isArray(policy.patches) && policy.patches.length === 3
-    && ['task-context.patch', 'bigint-uintn.patch', 'utf16-cstring.patch'].every((name, index) =>
+    && Array.isArray(policy.patches) && policy.patches.length === 4
+    && ['task-context.patch', 'bigint-uintn.patch', 'utf16-cstring.patch',
+      'arraybuffer-ownership.patch'].every((name, index) =>
       policy.patches[index]?.path === `packages/script-host/native/${name}`
       && policy.patches[index]?.source === 'quickjs' && digest(policy.patches[index]?.sha256))
     && Array.isArray(policy.mandatoryInputs) && Array.isArray(policy.inputDirectories)

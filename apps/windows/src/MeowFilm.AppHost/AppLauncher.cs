@@ -116,6 +116,7 @@ public static class AppLauncher
             ProtectedDocumentBridge? documents = null;
             AppRuntimeClient? runtime = null;
             ArtworkService? artwork = null;
+            AppAppearance? appearance = null;
             var modules = new List<IDesktopModule>();
             IAsyncDisposable? windowAttachment = null;
             ShellWindow? shell = null;
@@ -135,7 +136,7 @@ public static class AppLauncher
                     new(() => runtime?.DisposeAsync() ?? ValueTask.CompletedTask, InterruptsPendingOperations: true),
                     new(() => documents?.DisposeAsync() ?? ValueTask.CompletedTask),
                     new(() => store?.DisposeAsync() ?? ValueTask.CompletedTask)
-                ]);
+                ], sharedParticipants: appearance is null ? [] : [appearance]);
             }
             try
             {
@@ -158,13 +159,16 @@ public static class AppLauncher
                 });
                 cancellationToken.ThrowIfCancellationRequested();
                 createModules(runtime, store, modules);
+                appearance = new AppAppearance(store);
+                await appearance.LoadAsync();
                 ValidateModuleComposition(modules);
                 platformMethods = ComposeScriptCapabilities(documents.Methods, modules.OfType<IScriptPlatformCapabilities>());
                 // The shared runtime starts with the App; starting it executes no script.
                 runtime.Start();
                 var lifecycle = Lifecycle();
                 shell = new ShellWindow(modules, [],
-                    lifecycle.CloseAsync, lifecycle.ForceReleaseAsync, lifecycle.CancelShutdownPreparationAsync) { Title = "meowfilm" };
+                    lifecycle.CloseAsync, lifecycle.ForceReleaseAsync, lifecycle.CancelShutdownPreparationAsync,
+                    appearance) { Title = "meowfilm" };
                 artwork = new ArtworkService();
                 ArtworkScope.SetLoader(shell, artwork);
                 windowAttachment = attachWindow?.Invoke(shell, modules);

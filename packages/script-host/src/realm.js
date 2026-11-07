@@ -21,8 +21,18 @@ export const realmSource = String.raw`
   const freeze = Object.freeze;
   const promiseResolve = Promise.resolve.bind(Promise);
   const promiseReject = Promise.reject.bind(Promise);
+  const promiseThen = Function.prototype.call.bind(Promise.prototype.then);
+  const defineProperty = Object.defineProperty;
+  const privateThen = (promise, fulfilled, rejected) => {
+    // Only host/scheduler promises enter here, never a guest callback result.
+    // Avoid inherited species hooks and their later scope-0 resolving functions.
+    defineProperty(promise,'constructor',{__proto__:null,value:undefined});
+    promiseThen(promise,fulfilled,rejected);
+  };
   const trustedErrors = new WeakMap();
   const active = new Set();
+  const activeHas = active.has.bind(active), activeAdd = active.add.bind(active),
+    activeDelete = active.delete.bind(active);
   let nextId = 0, handler, initialized = false, alertSent = false, started = false;
   let readyResolve, readyReject, observeScriptErrors = false;
   const ready = new Promise((resolve,reject) => { readyResolve=resolve; readyReject=reject; });
@@ -158,11 +168,21 @@ export const realmSource = String.raw`
     }
     return value;
   };
+  function withCallbackScope(scope,fn) {
+    // Selecting a source must not enter guest code before its execution owner.
+    const callbackScope=activeHas(scope)?scope:0;
+    return withScope(callbackScope,()=>taskContext(callbackScope,fn));
+  }
   function callback(fn,args,scope) {
-    try {
-      const result=withScope(active.has(scope)?scope:0,()=>fn(...args));
-      promiseResolve(result).catch(e=>emit('callbackError',{code:failureCode(e)}));
-    } catch (e) { emit('callbackError',{code:failureCode(e)}); }
+    const report=e=>emit('callbackError',{code:failureCode(e)});
+    withCallbackScope(scope,()=>{
+      try {
+        // Absorption, species lookup and later rejection classification can
+        // execute guest getters just as the callback body can.
+        promiseThen(promiseResolve(fn(...args)),undefined,e=>
+          withCallbackScope(scope,()=>report(e)));
+      } catch (e) { report(e); }
+    });
   }
   function request(url,options,fn) {
     if (typeof options === 'function') { fn=options; options={}; }
@@ -171,40 +191,61 @@ export const realmSource = String.raw`
     const scope=taskContext(), id=++nextId;
     const requestedUrl=String(url);
     let settled=false, launched=false;
-    const finish=(failure,response)=>{
+    const finish=readArgs=>{
       if (settled) return;
       settled=true;
-      if (failure) { callback(fn,[failure,null,null],scope); return; }
-      try {
-        const raw=byteView(response.body);
-        let body=prepared.encoding===null?raw:raw.toString(prepared.encoding||'utf8');
-        if (prepared.encoding!==null) {
-          try { body=parse(body); }
-          catch { if (prepared.json===true) { callback(fn,[error('INVALID_JSON'),response,null],scope); return; } }
-        }
-        response.raw=raw; response.body=body;
-        callback(fn,[null,response,body],scope);
-      } catch (e) { callback(fn,[e,null,null],scope); }
+      // Normalization and error construction can enter guest code too, before
+      // fn runs. Keep the whole completion inside the trusted callback owner.
+      callback(()=>{
+        let args;
+        try { args=readArgs(); } catch (e) { args=[e,null,null]; }
+        return fn(...args);
+      },[],scope);
     };
-    // Admission is deferred within this thread: an immediate abort must not
-    // contact the adapter. Scope 0 owns the I/O even after dispatch settles.
-    withScope(0,()=>promiseResolve().then(()=>{
+    const failed=(failure,code='SCRIPT_EXCEPTION')=>
+      finish(()=>[error(failure?.code||code),null,null]);
+    const complete=response=>finish(()=>{
+      // Request failures cross native as a primitive, never a scope-0 Error.
+      if (typeof response==='string') return [error(response),null,null];
+      const raw=byteView(response.body);
+      let body=prepared.encoding===null?raw:raw.toString(prepared.encoding||'utf8');
+      if (prepared.encoding!==null) {
+        try { body=parse(body); }
+        catch { if (prepared.json===true) return [error('INVALID_JSON'),response,null]; }
+      }
+      response.raw=raw; response.body=body;
+      return [null,response,body];
+    });
+    const launch=()=>{
       if (settled) return;
-      launched=true;
-      return hostCall('request',{id,url:requestedUrl,options:prepared,scopeId:scope},0).then(
-        response=>finish(null,response), failure=>finish(failure),
-      );
-    })).catch(e=>finish(error(e?.code||'NETWORK_ERROR')));
+      withCallbackScope(scope,()=>{
+        try {
+          launched=true;
+          // Only I/O authority is session-owned. Input conversion can enter
+          // guest getters and retains the caller's execution control.
+          const pending=withScope(0,()=>
+            host('request',{id,url:requestedUrl,options:prepared,scopeId:scope},0));
+          privateThen(pending,complete,failed);
+        } catch (e) { failed(e,'NETWORK_ERROR'); }
+      });
+    };
+    // Defer admission so immediate abort cannot contact the adapter. Retain
+    // the current execution owner while registering this session-owned job.
+    try {
+      withScope(0,()=>privateThen(promiseResolve(),launch,e=>failed(e,'NETWORK_ERROR')));
+    } catch (e) { failed(e,'NETWORK_ERROR'); }
     return ()=>{
       if (settled) return;
-      if (launched) withScope(0,()=>hostCall('abortRequest',id,0)).catch(()=>{});
-      finish(error('CANCELLED'));
+      if (launched) {
+        try { privateThen(withScope(0,()=>host('abortRequest',id,0)),undefined,()=>{}); } catch (_) {}
+      }
+      finish(()=>[error('CANCELLED'),null,null]);
     };
   }
   function scopedStorage(scopeId) {
     return freeze(Object.fromEntries(['get','set','delete'].map(operation=>[
       operation,(key,value)=>{
-        if (!active.has(scopeId)) return promiseReject(error('PERMISSION_DENIED'));
+        if (!activeHas(scopeId)) return promiseReject(error('PERMISSION_DENIED'));
         try {
           return withScope(scopeId,()=>hostCall('storage',[
             scopeId,operation,key,...(operation==='set'?[value]:[]),
@@ -227,7 +268,7 @@ export const realmSource = String.raw`
   globalThis.queueMicrotask=fn=>{
     requireValue(typeof fn==='function');
     const scope=taskContext();
-    withScope(0,()=>promiseResolve().then(()=>callback(fn,[],scope)));
+    withScope(0,()=>privateThen(promiseResolve(),()=>callback(fn,[],scope)));
   };
   globalThis.btoa=str=>ScriptBuffer.from(str,'latin1').toString('base64');
   globalThis.atob=str=>ScriptBuffer.from(str,'base64').toString('latin1');
@@ -292,15 +333,15 @@ export const realmSource = String.raw`
       return ready;
     },
     async dispatch(id,payload) {
-      active.add(id);
+      activeAdd(id);
       try {
         const value=handler(payload,freeze({storage:scopedStorage(id)}));
         requireValue(value && typeof value.then==='function','SCRIPT_PROTOCOL_ERROR');
         return await value;
       } catch(e) { diagnose(e,id); throw error(failureCode(e)); }
-      finally { active.delete(id); }
+      finally { activeDelete(id); }
     },
-    retire(id) { active.delete(id); },
+    retire(id) { activeDelete(id); },
   });
 })()
 `;

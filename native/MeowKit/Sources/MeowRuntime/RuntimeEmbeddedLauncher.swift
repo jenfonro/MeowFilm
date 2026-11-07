@@ -48,6 +48,8 @@ public final class RuntimeEmbeddedLauncher: RuntimeBridgeLaunching, @unchecked S
     private let start: Start
     private let lock = NSLock()
     private var started = false
+    private var running = false
+    private var exitWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(payload: @escaping @Sendable () throws -> RuntimePayload, dataDirectory: URL,
                 stackSize: Int = 8 * 1024 * 1024, start: @escaping Start) {
@@ -74,15 +76,41 @@ public final class RuntimeEmbeddedLauncher: RuntimeBridgeLaunching, @unchecked S
         let arguments = ["node", payload.entry.path, "--meow-fd", String(descriptors[1]),
                          "--meow-session", session, "--meow-data", dataDirectory.path]
         let start = self.start
-        let thread = Thread {
+        markRunning()
+        let thread = Thread { [self] in
             _ = start(arguments)
             // A finished runtime is final for this process; our end reports it.
             connection.close()
+            runtimeExited()
         }
         thread.name = "meowfilm.runtime"
         thread.stackSize = stackSize
         thread.start()
         return connection
+    }
+
+    /// The bridge's EOF requests shutdown; only the return from `start` (the
+    /// App's node_start) confirms executor exit. Never guesses with a delay.
+    public func waitForExit() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if !running { lock.unlock(); continuation.resume(); return }
+            exitWaiters.append(continuation)
+            lock.unlock()
+        }
+    }
+
+    private func markRunning() {
+        lock.lock(); running = true; lock.unlock()
+    }
+
+    private func runtimeExited() {
+        lock.lock()
+        running = false
+        let waiters = exitWaiters
+        exitWaiters.removeAll()
+        lock.unlock()
+        for waiter in waiters { waiter.resume() }
     }
 
     /// Contiguous, writable C argv storage, valid for the duration of `body`.

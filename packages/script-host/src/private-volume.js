@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve, sep, posix } from 'node:path';
 import { identifier, requireValue } from './errors.js';
-import { closeResource } from './resource-close.js';
+import { afterCloseDispatch, closeResource } from './resource-close.js';
 
 const ignoreError = () => {};
 const volumeOwner = Symbol('private-volume-owner');
@@ -187,17 +187,15 @@ export class PrivateVolume {
       // prevents an unhandled native EventEmitter error from escaping the sandbox.
       const state = {
         active: true, owner: this, detach: null, persisted,
-        closeAttached: false, persistedAttached: false, errorAttached: false,
+        detachClosed: null, persistedAttached: false, errorAttached: false,
       };
       const persistedListener = () => state.persisted?.();
       const cleanup = () => {
         if (!state.active) return;
         const owner = state.owner;
         let failure;
-        if (state.closeAttached) {
-          try { stream.off('close', closed); state.closeAttached = false; }
-          catch (error) { failure ??= error; }
-        }
+        try { state.detachClosed?.(); } catch (error) { failure ??= error; }
+        state.detachClosed = null;
         if (state.persistedAttached) {
           try { stream.off('close', persistedListener); state.persistedAttached = false; }
           catch (error) { failure ??= error; }
@@ -217,11 +215,9 @@ export class PrivateVolume {
         state.active = false;
         if (failure && owner) owner.failure ??= failure;
       };
-      const closed = () => cleanup();
       cleanups.set(stream, cleanup);
       try {
-        stream.once('close', closed);
-        state.closeAttached = true;
+        state.detachClosed = afterCloseDispatch(stream, cleanup);
         stream.on('error', ignoreError);
         state.errorAttached = true;
         if (persisted) {
@@ -543,12 +539,7 @@ export class PrivateVolume {
     if (this.closing) return this.closing;
     this.closed = true;
     this.closing = (async () => {
-      const pending = [];
-      for (const stream of this.streams) {
-        let closed = false;
-        try { closed = Boolean(stream.closed); } catch (error) { this.failure ??= error; }
-        if (!closed) pending.push(stream);
-      }
+      const pending = [...this.streams];
       const results = await Promise.all(pending.map(stream => closeResource(stream, {
         stop: () => {
           if (stream.writable) {
@@ -557,7 +548,7 @@ export class PrivateVolume {
         },
         release: () => this.streamCleanup.get(stream)?.(),
         timeoutMs: this.cleanupTimeoutMs,
-        closed: value => value.closed,
+        closed: value => value.closed && !this.streamCleanup.has(value),
       })));
       for (const result of results) {
         this.failure ??= result.error?.code === 'TIMEOUT' ? nativeError('ETIMEDOUT') : result.error;

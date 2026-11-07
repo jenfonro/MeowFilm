@@ -20,7 +20,7 @@
     </Window.Resources>
     <Window.Style>
         <Style TargetType="Window">
-            <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Window}" />
+            <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AppBackground}" />
             <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}" />
             <Style.Triggers>
                 <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
@@ -68,10 +68,12 @@
             <Border x:Name="SidebarBackground" Grid.RowSpan="2">
                 <Border.Style>
                     <Style TargetType="Border">
-                        <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}" />
-                        <Setter Property="BorderThickness" Value="0" />
+                        <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Sidebar}" />
+                        <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.SidebarBorder}" />
+                        <Setter Property="BorderThickness" Value="0,0,1,0" />
                         <Style.Triggers>
                             <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}" />
                                 <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
                                 <Setter Property="BorderThickness" Value="0,0,1,0" />
                             </Trigger>

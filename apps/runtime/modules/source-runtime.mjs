@@ -126,6 +126,7 @@ export function createSourceRuntimeModule({
   const sources = new SourceCandidates({ module: 'source', fail: code => new Failure(code) });
   const operations = new InstallationOperations();
   const bindings = new Map();
+  const initialLoads = new Map();
   const profileInstallations = new Set();
   const lifetime = new AbortController();
   let closed = false;
@@ -194,6 +195,13 @@ export function createSourceRuntimeModule({
   const interruptUnload = params => {
     if (!operations.has(params.installationId)) return;
     const binding = bindings.get(params.installationId), live = current(params.installationId);
+    if (!binding) {
+      const initial = initialLoads.get(params.installationId);
+      if (!initial) return;
+      requireValue(initial.revision === params.revision && params.generation === undefined, 'STALE_SOURCE');
+      host.captureInitialization(params.installationId)?.();
+      return initial;
+    }
     if (binding?.revision !== params.revision || live?.generation !== binding?.generation ||
         params.generation !== undefined && params.generation !== binding?.generation) return;
     host.captureInitialization(params.installationId)?.();
@@ -321,6 +329,8 @@ export function createSourceRuntimeModule({
         const uploadHash = uploaded.contentHash;
         sources.take(id, params.sourceRevision);
         profileInstallations.add(id);
+        const initial = old ? null : { revision: params.revision, binding: null };
+        if (initial) initialLoads.set(id, initial);
         try {
           const result = old ? await host.update(id, spec, { signal }) : await host.install(spec, { signal });
           guard(signal);
@@ -344,6 +354,7 @@ export function createSourceRuntimeModule({
           };
           const response = { instance: instance(binding, next) };
           success(response);
+          if (initial) initial.binding = binding;
           bindings.set(id, binding);
           await releaseProfiles(id, next.generation);
           guard(signal);
@@ -386,6 +397,8 @@ export function createSourceRuntimeModule({
             profileInstallations.delete(id);
           }
           throw error;
+        } finally {
+          if (initial) initialLoads.delete(id);
         }
       });
     }),
@@ -397,12 +410,15 @@ export function createSourceRuntimeModule({
         identifier(params.installationId);
         integer(params.revision, 1);
         if (params.generation !== undefined) integer(params.generation, 1);
-        interruptUnload(params);
+        const initial = interruptUnload(params);
         return operations.run(params.installationId, async () => {
           guard(signal);
           const binding = bindings.get(params.installationId);
           const live = current(params.installationId);
           requireValue(binding && live, 'SOURCE_NOT_FOUND');
+          // An unload admitted against an unpublished candidate cannot select
+          // a later same-revision installation after waiting for the queue.
+          requireValue(!initial || binding === initial.binding, 'STALE_SOURCE');
           await refreshBinding(binding, live);
           requireValue(binding.revision === params.revision &&
             (params.generation === undefined || binding.generation === params.generation),
@@ -455,6 +471,9 @@ export function createSourceRuntimeModule({
       guard(signal);
       requireValue(bindings.get(params.installationId) === binding &&
         current(params.installationId)?.generation === params.generation, 'STALE_SOURCE');
+      if (params.action === 'image' && value?.body instanceof Uint8Array) {
+        return { ...value, body: { type: 'Buffer', data: Array.from(value.body) } };
+      }
       return value ?? null;
     }),
     'source.runtime.status': method([], undefined, (_params, signal) => {

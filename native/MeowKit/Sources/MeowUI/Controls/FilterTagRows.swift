@@ -3,11 +3,11 @@ import Foundation
 
 /// iWebPlus discovery.css:51–55: intrinsic chips, 8pt gaps, wrapping rows.
 /// Geometry is independent of the rendering host and never owns filter state.
-struct MusicChannelTagRows {
-    let size: CGSize
-    let frames: [CGRect]
+public struct FilterTagRows {
+    public let size: CGSize
+    public let frames: [CGRect]
 
-    init(width: CGFloat?, items: [CGSize], rowSpacing: CGFloat = 8) {
+    public init(width: CGFloat?, items: [CGSize], rowSpacing: CGFloat = 8) {
         let gap: CGFloat = 8
         let intrinsic = items.reduce(CGFloat.zero) { $0 + $1.width } + CGFloat(max(0, items.count - 1)) * gap
         let width = max(1, width ?? intrinsic)

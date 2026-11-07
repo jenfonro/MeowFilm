@@ -110,9 +110,9 @@ public static partial class MusicUiTests
             Render(f.Module.SettingsView, 1080, 680);
             var navigation = (Panel)f.Module.SettingsView.FindName("SettingsNavigation");
             var anchors = navigation.Children.OfType<RadioButton>().ToArray();
-            Equal(6, anchors.Length);
+            Equal(5, anchors.Length);
             True(anchors.Select(anchor => (string)anchor.Content)
-                .SequenceEqual(new[] { "账号与平台", "搜索", "音质与缓存", "外观", "歌词与封面", "音源" }),
+                .SequenceEqual(new[] { "账号与平台", "搜索", "音质", "歌词与封面", "音源" }),
                 "reference settings groups are all present");
             await f.Module.ActivateSettingsAsync();
             await Until(() => !f.Module.Busy && f.Module.Accounts.All(account => account.State == "none"));
@@ -941,7 +941,7 @@ public static partial class MusicUiTests
                 await Drain();
                 Render(root, 860, 600);
                 var picker = Visuals(f.Module.SettingsView).OfType<ComboBox>()
-                    .Single(c => AutomationProperties.GetName(c) == "播放请求音质");
+                    .Single(c => AutomationProperties.GetName(c) == "起播目标音质");
                 SimulateFocus(picker, UIElement.IsKeyboardFocusWithinProperty, true);
                 Render(root, 860, 600);
                 Equal(SystemColors.HighlightColor, ((SolidColorBrush)picker.BorderBrush).Color);
@@ -1185,7 +1185,7 @@ public static partial class MusicUiTests
         public readonly Dialogs Dialogs;
         private Fixture(PlaybackProbe playback, Dialogs dialogs) { Playback = playback; Dialogs = dialogs; }
         public static async Task<Fixture> Create(string? root = null, bool persistent = false, NativePlayback? native = null,
-            IMusicPlayback? output = null)
+            IMusicPlayback? output = null, bool withPlaybackCache = false)
         {
             root ??= NewRoot();
             IDocumentStore store = persistent
@@ -1196,7 +1196,8 @@ public static partial class MusicUiTests
             {
                 var calls = new ObservedApplication(application); var playback = new PlaybackProbe(); var dialogs = new Dialogs();
                 module = native is null
-                    ? new MusicCapability(calls, store, output ?? playback, null, dialogs)
+                    ? new MusicCapability(calls, store, output ?? playback, withPlaybackCache ?
+                        new MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache(Path.Combine(root, "playback-cache"), store) : null, dialogs)
                     : new MusicCapability(calls, store, native, dialogs);
                 await module.InitializeAsync(default);
                 Equal("wy", module.CatalogSourcePlatform);

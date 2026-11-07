@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Windows.Media;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
@@ -20,11 +21,16 @@ public sealed record MusicAppearancePalette(string Key, string Name, string Colo
 
     public static Brush Brush(string key)
     {
-        var color = Options.FirstOrDefault(p => p.Key == key) ?? Options[0];
-        var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color.Color));
+        var value = ColorValue(key);
+        var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(value));
         brush.Freeze();
         return brush;
     }
+    public static bool IsValid(string key) =>
+        Options.Any(p => p.Key == key) || AppearanceColors.TryParse(key, out _);
+    public static string ColorValue(string key) =>
+        Options.FirstOrDefault(p => p.Key == key)?.Color ??
+        (AppearanceColors.TryParse(key, out var color) ? AppearanceColors.Hex(color) : Options[0].Color);
 }
 
 public sealed partial class MusicCapability
@@ -33,7 +39,6 @@ public sealed partial class MusicCapability
     private bool appearanceLoaded, appearanceBusy;
     private string savedPlaylistView = "grid", savedColorMode = "song", savedColorPalette = "lilac";
     private string appearanceStatus = "";
-    public IReadOnlyList<MusicAppearancePalette> ColorPalettes => MusicAppearancePalette.Options;
     public MusicCatalogChoice[] ColorModes { get; } =
         [new("song", "跟随歌曲"), new("fixed", "固定配色")];
     public MusicCatalogChoice[] PlaylistViews { get; } =
@@ -77,6 +82,22 @@ public sealed partial class MusicCapability
         AcceptAppearance(reply);
     }
 
+    internal Task EnsureAppearanceAsync() =>
+        appearanceLoaded ? Task.CompletedTask : ReloadAppearanceAsync();
+
+    internal Task ReloadAppearanceAsync()
+    {
+        if (appearanceBusy || stopping || disposed) return Task.CompletedTask;
+        appearanceBusy = true;
+        AppearanceBindings();
+        return RunAsync(async () =>
+        {
+            try { await ReadAppearance(lifetime.Token); }
+            catch { appearanceStatus = "外观设置读取失败"; }
+            finally { appearanceBusy = false; AppearanceBindings(); }
+        });
+    }
+
     private bool AppearanceMatches(string playlistView, string colorMode, string colorPalette) =>
         savedPlaylistView == playlistView && savedColorMode == colorMode &&
         savedColorPalette == colorPalette;
@@ -93,8 +114,8 @@ public sealed partial class MusicCapability
             case "colorMode" when ColorModes.Any(option => option.Key == value):
                 colorMode = value;
                 break;
-            case "colorPalette" when ColorPalettes.Any(option => option.Key == value):
-                colorPalette = value;
+            case "colorPalette" when MusicAppearancePalette.IsValid(value):
+                colorPalette = AppearanceColors.TryParse(value, out var color) ? AppearanceColors.Hex(color) : value;
                 break;
             default:
                 return Task.CompletedTask;

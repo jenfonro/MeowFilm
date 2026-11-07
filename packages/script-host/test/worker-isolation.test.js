@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
+import { once } from 'node:events';
 import { createScriptHost, createCatRuntime } from '../src/index.js';
 import { NativeSession } from '../src/native-session.js';
-import { lxScript, target } from './fixtures.js';
+import { lxScript, target, deferred } from './fixtures.js';
 import { serverFor } from './http-fixture.js';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, watch } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -606,6 +607,110 @@ test('B23 an expired Cat invocation fails the worker without affecting another i
       operation: 'home', payload: {} }), { from: 'stuck' });
   });
 
+for (const operation of ['describe', 'sync']) for (const ending of ['timeout', 'abort', 'normal']) {
+  test(`Cat management ${operation} ${ending} controls its own Worker without a later lifecycle request`,
+    { timeout: 30000 }, async t => {
+      const root = catRootFor(t), diagnostics = [];
+      const runtime = createCatRuntime({ dataRoot: root,
+        limits: { initTimeoutMs: 10000, cleanupTimeoutMs: 100,
+          requestTimeoutMs: ending === 'timeout' ? 150 : ending === 'normal' ? 2000 : 60000 },
+        onDiagnostic: event => diagnostics.push(event) });
+      t.after(() => runtime.close().catch(() => {}));
+      const installed = await runtime.install({ installationId: 'managed', enabled: true,
+        source: catSource({ beforeBody: `
+          if (request.url === '/website/api/credentials') {
+            fs.writeFileSync('/management-entered.txt', 'entered');
+            ${ending === 'normal'
+              ? 'const end = Date.now() + 600; while (Date.now() < end) {}'
+              : 'while (true) {}'}
+            response.end(JSON.stringify({code:0,data:{quark:{cookie:''}}}));
+            return;
+          }
+          if (request.url === '/website/api/credential/quark/cookie' && request.method === 'PUT') {
+            fs.writeFileSync('/credentials.json', JSON.stringify({cookie:input.value}));
+            response.end(JSON.stringify({code:0}));
+            return;
+          }
+        ` }) });
+      const healthy = await runtime.install({ installationId: 'healthy', enabled: true,
+        source: 'let count=0; module.exports={home(){return {count:++count}}};' });
+      const invokeHealthy = () => runtime.invoke({
+        installationId: 'healthy', siteId: 'default', operation: 'home', payload: {},
+      });
+      assert.deepEqual(await invokeHealthy(), { count: 1 });
+      const session = runtime.sessions.get('managed'), worker = session.worker, thread = worker.threadId;
+      const healthySession = runtime.sessions.get('healthy'), healthyThread = healthySession.worker.threadId;
+      const port = Number(new URL(session.endpoint().origin).port);
+      const marker = join(root, 'volumes', 'managed', 'management-entered.txt');
+      const entered = deferred(), failed = deferred();
+      const watcher = watch(join(root, 'volumes', 'managed'), (_event, filename) => {
+        if (String(filename) === 'management-entered.txt' &&
+            existsSync(marker) && readFileSync(marker, 'utf8') === 'entered') entered.resolve();
+      });
+      t.after(() => watcher.close());
+      const onFailure = session.input.onFailure;
+      session.input.onFailure = (...args) => { onFailure(...args); failed.resolve(); };
+      const exited = ending === 'normal' ? null : once(worker, 'exit', { signal: t.signal });
+      exited?.catch(() => {});
+      const controller = new AbortController();
+      let settled = false;
+      const started = performance.now();
+      const pending = (operation === 'describe'
+        ? runtime.management('managed', installed.generation, { signal: controller.signal })
+        : runtime.sync('managed', installed.generation,
+          { provider: 'quark', credentials: { cookie: 'fixture' } }, { signal: controller.signal }))
+        .then(value => { settled = true; return { value }; },
+          error => { settled = true; return { code: error.code }; });
+      await entered.promise;
+      watcher.close();
+      assert.equal(settled, false, 'the management handler must enter before its caller is retired');
+      assert.equal(worker.threadId, thread);
+      const interrupted = performance.now();
+      if (ending === 'abort') controller.abort();
+      assert.deepEqual(await invokeHealthy(), { count: 2 });
+      const outcome = await pending;
+      if (ending === 'normal') {
+        assert.deepEqual(outcome, { value: operation === 'describe'
+          ? { protocol: 'website-api-v1', fields: { quark: ['cookie'] } }
+          : { status: 'saved', protocol: 'website-api-v1' } });
+        assert.ok(performance.now() - started >= 600);
+        assert.equal(session.limits.cleanupTimeoutMs, 100);
+        assert.equal(worker.threadId, thread);
+        assert.equal(runtime.instance('managed').generation, installed.generation);
+        assert.equal(runtime.instance('managed').state, 'ready');
+        assert.deepEqual(diagnostics.filter(event => event.operation === 'worker.unresponsive'), []);
+        if (operation === 'sync')
+          assert.deepEqual(JSON.parse(readFileSync(join(root, 'volumes', 'managed', 'credentials.json'), 'utf8')),
+            { cookie: 'fixture' });
+      } else {
+        const code = ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
+        assert.deepEqual(outcome, { code });
+        // Only management's own interruption may retire A: no extra invoke,
+        // stop, disable or close of A precedes this real exit observation.
+        await exited;
+        await failed.promise;
+        assertUnder1s(ending === 'timeout' ? started : interrupted, 'management Worker exit');
+        assert.equal(worker.threadId, -1);
+        assert.equal(session.worker, null);
+        assert.equal(session.live, false);
+        assert.equal(runtime.instance('managed').state, 'failed');
+        assert.equal(runtime.instance('managed').error, code);
+        assert.equal(runtime.instance('managed').generation, installed.generation);
+        assert.equal(existsSync(join(root, 'volumes', 'managed', 'credentials.json')), false);
+        const rebound = await assertPortReleased(port);
+        t.after(() => new Promise(resolve => rebound.close(resolve)));
+        assert.deepEqual(diagnostics.filter(event => event.operation === 'worker.unresponsive')
+          .map(({ installationId, code, phase }) => ({ installationId, code, phase })),
+        [{ installationId: 'managed', code, phase: 'running' }]);
+      }
+      assert.deepEqual(await invokeHealthy(), { count: 3 });
+      assert.equal(runtime.instance('healthy').generation, healthy.generation);
+      assert.equal(runtime.instance('healthy').state, 'ready');
+      assert.equal(runtime.sessions.get('healthy'), healthySession);
+      assert.equal(healthySession.worker.threadId, healthyThread);
+    });
+}
+
 for (const [kind, loop] of [
   ['synchronous loop', 'while (true) {}'],
   ['infinite microtasks', 'const spin = () => Promise.resolve().then(spin); spin();'],
@@ -1008,7 +1113,7 @@ test('B25 a real Cat Worker exit fails its pending call and leaves another insta
     assert.ok(session.stats().memory.heapUsed > 0);
     const enteredFrom = networkEvents.length;
     const pending = assert.rejects(runtime.invoke({ installationId: 'a', siteId: 'site',
-      operation: 'home', payload: { stuck: true } }), { code: 'SCRIPT_EXCEPTION' });
+      operation: 'home', payload: { stuck: true } }), { code: 'STALE_SESSION' });
     await waitFor(catEntered(networkEvents, 'a', enteredFrom), 'Cat invocation did not enter its worker loop');
     await session.worker.terminate();
     await pending;

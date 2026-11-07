@@ -3,7 +3,7 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
- Background="Transparent" SizeChanged="OnSizeChanged"
+ SizeChanged="OnSizeChanged"
  FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
  TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
  UseLayoutRounding="True" SnapsToDevicePixels="True">
@@ -12,6 +12,9 @@
    <ResourceDictionary.MergedDictionaries>
     <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
    </ResourceDictionary.MergedDictionaries>
+   <!-- Playback owns the text/ambient contrast pair, independently of the application theme. -->
+   <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#303443"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#616573"/>
    <local:FilmPlayerHeightConverter x:Key="Film.PlayerHeight"/>
    <local:FilmScaleConverter x:Key="Film.Scale"/>
    <local:FilmAmbientTintConverter x:Key="Film.AmbientTint"/>
@@ -195,6 +198,12 @@
    </Style>
   </ResourceDictionary>
  </UserControl.Resources>
+ <UserControl.Style><Style TargetType="UserControl">
+  <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Window}"/>
+  <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+   <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+  </Trigger></Style.Triggers>
+ </Style></UserControl.Style>
  <Grid>
   <!-- Viewport-fixed ambience behind the scrolling page; it fades out where Shell chrome meets this view. -->
   <Border x:Name="AmbientLayer" IsHitTestVisible="False" Tag="{DynamicResource MeowFilm.Brush.Window}">

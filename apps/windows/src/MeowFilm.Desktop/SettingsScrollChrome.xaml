@@ -1,0 +1,60 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="clr-namespace:MeowFilm.Desktop">
+ <ResourceDictionary.MergedDictionaries>
+  <ResourceDictionary Source="/MeowFilm.Desktop;component/OverlayScrollChrome.xaml"/>
+ </ResourceDictionary.MergedDictionaries>
+ <Style x:Key="MeowFilm.SettingsScrollThumb" TargetType="Thumb">
+  <Setter Property="Background" Value="#809CA3AF"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Thumb">
+   <Border Background="{TemplateBinding Background}" CornerRadius="4" Margin="2"/>
+  </ControlTemplate></Setter.Value></Setter>
+  <Style.Triggers>
+   <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#B36B7280"/></Trigger>
+   <Trigger Property="IsDragging" Value="True"><Setter Property="Background" Value="#D96B7280"/></Trigger>
+   <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
+  </Style.Triggers>
+ </Style>
+ <Style x:Key="MeowFilm.SettingsScrollBar" TargetType="ScrollBar">
+  <Setter Property="Width" Value="12"/>
+  <Setter Property="Background" Value="#0A6B7280"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar">
+   <Border Background="{TemplateBinding Background}" CornerRadius="6">
+    <Track x:Name="PART_Track" IsDirectionReversed="True" Orientation="{TemplateBinding Orientation}">
+     <Track.DecreaseRepeatButton><RepeatButton x:Name="Before" Command="ScrollBar.PageUpCommand" Style="{StaticResource MeowFilm.ScrollPage}"/></Track.DecreaseRepeatButton>
+     <Track.Thumb><Thumb Style="{StaticResource MeowFilm.SettingsScrollThumb}" MinWidth="10" MinHeight="10"/></Track.Thumb>
+     <Track.IncreaseRepeatButton><RepeatButton x:Name="After" Command="ScrollBar.PageDownCommand" Style="{StaticResource MeowFilm.ScrollPage}"/></Track.IncreaseRepeatButton>
+    </Track>
+   </Border>
+   <ControlTemplate.Triggers><Trigger Property="Orientation" Value="Horizontal">
+    <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+    <Setter TargetName="Before" Property="Command" Value="ScrollBar.PageLeftCommand"/>
+    <Setter TargetName="After" Property="Command" Value="ScrollBar.PageRightCommand"/>
+   </Trigger></ControlTemplate.Triggers>
+  </ControlTemplate></Setter.Value></Setter>
+  <Style.Triggers>
+   <Trigger Property="Orientation" Value="Horizontal"><Setter Property="Width" Value="Auto"/><Setter Property="Height" Value="12"/></Trigger>
+   <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger>
+  </Style.Triggers>
+ </Style>
+ <Style TargetType="ScrollBar" BasedOn="{StaticResource MeowFilm.SettingsScrollBar}"/>
+ <Style x:Key="MeowFilm.SettingsScrollViewer" TargetType="ScrollViewer">
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollViewer">
+   <Grid Background="{TemplateBinding Background}" ClipToBounds="True">
+    <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+    <Grid.RowDefinitions><RowDefinition/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <ScrollContentPresenter x:Name="PART_ScrollContentPresenter" Content="{TemplateBinding Content}"
+      ContentTemplate="{TemplateBinding ContentTemplate}" CanContentScroll="{TemplateBinding CanContentScroll}"
+      Margin="{TemplateBinding Padding}"/>
+    <ScrollBar x:Name="PART_VerticalScrollBar" Grid.Column="1" Orientation="Vertical"
+      Style="{StaticResource MeowFilm.SettingsScrollBar}" Maximum="{TemplateBinding ScrollableHeight}"
+      ViewportSize="{TemplateBinding ViewportHeight}" Value="{TemplateBinding VerticalOffset}"
+      Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}"/>
+    <ScrollBar x:Name="PART_HorizontalScrollBar" Grid.Row="1" Orientation="Horizontal"
+      Style="{StaticResource MeowFilm.SettingsScrollBar}" Maximum="{TemplateBinding ScrollableWidth}"
+      ViewportSize="{TemplateBinding ViewportWidth}" Value="{TemplateBinding HorizontalOffset}"
+      Visibility="{TemplateBinding ComputedHorizontalScrollBarVisibility}"/>
+   </Grid>
+  </ControlTemplate></Setter.Value></Setter>
+ </Style>
+</ResourceDictionary>

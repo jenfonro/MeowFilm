@@ -1,11 +1,15 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Net.Http;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Media;
+using System.Windows.Input;
+using System.Globalization;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
@@ -122,6 +126,84 @@ public static class MusicOfficialPlaybackScopeTests
             await play.WaitAsync(TimeSpan.FromSeconds(5));
             Check(f.Output.NetworkOpens == 0 && !f.Output.HasMedia && f.App.Plans.Count == 1);
         });
+        yield return Case("context menu mouse and keyboard openings rebuild current quality choices", async () =>
+        {
+            foreach (bool keyboard in new[] { false, true })
+            {
+                await using var f = await Scene.Create();
+                await f.Play(Song("first"), Song("next"));
+                using var surface = new PlayerSurface(f.Module);
+                int resolutions = f.App.Resolutions.Count, plans = f.App.Plans.Count;
+                await surface.OpenQuality(keyboard);
+                Check(surface.Menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, "lossless")).IsChecked);
+                surface.Menu.IsOpen = false;
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(f.App.Resolutions.Count == resolutions && f.App.Plans.Count == plans &&
+                    f.App.Completions.Count == 0, "opening either context entry does not resolve or search");
+                f.App.MediaQuality = "320k";
+                await f.SetQuality("320k");
+                await f.Module.StepAsync(true);
+                Check(f.Module.CurrentQualityLabel == "高音质", "the fixture accepts new playback before checking its menu");
+                resolutions = f.App.Resolutions.Count;
+                int completions = f.App.Completions.Count;
+                await surface.OpenQuality(keyboard);
+                Check(surface.Menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, "high")).IsChecked &&
+                    !surface.Menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, "lossless")).IsChecked,
+                    "context reopen reflects the newly accepted quality, not the previous menu");
+                Check(f.App.Resolutions.Count == resolutions && f.App.Completions.Count == completions);
+            }
+        });
+        yield return Case("quality and source text follows disabled and high contrast control states", async () =>
+        {
+            await using var f = await Scene.Create();
+            await f.Play(Song("first"));
+            using var surface = new PlayerSurface(f.Module);
+            await surface.OpenQuality();
+            foreach (var item in surface.Menu.Items.OfType<MenuItem>().Where(item => item.IsChecked || item.HasItems).ToArray())
+            {
+                void TextMatches(Brush expected)
+                {
+                    foreach (string name in new[] { "Header", "Check", "Arrow" })
+                        Check(((TextBlock)item.Template.FindName(name, item)).Foreground == expected,
+                            $"{name} inherits the actual menu item's state color");
+                }
+                DesktopTheme.SetIsHighContrast(surface.Menu, false);
+                item.IsEnabled = false; await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                TextMatches((Brush)item.FindResource("MeowFilm.Brush.Disabled"));
+                item.IsEnabled = true;
+                DesktopTheme.SetIsHighContrast(surface.Menu, true);
+                var highlightKey = (DependencyPropertyKey)typeof(MenuItem).GetField("IsHighlightedPropertyKey",
+                    BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+                item.SetValue(highlightKey, true);
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(item.IsHighlighted, "the actual menu row is in the highlighted state for the color check");
+                TextMatches(SystemColors.HighlightTextBrush);
+                item.IsEnabled = false; await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                TextMatches(SystemColors.GrayTextBrush);
+                item.IsEnabled = true;
+                item.SetValue(highlightKey, false);
+            }
+            DesktopTheme.SetIsHighContrast(surface.Menu, false);
+            await surface.List();
+            f.Module.SourceChoices.Add(new("failed-fixture", "不可用音源", "QQ", "无损", "不可用", false, false));
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            var rows = PlayerVisuals(surface.SourceDialog.Child).OfType<Button>()
+                .Where(button => button.Tag is MusicSourceChoice).ToArray();
+            Check(rows.Any(row => !row.IsEnabled), "the source view includes a genuinely unavailable candidate");
+            foreach (bool contrast in new[] { false, true })
+            {
+                DesktopTheme.SetIsHighContrast(surface.SourceDialog.Child, contrast);
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                foreach (var row in rows)
+                {
+                    if (!row.IsEnabled)
+                        Check(row.Foreground == (contrast ? SystemColors.GrayTextBrush :
+                            (Brush)row.FindResource("MeowFilm.Brush.Disabled")));
+                    Check(PlayerVisuals(row).OfType<TextBlock>().All(text => text.Foreground == row.Foreground),
+                        "actual quality, provider and state text respects enabled/disabled contrast colors");
+                }
+            }
+        });
         yield return Case("opening source list is cache-only and load more keeps playback and queue", async () =>
         {
             await using var f = await Scene.Create(files: true);
@@ -132,7 +214,7 @@ public static class MusicOfficialPlaybackScopeTests
             string queue = await f.Queue();
             int plans = f.App.Plans.Count, resolutions = f.App.Resolutions.Count, transfers = f.Files.Requests;
             using var surface = new PlayerSurface(f.Module);
-            await surface.OpenQuality(); surface.List();
+            await surface.OpenQuality(); await surface.List();
             Check(f.App.Plans.Count == plans && f.App.Resolutions.Count == resolutions && f.App.Completions.Count == 0,
                 "opening quality controls and source list never resolves or searches");
             surface.Search();
@@ -142,16 +224,16 @@ public static class MusicOfficialPlaybackScopeTests
             Check(await f.Queue() == queue, "exploring sources does not mutate the queue");
             Check(await f.Files.Cache.ReadInfoAsync("fixture", LJ.S(song["songId"]), Signature("wy"), default) is not null);
         });
-        yield return Case("closing the real quality popup cancels discovery and discards a noncooperative late reply", async () =>
+        yield return Case("closing the source dialog cancels discovery and discards a noncooperative late reply", async () =>
         {
             await using var f = await Scene.Create();
             await f.Play(Song("first"));
             using var surface = new PlayerSurface(f.Module);
-            await surface.OpenQuality(); surface.List();
+            await surface.OpenQuality(); await surface.List();
             f.App.HoldDiscovery = true;
             surface.Search();
             await f.App.DiscoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            surface.Popup.IsOpen = false;
+            surface.CloseSourcesWithEscape();
             // WPF destroys the popup window and raises Closed from its dispatcher, not inside the IsOpen setter.
             await Until(() => f.App.DiscoveryToken.IsCancellationRequested);
             f.App.DiscoveryRelease.TrySetResult();
@@ -160,13 +242,52 @@ public static class MusicOfficialPlaybackScopeTests
                 f.Output.NetworkOpens == 1 && f.Module.CurrentSource == "网易云音乐",
                 "a retired search cannot publish candidates or replace the accepted input");
         });
+        yield return Case("reopening sources can finish discovery cancelled by closing the dialog", async () =>
+        {
+            await using var f = await Scene.Create();
+            await f.Play(Song("first"), Song("next"));
+            using var surface = new PlayerSurface(f.Module);
+            string? identity = f.Output.Identity;
+            string queue = await f.Queue();
+            await surface.OpenSources();
+            f.App.HoldDiscovery = true;
+            surface.Search();
+            await f.App.DiscoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var cancelled = f.App.DiscoveryToken;
+            surface.CloseSourcesWithEscape();
+            await Until(() => cancelled.IsCancellationRequested);
+            f.App.DiscoveryRelease.TrySetResult();
+            await Until(() => f.App.DiscoveryReturns == 1);
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(!f.Module.SourceChoices.Any(row => row.Platform == "QQ"),
+                "the cancelled late discovery must not populate the closed dialog");
+
+            int resolutions = f.App.Resolutions.Count;
+            await surface.OpenSources();
+            Check(f.App.Completions.Count == 1 && f.App.Resolutions.Count == resolutions,
+                "reopening is still cache-only");
+            Check(f.Module.CanLoadMoreSources, "cancelled discovery does not exhaust the current tier");
+            surface.Search();
+            await Until(() => !f.Module.IsLoadingSources);
+            Check(f.App.Completions.Count == 2 && f.Module.SourceChoices.Any(row => row.Platform == "QQ"),
+                $"explicit reload must complete the cancelled discovery; requests={f.App.Completions.Count}, " +
+                $"platforms={string.Join(',', f.Module.SourceChoices.Select(row => row.Platform))}");
+            Check(f.Module.CanLoadMoreSources, "the fixture still has another tier to explore");
+            surface.Search();
+            await Until(() => !f.Module.IsLoadingSources);
+            Check(f.App.Completions.Count == 2, "a successful discovery remains shared across subsequent tiers");
+            Check(f.Output.Identity == identity && f.Output.NetworkOpens == 1 &&
+                f.Module.CurrentSource == "网易云音乐" && await f.Queue() == queue,
+                "resuming discovery neither replaces playback nor mutates the queue");
+        });
         yield return Case("changing song cancels source search and prevents its old candidates reaching the next occurrence", async () =>
         {
             await using var f = await Scene.Create();
             var next = Song("next");
             await f.Play(Song("first"), next);
+            using var surface = new PlayerSurface(f.Module);
+            await surface.OpenQuality(); await surface.List();
             f.App.HoldDiscovery = true;
-            f.Module.OpenSourceChoices();
             var search = f.Module.LoadMoreSourcesAsync();
             await f.App.DiscoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             var step = f.Module.StepAsync(true);
@@ -175,6 +296,7 @@ public static class MusicOfficialPlaybackScopeTests
             await Task.WhenAll(search, step).WaitAsync(TimeSpan.FromSeconds(5));
             Check(f.Module.CurrentTitle == LJ.S(next["title"]) && f.Output.NetworkOpens == 2 &&
                 !f.Module.SourceChoices.Any(row => row.Platform == "QQ"));
+            Check(!surface.SourceDialog.IsOpen, "changing songs closes the old source dialog");
         });
         yield return Case("next-song admission cancels known resolution without starting catalog discovery for the retired song", async () =>
         {
@@ -295,7 +417,7 @@ public static class MusicOfficialPlaybackScopeTests
         internal readonly TaskCompletionSource ResolutionRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal bool HoldDiscovery, HoldResolution, HideKnown, EnabledScript;
         internal string MediaQuality = "flac";
-        internal int MediaLookups, Authorizations;
+        internal int MediaLookups, Authorizations, DiscoveryReturns;
         internal CancellationToken DiscoveryToken, ResolutionToken;
         private readonly HashSet<string> revoked = [];
         private event Action<string>? invalidated;
@@ -354,6 +476,7 @@ public static class MusicOfficialPlaybackScopeTests
                 if (!raw["sources"]!.AsArray().OfType<JsonObject>().Any(row => LJ.S(row["source"]) == "tx"))
                     raw["sources"]!.AsArray().Add(MusicSongFixture.Online("tx", "Discovered", LJ.S(raw["title"]),
                         LJ.S(raw["artist"]), LJ.S(raw["album"]), LJ.N(raw["duration"]))["sources"]![0]!.DeepClone());
+                DiscoveryReturns++;
                 return Element(new { ok = true, song = NativeMusicSong.Normalize(raw) });
             }
             if (method == "music.official.candidates")
@@ -400,21 +523,107 @@ public static class MusicOfficialPlaybackScopeTests
     {
         private readonly MusicPlayerView view;
         private readonly Window window;
-        internal Popup Popup => (Popup)view.FindName("QualityPopup");
+        private readonly MusicCapability module;
+        internal ContextMenu Menu => (ContextMenu)view.FindName("QualityMenu");
+        internal Popup SourceDialog => (Popup)view.FindName("SourcePopup");
         internal PlayerSurface(MusicCapability module)
         {
+            this.module = module;
             view = (MusicPlayerView)module.PlayerView;
             window = new Window { Content = view, Width = 1000, Height = 160, Left = -10000, Top = -10000,
                 ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None };
             window.Show(); window.UpdateLayout();
         }
-        internal async Task OpenQuality()
+        internal async Task OpenQuality(bool? contextKeyboard = null)
         {
-            ((Button)view.FindName("QualityButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            var button = (Button)view.FindName("QualityButton");
+            var badge = (Border)button.Content;
+            Check(badge.Width == 72 && ((TextBlock)badge.Child).TextAlignment == TextAlignment.Center,
+                "fixed-width quality badge centers short labels without changing playback state");
+            if (contextKeyboard is { } keyboard)
+            {
+                // Raise WPF's actual routed request without injecting input into the desktop.
+                double position = keyboard ? -1 : 12;
+                var request = (ContextMenuEventArgs)typeof(ContextMenuEventArgs)
+                    .GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null,
+                        [typeof(object), typeof(bool), typeof(double), typeof(double)], null)!
+                    .Invoke([button, true, position, position]);
+                button.RaiseEvent(request);
+                Check(request.Handled, "context requests use the same initialization owner as left-click");
+            }
+            else button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Until(() => Menu.IsOpen);
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            Check(Popup.IsOpen, "actual quality popup must open");
+            Check(Menu.IsOpen, "actual quality menu must open");
+            var choices = Menu.Items.OfType<MenuItem>().ToArray();
+            Check(Equals(choices[0].Header, "查看更多") && choices.Skip(1).Where(item => !item.HasItems)
+                .Select(item => item.Tag as string).SequenceEqual(module.QualityChoices().Select(item => item.Key)),
+                "the existing category order is retained with more sources first");
+            double widestLabel = choices.Max(item => new FormattedText(item.Header.ToString()!, CultureInfo.CurrentCulture,
+                item.FlowDirection, new Typeface(item.FontFamily, item.FontStyle, item.FontWeight, item.FontStretch),
+                item.FontSize, Brushes.Black, VisualTreeHelper.GetDpi(item).PixelsPerDip).WidthIncludingTrailingWhitespace);
+            Check(double.IsNaN(Menu.Width) && Menu.ActualWidth >= widestLabel && Menu.ActualWidth - widestLabel < 80,
+                "menu fits its labels with only padding, selection and submenu glyph slots");
+            GeneralAppearanceTests.SavePreview(Menu, "refinement-quality-menu",
+                (int)Math.Ceiling(Menu.ActualWidth), (int)Math.Ceiling(Menu.ActualHeight));
+            var spatial = choices.SingleOrDefault(item => item.HasItems);
+            if (spatial is not null)
+            {
+                Check(Equals(spatial.Header, "空间／全景") && spatial.Items.OfType<MenuItem>().Select(item => item.Header)
+                    .SequenceEqual(module.SpatialChoices().Select(item => item.Label)), "spatial names agree with settings");
+                spatial.Focus();
+                spatial.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(spatial), 0, System.Windows.Input.Key.Right)
+                { RoutedEvent = UIElement.KeyDownEvent });
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(spatial.IsSubmenuOpen && Menu.IsOpen, "Right opens the submenu without closing its parent");
+                var popup = (Popup)spatial.Template.FindName("PART_Popup", spatial);
+                var submenu = (FrameworkElement)popup.Child;
+                var rowStart = spatial.PointToScreen(new());
+                var rowEnd = spatial.PointToScreen(new(spatial.ActualWidth, spatial.ActualHeight));
+                var menuStart = submenu.PointToScreen(new());
+                var menuEnd = submenu.PointToScreen(new(submenu.ActualWidth, submenu.ActualHeight));
+                Check(Math.Min(Math.Abs(menuStart.X - rowEnd.X), Math.Abs(menuEnd.X - rowStart.X)) < 3 &&
+                    menuStart.Y <= rowEnd.Y && menuEnd.Y >= rowStart.Y,
+                    "the actual submenu joins the corresponding parent row on either side");
+                GeneralAppearanceTests.SavePreview(submenu, "refinement-spatial-menu",
+                    (int)Math.Ceiling(submenu.ActualWidth), (int)Math.Ceiling(submenu.ActualHeight));
+                var first = (MenuItem)spatial.Items[0];
+                first.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(first), 0, System.Windows.Input.Key.Left)
+                { RoutedEvent = UIElement.KeyDownEvent });
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(!spatial.IsSubmenuOpen && Menu.IsOpen, "Left returns to the still-open parent menu");
+            }
         }
-        internal void List() => ((Button)view.FindName("SourceListButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        internal async Task List()
+        {
+            var more = (MenuItem)view.FindName("SourceListItem");
+            more.Focus();
+            more.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(more), 0, System.Windows.Input.Key.Enter)
+            { RoutedEvent = UIElement.KeyDownEvent });
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(!Menu.IsOpen && SourceDialog.IsOpen && MeowFilm.Desktop.DialogPlacement.GetCentered(SourceDialog),
+                "Enter on more sources leaves the menu for an independent centered dialog");
+            SourceDialog.Child.UpdateLayout();
+            GeneralAppearanceTests.SavePreview((FrameworkElement)SourceDialog.Child, "refinement-source-dialog", 560, 482);
+        }
+        internal async Task OpenSources()
+        {
+            var button = (Button)view.FindName("QualityButton");
+            Check(button.IsVisible && button.IsEnabled, "the quality entry is available for source discovery");
+            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Until(() => Menu.IsOpen);
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            var more = (MenuItem)view.FindName("SourceListItem");
+            Check(more.IsVisible && more.IsEnabled, "the actual more-sources menu action is available");
+            // Source lifetime tests use the click route, independently of submenu keyboard/capture tests.
+            more.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await Until(() => SourceDialog.IsOpen && !Menu.IsOpen);
+            Check(DialogPlacement.GetCentered(SourceDialog), "the source action opens the centered dialog");
+        }
+        internal void CloseSourcesWithEscape() =>
+            SourceDialog.Child.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice,
+                PresentationSource.FromVisual(SourceDialog.Child), 0, System.Windows.Input.Key.Escape)
+            { RoutedEvent = UIElement.KeyDownEvent });
         internal void Search()
         {
             var button = (Button)view.FindName("LoadMoreSourcesButton");
@@ -423,9 +632,15 @@ public static class MusicOfficialPlaybackScopeTests
         }
         public void Dispose()
         {
-            Popup.IsOpen = false;
+            Menu.IsOpen = false; SourceDialog.IsOpen = false;
             window.Content = null; window.Close();
         }
+    }
+    private static IEnumerable<DependencyObject> PlayerVisuals(DependencyObject root)
+    {
+        yield return root;
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            foreach (var child in PlayerVisuals(VisualTreeHelper.GetChild(root, i))) yield return child;
     }
     private sealed class Output : IMusicPlayback, INativePlaybackContinuation, INativePlaybackHandoff
     {
@@ -478,7 +693,13 @@ public static class MusicOfficialPlaybackScopeTests
             throw new InvalidOperationException("exploration must not prepare playback");
         public Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token) =>
             throw new InvalidOperationException("exploration must not prepare playback");
-        public Task CommitHandoffAsync(CancellationToken token) => throw new InvalidOperationException("no handoff during exploration");
+        public async Task ReopenReadAsync(NativePlaybackContinuation continuation, INativeMediaReadLease lease,
+            CancellationToken token = default)
+        {
+            await lease.DisposeAsync();
+            throw new InvalidOperationException("no read continuation during exploration");
+        }
+        public Task CommitHandoffAsync(Action committed, CancellationToken token) => throw new InvalidOperationException("no handoff during exploration");
         public Task DiscardHandoffAsync() => Task.CompletedTask;
         public NativePlaybackContinuation? CaptureContinuation() => null;
         public Task ReopenAsync(NativePlaybackContinuation continuation, Uri uri,

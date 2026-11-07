@@ -23,11 +23,12 @@ public sealed class FilmSettingsRuleRow(string title, int number, string pattern
     public string Pattern { get => pattern; set { pattern = value; Changed(); } }
     public string Replace { get => replace; set { replace = value; Changed(); } }
     public string Flags { get; } = flags;
+    public int Number { get; } = number;
     public string Preview { get => preview; set { preview = value; Changed(); } }
-    public string PatternLabel => $"{title}第 {number} 条正则";
-    public string ReplaceLabel => $"{title}第 {number} 条替换";
-    public string SaveLabel => $"保存{title}第 {number} 条";
-    public string DeleteLabel => $"删除{title}第 {number} 条";
+    public string PatternLabel => $"{title}第 {Number} 条正则";
+    public string ReplaceLabel => $"{title}第 {Number} 条替换";
+    public string SaveLabel => $"保存{title}第 {Number} 条";
+    public string DeleteLabel => $"删除{title}第 {Number} 条";
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Changed([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));
 }
@@ -67,10 +68,6 @@ public partial class FilmSettingsRuleEditor : UserControl
     {
         if (e.PropertyName is nameof(FilmSettingsRuleRow.Pattern) or nameof(FilmSettingsRuleRow.Replace))
             DraftChanged?.Invoke(this, EventArgs.Empty);
-    }
-    private void NewPattern_Changed(object sender, TextChangedEventArgs e)
-    {
-        if (AddButton is not null) AddButton.IsEnabled = !string.IsNullOrWhiteSpace(NewPattern.Text);
     }
     private void Add_Click(object sender, RoutedEventArgs e) => Raise(FilmSettingsRuleAction.Add, sender);
     private void Save_Click(object sender, RoutedEventArgs e) => Raise(FilmSettingsRuleAction.Save, sender);

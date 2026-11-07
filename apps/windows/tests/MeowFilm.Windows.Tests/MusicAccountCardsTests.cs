@@ -21,6 +21,83 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> PlatformAccountCardCases()
     {
+        yield return Case("login mode buttons preserve paired colors across selection disabled hover and high contrast", async () =>
+        {
+            await using var f = await SearchScene.Create();
+            await f.Module.ActivateSettingsAsync();
+            var view = new MusicAccountsView { DataContext = f.Module };
+            var window = AccountCardWindow(view);
+            try
+            {
+                window.Show(); await Drain();
+                // SearchScene uses an in-process transport: QR begin fails without contacting an upstream.
+                // Keep the real login/mode handlers and exercise their usable post-failure surface.
+                AccountCardButton(view, "网易云音乐登录").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await SearchUntil(() => !f.Module.AccountBusy); await Drain();
+                var popup = (Popup)view.FindName("LoginPopup");
+                var qr = (Button)view.FindName("QrModeButton");
+                var sms = (Button)view.FindName("SmsModeButton");
+                True(popup.IsOpen && f.Module.ShowAccountSms && sms.IsEnabled,
+                    "the real login entry admits the existing QR and SMS modes");
+                var hoverKey = (DependencyPropertyKey)typeof(UIElement).GetField("IsMouseOverPropertyKey",
+                    BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+                // Inject only dependency-property states; no mouse movement or capture.
+                qr.SetValue(hoverKey, false); sms.SetValue(hoverKey, false);
+                foreach (var selected in new[] { qr, sms, qr })
+                {
+                    selected.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
+                    Equal(selected == qr ? Visibility.Visible : Visibility.Collapsed,
+                        ((FrameworkElement)view.FindName("QrPanel")).Visibility);
+                    Equal(selected == sms ? Visibility.Visible : Visibility.Collapsed,
+                        ((FrameworkElement)view.FindName("SmsPanel")).Visibility);
+                    foreach (bool contrast in new[] { false, true, false })
+                    {
+                        DesktopTheme.SetIsHighContrast(view, contrast); await Drain();
+                        foreach (var button in new[] { qr, sms })
+                        {
+                            var normal = contrast ? SystemColors.WindowBrush :
+                                button == selected ? (Brush)view.FindResource("MeowFilm.Brush.Surface") : Brushes.Transparent;
+                            var foreground = contrast ? SystemColors.WindowTextBrush :
+                                (Brush)view.FindResource("MeowFilm.Brush.Text");
+                            AssertPair(button, normal, foreground);
+                            button.SetValue(hoverKey, true); view.UpdateLayout();
+                            AssertPair(button, contrast ? SystemColors.HighlightBrush :
+                                (Brush)view.FindResource("MeowFilm.Brush.Hover"),
+                                contrast ? SystemColors.HighlightTextBrush : foreground);
+                            button.SetValue(hoverKey, false);
+                            SetCardActionPressed(button, true); view.UpdateLayout();
+                            AssertPair(button, contrast ? SystemColors.WindowBrush :
+                                (Brush)view.FindResource("MeowFilm.Brush.Pressed"), foreground);
+                            SetCardActionPressed(button, false);
+                            // Parent disable preserves the SMS button's business IsEnabled binding.
+                            var parent = (UIElement)VisualTreeHelper.GetParent(button);
+                            parent.IsEnabled = false; view.UpdateLayout();
+                            AssertPair(button, contrast ? SystemColors.WindowBrush : Brushes.Transparent,
+                                contrast ? SystemColors.GrayTextBrush : (Brush)view.FindResource("MeowFilm.Brush.Disabled"));
+                            parent.ClearValue(UIElement.IsEnabledProperty); view.UpdateLayout();
+                            True(button.IsEnabled, "restoring the parent restores mode admission");
+                            AssertPair(button, normal, foreground);
+                        }
+                    }
+                }
+                True(popup.IsOpen && f.Module.SelectedAccountPlatform == "wy",
+                    "visual states do not retire login or change the selected account");
+                AccountCardButton(popup.Child, "关闭登录").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await Drain();
+                True(!popup.IsOpen, "the original close action still retires login");
+
+                void AssertPair(Button button, Brush background, Brush foreground)
+                {
+                    button.UpdateLayout();
+                    AssertCardActionBrush(button.Background, background);
+                    AssertCardActionBrush(button.Foreground, foreground);
+                    var text = Visuals(button).OfType<TextBlock>().Single();
+                    Equal(button.Content.ToString(), text.Text);
+                    AssertCardActionBrush(text.Foreground, foreground);
+                }
+            }
+            finally { window.Close(); await Drain(); }
+        });
         yield return Case("platform account table keeps unknown accounts unread while independent platform marks stay visible", async () =>
         {
             await using var f = await SearchScene.Create();
@@ -166,19 +243,13 @@ public static partial class MusicUiTests
                 if (dark)
                     foreach (var resource in new (string Key, Brush Brush)[]
                     {
-                        ("Surface", Brushes.DarkSlateGray), ("Text", Brushes.WhiteSmoke),
+                        ("Surface", Brushes.DarkSlateGray), ("Text", Brushes.WhiteSmoke), ("Muted", Brushes.LightGray),
                         ("Border", Brushes.SlateGray), ("Hover", Brushes.SlateGray),
                         ("Pressed", Brushes.Black), ("Error", Brushes.IndianRed),
                         ("Focus", Brushes.DodgerBlue), ("Disabled", Brushes.Gray)
                     })
                         view.Resources["MeowFilm.Brush." + resource.Key] = resource.Brush;
-                if (dark)
-                    foreach (var resource in new (string Key, Brush Brush)[]
-                    {
-                        ("Text", Brushes.WhiteSmoke), ("Muted", Brushes.LightGray),
-                        ("Active", Brushes.SlateGray), ("Control", Brushes.SlateGray)
-                    })
-                        view.Resources["Settings.Brush." + resource.Key] = resource.Brush;
+                if (dark) view.Resources["Settings.Brush.Active"] = Brushes.SlateGray;
                 foreach (bool highContrast in new[] { false, true })
                 {
                     DesktopTheme.SetIsHighContrast(view, highContrast);
@@ -195,11 +266,11 @@ public static partial class MusicUiTests
                         Equal(13d, button.FontSize); Equal(32d, button.ActualHeight);
                         var surface = Visuals(button).OfType<Border>().Single();
                         Equal(new Thickness(0), surface.BorderThickness);
-                        Equal(6d, surface.CornerRadius.TopLeft);
+                        Equal(10d, surface.CornerRadius.TopLeft);
                         AssertCardActionBrush(button.Background, highContrast ? SystemColors.WindowBrush : Brushes.Transparent);
                         AssertCardActionBrush(button.Foreground, highContrast ? SystemColors.WindowTextBrush : (Brush)button.FindResource("MeowFilm.Brush.Text"));
                         AssertCardActionBrush(button.BorderBrush, highContrast ? SystemColors.WindowTextBrush :
-                            (Brush)button.FindResource("Settings.Brush.Control"));
+                            (Brush)button.FindResource("MeowFilm.Brush.Border"));
                         SimulateFocus(button, UIElement.IsMouseOverProperty, true);
                         Render(view, 840, 360);
                         AssertCardActionBrush(button.Background, highContrast ? SystemColors.HighlightBrush : (Brush)button.FindResource("MeowFilm.Brush.Hover"));
@@ -489,7 +560,7 @@ public static partial class MusicUiTests
                 }
                 var login = AccountCardButton(view, "酷狗音乐登录");
                 AssertAccountDimension(32d, login.ActualHeight);
-                AssertCardActionBrush(login.Background, (Brush)view.FindResource("Settings.Brush.Text"));
+                AssertCardActionBrush(login.Background, (Brush)view.FindResource("MeowFilm.Brush.Accent"));
             }
             Equal(0, f.Http.Requests); Equal(0, f.Runtime.Calls.Count);
         });

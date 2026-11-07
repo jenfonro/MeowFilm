@@ -1,0 +1,95 @@
+<UserControl x:Class="MeowFilm.Desktop.ColorPicker"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="clr-namespace:MeowFilm.Desktop"
+ x:Name="Root" UseLayoutRounding="True" SnapsToDevicePixels="True" FontSize="14"
+ FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto">
+ <UserControl.Resources>
+  <ResourceDictionary><ResourceDictionary.MergedDictionaries>
+   <ResourceDictionary Source="/MeowFilm.Desktop;component/Theme.xaml"/>
+  </ResourceDictionary.MergedDictionaries></ResourceDictionary>
+ </UserControl.Resources>
+ <UserControl.Style><Style TargetType="UserControl">
+  <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+  <Style.Triggers><Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+   <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+  </Trigger></Style.Triggers>
+ </Style></UserControl.Style>
+ <Grid>
+  <StackPanel Orientation="Horizontal">
+   <TextBox x:Name="SavedHex" Width="112" Height="34" MinHeight="0" Padding="10,5"
+            Style="{StaticResource MeowFilm.TextBox}" MaxLength="7"
+            LostKeyboardFocus="SavedHex_LostFocus" PreviewKeyDown="SavedHex_KeyDown"
+            AutomationProperties.Name="{Binding Label,ElementName=Root,StringFormat='{}{0} HEX'}"/>
+   <Button x:Name="OpenButton" Style="{StaticResource MeowFilm.QuietButton}" Click="Open_Click"
+           Width="34" Height="34" MinHeight="0" Padding="8" Margin="4,0,0,0"
+           AutomationProperties.Name="{Binding Label,ElementName=Root,StringFormat='编辑{0}'}">
+    <Path Data="M2,12 L2,16 6,16 16,6 12,2 Z M10,4 L14,8"
+          Width="16" Height="16" Stretch="Uniform" StrokeThickness="1.4"
+          Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+   </Button>
+  </StackPanel>
+  <Popup x:Name="Editor" PlacementTarget="{Binding ElementName=OpenButton}" Placement="Bottom"
+         StaysOpen="False" AllowsTransparency="True" Closed="Editor_Closed">
+   <Border Style="{StaticResource MeowFilm.Surface}" Padding="16" Margin="0,6,0,0"
+           KeyboardNavigation.TabNavigation="Cycle" PreviewKeyDown="Editor_KeyDown">
+    <StackPanel Width="280">
+     <TextBlock Text="{Binding Label,ElementName=Root}" FontWeight="SemiBold" Margin="0,0,0,12"/>
+     <Grid Height="170" ClipToBounds="True" Margin="0,0,0,12">
+      <Border x:Name="HueSurface" Background="Red"/>
+      <Border><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,0"><GradientStop Color="White"/><GradientStop Color="#00FFFFFF" Offset="1"/></LinearGradientBrush></Border.Background></Border>
+      <Border><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00000000"/><GradientStop Color="Black" Offset="1"/></LinearGradientBrush></Border.Background></Border>
+      <Canvas IsHitTestVisible="False">
+       <Ellipse x:Name="Marker" Width="12" Height="12" Stroke="White" StrokeThickness="2" Fill="Transparent"/>
+      </Canvas>
+      <Thumb x:Name="ColorThumb" Focusable="True" FocusVisualStyle="{StaticResource MeowFilm.FocusVisual}"
+             DragStarted="Color_DragStarted" DragDelta="Color_DragDelta" PreviewKeyDown="Color_KeyDown"
+             AutomationProperties.Name="饱和度和明度">
+       <Thumb.Template><ControlTemplate TargetType="Thumb"><Border Background="Transparent"/></ControlTemplate></Thumb.Template>
+      </Thumb>
+     </Grid>
+     <TextBlock Text="色相" Margin="0,0,0,4"/>
+     <Slider x:Name="Hue" Minimum="0" Maximum="360" ValueChanged="Hue_Changed" SmallChange="1" LargeChange="15"
+             Height="24" FocusVisualStyle="{StaticResource MeowFilm.FocusVisual}"
+             AutomationProperties.Name="色相" Margin="0,0,0,12">
+      <Slider.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+       <GradientStop Color="Red"/><GradientStop Color="Yellow" Offset=".167"/>
+       <GradientStop Color="Lime" Offset=".333"/><GradientStop Color="Cyan" Offset=".5"/>
+       <GradientStop Color="Blue" Offset=".667"/><GradientStop Color="Magenta" Offset=".833"/><GradientStop Color="Red" Offset="1"/>
+      </LinearGradientBrush></Slider.Background>
+      <Slider.Template><ControlTemplate TargetType="Slider">
+       <Grid>
+        <Border Height="12" CornerRadius="6" Background="{TemplateBinding Background}" Margin="7,0"/>
+        <Track x:Name="PART_Track">
+         <Track.DecreaseRepeatButton><RepeatButton Command="Slider.DecreaseLarge">
+          <RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate></RepeatButton.Template>
+         </RepeatButton></Track.DecreaseRepeatButton>
+         <Track.Thumb><Thumb Width="14" Height="20">
+          <Thumb.Template><ControlTemplate TargetType="Thumb">
+           <Border Background="White" BorderBrush="{DynamicResource MeowFilm.Brush.Text}" BorderThickness="1" CornerRadius="7"/>
+          </ControlTemplate></Thumb.Template>
+         </Thumb></Track.Thumb>
+         <Track.IncreaseRepeatButton><RepeatButton Command="Slider.IncreaseLarge">
+          <RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate></RepeatButton.Template>
+         </RepeatButton></Track.IncreaseRepeatButton>
+        </Track>
+       </Grid>
+      </ControlTemplate></Slider.Template>
+     </Slider>
+     <Grid Margin="0,0,0,12">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="52"/></Grid.ColumnDefinitions>
+      <TextBox x:Name="HexInput" Style="{StaticResource MeowFilm.TextBox}" MaxLength="7"
+               TextChanged="Hex_Changed" AutomationProperties.Name="颜色 HEX"/>
+      <Border x:Name="DraftSwatch" Grid.Column="1" Margin="12,0,0,0" CornerRadius="8" BorderThickness="1"
+              BorderBrush="{DynamicResource MeowFilm.Brush.Border}"/>
+     </Grid>
+     <WrapPanel HorizontalAlignment="Right">
+      <Button Content="取消" Style="{StaticResource MeowFilm.Button}" Click="Cancel_Click" Margin="0,0,8,0"/>
+      <Button x:Name="ConfirmButton" Content="确定" Style="{StaticResource MeowFilm.PrimaryButton}" Click="Confirm_Click"/>
+     </WrapPanel>
+    </StackPanel>
+   </Border>
+  </Popup>
+ </Grid>
+</UserControl>

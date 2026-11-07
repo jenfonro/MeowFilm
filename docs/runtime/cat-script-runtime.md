@@ -60,9 +60,11 @@ contract: cat.script.v2
 
 源码先经过 UTF-8、宿主源码字节边界和 CommonJS 语法验证。候选 enabled=true 时，还需停止旧 Worker 并等待其真实退出，再由候选完成 Cat 初始化及能力发现，之后提交源码与设置。候选 enabled=false 时不执行脚本，只验证源码并提交；若是已停用项重新导入或更新，保留最后成功的站点描述，首次停用导入的 sites 为空。其新运行能力要等以后启用成功才确定，导入成功不能代替运行就绪。`edit` 不启动脚本；名称编辑不会改变类型，URL 编辑只适用于已存在的 network 类型。
 
-`update` 内容相同返回 instance 的 `updateState:"unchanged"`、`updateError:null`，不换代、不刷新 updatedAt。内容成功变更返回 `updateState:"updated"`；失败返回错误包装，并在原安装上保存 `updateState:"failed"` 与错误码 `updateError`，保留旧源码、描述及时间。候选运行失败会先停止候选并等待真实退出，再恢复原先启用的旧源码；恢复的 generation、endpoint 和内存变量允许变化，因此失败后 state 可为 ready，而 updateState 仍为 failed；若恢复也失败，运行 state/error 独立报告。普通 `install/import` 的失败返回错误包装并保留原记录，不把它当作一次普通 update 来改写更新状态。
+`update` 内容相同返回 instance 的 `updateState:"unchanged"`、`updateError:null`，不刷新 updatedAt；已 ready 的实例不换代，停用项不执行脚本。若同内容更新抢占了尚未完成的候选，原先启用的脚本必须重新就绪后才能成功返回，generation、endpoint 和内存变量允许变化。内容成功变更返回 `updateState:"updated"`；失败返回错误包装，并在原安装上保存 `updateState:"failed"` 与错误码 `updateError`，保留旧源码、描述及时间。候选运行失败会先停止候选并等待真实退出，再恢复原先启用的旧源码；恢复的 generation、endpoint 和内存变量允许变化，因此失败后 state 可为 ready，而 updateState 仍为 failed；若恢复也失败，运行 state/error 独立报告。普通 `install/import` 的失败返回错误包装并保留原记录，不把它当作一次普通 update 来改写更新状态。
 
 失败恢复的事务范围是源码和安装管理记录；私有卷继续属于同一个 installation，不复制或回滚脚本已经完成的私有数据写入。
+
+停用／卸载可以取消正在初始化的更新，但尚未提交的后续命令不能改变旧安装的持久启用意图。因此失败更新先完整恢复原启用源码，随后在同一安装队列中执行停用／卸载；后续命令取消或保存失败时，旧源仍可调用。正常停用可能在更新回滚完成后再停止恢复的旧 Worker，两者不会重叠访问私有卷。关闭运行器不恢复实例。启停和 refresh 同时核对宿主实际启用状态，启用项还须 ready，不能仅因持久配置未变就跳过实际状态协调。
 
 `import/update` 的下载由 Node 执行，保留用户提供的完整 URL，使用源码专用下载路径，最多5次重定向，限制实际传输及解压后源码各16MiB，并沿用请求超时；取消等待连接与解压流真实关闭，不增加域名或安装数量白名单。非 2xx 返回 `HTTP_ERROR`，连接或响应中断为 `NETWORK_ERROR`，超时为 `TIMEOUT`，超源码边界为 `RESOURCE_LIMIT`，非法 UTF-8/BOM 为 `SCRIPT_PROTOCOL_ERROR`；语法或执行失败为 `SCRIPT_EXCEPTION`。这些错误均通过上述失败包装返回。
 
@@ -132,7 +134,15 @@ Buffer、typed arrays、KeyObject、X509Certificate、ECDH、Web 事件、Promis
 
 所有资源登记在所属生命周期，一次终止后等待真实 close，再解除所有权。清理失败如实返回 SCRIPT_CLEANUP；有界清理超时仅留下不持有 session 图的迟到错误守卫，不通过重复 destroy/off 隐藏失败。finish/close 监听器在传输所有权释放前执行。实例停用、更新、卸载和关闭回收所有残余资源与 Worker；后台 callback 异常只产生结构化诊断，不因已结束请求而伤及另一调用。
 
+原生 Timeout 的 `refresh()` 再激活仍归原实例，对象/数字 clear、`close()` 和 `Symbol.dispose` 同步解除登记；正常完成不长期保留回调。端口探测、HTTP/2 connect、注入网络 timeout 与 diagnostics_channel 的订阅回调保留注册请求的归属；同步抛错和异步拒绝不升级为 Worker 未捕获异常。diagnostics_channel 仍使用 Node 原生频道与派发，module/channel 订阅和移除保持同一身份，实例 stop 解除其订阅。
+
+同样的归属覆盖真实 Writable、socket、HTTP 和私有文件流的 write/end 完成回调、HTTP/2 ping/settings ACK 及 HTTP Agent 连接回调；取消和 stop 仍交付必要终结回调以完成真实资源关闭，不让它们继承 stop hook 的权限。diagnostics_channel 的 bindStore 保持同步 transform、ALS 值及替换/解绑行为，stop 解除实际 store 绑定。net/tls connect 与 HTTP(S) listen 的 callback 按原函数身份注册为一次性 listener，可通过 removeListener/off 移除；listen 的请求归属不改变 server 的实例资源所有权。
+
+`stream.pipeline/finished` 的完成回调同样保留注册归属、原生参数和返回值，`finished` 返回的 cleanup 仍能解除监听；别名、Promise API 与 `util.promisify.custom` 沿用 Node。已发起的异步 crypto/zlib/DNS 操作在 stop 期间仍交付真实完成通知，合作 stop hook 可等待其完成后持久写入；通知不获得 stop hook 的权限，物理任务仍在实际结算后解除登记。
+
 聚合入口请求体、listener 响应和普通调用结果没有由内存配额派生的字节上限。媒体代理继续流式背压，不把媒体转成控制 JSON。注入网络适配器若解压响应，会移除失效的压缩编码/长度头，损坏压缩体报告网络失败；不能以移除配额为由改变错误或取消归属。
+
+Cat `fetch` 仅对已支持的 Content-Encoding 执行解压；未知编码保留原字节、状态和响应头，不采用注入普通网络适配器的 `UNSUPPORTED_OPTION` 拒绝规则。
 
 启动优先采用明确导出的 `start` 或函数入口，其次识别已求值函数的明确服务启动信号及其包装器。已有可选入口或直接导出的 spider 时不扫描整份 bundle；只有无法从已求值作用域找到入口的闭包包装器，才由 Acorn 一次词法索引、定向解析目标函数和单调用包装链。静态发现不执行表达式、不解析整份 bundle AST，不把字符串／注释内的代码当作声明，也不使用脚本名或作者名白名单。
 
@@ -142,7 +152,7 @@ Fastify 通过标准 `fastify.initialization` 诊断频道和 `onRoute` hook 收
 
 没有框架注册信息时，在所属 Worker 内按需使用 Acorn 解析源码，只识别常量模板／拼接、明确路由调用、`METHOD path` Map 和首尾锚定且动作枚举明确的正则分派。绑定按词法作用域解析，不执行表达式、不扫描字符串内的伪路由、不按固定动作列表猜能力。解析后的 AST、启动源码引用与临时路由记录及时释放。调用只接受已发布的 action。
 
-标准 Cat HTTP `category` 输入为 `{id,page,filter,filters}`，`search` 为 `{wd,quick,page}`，`detail` 为 `{id}`，`play` 为 `{flag,id,flags}`。HTTP 服务保留这些字段；direct spider 在调用边界转为其位置参数，亦接受直接调用习惯的 `tid/pg/extend`。同一路由优先使用 POST，否则使用其实际注册方法；GET／HEAD 将字段编码为查询参数，对象与数组使用 JSON，不丢弃输入。
+标准 Cat HTTP `category` 输入为 `{id,page,filter,filters}`，`search` 为 `{wd,quick,page}`，`detail` 为 `{id}`，`play` 为 `{flag,id,flags}`。HTTP 服务保留这些字段；direct spider 在调用边界转为其位置参数，亦接受直接调用习惯的 `tid/pg/extend`。明确路由方法优先于只有路径的比较、switch 或正则分派证据，启动期不同加载源码也统一合并；只有没有明确方法时才补 POST 缺省，不因同路径方法保护将 GET 改成 POST。同一路由实际同时声明 GET 与 POST 时仍优先 POST，否则使用其实际注册方法；GET／HEAD 将字段编码为查询参数，对象与数组使用 JSON，不丢弃输入。
 
 启动期通过受控 `vm` 接口动态执行的源码及框架注册也参与发现，仍留在同一 Worker，不保留额外完整源码或按动作数量截断。整份源码在完整上传和 ScriptHost install/update 保留 16 MiB 输入校验；运行期动态代码不扩大已发布能力。
 
@@ -214,7 +224,9 @@ TLS 证书链可保留循环引用，缓存的真实 KeyObject 可跨请求使�
 }
 ```
 
-不会返回 `{cat:{...}, own:{...}}` 两份数据，也不会覆盖脚本自有 `_meow`。增强包括已认领本地代理路由、真实宽高/分辨率/fps/文件名和可选 M3U8 variant；增强失败保留原始结果。
+不会返回 `{cat:{...}, own:{...}}` 两份数据，也不会覆盖脚本自有 `_meow`。增强包括已认领本地代理路由、真实宽高/分辨率/fps/文件名和可选 M3U8 variant；HTTP 失败、断连和增强自身超时仅在原实例仍有效时保留原始结果。M3U8 增强继承同一次调用的取消信号；取消停止在途下载并以 `CANCELLED` 结束调用，不回退为成功的原始结果。
+
+调用开始时即绑定原 session/generation，即使调用方未显式提供 generation，增强也只交给该 session，不转交后续代次。主调用的成功与失败回执、增强成功结果和普通失败回退在返回前均核对原 session 仍为当前有效实例；停用、更新、重启、卸载、实例失败或关闭使其失效后，调用以生命周期错误结束，不发布退役代次的原始或增强结果，不把退役失败当作仍有效实例的普通阶段错误，不探测或重放调用。原调用信号取消仍为 `CANCELLED`；未关闭运行器中已退役的 session 返回 `STALE_SESSION`。仍存活实例的普通 HTTP 失败等保留原错误语义，不按错误码一概判为失效。增强所有权标记仅作内部控制，返回值不携带该 Symbol。
 
 成功但没有正文的响应（例如 void `init` 或未提供搜索结果）返回 JSON `null`，不伪造列表；非 JSON 的文本响应保留为字符串，声明 JSON 却返回非空无效 JSON 仍报错。已声明路由返回的 404 属于脚本 HTTP 响应，不冒充宿主缺少 API。Fastify、direct spider 的错误及 HTTP JSON 的明确错误字段按所属请求输出脱敏诊断，只保留固定分类与受限错误码，不输出原异常文本；HTTP 状态、脚本错误与真实网络证据分别保留。
 
@@ -231,9 +243,9 @@ TLS 证书链可保留循环引用，缓存的真实 KeyObject 可跨请求使�
 
 更新先停止该 installation 的旧 generation，再装载并启动新 generation，避免两个 generation 并发写同一私有卷。若脚本 stop 返回 Promise，运行器在有界清理时限内等待其完成，以便关闭服务并落盘；超时或失败后仍强制回收实例自有资源。停用、卸载和关闭回收 listener、socket、timer、流、fd、代理身份和 Worker 内存。
 
-卸载或刷新时脚本从配置移除，实例停止、资源回收后在同一次调用内递归删除 `volumes/<installationId>`，并删除不再被任何 installation 引用的 `sources/<importhash>.js`；更新成功后也清理不再引用的旧源码文件，返回时删除已完成。删除依据设置中的原始文件引用，不使用 host 的实际执行内容摘要；状态中的 `sourceHash` 在已有 host revision 时报告该实际摘要，手工编辑后可与设置引用不同。共享引用仍保留，未知文件不扫描删除。目录身份、普通文件、符号链接和硬链接隔离检查继续保留。卸载后同一 installationId 再次安装从空卷开始；尚未卸载的同 ID 明确重新导入保留私有卷。若上次删除失败留有残卷，新的安装先删除，仍失败则安装失败、不启动。停止、停用、更新、端口变化、进程重启均保留私有卷。删除失败如实进入 `failures`，实例仍算已卸载，不影响其他实例；删除只作用于已校验的卷目录，不跟随符号链接。运行器启动和冷启动不扫描或清理 `volumes`。
+卸载或刷新时脚本从配置移除，实例停止、资源回收后在同一次调用内递归删除 `volumes/<installationId>`，并删除不再被任何 installation 引用的 `sources/<importhash>.js`；更新成功后也清理不再引用的旧源码文件，返回时删除已完成。删除依据设置中的原始文件引用，不使用 host 的实际执行内容摘要；冷启动后未执行过的 disabled 记录同样保留该引用，外部删除设置项后的 refresh 也会完成上述清理。状态中的 `sourceHash` 在已有 host revision 时报告该实际摘要，手工编辑后可与设置引用不同。共享引用仍保留，未知文件不扫描删除。目录身份、普通文件、符号链接和硬链接隔离检查继续保留。卸载后同一 installationId 再次安装从空卷开始；尚未卸载的同 ID 明确重新导入保留私有卷。若上次删除失败留有残卷，新的安装先删除，仍失败则安装失败、不启动。停止、停用、更新、端口变化、进程重启均保留私有卷。删除失败如实进入 `failures`，实例仍算已卸载，不影响其他实例；删除只作用于已校验的卷目录，不跟随符号链接。运行器启动和冷启动不扫描或清理 `volumes`。
 
-`refresh`／`uninstall` 在各自变更全部处理完后返回 `applied`／`failures`，其他安装管理方法在目标实例处理完后返回其状态，错误包装见上文。取消管理请求会终止下载与正在初始化的候选；停用/卸载同时取消该安装尚未完成的管理操作，旧异步结果不能再次启用或覆盖它。请求取消可恢复原先启用的旧版本；停用、卸载和关闭不为该恢复重新启动脚本。关闭时取消尚未开始的启动事务，先向已有及正在初始化的实例发停止，再等待在途事务、真实线程退出和 server 回收，不先等完整初始化截止时间；后台启动失败记入 `failures`，不产生未处理 rejection。
+`refresh`／`uninstall` 在各自变更全部处理完后返回 `applied`／`failures`，其他安装管理方法在目标实例处理完后返回其状态，错误包装见上文。设置快照发布不等于实例变更已应用；refresh 在逐安装队列中取消后，下次 refresh 仍会补应用未完成的变更，元数据编辑或更新结果的持久化不会冒充该执行变更已经完成。取消管理请求会终止下载与该操作拥有的候选初始化，不终止已开始的独立旧源恢复；停用／卸载同时取消该安装尚未完成的管理操作，但未提交的命令不改变旧安装的持久启用意图。失败更新先恢复原先启用的旧版本，后续成功停用／卸载再在同一安装队列中落地；后续命令取消或保存失败时，旧源仍可调用，迟到结果不能覆盖已提交的停用／卸载。关闭不为恢复重新启动脚本，并终止已开始的恢复。关闭时取消尚未开始的启动事务，先向已有及正在初始化的实例发停止，再等待在途事务、真实线程退出和 server 回收，不先等完整初始化截止时间；后台启动失败记入 `failures`，不产生未处理 rejection。
 
 主线程每次 `settings.publish` 后按发布顺序向各 worker 推送只读设置快照和实际聚合端口；worker 不持久化或读取第二份设置文件，之后发出的调用使用新快照，调用开始时读取设置快照的语义不变。脚本结果的 mapUrl、本地代理 id 生成和可选 M3U8 元数据增强及变体改写在所属 worker 内完成；主线程转发媒体时的 Location／HLS／MPD 改写只查已登记代理与真实 endpoints 快照，不生成新的代理 id，也不为改写发起同步 RPC。
 

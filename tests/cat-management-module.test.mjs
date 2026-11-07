@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { createCatScriptModule } from '../apps/runtime/modules/cat-script.mjs';
 import { moduleHttp } from './runtime-http-fixture.mjs';
+import { deferred } from '../packages/runtime-bridge/test/http-fixture.js';
 const temporaryRoot = new URL('../tmp/test-results/', import.meta.url).pathname;
 
 const source = value => `module.exports = { home() { return { value: ${JSON.stringify(value)} }; } };`;
@@ -179,4 +180,175 @@ test('Cat module close cancels a pending network update and leaves the accepted 
     assert.equal(saved.updateState, 'failed');
     assert.equal(saved.updateError, 'CANCELLED');
     assert.deepEqual(await call('status'), { ok: false, contract: 'cat.script.v2', code: 'HOST_CLOSED' });
+  });
+
+async function managementGates(t) {
+  const detect = deferred(), commit = deferred();
+  const sockets = new Set();
+  const server = http.createServer((request, response) => {
+    const socket = request.socket;
+    const responseClosed = new Promise(resolve => response.once('close', resolve));
+    const socketClosed = new Promise(resolve => socket.once('close', resolve));
+    (request.url === '/detect' ? detect : commit).resolve({
+      response, socket, closed: Promise.all([responseClosed, socketClosed]),
+    });
+  });
+  server.on('connection', socket => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(async () => {
+    const closed = new Promise(resolve => server.close(resolve));
+    for (const socket of sockets) socket.destroy();
+    await closed;
+  });
+  return { detect: detect.promise, commit: commit.promise,
+    origin: `http://127.0.0.1:${server.address().port}` };
+}
+
+function credentialSource(origin) {
+  return `
+    const http = require('http'), fs = require('fs');
+    let server, gets = 0, puts = 0, released = 0, responseCloses = 0, socketCloses = 0;
+    let writeCloses = 0, putResponse;
+    let probeClosed = Promise.resolve(), probeReleased = Promise.resolve(), putFinished = Promise.resolve();
+    const gate = path => new Promise((resolve, reject) => {
+      const request = http.get(${JSON.stringify(origin)} + path, { agent: false }, response => {
+        response.once('end', resolve);
+        response.once('error', reject);
+        response.resume();
+      });
+      request.once('error', reject);
+      request.once('close', () => reject(new Error('gate closed')));
+    });
+    const json = (response, value) => response.end(JSON.stringify(value));
+    module.exports.start = async () => {
+      fs.writeFileSync('/credentials.json', JSON.stringify({cookie:'old'}));
+      server = http.createServer(async (request, response) => {
+        if (request.url === '/config' || request.url === '/full-config') {
+          json(response, {video:{sites:[{key:'default',name:'Management',api:'/api',actions:['home']}]}});
+        } else if (request.url === '/website/api/credentials') {
+          gets++;
+          probeClosed = Promise.all([
+            new Promise(resolve => response.once('close', () => { responseCloses++; resolve(); })),
+            new Promise(resolve => request.socket.once('close', () => { socketCloses++; resolve(); })),
+          ]);
+          probeReleased = gate('/detect').catch(() => {}).then(() => {
+            released++;
+            json(response, {code:0,data:{quark:{cookie:'old'}}});
+          });
+          await probeReleased;
+        } else if (request.url === '/website/api/credential/quark/cookie' && request.method === 'PUT') {
+          puts++;
+          const chunks = [];
+          for await (const chunk of request) chunks.push(chunk);
+          const body = JSON.parse(Buffer.concat(chunks).toString());
+          // Opening the existing file with r+ does not acknowledge a mutation.
+          const output = fs.createWriteStream('/credentials.json', {flags:'r+'});
+          const closed = new Promise((resolve, reject) => {
+            output.once('close', () => { writeCloses++; resolve(); });
+            output.once('error', reject);
+          });
+          await new Promise(resolve => output.once('open', resolve));
+          const allowed = gate('/commit');
+          putResponse = response;
+          putFinished = new Promise(resolve => response.once('finish', resolve));
+          json(response, {code:0});
+          await allowed;
+          output.end(JSON.stringify({cookie:body.value}));
+          await closed;
+        } else if (request.url === '/api/home') {
+          await Promise.all([probeClosed, probeReleased, putFinished]);
+          json(response, {gets,puts,released,responseCloses,socketCloses,writeCloses,
+            putFinished:putResponse?.writableFinished ?? false});
+        } else { response.statusCode = 404; response.end(); }
+      });
+      await new Promise(resolve => server.listen(Number(process.env.PORT), '127.0.0.1', resolve));
+    };
+    module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+  `;
+}
+
+for (const operation of ['describe', 'sync']) {
+  test(`Cat management HTTP ${operation} cancellation closes its probe before a released GET can write credentials`,
+    { timeout: 30000 }, async t => {
+      const gates = await managementGates(t);
+      const { call, dataRoot } = moduleFor(t);
+      const installed = result(call, await call('install', { installationId: 'managed',
+        sourceRevision: await upload(call, 'managed', 1, credentialSource(gates.origin)) }));
+      const healthy = result(call, await call('install', { installationId: 'healthy',
+        sourceRevision: await upload(call, 'healthy', 1,
+          'let count=0; module.exports={home(){return {count:++count}}};') }));
+      const invoke = installationId => call('invoke', { installationId, siteId: 'default', operation: 'home' });
+      assert.deepEqual(result(call, await invoke('healthy')), { count: 1 });
+      const file = join(dataRoot, 'volumes', 'managed', 'credentials.json');
+      const before = readFileSync(file);
+      const controller = new AbortController();
+      const pending = call('management.' + operation, {
+        installationId: 'managed', generation: installed.generation,
+        ...(operation === 'sync' ? { provider: 'quark', credentials: { cookie: 'new' } } : {}),
+      }, { signal: controller.signal });
+      const probe = await gates.detect;
+      assert.equal(probe.response.destroyed, false);
+      controller.abort();
+      assert.deepEqual(await pending, { ok: false, contract: 'cat.script.v2', code: 'CANCELLED' });
+      // The external gate can close only after the actual management transport
+      // cancels its inbound scope; caller-side CANCELLED alone is not a barrier.
+      await probe.closed;
+      assert.equal(probe.response.destroyed, true);
+      assert.equal(probe.socket.destroyed, true);
+      probe.response.end('released after cancellation');
+      assert.deepEqual(result(call, await invoke('managed')), {
+        gets: 1, puts: 0, released: 1, responseCloses: 1, socketCloses: 1,
+        writeCloses: 0, putFinished: false,
+      });
+      assert.deepEqual(readFileSync(file), before);
+      assert.deepEqual(result(call, await invoke('healthy')), { count: 2 });
+      const instances = result(call, await call('status')).instances;
+      for (const item of [installed, healthy]) {
+        const current = instances.find(value => value.installationId === item.installationId);
+        assert.equal(current.generation, item.generation);
+        assert.equal(current.state, 'ready');
+      }
+    });
+}
+
+test('Cat management HTTP sync returns saved only after its one PUT has a durable private-volume receipt',
+  { timeout: 30000 }, async t => {
+    const gates = await managementGates(t);
+    const { call, dataRoot } = moduleFor(t);
+    const installed = result(call, await call('install', { installationId: 'managed',
+      sourceRevision: await upload(call, 'managed', 1, credentialSource(gates.origin)) }));
+    const file = join(dataRoot, 'volumes', 'managed', 'credentials.json');
+    let settled = false, savedBytes;
+    const pending = call('management.sync', { installationId: 'managed', generation: installed.generation,
+      provider: 'quark', credentials: { cookie: 'new' } }).then(reply => {
+      settled = true;
+      savedBytes = readFileSync(file, 'utf8');
+      return reply;
+    });
+    const probe = await gates.detect;
+    probe.response.end('release probe');
+    const commit = await gates.commit;
+    const inspect = async () => result(call, await call('invoke', {
+      installationId: 'managed', siteId: 'default', operation: 'home',
+    }));
+    const waiting = await inspect();
+    assert.equal(waiting.gets, 1);
+    assert.equal(waiting.puts, 1);
+    assert.equal(waiting.putFinished, true);
+    assert.equal(waiting.writeCloses, 0);
+    assert.equal(readFileSync(file, 'utf8'), JSON.stringify({ cookie: 'old' }));
+    assert.equal(settled, false, 'an HTTP success without a durable write is not saved');
+    commit.response.end('allow real write');
+    assert.deepEqual(result(call, await pending), { status: 'saved', protocol: 'website-api-v1' });
+    assert.equal(savedBytes, JSON.stringify({ cookie: 'new' }));
+    assert.equal(readFileSync(file, 'utf8'), savedBytes);
+    await Promise.all([probe.closed, commit.closed]);
+    const saved = await inspect();
+    assert.equal(saved.puts, 1);
+    assert.equal(saved.writeCloses, 1);
+    assert.equal(result(call, await call('status')).instances[0].generation, installed.generation);
   });

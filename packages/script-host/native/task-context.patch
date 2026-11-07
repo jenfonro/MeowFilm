@@ -1,15 +1,17 @@
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -321,6 +321,8 @@
+@@ -321,6 +321,10 @@
      void *host_promise_rejection_tracker_opaque;
  
      struct list_head job_list; /* list of JSJobEntry.link */
 +    JSHostTaskContext *host_task;
 +    JSHostTaskContext *host_execution_task;
++    JSHostTaskContext *host_execution_owner;
++    JSHostExecutionOwnerSelector *host_execution_owner_selector;
  
      bool module_normalize_has_attr;
      union {
-@@ -977,10 +979,18 @@
+@@ -977,10 +981,18 @@
      JSValue private_value; /* private value for C modules */
  };
  
@@ -28,7 +30,7 @@
      int argc;
      JSValue argv[];
  } JSJobEntry;
-@@ -2111,9 +2121,61 @@
+@@ -2111,9 +2123,78 @@
      rt->sab_funcs = *sf;
  }
  
@@ -87,13 +89,30 @@
 +    JS_FreeHostTaskContext(rt, previous);
 +}
 +
++JSHostTaskContext *JS_GetHostExecutionOwner(JSRuntime *rt)
++{
++    return rt->host_execution_owner;
++}
++
++void JS_SetHostExecutionOwner(JSRuntime *rt, JSHostTaskContext *task)
++{
++    JSHostTaskContext *previous = rt->host_execution_owner;
++    rt->host_execution_owner = JS_DupHostTaskContext(task);
++    JS_FreeHostTaskContext(rt, previous);
++}
++
++void JS_SetHostExecutionOwnerSelector(JSRuntime *rt, JSHostExecutionOwnerSelector *selector)
++{
++    rt->host_execution_owner_selector = selector;
++}
++
 +static int js_enqueue_job_with_task(JSContext *ctx, JSJobFunc *job_func,
 +                                    int argc, JSValueConst *argv,
 +                                    JSHostTaskContext *task)
  {
      JSRuntime *rt = ctx->rt;
      JSJobEntry *e;
-@@ -2126,12 +2188,34 @@
+@@ -2126,12 +2207,34 @@
          return -1;
      e->ctx = ctx;
      e->job_func = job_func;
@@ -128,7 +147,7 @@
  }
  
  bool JS_IsJobPending(JSRuntime *rt)
-@@ -2165,7 +2249,19 @@
+@@ -2165,7 +2268,19 @@
      e = list_entry(rt->job_list.next, JSJobEntry, link);
      list_del(&e->link);
      ctx = e->ctx;
@@ -148,12 +167,13 @@
      for(i = 0; i < e->argc; i++)
          JS_FreeValue(ctx, e->argv[i]);
      if (JS_IsException(res))
-@@ -2268,12 +2364,16 @@
+@@ -2268,12 +2383,17 @@
      int i;
  
      rt->in_free = true;
 +    JS_SetHostTaskContext(rt, NULL);
 +    JS_SetHostExecutionContext(rt, NULL);
++    JS_SetHostExecutionOwner(rt, NULL);
      JS_FreeValueRT(rt, rt->current_exception);
  
      list_for_each_safe(el, el1, &rt->job_list) {
@@ -165,7 +185,7 @@
          js_free_rt(rt, e);
      }
      init_list_head(&rt->job_list);
-@@ -6020,6 +6120,16 @@
+@@ -6020,6 +6140,16 @@
              class_id == JS_CLASS_ASYNC_GENERATOR_FUNCTION);
  }
  
@@ -182,7 +202,7 @@
  /* return NULL without exception if not a function or no bytecode */
  static JSFunctionBytecode *JS_GetFunctionBytecode(JSValueConst val)
  {
-@@ -7324,6 +7434,8 @@
+@@ -7324,6 +7454,8 @@
              {
                  JSArrayBuffer *abuf = p->u.array_buffer;
                  if (abuf) {
@@ -191,45 +211,55 @@
                      s->memory_used_count += 1;
                      s->memory_used_size += sizeof(*abuf);
                      if (abuf->data) {
-@@ -20771,6 +20883,7 @@
+@@ -20771,6 +20903,8 @@
  
  typedef struct JSAsyncGeneratorRequest {
      struct list_head link;
 +    JSHostTaskContext *host_task;
++    JSHostTaskContext *execution_owner;
      /* completion */
      int completion_type; /* GEN_MAGIC_x */
      JSValue result;
-@@ -20798,6 +20911,7 @@
+@@ -20798,6 +20932,8 @@
          JS_FreeValueRT(rt, req->promise);
          JS_FreeValueRT(rt, req->resolving_funcs[0]);
          JS_FreeValueRT(rt, req->resolving_funcs[1]);
 +        JS_FreeHostTaskContext(rt, req->host_task);
++        JS_FreeHostTaskContext(rt, req->execution_owner);
          js_free_rt(rt, req);
      }
      if (s->state != JS_ASYNC_GENERATOR_STATE_COMPLETED &&
-@@ -20915,6 +21029,7 @@
+@@ -20915,6 +21051,8 @@
      JS_FreeValue(ctx, next->promise);
      JS_FreeValue(ctx, next->resolving_funcs[0]);
      JS_FreeValue(ctx, next->resolving_funcs[1]);
 +    JS_FreeHostTaskContext(ctx->rt, next->host_task);
++    JS_FreeHostTaskContext(ctx->rt, next->execution_owner);
      js_free(ctx, next);
  }
  
-@@ -20989,11 +21104,13 @@
+@@ -20989,11 +21127,20 @@
  {
      JSAsyncGeneratorRequest *next;
      JSValue func_ret, value;
 +    JSHostTaskContext *previous = JS_DupHostTaskContext(ctx->rt->host_task);
++    JSHostTaskContext *previous_execution = JS_DupHostTaskContext(ctx->rt->host_execution_task);
++    JSHostTaskContext *previous_owner = JS_DupHostTaskContext(ctx->rt->host_execution_owner);
  
      for(;;) {
          if (list_empty(&s->queue))
              break;
          next = list_entry(s->queue.next, JSAsyncGeneratorRequest, link);
++        JSHostTaskContext *owner = ctx->rt->host_execution_owner_selector
++            ? ctx->rt->host_execution_owner_selector(next->execution_owner, previous_owner)
++            : next->execution_owner;
++        JS_SetHostExecutionOwner(ctx->rt, owner);
++        JS_SetHostExecutionContext(ctx->rt, owner);
 +        JS_SetHostTaskContext(ctx->rt, next->host_task);
          switch(s->state) {
          case JS_ASYNC_GENERATOR_STATE_EXECUTING:
              /* only happens when restarting execution after await() */
-@@ -21083,7 +21200,9 @@
+@@ -21083,7 +21230,13 @@
              abort();
          }
      }
@@ -237,18 +267,23 @@
 + done:
 +    JS_SetHostTaskContext(ctx->rt, previous);
 +    JS_FreeHostTaskContext(ctx->rt, previous);
++    JS_SetHostExecutionContext(ctx->rt, previous_execution);
++    JS_FreeHostTaskContext(ctx->rt, previous_execution);
++    JS_SetHostExecutionOwner(ctx->rt, previous_owner);
++    JS_FreeHostTaskContext(ctx->rt, previous_owner);
  }
  
  static JSValue js_async_generator_resolve_function(JSContext *ctx,
-@@ -21148,6 +21267,7 @@
+@@ -21148,6 +21301,8 @@
      req = js_mallocz(ctx, sizeof(*req));
      if (!req)
          goto fail;
 +    req->host_task = JS_DupHostTaskContext(ctx->rt->host_task);
++    req->execution_owner = JS_DupHostTaskContext(ctx->rt->host_execution_owner);
      req->completion_type = magic;
      req->result = js_dup(argv[0]);
      req->promise = js_dup(promise);
-@@ -52724,6 +52844,7 @@
+@@ -52724,6 +52879,7 @@
  
  typedef struct JSPromiseReactionData {
      struct list_head link; /* not used in promise_reaction_job */
@@ -256,7 +291,7 @@
      JSValue resolving_funcs[2];
      JSValue handler;
  } JSPromiseReactionData;
-@@ -52765,6 +52886,7 @@
+@@ -52765,6 +52921,7 @@
      JS_FreeValueRT(rt, rd->resolving_funcs[0]);
      JS_FreeValueRT(rt, rd->resolving_funcs[1]);
      JS_FreeValueRT(rt, rd->handler);
@@ -264,7 +299,7 @@
      js_free_rt(rt, rd);
  }
  
-@@ -52873,7 +52995,7 @@
+@@ -52873,7 +53030,7 @@
          args[2] = rd->handler;
          args[3] = js_bool(is_reject);
          args[4] = value;
@@ -273,7 +308,7 @@
          list_del(&rd->link);
          promise_reaction_data_free(ctx->rt, rd);
      }
-@@ -53644,6 +53766,7 @@
+@@ -53644,6 +53801,7 @@
          handler = resolve_reject[i];
          if (!JS_IsFunction(ctx, handler))
              handler = JS_UNDEFINED;
@@ -281,7 +316,7 @@
          rd->handler = js_dup(handler);
          rd_array[i] = rd;
      }
-@@ -53666,7 +53789,7 @@
+@@ -53666,7 +53824,7 @@
          args[2] = rd->handler;
          args[3] = js_bool(i);
          args[4] = s->promise_result;
@@ -290,7 +325,7 @@
          for(i = 0; i < 2; i++)
              promise_reaction_data_free(ctx->rt, rd_array[i]);
      }
-@@ -60092,6 +60215,7 @@
+@@ -60092,6 +60250,7 @@
  
  typedef struct JSFinRecEntry {
      struct list_head link;
@@ -298,7 +333,7 @@
      JSValueConst target;
      JSValue held_val;
      JSValue token;
-@@ -60127,6 +60251,7 @@
+@@ -60127,6 +60286,7 @@
      JS_FreeValueRT(rt, fre->token);
      JS_FreeValueRT(rt, fre->cb);
      JS_FreeContext(fre->ctx);
@@ -306,7 +341,7 @@
      js_free_rt(rt, fre);
  }
  
-@@ -60223,6 +60348,7 @@
+@@ -60223,6 +60383,7 @@
      }
      fre->cb = js_dup(frd->cb);
      fre->ctx = JS_DupContext(frd->ctx);
@@ -314,7 +349,7 @@
      fre->target = target;
      fre->held_val = js_dup(held_val);
      fre->token = js_dup(token);
-@@ -60386,7 +60512,7 @@
+@@ -60386,7 +60547,7 @@
                  JSValueConst args[2];
                  args[0] = fre->cb;
                  args[1] = fre->held_val;
@@ -323,7 +358,7 @@
              }
              js_finrec_free(rt, fre);
              break;
-@@ -60881,3 +61007,14 @@
+@@ -60881,3 +61042,14 @@
  #undef malloc
  #undef free
  #undef realloc
@@ -348,7 +383,7 @@
  } JSMemoryUsage;
  
  JS_EXTERN void JS_ComputeMemoryUsage(JSRuntime *rt, JSMemoryUsage *s);
-@@ -1202,12 +1203,31 @@
+@@ -1202,12 +1203,38 @@
  JS_EXTERN int JS_SetModulePrivateValue(JSContext *ctx, JSModuleDef *m, JSValue val);
  JS_EXTERN JSValue JS_GetModulePrivateValue(JSContext *ctx, JSModuleDef *m);
  
@@ -363,6 +398,13 @@
 +JS_EXTERN JSHostTaskContext *JS_GetHostTaskContext(JSRuntime *rt);
 +JS_EXTERN void JS_SetHostTaskContext(JSRuntime *rt, JSHostTaskContext *task);
 +JS_EXTERN void JS_SetHostExecutionContext(JSRuntime *rt, JSHostTaskContext *task);
++/* Execution ownership is separate from authority and the scheduling context.
++   The selector returns a borrowed owner; generator entry retains and restores it. */
++typedef JSHostTaskContext *JSHostExecutionOwnerSelector(JSHostTaskContext *queued_owner,
++                                                       JSHostTaskContext *resuming_owner);
++JS_EXTERN JSHostTaskContext *JS_GetHostExecutionOwner(JSRuntime *rt);
++JS_EXTERN void JS_SetHostExecutionOwner(JSRuntime *rt, JSHostTaskContext *task);
++JS_EXTERN void JS_SetHostExecutionOwnerSelector(JSRuntime *rt, JSHostExecutionOwnerSelector *selector);
 +JS_EXTERN bool JS_HasActiveScriptFrame(JSRuntime *rt);
 +
  /* JS Job support */

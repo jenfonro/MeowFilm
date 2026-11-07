@@ -1,0 +1,49 @@
+<UserControl x:Class="MeowFilm.Capabilities.MusicAppearanceView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
+ FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
+ UseLayoutRounding="True" SnapsToDevicePixels="True"
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto">
+ <UserControl.Resources>
+  <ResourceDictionary><ResourceDictionary.MergedDictionaries>
+   <ResourceDictionary Source="/MeowFilm.Capabilities;component/Settings/SettingsTheme.xaml"/>
+  </ResourceDictionary.MergedDictionaries></ResourceDictionary>
+ </UserControl.Resources>
+ <StackPanel>
+  <Border Style="{StaticResource Settings.Section}">
+   <StackPanel>
+    <TextBlock Text="播放器配色" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,8"/>
+    <ComboBox Tag="colorMode" Width="190" HorizontalAlignment="Left" Style="{StaticResource Settings.ComboBox}"
+              ItemsSource="{Binding ColorModes}" DisplayMemberPath="Name" SelectedValuePath="Key"
+              SelectedValue="{Binding AppearanceColorMode,Mode=OneWay}" SelectionChanged="Choice_Changed"
+              IsEnabled="{Binding CanEditAppearance}" AutomationProperties.Name="播放器配色"/>
+    <StackPanel Margin="0,12,0,0">
+     <StackPanel.Style><Style TargetType="StackPanel">
+      <Setter Property="IsEnabled" Value="False"/>
+      <Style.Triggers><MultiDataTrigger><MultiDataTrigger.Conditions>
+       <Condition Binding="{Binding CanEditAppearance}" Value="True"/>
+       <Condition Binding="{Binding AppearanceColorMode}" Value="fixed"/>
+      </MultiDataTrigger.Conditions><Setter Property="IsEnabled" Value="True"/></MultiDataTrigger></Style.Triggers>
+     </Style></StackPanel.Style>
+     <TextBlock Text="固定配色" Style="{StaticResource Settings.Text}" Margin="0,0,0,8"/>
+     <desktop:ColorSelection x:Name="PaletteSelection" Value="{Binding AppearanceColorPalette,Mode=OneWay}"
+                             Label="播放器固定配色" ValueCommitted="Palette_Committed"/>
+    </StackPanel>
+    <Button Content="重新读取" Style="{StaticResource Settings.QuietButton}" HorizontalAlignment="Left" Click="Retry_Click" Margin="0,12,0,0">
+     <Button.Visibility><Binding Path="AppearanceStatus" Converter="{x:Static desktop:GeneralSettingsView.StatusVisibility}"/></Button.Visibility>
+    </Button>
+    <desktop:NoticeOutlet Message="{Binding AppearanceStatus}"/>
+   </StackPanel>
+  </Border>
+  <Border Style="{StaticResource Settings.Section}">
+   <StackPanel>
+    <TextBlock Text="歌单样式" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,8"/>
+    <ComboBox Tag="playlistView" Width="190" HorizontalAlignment="Left" Style="{StaticResource Settings.ComboBox}"
+              ItemsSource="{Binding PlaylistViews}" DisplayMemberPath="Name" SelectedValuePath="Key"
+              SelectedValue="{Binding AppearancePlaylistView,Mode=OneWay}" SelectionChanged="Choice_Changed"
+              IsEnabled="{Binding CanEditAppearance}" AutomationProperties.Name="歌单样式"/>
+   </StackPanel>
+  </Border>
+ </StackPanel>
+</UserControl>

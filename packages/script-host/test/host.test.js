@@ -381,16 +381,17 @@ test('non-HTTP input is rejected before injected network access', async t => {
   assert.equal(calls, 0);
 });
 
-test('request cancellation keeps session-owned network work; late completion cannot call old callbacks', async t => {
+test('request cancellation keeps session-owned network work; its callback completes once without reviving the invocation', async t => {
   const started = deferred(), response = deferred();
   let outbound;
   const host = hostFor(t, { network: request => { outbound = request; started.resolve(); return response.promise; } });
   await host.install({ installationId: 'a', enabled: true,
     permissions: {},
-    source: lxScript({ setup: 'let callbacks = 0;', handler: `async ({info}) => {
-      if (info.musicInfo.probe) return callbacks;
+    source: lxScript({ setup: `let callbacks = 0, finishCallback;
+      const callbackDone = new Promise(resolve => { finishCallback = resolve; });`, handler: `async ({info}) => {
+      if (info.musicInfo.probe) { await callbackDone; return callbacks; }
       return new Promise((resolve,reject)=>lx.request('https://fixture.invalid/x',{},
-        (e,r,b)=>{callbacks++;e?reject(e):resolve(b)}));
+        (e,r,b)=>{callbacks++;e?reject(e):resolve(b);finishCallback();}));
     }` }) });
   const controller = new AbortController();
   const request = host.invoke(target(), { signal: controller.signal });
@@ -398,14 +399,13 @@ test('request cancellation keeps session-owned network work; late completion can
   await started.promise;
   controller.abort();
   await rejected;
-  // Request cancellation terminates the transport, while the session-owned
+  // Request cancellation ends this invocation, while the session-owned
   // network task keeps its own lifetime until the adapter settles.
   assert.equal(outbound.signal.aborted, false);
   await waitFor(() => host.stats().networkRequests === 1,
     'the live network request did not reach the worker snapshot');
   assert.equal(host.stats().networkRequests, 1);
   response.resolve({ statusCode: 200, body: 'too late' });
-  await turn();
   // The late response may settle the session-owned callback, but the cancelled
   // request's result must not become a successful invocation.
   assert.equal(await host.invoke(target('a', 'kw', { probe: true })), 1);

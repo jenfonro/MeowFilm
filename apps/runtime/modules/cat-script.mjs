@@ -179,10 +179,10 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
       requireValue(input.payload === undefined || object(input.payload));
       return get().invoke({ ...input, payload: input.payload ?? {} }, { signal });
     });
-  method('management.describe', ['installationId', 'generation'], ['installationId'], input => {
+  method('management.describe', ['installationId', 'generation'], ['installationId'], (input, signal) => {
     identifier(input.installationId);
     if (input.generation !== undefined) integer(input.generation);
-    return get().management(input.installationId, input.generation);
+    return get().management(input.installationId, input.generation, { signal });
   });
   method('management.sync', ['installationId', 'generation', 'provider', 'credentials'],
     ['installationId', 'provider', 'credentials'], (input, signal) => {
