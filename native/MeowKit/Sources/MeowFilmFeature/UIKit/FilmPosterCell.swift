@@ -88,25 +88,39 @@ final class FilmPosterCell: UICollectionViewCell {
 final class FilmSectionHeader: UICollectionReusableView {
     static let reuseIdentifier = "FilmSectionHeader"
     private let titleLabel = UILabel()
+    private let more = UIButton(type: .system)
+    private var onMore: (() -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
         titleLabel.accessibilityTraits = .header
+        more.setTitle("查看更多", for: .normal)
+        more.titleLabel?.font = .systemFont(ofSize: 13)
+        more.addAction(UIAction { [weak self] _ in self?.onMore?() }, for: .touchUpInside)
         addSubview(titleLabel)
+        addSubview(more)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(title: String, theme: PageTheme) {
+    func configure(title: String, theme: PageTheme, sectionID: String, onMore: (() -> Void)?) {
         titleLabel.text = title
         titleLabel.textColor = UIColor(theme.ink)
+        self.onMore = onMore
+        more.isHidden = onMore == nil
+        more.tintColor = UIColor(theme.muted)
+        more.accessibilityIdentifier = "film.home.more.\(sectionID)"
+        more.accessibilityLabel = "查看更多\(title)"
+        setNeedsLayout()
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        titleLabel.frame = bounds.insetBy(dx: 0, dy: 8)
+        let width: CGFloat = more.isHidden ? 0 : 72
+        more.frame = CGRect(x: bounds.width - width, y: 0, width: width, height: bounds.height)
+        titleLabel.frame = CGRect(x: 0, y: 8, width: max(0, bounds.width - width), height: bounds.height - 16)
     }
 }
 

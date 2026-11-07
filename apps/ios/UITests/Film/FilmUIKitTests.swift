@@ -7,6 +7,370 @@ import MeowUI
 
 @MainActor
 final class FilmUIKitTests: XCTestCase {
+    func testCategoryGridHasThreeColumnsAtPhoneWidthsAndSelectsExistingItems() async throws {
+        let source = FilmCategoryUIKitSource()
+        for category in FilmCategory.allCases {
+            let model = FilmCategoryModel(category: category, source: source)
+            await model.loadIfNeeded()?.value
+            let page = FilmCategoryViewController(model: model, images: artworkImages(), themeProvider: FilmUIKitTheme())
+            page.loadViewIfNeeded()
+            let collection = try XCTUnwrap(identified("film.category.grid", in: page.view) as? UICollectionView)
+            defer { PageViewController.invalidatePages(in: page); model.close() }
+            var selected: FilmItem?
+            page.onSelectItem = { selected = $0 }
+            for width in [CGFloat(375), 402, 440] {
+                let context = "\(category.rawValue) at width \(width)"
+                page.view.frame = CGRect(x: 0, y: 0, width: width, height: 844)
+                page.view.setNeedsLayout()
+                page.view.layoutIfNeeded()
+                page.view.layoutIfNeeded()
+                collection.collectionViewLayout.invalidateLayout()
+                collection.layoutIfNeeded()
+                XCTAssertFalse(collection.hasAmbiguousLayout, context)
+                XCTAssertGreaterThan(collection.bounds.height, 0, context)
+                if category == .anime {
+                    XCTAssertFalse(descendants(page.view).contains { $0 is FilterTagsView })
+                    XCTAssertEqual(collection.frame.minY, page.pageHeader.frame.maxY, accuracy: 0.5, context)
+                }
+                let frames = try (0..<6).map {
+                    try XCTUnwrap(collection.layoutAttributesForItem(at: IndexPath(item: $0, section: 0))).frame
+                }
+                for index in 0..<3 {
+                    let cell = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: index, section: 0)),
+                                            context)
+                    XCTAssertTrue(collection.bounds.contains(cell.frame), context)
+                }
+                XCTAssertEqual(frames[0].minY, frames[2].minY, accuracy: 0.5)
+                XCTAssertGreaterThan(frames[3].minY, frames[0].maxY)
+                XCTAssertEqual(frames[0].minX, 16, accuracy: 0.5)
+                XCTAssertEqual(frames[2].maxX, width - 16, accuracy: 0.5)
+                XCTAssertEqual(frames[1].width, frames[0].width, accuracy: 0.5)
+                XCTAssertEqual(frames[3].minX, frames[0].minX, accuracy: 0.5)
+                let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: page.view.bounds).image { context in
+                    page.view.layer.render(in: context.cgContext)
+                })
+                attachment.name = "film-category-\(category.rawValue)-\(Int(width))"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
+            page.collectionView(collection, didSelectItemAt: IndexPath(item: 1, section: 0))
+            XCTAssertEqual(selected?.identity, model.items[1].identity)
+        }
+    }
+
+    func testCategoryFilterRowsExpandIndependentlyAndSelectCombinedValues() async throws {
+        let model = FilmCategoryModel(category: .movie, source: FilmCategoryUIKitSource())
+        await model.loadIfNeeded()?.value
+        let page = FilmCategoryViewController(model: model, images: artworkImages(), themeProvider: FilmUIKitTheme())
+        page.loadViewIfNeeded()
+        defer { PageViewController.invalidatePages(in: page); model.close() }
+        page.view.frame = CGRect(x: 0, y: 0, width: 320, height: 844)
+        page.view.layoutIfNeeded()
+        page.view.layoutIfNeeded()
+        let category = try XCTUnwrap(identified("film.category.category.tags", in: page.view) as? FilterTagsView)
+        let area = try XCTUnwrap(identified("film.category.area.tags", in: page.view) as? FilterTagsView)
+        let categoryToggle = try XCTUnwrap(identified("film.category.category.tags.toggle", in: page.view) as? UIButton)
+        let areaToggle = try XCTUnwrap(identified("film.category.area.tags.toggle", in: page.view) as? UIButton)
+        XCTAssertTrue(category.hasOverflow)
+        XCTAssertTrue(area.hasOverflow)
+        let initialAreaY = area.convert(area.bounds, to: page.view).minY
+        categoryToggle.sendActions(for: .touchUpInside)
+        page.view.layoutIfNeeded()
+        XCTAssertTrue(category.isExpanded)
+        XCTAssertFalse(area.isExpanded)
+        XCTAssertGreaterThan(area.convert(area.bounds, to: page.view).minY, initialAreaY)
+        areaToggle.sendActions(for: .touchUpInside)
+        page.view.layoutIfNeeded()
+        XCTAssertTrue(area.isExpanded)
+        let japan = try XCTUnwrap(identified("film.category.area.tag.日本", in: page.view) as? UIButton)
+        japan.sendActions(for: .touchUpInside)
+        XCTAssertFalse(area.isExpanded)
+        XCTAssertTrue(category.isExpanded)
+        let best = try XCTUnwrap(identified("film.category.category.tag.豆瓣高分", in: page.view) as? UIButton)
+        best.sendActions(for: .touchUpInside)
+        XCTAssertFalse(category.isExpanded)
+        XCTAssertEqual(model.filters, ["category": "豆瓣高分", "area": "日本"])
+        await model.loadMore()?.value
+    }
+
+    func testTVCategoryLayoutHidesAndRestoresInactiveRegionFilter() async throws {
+        let model = FilmCategoryModel(category: .tv, source: FilmCategoryUIKitSource())
+        await model.loadIfNeeded()?.value
+        let page = FilmCategoryViewController(model: model, images: artworkImages(), themeProvider: FilmUIKitTheme())
+        let window = mount(page)
+        defer { release(page, window: window); model.close() }
+        let collection = try XCTUnwrap(identified("film.category.grid", in: page.view) as? UICollectionView)
+        let initialGridY = collection.frame.minY
+        let japan = try XCTUnwrap(identified("film.category.area.tag.tv_japanese", in: page.view) as? UIButton)
+        japan.sendActions(for: .touchUpInside)
+        await model.loadMore()?.value
+        for category in ["tv_animation", "tv_documentary"] {
+            let option = try XCTUnwrap(identified("film.category.category.tag.\(category)", in: page.view) as? UIButton)
+            option.sendActions(for: .touchUpInside)
+            await model.loadMore()?.value
+            await waitFor("inactive region row removed") {
+                self.identified("film.category.area.tags", in: page.view) == nil
+            }
+            page.view.layoutIfNeeded()
+            XCTAssertLessThan(collection.frame.minY, initialGridY)
+            XCTAssertFalse(collection.hasAmbiguousLayout)
+            XCTAssertGreaterThan(collection.bounds.height, 0)
+            let tv = try XCTUnwrap(identified("film.category.category.tag.tv", in: page.view) as? UIButton)
+            tv.sendActions(for: .touchUpInside)
+            await model.loadMore()?.value
+            await waitFor("region row restored") {
+                self.identified("film.category.area.tags", in: page.view) != nil
+            }
+            page.view.layoutIfNeeded()
+            XCTAssertEqual(collection.frame.minY, initialGridY, accuracy: 0.5)
+            XCTAssertFalse(collection.hasAmbiguousLayout)
+            XCTAssertEqual(model.filters["area"], "tv_japanese")
+            let restored = try XCTUnwrap(identified("film.category.area.tag.tv_japanese", in: page.view) as? UIButton)
+            XCTAssertTrue(restored.accessibilityTraits.contains(.selected))
+        }
+    }
+
+    func testHomeMoreOpensMatchingCategoryAndUnsupportedSourceHasNoEntry() async throws {
+        let model = FilmHomeModel(sources: [FilmCategoryUIKitSource()])
+        await model.loadIfNeeded()?.value
+        let page = FilmHomeViewController(model: model, images: artworkImages(), themeProvider: FilmUIKitTheme())
+        var selected: FilmCategory?
+        page.onSelectCategory = { selected = $0.category }
+        let window = mount(page)
+        defer { release(page, window: window); model.close() }
+        let more = try XCTUnwrap(identified("film.home.more.movie", in: page.view) as? UIButton)
+        more.sendActions(for: .touchUpInside)
+        XCTAssertEqual(selected, .movie)
+        let unsupported = FilmHomeModel(sources: [FilmUIKitSource(id: "other", title: "其他", sections: [])])
+        XCTAssertNil(unsupported.categoryModel(sectionID: "movie"))
+        unsupported.close()
+    }
+
+    func testCategoryExplicitRetryPresentsTheSameFailureAgain() async throws {
+        let runner = XCUIApplication(bundleIdentifier: try XCTUnwrap(Bundle.main.bundleIdentifier))
+        try await performRunnerAction { $0.activate() }
+        let source = FilmFailingUIKitSource()
+        let model = FilmCategoryModel(category: .anime, source: source)
+        await model.loadIfNeeded()?.value
+        let page = FilmCategoryViewController(model: model, images: artworkImages(), themeProvider: FilmUIKitTheme())
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = mount(page)
+        defer {
+            page.dismiss(animated: false)
+            release(page, window: window)
+            model.close()
+            previousKeyWindow?.makeKey()
+        }
+        await waitFor("initial category error presented") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert.view.window != nil && !alert.isBeingPresented
+        }
+        let first = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        XCTAssertEqual(source.categoryReads, 1)
+        XCTAssertEqual(first.actions.map(\.title), ["确定", "重试"])
+        XCTAssertEqual(first.actions.map(\.style), [.cancel, .default])
+        let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        })
+        attachment.name = "film-category-error-retry"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertTrue(runner.alerts["错误"].buttons["重试"].waitForExistence(timeout: 2))
+        try await performRunnerAction { $0.alerts["错误"].buttons["重试"].tap() }
+        await waitFor("same category failure presented for the new request") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert !== first && alert.view.window != nil && !alert.isBeingPresented
+        }
+        let second = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        XCTAssertEqual(source.categoryReads, 2)
+        XCTAssertFalse(model.isLoading)
+        XCTAssertEqual(second.message, first.message)
+        XCTAssertTrue(try XCTUnwrap(second.actions.first { $0.title == "重试" }).isEnabled)
+        XCTAssertTrue(runner.alerts["错误"].buttons["重试"].isEnabled)
+        try await performRunnerAction { $0.alerts["错误"].buttons["确定"].tap() }
+        await waitFor("category error acknowledged") { page.presentedViewController == nil && page.canPresentPageAlert }
+        page.pageDidFinishAppearing()
+        await deliverMainRunLoop()
+        XCTAssertNil(page.presentedViewController, "An acknowledged failure does not present again without a request")
+        XCTAssertEqual(source.categoryReads, 2, "Acknowledging must not request again")
+        let collection = try XCTUnwrap(identified("film.category.grid", in: page.view) as? UICollectionView)
+        let refresh = try XCTUnwrap(collection.refreshControl)
+        refresh.beginRefreshing()
+        refresh.sendActions(for: .valueChanged)
+        await waitFor("pull refresh can request after acknowledgement") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert !== second && alert.view.window != nil && !alert.isBeingPresented
+        }
+        XCTAssertEqual(source.categoryReads, 3)
+        XCTAssertFalse(model.isLoading)
+        XCTAssertFalse(refresh.isRefreshing)
+    }
+
+    func testHomeExplicitRetryPresentsTheSameFailureAgain() async throws {
+        let runner = XCUIApplication(bundleIdentifier: try XCTUnwrap(Bundle.main.bundleIdentifier))
+        try await performRunnerAction { $0.activate() }
+        let source = FilmFailingUIKitSource()
+        let model = FilmHomeModel(sources: [source])
+        await model.loadIfNeeded()?.value
+        let page = FilmHomeViewController(model: model, images: artworkImages(), themeProvider: FilmUIKitTheme())
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = mount(page)
+        defer {
+            page.dismiss(animated: false)
+            release(page, window: window)
+            model.close()
+            previousKeyWindow?.makeKey()
+        }
+        await waitFor("initial home error presented") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert.view.window != nil && !alert.isBeingPresented
+        }
+        let first = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        XCTAssertEqual(source.homeReads, 1)
+        XCTAssertEqual(first.actions.map(\.title), ["确定", "重试"])
+        XCTAssertEqual(first.actions.map(\.style), [.cancel, .default])
+        let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        })
+        attachment.name = "film-home-error-retry"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertTrue(runner.alerts["错误"].buttons["重试"].waitForExistence(timeout: 2))
+        try await performRunnerAction { $0.alerts["错误"].buttons["重试"].tap() }
+        await waitFor("same home failure presented for the new request") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert !== first && alert.view.window != nil && !alert.isBeingPresented
+        }
+        let second = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        XCTAssertEqual(source.homeReads, 2)
+        XCTAssertFalse(model.isLoading)
+        XCTAssertEqual(second.message, first.message)
+        XCTAssertTrue(try XCTUnwrap(second.actions.first { $0.title == "重试" }).isEnabled)
+        XCTAssertTrue(runner.alerts["错误"].buttons["重试"].isEnabled)
+        try await performRunnerAction { $0.alerts["错误"].buttons["确定"].tap() }
+        await waitFor("home error acknowledged") { page.presentedViewController == nil && page.canPresentPageAlert }
+        page.pageDidFinishAppearing()
+        await deliverMainRunLoop()
+        XCTAssertNil(page.presentedViewController, "An acknowledged failure does not present again without a request")
+        XCTAssertEqual(source.homeReads, 2, "Acknowledging must not request again")
+        let collection = try homeCollection(in: page)
+        let refresh = try XCTUnwrap(collection.refreshControl)
+        refresh.beginRefreshing()
+        refresh.sendActions(for: .valueChanged)
+        await waitFor("pull refresh can request after acknowledgement") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert !== second && alert.view.window != nil && !alert.isBeingPresented
+        }
+        XCTAssertEqual(source.homeReads, 3)
+        XCTAssertFalse(model.isLoading)
+        XCTAssertFalse(refresh.isRefreshing)
+    }
+
+    func testCategoryPaginationFailureRetriesSameOffsetAndKeepsItems() async throws {
+        let runner = XCUIApplication(bundleIdentifier: try XCTUnwrap(Bundle.main.bundleIdentifier))
+        try await performRunnerAction { $0.activate() }
+        let source = FilmPaginationFailingUIKitSource()
+        let model = FilmCategoryModel(category: .anime, source: source)
+        await model.loadIfNeeded()?.value
+        let originalItems = model.items
+        XCTAssertEqual(originalItems.count, 3)
+        XCTAssertEqual(source.offsets, [0])
+        let page = FilmCategoryViewController(model: model, images: artworkImages(), themeProvider: FilmUIKitTheme())
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = mount(page)
+        defer {
+            page.dismiss(animated: false)
+            release(page, window: window)
+            model.close()
+            previousKeyWindow?.makeKey()
+        }
+        let more = try button("film.category.more", in: page.view)
+        let collection = try XCTUnwrap(identified("film.category.grid", in: page.view) as? UICollectionView)
+        XCTAssertTrue(more.isEnabled)
+        more.sendActions(for: .touchUpInside)
+        await waitFor("next page failure presented") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert.view.window != nil && !alert.isBeingPresented
+        }
+        let first = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        XCTAssertEqual(source.offsets, [0, 24])
+        XCTAssertEqual(model.items, originalItems)
+        XCTAssertEqual(collection.numberOfItems(inSection: 0), originalItems.count)
+        XCTAssertFalse(model.isLoading)
+        XCTAssertFalse(more.isEnabled)
+        try await performRunnerAction { $0.alerts["错误"].buttons["重试"].tap() }
+        await waitFor("same offset retry failure presented") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert !== first && alert.view.window != nil && !alert.isBeingPresented
+        }
+        XCTAssertEqual(source.offsets, [0, 24, 24])
+        XCTAssertEqual(model.items, originalItems)
+        XCTAssertEqual(collection.numberOfItems(inSection: 0), originalItems.count)
+        XCTAssertFalse(model.isLoading)
+        XCTAssertFalse(more.isEnabled)
+        XCTAssertEqual((page.presentedViewController as? UIAlertController)?.message, first.message)
+        XCTAssertTrue(runner.alerts["错误"].buttons["重试"].isEnabled)
+        try await performRunnerAction { $0.alerts["错误"].buttons["确定"].tap() }
+        await waitFor("pagination error acknowledged") { page.presentedViewController == nil && page.canPresentPageAlert }
+        page.pageDidFinishAppearing()
+        await deliverMainRunLoop()
+        XCTAssertNil(page.presentedViewController)
+        XCTAssertFalse(more.isEnabled)
+        XCTAssertEqual(source.offsets, [0, 24, 24], "Neither rendering nor acknowledgement may retry pagination")
+        XCTAssertEqual(model.items, originalItems)
+    }
+
+    func testHomeCachedSourcesWithTheSameEmptySectionUpdateItsHeaderAndCategoryEntry() async throws {
+        let first = FilmEmptyCategoryUIKitSource()
+        let second = FilmUIKitSource(id: "other", title: "其他源", sections: [
+            .init(id: "movie", title: "其他源栏目", items: []),
+        ])
+        let model = FilmHomeModel(sources: [first, second])
+        let page = FilmHomeViewController(model: model, images: artworkImages(), themeProvider: FilmUIKitTheme())
+        let window = mount(page)
+        defer { release(page, window: window); model.close() }
+        let collection = try homeCollection(in: page)
+        let switcher = try XCTUnwrap(page.sourceSwitcherView as? UIButton)
+        var selected: FilmCategoryModel?
+        page.onSelectCategory = { selected = $0 }
+        for id in ["empty-category", "other", "empty-category", "other"] {
+            if model.selectedSourceID != id {
+                invoke(try menuAction(id == "other" ? "其他源" : "分类源", in: switcher))
+            }
+            await waitFor("source snapshot rendered: \(id)") {
+                collection.layoutIfNeeded()
+                guard !model.isLoading, switcher.configuration?.title ==
+                    (id == "other" ? "影视 · 其他源" : "影视 · 分类源"),
+                    let header = collection.supplementaryView(
+                        forElementKind: UICollectionView.elementKindSectionHeader, at: IndexPath(item: 0, section: 0))
+                else { return false }
+                return self.descendants(header).compactMap { $0 as? UILabel }.contains {
+                    $0.text == (id == "other" ? "其他源栏目" : "分类源栏目")
+                }
+            }
+            let header = try XCTUnwrap(collection.supplementaryView(
+                forElementKind: UICollectionView.elementKindSectionHeader, at: IndexPath(item: 0, section: 0)))
+            try assertText(id == "other" ? "其他源栏目" : "分类源栏目", in: header)
+            let more = try button("film.home.more.movie", in: header)
+            XCTAssertEqual(more.isHidden, id == "other")
+            if id == "empty-category" {
+                selected = nil
+                more.sendActions(for: .touchUpInside)
+                let category = try XCTUnwrap(selected)
+                XCTAssertEqual(category.category, .movie)
+                await category.loadIfNeeded()?.value
+                XCTAssertEqual(category.items.first?.sourceID, id)
+                category.close()
+            }
+        }
+        let secondReads = await second.loadCount
+        XCTAssertEqual(first.homeReads, 1)
+        XCTAssertEqual(secondReads, 1)
+    }
+
     func testPosterRailsFitThreeCompleteCardsAndTheEdgeOfAFourthAtPhoneWidths() async throws {
         let items = (0..<6).map {
             FilmItem(sourceID: "fixture", id: "\($0)", title: "影片 \($0)", score: "8.7")
@@ -859,6 +1223,18 @@ final class FilmUIKitTests: XCTestCase {
         }
     }
 
+    // XCTest requires the main thread, but its nested run loop must not hold
+    // this async test's actor job while delivering touches to the runner itself.
+    private func performRunnerAction(_ action: @escaping @MainActor (XCUIApplication) -> Void) async throws {
+        let identifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
+        await withCheckedContinuation { continuation in
+            RunLoop.main.perform {
+                MainActor.assumeIsolated { action(XCUIApplication(bundleIdentifier: identifier)) }
+                continuation.resume()
+            }
+        }
+    }
+
     private func mount(_ controller: UIViewController) -> UIWindow {
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
         let window = scene.map { UIWindow(windowScene: $0) }
@@ -892,6 +1268,68 @@ private actor FilmUIKitSource: FilmSource {
     func loadHome() async throws -> [FilmHomeSection] {
         loadCount += 1
         return sections
+    }
+}
+
+private struct FilmCategoryUIKitSource: FilmCategorySource {
+    let descriptor = FilmSourceDescriptor(id: "fixture", title: "测试")
+    let categories = FilmCategory.allCases
+    func loadHome() async throws -> [FilmHomeSection] {
+        [.init(id: "movie", title: "热门电影", items: try await loadCategory(.movie, filters: [:], offset: 0).items)]
+    }
+    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int) async throws -> FilmCategoryPage {
+        .init(items: (0..<12).map { FilmItem(sourceID: "fixture", id: "\($0)", title: "影片 \($0)") }, nextOffset: nil)
+    }
+}
+
+@MainActor
+private final class FilmFailingUIKitSource: FilmCategorySource {
+    nonisolated let descriptor = FilmSourceDescriptor(id: "failure", title: "失败源")
+    nonisolated let categories = FilmCategory.allCases
+    private(set) var homeReads = 0
+    private(set) var categoryReads = 0
+
+    func loadHome() async throws -> [FilmHomeSection] {
+        homeReads += 1
+        throw URLError(.notConnectedToInternet)
+    }
+
+    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int) async throws -> FilmCategoryPage {
+        categoryReads += 1
+        throw URLError(.notConnectedToInternet)
+    }
+}
+
+@MainActor
+private final class FilmPaginationFailingUIKitSource: FilmCategorySource {
+    nonisolated let descriptor = FilmSourceDescriptor(id: "pagination-failure", title: "分页失败源")
+    nonisolated let categories: [FilmCategory] = [.anime]
+    private(set) var offsets: [Int] = []
+
+    func loadHome() async throws -> [FilmHomeSection] { [] }
+
+    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int) async throws -> FilmCategoryPage {
+        offsets.append(offset)
+        guard offset == 0 else { throw URLError(.notConnectedToInternet) }
+        return .init(items: (0..<3).map {
+            FilmItem(sourceID: descriptor.id, id: "\($0)", title: "影片 \($0)")
+        }, nextOffset: 24)
+    }
+}
+
+@MainActor
+private final class FilmEmptyCategoryUIKitSource: FilmCategorySource {
+    nonisolated let descriptor = FilmSourceDescriptor(id: "empty-category", title: "分类源")
+    nonisolated let categories: [FilmCategory] = [.movie]
+    private(set) var homeReads = 0
+
+    func loadHome() async throws -> [FilmHomeSection] {
+        homeReads += 1
+        return [.init(id: "movie", title: "分类源栏目", items: [])]
+    }
+
+    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int) async throws -> FilmCategoryPage {
+        .init(items: [.init(sourceID: descriptor.id, id: "selected", title: "分类源影片")], nextOffset: nil)
     }
 }
 

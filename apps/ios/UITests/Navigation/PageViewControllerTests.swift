@@ -561,6 +561,170 @@ final class PageViewControllerTests: XCTestCase {
         XCTAssertTrue(page.isPageActive)
     }
 
+    func testShowErrorKeepsDefaultConfirmationAndAcknowledgedCallback() async throws {
+        try await performRunnerAction { $0.activate() }
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = page
+        window.makeKeyAndVisible()
+        defer {
+            page.dismiss(animated: false)
+            PageViewController.invalidatePages(in: page)
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        await waitForErrorAlertState("page ready") { page.canPresentPageAlert }
+        XCTAssertTrue(page.showError("default failure"))
+        await waitForErrorAlertState("default error presented") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert.view.window != nil && !alert.isBeingPresented
+        }
+        let first = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        XCTAssertEqual(first.message, "default failure")
+        XCTAssertEqual(first.actions.map(\.title), ["确定"])
+        try await performRunnerAction { $0.alerts["错误"].buttons["确定"].tap() }
+        await waitForErrorAlertState("default error dismissed") { page.presentedViewController == nil && page.canPresentPageAlert }
+        var acknowledgements = 0
+        XCTAssertTrue(page.showError("acknowledged failure") { acknowledgements += 1 })
+        await waitForErrorAlertState("acknowledged error presented") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert.view.window != nil && !alert.isBeingPresented
+        }
+        let second = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        XCTAssertEqual(second.message, "acknowledged failure")
+        XCTAssertEqual(second.actions.map(\.title), ["确定"])
+        XCTAssertEqual(acknowledgements, 0)
+        try await performRunnerAction { $0.alerts["错误"].buttons["确定"].tap() }
+        await waitForErrorAlertState("acknowledged callback completed") {
+            page.presentedViewController == nil && acknowledgements == 1
+        }
+        await drainErrorAlertRunLoop()
+        XCTAssertEqual(acknowledgements, 1)
+        XCTAssertTrue(page.isPageActive)
+    }
+
+    func testRetryableErrorCallsRetryOnceAfterActualDismissal() async throws {
+        try await performRunnerAction { $0.activate() }
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = page
+        window.makeKeyAndVisible()
+        defer {
+            page.dismiss(animated: false)
+            PageViewController.invalidatePages(in: page)
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        await waitForErrorAlertState("page ready") { page.canPresentPageAlert }
+        var retries = 0
+        weak var presentedAlert: UIAlertController?
+        let retried = expectation(description: "retry after dismissal")
+        retried.assertForOverFulfill = true
+        XCTAssertTrue(page.showRetryableError("retry failure") {
+            retries += 1
+            XCTAssertNil(page.presentedViewController)
+            XCTAssertNil(presentedAlert?.presentingViewController)
+            XCTAssertNil(presentedAlert?.viewIfLoaded?.window)
+            XCTAssertFalse(presentedAlert?.isBeingDismissed ?? false)
+            XCTAssertTrue(page.isPageActive)
+            retried.fulfill()
+        })
+        await waitForErrorAlertState("retryable error presented") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert.view.window != nil && !alert.isBeingPresented
+        }
+        let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        presentedAlert = alert
+        XCTAssertEqual(alert.message, "retry failure")
+        XCTAssertEqual(alert.actions.map(\.title), ["确定", "重试"])
+        XCTAssertEqual(alert.actions.map(\.style), [.cancel, .default])
+        XCTAssertEqual(retries, 0)
+        try await performRunnerAction { $0.alerts["错误"].buttons["重试"].tap() }
+        await fulfillment(of: [retried], timeout: 4)
+        await drainErrorAlertRunLoop()
+        XCTAssertEqual(retries, 1)
+        XCTAssertNil(page.presentedViewController)
+
+        await waitForErrorAlertState("page ready for cancellation") { page.canPresentPageAlert }
+        XCTAssertTrue(page.showRetryableError("cancel retry") { retries += 1 })
+        await waitForErrorAlertState("cancelable retry error presented") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert.view.window != nil && !alert.isBeingPresented
+        }
+        try await performRunnerAction { $0.alerts["错误"].buttons["确定"].tap() }
+        await waitForErrorAlertState("retry cancelled") { page.presentedViewController == nil }
+        await drainErrorAlertRunLoop()
+        XCTAssertEqual(retries, 1, "Confirmation must not invoke retry")
+    }
+
+    func testRetryableErrorDoesNotCallRetryAfterPageInvalidation() async throws {
+        let runner = XCUIApplication(bundleIdentifier: try XCTUnwrap(Bundle.main.bundleIdentifier))
+        try await performRunnerAction { $0.activate() }
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = page
+        window.makeKeyAndVisible()
+        defer {
+            page.dismiss(animated: false)
+            PageViewController.invalidatePages(in: page)
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        await waitForErrorAlertState("page ready") { page.canPresentPageAlert }
+        var retries = 0
+        XCTAssertTrue(page.showRetryableError("invalidated failure") { retries += 1 })
+        await waitForErrorAlertState("error presented before invalidation") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert.view.window != nil && !alert.isBeingPresented
+        }
+        let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        PageViewController.invalidatePages(in: page)
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertTrue(runner.alerts["错误"].buttons["重试"].isHittable)
+        try await performRunnerAction { $0.alerts["错误"].buttons["重试"].tap() }
+        await waitForErrorAlertState("invalidated page alert dismissed") {
+            page.presentedViewController == nil && alert.viewIfLoaded?.window == nil
+        }
+        await drainErrorAlertRunLoop()
+        XCTAssertEqual(retries, 0)
+    }
+
+    private func waitForErrorAlertState(_ description: String,
+                                       file: StaticString = #filePath, line: UInt = #line,
+                                       _ predicate: @escaping @MainActor () -> Bool) async {
+        let ready = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated { predicate() } },
+                                evaluatedWith: nil)
+        let result = await XCTWaiter.fulfillment(of: [ready], timeout: 4)
+        XCTAssertEqual(result, .completed, description, file: file, line: line)
+    }
+
+    private func drainErrorAlertRunLoop() async {
+        await withCheckedContinuation { continuation in
+            RunLoop.main.perform { continuation.resume() }
+        }
+    }
+
+    // XCTest requires the main thread, but its nested run loop must not hold
+    // this async test's actor job while delivering touches to the runner itself.
+    private func performRunnerAction(_ action: @escaping @MainActor (XCUIApplication) -> Void) async throws {
+        let identifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
+        await withCheckedContinuation { continuation in
+            RunLoop.main.perform {
+                MainActor.assumeIsolated { action(XCUIApplication(bundleIdentifier: identifier)) }
+                continuation.resume()
+            }
+        }
+    }
+
     func testDeinitCancelsTasksAndSubscriptions() async {
         var page: PageLifecycleTestPage? = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
         let changes = PassthroughSubject<Void, Never>()
