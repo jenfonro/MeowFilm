@@ -21,6 +21,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         if (active) module.Presentation.PageLoaded();
         if (!active)
         {
+            module.InvalidateCatalogAction();
             CloseCreatePlaylistDialog(restoreFocus: false);
             songScrollIntent.Clear();
             EndSongDrag();
@@ -321,14 +322,17 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         var row = FindRow(e.OriginalSource as DependencyObject);
         module.SelectedSong = row?.Item as SongRow;
         row?.Focus();
-        if (ActiveSongsGrid.ContextMenu is { } menu)
-        {
-            menu.PlacementTarget = ActiveSongsGrid;
-            menu.Placement = PlacementMode.MousePoint;
-            menu.HorizontalOffset = 0;
-            menu.VerticalOffset = 0;
-            menu.GetBindingExpression(FrameworkElement.DataContextProperty)?.UpdateTarget();
-        }
+    }
+    private void SongMenu_Opening(object sender, ContextMenuEventArgs e)
+    {
+        if (sender is not DataGrid grid || grid.ContextMenu is not { } menu) return;
+        if (!ReferenceEquals(grid, ActiveSongsGrid) || module.SelectedSong is not { } song)
+        { e.Handled = true; return; }
+        menu.PlacementTarget = grid;
+        menu.Placement = PlacementMode.MousePoint;
+        menu.HorizontalOffset = menu.VerticalOffset = 0;
+        module.PopulateSongMenu(menu, song, null, () => ReferenceEquals(grid, ActiveSongsGrid) && grid.IsVisible);
+        MusicCapability.ApplyContentMenuStyles(grid, menu);
     }
     private async void Song_KeyDown(object sender, KeyEventArgs e)
     {
@@ -370,22 +374,20 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     }
     private void SongMore_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button button || !SelectActionSong(button) || ActiveSongsGrid.ContextMenu is not { } menu) return;
-        button.Focus();
+        if (sender is not Button { CommandParameter: SongRow song } button || !SelectActionSong(button) ||
+            ActiveSongsGrid.ContextMenu is not { } menu) return;
         menu.IsOpen = false;
+        module.PopulateSongMenu(menu, song, null, () => button.IsVisible && ReferenceEquals(button.CommandParameter, song));
+        button.Focus();
         menu.PlacementTarget = button;
         menu.Placement = PlacementMode.Bottom;
-        menu.HorizontalOffset = 0;
         menu.VerticalOffset = -2;
-        menu.GetBindingExpression(FrameworkElement.DataContextProperty)?.UpdateTarget();
+        MusicCapability.ApplyContentMenuStyles(button, menu);
         menu.IsOpen = true;
         e.Handled = true;
     }
-    private async void Remove_Click(object sender, RoutedEventArgs e) => await module.RemoveSongAsync();
     private async void PreviousPage_Click(object sender, RoutedEventArgs e) => await module.PageAsync(-1);
     private async void NextPage_Click(object sender, RoutedEventArgs e) => await module.PageAsync(1);
-    private async void AddToPlaylist_Click(object sender, RoutedEventArgs e)
-    { if (sender is MenuItem { Tag: string id }) await module.AddSelectionToPlaylistAsync(id); }
     private void SongsGrid_ScrollChanged(object sender, ScrollChangedEventArgs e)
     {
         if (e.VerticalChange <= 0 || !songScrollIntent.Accepts(ActiveSongsGrid)) return;

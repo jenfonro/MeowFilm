@@ -254,13 +254,17 @@ public sealed partial class MusicLibraryOwner
             }
             case "music.queue.append":
             {
-                LJ.Fields(p, "songs context next", "songs"); LJ.Require(p["next"] is null || LJ.IsBool(p["next"])); var songs = Songs(p, false, full); var context = Context(p["context"]);
+                LJ.Fields(p, full ? "songs context next expectedVersion" : "songs context next", "songs");
+                if (full) LJ.Require(LJ.I(p["expectedVersion"]) == queueVersion, "REVISION_CONFLICT");
+                LJ.Require(p["next"] is null || LJ.IsBool(p["next"])); var songs = Songs(p, false, full); var context = Context(p["context"]);
                 var added = songs.Select(s => MakeEntry(s, context)).ToArray();
                 int index = LJ.B(p["next"]) && current.Length > 0 ? entries.Select(e => LJ.S(e?["id"])).ToList().IndexOf(current) + 1 : entries.Count;
-                foreach (var entry in added) entries.Insert(index++, entry.DeepClone());
+                q["entries"] = LJ.Arr(entries.Take(index).Concat(added).Concat(entries.Skip(index)));
                 if (current.Length == 0) q["currentId"] = added[0]["id"]!.DeepClone();
                 else if (LJ.B(p["next"])) q["priority"] = LJ.Arr(added.Select(e => LJ.S(e["id"])).Concat(LJ.Array(q["priority"]).Select(n => LJ.S(n))));
-                queueVersion++; result = LJ.Obj(("entryIds", LJ.Arr(added.Select(e => LJ.S(e["id"]))))); break;
+                queueVersion++;
+                if (!full) result = LJ.Obj(("entryIds", LJ.Arr(added.Select(e => LJ.S(e["id"])))));
+                break;
             }
             case "music.queue.select":
                 LJ.Fields(p, "id remember", "id"); LJ.Require(p["remember"] is null || LJ.IsBool(p["remember"]));

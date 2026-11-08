@@ -38,6 +38,8 @@ public static class MusicNativeRecommendationTests
         yield return Case("queue-replacement-fences-inflight-recommendation-before-final-commit", ReplaceDuringRead);
         yield return Case("queue-clear-and-history-restore-retire-recommendation", ClearAndHistory);
         yield return Case("catalog-prepare-does-not-retire-save-shares-lane-play-fences-final-cas", CatalogCommit);
+        yield return Case("catalog-next-preserves-active-queue-and-persistence-fences-late-recommendation", () => NextDuringRecommendation(true));
+        yield return Case("ordinary-next-append-preserves-active-queue-and-persistence-fences-late-recommendation", () => NextDuringRecommendation(false));
         foreach (int read in new[] { 1, 2 })
         {
             int number = read;
@@ -470,6 +472,63 @@ public static class MusicNativeRecommendationTests
         var commit = f.Call("music.catalog.playlist.commit", new { token = S(stage, "token"), action = "play", index = 1, expectedVersion = version });
         await Wait(hold.Entered.Task); Check(!old.IsCurrent(), "Final catalog CAS bypassed queue lane"); hold.Release.TrySetResult();
         await commit; Check(N(await f.Queue(), "total") == 2 && !B(await f.State(), "active"));
+    }
+    private static async Task NextDuringRecommendation(bool catalog)
+    {
+        await using var f = await Fixture.Create();
+        var started = await f.Start(); string session = S(started, "id");
+        var prior = f.Selections.Last(); var before = await f.Queue();
+        string? stage = catalog ? S(await f.Call("music.catalog.playlist.prepare", new { platform = "wy", id = "77" }), "token") : null;
+        Check(prior.IsCurrent() && B(await f.State(), "active"));
+        var late = f.Handler.Hold();
+        var retry = f.Call("music.recommendations.retry", new { id = session });
+        await Wait(late.Entered.Task);
+        int selections = f.Selections.Count, writes = f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace);
+        var durable = f.Store.HoldWrite(MusicLibraryOwner.DocumentNamespace);
+        var append = catalog
+            ? f.Call("music.catalog.playlist.commit", new { token = stage, action = "next", expectedVersion = N(before, "version") })
+            : f.Call("music.queue.append", new { songs = new[] { Song(501), Song(502) }, next = true });
+        await Wait(durable.Entered.Task);
+        Check(!prior.IsCurrent(), "Next edit must fence the old media selection before durable completion");
+        durable.Release.TrySetResult(); var result = await append;
+        var after = await f.Queue();
+        Check(S(result, "currentId") == Fixture.Current(before) && Fixture.Current(after) == Fixture.Current(before));
+        Check(N(after, "mode") == N(before, "mode") && N(after, "version") == N(before, "version") + 1);
+        Check(N(after, "total") == 5 && f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace) == writes + 1);
+        var original = before.GetProperty("entries").EnumerateArray().ToArray();
+        var entries = after.GetProperty("entries").EnumerateArray().ToArray();
+        Check(entries[0].GetRawText() == original[0].GetRawText() &&
+            entries[3].GetRawText() == original[1].GetRawText() && entries[4].GetRawText() == original[2].GetRawText(),
+            "Next must preserve original occurrences around one contiguous inserted segment");
+        Check(entries.Skip(1).Take(2).Select(e => MusicSongFixture.NativeId(e.GetProperty("song"))).SequenceEqual(new[] { "501", "502" }));
+        Check(entries.Select(e => S(e, "id")).Distinct().Count() == 5 && f.Selections.Count == selections);
+        await Until(async () => N(await f.State(), "queueVersion") == N(after, "version"));
+        var state = await f.State();
+        Check(B(state, "active") && S(state, "id") == session && N(state, "batch") == 1,
+            "Next append must retain the live recommendation session like an ordinary edit");
+        string persisted = await f.Store.RawLibrary();
+        using var document = JsonDocument.Parse(persisted);
+        var savedQueue = document.RootElement.GetProperty("entries").EnumerateArray()
+            .Single(e => S(e, "key") == "[\"meowfilm\",\"music\",1,\"local\",\"queue\"]").GetProperty("value");
+        Check(S(savedQueue, "currentId") == Fixture.Current(before) &&
+            savedQueue.GetProperty("entries").EnumerateArray().Select(e => S(e, "id")).SequenceEqual(entries.Select(e => S(e, "id"))),
+            "Durable queue must retain the same ordered occurrences and current selection");
+
+        late.Release.TrySetResult(); await Wait(retry); await Wait(late.Settled.Task);
+        var settled = await f.State(); var queue = await f.Queue();
+        Check(B(settled, "active") && !B(settled, "loading") && N(settled, "batch") == 1 && S(settled, "error") == "");
+        Check(queue.GetProperty("entries").GetRawText() == after.GetProperty("entries").GetRawText() &&
+            Fixture.Current(queue) == Fixture.Current(before) && N(queue, "version") == N(after, "version"));
+        Check(f.Selections.Count == selections && f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace) == writes + 1 &&
+            await f.Store.RawLibrary() == persisted, "Late recommendation must not write or restart media");
+        var cancelled = await f.Call("music.recommendations.cancel", new { id = session });
+        Check(!B(cancelled, "active"));
+        queue = await f.Queue();
+        Check(queue.GetProperty("entries").GetRawText() == after.GetProperty("entries").GetRawText() &&
+            Fixture.Current(queue) == Fixture.Current(before) && N(queue, "version") == N(after, "version") &&
+            N(queue, "mode") == N(before, "mode"));
+        Check(await f.Store.RawLibrary() == persisted && f.Selections.Count == selections,
+            "Leaving recommendations must retain the explicitly appended queue without a media callback");
     }
     private static async Task AccountReadDrain(int number)
     {

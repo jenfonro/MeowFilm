@@ -177,7 +177,8 @@
    <local:EntryCard Margin="0,0,16,0" OpenRequested="Entry_Open" PlayRequested="CardPlay_Click"/>
   </DataTemplate>
   <DataTemplate x:Key="Catalog.PlaylistCard">
-   <Button x:Name="PlaylistHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
+   <Button x:Name="PlaylistHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" ContextMenuOpening="CardMenu_Opening" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
+    <Button.ContextMenu><ContextMenu Style="{DynamicResource MeowFilm.ContextMenu}"/></Button.ContextMenu>
     <StackPanel>
      <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" Background="#E7EAF0" local:CardClip.Radius="8">
       <art:ArtworkImage Address="{Binding Cover}"/>
@@ -202,7 +203,8 @@
    </Button>
   </DataTemplate>
   <DataTemplate x:Key="Catalog.PlaylistRow">
-   <Button Tag="{Binding}" Click="Card_Click" IsEnabled="{Binding CanOpen}" Style="{StaticResource Catalog.Flat}" Margin="0,0,0,8" AutomationProperties.Name="{Binding Title}">
+   <Button Tag="{Binding}" Click="Card_Click" ContextMenuOpening="CardMenu_Opening" IsEnabled="{Binding CanOpen}" Style="{StaticResource Catalog.Flat}" Margin="0,0,0,8" AutomationProperties.Name="{Binding Title}">
+    <Button.ContextMenu><ContextMenu Style="{DynamicResource MeowFilm.ContextMenu}"/></Button.ContextMenu>
     <Grid Height="64">
      <Grid.ColumnDefinitions><ColumnDefinition Width="64"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
      <art:ArtworkImage Address="{Binding Cover}" Width="56" Height="56" HorizontalAlignment="Left" local:CardClip.Radius="4"/>
@@ -252,7 +254,8 @@
    </Button>
   </DataTemplate>
   <DataTemplate x:Key="Catalog.SongRow">
-   <Border x:Name="SongRow" Height="84" Margin="0,0,16,0" CornerRadius="12" local:CardMotion.Enabled="True">
+   <Border x:Name="SongRow" ContextMenuOpening="CardMenu_Opening" Height="84" Margin="0,0,16,0" CornerRadius="12" local:CardMotion.Enabled="True">
+    <Border.ContextMenu><ContextMenu Style="{DynamicResource MeowFilm.ContextMenu}"/></Border.ContextMenu>
     <Border.Style><Style TargetType="Border"><Setter Property="Background" Value="Transparent"/><Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger></Style.Triggers></Style></Border.Style>
     <Grid>
     <Border CornerRadius="12" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=SongRow}">
@@ -415,7 +418,7 @@
    </Style>
  <DataTemplate x:Key="Catalog.SectionsTemplate">
       <StackPanel Margin="0,0,0,32">
-      <DockPanel Height="24" Margin="0,0,0,18"><DockPanel.Style><Style TargetType="DockPanel"><Style.Triggers><DataTrigger Binding="{Binding Title}" Value=""><Setter Property="Visibility" Value="Collapsed"/><Setter Property="Margin" Value="0"/></DataTrigger></Style.Triggers></Style></DockPanel.Style>
+      <DockPanel MinHeight="24" Margin="0,0,0,18"><DockPanel.Style><Style TargetType="DockPanel"><Style.Triggers><DataTrigger Binding="{Binding Title}" Value=""><Setter Property="Visibility" Value="Collapsed"/><Setter Property="Margin" Value="0"/></DataTrigger></Style.Triggers></Style></DockPanel.Style>
        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Visibility="{Binding (local:MusicCatalogSurface.IsHome),RelativeSource={RelativeSource Self},Converter={StaticResource Visible}}">
         <Button Click="BatchRefresh_Click" Style="{StaticResource Catalog.Refresh}" IsEnabled="{Binding DataContext.CanCatalogBrowse,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" AutomationProperties.Name="刷新推荐"/>
        </StackPanel>

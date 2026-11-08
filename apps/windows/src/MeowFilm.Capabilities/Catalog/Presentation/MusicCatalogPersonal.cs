@@ -238,9 +238,11 @@ public sealed partial class MusicCapability
     }
     public Task QueueCatalogCardAsync(MusicCatalogCard card)
     {
-        if (!CanEdit || !ContainsCatalogCard(card) || !card.CanFavorite) return Task.CompletedTask;
+        if (!CanEdit || !ContainsCatalogCard(card)) return Task.CompletedTask;
+        if (card.Kind == "playlist") return CatalogPlaylistActionAsync("next", 0, entry: card);
+        if (!card.CanFavorite) return Task.CompletedTask;
         try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
-        SelectedSong = card.Song; return AppendNextAsync();
+        return AppendSongNextAsync(card.Song);
     }
     public Task HeartbeatCatalogCardAsync(MusicCatalogCard card)
     {

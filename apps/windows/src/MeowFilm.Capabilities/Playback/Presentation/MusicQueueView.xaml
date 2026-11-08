@@ -12,6 +12,23 @@
    <ResourceDictionary.MergedDictionaries>
     <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
    </ResourceDictionary.MergedDictionaries>
+   <Style x:Key="Queue.Text" TargetType="TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
+    <Style.Triggers>
+     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
+     <MultiDataTrigger><MultiDataTrigger.Conditions>
+      <Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=(desktop:DesktopTheme.IsHighContrast)}" Value="True"/>
+      <Condition Binding="{Binding IsMouseOver,RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True"/>
+     </MultiDataTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/></MultiDataTrigger>
+     <MultiDataTrigger><MultiDataTrigger.Conditions>
+      <Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=(desktop:DesktopTheme.IsHighContrast)}" Value="True"/>
+      <Condition Binding="{Binding IsKeyboardFocusWithin,RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True"/>
+     </MultiDataTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/></MultiDataTrigger>
+    </Style.Triggers>
+   </Style>
+   <Style TargetType="TextBlock" BasedOn="{StaticResource Queue.Text}">
+    <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+   </Style>
   </ResourceDictionary>
  </UserControl.Resources>
  <Grid Margin="20,18,8,14">
@@ -21,7 +38,7 @@
    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
     <TextBlock Text="播放列表" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center"/>
-    <TextBlock Text="{Binding QueueSurfaceCountText}" FontSize="12" Foreground="{DynamicResource MeowFilm.Brush.Muted}"
+    <TextBlock Text="{Binding QueueSurfaceCountText}" FontSize="12" Style="{StaticResource Queue.Text}"
                Margin="5,2,0,0" VerticalAlignment="Center"/>
    </StackPanel>
    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
@@ -50,7 +67,11 @@
       <ContentPresenter/>
      </Border>
      <ControlTemplate.Triggers>
-      <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="RowSurface" Property="Background" Value="{DynamicResource MeowFilm.Brush.Hover}"/></Trigger>
+      <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="RowSurface" Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemHover}"/></Trigger>
+      <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="RowSurface" Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemHover}"/></Trigger>
+      <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter TargetName="RowSurface" Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger>
+      <MultiTrigger><MultiTrigger.Conditions><Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsMouseOver" Value="True"/></MultiTrigger.Conditions><Setter TargetName="RowSurface" Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
+      <MultiTrigger><MultiTrigger.Conditions><Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsKeyboardFocusWithin" Value="True"/></MultiTrigger.Conditions><Setter TargetName="RowSurface" Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
      </ControlTemplate.Triggers>
     </ControlTemplate></Setter.Value></Setter>
    </Style></ListBox.ItemContainerStyle>
@@ -58,40 +79,51 @@
     <Grid x:Name="QueueRow" Height="58" Background="Transparent">
      <Grid.ColumnDefinitions><ColumnDefinition Width="48"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/><ColumnDefinition Width="30"/></Grid.ColumnDefinitions>
      <Button Tag="{Binding}" Click="Play_Click" Grid.ColumnSpan="3" Background="Transparent" BorderThickness="0"
-             Padding="0" Margin="0" HorizontalContentAlignment="Stretch" AutomationProperties.Name="{Binding Title}">
+             Padding="0" Margin="0" HorizontalContentAlignment="Stretch" FocusVisualStyle="{DynamicResource MeowFilm.FocusVisual}" AutomationProperties.Name="{Binding Title}">
+      <Button.Template><ControlTemplate TargetType="Button"><ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Center"/></ControlTemplate></Button.Template>
       <Grid>
        <Grid.ColumnDefinitions><ColumnDefinition Width="48"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
        <Grid Width="42" Height="42" HorizontalAlignment="Left" local:CardClip.Radius="4">
         <art:ArtworkImage Address="{Binding Cover}"/>
-        <Border Background="#60000000" Opacity="0">
+        <Border Background="#60000000">
          <Path Data="M0,0 L0,18 L14,9 Z" Fill="White" Width="14" Height="18"
                HorizontalAlignment="Center" VerticalAlignment="Center"/>
          <Border.Style><Style TargetType="Border"><Setter Property="Opacity" Value="0"/>
-          <Style.Triggers><DataTrigger Binding="{Binding IsMouseOver,ElementName=QueueRow}" Value="True"><Setter Property="Opacity" Value="1"/></DataTrigger></Style.Triggers>
+          <Style.Triggers>
+           <DataTrigger Binding="{Binding IsMouseOver,ElementName=QueueRow}" Value="True"><Setter Property="Opacity" Value="1"/></DataTrigger>
+           <DataTrigger Binding="{Binding IsKeyboardFocusWithin,ElementName=QueueRow}" Value="True"><Setter Property="Opacity" Value="1"/></DataTrigger>
+          </Style.Triggers>
          </Style></Border.Style>
         </Border>
        </Grid>
        <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="8,0,8,0">
         <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14">
-         <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-          <Style.Triggers><DataTrigger Binding="{Binding IsCurrent}" Value="True"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Accent}"/></DataTrigger></Style.Triggers>
+         <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Queue.Text}">
+          <Style.Triggers>
+           <DataTrigger Binding="{Binding IsCurrent}" Value="True"><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger>
+           <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="False"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/></Trigger>
+           <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding IsCurrent}" Value="True"/><Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=(desktop:DesktopTheme.IsHighContrast)}" Value="False"/></MultiDataTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Accent}"/></MultiDataTrigger>
+          </Style.Triggers>
          </Style></TextBlock.Style>
         </TextBlock>
         <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="12"
-                   Foreground="{DynamicResource MeowFilm.Brush.Muted}" Margin="0,3,0,0"/>
+                   Style="{StaticResource Queue.Text}" Margin="0,3,0,0"/>
        </StackPanel>
        <TextBlock Grid.Column="2" Text="{Binding Duration}" VerticalAlignment="Center" HorizontalAlignment="Right"
-                  FontSize="12" Foreground="{DynamicResource MeowFilm.Brush.Muted}"/>
+                  FontSize="12" Style="{StaticResource Queue.Text}"/>
       </Grid>
      </Button>
      <Button Grid.Column="3" Tag="{Binding}" Click="Remove_Click" Content="&#xE711;"
-             Width="28" Height="28" Margin="0"
+             Width="28" Height="28" Margin="0" Background="Transparent" BorderThickness="0"
              VerticalAlignment="Center" AutomationProperties.Name="从播放列表移除">
       <Button.Style><Style TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}">
        <Setter Property="Opacity" Value="0"/>
        <Style.Triggers>
         <DataTrigger Binding="{Binding IsMouseOver,ElementName=QueueRow}" Value="True"><Setter Property="Opacity" Value=".8"/></DataTrigger>
         <DataTrigger Binding="{Binding IsKeyboardFocusWithin,ElementName=QueueRow}" Value="True"><Setter Property="Opacity" Value=".8"/></DataTrigger>
+        <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/><Setter Property="Opacity" Value="1"/></Trigger>
+        <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=(desktop:DesktopTheme.IsHighContrast)}" Value="True"/><Condition Binding="{Binding IsMouseOver,RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/></MultiDataTrigger>
+        <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=(desktop:DesktopTheme.IsHighContrast)}" Value="True"/><Condition Binding="{Binding IsKeyboardFocusWithin,RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/></MultiDataTrigger>
        </Style.Triggers>
       </Style></Button.Style>
      </Button>

@@ -32,7 +32,7 @@ public sealed partial class MusicCapability
     private Task CatalogPlaylistActionAsync(string action, int index, string? expectedSongId = null, string? memberId = null,
         MusicCatalogCard? entry = null, string? sourcePlaylistId = null)
     {
-        if (entry is null ? !CanCatalogAction : !CanCatalogBrowse || !entry.CanPlay || !ContainsCatalogCard(entry)) return Task.CompletedTask;
+        if (entry is null ? !CanCatalogAction : !CanCatalogBrowse || !(action == "save" ? entry.CanOpen : entry.CanPlay) || !ContainsCatalogCard(entry)) return Task.CompletedTask;
         var parts = entry is null ? location.Route.Split('/', 3) : new[] { "catalog-playlist", entry.Platform, Uri.EscapeDataString(sourcePlaylistId ?? entry.ActionId) };
         if (parts.Length != 3 || index < 0) return Task.CompletedTask;
         var platform = parts[1]; var id = Uri.UnescapeDataString(parts[2]);
@@ -43,7 +43,7 @@ public sealed partial class MusicCapability
         {
             RequireCatalogContent();
             long version = 0;
-            if (action == "play")
+            if (action is "play" or "next")
             {
                 var queue = await Call("music.queue.get", new { offset = 0, limit = 1 }, signal);
                 version = MusicDto.Integer(queue, "version");
@@ -64,22 +64,30 @@ public sealed partial class MusicCapability
                     if (!currentAction()) return;
                     RequireCatalogContent();
                     var parameters = new Dictionary<string, object?> { ["token"] = token, ["action"] = action };
-                    if (action == "play")
+                    if (action is "play" or "next")
                     {
-                        if (memberId is not null) parameters["memberId"] = memberId;
-                        else if (sourcePlaylistId is null) parameters["index"] = index;
+                        if (action == "play")
+                        {
+                            if (memberId is not null) parameters["memberId"] = memberId;
+                            else if (sourcePlaylistId is null) parameters["index"] = index;
+                        }
                         parameters["expectedVersion"] = version;
                     }
                     if (expectedSongId is not null) parameters["expectedSongId"] = expectedSongId;
                     try
                     {
-                        if (action == "play") queueEpoch++;
+                        if (action is "play" or "next") queueEpoch++;
                         var result = await CallSettledReceipt("music.catalog.playlist.commit", parameters, signal);
-                        if (action == "play")
+                        if (action is "play" or "next")
                         {
                             MusicDto.Require(MusicDto.Integer(result, "version") > version);
+                            if (action == "next")
+                            {
+                                ObservePreloadQueueMutation(result);
+                                InvalidateQueueSurface();
+                            }
                             await ReadQueue(lifetime.Token);
-                            if (currentAction()) await StartCurrent(signal);
+                            if (action == "play" && currentAction()) await StartCurrent(signal);
                         }
                         else
                         {
@@ -88,10 +96,14 @@ public sealed partial class MusicCapability
                             if (currentAction()) { status = "已保存到本地歌单"; Changed(nameof(Status)); }
                         }
                     }
-                    catch (OperationCanceledException) { }
+                    catch (OperationCanceledException)
+                    {
+                        if (action == "next") await RecoverNextQueueAsync();
+                    }
                     catch (Exception error)
                     {
                         if (action == "play") queueSaved = false;
+                        if (action == "next") await RecoverNextQueueAsync();
                         if (currentAction()) PublishCatalogActionError(error);
                     }
                 });
@@ -103,6 +115,17 @@ public sealed partial class MusicCapability
                 catch { /* Native stage TTL/invalidate/close also release the bounded stage. */ }
             }
         }, card: entry);
+    }
+    private async Task RecoverNextQueueAsync()
+    {
+        queueSaved = false;
+        // A missing commit receipt may hide a durable mutation, including while
+        // the old preload is still awaiting peekNext and has no queue version.
+        CancelMusicPreload();
+        RefreshBindings();
+        InvalidateQueueSurface();
+        try { await ReadQueue(lifetime.Token); }
+        catch { /* Retain the conservative gate until an authoritative snapshot succeeds. */ }
     }
     private Task CatalogBatchActionAsync(string action, int index)
     {

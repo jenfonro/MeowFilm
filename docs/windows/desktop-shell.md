@@ -24,6 +24,12 @@ Desktop 只拥有原生 WPF 壳、导航/历史、设置展示、窗口及界面
 
 资源为 `/MeowFilm.Desktop;component/Theme.xaml`。样式覆盖焦点、键盘、悬停、按下、取消、禁用、卸载、高对比、减少动画与缩放。能力可覆盖明确语义色，不复制未知资源或按领域名分支。通知经 NoticeOutlet/NoticeStack，不添加解释性文字。
 
+应用菜单使用 `MeowFilm.ContextMenu`／`MeowFilm.MenuItem`：根菜单与子菜单共用圆角、阴影留白及 `MeowFilm.FloatingSurface`；动态子项的局部样式须 `BasedOn` 公共项。模板保留富内容 Header、访问键、图标、快捷键文字、普通可勾选项和 WPF 子菜单键盘逻辑。音质仅以公共项派生当前背景与字重，不另建模板或画勾。Shell 对自身及 Owner 链归属该 Shell 的窗口中的 WPF 自动编辑菜单及其内部派生项目只应用外观，不新建、删减或替换剪贴板、拼写／IME 项及 CommandTarget；原生默认菜单没有提供的操作也不自行增加；不接管无 Shell owner 的独立窗口。
+
+底栏空白使用 `PlayerSurfaceInput` 配对同一轮左键 Down/Up，按下时记录活跃窗口及浮层／队列状态；按钮、滑条等不通过此准入。所属窗口和已打开浮层的 HWND hook 观察 `WM_MOUSEACTIVATE` 的左键触发消息与原生按下，鼠标激活窗口的那一轮只激活；右键／中键激活不占用后续左键。关闭层不使本轮重新准入，不使用延时冷却。队列事实由 Shell 以继承附加属性提供；已活跃窗口中按下底栏空白关闭队列并消费该轮。隐藏取消资格，卸载注销 InputManager 和 HWND hook。合成消息与离屏路由测试只证明适配和状态契约，不证明真实桌面捕获／激活消息实序。
+
+队列外壳四角圆角且保留阴影溢出空间，内层 `QueueHost` 单独按圆角几何裁剪内容；矩形 `ClipToBounds` 不承担圆角裁剪。行高、虚拟化、播放和删除动作保留，整行悬停／键盘焦点显示浅色底与封面播放图标，高对比使用系统窗口／高亮色，当前歌曲另以字重识别。
+
 全应用不提供普通文字悬停提示，包括按钮说明、歌名／片名全称、截断简介、音源信息和禁用内容说明；仅保留进度条的时间预览。控件的无障碍名称、菜单、内容预览和真实操作错误通知不受影响。
 
 普通页面由窗口提供应用渐变背景，侧栏叠加白色40%层与右分隔线，内容区和底部 `PlayerFrame` 保持透明；播放器页由其根视图提供当前封面派生背景（高对比时为系统窗口色），详情与自有底部播放控件透明。播放控件只通过 `Capability.Player.*`（前景、正文、次要正文、悬停、按下、进度轨道）适配所在底色，播放器页仅为自身底部控件替换这一组；弹层是独立浮层，保留自己的表面色。
@@ -40,6 +46,7 @@ Desktop 只拥有原生 WPF 壳、导航/历史、设置展示、窗口及界面
 - `AppAppearance` 独占原生文档 `app.appearance.v1`，严格字段为 `{schema:1, themeColor:"#RRGGBB"}`。缺失只采用默认、不写盘；损坏或未知版本不覆盖，通知并允许重新读取。保存使用读取指纹 CAS，失败后权威重读、不重放写入；已接受写入在 App 关闭前实际排空，取消关闭可恢复准入。该 namespace 不开放给脚本桥。
 - `MeowFilm.Brush.AppBackground` 只属于壳的普通页面背景。默认六段纵向渐变为 `#E6F3FB/#EAF3F7/#F7F7F3/#E9ECEF/#DBE3EA/#D3DDE6`，位置 `0/.18/.38/.60/.80/1`；自定义色按各层固定权重着色，保留浅底与中性过渡，不铺纯色。侧栏使用白色40%层与细边线；普通页主操作为绿色，错误、删除、收藏心形及平台标识可保留语义红。
 - 全屏音乐播放器与影片播放页仍拥有独立背景资源，不读取 AppBackground；底栏背景/进度仍跟随歌曲或固定播放器配色，主播放按钮使用绿色。高对比仍优先系统资源。
+- `FloatingSurface`、`ItemHover`、`ItemSelected`、`InputSurface` 从同一 `ThemeColor` 派生浅色菜单／弹层、悬停、当前及搜索底色。AppHost 当前仅装配一个 Shell 和一个 appearance owner；同一 UI dispatcher 的重复 Theme 字典与脱离视觉树的 Popup 引用同一组颜色 Brush。Brush 的 Color 绑定到派生值，防止 WPF 模板／资源封存冻结后不能更新；未复制主题设置或遍历控件树。这不是同一 dispatcher 多个独立主题 owner 的契约。高对比由控件样式切到系统色。
 - `SettingsScrollChrome.xaml` 仅用于设置页和其中列表，常显且不创建空闲计时器；普通页保留 `OverlayScrollChrome` 的原自动隐藏机制。
 
 `DialogPlacement.Centered` 为业务表单Popup提供窗口内容区居中、移动/缩放重定位和所属控件退场清理；其PlacementTarget仍用于上下文/焦点，不再决定表单位置。锚点菜单、调色盘不启用此机制。`ColorSelection`、设置下拉框和栏目间距资源由Desktop共用，业务设置页只负责提供选项和提交至各自owner。

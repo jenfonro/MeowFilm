@@ -482,9 +482,10 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         });
     }
 
-    public Task FavoriteAsync()
+    public Task FavoriteAsync() => FavoriteSongAsync(selectedSong);
+    private Task FavoriteSongAsync(SongRow? song)
     {
-        var song = selectedSong; var origin = loadGeneration;
+        var origin = loadGeneration;
         return RunAsync(async () =>
         {
             if (song is null) return;
@@ -494,10 +495,10 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             await RefreshAfterEdit(origin);
         });
     }
-    public Task AppendNextAsync()
+    public Task AppendNextAsync() => AppendSongNextAsync(selectedSong);
+    private Task AppendSongNextAsync(SongRow? song)
     {
         InvalidateCatalogAction();
-        var song = selectedSong; var origin = loadGeneration;
         var queueContext = CaptureFeedbackContext();
         return RunAsync(async () =>
         {

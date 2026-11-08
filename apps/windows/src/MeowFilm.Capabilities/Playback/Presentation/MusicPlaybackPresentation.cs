@@ -19,7 +19,8 @@ internal sealed class MusicPlaybackPresentation(MusicCapability module, Action<s
     private double position, duration = 1;
     private double? rate;
     private int volume;
-    private string source = "", quality = "", sourceQuality = "", glyph = "▶", positionText = "0:00", durationText = "0:00";
+    private string source = "", quality = "", sourceQuality = "", sourceSymbol = "", sourceDescription = "",
+        glyph = "▶", positionText = "0:00", durationText = "0:00";
 
     internal void RefreshPosition()
     {
@@ -33,6 +34,8 @@ internal sealed class MusicPlaybackPresentation(MusicCapability module, Action<s
         Publish(ref playing, module.IsPlaying, nameof(MusicCapability.IsPlaying));
         Publish(ref source, module.CurrentSource, nameof(MusicCapability.CurrentSource));
         Publish(ref sourceQuality, module.CurrentSourceQuality, nameof(MusicCapability.CurrentSourceQuality));
+        Publish(ref sourceSymbol, module.CurrentSourceSymbol, nameof(MusicCapability.CurrentSourceSymbol));
+        Publish(ref sourceDescription, module.CurrentSourceDescription, nameof(MusicCapability.CurrentSourceDescription));
         Publish(ref quality, module.CurrentQualityLabel, nameof(MusicCapability.CurrentQualityLabel));
         Publish(ref hasQuality, module.HasQualityButton, nameof(MusicCapability.HasQualityButton));
         Publish(ref glyph, module.PlayGlyph, nameof(MusicCapability.PlayGlyph));

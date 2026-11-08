@@ -152,18 +152,36 @@ public static partial class MusicUiTests
             await using var f = await Fixture.Create(output: output);
             await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var player = (MusicPlayerView)f.Module.PlayerView;
-            var button = (Button)player.FindName("MoreButton");
-            Equal("更多", AutomationProperties.GetName(button));
-            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            var rate = (MenuItem)button.ContextMenu.Items[0];
-            True(rate.Header.ToString()!.StartsWith("播放倍速"), "rate is a more-menu action");
-            var slider = (Slider)player.FindName("RateSlider");
-            Equal(0.5, slider.Minimum); Equal(3d, slider.Maximum); Equal(0.1, slider.TickFrequency);
-            True(slider.IsSnapToTickEnabled, "keyboard/mouse tenths");
-            await f.Module.ChangePlaybackRateAsync(1.3); await Drain();
-            True(button.ToolTip is null, "the footer has no explanatory hover hint");
-            Equal(1.3, slider.Value);
-            True(!f.Module.EffectivePlaybackRateVerified, "requested != measured");
+            var window = new Window { Content = player, Width = 1110, Height = 100,
+                Left = -32000, Top = -32000, ShowActivated = false, ShowInTaskbar = false,
+                WindowStyle = WindowStyle.None };
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain();
+                var popup = (Popup)player.FindName("RatePopup");
+                True(player.IsLoaded && popup.IsLoaded, "rate panel belongs to the actually loaded offscreen player");
+                var button = (Button)player.FindName("MoreButton");
+                Equal("更多", AutomationProperties.GetName(button));
+                button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                var rate = (MenuItem)button.ContextMenu.Items[0];
+                True(button.ContextMenu.IsOpen, "more menu is actually open before choosing rate");
+                True(ReferenceEquals(button.ContextMenu.Style, player.FindResource("MeowFilm.ContextMenu")),
+                    "more uses the shared menu surface");
+                True(rate.Header.ToString()!.StartsWith("播放倍速"), "rate is a more-menu action");
+                var slider = (Slider)player.FindName("RateSlider");
+                Equal(0.5, slider.Minimum); Equal(3d, slider.Maximum); Equal(0.1, slider.TickFrequency);
+                True(slider.IsSnapToTickEnabled, "keyboard/mouse tenths");
+                await f.Module.ChangePlaybackRateAsync(1.3); await Drain();
+                True(button.ToolTip is null, "the footer has no explanatory hover hint");
+                Equal(1.3, slider.Value);
+                True(!f.Module.EffectivePlaybackRateVerified, "requested != measured");
+                rate.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                True(!button.ContextMenu.IsOpen && popup.IsOpen, "rate action hands off from menu to its panel");
+                True(ReferenceEquals(((Border)popup.Child).Background, player.FindResource("MeowFilm.Brush.FloatingSurface")),
+                    "rate panel uses the same floating palette");
+                popup.IsOpen = false;
+            }
+            finally { player.Deactivate(); window.Content = null; window.Close(); await Drain(); }
         });
     }
 

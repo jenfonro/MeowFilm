@@ -122,9 +122,10 @@ public sealed partial class MusicCapability
             await ReadQueue(lifetime.Token); await StartCurrent(lifetime.Token);
         });
     }
-    public Task AddSelectionToPlaylistAsync(string id)
+    public Task AddSelectionToPlaylistAsync(string id) => AddSongToPlaylistAsync(selectedSong, id);
+    private Task AddSongToPlaylistAsync(SongRow? song, string id)
     {
-        var song = selectedSong; var destination = Playlists.FirstOrDefault(row => row.Id == id); var origin = loadGeneration;
+        var destination = Playlists.FirstOrDefault(row => row.Id == id); var origin = loadGeneration;
         return RunAsync(async () =>
         {
             if (song is null || destination is null) return;

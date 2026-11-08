@@ -327,23 +327,24 @@ public sealed partial class MusicCapability
         {
             return
             [
-                Section("单曲", songCards.Take(6).ToArray()),
-                Section("歌单", playlistCards.Take(6).ToArray())
+                Section("songs", "单曲", songCards.Take(6).ToArray()),
+                Section("playlists", "歌单", playlistCards.Take(6).ToArray())
             ];
         }
         if (searchView == "songs")
         {
-            return [Section("", songCards)];
+            return [Section("songs", "", songCards)];
         }
-        return [Section("", playlistCards)];
+        return [Section("playlists", "", playlistCards)];
     }
 
-    private MusicCatalogSection Section(string title, MusicCatalogCard[] cards)
+    private MusicCatalogSection Section(string kind, string title, MusicCatalogCard[] cards)
     {
-        if (CatalogSections.FirstOrDefault(section => section.Title == title) is { } existing &&
+        var id = "catalog-search:" + kind;
+        if (CatalogSections.FirstOrDefault(section => section.Id == id && section.Title == title) is { } existing &&
             existing.Items.SequenceEqual(cards, ReferenceEqualityComparer.Instance))
             return existing;
-        return new(title, cards);
+        return new(title, cards, Id: id);
     }
 
     private bool ApplySearchSections(MusicCatalogSection[] sections)
@@ -411,6 +412,7 @@ public sealed partial class MusicCapability
     {
         if (publishing || !IsSearchPage || stopping) return Task.CompletedTask;
         if (tab is not (SearchOverview or "songs" or "playlists")) return Task.CompletedTask;
+        if (searchView != tab) InvalidateCatalogAction();
         RememberSearch();
         searchView = tab;
         searchKind = tab == "playlists" ? "playlists" : "songs";

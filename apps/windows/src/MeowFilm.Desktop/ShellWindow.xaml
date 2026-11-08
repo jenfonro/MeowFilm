@@ -9,6 +9,7 @@
         UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display"
         TextOptions.TextRenderingMode="Auto"
         Loaded="OnLoaded" PreviewKeyDown="OnPreviewKeyDown"
+        local:PlayerSurfaceInput.DismissRequested="OnQueueDismissClick"
         AutomationProperties.Name="meowfilm">
     <Window.Resources>
         <ResourceDictionary>
@@ -221,7 +222,7 @@
                                  AutomationProperties.AcceleratorKey="Ctrl+F">
                             <TextBox.Style><Style TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
                                 <Setter Property="BorderBrush" Value="#E3E6ED"/>
-                                <Setter Property="Background" Value="#EFF1F6"/>
+                                <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.InputSurface}"/>
                             </Style></TextBox.Style>
                         </TextBox>
                         <Button x:Name="SearchButton" Content="&#xE721;" Margin="2,0,0,0"
@@ -283,15 +284,12 @@
                     Focusable="False" IsTabStop="False" Click="OnQueueDismissClick"
                     AutomationProperties.Name="收起播放列表" />
             <Border x:Name="QueueSurface" Grid.RowSpan="2" Grid.ColumnSpan="2" Panel.ZIndex="30"
-                    Width="386" Margin="0,76,0,16" HorizontalAlignment="Right"
-                    Background="{DynamicResource MeowFilm.Brush.Surface}" CornerRadius="12,0,0,12"
-                    Visibility="Collapsed" ClipToBounds="True">
-                <Border.Effect>
-                    <DropShadowEffect BlurRadius="24" ShadowDepth="0" Opacity=".22" Color="#44000000" />
-                </Border.Effect>
+                    Width="386" Margin="0,76,12,16" HorizontalAlignment="Right"
+                    Style="{StaticResource MeowFilm.FloatingSurface}" CornerRadius="12"
+                    Visibility="Collapsed">
                 <Border.RenderTransform><TranslateTransform x:Name="QueueTransform" /></Border.RenderTransform>
                 <ContentControl x:Name="QueueHost" HorizontalContentAlignment="Stretch"
-                                VerticalContentAlignment="Stretch" Focusable="False" IsTabStop="False" />
+                                VerticalContentAlignment="Stretch" Focusable="False" IsTabStop="False" SizeChanged="OnQueueHostSizeChanged" />
             </Border>
 
             <!-- Auto-sized layout row, never an overlay on scrolling content. No player is created by the shell. -->

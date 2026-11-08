@@ -24,10 +24,11 @@ namespace MeowFilm.Windows.Tests;
 
 // Real native dummy and real domain modules/owners; only upstream resolution and
 // origin sockets are synthetic. No Node, external accounts or production endpoints.
-public static class PlaybackRecoveryTests
+public static partial class PlaybackRecoveryTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in CatalogNextRecoveryCases()) yield return test;
         foreach (var test in SelectionRegressionCases()) yield return test;
         foreach (var test in SourceLifecycleRegressionCases()) yield return test;
         foreach (var test in PlaybackBoundaryRegressionCases()) yield return test;
@@ -372,6 +373,94 @@ public static class PlaybackRecoveryTests
                     "fixture", f.NextSongId!, new string('a', 64), default);
                 Check(absent is null && !Directory.EnumerateFiles(f.CacheRoot!, "*.audio").Any(),
                     action + " cannot publish stale prepared bytes");
+            });
+        foreach (bool holdPeek in new[] { true, false })
+            yield return Test(holdPeek
+                ? "playlist next cancels an unobserved old peek before queue reconciliation"
+                : "playlist next cancels observed physical preparation before queue reconciliation", async () =>
+            {
+                await using var f = await ControlledMusicFixture.Create(playbackCache: true,
+                    catalogHttp: new PlaylistNextHttp());
+                await f.Module.NavigateAsync("catalog-home", default);
+                await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
+                var card = f.Module.CatalogSections.SelectMany(section => section.Items)
+                    .Single(item => item.Kind == "playlist");
+                await f.PlayPair();
+                await Until(() => f.App.HistoryWrites == 1 && f.App.ConfirmWrites == 1, "playlist next current media");
+                var probe = f.App.PlaylistNext = new PlaylistNextProbe(holdPeek);
+                f.HoldValidation = !holdPeek;
+                f.Output.SetPosition(105);
+                MusicAudioFileCache.PreparedFile? prepared = null;
+                if (holdPeek) await probe.PeekEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                else prepared = await f.WaitForPrepared();
+                var attempt = Field(f.Module, "musicPreload") ?? throw new InvalidOperationException("missing old preload");
+                var oldToken = ((CancellationTokenSource)Field(attempt, "Cancellation")!).Token;
+                Check((bool)Field(attempt, "QueueObserved")! == !holdPeek && !oldToken.IsCancellationRequested,
+                    "fixture stops at the required unobserved peek or observed physical preparation boundary");
+                if (holdPeek)
+                    Check(f.Prepared is null && !f.ValidationEntered.Task.IsCompleted &&
+                        !probe.PeekToken.IsCancellationRequested, "old peek has not reached physical preparation");
+                else
+                    Check(!prepared!.Work.IsCompleted && !f.ValidationToken.IsCancellationRequested,
+                        "observed preparation is physically suspended before validation completes");
+                var before = (f.Output.Identity, f.Output.NetworkOpens, f.Output.ReadOpens, f.Output.Reopens,
+                    f.Output.Commits, f.Output.CandidateStarts, f.App.HistoryWrites, f.App.ConfirmWrites);
+                int resolutions = f.App.Resolutions.Count;
+                var action = f.Module.QueueCatalogCardAsync(card);
+                try
+                {
+                    await probe.QueueReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    Check(probe.CommitReceipt is { } receipt && receipt.GetProperty("ok").GetBoolean() &&
+                        probe.CatalogMethods.SequenceEqual(new[] { "music.catalog.playlist.prepare", "music.catalog.playlist.commit" }),
+                        "public card action completed one real native prepare and next commit before reconciliation");
+                    Check(probe.CommitInput is { } input && input.GetProperty("action").GetString() == "next" &&
+                        input.EnumerateObject().Select(property => property.Name).OrderBy(name => name)
+                            .SequenceEqual(new[] { "action", "expectedVersion", "token" }),
+                        "consumer used the actual token-only next commit contract");
+                    Check(!action.IsCompleted && !probe.ReleaseQueueRead.Task.IsCompleted && oldToken.IsCancellationRequested,
+                        "successful next cancels the old attempt before any post-commit queue snapshot can return");
+                    if (holdPeek) Check(probe.PeekToken.IsCancellationRequested, "in-flight old peek loses authority immediately");
+                    else Check(f.ValidationToken.IsCancellationRequested && f.Prepared is null,
+                        "in-flight physical preparation loses authority and its playable handle immediately");
+                    Check(before == (f.Output.Identity, f.Output.NetworkOpens, f.Output.ReadOpens, f.Output.Reopens,
+                        f.Output.Commits, f.Output.CandidateStarts, f.App.HistoryWrites, f.App.ConfirmWrites) &&
+                        f.Output.HasMedia && f.Output.IsPlaying, "playlist next does not restart or republish current media");
+
+                    // Both old operations deliberately return after cancellation while the new queue read is still held.
+                    probe.ReleasePeek.TrySetResult(); f.ValidationRelease.TrySetResult();
+                    if (prepared is not null) await prepared.Work.WaitAsync(TimeSpan.FromSeconds(5));
+                    await Until(() => Field(f.Module, "musicPreload") is null, "late old preload is drained");
+                    await using var absent = await f.Cache!.OpenAsync("fixture", f.NextSongId!, new string('a', 64), default);
+                    Check(absent is null && f.Prepared is null && !Directory.EnumerateFiles(f.CacheRoot!, "*.audio").Any() &&
+                        f.Output.HasMedia && f.Output.IsPlaying &&
+                        f.App.Resolutions.Count == resolutions &&
+                        before == (f.Output.Identity, f.Output.NetworkOpens, f.Output.ReadOpens, f.Output.Reopens,
+                            f.Output.Commits, f.Output.CandidateStarts, f.App.HistoryWrites, f.App.ConfirmWrites),
+                        "late old peek or physical validation cannot resolve again publish cached bytes or reopen current media");
+                }
+                finally
+                {
+                    probe.ReleasePeek.TrySetResult(); f.ValidationRelease.TrySetResult(); probe.ReleaseQueueRead.TrySetResult();
+                    await action.WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                Check(probe.CatalogMethods.SequenceEqual(new[] { "music.catalog.playlist.prepare",
+                    "music.catalog.playlist.commit", "music.catalog.playlist.discard" }), "committed stage is released once");
+                var queue = await f.App.ExecuteAsync("music.queue.get", new { limit = 100 });
+                Check(queue.GetProperty("ok").GetBoolean() && queue.GetProperty("currentId").GetString() == before.Identity &&
+                    queue.GetProperty("entries").EnumerateArray().Select(entry => MusicSongFixture.NativeId(entry.GetProperty("song")))
+                        .SequenceEqual(new[] { "First", "8001", "8002", "Next" }),
+                    "complete staged playlist is inserted in order behind the unchanged current occurrence");
+                var next = await f.App.ExecuteAsync("music.queue.peekNext");
+                Check(next.GetProperty("ok").GetBoolean() &&
+                    MusicSongFixture.NativeId(next.GetProperty("next").GetProperty("song")) == "8001",
+                    "new next authority points to the first inserted playlist song");
+                await f.Module.StepAsync(true);
+                await Until(() => f.App.HistoryWrites == before.HistoryWrites + 1 &&
+                    f.App.ConfirmWrites == before.ConfirmWrites + 1, "inserted first song starts");
+                Check(f.Output.Identity == next.GetProperty("next").GetProperty("id").GetString() &&
+                    f.Module.CurrentTitle == "插入首曲" && f.Output.NetworkOpens == before.NetworkOpens + 1 &&
+                    f.Output.ReadOpens == before.ReadOpens && f.Output.Reopens == before.Reopens,
+                    "actual next playback consumes the inserted first song and never the cancelled old prepared bytes");
             });
         yield return Test("official shutdown waits for a noncooperative physical preload to settle", async () =>
         {
@@ -2386,6 +2475,51 @@ public static class PlaybackRecoveryTests
     }
 
 
+    // Only upstream catalogue HTTP and receipt timing are controlled. Prepare,
+    // token commit/discard, queue persistence and cache production stay native.
+    private sealed class PlaylistNextHttp : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var uri = request.RequestUri!;
+            Check(uri.Host is "music.163.com" or "interfacepc.music.163.com", "synthetic playlist origin only");
+            object body;
+            if (uri.AbsolutePath.EndsWith("/rcmd/resource/show", StringComparison.Ordinal))
+                body = new { code = 200, data = new { cursor = "1", hasMore = false,
+                    blockCodeOrderList = "[\"PLAYLIST\"]", blocks = new[] {
+                        new { positionCode = "PLAYLIST", uiElement = new { subTitle = new { title = "预取竞态歌单" } },
+                            creatives = new[] { new { resources = new[] {
+                                new { resourceType = "playlist", resourceId = "800", name = "插入歌单" }
+                            } } } }
+                    } } };
+            else if (uri.AbsolutePath.Contains("/playlist/detail", StringComparison.Ordinal))
+                body = new { code = 200, playlist = new { id = "800", name = "插入歌单", trackCount = 2,
+                    trackIds = new[] { new { id = "8001" }, new { id = "8002" } }, updateTime = 1 } };
+            else if (uri.AbsolutePath.Contains("/song/detail", StringComparison.Ordinal))
+                body = new { code = 200, songs = new[] {
+                    new { id = "8001", name = "插入首曲", ar = new[] { new { name = "fixture" } },
+                        al = new { name = "插入专辑" }, dt = 120000 },
+                    new { id = "8002", name = "插入次曲", ar = new[] { new { name = "fixture" } },
+                        al = new { name = "插入专辑" }, dt = 120000 }
+                } };
+            else throw new InvalidOperationException("Unexpected playlist race upstream path: " + uri.AbsolutePath);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json") });
+        }
+    }
+    private sealed class PlaylistNextProbe(bool holdPeek)
+    {
+        internal bool HoldPeek = holdPeek;
+        internal bool LoseCommitReceipt;
+        internal CancellationToken PeekToken, QueueReadToken;
+        internal JsonElement? CommitInput, CommitReceipt;
+        internal readonly List<string> CatalogMethods = [];
+        internal readonly TaskCompletionSource PeekEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource ReleasePeek = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource QueueReadEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource ReleaseQueueRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
     private sealed class ControlledMusicFixture : IAsyncDisposable
     {
         internal readonly Origin Origin = WaveOrigin();
@@ -2406,10 +2540,10 @@ public static class PlaybackRecoveryTests
         internal MusicAudioFileCache.PreparedFile? Prepared =>
             (MusicAudioFileCache.PreparedFile?)Field(Module, "preparedAudio");
         private ControlledMusicFixture(bool playbackCache, bool official, ScriptSource[] sources,
-            string qualityRequest, string officialQuality)
+            string qualityRequest, string officialQuality, HttpMessageHandler? catalogHttp)
         {
             Origin.RequireAuthorization = false;
-            App = new(new MusicNativeApplication(Store, Runtime, new NoHttp()), Origin,
+            App = new(new MusicNativeApplication(Store, Runtime, catalogHttp ?? new NoHttp()), Origin,
                 expiry: false, official, sources)
             {
                 QualityRequest = qualityRequest,
@@ -2430,10 +2564,10 @@ public static class PlaybackRecoveryTests
         }
         internal static async Task<ControlledMusicFixture> Create(bool playbackCache = false,
             bool official = true, ScriptSource[]? scripts = null, string qualityRequest = "320k",
-            string officialQuality = "320k")
+            string officialQuality = "320k", HttpMessageHandler? catalogHttp = null)
         {
             var f = new ControlledMusicFixture(playbackCache, official,
-                scripts ?? [new("fixture-source", enabled: false)], qualityRequest, officialQuality);
+                scripts ?? [new("fixture-source", enabled: false)], qualityRequest, officialQuality, catalogHttp);
             await f.App.InitializeAsync();
             await f.Module.InitializeAsync(default);
             return f;
@@ -2470,6 +2604,8 @@ public static class PlaybackRecoveryTests
         public async ValueTask DisposeAsync()
         {
             App.ReleaseRefresh.TrySetResult();
+            App.PlaylistNext?.ReleasePeek.TrySetResult();
+            App.PlaylistNext?.ReleaseQueueRead.TrySetResult();
             ValidationRelease.TrySetResult();
             try { await Module.DisposeAsync(); }
             finally
@@ -2735,6 +2871,7 @@ public static class PlaybackRecoveryTests
     private sealed class MusicApp(MusicNativeApplication inner, Origin origin, bool expiry, bool official,
         ScriptSource[] sources) : MusicApplicationForwarder(inner)
     {
+        internal PlaylistNextProbe? PlaylistNext;
         internal readonly List<JsonElement> Resolutions = [];
         internal bool PreserveOfficialRequest;
         internal bool HoldRefresh;
@@ -2832,6 +2969,35 @@ public static class PlaybackRecoveryTests
         public override async Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
             var input = Element(parameters ?? new { });
+            if (PlaylistNext is { } probe)
+            {
+                if (method == "music.queue.peekNext" && probe.HoldPeek)
+                {
+                    probe.HoldPeek = false;
+                    var oldNext = await inner.ExecuteAsync(method, parameters, cancellationToken);
+                    Check(oldNext.GetProperty("ok").GetBoolean(), "native old peek fixture");
+                    probe.PeekToken = cancellationToken; probe.PeekEntered.TrySetResult();
+                    await probe.ReleasePeek.Task; // Deliberately return the old receipt after cancellation.
+                    return oldNext;
+                }
+                if (method.StartsWith("music.catalog.playlist.", StringComparison.Ordinal))
+                {
+                    probe.CatalogMethods.Add(method);
+                    if (method == "music.catalog.playlist.commit")
+                    {
+                        probe.CommitInput = input.Clone();
+                        var committed = await inner.ExecuteAsync(method, parameters, cancellationToken);
+                        probe.CommitReceipt = committed.Clone();
+                        return probe.LoseCommitReceipt ? Element(new { ok = false, code = "STORAGE_ERROR" }) : committed;
+                    }
+                }
+                if (method == "music.queue.get" && probe.CommitReceipt is { } receipt && receipt.GetProperty("ok").GetBoolean())
+                {
+                    probe.QueueReadToken = cancellationToken;
+                    probe.QueueReadEntered.TrySetResult();
+                    await probe.ReleaseQueueRead.Task; // No later snapshot may mask a missing mutation notification.
+                }
+            }
             // The native owner's complete quality reply and all failure fields
             // remain authoritative; only the existing script/media port is fake.
             if (official && method == "music.online.song")

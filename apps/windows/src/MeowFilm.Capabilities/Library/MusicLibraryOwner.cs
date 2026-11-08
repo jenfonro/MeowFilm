@@ -52,6 +52,9 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     public Task<JsonElement> ReplaceQueueAsync(IReadOnlyList<JsonElement> songs, int index, JsonElement? context,
         long expectedVersion, CancellationToken cancellationToken = default) =>
         ExecuteCoreAsync("music.queue.replace", new { songs, index, context, expectedVersion }, cancellationToken, true);
+    public Task<JsonElement> AppendQueueAsync(IReadOnlyList<JsonElement> songs, JsonElement? context,
+        long expectedVersion, CancellationToken cancellationToken = default) =>
+        ExecuteCoreAsync("music.queue.append", new { songs, context, next = true, expectedVersion }, cancellationToken, true);
     private string Key(string area) => LJ.Stringify(new JsonArray("meowfilm", "music", 1, scope, area));
     private JsonNode? Value(JsonObject doc, string area) =>
         LJ.Array(doc["entries"]).OfType<JsonObject>().FirstOrDefault(e => LJ.S(e["key"]) == Key(area))?["value"];

@@ -340,20 +340,33 @@ public partial class MusicCatalogView : UserControl
         catch { /* The owner publishes bounded business errors; never retry in a scroll loop. */ }
         finally { loadingMore = false; scrollIntent.Clear(); }
     }
+    private void CardMenu_Opening(object sender, ContextMenuEventArgs e)
+    {
+        if (Owner is not { } owner || sender is not FrameworkElement { DataContext: MusicCatalogCard card } host ||
+            host.ContextMenu is not { } menu || card.Kind != "playlist" && card.Song is null)
+        { e.Handled = true; return; }
+        PopulateCardMenu(owner, menu, card, host);
+        menu.PlacementTarget = host;
+        MusicCapability.ApplyContentMenuStyles(host, menu);
+    }
+    private void PopulateCardMenu(MusicCapability owner, ContextMenu menu, MusicCatalogCard card, FrameworkElement host)
+    {
+        bool Current() => host.IsLoaded && host.IsVisible &&
+            ReferenceEquals(Owner, owner) && ReferenceEquals(host.DataContext, card);
+        if (card.Song is not null) owner.PopulateSongMenu(menu, card.Song, card, Current);
+        else owner.PopulatePlaylistMenu(menu, card, Current);
+    }
     private void SongOptions_Click(object sender, RoutedEventArgs e)
     {
-        if (Owner is not { } owner || sender is not Button { Tag: MusicCatalogCard card } button) return;
+        if (Owner is not { } owner || sender is not Button { DataContext: MusicCatalogCard card } button) return;
         var menu = new ContextMenu();
-        void Add(string title, bool enabled, Func<Task> action)
-        {
-            var item = new MenuItem { Header = title, IsEnabled = enabled };
-            item.Click += async (_, _) => { try { await action(); } catch { } }; menu.Items.Add(item);
-        }
-        Add("下一首播放", card.CanFavorite, () => owner.QueueCatalogCardAsync(card));
-        Add("相似歌曲", card.CanSimilar, () => owner.SimilarCatalogCardAsync(card));
-        Add("专辑", card.CanAlbum, () => owner.AlbumCatalogCardAsync(card));
-        Add("心动推荐", card.CanSimilar && owner.IsCatalogPlaylist, () => owner.HeartbeatCatalogCardAsync(card));
-        menu.PlacementTarget = button; menu.IsOpen = true;
+        PopulateCardMenu(owner, menu, card, button);
+        button.ContextMenu = menu;
+        menu.Closed += (_, _) => { if (ReferenceEquals(button.ContextMenu, menu)) button.ContextMenu = null; };
+        menu.PlacementTarget = button; menu.Placement = PlacementMode.Bottom;
+        MusicCapability.ApplyContentMenuStyles(button, menu);
+        menu.IsOpen = true;
+        e.Handled = true;
     }
     private MusicCapability? Owner => DataContext as MusicCapability;
     private async void SearchBack_Click(object sender, RoutedEventArgs e)

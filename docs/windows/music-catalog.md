@@ -90,12 +90,19 @@
 
 ## 完整歌单动作
 
+- 首页推荐、搜索综合／歌单页与频道中的普通歌单卡／行使用共同右键菜单：查看歌单、播放、下一首播放、收藏；头部入口、栏目更多和频道 tab 不增加这些动作。收藏复用完整 `save`，每次复制为新的本地歌单，不记录远端收藏关系或按远端 ID 去重。
+- 目录歌曲整行与更多按钮共用搜索歌曲菜单的播放、下一首、收藏、添加到本地歌单和移除权限；目录原有相似歌曲、专辑、心动推荐保留。播放仍遵循原入口的单曲／栏目／完整歌单范围。菜单在打开时捕获具体对象及页面代次，回收容器、离页或失去权限后不操作旧目标；打开菜单本身不请求歌曲或写存储。
 - 读取歌单和改变本地曲库／队列是两个阶段。`prepare` 完整读取并验证同一歌单快照，返回短期、单次使用 token；此时不修改曲库或队列。
-- `commit` 只允许 `play` 或 `save`，并核对 token、目标歌曲、队列版本、账号与目录代次。播放未指定 index／memberId、但指定 expectedSongId 时，在完整快照中选择该领域歌曲的首次出现；缺失返回 SNAPSHOT_CHANGED，不提交。显式 index／memberId 的校验语义不变。提交进入唯一 `MusicLibraryOwner` 串行边界。
+- `commit` 允许 `play`、`save` 或 `next`，并核对 token、相应动作字段、账号与目录代次。播放未指定 index／memberId、但指定 expectedSongId 时，在完整快照中选择该领域歌曲的首次出现；缺失返回 SNAPSHOT_CHANGED，不提交。显式 index／memberId 的校验语义不变。提交进入唯一 `MusicLibraryOwner` 串行边界。
+- `next` 仅接受 `{token, action:"next", expectedVersion}`，返回 `{ok:true,currentId,version,mode}`。它复用完整 stage，以准备前捕获的队列版本在 library 串行边界校验，一次把全部歌曲作为连续段插入当前曲之后；保留重复 occurrence、旧队列、当前曲和模式，随机模式沿用 next priority。空队列只选中首曲，不启动媒体；空 stage 返回 `INVALID_REQUEST`，调用方仍须 discard。没有逐首或分批提交。
+- `next` 经推荐队列公共 admission lane 按 `Append` 通知协调器；`play` 为 `Replace`，`save` 仅共享 lane。版本冲突返回 `REVISION_CONFLICT`，不写入任何歌曲且消费 token；进入 library 等待后取消也消费 token，实际 CAS 准入后则按真实持久化结果结算。
+- 音乐主视图隐藏／卸载，以及实际切换搜索 tab，同步撤销原栏目未提交意图；重复选择当前 tab 不撤销。搜索歌曲栏目使用稳定领域 ID，播放继续保留整个栏目顺序及点击位置。
+- `next` 失败或明确取消后先保守关闭播放控制并撤销旧预取，再以应用 lifetime 读取权威队列的 persistence 恢复状态；仍 pending 或读取失败时不假定已保存，不重放 commit、不重启当前媒体。队列浮窗是否打开不影响该恢复。
 - `prepare` 的成功回执即使与取消交错也必须先被实际接收；presentation 取得 token 后再 `discard`，不能丢失回执并把 stage 留给 TTL。
 - `discard` 只释放未消费 token。取消或失败不会生成半歌单；提交结果未知时不得重放提交。
 - `commit` 一旦进入曲库 CAS 就等待真实回执。已确认成功的提交必须重新读取当前曲库／队列；若原播放意图已经过期，只同步状态，不启动旧媒体。
 - 暂存以实际保留字节和有效期管理，不设固定歌曲数量，也不按 token／准备／提交数量拒绝请求。完整歌单按平台返回的总量和分页结束条件读取；普通目录与搜索不使用暂存容量截断。资源超限或重复游标明确失败，不返回截断结果冒充完整成功。
+- 资源边界保持 stage 单份 32MiB／总预约 64MiB、library 完整输入 16MiB、持久化文档 8MiB；stage 准备成功不承诺必然能持久化。完整 next 不受普通 append 的 1000 首输入边界限制。
 
 ## 身份与错误
 
