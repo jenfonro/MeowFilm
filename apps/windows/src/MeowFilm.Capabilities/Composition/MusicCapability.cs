@@ -785,6 +785,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             if (args.PropertyName == nameof(IMusicPlayback.DurationSeconds)) CheckMediaDuration();
             playbackPresentation.Refresh();
             Changed(nameof(CanHeartbeatCurrent));
+            Changed(nameof(CanTogglePlaybackHeartbeat));
         }
     }
     private void PlaybackStarted(object? sender, EventArgs args)

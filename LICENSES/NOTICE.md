@@ -51,6 +51,14 @@ Adapted portions:
   and `src/kugou-feedback.ts`; `MusicFeedbackProtocolTests.cs` uses synthetic vectors from
   `tests/{netease,qq-feedback,kugou-feedback}.test.cjs`.
 - Sync: `MusicSyncAdapter.cs`.
+- Windows: `MusicPlaybackIcon.cs` adapts the heart/FM SVGs in `static/index.html`
+  and all 42 scene SVGs in `static/fm-icons.js` into frozen native WPF geometry,
+  retaining their Apache-2.0 attribution. Reference package:
+  `iwebplus.jsplugin.zip`, SHA-256
+  `325524de00243b7e01779c41b92a07ac601091e5b1454244859cdc71f2da26a8`.
+  SVG paths, fill rules, stroke proportions and text transforms are preserved;
+  text uses system fonts. The ordinary playback mode artwork follows the supplied
+  user references, and the additional `HOT_SONG` flame is local artwork.
 - iOS: music interface and behavior in `native/MeowKit/Sources/MeowMusicFeature` and
   `native/MeowKit/Sources/MeowUI`; queue appearance and drag admission follow
   `static/queue-sheet.{js,css}` and `static/list-reorder.js`, with native UIKit

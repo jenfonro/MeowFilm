@@ -454,13 +454,25 @@ public static partial class MusicUiTests
         yield return Case("player mode failure reverts and retired queue surface reads cannot overwrite current rows", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection();
-            Render(f.Module.PlayerView, 860, 92);
+            using var source = new System.Windows.Interop.HwndSource(new System.Windows.Interop.HwndSourceParameters("player-mode-failure-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                PositionX = -32000, PositionY = -32000, Width = 860, Height = 92
+            });
+            source.RootVisual = f.Module.PlayerView; Render(f.Module.PlayerView, 860, 92); await Drain();
             var button = FindButton(f.Module.PlayerView, f.Module.ModeText);
+            var menu = (ContextMenu)((MusicPlayerView)f.Module.PlayerView).FindName("ModeMenu");
             f.Calls.FailNext("music.queue.mode", "STORAGE_UNAVAILABLE");
-            Click(button); await Until(() => !f.Module.Busy);
+            Click(button); await Drain();
+            Equal(0, f.Calls.Count("music.queue.mode"));
+            menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2)).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await Until(() => f.Calls.Count("music.queue.mode") == 1 && !f.Module.Busy);
             Equal(1, f.Module.Mode); Equal("列表循环", AutomationProperties.GetName(button));
             Equal(1, f.Calls.Count("music.queue.mode"));
-            Click(button); await Until(() => !f.Module.Busy);
+            Click(button); await Drain();
+            True(menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 1)).IsChecked, "failed change keeps the saved selection");
+            menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2)).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await Until(() => f.Calls.Count("music.queue.mode") == 2 && !f.Module.Busy);
             Equal(2, f.Module.Mode); Equal("随机播放", AutomationProperties.GetName(button));
             await Task.WhenAll(f.Module.ChangeModeAsync(2), f.Module.ChangeModeAsync(1)); Equal(1, f.Module.Mode);
 

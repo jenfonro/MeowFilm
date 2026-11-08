@@ -48,6 +48,9 @@ public sealed partial class MusicCapability
             "queue" => "为你推荐", _ => "推荐" };
     public bool HasPlaybackFm => !stopping && HasActiveRecommendation && recommendationSnapshot is { } value &&
         RecText(value, "platform") == "wy" && RecText(value, "kind") == "fm" && RecText(value, "mode").Length > 0;
+    public bool HasPlaybackHeartbeat => !stopping && HasActiveRecommendation && recommendationSnapshot is { } value &&
+        RecText(value, "platform") == "wy" && RecText(value, "kind") == "heartbeat" &&
+        value.TryGetProperty("batch", out var batch) && batch.TryGetInt32(out int count) && count > 0;
     public string PlaybackFmMode => HasPlaybackFm ? RecText(recommendationSnapshot!.Value, "mode") : "";
     public string PlaybackFmScene => HasPlaybackFm ? RecText(recommendationSnapshot!.Value, "submode") : "";
     public string PlaybackFmRuleId => HasPlaybackFm ? RecText(recommendationSnapshot!.Value, "ruleId") : "";
@@ -56,12 +59,20 @@ public sealed partial class MusicCapability
         ? RecText(recommendationSnapshot!.Value, "id") + ":" + recommendationCommandEpoch + ":" + accountEpoch +
             ":" + PlaybackFmMode + ":" + PlaybackFmScene + ":" + PlaybackFmRuleId + ":" + PlaybackFmTabTagId
         : "";
-    public string PlaybackModeText => !HasPlaybackFm ? ModeText :
+    public string PlaybackModeText => !HasPlaybackFm ? HasPlaybackHeartbeat ? "心动模式" : ModeText :
         PlaybackFmRuleId.Length > 0 || PlaybackFmTabTagId.Length > 0 ? "频道漫游" :
         PlaybackFmMode == "scene" ? CatalogFmScenes.FirstOrDefault(choice => choice.Key == PlaybackFmScene)?.Name ?? "场景模式" :
         PlaybackFmModes.FirstOrDefault(choice => choice.Key == PlaybackFmMode)?.Name ?? "私人漫游";
-    public string PlaybackModeGlyph => HasPlaybackFm ? "\uE700" : "\uE8EE";
+    public string PlaybackModeIcon => HasPlaybackFm ? "fm" : HasPlaybackHeartbeat ? "heartbeat" :
+        Mode switch { 0 => "order", 1 => "repeat", 2 => "shuffle", _ => "single" };
+    public string PlaybackModeActionKey => recommendationCommandEpoch + ":" + accountEpoch + ":" + queueEpoch +
+        ":" + PlaybackPresentationKey + ":" + (recommendationSnapshot is { } value ? RecText(value, "id") : "") +
+        ":" + HasPlaybackFm + ":" + HasPlaybackHeartbeat;
+    public string PlaybackFmTitle => PlaybackFmRuleId.Length > 0 || PlaybackFmTabTagId.Length > 0
+        ? "频道漫游" : "私人漫游 · " + PlaybackModeText;
     public bool CanChangePlaybackMode => HasPlaybackFm ? !CanReconcileRecommendation : CanEdit;
+    public bool CanTogglePlaybackHeartbeat => !CanReconcileRecommendation &&
+        (HasPlaybackHeartbeat ? CanReturnRecommendation : CanHeartbeatCurrent && !RecommendationLoading);
     public MusicCatalogChoice[] PlaybackFmModes { get; } =
         [new("default", "默认模式"), new("familiar", "熟悉模式"), new("explore", "探索模式"), new("puzzle", "拼图模式")];
     public bool CanHeartbeatCurrent => CanPlay && OwnsCurrent && playback.HasMedia &&
@@ -113,8 +124,9 @@ public sealed partial class MusicCapability
             nameof(HasQueueRecommendations), nameof(CanChooseRecommendation), nameof(RecommendationCandidates),
             nameof(QueueRecommendationStatus), nameof(QueueRecommendationEmptyText), nameof(HasPlaybackFm),
             nameof(PlaybackFmMode), nameof(PlaybackFmScene), nameof(PlaybackFmRuleId), nameof(PlaybackFmTabTagId),
-            nameof(PlaybackFmActionKey), nameof(PlaybackModeText), nameof(PlaybackModeGlyph), nameof(CanChangePlaybackMode),
-            nameof(CanHeartbeatCurrent), nameof(HasActiveRecommendation),
+            nameof(PlaybackFmActionKey), nameof(PlaybackModeText), nameof(PlaybackModeIcon), nameof(CanChangePlaybackMode),
+            nameof(HasPlaybackHeartbeat), nameof(PlaybackModeActionKey), nameof(PlaybackFmTitle),
+            nameof(CanTogglePlaybackHeartbeat), nameof(CanHeartbeatCurrent), nameof(HasActiveRecommendation),
             nameof(RecommendationTitle), nameof(RecommendationStatus), nameof(RecommendationLoading),
             nameof(RecommendationContinue), nameof(CanChangeRecommendationContinue), nameof(CanRetryRecommendation),
             nameof(CanReturnRecommendation), nameof(CanCancelRecommendation), nameof(CanReconcileRecommendation) })
@@ -254,6 +266,11 @@ public sealed partial class MusicCapability
         if (!CanHeartbeatCurrent || presentationKey != PlaybackPresentationKey) return Task.CompletedTask;
         return StartRecommendation(Target("heartbeat", "wy", "心动模式",
             new { entry = "current", songId = SongJson.NativeId(current!.Raw), seedEntryId = current.EntryId }));
+    }
+    public Task TogglePlaybackHeartbeatAsync(string actionKey)
+    {
+        if (!CanTogglePlaybackHeartbeat || HasPlaybackFm || actionKey != PlaybackModeActionKey) return Task.CompletedTask;
+        return HasPlaybackHeartbeat ? ReturnRecommendationAsync() : HeartbeatCurrentAsync(PlaybackPresentationKey);
     }
 
     // Invoked only after an explicit ordinary playback action established a new
