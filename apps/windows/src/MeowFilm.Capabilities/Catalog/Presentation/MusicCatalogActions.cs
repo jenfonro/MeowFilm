@@ -89,7 +89,11 @@ public sealed partial class MusicCapability
                                 InvalidateQueueSurface();
                             }
                             await ReadQueue(lifetime.Token);
-                            if (action == "play" && currentAction()) await StartCurrent(signal);
+                            if (action == "play" && currentAction())
+                            {
+                                await StartCurrent(signal);
+                                _ = TrackRecommendation(StartQueueRecommendationPreviewAsync());
+                            }
                         }
                         else
                         {
@@ -161,7 +165,11 @@ public sealed partial class MusicCapability
                             context = queueContext }, signal);
                         MusicDto.Require(MusicDto.Integer(result, "version") > version);
                         await ReadQueue(lifetime.Token);
-                        if (currentAction()) await StartCurrent(signal);
+                        if (currentAction())
+                        {
+                            await StartCurrent(signal);
+                            _ = TrackRecommendation(StartQueueRecommendationPreviewAsync());
+                        }
                     }
                     else
                     {
@@ -209,7 +217,11 @@ public sealed partial class MusicCapability
                 }
                 catch { queueSaved = false; throw; }
                 await ReadQueue(lifetime.Token);
-                if (current()) await StartCurrent(signal);
+                if (current())
+                {
+                    await StartCurrent(signal);
+                    _ = TrackRecommendation(StartQueueRecommendationPreviewAsync());
+                }
             });
         }, card: card);
     }
@@ -242,7 +254,11 @@ public sealed partial class MusicCapability
             await QueueCall("music.queue.replace", new { songs = new[] { song.Raw }, index = 0,
                 context = new { sourcePlatform = platform, sourceType = "song" } });
             await ReadQueue(lifetime.Token);
-            if (currentAction() && sourceCurrent()) await StartCurrent(signal);
+            if (currentAction() && sourceCurrent())
+            {
+                await StartCurrent(signal);
+                _ = TrackRecommendation(StartQueueRecommendationPreviewAsync());
+            }
         });
     }, "正在加载歌曲");
     private void PublishCatalogActionError(Exception error)

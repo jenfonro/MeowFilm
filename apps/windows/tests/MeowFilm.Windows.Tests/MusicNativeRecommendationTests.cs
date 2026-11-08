@@ -29,6 +29,14 @@ public static class MusicNativeRecommendationTests
         yield return Case("identical-native-start-reuses-account-observation-session-and-provider-flight", NativeDuplicateStart);
         yield return Case("similar-return-restores-paused-occurrence-without-queue-select-replay", SimilarReturn);
         yield return Case("heartbeat-continuation-uses-queue-recommendations-not-second-heartbeat", Heartbeat);
+        yield return Case("heartbeat-current-retains-native-occurrence-and-returns-original-queue", HeartbeatCurrent);
+        yield return Case("heartbeat-browser-seed-from-empty-queue-restores-empty-checkpoint", () => HeartbeatBrowser(false));
+        yield return Case("heartbeat-browser-seed-from-other-current-restores-original-checkpoint", () => HeartbeatBrowser(true));
+        yield return Case("queue-mixed-platform-wy-current-never-dispatches-http", () => QueueMixed(0));
+        yield return Case("queue-mixed-platform-other-current-never-dispatches-http", () => QueueMixed(1));
+        yield return Case("queue-preview-choose-and-tail-preserve-original-source-with-live-feedback", QueuePreviewChoose);
+        yield return Case("queue-disable-after-cas-admission-keeps-committed-facts-without-autoplay", QueueDisableCommit);
+        yield return Case("queue-late-account-invalidated-preview-never-writes-or-selects", QueueAccountPreview);
         yield return Case("fm-real-tail-playback-and-natural-next-retain-live-feedback", Playback);
         foreach (string method in new[] { "append", "remove", "reorder", "mode", "select", "next", "previous", "step" })
         {
@@ -228,7 +236,7 @@ public static class MusicNativeRecommendationTests
                 "Unexpected fixed native upstream");
             string path = uri.AbsolutePath;
             Check(path is "/eapi/v1/radio/get" or "/weapi/v1/radio/get" or "/eapi/playmode/intelligence/list" or
-                "/eapi/homepage/more/rcmd/song" or "/eapi/v6/playlist/detail" or "/weapi/v3/song/detail",
+                "/eapi/homepage/more/rcmd/song" or "/eapi/v6/playlist/detail" or "/weapi/v3/song/detail" or "/weapi/user/playlist",
                 "Unexpected native operation");
             Check(request.Headers.TryGetValues("Cookie", out var cookie) && string.Join(";", cookie).Contains(ExpectedAccount, StringComparison.Ordinal),
                 "Wrong actual account lease");
@@ -237,19 +245,25 @@ public static class MusicNativeRecommendationTests
             if (hold is not null) await hold.Block(token).ConfigureAwait(false);
             object result;
             if (code != 200) result = new { code };
+            else if (path == "/weapi/user/playlist")
+                result = new { code = 200, more = false, playlist = new[] {
+                    new { id = 77, name = "Complete fixture", specialType = 5, creator = new { userId = 101 } } } };
             else if (path == "/eapi/v6/playlist/detail")
-                result = new { code = 200, playlist = new { id = 77, name = "Complete fixture", trackCount = 2,
+                result = new { code = 200, playlist = new { id = 77, name = "Complete fixture", trackCount = 2, specialType = 5,
+                    creator = new { userId = 101 },
                     trackIds = new[] { new { id = 501 }, new { id = 502 } }, updateTime = 1 } };
             else if (path == "/weapi/v3/song/detail")
                 result = new { code = 200, songs = new[] { WireSong(501), WireSong(502) } };
             else
             {
                 int start = 100 * Interlocked.Increment(ref Batch);
-                var songs = Enumerable.Range(start + 1, 3).Select(WireSong).ToArray();
+                var songs = Enumerable.Range(start + 1, path == "/eapi/playmode/intelligence/list" ? 5 : 3).Select(WireSong).ToArray();
                 result = path switch
                 {
                     "/eapi/playmode/intelligence/list" => new { code = 200, data = songs.Select(song => new { songInfo = song }).ToArray() },
-                    "/eapi/homepage/more/rcmd/song" => new { code = 200, data = new { songList = songs } },
+                    "/eapi/homepage/more/rcmd/song" => new { code = 200, data = new { songList = songs,
+                        sourceMap = Enumerable.Range(start + 1, 3).ToDictionary(id => id.ToString(), id => "native-source-" + id),
+                        hasMore = true } },
                     _ => new { code = 200, data = songs }
                 };
             }
@@ -400,12 +414,120 @@ public static class MusicNativeRecommendationTests
     private static async Task Heartbeat()
     {
         await using var f = await Fixture.Create();
-        var start = await f.Start(new { kind = "heartbeat", platform = "wy", playlistId = "77", startMusicId = "9", songId = "9", @continue = true });
-        Check(B(start, "active"));
+        var start = await f.Start(new { kind = "heartbeat", platform = "wy", entry = "favorites" });
+        Check(B(start, "active") && !B(start, "continue") && N(await f.Queue(), "total") == 5);
+        Check(f.Source.GetFeedback(Fixture.Current(await f.Queue())) is { FromHome: true, FeedbackSource: "aiMode", SourceId: "77" });
         string tail = await f.Tail(); await f.Source.OnPlaybackAsync(new(tail, true, true, true));
+        Check(!f.Handler.Paths.Contains("/eapi/homepage/more/rcmd/song"));
+        await f.Call("music.recommendations.continue", new { id = S(start, "id"), enabled = true });
         Check(f.Handler.Paths.Count(p => p == "/eapi/playmode/intelligence/list") == 1 &&
-            f.Handler.Paths.Count(p => p == "/eapi/homepage/more/rcmd/song") == 1 && N(await f.Queue(), "total") == 6);
-        Check(f.Source.GetFeedback(S((await f.Queue()).GetProperty("entries").EnumerateArray().Last(), "id")) is { Provider: "queue-recommendations", SourceId: "77" });
+            f.Handler.Paths.Count(p => p == "/eapi/homepage/more/rcmd/song") == 1 && N(await f.Queue(), "total") == 8);
+        Check(f.Source.GetFeedback(S((await f.Queue()).GetProperty("entries").EnumerateArray().Last(), "id")) is
+            { Provider: "queue-recommendations", SourceId: "77", FeedbackSource: "native-source-203" });
+    }
+    private static async Task HeartbeatCurrent()
+    {
+        await using var f = await Fixture.Create();
+        await f.Call("music.queue.replace", new { songs = new[] { Song(9), Song(10) }, index = 0,
+            context = new { sourceTitle = "Original", sourceType = "search", searchKeyword = "seed" } });
+        var before = await f.Queue(); string seed = Fixture.Current(before);
+        var start = await f.Start(new { kind = "heartbeat", platform = "wy", entry = "current", songId = "9", seedEntryId = seed });
+        Check(N(await f.Queue(), "total") == 6 && Fixture.Current(await f.Queue()) == seed && f.Selections.IsEmpty);
+        Check(f.Source.GetFeedback(S((await f.Queue()).GetProperty("entries")[1], "id")) is
+            { FromHome: false, FeedbackSource: "aiMode", SourceId: "77" });
+        Check(f.Handler.Paths.Count(p => p == "/weapi/user/playlist") == 1 && f.Handler.Paths.Count(p => p == "/eapi/playmode/intelligence/list") == 1);
+        await f.Call("music.recommendations.return", new { id = S(start, "id") });
+        Check((await f.Queue()).GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText() &&
+            Fixture.Current(await f.Queue()) == seed && f.Selections.IsEmpty);
+    }
+    private static async Task HeartbeatBrowser(bool existingQueue)
+    {
+        await using var f = await Fixture.Create();
+        if (existingQueue)
+            await f.Call("music.queue.replace", new { songs = new[] { Song(9), Song(10) }, index = 1,
+                context = new { sourceTitle = "Original", sourceType = "search", searchKeyword = "before browser seed" } });
+        var before = await f.Queue();
+        var start = await f.Start(new { kind = "heartbeat", platform = "wy", entry = "current", songId = "501" });
+        var after = await f.Queue();
+        Check(S(start, "error") == "" && B(start, "canReturn") && !B(start, "continue") &&
+            N(after, "total") == 5 && Fixture.Current(after) != Fixture.Current(before));
+        Check(f.Selections.Single() is { Play: true, Automatic: false } &&
+            f.Source.GetFeedback(Fixture.Current(after)) is { FromHome: false, FeedbackSource: "aiMode", SourceId: "77" });
+        Check(f.Handler.Paths.Count(p => p == "/weapi/user/playlist") == 1 &&
+            f.Handler.Paths.Count(p => p == "/eapi/playmode/intelligence/list") == 1);
+        await f.Call("music.recommendations.return", new { id = S(start, "id") });
+        var restored = await f.Queue();
+        Check(Fixture.Current(restored) == Fixture.Current(before) &&
+            restored.GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText() &&
+            restored.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText());
+    }
+    private static async Task QueueMixed(int index)
+    {
+        await using var f = await Fixture.Create();
+        await f.Call("music.queue.replace", new { songs = new[] { Song(9),
+            MusicSongFixture.Element(MusicSongFixture.Online("tx", "qq123")) }, index });
+        var before = await f.Queue(); int writes = f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace);
+        var state = await f.Start(new { kind = "queue", platform = "wy" }); var after = await f.Queue();
+        Check(S(state, "error") == "NATIVE_ID_REQUIRED" && f.Handler.Paths.IsEmpty && f.Selections.IsEmpty &&
+            state.GetProperty("candidates").GetArrayLength() == 0 &&
+            f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace) == writes);
+        Check(N(after, "version") == N(before, "version") && Fixture.Current(after) == Fixture.Current(before) &&
+            after.GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText() &&
+            after.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText());
+    }
+    private static async Task QueuePreviewChoose()
+    {
+        await using var f = await Fixture.Create();
+        await f.Call("music.queue.replace", new { songs = new[] { Song(9) }, index = 0,
+            context = new { sourceTitle = "Original search", sourceType = "search", searchKeyword = "original",
+                queueSource = new { id = "search", title = "Original search", kind = "search", platform = "wy" } } });
+        var before = await f.Queue(); int writes = f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace);
+        var preview = await f.Start(new { kind = "queue", platform = "wy" });
+        Check(preview.GetProperty("candidates").GetArrayLength() == 3 && !B(preview, "continue") && N(await f.Queue(), "total") == 1 &&
+            f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace) == writes && f.Selections.IsEmpty);
+        Check(f.Source.GetFeedback(Fixture.Current(before)) is null);
+        await f.Call("music.recommendations.choose", new { id = S(preview, "id"), candidateId = S(preview.GetProperty("candidates")[1], "id") });
+        var chosen = await f.Queue();
+        Check(N(chosen, "total") == 4 && MusicSongFixture.NativeId(chosen.GetProperty("current").GetProperty("song")) == "102");
+        Check(chosen.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText() &&
+            chosen.GetProperty("entries")[0].GetRawText() == before.GetProperty("entries")[0].GetRawText());
+        Check(f.Selections.Single() is { Play: true, Automatic: false } &&
+            f.Source.GetFeedback(Fixture.Current(chosen)) is { Kind: "queue", Provider: "queue-recommendations", FeedbackSource: "native-source-102" });
+        string tail = await f.Tail(); await f.Source.OnPlaybackAsync(new(tail, true, true, true));
+        Check(f.Handler.Paths.Count(p => p == "/eapi/homepage/more/rcmd/song") == 1);
+        await f.Call("music.recommendations.continue", new { id = S(preview, "id"), enabled = true });
+        Check(N(await f.Queue(), "total") == 7 && Fixture.Current(await f.Queue()) == tail && f.Selections.Count == 1 &&
+            f.Handler.Paths.Count(p => p == "/eapi/homepage/more/rcmd/song") == 2);
+    }
+    private static async Task QueueAccountPreview()
+    {
+        await using var f = await Fixture.Create();
+        await f.Call("music.queue.replace", new { songs = new[] { Song(9) }, index = 0 });
+        var hold = f.Handler.Hold(); var start = f.Start(new { kind = "queue", platform = "wy" });
+        await Wait(hold.Entered.Task);
+        int writes = f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace);
+        var logout = f.App.ExecuteAsync("music.accounts.logout", new { platform = "wy" });
+        await Until(async () => !B(await f.State(), "active"));
+        hold.Release.TrySetResult(); await start; await logout;
+        Check(N(await f.Queue(), "total") == 1 && f.Selections.IsEmpty && (await f.State()).GetProperty("candidates").GetArrayLength() == 0 &&
+            f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace) == writes);
+    }
+    private static async Task QueueDisableCommit()
+    {
+        await using var f = await Fixture.Create();
+        await f.Call("music.queue.replace", new { songs = new[] { Song(9) }, index = 0 });
+        var start = await f.Start(new { kind = "queue", platform = "wy" }); string id = S(start, "id");
+        await f.Call("music.recommendations.choose", new { id, candidateId = S(start.GetProperty("candidates")[0], "id") });
+        string tail = await f.Tail(); await f.Source.OnPlaybackAsync(new(tail, true, true, true));
+        var hold = f.Store.HoldWrite(MusicLibraryOwner.DocumentNamespace);
+        var enable = f.Call("music.recommendations.continue", new { id, enabled = true }); await Wait(hold.Entered.Task);
+        var disable = f.Call("music.recommendations.continue", new { id, enabled = false });
+        await Until(async () => !B(await f.State(), "continue")); await Pending(disable);
+        hold.Release.TrySetResult(); await enable; var state = await disable; var queue = await f.Queue();
+        Check(N(queue, "total") == 7 && Fixture.Current(queue) == tail && N(state, "count") == 7 &&
+            N(state, "queueVersion") == N(queue, "version") && f.Selections.Count == 1 && !B(state, "continue"));
+        Check(f.Source.GetFeedback(S(queue.GetProperty("entries").EnumerateArray().Last(), "id")) is
+            { Kind: "queue", Provider: "queue-recommendations", FeedbackSource: "native-source-203" });
     }
     private static async Task Playback()
     {

@@ -236,6 +236,10 @@ music.history.restorePlaylist
 music.history.recordPlayed
 ```
 
+原生持续推荐在同一 owner 内使用私有 `music.queue.recommendation.*` 事务，application 普通调用不可用。`enter` 捕获原队列 checkpoint 并可保留实际当前 seed occurrence；心动首批完整入队。`append` 核对 `expectedVersion` 并复用现有队列尾部追加算法，私有回执包含全部新增 `entryIds`，不改变完整目录 next 入口的公开响应。它可携带新批次内的 `selectIndex`，在同一次 envelope CAS 中追加整批并选择指定 occurrence；不携带时保留当前选择、原队列来源及已有 next priority。私有完整批次不受普通外部 append 的条数门槛裁剪，仍服从既有请求／响应字节和持久 envelope 资源校验。
+
+这些事务的 nonce、checkpoint 与算法／逐曲反馈 proof 不作为可恢复推荐会话持久化。丢失 ACK 只通过 nonce reconcile 读取真实结果，不重放 append／select；恢复原队列、取消或关闭按[推荐生命周期](music-recommendations.md)释放 checkpoint。
+
 设置和歌词：
 
 ```text

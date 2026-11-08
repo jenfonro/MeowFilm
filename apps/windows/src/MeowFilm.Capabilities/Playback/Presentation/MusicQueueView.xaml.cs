@@ -73,4 +73,10 @@ public partial class MusicQueueView : UserControl
     { if (sender is Button { Tag: MusicQueueSurfaceRow row }) await module.RemoveQueueSurfaceItemAsync(row); }
     private async void Clear_Click(object sender, RoutedEventArgs e) => await module.ClearQueueSurfaceAsync();
     private async void FavoriteAll_Click(object sender, RoutedEventArgs e) => await module.FavoriteQueueSurfaceAsync();
+    private async void Recommendation_Click(object sender, RoutedEventArgs e)
+    { if (sender is Button { Tag: MusicRecommendationCandidate candidate }) await module.ChooseRecommendationAsync(candidate); }
+    private async void Continue_Click(object sender, RoutedEventArgs e)
+    { if (sender is CheckBox box) await module.ChangeRecommendationContinueAsync(box.IsChecked == true); }
+    private async void RetryRecommendation_Click(object sender, RoutedEventArgs e) => await module.RetryRecommendationAsync();
+    private async void ReconcileRecommendation_Click(object sender, RoutedEventArgs e) => await module.ReconcileRecommendationAsync();
 }

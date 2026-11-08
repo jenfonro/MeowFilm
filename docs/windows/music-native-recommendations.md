@@ -76,6 +76,19 @@ music.catalog.playlist.commit action=play
 - 未绑定播放 consumer 时 start 返回 `PLAYBACK_UNAVAILABLE`。
 - 同一完整配置的重复 start、同一 session 的重复读取、继续加载和自然结束推进由协调器去重；在途 start 复用同一物理读取及最终快照，不通过 UI 绑定或集合变化递归触发。
 
+## 原生命令与投影
+
+`MusicNativeApplication.ExecuteAsync` 将全部 `music.recommendations.*` 命令交由同一 native coordinator，包含 `choose {id,candidateId}`；UI 不直接调用私有 `music.queue.recommendation.*`。
+
+- `kind=queue` 的 start 从完整队列提取网易云 native IDs 与实际 current ID，只读返回 `candidates:[{id,song}]` 和 `exhausted`。start／retry／自动续播均要求整队每条歌曲有有效网易云 ID；混合或缺少 ID 时返回 `NATIVE_ID_REQUIRED`，不向平台发送过滤后的子集。候选 token 只属于当前候选批，retry、队列编辑、会话替换和账号失效都会使旧 token 失效。
+- choose 在同一 lane 核对队列版本／current 后，将完整新曲批次 append，并以私有 `selectIndex` 选中候选；一次 envelope CAS 后才派发一个媒体 selection。自动尾部 append 不带 `selectIndex`，不抢当前播放。
+- 自动尾部追加优先消费已有候选批，沿用该批队列版本／epoch 和同一 CAS，不另发请求；未消费的最后一批候选不会因 `hasMore=false` 被提前标记 exhausted。消费后按该批 hasMore 决定是否结束；后续请求仍按原队列 occurrence 顺序保留重复 native ID。
+- continue 关闭后不再准入旧请求结果；已准入的 CAS 仍等实际结算。快速关闭／重开和初始预览转入尾部追加时，next／Ended 的等待跟随实际后继 flight，不先停止或漏过新批次。
+- 心动 native 参数为 `entry=favorites|current` 和 current 的 `songId`／可选 `seedEntryId`。只有显式播放器 `seedEntryId` 要求严格匹配实际当前 occurrence 和歌曲 ID；浏览歌曲无此参数时允许空队列或不同当前曲，实际匹配的当前 occurrence 可自动复用。平台响应的真实喜欢列表 context 用于队列 context 和反馈来源；完整首批入队，原 checkpoint 返回及默认关闭续播保持。
+- FM snapshot 的 `mode/submode/ruleId/tabTagId` 是已提交配置；尚未提交、切换失败和旧响应不污染播放器显示。
+
+逐曲反馈通过 `MusicRecommendationFeedback` 的 `Provider/Algorithm/FeedbackSource` 与 session／batch／entry proof 传递。候选读取及原队列条目不凭推荐标签获得 proof；只有当前活会话实际入队的 occurrence 可读取。sourceMap 缺失为 `moreRcmd`，心动首批为 `aiMode`；反馈 consent 和账号校验仍由既有反馈职责拥有。请求配方、结束条件和资源边界见[原生持续推荐](music-recommendations.md)。
+
 ## 未知提交
 
 推荐队列提交若返回 `COMMIT_UNKNOWN`：

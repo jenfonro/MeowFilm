@@ -139,6 +139,9 @@
      <StackPanel Orientation="Horizontal">
       <RadioButton Content="歌词" Style="{StaticResource Player.DetailTab}" IsChecked="True"/>
       <RadioButton Content="相似推荐" Style="{StaticResource Player.DetailTab}" IsHitTestVisible="False"/>
+      <Button Content="心动模式" Click="Heartbeat_Click" IsEnabled="{Binding CanHeartbeatCurrent}"
+              Style="{StaticResource MeowFilm.QuietButton}" FontSize="13" Padding="12,6" Margin="4,0"
+              AutomationProperties.Name="从当前歌曲开始心动"/>
      </StackPanel>
     </Border>
    <Grid Grid.Row="2">

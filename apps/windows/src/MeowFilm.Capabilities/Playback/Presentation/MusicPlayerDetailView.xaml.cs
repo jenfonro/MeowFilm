@@ -319,6 +319,8 @@ public partial class MusicPlayerDetailView : UserControl
 
     private void LyricPreview_Click(object sender, RoutedEventArgs e)
     { if (sender is Button { Tag: MusicLyricRow row }) module.PreviewLyric(row); }
+    private async void Heartbeat_Click(object sender, RoutedEventArgs e) =>
+        await module.HeartbeatCurrentAsync(module.PlaybackPresentationKey);
     private async void PlayLyric_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: MusicLyricRow row }) return;

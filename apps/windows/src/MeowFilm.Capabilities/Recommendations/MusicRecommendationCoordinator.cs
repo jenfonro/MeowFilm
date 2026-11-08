@@ -30,9 +30,9 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         internal readonly Dictionary<string, MusicRecommendationFeedback> Feedback = [];
         internal readonly HashSet<string> Attempted = [];
         internal bool Active = true, Loading, Waiting, Continue = config.Kind == "fm" || config.Continue,
-            Play = config.Play, InitialAppend, InitialPending = true, Returning;
+            Play = config.Play, InitialAppend, InitialPending = true, Returning, Exhausted;
         internal string Status = "idle", Error = "", Checkpoint = "", Anchor = "";
-        internal int Batch, Generation, Navigation, MediaIntent, Failures;
+        internal int Batch, Generation, Navigation, AdvanceNavigation, MediaIntent, Failures;
         internal long QueueEpoch;
         internal DateTimeOffset RetryAt = DateTimeOffset.UnixEpoch;
         internal QueueSnapshot? Queue;
@@ -42,10 +42,17 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         internal Task Predecessor = Task.CompletedTask;
         internal Session? TransferTo;
         internal PendingOperation? Pending;
+        internal CandidateBatch? Candidates;
+        internal HeartbeatContext? Heartbeat;
     }
-    private sealed record Song(JsonElement Value, string NativeId, string Algorithm);
+    private sealed record Song(JsonElement Value, string NativeId, string Algorithm, string FeedbackSource);
+    private sealed record HeartbeatContext(string PlaylistId, string StartMusicId, string SongId, bool FromHome, long Count);
+    private sealed record Candidate(string Id, Song Song);
+    private sealed record CandidateBatch(QueueSnapshot Queue, long Epoch, MusicRecommendationRequest Request,
+        Candidate[] Items, bool HasMore);
     private sealed record PendingOperation(string Nonce, string Action, Song[] Songs,
-        MusicRecommendationRequest? Request, string Seed, bool Select, bool Automatic, long QueueEpoch);
+        MusicRecommendationRequest? Request, string Seed, bool Select, bool Automatic, long QueueEpoch,
+        int? SelectIndex = null, bool HasMore = true, HeartbeatContext? Heartbeat = null);
 
     public MusicRecommendationCoordinator(IMusicPlatformCatalog catalog, MusicRecommendationQueuePort queue,
         Func<MusicRecommendationSelection, CancellationToken, Task<bool>> selectAsync,
@@ -90,8 +97,13 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
                     return SnapshotLocked(session);
                 }
             }
-            Fields(p, method == "music.recommendations.continue" ? "id enabled" : "id",
-                method == "music.recommendations.continue" ? "id enabled" : "id");
+            string fields = method switch
+            {
+                "music.recommendations.continue" => "id enabled",
+                "music.recommendations.choose" => "id candidateId",
+                _ => "id"
+            };
+            Fields(p, fields, fields);
             Session target; Task? pending = null;
             lock (gate)
             {
@@ -99,6 +111,8 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
                 var found = unknown ?? (session?.Id == Text(p, "id") ? session : null);
                 Require(found is not null, "SESSION_NOT_FOUND");
                 target = found!;
+                Require(unresolved.Count == 0 || method is "music.recommendations.cancel" or "music.recommendations.reconcile",
+                    "COMMIT_UNKNOWN");
                 switch (method)
                 {
                     case "music.recommendations.cancel":
@@ -133,6 +147,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
                             {
                                 target.Generation++; target.Navigation++; target.Waiting = false;
                                 CancelLocked(target.Cancellation);
+                                target.Attempted.Clear();
                             }
                             PublishLocked();
                         }
@@ -141,8 +156,16 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
                     case "music.recommendations.retry":
                         GuardLocked(); Require(CurrentLocked(target) && !target.Returning, "STALE_SESSION");
                         Require(target.Pending is null, "COMMIT_UNKNOWN");
-                        Require(target.Batch == 0 || target.Config.Kind == "fm" || target.Continue, "CONTINUATION_DISABLED");
-                        pending = BeginBatchLocked(target, target.InitialPending, false, cancellationToken);
+                        Require(target.Batch == 0 || target.Config.Kind is "fm" or "queue" || target.Continue, "CONTINUATION_DISABLED");
+                        pending = BeginBatchLocked(target, target.InitialPending,
+                            target.Config.Kind == "queue" && target.Continue && PlayingTailLocked(target), cancellationToken);
+                        break;
+                    case "music.recommendations.choose":
+                        GuardLocked(); Require(CurrentLocked(target) && !target.Returning, "STALE_SESSION");
+                        Require(target.Config.Kind == "queue", "INVALID_REQUEST");
+                        Require(target.Pending is null, "COMMIT_UNKNOWN");
+                        Require(!target.Loading, "BUSY");
+                        pending = BeginChooseLocked(target, Text(p, "candidateId", "", 80), cancellationToken);
                         break;
                     default: throw new RecommendationException("METHOD_NOT_FOUND");
                 }
@@ -156,9 +179,9 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
 
     private static Configuration Parse(JsonElement p)
     {
-        Fields(p, "kind platform mode submode ruleId tabTagId sourceIds playlistId startMusicId songId fromHome seedEntryId continue play local", "kind platform");
+        Fields(p, "kind platform mode submode ruleId tabTagId sourceIds entry songId seedEntryId continue play local", "kind platform");
         string kind = Text(p, "kind"), platform = Text(p, "platform");
-        Require(kind is "fm" or "similar" or "heartbeat");
+        Require(kind is "fm" or "similar" or "heartbeat" or "queue");
         Require(platform is "wy" or "tx" or "kw" or "kg" or "mg");
         Require(platform == "wy", "UNSUPPORTED");
         Require(Bool(p, "local", true), "REMOTE_NOT_SUPPORTED");
@@ -182,14 +205,16 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
             ids = source.EnumerateArray().Select(v => v.ValueKind == JsonValueKind.String ? v.GetString()! : "").ToArray();
             Require(ids.All(ValidId) && ids.Distinct(StringComparer.Ordinal).Count() == ids.Length);
         }
-        else
+        else if (kind == "heartbeat")
         {
-            Fields(p, "kind platform playlistId startMusicId songId fromHome seedEntryId continue play local",
-                "kind platform playlistId startMusicId songId");
-            string playlist = Text(p, "playlistId"), start = Text(p, "startMusicId"), song = Text(p, "songId");
-            Require(ValidId(playlist) && ValidId(start) && ValidId(song));
-            heartbeat = new(platform, playlist, start, song, Bool(p, "fromHome"));
+            Fields(p, "kind platform entry songId seedEntryId continue play local", "kind platform entry");
+            string entry = Text(p, "entry"), song = Text(p, "songId");
+            Require(entry is "favorites" or "current");
+            Require(entry == "current" ? ValidId(song) : !p.TryGetProperty("songId", out _) && !p.TryGetProperty("seedEntryId", out _));
+            heartbeat = new(platform, entry == "favorites" ? MusicHeartbeatEntry.Favorites : MusicHeartbeatEntry.CurrentSong,
+                entry == "current" ? song : null);
         }
+        else Fields(p, "kind platform continue play local", "kind platform");
         return new(kind, platform, fm, ids, heartbeat, Text(p, "seedEntryId", "", 80),
             Bool(p, "continue"), Bool(p, "play", true));
     }
@@ -228,9 +253,9 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
                         next.PreviousConfiguration = old.PreviousConfiguration ?? old.Config;
                         foreach (var entry in old.Feedback) next.Feedback.Add(entry.Key, entry.Value);
                     }
-                    if (config.Kind != "fm" && old.Config.Kind != "fm" && old.Checkpoint.Length > 0)
+                    if (config.Kind is "similar" or "heartbeat" && old.Config.Kind is "similar" or "heartbeat" && old.Checkpoint.Length > 0)
                     { next.Checkpoint = old.Checkpoint; old.Checkpoint = ""; }
-                    if (config.Kind != "fm" && old.Config.Kind != "fm") old.TransferTo = next;
+                    if (config.Kind is "similar" or "heartbeat" && old.Config.Kind is "similar" or "heartbeat") old.TransferTo = next;
                     RetireLocked(old, "replaced");
                     next.Predecessor = old.Cleanup;
                 }
@@ -260,12 +285,19 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         loading = s?.Loading ?? false, waiting = s?.Waiting ?? false, @continue = s?.Continue ?? false,
         play = s?.Play ?? false, error = s?.Error ?? "", batch = s?.Batch ?? 0,
         canRetry = s is not null && CurrentLocked(s) && !s.Loading && !s.Returning && s.Pending is null && unresolved.Count == 0 &&
-            (s.Batch == 0 || s.Config.Kind == "fm" || s.Continue),
+            (s.Batch == 0 || s.Config.Kind is "fm" or "queue" || s.Continue),
         canReturn = s is not null && s.Checkpoint.Length > 0 && s.Config.Kind != "fm" && s.Pending is null && unresolved.Count == 0,
         requiresReconcile = s is not null && (s.Pending is not null || unresolved.Any(x => x.Id == s.Id)),
         retryAt = s?.RetryAt.ToUnixTimeMilliseconds() ?? 0,
         reconcileIds = unresolved.Select(x => x.Id).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
         queueVersion = s?.Queue?.Version ?? 0, currentId = s?.Queue?.CurrentId ?? "", anchorId = s?.Anchor ?? "",
-        count = s?.Queue?.Entries.Length ?? 0, failures = s?.Failures ?? 0
+        count = s?.Queue?.Entries.Length ?? 0, failures = s?.Failures ?? 0,
+        candidates = s?.Candidates?.Items.Select(c => new { id = c.Id, song = c.Song.Value }).ToArray() ?? [],
+        exhausted = s?.Exhausted ?? false,
+        mode = CommittedFm(s)?.Mode.ToString().ToLowerInvariant() ?? "",
+        submode = CommittedFm(s)?.Submode ?? "",
+        ruleId = CommittedFm(s)?.RuleId ?? "", tabTagId = CommittedFm(s)?.TabTagId ?? ""
     });
+    private static MusicFmRequest? CommittedFm(Session? s) =>
+        s?.PreviousConfiguration?.Fm ?? (s is { InitialPending: false } ? s.Config.Fm : null);
 }

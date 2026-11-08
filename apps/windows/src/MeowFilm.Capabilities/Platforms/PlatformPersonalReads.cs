@@ -45,7 +45,7 @@ public sealed partial class MusicPlatformCatalog
         "SWEET", "RHYTHM_BLUES", "RAINY", "GAMES", "RAP", "K_POP", "ORIGINAL_MUSICIAL", "ELECTRONIC", "COMMUTE",
         "TAKE_SHOWER", "COFFEE_SHOP", "ROCK", "INSPIRATIONAL", "CHINESE", "ENGLISH", "YUEYU", "MANYAO", "JINGDIAN",
         "LIGHT", "GUOFENG", "FOLK", "ACG", "GUDIAN", "JAZZ", "JAPANESE", "GLOBAL", "FRANCH", "BLUE", "DANCE",
-        "LATIN", "PUNK", "COUNTRY", "MUSICAL", "YINGSHI"];
+        "LATIN", "PUNK", "COUNTRY", "MUSICAL", "YINGSHI", "HOT_SONG"];
     public Task<JsonElement> FmAsync(MusicFmRequest request, CancellationToken cancellationToken = default)
     {
         PJ.Require(request is not null && Enum.IsDefined(request.Mode)); var p = request!;
@@ -87,9 +87,9 @@ public sealed partial class MusicPlatformCatalog
         if (!p.Preview) data["limit"] = 5;
         return data;
     }
-    private static string[] SongIds(IReadOnlyList<string>? ids, int max)
+    private static string[] SongIds(IReadOnlyList<string>? ids)
     {
-        PJ.Require(ids is not null && ids.Count > 0 && ids.Count <= max);
+        PJ.Require(ids is not null && ids.Count > 0);
         var copy = ids!.ToArray();
         foreach (var id in copy) PJ.IdInput(id);
         return copy;
@@ -97,7 +97,8 @@ public sealed partial class MusicPlatformCatalog
     private static string IntegerArray(IEnumerable<string> ids) => "[" + string.Join(",", ids) + "]";
     private static List<JsonObject> RadioRows(JsonObject data, int max)
         => PJ.Rows(data["data"] is JsonArray ? data["data"] : PJ.At(data, "data", "songs"), max);
-    private static JsonObject Batch(Call c, string kind, List<JsonObject> rows, JsonObject context, JsonObject? algorithms = null)
+    private static JsonObject Batch(Call c, string kind, List<JsonObject> rows, JsonObject context,
+        JsonObject? algorithms = null, JsonObject? sources = null)
     {
         var items = rows.Select(PlatformSongs.Wy).ToArray();
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -105,9 +106,13 @@ public sealed partial class MusicPlatformCatalog
         var provenance = rows.Select((r, i) =>
         {
             string id = NativeMusicSong.NativeId(items[i]);
-            return PJ.Obj(("id", id),
-                ("alg", PJ.Metadata(PJ.First(r["alg"], PJ.At(r, "songInfo", "alg"), algorithms?[id]))),
+            var metadata = PJ.Obj(("id", id),
+                ("alg", PJ.Metadata(PJ.First(algorithms?[id], r["alg"], PJ.At(r, "songInfo", "alg")))),
                 ("source", kind));
+            if (kind == "heartbeat") metadata["feedbackSource"] = "aiMode";
+            else if (kind == "queue-recommendations")
+                metadata["feedbackSource"] = PJ.Metadata(sources?[id]) is { Length: > 0 } source ? source : "moreRcmd";
+            return metadata;
         }).ToArray();
         return PJ.Obj(("platform", c.Platform), ("kind", kind), ("items", PJ.Arr(items)), ("count", items.Length),
             ("empty", items.Length == 0), ("context", context), ("recommendations", PJ.Arr(provenance)),
@@ -115,7 +120,8 @@ public sealed partial class MusicPlatformCatalog
     }
     public Task<JsonElement> SimilarAsync(MusicSimilarRequest request, CancellationToken cancellationToken = default)
     {
-        PJ.Require(request is not null); var p = request! with { SourceIds = SongIds(request!.SourceIds, 20) };
+        PJ.Require(request is not null && request.SourceIds is { Count: <= 20 });
+        var p = request! with { SourceIds = SongIds(request!.SourceIds) };
         return RunAsync(p.Platform, "similar", p, false, c =>
         {
             PJ.Require(c.Platform == "wy", "UNSUPPORTED"); c.Auth();
@@ -126,33 +132,147 @@ public sealed partial class MusicPlatformCatalog
     }
     public Task<JsonElement> HeartbeatAsync(MusicHeartbeatRequest request, CancellationToken cancellationToken = default)
     {
-        PJ.Require(request is not null); var p = request!;
-        PJ.IdInput(p.PlaylistId); PJ.IdInput(p.StartMusicId); PJ.IdInput(p.SongId);
-        return RunAsync(p.Platform, "heartbeat", p, false, c =>
+        PJ.Require(request is not null && Enum.IsDefined(request.Entry)); var p = request!;
+        if (p.Entry == MusicHeartbeatEntry.CurrentSong) PJ.IdInput(p.SongId!);
+        else PJ.Require(p.SongId is null);
+        return RunAsync(p.Platform, "heartbeat", p, false, async c =>
         {
             PJ.Require(c.Platform == "wy", "UNSUPPORTED"); c.Auth();
-            return c.Wy("/api/playmode/intelligence/list", PJ.Obj(("playlistId", p.PlaylistId), ("startMusicId", p.StartMusicId),
-                ("songId", p.SongId), ("type", p.FromHome ? "fromPlayAll" : "fromPlayOne"), ("count", 100)), data =>
+            var favorites = await HeartbeatFavorites(c);
+            var usable = favorites.Ids.Where(id => PlatformSongs.HasWyDisplayTitle(favorites.Songs[id])).ToArray();
+            PJ.Require(usable.Length > 0, "NOT_FOUND");
+            var fromHome = p.Entry == MusicHeartbeatEntry.Favorites;
+            var songId = fromHome ? usable[Random.Shared.Next(usable.Length)] : p.SongId!;
+            var startMusicId = usable[0];
+            return await c.Wy("/api/playmode/intelligence/list",
+                PJ.Obj(("playlistId", favorites.PlaylistId), ("startMusicId", startMusicId),
+                    ("songId", songId), ("type", fromHome ? "fromPlayAll" : "fromPlayOne"), ("count", favorites.Ids.Length)), data =>
             {
-                // Missing songInfo is not enough metadata for a playable placeholder.
-                var rows = PJ.Rows(data["data"], 100);
-                PJ.Require(rows.All(r => r["songInfo"] is JsonObject), "INVALID_RESPONSE");
-                return Batch(c, "heartbeat", rows, PJ.Obj(("playlistId", p.PlaylistId), ("startMusicId", p.StartMusicId),
-                    ("songId", p.SongId), ("fromHome", p.FromHome)));
+                var rows = PJ.RowsAll(data["data"]);
+                foreach (var row in rows)
+                {
+                    var id = PJ.Id(PJ.First(row["id"], PJ.At(row, "songInfo", "id")), "^[1-9][0-9]{0,19}$");
+                    if (row["songInfo"] is null)
+                    {
+                        PJ.Require(favorites.Songs.TryGetValue(id, out var favorite), "INVALID_RESPONSE");
+                        row["songInfo"] = favorite!.DeepClone();
+                    }
+                    PJ.Require(row["songInfo"] is JsonObject && PlatformSongs.HasWyDisplayTitle(row), "INVALID_RESPONSE");
+                    PJ.Require(PJ.Id(PJ.At(row, "songInfo", "id")) == id, "IDENTITY_MISMATCH");
+                }
+                return Batch(c, "heartbeat", rows, PJ.Obj(("playlistId", favorites.PlaylistId), ("startMusicId", startMusicId),
+                    ("songId", songId), ("fromHome", fromHome), ("count", favorites.Ids.Length)));
             });
         }, cancellationToken, cacheable: false);
     }
+    private static async Task<(string PlaylistId, string[] Ids, Dictionary<string, JsonObject> Songs)> HeartbeatFavorites(Call c)
+    {
+        var uid = PJ.IdInput(c.Session!.UserId);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var playlistId = "";
+        for (long offset = 0; playlistId.Length == 0;)
+        {
+            var page = await c.Wy("/api/user/playlist", PJ.Obj(("uid", uid), ("limit", 100),
+                ("offset", offset), ("includeVideo", true)), data =>
+            {
+                var rows = PJ.Rows(data["playlist"], 100); var more = PJ.Bool(data["more"]);
+                if (more) PJ.Require(rows.Count == 100, "INCOMPLETE_PAGE");
+                var favorite = "";
+                foreach (var row in rows)
+                {
+                    var id = PJ.Id(row["id"], "^[1-9][0-9]{0,19}$");
+                    PJ.Require(seen.Add(id), "PAGINATION_STALLED");
+                    var owner = PJ.Id(PJ.At(row, "creator", "userId"));
+                    if (row["userId"] is { } declared) PJ.Require(PJ.Id(declared) == owner, "IDENTITY_MISMATCH");
+                    if (owner != uid || PJ.Scalar(row["specialType"]) != "5") continue;
+                    PJ.Require(favorite.Length == 0, "IDENTITY_MISMATCH");
+                    favorite = id;
+                }
+                return (Favorite: favorite, More: more, Count: rows.Count);
+            }, true);
+            playlistId = page.Favorite;
+            if (playlistId.Length == 0) PJ.Require(page.More, "NOT_FOUND");
+            offset += page.Count;
+        }
+        var membership = await c.Wy("/api/v6/playlist/detail",
+            PJ.Obj(("id", playlistId), ("n", 100), ("s", 8)), data =>
+        {
+            var list = data["playlist"];
+            PJ.Require(list is JsonObject && PJ.Id(PJ.At(list, "id")) == playlistId &&
+                PJ.Id(PJ.At(list, "creator", "userId")) == uid && PJ.Scalar(PJ.At(list, "specialType")) == "5",
+                "IDENTITY_MISMATCH");
+            if (list!["userId"] is { } declared) PJ.Require(PJ.Id(declared) == uid, "IDENTITY_MISMATCH");
+            var total = PJ.Count(list["trackCount"]);
+            var cloud = list["cloudTrackCount"] is null ? 0 : PJ.Count(list["cloudTrackCount"]);
+            var ids = PJ.RowsAll(list["trackIds"] ?? (list["tracks"] is JsonArray tracks &&
+                    (tracks.Count == total || tracks.Count == total + cloud)
+                    ? tracks : total == 0 && cloud == 0 ? new JsonArray() : null))
+                .Select(row => PJ.Id(row["id"], "^[1-9][0-9]{0,19}$")).ToArray();
+            var members = ids.ToHashSet(StringComparer.Ordinal);
+            PJ.Require((ids.LongLength == total || ids.LongLength == total + cloud) &&
+                members.Count == ids.Length, "INCOMPLETE_PLAYLIST");
+            var songs = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+            foreach (var song in PJ.RowsAll(list["tracks"] ?? new JsonArray()))
+            {
+                var id = PJ.Id(song["id"]);
+                PJ.Require(members.Contains(id) && songs.TryAdd(id, song), "IDENTITY_MISMATCH");
+                if (PlatformSongs.HasWyDisplayTitle(song))
+                    PJ.Require(NativeMusicSong.NativeId(PlatformSongs.Wy(song)) == id, "IDENTITY_MISMATCH");
+            }
+            return (Ids: ids, Songs: songs);
+        });
+        var missing = membership.Ids.Where(id => !membership.Songs.TryGetValue(id, out var song) ||
+            !PlatformSongs.HasWyDisplayTitle(song)).ToArray();
+        foreach (var ids in missing.Chunk(100))
+        {
+            var songs = await c.Wy("/api/v3/song/detail",
+                PJ.Obj(("c", "[" + string.Join(",", ids.Select(id => "{\"id\":" + id + "}")) + "]")), data =>
+            {
+                var rows = PJ.Rows(data["songs"], ids.Length);
+                var found = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var row in rows)
+                {
+                    var id = PJ.Id(row["id"]);
+                    PJ.Require(found.Add(id) && ids.Contains(id, StringComparer.Ordinal), "IDENTITY_MISMATCH");
+                    if (PlatformSongs.HasWyDisplayTitle(row))
+                        PJ.Require(NativeMusicSong.NativeId(PlatformSongs.Wy(row)) == id, "IDENTITY_MISMATCH");
+                }
+                PJ.Require(found.Count == ids.Length, "INCOMPLETE_PLAYLIST");
+                return rows;
+            }, true);
+            foreach (var song in songs) membership.Songs[PJ.Id(song["id"])] = song;
+        }
+        return (playlistId, membership.Ids, membership.Songs);
+    }
+    private static JsonObject? RecommendationMap(JsonNode? value)
+    {
+        if (value is null) return null;
+        if (value is JsonObject map) return map;
+        try
+        {
+            using var document = JsonDocument.Parse(PJ.Text(value));
+            return PJ.Read(document.RootElement) as JsonObject ?? throw new MusicPlatformException("INVALID_RESPONSE");
+        }
+        catch (JsonException) { throw new MusicPlatformException("INVALID_RESPONSE"); }
+    }
     public Task<JsonElement> QueueRecommendationsAsync(MusicQueueRecommendationsRequest request, CancellationToken cancellationToken = default)
     {
-        PJ.Require(request is not null); var p = request! with { SongIds = SongIds(request!.SongIds, 1000) };
+        PJ.Require(request is not null); var p = request! with { SongIds = SongIds(request!.SongIds) };
         PJ.IdInput(p.CurrentPlaySongId); PJ.Require(p.SongIds.Contains(p.CurrentPlaySongId, StringComparer.Ordinal));
         return RunAsync(p.Platform, "queue-recommendations", p, false, c =>
         {
             PJ.Require(c.Platform == "wy", "UNSUPPORTED"); c.Auth();
             return c.Wy("/api/homepage/more/rcmd/song", PJ.Obj(("songIds", IntegerArray(p.SongIds)),
                 ("currentPlaySongId", p.CurrentPlaySongId), ("source", "curlist_more_rcmd")),
-                data => Batch(c, "queue-recommendations", PJ.Rows(PJ.At(data, "data", "songList"), 1000),
-                    PJ.Obj(("songIds", p.SongIds), ("currentPlaySongId", p.CurrentPlaySongId)), PJ.At(data, "data", "algMap") as JsonObject));
+                data =>
+                {
+                    var rows = PJ.RowsAll(PJ.At(data, "data", "songList"));
+                    var batch = Batch(c, "queue-recommendations", rows,
+                        PJ.Obj(("songIds", p.SongIds), ("currentPlaySongId", p.CurrentPlaySongId)),
+                        RecommendationMap(PJ.At(data, "data", "algMap")), RecommendationMap(PJ.At(data, "data", "sourceMap")));
+                    batch["hasMore"] = PJ.At(data, "data", "hasMore") is { } more ? PJ.Bool(more) : rows.Count > 0;
+                    return batch;
+                });
         }, cancellationToken, cacheable: false);
     }
     public Task<JsonElement> PersonalPlaylistsAsync(MusicPersonalPlaylistsRequest request, CancellationToken cancellationToken = default)

@@ -158,13 +158,13 @@ internal static class PlatformDiscovery
                 result["subtitle"] = Regex.Replace(caption, "^" + Regex.Escape(S(result, "name")) + @"\s*\|\s*", "");
             return Finish("collection", PJ.Obj(("type", "daily"), ("branch", S(click, "branch") == "style" ? "style" : "default")));
         }
-        if (kind == "star" || S(r, "lunaItemType") == "heartRcmd") return Finish("collection", PJ.Obj(("type", "heartbeat")));
+        if (kind == "star" || S(r, "lunaItemType") == "heartRcmd")
+            return Finish("collection", PJ.Obj(("type", "heartbeat"), ("entry", "favorites")));
         if (kind == "fm" || S(click, "type") == "fm")
         {
             var mode = S(r, "mode"); var submode = PJ.Text(Pick(r, "subMode", "submode"));
             result["coverLabel"] = S(r, "fmLogoTextContent");
-            if (mode.Length == 0 && submode.Length > 0) return Unsupported();
-            if (mode.Length == 0 && (channel || PJ.Scalar(A(r, "ruleId")).Length > 0 || PJ.Scalar(A(r, "tabTagId")).Length > 0))
+            if (PJ.Scalar(A(r, "ruleId")).Length > 0 || PJ.Scalar(A(r, "tabTagId")).Length > 0)
             {
                 var rule = Id(A(r, "ruleId")); var tab = PJ.Scalar(A(r, "tabTagId"));
                 if (PJ.Scalar(A(r, "ruleId")).Length > 0 ? rule.Length == 0 :
@@ -172,10 +172,10 @@ internal static class PlatformDiscovery
                 return Finish("fm", PJ.Obj(("type", "fm"), ("provider", "rule"), ("ruleId", rule),
                     ("tabTagId", rule.Length > 0 ? "" : tab), ("sourceName", S(result, "coverLabel").Length > 0 ? S(result, "coverLabel") : S(result, "name"))));
             }
-            if (mode.Length > 0 && mode is not ("DEFAULT" or "FAMILIAR" or "EXPLORE" or "PUZZLE_MODE_RCMD" or "SCENE_RCMD")) return Unsupported();
-            var action = PJ.Obj(("type", "fm"), ("mode", mode.Length > 0 ? mode : "DEFAULT"), ("submode", submode));
-            if (channel) action["entry"] = "channel";
-            return Finish("fm", action);
+            if (!channel) return Finish("fm", PJ.Obj(("type", "fm"), ("mode", "DEFAULT"), ("submode", "")));
+            if (mode.Length == 0 && submode.Length == 0 && S(click, "type") == "fm") mode = S(click, "mode");
+            if (mode is not ("DEFAULT" or "FAMILIAR" or "EXPLORE" or "PUZZLE_MODE_RCMD" or "SCENE_RCMD")) return Unsupported();
+            return Finish("fm", PJ.Obj(("type", "fm"), ("mode", mode), ("submode", submode), ("entry", "channel")));
         }
         if (kind is "playlist" or "play_list" or "song_list" or "list" or "scroll_playlist" or "toplist" || S(click, "type") == "playlist")
         {
@@ -309,9 +309,10 @@ internal static class PlatformDiscovery
                 var unique = new List<JsonObject>();
                 foreach (var n in native)
                 {
-                    var resource = Resource(n, modern: block["dslData"] is not null);
+                    var resource = Resource(n, modern: block["dslData"] is not null, channel: target != "wy:home");
                     if (resource is null) { if (S(n, "resourceType").Length > 0) omitted.Add(S(n, "resourceType")); continue; }
                     var identity = S(resource, "kind") + ":" + (S(resource, "id").Length > 0 ? S(resource, "id") : S(resource, "action", "type")) + ":" + S(resource, "action", "branch");
+                    if (S(resource, "action", "type") == "fm") identity += ":" + PJ.Encode(resource["action"]);
                     if (emitted.Add(identity)) unique.Add(resource);
                 }
                 var entrance = unique.Any(x => S(x, "action", "type") is "daily" or "heartbeat" or "fm" or "similar") ||
@@ -322,6 +323,7 @@ internal static class PlatformDiscovery
                     for (var i = 0; i < unique.Count; i++)
                     {
                         var x = unique[i]; x["key"] = $"{baseId}:entry:{S(x, "kind")}:{(S(x, "id").Length > 0 ? S(x, "id") : i.ToString())}:{S(x, "action", "branch")}";
+                        if (S(x, "action", "type") == "fm") x["key"] = S(x, "key") + ":" + PJ.Hash(x["action"]);
                         entries.Add(Entry(x));
                     }
                     continue;
@@ -597,7 +599,7 @@ internal static class PlatformDiscovery
         {
             if (A(n, "props") is not JsonObject props) return null;
             var row = (JsonObject)props.DeepClone(); row["resourceType"] = S(n, "componentName") == "Entrance" ? "" : S(n, "componentName").ToLowerInvariant();
-            return Resource(row);
+            return Resource(row, channel: true);
         }
         void Walk(JsonNode? n, int depth = 0, string heading = "")
         {
@@ -624,7 +626,13 @@ internal static class PlatformDiscovery
                     var g = modules[i]; var items = PJ.Arr(PJ.Array(A(g, "modules")).OfType<JsonObject>().Select((x, index) =>
                     {
                         var row = (JsonObject)x.DeepClone(); row["resourceType"] = x["type"]?.DeepClone();
-                        if (S(x, "type") == "fm" && PJ.Scalar(x["tabTagId"]).Length == 0) row["tabTagId"] = A(p, "tab")?.DeepClone();
+                        if (S(x, "type") == "fm" && S(x, "mode").Length == 0 &&
+                            PJ.Scalar(x["ruleId"]).Length == 0 && PJ.Scalar(x["tabTagId"]).Length == 0)
+                        {
+                            var declared = Action(Pick(x, "action", "url", "orpheus", "clickAction")) ??
+                                Action(A(Nested(A(x, "playBtnData")), "detailUrl"));
+                            if (S(declared, "type") != "fm") row["tabTagId"] = A(p, "tab")?.DeepClone();
+                        }
                         var resource = Resource(row, channel: true);
                         if (resource is null) return null;
                         resource["key"] = $"{target}:{(S(n, "id").Length > 0 ? S(n, "id") : sections.Count.ToString())}:entry:{i}:{index}";

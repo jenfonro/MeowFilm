@@ -16,7 +16,11 @@ public sealed class MusicFeedbackAttempt
 public sealed record MusicFeedbackStart(MusicFeedbackAttempt Attempt, MusicFeedbackRecording Recording,
     double Duration, double Position, double Rate, bool Automatic,
     string Source = "unknown", string SourceId = "", string SourceType = "", string Algorithm = "",
-    string Mode = "");
+    string Mode = "")
+{
+    // Only a live native recommendation proof can supply an upstream sourceMap value.
+    internal bool IsQueueRecommendation { get; init; }
+}
 
 public sealed record MusicFeedbackEnd(double Listened, double MediaListened, double Duration,
     double Position, double Rate, string Reason, string Mode = "");

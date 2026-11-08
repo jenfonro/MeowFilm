@@ -393,6 +393,12 @@ public partial class MusicCatalogView : UserControl
     { if (Owner is { } owner) try { await owner.OpenVipBannerAsync(); } catch { } }
     private async void QueueRecommendations_Click(object sender, RoutedEventArgs e)
     { if (Owner is { } owner) await owner.CatalogQueueRecommendationsAsync(); }
+    private async void HeartbeatFavorites_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (Owner is { } owner && sender is Button { Tag: MusicCatalogCard card })
+            await owner.HeartbeatFavoritesCatalogCardAsync(card);
+    }
     private async void Platform_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (IsLoaded && IsVisible && Owner is { } owner)

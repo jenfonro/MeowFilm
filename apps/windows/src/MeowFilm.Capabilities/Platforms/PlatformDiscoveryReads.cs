@@ -34,7 +34,7 @@ public sealed partial class MusicPlatformCatalog
             var action = o["action"];
             if (PJ.S(action, "type") is { Length: > 0 } type)
             {
-                var supported = type is "song" or "playlist" or "channel" or "chart" or "album" or "daily" or "fm" or "similar";
+                var supported = type is "song" or "playlist" or "channel" or "chart" or "album" or "daily" or "fm" or "similar" or "heartbeat";
                 var needsAccount = type is "daily" or "fm" or "similar" or "heartbeat";
                 var display = !needsAccount || c.Session is not null;
                 o["requiresAccount"] = needsAccount;

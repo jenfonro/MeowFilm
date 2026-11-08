@@ -13,7 +13,8 @@ public sealed record MusicRecommendationPlaybackState(string EntryId, bool IsPla
 /// <summary>Ephemeral provenance of an entry actually admitted by this live coordinator.</summary>
 public sealed record MusicRecommendationFeedback(string SessionId, string BatchId, string EntryId,
     string Platform, string Kind, string Provider, string SourceType, string SourceId,
-    string Algorithm, string Mode, string Submode, bool Automatic, bool FromHome);
+    string Algorithm, string Mode, string Submode, bool Automatic, bool FromHome,
+    string FeedbackSource = "");
 
 public sealed class MusicRecommendationSelection
 {

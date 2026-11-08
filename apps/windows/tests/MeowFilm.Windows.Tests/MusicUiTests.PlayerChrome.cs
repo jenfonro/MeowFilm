@@ -51,6 +51,61 @@ public static partial class MusicUiTests
 
     private static IEnumerable<TestCase> PlayerChromeCases()
     {
+        yield return Case("player FM popup dismissal cannot open detail and releases its input hook", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            var player = (MusicPlayerView)f.Module.PlayerView;
+            var window = new Window { Content = player };
+            using var surface = new HwndSource(new HwndSourceParameters("recommendation-fm-input-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
+                PositionX = -32000, PositionY = -32000, Width = 1110, Height = 100
+            });
+            var activeKey = typeof(Window).GetFields(
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
+                .Where(field => field.FieldType == typeof(DependencyPropertyKey))
+                .Select(field => (DependencyPropertyKey)field.GetValue(null)!)
+                .Single(key => key.DependencyProperty == Window.IsActiveProperty);
+            int requests = 0;
+            f.Module.GlobalSurfaceRequested += (_, args) =>
+            { if (args.Surface == DesktopGlobalSurface.PlayerDetail) requests++; };
+            var popup = (System.Windows.Controls.Primitives.Popup)player.FindName("FmPopup");
+            try
+            {
+                // A logical Window supplies ownership without Show/Activate or physical input.
+                surface.RootVisual = player; Render(player, 1110, 100); await Drain();
+                True(player.IsLoaded && player.IsVisible && ReferenceEquals(Window.GetWindow(player), window),
+                    "offscreen player keeps its logical window owner");
+                window.SetValue(activeKey, true);
+                var inputField = typeof(MusicPlayerView).GetField("surfaceInput",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+                var input = (PlayerSurfaceInput)inputField.GetValue(player)!;
+                var sourcesField = typeof(PlayerSurfaceInput).GetField("sources",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+                var sources = (System.Collections.IDictionary)sourcesField.GetValue(input)!;
+                Equal(0, sources.Count);
+                popup.IsOpen = true; await Drain();
+                True(popup.IsOpen && PresentationSource.FromVisual(popup.Child) is HwndSource,
+                    "FM layer owns a real offscreen popup source");
+                Equal(1, sources.Count);
+                var blank = (Grid)player.Content;
+                void Input(RoutedEvent routed) => ProcessBlankInput(blank, routed, (_, _) => { });
+                Input(Mouse.PreviewMouseDownEvent);
+                popup.IsOpen = false;
+                Input(Mouse.PreviewMouseUpEvent); await Drain();
+                Equal(0, requests); Equal(0, sources.Count);
+                Input(Mouse.PreviewMouseDownEvent); Input(Mouse.PreviewMouseUpEvent); await Drain();
+                Equal(1, requests);
+                surface.RootVisual = null; window.Content = null; await Drain();
+                True(inputField.GetValue(player) is null, "unload releases the input owner");
+                Equal(0, sources.Count);
+            }
+            finally
+            {
+                window.SetValue(activeKey, false); player.Deactivate();
+                surface.RootVisual = null; window.Content = null; window.Close();
+            }
+        });
         yield return Case("player synthetic WPF input routes suppress actual popup dismissal and admit the next gesture", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
@@ -307,6 +362,27 @@ public static partial class MusicUiTests
                 Equal(0, (int)sources.GetType().GetProperty("Count")!.GetValue(sources)!);
             }
             finally { player.Deactivate(); window.Content = null; window.Close(); await Drain(); }
+        });
+        yield return Case("player ordinary mode control and current heartbeat availability follow actual playback", async () =>
+        {
+            await using var f = await Fixture.Create();
+            var footer = (MusicPlayerView)f.Module.PlayerView;
+            Render(footer, 1000, 100);
+            var mode = (Button)footer.FindName("ModeButton");
+            var popup = (System.Windows.Controls.Primitives.Popup)footer.FindName("FmPopup");
+            Equal(f.Module.ModeText, System.Windows.Automation.AutomationProperties.GetName(mode));
+            True(!f.Module.HasPlaybackFm && !f.Module.CanHeartbeatCurrent, "no active recording implies no current-song heartbeat");
+            mode.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            await Until(() => f.Calls.Count("music.queue.mode") == 1 && !f.Module.Busy);
+            Equal(2, f.Module.Mode);
+            True(!popup.IsOpen, "ordinary mode keeps the native loop command");
+            await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            True(!f.Module.HasPlaybackFm && !f.Module.CanHeartbeatCurrent, "local recording is never sent to WY heartbeat");
+            var more = (Button)footer.FindName("MoreButton");
+            more.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            var heartbeat = more.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "从当前歌曲开始心动"));
+            True(!heartbeat.IsEnabled, "disabled native entry remains clearly named");
+            more.ContextMenu.IsOpen = false;
         });
         yield return Case("player first visible frame has prepared artwork and no secondary footer disc", async () =>
         {

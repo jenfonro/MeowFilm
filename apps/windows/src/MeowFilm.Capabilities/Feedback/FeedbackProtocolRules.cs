@@ -111,14 +111,17 @@ internal static class FeedbackProtocolRules
         Require(Seconds(value.Duration) && value.Duration > 0, "DURATION_REQUIRED");
         Require(Seconds(value.Position) && value.Position <= value.Duration + (account.Platform == "kg" ? 1 : 0));
         Require(Rate(value.Rate, account.Platform));
-        Require(Text(value.Source, 32) && Text(value.SourceId, 512, true) &&
+        Require(Text(value.Source, value.IsQueueRecommendation ? 512 : 32) && Text(value.SourceId, 512, true) &&
             Text(value.SourceType, 32, true) && Text(value.Algorithm, 2000, true) && Mode(value.Mode));
+        Require(!value.IsQueueRecommendation || account.Platform == "wy");
         if (account.Platform == "wy")
         {
-            Require(value.Source is "userfm" or "playlist" or "album" or "search" or "dailySongRecommend" or
-                "song" or "likeMusic" or "aiMode" or "moreRcmd" or "unknown");
+            Require(value.IsQueueRecommendation || value.Source is "userfm" or "playlist" or "album" or "search" or
+                "dailySongRecommend" or "song" or "likeMusic" or "aiMode" or "moreRcmd" or "unknown");
             Require(value.SourceType is "" or "list" or "album" or "track" or "dailyRecommend");
-            if (value.Source is "playlist" or "likeMusic" or "album" or "aiMode")
+            if (value.IsQueueRecommendation)
+                Require(value.SourceId.Length == 0 && value.SourceType == "track");
+            else if (value.Source is "playlist" or "likeMusic" or "album" or "aiMode")
                 Require(Id(value.SourceId, true) && value.SourceType ==
                     (value.Source == "album" ? "album" : value.Source == "aiMode" ? "track" : "list"));
             else if (value.Source != "search") Require(value.SourceId.Length == 0);
@@ -148,7 +151,8 @@ internal static class FeedbackProtocolRules
         // Attempt-local equality check; no process-wide history or outbound queue.
         byte[] bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
         {
-            account.Platform, account.Scope, account.Generation, account.UserId, account.Cookie, Start = start
+            account.Platform, account.Scope, account.Generation, account.UserId, account.Cookie,
+            Start = start, start.IsQueueRecommendation
         }, Json));
         try { return Convert.ToHexString(SHA256.HashData(bytes)); }
         finally { CryptographicOperations.ZeroMemory(bytes); }
