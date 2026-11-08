@@ -1,5 +1,7 @@
 import http from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { Readable, Writable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { BridgeError, HTTP_PROTOCOL } from './errors.js';
 import { checkJSON, encodeJSONValue, decodeJSONValue, parseJSON } from './json.js';
 
@@ -7,6 +9,7 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![
 const keyPattern = /^[0-9a-f]{64}$(?![\s\S])/;
 const publicCodes = new Set(['INVALID_REQUEST', 'METHOD_NOT_FOUND', 'PERMISSION_DENIED',
   'CLOSED', 'CANCELLED', 'TIMEOUT', 'INVALID_RESPONSE']);
+const streamHeaderNames = new Set(['content-type', 'content-length', 'cache-control', 'etag', 'last-modified']);
 const invalid = () => { throw new BridgeError('INVALID_REQUEST'); };
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -38,6 +41,121 @@ function envelope(value, contract, codes) {
   return value;
 }
 const failed = code => ({ ok: false, contract: HTTP_PROTOCOL, code });
+
+function streamHeaders(reply) {
+  if (!object(reply) || Object.keys(reply).length !== 4 ||
+      !['status', 'headers', 'body', 'dispose'].every(name => Object.hasOwn(reply, name)) ||
+      reply.status !== 200 || !object(reply.headers) ||
+      !(reply.body instanceof Readable) || reply.body.destroyed || reply.body.readableEnded ||
+      typeof reply.dispose !== 'function') throw new BridgeError('INVALID_RESPONSE');
+  const headers = {};
+  for (const [name, value] of Object.entries(reply.headers)) {
+    const lower = name.toLowerCase();
+    if (!streamHeaderNames.has(lower) || Object.hasOwn(headers, lower) ||
+        !(typeof value === 'string' || lower === 'content-length' && Number.isSafeInteger(value) && value >= 0) ||
+        lower === 'content-length' && (!/^[0-9]+$(?![\s\S])/.test(String(value)) ||
+          !Number.isSafeInteger(Number(value)))) {
+      throw new BridgeError('INVALID_RESPONSE');
+    }
+    http.validateHeaderValue(lower, value);
+    headers[lower] = String(value);
+  }
+  if (!headers['content-type']?.trim()) throw new BridgeError('INVALID_RESPONSE');
+  return headers;
+}
+
+async function streamResponse(reply, response, { signal, requestId, contract, codes, onCleanupFailure }, send) {
+  let body, dispose, drained, disposal;
+  const release = () => disposal ??= Promise.resolve().then(async () => {
+    if (body instanceof Readable) body.destroy();
+    const results = await Promise.allSettled([drained,
+      Promise.resolve().then(() => typeof dispose === 'function' ? dispose.call(reply) : undefined)]);
+    if (results[1].status === 'rejected') {
+      onCleanupFailure();
+      throw new BridgeError('INVALID_RESPONSE');
+    }
+  });
+  const releaseInBackground = () => { void release().catch(() => {}); };
+  try {
+    // Acquire cleanup before validation or the abort fence, including late replies.
+    dispose = reply?.dispose;
+    body = reply?.body;
+    if (body instanceof Readable) {
+      drained = new Promise(resolve => {
+        let timer;
+        const done = () => { clearInterval(timer); body.off('close', done); resolve(); };
+        body.once('close', done);
+        if (!body.destroyed) {
+          const destroy = body._destroy, ownDestroy = Object.hasOwn(body, '_destroy');
+          // end/finished do not prove destruction, and emitClose may be false.
+          // Observe the actual implementation callback before pipeline can destroy.
+          body._destroy = function (error, callback) {
+            if (ownDestroy) this._destroy = destroy;
+            else delete this._destroy;
+            const complete = error => {
+              callback(error);
+              // Node queues destroy's error/close events after its callback.
+              process.nextTick(done);
+            };
+            try { destroy.call(this, error, complete); }
+            catch (error) { complete(error); }
+          };
+        } else if (!body.closed) {
+          // Destruction started before handoff; its callback is already captured.
+          // close may be disabled, so observe actual completion, never elapsed time.
+          timer = setInterval(() => { if (body.closed) done(); }, 25);
+        }
+        if (body.closed) process.nextTick(done);
+      });
+      body.once('end', releaseInBackground);
+      body.once('error', releaseInBackground);
+    }
+    signal.addEventListener('abort', releaseInBackground, { once: true });
+    if (signal.aborted) return;
+    if (reply?.ok === false) {
+      envelope(reply, contract, codes);
+      send(502, reply);
+      return;
+    }
+    const headers = streamHeaders(reply);
+    const start = () => {
+      if (signal.aborted || response.destroyed) throw new BridgeError('CANCELLED');
+      if (!response.headersSent) {
+        response.strictContentLength = Object.hasOwn(headers, 'content-length');
+        response.writeHead(200, { ...headers, 'x-meow-request-id': requestId });
+      }
+    };
+    // The sink keeps pre-header source failures available for a JSON error.
+    // ServerResponse write callbacks retain real downstream backpressure.
+    const destination = new Writable({
+      highWaterMark: response.writableHighWaterMark,
+      write(chunk, encoding, done) {
+        try { start(); response.write(chunk, encoding, done); }
+        catch (error) { done(error); }
+      },
+      final(done) {
+        let settled = false;
+        const complete = error => { if (!settled) { settled = true; done(error); } };
+        // end() may queue its callback before throwing a content-length error.
+        try { start(); response.end(complete); }
+        catch (error) { complete(error); }
+      },
+    });
+    await pipeline(body, destination, { signal });
+  } catch (error) {
+    if (response.headersSent) response.destroy();
+    throw error;
+  } finally {
+    try { await release(); }
+    finally {
+      signal.removeEventListener('abort', releaseInBackground);
+      if (body instanceof Readable) {
+        body.off('end', releaseInBackground);
+        body.off('error', releaseInBackground);
+      }
+    }
+  }
+}
 
 function readBody(stream, { maximumBytes, limitCode, signal } = {}) {
   return new Promise((resolve, reject) => {
@@ -76,13 +194,14 @@ export function createHttpServer({ sessionId, key, resolve: resolveRoute, onClos
   validateSession({ sessionId, key });
   if (typeof resolveRoute !== 'function' || onClose !== undefined && typeof onClose !== 'function') invalid();
   const active = new Map(), sockets = new Set();
-  let baseUrl, starting, closing, closed = false, sequence = 0;
+  let baseUrl, starting, closing, closed = false, sequence = 0, streamCleanupFailed = false;
   const server = http.createServer({ requestTimeout: 0 }, (request, response) => {
     const requestId = request.headers['x-meow-request-id'];
     const controller = new AbortController();
     const abort = () => { if (!response.writableFinished) controller.abort(); };
     const send = (status, value) => {
       if (controller.signal.aborted || response.destroyed) return;
+      if (response.headersSent) { response.destroy(); return; }
       response.writeHead(status, { 'content-type': 'application/json',
         ...(uuid.test(requestId ?? '') ? { 'x-meow-request-id': requestId } : {}),
         ...(status === 413 ? { connection: 'close' } : {}) });
@@ -135,13 +254,19 @@ export function createHttpServer({ sessionId, key, resolve: resolveRoute, onClos
             const result = await route.handler(input, { signal: controller.signal, sessionId,
               requestId, sequence: owner.sequence,
               isCurrent: () => owner.current && !closed && !controller.signal.aborted });
+            if (route.responseType === 'stream') {
+              await streamResponse(result, response, { signal: controller.signal, requestId,
+                contract: route.contract, codes: route.codes,
+                onCleanupFailure: () => { streamCleanupFailed = true; } }, send);
+              return;
+            }
             if (controller.signal.aborted) return;
             envelope(result, route.contract, route.codes);
             send(route.status?.(result) ?? 200, result);
           } catch (error) {
             if (controller.signal.aborted) return;
             if (error?.sourceLimit) send(413, { ok: false, contract: route.contract, code: route.limitCode });
-            else send(!admitted && error?.code === 'INVALID_REQUEST' ? 400 : 200,
+            else send(!admitted && error?.code === 'INVALID_REQUEST' ? 400 : route.responseType === 'stream' ? 502 : 200,
               failed(admitted && error?.code === 'INVALID_REQUEST' ? 'INVALID_RESPONSE'
                 : error instanceof BridgeError ? error.code : 'INVALID_RESPONSE'));
           } finally {
@@ -168,10 +293,13 @@ export function createHttpServer({ sessionId, key, resolve: resolveRoute, onClos
   return Object.freeze({
     get baseUrl() { return baseUrl; },
     get state() { return { closed, active: active.size }; },
-    abortActive(exceptRequestId) {
+    async abortActive(exceptRequestId) {
       const owners = [...active.entries()].filter(([id]) => id !== exceptRequestId).map(([, owner]) => owner);
       for (const owner of owners) { owner.controller.abort(); owner.response.destroy(); }
-      return Promise.all(owners.map(owner => owner.promise));
+      const results = await Promise.allSettled(owners.map(owner => owner.promise));
+      if (streamCleanupFailed || results.some(result => result.status === 'rejected')) {
+        throw new BridgeError('INVALID_RESPONSE');
+      }
     },
     start() {
       if (closed) return Promise.reject(new BridgeError('CLOSED'));
@@ -194,8 +322,13 @@ export function createHttpServer({ sessionId, key, resolve: resolveRoute, onClos
         const drained = [...active.values()].map(owner => owner.promise);
         const stopped = new Promise(resolve => server.close(() => resolve()));
         for (const socket of sockets) socket.destroy();
-        await Promise.all([stopped, ...drained]);
-        await onClose?.();
+        const results = await Promise.allSettled([stopped, ...drained]);
+        try { await onClose?.(); }
+        finally {
+          if (streamCleanupFailed || results.some(result => result.status === 'rejected')) {
+            throw new BridgeError('INVALID_RESPONSE');
+          }
+        }
       })();
     },
   });

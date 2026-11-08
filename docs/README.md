@@ -15,6 +15,7 @@
 - [source CatVod Spider 输入契约](runtime/cat-source-runtime.md)
 - [来源 capability ABI（共同契约唯一来源）](runtime/source-capability-abi.md)
 - [Runtime bridge](runtime/runtime-bridge.md)
+- [TMDB／豆瓣只读数据、持久设置与图片流](runtime/metadata-data.md)
 - [外部 LX、CatNode 与 Reader／CatVod 来源动态验收](runtime/source-acceptance.md)
 
 ## iOS

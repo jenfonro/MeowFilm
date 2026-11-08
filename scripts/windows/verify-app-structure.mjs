@@ -8,13 +8,16 @@ const generated = new Set(['bin', 'obj', 'node_modules', '.git']);
 const runtimeTrees = new Map([
   ['apps/runtime', {
     files: ['bootstrap.mjs', 'entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
-      'modules/music-script.mjs', 'modules/cat-script.mjs', 'modules/source-runtime.mjs'],
-    directories: ['modules'],
+      'modules/music-script.mjs', 'modules/cat-script.mjs', 'modules/source-runtime.mjs',
+      'modules/metadata-data.mjs', 'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
+      'modules/metadata/tmdb.mjs', 'modules/metadata/douban.mjs'],
+    directories: ['modules', 'modules/metadata'],
   }],
   ['apps/windows/runtime', { files: ['bootstrap.mjs', 'entries/aggregate.mjs'], directories: ['entries'] }],
 ]);
 const sharedImports = new Set([
-  'node:buffer', 'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
+  'node:buffer', 'node:crypto', 'node:http', 'node:https',
+  '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
 ]);
 const windowsImports = new Set(['node:net', 'node:path', '@meowfilm/runtime-bridge']);
 function fail(message) { throw new Error('Windows App structure: ' + message); }

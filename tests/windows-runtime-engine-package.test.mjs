@@ -20,6 +20,10 @@ const areas = [];
 after(() => { for (const area of areas) rmSync(assertOwnedPath(temporary, area), { recursive: true, force: true }); });
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const readJSON = path => JSON.parse(readFileSync(path, 'utf8'));
+const metadataFiles = [
+  'modules/metadata-data.mjs', 'modules/metadata/douban.mjs', 'modules/metadata/network.mjs',
+  'modules/metadata/settings.mjs', 'modules/metadata/tmdb.mjs',
+];
 function area() {
   const path = mkdtempSync(join(temporary, 'case-'));
   areas.push(path);
@@ -62,7 +66,7 @@ function verifyManifest(output, manifest) {
   }
   assert.deepEqual(paths.filter(path => path.startsWith('app/')), [
     'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/entry.mjs',
-    'app/modules/cat-script.mjs', 'app/modules/music-script.mjs',
+    'app/modules/cat-script.mjs', ...metadataFiles.map(file => `app/${file}`), 'app/modules/music-script.mjs',
     'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs',
     'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
   ]);
@@ -99,6 +103,7 @@ function packagingFixture({
     write(source, 'apps/runtime/modules/cat-script.mjs', inert);
   }
   if (!missingSourceModule) write(source, 'apps/runtime/modules/source-runtime.mjs', inert);
+  for (const file of metadataFiles) write(source, `apps/runtime/${file}`, inert);
   for (const path of ['bootstrap.mjs', 'entries/aggregate.mjs']) {
     if (missingBootstrap && path === 'bootstrap.mjs') continue;
     let text = readFileSync(join(root, 'apps/windows/runtime', path), 'utf8');
@@ -164,8 +169,63 @@ test('Windows packaging preserves common files byte-for-byte and is reproducible
   assert.deepEqual(first.files.filter(file => !file.path.startsWith('app/windows/')), shared.files);
   assert.deepEqual(first.dependencies, shared.dependencies);
   assert.deepEqual(first.omittedOptionalDependencies, shared.omittedOptionalDependencies);
+  for (const file of metadataFiles) {
+    const path = `apps/runtime/${file}`, bytes = readFileSync(join(f.root, path));
+    assert.deepEqual(readFileSync(join(f.output, 'app', file)), bytes);
+    assert.deepEqual(first.inputs.filter(input => input.path === path), [{ path, sha256: sha256(bytes) }]);
+  }
   assert.ok(readFileSync(join(f.output, first.entry), 'utf8').includes("from '../../entry.mjs'"));
 });
+
+test('Windows packaging accepts the optional metadata closure and neutral HTTP imports', async () => {
+  const f = packagingFixture();
+  write(f.root, 'apps/runtime/modules/metadata-data.mjs', `
+    import '../contracts.mjs';
+    import './metadata/settings.mjs';
+    import './metadata/network.mjs';
+    import './metadata/tmdb.mjs';
+    import './metadata/douban.mjs';
+    throw new Error('Metadata fixture code must never execute');
+  `);
+  write(f.root, 'apps/runtime/modules/metadata/network.mjs', `
+    import 'node:http';
+    import 'node:https';
+    import '@meowfilm/script-host';
+    import './settings.mjs';
+    throw new Error('Metadata network fixture code must never execute');
+  `);
+  verifyManifest(f.output, await packageWindowsRuntime({ ...f, product: 'aggregate' }));
+});
+
+for (const [name, mutate, code] of [
+  ...metadataFiles.map(file => [`missing shared ${file}`, f =>
+    rmSync(join(f.root, 'apps/runtime', file)), 'MISSING_SOURCE']),
+  ...['unlisted', 'modules/unlisted', 'modules/metadata/unlisted'].map(path =>
+    [`unlisted shared directory ${path}`, f =>
+      mkdirSync(join(f.root, 'apps/runtime', path)), 'SHARED_CLOSURE']),
+  ...['unlisted-helper.mjs', 'modules/metadata/unlisted-helper.mjs'].map(file =>
+    [`unlisted shared file ${file}`, f =>
+      write(f.root, `apps/runtime/${file}`, 'export {};'), 'SHARED_CLOSURE']),
+  ...['node:net', 'node:fs', '@meowfilm/script-host/src/host.js',
+    '../../../windows/runtime/bootstrap.mjs', '../../../ios/runtime/bootstrap.mjs'].map(specifier =>
+    [`metadata import ${specifier}`, f =>
+      write(f.root, 'apps/runtime/modules/metadata/network.mjs', `import '${specifier}';`), 'SHARED_IMPORT']),
+]) {
+  test(`Windows packaging rejects ${name} and retains a failed inventory`, async () => {
+    const f = packagingFixture();
+    mutate(f);
+    await assert.rejects(packageWindowsRuntime({ ...f, product: 'aggregate' }), { code });
+    const manifest = readJSON(join(f.output, 'runtime-manifest.json'));
+    assert.equal(manifest.status, 'failed');
+    assert.equal(manifest.error.code, code);
+    assert.deepEqual(manifest.modules, ['music', 'cat', 'source']);
+    for (const file of manifest.files) {
+      const bytes = readFileSync(join(f.output, file.path));
+      assert.equal(bytes.length, file.bytes);
+      assert.equal(sha256(bytes), file.sha256);
+    }
+  });
+}
 
 test('test bundles use the public assembly and reject existing or unowned output', async () => {
   const f = packagingFixture(), output = join(f.area, 'bundles');

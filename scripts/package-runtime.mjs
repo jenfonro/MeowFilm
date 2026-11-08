@@ -17,9 +17,12 @@ const MODULE_FILES = Object.freeze({
 const MANIFEST = 'runtime-manifest.json';
 const SHARED_SOURCE = 'apps/runtime';
 const SHARED_FILES = ['bootstrap.mjs', 'entry.mjs', 'client.mjs', 'contracts.mjs',
-  'modules/source-candidates.mjs', ...Object.values(MODULE_FILES)];
+  'modules/source-candidates.mjs', ...Object.values(MODULE_FILES), 'modules/metadata-data.mjs',
+  'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
+  'modules/metadata/tmdb.mjs', 'modules/metadata/douban.mjs'];
 const SHARED_IMPORTS = new Set([
-  'node:buffer', 'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
+  'node:buffer', 'node:crypto', 'node:http', 'node:https',
+  '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
 ]);
 const NATIVE_POLICY = 'scripts/script-host-native.json';
 const NATIVE_ARTIFACT = 'packages/script-host/build/Release/script_host_native.node';
@@ -852,7 +855,8 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       safeRelative(child);
       check(!item.isSymbolicLink(), 'UNSAFE_SYMLINK', `Shared runtime symlink is not allowed: ${location}/${item.name}`);
       if (item.isDirectory()) {
-        check(child === 'modules', 'SHARED_CLOSURE', `Unexpected shared runtime directory: ${child}`);
+        check(SHARED_FILES.some(file => file.startsWith(child + '/')),
+          'SHARED_CLOSURE', `Unexpected shared runtime directory: ${child}`);
         copySharedRuntime(child);
       } else {
         check(item.isFile() && SHARED_FILES.includes(child), 'SHARED_CLOSURE', `Unexpected shared runtime source: ${child}`);

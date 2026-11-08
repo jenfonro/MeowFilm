@@ -35,6 +35,36 @@ X-Meow-Request-Id: <UUID>
 
 旧长度帧、stage/control/blob、Base64 传输、随机 token、offset、TTL 和 checksum 协议均已删除，没有兼容回退、续传或业务 release 方法。底层 HTTP 分段读写属于标准流传输。媒体代理沿独立入口流式转发，不经控制 JSON 聚合。
 
+## 原始流响应
+
+`createHttpServer` 的路由可显式设置 `responseType: 'stream'`。该设置改变成功响应的字节传输及受理后失败的 HTTP 状态；认证、请求正文、`validate(input)` 与 handler 上下文仍沿用现有规则。未设置时继续使用 JSON 信封，上传也保持现行行为。公共 bridge 只处理 HTTP 与 Node 流，不识别来源、图片路径、供应方内容或代理地址，业务模块负责这些判断。
+
+路由仍提供 `contract`、允许失败码的 `codes` 集合及 `handler(input, context)`。成功 handler 结果为下面四个字段，`body` 必须是尚未结束或销毁的 Node `Readable`，`dispose` 必须是函数：
+
+```js
+{
+  status: 200,
+  headers: {
+    'content-type': 'application/octet-stream',
+    // 可选：'content-length'、'cache-control'、'etag'、'last-modified'
+  },
+  body, // Node Readable，直接输出字节
+  dispose: async () => { /* 关闭并等待本次资源真正释放 */ },
+}
+```
+
+成功仅支持 HTTP 200。`content-type` 必填且非空；仅允许 `content-type/content-length/cache-control/etag/last-modified`，名称不区分大小写且不得重复。值为合法 HTTP header 字符串，`content-length` 也接受非负安全整数；长度必须是 Node HTTP 能精确表示的十进制非负安全整数，发送时按声明检查实际长度。这是传输数值边界，不是额外的响应大小配额。`Location`、`set-cookie`、其他任意 header（包括 `x-meow-request-id`）均拒绝，bridge 自行回显请求 ID。缓存头仅透传标准 HTTP 元数据，不建立运行器缓存或新增缓存策略。
+
+字节通过 Node `pipeline` 和遵守实际 HTTP 写回调的流目标发送，保留首块提前与背压，不聚合为完整响应。响应头在首块或空流结束时提交。首块前的源流错误、成功结果校验失败及未知 handler 异常返回 HTTP 502、`application/json` 的 `{ok:false,contract:"runtime.http.v1",code:"INVALID_RESPONSE"}`；公开 `BridgeError` 保留其安全码。模块主动失败仍返回经过 `contract/codes` 校验的 `{ok:false,contract,code}`，HTTP 状态为 502。正文格式或认证等未受理错误继续使用现有 400/401/403/404/413/415 规则。本节的 502 规则专用于 stream 路由。响应头已提交后发生失败只终止流，不再次发送 JSON、重定向或追加错误正文。
+
+每份收到的原始流结果由 bridge 承接清理：成功、验证失败、源流错误、断连、取消及取消后迟到的 handler 结果，都只调用一次可用的 `dispose()` 并等待其 Promise 实际完成；同时销毁并等待所交付 Node 流的真实销毁完成，而不只等待 `end`。`autoDestroy:false` 和 `emitClose:false` 不改变支持范围：bridge 在接管尚未销毁的流时观察其 `_destroy` 完成回调，即使不发出 `close`，也要等该回调完成；`dispose` 的其他资源仍独立排空。仅当接管时流已开始销毁但尚未 `closed`，无法事后接入销毁回调时，bridge 保留 `close` 监听，并用单个 25ms 定时器持续检查公开 `body.closed`；只有观察到实际销毁完成才结束等待，并清除定时器与监听。这不是总超时或按等待时长判成功，不依赖 `dispose` 等待同一资源，也不发出伪造 `close`；正常有效流不使用轮询。缺少必需 `dispose` 的成功结果拒绝，仍清理已交付的 Node 流。标准失败信封不交付流资源，无需 `dispose`。handler 抛出前尚未交付的资源由 handler 自行清理。
+
+模块用 `context.signal` 取消尚未交付的上游工作，用 `dispose` 关闭并等待其上游 socket/response 等实际资源。bridge 在传输结束、源流失败或取消时启动清理；传输和清理均完成才移除请求所有者。客户端已收到全部字节或连接已断开时，`state.active` 仍可能为 1。`abortActive()` 和 `close()` 等待 handler、流与 `dispose`，不能提前报告排空；关闭后拒绝新工作。清理异常在未提交响应头时脱敏为失败，提交后终止该交换。完整响应后的清理拒绝不能改写已送达的成功响应，也不证明资源释放成功；请求所有者在清理 Promise 结束后仍须排空。
+
+`dispose()` 的真实拒绝保留为本会话清理失败，不保存底层异常或请求历史。之后每次 `abortActive()` 和 `close()` 都在实际工作 settle 后以 `BridgeError('INVALID_RESPONSE')` 拒绝，即使当时 `state.active` 已为 0；`close()` 仍执行一次 `onClose` 并等待其完成。普通上游、流传输及响应格式错误不记为会话清理失败。由此 HTTP `/v1/close` 可报告标准失败信封，不能在清理已失败时返回 `cleanupComplete:true`；完整图片仍保持已送达的原始成功响应，不二次发送 JSON。
+
+`createHttpClient` 保持 JSON 客户端契约，不提供原始流消费能力；原始流调用方使用其平台 HTTP API 携带同一会话认证与请求 ID。
+
 ## 完整源码候选
 
 上传不启动脚本、不修改 enabled 状态，也不建立持久来源事实源。只在 body 完整且格式有效后按 `(session,module,installationId,sourceRevision)` 发布完整候选；中断上传销毁本次缓冲，不影响旧完整候选。
@@ -55,7 +85,7 @@ X-Meow-Request-Id: <UUID>
 
 ## 错误
 
-业务已受理后的成功和失败均为 HTTP 200。未进入业务的坏格式 400、访问拒绝 401/403、未知路由 404、不支持 Content-Type 415、源码超限 413。公共错误 contract 为 `runtime.http.v1`，code 限 `INVALID_REQUEST/METHOD_NOT_FOUND/PERMISSION_DENIED/CLOSED/CANCELLED/TIMEOUT/INVALID_RESPONSE`；业务安全码见各模块契约。未知业务错误映射为模块未分类失败，不输出底层异常、源码、凭据或供应方正文。
+普通 JSON 业务已受理后的成功和失败均为 HTTP 200；上传保留路由声明的状态（如源码超限 413）。原始流路由例外：成功为 HTTP 200，受理后且未提交响应头的失败为 HTTP 502，提交后失败只断流，详见上文。未进入业务的坏格式 400、访问拒绝 401/403、未知路由 404、不支持 Content-Type 415、源码超限 413。公共错误 contract 为 `runtime.http.v1`，code 限 `INVALID_REQUEST/METHOD_NOT_FOUND/PERMISSION_DENIED/CLOSED/CANCELLED/TIMEOUT/INVALID_RESPONSE`；业务安全码见各模块契约。未知业务错误映射为模块未分类失败，不输出底层异常、源码、凭据或供应方正文。
 
 通用 handler 抛出的未知值（包括 `null`／`undefined`）返回 `INVALID_RESPONSE`；错误响应本身写入失败则关闭该交换，不等待未发送的响应。正常响应背压仍由原请求持有至完成或连接关闭。
 

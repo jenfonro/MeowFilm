@@ -4,6 +4,7 @@ import { createCatScriptModule } from './modules/cat-script.mjs';
 import { createSourceRuntimeModule } from './modules/source-runtime.mjs';
 
 export { createMusicScriptModule, createCatScriptModule, createSourceRuntimeModule };
+export { createTMDBDataModule, createDoubanDataModule } from './modules/metadata-data.mjs';
 export { createAppRuntime } from './bootstrap.mjs';
 export { createRuntimeClient } from './client.mjs';
 
