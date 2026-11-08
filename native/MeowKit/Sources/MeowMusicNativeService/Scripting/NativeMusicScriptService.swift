@@ -1,23 +1,23 @@
 import Foundation
-import MeowJSON
 import MeowMusicFeature
 import MeowRuntime
 
 /// Thin adapter of music.script.v3. The shared module owns installations,
 /// source bytes, checks and request-bound guest storage under the App data root.
 public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceManaging {
-    private let connect: @Sendable () async throws -> RuntimeBridgeConnection
-    private var connection: RuntimeBridgeConnection?
+    private let connect: @Sendable () async throws -> RuntimeHTTPClient
+    private var connection: RuntimeHTTPClient?
     private var starting: Task<Void, Error>?
     private var closing: Task<Void, Error>?
     private var closed = false
+    private var sourceChanges: [String: UUID] = [:]
     private struct Work: Sendable {
         let cancel: @Sendable () -> Void
         let drain: @Sendable () async -> Void
     }
     private var pending: [UUID: Work] = [:]
 
-    public init(connection: @escaping @Sendable () async throws -> RuntimeBridgeConnection) {
+    public init(connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
         connect = connection
     }
 
@@ -31,16 +31,20 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
             // the module's close receipt can confirm its cleanup afterwards.
             connection = value
             try Task.checkCancellation()
-            let description = try await value.call("runtime.describe", .null, timeout: 60)
-            guard description["protocol"]?.scriptInteger == 1,
-                  case .array(let modules)? = description["modules"],
-                  modules.contains(where: { $0["id"] == .string("music") && $0["version"] == .string("0.8.0") }) else {
+            let description = try await value.describe()
+            guard description.scriptField("protocol") == .string("runtime.http.v1"),
+                  case .array(let modules)? = description.scriptField("modules"),
+                  modules.contains(where: {
+                      $0.scriptField("id") == .string("music") &&
+                      $0.scriptField("version") == .string("0.8.0") &&
+                      $0.scriptField("contract") == .string("music.script.v3")
+                  }) else {
                 throw MusicServiceError.scriptRuntimeUnavailable
             }
         }
     }
 
-    /// Stops admission, drains local work including transfer release, then asks
+    /// Stops admission, drains local HTTP work, then asks
     /// the module for its terminal receipt. The App alone closes the session.
     public func close() async throws {
         if let closing { return try await closing.value }
@@ -53,8 +57,8 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
             for item in work { await item.drain() }
             guard let connection else { return }
             do {
-                let result = try await MusicScriptTransport(connection: connection).call("close", [:], timeout: 35)
-                guard result["closed"] == .bool(true), result["cleanupComplete"] == .bool(true) else {
+                let result = try await MusicScriptTransport(connection: connection).call("close")
+                guard result.scriptField("closed") == .bool(true), result.scriptField("cleanupComplete") == .bool(true) else {
                     throw MusicServiceError.scriptCleanupFailed
                 }
             } catch { throw MusicServiceError.scriptCleanupFailed }
@@ -95,14 +99,14 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
         return MusicScriptTransport(connection: connection)
     }
 
-    private func call(_ operation: String, _ parameters: [String: JSONValue] = [:]) async throws -> [String: JSONValue] {
-        do { return try await transport().call(operation, parameters, timeout: 35) }
+    private func call(_ operation: String, _ parameters: RuntimeObject = [:]) async throws -> RuntimeValue {
+        do { return try await transport().call(operation, parameters) }
         catch { throw Self.failure(error) }
     }
 
-    private func row(_ operation: String, _ parameters: [String: JSONValue]) async throws -> [String: JSONValue] {
+    private func row(_ operation: String, _ parameters: RuntimeObject) async throws -> RuntimeObject {
         let result = try await call(operation, parameters)
-        guard case .object(let value)? = result["item"] else { throw MusicServiceError.invalidResponse }
+        guard case .object(let value)? = result.scriptField("item") else { throw MusicServiceError.invalidResponse }
         return value
     }
 
@@ -111,8 +115,8 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
             try await service.rows().map(Self.item)
         }
     }
-    private func rows() async throws -> [[String: JSONValue]] {
-        guard case .array(let values)? = try await call("sources.list")["items"] else {
+    private func rows() async throws -> [RuntimeObject] {
+        guard case .array(let values)? = try await call("sources.list").scriptField("items") else {
             throw MusicServiceError.invalidResponse
         }
         return try values.map { value in
@@ -122,22 +126,23 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
     }
     public func importScriptSource(_ data: Data, fileName: String) async throws -> MusicScriptSourceItem {
         try await perform { service in
-            try await service.upload(data, fileName: fileName, operation: "sources.add", parameters: [:])
+            try await service.upload(data, fileName: fileName, operation: "sources.add",
+                                     installationID: UUID().uuidString.lowercased())
         }
     }
     private func upload(_ data: Data, fileName: String, operation: String,
-                        parameters: [String: JSONValue]) async throws -> MusicScriptSourceItem {
+                        installationID: String) async throws -> MusicScriptSourceItem {
+        let revision = Int.random(in: 1...9_007_199_254_740_991)
         do {
-            let transport = try await transport()
-            let token = try await transport.stage(data, basename: fileName)
-            var parameters = parameters; parameters["token"] = .string(token)
-            do {
-                let result = try await row(operation, parameters)
-                await transport.release("stage.abort", token)
-                return try Self.item(result)
-            } catch { await transport.release("stage.abort", token); throw error }
+            try await transport().upload(data, installationID: installationID, revision: revision, basename: fileName)
+            try Task.checkCancellation()
+            if operation == "sources.update" { invalidate(installationID) }
+            let result = try await row(operation, ["installationId": .string(installationID),
+                                                   "sourceRevision": .number(Double(revision))])
+            return try Self.item(result)
         } catch { throw Self.failure(error) }
     }
+    private func invalidate(_ id: String) { sourceChanges[id] = UUID() }
     public func downloadScriptSource(from url: URL) async throws -> MusicScriptSourceItem {
         try await perform { service in
             try Self.item(await service.row("sources.download", ["url": .string(url.absoluteString)]))
@@ -145,41 +150,45 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
     }
     public func setScriptSourceEnabled(_ id: String, enabled: Bool) async throws -> MusicScriptSourceItem {
         try await perform { service in
-            try Self.item(await service.row(enabled ? "sources.enable" : "sources.disable", ["installationId": .string(id)]))
+            service.invalidate(id)
+            return try Self.item(await service.row(enabled ? "sources.enable" : "sources.disable", ["installationId": .string(id)]))
         }
     }
     public func removeScriptSource(_ id: String) async throws {
         try await perform { service in
+            service.invalidate(id)
             _ = try await service.call("sources.remove", ["installationId": .string(id)])
         }
     }
     public func scriptSourceDetail(_ id: String) async throws -> MusicScriptSourceDetail {
         try await perform { service in
             let value = try await service.row("sources.detail", ["installationId": .string(id)])
-            return .init(item: try Self.item(value), networkURL: value["origin"]?["url"]?.scriptText,
+            return .init(item: try Self.item(value), networkURL: value["origin"]?.scriptField("url")?.scriptText,
                          rollbackAvailable: value["rollbackAvailable"] == .bool(true))
         }
     }
     public func editScriptSource(_ id: String, name: String, networkURL: String? = nil) async throws -> MusicScriptSourceItem {
         try await perform { service in
-            var parameters: [String: JSONValue] = ["installationId": .string(id), "name": .string(name)]
+            var parameters: RuntimeObject = ["installationId": .string(id), "name": .string(name)]
             if let networkURL { parameters["url"] = .string(networkURL) }
             return try Self.item(await service.row("sources.edit", parameters))
         }
     }
     public func updateScriptSource(_ id: String) async throws -> MusicScriptSourceItem {
         try await perform { service in
-            try Self.item(await service.row("sources.update", ["installationId": .string(id)]))
+            service.invalidate(id)
+            return try Self.item(await service.row("sources.update", ["installationId": .string(id)]))
         }
     }
     public func updateScriptSource(_ id: String, data: Data, fileName: String) async throws -> MusicScriptSourceItem {
         try await perform { service in
-            try await service.upload(data, fileName: fileName, operation: "sources.update", parameters: ["installationId": .string(id)])
+            try await service.upload(data, fileName: fileName, operation: "sources.update", installationID: id)
         }
     }
     public func rollbackScriptSource(_ id: String) async throws -> MusicScriptSourceItem {
         try await perform { service in
-            try Self.item(await service.row("sources.rollback", ["installationId": .string(id)]))
+            service.invalidate(id)
+            return try Self.item(await service.row("sources.rollback", ["installationId": .string(id)]))
         }
     }
     public func checkScriptSource(_ id: String) async throws -> MusicScriptSourceItem {
@@ -188,19 +197,10 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
         }
     }
 
-    // Playback asks for live declarations only when it needs scripts. Startup
-    // and management listing do not execute an installation.
+    // Directory reads never enable, execute or retry an installation.
     public func sources() async throws -> [MusicScriptSource] {
         try await perform { service in
-            var result: [MusicScriptSource] = []
-            for item in try await service.rows() where item["enabled"] == .bool(true) {
-                guard let id = item["installationId"]?.scriptText else { throw MusicServiceError.invalidResponse }
-                do { result.append(try await service.sourceSnapshot(installationID: id)) }
-                catch MusicServiceError.scriptRuntimeUnavailable { throw MusicServiceError.scriptRuntimeUnavailable }
-                catch MusicServiceError.cancelled { throw MusicServiceError.cancelled }
-                catch { continue } // A broken script does not hide other enabled scripts.
-            }
-            return result
+            try await service.rows().filter { $0["enabled"] == .bool(true) }.map(Self.snapshot)
         }
     }
     public func source(installationID id: String) async throws -> MusicScriptSource {
@@ -209,49 +209,72 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
         }
     }
     private func sourceSnapshot(installationID id: String) async throws -> MusicScriptSource {
-        var item = try await row("sources.detail", ["installationId": .string(id)])
-        try musicRequire(item["enabled"] == .bool(true), .sourceUnavailable)
-        if item["state"] != .string("ready") {
-            item = try await row("sources.enable", ["installationId": .string(id)])
-        }
-        return try Self.snapshot(item)
+        try Self.snapshot(await row("sources.detail", ["installationId": .string(id)]))
     }
     private func request(_ request: MusicScriptRequest, operation: String,
-                         parameters: [String: JSONValue]) async throws -> [String: JSONValue] {
-        let current = try await row("sources.detail", ["installationId": .string(request.installationID)])
-        try musicRequire(current["enabled"] == .bool(true) && current["state"] == .string("ready") &&
-            current["generation"]?.scriptInteger == request.generation, .sourceUnavailable)
+                         parameters: RuntimeObject) async throws -> MusicScriptResult<RuntimeValue> {
+        let change = sourceChanges[request.installationID]
+        let before = try await sourceSnapshot(installationID: request.installationID)
+        try Self.pin(before, to: request.source)
         let result = try await call(operation, parameters)
-        try musicRequire(result["installationId"] == .string(request.installationID) &&
-            result["generation"]?.scriptInteger == request.generation, .sourceUnavailable)
-        return result
+        let after = try await sourceSnapshot(installationID: request.installationID)
+        try musicRequire(sourceChanges[request.installationID] == change, .sourceUnavailable)
+        try Self.pin(after, to: before)
+        try musicRequire(after.state == .ready && after.generation > 0, .sourceUnavailable)
+        if operation == "resolve" {
+            try musicRequire(result.scriptField("installationId") == .string(after.installationID) &&
+                result.scriptField("generation")?.scriptInteger == after.generation &&
+                result.scriptField("contentHash") == .string(after.contentHash), .sourceUnavailable)
+        }
+        // invoke is the raw business result. Its identity comes from the two
+        // snapshots and the runtime's own generation fence, not result fields.
+        return .init(value: result, source: after)
     }
-    public func resolve(request: MusicScriptRequest) async throws -> MusicNativeAudio {
+    private static func pin(_ current: MusicScriptSource, to previous: MusicScriptSource) throws {
+        try musicRequire(current.isCandidate && previous.isCandidate &&
+            current.installationID == previous.installationID && current.identity == previous.identity &&
+            (current.generation == previous.generation ||
+             previous.generation == 0 && current.state == .ready && current.generation > 0),
+            .sourceUnavailable)
+    }
+    public func resolve(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeAudio> {
         try await perform { service in
-            let result = try await service.request(request, operation: "resolve", parameters: [
+            let execution = try await service.request(request, operation: "resolve", parameters: [
                 "installationId": .string(request.installationID), "platform": .string(request.siteID),
                 "quality": .string(request.quality), "musicInfo": try Self.musicInfo(request.musicInfo),
             ])
-            guard let url = result["url"]?.scriptText, result["platform"] == .string(request.siteID),
-                  result["quality"] == .string(request.quality), case .object(let values)? = result["headers"] else {
+            let result = execution.value
+            guard let url = result.scriptField("url")?.scriptText,
+                  result.scriptField("platform") == .string(request.siteID),
+                  result.scriptField("quality") == .string(request.quality),
+                  case .object(let values)? = result.scriptField("headers") else {
                 throw MusicServiceError.invalidMediaCandidate
             }
             var headers: [String: String] = [:]
             for (key, value) in values {
-                guard let text = value.scriptText else { throw MusicServiceError.invalidMediaCandidate }
+                guard key.utf8.allSatisfy({ $0 < 128 }), let text = value.scriptText else {
+                    throw MusicServiceError.invalidMediaCandidate
+                }
                 headers[key] = text
             }
-            let expires = result["expiresAt"]?.scriptInteger.map { Date(timeIntervalSince1970: Double($0) / 1000) }
-            return .init(url: try Self.mediaURL(url), headers: headers, expiresAt: expires, fileCachePolicy: .denied)
+            let expires: Date?
+            switch result.scriptField("expiresAt") {
+            case nil, .null?: expires = nil
+            case let value?:
+                guard let milliseconds = value.scriptInteger else { throw MusicServiceError.invalidMediaCandidate }
+                expires = Date(timeIntervalSince1970: Double(milliseconds) / 1000)
+            }
+            return .init(value: .init(url: try Self.mediaURL(url), headers: headers, expiresAt: expires,
+                                     fileCachePolicy: .denied), source: execution.source)
         }
     }
-    public func lyrics(request: MusicScriptRequest) async throws -> MusicNativeLyrics {
+    public func lyrics(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeLyrics> {
         try await perform { service in
-            let result = try await service.request(request, operation: "invoke", parameters: [
+            let execution = try await service.request(request, operation: "invoke", parameters: [
                 "installationId": .string(request.installationID), "siteId": .string(request.siteID),
                 "operation": .string("lyric"), "payload": .object(["musicInfo": try Self.musicInfo(request.musicInfo)]),
             ])
-            guard case .object(let fields)? = result["value"], let text = fields["lyric"]?.scriptText else {
+            guard case .object(let fields) = execution.value, let text = fields["lyric"]?.scriptText else {
                 throw MusicServiceError.invalidLyricResponse
             }
             func optional(_ key: String) throws -> String {
@@ -261,27 +284,21 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
                 default: throw MusicServiceError.invalidLyricResponse
                 }
             }
-            return .init(text: text, translation: try optional("tlyric"), romanization: try optional("rlyric"))
+            return .init(value: .init(text: text, translation: try optional("tlyric"),
+                                     romanization: try optional("rlyric")), source: execution.source)
         }
     }
 
-    private static func item(_ value: [String: JSONValue]) throws -> MusicScriptSourceItem {
+    private static func item(_ value: RuntimeObject) throws -> MusicScriptSourceItem {
         guard let id = value["installationId"]?.scriptText, let name = value["name"]?.scriptText,
               let version = value["version"]?.scriptText, case .bool(let enabled)? = value["enabled"],
               let state = value["state"]?.scriptText else { throw MusicServiceError.invalidResponse }
-        let status: MusicScriptSourceItem.State
-        switch state {
-        case "ready": status = .ready
-        case "idle": status = .idle
-        case "disabled": status = .disabled
-        case "failed": status = .failed
-        default: throw MusicServiceError.invalidResponse
-        }
+        guard let status = MusicScriptSourceItem.State(rawValue: state) else { throw MusicServiceError.invalidResponse }
         let origin: MusicScriptSourceItem.Origin
-        switch value["origin"]?["kind"] {
+        switch value["origin"]?.scriptField("kind") {
         case .string("file"): origin = .file
         case .string("network"):
-            guard let host = value["origin"]?["host"]?.scriptText else { throw MusicServiceError.invalidResponse }
+            guard let host = value["origin"]?.scriptField("host")?.scriptText else { throw MusicServiceError.invalidResponse }
             origin = .network(host: host)
         default: throw MusicServiceError.invalidResponse
         }
@@ -291,8 +308,9 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
             guard let summary = checked["summary"]?.scriptText, let at = checked["checkedAt"]?.scriptInteger,
                   case .object(let sites)? = checked["sites"] else { throw MusicServiceError.invalidResponse }
             var states: [String: String] = [:]
-            for (platform, result) in sites {
-                guard let state = result["state"]?.scriptText else { throw MusicServiceError.invalidResponse }
+            for platform in MusicPublicBrowsePlatform.allCases.map(\.rawValue) {
+                guard let result = sites[platform] else { continue }
+                guard let state = result.scriptField("state")?.scriptText else { throw MusicServiceError.invalidResponse }
                 states[platform] = state
             }
             check = .init(summary: summary, checkedAt: Date(timeIntervalSince1970: Double(at) / 1000), platforms: states)
@@ -302,12 +320,12 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
             origin: origin, platforms: capabilities.compactMap { MusicPublicBrowsePlatform(rawValue: $0.siteID) },
             enabled: enabled, state: status, check: check)
     }
-    private static func capabilities(_ value: [String: JSONValue]) throws -> [MusicScriptCapability] {
+    private static func capabilities(_ value: RuntimeObject) throws -> [MusicScriptCapability] {
         if value["sites"] == .null { return [] }
         guard case .object(let sites)? = value["sites"] else { throw MusicServiceError.invalidResponse }
         return try MusicPublicBrowsePlatform.allCases.compactMap { platform in
             guard let site = sites[platform.rawValue] else { return nil }
-            guard case .array(let actions)? = site["actions"], case .array(let qualities)? = site["qualitys"],
+            guard case .array(let actions)? = site.scriptField("actions"), case .array(let qualities)? = site.scriptField("qualitys"),
                   actions.allSatisfy({ $0.scriptText != nil }), qualities.allSatisfy({ $0.scriptText != nil }) else {
                 throw MusicServiceError.invalidResponse
             }
@@ -315,16 +333,20 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
                          actions: actions.compactMap(\.scriptText), qualities: qualities.compactMap(\.scriptText))
         }
     }
-    private static func snapshot(_ value: [String: JSONValue]) throws -> MusicScriptSource {
+    private static func snapshot(_ value: RuntimeObject) throws -> MusicScriptSource {
         guard let id = value["installationId"]?.scriptText, let generation = value["generation"]?.scriptInteger,
-              generation > 0, let version = value["version"]?.scriptText, let hash = value["contentHash"]?.scriptText,
-              let execution = value["executionHash"]?.scriptText else { throw MusicServiceError.invalidResponse }
-        return .init(installationID: id, generation: generation, enabled: true, ready: true, version: version,
+              let version = value["version"]?.scriptText, let hash = value["contentHash"]?.scriptText,
+              let execution = value["executionHash"]?.scriptText, case .bool(let enabled)? = value["enabled"],
+              let stateName = value["state"]?.scriptText, let state = MusicScriptSourceItem.State(rawValue: stateName),
+              generation >= 0, (state == .ready ? generation > 0 : generation == 0) else {
+            throw MusicServiceError.invalidResponse
+        }
+        return .init(installationID: id, generation: generation, enabled: enabled, state: state, version: version,
                      contentHash: hash, revisionHash: execution, capabilities: try capabilities(value))
     }
 
-    static func musicInfo(_ data: Data) throws -> JSONValue {
-        guard let value = try? RuntimeBridgeJSON.decode(data, maximumBytes: 64 * 1024), case .object = value else {
+    static func musicInfo(_ data: Data) throws -> RuntimeValue {
+        guard let value = try? RuntimeJSON.decode(data), case .object = value else {
             throw MusicServiceError.invalidRequest
         }
         return value
@@ -350,30 +372,37 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
     private static func failure(_ error: Error) -> MusicServiceError {
         if Task.isCancelled || error is CancellationError { return .cancelled }
         if let error = error as? MusicServiceError { return error }
-        if let error = error as? RuntimeBridgeError {
+        if let error = error as? RuntimeHTTPError {
             switch error {
             case .cancelled: return .cancelled
             case .timeout: return .timeout
             case .closed: return .scriptRuntimeUnavailable
-            default: return .invalidResponse
-            }
-        }
-        if let error = error as? MusicScriptCallError {
-            switch error.code {
-            case "NETWORK_ERROR", "UPSTREAM_HTTP": return .upstreamFailed
-            case "UPSTREAM_FORMAT": return .upstreamInvalid
-            case "TIMEOUT": return .timeout
-            case "CANCELLED": return .cancelled
-            case "STALE_SOURCE", "SOURCE_NOT_FOUND", "SOURCE_DISABLED", "CAPABILITY_UNAVAILABLE": return .sourceUnavailable
-            case "CLOSED": return .scriptRuntimeUnavailable
-            case "SCRIPT_CLEANUP": return .scriptCleanupFailed
-            case "CORRUPT_STORAGE": return .corruptDocument
-            case "STORAGE", "STORAGE_ERROR": return .storageFailed
-            case "SCRIPT_ENCODING", "SCRIPT_INTEGRITY", "INVALID_SCRIPT": return .invalidScript
-            case "INVALID_MEDIA_CANDIDATE", "MEDIA_UNAVAILABLE": return .invalidMediaCandidate
-            case "LIMIT": return .limit
-            case "INVALID_REQUEST": return .invalidRequest
-            default: return .scriptFailed
+            case .invalidRequest: return .invalidRequest
+            case .invalidResponse: return .invalidResponse
+            case .remote(let code):
+                switch code {
+                case "NETWORK_ERROR", "UPSTREAM_HTTP": return .upstreamFailed
+                case "UPSTREAM_FORMAT": return .upstreamInvalid
+                case "TIMEOUT": return .timeout
+                case "CANCELLED": return .cancelled
+                case "STALE_SOURCE", "SOURCE_NOT_FOUND", "SOURCE_DISABLED", "CAPABILITY_UNAVAILABLE": return .sourceUnavailable
+                case "CLOSED": return .scriptRuntimeUnavailable
+                case "SCRIPT_CLEANUP": return .scriptCleanupFailed
+                case "CORRUPT_STORAGE": return .corruptDocument
+                case "STORAGE_ERROR": return .storageFailed
+                case "SCRIPT_ENCODING", "SCRIPT_INTEGRITY", "SCRIPT_PROTOCOL_ERROR": return .invalidScript
+                case "INVALID_MEDIA_CANDIDATE", "MEDIA_UNAVAILABLE", "EXPIRED_MEDIA_CANDIDATE", "MEDIA_HEADERS_UNSUPPORTED":
+                    return .invalidMediaCandidate
+                case "TARGET_CHANGED", "RECORDING_MISMATCH": return .targetChanged
+                case "INVALID_SOURCE_URL": return .insecureScriptURL
+                case "SOURCE_DOWNLOAD_FAILED": return .scriptDownloadFailed
+                case "SOURCE_REDIRECT": return .scriptRedirect
+                case "ROLLBACK_UNAVAILABLE": return .sourceUnavailable
+                case "PERMISSION_DENIED": return .permissionDenied
+                case "LIMIT": return .limit
+                case "INVALID_REQUEST": return .invalidRequest
+                default: return .scriptFailed
+                }
             }
         }
         return .scriptFailed

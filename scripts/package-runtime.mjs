@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, matchesGlob, parse, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { iosTarget, iosArtifacts, checkIOSMachO, checkIOSSymbols, IOS_CAT_WEB_VALUES } from './quickjs/ios-target.mjs';
 
 const PRODUCTS = Object.freeze({
   aggregate: ['music', 'cat', 'source'],
@@ -36,7 +37,7 @@ const OMIT_DIRECTORIES = new Set([
   'node_modules', 'test', 'tests', '__tests__', 'fixtures', '__fixtures__', '__mocks__',
   'coverage', 'benchmark', 'benchmarks', 'example', 'examples',
 ]);
-const NATIVE_FILE = /(?:\.(?:node|dll|dylib|so(?:\.\d+)*|exe|a|o|wasm)|^binding\.gyp)$/i;
+const NATIVE_FILE = /(?:\.(?:node|dll|dylib|so(?:\.\d+)*|exe|a|o|wasm|framework|xcframework)|^binding\.gyp)$/i;
 const LEGAL_FILE = /^(?:\.?licen[cs]e[sd]?|notice|copying|copyright|authors|third[-_]?party|sources)(?:[._-]|$)/i;
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
@@ -156,9 +157,13 @@ function checkNativeTarget(root, artifact) {
   check(valid, 'NATIVE_TARGET_MISMATCH', 'Native artifact format/architecture does not match this packaging host');
 }
 
-function trustedNative(root, inputs) {
+function trustedNative(root, inputs, target) {
   const { value: policy, hash: policyHash } = readJSON(root, NATIVE_POLICY);
-  const { value: receipt, hash: receiptHash } = readJSON(root, NATIVE_RECEIPT);
+  const ios = target ? iosArtifacts(iosTarget(target.sdk, target.arch, target.minimumOS)) : undefined;
+  const receiptPath = ios?.receipt ?? NATIVE_RECEIPT;
+  const artifactPath = ios?.artifact ?? NATIVE_ARTIFACT;
+  const sdkPath = ios?.sdk ?? SOURCE_SDK;
+  const { value: receipt, hash: receiptHash } = readJSON(root, receiptPath);
   const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
   const artifact = (value, path) => isObject(value) && value.path === path
     && Number.isSafeInteger(value.bytes) && value.bytes > 0 && digest(value.sha256);
@@ -192,12 +197,14 @@ function trustedNative(root, inputs) {
   }
   check(receipt.schemaVersion === 1 && receipt.abi === policy.abi && receipt.napi === policy.napi
     && isDeepStrictEqual(receipt.sources, sources)
-    && isDeepStrictEqual(receipt.nodeHeaders, policy.nodeHeaders)
+    && (ios || isDeepStrictEqual(receipt.nodeHeaders, policy.nodeHeaders))
     && isObject(receipt.sourceTrees)
-    && artifact(receipt.artifact, NATIVE_ARTIFACT) && artifact(receipt.sdk, SOURCE_SDK)
+    && artifact(receipt.artifact, artifactPath) && artifact(receipt.sdk, sdkPath)
     && Array.isArray(receipt.inputs) && receipt.inputs.length > 0,
   'INVALID_NATIVE_RECEIPT', 'Build receipt does not match the reviewed native policy');
-  check(receipt.platform === process.platform && receipt.arch === process.arch
+  check((ios ? receipt.platform === 'ios' && receipt.arch === target.arch
+    && isDeepStrictEqual(receipt.target, target)
+    : receipt.platform === process.platform && receipt.arch === process.arch)
     && Number(process.versions.napi) >= receipt.napi,
   'NATIVE_TARGET_MISMATCH', 'Native build target does not match this packaging host');
   const recorded = new Map();
@@ -210,7 +217,8 @@ function trustedNative(root, inputs) {
   const required = [
     NATIVE_POLICY, 'packages/script-host/binding.gyp', 'scripts/quickjs/build-native.mjs',
     'scripts/quickjs/build-source-sdk.mjs', 'package.json', 'package-lock.json',
-    policy.nodeHeaders.archivePath,
+    ...(ios ? ['scripts/quickjs/build-ios.mjs', 'scripts/quickjs/ios-target.mjs',
+      'scripts/prepare-ios-runtime.py', 'scripts/ios-node-mobile.json'] : [policy.nodeHeaders.archivePath]),
     ...policy.mandatoryInputs,
     ...policy.patches.map(input => input.path),
     ...Object.values(policy.sources).flatMap(source => [source.license.path, source.archivePath]),
@@ -232,8 +240,96 @@ function trustedNative(root, inputs) {
         && recorded.has(path)),
     'NATIVE_INPUT_MISMATCH', `Build receipt omits the native source inventory: ${name}`);
   }
-  check(recorded.get(policy.nodeHeaders.archivePath) === policy.nodeHeaders.sha256,
-    'NATIVE_INPUT_MISMATCH', 'Node headers differ from policy');
+  if (ios) {
+    const web = receipt.catWebValues;
+    const dependencyFields = ['dependencies', 'optionalDependencies', 'peerDependencies'];
+    const { value: manifest } = readJSON(root, 'package.json');
+    const { value: lock } = readJSON(root, 'package-lock.json');
+    const { value: installed } = readJSON(root, 'node_modules/undici/package.json');
+    const pinned = lock.packages?.['node_modules/undici'];
+    check(manifest.devDependencies?.undici === IOS_CAT_WEB_VALUES.version
+      && lock.packages?.['']?.devDependencies?.undici === IOS_CAT_WEB_VALUES.version
+      && dependencyFields.every(field => !manifest[field]?.undici && !lock.packages?.['']?.[field]?.undici)
+      && installed.name === 'undici' && installed.version === IOS_CAT_WEB_VALUES.version
+      && installed.license === 'MIT' && installed.engines?.node === '>=18.17'
+      && pinned?.version === IOS_CAT_WEB_VALUES.version && pinned.resolved === IOS_CAT_WEB_VALUES.resolved
+      && pinned.integrity === IOS_CAT_WEB_VALUES.integrity && pinned.dev === true && !pinned.link
+      && pinned.license === 'MIT' && pinned.engines?.node === '>=18.17'
+      && [installed, pinned].every(value => dependencyFields.every(field => Object.keys(value[field] ?? {}).length === 0)),
+    'NATIVE_INPUT_MISMATCH', 'Cat Web values must use the locked build-only Undici 6.29.1');
+    check(artifact(web, ios.catWebValues) && Array.isArray(web.inputs)
+      && artifact(web.license, IOS_CAT_WEB_VALUES.license.path)
+      && web.license.sha256 === IOS_CAT_WEB_VALUES.license.sha256,
+    'INVALID_NATIVE_RECEIPT', 'iOS build must include the fixed Cat Web value bundle and license');
+    const webInputs = [
+      'package.json', 'package-lock.json', 'scripts/quickjs/build-ios.mjs', 'scripts/quickjs/ios-target.mjs',
+      'node_modules/esbuild/package.json', 'node_modules/undici/package.json', web.license.path,
+      ...IOS_CAT_WEB_VALUES.modules.map(path => `node_modules/undici/${path}`),
+    ].sort();
+    check(isDeepStrictEqual(web.inputs.map(input => input?.path).sort(), webInputs)
+      && web.inputs.every(input => isObject(input) && digest(input.sha256) && recorded.get(input.path) === input.sha256)
+      && recorded.get(web.license.path) === web.license.sha256,
+    'NATIVE_INPUT_MISMATCH', 'Cat Web value inputs differ from the build');
+    check(lstatSync(sourcePath(root, web.license.path)).size === web.license.bytes
+      && fileHash(root, web.license.path) === web.license.sha256,
+    'NATIVE_LICENSE_MISMATCH', 'Undici license changed since build');
+    check(isDeepStrictEqual([...recorded.keys()].filter(path => path.startsWith('node_modules/undici/')).sort(),
+      inputFiles(root, 'node_modules/undici').sort()),
+    'NATIVE_INPUT_MISMATCH', 'Undici dependency inventory changed since build');
+    const { value: mobile } = readJSON(root, 'scripts/ios-node-mobile.json');
+    const archive = `.cache/nodejs-mobile/${posix.basename(new URL(mobile.archive.url).pathname)}`;
+    check(mobile.version === '18.20.4'
+      && mobile.archive.sha256 === '8c5ca3a0d1e38de7f182a5642593e82593b820efd375a14b3ecafc4bcfee620e'
+      && receipt.nodeMobile?.version === mobile.version
+      && receipt.nodeMobile.archiveSha256 === mobile.archive.sha256
+      && recorded.get(archive) === mobile.archive.sha256
+      && recorded.get(mobile.license.path) === mobile.license.sha256
+      && receipt.toolchain?.host?.platform === 'darwin'
+      && receipt.toolchain.node === policy.build.node && receipt.toolchain.esbuild === policy.build.esbuild
+      && typeof receipt.toolchain.compiler === 'string' && receipt.toolchain.compiler.length > 0
+      && typeof receipt.toolchain.xcode === 'string' && receipt.toolchain.xcode.length > 0
+      && typeof receipt.toolchain.sdk === 'string' && receipt.toolchain.sdk.length > 0
+      && digest(receipt.bindingIdentity)
+      && isDeepStrictEqual(policy.ios, {
+        framework: 'MeowScriptHost.framework/MeowScriptHost', cache: '.cache/ios-native',
+        minimumOS: '17.0', nodeMobilePolicy: 'scripts/ios-node-mobile.json',
+        exports: ['_napi_register_module_v1', '_node_api_module_get_api_version_v1'],
+      })
+      && artifact(receipt.frameworkInfo, ios.info) && artifact(receipt.exports, ios.exports),
+    'INVALID_NATIVE_RECEIPT', 'iOS build must pin the official Node Mobile, target, tools and framework identity');
+    const headerDirectory = '.cache/nodejs-mobile/ios/include/node';
+    check(Array.isArray(receipt.nodeHeaderFiles) && receipt.nodeHeaderFiles.length > 0
+      && receipt.nodeHeaderFiles.every(input => digest(input.sha256)
+        && input.path.startsWith(`${headerDirectory}/`) && recorded.get(input.path) === input.sha256)
+      && receipt.nodeHeaderFiles.some(input => input.path === `${headerDirectory}/node_api.h`),
+    'NATIVE_INPUT_MISMATCH', 'iOS build must inventory the official Node Mobile headers');
+    check(isDeepStrictEqual(receipt.nodeHeaderFiles.map(input => input.path).sort(), inputFiles(root, headerDirectory).sort()),
+      'NATIVE_INPUT_MISMATCH', 'Node Mobile header membership changed since build');
+    for (const input of [receipt.frameworkInfo, receipt.exports]) {
+      check(lstatSync(sourcePath(root, input.path)).size === input.bytes && fileHash(root, input.path) === input.sha256,
+        'NATIVE_HASH_MISMATCH', 'Framework metadata changed since build');
+      addInput(inputs, { path: input.path, sha256: input.sha256 });
+    }
+    const { value: symbolAudit } = readJSON(root, ios.exports);
+    const { dylibs } = checkIOSMachO(readFileSync(sourcePath(root, artifactPath)), target);
+    checkIOSSymbols(symbolAudit.exported, symbolAudit.undefinedSymbols, policy.ios.exports);
+    check(isDeepStrictEqual(symbolAudit.exported, [...policy.ios.exports].sort())
+      && isDeepStrictEqual(symbolAudit.dylibs, dylibs),
+    'NATIVE_TARGET_MISMATCH', 'Framework export or linkage boundary differs from policy');
+    // Reconstruct the identity embedded in addon.cc, excluding post-link evidence.
+    const identity = {
+      schemaVersion: receipt.schemaVersion, abi: receipt.abi, napi: receipt.napi,
+      platform: receipt.platform, target: receipt.target, sources: receipt.sources,
+      inputs: receipt.inputs, sdk: receipt.sdk, catWebValues: receipt.catWebValues, nodeMobile: receipt.nodeMobile,
+      nodeHeaderFiles: receipt.nodeHeaderFiles,
+      toolchain: Object.fromEntries(Object.entries(receipt.toolchain).filter(([name]) => name !== 'commands')),
+    };
+    check(sha256(JSON.stringify(identity)) === receipt.bindingIdentity,
+      'NATIVE_INPUT_MISMATCH', 'Framework compiled identity does not match its build inputs');
+  } else {
+    check(recorded.get(policy.nodeHeaders.archivePath) === policy.nodeHeaders.sha256,
+      'NATIVE_INPUT_MISMATCH', 'Node headers differ from policy');
+  }
   check(recorded.get(NATIVE_POLICY) === policyHash && policy.patches.every(patch =>
     recorded.get(patch.path) === patch.sha256),
   'NATIVE_INPUT_MISMATCH', 'Native policy or patches changed since the build');
@@ -241,14 +337,14 @@ function trustedNative(root, inputs) {
     check(fileHash(root, path) === sha256, 'NATIVE_INPUT_MISMATCH', `Native input changed since the build: ${path}`);
     addInput(inputs, { path, sha256 });
   }
-  for (const value of [receipt.artifact, receipt.sdk]) {
+  for (const value of [receipt.artifact, receipt.sdk, ...(ios ? [receipt.catWebValues] : [])]) {
     check(lstatSync(sourcePath(root, value.path)).size === value.bytes
       && fileHash(root, value.path) === value.sha256,
     'NATIVE_HASH_MISMATCH', `Build output differs from its receipt: ${value.path}`);
   }
-  checkNativeTarget(root, NATIVE_ARTIFACT);
-  addInput(inputs, { path: NATIVE_RECEIPT, sha256: receiptHash });
-  return { policy, receipt, receiptHash };
+  if (!ios) checkNativeTarget(root, NATIVE_ARTIFACT);
+  addInput(inputs, { path: receiptPath, sha256: receiptHash });
+  return { policy, receipt, receiptHash, receiptPath, ios };
 }
 
 function dependencyMap(manifest, field, location) {
@@ -457,7 +553,7 @@ function fileDeclarations(root, manifest, location, workspace) {
   return required;
 }
 
-function buildGraph(root, product) {
+function buildGraph(root, product, target) {
   const rootJSON = readJSON(root, 'package.json');
   const lockJSON = readJSON(root, 'package-lock.json');
   const manifest = rootJSON.value, lock = lockJSON.value;
@@ -540,7 +636,7 @@ function buildGraph(root, product) {
     const node = {
       location, path: outputPath(location), name: pkg.name, version: pkg.version,
       workspace, manifest: pkg, manifestHash: data.hash, required: fileDeclarations(root, pkg, location, workspace), locked,
-      nativeBuild: pkg.gypfile ? trustedNative(root, inputs) : undefined,
+      nativeBuild: pkg.gypfile ? trustedNative(root, inputs, target) : undefined,
     };
     nodes.set(location, node); // Register before traversal: real dependency cycles are legal.
     const dependencies = dependencyMap(pkg, 'dependencies', location);
@@ -638,7 +734,7 @@ function includedFile(rel, node) {
  * Synchronous file operations keep each local validation/copy step contiguous.
  */
 export async function packageRuntime({ root = fileURLToPath(new URL('../', import.meta.url)), product, output,
-  profile = 'common-native' } = {}) {
+  profile = 'common-native', target } = {}) {
   check(Object.hasOwn(PRODUCTS, product), 'INVALID_PRODUCT', 'Only the App wire identity aggregate is supported');
   check(profile === 'common-native', 'INVALID_PROFILE', 'Only common-native is supported');
   check(typeof root === 'string' && isAbsolute(root) && !/^(?:\\\\|\/\/)/.test(root),
@@ -735,7 +831,7 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       if (item.name === 'node_modules') continue; // Only the resolved graph can add dependencies.
       check(!item.isSymbolicLink(), 'UNSAFE_SYMLINK', `Package symlink is not allowed: ${location}/${item.name}`);
       // Build intermediates and reviewed native sources are never runtime payloads.
-      // The three exact build outputs are copied below, through sourcePath checks.
+      // Exact build outputs are copied below, through sourcePath checks.
       if (node.nativeBuild && ['build', 'native', 'binding.gyp'].includes(child)) continue;
       check(!NATIVE_FILE.test(item.name),
         'NATIVE_PAYLOAD', `Native payload is not allowed: ${location}/${item.name}`);
@@ -781,7 +877,7 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
   try {
     manifestFD = openSync(join(output, MANIFEST), 'wx', 0o644);
     saveManifest();
-    const graph = buildGraph(root, product);
+    const graph = buildGraph(root, product, target);
     manifest.inputs = graph.inputs;
     manifest.omittedOptionalDependencies = graph.omitted;
     manifest.dependencies = graph.nodes.map(node => ({
@@ -790,25 +886,37 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       ...(!node.workspace ? { resolved: node.locked.resolved, integrity: node.locked.integrity } : {}),
     }));
     manifest.trustedNative = graph.nodes.filter(node => node.nativeBuild).map(node => {
-      const { receipt, policy } = node.nativeBuild;
+      const { receipt, policy, ios } = node.nativeBuild;
       return { package: node.name, version: node.version,
-        ...receipt.artifact, path: `${node.path}/build/Release/script_host_native.node`,
+        ...receipt.artifact, path: ios ? 'Frameworks/MeowScriptHost.framework/MeowScriptHost'
+          : `${node.path}/build/Release/script_host_native.node`,
         platform: receipt.platform, arch: receipt.arch, abi: receipt.abi, napi: receipt.napi,
+        ...(ios ? { target: receipt.target, bindingIdentity: receipt.bindingIdentity,
+          integrity: 'pre-sign-sha256; installed-code=app-signature+compiled-identity',
+          catWebValues: { ...receipt.catWebValues, path: `${node.path}/build/Release/cat-web-values.cjs`,
+            license: { ...receipt.catWebValues.license, path: 'licenses/undici-LICENSE.txt' } },
+        } : {}),
         sources: receipt.sources, patches: policy.patches,
         sdk: { ...receipt.sdk, path: `${node.path}/build/Release/source-sdk.js` },
         licenses: Object.values(policy.sources).map(source => ({ ...source.license,
-          path: `licenses/${posix.basename(source.license.path)}` })),
+          path: `licenses/${posix.basename(source.license.path)}` })).concat(ios ? [{
+          ...receipt.catWebValues.license, path: 'licenses/undici-LICENSE.txt',
+        }] : []),
       };
     });
     copySharedRuntime();
     for (const node of graph.nodes) {
       copyPackage(node);
       if (node.nativeBuild) {
-        const { receipt, policy, receiptHash } = node.nativeBuild;
-        copy(NATIVE_ARTIFACT, `${node.path}/build/Release/script_host_native.node`,
+        const { receipt, policy, receiptHash, receiptPath, ios } = node.nativeBuild;
+        if (!ios) copy(NATIVE_ARTIFACT, `${node.path}/build/Release/script_host_native.node`,
           receipt.artifact.sha256, receipt.artifact);
-        copy(NATIVE_RECEIPT, `${node.path}/build/Release/script-host-native.json`, receiptHash);
-        copy(SOURCE_SDK, `${node.path}/build/Release/source-sdk.js`, receipt.sdk.sha256);
+        copy(receiptPath, `${node.path}/build/Release/script-host-native.json`, receiptHash);
+        copy(receipt.sdk.path, `${node.path}/build/Release/source-sdk.js`, receipt.sdk.sha256);
+        if (ios) {
+          copy(receipt.catWebValues.path, `${node.path}/build/Release/cat-web-values.cjs`, receipt.catWebValues.sha256);
+          copy(receipt.catWebValues.license.path, 'licenses/undici-LICENSE.txt', receipt.catWebValues.license.sha256);
+        }
         for (const { license } of Object.values(policy.sources)) {
           copy(license.path, `licenses/${posix.basename(license.path)}`, license.sha256);
         }

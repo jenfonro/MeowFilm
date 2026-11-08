@@ -45,6 +45,6 @@ QuickJS realm 提供受限 `Buffer`、URL、定时器、HTTP helper、作用域�
 
 ## 排除项
 
-本输入只支持 CatVod JS Spider。TVBox Android JAR／DEX、任意 JVM 插件和 Android API 不在当前范围，也不提供 CatNode 的文件、服务和管理 API。Node-independent 仅指 source-runtime 纯规则包，当前通用执行由 Node 主控和原生 QuickJS 线程承载；Windows/iOS 旧接入本轮未迁移。
+本输入只支持 CatVod JS Spider。TVBox Android JAR／DEX、任意 JVM 插件和 Android API 不在当前范围，也不提供 CatNode 的文件、服务和管理 API。Node-independent 仅指 source-runtime 纯规则包，当前通用执行由 Node 主控和原生 QuickJS 线程承载；iOS 平台载体见[运行底座](../ios/runtime-preflight.md)，Windows 旧接入仍待迁移。
 
 一次 raw HTTP 源码上传、普通 JSON、完整候选和 CAS 与[Reader 来源入口](reader-source-runtime.md#生命周期与-rpc)相同。源码 16 MiB、栈、60 秒初始化/请求和 3 秒清理保持；取消、真实线程退出见[共用运行时](script-runtime.md#quickjs-执行边界)。虚拟路由、变量、Cookie、存储和响应不再有运行器累计内存配额，不进行 OOM 自动重启；`maximumParseBytes` 仅限制解析，不限制普通 body 或状态。资源仍按 owner 释放，无固定实例/并发/timer/网络/profile 数量。通用原生构建与定向回归已通过，适用环境及未覆盖项见[通用验证范围](script-runtime.md#构建发布与验证边界)。

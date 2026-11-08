@@ -1,5 +1,4 @@
 import Foundation
-import MeowJSON
 import MeowRuntime
 
 /// Matches the reference probe: sample three videos and the first episode of
@@ -21,7 +20,7 @@ struct FilmSourceProbe {
 
     private mutating func execute() async throws -> FilmSourceDetection {
         let home = try await call("home", .object([:]))
-        var category: JSONValue?
+        var category: RuntimeValue?
         if let home {
             let id = Self.classes(home).map { Self.pick($0, ["type_id", "tid", "id", "typeId"]) }.first { !$0.isEmpty } ?? "0"
             category = try await call("category", .object(["id": .string(id), "page": .number(1),
@@ -31,7 +30,7 @@ struct FilmSourceProbe {
         if category != nil && items.isEmpty { empty("category", "EMPTY_LIST") }
         let categoryPlay = try await (items.isEmpty ? Attempt() : tryPlay(items))
         let searchForPlay = category == nil || items.isEmpty || (!categoryPlay.ok && categoryPlay.missing)
-        let search: JSONValue?
+        let search: RuntimeValue?
         if searchForPlay || categoryPlay.ok {
             search = try await call("search", .object(["wd": .string("斗破"), "page": .number(1)]))
         } else { search = nil }
@@ -62,7 +61,7 @@ struct FilmSourceProbe {
         }
     }
 
-    private mutating func tryPlay(_ items: [JSONValue]) async throws -> Attempt {
+    private mutating func tryPlay(_ items: [RuntimeValue]) async throws -> Attempt {
         var missing = false
         let videos = items.filter { if case .object = $0 { return true }; return false }.prefix(3)
         for video in videos {
@@ -89,17 +88,17 @@ struct FilmSourceProbe {
         return Attempt(ok: false, missing: missing)
     }
 
-    private struct Navigation { let action: String; let payload: JSONValue }
+    private struct Navigation { let action: String; let payload: RuntimeValue }
     private struct Page {
-        let document: JSONValue
+        let document: RuntimeValue
         let action: String?
-        let payload: JSONValue?
+        let payload: RuntimeValue?
         let previousPage: Int64
         var ancestors: Set<Data>
         var lists: Set<Data>
     }
 
-    private mutating func detailCandidates(_ detail: JSONValue) async throws -> [Candidate] {
+    private mutating func detailCandidates(_ detail: RuntimeValue) async throws -> [Candidate] {
         let first = Self.list(detail)
         let hasNavigation = first.contains { item in
             if Self.navigation(item) != nil { return true }
@@ -142,7 +141,7 @@ struct FilmSourceProbe {
                !list.isEmpty, current > 0, count > current {
                 if payload["pg"] != nil { payload["pg"] = .number(Double(current + 1)) }
                 if payload["page"] != nil || payload["pg"] == nil { payload["page"] = .number(Double(current + 1)) }
-                let body = JSONValue.object(payload)
+                let body = RuntimeValue.object(payload)
                 let key = try Self.canonical(.array([.string(action), body]))
                 if !seen.insert(key).inserted {
                     steps.append(.init(action, "failed", "NAVIGATION_CYCLE")); continue
@@ -157,7 +156,7 @@ struct FilmSourceProbe {
         return result.filter { unique.insert($0).inserted }
     }
 
-    private mutating func call(_ operation: String, _ payload: JSONValue) async throws -> JSONValue? {
+    private mutating func call(_ operation: String, _ payload: RuntimeValue) async throws -> RuntimeValue? {
         try Task.checkCancellation()
         guard site.actions.contains(operation) else {
             steps.append(.init(operation, "unsupported", "CAPABILITY_UNAVAILABLE")); return nil
@@ -186,7 +185,7 @@ struct FilmSourceProbe {
         } catch is CancellationError { throw CancellationError() }
         catch {
             try Task.checkCancellation()
-            let code = (error as? FilmSourceError)?.code ?? (error as? RuntimeBridgeError)?.rawValue ?? "CALL_FAILED"
+            let code = (error as? FilmSourceError)?.code ?? "CALL_FAILED"
             if ["CANCELLED", "STALE_SESSION", "HOST_CLOSED", "CLOSED", "DISABLED", "STARTING"].contains(code) {
                 throw CancellationError()
             }
@@ -196,19 +195,19 @@ struct FilmSourceProbe {
     }
 
     private mutating func empty(_ operation: String, _ reason: String) { steps.append(.init(operation, "empty", reason)) }
-    private static func list(_ value: JSONValue) -> [JSONValue] {
+    private static func list(_ value: RuntimeValue) -> [RuntimeValue] {
         if let array = value.catArray { return array }
         let data = value.catField("data")
         return [value.catField("list"), data, data?.catField("list"), data?.catField("vod_list"), data?.catField("items")]
             .compactMap { $0?.catArray }.first ?? []
     }
-    private static func classes(_ value: JSONValue) -> [JSONValue] {
+    private static func classes(_ value: RuntimeValue) -> [RuntimeValue] {
         let data = value.catField("data")
         return [value.catField("class"), value.catField("classes"), data?.catField("class"),
                 data?.catField("classes"), data?.catField("types"), value.catField("types")]
             .compactMap { $0?.catArray }.first ?? []
     }
-    private static func candidates(_ value: JSONValue) -> [Candidate] {
+    private static func candidates(_ value: RuntimeValue) -> [Candidate] {
         let from = pick(value, ["vod_play_from", "play_from", "playFrom"])
         let urls = pick(value, ["vod_play_url", "play_url", "playUrl"])
         let flags = from.isEmpty ? [] : literalComponents(from, separator: "$$$")
@@ -244,7 +243,7 @@ struct FilmSourceProbe {
         result.append(String(value[start...]))
         return result
     }
-    private static func playURL(_ value: JSONValue) -> String {
+    private static func playURL(_ value: RuntimeValue) -> String {
         for item in [value.catField("url"), value.catField("playUrl"), value.catField("data")?.catField("url")] {
             if let text = item?.catText, !trim(text).isEmpty { return trim(text) }
             guard let array = item?.catArray else { continue }
@@ -255,7 +254,7 @@ struct FilmSourceProbe {
         }
         return ""
     }
-    private static func navigation(_ value: JSONValue) -> Navigation? {
+    private static func navigation(_ value: RuntimeValue) -> Navigation? {
         guard !pick(value, ["vod_id"]).isEmpty, text(value, "vod_play_from").isEmpty, text(value, "vod_play_url").isEmpty else { return nil }
         let nav = value.catField("vod_navigation") ?? .null
         var action = text(nav, "action")
@@ -263,18 +262,18 @@ struct FilmSourceProbe {
         func letter(_ byte: UInt8) -> Bool { (65...90).contains(byte) || (97...122).contains(byte) }
         guard let first = action.utf8.first, letter(first),
               action.utf8.allSatisfy({ letter($0) || (48...57).contains($0) || $0 == 95 || $0 == 45 }) else { return nil }
-        let payload: JSONValue
+        let payload: RuntimeValue
         if case .object(let fields)? = nav.catField("payload") { payload = .object(fields) }
         else {
             var fields = ["id": value.catField("vod_id") ?? .null]
             if action == "category" { fields["page"] = .number(1) }
-            payload = .object(fields)
+            payload = .object(RuntimeObject(fields))
         }
         return Navigation(action: action, payload: payload)
     }
     private static func trim(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private static func text(_ value: JSONValue, _ key: String) -> String { value.catField(key)?.catText.map(trim) ?? "" }
-    private static func pick(_ value: JSONValue, _ keys: [String]) -> String {
+    private static func text(_ value: RuntimeValue, _ key: String) -> String { value.catField(key)?.catText.map(trim) ?? "" }
+    private static func pick(_ value: RuntimeValue, _ keys: [String]) -> String {
         for key in keys {
             let item = value.catField(key)
             let string: String
@@ -286,9 +285,33 @@ struct FilmSourceProbe {
         }
         return ""
     }
-    private static func pageNumber(_ value: JSONValue, _ key: String) -> Int64 { max(0, Int64(pick(value, [key])) ?? 0) }
-    private static func canonical(_ value: JSONValue) throws -> Data {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return try encoder.encode(value)
+    private static func pageNumber(_ value: RuntimeValue, _ key: String) -> Int64 { max(0, Int64(pick(value, [key])) ?? 0) }
+    // Traversal identity ignores member order but preserves every UTF-8 key.
+    private static func canonical(_ value: RuntimeValue) throws -> Data {
+        var bytes = Data()
+        try appendCanonical(value, to: &bytes)
+        return bytes
+    }
+    private static func appendCanonical(_ value: RuntimeValue, to bytes: inout Data) throws {
+        switch value {
+        case .object(let fields):
+            bytes.append(0x7b)
+            let keys = fields.keys.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+            for (index, key) in keys.enumerated() {
+                if index > 0 { bytes.append(0x2c) }
+                bytes.append(try RuntimeJSON.encode(.string(key)))
+                bytes.append(0x3a)
+                try appendCanonical(fields[key]!, to: &bytes)
+            }
+            bytes.append(0x7d)
+        case .array(let values):
+            bytes.append(0x5b)
+            for (index, value) in values.enumerated() {
+                if index > 0 { bytes.append(0x2c) }
+                try appendCanonical(value, to: &bytes)
+            }
+            bytes.append(0x5d)
+        default: bytes.append(try RuntimeJSON.encode(value))
+        }
     }
 }

@@ -3891,10 +3891,11 @@ final class MusicPlayerContentModelTests: XCTestCase {
         let attempt = playback.playAttempt(resource: resource, owner: "music", autoplay: false)
         XCTAssertNil(playback.player.currentItem)
         model.nativeAttempt = .init(id: attempt.id, resourceID: resource.id)
+        let selection = MusicPlaybackSelection(installationId: "official:fixture", generation: 1,
+            siteId: "wy", sourceKey: "wy:" + id, quality: "128k")
         model.candidate = .init(attemptId: id, occurrenceId: id, resourceId: resource.id,
-                                url: url, title: id, requestedQuality: "128k")
-        model.lastSelection = .init(installationId: "official:fixture", generation: 1,
-                                    siteId: "wy", sourceKey: "wy:" + id, quality: "128k")
+                                url: url, title: id, requestedQuality: "128k", resolvedSelection: selection)
+        model.lastSelection = selection
         model.playbackState.queue = [.init(id: id, track: .init(ref: .init(kind: .queue, id: id),
                                                              songId: id, title: id))]
         model.playbackState.state = .init(currentId: id, total: 1)

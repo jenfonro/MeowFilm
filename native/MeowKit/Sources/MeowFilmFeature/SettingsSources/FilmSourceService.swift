@@ -1,5 +1,4 @@
 import Foundation
-import MeowJSON
 import MeowRuntime
 import MeowStorage
 
@@ -168,7 +167,7 @@ public actor FilmSourceService {
 
     public func editCat(_ installationId: String, name: String, sourceURL: String? = nil) async throws -> FilmCatSource {
         try nonempty(name)
-        var body: [String: JSONValue] = ["installationId": .string(installationId), "name": .string(name)]
+        var body: [String: RuntimeValue] = ["installationId": .string(installationId), "name": .string(name)]
         if let sourceURL { body["sourceUrl"] = .string(sourceURL) }
         let params = body
         return try await run { try await self.manage(installationId) { try await self.transport.call("edit", params) } }
@@ -217,7 +216,7 @@ public actor FilmSourceService {
     }
 
     private func manage(_ id: String, reimport: Bool = false, restoreReceipts: [FilmSourceKey: UUID] = [:],
-                        operation: @escaping @Sendable () async throws -> JSONValue) async throws -> FilmCatSource {
+                        operation: @escaping @Sendable () async throws -> RuntimeValue) async throws -> FilmCatSource {
         try nonempty(id)
         return try await managed {
             try await self.manageCore(id, reimport: reimport, restoreReceipts: restoreReceipts, operation: operation)
@@ -225,23 +224,22 @@ public actor FilmSourceService {
     }
 
     private func manageCore(_ id: String, reimport: Bool, restoreReceipts: [FilmSourceKey: UUID],
-                            operation: @Sendable () async throws -> JSONValue) async throws -> FilmCatSource {
+                            operation: @Sendable () async throws -> RuntimeValue) async throws -> FilmCatSource {
         if !reimport { _ = try findCat(id) }
         invalidateCat(id); changingCats.insert(id)
         defer { changingCats.remove(id) }
-        let receipt: JSONValue
-        do { receipt = try await operation() }
-        catch {
+        var restored: FilmCatSource?
+        do {
+            let receipt = try await operation()
+            try Task.checkCancellation()
+            if reimport {
+                let imported = try parseFilmCat(receipt)
+                guard imported.installationId == id else { throw FilmSourceError(code: "INVALID_RESPONSE") }
+                if imported.state == "ready" && imported.enabled { restored = imported }
+            }
+        } catch {
             if !(error is CancellationError), !Task.isCancelled { try? await synchronize() }
             throw error
-        }
-        try Task.checkCancellation()
-        var restored: FilmCatSource?
-        if reimport {
-            let instance = receipt.catField("instances")?.catArray?.first { $0.catField("installationId") == .string(id) } ?? receipt
-            let imported = try parseFilmCat(instance)
-            guard imported.installationId == id else { throw FilmSourceError(code: "INVALID_RESPONSE") }
-            if imported.state == "ready" && imported.enabled { restored = imported }
         }
         try await synchronize(restored: restored, restoreReceipts: restoreReceipts)
         let result = try findCat(id)
@@ -256,7 +254,7 @@ public actor FilmSourceService {
     private func deleteCatCore(_ id: String) async throws {
         _ = try findCat(id); invalidateCat(id); changingCats.insert(id)
         defer { changingCats.remove(id) }
-        let receipt: JSONValue
+        let receipt: RuntimeValue
         do { receipt = try await transport.call("uninstall", ["installationId": .string(id)]) }
         catch {
             if !(error is CancellationError), !Task.isCancelled { try? await synchronize() }
@@ -385,9 +383,8 @@ public actor FilmSourceService {
                                  id: UUID, generation: Int64) async throws -> FilmSourceDetection {
         try Task.checkCancellation()
         guard probes[key]?.0 == id else { throw CancellationError() }
-        // A completed result blob outlives its script session. Confirm the host
-        // after transfer cleanup, serialized with local management, not merely
-        // against the cached generation captured before the probe.
+        // The host may change after the last response. Confirm its generation
+        // before publishing, serialized with local management.
         try await synchronize()
         try Task.checkCancellation()
         guard probes[key]?.0 == id, let current = snapshot.cats.first(where: { $0.installationId == key.installationId }),

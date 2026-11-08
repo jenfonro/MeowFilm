@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-import MeowJSON
+import MeowRuntime
 import MeowStorage
 @testable import MeowFilmFeature
 
@@ -127,13 +127,43 @@ final class FilmSourceProbeIdentityTests: XCTestCase {
         XCTAssertFalse(result.steps.contains { $0.error == "NAVIGATION_CYCLE" })
     }
 
+    func testNavigationPayloadKeysSurviveStringParsingAndSkipOnlyExactDuplicateObjects() async throws {
+        let first = try RuntimeJSON.decode(Data(#"{"id":"directory","page":1,"é":1,"e\u0301":2,"blob":{"token":"业务值"}}"#.utf8))
+        let reordered = try RuntimeJSON.decode(Data(#"{"blob":{"token":"业务值"},"e\u0301":2,"é":1,"page":1,"id":"directory"}"#.utf8))
+        let second = try RuntimeJSON.decode(Data(#"{"id":"directory","page":1,"é":2,"e\u0301":1,"blob":{"token":"业务值"}}"#.utf8))
+        let detail = identityList([first, reordered, second].map { payload in
+            .object(["vod_id": .string("directory"), "vod_navigation": .object([
+                "action": .string("directory"), "payload": payload])])
+        })
+        for textResult in [false, true] {
+            let response: RuntimeValue = textResult ? .string(String(decoding: try RuntimeJSON.encode(detail), as: UTF8.self)) : detail
+            let fixture = ProbeIdentityFixture { action, payload in
+                if action == "detail" { return response }
+                if action == "directory" {
+                    let matches = payload.catField("é") == .number(2) && payload.catField("e\u{0301}") == .number(1)
+                    return identityList(matches ? [identityVideo(flags: ["line"], ids: ["episode"])] : [])
+                }
+                return nil
+            }
+            let result = try await probe(fixture).run()
+            XCTAssertEqual(result.result, "valid")
+            let calls = await fixture.calls
+            let payloads = calls.filter { $0.0 == "directory" }.map(\.1)
+            XCTAssertEqual(payloads.count, 2, "Object order does not create another request; exact Unicode keys remain distinct")
+            XCTAssertEqual(payloads.map { $0.catField("é") }, [.number(1), .number(2)])
+            XCTAssertEqual(payloads.map { $0.catField("e\u{0301}") }, [.number(2), .number(1)])
+            XCTAssertTrue(payloads.allSatisfy { $0.catField("blob")?.catField("token") == .string("业务值") })
+            XCTAssertFalse(result.steps.contains { $0.error == "NAVIGATION_CYCLE" })
+        }
+    }
+
     func testConsecutivePageListsWithDifferentRawTextAreNotRepeatedPages() async throws {
         let first = composed, second = decomposed
         let fixture = ProbeIdentityFixture { action, payload in
             if action == "detail" { return identityList([identityFolder("pages")]) }
             if action == "directory" {
                 let page = payload.catField("page")?.catInteger ?? 1
-                let items: [JSONValue]
+                let items: [RuntimeValue]
                 if page < 3 { items = [.object(["vod_id": .string(page == 1 ? first : second)])] }
                 else { items = [identityVideo(flags: ["line"], ids: ["episode"])] }
                 return .object(["list": .array(items), "page": .number(Double(page)), "pagecount": .number(3)])
@@ -290,41 +320,41 @@ final class FilmSourceProbeIdentityTests: XCTestCase {
     }
 }
 
-private func identityBytes(_ payload: JSONValue, _ field: String) -> [UInt8] {
+private func identityBytes(_ payload: RuntimeValue, _ field: String) -> [UInt8] {
     payload.catField(field)?.catText.map { Array($0.utf8) } ?? []
 }
 
-private func identityList(_ items: [JSONValue]) -> JSONValue { .object(["list": .array(items)]) }
+private func identityList(_ items: [RuntimeValue]) -> RuntimeValue { .object(["list": .array(items)]) }
 
-private func identityVideo(flags: [String], ids: [String]) -> JSONValue {
+private func identityVideo(flags: [String], ids: [String]) -> RuntimeValue {
     .object(["vod_play_from": .string(flags.joined(separator: "$$$")),
         "vod_play_url": .string(ids.map { "首集$" + $0 }.joined(separator: "$$$"))])
 }
 
-private func identityFolder(_ id: String) -> JSONValue {
+private func identityFolder(_ id: String) -> RuntimeValue {
     .object(["vod_id": .string(id), "vod_navigation": .object([
         "action": .string("directory"), "payload": .object(["id": .string(id), "page": .number(1)])])])
 }
 
 private actor ProbeIdentityFixture {
     private let runtime = SourcesRuntimeFixture()
-    private let reply: @Sendable (String, JSONValue) -> JSONValue?
-    var calls: [(String, JSONValue)] = []
+    private let reply: @Sendable (String, RuntimeValue) -> RuntimeValue?
+    var calls: [(String, RuntimeValue)] = []
 
-    init(reply: @escaping @Sendable (String, JSONValue) -> JSONValue?) { self.reply = reply }
+    init(reply: @escaping @Sendable (String, RuntimeValue) -> RuntimeValue?) { self.reply = reply }
 
     nonisolated var transport: CatScriptTransport {
-        CatScriptTransport(rpc: { method, params, _ in try await self.rpc(method, params) })
+        CatScriptTransport(request: { operation, params in try await self.request(operation, params) },
+            upload: { _, _, _ in throw FilmSourceError(code: "UNEXPECTED_UPLOAD") })
     }
 
-    private func rpc(_ method: String, _ params: JSONValue) async throws -> JSONValue {
-        if method == "cat.script.invoke" {
+    private func request(_ operation: String, _ params: RuntimeValue) async throws -> RuntimeValue {
+        if operation == "invoke" {
             let action = try XCTUnwrap(params.catField("operation")?.catText)
-            let text = try XCTUnwrap(params.catField("payload")?.catText)
-            let payload = try CatScriptTransport.parse(Data(text.utf8))
+            let payload = try XCTUnwrap(params.catField("payload"))
             calls.append((action, payload))
-            if let value = reply(action, payload) { return try SourcesRuntimeFixture.envelope(value) }
+            if let value = reply(action, payload) { return value }
         }
-        return try await runtime.rpc(method, params)
+        return try await runtime.request(operation, params)
     }
 }

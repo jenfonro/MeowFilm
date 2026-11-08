@@ -69,6 +69,34 @@ def application_membership(base, project_text):
     return failures
 
 
+def runtime_membership(project_text):
+    """The App owns one embedded framework; hosted tests share that instance."""
+    failures = []
+    objects = dict(re.findall(r"^\s*([A-F0-9]{24}) = \{ (.*) \};$", project_text, re.M))
+    references = [key for key, text in objects.items() if "isa = PBXFileReference;" in text
+                  and "name = MeowScriptHost.framework;" in text]
+    if len(references) != 1:
+        return ["Expected one MeowScriptHost framework reference"]
+    reference = references[0]
+    expected = "../../.cache/ios-native/$(MEOW_RUNTIME_SDK)-$(MEOW_RUNTIME_ARCH)/MeowScriptHost.framework"
+    if f'path = "{expected}";' not in objects[reference]:
+        failures.append("Script host framework must use the selected SDK/architecture input")
+    builds = [key for key, text in objects.items() if "isa = PBXBuildFile;" in text
+              and f"fileRef = {reference};" in text]
+    if len(builds) != 1 or "CodeSignOnCopy" not in objects[builds[0]]:
+        return failures + ["Script host framework must have one signed embed build file"]
+    build = builds[0]
+    phases = [key for key, text in objects.items()
+              if re.search(r"\b" + build + r"\b", text) and "isa = PBXBuildFile;" not in text]
+    if len(phases) != 1 or "isa = PBXCopyFilesBuildPhase;" not in objects[phases[0]] or "dstSubfolderSpec = 10;" not in objects[phases[0]]:
+        return failures + ["Script host framework must only join Embed Frameworks"]
+    owners = [text for text in objects.values() if "isa = PBXNativeTarget;" in text
+              and phases[0] in text]
+    if len(owners) != 1 or "name = Meowfilm;" not in owners[0]:
+        failures.append("Only the App may embed MeowScriptHost")
+    return failures
+
+
 def check(root):
     # macOS exposes temporary directories through /var while their canonical
     # location is /private/var. Anchor every traversal to one canonical root so
@@ -155,6 +183,7 @@ def check(root):
         if len(app_products) != len(set(app_products)) or not set(app_products) <= products:
             failures.append("Xcode refers to duplicate or undeclared package products")
         failures.extend(application_membership(root / "apps/ios", text))
+        failures.extend(runtime_membership(text))
     else:
         failures.append("Missing Xcode project")
     return failures

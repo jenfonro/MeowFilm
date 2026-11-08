@@ -75,9 +75,11 @@
 
 ## 音源文档
 
-公共音乐模块唯一写入 `meowfilm/script-runtime/music`，使用 Node 的 `PrivateDocuments` 保存安装目录、内容寻址源码和请求绑定的 guest KV；格式与隔离规则以[共用 LX 契约](../runtime/music-script-runtime.md#持久化与隔离)为准。数据不混入曲库同步，不使用 Keychain 或加密文档。
+公共音乐模块唯一写入 `meowfilm/script-runtime/music`，使用 Node 的 `PrivateDocuments` 保存安装目录、内容寻址源码和请求绑定的 guest KV；格式与隔离规则以[共用 LX 契约](../runtime/music-script-runtime.md)为准。数据不混入曲库同步，不使用 Keychain 或加密文档。
 
 `NativeMusicScriptService` 仅适配 `music.script.v3`，不维护原生脚本 `DocumentStore`、下载器或反向 storage RPC。旧原生脚本数据不读取、迁移、双写或主动删除；用户明确清除本机数据时仍按整个应用数据根清理。
+
+Cat 继续使用 `meowfilm/script-runtime/cat`，客户端视频选项、排序、检测与删除记录仍属于 `film.video-sources.v1`。HTTP／引擎适配不改变这些目录或 namespace，不把公共独立入口的默认根目录套到旧安装上，再用空 status 清掉客户端记录；不新增自动数据迁移或清理。
 
 内置官方源开关仍属于 `music.library.v1` 的 playback 记录 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；新建文档显式写入全部启用，已有文档必须包含该数组，空数组全部关闭，不接受缺失、null 或未知平台。写入使用既有 settingsRevision／文档 CAS，不创建第二份设置事实来源。
 

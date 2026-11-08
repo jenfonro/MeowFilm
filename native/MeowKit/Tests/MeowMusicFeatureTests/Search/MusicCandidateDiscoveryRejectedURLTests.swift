@@ -28,7 +28,7 @@ private actor RejectedURLDiscoverySession: MusicCandidateDiscoverySession {
         if let failure = failures[installation] { throw failure }
         guard let url = urls[installation] else { throw MusicServiceError.invalidResponse }
         return .init(attemptId: attemptID, occurrenceId: "entry-1", resourceId: "music:" + attemptID,
-            url: url, title: "Synthetic", requestedQuality: target.quality)
+            url: url, title: "Synthetic", requestedQuality: target.quality, resolvedSelection: target.selection)
     }
     func cancel(attemptID: String) { cancellations.append(attemptID) }
     func close(retainingAttemptID: String?) { retained = retainingAttemptID }

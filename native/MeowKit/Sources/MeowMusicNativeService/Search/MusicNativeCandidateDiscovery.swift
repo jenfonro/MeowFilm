@@ -113,7 +113,7 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
 
     /// Automatic discovery searches only platforms whose rows can become a
     /// playback candidate now: official accounts that could answer, plus enabled,
-    /// ready script sites declaring musicUrl. Local state and the script list
+    /// available script sites declaring musicUrl. Local state and the script list
     /// only; no account restore or platform request.
     func candidateDiscoveryScope(seed: MusicNativeCandidateDiscoverySeed, label: String) async throws -> Set<String> {
         try candidateCheck(seed)
@@ -129,7 +129,7 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
         if let scripts {
             do {
                 let sources = try await work(label: label) { try await scripts.sources() }
-                for source in sources where source.enabled && source.ready {
+                for source in sources where source.isCandidate {
                     for capability in source.capabilities where capability.actions.contains("musicUrl") {
                         result.insert(capability.siteID)
                     }

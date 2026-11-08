@@ -116,6 +116,7 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: occurrenceID,
             resourceId: "music:" + attemptID, url: hit.fileURL, title: song["title"].string,
             startPosition: d.playback["position"]["seconds"].number, requestedQuality: selected.quality,
+            resolvedSelection: selected,
             expiresAt: hit.expiresAt.timeIntervalSince1970 * 1000, fileAuthorization: authorization,
             delivery: .init(quality: hit.measuredQuality, evidence: .decodedFile, duration: hit.duration))
         do {

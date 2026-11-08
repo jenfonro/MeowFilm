@@ -76,6 +76,13 @@
     "path": "packages/script-host/build/Release/script_host_native.node",
     "manifest": "packages/script-host/build/Release/script-host-native.json"
   },
+  "ios": {
+    "framework": "MeowScriptHost.framework/MeowScriptHost",
+    "cache": ".cache/ios-native",
+    "minimumOS": "17.0",
+    "nodeMobilePolicy": "scripts/ios-node-mobile.json",
+    "exports": ["_napi_register_module_v1", "_node_api_module_get_api_version_v1"]
+  },
   "mandatoryInputs": [
     "packages/script-host/binding.gyp",
     "scripts/quickjs/build-native.mjs",

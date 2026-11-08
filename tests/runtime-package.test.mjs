@@ -609,6 +609,7 @@ test('root manifest/lock drift and nested lock overrides are rejected', async ()
 test('CLI uses its own repository root and never imports fixture business code', () => {
   const f = fixture();
   write(f.root, 'scripts/package-runtime.mjs', readFileSync(join(repository, 'scripts/package-runtime.mjs')));
+  write(f.root, 'scripts/quickjs/ios-target.mjs', readFileSync(join(repository, 'scripts/quickjs/ios-target.mjs')));
   const output = f.output('cli');
   const run = spawnSync(process.execPath, [join(f.root, 'scripts/package-runtime.mjs'),
     '--product', 'aggregate', '--output', output], { cwd: f.area, encoding: 'utf8', timeout: 20_000 });

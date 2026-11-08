@@ -2,6 +2,102 @@ import XCTest
 import MeowMusicFeature
 
 final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
+    func testColdResolutionKeepsTheOriginalRequestTargetAndReturnsTheActualSelection() async throws {
+        let option = MusicCandidateDiscoveryFixture.option(generation: 0)
+        let target = option.target(quality: "flac")
+        let actual = MusicPlaybackSelection(installationId: "script-a", generation: 7, siteId: "tx",
+            sourceKey: "source-a", quality: "flac",
+            scriptIdentity: .init(version: "1", contentHash: String(repeating: "a", count: 64), revisionHash: "r1"))
+        for automatic in [false, true] {
+            let session = MusicCandidateDiscoveryTestSession(known: MusicCandidateDiscoveryFixture.snapshot([option]),
+                resultSelection: { _ in actual })
+            let consumer = MusicCandidateDiscoveryConsumer(provider: MusicCandidateDiscoveryTestProvider(session: session))
+            let result = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1,
+                mode: automatic ? .automatic() : .manual(target))
+            XCTAssertEqual(result.candidate.resolvedSelection, actual)
+            XCTAssertEqual(result.target, target)
+            XCTAssertEqual(result.target.selection.generation, 0)
+            XCTAssertTrue(result.target.sameRequest(as: target))
+            let facts = await session.facts()
+            XCTAssertEqual(facts.targets, [target]); XCTAssertEqual(facts.commits, 0)
+            XCTAssertEqual(facts.retained, result.candidate.attemptId)
+            XCTAssertTrue(facts.cancellations.isEmpty)
+        }
+    }
+
+    func testMismatchedResolvedSelectionIsTerminalAndCancelsOnlyTheExactAttempt() async throws {
+        let hash = String(repeating: "a", count: 64)
+        let identity = MusicScriptIdentity(version: "1", contentHash: hash, revisionHash: "r1")
+        let cold = MusicCandidateDiscoveryFixture.option(generation: 0)
+        let ready = MusicCandidateDiscoveryFixture.option(generation: 7)
+        let official = MusicCandidateDiscoveryFixture.option("official:fixture")
+        let officialCold = MusicCandidateDiscoveryFixture.option("official:fixture", generation: 0)
+        let cases: [(String, MusicCandidateDiscoveryOption, MusicPlaybackSelection)] = [
+            ("installation", cold, .init(installationId: "other", generation: 7, siteId: "tx",
+                sourceKey: "source-a", quality: "flac", scriptIdentity: identity)),
+            ("site", cold, .init(installationId: "script-a", generation: 7, siteId: "wy",
+                sourceKey: "source-a", quality: "flac", scriptIdentity: identity)),
+            ("source", cold, .init(installationId: "script-a", generation: 7, siteId: "tx",
+                sourceKey: "source-b", quality: "flac", scriptIdentity: identity)),
+            ("quality", cold, .init(installationId: "script-a", generation: 7, siteId: "tx",
+                sourceKey: "source-a", quality: "128k", scriptIdentity: identity)),
+            ("version", cold, .init(installationId: "script-a", generation: 7, siteId: "tx",
+                sourceKey: "source-a", quality: "flac",
+                scriptIdentity: .init(version: "2", contentHash: hash, revisionHash: "r1"))),
+            ("content", cold, .init(installationId: "script-a", generation: 7, siteId: "tx",
+                sourceKey: "source-a", quality: "flac",
+                scriptIdentity: .init(version: "1", contentHash: String(repeating: "b", count: 64), revisionHash: "r1"))),
+            ("revision", cold, .init(installationId: "script-a", generation: 7, siteId: "tx",
+                sourceKey: "source-a", quality: "flac",
+                scriptIdentity: .init(version: "1", contentHash: hash, revisionHash: "r2"))),
+            ("missing identity", cold, .init(installationId: "script-a", generation: 7, siteId: "tx",
+                sourceKey: "source-a", quality: "flac")),
+            ("still cold", cold, cold.target(quality: "flac").selection),
+            ("positive generation changed", ready, .init(installationId: "script-a", generation: 8, siteId: "tx",
+                sourceKey: "source-a", quality: "flac", scriptIdentity: identity)),
+            ("official generation changed", official, .init(installationId: "official:fixture", generation: 2, siteId: "tx",
+                sourceKey: "source-a", quality: "flac")),
+            ("official cannot cold-bind", officialCold, official.target(quality: "flac").selection),
+        ]
+        for (name, option, actual) in cases {
+            for automatic in [false, true] {
+                let target = option.target(quality: "flac")
+                let session = MusicCandidateDiscoveryTestSession(known: MusicCandidateDiscoveryFixture.snapshot([option]),
+                    resultSelection: { _ in actual })
+                let consumer = MusicCandidateDiscoveryConsumer(provider: MusicCandidateDiscoveryTestProvider(session: session))
+                do {
+                    _ = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1,
+                        mode: automatic ? .automatic() : .manual(target))
+                    XCTFail("Invalid resolved selection: \(name)")
+                } catch {
+                    let failure = (error as? MusicCandidateDiscoveryFailure)?.failure ?? error as? MusicServiceError
+                    XCTAssertEqual(failure, .invalidResponse, name)
+                }
+                let facts = await session.facts()
+                XCTAssertEqual(facts.targets, [target], name)
+                XCTAssertEqual(facts.attempts.count, 1, name)
+                XCTAssertEqual(facts.cancellations, facts.attempts, name)
+                XCTAssertNil(facts.retained, name)
+                XCTAssertEqual(facts.discoveries, 0, name)
+                XCTAssertEqual(facts.commits, 0, name)
+            }
+        }
+    }
+
+    func testTargetRevisionMismatchIsNotPermissionToIgnoreThePin() async throws {
+        let playback = MusicCandidateDiscoveryFixture.option().playback
+        let option = MusicCandidateDiscoveryOption(playback: playback, revisionHash: "different")
+        let session = MusicCandidateDiscoveryTestSession(known: MusicCandidateDiscoveryFixture.snapshot([option]))
+        let consumer = MusicCandidateDiscoveryConsumer(provider: MusicCandidateDiscoveryTestProvider(session: session))
+        do {
+            _ = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1,
+                mode: .manual(option.target(quality: "flac")))
+            XCTFail("Inconsistent request pin")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .invalidResponse) }
+        let facts = await session.facts()
+        XCTAssertEqual(facts.cancellations, facts.attempts); XCTAssertNil(facts.retained)
+    }
+
     func testManualFailureNeverDiscoversOrChangesTarget() async throws {
         let target = MusicCandidateDiscoveryFixture.option().target(quality: "flac")
         let session = MusicCandidateDiscoveryTestSession(known: MusicCandidateDiscoveryFixture.snapshot([target.option]), failures: [.upstreamFailed])

@@ -29,7 +29,7 @@ let package = Package(
         .target(name: "MeowAccounts", dependencies: ["MeowContracts"]),
         .target(name: "MeowPlayback", dependencies: ["MeowContracts"]),
         .target(name: "MeowUI", dependencies: []),
-        .target(name: "MeowRuntime", dependencies: ["MeowJSON"]),
+        .target(name: "MeowRuntime", dependencies: []),
         .target(name: "MeowMusicFeature", dependencies: ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowUI"]),
         .target(name: "MeowMusicPlatform", dependencies: ["MeowMusicFeature", "MeowContracts", "MeowJSON", "MeowAccounts", "MeowStorage"], linkerSettings: [.linkedLibrary("z")]),
         .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowRuntime", "MeowStorage"], linkerSettings: [.linkedLibrary("z")]),

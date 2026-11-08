@@ -13,6 +13,7 @@ final class MusicNativePlaybackRecoveryTests: XCTestCase {
     func testExactThreePlatformRefreshPreservesOccurrencePositionStartedAndExistingFactWriter() async throws {
         for platform in MusicAccountPlatform.allCases {
             let f = try await MusicRecoveryTestFixture.make(platform: platform)
+            XCTAssertEqual(f.original.resolvedSelection, f.selection)
             _ = try await f.service.record(f.fact(f.original, kind: .playing, position: 23))
             let history = try f.historyDocument(), before = f.store.snapshot().0
             f.clock.advance(20)
@@ -25,6 +26,9 @@ final class MusicNativePlaybackRecoveryTests: XCTestCase {
             XCTAssertEqual(value.candidate.startPosition, 37.25)
             XCTAssertEqual(value.candidate.requestedQuality, "flac")
             XCTAssertEqual(value.selection, f.selection)
+            XCTAssertEqual(value.candidate.resolvedSelection, f.selection)
+            let actual = await f.service.attempt
+            XCTAssertEqual(actual?.selection, value.candidate.resolvedSelection)
             XCTAssertFalse(value.candidate.isCachedAudio)
             XCTAssertEqual(f.store.snapshot().0, before, "refresh does not manufacture a fact or write progress")
             let calls = await f.accounts.requests(), counts = await f.accounts.counts()
@@ -57,9 +61,11 @@ final class MusicNativePlaybackRecoveryTests: XCTestCase {
 
     func testCandidateDiscoveryPublishesTheSameRecoveryPinAndOwner() async throws {
         let f = try await MusicRecoveryTestFixture.make(discovery: true)
+        XCTAssertEqual(f.original.resolvedSelection, f.selection)
         let before = f.store.snapshot().0
         let value = try await f.recover()
         XCTAssertEqual(value.selection, f.selection)
+        XCTAssertEqual(value.candidate.resolvedSelection, f.selection)
         XCTAssertEqual(value.candidate.occurrenceId, "entry-1")
         XCTAssertEqual(f.store.snapshot().0, before)
         _ = try await f.service.record(f.fact(value.candidate, kind: .playing))

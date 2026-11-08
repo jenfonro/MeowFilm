@@ -3,9 +3,11 @@ import MeowMusicFeature
 
 enum MusicCandidateDiscoveryFixture {
     static func option(_ installation: String = "script-a", platform: String = "tx", source: String = "source-a",
-                       qualities: [String] = ["flac", "128k"], version: String = "1", revision: String = "r1") -> MusicCandidateDiscoveryOption {
-        .init(playback: .init(installationId: installation, generation: 1, siteId: platform, sourceKey: source,
-            qualities: qualities, title: "Synthetic", version: version, contentHash: String(repeating: "a", count: 64)),
+                       qualities: [String] = ["flac", "128k"], version: String = "1", revision: String = "r1",
+                       generation: Int = 1) -> MusicCandidateDiscoveryOption {
+        .init(playback: .init(installationId: installation, generation: generation, siteId: platform, sourceKey: source,
+            qualities: qualities, title: "Synthetic", version: version, contentHash: String(repeating: "a", count: 64),
+            revisionHash: installation.hasPrefix("official:") ? nil : revision),
             revisionHash: installation.hasPrefix("official:") ? nil : revision)
     }
     static func snapshot(_ options: [MusicCandidateDiscoveryOption]) -> MusicCandidateDiscoverySnapshot {
@@ -39,16 +41,20 @@ actor MusicCandidateDiscoveryTestSession: MusicCandidateDiscoverySession {
     let discoveryGate: MusicCandidateDiscoveryTestGate?
     let resolutionGate: MusicCandidateDiscoveryTestGate?
     let failures: [MusicServiceError]
+    let resultSelection: @Sendable (MusicPlaybackSelection) -> MusicPlaybackSelection
     private var targets: [MusicCandidateDiscoveryTarget] = []
+    private var attempts: [String] = []
     private var snapshots = 0, discoveries = 0, commits = 0
     private var closed = false
     private var retained: String?
     private var cancellations: [String] = []
     init(known: MusicCandidateDiscoverySnapshot, discovered: MusicCandidateDiscoverySnapshot? = nil,
          failures: [MusicServiceError] = [], discoveryGate: MusicCandidateDiscoveryTestGate? = nil,
-         resolutionGate: MusicCandidateDiscoveryTestGate? = nil) {
+         resolutionGate: MusicCandidateDiscoveryTestGate? = nil,
+         resultSelection: @escaping @Sendable (MusicPlaybackSelection) -> MusicPlaybackSelection = { $0 }) {
         self.known = known; self.discovered = discovered ?? known; self.failures = failures
         self.discoveryGate = discoveryGate; self.resolutionGate = resolutionGate
+        self.resultSelection = resultSelection
     }
     func snapshot(discover: Bool, force: Bool) async throws -> MusicCandidateDiscoverySnapshot {
         snapshots += 1
@@ -63,11 +69,13 @@ actor MusicCandidateDiscoveryTestSession: MusicCandidateDiscoverySession {
     }
     func resolve(_ target: MusicCandidateDiscoveryTarget, attemptID: String) async throws -> MusicPlaybackCandidate {
         targets.append(target)
+        attempts.append(attemptID)
         if let resolutionGate { await resolutionGate.wait() }
         if closed || Task.isCancelled { throw MusicServiceError.cancelled }
         if targets.count <= failures.count { throw failures[targets.count - 1] }
         return .init(attemptId: attemptID, occurrenceId: "entry-1", resourceId: "music:" + attemptID,
-            url: URL(string: "https://media.invalid/fixture.flac")!, title: "Synthetic", requestedQuality: target.quality)
+            url: URL(string: "https://media.invalid/fixture.flac")!, title: "Synthetic", requestedQuality: target.quality,
+            resolvedSelection: resultSelection(target.selection))
     }
     func cancel(attemptID: String) { cancellations.append(attemptID) }
     func close(retainingAttemptID: String?) async {
@@ -76,8 +84,8 @@ actor MusicCandidateDiscoveryTestSession: MusicCandidateDiscoverySession {
         await resolutionGate?.release()
     }
     func facts() -> (targets: [MusicCandidateDiscoveryTarget], snapshots: Int, discoveries: Int, commits: Int,
-                     retained: String?, cancellations: [String]) {
-        (targets, snapshots, discoveries, commits, retained, cancellations)
+                     retained: String?, cancellations: [String], attempts: [String]) {
+        (targets, snapshots, discoveries, commits, retained, cancellations, attempts)
     }
 }
 

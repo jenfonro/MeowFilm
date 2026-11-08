@@ -49,7 +49,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `Presentation` — 主页面外壳、页头、底部导航和播放器停靠区
   - `UITests` — 共享 UIKit 组件测试
   - `RuntimeTests` — 真实 App 宿主的内嵌运行器与页面生命周期测试
-  - `runtime` — iOS socketpair bootstrap 与薄 entry
+  - `runtime` — iOS 受信启动／生命周期交接与公共 HTTP 运行器薄 entry
 - `native/MeowKit/` — iOS Swift Package
   - `MeowContracts`、`MeowJSON`、`MeowStorage`、`MeowAccounts`、`MeowPlayback`、`MeowUI`、`MeowRuntime` — 共享能力
   - `MeowMusicFeature`、`MeowMusicPlatform`、`MeowMusicNativeService` — 音乐界面、平台和原生业务
@@ -64,11 +64,11 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/windows/tests/` — Windows 原生测试
-- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`entry.mjs` 管理三个模块，契约为 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.2.0。旧 Windows／iOS 启动接入另行迁移，不保留旧运行器协议回退。
+- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`entry.mjs` 管理三个模块，契约为 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.2.0。iOS 使用同一契约及平台受信启动，旧 Windows 接入另行迁移，不保留旧运行器协议回退。
 - `apps/windows/runtime/` — 仅 Windows 启动／命名管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
 - `packages/script-host/` — 统一实例生命周期；LX 与 portable 来源使用共享原生绑定、逐实例线程／QuickJS Runtime，CatNode 使用逐实例 Node Worker 与原生 Node 能力。
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层
-- `packages/runtime-bridge/` — runtime.http.v1 完整 HTTP 请求／响应、通用双向调用能力、取消与连接生命周期
+- `packages/runtime-bridge/` — runtime.http.v1 完整 HTTP 请求／响应、取消与连接生命周期
 - `scripts/` — iOS 工程生成、结构检查、测试、构建打包与发布，`scripts/tests/` 为脚本测试；Node 共用工具
 - `scripts/windows/` — Windows 构建、测试、打包与结构检查
 - `tests/` — Node 测试
@@ -132,6 +132,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - 可机械核对的目录、依赖和契约约束接入 `scripts`（Windows 为 `scripts/windows`）中的现有检查。
 - 通用运行器原生引擎仅按 `scripts/script-host-native.json` 的精确来源、版本、ABI／架构、补丁、根锁、构建输入及文件／许可哈希放行；用 `node scripts/quickjs/build-native.mjs` 构建，再由 `scripts/package-runtime.mjs --product aggregate --profile common-native --output <absolute-directory>` 复制受信产物。无 WASM／asm.js 回退；其他 native/WASM 仍拒绝，打包不安装／修锁。平台包装尚未迁移时，不将通用运行器通过表述为平台 App 通过。
 - 客户端影视规则引擎独立按 `scripts/quickjs-native.json` 锁定源码与许可，通过 `native/JavaScript` 薄 C ABI 构建；不属于 Node 脚本宿主闭包，也不放宽通用打包的二进制策略。
+- iOS 脚本引擎使用 App 内置 `MeowScriptHost.framework`，复用通用原生核心与固定依赖，构建目标明确区分 device／simulator。原生载体随 App 签名；构建回执、内置身份和 JS／SDK 清单不能用签名前 Mach-O 全文件 hash 代替安装后签名边界，也不能据此放宽桌面 `.node` 校验。
 - 长期测试验证现行行为与契约；删除／重构后的旧实现及引用清理检查只做当次验证，通过后移除，不堆入长期测试。功能、安全、取消与资源释放等有效回归保留。
 - 编译成功、测试替身和真实业务验证分别记录，不互相冒充；不为刷绿删除有效断言、隐藏失败或用空测试集代替验证。
 - 外部脚本由 `scripts/accept-sources.mjs` 按实际声明动作验收；未归因、宿主缺失能力、资源超限或清理失败不能因初始化成功而放行。报告只保留脱敏结构和固定分类，见 `docs/runtime/source-acceptance.md`。

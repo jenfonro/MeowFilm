@@ -25,6 +25,7 @@ import { dirname, extname, isAbsolute, relative, resolve, sep, posix } from 'nod
 import { fault, requireValue } from './errors.js';
 import { PrivateVolume } from './private-volume.js';
 import { NativeResources } from './cat-resources.js';
+import { Request, Response } from './node-web-values.js';
 import { dnsFacade, isLoopbackHost } from './network-boundary.js';
 import { afterCloseDispatch, closeResource, guardDetachedEmitter } from './resource-close.js';
 

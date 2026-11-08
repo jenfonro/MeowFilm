@@ -85,42 +85,69 @@ public struct MusicScriptCapability: Sendable, Equatable {
         self.siteID = siteID; self.title = title; self.actions = actions; self.qualities = qualities
     }
 }
+public struct MusicScriptIdentity: Codable, Sendable, Equatable {
+    public let version: String
+    public let contentHash: String
+    public let revisionHash: String
+    public init(version: String, contentHash: String, revisionHash: String) {
+        self.version = version; self.contentHash = contentHash; self.revisionHash = revisionHash
+    }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.version.utf8.elementsEqual(rhs.version.utf8) &&
+            lhs.contentHash.utf8.elementsEqual(rhs.contentHash.utf8) &&
+            lhs.revisionHash.utf8.elementsEqual(rhs.revisionHash.utf8)
+    }
+}
 public struct MusicScriptSource: Sendable, Equatable {
     public let installationID: String
     public let generation: Int
     public let enabled: Bool
-    public let ready: Bool
+    public let state: MusicScriptSourceItem.State
     public let version: String
     public let contentHash: String
     public let revisionHash: String
     public let capabilities: [MusicScriptCapability]
-    public init(installationID: String, generation: Int, enabled: Bool, ready: Bool, version: String,
+    public var identity: MusicScriptIdentity {
+        .init(version: version, contentHash: contentHash, revisionHash: revisionHash)
+    }
+    public var isCandidate: Bool { enabled && (state == .idle || state == .starting || state == .ready) }
+    public init(installationID: String, generation: Int, enabled: Bool, state: MusicScriptSourceItem.State, version: String,
                 contentHash: String, revisionHash: String, capabilities: [MusicScriptCapability]) {
-        self.installationID = installationID; self.generation = generation; self.enabled = enabled; self.ready = ready
+        self.installationID = installationID; self.generation = generation; self.enabled = enabled; self.state = state
         self.version = version; self.contentHash = contentHash; self.revisionHash = revisionHash; self.capabilities = capabilities
     }
 }
-/// Address and generation are mandatory. musicInfo is a bounded public locator,
+/// Pins the selected catalog content and, once loaded, its execution generation.
+/// Generation zero belongs only to a cold directory candidate.
+/// musicInfo is a public locator,
 /// not a URL, credential, RPC method name or mutable global "current source".
 public struct MusicScriptRequest: Sendable {
-    public let installationID: String
-    public let generation: Int
+    public let source: MusicScriptSource
+    public var installationID: String { source.installationID }
+    public var generation: Int { source.generation }
     public let siteID: String
     public let sourceKey: String
     public let quality: String
     public let musicInfo: Data
-    public init(installationID: String, generation: Int, siteID: String, sourceKey: String, quality: String, musicInfo: Data) {
-        self.installationID = installationID; self.generation = generation; self.siteID = siteID
+    public init(source: MusicScriptSource, siteID: String, sourceKey: String, quality: String, musicInfo: Data) {
+        self.source = source; self.siteID = siteID
         self.sourceKey = sourceKey; self.quality = quality; self.musicInfo = musicInfo
     }
+}
+/// Execution provenance accompanies the business value, including the first
+/// lazy load. Consumers can keep fencing the actual generation after the call.
+public struct MusicScriptResult<Value: Sendable>: Sendable {
+    public let value: Value
+    public let source: MusicScriptSource
+    public init(value: Value, source: MusicScriptSource) { self.value = value; self.source = source }
 }
 /// The only JS execution boundary. The product implements this against LX
 /// instances. No music business RPC, document access or account authority.
 public protocol MusicScriptResolving: Sendable {
     func sources() async throws -> [MusicScriptSource]
     func source(installationID: String) async throws -> MusicScriptSource
-    func resolve(request: MusicScriptRequest) async throws -> MusicNativeAudio
-    func lyrics(request: MusicScriptRequest) async throws -> MusicNativeLyrics
+    func resolve(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeAudio>
+    func lyrics(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeLyrics>
 }
 
 /// One installed raw LX script as shown in source management. Metadata comes
@@ -130,7 +157,7 @@ public struct MusicScriptSourceItem: Sendable, Equatable, Identifiable {
     /// The single-script source bound of the shared ScriptHost.
     public static let maximumSourceBytes = 16 * 1024 * 1024
     public enum Origin: Sendable, Equatable { case file, network(host: String) }
-    public enum State: Sendable, Equatable { case disabled, idle, ready, failed }
+    public enum State: String, Sendable, Equatable { case disabled, idle, starting, ready, failed }
     public let id: String
     public let name: String
     public let version: String
@@ -170,7 +197,7 @@ public struct MusicScriptSourceDetail: Sendable {
 }
 
 /// Script-source management for the settings page. Import and download only
-/// store a disabled installation; enabling is the only operation that runs it.
+/// store a disabled installation. Explicit enable and execution/check may load it.
 public protocol MusicScriptSourceManaging: Sendable {
     func scriptSources() async throws -> [MusicScriptSourceItem]
     func importScriptSource(_ data: Data, fileName: String) async throws -> MusicScriptSourceItem

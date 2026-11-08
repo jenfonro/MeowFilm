@@ -13,8 +13,13 @@ const loadSDK = () => sdkSource ??= (async () => {
     readFile(new URL('../build/Release/script-host-native.json', import.meta.url), 'utf8')
       .then(JSON.parse),
   ]);
+  const sdkPath = process.platform === 'ios' && manifest.platform === 'ios'
+    && ['iphoneos', 'iphonesimulator'].includes(manifest.target?.sdk)
+    && manifest.target.arch === process.arch && manifest.target.minimumOS === '17.0'
+    ? `.cache/ios-native/${manifest.target.sdk}-${manifest.target.arch === 'x64' ? 'x86_64' : manifest.target.arch}/build/Release/source-sdk.js`
+    : 'packages/script-host/build/Release/source-sdk.js';
   requireValue(stat.isFile() && !stat.isSymbolicLink() &&
-    manifest.sdk?.path === 'packages/script-host/build/Release/source-sdk.js' &&
+    manifest.sdk?.path === sdkPath &&
     manifest.sdk.bytes === bytes.length &&
     manifest.sdk.sha256 === createHash('sha256').update(bytes).digest('hex'),
   'SCRIPT_PROTOCOL_ERROR');

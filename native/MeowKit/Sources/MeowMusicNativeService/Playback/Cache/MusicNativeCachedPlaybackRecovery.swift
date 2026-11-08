@@ -107,7 +107,7 @@ extension NativeMusicService: MusicCachedPlaybackRecoveryServing {
             // The next real playing fact belongs to this attempt. The only
             // transferred bit came from the old owner's successful history CAS.
             attempt?.cacheRecoveryID = nil
-            return .init(candidate: result.candidate, selection: result.target.selection)
+            return .init(candidate: result.candidate, selection: result.candidate.resolvedSelection)
         } catch {
             if let current = attempt, current.cacheRecoveryID == pin.id {
                 cancelCandidateAttempt(current.id)

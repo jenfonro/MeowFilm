@@ -20,11 +20,11 @@
 
 ## 猫源与公共宿主
 
-契约见 [cat.script.v1](../runtime/cat-script-runtime.md)。只有本地／网络，无内置猫源和版本副标题。本地通过系统文件选择及既有 `ImportedFileReader` 读取严格 UTF-8 安全快照（32 MiB 文件读取资源边界，实际字节计数与修改检测），再用分块传输交给公共 Node 管理；网络导入和更新由 Node 下载。
+契约见 [cat.script.v2](../runtime/cat-script-runtime.md)。只有本地／网络，无内置猫源和版本副标题。本地通过系统文件选择及既有 `ImportedFileReader` 读取严格 UTF-8 安全快照（32 MiB 文件读取资源边界，实际字节计数与修改检测），再以一次 raw PUT 上传并用 sourceRevision 选择完整候选；运行器源码上限仍为 16 MiB。网络导入和更新由 Node 下载。业务参数及结果直接 JSON，不保留分片、传输 token 或字符串化信封；脚本本身返回 JSON 文本时仍由业务解析。
 
 列表显示名称、类型、启停、状态、修改时间及更新状态；详情有启用开关、编辑、更新、单实例重启、删除，列表支持选择及批量操作。本地更新重新选文件，网络更新重新下载。首次成功导入默认启用；停用保留本地清单但禁止重启／检测；父源删除清除关联本地视频、配置与删除记录。时间取更新时间，否则导入时间；失败、无变化、重启不改时间，失败更新保留旧版本。
 
-App 的 `RuntimeBridgeSession` 唯一持有连接，配置空反向处理表后显式启动音乐薄适配器并调用 `FilmSourceService.start()`。音乐使用 `music.script.v3`，安装、源码和请求私有存储均由 Node 管理，没有原生反向存储处理器。音乐服务与 `CatScriptTransport` 共享连接但不共享业务状态；启动恢复启用猫源，不执行音乐脚本、不自动检测。真实 starting 状态仅在猫源恢复尚未完成时轮询。启动失败写入可观察状态，规则仍可编辑测试。每进程只启动一次，EOF／不可恢复失败不重放命令或启动第二个 Node。
+App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期；装配显式启动音乐薄适配器并调用 `FilmSourceService.start()`，没有空反向处理表或反向存储接口。音乐使用 `music.script.v3`，安装、源码和请求私有存储均由 Node 管理。音乐服务与 `CatScriptTransport` 共享客户端但不共享业务状态；启动恢复启用猫源，不执行音乐脚本、不自动检测。真实 starting 状态仅在猫源恢复尚未完成时轮询。启动失败写入可观察状态，规则仍可编辑测试。每进程只启动一次，宿主退出／不可恢复失败不重放命令或启动第二个 Node。
 
 ## 客户端视频清单
 
@@ -34,7 +34,7 @@ App 的 `RuntimeBridgeSession` 唯一持有连接，配置空反向处理表后�
 
 检测沿参考流程：home → category，必要时 detail／play，条件 search；从真实响应取得后续 ID、线路和 URL，保留 Unicode 与标点参数。播放候选与导航去重按原始内容精确区分，不合并 Unicode 规范等价但码点不同的线路、ID 或导航参数；`$$$`、`|||`、`#`、`$` 按字面协议分隔，不因相邻组合字符漏切；真正重复的候选、循环和重复页仍按参考流程处理。逐阶段区分 unsupported、empty、failed，导航循环／重复页明确失败；“有效”仅代表接口与播放地址解析，不代表媒体已播放。generation、停用、删除、页面隐藏取消或 owner 关闭后不发布迟到结果。
 
-结果分片传输与 token 收尾完成后，检测在管理串行边界读取一次宿主权威 status，再检查原检测资格、原 generation 和站点存在性才保存。实例自行重启不会撤销模块持有的旧 blob，因此不能仅使用检测开始前的本地代次；最终确认失败也不发布检测。此确认只属于显式检测，不新增后台轮询或让页面展示逐次请求运行器。
+完整结果返回后，检测在管理串行边界读取一次宿主权威 status，再检查原检测资格、原 generation 和站点存在性才保存。响应完成与本地落盘之间仍可能发生独立管理换代，因此不能仅使用检测开始前的本地代次；最终确认失败也不发布检测。此确认只属于显式检测，不新增后台轮询或让页面展示逐次请求运行器。
 
 ## 生命周期与验证边界
 
@@ -42,9 +42,9 @@ App 的 `RuntimeBridgeSession` 唯一持有连接，配置空反向处理表后�
 
 App 关闭先停止接纳并排空本地规则／来源任务；音乐薄适配器拒绝新工作、取消并排空已接纳的调用与传输，通过 `music.script.close` 的 `closed:true, cleanupComplete:true` 回执确认音乐模块收口，空实例清单或连接断开不等于清理成功。并发／重复关闭共用同一终态，取消等待者不放弃收尾。音乐不关闭共享连接／Cat 模块；App 最后关闭并等待共享连接和 Node 线程。数据清除仍按既有下次冷启动删除流程覆盖普通文档和 `script-runtime`，不在原进程重建 Node。
 
-- Swift 定向单测：真实原生 C、共享固定规则场景、持久化／并发／取消、Cat RPC blob 与检测语义；RPC 替身不代表真实 Node。
+- Swift 定向单测：真实原生 C、共享固定规则场景、持久化／并发／取消、Cat 完整请求与检测语义；传输替身不代表真实 Node。
 - `MeowfilmRuntimeTests/FilmSettingsPlatformTests`：在真实前台 App 宿主中验证 UIKit 草稿、导航生命周期、控件、失败／重试、确认、取消、窄／宽视口和大字体截图；来源 RPC 仍为协议夹具，不冒充 NodeMobile 实跑。
-- `MeowfilmFilmSettingsHostTests`：真实 App 资源／静态引擎、NodeMobile Cat HTTP 五阶段参数与客户端持久化、真实 blob 下载期间通过独立管理命令换代后拒绝旧检测，以及前台 App 窗口中的确认／失败弹窗。显式重启回归不是实际内存超限实验；后台 UI runner 的视图快照不能替代系统弹窗合成截图。`MeowfilmRuntimeHostTests` 使用同一 App 音乐 owner 验证 LX，不能另启一个运行器。
+- `MeowfilmFilmSettingsHostTests`：真实 App 资源／静态引擎、NodeMobile Cat HTTP 五阶段参数与客户端持久化、完整响应返回后落盘前通过独立管理命令换代并拒绝旧检测，以及前台 App 窗口中的确认／失败弹窗。显式重启回归不是实际内存超限实验；后台 UI runner 的视图快照不能替代系统弹窗合成截图。`MeowfilmRuntimeHostTests` 使用同一 App 音乐 owner 验证 LX，并在同进程并发调用原生 source 和独立影视规则引擎，不能另启一个运行器。
 - `MeowfilmScriptShutdownHostTests` 仅设 `TEST_RUNNER_MEOWFILM_SCRIPT_SHUTDOWN=1` 后单独运行：真实音乐模块关闭后 Cat 仍可访问，App 最终关闭共享连接并等待 Node 退出；该测试会终止本进程装配，默认跳过，不能与其他宿主业务用例放在同次调用。
 - 冷启动必须分两次独立 `xcodebuild test`／`test-without-building`，同一专用模拟器：先仅运行 `MeowfilmCatColdStartPrepareTests` 并设置 `TEST_RUNNER_MEOWFILM_CAT_COLD_PHASE=prepare`，结束宿主进程后再仅运行 `MeowfilmCatColdStartRestoreTests`，设为 `restore`。脚本私有卷计数证明启用项恢复一次、停用项未执行、没有自动检测且 tombstone 未复活；restore 清理两条测试安装。普通测试运行跳过这两个显式跨进程场景，不能把跳过当作冷启动通过。
 

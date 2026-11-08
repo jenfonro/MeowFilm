@@ -1,49 +1,55 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { packageIOSRuntime } from '../scripts/package-ios-runtime.mjs';
-import { assertOwnedPath, temporaryRoot } from '../scripts/windows/working-paths.mjs';
-import { connect, load, nativeStorage, okay, root, simulatedIOS, spawnRuntime } from './ios-runtime-support.mjs';
+import { fixture } from './ios-native-package-support.mjs';
 
-test('packaged iOS payload runs its manifest entry offline, self-contained, on the simulated asm.js backend',
-  { timeout: 90000 }, async t => {
-    mkdirSync(temporaryRoot, { recursive: true });
-    const area = mkdtempSync(join(temporaryRoot, 'ios-runtime-payload-'));
-    t.after(() => rmSync(assertOwnedPath(temporaryRoot, area), { recursive: true, force: true }));
-    const output = join(area, 'payload');
-    const manifest = await packageIOSRuntime({ root, product: 'aggregate', output });
-    assert.equal(manifest.status, 'complete');
-    assert.deepEqual(JSON.parse(readFileSync(join(output, 'runtime-manifest.json'), 'utf8')), manifest);
-    // Every resolved file must come from this payload, never the source tree.
-    const confined = `${simulatedIOS}
-      import { registerHooks } from 'node:module';
-      import { fileURLToPath } from 'node:url';
-      import { isAbsolute, relative, sep } from 'node:path';
-      const payload = ${JSON.stringify(output)};
-      registerHooks({ resolve(specifier, context, next) {
-        const result = next(specifier, context);
-        if (result.url.startsWith('file:')) {
-          const path = relative(payload, fileURLToPath(result.url));
-          if (path === '..' || path.startsWith('..' + sep) || isAbsolute(path))
-            throw new Error('PAYLOAD_DEPENDENCY_ESCAPED');
-        }
-        return result;
-      } });`;
-    const runtime = spawnRuntime(t, { entry: join(output, manifest.entry), cwd: output, preload: confined });
-    const storage = nativeStorage();
-    const { peer, closed } = connect(runtime, storage.methods);
-    const described = await peer.call('runtime.describe', null);
-    assert.deepEqual(described.modules.map(module => [module.id, module.version]), [['music', '0.8.0'], ['cat', '0.1.0']]);
-    const instance = okay(await load(peer)).item;
-    const reply = okay(await peer.call('music.script.resolve', {
-      installationId: instance.installationId, platform: 'tx', quality: '320k', musicInfo: { songmid: 'm' },
-    }));
-    assert.equal(reply.url, 'http://media.invalid/tx/320k?n=1');
-    assert.deepEqual(storage.calls, []);
-    okay(await peer.call('music.script.sources.disable', { installationId: instance.installationId }));
-    peer.close();
-    await closed;
-    assert.deepEqual(await runtime.exited, { code: 0, signal: null }, JSON.stringify(runtime.output()));
-    assert.equal(runtime.output().stderr, '');
-  });
+test('packaged iOS JavaScript resolves only its offline closure on the build host', async t => {
+  const f = fixture(t);
+  await f.pack();
+  // This is import/storage/HTTP evidence only. iOS native invocation and true
+  // NodeMobile exit run in the signed preflight and real App host.
+  const entry = join(f.output, 'closure-probe.mjs');
+  writeFileSync(entry, `
+    import assert from 'node:assert/strict';
+    import { registerHooks } from 'node:module';
+    import { fileURLToPath } from 'node:url';
+    import { isAbsolute, relative, sep, join } from 'node:path';
+    const payload = process.cwd();
+    registerHooks({ resolve(specifier, context, next) {
+      const result = next(specifier, context);
+      if (result.url.startsWith('file:')) {
+        const path = relative(payload, fileURLToPath(result.url));
+        if (path === '..' || path.startsWith('..' + sep) || isAbsolute(path))
+          throw new Error('PAYLOAD_DEPENDENCY_ESCAPED');
+      }
+      return result;
+    } });
+    const { createRuntime, createRuntimeClient } = await import('./app/entry.mjs');
+    const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86', requestKey = 'a'.repeat(64);
+    const runtime = createRuntime({ sessionId, requestKey, dataRoot: join(payload, 'data'), source: { platform: 'ios' } });
+    let client;
+    try {
+      await runtime.start();
+      client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
+      const described = await client.describe();
+      assert.equal(described.ok, true);
+      assert.deepEqual(described.value.modules.map(value => [value.id, value.version]),
+        [['music', '0.8.0'], ['cat', '0.2.0'], ['source', '0.2.0']]);
+      const listed = await client.call('music.script.sources.list');
+      assert.equal(listed.ok, true);
+      assert.equal((await client.shutdown()).ok, true);
+    } finally { await runtime.close(); await client?.close(); }
+    console.log('IOS_JS_CLOSURE_OK');
+  `);
+  try {
+    const result = spawnSync(process.execPath, [entry], {
+      cwd: f.output, env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' },
+      encoding: 'utf8', timeout: 30_000,
+    });
+    assert.equal(result.signal, null, result.stderr);
+    assert.equal(result.status, 0, result.stderr || result.error?.message);
+    assert.match(result.stdout, /IOS_JS_CLOSURE_OK/);
+  } finally { rmSync(entry); }
+});

@@ -70,7 +70,9 @@ private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
 @MainActor final class MusicPlaybackFeedbackTests: XCTestCase {
     private func candidate(_ id: String = "observed") -> MusicPlaybackCandidate {
         .init(attemptId: id, occurrenceId: "entry-1", resourceId: "music:" + id,
-              url: URL(string: "https://media.invalid/synthetic.mp3")!, title: "Synthetic", requestedQuality: "128k")
+              url: URL(string: "https://media.invalid/synthetic.mp3")!, title: "Synthetic", requestedQuality: "128k",
+              resolvedSelection: .init(installationId: "official:fixture", generation: 1,
+                  siteId: "tx", sourceKey: "source-a", quality: "128k"))
     }
     private func event(_ kind: PlaybackEvent.Kind, id: UUID, owner: String = "music",
                        resource: String = "music:observed", position: Double = 0,

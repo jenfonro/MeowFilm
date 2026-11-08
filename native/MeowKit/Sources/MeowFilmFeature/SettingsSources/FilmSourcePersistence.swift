@@ -1,5 +1,5 @@
 import Foundation
-import MeowJSON
+import MeowRuntime
 
 struct FilmSourceDocument: Codable {
     var version = 1
@@ -53,9 +53,9 @@ struct StoredFilmCat: Codable {
     }
 }
 
-func parseFilmCat(_ value: JSONValue) throws -> FilmCatSource {
+func parseFilmCat(_ value: RuntimeValue) throws -> FilmCatSource {
     do {
-        let cat = try JSONDecoder().decode(FilmCatSource.self, from: JSONEncoder().encode(value))
+        let cat = try JSONDecoder().decode(FilmCatSource.self, from: RuntimeJSON.encode(value))
         let timestamps = [cat.importedAt, cat.updatedAt].compactMap { $0 }
         guard !cat.installationId.isEmpty, !cat.name.isEmpty, ["local", "network"].contains(cat.sourceType),
               ["idle", "updated", "unchanged", "failed"].contains(cat.updateState),

@@ -146,7 +146,7 @@ actor MusicNativeLyricsNoScript: MusicScriptResolving {
     private var operations: [String] = []
     func sources() throws -> [MusicScriptSource] { operations.append("list"); throw MusicServiceError.sourceUnavailable }
     func source(installationID: String) throws -> MusicScriptSource { operations.append("source"); throw MusicServiceError.sourceUnavailable }
-    func resolve(request: MusicScriptRequest) throws -> MusicNativeAudio { operations.append("resolve"); throw MusicServiceError.sourceUnavailable }
-    func lyrics(request: MusicScriptRequest) throws -> MusicNativeLyrics { operations.append("lyric"); throw MusicServiceError.sourceUnavailable }
+    func resolve(request: MusicScriptRequest) throws -> MusicScriptResult<MusicNativeAudio> { operations.append("resolve"); throw MusicServiceError.sourceUnavailable }
+    func lyrics(request: MusicScriptRequest) throws -> MusicScriptResult<MusicNativeLyrics> { operations.append("lyric"); throw MusicServiceError.sourceUnavailable }
     func calls() -> [String] { operations }
 }

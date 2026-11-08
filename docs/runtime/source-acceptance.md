@@ -92,7 +92,7 @@ node_modules/@meowfilm/script-host/src/index.js
 node_modules/@meowfilm/source-runtime/src/index.js
 ```
 
-Reader 不需要同时实例化 music/CatNode。LX/CatNode 对应替换业务模块入口，使用相同 HTTP 装配。整个公共 payload 仅支持 `common-native`，入口 `app/entry.mjs`；native 固定来源与构建见 `scripts/script-host-native.json`、`scripts/quickjs/build-native.mjs`。本轮不改 Windows/iOS launcher、旧管道或嵌入式接入，也不能把公共 Node HTTP 验收称作平台应用验证。通用构建与夹具回归已通过（见[通用验证范围](script-runtime.md#构建发布与验证边界)）；真实外部来源验收未覆盖，不能据此宣称真实来源通过。
+Reader 不需要同时实例化 music/CatNode。LX/CatNode 对应替换业务模块入口，使用相同 HTTP 装配。整个公共 payload 仅支持 `common-native`，独立入口 `app/entry.mjs`；native 固定来源与构建见 `scripts/script-host-native.json`、`scripts/quickjs/build-native.mjs`。此公共验收工具不启动 Windows/iOS App，也不能把公共 Node HTTP 验收称作平台应用验证；iOS 独立载体与宿主测试见[运行底座](../ios/runtime-preflight.md)。通用构建与夹具回归的适用范围见[通用验证范围](script-runtime.md#构建发布与验证边界)；真实外部来源验收未覆盖，不能据此宣称真实来源通过。
 
 普通数据采用 ABI2 typed bytes 跨 native 边界；显式 Base64 算法仍可用，但工具不对正文自动编码/压缩/摘要。maximumParseBytes 仅限制 DOM/规则解析，不限制普通 HTTP、存储状态或会话内存；不存在单实例内存配额或 OOM 自动重启。
 

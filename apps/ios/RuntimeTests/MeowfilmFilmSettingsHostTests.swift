@@ -1,7 +1,6 @@
 import XCTest
 import UIKit
 @testable import MeowFilmFeature
-import MeowJSON
 import MeowRuntime
 import MeowStorage
 import MeowUI
@@ -242,26 +241,29 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
         }
     }
 
-    func testRealCatGenerationChangeDuringBlobTransferRejectsOldDetection() async throws {
+    func testRealCatGenerationChangeBeforeDetectionCommitRejectsOldResult() async throws {
         let resources = try await hostResources()
         let connection = try await resources.scriptSession.connection()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try DocumentStore(baseURL: directory, namespace: FilmSourceService.documentNamespace)
-        let paused = expectation(description: "Real final search blob chunk received")
-        let gate = RealCatBlobGate(connection: connection, paused: { paused.fulfill() })
-        let transport = CatScriptTransport(rpc: { method, params, timeout in
-            try await gate.call(method, params, timeout: timeout)
+        let paused = expectation(description: "Real complete search response received")
+        let gate = RealCatResultGate(connection: connection, paused: { paused.fulfill() })
+        let transport = CatScriptTransport(request: { operation, parameters in
+            try await gate.call(operation, parameters)
+        }, upload: { id, revision, bytes in
+            try await connection.upload(module: .cat, installationID: id,
+                sourceRevision: revision, source: bytes)
         })
         let raw = CatScriptTransport(connectionProvider: { connection })
         let service = FilmSourceService(transport: transport, storeFactory: { store })
-        let id = "ios-blob-" + UUID().uuidString.lowercased()
+        let id = "ios-fence-" + UUID().uuidString.lowercased()
         let key = FilmSourceKey(installationId: id, siteKey: "fixture")
         var detection: Task<FilmSourceDetection, Error>?
         do {
-            let installed = try await service.importLocal(name: "Blob fixture",
-                source: filmCatScript("blob", largeSearchResult: true), installationId: id)
+            let installed = try await service.importLocal(name: "Detection fence fixture",
+                source: filmCatScript("fence", largeSearchResult: true), installationId: id)
             let options = FilmVideoOptions(enabled: false, homeVisible: false, searchEnabled: false, aggregateImages: true)
             try await service.saveVideoOptions(key, options: options, order: -11)
             let bytes = try store.read(key: FilmSourceService.documentKey)
@@ -280,7 +282,7 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
             let cached = await service.snapshot
             XCTAssertEqual(cached.cats.first { $0.installationId == id }?.generation, installed.generation)
             await gate.release()
-            do { _ = try await task.value; XCTFail("Real old-generation blob must not become a saved detection") }
+            do { _ = try await task.value; XCTFail("Real old-generation result must not become a saved detection") }
             catch { XCTAssertTrue(error is CancellationError, "\(error)") }
             let after = await service.snapshot
             XCTAssertEqual(after.cats.first { $0.installationId == id }?.generation, Int64(generation))
@@ -294,14 +296,8 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
             XCTAssertEqual(document.videos.first { $0.key == key }?.detection,
                 before.videos.first { $0.key == key }?.detection)
             XCTAssertEqual(document.videos.first { $0.key == key }?.options, options)
-            let receipt = await gate.receipt
-            XCTAssertGreaterThan(receipt.length, 65_536)
-            XCTAssertTrue(receipt.released)
-            let token = try XCTUnwrap(receipt.token)
-            do {
-                _ = try await raw.call("blob.read", ["token": .string(token), "offset": .number(0)])
-                XCTFail("Released real token must no longer be readable")
-            } catch let error as FilmSourceError { XCTAssertEqual(error.code, "NOT_FOUND") }
+            let receivedBytes = await gate.receivedBytes
+            XCTAssertGreaterThan(receivedBytes, 65_536)
             try await service.deleteCat(id)
             await service.close()
         } catch {
@@ -315,33 +311,22 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
     }
 }
 
-private actor RealCatBlobGate {
-    let connection: RuntimeBridgeConnection
+private actor RealCatResultGate {
+    let connection: RuntimeHTTPClient
     let paused: @Sendable () -> Void
     private var pending: CheckedContinuation<Void, Never>?
-    private var token: String?
-    private var length = 0
-    private var released = false
+    private(set) var receivedBytes = 0
     private var open = false
-    var receipt: (token: String?, length: Int, released: Bool) { (token, length, released) }
-
-    init(connection: RuntimeBridgeConnection, paused: @escaping @Sendable () -> Void) {
+    init(connection: RuntimeHTTPClient, paused: @escaping @Sendable () -> Void) {
         self.connection = connection; self.paused = paused
     }
     func release() { open = true; pending?.resume(); pending = nil }
 
-    func call(_ method: String, _ params: JSONValue, timeout: TimeInterval?) async throws -> JSONValue {
-        let result = try await connection.call(method, params, timeout: timeout)
-        if method == "cat.script.invoke", params.catField("operation") == .string("search"),
-           let blob = result.catField("blob") {
-            token = blob.catField("token")?.catText
-            length = blob.catField("length")?.catInteger ?? 0
-        }
-        if let token, params.catField("token") == .string(token) {
-            if method == "cat.script.blob.read", result.catField("next")?.catInteger == length, !open {
-                await withCheckedContinuation { pending = $0; paused() }
-            }
-            if method == "cat.script.blob.release", result.catField("released") == .bool(true) { released = true }
+    func call(_ operation: String, _ params: RuntimeValue) async throws -> RuntimeValue {
+        let result = try await connection.call(module: .cat, operation: operation, parameters: params)
+        if operation == "invoke", params.catField("operation") == .string("search"), !open {
+            receivedBytes = try RuntimeJSON.encode(result).count
+            await withCheckedContinuation { pending = $0; paused() }
         }
         return result
     }

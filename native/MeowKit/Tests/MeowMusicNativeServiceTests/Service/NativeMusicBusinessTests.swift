@@ -4,12 +4,56 @@ import MeowStorage
 @testable import MeowMusicNativeService
 
 final class NativeMusicBusinessTests: XCTestCase {
+    func testColdPickerSelectionCarriesContentAndLoadsTheSelectedScriptWithoutAnEagerRun() async throws {
+        let scripts = NativeMusicScriptFixture()
+        await scripts.coldStart()
+        let service = try await NativeMusicFixture.service(scripts: scripts)
+        let search = try await service.search(platform: "tx", query: "SyntheticMID", page: 1, limit: 30)
+        let state = try await service.changeQueue(.replace([search.items[0].ref], index: 0), expectedRevision: 0)
+        let options = try await service.sourceAvailability(for: search.items[0].ref).options
+        let option = try XCTUnwrap(options.first)
+        XCTAssertEqual(option.generation, 0); XCTAssertNotNil(option.selection(quality: "128k").scriptIdentity)
+        let before = await scripts.calls(); XCTAssertTrue(before.isEmpty)
+        let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(),
+            occurrenceId: XCTUnwrap(state.currentId), selection: option.selection(quality: "128k"))
+        XCTAssertEqual(candidate.url.host, "media.invalid")
+        let calls = await scripts.calls(); XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.source.state, .idle)
+        let live = try await scripts.source(installationID: option.installationId)
+        XCTAssertEqual(live.state, .ready); XCTAssertEqual(live.generation, 7)
+        let resolved = MusicPlaybackSelection(installationId: live.installationID, generation: 7,
+            siteId: option.siteId, sourceKey: option.sourceKey, quality: "128k", scriptIdentity: live.identity)
+        XCTAssertEqual(candidate.resolvedSelection, resolved)
+        let attempt = await service.attempt
+        XCTAssertEqual(attempt?.selection, resolved)
+        XCTAssertEqual(attempt?.scriptSource, live)
+        await scripts.configure(generation: 8)
+        await scriptExpectFailure(.targetChanged) {
+            try await service.resolve(attemptId: UUID().uuidString.lowercased(),
+                occurrenceId: XCTUnwrap(state.currentId), selection: resolved)
+        }
+        let afterReload = await scripts.calls(); XCTAssertEqual(afterReload.count, 1)
+        let history = try await service.playedSongs(); XCTAssertTrue(history.isEmpty)
+        await service.close()
+    }
+
+    func testUnavailableRuntimeStillPublishesNativeOfficialOptionsAndItsOwnDiagnostic() async throws {
+        let scripts = NativeMusicScriptService(connection: { throw MusicServiceError.scriptRuntimeUnavailable })
+        let service = try await NativeMusicFixture.service(scripts: scripts, accounts: NativeMusicAccountFixture())
+        let search = try await service.search(platform: "tx", query: "SyntheticMID", page: 1, limit: 30)
+        let availability = try await service.sourceAvailability(for: search.items[0].ref)
+        XCTAssertEqual(availability.scriptState, .unavailable(.scriptRuntimeUnavailable))
+        XCTAssertEqual(availability.options.count, 1)
+        XCTAssertTrue(availability.options[0].installationId.hasPrefix("official:"))
+        await service.close(); try await scripts.close()
+    }
+
     func testUnavailableLXDoesNotGateNativeStateLibraryQueueSearchOrOfficialOptions() async throws {
         struct UnavailableLX: MusicScriptResolving {
             func sources() throws -> [MusicScriptSource] { throw MusicServiceError.sourceUnavailable }
             func source(installationID: String) throws -> MusicScriptSource { throw MusicServiceError.sourceUnavailable }
-            func resolve(request: MusicScriptRequest) throws -> MusicNativeAudio { throw MusicServiceError.sourceUnavailable }
-            func lyrics(request: MusicScriptRequest) throws -> MusicNativeLyrics { throw MusicServiceError.sourceUnavailable }
+            func resolve(request: MusicScriptRequest) throws -> MusicScriptResult<MusicNativeAudio> { throw MusicServiceError.sourceUnavailable }
+            func lyrics(request: MusicScriptRequest) throws -> MusicScriptResult<MusicNativeLyrics> { throw MusicServiceError.sourceUnavailable }
         }
         let accounts = NativeMusicAccountFixture(), service = try await NativeMusicFixture.service(scripts: UnavailableLX(), accounts: accounts)
         let state = try await service.state(); XCTAssertEqual(state.total, 0)

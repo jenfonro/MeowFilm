@@ -1,7 +1,7 @@
 {
   "variables": {
     "runtime_native": "../../tmp/build/runtime-native",
-    "openssl_library%": "../../tmp/build/runtime-native/openssl/libcrypto.a"
+    "openssl_library%": "../../tmp/build/runtime-native/openssl-build/libcrypto.a"
   },
   "target_defaults": {
     "defines": ["NAPI_VERSION=8"],
@@ -60,9 +60,12 @@
     {
       "target_name": "script_host_native",
       "dependencies": ["quickjs", "zlib"],
+      "include_dirs+": [
+        "<(runtime_native)/openssl-build/include",
+        "<(runtime_native)/openssl/include"
+      ],
       "include_dirs": [
         "<(runtime_native)/quickjs",
-        "<(runtime_native)/openssl/include",
         "<(runtime_native)/zlib"
       ],
       "sources": ["native/addon.cc", "native/engine.cc", "native/value.cc", "native/algorithms.cc"],
@@ -72,6 +75,12 @@
         ["OS=='linux'", {
           "libraries": ["-lpthread", "-ldl", "-lm"],
           "ldflags": ["-Wl,-Bsymbolic", "-Wl,--exclude-libs,ALL"]
+        }],
+        ["OS=='mac'", {
+          "xcode_settings": {
+            "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
+            "GCC_ENABLE_CPP_RTTI": "YES"
+          }
         }],
         ["OS=='win'", {
           "libraries": ["ws2_32.lib", "crypt32.lib", "advapi32.lib", "user32.lib", "bcrypt.lib"]

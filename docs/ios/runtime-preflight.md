@@ -1,40 +1,51 @@
 # 内嵌 Node 运行底座预检
 
-本工具验证“iOS 内嵌 Node 承载公共运行器”，不重写 LX／Cat 协议或管理逻辑。它是独立诊断 App，与 Meowfilm 共用受审查载荷及框架构建输入，不能代替真实 App 宿主测试或正式发布打包。产品接入见[音源管理](music.md#音源管理)。
+本工具验证 iOS 的正式 NodeMobile／原生引擎载体，不维护另一套 LX、Cat 或 Reader 实现。独立诊断 App 复用正式构建输入，不能代替 `MeowfilmRuntimeTests` 的真实 App 装配、发布签名或真机验收。
 
-## 运行
+## 构建与运行
 
-需要 macOS、Xcode 和已经启动的 iOS 模拟器。先用构建机 Node 24 和根锁生成受审查的 iOS JS 载荷；构建工具版本与嵌入 App 的 Node 版本是两回事：
+需要 macOS、Xcode、构建机 Node 24 及根锁依赖。App 内嵌版本仍由 `scripts/ios-node-mobile.json` 锁定为官方 NodeMobile 18.20.4；构建机 Node 不成为用户设备的运行依赖。
 
 ```sh
 npm ci --ignore-scripts
-mkdir -p tmp/ios-node-preflight
-python3 -I -B scripts/prepare-ios-runtime.py
 python3 -I -B scripts/ios-node-preflight.py --simulator <UDID>
 ```
 
-准备工具复用 Node Mobile archive／解包缓存，并生成替换 `.cache/ios-runtime/Runtime`。构建机 Node 仅为打包工具，不是 iOS App 运行依赖。
+预检工具先分别调用准备工具，为本机构建架构的 simulator 和 device arm64 准备输入，再构建诊断 App；准备失败即停止，不用旧载荷继续构建。准备工具复用已校验的 NodeMobile archive／解包缓存，按明确的 iOS SDK 和架构准备原生引擎及载荷。device arm64 与 simulator arm64／x86_64 是不同目标，不能把 macOS arm64 二进制或另一种 iOS variant 改清单后使用；缓存按实际目标复用，不按测试轮次新建。
 
-`ios-embedded` 装配复用公共打包器，按根锁和 `scripts/quickjs-runtime.json` 审核 manifest、许可与引擎文件。它包含公共 music／Cat 模块及 asmjs，不携带 WASM 引擎、Windows 启动入口或开发测试夹具。`package-ios-runtime.mjs` 补齐 iOS entry 与 bootstrap 后生成 `status: complete`、`platform: ios`、`transport: ios-socketpair-v1` 的载荷；预检只接受该完整清单。
+`common-native` 公共闭包含 music、Cat、source 三模块、规则 SDK 和锁定依赖。iOS 包装只增加受信启动及平台产物接线，完整 manifest 为 `platform: ios`、`transport: runtime.http.v1`，入口为 `app/ios/entries/aggregate.mjs`。旧帧协议、分片、asm.js／WASM 后端及“iOS 不装 source”的例外不保留。
 
-工具下载并校验上游 `nodejs-mobile/nodejs-mobile` 的 `v18.20.4` iOS release archive，复用 `.cache/nodejs-mobile/`，不从源码维护 Node 分叉。它分别编译链接模拟器与 iOS arm64 宿主，嵌入对应的 `NodeMobile.framework` 和已核对文件清单／哈希的 JS 载荷，再将诊断 App 安装到指定模拟器。使用正式后端代码，不在 App 内临时替换引擎。产物、日志和结果使用 `tmp/ios-node-preflight/`；仅清理诊断 App 自己的旧结果，不操作 Meowfilm 数据。
+App 嵌入两个 framework：
 
-设备目标是无开发者签名的编译／链接检查，不代表真机已安装运行。诊断 App 的 ad-hoc 签名不是发行签名，也不能代替 Meowfilm 的生产组件装配。
+- 官方 `NodeMobile.framework` 提供 Node 主控和 Cat Worker。
+- `MeowScriptHost.framework` 提供同一套原生 Node-API 8 执行核心；QuickJS-NG 0.14、四份固定补丁、OpenSSL libcrypto 和 zlib 静态进入该 framework，并限制导出。LX／source 每实例使用独立 Runtime／线程，不是每脚本复制 framework 或新建 Node 进程。
+
+客户端影视规则的 QuickJS-NG 0.18 继续由 `MeowJavaScript` 独立静态链接。两套引擎有不同职责及补丁，不能依赖链接顺序混用符号。许可和来源分别保留。
+
+NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网络实现。iOS 因此只在构建期从锁定的 Undici 6.29.1 打包 `Request`／`Response`／`Headers`／`FormData` 纯值闭包为 `cat-web-values.cjs`，不发布完整 npm 包、fetch／dispatcher／llhttp 或 WASM；网络仍经现有 managed `node:http`，Buffer／Blob／WebStream 仍用 Node 原生值。该产物、实际输入和许可纳入 receipt 与编译身份。其他平台仍用原生 Web 值构造器。缺失的 `CustomEvent` 仅在 Cat realm 内以原生 `Event` 子类提供，不改宿主全局或启动开关。
+
+## 完整性与启动边界
+
+构建期校验固定来源、补丁、工具、目标、源码／SDK／依赖清单、许可与签名前产物。安装后的原生 framework 由 App 签名链保护，并核对编译内置身份、ABI 和目标；JS／SDK 的文件身份继续校验。IPA 移除签名和侧载重签会改变 Mach-O，不能把签名前全文件 hash 当作安装后恒定值，也不能借此关闭桌面 `.node` 校验。
+
+原生宿主使用最小私有启动通道交接临时 session、requestKey、数据目录，并接收实际回环监听地址；通道只负责启动与生命期，不承载业务请求。key 不进入命令行、URL、日志或持久文件。所有业务经标准 HTTP；App 最终关闭运行器并等待 `node_start` 返回，不能用 HTTP close 回执或固定延时假定已退出。
+
+每个 App 进程只启动一次 Node；不可恢复失败后脚本不可用，不自动重启，也不通过 `process.exit` 杀掉整个 App。它不是恶意原生代码安全沙箱，取消和独立执行不等于整个进程崩溃／OOM 隔离。
 
 ## 验证内容与成功判据
 
-- 实际 Node 版本、架构、平台、WebAssembly 不可用及 iOS asmjs 载荷身份。
-- 无 ICU 构建下的严格 UTF-8 检查，不用替换字符接收损坏的消息或源码。
-- 文件写入、文件／目录 fsync、rename、读回及清理。
-- SHA-256、AES-GCM 和 WebCrypto。
-- Node HTTP 回环请求、响应及 listener 关闭。
-- Worker 消息，以及运行死循环后实际终止线程。
-- 原生 `socketpair` 与公共 `createDescriptorPeer`／`createAppRuntime` 双向调用、描述查询及关闭。
-- 公共 music／Cat 模块加载、真实 QuickJS 初始化、LX 与 Cat 安装／调用／停用／关闭。
-- 独立 guest 堆、BigInt、Promise job、20 MiB 扩容后的 JSON／字节帧桥，以及真实 LX 死循环停用和重新启用。
+独立预检覆盖实际 Node／N-API／目标身份、正式 framework 加载、异步原生回调、typed bytes、明确脚本算法、线程取消及真实退出；同时保留有用途的文件、Node crypto、HTTP 和 Worker 能力检查。正式 App 宿主覆盖：
 
-每项结果记录在 `result.json`，应用日志在 `simulator.log`。只有全部用例、原生对端检查和 `node_start` 返回状态都通过，工具才返回零；构建成功但 guest 引擎不可用仍返回非零，不回退到宿主 `eval` 或 Node `vm` 执行用户脚本。
+- 当前三模块 describe；LX 导入、启用、取链、请求私有 KV、歌词、停用、删除。
+- Cat 实际 HTTP 五阶段请求、私有卷、客户端选项、删除标记及结果返回后管理换代。
+- source 的实际原生装载、调用、卸载，以及 Reader 的统一结果，不新增阅读 UI。
+- 同进程客户端规则引擎与运行器引擎共存；Unicode 原样 JSON 键及业务 `blob`／`token` 字段。
+- 音乐模块关闭后 Cat 仍可用，App 最终关 listener 和全部执行资源并等 Node 线程返回。
 
-Node 18 已结束上游维护。采用它不等于获得上游安全维护。`MeowfilmRuntimeTests` 在真实 App 进程中覆盖描述查询和 LX 导入／启用／取链／私有存储／歌词／停用／删除；独立预检的通过不能代替这些证据。前后台长时间恢复、真机运行与外部真实源业务验收需要分别验证。
+独立预检的 Cat 安装／调用链还验证 Web 值、原生事件分发及脚本内 loopback fetch；不能只验证普通 `require('http')` 而漏掉 Web 值的隐式依赖。
 
-官方 Node Mobile 18.20.4 的 iOS 产物没有 ICU，也没有可用的 `WebAssembly`。公共通信与源码解码不依赖 ICU；iOS 固定选择同源 `@jitl/quickjs-asmjs-mjs-release-sync@0.32.0`，不是 WASM 失败后的自动回退。它仍在独立 QuickJS 数字堆中执行用户脚本，保留受控桥、既有权限和 Worker 终止，但没有 WASM 的完整越界及间接调用 trap。此差异已作为 iOS 接入方案接受；iOS 系统沙箱不替代本 App 内的数据、网络和资源防护。桌面继续使用原 WASM 后端。
+测试报告须逐项区分编译／链接、模拟器运行、真实 App 装配和设备运行。独立预检只有所有选定检查及 `node_start` 返回状态符合预期才成功；不能加载时明确失败，不回退 `eval`、Node `vm` 或旧引擎。
+
+终止宿主的关闭场景和持久冷启动场景必须独立进程运行，流程见[影视设置验证边界](film-settings.md#生命周期与验证边界)。默认跳过这些显式场景不等于通过；测试替身和桌面 Node 结果也不能算 iOS 实跑。
+
+Node 18 已结束上游维护，采用官方嵌入包不意味着获得上游安全维护。当前无需 ICU 或 WebAssembly 承载原生引擎。真机、长时间前后台恢复、外部真实源、媒体播放和其他架构须有各自证据，不能从一次模拟器通过外推。

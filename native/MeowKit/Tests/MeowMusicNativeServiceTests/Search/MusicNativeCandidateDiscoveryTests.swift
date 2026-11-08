@@ -3,6 +3,97 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class MusicNativeCandidateDiscoveryTests: XCTestCase {
+    func testColdIdleCandidatesLoadOnlyWhenSelectedAndKeepTheirRealExecutionIdentity() async throws {
+        for state in [MusicScriptSourceItem.State.idle, .starting] {
+            let scripts = MusicNativeCandidateDiscoveryScripts()
+            await scripts.directory(state)
+            let service = try await NativeMusicFixture.service(try MusicNativeCandidateDiscoveryFixture.store(), scripts: scripts)
+            let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
+            let snapshot = try await session.snapshot(discover: false, force: false)
+            let target = try XCTUnwrap(MusicNativeCandidateDiscoveryFixture.target(snapshot, platform: "tx"))
+            XCTAssertEqual(target.selection.generation, 0)
+            XCTAssertNotNil(target.selection.scriptIdentity)
+            let before = await scripts.calls(); XCTAssertTrue(before.isEmpty)
+            let candidate = try await session.resolve(target, attemptID: UUID().uuidString.lowercased())
+            XCTAssertEqual(candidate.url.host, "media.invalid")
+            let calls = await scripts.calls()
+            XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls.first?.generation, 0)
+            let live = try await scripts.source(installationID: target.selection.installationId)
+            XCTAssertEqual(live.state, .ready); XCTAssertEqual(live.generation, 7)
+            let resolved = MusicPlaybackSelection(installationId: live.installationID, generation: 7,
+                siteId: target.selection.siteId, sourceKey: target.selection.sourceKey, quality: target.quality,
+                scriptIdentity: live.identity)
+            XCTAssertEqual(candidate.resolvedSelection, resolved)
+            let attempt = await service.attempt
+            XCTAssertEqual(attempt?.selection, resolved)
+            XCTAssertEqual(attempt?.scriptSource, live)
+            let ready = try await session.snapshot(discover: false, force: false)
+            let old = try XCTUnwrap(MusicNativeCandidateDiscoveryFixture.target(ready, platform: "tx"))
+            XCTAssertEqual(old.selection, resolved)
+            await scripts.configure(generation: 8)
+            await scriptExpectFailure(.targetChanged) {
+                try await session.resolve(old, attemptID: UUID().uuidString.lowercased())
+            }
+            let afterReload = await scripts.calls(); XCTAssertEqual(afterReload.count, 1)
+            await session.close(retainingAttemptID: candidate.attemptId)
+            await service.close()
+        }
+    }
+
+    func testBothSourcePickerAndAutomaticCandidatesKeepEveryOneOfThirtyThreeIdleInstallations() async throws {
+        let scripts = MusicNativeCandidateDiscoveryScripts()
+        let ids = (1...33).map { String(format: "00000000-0000-4000-8000-%012d", $0) }
+        await scripts.installed(ids); await scripts.directory(.idle)
+        let service = try await NativeMusicFixture.service(try MusicNativeCandidateDiscoveryFixture.store(), scripts: scripts)
+        let availability = try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))
+        XCTAssertEqual(availability.options.count, 33)
+        XCTAssertEqual(Set(availability.options.map(\.installationId)), Set(ids))
+        XCTAssertTrue(availability.options.allSatisfy { $0.generation == 0 && $0.selection(quality: "128k").scriptIdentity != nil })
+        let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let snapshot = try await session.snapshot(discover: false, force: false)
+        XCTAssertEqual(snapshot.options.count, 33)
+        XCTAssertEqual(Set(snapshot.options.map { $0.playback.installationId }), Set(ids))
+        let before = await scripts.calls(); XCTAssertTrue(before.isEmpty)
+        let last = try XCTUnwrap(snapshot.options.first { $0.playback.installationId == ids.last })
+        let candidate = try await session.resolve(last.target(quality: "128k"), attemptID: UUID().uuidString.lowercased())
+        let calls = await scripts.calls()
+        XCTAssertEqual(calls.map(\.installationID), [ids[32]])
+        await session.close(retainingAttemptID: candidate.attemptId); await service.close()
+    }
+
+    func testFailedInstallationsStayOutOfBothCandidateListsAndDoNotExecute() async throws {
+        let scripts = MusicNativeCandidateDiscoveryScripts()
+        await scripts.directory(.failed)
+        let service = try await NativeMusicFixture.service(try MusicNativeCandidateDiscoveryFixture.store(), scripts: scripts)
+        let availability = try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))
+        XCTAssertTrue(availability.options.isEmpty)
+        let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let snapshot = try await session.snapshot(discover: false, force: false)
+        XCTAssertTrue(snapshot.options.isEmpty)
+        let calls = await scripts.calls(); XCTAssertTrue(calls.isEmpty)
+        let live = await scripts.sources()
+        XCTAssertEqual(live.first?.state, .failed)
+        await session.close(retainingAttemptID: nil); await service.close()
+    }
+
+    func testColdSelectionRejectsChangedContentBeforeResolveAndAfterLazyLoading() async throws {
+        for afterCall in [false, true] {
+            let scripts = MusicNativeCandidateDiscoveryScripts()
+            await scripts.directory(.idle)
+            let service = try await NativeMusicFixture.service(try MusicNativeCandidateDiscoveryFixture.store(), scripts: scripts)
+            let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
+            let snapshot = try await session.snapshot(discover: false, force: false)
+            let target = try XCTUnwrap(MusicNativeCandidateDiscoveryFixture.target(snapshot, platform: "tx"))
+            await scripts.configure(generation: 0, version: afterCall ? "1" : "2", mutateAfterResolve: afterCall)
+            await scriptExpectFailure(.targetChanged) {
+                try await session.resolve(target, attemptID: UUID().uuidString.lowercased())
+            }
+            let calls = await scripts.calls(); XCTAssertEqual(calls.count, afterCall ? 1 : 0)
+            let played = try await service.playedSongs(); XCTAssertTrue(played.isEmpty)
+            await session.close(retainingAttemptID: nil); await service.close()
+        }
+    }
+
     func testParallelNativeDiscoveryCASAndExactPlaybackUseExistingFactWriter() async throws {
         let barrier = MusicNativeCandidateDiscoveryBarrier(), store = try MusicNativeCandidateDiscoveryFixture.store()
         let scripts = MusicNativeCandidateDiscoveryScripts()

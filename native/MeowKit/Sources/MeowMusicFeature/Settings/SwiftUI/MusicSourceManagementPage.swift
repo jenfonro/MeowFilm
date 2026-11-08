@@ -300,6 +300,7 @@ struct MusicScriptSourceDetailContent: View {
         switch value {
         case .disabled: return "已停用"
         case .idle: return "已启用"
+        case .starting: return "启动中"
         case .ready: return "运行中"
         case .failed: return "加载失败"
         }

@@ -146,7 +146,7 @@ actor MusicNativePublicBrowseFiveScripts: MusicScriptResolving {
          snapshot("22222222-2222-4222-8222-222222222222", platform: "tx")]
     }
     private func snapshot(_ id: String, platform: String) -> MusicScriptSource {
-        .init(installationID: id, generation: 1, enabled: true, ready: true, version: "1",
+        .init(installationID: id, generation: 1, enabled: true, state: .ready, version: "1",
             contentHash: String(repeating: "a", count: 64), revisionHash: String(repeating: "a", count: 64),
             capabilities: [.init(siteID: platform, title: "Synthetic", actions: ["musicUrl"], qualities: ["128k"])])
     }
@@ -154,11 +154,11 @@ actor MusicNativePublicBrowseFiveScripts: MusicScriptResolving {
         guard let value = sources().first(where: { $0.installationID == installationID }) else { throw MusicServiceError.sourceUnavailable }
         return value
     }
-    func resolve(request: MusicScriptRequest) async -> MusicNativeAudio {
+    func resolve(request: MusicScriptRequest) async -> MusicScriptResult<MusicNativeAudio> {
         requests.append(request)
         if let gate { await gate.wait() }
-        return .init(url: URL(string: "https://media.invalid/synthetic.mp3")!)
+        return .init(value: .init(url: URL(string: "https://media.invalid/synthetic.mp3")!), source: request.source)
     }
-    func lyrics(request: MusicScriptRequest) -> MusicNativeLyrics { .init(text: "") }
+    func lyrics(request: MusicScriptRequest) -> MusicScriptResult<MusicNativeLyrics> { .init(value: .init(text: ""), source: request.source) }
     func calls() -> [MusicScriptRequest] { requests }
 }

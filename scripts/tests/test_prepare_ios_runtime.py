@@ -1,6 +1,7 @@
 """Build-input preparation: local fixtures only, no network or Node download."""
 import importlib.util
 import json
+import plistlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -33,10 +34,73 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "SHA-256"):
                     prepare.node_mobile(pinned)
 
+    def test_reused_extraction_cannot_hide_modified_missing_extra_or_linked_headers(self):
+        for change in ("modified", "missing", "extra", "linked"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                cache = Path(temporary)
+                archive = cache / "fixture.zip"
+                with zipfile.ZipFile(archive, "w") as package:
+                    package.writestr("NodeMobile.xcframework/Info.plist", b"fixture")
+                    package.writestr("include/node/node_api.h", b"pinned-header")
+                pinned = {"archive": {"url": "https://download.invalid/fixture.zip", "sha256": prepare.sha256(archive)}}
+                with patch.dict(prepare.node_mobile.__globals__, NODE_MOBILE=cache):
+                    prepare.node_mobile(pinned)
+                    header = cache / "ios/include/node/node_api.h"
+                    if change == "modified":
+                        header.write_text("changed")
+                    elif change == "missing":
+                        header.unlink()
+                    elif change == "extra":
+                        header.with_name("extra.h").write_text("unlisted")
+                    else:
+                        header.unlink()
+                        header.symlink_to(archive)
+                    with self.assertRaises(ValueError):
+                        prepare.node_mobile(pinned)
+
+    def test_target_mapping_keeps_node_x64_identity_and_xcode_x86_64_paths(self):
+        selected = prepare.target("iphonesimulator", "x86_64")
+        self.assertEqual(selected, {"sdk": "iphonesimulator", "arch": "x64", "minimumOS": "17.0"})
+        self.assertEqual(prepare.runtime_path(selected), ROOT / ".cache/ios-runtime/iphonesimulator-x86_64/Runtime")
+        self.assertEqual(prepare.target("iphonesimulator", "arm64")["arch"], "arm64")
+        self.assertEqual(prepare.target("iphoneos", "arm64")["sdk"], "iphoneos")
+        for sdk, arch in (("macosx", "arm64"), ("iphoneos", "x86_64"), ("iphonesimulator", "ia32")):
+            with self.assertRaises(ValueError):
+                prepare.target(sdk, arch)
+
+    def test_verified_official_archive_headers_and_slice_are_returned_as_build_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache/nodejs-mobile"
+            cache.mkdir(parents=True)
+            archive = cache / "fixture.zip"
+            info = {"AvailableLibraries": [
+                {"LibraryIdentifier": "ios-arm64", "SupportedPlatform": "ios", "SupportedArchitectures": ["arm64"]},
+                {"LibraryIdentifier": "ios-arm64_x86_64-simulator", "SupportedPlatform": "ios",
+                 "SupportedPlatformVariant": "simulator", "SupportedArchitectures": ["arm64", "x86_64"]},
+            ]}
+            with zipfile.ZipFile(archive, "w") as package:
+                package.writestr("NodeMobile.xcframework/Info.plist", plistlib.dumps(info))
+                for item in info["AvailableLibraries"]:
+                    package.writestr("NodeMobile.xcframework/" + item["LibraryIdentifier"] + "/NodeMobile.framework/NodeMobile", b"fixture")
+                package.writestr("include/node/node_api.h", b"pinned-header")
+            license_path = root / "LICENSES/nodejs-mobile-LICENSE.txt"
+            license_path.parent.mkdir()
+            license_path.write_text("fixture-license")
+            pinned = {"version": "18.20.4", "license": {"path": "LICENSES/nodejs-mobile-LICENSE.txt"},
+                      "archive": {"url": "https://download.invalid/fixture.zip", "sha256": prepare.sha256(archive)}}
+            with patch.dict(prepare.node_mobile_inputs.__globals__, ROOT=root, NODE_MOBILE=cache):
+                value = prepare.node_mobile_inputs(pinned, prepare.target("iphonesimulator", "x64"))
+            self.assertEqual(value["identity"]["slice"], "ios-arm64_x86_64-simulator")
+            self.assertEqual(value["headers"], [{"path": ".cache/nodejs-mobile/ios/include/node/node_api.h",
+                                                "sha256": prepare.hashlib.sha256(b"pinned-header").hexdigest()}])
+            self.assertTrue(any(item["path"].endswith("NodeMobile.framework/NodeMobile") for item in value["inputs"]))
+
     def test_failed_payload_packaging_preserves_previous_complete_payload(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            target = root / ".cache/ios-runtime/Runtime"
+            selected = prepare.target("iphonesimulator", "x86_64")
+            target = root / ".cache/ios-runtime/iphonesimulator-x86_64/Runtime"
             target.mkdir(parents=True)
             (target / "runtime-manifest.json").write_text(json.dumps({"status": "complete"}))
             (root / "node_modules/@meowfilm/script-host").mkdir(parents=True)
@@ -46,9 +110,9 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                         stdout = "v24.21.0\n"
                     return Result()
                 raise prepare.subprocess.CalledProcessError(1, command)
-            with patch.dict(prepare.payload.__globals__, ROOT=root, RUNTIME=target), patch.object(prepare.subprocess, "run", run):
+            with patch.dict(prepare.payload.__globals__, ROOT=root), patch.object(prepare.subprocess, "run", run):
                 with self.assertRaises(prepare.subprocess.CalledProcessError):
-                    prepare.payload("node")
+                    prepare.payload("node", selected)
                 self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), {"status": "complete"})
                 self.assertEqual([p.name for p in target.parent.iterdir()], ["Runtime"])
 

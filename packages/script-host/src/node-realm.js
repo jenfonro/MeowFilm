@@ -1,6 +1,7 @@
 import * as vm from 'node:vm';
 import { posix as path } from 'node:path';
 import { createFetch } from './node-http-realm.js';
+import { Headers, FormData } from './node-web-values.js';
 import { discoverSourceRoutes, createLocalStartupLookup, startupWrapperTarget } from './cat-source-routes.js';
 import { fault, requireValue } from './errors.js';
 
@@ -13,6 +14,15 @@ export function createNodeRealm(session, node) {
   const nodeError = fault;
   const process = node.process;
   let booting = false;
+  const CustomEvent = globalThis.CustomEvent ?? class CustomEvent extends Event {
+    #detail;
+    constructor(type, options = {}) {
+      super(type, options);
+      this.#detail = options?.detail ?? null;
+    }
+    get detail() { return this.#detail; }
+    get [Symbol.toStringTag]() { return 'CustomEvent'; }
+  };
   const sandbox = { Buffer, URL, URLSearchParams, TextEncoder, TextDecoder,
     Headers, ...node.web, FormData, AbortController, AbortSignal,
     DOMException, Event, CustomEvent, EventTarget, structuredClone,

@@ -27,7 +27,7 @@ cleanup() {
 trap cleanup EXIT
 mkdir "$staging"
 
-python3 -I -B scripts/prepare-ios-runtime.py
+python3 -I -B scripts/prepare-ios-runtime.py --sdk iphoneos --arch arm64
 
 settings=(
   -project apps/ios/Meowfilm.xcodeproj

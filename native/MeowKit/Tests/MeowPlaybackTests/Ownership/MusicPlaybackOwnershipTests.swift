@@ -7,7 +7,9 @@ import MeowMusicFeature
 
 private let crossDomainSelection = MusicPlaybackSelection(
     installationId: "synthetic-installation", generation: 1, siteId: "wy",
-    sourceKey: "synthetic-source", quality: "128k"
+    sourceKey: "synthetic-source", quality: "128k",
+    scriptIdentity: .init(version: "1", contentHash: String(repeating: "a", count: 64),
+        revisionHash: String(repeating: "b", count: 64))
 )
 
 /// Deliberately ignores cancellation; only the test can settle the dependency.
@@ -83,7 +85,8 @@ private actor CrossDomainNavigationService: MusicServing {
     func sourceAvailability(for ref: MusicReference) -> MusicSourceAvailability {
         .init(options: [.init(installationId: crossDomainSelection.installationId, generation: 1, siteId: "wy",
                sourceKey: "synthetic-source", qualities: ["128k"], title: "Synthetic",
-               version: "1", contentHash: String(repeating: "a", count: 64))], scriptState: .ready)
+               version: "1", contentHash: String(repeating: "a", count: 64),
+               revisionHash: crossDomainSelection.scriptIdentity!.revisionHash)], scriptState: .ready)
     }
     func metadataPreferences() throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
     func updateMetadataPreferences(_ change: MusicMetadataPreferencesChange) throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
@@ -92,7 +95,7 @@ private actor CrossDomainNavigationService: MusicServing {
                  selection: MusicPlaybackSelection) -> MusicPlaybackCandidate {
         .init(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
               url: URL(string: "https://media.invalid/synthetic.mp3")!,
-              title: "Synthetic", requestedQuality: selection.quality)
+              title: "Synthetic", requestedQuality: selection.quality, resolvedSelection: selection)
     }
     func record(_ fact: MusicPlaybackFact) async -> Bool {
         facts.append(fact)

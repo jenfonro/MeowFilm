@@ -10,7 +10,7 @@ const require = createRequire(import.meta.url);
 const sourceDirectory = resolve(root, 'packages/script-host/src');
 const outputDirectory = resolve(root, 'packages/script-host/build/Release');
 
-export async function buildSourceSDK() {
+export async function buildSourceSDK({ directory = outputDirectory } = {}) {
   const captured = new Map();
   const readInput = async path => {
     const bytes = await readFile(path);
@@ -76,7 +76,7 @@ export async function buildSourceSDK() {
     }],
   });
   const bundle = `(() => {\n${result.outputFiles[0].text}\nreturn __sourceSDK.runtime;\n})()`;
-  const output = resolve(outputDirectory, 'source-sdk.js');
+  const output = resolve(directory, 'source-sdk.js');
   const relativePath = path => {
     const result = relative(root, resolve(root, path)).split(sep).join('/');
     if (result.startsWith('../')) throw new Error('Source SDK input outside the workspace');
@@ -93,7 +93,7 @@ export async function buildSourceSDK() {
     if (!sha256 || sha256 !== current) throw new Error(`Source SDK input changed during build: ${path}`);
     return { path, sha256 };
   }));
-  await mkdir(outputDirectory, { recursive: true });
+  await mkdir(directory, { recursive: true });
   await writeFile(output, bundle);
   return {
     path: relativePath(output),

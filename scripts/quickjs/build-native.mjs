@@ -8,12 +8,12 @@ import {
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = fileURLToPath(new URL('../../', import.meta.url));
+export const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(import.meta.url);
 const policyPath = 'scripts/script-host-native.json';
 const policyBytes = await readFile(resolve(root, policyPath));
-const policy = JSON.parse(policyBytes.toString('utf8'));
-const loadedBuildInputs = [
+export const policy = JSON.parse(policyBytes.toString('utf8'));
+export const loadedBuildInputs = [
   { path: policyPath, sha256: createHash('sha256').update(policyBytes).digest('hex') },
   { path: 'scripts/quickjs/build-native.mjs',
     sha256: createHash('sha256').update(await readFile(fileURLToPath(import.meta.url))).digest('hex') },
@@ -23,7 +23,7 @@ const sha256 = data => createHash('sha256').update(data).digest('hex');
 const pathOf = path => relative(root, resolve(root, path)).split(sep).join('/');
 const fileHash = async path => sha256(await readFile(resolve(root, path)));
 const exists = async path => access(path).then(() => true, () => false);
-const commands = [];
+export const commands = [];
 let headerCache = '';
 function portableArgument(value) {
   if (value === process.execPath) return 'node';
@@ -40,7 +40,7 @@ function portableArgument(value) {
   return result;
 }
 
-async function run(command, args, cwd = root, capture = false) {
+export async function run(command, args, cwd = root, capture = false, environment = {}) {
   const invocation = { command, args, cwd };
   await appendFile(resolve(cache, 'build-commands.jsonl'), JSON.stringify(invocation) + '\n');
   const portableCommand = portableArgument(command);
@@ -51,7 +51,7 @@ async function run(command, args, cwd = root, capture = false) {
   return new Promise((resolveResult, reject) => {
     const child = spawn(command, args, {
       cwd, stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
-      env: { ...process.env, PATH: `${dirname(process.execPath)}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}` },
+      env: { ...process.env, ...environment, PATH: `${dirname(process.execPath)}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}` },
     });
     const output = [];
     if (capture) {
@@ -66,7 +66,7 @@ async function run(command, args, cwd = root, capture = false) {
     });
   });
 }
-async function files(directory, packageContents = false) {
+export async function files(directory, packageContents = false) {
   const result = [];
   for (const entry of await readdir(resolve(root, directory), { withFileTypes: true })) {
     const path = `${directory}/${entry.name}`;
@@ -79,13 +79,17 @@ async function files(directory, packageContents = false) {
   }
   return result.sort();
 }
-async function hashInputs(paths) {
-  return Promise.all([...new Set(paths)].sort().map(async path => {
-    if (path.startsWith('../') || pathOf(path) !== path) throw new Error(`Invalid native input: ${path}`);
-    const stat = await lstat(resolve(root, path));
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`Not a regular native input: ${path}`);
-    return { path, sha256: await fileHash(path) };
-  }));
+export async function hashInputs(paths) {
+  const ordered = [...new Set(paths)].sort(), result = [];
+  for (let index = 0; index < ordered.length; index += 32) {
+    result.push(...await Promise.all(ordered.slice(index, index + 32).map(async path => {
+      if (path.startsWith('../') || pathOf(path) !== path) throw new Error(`Invalid native input: ${path}`);
+      const stat = await lstat(resolve(root, path));
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`Not a regular native input: ${path}`);
+      return { path, sha256: await fileHash(path) };
+    })));
+  }
+  return result;
 }
 async function download(url, path, expected) {
   if (await exists(path)) {
@@ -131,7 +135,14 @@ async function applyPatch(source, patch) {
     output.push(...original.slice(cursor)); await writeFile(path, output.join('\n'));
   }
 }
-async function prepareSource(name, source) {
+export async function verifySourceInventory(source, paths) {
+  const remaining = new Set(paths);
+  for (const path of await files(source.sourcePath)) {
+    if (!remaining.delete(path)) throw new Error(`Unrecorded upstream input: ${path}`);
+  }
+  if (remaining.size) throw new Error(`Missing upstream input: ${remaining.values().next().value}`);
+}
+export async function prepareSource(name, source) {
   const archive = resolve(root, source.archivePath);
   const directory = resolve(root, source.sourcePath);
   const recordPath = resolve(cache, `${name}-source.json`);
@@ -140,11 +151,13 @@ async function prepareSource(name, source) {
   await download(source.url, archive, source.sha256);
   if (await exists(recordPath)) {
     const record = JSON.parse(await readFile(recordPath, 'utf8'));
+    const paths = record.files.map(input => input.path);
+    await verifySourceInventory(source, paths);
     if (JSON.stringify(record.identity) === JSON.stringify(identity)) {
       for (const input of record.files) {
         if (await fileHash(input.path) !== input.sha256) throw new Error(`Modified upstream input: ${input.path}`);
       }
-      return record.files.map(input => input.path);
+      return paths;
     }
     // Only this tool's fixed dependency cache is replaced when locked inputs change.
     await rm(directory, { recursive: true, force: true });
@@ -154,21 +167,23 @@ async function prepareSource(name, source) {
     const temporary = `${directory}.prepare`;
     if (await exists(temporary)) throw new Error(`Unfinished native source preparation: ${pathOf(temporary)}`);
     await mkdir(temporary);
-    await run('tar', ['-xzf', archive, '--strip-components=1', '-C', temporary]);
-    const oldPath = source.sourcePath;
-    const tempSource = { ...source, sourcePath: pathOf(temporary) };
-    for (const patch of patches) await applyPatch(tempSource, patch);
-    const sourceFiles = await files(pathOf(temporary));
-    for (const file of sourceFiles) {
-      const target = `${oldPath}/${relative(temporary, resolve(root, file)).split(sep).join('/')}`;
-      if (!await exists(resolve(root, target)) || await fileHash(target) !== await fileHash(file)) {
-        throw new Error(`Existing native source does not match pinned input: ${target}`);
+    try {
+      await run('tar', ['-xzf', archive, '--strip-components=1', '-C', temporary]);
+      const oldPath = source.sourcePath;
+      const tempSource = { ...source, sourcePath: pathOf(temporary) };
+      for (const patch of patches) await applyPatch(tempSource, patch);
+      const sourceFiles = await files(pathOf(temporary));
+      const paths = sourceFiles.map(file => `${oldPath}/${file.slice(pathOf(temporary).length + 1)}`);
+      await verifySourceInventory(source, paths);
+      for (const file of sourceFiles) {
+        const target = `${oldPath}/${relative(temporary, resolve(root, file)).split(sep).join('/')}`;
+        if (!await exists(resolve(root, target)) || await fileHash(target) !== await fileHash(file)) {
+          throw new Error(`Existing native source does not match pinned input: ${target}`);
+        }
       }
-    }
-    await rm(temporary, { recursive: true });
-    const paths = sourceFiles.map(file => `${oldPath}/${file.slice(pathOf(temporary).length + 1)}`);
-    await writeFile(recordPath, JSON.stringify({ identity, files: await hashInputs(paths) }, null, 2) + '\n');
-    return paths;
+      await writeFile(recordPath, JSON.stringify({ identity, files: await hashInputs(paths) }, null, 2) + '\n');
+      return paths;
+    } finally { await rm(temporary, { recursive: true }); }
   }
   await mkdir(directory, { recursive: true });
   await run('tar', ['-xzf', archive, '--strip-components=1', '-C', directory]);
@@ -177,17 +192,17 @@ async function prepareSource(name, source) {
   await writeFile(recordPath, JSON.stringify({ identity, files: await hashInputs(paths) }, null, 2) + '\n');
   return paths;
 }
-async function artifact(path) {
+export async function artifact(path) {
   const stat = await lstat(resolve(root, path));
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`Invalid native artifact: ${path}`);
   return { path, bytes: stat.size, sha256: await fileHash(path) };
 }
-async function unchanged(inputs) {
+export async function unchanged(inputs) {
   for (const input of inputs) {
     if (await fileHash(input.path) !== input.sha256) throw new Error(`Native input changed during build: ${input.path}`);
   }
 }
-async function sdkDependencyInputs() {
+export async function sdkDependencyInputs() {
   const visited = new Set(), paths = [];
   const workspaceManifests = new Set(await Promise.all([
     'packages/script-host/package.json', 'packages/source-runtime/package.json',
@@ -290,7 +305,9 @@ async function buildNative() {
   await run(process.execPath, [gyp, 'install', '--ensure', `--tarball=${nodeArchive}`]);
   const headers = await verifyHeaders(gypPackage, nodeArchive);
   headerCache = headers.root;
-  const openssl = resolve(root, policy.sources.openssl.sourcePath);
+  const opensslSource = resolve(root, policy.sources.openssl.sourcePath);
+  const opensslBuild = resolve(cache, 'openssl-build');
+  await mkdir(opensslBuild, { recursive: true });
   const targets = {
     'linux-arm64': 'linux-aarch64', 'linux-x64': 'linux-x86_64',
     'darwin-arm64': 'darwin64-arm64-cc', 'darwin-x64': 'darwin64-x86_64-cc',
@@ -298,19 +315,19 @@ async function buildNative() {
   };
   const target = targets[`${process.platform}-${process.arch}`];
   if (!target) throw new Error(`Unsupported native build target ${process.platform}/${process.arch}`);
-  const configure = [target, 'no-shared', 'no-module', 'no-tests', 'no-apps', 'no-docs',
+  const configure = [resolve(opensslSource, 'Configure'), target, 'no-shared', 'no-module', 'no-tests', 'no-apps', 'no-docs',
     'no-legacy', 'no-autoload-config', 'no-ssl', 'no-dtls'];
   if (process.platform !== 'win32') configure.push('-fPIC', '-fvisibility=hidden');
-  const configFile = resolve(cache, 'openssl-config.json');
+  const configFile = resolve(opensslBuild, 'meow-config.json');
   const config = JSON.stringify({ source: policy.sources.openssl.sha256, configure, cc: process.env.CC ?? '' });
   if (!await exists(configFile) || await readFile(configFile, 'utf8') !== config) {
-    await run('perl', ['Configure', ...configure], openssl);
+    await run('perl', configure, opensslBuild);
     await writeFile(configFile, config);
   }
   const parallel = String(availableParallelism());
   await run(process.platform === 'win32' ? 'nmake' : 'make',
-    process.platform === 'win32' ? ['build_generated', 'libcrypto.lib'] : ['-j', parallel, 'build_generated', 'libcrypto.a'], openssl);
-  const library = resolve(openssl, process.platform === 'win32' ? 'libcrypto.lib' : 'libcrypto.a');
+    process.platform === 'win32' ? ['build_generated', 'libcrypto.lib'] : ['-j', parallel, 'build_generated', 'libcrypto.a'], opensslBuild);
+  const library = resolve(opensslBuild, process.platform === 'win32' ? 'libcrypto.lib' : 'libcrypto.a');
   const packageRoot = resolve(root, 'packages/script-host');
   await run(process.execPath, [gyp, 'configure', `--nodedir=${headers.root}`,
     '--', `-Dopenssl_library=${library}`], packageRoot);
@@ -379,8 +396,11 @@ async function buildNative() {
   };
   await unchanged(before);
   await unchanged(inputs);
+  for (const source of Object.values(policy.sources)) {
+    await verifySourceInventory(source, sourceInputs.filter(path => path.startsWith(source.sourcePath + '/')));
+  }
   await writeFile(resolve(root, policy.artifact.manifest), JSON.stringify(receipt, null, 2) + '\n');
   console.log(`Built ${receipt.artifact.path} ${receipt.artifact.sha256}`);
 }
 
-await buildNative();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await buildNative();

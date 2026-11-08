@@ -54,6 +54,6 @@ guest 只得到能力调用结果，不得到 Node socket、`fetch` 实现、Coo
 
 通用 Node 主控的 `createNodeSourceCapabilities` 负责异步 HTTP、Cookie、内存作用域存储和虚拟路由等 I/O/profile 所有权；不承担编码或加解密同步计算。`encoding.*`、`crypto.*` 由 source core 在实例所属 native 线程执行，不为这些计算往返 Node 主线程。真实 `web.interact` 未注入时返回 `CAPABILITY_UNAVAILABLE`。自定义 storage 必须同时实现 get/set/delete 和 `releaseProfiles`，不能把未清理状态当作成功。该实现不承诺原生永久落盘或向源开放 CatNode 私有卷。
 
-Windows/iOS 现有旧接入本轮未迁移，后续需接入 HTTP v1、原生承载和 ABI 2；没有完成相应端侧验证，也不承诺 Android 接入。Reader/CatVod 的规则与动作维护一份；只有新增现有 ABI 无法表达的系统语义时才扩展 ABI，并由各平台分别实现。不能据此宣称 CatNode 的 Node 兼容层可脱离 Node。
+iOS 通过内置 `MeowScriptHost.framework` 承载原生核心，使用 HTTP v1 和此能力 ABI，source 与音乐、Cat 共用 Node 主控；iOS 验证范围见[平台预检](../ios/runtime-preflight.md)。Windows 旧接入尚未迁移，不将通用验证视为 Windows 或 Android 接入通过。Reader/CatVod 的规则与动作维护一份；只有新增现有 ABI 无法表达的系统语义时才扩展 ABI，并由各平台分别实现。不能据此宣称 CatNode 的 Node 兼容层可脱离 Node。
 
 当前 ABI 文档描述通用迁移契约；通用原生构建与定向回归已通过（见[通用验证范围](script-runtime.md#构建发布与验证边界)），不能把接口或合成夹具视为平台业务通过。

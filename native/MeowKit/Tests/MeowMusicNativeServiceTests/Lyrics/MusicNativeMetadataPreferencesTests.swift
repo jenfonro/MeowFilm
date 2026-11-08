@@ -76,10 +76,10 @@ private actor MetadataNetworkProbe: MusicNativeHTTPTransport, MusicPublicQQProvi
     func source(installationID: String) throws -> MusicScriptSource {
         events.append("script"); throw MusicServiceError.unavailable
     }
-    func resolve(request: MusicScriptRequest) throws -> MusicNativeAudio {
+    func resolve(request: MusicScriptRequest) throws -> MusicScriptResult<MusicNativeAudio> {
         events.append("resolve"); throw MusicServiceError.unavailable
     }
-    func lyrics(request: MusicScriptRequest) throws -> MusicNativeLyrics {
+    func lyrics(request: MusicScriptRequest) throws -> MusicScriptResult<MusicNativeLyrics> {
         events.append("script-lyrics"); throw MusicServiceError.unavailable
     }
     func calls() -> [String] { events }
