@@ -62,6 +62,17 @@ Invalidate
 - `Refresh=true` 只绕过本次目标的当前内存缓存，不触发其他平台、其他栏目或隐藏页面请求。
 - 失败页不前移游标；不完整页、重复身份、停滞游标和 snapshot 变化必须明确失败。
 
+## 网易云漫游与推荐
+
+- 首页私人漫游进入 `DEFAULT`；显式 `ruleId`／`tabTagId` 卡仍按规则入口处理，频道卡保留声明的 mode/subMode 或规则。频道的私人漫游链接保留链接声明的 `DEFAULT`，Cube 父标签不覆盖该动作。同一区块的漫游入口按完整动作身份去重，不合并不同模式／场景／规则。四个主模式为 `DEFAULT`、`FAMILIAR`、`EXPLORE`、`PUZZLE_MODE_RCMD`；场景为 `SCENE_RCMD`，白名单包含 `HOT_SONG` 及原有官方 `FRANCH`、`PUNK` 等键，共 43 项。普通 FM 每批 3 首、规则 FM 每批 5 首、预览 1 首是现有请求配方。
+- 首页心动卡声明 `action.type=heartbeat, entry=favorites`，需要当前账号；匿名卡保留账号需求但不可见、不可执行。平台契约为 `MusicHeartbeatRequest(string Platform, MusicHeartbeatEntry Entry, string? SongId = null)`，枚举为 `Favorites`／`CurrentSong`。native catalog 命令 `music.catalog.heartbeat` 只接收 `platform`、`entry=favorites|current` 和当前曲入口的 `songId`；不接受浏览歌单 ID、起始喜欢曲或旧 fromHome 参数。
+- 心动由同一个已准入读取及账号 lease 完成目录、成员、缺失详情和推荐请求。云喜欢歌单以 `specialType=5` 且 creator/userId 属于当前账号识别，不按名称猜测；完整唯一成员数接受 `trackCount` 或 `trackCount + cloudTrackCount` 两种既有口径，`cloudTrackCount` 缺失按 0，存在时须为合法非负计数。不截断云盘成员，请求及响应 context 的 count 始终取实际完整成员长度。没有 `trackIds` 时仅接受符合相同计数口径的完整 `tracks`；没有成员数据且云盘计数非零时不能伪造空列表。详情中的歌曲前缀仅作为已有元数据，缺失条目按原生 ID 分批补全，每次详情请求最多 100 首，累计喜欢列表不设数量截断。
+- 喜欢入口在具有有效原生 ID、真实显示名称且通过现有网易云歌曲解析的喜欢曲中随机选择种子，发 `fromPlayAll`；缺失名称先按 ID 补详情，仍无名称的条目不作为种子。当前曲入口使用调用者传入的实际当前网易云歌曲 ID，发 `fromPlayOne`，该曲可以不属于喜欢列表。两者的 `startMusicId` 都取首个有效喜欢曲，`count` 都取完整喜欢列表实际长度。没有喜欢歌单、空喜欢或没有有效种子返回 `NOT_FOUND`；身份不一致、成员不完整、账号失效分别明确失败。
+- `/api/playmode/intelligence/list` 首批完整返回，不固定请求 100 首，不裁成 3 首。结果缺 `songInfo` 时仅按该条 ID 从已读喜欢列表补真实元数据；无法解析、无标题或身份不一致直接失败，不造占位歌曲。响应 `context` 为 `playlistId/startMusicId/songId/fromHome/count`，其中 count 为喜欢列表长度，顶层 count 为推荐结果长度。
+- 普通队列推荐继续使用 Windows 已证实的 `/api/homepage/more/rcmd/song`，请求仅含当前完整网易云队列的 `songIds` 数值数组字符串、实际 `currentPlaySongId` 和 `source=curlist_more_rcmd`（另由传输添加加密包络）。当前 ID 必须属于队列；数组保留顺序及精确整数，不按 1000 条截断或拒绝。此接口没有 offset，不生成分页游标，不调用 Android `homepage/scene/more/rcmd/song`。
+- `data.songList` 完整解码；`algMap` 和 `sourceMap` 同时支持对象或 JSON 对象字符串，算法映射优先于歌曲内 alg。`recommendations[].source` 继续表示 provider（`heartbeat`／`queue-recommendations`），独立的 `feedbackSource` 在心动为 `aiMode`，普通推荐使用该曲 sourceMap 值、缺失时为 `moreRcmd`。原列表来源继续由会话／队列所有者保存，读取候选本身不入队或发送反馈。
+- 普通推荐响应带 `hasMore`：保留上游明确布尔值，上游缺失时以本批非空为 true；空／重复批次的自动续播终止由会话 owner 处理。心动和普通队列读取不缓存、不写账号／云收藏，沿用同一账号失效、物理请求收尾、4 MiB 原始响应及调用截止时间边界。
+
 ## 当前输出
 
 歌曲是精简的统一模型，曲库、队列、历史、歌单、同步、播放、歌词和搜索共用：

@@ -207,7 +207,7 @@ public sealed partial class MusicCapability
             return PlayCatalogSectionAsync(card);
         }
         if (card.Kind == "song") return PlayCatalogSongAsync(card);
-        if (card.Locator is not null || card.Kind is "daily" or "fm" or "similar" or "album" or "chart")
+        if (card.Locator is not null || card.Kind is "daily" or "fm" or "similar" or "heartbeat" or "album" or "chart")
             return OpenPersonalCatalogCardAsync(card);
         RememberCatalogLocation();
         var destination = "catalog-" + card.Kind + "/" + card.Platform + "/" + Uri.EscapeDataString(card.ActionId);

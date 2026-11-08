@@ -95,10 +95,15 @@ internal static class MusicFeedbackIdentity
             else if (origin.Provider == "heartbeat" && Positive(origin.SourceId))
             { source = "aiMode"; sourceId = origin.SourceId; sourceType = "track"; mode = "ai"; }
             else if (origin.Provider == "queue-recommendations")
-            { source = "moreRcmd"; sourceType = "track"; if (origin.Kind == "heartbeat") mode = "ai"; }
+            {
+                source = origin.FeedbackSource.Length > 0 ? origin.FeedbackSource : "moreRcmd";
+                sourceType = "track";
+                if (origin.Kind == "heartbeat") mode = "ai";
+            }
             else if (origin.Kind == "similar") sourceType = "track";
             return new(instance, recording, duration, position, rate, selection.Automatic,
-                source, sourceId, sourceType, algorithm, mode);
+                source, sourceId, sourceType, algorithm, mode)
+                { IsQueueRecommendation = origin.Provider == "queue-recommendations" };
         }
         // Only preserve provenance for the selected exact recording. FM and
         // recommendation modes require their own live controller; old persisted

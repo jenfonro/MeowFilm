@@ -10,8 +10,8 @@ public sealed partial class MusicCapability
     private sealed record CatalogTarget(string Operation, string Platform, string Title, JsonElement Parameters)
     {
         public bool Private => Operation is "personalPlaylists" or "daily" or "fm" or "similar" or
-            "heartbeat" or "queueRecommendations" || Parameters.TryGetProperty("personal", out _);
-        public bool Cacheable => Operation is not ("fm" or "similar" or "heartbeat" or "queueRecommendations");
+            "heartbeat" || Parameters.TryGetProperty("personal", out _);
+        public bool Cacheable => Operation is not ("fm" or "similar" or "heartbeat");
         public int Limit => Operation == "personalPlaylists" ? 30 :
             Parameters.TryGetProperty("personal", out var p) && MusicCatalogDto.Text(p, "kind") == "kugou-owned" ? 30 : 100;
     }
@@ -27,17 +27,17 @@ public sealed partial class MusicCapability
     public MusicCatalogChoice[] CatalogFmModes { get; } =
         [new("default", "私人 FM"), new("familiar", "熟悉"), new("explore", "探索"), new("puzzle", "拼图"), new("scene", "场景")];
     public MusicCatalogChoice[] CatalogFmScenes { get; } =
-        [new("FOCUS", "专注"), new("EXERCISE", "运动"), new("SLEEP_HELP", "助眠"), new("RELAX", "放松"),
-         new("COMMUTE", "通勤"), new("NIGHT_EMO", "深夜"), new("CHEERFUL", "愉快"), new("RAINY", "雨天"),
-         new("LYRICAL", "抒情"), new("CURE", "治愈"), new("SWEET", "甜蜜"), new("RHYTHM_BLUES", "节奏布鲁斯"),
-         new("GAMES", "游戏"), new("RAP", "说唱"), new("K_POP", "韩流"), new("ORIGINAL_MUSICIAL", "原声"),
-         new("ELECTRONIC", "电子"), new("TAKE_SHOWER", "沐浴"), new("COFFEE_SHOP", "咖啡馆"),
-         new("ROCK", "摇滚"), new("INSPIRATIONAL", "励志"), new("CHINESE", "华语"), new("ENGLISH", "英语"),
-         new("YUEYU", "粤语"), new("MANYAO", "慢摇"), new("JINGDIAN", "经典"), new("LIGHT", "轻音乐"),
-         new("GUOFENG", "国风"), new("FOLK", "民谣"), new("ACG", "动漫"), new("GUDIAN", "古典"),
-         new("JAZZ", "爵士"), new("JAPANESE", "日语"), new("GLOBAL", "世界音乐"), new("FRANCH", "法语"),
-         new("BLUE", "蓝调"), new("DANCE", "舞曲"), new("LATIN", "拉丁"), new("PUNK", "朋克"),
-         new("COUNTRY", "乡村"), new("MUSICAL", "音乐剧"), new("YINGSHI", "影视")];
+        [new("NIGHT_EMO", "伤感"), new("EXERCISE", "运动"), new("SLEEP_HELP", "助眠"), new("RELAX", "放松"),
+         new("CHEERFUL", "欢快"), new("LYRICAL", "抒情"), new("CURE", "治愈"), new("FOCUS", "专注"),
+         new("SWEET", "情歌"), new("RHYTHM_BLUES", "R&B"), new("RAINY", "下雨天"), new("GAMES", "打游戏"),
+         new("RAP", "说唱"), new("K_POP", "K-Pop"), new("ORIGINAL_MUSICIAL", "宝藏原创"), new("ELECTRONIC", "电音"),
+         new("COMMUTE", "出行"), new("TAKE_SHOWER", "洗澡"), new("COFFEE_SHOP", "咖啡馆"), new("ROCK", "摇滚"),
+         new("INSPIRATIONAL", "励志"), new("CHINESE", "华语"), new("ENGLISH", "欧美"), new("YUEYU", "粤语"),
+         new("MANYAO", "慢摇DJ"), new("JINGDIAN", "经典"), new("LIGHT", "轻音乐"), new("GUOFENG", "国风"),
+         new("FOLK", "民谣"), new("ACG", "二次元"), new("GUDIAN", "古典"), new("JAZZ", "爵士"),
+         new("JAPANESE", "日语"), new("GLOBAL", "全球"), new("FRANCH", "法语"), new("BLUE", "蓝调"),
+         new("DANCE", "舞蹈"), new("LATIN", "拉丁"), new("PUNK", "放克"), new("COUNTRY", "乡村乐"),
+         new("MUSICAL", "音乐剧"), new("YINGSHI", "影视"), new("HOT_SONG", "热歌")];
     public string CatalogPersonalKind { get; set; } = "all";
     public string CatalogDailyBranch { get; set; } = "default";
     public string CatalogFmMode { get; set; } = "default";
@@ -47,7 +47,7 @@ public sealed partial class MusicCapability
     public bool IsCatalogFm => catalogLoadedTarget?.Operation == "fm" && IsCatalogPage;
     public bool IsCatalogFmScene => IsCatalogFm && CatalogFmMode == "scene";
     public bool IsCatalogBatch => IsCatalogPage && catalogLoadedTarget?.Operation is
-        "daily" or "fm" or "similar" or "heartbeat" or "queueRecommendations" or "album" or "artist";
+        "daily" or "fm" or "similar" or "heartbeat" or "album" or "artist";
     public bool IsCatalogCollection => IsCatalogPlaylist || IsCatalogBatch;
     public bool CanCatalogWy => CanCatalogBrowse && SelectedCatalogPlatform.Key == "wy";
     public bool CanCatalogBatchRefresh => IsCatalogBatch && CanCatalogBrowse;
@@ -148,7 +148,7 @@ public sealed partial class MusicCapability
     }
     private static bool IsCatalogRoute(string route) =>
         route is "catalog-home" or "catalog-channels" or "catalog-personal" or "catalog-daily" or "catalog-fm" or "catalog-search" ||
-        new[] { "playlist", "channel", "chart", "album", "artist", "daily", "fm", "similar", "heartbeat", "queueRecommendations" }
+        new[] { "playlist", "channel", "chart", "album", "artist", "daily", "fm", "similar", "heartbeat" }
             .Any(kind => route.StartsWith("catalog-" + kind + "/", StringComparison.Ordinal));
     private static CatalogTarget Target(string operation, string platform, string title, object parameters) =>
         new(operation, platform, title, JsonSerializer.SerializeToElement(parameters));
@@ -213,6 +213,8 @@ public sealed partial class MusicCapability
                 return CatalogBusinessError("INVALID_REQUEST");
             return StartRecommendation(Target("similar", card.Platform, card.Title, new { sourceIds = ids.Clone() }));
         }
+        if (card.Kind == "heartbeat")
+            return StartRecommendation(Target("heartbeat", card.Platform, card.Title, new { entry = "favorites" }));
         if (card.Kind == "fm")
         {
             var mode = MusicCatalogDto.Text(action, "mode").ToLowerInvariant();
@@ -251,40 +253,25 @@ public sealed partial class MusicCapability
     {
         if (!CanCatalogBrowse || !IsCatalogPlaylist || !ContainsCatalogCard(card) || !card.CanSimilar) return Task.CompletedTask;
         try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
-        var parts = location.Route.Split('/', 3);
         return StartRecommendation(Target("heartbeat", card.Platform, "心动推荐", new {
-            playlistId = Uri.UnescapeDataString(parts[2]), startMusicId = card.ActionId, songId = card.ActionId, fromHome = false }));
+            entry = "current", songId = card.ActionId }));
+    }
+    public Task HeartbeatFavoritesCatalogCardAsync(MusicCatalogCard card)
+    {
+        if (!CanCatalogBrowse || !ContainsCatalogCard(card) || !card.CanHeartbeatFavorites) return Task.CompletedTask;
+        try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
+        return StartRecommendation(Target("heartbeat", "wy", "心动模式", new { entry = "favorites" }));
     }
     public Task CatalogQueueRecommendationsAsync()
     {
         if (!CanCatalogWy) return Task.CompletedTask;
-        return TrackCatalogAction(async (signal, currentAction) =>
+        return OpenQueueRecommendations();
+        async Task OpenQueueRecommendations()
         {
-            var ids = new List<string>(); long? version = null; string currentId = ""; int count;
-            do
-            {
-                var reply = await Call("music.queue.get", new { offset = ids.Count, limit = 100 }, signal);
-                long nextVersion = MusicDto.Integer(reply, "version"); count = MusicDto.Count(reply, "total");
-                if (count is < 1 or > 1000) throw new MusicOperationException(count == 0 ? "NOT_FOUND" : "LIMIT");
-                if (version is not null && version != nextVersion) throw new MusicOperationException("REVISION_CONFLICT");
-                version = nextVersion;
-                if (reply.GetProperty("current").ValueKind == JsonValueKind.Object)
-                    currentId = SongJson.NativeId(reply.GetProperty("current").GetProperty("song"));
-                foreach (var entry in MusicDto.Page(reply, "entries", ids.Count))
-                {
-                    var song = entry.GetProperty("song");
-                    if (SongJson.Platform(song) != "wy")
-                        throw new MusicOperationException("UNSUPPORTED");
-                    var id = SongJson.NativeId(song);
-                    MusicDto.Require(id.Length > 0);
-                    ids.Add(id);
-                }
-            } while (ids.Count < count);
-            if (!currentAction()) return;
-            if (currentId.Length == 0 || !ids.Contains(currentId)) throw new MusicOperationException("NOT_FOUND");
-            await OpenCatalogTargetAsync(Target("queueRecommendations", "wy", "队列推荐",
-                new { songIds = ids.ToArray(), currentPlaySongId = currentId }));
-        }, "正在读取队列");
+            if (HasQueueRecommendations) await RetryRecommendationAsync();
+            else await StartRecommendation(Target("queue", "wy", "为你推荐", new { }));
+            if (HasQueueRecommendations) await OpenPlayQueueAsync();
+        }
     }
     private async Task ReadCatalogAccountForRequestAsync(string platform, long generation, CancellationToken token)
     {
@@ -300,7 +287,7 @@ public sealed partial class MusicCapability
     {
         foreach (var p in target.Parameters.EnumerateObject()) parameters[p.Name] = p.Value.Clone();
         parameters["platform"] = target.Platform;
-        if (target.Operation is "fm" or "similar" or "heartbeat" or "queueRecommendations") parameters.Remove("refresh");
+        if (target.Operation is "fm" or "similar" or "heartbeat") parameters.Remove("refresh");
         else parameters["refresh"] = refresh;
         if (target.Operation == "personalPlaylists")
         {

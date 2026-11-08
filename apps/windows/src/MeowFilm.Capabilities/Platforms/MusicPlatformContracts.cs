@@ -40,6 +40,7 @@ public enum MusicSearchKind { Songs, Playlists }
 public enum MusicPersonalListKind { All, Created, Subscribed }
 public enum MusicDailyBranch { Default, Style }
 public enum MusicFmMode { Default, Familiar, Explore, Puzzle, Scene }
+public enum MusicHeartbeatEntry { Favorites, CurrentSong }
 public enum MusicPersonalPlaylistKind { QqFavorites, KugouOwned }
 
 /// <summary>Account-bound directory locator, not credentials or a transferable authorization token.</summary>
@@ -82,8 +83,7 @@ public sealed record MusicDailyRequest(string Platform = "wy",
 public sealed record MusicFmRequest(string Platform = "wy", MusicFmMode Mode = MusicFmMode.Default,
     string Submode = "", bool Preview = false, string? RuleId = null, string? TabTagId = null);
 public sealed record MusicSimilarRequest(string Platform, IReadOnlyList<string> SourceIds);
-public sealed record MusicHeartbeatRequest(string Platform, string PlaylistId, string StartMusicId,
-    string SongId, bool FromHome = false);
+public sealed record MusicHeartbeatRequest(string Platform, MusicHeartbeatEntry Entry, string? SongId = null);
 public sealed record MusicQueueRecommendationsRequest(string Platform,
     IReadOnlyList<string> SongIds, string CurrentPlaySongId);
 public sealed record MusicAlbumRequest(string Platform, string Id, bool Refresh = false);

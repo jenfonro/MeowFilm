@@ -45,8 +45,9 @@ public sealed partial class MusicRecommendationCoordinator
     private void RetireLocked(Session s, string reason, bool stopPlayback = false)
     {
         if (!s.Active) return;
+        bool ownsPlayback = s.Queue is { } current && s.Feedback.ContainsKey(current.CurrentId);
         s.Active = false; s.Waiting = false; s.Continue = false; s.Status = reason;
-        s.Generation++; s.Navigation++; s.Feedback.Clear(); CancelLocked(s.Cancellation);
+        s.Generation++; s.Navigation++; s.Feedback.Clear(); s.Candidates = null; CancelLocked(s.Cancellation);
         var flight = s.Flight; var advance = s.Advance;
         s.Cleanup = LaunchLocked(async () =>
         {
@@ -59,7 +60,7 @@ public sealed partial class MusicRecommendationCoordinator
             }
             await DiscardAsync(s).ConfigureAwait(false);
         });
-        if (stopPlayback && s.Queue is { } q)
+        if (stopPlayback && ownsPlayback && s.Queue is { } q)
         {
             var selection = SelectionLocked(s, q.CurrentId, false, false, false, MusicRecommendationPlaybackAction.Stop, inactive: true);
             _ = LaunchLocked(() => SelectAsync(s, selection, CancellationToken.None));
@@ -81,10 +82,10 @@ public sealed partial class MusicRecommendationCoordinator
         lock (gate)
         {
             if (session is not { } s || !CurrentLocked(s)) return;
-            if (s.Batch == 0 || s.Returning || change is MusicRecommendationQueueChange.Replace or
+            if (s.Batch == 0 && s.Config.Kind != "queue" || s.Returning || change is MusicRecommendationQueueChange.Replace or
                 MusicRecommendationQueueChange.Clear or MusicRecommendationQueueChange.Restore or MusicRecommendationQueueChange.Reset)
             { RetireLocked(s, "queue-replaced"); return; }
-            s.Generation++; s.Navigation++; s.Waiting = false;
+            s.Generation++; s.Navigation++; s.Waiting = false; s.Candidates = null;
             CancelLocked(s.Cancellation); s.Status = "ready";
             if (s.Pending is null && s.PreviousConfiguration is { } previousConfig)
             { s.Config = previousConfig; s.PreviousConfiguration = null; s.InitialPending = false; }

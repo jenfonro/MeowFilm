@@ -85,7 +85,7 @@ public static class MusicFeedbackProtocolTests
             ("playlist", "7", "list", "list"), ("likeMusic", "7", "list", "list"),
             ("album", "8", "album", "album"), ("search", " 原始关键词 & 歌手 ", "track", "search"),
             ("dailySongRecommend", "", "dailyRecommend", "dailySongRecommend"), ("song", "", "track", "song"),
-            ("aiMode", "7", "track", ""), ("moreRcmd", "", "track", ""), ("unknown", "", "", "")
+            ("aiMode", "7", "track", "aiMode"), ("moreRcmd", "", "track", "moreRcmd"), ("unknown", "", "", "")
         })
             yield return Case("fixed provenance " + vector.Source, async () =>
             {
@@ -96,6 +96,26 @@ public static class MusicFeedbackProtocolTests
                 if (vector.Wire.Length > 0) { Equal(vector.Wire, Text(json["source"])); Equal(vector.Id, Text(json["sourceId"])); }
                 else True(json["source"] is null && json["sourceId"] is null);
                 True(json["mode"] is null && json["is_heart"] is null);
+                if (vector.Source is "aiMode" or "moreRcmd")
+                {
+                    f.Clock.Advance(10);
+                    await s.FinishAsync(End());
+                    Equal(vector.Wire, Text(f.Logs.Last()["json"]!["source"]));
+                    Equal(vector.Id, Text(f.Logs.Last()["json"]!["sourceId"]));
+                }
+            });
+        foreach (string source in new[] { "search_song_detail_page_song_rec", "playlist", "queue-source-fixture" })
+            yield return Case("live queue sourceMap wire " + source, async () =>
+            {
+                await using var f = new Fixture();
+                await using var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt) with
+                    { Source = source, SourceType = "track", IsQueueRecommendation = true, Algorithm = "queue-alg" });
+                var start = f.Logs.Single()["json"]!.AsObject();
+                Equal(source, Text(start["source"])); Equal("", Text(start["sourceId"]));
+                Equal("queue-alg", Text(start["alg"]));
+                f.Clock.Advance(10);
+                await s.FinishAsync(End());
+                Equal(source, Text(f.Logs.Last()["json"]!["source"]));
             });
         yield return Case("saved account is not authenticated until live matching profile", async () =>
         {
@@ -149,6 +169,10 @@ public static class MusicFeedbackProtocolTests
                 Start(f.Attempt) with { Rate = double.PositiveInfinity }, Start(f.Attempt) with { Position = 201 },
                 Start(f.Attempt) with { Source = "search", SourceId = "keyword\n" },
                 Start(f.Attempt) with { Source = "playlist", SourceId = "7", SourceType = "album" },
+                Start(f.Attempt) with { Source = "queue-source-fixture", SourceType = "track" },
+                Start(f.Attempt) with { Source = "queue-source\n", SourceType = "track", IsQueueRecommendation = true },
+                Start(f.Attempt) with { Source = "queue-source", SourceId = "7", SourceType = "track", IsQueueRecommendation = true },
+                Start(f.Attempt) with { Source = "queue-source", SourceType = "list", IsQueueRecommendation = true },
                 Start(f.Attempt) with { Algorithm = "\ud800" }
             })
                 await AnyFeedbackError(() => f.Protocol.StartAsync(f.Account, input));
@@ -198,6 +222,15 @@ public static class MusicFeedbackProtocolTests
             await using var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt));
             await Error(() => f.Protocol.StartAsync(new("wy", f.Account.Scope, 2, "123", f.Account.Cookie), Start(f.Attempt)), "INSTANCE_MISMATCH");
             await Error(() => f.Protocol.StartAsync(new("wy", f.Account.Scope, 1, "123", "MUSIC_U=synthetic-new"), Start(f.Attempt)), "INSTANCE_MISMATCH");
+            Equal(3, f.Calls);
+        });
+        yield return Case("recommendation provenance qualification cannot change within a playback attempt", async () =>
+        {
+            await using var f = new Fixture();
+            var input = Start(f.Attempt) with { Source = "moreRcmd", SourceType = "track" };
+            await using var session = await f.Protocol.StartAsync(f.Account, input);
+            await Error(() => f.Protocol.StartAsync(f.Account, input with { IsQueueRecommendation = true }),
+                "INSTANCE_MISMATCH");
             Equal(3, f.Calls);
         });
         foreach (string code in new[] { "\"200\"", "true", "0", "500", "null" })

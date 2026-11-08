@@ -26,7 +26,8 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     string UpdateFrequency = "", MusicCatalogEntryPresentation Presentation = MusicCatalogEntryPresentation.Static,
     int? DayOfMonth = null, string Decoration = "",
     bool RequiresAccount = false, bool Display = true, string Placement = "",
-    bool DirectPlay = true, JsonElement? PlaybackSource = null, string RankText = "", string SalesText = "") : INotifyPropertyChanged
+    bool DirectPlay = true, JsonElement? PlaybackSource = null, string RankText = "", string SalesText = "",
+    bool IsCloudFavorites = false) : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
     private IReadOnlyList<MusicRankPreview>? initializedPreview;
@@ -54,10 +55,11 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     public bool IsOverlayEntry => Presentation == MusicCatalogEntryPresentation.Overlay;
     public bool IsAnimatedEntry => Presentation == MusicCatalogEntryPresentation.Animated;
     public bool CanRequestPreview => Display && IsPreviewEntry && CanOpen && Kind is "playlist" or "daily" or "album";
-    public bool CanPlay => DirectPlay && CanOpen && (Song is not null || Kind is "song" or "playlist" or "daily" or "fm" or "similar" or "album");
+    public bool CanPlay => DirectPlay && CanOpen && (Song is not null || Kind is "song" or "playlist" or "daily" or "fm" or "similar" or "heartbeat" or "album");
     public bool CanOpen => Available && (Song is not null || MusicCatalogDto.SupportsAction(Platform, Kind));
     public bool CanFavorite => Available && Song is not null;
     public bool CanSimilar => CanFavorite && Platform == "wy" && ActionId.Length > 0;
+    public bool CanHeartbeatFavorites => CanOpen && Platform == "wy" && IsCloudFavorites;
     public string AlbumId => Song is { } song ? MusicCatalogDto.Text(SongJson.PrimaryInfo(song.Raw), "albumId") : "";
     public bool CanAlbum => CanFavorite && Platform == "wy" && AlbumId.Length > 0;
     public string Key => Platform + "/" + (StableKey.Length > 0 ? StableKey : Kind + "/" + Identity);
@@ -121,7 +123,7 @@ public static class MusicCatalogDto
         if (platform is not ("wy" or "tx" or "kg" or "kw" or "mg")) return false;
         return kind is "song" or "playlist" ||
             (platform is "wy" or "tx" or "kg") && kind == "channel" ||
-            platform == "wy" && kind is "daily" or "fm" or "similar" or "album" or "artist" or "chart";
+            platform == "wy" && kind is "daily" or "fm" or "similar" or "heartbeat" or "album" or "artist" or "chart";
     }
     public static string Text(JsonElement element, string name) =>
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) &&
@@ -259,6 +261,7 @@ public static class MusicCatalogDto
         }
         var id = Text(item, "id");
         var kind = Text(item, "kind");
+        bool cloudFavorites = platform == "wy" && kind == "favorites" && Text(item, "relationship") == "owned";
         var actionId = id; var pageCode = Text(item, "pageCode");
         var placement = "";
         JsonElement? actionValue = null, locator = null;
@@ -279,7 +282,7 @@ public static class MusicCatalogDto
                 actionId = Text(channel, "id"); pageCode = Text(channel, "pageCode");
             }
             available &= SupportsAction(platform, kind);
-            if (kind is "daily" or "fm" or "similar") actionId = kind;
+            if (kind is "daily" or "fm" or "similar" or "heartbeat") actionId = kind;
             if (action.TryGetProperty("locator", out var value) && value.ValueKind == JsonValueKind.Object)
                 locator = value.Clone();
         }
@@ -301,7 +304,8 @@ public static class MusicCatalogDto
             Action: actionValue, Locator: locator, Preview: Preview(item), UpdateFrequency: Text(item, "updateFrequency"),
             Presentation: presentation, DayOfMonth: CalendarDay(item),
             Decoration: Text(item, "decoration"), RequiresAccount: requiresAccount, Display: display, Placement: placement,
-            DirectPlay: Boolean(item, "canPlay", true), RankText: Text(item, "rankText"), SalesText: Text(item, "salesText"));
+            DirectPlay: Boolean(item, "canPlay", true), RankText: Text(item, "rankText"), SalesText: Text(item, "salesText"),
+            IsCloudFavorites: cloudFavorites);
     }
     private static bool Boolean(JsonElement item, string name, bool fallback)
     {

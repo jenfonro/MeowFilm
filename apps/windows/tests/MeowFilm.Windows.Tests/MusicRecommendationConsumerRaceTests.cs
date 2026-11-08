@@ -24,6 +24,66 @@ public static partial class MusicUiTests
             () => RecommendationRetirementRace(restoreOnly: true));
         yield return Case("recommendation consumer FM retry deadline releases identical observation once under reentrant Changed",
             RecommendationRetryObservationRace);
+        yield return Case("recommendation consumer committed FM configuration rejects old snapshots and retired action keys",
+            RecommendationCommittedFmRace);
+        yield return Case("recommendation consumer candidate replacement rejects old tokens before a native choose command",
+            RecommendationCandidateRace);
+    }
+
+    private static async Task RecommendationCommittedFmRace()
+    {
+        await using var f = await RecommendationRaceScene.Create();
+        var queue = await f.App.Replace("851");
+        f.App.PublishConfiguration(queue, "default", "");
+        await Drain();
+        True(f.Module.HasPlaybackFm, "committed WY FM is available to the footer");
+        var old = f.App.CurrentSnapshot;
+        string action = f.Module.PlaybackFmActionKey;
+        f.Module.CatalogFmMode = "puzzle";
+        Equal("default", f.Module.PlaybackFmMode);
+        f.App.PublishConfiguration(queue, "scene", "HOT_SONG");
+        await Drain();
+        Equal("热歌", f.Module.PlaybackModeText);
+        f.App.Emit(old);
+        await Drain();
+        Equal("HOT_SONG", f.Module.PlaybackFmScene);
+        int calls = f.App.RecommendationCalls.Count;
+        await f.Module.ChangePlaybackFmAsync("familiar", "", action);
+        Equal(calls, f.App.RecommendationCalls.Count);
+        string current = f.Module.PlaybackFmActionKey;
+        f.App.PublishConfiguration(queue, "scene", "HOT_SONG", active: false);
+        await Drain();
+        True(!f.Module.HasPlaybackFm, "inactive snapshots retire footer actions");
+        await f.Module.ChangePlaybackFmAsync("familiar", "", current);
+        Equal(calls, f.App.RecommendationCalls.Count);
+    }
+
+    private static async Task RecommendationCandidateRace()
+    {
+        await using var f = await RecommendationRaceScene.Create();
+        var queue = await f.App.Replace("861");
+        f.App.PublishCandidates(queue, "old-candidate", "862");
+        await Drain();
+        var old = f.Module.RecommendationCandidates.Single();
+        var stale = f.App.CurrentSnapshot;
+        f.App.Emit(stale); await Drain();
+        True(ReferenceEquals(old, f.Module.RecommendationCandidates.Single()), "unchanged public candidates retain row identity");
+        f.App.PublishCandidates(queue, "new-candidate", "863");
+        await Drain();
+        var current = f.Module.RecommendationCandidates.Single();
+        f.App.Emit(stale); await Drain();
+        Equal("new-candidate", f.Module.RecommendationCandidates.Single().Id);
+        int chooses = f.App.RecommendationCalls.Count(row => row.Method == "music.recommendations.choose");
+        await f.Module.ChooseRecommendationAsync(old);
+        Equal(chooses, f.App.RecommendationCalls.Count(row => row.Method == "music.recommendations.choose"));
+        await f.Module.ChooseRecommendationAsync(current);
+        var call = f.App.RecommendationCalls.Last(row => row.Method == "music.recommendations.choose");
+        Equal("consumer-race", call.Parameters.GetProperty("id").GetString());
+        Equal("new-candidate", call.Parameters.GetProperty("candidateId").GetString());
+        Equal(chooses + 1, f.App.RecommendationCalls.Count(row => row.Method == "music.recommendations.choose"));
+        f.App.PublishCandidates(queue, "new-candidate", "863", active: false); await Drain();
+        await f.Module.ChooseRecommendationAsync(current);
+        Equal(chooses + 1, f.App.RecommendationCalls.Count(row => row.Method == "music.recommendations.choose"));
     }
 
     private static async Task RecommendationRetirementRace(bool restoreOnly)
@@ -197,6 +257,8 @@ public static partial class MusicUiTests
         internal readonly List<MusicRecommendationPlaybackState> Observations = [];
         internal Action<MusicRecommendationPlaybackState>? OnObservation;
         internal int ResolveCalls;
+        internal readonly List<(string Method, JsonElement Parameters)> RecommendationCalls = [];
+        internal JsonElement CurrentSnapshot => snapshot!.Value.Clone();
         public override event Action<JsonElement>? Changed;
 
         public override IDisposable BindSelection(
@@ -263,7 +325,29 @@ public static partial class MusicUiTests
                 error = "NETWORK", batch = 1, canRetry = true, canReturn = false, requiresReconcile = false,
                 reconcileIds = Array.Empty<string>(), retryAt, queueVersion = queue.GetProperty("version").GetInt64(),
                 currentId = queue.GetProperty("currentId").GetString(), anchorId = queue.GetProperty("currentId").GetString(),
-                count = queue.GetProperty("total").GetInt32(), failures = 1
+                count = queue.GetProperty("total").GetInt32(), failures = 1,
+                mode = "default", submode = "", ruleId = "", tabTagId = ""
+            });
+            Changed?.Invoke(snapshot.Value);
+        }
+        internal void Emit(JsonElement value) => Changed?.Invoke(value);
+        internal void PublishConfiguration(JsonElement queue, string mode, string submode, bool active = true)
+        {
+            snapshot = JsonSerializer.SerializeToElement(new {
+                ok = true, id = "consumer-race", revision = ++revision, kind = "fm", platform = "wy", active,
+                mode, submode, ruleId = "", tabTagId = "", loading = false, @continue = true,
+                queueVersion = queue.GetProperty("version").GetInt64(), candidates = Array.Empty<object>()
+            });
+            Changed?.Invoke(snapshot.Value);
+        }
+        internal void PublishCandidates(JsonElement queue, string candidate, string songId, bool active = true)
+        {
+            snapshot = JsonSerializer.SerializeToElement(new {
+                ok = true, id = "consumer-race", revision = ++revision, kind = "queue", platform = "wy", active,
+                loading = false, @continue = false, canRetry = true,
+                queueVersion = queue.GetProperty("version").GetInt64(),
+                candidates = new[] { new { id = candidate,
+                    song = MusicSongFixture.Online("wy", songId, "候选歌曲" + songId, "合成歌手", "", 180) } }
             });
             Changed?.Invoke(snapshot.Value);
         }
@@ -313,21 +397,40 @@ public static partial class MusicUiTests
                 return JsonSerializer.SerializeToElement(new { ok = true,
                     items = new[] { "wy", "tx", "kg" }.Select(platform =>
                         new { platform, state = "none", generation = 0, profile = (object?)null }).ToArray() });
+            if (method.StartsWith("music.recommendations.", StringComparison.Ordinal))
+                RecommendationCalls.Add((method, JsonSerializer.SerializeToElement(parameters ?? new { })));
             if (method == "music.quality.settings.get") return await ReadQualitySettings(cancellationToken);
-            if (method == "music.songs.complete")
-                return JsonSerializer.SerializeToElement(new { ok = true,
-                    song = JsonSerializer.SerializeToElement(parameters).GetProperty("song"), failures = Array.Empty<object>() });
             if (method == "music.official.candidates")
             {
+                var request = JsonSerializer.SerializeToElement(parameters);
+                var input = JsonNode.Parse(request.GetRawText())!.AsObject();
+                LJ.Fields(input, "song quality qualityPolicySignature", "song quality qualityPolicySignature");
+                _ = NativeMusicSong.Normalize(input["song"]);
+                string level = LJ.S(input["quality"]);
+                LJ.Require(level == "auto" || MusicQualityPolicy.OfficialTypes.Contains(level), "QUALITY_UNAVAILABLE");
                 var quality = await ReadQualitySettings(cancellationToken);
-                return JsonSerializer.SerializeToElement(new { ok = true,
-                    song = JsonSerializer.SerializeToElement(parameters).GetProperty("song"),
-                    candidates = Array.Empty<object>(),
-                    qualityPolicySignature = quality.GetProperty("signature").GetString(),
-                    authorizationRequired = false });
+                if (!quality.GetProperty("ok").GetBoolean()) return quality;
+                string signature = quality.GetProperty("signature").GetString()!;
+                LJ.Require(LJ.S(input["qualityPolicySignature"]) == signature, "QUALITY_POLICY_CHANGED");
+                var policy = JsonNode.Parse(quality.GetProperty("settings").GetRawText())!.AsObject();
+                LJ.Require(level == "auto" ? MusicQualityPolicy.HasEnabled(policy) :
+                    MusicQualityPolicy.Enabled(level, policy), "QUALITY_DISABLED");
+                return JsonSerializer.SerializeToElement(new { ok = true, song = request.GetProperty("song"),
+                    candidates = Array.Empty<object>(), qualityPolicySignature = signature, authorizationRequired = false });
             }
             if (method.StartsWith("music.official.", StringComparison.Ordinal))
                 return JsonSerializer.SerializeToElement(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
+            if (method == "music.songs.complete")
+            {
+                var request = JsonSerializer.SerializeToElement(parameters);
+                var input = JsonNode.Parse(request.GetRawText())!.AsObject();
+                LJ.Fields(input, "song platforms", "song platforms");
+                _ = NativeMusicSong.Normalize(input["song"]);
+                var platforms = LJ.Array(input["platforms"]).Select(value => LJ.Text(value)).Distinct(StringComparer.Ordinal).ToArray();
+                LJ.Require(platforms.Length is > 0 and <= 5 && platforms.All(NativeMusicSong.Platforms.Contains));
+                return JsonSerializer.SerializeToElement(new { ok = true, song = request.GetProperty("song"),
+                    failures = Array.Empty<object>() });
+            }
             if (method == "music.sources.list")
                 return JsonSerializer.SerializeToElement(new { ok = true, revision = 1, items = new[] { ScriptSource() } });
             if (method == "music.sources.detail")
@@ -338,21 +441,29 @@ public static partial class MusicUiTests
             {
                 ResolveCalls++;
                 var request = JsonSerializer.SerializeToElement(parameters);
+                var input = JsonNode.Parse(request.GetRawText())!.AsObject();
+                LJ.Fields(input, "installationId platform song sourceKey quality qualityPolicySignature qualityCacheSignature",
+                    "installationId platform song quality");
+                var installation = ScriptSource();
+                string platform = request.GetProperty("platform").GetString()!;
+                True(request.GetProperty("installationId").GetString() == installation.GetProperty("installationId").GetString() &&
+                    platform == "wy" && installation.GetProperty("sites").TryGetProperty(platform, out _),
+                    "resolution uses the enabled fixture installation and its live declaration");
                 var song = request.GetProperty("song");
+                var songNode = NativeMusicSong.Normalize(input["song"]);
+                var source = songNode["sources"]!.AsArray().OfType<JsonObject>().Single(row =>
+                    LJ.S(row["source"]) == platform &&
+                    (input["sourceKey"] is null || LJ.S(row["sourceKey"]) == LJ.Text(input["sourceKey"])));
+                string sourceKey = LJ.Text(source["sourceKey"]);
                 var quality = await ReadQualitySettings(cancellationToken);
                 if (!quality.GetProperty("ok").GetBoolean()) return quality;
                 if (request.GetProperty("quality").GetString() != "320k")
                     return JsonSerializer.SerializeToElement(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
-                True(request.GetProperty("installationId").GetString() == "recommendation-consumer-race" &&
-                    request.GetProperty("platform").GetString() == "wy",
-                    "resolution uses the enabled fixture installation and its live declaration");
                 string policy = quality.GetProperty("signature").GetString()!;
-                var source = song.GetProperty("sources")[0];
-                var songNode = JsonNode.Parse(song.GetRawText())!.AsObject();
-                string cache = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v1"), ("policy", policy),
-                    ("installation", request.GetProperty("installationId")), ("platform", request.GetProperty("platform")),
-                    ("revision", 1), ("generation", Generation),
-                    ("sourceKey", source.GetProperty("sourceKey")), ("recording", source.GetProperty("musicInfo")),
+                string cache = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v2"), ("policy", policy),
+                    ("installation", installation.GetProperty("installationId")), ("platform", platform),
+                    ("content", installation.GetProperty("contentHash")), ("sourceKey", sourceKey),
+                    ("recording", NativeMusicSong.SourceData(source)),
                     ("songId", songNode["songId"]),
                     ("duration", songNode["duration"]), ("quality", request.GetProperty("quality"))));
                 if (request.TryGetProperty("qualityPolicySignature", out var expectedPolicy) && expectedPolicy.GetString() != policy)
@@ -361,16 +472,18 @@ public static partial class MusicUiTests
                     return JsonSerializer.SerializeToElement(new { ok = false, code = "QUALITY_CACHE_CHANGED" });
                 return JsonSerializer.SerializeToElement(new
                 {
-                    ok = true, installationId = request.GetProperty("installationId").GetString(),
-                    platform = request.GetProperty("platform").GetString(), generation = Generation,
+                    ok = true, installationId = installation.GetProperty("installationId").GetString(),
+                    platform, generation = installation.GetProperty("generation").GetInt64(),
+                    contentHash = installation.GetProperty("contentHash").GetString(),
                     songId = song.GetProperty("songId").GetString(), quality = request.GetProperty("quality").GetString(),
-                    sourceKey = source.GetProperty("sourceKey").GetString(),
+                    requestedQuality = request.GetProperty("quality").GetString(), expiresAt = (long?)null, sourceKey,
                     qualityPolicySignature = policy, qualityCacheSignature = cache, qualityVerified = false,
                     playbackVerified = false, url = "https://recommendation-consumer-race.invalid/synthetic.mp3",
                     headers = new Dictionary<string, string>()
                 });
             }
             if (method == "music.recommendations.get" && snapshot is { } value) return value.Clone();
+            if (method == "music.recommendations.choose" && snapshot is { } candidates) return candidates.Clone();
             // Unsupported incidental calls are real bounded errors, not an
             // invented success. Library/history remain native.
             return await library.ExecuteAsync(method, parameters, cancellationToken);

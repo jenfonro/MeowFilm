@@ -122,7 +122,7 @@ public sealed partial class MusicLibraryOwner
         LJ.Fields(p, action switch
         {
             "enter" => "nonce expectedVersion checkpoint seedEntryId songs context",
-            "append" => "nonce expectedVersion songs context selectFirst",
+            "append" => "nonce expectedVersion songs context selectIndex",
             "select" => "nonce expectedVersion id",
             _ => "nonce expectedVersion checkpoint"
         }, action is "enter" or "append" ? "nonce expectedVersion songs" :
@@ -142,19 +142,25 @@ public sealed partial class MusicLibraryOwner
         {
             // The existing queue algorithm remains the only append implementation.
             // The nonce only makes an ACK-lost append explicitly reconcilable.
-            var arguments = LJ.Obj(("songs", p["songs"]), ("context", p["context"]));
-            response = RecommendationResult(QueueCommand("music.queue.append", arguments, doc, false).Result, operation);
-            LJ.Require(p["selectFirst"] is null || LJ.IsBool(p["selectFirst"]));
-            if (LJ.B(p["selectFirst"]))
+            int offset = LJ.Array(Queue(doc)["entries"]).Count;
+            var arguments = LJ.Obj(("songs", p["songs"]), ("context", p["context"]),
+                ("expectedVersion", p["expectedVersion"]));
+            var appended = QueueCommand("music.queue.append", arguments, doc, true).Result;
+            // Full catalog appends omit IDs; this private receipt needs the new tail
+            // occurrences for selection and live recommendation provenance.
+            var entryIds = LJ.Arr(LJ.Array(Queue(doc)["entries"]).Skip(offset).Select(e => LJ.S(e?["id"])));
+            response = RecommendationResult(LJ.Merge(appended, LJ.Obj(("entryIds", entryIds))), operation);
+            if (p["selectIndex"] is not null)
             {
-                var selected = QueueCommand("music.queue.select", LJ.Obj(("id", LJ.Array(response["entryIds"])[0])), doc, false);
+                var ids = LJ.Array(response["entryIds"]);
+                int index = (int)LJ.I(p["selectIndex"], 0, ids.Count - 1);
+                var selected = QueueCommand("music.queue.select", LJ.Obj(("id", ids[index])), doc, false);
                 response = LJ.Merge(response, selected.Result);
             }
         }
         else if (action == "enter")
         {
             var songs = Songs(p, false, true);
-            LJ.Require(songs.Length <= 1000, "LIMIT");
             var context = Context(p["context"]); var old = Queue(doc);
             string seed = p["seedEntryId"] is null ? "" : LJ.Text(p["seedEntryId"]);
             var retained = seed.Length == 0 ? null : LJ.Array(old["entries"]).OfType<JsonObject>()

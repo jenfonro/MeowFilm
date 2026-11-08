@@ -934,6 +934,112 @@ public static partial class MusicNativePlatformTests
             Equal("animated", presentations["heartbeat"]);
             Equal("static", presentations["unsupported"]);
         });
+        yield return Case("home private FM defaults while rule and channel entries retain their context", async () =>
+        {
+            using var f = new Fixture(_ => Home(false, "1",
+                J(new { resourceType = "fm", resourceId = "99", name = "私人漫游", mode = "FAMILIAR", subMode = "NIGHT_EMO" }),
+                J(new { resourceType = "fm", resourceId = "99", name = "规则漫游", mode = "DEFAULT", ruleId = "9" }),
+                J(new { resourceType = "fm", resourceId = "99", name = "标签漫游", mode = "DEFAULT", tabTagId = "rap" }),
+                J(new { resourceType = "star", name = "心动模式" })), Session("wy"));
+            var entries = (await f.Catalog.HomeAsync(new("wy"))).GetProperty("entries");
+            Equal(4, entries.GetArrayLength());
+            Equal("DEFAULT", entries[0].GetProperty("action").GetProperty("mode").GetString());
+            Equal("", entries[0].GetProperty("action").GetProperty("submode").GetString());
+            Equal("rule", entries[1].GetProperty("action").GetProperty("provider").GetString());
+            Equal("9", entries[1].GetProperty("action").GetProperty("ruleId").GetString());
+            Equal("rap", entries[2].GetProperty("action").GetProperty("tabTagId").GetString());
+            Equal("favorites", entries[3].GetProperty("action").GetProperty("entry").GetString());
+            True(entries[3].GetProperty("available").GetBoolean());
+            True(entries[3].GetProperty("requiresAccount").GetBoolean());
+            Equal(4, entries.EnumerateArray().Select(e => e.GetProperty("key").GetString()).Distinct().Count());
+            using var anonymous = new Fixture(_ => Home(false, "1", J(new { resourceType = "star", name = "心动模式" })));
+            var hidden = (await anonymous.Catalog.HomeAsync(new("wy"))).GetProperty("entries")[0];
+            True(!hidden.GetProperty("available").GetBoolean() && !hidden.GetProperty("display").GetBoolean());
+            Equal("AUTH_REQUIRED", hidden.GetProperty("errorCode").GetString());
+
+            using var channel = new Fixture(req => req.RequestUri!.AbsolutePath.Contains("position/show", StringComparison.Ordinal)
+                ? Directory() : Home(false, "1",
+                    J(new { resourceType = "fm", resourceId = "99", name = "热歌漫游", mode = "SCENE_RCMD", subMode = "HOT_SONG" }),
+                    J(new { resourceType = "fm", resourceId = "99", name = "朋克漫游", mode = "SCENE_RCMD", subMode = "PUNK" }),
+                    J(new { resourceType = "fm", resourceId = "99", name = "热歌漫游", mode = "SCENE_RCMD", subMode = "HOT_SONG" }),
+                    J(new { resourceType = "fm", resourceId = "99", name = "规则漫游", mode = "DEFAULT", ruleId = "9" }),
+                    J(new { resourceType = "fm", resourceId = "99", name = "频道漫游", mode = "DEFAULT", tabTagId = "rap" })), Session("wy"));
+            var cards = (await channel.Catalog.ChannelAsync(new("wy", "feature"))).GetProperty("entries");
+            Equal(4, cards.GetArrayLength());
+            Equal("SCENE_RCMD", cards[0].GetProperty("action").GetProperty("mode").GetString());
+            Equal("HOT_SONG", cards[0].GetProperty("action").GetProperty("submode").GetString());
+            Equal("PUNK", cards[1].GetProperty("action").GetProperty("submode").GetString());
+            Equal("9", cards[2].GetProperty("action").GetProperty("ruleId").GetString());
+            Equal("rap", cards[3].GetProperty("action").GetProperty("tabTagId").GetString());
+            Equal(4, cards.EnumerateArray().Select(e => e.GetProperty("key").GetString()).Distinct().Count());
+
+            using var cube = new Fixture(req => req.RequestUri!.AbsolutePath.Contains("position/show", StringComparison.Ordinal)
+                ? Directory() : CubePage(J(new { id = "fm", componentName = "RecommendHorizontal", props = new {
+                    tab = "electronic", recommendModule = new[] { new { isDefaultTab = true, modules = new object[] {
+                        new { type = "fm", title = "场景", mode = "SCENE_RCMD", subMode = "HOT_SONG" },
+                        new { type = "fm", title = "规则", mode = "DEFAULT", ruleId = "9" },
+                        new { type = "fm", title = "显式标签", mode = "DEFAULT", tabTagId = "rap" },
+                        new { type = "fm", title = "频道标签" }
+                    } } }
+                } })), Session("wy"));
+            var cubeCards = (await cube.Catalog.ChannelAsync(new("wy", "rock"))).GetProperty("sections")[0].GetProperty("items");
+            Equal(4, cubeCards.GetArrayLength());
+            Equal("HOT_SONG", cubeCards[0].GetProperty("action").GetProperty("submode").GetString());
+            Equal("9", cubeCards[1].GetProperty("action").GetProperty("ruleId").GetString());
+            Equal("rap", cubeCards[2].GetProperty("action").GetProperty("tabTagId").GetString());
+            Equal("electronic", cubeCards[3].GetProperty("action").GetProperty("tabTagId").GetString());
+        });
+        yield return Case("channel private FM links and cube entrances retain declared modes", async () =>
+        {
+            var links = new[] {
+                J(new { resourceType = "fm", resourceId = "1", name = "私人漫游", url = "orpheus://nm/luna/privatefm" }),
+                J(new { resourceType = "fm", resourceId = "2", name = "私人漫游", action = new { url = "orpheus://privatefm" } }),
+                J(new { resourceType = "fm", resourceId = "3", name = "私人漫游", playBtnData = new { detailUrl = "orpheus://privatefm/" } })
+            };
+            using var channel = new Fixture(req => req.RequestUri!.AbsolutePath.Contains("position/show", StringComparison.Ordinal)
+                ? Directory() : Home(false, "1", links), Session("wy"));
+            var cards = (await channel.Catalog.ChannelAsync(new("wy", "feature"))).GetProperty("entries");
+            Equal(3, cards.GetArrayLength());
+            foreach (var card in cards.EnumerateArray())
+            {
+                True(card.GetProperty("available").GetBoolean());
+                Equal("fm", card.GetProperty("action").GetProperty("type").GetString());
+                Equal("DEFAULT", card.GetProperty("action").GetProperty("mode").GetString());
+                Equal("", card.GetProperty("action").GetProperty("submode").GetString());
+            }
+            var modules = links.Select(link =>
+            {
+                var module = (JsonObject)link.DeepClone(); module["type"] = "fm"; return module;
+            }).ToArray();
+            using var cube = new Fixture(req => req.RequestUri!.AbsolutePath.Contains("position/show", StringComparison.Ordinal)
+                ? Directory() : CubePage(J(new { id = "fm", componentName = "RecommendHorizontal", props = new {
+                    tab = "electronic", recommendModule = new[] { new { isDefaultTab = true, modules } }
+                } }), J(new { id = "entrances", componentName = "Grid", props = new { title = "入口" }, children = new object[] {
+                    new { componentName = "Entrance", props = new {
+                        title = "热歌漫游", url = "orpheus://privatefm", mode = "SCENE_RCMD", subMode = "HOT_SONG" } },
+                    new { componentName = "Entrance", props = new {
+                        title = "规则漫游", url = "orpheus://privatefm", ruleId = "9" } },
+                    new { componentName = "Entrance", props = new {
+                        title = "私人漫游", url = "orpheus://privatefm" } }
+                } })), Session("wy"));
+            var cubePage = await cube.Catalog.ChannelAsync(new("wy", "rock"));
+            var cubeCards = cubePage.GetProperty("sections")[0].GetProperty("items");
+            Equal(3, cubeCards.GetArrayLength());
+            foreach (var card in cubeCards.EnumerateArray())
+            {
+                True(card.GetProperty("available").GetBoolean());
+                Equal("DEFAULT", card.GetProperty("action").GetProperty("mode").GetString());
+                True(!card.GetProperty("action").TryGetProperty("tabTagId", out _));
+            }
+            var entrances = cubePage.GetProperty("sections")[1].GetProperty("items");
+            Equal(3, entrances.GetArrayLength());
+            True(entrances.EnumerateArray().All(card => card.GetProperty("available").GetBoolean()));
+            Equal("SCENE_RCMD", entrances[0].GetProperty("action").GetProperty("mode").GetString());
+            Equal("HOT_SONG", entrances[0].GetProperty("action").GetProperty("submode").GetString());
+            Equal("rule", entrances[1].GetProperty("action").GetProperty("provider").GetString());
+            Equal("9", entrances[1].GetProperty("action").GetProperty("ruleId").GetString());
+            Equal("DEFAULT", entrances[2].GetProperty("action").GetProperty("mode").GetString());
+        });
         yield return Case("home repeated cursor and cross-session continuation rejected", async () =>
         {
             using var f = new Fixture(_ => Home(true, "1", J(new { resourceType = "playlist", resourceId = "500", name = "列表" })));
@@ -1556,6 +1662,26 @@ public static partial class MusicNativePlatformTests
             using var bad = new Fixture(_ => Json(J(new { code = 500, data = Array.Empty<object>() })), Session("wy"));
             await Error("UPSTREAM_ERROR", () => bad.Catalog.FmAsync(new()));
         });
+        yield return Case("fm four main modes and HOT_SONG use the declared radio context", async () =>
+        {
+            foreach (var (mode, wire, scene) in new[] {
+                (MusicFmMode.Default, "DEFAULT", ""), (MusicFmMode.Familiar, "FAMILIAR", ""),
+                (MusicFmMode.Explore, "EXPLORE", ""), (MusicFmMode.Puzzle, "PUZZLE_MODE_RCMD", ""),
+                (MusicFmMode.Scene, "SCENE_RCMD", "HOT_SONG"), (MusicFmMode.Scene, "SCENE_RCMD", "FRANCH"),
+                (MusicFmMode.Scene, "SCENE_RCMD", "PUNK") })
+            {
+                using var f = new Fixture(req =>
+                {
+                    var (path, body) = Eapi(req);
+                    Equal("/api/v1/radio/get", path); Equal(wire, S(body["mode"])); Equal(scene, S(body["subMode"]));
+                    Equal("3", S(body["limit"]));
+                    return Json(J(new { code = 200, data = new[] { Wy("1") } }));
+                }, Session("wy"));
+                var result = await f.Catalog.FmAsync(new(Mode: mode, Submode: scene));
+                Equal(wire, result.GetProperty("context").GetProperty("mode").GetString());
+                Equal(scene, result.GetProperty("context").GetProperty("submode").GetString());
+            }
+        });
         yield return Case("fm preview and rule variants target distinct verified recipes", async () =>
         {
             using var f = new Fixture(req =>
@@ -1611,13 +1737,371 @@ public static partial class MusicNativePlatformTests
         });
         yield return Case("heartbeat keeps play-all versus play-one and no fabricated metadata", async () =>
         {
+            foreach (var entry in new[] { MusicHeartbeatEntry.Favorites, MusicHeartbeatEntry.CurrentSong })
+            {
+                var favorite = Wy("2"); favorite["name"] = "喜欢曲二"; favorite["dt"] = 231000;
+                using var f = new Fixture(req =>
+                {
+                    if (req.RequestUri!.AbsolutePath == "/weapi/user/playlist")
+                    {
+                        Weapi(req, "/weapi/user/playlist");
+                        return Json(J(new { code = 200, more = false, playlist = new[] {
+                            new { id = "11", specialType = 0, name = "我喜欢的音乐", creator = new { userId = Huge } },
+                            new { id = "12", specialType = 5, name = "其他账号喜欢", creator = new { userId = "42" } },
+                            new { id = "500", specialType = 5, name = "自定义名称", creator = new { userId = Huge } }
+                        } }));
+                    }
+                    var (path, body) = Eapi(req);
+                    if (path == "/api/v6/playlist/detail")
+                    {
+                        Equal("500", S(body["id"]));
+                        return HeartbeatPlaylist(["1", "2"], [Wy("1"), favorite]);
+                    }
+                    Equal("/api/playmode/intelligence/list", path);
+                    Equal("500", S(body["playlistId"])); Equal("1", S(body["startMusicId"])); Equal("2", S(body["count"]));
+                    Equal(entry == MusicHeartbeatEntry.Favorites ? "fromPlayAll" : "fromPlayOne", S(body["type"]));
+                    if (entry == MusicHeartbeatEntry.Favorites) True(S(body["songId"]) is "1" or "2");
+                    else Equal(Huge, S(body["songId"]));
+                    return Json(J(new { code = 200, data = new object[] {
+                        new { id = "2", alg = "liked" }, new { id = Huge, songInfo = Wy(Huge), alg = "new" }
+                    } }));
+                }, Session("wy"));
+                var result = await f.Catalog.HeartbeatAsync(new("wy", entry, entry == MusicHeartbeatEntry.CurrentSong ? Huge : null));
+                Equal("heartbeat", result.GetProperty("kind").GetString()); Equal(2, result.GetProperty("count").GetInt32());
+                Song(result.GetProperty("items")[0], "wy", "2"); Song(result.GetProperty("items")[1], "wy", Huge);
+                Equal("喜欢曲二", result.GetProperty("items")[0].GetProperty("title").GetString());
+                Equal(231d, result.GetProperty("items")[0].GetProperty("duration").GetDouble());
+                var context = result.GetProperty("context");
+                Equal("500", context.GetProperty("playlistId").GetString()); Equal("1", context.GetProperty("startMusicId").GetString());
+                Equal(entry == MusicHeartbeatEntry.Favorites, context.GetProperty("fromHome").GetBoolean());
+                Equal(2, context.GetProperty("count").GetInt32());
+                if (entry == MusicHeartbeatEntry.CurrentSong) Equal(Huge, context.GetProperty("songId").GetString());
+                foreach (var metadata in result.GetProperty("recommendations").EnumerateArray())
+                {
+                    Equal("heartbeat", metadata.GetProperty("source").GetString());
+                    Equal("aiMode", metadata.GetProperty("feedbackSource").GetString());
+                }
+                Equal("liked", result.GetProperty("recommendations")[0].GetProperty("alg").GetString());
+                Equal(3, f.Calls);
+            }
+        });
+        yield return Case("heartbeat accepts both cloud count conventions and complete tracks for both entries", async () =>
+        {
+            foreach (var entry in new[] { MusicHeartbeatEntry.Favorites, MusicHeartbeatEntry.CurrentSong })
+            foreach (var convention in new[] { "included", "additional", "cloud-only", "missing-cloud" })
+            foreach (var embeddedOnly in new[] { false, true })
+            {
+                string[] ids = ["1", "2", "3", "4"];
+                var sentHeartbeat = false;
+                using var f = new Fixture(req =>
+                {
+                    if (req.RequestUri!.AbsolutePath == "/weapi/user/playlist") return HeartbeatDirectory();
+                    if (req.RequestUri.AbsolutePath == "/weapi/v3/song/detail")
+                    {
+                        Weapi(req, "/weapi/v3/song/detail");
+                        True(convention == "additional" && !embeddedOnly);
+                        return Json(J(new { code = 200, songs = ids.Skip(2).Reverse().Select(Wy).ToArray() }));
+                    }
+                    var (path, body) = Eapi(req);
+                    if (path == "/api/v6/playlist/detail")
+                    {
+                        var list = J(new
+                        {
+                            id = "500", specialType = 5, creator = new { userId = Huge },
+                            trackCount = convention == "additional" ? 2 : convention == "cloud-only" ? 0 : 4,
+                            trackIds = ids.Select(id => new { id }).ToArray(),
+                            tracks = ids.Take(convention == "additional" && !embeddedOnly ? 2 : ids.Length).Select(Wy).ToArray()
+                        });
+                        if (convention != "missing-cloud")
+                            list["cloudTrackCount"] = convention == "cloud-only" ? 4 : 2;
+                        if (embeddedOnly) list.Remove("trackIds");
+                        return Json(J(new { code = 200, playlist = list }));
+                    }
+                    Equal("/api/playmode/intelligence/list", path); sentHeartbeat = true;
+                    Equal("4", S(body["count"])); Equal("1", S(body["startMusicId"]));
+                    Equal(entry == MusicHeartbeatEntry.Favorites ? "fromPlayAll" : "fromPlayOne", S(body["type"]));
+                    if (entry == MusicHeartbeatEntry.Favorites) True(ids.Contains(S(body["songId"]), StringComparer.Ordinal));
+                    else Equal(Huge, S(body["songId"]));
+                    return Json(J(new { code = 200, data = ids.Select(id => new { id }).ToArray() }));
+                }, Session("wy"));
+                var result = await f.Catalog.HeartbeatAsync(new("wy", entry, entry == MusicHeartbeatEntry.CurrentSong ? Huge : null));
+                True(sentHeartbeat); Equal(convention == "additional" && !embeddedOnly ? 4 : 3, f.Calls);
+                Equal(4, result.GetProperty("context").GetProperty("count").GetInt32());
+                Equal(4, result.GetProperty("items").GetArrayLength());
+                for (int i = 0; i < ids.Length; i++) Song(result.GetProperty("items")[i], "wy", ids[i]);
+                Equal(4, result.GetProperty("recommendations").GetArrayLength());
+                foreach (var metadata in result.GetProperty("recommendations").EnumerateArray())
+                    Equal("aiMode", metadata.GetProperty("feedbackSource").GetString());
+            }
+        });
+        yield return Case("heartbeat rejects invalid cloud counts and incomplete cloud membership before recommendation HTTP", async () =>
+        {
+            foreach (var entry in new[] { MusicHeartbeatEntry.Favorites, MusicHeartbeatEntry.CurrentSong })
+            foreach (var failure in new[] { "short", "intermediate", "long", "duplicate", "negative-cloud",
+                "fractional-cloud", "nonnumeric-cloud", "object-cloud", "unsafe-cloud", "missing-members" })
+            foreach (var embeddedOnly in new[] { false, true })
+            {
+                var sentHeartbeat = false;
+                using var f = new Fixture(req =>
+                {
+                    if (req.RequestUri!.AbsolutePath == "/weapi/user/playlist") return HeartbeatDirectory();
+                    var path = Eapi(req).Path;
+                    if (path == "/api/playmode/intelligence/list") sentHeartbeat = true;
+                    Equal("/api/v6/playlist/detail", path);
+                    string[] ids = failure switch
+                    {
+                        "short" => ["1"], "intermediate" => ["1", "2", "3"],
+                        "long" => ["1", "2", "3", "4", "5"],
+                        "duplicate" => ["1", "2", "3", "3"],
+                        _ => ["1", "2", "3", "4"]
+                    };
+                    var list = J(new
+                    {
+                        id = "500", specialType = 5, creator = new { userId = Huge },
+                        trackCount = failure == "missing-members" ? 0 :
+                            failure.EndsWith("-cloud", StringComparison.Ordinal) ? 4 : 2, cloudTrackCount = 2,
+                        trackIds = ids.Select(id => new { id }).ToArray(), tracks = ids.Select(Wy).ToArray()
+                    });
+                    list["cloudTrackCount"] = failure switch
+                    {
+                        "negative-cloud" => JsonValue.Create(-1),
+                        "fractional-cloud" => JsonValue.Create(1.5),
+                        "nonnumeric-cloud" => JsonValue.Create("invalid"),
+                        "object-cloud" => new JsonObject(),
+                        "unsafe-cloud" => JsonValue.Create(9007199254740992L),
+                        _ => JsonValue.Create(2)
+                    };
+                    if (embeddedOnly) list.Remove("trackIds");
+                    if (failure == "missing-members") { list.Remove("trackIds"); list.Remove("tracks"); }
+                    return Json(J(new { code = 200, playlist = list }));
+                }, Session("wy"));
+                var expected = failure == "duplicate" || !embeddedOnly && (failure is "short" or "intermediate" or "long")
+                    ? "INCOMPLETE_PLAYLIST" : "INVALID_RESPONSE";
+                await Error(expected,
+                    () => f.Catalog.HeartbeatAsync(new("wy", entry, entry == MusicHeartbeatEntry.CurrentSong ? Huge : null)));
+                True(!sentHeartbeat); Equal(2, f.Calls);
+            }
+        });
+        yield return Case("heartbeat resolves the complete favorites membership and retains the entire first batch", async () =>
+        {
+            var ids = Enumerable.Range(1, 205).Select(i => i.ToString()).ToArray();
+            var detailCalls = 0;
+            var directoryCalls = 0;
+            var nameless = Wy("1"); nameless["name"] = "";
             using var f = new Fixture(req =>
             {
-                var (path, body) = Eapi(req); Equal("/api/playmode/intelligence/list", path);
-                Equal("fromPlayAll", S(body["type"])); Equal(Huge, S(body["playlistId"]));
-                return Json(J(new { code = 200, data = new[] { new { songInfo = Wy("1"), alg = "fixture" } } }));
+                if (req.RequestUri!.AbsolutePath == "/weapi/user/playlist")
+                {
+                    directoryCalls++;
+                    if (directoryCalls == 1)
+                        return Json(J(new { code = 200, more = true, playlist = Enumerable.Range(1000, 100).Select(i =>
+                            new { id = i.ToString(), specialType = 0, creator = new { userId = Huge } }).ToArray() }));
+                    Equal(2, directoryCalls); return HeartbeatDirectory();
+                }
+                if (req.RequestUri.AbsolutePath == "/weapi/v3/song/detail")
+                {
+                    Weapi(req, "/weapi/v3/song/detail");
+                    var chunk = new[] { "1" }.Concat(ids.Skip(2)).Chunk(100).ElementAt(detailCalls++);
+                    return Json(J(new { code = 200, songs = chunk.Select(id => id == "1" ? nameless : Wy(id)).ToArray() }));
+                }
+                var (path, body) = Eapi(req);
+                if (path == "/api/v6/playlist/detail") return HeartbeatPlaylist(ids, [nameless, Wy("2")]);
+                Equal("/api/playmode/intelligence/list", path);
+                Equal("205", S(body["count"])); Equal("2", S(body["startMusicId"]));
+                True(ids.Skip(1).Contains(S(body["songId"]), StringComparer.Ordinal));
+                return Json(J(new { code = 200, data = ids.Skip(1).Select(id => new { id, alg = "complete" }).ToArray() }));
             }, Session("wy"));
-            Equal("heartbeat", (await f.Catalog.HeartbeatAsync(new("wy", Huge, "1", "1", true))).GetProperty("kind").GetString());
+            var result = await f.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.Favorites));
+            Equal(204, result.GetProperty("items").GetArrayLength()); Equal(204, result.GetProperty("recommendations").GetArrayLength());
+            Equal(205, result.GetProperty("context").GetProperty("count").GetInt32());
+            Song(result.GetProperty("items")[203], "wy", "205");
+            Equal(3, detailCalls); Equal(2, directoryCalls); Equal(7, f.Calls);
+        });
+        yield return Case("heartbeat fills exact favorite identities and real metadata from unordered detail rows", async () =>
+        {
+            var nameless = Wy("1"); nameless["name"] = " ";
+            var repaired = Wy("1"); repaired["name"] = ""; repaired["title"] = "详情中的喜欢曲一"; repaired["dt"] = 201000;
+            var existing = Wy(Huge); existing["name"] = "已有喜欢曲"; existing["dt"] = 202000;
+            var fetched = Wy("3"); fetched["name"] = "详情中的喜欢曲三"; fetched["dt"] = 203000;
+            using var f = new Fixture(req =>
+            {
+                var route = req.RequestUri!.AbsolutePath;
+                if (route == "/weapi/user/playlist") return HeartbeatDirectory();
+                if (route == "/weapi/v3/song/detail")
+                {
+                    Weapi(req, route);
+                    return Json(J(new { code = 200, songs = new[] { fetched, repaired } }));
+                }
+                var (path, body) = Eapi(req);
+                if (path == "/api/v6/playlist/detail")
+                    return HeartbeatPlaylist(["1", Huge, "3"], [existing, nameless]);
+                Equal("/api/playmode/intelligence/list", path);
+                Equal("1", S(body["startMusicId"])); Equal("3", S(body["count"]));
+                True(S(body["songId"]) == "1" || S(body["songId"]) == Huge || S(body["songId"]) == "3");
+                return Json(J(new { code = 200, data = new[] {
+                    new { id = "3", alg = "third" }, new { id = Huge, alg = "existing" }, new { id = "1", alg = "first" }
+                } }));
+            }, Session("wy"));
+            var result = await f.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.Favorites));
+            var items = result.GetProperty("items");
+            Equal(3, items.GetArrayLength());
+            Song(items[0], "wy", "3"); Song(items[1], "wy", Huge); Song(items[2], "wy", "1");
+            Equal("详情中的喜欢曲三", items[0].GetProperty("title").GetString());
+            Equal("已有喜欢曲", items[1].GetProperty("title").GetString());
+            Equal("详情中的喜欢曲一", items[2].GetProperty("title").GetString());
+            Equal(203d, items[0].GetProperty("duration").GetDouble());
+            Equal(202d, items[1].GetProperty("duration").GetDouble());
+            Equal(201d, items[2].GetProperty("duration").GetDouble());
+            Equal("third", result.GetProperty("recommendations")[0].GetProperty("alg").GetString());
+            Equal(4, f.Calls);
+        });
+        yield return Case("heartbeat validates favorite metadata before choosing seeds and client handoff", async () =>
+        {
+            foreach (var embedded in new[] { true, false })
+                foreach (var defect in new[] { "duration", "album", "identity" })
+                {
+                    var row = Wy("1");
+                    if (defect == "duration") row["dt"] = -1;
+                    else if (defect == "album") row["al"]!["id"] = "invalid";
+                    else row["songInfo"] = Wy("2");
+                    using var f = new Fixture(req =>
+                    {
+                        if (req.RequestUri!.AbsolutePath == "/weapi/user/playlist") return HeartbeatDirectory();
+                        HttpResponseMessage response;
+                        if (req.RequestUri.AbsolutePath == "/weapi/v3/song/detail")
+                            response = Json(J(new { code = 200, songs = new[] { row } }));
+                        else
+                        {
+                            Equal("/api/v6/playlist/detail", Eapi(req).Path);
+                            response = HeartbeatPlaylist(["1"], embedded ? [row] : []);
+                            if (!embedded) return response;
+                        }
+                        response.Headers.TryAddWithoutValidation("Set-Cookie", "NMTID=SYNTHETIC_INVALID_FAVORITE; Domain=music.163.com");
+                        return response;
+                    }, Session("wy"));
+                    var before = await f.Clients.Owner.AcquireWyAsync();
+                    await Error(defect == "identity" ? "IDENTITY_MISMATCH" : "INVALID_RESPONSE",
+                        () => f.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.Favorites)));
+                    True(ReferenceEquals(before, await f.Clients.Owner.AcquireWyAsync()) && f.Clients.Owner.IsCurrent(before));
+                    Equal(embedded ? 2 : 3, f.Calls);
+                }
+        });
+        yield return Case("heartbeat fails empty unavailable mismatched and unresolvable favorites without inventing songs", async () =>
+        {
+            foreach (var entry in new[] { MusicHeartbeatEntry.Favorites, MusicHeartbeatEntry.CurrentSong })
+            foreach (var failure in new[] { "missing-favorites", "empty", "no-title", "wrong-owner", "incomplete",
+                "unresolved", "wrong-song", "missing-response-title" })
+            {
+                var nameless = Wy("1"); nameless["name"] = "";
+                var sentHeartbeat = false;
+                using var f = new Fixture(req =>
+                {
+                    if (req.RequestUri!.AbsolutePath == "/weapi/user/playlist")
+                        return failure == "missing-favorites" ? Json(J(new { code = 200, more = false, playlist = Array.Empty<object>() })) : HeartbeatDirectory();
+                    if (req.RequestUri.AbsolutePath == "/weapi/v3/song/detail")
+                        return Json(J(new { code = 200, songs = new[] { nameless } }));
+                    var path = Eapi(req).Path;
+                    if (path == "/api/v6/playlist/detail")
+                        return failure switch
+                        {
+                            "empty" => HeartbeatPlaylist([], []),
+                            "no-title" => HeartbeatPlaylist(["1"], [nameless]),
+                            "wrong-owner" => HeartbeatPlaylist(["1"], [Wy("1")], "42"),
+                            "incomplete" => Json(J(new { code = 200, playlist = new { id = "500", specialType = 5,
+                                creator = new { userId = Huge }, trackCount = 2, trackIds = new[] { new { id = "1" } } } })),
+                            _ => HeartbeatPlaylist(["1"], [Wy("1")])
+                        };
+                    Equal("/api/playmode/intelligence/list", path); sentHeartbeat = true;
+                    return Json(J(new { code = 200, data = new[] { failure switch {
+                        "unresolved" => J(new { id = "2" }),
+                        "wrong-song" => J(new { id = "1", songInfo = Wy("2") }),
+                        _ => J(new { id = "1", songInfo = nameless })
+                    } } }));
+                }, Session("wy"));
+                await Error(failure switch
+                {
+                    "missing-favorites" or "empty" or "no-title" => "NOT_FOUND",
+                    "wrong-owner" or "wrong-song" => "IDENTITY_MISMATCH",
+                    "incomplete" => "INCOMPLETE_PLAYLIST", _ => "INVALID_RESPONSE"
+                }, () => f.Catalog.HeartbeatAsync(new("wy", entry, entry == MusicHeartbeatEntry.CurrentSong ? Huge : null)));
+                Equal(failure is "unresolved" or "wrong-song" or "missing-response-title", sentHeartbeat);
+            }
+            using var invalid = new Fixture(_ => throw new InvalidOperationException("Invalid input dispatched"), Session("wy"));
+            await Error("INVALID_REQUEST", () => invalid.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.CurrentSong)));
+            await Error("INVALID_REQUEST", () => invalid.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.Favorites, "1")));
+            await Error("INVALID_REQUEST", () => invalid.Catalog.HeartbeatAsync(new("wy", (MusicHeartbeatEntry)99)));
+            Equal(0, invalid.Calls);
+        });
+        yield return Case("heartbeat rejects incomplete duplicate and foreign favorite members at their read boundary", async () =>
+        {
+            foreach (var failure in new[] { "duplicate-member", "foreign-track", "duplicate-track", "missing-detail",
+                "duplicate-detail", "foreign-detail", "directory-owner", "detail-owner" })
+            {
+                using var f = new Fixture(req =>
+                {
+                    if (req.RequestUri!.AbsolutePath == "/weapi/user/playlist")
+                        return failure == "directory-owner"
+                            ? Json(J(new { code = 200, more = false, playlist = new[] {
+                                new { id = "500", specialType = 5, userId = "42", creator = new { userId = Huge } }
+                            } })) : HeartbeatDirectory();
+                    if (req.RequestUri.AbsolutePath == "/weapi/v3/song/detail")
+                        return Json(J(new { code = 200, songs = failure switch {
+                            "missing-detail" => Array.Empty<JsonObject>(),
+                            "duplicate-detail" => new[] { Wy("1"), Wy("1") },
+                            _ => new[] { Wy("2") }
+                        } }));
+                    Equal("/api/v6/playlist/detail", Eapi(req).Path);
+                    return failure switch
+                    {
+                        "duplicate-member" => HeartbeatPlaylist(["1", "1"], []),
+                        "foreign-track" => HeartbeatPlaylist(["1"], [Wy("2")]),
+                        "duplicate-track" => HeartbeatPlaylist(["1"], [Wy("1"), Wy("1")]),
+                        "detail-owner" => Json(J(new { code = 200, playlist = new {
+                            id = "500", specialType = 5, creator = new { userId = Huge }, userId = "42",
+                            trackCount = 1, trackIds = new[] { new { id = "1" } }, tracks = new[] { Wy("1") }
+                        } })),
+                        "duplicate-detail" => HeartbeatPlaylist(["1", "2"], []),
+                        _ => HeartbeatPlaylist(["1"], [])
+                    };
+                }, Session("wy"));
+                await Error(failure is "duplicate-member" or "missing-detail" ? "INCOMPLETE_PLAYLIST" : "IDENTITY_MISMATCH",
+                    () => f.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.Favorites)));
+                Equal(failure == "directory-owner" ? 1 : failure.EndsWith("-detail", StringComparison.Ordinal) ? 3 : 2, f.Calls);
+            }
+        });
+        yield return Case("heartbeat account invalidation between directory detail and response fences the same lease", async () =>
+        {
+            foreach (var stage in new[] { "/weapi/user/playlist", "/eapi/v6/playlist/detail", "/weapi/v3/song/detail",
+                "/eapi/playmode/intelligence/list" })
+            {
+                var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                CancellationToken transportToken = default;
+                using var f = new Fixture(async (req, ct) =>
+                {
+                    var path = req.RequestUri!.AbsolutePath;
+                    if (path == stage) { transportToken = ct; entered.TrySetResult(); await release.Task; }
+                    return path switch
+                    {
+                        "/weapi/user/playlist" => HeartbeatDirectory(),
+                        "/eapi/v6/playlist/detail" => HeartbeatPlaylist(["1"], []),
+                        "/weapi/v3/song/detail" => Json(J(new { code = 200, songs = new[] { Wy("1") } })),
+                        "/eapi/playmode/intelligence/list" => Json(J(new { code = 200, data = new[] { new { id = "1" } } })),
+                        _ => throw new InvalidOperationException("Unexpected heartbeat route")
+                    };
+                }, Session("wy"));
+                var work = f.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.Favorites));
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                try
+                {
+                    f.Sessions.Current = Session("wy", 2); f.Catalog.Invalidate("wy");
+                    True(transportToken.IsCancellationRequested);
+                }
+                finally { release.TrySetResult(); }
+                await Error("STALE_SESSION", () => work);
+                Equal(stage switch { "/weapi/user/playlist" => 1, "/eapi/v6/playlist/detail" => 2,
+                    "/weapi/v3/song/detail" => 3, _ => 4 }, f.Calls);
+            }
         });
         yield return Case("queue recommendations numeric array lossless and current must be in queue", async () =>
         {
@@ -1625,10 +2109,63 @@ public static partial class MusicNativePlatformTests
             {
                 var (path, body) = Eapi(req); Equal("/api/homepage/more/rcmd/song", path);
                 Equal("[" + Huge + "]", S(body["songIds"])); Equal(Huge, S(body["currentPlaySongId"]));
+                Equal("curlist_more_rcmd", S(body["source"])); True(body["offset"] is null);
                 return Json(J(new { code = 200, data = new { songList = new[] { Wy("1") } } }));
             }, Session("wy"));
-            Equal(1, (await f.Catalog.QueueRecommendationsAsync(new("wy", [Huge], Huge))).GetProperty("count").GetInt32());
+            var result = await f.Catalog.QueueRecommendationsAsync(new("wy", [Huge], Huge));
+            Equal(1, result.GetProperty("count").GetInt32()); True(result.GetProperty("hasMore").GetBoolean());
+            Equal("queue-recommendations", result.GetProperty("recommendations")[0].GetProperty("source").GetString());
+            Equal("moreRcmd", result.GetProperty("recommendations")[0].GetProperty("feedbackSource").GetString());
             await Error("INVALID_REQUEST", () => f.Catalog.QueueRecommendationsAsync(new("wy", ["1"], "2")));
+        });
+        yield return Case("queue recommendations preserve complete queues maps and explicit exhaustion", async () =>
+        {
+            var ids = Enumerable.Range(1, 1201).Select(i => i.ToString()).Append("1").Append(Huge).ToArray();
+            foreach (var encoded in new[] { false, true })
+            {
+                using var f = new Fixture(req =>
+                {
+                    var (path, body) = Eapi(req);
+                    Equal("/api/homepage/more/rcmd/song", path); Equal("[" + string.Join(",", ids) + "]", S(body["songIds"]));
+                    Equal(Huge, S(body["currentPlaySongId"])); Equal("curlist_more_rcmd", S(body["source"]));
+                    var rows = Enumerable.Range(2000, 1001).Select(i => Wy(i.ToString())).ToArray();
+                    rows[0]["alg"] = "inline"; rows[1]["alg"] = "inline-only";
+                    var alg = J(new Dictionary<string, string> { ["2000"] = "mapped", ["3000"] = "tail-alg" });
+                    var source = J(new Dictionary<string, string> { ["2000"] = "desktopSource", ["3000"] = "tailSource" });
+                    return Json(J(new { code = 200, data = new {
+                        songList = rows, algMap = encoded ? (object)alg.ToJsonString() : alg,
+                        sourceMap = encoded ? (object)source.ToJsonString() : source, hasMore = false
+                    } }));
+                }, Session("wy"));
+                var result = await f.Catalog.QueueRecommendationsAsync(new("wy", ids, Huge));
+                Equal(1001, result.GetProperty("items").GetArrayLength()); True(!result.GetProperty("hasMore").GetBoolean());
+                Equal(ids.Length, result.GetProperty("context").GetProperty("songIds").GetArrayLength());
+                var first = result.GetProperty("recommendations")[0]; var last = result.GetProperty("recommendations")[1000];
+                Equal("mapped", first.GetProperty("alg").GetString()); Equal("desktopSource", first.GetProperty("feedbackSource").GetString());
+                Equal("queue-recommendations", first.GetProperty("source").GetString());
+                Equal("tail-alg", last.GetProperty("alg").GetString()); Equal("tailSource", last.GetProperty("feedbackSource").GetString());
+                Equal("inline-only", result.GetProperty("recommendations")[1].GetProperty("alg").GetString());
+                Equal("moreRcmd", result.GetProperty("recommendations")[1].GetProperty("feedbackSource").GetString());
+            }
+        });
+        yield return Case("queue recommendations distinguish absent exhaustion from invalid maps and metadata", async () =>
+        {
+            foreach (var count in new[] { 0, 5 })
+                foreach (var more in new bool?[] { null, true, false })
+                {
+                    var data = J(new { songList = Enumerable.Range(1, count).Select(i => Wy(i.ToString())).ToArray() });
+                    if (more is not null) data["hasMore"] = more.Value;
+                    using var f = new Fixture(_ => Json(J(new { code = 200, data })), Session("wy"));
+                    var result = await f.Catalog.QueueRecommendationsAsync(new("wy", ["1"], "1"));
+                    Equal(more ?? count > 0, result.GetProperty("hasMore").GetBoolean());
+                    Equal(count, result.GetProperty("count").GetInt32());
+                }
+            foreach (var field in new[] { "algMap", "sourceMap", "hasMore" })
+            {
+                var data = J(new { songList = new[] { Wy("1") } }); data[field] = "invalid";
+                using var f = new Fixture(_ => Json(J(new { code = 200, data })), Session("wy"));
+                await Error("INVALID_RESPONSE", () => f.Catalog.QueueRecommendationsAsync(new("wy", ["1"], "1")));
+            }
         });
         yield return Case("album verified endpoint and exact identity", async () =>
         {
@@ -2577,6 +3114,8 @@ public static partial class MusicNativePlatformTests
             if (path != route)
                 return path switch
                 {
+                    "/weapi/user/playlist" when branch == "heartbeat" => HeartbeatDirectory(),
+                    "/eapi/v6/playlist/detail" when branch == "heartbeat" => HeartbeatPlaylist(["1"], [Wy("1")]),
                     directory => Directory(), cube => Cube(),
                     tags => Json(J(new { code = 200, data = new { algTagInfos = Array.Empty<object>() } })),
                     feed => Json(J(new { code = 200, data = new { songs = new[] { Wy("1") }, hasMore = false } })),
@@ -2635,7 +3174,7 @@ public static partial class MusicNativePlatformTests
             "home" => f.Catalog.HomeAsync(new("wy")), "directory" => f.Catalog.ChannelsAsync(new("wy")),
             "fm" => f.Catalog.FmAsync(new()), "fm-rule" => f.Catalog.FmAsync(new(RuleId: "123")),
             "fm-preview" => f.Catalog.FmAsync(new(Preview: true, RuleId: "123")),
-            "similar" => f.Catalog.SimilarAsync(new("wy", ["1"])), "heartbeat" => f.Catalog.HeartbeatAsync(new("wy", "500", "1", "1")),
+            "similar" => f.Catalog.SimilarAsync(new("wy", ["1"])), "heartbeat" => f.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.CurrentSong, "1")),
             "queue" => f.Catalog.QueueRecommendationsAsync(new("wy", ["1"], "1")), "personal" => f.Catalog.PersonalPlaylistsAsync(new("wy")),
             "rankings" => f.Catalog.ChannelAsync(new("wy", "chart")), "new-songs" => f.Catalog.ChannelAsync(new("wy", "newsong")),
             "square" => f.Catalog.ChannelAsync(new("wy", "playlist")), "artists" => f.Catalog.ChannelAsync(new("wy", "artist")),
@@ -2663,6 +3202,7 @@ public static partial class MusicNativePlatformTests
         else True(ReferenceEquals(before, after) && f.Clients.Owner.IsCurrent(before));
         Equal(branch switch
         {
+            "heartbeat" => 3,
             "rankings" or "new-songs" or "square" or "artists" => 2,
             "cube-layout" => valid ? 4 : 2, "cube-tags" => valid ? 4 : 3, "cube-feed" => 4,
             "vip-songs" or "vip-rankings" => 3, _ => 1
@@ -2834,6 +3374,13 @@ public static partial class MusicNativePlatformTests
         trackIds = ids.Select(id => new { id }).ToArray() } }));
     private static HttpResponseMessage WyList(string[] ids, JsonObject[] tracks) => Json(J(new { code = 200, playlist = new { id = "500", name = "列表", trackCount = ids.Length,
         trackIds = ids.Select(id => new { id }).ToArray(), tracks } }));
+    private static HttpResponseMessage HeartbeatDirectory() => Json(J(new { code = 200, more = false, playlist = new[] {
+        new { id = "500", name = "合成喜欢歌单", specialType = 5, creator = new { userId = Huge } }
+    } }));
+    private static HttpResponseMessage HeartbeatPlaylist(string[] ids, JsonObject[] tracks, string owner = Huge) => Json(J(new {
+        code = 200, playlist = new { id = "500", name = "合成喜欢歌单", specialType = 5, creator = new { userId = owner },
+            trackCount = ids.Length, trackIds = ids.Select(id => new { id }).ToArray(), tracks }
+    }));
     private static HttpResponseMessage Home(bool more, string cursor, params JsonObject[] resources) => Json(J(new { code = 200, data = new { cursor, hasMore = more,
         blocks = new[] { new { positionCode = "PLAYLIST", dslData = new { blockResource = new { header = new { title = "推荐" }, items = resources } } } } } }));
     private static HttpResponseMessage Directory() => Json(J(new { code = 200, data = new { channels = new[] {

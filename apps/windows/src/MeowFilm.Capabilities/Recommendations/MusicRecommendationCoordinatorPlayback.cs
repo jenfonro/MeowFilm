@@ -21,14 +21,17 @@ public sealed partial class MusicRecommendationCoordinator
             return MaybeBeginLocked(s) ?? Task.CompletedTask;
         }
     }
-    private Task? MaybeBeginLocked(Session s)
+    private Task? MaybeBeginLocked(Session s, bool naturalEnd = false, CancellationToken caller = default)
     {
-        if (!CurrentLocked(s) || s.Loading || s.Returning || s.Pending is not null || !s.Continue || s.InitialPending ||
+        if (!CurrentLocked(s) || s.Loading || s.Returning || s.Pending is not null || !s.Continue ||
+            s.InitialPending && s.Config.Kind != "queue" || s.Exhausted ||
             s.Failures >= 2 || s.RetryAt > clock.GetUtcNow() || s.Queue is not { } q ||
-            s.Playback is not { IsPlaying: true, HasStarted: true, MediaReady: true, IsLocal: true } state ||
+            s.Playback is not { HasStarted: true, MediaReady: true, IsLocal: true } state ||
+            !state.IsPlaying && !naturalEnd ||
             state.EntryId != q.CurrentId || q.Tail.Length == 0 || q.CurrentId != q.Tail) return null;
         if (s.Config.Kind != "fm" && !s.Attempted.Add(q.Tail)) return null;
-        return BeginBatchLocked(s, false, true);
+        if (s.Candidates is { } batch) return BeginCandidatesLocked(s, batch, null, caller);
+        return BeginBatchLocked(s, false, true, caller);
     }
     public async Task<bool> TryAdvanceAsync(string entryId, bool naturalEnd, bool play,
         CancellationToken cancellationToken = default)
@@ -40,11 +43,16 @@ public sealed partial class MusicRecommendationCoordinator
                 s.Queue?.CurrentId != entryId && !(s.Config.Kind == "fm" && s.Batch == 0 && s.Loading) ||
                 s.Config.Kind != "fm" && !s.Continue) return false;
             if (s.Play != play) { s.Play = play; s.MediaIntent++; }
-            if (s.Advance is Task<bool> running && !running.IsCompleted) next = running;
+            if (s.Advance is Task<bool> running && !running.IsCompleted && s.AdvanceNavigation == s.Navigation) next = running;
             else
             {
                 int navigation = ++s.Navigation; long epoch = queue.Epoch;
-                next = LaunchLocked(() => AdvanceAsync(s, entryId, naturalEnd, navigation, epoch, cancellationToken));
+                var previous = s.Advance; s.AdvanceNavigation = navigation;
+                next = LaunchLocked(async () =>
+                {
+                    await previous.ConfigureAwait(false);
+                    return await AdvanceAsync(s, entryId, naturalEnd, navigation, epoch, cancellationToken).ConfigureAwait(false);
+                });
                 s.Advance = next;
             }
         }
@@ -62,19 +70,35 @@ public sealed partial class MusicRecommendationCoordinator
                 if (!NavigationCurrentLocked(s, navigation, epoch) || before.CurrentId != entryId) return true;
                 s.Queue = before;
                 if (s.Config.Kind != "fm" && before.CurrentId != before.Tail) return false;
-                if (s.Batch == 0) flight = s.Flight;
+                if (s.InitialPending && (s.Config.Kind != "queue" || s.Loading))
+                { s.Waiting = true; PublishLocked(); flight = s.Flight; }
                 else if (before.CurrentId == before.Tail)
                 {
                     s.Waiting = true; PublishLocked();
-                    flight = s.Loading ? s.Flight :
+                    bool loading = s.Loading;
+                    flight = loading ? s.Flight :
+                        s.Config.Kind == "queue" ? MaybeBeginLocked(s, naturalEnd, token) :
+                        s.Exhausted ||
                         naturalEnd && (s.RetryAt > clock.GetUtcNow() || s.Failures >= 2 ||
                             s.Config.Kind != "fm" && s.Attempted.Contains(before.Tail)) ? null :
                         BeginBatchLocked(s, false, naturalEnd, token);
-                    if (s.Config.Kind != "fm") s.Attempted.Add(before.Tail);
+                    if (!loading && flight is not null && s.Config.Kind is not ("fm" or "queue")) s.Attempted.Add(before.Tail);
                 }
                 else flight = null;
             }
-            if (flight is not null) await flight.ConfigureAwait(false);
+            while (flight is not null)
+            {
+                await flight.ConfigureAwait(false);
+                lock (gate)
+                {
+                    if (!NavigationCurrentLocked(s, navigation, epoch)) return true;
+                    // A preview or a cancelled prior flight can hand the same
+                    // playing tail to its actual automatic append in finally.
+                    if (s.Config.Kind != "queue") flight = null;
+                    else if (s.Loading) flight = !ReferenceEquals(s.Flight, flight) ? s.Flight : null;
+                    else flight = MaybeBeginLocked(s, naturalEnd, token);
+                }
+            }
             MusicRecommendationSelection? selection = null;
             await queue.InLaneAsync(async (owner, ct) =>
             {
@@ -124,6 +148,10 @@ public sealed partial class MusicRecommendationCoordinator
     }
     private bool NavigationCurrentLocked(Session s, int navigation, long epoch) =>
         CurrentLocked(s) && !s.Returning && s.Navigation == navigation && queue.Epoch == epoch;
+    private static bool PlayingTailLocked(Session s) =>
+        s.Queue is { } q && q.CurrentId.Length > 0 && q.CurrentId == q.Tail &&
+        s.Playback is { IsPlaying: true, HasStarted: true, MediaReady: true, IsLocal: true } state &&
+        state.EntryId == q.CurrentId;
     private MusicRecommendationSelection SelectionLocked(Session s, string entryId, bool play, bool automatic,
         bool restoreOnly, MusicRecommendationPlaybackAction action = MusicRecommendationPlaybackAction.Select, bool inactive = false)
     {

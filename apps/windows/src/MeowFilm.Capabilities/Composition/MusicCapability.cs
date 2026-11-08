@@ -523,6 +523,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             if (selected is not null) await QueueCall("music.queue.playCollection", new { id = selected.Id, ifRevision = selected.Revision, index });
             else await QueueCall("music.queue.replace", new { songs = new[] { song.Raw }, index = 0, context = queueContext });
             await ReadQueue(lifetime.Token); await StartCurrent(lifetime.Token);
+            _ = TrackRecommendation(StartQueueRecommendationPreviewAsync());
         });
     }
     public Task PlayCollectionAsync()
@@ -783,6 +784,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             if (args.PropertyName != nameof(IMusicPlayback.Volume)) SyncChorus();
             if (args.PropertyName == nameof(IMusicPlayback.DurationSeconds)) CheckMediaDuration();
             playbackPresentation.Refresh();
+            Changed(nameof(CanHeartbeatCurrent));
         }
     }
     private void PlaybackStarted(object? sender, EventArgs args)

@@ -184,7 +184,14 @@
       <art:ArtworkImage Address="{Binding Cover}"/>
       <Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=PlaylistHost}"/>
      </Grid>
-     <TextBlock Text="{Binding Title}" Style="{StaticResource Catalog.PlaylistTitle}" Margin="0,8,0,0" Height="40" TextWrapping="Wrap"/>
+     <Grid Margin="0,8,0,0">
+      <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <TextBlock Text="{Binding Title}" Style="{StaticResource Catalog.PlaylistTitle}" Height="40" TextWrapping="Wrap"/>
+      <Button Grid.Column="1" Content="心动" Tag="{Binding}" Click="HeartbeatFavorites_Click"
+              Style="{StaticResource MeowFilm.QuietButton}" Margin="4,0,0,0" Padding="6,4"
+              VerticalAlignment="Top" Visibility="{Binding CanHeartbeatFavorites,Converter={StaticResource Visible}}"
+              AutomationProperties.Name="从云喜欢开始心动"/>
+     </Grid>
     </StackPanel>
    </Button>
   </DataTemplate>
