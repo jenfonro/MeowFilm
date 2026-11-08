@@ -196,6 +196,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private func install(_ model: MusicViewModel) {
         guard main == nil, model.isAvailable, !model.isClosed else { return }
         let appearance = assembly.appearance
+        let filmHome = FilmHomeModel(sources: assembly.filmSources)
         let factories: [@MainActor () -> UIViewController] = [
             { [weak self] in
                 guard let self else { return UIViewController() }
@@ -209,7 +210,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             },
             { [weak self] in
                 guard let self else { return UIViewController() }
-                let page = FilmHomeViewController(model: FilmHomeModel(sources: self.assembly.filmSources),
+                let page = FilmHomeViewController(model: filmHome,
                                                   images: self.assembly.filmImages,
                                                   themeProvider: appearance)
                 page.onSelectItem = { [weak self] in self?.showFilm($0) }
@@ -229,7 +230,13 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         ]
         let page = MeowfilmPrimaryShellViewController(
             pageFactories: factories, themeProvider: appearance,
-            openMenu: { [weak self] in self?.root.showSidebar() },
+            openMenu: { [weak self] in
+                guard let self, let main = self.main else { return }
+                let content: MeowfilmSidebarContent = main.selectedPage == .film
+                    ? .film(home: filmHome, settings: self.assembly.filmSettings)
+                    : .music(source: MusicHomeSourceSettingsModel(model: model), selectedPage: main.selectedPage)
+                self.root.showSidebar(content: content)
+            },
             openSearch: { [weak self] in self?.showSearch() }
         )
         page.onSelectionChanged = { [weak self] selected, duration in

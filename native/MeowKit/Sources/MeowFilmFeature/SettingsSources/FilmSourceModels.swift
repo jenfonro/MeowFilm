@@ -135,6 +135,10 @@ public struct FilmSourceSnapshot: Equatable, Sendable {
     public let cats: [FilmCatSource]
     public let videos: [FilmVideoSource]
     public let runtimeError: String?
+    /// Sidebar presentation keeps the directory's order and exact source identities.
+    public var homeVideos: [FilmVideoSource] {
+        videos.filter { $0.options.enabled && $0.options.homeVisible }
+    }
     public init(cats: [FilmCatSource] = [], videos: [FilmVideoSource] = [], runtimeError: String? = nil) {
         self.cats = cats; self.videos = videos; self.runtimeError = runtimeError
     }

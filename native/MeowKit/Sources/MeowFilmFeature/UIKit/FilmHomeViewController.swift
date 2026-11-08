@@ -7,10 +7,8 @@ import MeowUI
 public final class FilmHomeViewController: PageViewController, UICollectionViewDelegate {
     public var onSelectCategory: ((FilmCategoryModel) -> Void)?
     public var onSelectItem: ((FilmItem) -> Void)?
-    public var sourceSwitcherView: UIView { sourceButton }
     private let model: FilmHomeModel
     private let images: ArtworkImages
-    private let sourceButton = UIButton(type: .system)
     private let activity = UIActivityIndicatorView(style: .medium)
     private let status = UILabel()
     private let stateView = UIStackView()
@@ -35,8 +33,6 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.accessibilityIdentifier = "film.home"
-        configureSourceButton()
-        if hasOwnPageHeader { pageHeader.setTitleView(sourceButton) }
         collection.backgroundColor = .clear
         collection.accessibilityIdentifier = "film.home.sections"
         collection.delegate = self
@@ -106,7 +102,6 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
     public override func applyTheme() {
         super.applyTheme()
         guard isViewLoaded else { return }
-        sourceButton.tintColor = UIColor(theme.ink)
         status.textColor = UIColor(theme.muted)
         activity.color = UIColor(theme.muted)
         guard dataSource != nil else { return }
@@ -135,34 +130,8 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
                                                  sectionID: section.id, onMore: action)
     }
 
-    private func configureSourceButton() {
-        var configuration = UIButton.Configuration.plain()
-        configuration.image = UIImage(systemName: "chevron.down",
-            withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
-        configuration.imagePlacement = .trailing
-        configuration.imagePadding = 8
-        configuration.contentInsets = .zero
-        configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
-            var attributes = $0
-            attributes.font = .systemFont(ofSize: 19, weight: .semibold)
-            return attributes
-        }
-        sourceButton.configuration = configuration
-        sourceButton.contentHorizontalAlignment = .leading
-        sourceButton.showsMenuAsPrimaryAction = true
-        sourceButton.accessibilityIdentifier = "film.source"
-    }
-
     private func render() {
         guard isViewLoaded, dataSource != nil else { return }
-        let selected = model.sources.first { $0.id == model.selectedSourceID }
-        sourceButton.configuration?.title = selected.map { "影视 · \($0.title)" } ?? "影视"
-        sourceButton.accessibilityLabel = selected.map { "影视数据源，\($0.title)" } ?? "影视数据源"
-        sourceButton.menu = UIMenu(title: "数据源", children: model.sources.map { source in
-            UIAction(title: source.title, state: source.id == model.selectedSourceID ? .on : .off) { [weak self] _ in
-                self?.model.selectSource(id: source.id)
-            }
-        })
         if sections != model.sections || renderedSourceID != model.selectedSourceID {
             let switchedSource = renderedSourceID != model.selectedSourceID
             renderedSourceID = model.selectedSourceID
