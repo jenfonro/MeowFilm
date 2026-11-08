@@ -10,6 +10,264 @@ import MeowPlayback
 
 @MainActor
 final class MusicUIKitRegressionTests: XCTestCase {
+    func testPlaybackModeMenuHasFourNativeItemsAndOnlyExplicitSelectionWrites() async throws {
+        let fixture = await makeModePlayer()
+        defer { release(fixture.root, window: fixture.window) }
+        let mode = try resultButton(id: "music.player.mode", in: fixture.page.view)
+        let quality = try resultButton(id: "music.player.quality", in: fixture.page.view)
+        XCTAssertTrue(mode.showsMenuAsPrimaryAction)
+        XCTAssertEqual(mode.preferredMenuElementOrder, .fixed)
+        XCTAssertTrue(quality.showsMenuAsPrimaryAction)
+        XCTAssertEqual(mode.accessibilityValue, "顺序播放")
+        XCTAssertTrue(mode.image(for: .normal) === MusicPlaybackModeIcon.image(.order))
+        let actions = try modeActions(mode)
+        XCTAssertEqual(actions.map(\.title), ["心动", "列表循环", "单曲循环", "随机播放"])
+        XCTAssertTrue(actions.allSatisfy { $0.image != nil && $0.state == .off })
+        if #available(iOS 17.4, *) { mode.performPrimaryAction() }
+        else { mode.sendActions(for: .touchUpInside) }
+        await deliverMainRunLoop()
+        attachPlaybackView(fixture.window, name: "playback-mode-native-menu")
+        mode.contextMenuInteraction?.dismissMenu()
+        let unopenedWrites = await fixture.service.modeWrites()
+        XCTAssertTrue(unopenedWrites.isEmpty, "Opening a menu must never cycle or save a mode")
+        for (title, expected) in [("列表循环", MusicPlaybackMode.loop), ("单曲循环", .single), ("随机播放", .shuffle)] {
+            invoke(try XCTUnwrap(try modeActions(mode).first { $0.title == title }))
+            await waitForResult { fixture.content.model.state.mode == expected && mode.accessibilityValue == title }
+            XCTAssertEqual(try modeActions(mode).filter { $0.state == .on }.map(\.title), [title])
+        }
+        let writes = await fixture.service.modeWrites()
+        XCTAssertEqual(writes, [.loop, .single, .shuffle])
+        attachPlaybackView(fixture.page.view, name: "playback-mode-player")
+        await fixture.content.model.close()
+    }
+
+    func testPlaybackModeFailureKeepsCommittedSelectionAndHeartbeatIsIndependent() async throws {
+        let fixture = await makeModePlayer()
+        defer { release(fixture.root, window: fixture.window) }
+        let model = fixture.content.model
+        let mode = try resultButton(id: "music.player.mode", in: fixture.page.view)
+        await fixture.service.failNextModeWrite()
+        invoke(try XCTUnwrap(try modeActions(mode).first { $0.title == "单曲循环" }))
+        await waitForResult { model.error != nil }
+        XCTAssertEqual(model.state.mode, .order)
+        XCTAssertTrue(try modeActions(mode).allSatisfy { $0.state == .off })
+        XCTAssertTrue(mode.image(for: .normal) === MusicPlaybackModeIcon.image(.order))
+
+        model.error = nil
+        await fixture.service.failNextHeartbeatStart()
+        invoke(try XCTUnwrap(try modeActions(mode).first { $0.title == "心动" }))
+        await waitForResult { model.error != nil && !model.isChangingSimilarMode }
+        XCTAssertNil(model.similarMode)
+        XCTAssertTrue(mode.image(for: .normal) === MusicPlaybackModeIcon.image(.order))
+        XCTAssertEqual(try modeActions(mode).first?.state, .off)
+
+        model.error = nil
+        invoke(try XCTUnwrap(try modeActions(mode).first { $0.title == "心动" }))
+        await waitForResult { model.similarMode?.active == true && !model.isChangingSimilarMode &&
+            mode.accessibilityValue == "心动，顺序播放" }
+        let snapshot = try XCTUnwrap(model.similarMode?.id)
+        XCTAssertEqual(try modeActions(mode).first?.state, .on)
+        XCTAssertTrue(mode.image(for: .normal) === MusicPlaybackModeIcon.image(.heartbeat))
+        invoke(try XCTUnwrap(try modeActions(mode).first { $0.title == "列表循环" }))
+        await waitForResult { model.state.mode == .loop && mode.accessibilityValue == "心动，列表循环" }
+        XCTAssertEqual(model.similarMode?.id, snapshot)
+        XCTAssertEqual(try modeActions(mode).filter { $0.state == .on }.map(\.title), ["心动", "列表循环"])
+        attachPlaybackView(fixture.page.view, name: "playback-mode-heartbeat")
+        let more = try resultButton(id: "music.player.more", in: fixture.page.view)
+        more.sendActions(for: .touchUpInside)
+        let menu = try XCTUnwrap(fixture.page.presentedViewController as? UIAlertController)
+        XCTAssertTrue(menu.actions.contains { $0.title == "开启推荐续播" })
+        await withCheckedContinuation { continuation in
+            menu.dismiss(animated: false) { continuation.resume() }
+        }
+        invoke(try XCTUnwrap(try modeActions(mode).first { $0.title == "心动" }))
+        await waitForResult { model.similarMode == nil && !model.isChangingSimilarMode &&
+            mode.accessibilityValue == "列表循环" }
+        let exits = await fixture.service.heartbeatExits()
+        XCTAssertEqual(exits, 1)
+        XCTAssertEqual(model.state.mode, .loop)
+        await model.close()
+    }
+
+    func testPlaybackModeOldActionsRejectLiveIdentityChangesBeforeRenderingCatchesUp() async throws {
+        for change in ["occurrence", "attempt", "queue", "settings", "account", "snapshot", "command", "fm", "hidden"] {
+            let fixture = await makeModePlayer()
+            let model = fixture.content.model
+            let mode = try resultButton(id: "music.player.mode", in: fixture.page.view)
+            let old = try XCTUnwrap(try modeActions(mode).first { $0.title == "单曲循环" })
+            switch change {
+            case "occurrence":
+                model.playbackState.state = .init(currentId: "replacement", total: 1)
+            case "attempt":
+                model.nativeAttempt = .init(id: UUID(), resourceID: "new-attempt")
+            case "queue":
+                model.playbackState.state = .init(revision: 1, mode: .order, currentId: "mode-seed", total: 1)
+            case "settings":
+                model.playbackState.state = .init(settingsRevision: 1, mode: .order, currentId: "mode-seed", total: 1)
+            case "account":
+                model.accountSessionsChanged(.netease)
+            case "snapshot":
+                model.playbackState.similarMode = .init(id: UUID(), active: true, status: .ready,
+                    seed: .init(title: "新会话"), seedEntryID: "mode-seed", continueEnabled: false,
+                    candidates: [], batches: [], sourceIDs: [], fromHome: false,
+                    provider: .heartbeat, error: nil, canRetry: false)
+            case "command":
+                model.recommendationCommandID = UUID()
+            case "fm":
+                model.playbackState.isFMActive = true
+            default:
+                (fixture.page.view as? MusicFullPlayerView)?.setRendering(false)
+            }
+            invoke(old)
+            await deliverMainRunLoop()
+            let writes = await fixture.service.modeWrites()
+            XCTAssertTrue(writes.isEmpty, "Stale \(change) action wrote settings")
+            if change == "attempt" { model.nativeAttempt = nil }
+            await model.close()
+            release(fixture.root, window: fixture.window)
+        }
+    }
+
+    func testFMHeaderAndBottomButtonOpenTheExistingSelectorOnlyWhileFMIsActive() async throws {
+        let fixture = await makeModePlayer()
+        defer { release(fixture.root, window: fixture.window) }
+        let model = fixture.content.model
+        let source = try resultButton(id: "music.player.fmSource", in: fixture.page.view)
+        let mode = try resultButton(id: "music.player.mode", in: fixture.page.view)
+        XCTAssertFalse(source.isUserInteractionEnabled)
+        source.sendActions(for: .touchUpInside)
+        XCTAssertNil(fixture.page.presentedViewController)
+        model.playbackState.isFMActive = true
+        model.playbackState.activeHomeFM = MusicFMModeChoice.main[2].action
+        await waitForResult { source.configuration?.title == "FM·探索" && mode.menu == nil }
+        XCTAssertTrue(source.isUserInteractionEnabled)
+        XCTAssertNotNil(source.configuration?.image)
+        XCTAssertEqual(source.accessibilityLabel, "切换 FM：探索模式")
+        XCTAssertTrue(mode.image(for: .normal) === MusicPlaybackModeIcon.image(.fm))
+        XCTAssertFalse(mode.showsMenuAsPrimaryAction)
+        attachPlaybackView(fixture.page.view, name: "playback-mode-fm-header")
+        source.sendActions(for: .touchUpInside)
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        await waitForResult { (fixture.page.presentedViewController as? MusicFMSettingsViewController)?.isPageVisible == true }
+        let page = try XCTUnwrap(fixture.page.presentedViewController as? MusicFMSettingsViewController)
+        XCTAssertEqual(page.modalPresentationStyle, .custom)
+        let hosting = try XCTUnwrap(page.children.compactMap { $0 as? UIHostingController<MusicFMSettingsContent> }.first)
+        XCTAssertEqual(hosting.rootView.state.active, MusicFMModeChoice.main[2].action)
+        XCTAssertEqual(hosting.rootView.icons.count, 43)
+        attachPlaybackView(page.view, name: "playback-mode-fm-selector")
+        try XCTUnwrap(descendants(page.pageHeader).compactMap { $0 as? PageHeaderButton }
+            .first { $0.accessibilityLabel == "关闭" }).sendActions(for: .touchUpInside)
+        await waitForResult { fixture.page.presentedViewController == nil && fixture.page.isPageVisible }
+        model.playbackState.activeHomeFM = MusicFMModeChoice.scenes[0].action
+        await waitForResult { source.configuration?.title == "FM·场景" }
+        XCTAssertEqual(source.accessibilityLabel, "切换 FM：伤感")
+        mode.sendActions(for: .touchUpInside)
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        await waitForResult { (fixture.page.presentedViewController as? MusicFMSettingsViewController)?.isPageVisible == true }
+        let second = try XCTUnwrap(fixture.page.presentedViewController as? MusicFMSettingsViewController)
+        XCTAssertFalse(second === page)
+        model.stopFM()
+        await waitForResult { fixture.page.presentedViewController == nil }
+        XCTAssertTrue(fixture.root.presentedViewController === fixture.page)
+        await model.close()
+    }
+
+    func testFMSelectorEdgeCancellationAndCompletionPreserveTheCorrectPageLifetime() async throws {
+        let fixture = await makeModePlayer()
+        defer { release(fixture.root, window: fixture.window) }
+        let model = fixture.content.model
+        model.playbackState.isFMActive = true
+        model.playbackState.activeHomeFM = MusicFMModeChoice.main[0].action
+        let page = MusicFMSettingsViewController(model: model, appearance: fixture.content.appearance)
+        await withCheckedContinuation { continuation in
+            fixture.page.present(page, animated: false) { continuation.resume() }
+        }
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        await waitForResult { page.isPageVisible }
+        let transition = try XCTUnwrap(page.transitioningDelegate as? BottomPageTransition)
+        XCTAssertEqual(transition.edgeGesture.edges, .left)
+        XCTAssertTrue(transition.edgeGesture.view === page.view)
+        let frame = page.view.frame
+        driveFMEdge(transition, state: .began, x: 0, velocity: 100)
+        driveFMEdge(transition, state: .changed, x: 24, velocity: 0)
+        driveFMEdge(transition, state: .ended, x: 24, velocity: 0)
+        await waitForResult { !transition.isTransitioning }
+        XCTAssertTrue(fixture.page.presentedViewController === page)
+        XCTAssertTrue(page.isPageActive)
+        XCTAssertEqual(page.view.frame, frame)
+        XCTAssertEqual(page.view.transform, .identity)
+
+        driveFMEdge(transition, state: .began, x: 0, velocity: 100)
+        driveFMEdge(transition, state: .changed, x: 40, velocity: 0)
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        await waitForResult { !transition.isTransitioning }
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        await waitForResult { page.isPageVisible }
+        let hosting = try XCTUnwrap(page.children.compactMap { $0 as? UIHostingController<MusicFMSettingsContent> }.first)
+        XCTAssertTrue(hosting.rootView.state.available)
+        XCTAssertTrue(page.isPageActive)
+        driveFMEdge(transition, state: .began, x: 0, velocity: 100)
+        driveFMEdge(transition, state: .changed, x: 40, velocity: 0)
+        let coordinator = try XCTUnwrap(page.transitionCoordinator)
+        page.viewWillTransition(to: CGSize(width: frame.height, height: frame.width), with: coordinator)
+        await waitForResult { !transition.isTransitioning }
+        XCTAssertTrue(fixture.page.presentedViewController === page)
+        XCTAssertTrue(page.isPageActive)
+        driveFMEdge(transition, state: .began, x: 0, velocity: 100)
+        driveFMEdge(transition, state: .changed, x: page.view.bounds.width * 0.7, velocity: 500)
+        driveFMEdge(transition, state: .ended, x: page.view.bounds.width * 0.7, velocity: 500)
+        await waitForResult { fixture.page.presentedViewController == nil && !transition.isTransitioning }
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertTrue(fixture.root.presentedViewController === fixture.page)
+        XCTAssertTrue(model.isFMActive, "Returning from the selector does not exit FM")
+        await model.close()
+    }
+
+    func testFMSelectorAccountLossDuringPresentationOrInteractiveReturnDrainsItsClose() async throws {
+        for whilePresenting in [true, false] {
+            let fixture = await makeModePlayer()
+            let model = fixture.content.model
+            model.playbackState.isFMActive = true
+            model.playbackState.activeHomeFM = MusicFMModeChoice.main[0].action
+            let page = MusicFMSettingsViewController(model: model, appearance: fixture.content.appearance)
+            fixture.page.present(page, animated: whilePresenting)
+            NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+            if !whilePresenting {
+                await waitForResult { page.isPageVisible }
+                let transition = try XCTUnwrap(page.transitioningDelegate as? BottomPageTransition)
+                driveFMEdge(transition, state: .began, x: 0, velocity: 100)
+                driveFMEdge(transition, state: .changed, x: 30, velocity: 0)
+            }
+            model.accountSessionsChanged(.netease)
+            await waitForResult { fixture.page.presentedViewController == nil }
+            XCTAssertFalse(page.isPageActive)
+            XCTAssertTrue(fixture.root.presentedViewController === fixture.page)
+            await model.close()
+            release(fixture.root, window: fixture.window)
+        }
+    }
+
+    func testPlaybackModeArtworkIsCachedTemplateAndRendersSixDistinctNativeIcons() throws {
+        let strip = UIView(frame: CGRect(x: 0, y: 0, width: 390, height: 140))
+        strip.backgroundColor = .white
+        var data = Set<Data>()
+        for (index, kind) in MusicPlaybackModeIcon.Kind.allCases.enumerated() {
+            let image = MusicPlaybackModeIcon.image(kind)
+            XCTAssertTrue(image === MusicPlaybackModeIcon.image(kind))
+            XCTAssertEqual(image.renderingMode, .alwaysTemplate)
+            XCTAssertEqual(image.size, CGSize(width: 24, height: 24))
+            data.insert(try XCTUnwrap(image.pngData()))
+            for (y, size) in [(CGFloat(18), CGFloat(24)), (CGFloat(66), CGFloat(48))] {
+                let view = UIImageView(image: image)
+                view.tintColor = .black
+                view.frame = CGRect(x: CGFloat(index) * 64 + (64 - size) / 2, y: y, width: size, height: size)
+                strip.addSubview(view)
+            }
+        }
+        XCTAssertEqual(data.count, 6)
+        attachPlaybackView(strip, name: "playback-mode-six-icons")
+    }
+
     func testHomeAndCloudLikesExposeDirectHeartbeatActions() async throws {
         let service = MusicUIKitRegressionService(browse: .init(sections: [
             .init(id: "heartbeat", title: "", items: [
@@ -58,10 +316,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             let appearance = MusicAppearancePreferencesStore(), root = UIViewController()
             let window = mount(root)
             let page = MusicFMSettingsViewController(model: model, appearance: appearance)
-            let navigation = PageNavigationController(themeProvider: appearance)
-            navigation.setViewControllers([page], animated: false)
-            navigation.modalPresentationStyle = .fullScreen
-            await withCheckedContinuation { continuation in root.present(navigation, animated: false) { continuation.resume() } }
+            await withCheckedContinuation { continuation in root.present(page, animated: false) { continuation.resume() } }
             NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
             await waitForResult { page.isPageVisible }
             let hosting = try XCTUnwrap(page.children.compactMap { $0 as? UIHostingController<MusicFMSettingsContent> }.first)
@@ -3464,6 +3719,68 @@ final class MusicUIKitRegressionTests: XCTestCase {
     private func track(_ id: String) -> MusicRemoteTrack {
         .init(ref: .init(kind: .handle, id: id), songId: id, title: id)
     }
+
+    private func makeModePlayer() async -> (
+        service: MusicUIKitRegressionService, content: MusicPlayerContentModel,
+        page: MusicPlayerViewController, root: UIViewController, window: UIWindow
+    ) {
+        let service = MusicUIKitRegressionService()
+        let entry = MusicQueueEntry(id: "mode-seed", track: .init(ref: .init(kind: .queue, id: "mode-seed"),
+            songId: "wy:1", title: "测试歌曲", artist: "测试歌手",
+            sources: [.init(sourceKey: "wy:1", platform: "wy", nativeId: "1")]))
+        await service.configurePlaybackModes(entry)
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        model.playbackState.state = await service.state()
+        model.playbackState.queue = [entry]
+        model.playbackState.canEnterSimilarMode = true
+        let appearance = MusicAppearancePreferencesStore()
+        let presentation = MusicMiniPlayerPresentation()
+        let content = MusicPlayerContentModel(model: model, playback: PlaybackController(),
+            appearance: appearance, presentation: presentation)
+        let root = UIViewController(), window = mount(root)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.layoutIfNeeded()
+        let page = MusicPlayerViewController(content: content, appearance: appearance)
+        presentation.setFullPlayerPresented(true)
+        await withCheckedContinuation { continuation in
+            root.present(page, animated: false) { continuation.resume() }
+        }
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        await waitForResult { page.isPageVisible }
+        return (service, content, page, root, window)
+    }
+
+    private func modeActions(_ button: UIButton) throws -> [UIAction] {
+        try XCTUnwrap(button.menu).children.compactMap { $0 as? UIAction }
+    }
+
+    private func driveFMEdge(_ transition: BottomPageTransition, state: UIGestureRecognizer.State,
+                             x: CGFloat, velocity: CGFloat) {
+        let input = MusicPlaybackModeEdgePan()
+        input.sampleState = state
+        input.sampleTranslation = CGPoint(x: x, y: 0)
+        input.sampleVelocity = CGPoint(x: velocity, y: 0)
+        // Deliver native recognizer callbacks, including cancellation, without
+        // claiming a physical-device edge swipe from this component runner.
+        let action = NSSelectorFromString("edgePanned:")
+        XCTAssertTrue(transition.responds(to: action))
+        transition.perform(action, with: input)
+    }
+
+    private func attachPlaybackView(_ view: UIView, name: String) {
+        view.layoutIfNeeded()
+        let image = UIGraphicsImageRenderer(size: view.bounds.size).image { renderer in
+            if view.window != nil {
+                XCTAssertTrue(view.drawHierarchy(in: view.bounds, afterScreenUpdates: true))
+            } else {
+                view.layer.render(in: renderer.cgContext)
+            }
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
     private func searchDetail(_ collection: MusicPublicBrowseCollection,
                               positions: [Int]) -> MusicPublicBrowseDetail {
         let members = positions.map { position -> MusicPublicBrowseMember in
@@ -3813,6 +4130,10 @@ final class MusicPlayerContentModelTests: XCTestCase {
         let order = try ["favorite", "previous", "play", "next", "queue"].map { try dockButton($0, in: surface) }
         XCTAssertEqual(order.map(\.frame.midX), order.map(\.frame.midX).sorted())
         let slider = try XCTUnwrap(dockViews(surface).compactMap { $0 as? MusicProgressSlider }.first)
+        // Layout and Dynamic Type checks are not a five-second preview test.
+        // Hold through the existing progress interaction before waiting for traits.
+        slider.sendActions(for: .touchDown)
+        slider.sendActions(for: .touchCancel)
         let close = try dockButton("collapse", in: surface)
         let cover = try dockButton("open", in: surface)
         XCTAssertFalse(cover.frame.intersects(slider.frame))
@@ -3855,8 +4176,6 @@ final class MusicPlayerContentModelTests: XCTestCase {
         XCTAssertFalse(observer.cancelsTouchesInView)
         XCTAssertFalse(observer.delaysTouchesBegan)
         XCTAssertFalse(observer.delaysTouchesEnded)
-        slider.sendActions(for: .touchDown)
-        slider.sendActions(for: .touchCancel)
         observer.observeTouch(in: slider)
         XCTAssertTrue(content.dockExpanded)
         attachDock(surface, name: "card-player")
@@ -4275,6 +4594,19 @@ final class MusicPlayerContentModelTests: XCTestCase {
 }
 
 @MainActor
+private final class MusicPlaybackModeEdgePan: UIScreenEdgePanGestureRecognizer {
+    var sampleState: UIGestureRecognizer.State = .possible
+    var sampleTranslation = CGPoint.zero
+    var sampleVelocity = CGPoint.zero
+    override var state: UIGestureRecognizer.State {
+        get { sampleState }
+        set { sampleState = newValue }
+    }
+    override func translation(in view: UIView?) -> CGPoint { sampleTranslation }
+    override func velocity(in view: UIView?) -> CGPoint { sampleVelocity }
+}
+
+@MainActor
 private final class MusicUIKitRegressionRouter: MusicUIRouting {
     let primaryPlaybackPresentation = MusicMiniPlayerPresentation()
     var onChannel: ((MusicPublicBrowseChannel) -> Void)?
@@ -4339,6 +4671,20 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private var heartbeatRequests: [MusicSimilarModeStart] = []
     private var heartbeatSnapshot: MusicSimilarModeSnapshot?
     private var heartbeatObserver: (@Sendable () -> Void)?
+    private var playbackModeEntry: MusicQueueEntry?
+    private var playbackMode: MusicPlaybackMode = .order
+    private var playbackModeRevision = 0
+    private var playbackModeWrites: [MusicPlaybackMode] = []
+    private var rejectNextMode = false, rejectNextHeartbeat = false
+    private var heartbeatExitCount = 0
+    func configurePlaybackModes(_ entry: MusicQueueEntry) {
+        playbackModeEntry = entry
+        heartbeatEnabled = true
+    }
+    func modeWrites() -> [MusicPlaybackMode] { playbackModeWrites }
+    func failNextModeWrite() { rejectNextMode = true }
+    func failNextHeartbeatStart() { rejectNextHeartbeat = true }
+    func heartbeatExits() -> Int { heartbeatExitCount }
     private var fmRequests: [MusicHomeAction] = []
     private var fmObserver: (@Sendable () -> Void)?
     private var fmChoiceEnabled = false
@@ -4360,13 +4706,18 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func startSimilarMode(_ start: MusicSimilarModeStart) throws -> MusicSimilarModeResult {
         guard heartbeatEnabled else { throw MusicServiceError.authRequired }
         heartbeatRequests.append(start)
+        if rejectNextHeartbeat { rejectNextHeartbeat = false; throw MusicServiceError.upstreamFailed }
         heartbeatSnapshot = .init(id: UUID(), active: true, status: .ready, seed: .init(title: "喜欢种子"),
             seedEntryID: nil, continueEnabled: false, candidates: [], batches: [], sourceIDs: [],
             fromHome: start == .heartbeat, provider: .heartbeat, error: nil, canRetry: false)
         heartbeatObserver?(); heartbeatObserver = nil
         return .init(state: state(), action: .keepCurrent)
     }
-    func exitSimilarMode() -> MusicSimilarModeResult { heartbeatSnapshot = nil; return .init(state: state(), action: .restoreOnly) }
+    func exitSimilarMode() -> MusicSimilarModeResult {
+        heartbeatExitCount += 1
+        heartbeatSnapshot = nil
+        return .init(state: state(), action: playbackModeEntry == nil ? .restoreOnly : .keepCurrent)
+    }
     func playSimilarCandidate(snapshotID: UUID, candidateID: String) throws -> MusicSimilarModeResult { throw MusicServiceError.unsupported }
     func setSimilarContinue(_ enabled: Bool, snapshotID: UUID) throws {
         guard let value = heartbeatSnapshot, value.id == snapshotID else { throw MusicServiceError.targetChanged }
@@ -4585,6 +4936,9 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func accountCollections(platform: MusicAccountPlatform, cursor: String?) throws -> MusicAccountCollectionPage { throw MusicServiceError.unsupported }
     func accountTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicBrowsePage { throw MusicServiceError.unsupported }
     func state() -> MusicPlaybackState {
+        if let entry = playbackModeEntry {
+            return .init(settingsRevision: playbackModeRevision, mode: playbackMode, currentId: entry.id, total: 1)
+        }
         if let sourceSelection { return .init(currentId: sourceSelection.entry.id, total: 1) }
         return .init()
     }
@@ -4628,6 +4982,7 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     }
     func removePlaylist(_ collection: MusicCollection) throws { throw MusicServiceError.unsupported }
     func queue() -> MusicQueueSnapshot {
+        if let entry = playbackModeEntry { return .init(revision: 0, currentId: entry.id, entries: [entry]) }
         if let sourceSelection {
             return .init(revision: 0, currentId: sourceSelection.entry.id, entries: [sourceSelection.entry])
         }
@@ -4641,7 +4996,15 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         return .init()
     }
     func advance(_ direction: MusicDirection, reason: MusicAdvanceReason, expectedRevision: Int) throws -> MusicAdvanceResult { throw MusicServiceError.unsupported }
-    func updateSettings(_ change: MusicSettingsChange) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
+    func updateSettings(_ change: MusicSettingsChange) throws -> MusicPlaybackState {
+        guard playbackModeEntry != nil, let mode = change.mode else { throw MusicServiceError.unsupported }
+        guard change.ifRevision == playbackModeRevision else { throw MusicServiceError.staleRevision }
+        playbackModeWrites.append(mode)
+        if rejectNextMode { rejectNextMode = false; throw MusicServiceError.storageFailed }
+        playbackMode = mode
+        playbackModeRevision += 1
+        return state()
+    }
     func sourceAvailability(for ref: MusicReference) -> MusicSourceAvailability { .init(options: [], scriptState: .notConfigured) }
     func metadataPreferences() throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
     func updateMetadataPreferences(_ change: MusicMetadataPreferencesChange) throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }

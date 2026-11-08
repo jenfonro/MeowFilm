@@ -14,10 +14,9 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         get { controls.onPresent } set { controls.onPresent = newValue }
     }
     var onMore: (() -> Void)? { get { controls.onMore } set { controls.onMore = newValue } }
-    var onMode: (() -> Void)? { get { controls.onMode } set { controls.onMode = newValue } }
+    var onFMSettings: (() -> Void)? { get { controls.onFMSettings } set { controls.onFMSettings = newValue } }
     var onSources: (() -> Void)? { get { controls.onSources } set { controls.onSources = newValue } }
     var moreAnchor: UIView { controls.moreAnchor }
-    var modeAnchor: UIView { controls.modeAnchor }
 
     private let content: MusicPlayerContentModel
     private let controls: MusicPlaybackControlsView
@@ -28,7 +27,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         return button
     }()
     private let route = AVRoutePickerView()
-    private let sourceLabel = UILabel()
+    private let sourceButton = UIButton(type: .system)
     private let recordScroll = MusicRecordScrollView()
     private let discs = (0..<3).map { _ in MusicRecordDiscView() }
     private let tonearm = MusicTonearmView()
@@ -85,7 +84,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         super.init(style: .full, palette: content.appearance.effectivePalette)
         accessibilityIdentifier = "music.player.page"
         for item in [lyricBackdrop, recordScroll, tonearm, lyricPreview, lyricTable, controls,
-                     translationToggle, backgroundToggle, close, route, sourceLabel,
+                     translationToggle, backgroundToggle, close, route, sourceButton,
                      previewRule, previewTime, previewSeek, followLyrics] {
             addSubview(item)
         }
@@ -93,9 +92,22 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         route.prioritizesVideoDevices = false
         route.accessibilityLabel = "音频输出"
         route.accessibilityIdentifier = "music.player.audioOutput"
-        sourceLabel.font = .systemFont(ofSize: 14, weight: .medium)
-        sourceLabel.textAlignment = .center
-        sourceLabel.lineBreakMode = .byTruncatingTail
+        var sourceStyle = UIButton.Configuration.plain()
+        sourceStyle.contentInsets = .zero
+        sourceStyle.imagePlacement = .trailing
+        sourceStyle.imagePadding = 5
+        sourceStyle.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var result = attributes
+            result.font = .systemFont(ofSize: 14, weight: .medium)
+            return result
+        }
+        sourceButton.configuration = sourceStyle
+        sourceButton.titleLabel?.lineBreakMode = .byTruncatingTail
+        sourceButton.accessibilityIdentifier = "music.player.fmSource"
+        sourceButton.addAction(UIAction { [weak self] _ in
+            guard let self, self.rendering, self.content.isAvailable, self.content.model.isFMActive else { return }
+            self.onFMSettings?()
+        }, for: .touchUpInside)
 
         recordScroll.isPagingEnabled = true
         recordScroll.clipsToBounds = false
@@ -243,7 +255,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         close.frame = CGRect(x: headerLeading, y: headerY, width: headerButton, height: headerButton)
         route.frame = CGRect(x: width - headerTrailing - headerButton, y: headerY,
                              width: headerButton, height: headerButton)
-        sourceLabel.frame = CGRect(x: close.frame.maxX + 12, y: top,
+        sourceButton.frame = CGRect(x: close.frame.maxX + 12, y: top,
                                    width: max(0, route.frame.minX - close.frame.maxX - 24),
                                    height: headerHeight)
 
@@ -727,7 +739,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         close.tintColor = UIColor(theme.ink)
         previewSeek.tintColor = UIColor(theme.accent)
         followLyrics.tintColor = UIColor(theme.muted)
-        sourceLabel.textColor = UIColor(theme.ink)
+        sourceButton.configuration?.baseForegroundColor = UIColor(theme.ink)
         lyricStatus.textColor = UIColor(theme.muted)
         previewTime.textColor = UIColor(theme.muted)
         previewRule.backgroundColor = UIColor(theme.muted).withAlphaComponent(0.28)
@@ -767,11 +779,17 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
 
     private func updateSource() {
         let model = content.model
-        sourceLabel.text = MusicReferencePlayerLabels.source(
-            fm: model.isFMActive ? MusicFMModeChoice.title(for: model.activeHomeFM) : nil,
+        let title = MusicReferencePlayerLabels.source(
+            fm: model.isFMActive ? MusicReferencePlayerLabels.fmSource(model.activeHomeFM) : nil,
             context: model.current?.sourceTitle,
             collection: model.collections.first { $0.id == model.state.sourceCollectionID }?.title,
             track: model.displayTrack?.title ?? "")
+        sourceButton.configuration?.title = title
+        sourceButton.configuration?.image = model.isFMActive ? PageIcon.image(.down, size: 10) : nil
+        sourceButton.isUserInteractionEnabled = model.isFMActive && content.isAvailable
+        sourceButton.accessibilityTraits = model.isFMActive ? .button : .staticText
+        sourceButton.accessibilityLabel = model.isFMActive
+            ? "切换 FM：" + MusicFMModeChoice.title(for: model.activeHomeFM) : title
     }
 
     private func updateLyricPreview(force: Bool = false) {

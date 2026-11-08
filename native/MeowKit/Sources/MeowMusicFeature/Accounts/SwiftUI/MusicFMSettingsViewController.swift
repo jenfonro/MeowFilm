@@ -7,6 +7,8 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
     private let owner: MusicViewModel
     private let model: MusicFMSettingsViewModel
     private let account: UUID
+    private let transition = BottomPageTransition()
+    private var closeQueued = false
     private var icons: [String: UIImage] = [:]
     private var rendered: (MusicFMSettingsState, PageTheme)?
     var onSelected: @MainActor () -> Void
@@ -25,10 +27,17 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
             content: MusicFMSettingsContent(theme: PageTheme(palette: appearance.pageColorway))
         )
         pageTitle = "私人漫游"
+        modalPresentationStyle = .custom
+        transitioningDelegate = transition
+        transition.onTransitionEnded = { [weak self] presenting, completed in
+            if presenting || !completed { self?.drainClose() }
+        }
     }
 
     public override func viewDidLoad() {
         super.viewDidLoad()
+        view.accessibilityIdentifier = "music.fm.settings"
+        transition.installEdgeDismissal(on: self)
         icons = Dictionary(uniqueKeysWithValues: MusicFMModeChoice.scenes.map {
             ($0.submode, MusicFMSceneIcon.image(code: $0.submode))
         })
@@ -47,10 +56,17 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
     public override func pageDidBecomeVisible() { render() }
 
     public override func pageDidFinishAppearing() {
+        prioritizeEdgeGesture(in: view)
         render()
+        drainClose()
     }
 
     public override func pageDidBecomeInactive() { model.close() }
+
+    public override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        transition.cancelInteractiveDismissal()
+        super.viewWillTransition(to: size, with: coordinator)
+    }
 
     public override func applyTheme() {
         super.applyTheme()
@@ -70,7 +86,7 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
         guard isViewLoaded else { return }
         if account != owner.searchAccessGeneration || !owner.isAvailable || owner.isClosed || !owner.isFMActive {
             model.close()
-            if isPageVisible { close() }
+            close()
             return
         }
         let state = MusicFMSettingsState(
@@ -101,10 +117,30 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
     }
 
     private func close() {
-        let container = navigationController ?? self
-        guard !container.isBeingPresented, !container.isBeingDismissed,
-              let presenter = container.presentingViewController else { return }
-        presenter.dismiss(animated: true)
+        if isBeingPresented || transition.isTransitioning {
+            closeQueued = true
+            transition.cancelInteractiveDismissal()
+            return
+        }
+        guard !isBeingDismissed, presentingViewController != nil else { return }
+        if let child = presentedViewController {
+            child.dismiss(animated: false) { [weak self] in self?.close() }
+            return
+        }
+        dismiss(animated: !UIAccessibility.isReduceMotionEnabled)
+    }
+
+    private func drainClose() {
+        guard closeQueued, !isBeingPresented, !transition.isTransitioning else { return }
+        closeQueued = false
+        close()
+    }
+
+    private func prioritizeEdgeGesture(in view: UIView) {
+        if let scroll = view as? UIScrollView {
+            scroll.panGestureRecognizer.require(toFail: transition.edgeGesture)
+        }
+        for child in view.subviews { prioritizeEdgeGesture(in: child) }
     }
 }
 #endif

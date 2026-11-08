@@ -18,6 +18,17 @@ struct MusicReferencePlayerFence: Equatable, Sendable {
 }
 
 enum MusicReferencePlayerLabels {
+    static func fmSource(_ action: MusicHomeAction?) -> String {
+        switch action {
+        case .fm(.scene, _, _): return "FM·场景"
+        case .fm:
+            let title = MusicFMModeChoice.title(for: action)
+            return "FM·" + (title.hasSuffix("模式") ? String(title.dropLast(2)) : title)
+        case .ruleFM(_, _, let name): return "FM·" + (name.isEmpty ? "频道" : name)
+        default: return "FM·私人漫游"
+        }
+    }
+
     static func source(fm: String?, context: String?, collection: String?, track: String) -> String {
         if let fm { return fm }
         if let context, !context.isEmpty { return context }
