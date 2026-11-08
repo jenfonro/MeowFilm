@@ -74,7 +74,7 @@ import MeowJSON
         _ = await f.service.close()
     }
 
-    func testExistingAccountAuthenticationDenialNeverBecomesGuestOrHidesOtherFailures() async throws {
+    func testConfirmedAuthenticationDenialAllowsGuestWithoutHidingOtherFailures() async throws {
         for (code, expected) in [(500, MusicServiceError.upstreamFailed), (429, .rateLimited), (460, .verificationRequired)] {
             let f = try MusicNeteaseNativeFixture(); try await f.enable()
             await f.http.replies("/weapi/w/nuser/account/get", [try MusicNeteaseFixture.response(["code": code])])
@@ -85,9 +85,18 @@ import MeowJSON
         }
         let denied = try MusicNeteaseNativeFixture(); try await denied.enable()
         await denied.http.replies("/weapi/w/nuser/account/get", [try MusicNeteaseFixture.response(["code": 301])])
-        do { _ = try await denied.service.nativeHomeBinding(); XCTFail("Invalid account became guest") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .sessionExpired) }
+        let guest = try await denied.service.nativeHomeBinding()
+        XCTAssertFalse(guest.loggedIn)
+        let repeated = try await denied.service.nativeHomeBinding()
+        XCTAssertEqual(repeated, guest)
+        do {
+            _ = try await denied.service.nativeRecommendations(platform: .netease, kind: "daily", cursor: nil)
+            XCTFail("Guest home authorized private recommendations")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
         XCTAssertNil(denied.store.peek(denied.identity))
+        let deniedRequests = await denied.http.recorded()
+        XCTAssertEqual(deniedRequests.filter { $0.request.url.path == "/weapi/w/nuser/account/get" }.count, 1)
+        XCTAssertEqual(denied.store.calls().filter { $0 == "remove" }.count, 1)
         _ = await denied.service.close()
 
         let locked = try MusicNeteaseNativeFixture(); try await locked.enable()
@@ -228,7 +237,7 @@ import MeowJSON
         _ = await other.close(); _ = await f.service.close()
     }
 
-    func testAuthenticationFailureInvalidatesPersonalizedContentWithoutAnonymousReplay() async throws {
+    func testAuthenticationFailureRevokesPersonalizedBindingAndAllowsGuestWithoutPayloadReplay() async throws {
         let f = try MusicNeteaseNativeFixture(); try await f.enable()
         let original = try await f.service.nativeHomeBinding()
         await f.http.replies(homePath, [try MusicNeteaseFixture.response(["code": 301])])
@@ -236,17 +245,165 @@ import MeowJSON
         catch { XCTAssertEqual(error as? MusicServiceError, .sessionExpired) }
         XCTAssertFalse(original.authorization.isActive)
         XCTAssertThrowsError(try original.authorization.perform { () })
-        do { _ = try await f.service.nativeHomeBinding(); XCTFail("Invalidated account became guest") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
         XCTAssertNil(f.store.peek(f.identity))
-        try await f.service.logout(platform: .netease)
         let guest = try await f.service.nativeHomeBinding()
         XCTAssertFalse(guest.loggedIn); XCTAssertNotEqual(guest.scope, original.scope)
+        do {
+            _ = try await f.service.nativeRecommendations(platform: .netease, kind: "daily", cursor: nil)
+            XCTFail("Invalidated private request accepted")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
+        do { _ = try await f.service.nativeHomePayload(.home(), binding: original); XCTFail("Old home binding revived") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
         _ = try await f.service.nativeHomePayload(.artistActivity(), binding: guest)
         let records = await f.http.recorded()
         XCTAssertEqual(records.filter { $0.request.url.path == homePath }.count, 1, "No anonymous retry hidden inside the account port")
         XCTAssertNil(f.store.peek(f.identity))
         _ = await f.service.close()
+    }
+
+    func testPrivateAuthenticationFailureNotifiesHomeWithoutAnExistingHomeBinding() async throws {
+        for duringValidation in [false, true] {
+            let f = try MusicHomeOwnerFixture(); try await f.enable()
+            // Local preparation is not UI account initialization or remote acceptance.
+            try await f.service.prepareLocalAccounts()
+            if !duringValidation { _ = try await f.service.validate(platform: .netease) }
+            let stream = await f.service.nativeHomeChanges()
+            var changes = stream.makeAsyncIterator()
+            let initial: Void? = await changes.next(); XCTAssertNotNil(initial)
+            if duringValidation { await f.provider.failVerification(.sessionExpired) }
+            else { await f.provider.failRecommendations(.authRequired) }
+            let changed = MusicAccountQueueOwnerCall("home notified after private authentication failure") {
+                var iterator = stream.makeAsyncIterator()
+                guard await iterator.next() != nil else { throw MusicServiceError.closed }
+                return try await f.service.nativeHomeBinding()
+            }
+            do {
+                _ = try await f.service.nativeRecommendations(platform: .netease, kind: "daily", cursor: nil)
+                XCTFail("Private authentication denial accepted")
+            } catch { XCTAssertEqual(error as? MusicServiceError, .sessionExpired) }
+            await fulfillment(of: [changed.finished], timeout: 2)
+            let guest = try changed.value()
+            XCTAssertFalse(guest.loggedIn)
+            for _ in 0..<2 {
+                do {
+                    _ = try await f.service.nativeRecommendations(platform: .netease, kind: "daily", cursor: nil)
+                    XCTFail("Invalidated private request reused credentials")
+                } catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
+            }
+            let current = try await f.service.nativeHomeBinding(), calls = await f.provider.counts()
+            XCTAssertEqual(current, guest); XCTAssertTrue(guest.authorization.isActive)
+            XCTAssertEqual(calls.verifies, 1); XCTAssertEqual(calls.recommendations, duringValidation ? 0 : 1)
+            XCTAssertEqual(f.store.calls().filter { $0 == "remove" }.count, 1)
+            XCTAssertNil(f.store.peek(f.identity))
+            _ = await f.service.close()
+        }
+    }
+
+    func testNonAuthenticationPrivateFailuresKeepTheAuthenticatedHomeBinding() async throws {
+        for failure in [MusicServiceError.networkOffline, .permissionDenied, .rateLimited, .verificationRequired, .storageFailed] {
+            let f = try MusicHomeOwnerFixture(); try await f.enable()
+            let binding = try await f.service.nativeHomeBinding(), record = f.store.peek(f.identity)
+            await f.provider.failRecommendations(failure)
+            do {
+                _ = try await f.service.nativeRecommendations(platform: .netease, kind: "daily", cursor: nil)
+                XCTFail("Private failure accepted")
+            } catch { XCTAssertEqual(error as? MusicServiceError, failure) }
+            let current = try await f.service.nativeHomeBinding()
+            XCTAssertEqual(current, binding); XCTAssertTrue(current.loggedIn)
+            XCTAssertTrue(binding.authorization.isActive)
+            XCTAssertEqual(f.store.peek(f.identity), record)
+            XCTAssertEqual(f.store.calls().filter { $0 == "remove" }.count, 0)
+            _ = await f.service.close()
+        }
+    }
+
+    func testCredentialRemovalFailureCannotBecomeGuest() async throws {
+        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        f.store.fail("remove")
+        await f.http.replies("/weapi/w/nuser/account/get", [try MusicNeteaseFixture.response(["code": 301])])
+        do { _ = try await f.service.nativeHomeBinding(); XCTFail("Incomplete invalidation became guest") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .sessionExpired) }
+        let snapshot = await f.accounts.snapshot(for: f.identity)
+        XCTAssertEqual(snapshot.phase, .removalPending)
+        do { _ = try await f.service.nativeHomeBinding(); XCTFail("Storage failure became guest") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .storageFailed) }
+        XCTAssertNotNil(f.store.peek(f.identity))
+        let calls = await f.http.recorded()
+        XCTAssertEqual(calls.filter { $0.request.url.path == "/weapi/w/nuser/account/get" }.count, 1)
+        _ = await f.service.close()
+    }
+
+    func testConcurrentPrivateValidationDenialSharesOneInvalidation() async throws {
+        let f = try MusicHomeOwnerFixture(); try await f.enable()
+        try await f.service.prepareLocalAccounts()
+        let gate = MusicAccountQueueOwnerGate("shared private credential validation")
+        await f.provider.failVerification(.authRequired); await f.provider.holdVerification(gate)
+        let first = MusicAccountQueueOwnerCall("first private validation denial") {
+            try await f.service.nativeRecommendations(platform: .netease, kind: "daily", cursor: nil)
+        }
+        await fulfillment(of: [gate.entered], timeout: 2)
+        let second = MusicAccountQueueOwnerCall("second private validation denial") {
+            try await f.service.nativeRecommendations(platform: .netease, kind: "daily", cursor: nil)
+        }
+        let joined = expectation(description: "both private callers joined validation")
+        let observation = Task {
+            while !Task.isCancelled {
+                if await f.service.pendingSessionReaderCount == 2 { joined.fulfill(); return }
+                await Task.yield()
+            }
+        }
+        await fulfillment(of: [joined], timeout: 2)
+        observation.cancel()
+        XCTAssertNil(first.result); XCTAssertNil(second.result)
+        await gate.release()
+        await fulfillment(of: [first.finished, second.finished, gate.departed], timeout: 3)
+        for request in [first, second] {
+            do { _ = try request.value(); XCTFail("Private validation denial accepted") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .sessionExpired) }
+        }
+        let guest = try await f.service.nativeHomeBinding(), repeated = try await f.service.nativeHomeBinding()
+        XCTAssertFalse(guest.loggedIn); XCTAssertEqual(guest, repeated)
+        let calls = await f.provider.counts()
+        XCTAssertEqual(calls.verifies, 1); XCTAssertEqual(calls.recommendations, 0)
+        XCTAssertEqual(f.store.calls().filter { $0 == "remove" }.count, 1)
+        XCTAssertNil(f.store.peek(f.identity))
+        _ = await f.service.close()
+    }
+
+    func testConcurrentOldHomeRepliesCannotRevokeRecoveredGuestOrInvalidateTwice() async throws {
+        for lateFailure in [nil, MusicServiceError.authRequired] {
+            let f = try MusicHomeOwnerFixture(); try await f.enable()
+            let original = try await f.service.nativeHomeBinding()
+            let lateGate = MusicAccountQueueOwnerGate("late old home receipt")
+            await f.provider.failPayload(lateFailure); await f.provider.holdPayload(lateGate)
+            let late = MusicAccountQueueOwnerCall("old home receipt rejected") {
+                try await f.service.nativeHomePayload(.featured(), binding: original)
+            }
+            await fulfillment(of: [lateGate.entered], timeout: 2)
+            let rejectedGate = MusicAccountQueueOwnerGate("confirmed home authentication failure")
+            await f.provider.failPayload(.authRequired); await f.provider.holdPayload(rejectedGate)
+            let rejected = MusicAccountQueueOwnerCall("home authentication failure") {
+                try await f.service.nativeHomePayload(.home(), binding: original)
+            }
+            await fulfillment(of: [rejectedGate.entered], timeout: 2)
+            await rejectedGate.release()
+            await fulfillment(of: [rejected.finished, rejectedGate.departed, late.finished], timeout: 3)
+            do { _ = try rejected.value(); XCTFail("Rejected home request accepted") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .sessionExpired) }
+            do { _ = try late.value(); XCTFail("Old concurrent request accepted") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
+            XCTAssertFalse(original.authorization.isActive)
+            let guest = try await f.service.nativeHomeBinding()
+            XCTAssertFalse(guest.loggedIn)
+            await lateGate.release()
+            await fulfillment(of: [lateGate.departed], timeout: 3)
+            let current = try await f.service.nativeHomeBinding(), calls = await f.provider.counts()
+            XCTAssertEqual(current, guest); XCTAssertTrue(guest.authorization.isActive)
+            XCTAssertEqual(calls.payloads, 2); XCTAssertEqual(calls.verifies, 1)
+            XCTAssertEqual(f.store.calls().filter { $0 == "remove" }.count, 1)
+            XCTAssertNil(f.store.peek(f.identity))
+            _ = await f.service.close()
+        }
     }
 
     func testProtectionAndLogoutRevokeFenceBeforeSuspendedProviderCleanup() async throws {
@@ -387,14 +544,20 @@ private actor MusicHomeOwnerProvider: MusicAccountProvider, MusicNeteaseHomeProv
     private var verifyGate: MusicAccountQueueOwnerGate?, revokeGate: MusicAccountQueueOwnerGate?
     private var payloadGate: MusicAccountQueueOwnerGate?
     private var verifyFailure: MusicServiceError?
+    private var payloadFailure: MusicServiceError?, recommendationFailure: MusicServiceError?
+    private var verifies = 0, payloads = 0, recommendations = 0
     func holdVerification(_ gate: MusicAccountQueueOwnerGate) { verifyGate = gate }
     func holdRevoke(_ gate: MusicAccountQueueOwnerGate) { revokeGate = gate }
     func holdPayload(_ gate: MusicAccountQueueOwnerGate) { payloadGate = gate }
     func failVerification(_ error: MusicServiceError?) { verifyFailure = error }
+    func failPayload(_ error: MusicServiceError?) { payloadFailure = error }
+    func failRecommendations(_ error: MusicServiceError?) { recommendationFailure = error }
+    func counts() -> (verifies: Int, payloads: Int, recommendations: Int) { (verifies, payloads, recommendations) }
     func nativeID(_ credential: AccountCredential) throws -> String {
         try MusicNeteaseWire.id(MusicQQWire.decode(credential.dataRepresentation())["accountID"])
     }
     func verify(_ credential: AccountCredential) async throws -> MusicQQVerified {
+        verifies += 1
         if let verifyGate { self.verifyGate = nil; await verifyGate.wait() }
         try Task.checkCancellation()
         if let verifyFailure { throw verifyFailure }
@@ -405,15 +568,23 @@ private actor MusicHomeOwnerProvider: MusicAccountProvider, MusicNeteaseHomeProv
     func homePayload(_ request: MusicNativeHomeRequest, credential: AccountCredential,
                      authorize: @escaping @Sendable () async throws -> Void) async throws -> Data {
         try await authorize()
+        payloads += 1
+        let failure = payloadFailure, gate = payloadGate
+        payloadGate = nil
         // Deliberately non-cooperative after dispatch: the owner must reject
         // this late reply even when the provider does not honor cancellation.
-        if let payloadGate { self.payloadGate = nil; await payloadGate.wait() }
+        if let gate { await gate.wait() }
+        if let failure { throw failure }
         return Data(#"{"code":200,"data":{"blocks":[]}}"#.utf8)
     }
     func createQR(id: UUID) throws -> MusicLoginChallenge { throw MusicServiceError.unsupported }
     func pollQR(id: UUID) throws -> MusicQQLoginResult { throw MusicServiceError.unsupported }
     func cancelQR(_ id: UUID) {}
-    func recommendations(kind: String, page: Int, credential: AccountCredential) throws -> MusicQQRecommendation { throw MusicServiceError.unsupported }
+    func recommendations(kind: String, page: Int, credential: AccountCredential) throws -> MusicQQRecommendation {
+        recommendations += 1
+        if let recommendationFailure { throw recommendationFailure }
+        return .init(rows: [], nextPage: nil)
+    }
     func collectionRows(credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
     func tracks(collectionID: String, credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
     func capabilities(mid: String, credential: AccountCredential) throws -> [String] { throw MusicServiceError.unsupported }

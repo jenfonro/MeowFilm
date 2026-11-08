@@ -477,6 +477,7 @@ public static partial class MusicCatalogTests
                 int reads = f.Client.Count("music.catalog.channel");
                 string channelLocation = f.Module.CaptureNavigationLocation();
                 await f.Module.NavigateAsync("catalog-home", default);
+                await f.Module.HomeInitialization;
                 var home = f.Module.HomeSections.ToArray();
                 await f.Module.RestoreNavigationAsync(channelLocation, default);
                 Equal(reads, f.Client.Count("music.catalog.channel"));
@@ -486,7 +487,9 @@ public static partial class MusicCatalogTests
                 True(home.SequenceEqual(f.Module.HomeSections, ReferenceEqualityComparer.Instance), "home sections keep identity");
                 Equal(2, f.Client.Count("music.catalog.home"));
                 f.Module.RetireCatalogSession();
-                True(f.Module.HomeSections.Count == 0 && sections.Count == 0, "invalidation clears hidden retained content");
+                True(home.SequenceEqual(f.Module.HomeSections, ReferenceEqualityComparer.Instance),
+                    "account retirement keeps the last successful home display");
+                Equal(0, sections.Count);
                 await f.Module.NavigateAsync("catalog-channels", default);
                 True(!existing.Intersect(f.Module.CatalogSections, ReferenceEqualityComparer.Instance).Any(), "invalidated sections never revive");
             }
@@ -1623,7 +1626,7 @@ public static partial class MusicCatalogTests
         });
         yield return Case("page generation cancels physical initialization and blocks late publication", async () =>
         {
-            await using var f = await Fixture.Create(); await f.Configure(new { detailLimit = 3 });
+            await using var f = await Fixture.Create(); await f.Configure(new { detailLimit = 3, homePages = 1 });
             var hold = f.Client.Hold("music.catalog.playlist");
             await f.Module.NavigateAsync("catalog-home", default);
             var pending = f.Module.CatalogEntryInitialization;
@@ -2199,19 +2202,57 @@ public static partial class MusicCatalogTests
             True(!f.Module.CanCatalogNext, "native final page stops paging");
             await f.Module.CatalogPageAsync(1); Equal(101, f.Client.Count("music.catalog.home"));
         });
-        yield return Case("cancelled and retired responses cannot republish private display or cache", async () =>
+        yield return Case("account retirement keeps home until navigation refreshes and late receipts cannot replace it", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-home", default);
-            var hold = f.Client.Hold("music.catalog.home");
-            var pending = f.Module.RefreshCatalogAsync(); await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            f.Module.RetireCatalogSession();
-            await pending; hold.Release(); await Drain();
-            Equal(0, f.Module.CatalogSections.Count); Equal(0, f.Module.Songs.Count);
-            var reads = f.Client.Count("music.catalog.home");
-            await f.Module.NavigateAsync("catalog-home", default);
             await f.Module.HomeInitialization;
-            Equal(reads + 2, f.Client.Count("music.catalog.home"));
+            var home = f.Module.HomeSections.ToArray();
+            var sections = f.Module.CatalogSections.ToArray();
+            var songs = f.Module.Songs.ToArray();
+            True(home.Length > 0, "a successful home establishes the retained display");
+            var hold = f.Client.Hold("music.catalog.home");
+            var pending = f.Module.RefreshCatalogAsync();
+            try
+            {
+                await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                int reads = f.Client.Count("music.catalog.home");
+                f.Module.RetireCatalogSession();
+                await hold.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await Drain();
+                True(home.SequenceEqual(f.Module.HomeSections, ReferenceEqualityComparer.Instance) &&
+                    sections.SequenceEqual(f.Module.CatalogSections, ReferenceEqualityComparer.Instance) &&
+                    songs.SequenceEqual(f.Module.Songs, ReferenceEqualityComparer.Instance),
+                    "retirement cancels request authority without clearing successful home content");
+                Equal(reads, f.Client.Count("music.catalog.home"));
+
+                await f.Configure(new { homePlaylistStart = 700 });
+                var refreshHold = f.Client.Hold("music.catalog.home");
+                await f.Module.NavigateAsync("catalog-home", default);
+                await refreshHold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Equal(reads + 1, f.Client.Count("music.catalog.home"));
+                var request = f.Client.Last("music.catalog.home");
+                True(request.GetProperty("refresh").GetBoolean() && !request.TryGetProperty("continuation", out _),
+                    "the next navigation starts a fresh first page rather than resuming retired authority");
+                True(home.SequenceEqual(f.Module.HomeSections, ReferenceEqualityComparer.Instance),
+                    "home stays visible while the replacement request is pending");
+                refreshHold.Release();
+                await f.Module.HomeRefresh.WaitAsync(TimeSpan.FromSeconds(5));
+                Equal(reads + 2, f.Client.Count("music.catalog.home"));
+                var currentHome = f.Module.HomeSections.ToArray();
+                var currentSections = f.Module.CatalogSections.ToArray();
+                True(currentHome.SelectMany(section => section.Items).Where(card => card.Kind == "playlist")
+                    .Select(card => card.ActionId).SequenceEqual(new[] { "700", "701" }),
+                    "the successful refresh replaces old playlist identities without retaining the old tail");
+                hold.Release();
+                await pending.WaitAsync(TimeSpan.FromSeconds(5));
+                await Drain();
+                True(currentHome.SequenceEqual(f.Module.HomeSections, ReferenceEqualityComparer.Instance) &&
+                    currentSections.SequenceEqual(f.Module.CatalogSections, ReferenceEqualityComparer.Instance),
+                    "the late cancelled receipt cannot republish old home content");
+                Equal(reads + 2, f.Client.Count("music.catalog.home"));
+            }
+            finally { f.Client.ReleaseAll(); await pending; await f.Module.HomeRefresh; }
         });
         yield return Case("late A after B cannot replace current route", async () =>
         {
@@ -2223,14 +2264,50 @@ public static partial class MusicCatalogTests
             True(f.Module.CurrentChannelKey.Length > 0, "directory resolves to its first openable channel");
             Equal(45, f.Module.ChannelTabs.Count);
         });
-        yield return Case("auth failure clears private display while transient failure does not", async () =>
+        yield return Case("guest home auth failure preserves display without retry until an explicit refresh", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-home", default);
+            await f.Module.HomeInitialization;
+            var home = f.Module.HomeSections.ToArray();
+            var sections = f.Module.CatalogSections.ToArray();
+            var songs = f.Module.Songs.ToArray();
+            True(home.Length > 0, "the auth failure follows a successful home");
+            Equal("none", f.Module.Accounts.Single(account => account.Platform == "wy").State);
+            int reads = f.Client.Count("music.catalog.home");
+            int accountReads = f.Client.Count("music.accounts.list");
             await f.Configure(new { homeFailure = 401 });
             await f.Module.RefreshCatalogAsync();
-            Equal(0, f.Module.CatalogSections.Count); Equal(0, f.Module.Songs.Count);
+            await Drain();
+            True(home.SequenceEqual(f.Module.HomeSections, ReferenceEqualityComparer.Instance) &&
+                sections.SequenceEqual(f.Module.CatalogSections, ReferenceEqualityComparer.Instance) &&
+                songs.SequenceEqual(f.Module.Songs, ReferenceEqualityComparer.Instance),
+                "an authentication error cannot erase the last successful home");
             Equal("当前内容需要平台登录", f.Module.Status);
+            Equal("none", f.Module.Accounts.Single(account => account.Platform == "wy").State);
+            Equal(reads + 1, f.Client.Count("music.catalog.home"));
+            Equal(accountReads, f.Client.Count("music.accounts.list"));
+
+            await f.Configure(new { homeFailure = 0, homePlaylistStart = 700 });
+            var hold = f.Client.Hold("music.catalog.home");
+            var retry = f.Module.RefreshCatalogAsync();
+            try
+            {
+                await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var request = f.Client.Last("music.catalog.home");
+                True(request.GetProperty("refresh").GetBoolean() && !request.TryGetProperty("continuation", out _),
+                    "explicit recovery still reads the real first page");
+                True(home.SequenceEqual(f.Module.HomeSections, ReferenceEqualityComparer.Instance),
+                    "the failed refresh did not discard content needed during retry");
+                hold.Release();
+                await retry;
+                await f.Module.HomeInitialization;
+                Equal(reads + 3, f.Client.Count("music.catalog.home"));
+                True(f.Module.HomeSections.SelectMany(section => section.Items).Where(card => card.Kind == "playlist")
+                    .Select(card => card.ActionId).SequenceEqual(new[] { "700", "701" }),
+                    "successful recovery replaces old playlist identities and follows continuation");
+            }
+            finally { hold.Release(); await retry; await f.Module.HomeInitialization; }
         });
         yield return Case("search playlist DTO without kind is actionable and search uses page <=100", async () =>
         {
@@ -3096,7 +3173,7 @@ public static partial class MusicCatalogTests
                 return Json(new { code = 200, data = new { cursor = (cursor + 1).ToString(), hasMore = cursor < Number("homePages", 2) - 1,
                     blockCodeOrderList = "[\"PLAYLIST\"]", blocks = new object[] {
                         new { positionCode = "PLAYLIST", uiElement = new { subTitle = new { title = "推荐歌单" } },
-                            creatives = new[] { new { resources = new[] { new { resourceType = "playlist", resourceId = (500 + cursor).ToString(),
+                            creatives = new[] { new { resources = new[] { new { resourceType = "playlist", resourceId = (Number("homePlaylistStart", 500) + cursor).ToString(),
                                 name = "合成歌单", coverImg = "https://art.example.test/public-playlist.jpg" } } } } },
                         new { positionCode = "ENTRANCE", creatives = new[] { new { resources = entries.ToArray() } } } } } });
             }

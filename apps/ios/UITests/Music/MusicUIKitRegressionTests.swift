@@ -10,7 +10,7 @@ import MeowPlayback
 
 @MainActor
 final class MusicUIKitRegressionTests: XCTestCase {
-    func testHiddenHomeRevokesRowsAndDefersRefillAndFMPreviewUntilReturn() async throws {
+    func testHiddenHomeRetainsSameSourceRowsAndDefersRefillAndFMPreviewUntilReturn() async throws {
         let action = MusicHomeAction.fm(mode: .default, submode: "", entry: nil)
         func home(_ id: String) -> MusicPublicBrowsePage {
             .init(sections: [.init(id: "home", title: "", items: [
@@ -18,7 +18,10 @@ final class MusicUIKitRegressionTests: XCTestCase {
             ], layout: .featureRail)])
         }
         let service = MusicUIKitRegressionService(browse: home("initial"))
+        let changeProcessed = expectation(description: "hidden same-source home change processed")
+        await service.observeHomeChangeCompletion { changeProcessed.fulfill() }
         let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        addTeardownBlock { await model.close() }
         let appearance = MusicAppearancePreferencesStore(), router = MusicUIKitRegressionRouter()
         let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
             request: .discovery(.home), appearance: appearance, router: router, embedded: true)
@@ -45,7 +48,11 @@ final class MusicUIKitRegressionTests: XCTestCase {
         // Home scope invalidation is delivered by the native home stream;
         // the account UI echo only invalidates account-bound detail requests.
         await service.updateBrowse(home("replacement"))
-        await waitForResult { collection.numberOfSections == 0 }
+        // The next stream pull acknowledges the preceding event's full handling.
+        await fulfillment(of: [changeProcessed], timeout: 3)
+        await deliverMainRunLoop()
+        XCTAssertEqual(collection.numberOfSections, 1)
+        XCTAssertEqual(collection.numberOfItems(inSection: 0), 1)
         let afterAccount = await service.counts(), previewCalls = await service.fmPreviewCount
         XCTAssertEqual(afterAccount.browse, 1); XCTAssertEqual(previewCalls, 1)
         await deliverMainRunLoop()
@@ -63,6 +70,147 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let returned = await service.counts(), returnedPreviews = await service.fmPreviewCount
         XCTAssertEqual(returned.browse, 2); XCTAssertEqual(returnedPreviews, 2)
         await model.close()
+    }
+
+    func testRestoredHomeKeepsCardsAndRoutesOpenAndPlayToOwnDetailDuringSlowRefresh() async throws {
+        let destination = MusicPublicBrowseCollection(platform: .kugou,
+            nativeID: "collection_3_41_1_0", title: "缓存歌单")
+        let cached = MusicPublicBrowseItem(id: "cached-card", title: destination.title,
+            content: .collection(destination))
+        let snapshot = MusicPublicBrowsePage(sections: [
+            .init(id: "home", title: "", items: [cached], layout: .playlistRail),
+        ])
+        let service = MusicUIKitRegressionService(browse: .init(sections: [
+            .init(id: "home", title: "", items: [card("fresh-card", previews: [])], layout: .playlistRail),
+        ]), restoredHome: snapshot, detail: .init(collection: destination,
+            members: [], total: 0, cursor: nil, snapshot: "public-detail", consumed: 0))
+        let refreshing = expectation(description: "restored home starts background refresh")
+        let detailEntered = expectation(description: "cached card play enters public detail")
+        let homeGate = MusicUIKitSearchGate { refreshing.fulfill() }
+        let detailGate = MusicUIKitSearchGate { detailEntered.fulfill() }
+        await service.holdHome(homeGate)
+        await service.holdDetail(cursor: nil, gate: detailGate)
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        addTeardownBlock {
+            await homeGate.release(); await detailGate.release()
+            await model.close()
+        }
+        let router = MusicUIKitRegressionRouter()
+        var opened: [MusicPublicBrowseCollection] = []
+        router.onCollection = { opened.append($0) }
+        let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
+            request: .discovery(.home), appearance: MusicAppearancePreferencesStore(), router: router, embedded: true)
+        let window = mount(controller)
+        defer { release(controller, window: window) }
+        let collection = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UICollectionView }.first)
+        let path = IndexPath(item: 0, section: 0)
+        await fulfillment(of: [refreshing], timeout: 3)
+        await waitForResult {
+            collection.layoutIfNeeded()
+            return collection.cellForItem(at: path)?.accessibilityIdentifier == "music.browse.item.cached-card" &&
+                controller.canPresentPageAlert
+        }
+        XCTAssertEqual(collection.numberOfSections, 1)
+        XCTAssertEqual(collection.numberOfItems(inSection: 0), 1)
+        XCTAssertNil(collection.backgroundView, "Restored cards must remain visible without a loading skeleton")
+        let source = await service.homeSourceSelection()
+        XCTAssertNotEqual(destination.platform, source.selected,
+            "A public card's platform must not be replaced with the selected home source")
+        let cell = try XCTUnwrap(collection.cellForItem(at: path))
+        let play = try resultButton(id: "music.browse.play.cached-card", in: cell)
+        XCTAssertFalse(play.isHidden); XCTAssertTrue(play.isEnabled)
+        XCTAssertTrue(collection.isUserInteractionEnabled)
+        controller.collectionView(collection, didSelectItemAt: path)
+        XCTAssertEqual(opened, [destination])
+        play.sendActions(for: .touchUpInside)
+        await fulfillment(of: [detailEntered], timeout: 3)
+        XCTAssertEqual(cell.accessibilityIdentifier, "music.browse.item.cached-card")
+        let whileRefreshing = await service.counts()
+        XCTAssertEqual(whileRefreshing.browse, 1)
+
+        // Completing a background refresh must not retire the captured play action.
+        await homeGate.release()
+        await waitForHomeSubscription(service)
+        await waitForResult {
+            collection.layoutIfNeeded()
+            return collection.cellForItem(at: path)?.accessibilityIdentifier == "music.browse.item.fresh-card"
+        }
+        await detailGate.release()
+        await waitForResult {
+            guard let alert = controller.presentedViewController as? UIAlertController else { return false }
+            return alert.viewIfLoaded?.window != nil && !alert.isBeingPresented &&
+                alert.transitionCoordinator == nil
+        }
+        let details = await service.detailCallIDs()
+        XCTAssertEqual(details, [destination.id])
+        let alert = try XCTUnwrap(controller.presentedViewController as? UIAlertController)
+        // This fixture has no public queue loader: the assertion proves the play
+        // entry completed the correct detail read, not successful queue playback.
+        XCTAssertEqual(alert.message, MusicServiceError.unsupported.localizedDescription)
+        XCTAssertEqual(opened, [destination])
+        XCTAssertEqual(collection.numberOfItems(inSection: 0), 1)
+        let completed = await service.counts()
+        XCTAssertEqual(completed.browse, 1)
+        await model.close()
+    }
+
+    func testRestoredHomeAuthenticationRefreshFailureShowsAlertAndRetainsRows() async throws {
+        for failure in [MusicServiceError.authRequired, .sessionExpired] {
+            let cached = card("retained-card", previews: [])
+            let snapshot = MusicPublicBrowsePage(sections: [
+                .init(id: "home", title: "", items: [cached], layout: .playlistRail),
+            ])
+            let service = MusicUIKitRegressionService(browse: .init(sections: [
+                .init(id: "home", title: "", items: [card("replacement", previews: [])], layout: .playlistRail),
+            ]), restoredHome: snapshot)
+            let refreshing = expectation(description: "held home refresh before \(failure.rawValue)")
+            let gate = MusicUIKitSearchGate { refreshing.fulfill() }
+            await service.holdHome(gate)
+            await service.failNextHome(failure)
+            let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+            addTeardownBlock {
+                await gate.release()
+                await model.close()
+            }
+            let router = MusicUIKitRegressionRouter()
+            let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
+                request: .discovery(.home), appearance: MusicAppearancePreferencesStore(), router: router, embedded: true)
+            let window = mount(controller)
+            defer { release(controller, window: window) }
+            let collection = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UICollectionView }.first)
+            let path = IndexPath(item: 0, section: 0)
+            await fulfillment(of: [refreshing], timeout: 3)
+            await waitForResult {
+                collection.layoutIfNeeded()
+                return collection.cellForItem(at: path)?.accessibilityIdentifier == "music.browse.item.retained-card" &&
+                    controller.canPresentPageAlert
+            }
+            XCTAssertNil(collection.backgroundView)
+            XCTAssertNil(controller.presentedViewController)
+            await gate.release()
+            await waitForHomeSubscription(service)
+            await waitForResult {
+                guard let alert = controller.presentedViewController as? UIAlertController else { return false }
+                return alert.viewIfLoaded?.window != nil && !alert.isBeingPresented &&
+                    alert.transitionCoordinator == nil
+            }
+            let alert = try XCTUnwrap(controller.presentedViewController as? UIAlertController)
+            XCTAssertEqual(alert.title, "错误")
+            let message = failure.message(operation: "音乐内容读取")
+            XCTAssertTrue(alert.message?.hasPrefix(message) == true)
+            XCTAssertEqual(alert.actions.map(\.title), ["取消", "重试"])
+            XCTAssertEqual(collection.numberOfSections, 1)
+            XCTAssertEqual(collection.numberOfItems(inSection: 0), 1)
+            XCTAssertEqual(collection.cellForItem(at: path)?.accessibilityIdentifier, "music.browse.item.retained-card")
+            XCTAssertNil(collection.backgroundView)
+            XCTAssertFalse(descendants(collection).compactMap { $0 as? UILabel }.contains {
+                $0.text?.contains(message) == true
+            }, "Read failures belong in the alert, not the home layout")
+            let calls = await service.counts()
+            XCTAssertEqual(calls.browse, 1)
+            XCTAssertEqual(calls.details, 0)
+            await model.close()
+        }
     }
 
     func testCoveredHomeFinishesAdmittedReadWithoutRenderingOrReadingAgainOnReturn() async throws {
@@ -444,14 +592,17 @@ final class MusicUIKitRegressionTests: XCTestCase {
         await model.close()
     }
 
-    func testBrowseReusesHeaderAndStatusViewsButReplacesChangedMenusAndRejectsOldActions() async throws {
+    func testBrowseReusesHeaderStatusAndHomeMenuAcrossRefreshButRejectsActionsAfterNavigation() async throws {
         let service = MusicUIKitRegressionService()
         let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        addTeardownBlock { await model.close() }
         let appearance = MusicAppearancePreferencesStore(), router = MusicUIKitRegressionRouter()
         let page = MusicBrowseViewController(title: "推荐", model: model, browser: service,
             request: .discovery(.home), appearance: appearance, router: router)
-        let window = mount(page)
-        defer { release(page, window: window) }
+        let navigation = PageNavigationController(themeProvider: appearance)
+        navigation.setViewControllers([PageViewController(themeProvider: appearance), page], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
         let collection = try XCTUnwrap(page.view.subviews.compactMap { $0 as? UICollectionView }.first)
         await waitForHomeSubscription(service)
         await waitForResult { (collection.backgroundView as? UILabel)?.text == "暂无内容" }
@@ -464,6 +615,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertTrue(button.menu === menu); XCTAssertTrue(collection.backgroundView === status)
         let entered = expectation(description: "explicit refresh started")
         let gate = MusicUIKitSearchGate { entered.fulfill() }
+        addTeardownBlock { await gate.release() }
         await service.holdHome(gate)
         invoke(refresh)
         await fulfillment(of: [entered], timeout: 3)
@@ -473,18 +625,25 @@ final class MusicUIKitRegressionTests: XCTestCase {
         await waitForResult { (collection.backgroundView as? UILabel)?.text == "暂无内容" }
         XCTAssertTrue(descendants(page.pageHeader).contains { $0 === button })
         let currentMenu = try XCTUnwrap(button.menu)
-        XCTAssertFalse(currentMenu === menu)
-        let changed = expectation(description: "current refresh starts")
+        XCTAssertTrue(currentMenu === menu, "An ordinary home refresh keeps the same page and menu identity")
+        let changed = expectation(description: "captured home refresh remains valid")
         let nextGate = MusicUIKitSearchGate { changed.fulfill() }
+        addTeardownBlock { await nextGate.release() }
         await service.holdHome(nextGate)
         invoke(refresh)
-        await deliverMainRunLoop()
-        let staleCalls = await service.counts()
-        XCTAssertEqual(staleCalls.browse, 2, "An old captured menu cannot refresh a successor epoch")
-        invoke(try XCTUnwrap(currentMenu.children.compactMap { $0 as? UIAction }.first { $0.title == "刷新" }))
         await fulfillment(of: [changed], timeout: 3)
+        let refreshed = await service.counts()
+        XCTAssertEqual(refreshed.browse, 3, "The captured home action must remain usable after a refresh")
         await nextGate.release()
         await waitForResult { (collection.backgroundView as? UILabel)?.text == "暂无内容" }
+        await waitForResult { page.canPresentPageAlert && navigation.transitionCoordinator == nil }
+        XCTAssertTrue(navigation.popViewController(animated: false) === page)
+        navigation.view.layoutIfNeeded()
+        await waitForResult { !page.isPageActive }
+        invoke(refresh)
+        await deliverMainRunLoop()
+        let retired = await service.counts()
+        XCTAssertEqual(retired.browse, 3, "Real navigation must retire the captured home action")
         await model.close()
     }
 
@@ -3941,6 +4100,7 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     }
     private let discovery: [MusicSearchDiscoverySnapshot]
     private var browse: MusicPublicBrowsePage
+    private let restoredHomePage: MusicPublicBrowsePage?
     private let nextBrowse: MusicPublicBrowsePage?
     private let detail: MusicPublicBrowseDetail?
     private let nextDetail: MusicPublicBrowseDetail?
@@ -3969,7 +4129,9 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private let resultInspection = MusicUIKitResultInspectionSession()
     private var homeContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
     private var homeSubscriptionObserver: (@Sendable () -> Void)?
+    private var homeChangeCompletionObserver: (@Sendable () -> Void)?
     private var homeGate: MusicUIKitSearchGate?
+    private var homeFailure: MusicServiceError?
     private var catalogueGate: MusicUIKitSearchGate?
     private var channelGate: MusicUIKitSearchGate?
     private var detailGates: [String: MusicUIKitSearchGate] = [:]
@@ -3980,6 +4142,7 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private(set) var localQueueReferences: [MusicReference] = []
     var isObservingHome: Bool { !homeContinuations.isEmpty }
     init(discovery: [MusicSearchDiscoverySnapshot] = [], browse: MusicPublicBrowsePage = .init(sections: []),
+         restoredHome: MusicPublicBrowsePage? = nil,
          nextBrowse: MusicPublicBrowsePage? = nil, detail: MusicPublicBrowseDetail? = nil,
          nextDetail: MusicPublicBrowseDetail? = nil,
          channelBrowse: MusicPublicBrowsePage? = nil,
@@ -3987,6 +4150,7 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
          details: [String: [MusicPublicBrowseDetail]] = [:],
          discoveryGate: MusicUIKitSearchGate? = nil) {
         self.discovery = discovery; self.browse = browse; self.nextBrowse = nextBrowse
+        self.restoredHomePage = restoredHome
         self.detail = detail; self.nextDetail = nextDetail
         self.channelBrowse = channelBrowse
         self.localTracks = localTracks; self.collectionKind = collectionKind
@@ -4041,6 +4205,10 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         for continuation in homeContinuations.values { continuation.yield(()) }
     }
     func holdHome(_ gate: MusicUIKitSearchGate) { homeGate = gate }
+    func failNextHome(_ error: MusicServiceError) { homeFailure = error }
+    func observeHomeChangeCompletion(_ observer: @escaping @Sendable () -> Void) {
+        homeChangeCompletionObserver = observer
+    }
     func holdCatalogue(_ gate: MusicUIKitSearchGate) { catalogueGate = gate }
     func holdChannel(_ gate: MusicUIKitSearchGate) { channelGate = gate }
     func holdDetail(cursor: String?, gate: MusicUIKitSearchGate) { detailGates[cursor ?? ""] = gate }
@@ -4091,11 +4259,13 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func selectHomeSource(_ source: MusicPublicBrowsePlatform, ifRevision: Int) async throws -> MusicHomeSourceSelection {
         .init(selected: .netease, revision: 0, available: [.netease])
     }
-    func restoredHome() async throws -> MusicPublicBrowsePage? { nil }
+    func restoredHome() async throws -> MusicPublicBrowsePage? { restoredHomePage }
     func homePage(cursor: String?, refresh: Bool) async throws -> MusicPublicBrowsePage {
         browseCalls += 1
         let gate = homeGate; homeGate = nil
+        let failure = homeFailure; homeFailure = nil
         if let gate { await gate.wait() }
+        if let failure { throw failure }
         return cursor == nil ? browse : nextBrowse ?? browse
     }
     func homeChanges() async -> AsyncStream<Void> {
@@ -4105,6 +4275,10 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         let observer = homeSubscriptionObserver; homeSubscriptionObserver = nil; observer?()
         pair.continuation.onTermination = { [weak self] _ in
             Task { await self?.removeHomeContinuation(id) }
+        }
+        if let homeChangeCompletionObserver {
+            let changes = MusicUIKitObservedHomeChanges(pair.stream, processed: homeChangeCompletionObserver)
+            return AsyncStream(unfolding: { await changes.next() })
         }
         return pair.stream
     }
@@ -4218,6 +4392,25 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func playedSongs() -> [MusicPlayedSong] { [] }
     func playedPlaylists() -> [MusicPlayedPlaylist] { [] }
     func restoreHistory(id: String, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
+}
+
+private actor MusicUIKitObservedHomeChanges {
+    private var iterator: AsyncStream<Void>.Iterator
+    private let processed: @Sendable () -> Void
+    private var delivered = false
+    init(_ stream: AsyncStream<Void>, processed: @escaping @Sendable () -> Void) {
+        iterator = stream.makeAsyncIterator()
+        self.processed = processed
+    }
+    func next() async -> Void? {
+        // The consumer asks again only after its preceding loop body has returned.
+        if delivered { processed() }
+        var current = iterator
+        let value: Void? = await current.next()
+        iterator = current
+        delivered = value != nil
+        return value
+    }
 }
 
 private actor MusicUIKitResultInspectionSession: MusicSourceInspectionSession {

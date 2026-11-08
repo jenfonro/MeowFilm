@@ -42,7 +42,9 @@ public final class MusicNativeHomeSnapshotDocument: MusicHomeSnapshotStoring, @u
 }
 
 enum MusicNativeHomeSnapshot {
-    static let maximumBytes = 400_000
+    // The document store's byte boundary applies to the complete accumulated
+    // display. Per-response section/item limits belong to the request parser.
+    static let maximumBytes = 8 * 1024 * 1024
     private static func image(_ url: URL?) -> MJ {
         guard let url else { return .null }
         let value = MusicModel.publicURL(.string(url.absoluteString))
@@ -86,10 +88,8 @@ enum MusicNativeHomeSnapshot {
                          !id.hasPrefix("id_"), .invalidResponse)
         return id
     }
-    static func encode(_ page: MusicNativePublicBrowseDiscovery, source: MusicPublicBrowsePlatform, scope: String) throws -> Data {
+    static func encode(_ page: MusicNativePublicBrowseDiscovery, source: MusicPublicBrowsePlatform) throws -> Data {
         try musicRequire(source == .netease || source == .kugou, .unsupported)
-        try musicRequire(!scope.isEmpty && scope.utf8.count <= 256 && page.sections.count <= 60 &&
-                         page.sections.reduce(0, { $0 + $1.items.count }) <= 600, .limit)
         let sections = try page.sections.map { section in
             MJ.obj([("id", .string(section.id)), ("title", .string(section.title)), ("layout", .string(section.layout.rawValue)),
                 ("avatars", .array(section.avatars.prefix(3).map { image($0) })),
@@ -134,31 +134,38 @@ enum MusicNativeHomeSnapshot {
                     return value
                 }))])
         }
-        let root = MJ.obj([("schema", .n(2)), ("source", .string(source.rawValue)),
-                           ("scope", .string(scope)), ("sections", .array(sections))])
+        let root = MJ.obj([("schema", .n(3)), ("source", .string(source.rawValue)),
+                           ("sections", .array(sections))])
         try MusicModel.rejectSecrets(root)
         let data = root.bytes
         try musicRequire(data.count <= maximumBytes, .limit)
         // Validate the complete serialized shape before replacing last success.
-        _ = try decode(data, source: source, scope: scope)
+        _ = try decode(data, source: source)
         return data
     }
-    static func decode(_ data: Data, source: MusicPublicBrowsePlatform, scope: String) throws -> MusicNativePublicBrowseDiscovery? {
+    static func decode(_ data: Data, source: MusicPublicBrowsePlatform) throws -> MusicNativePublicBrowseDiscovery? {
         let root = try MJ.parse(data, maximum: maximumBytes)
-        try root.requireFields(["schema", "source", "scope", "sections"], required: ["schema", "source", "scope", "sections"])
-        try musicRequire(root["schema"] == .n(2))
+        return try decode(root, source: source)
+    }
+    static func restore(_ data: Data) throws -> (source: MusicPublicBrowsePlatform, page: MusicNativePublicBrowseDiscovery) {
+        let root = try MJ.parse(data, maximum: maximumBytes)
+        guard let source = MusicPublicBrowsePlatform(rawValue: root["source"].string),
+              let page = try decode(root, source: source) else { throw MusicServiceError.invalidResponse }
+        return (source, page)
+    }
+    private static func decode(_ root: MJ, source: MusicPublicBrowsePlatform) throws -> MusicNativePublicBrowseDiscovery? {
+        try root.requireFields(["schema", "source", "sections"], required: ["schema", "source", "sections"])
+        try musicRequire(root["schema"] == .n(3))
         try MusicModel.rejectSecrets(root)
-        guard root["source"].string == source.rawValue, root["scope"].string == scope else { return nil }
+        guard root["source"].string == source.rawValue else { return nil }
         try musicRequire(source == .netease || source == .kugou, .unsupported)
-        try musicRequire(!scope.isEmpty && scope.utf8.count <= 256 &&
-                         root["sections"].isArray && root["sections"].array.count <= 60, .limit)
-        var count = 0, ids = Set<String>()
+        try musicRequire(root["sections"].isArray)
+        var ids = Set<String>()
         let sections = try root["sections"].array.map { section -> MusicNativePublicBrowseSection in
             try section.requireFields(["id", "title", "layout", "items", "avatars", "channel"], required: ["id", "title", "layout", "items"])
             let id = try section["id"].text(1024), title = try text(section["title"])
             guard let layout = MusicPublicBrowseSection.Layout(rawValue: section["layout"].string) else { throw MusicServiceError.invalidResponse }
             try musicRequire(ids.insert(id).inserted && section["items"].isArray, .invalidResponse)
-            count += section["items"].array.count; try musicRequire(count <= 600, .limit)
             var itemIDs = Set<String>()
             let items = try section["items"].array.map { item -> MusicNativePublicBrowseItem in
                 try item.requireFields(["id", "title", "subtitle", "artwork", "kind", "collection", "song", "channel", "action",
@@ -180,7 +187,7 @@ enum MusicNativeHomeSnapshot {
                         count: value["count"] == .null ? nil : try value["count"].integer(1_000_000)))
                 case "song":
                     let raw = MusicNativeTrackData(platform: source.rawValue, data: item["song"].bytes)
-                    _ = try cleanTrack(raw, source: source); content = .song(raw)
+                    content = .song(.init(platform: source.rawValue, data: try cleanTrack(raw, source: source).bytes))
                 case "channel":
                     content = .channel(try Self.channel(item["channel"], source: source))
                 case "daily": content = .daily

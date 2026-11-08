@@ -341,15 +341,15 @@ final class MusicNativeCatalogSourceTests: XCTestCase {
         XCTAssertEqual(new.songId, old.songId); XCTAssertEqual(new.sources, old.sources)
         XCTAssertEqual(new.sources.first?.platform, "kg"); XCTAssertEqual(new.sources.first?.nativeId, F.hash(1))
         XCTAssertNotEqual(new.ref, old.ref)
-        let decoded = try XCTUnwrap(MusicNativeHomeSnapshot.decode(bytes, source: .kugou, scope: "kugou:guest"))
+        let decoded = try XCTUnwrap(MusicNativeHomeSnapshot.decode(bytes, source: .kugou))
         guard case .song(let raw)? = decoded.sections.first(where: { $0.id == "new" })?.items.first?.content else {
             return XCTFail("Expected native song")
         }
         XCTAssertEqual(try MJ.parse(raw.data)["types"].array.map { $0["type"].string }, ["128k"])
-        XCTAssertNil(try MusicNativeHomeSnapshot.decode(bytes, source: .netease, scope: "kugou:guest"))
+        XCTAssertNil(try MusicNativeHomeSnapshot.decode(bytes, source: .netease))
         var root = try MJ.parse(bytes), sections = root["sections"].array
         sections[0]["channel"]["platform"] = .string("wy"); root["sections"] = .array(sections)
-        XCTAssertThrowsError(try MusicNativeHomeSnapshot.decode(root.bytes, source: .kugou, scope: "kugou:guest"))
+        XCTAssertThrowsError(try MusicNativeHomeSnapshot.decode(root.bytes, source: .kugou))
         await finishKugou(restoredService, gateway, paths: [F.recommend, F.newSongs, F.rankList])
     }
     func testAdoptingNewDurableRevisionRetiresCursorEvenWhenPlatformIsUnchanged() async throws {

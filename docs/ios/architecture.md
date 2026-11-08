@@ -13,10 +13,20 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `apps/ios/Navigation` | 根容器、普通页面导航、播放器及其他非导航呈现的路由 |
 | `apps/ios/Presentation` | 主页面外壳、页头、底部导航和播放器停靠区 |
 | `apps/ios/UITests` | UIKit 与音乐 UI 组件测试，复用已有 UIKit runner，不属于 App 源成员 |
-| `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的宿主测试：运行器集成实际链接、启动 Node；冷启动清理测试使用临时数据与模拟 Keychain |
+| `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的宿主测试：运行器集成实际链接、启动 Node；音乐本地启动测试使用合成存储与拒绝网络的 transport，冷启动清理测试使用临时数据与模拟 Keychain |
 | `apps/ios/runtime` | iOS socketpair 启动参数／失败边界与 music/Cat 薄 entry，复用公共 JS 模块 |
 
 工程文件由 `scripts/generate-ios-project.py` 生成。App 只编译上述四个职责目录；UITests、RuntimeTests 使用独立测试 target。NodeMobile.xcframework 链接并嵌入签名，完整 JS 载荷作为 `Runtime` 资源随包签名；构建输入准备见[发布](release.md)。
+
+### 启动与首页发布
+
+`MeowfilmLaunchController` 只持有用户清除数据的冷启动屏障。屏障成功后才创建 `MeowfilmAssembly`，业务本地恢复不进入清除流程。Coordinator 继续使用已有 `startupPage`，通过原生 `UIActivityIndicatorView` 表示等待，并保留设置入口；不增加品牌画面或最低停留时长。
+
+装配先完成现有脚本会话的本地配置、启动音乐借用者并授权原生服务，再通过同一 `prepareMusic` 路径等待账号 `prepareLocalAccounts()`、首页来源 `homeSourceSelection()` 和展示快照 `restoredHome()`。账号准备与私有请求共享本地初始化，读取失败不能当作游客。三项准备成功后才创建并发布可用的 `MusicViewModel`，Coordinator 据此安装首页；快照由原生服务保留供首页复用，无快照也正常结束启动，由首页沿用首载骨架。整库 `model.load()` 和自动同步在发布后执行，启动页不等待远端账号校验、首页 HTTP 或脚本启动中的网络工作。
+
+本地启动失败通过现有 `PageViewController.showError` 浮窗报告，原启动页停止 loading，已经打开的设置栈保留，不用全页错误说明替代导航，也不新增清除数据入口。关闭会取消启动任务并撤销原生服务访问；本地等待随后无论成功或失败都不能再发布模型或启动错误。Coordinator 同时拒绝安装已不可用或关闭的模型，避免队列中的旧发布切回首页。
+
+`MeowfilmMusicStartupHostTests` 直接调用真实装配消费的 `prepareMusic` 发布边界，覆盖持有本地准备、快照预读复用、无缓存、账号／来源读取失败、取消、关闭后晚到回执及真实 Coordinator 的 loading／设置恢复／错误浮窗。测试用受控 continuation 判断等待和完成，不以延时推断准备成功；不替代真实账号或线上服务验收。
 
 ## Swift Package
 

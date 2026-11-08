@@ -98,16 +98,16 @@ public static partial class MusicUiTests
             }
             finally { window.Close(); await Drain(); }
         });
-        yield return Case("platform account table keeps unknown accounts unread while independent platform marks stay visible", async () =>
+        yield return Case("platform account table keeps startup account state while a shared reread is pending", async () =>
         {
             await using var f = await SearchScene.Create();
             var view = new MusicAccountsView { DataContext = f.Module };
             Render(view, 840, 360);
             foreach (var row in f.Module.PlatformSettings)
             {
-                Equal("unknown", row.Account.State);
-                Equal("未读取", row.DisplayName);
-                True(!row.IsLoggedIn && !row.ShowLogin, "unread identity is not logged out");
+                Equal("none", row.Account.State);
+                Equal("未登录", row.DisplayName);
+                True(!row.IsLoggedIn && row.ShowLogin, "startup confirms the local logged-out identity");
                 AssertAccountTableImages(view, row, avatarVisible: false);
             }
             var first = f.Module.PlatformSettings[0];
@@ -122,19 +122,24 @@ public static partial class MusicUiTests
             Equal(Visibility.Collapsed, unboundAvatar.Visibility);
             unboundLogo.ClearValue(FrameworkElement.DataContextProperty);
             unboundAvatar.ClearValue(FrameworkElement.DataContextProperty);
+            int accountReads = f.Store.AccountReads;
             var hold = f.Store.HoldNextAccountRead();
+            var reread = f.Module.ReadAccountsAsync();
             var activation = f.Module.ActivateSettingsAsync();
             try
             {
                 await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Equal(accountReads + 1, f.Store.AccountReads);
                 Render(view, 840, 360);
                 foreach (var row in f.Module.PlatformSettings)
                 {
-                    Equal("unknown", row.Account.State);
+                    Equal("none", row.Account.State);
+                    True(row.ShowLogin && !row.IsLoggedIn, "a pending reread preserves the last confirmed identity");
                     AssertAccountTableImages(view, row, avatarVisible: false);
                 }
                 hold.Release();
-                await activation.WaitAsync(TimeSpan.FromSeconds(5));
+                await Task.WhenAll(reread, activation).WaitAsync(TimeSpan.FromSeconds(5));
+                Equal(accountReads + 1, f.Store.AccountReads);
                 Render(view, 840, 360);
                 foreach (var row in f.Module.PlatformSettings)
                 {
@@ -144,7 +149,7 @@ public static partial class MusicUiTests
                 }
                 Equal(0, f.Http.Requests.Count); Equal(0, f.Runtime.Calls.Count);
             }
-            finally { hold.Release(); await activation; }
+            finally { hold.Release(); await Task.WhenAll(reread, activation); }
         });
         yield return Case("platform account table never substitutes a brand mark for a logged-in user avatar", async () =>
         {

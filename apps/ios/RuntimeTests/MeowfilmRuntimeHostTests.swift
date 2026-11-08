@@ -1,10 +1,12 @@
 import XCTest
 import UIKit
+import Combine
 import MeowMusicFeature
 import MeowMusicNativeService
 import MeowFilmFeature
 import MeowStorage
 import MeowRuntime
+import MeowUI
 @testable import Meowfilm
 
 /// Runs inside the real Meowfilm App process (TEST_HOST): the App's embedded
@@ -261,5 +263,317 @@ final class MeowfilmScriptShutdownHostTests: XCTestCase {
             _ = try await resources.scriptSession.connection()
             XCTFail("App shutdown must close the shared session")
         } catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
+    }
+}
+
+/// Uses the App's real publication path with synthetic local stores and a
+/// transport that rejects every request. No Keychain or runtime is opened.
+@MainActor
+final class MeowfilmMusicStartupHostTests: XCTestCase {
+    func testLocalPreparationHoldsPublicationAndCacheMissEntersBeforeLibraryLoad() async {
+        let fixture = MusicStartupFixture()
+        addTeardownBlock { await fixture.close() }
+        let preparation = MusicStartupPreparation()
+        defer { preparation.release() }
+        var publications = 0
+        let observation = fixture.assembly.$music.sink { model in
+            guard let model else { return }
+            publications += 1
+            XCTAssertTrue(model.isAvailable)
+            XCTAssertFalse(model.hasLoadedLibrary, "Full library loading must follow publication")
+            XCTAssertGreaterThan(fixture.document.reads, 0, "The durable source must be read first")
+            XCTAssertEqual(fixture.home.reads, 1, "A cache miss is still a completed local read")
+        }
+        defer { observation.cancel() }
+        let startup = Task { await fixture.prepare { await preparation.wait() } }
+        await fulfillment(of: [preparation.entered], timeout: 5)
+        XCTAssertNil(fixture.assembly.music)
+        XCTAssertFalse(fixture.assembly.startupFailed)
+        XCTAssertEqual(fixture.modelsCreated, 0)
+        XCTAssertEqual(fixture.document.reads, 0)
+        XCTAssertEqual(fixture.home.reads, 0)
+        XCTAssertEqual(publications, 0)
+
+        preparation.release()
+        await startup.value
+        XCTAssertNotNil(fixture.assembly.music)
+        XCTAssertFalse(fixture.assembly.startupFailed)
+        XCTAssertEqual(fixture.modelsCreated, 1)
+        XCTAssertEqual(publications, 1)
+        let networkCalls = await fixture.network.calls
+        XCTAssertEqual(networkCalls, 0, "Local preparation must not verify an account or fetch home")
+    }
+
+    func testLocalAccountFailureDoesNotPublishOrReadHomeAsGuest() async {
+        let fixture = MusicStartupFixture()
+        addTeardownBlock { await fixture.close() }
+        await fixture.prepare { throw MusicServiceError.storageFailed }
+        XCTAssertTrue(fixture.assembly.startupFailed)
+        XCTAssertNil(fixture.assembly.music)
+        XCTAssertEqual(fixture.modelsCreated, 0)
+        XCTAssertEqual(fixture.document.reads, 0)
+        XCTAssertEqual(fixture.home.reads, 0)
+        let networkCalls = await fixture.network.calls
+        XCTAssertEqual(networkCalls, 0)
+    }
+
+    func testPreparedHomeSnapshotIsAvailableToThePublishedModelWithoutAnotherDiskRead() async throws {
+        let snapshot = Data(#"""
+        {"schema":3,"source":"wy","sections":[{"id":"saved","title":"最近首页","layout":"list","items":[
+          {"id":"playlist:42","title":"合成歌单","subtitle":"","artwork":null,"kind":"collection",
+           "collection":{"id":"42","kind":"playlist","title":"合成歌单","creator":"","artwork":null,"count":2}}
+        ]}]}
+        """#.utf8)
+        let fixture = MusicStartupFixture(homeData: snapshot)
+        addTeardownBlock { await fixture.close() }
+        let observation = fixture.assembly.$music.sink { model in
+            if model != nil { XCTAssertEqual(fixture.home.reads, 1) }
+        }
+        defer { observation.cancel() }
+        await fixture.prepare {}
+        let model = try XCTUnwrap(fixture.assembly.music)
+        let browser = try XCTUnwrap(model.publicBrowser as? any MusicHomeBrowsing)
+        let restored = try await browser.restoredHome()
+        let page = try XCTUnwrap(restored)
+        XCTAssertEqual(page.sections.first?.title, "最近首页")
+        XCTAssertEqual(page.sections.first?.items.first?.title, "合成歌单")
+        XCTAssertEqual(fixture.home.reads, 1, "The first page consumes the App's pre-read snapshot")
+        let networkCalls = await fixture.network.calls
+        XCTAssertEqual(networkCalls, 0)
+        XCTAssertFalse(fixture.assembly.startupFailed)
+    }
+
+    func testSourceReadFailureDoesNotPublishADefaultHome() async {
+        let fixture = MusicStartupFixture(documentFailure: .storageFailed)
+        addTeardownBlock { await fixture.close() }
+        var accountsPrepared = false
+        await fixture.prepare { accountsPrepared = true }
+        XCTAssertTrue(accountsPrepared)
+        XCTAssertTrue(fixture.assembly.startupFailed)
+        XCTAssertNil(fixture.assembly.music)
+        XCTAssertEqual(fixture.modelsCreated, 0)
+        XCTAssertEqual(fixture.document.reads, 1)
+        XCTAssertEqual(fixture.home.reads, 0)
+        let networkCalls = await fixture.network.calls
+        XCTAssertEqual(networkCalls, 0)
+    }
+
+    func testCancelledPreparationCannotPublishALateSuccessOrFailure() async {
+        for fails in [false, true] {
+            let fixture = MusicStartupFixture()
+            addTeardownBlock { await fixture.close() }
+            let preparation = MusicStartupPreparation()
+            let startup = Task {
+                await fixture.prepare {
+                    await preparation.wait()
+                    if fails { throw MusicServiceError.storageFailed }
+                }
+            }
+            await fulfillment(of: [preparation.entered], timeout: 5)
+            startup.cancel()
+            preparation.release()
+            await startup.value
+            XCTAssertNil(fixture.assembly.music)
+            XCTAssertFalse(fixture.assembly.startupFailed)
+            XCTAssertEqual(fixture.modelsCreated, 0)
+            XCTAssertEqual(fixture.home.reads, 0)
+        }
+    }
+
+    func testShutdownDuringPreparationClosesServiceAndRejectsLateCompletion() async {
+        for fails in [false, true] {
+            let fixture = MusicStartupFixture()
+            let preparation = MusicStartupPreparation()
+            let startup = Task {
+                await fixture.prepare {
+                    await preparation.wait()
+                    if fails { throw MusicServiceError.storageFailed }
+                }
+            }
+            await fulfillment(of: [preparation.entered], timeout: 5)
+            await fixture.close()
+            preparation.release()
+            await startup.value
+            XCTAssertNil(fixture.assembly.music)
+            XCTAssertFalse(fixture.assembly.startupFailed)
+            XCTAssertEqual(fixture.modelsCreated, 0)
+            XCTAssertEqual(fixture.home.reads, 0)
+            do {
+                _ = try await fixture.service.homeSourceSelection()
+                XCTFail("Shutdown must close the native owner, not just hide publication")
+            } catch { XCTAssertEqual(error as? MusicServiceError, .closed) }
+        }
+    }
+
+    func testStartupFailureUsesAlertAndPreservesTheOpenSettingsRoute() async throws {
+        let fixture = MusicStartupFixture()
+        addTeardownBlock { await fixture.close() }
+        await waitForStartupUI {
+            UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
+        }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.first { $0.activationState == .foregroundActive })
+        let previousWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.windowLevel = .normal + 1
+        var resetRequests = 0
+        let coordinator = MeowfilmCoordinator(window: window, assembly: fixture.assembly,
+                                              resetUserData: { resetRequests += 1 })
+        coordinator.start()
+        defer {
+            if let root = window.rootViewController { PageViewController.invalidatePages(in: root) }
+            window.isHidden = true; window.rootViewController = nil
+            previousWindow?.makeKey()
+        }
+        let root = try XCTUnwrap(window.rootViewController as? MeowfilmRootContainerViewController)
+        let startupPage = try XCTUnwrap(root.navigation.viewControllers.first as? PageViewController)
+        await waitForStartupUI { startupPage.canPresentPageAlert }
+        let activity = try XCTUnwrap(startupDescendants(startupPage.view)
+            .first { $0.accessibilityIdentifier == "startup.loading" } as? UIActivityIndicatorView)
+        XCTAssertTrue(activity.isAnimating)
+        XCTAssertNil(root.dock)
+        attachStartupWindow(window, name: "music-startup-local-preparation")
+        let settings = try XCTUnwrap(startupDescendants(startupPage.view)
+            .first { $0.accessibilityIdentifier == "startup.settings" } as? UIControl)
+        settings.sendActions(for: .touchUpInside)
+        await waitForStartupUI { root.navigation.topViewController is MeowfilmSettingsViewController }
+        let settingsPage = try XCTUnwrap(root.navigation.topViewController as? MeowfilmSettingsViewController)
+        await waitForStartupUI { settingsPage.canPresentPageAlert }
+        let table = try XCTUnwrap(startupDescendants(settingsPage.view).compactMap { $0 as? UITableView }.first)
+        XCTAssertEqual(table.numberOfRows(inSection: 0), 2)
+
+        await fixture.prepare { throw MusicServiceError.storageFailed }
+        await waitForStartupUI {
+            root.presentedViewController is UIAlertController &&
+                root.presentedViewController?.isBeingPresented == false
+        }
+        let alert = try XCTUnwrap(root.presentedViewController as? UIAlertController)
+        XCTAssertEqual(alert.message, "本地数据不可用")
+        XCTAssertEqual(alert.actions.map(\.title), ["确定"])
+        XCTAssertTrue(root.navigation.viewControllers.first === startupPage)
+        XCTAssertTrue(root.navigation.topViewController === settingsPage)
+        XCTAssertFalse(activity.isAnimating)
+        XCTAssertTrue(settings.isEnabled)
+        XCTAssertEqual(table.numberOfRows(inSection: 0), 2)
+        XCTAssertEqual(resetRequests, 0)
+        XCTAssertFalse(startupDescendants(startupPage.view).compactMap { ($0 as? UILabel)?.text }
+            .contains("本地数据不可用"), "The error belongs only to the alert")
+        XCTAssertNil(root.dock)
+        XCTAssertNil(fixture.assembly.music)
+        attachStartupWindow(window, name: "music-startup-local-failure")
+        withExtendedLifetime(coordinator) {}
+    }
+
+    private func attachStartupWindow(_ window: UIWindow, name: String) {
+        XCTAssertEqual(window.windowScene?.activationState, .foregroundActive)
+        window.layoutIfNeeded()
+        var rendered = false
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            rendered = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        XCTAssertTrue(rendered)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name; attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func waitForStartupUI(_ predicate: @escaping @MainActor () -> Bool) async {
+        let ready = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated { predicate() } },
+                                evaluatedWith: nil)
+        await fulfillment(of: [ready], timeout: 5)
+        XCTAssertTrue(predicate())
+    }
+
+    private func startupDescendants(_ view: UIView) -> [UIView] {
+        [view] + view.subviews.flatMap(startupDescendants)
+    }
+}
+
+@MainActor
+private final class MusicStartupFixture {
+    let assembly = MeowfilmAssembly()
+    let document: MusicStartupDocument
+    let home: MusicStartupHomeSnapshot
+    let network = MusicStartupNoNetwork()
+    let service: NativeMusicService
+    private(set) var modelsCreated = 0
+
+    init(documentFailure: MusicServiceError? = nil, homeData: Data? = nil) {
+        document = MusicStartupDocument(failure: documentFailure)
+        home = MusicStartupHomeSnapshot(data: homeData)
+        service = NativeMusicService(document: document, qq: network, homeSnapshot: home, transport: network)
+    }
+
+    func prepare(accounts: () async throws -> Void) async {
+        await assembly.prepareMusic(service, prepareAccounts: accounts, makeModel: {
+            modelsCreated += 1
+            return MusicViewModel(service: service, playback: assembly.playback)
+        })
+    }
+
+    func close() async {
+        assembly.shutdown()
+        await assembly.waitForShutdown()
+    }
+}
+
+@MainActor
+private final class MusicStartupPreparation {
+    let entered = XCTestExpectation(description: "Local account preparation held")
+    private var continuation: CheckedContinuation<Void, Never>?
+    func wait() async {
+        await withCheckedContinuation {
+            continuation = $0
+            entered.fulfill()
+        }
+    }
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private final class MusicStartupDocument: MusicNativeDocumentStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private let failure: MusicServiceError?
+    private var value: Data?
+    private var count = 0
+    init(failure: MusicServiceError?) { self.failure = failure }
+    var reads: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func read() throws -> Data? {
+        lock.lock(); defer { lock.unlock() }
+        count += 1
+        if let failure { throw failure }
+        return value
+    }
+    func compareAndSwap(expected: Data?, replacement: Data) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard value == expected else { throw MusicServiceError.storageConflict }
+        value = replacement
+    }
+}
+
+private final class MusicStartupHomeSnapshot: MusicHomeSnapshotStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private let data: Data?
+    private var count = 0
+    init(data: Data?) { self.data = data }
+    var reads: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func read() -> Data? { lock.lock(); defer { lock.unlock() }; count += 1; return data }
+    func write(_ data: Data) { XCTFail("Local startup must not replace the last successful home") }
+    func clear() { XCTFail("Local startup must not erase the last successful home") }
+}
+
+private actor MusicStartupNoNetwork: MusicNativeHTTPTransport, MusicPublicQQProviding {
+    private(set) var calls = 0
+    func send(_ request: MusicNativeHTTPRequest) throws -> MusicNativeHTTPResponse {
+        calls += 1; throw MusicServiceError.unavailable
+    }
+    func search(query: String, page: Int, limit: Int) throws -> MusicNativeTrackPage {
+        calls += 1; throw MusicServiceError.unavailable
+    }
+    func lyrics(mid: String) throws -> MusicNativeLyrics {
+        calls += 1; throw MusicServiceError.unavailable
     }
 }

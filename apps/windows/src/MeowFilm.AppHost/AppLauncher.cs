@@ -155,6 +155,7 @@ public static class AppLauncher
                 appearance = new AppAppearance(store);
                 await appearance.LoadAsync();
                 ValidateModuleComposition(modules);
+                await PrepareModulesAsync(modules, cancellationToken);
                 // The shared runtime starts with the App; starting it executes no script.
                 runtime.Start();
                 var lifecycle = Lifecycle();
@@ -188,6 +189,17 @@ public static class AppLauncher
                 return cancellationToken.IsCancellationRequested ? StartupOutcome.Cancelled : StartupOutcome.RetryableFailure;
             }
         }
+    }
+
+    internal static async Task PrepareModulesAsync(IReadOnlyList<IDesktopModule> modules,
+        CancellationToken cancellationToken = default)
+    {
+        foreach (var participant in modules.OfType<IDesktopStartupParticipant>())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await participant.PrepareStartupAsync(cancellationToken);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     internal static void ValidateModuleComposition(IReadOnlyList<IDesktopModule> modules)

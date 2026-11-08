@@ -236,24 +236,31 @@ public static partial class MusicUiTests
             True(f.Module.HasSearchHistory, "retired empty snapshot cannot replace the current history");
             await f.Module.DeactivateSettingsAsync();
         });
-        yield return Case("rapid settings unload and reopen has one account observation and no stale activation", async () =>
+        yield return Case("rapid settings unload and reopen shares one account reread after startup and no stale activation", async () =>
         {
             await using var f = await Fixture.Create();
+            Equal(1, f.Calls.Count("music.accounts.list"));
             var hold = f.Calls.HoldNext("music.accounts.list");
+            var reread = f.Module.ReadAccountsAsync();
             var first = f.Module.ActivateSettingsAsync();
-            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            var leaving = f.Module.DeactivateSettingsAsync();
-            var reopened = f.Module.ActivateSettingsAsync();
-            await Drain();
-            Equal(1, f.Calls.Count("music.accounts.list"));
-            hold.Release();
-            await Task.WhenAll(first, leaving, reopened);
-            Equal(1, f.Calls.Count("music.accounts.list"));
-            True(f.Module.LibrarySync.IsActive && f.Module.LibrarySync.CanEdit,
-                "only the reopened settings generation owns presentation state");
-            await f.Module.DeactivateSettingsAsync();
-            True(!f.Module.LibrarySync.IsActive && !f.Module.LibrarySync.CanEdit,
-                "the final unload retires the sole settings generation");
+            Task leaving = Task.CompletedTask, reopened = Task.CompletedTask;
+            try
+            {
+                await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                leaving = f.Module.DeactivateSettingsAsync();
+                reopened = f.Module.ActivateSettingsAsync();
+                await Drain();
+                Equal(2, f.Calls.Count("music.accounts.list"));
+                hold.Release();
+                await Task.WhenAll(reread, first, leaving, reopened);
+                Equal(2, f.Calls.Count("music.accounts.list"));
+                True(f.Module.LibrarySync.IsActive && f.Module.LibrarySync.CanEdit,
+                    "only the reopened settings generation owns presentation state");
+                await f.Module.DeactivateSettingsAsync();
+                True(!f.Module.LibrarySync.IsActive && !f.Module.LibrarySync.CanEdit,
+                    "the final unload retires the sole settings generation");
+            }
+            finally { hold.Release(); await Task.WhenAll(reread, first, leaving, reopened); }
         });
         yield return Case("search discovery first visibility loads history once without startup prefetch", async () =>
         {

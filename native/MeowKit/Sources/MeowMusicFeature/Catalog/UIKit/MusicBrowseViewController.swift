@@ -391,7 +391,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 guard !Task.isCancelled, self?.isPageActive == true else { return }
                 await page.observeHomeChanges()
             }
-        } else if !observationNeedsRestart, !page.loaded, !page.isLoading, page.error == nil {
+        } else if !observationNeedsRestart, !page.isLoading {
             runPageTask { [weak self] in
                 guard self?.isPageVisible == true else { return }
                 await page.restoreHomeIfNeeded()
@@ -481,6 +481,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             collection.backgroundView = nil
         }
         configureActions()
+        loadVisibleFMPreviews()
         showError(page?.actionError?.localizedDescription)
         showReadErrorIfNeeded()
     }
@@ -857,10 +858,19 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         }
     }
 
+    private func isCurrentDisplayPreview(_ item: MusicPublicBrowseItem) -> Bool {
+        guard let page, page.canLoadDisplayPreviews else { return false }
+        // Published loading and the collection projection settle separately.
+        // Never start optional work for a retained cell already replaced by
+        // the model, even if the collection has not rendered that replacement.
+        return page.sections.contains { $0.items.contains { sameItem($0, item) } }
+    }
+
     private func loadFMPreview(_ item: MusicPublicBrowseItem, action: MusicHomeAction) {
         guard isPageActive, isPageVisible, model.isAvailable, !model.isClosed,
               item.artwork == nil, model.currentFMArtwork(action) == nil,
               !previewRequests.contains(item.id), previewTasks[item.id] == nil,
+              isCurrentDisplayPreview(item),
               let provider = model.publicBrowser as? any MusicFMPreviewServing else { return }
         let access = model.accountAccessGeneration
         previewTasks[item.id] = Task { [weak self] in
@@ -871,7 +881,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 }
             }
             do {
-                guard !Task.isCancelled, self?.isPageVisible == true,
+                guard !Task.isCancelled, self?.isPageVisible == true, self?.isCurrentDisplayPreview(item) == true,
                       self?.model.accountAccessGeneration == access else { return }
                 self?.previewRequests.insert(item.id)
                 let value = try await provider.fmPreview(action)

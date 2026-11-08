@@ -12,7 +12,8 @@ public struct MusicHomeSourceSelection: Sendable, Equatable {
 
 /// Optional v1 home lifecycle. A restored page is display data, never a
 /// continuation or account grant. Refresh keeps the last successful page until
-/// replacement, except when the account/protection binding is revoked.
+/// replacement, including account changes. Source and application-access changes
+/// still retire the old page; private actions always acquire current authority.
 public protocol MusicHomeBrowsing: MusicPublicBrowsing {
     /// Independent of search and playback source selection. Only implemented
     /// home providers are available; selecting the current source is a no-op.

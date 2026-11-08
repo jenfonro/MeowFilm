@@ -187,6 +187,7 @@ public static partial class MusicUiTests
     // MusicLibraryOwner. No Node, network, reflection or second writer.
     private sealed class RecommendationRaceApplication(IDocumentStore store) : MusicApplicationTestDouble
     {
+        private const long Generation = 1;
         private readonly MusicLibraryOwner library = new(store);
         private readonly HashSet<Task> selections = [];
         private Func<MusicRecommendationSelection, CancellationToken, Task<bool>>? callback;
@@ -302,13 +303,29 @@ public static partial class MusicUiTests
         private static JsonElement ScriptSource() => JsonSerializer.SerializeToElement(new {
             installationId = "recommendation-consumer-race", name = "Recommendation race fixture", version = "1",
             contentHash = new string('c', 64), executionHash = new string('d', 64), sourceRevision = 1,
-            generation = 1, enabled = true, state = "ready", rollbackAvailable = false, lastFailure = (string?)null,
-            capabilities = new[] { new { platform = "wy", actions = new[] { "musicUrl" }, qualitys = new[] { "320k" } } } });
+            generation = Generation, enabled = true, state = "ready", rollbackAvailable = false, lastFailure = (string?)null,
+            sites = new { wy = new { actions = new[] { "musicUrl" }, qualitys = new[] { "320k" } } } });
         public override async Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (method == "music.accounts.list")
+                return JsonSerializer.SerializeToElement(new { ok = true,
+                    items = new[] { "wy", "tx", "kg" }.Select(platform =>
+                        new { platform, state = "none", generation = 0, profile = (object?)null }).ToArray() });
             if (method == "music.quality.settings.get") return await ReadQualitySettings(cancellationToken);
+            if (method == "music.songs.complete")
+                return JsonSerializer.SerializeToElement(new { ok = true,
+                    song = JsonSerializer.SerializeToElement(parameters).GetProperty("song"), failures = Array.Empty<object>() });
+            if (method == "music.official.candidates")
+            {
+                var quality = await ReadQualitySettings(cancellationToken);
+                return JsonSerializer.SerializeToElement(new { ok = true,
+                    song = JsonSerializer.SerializeToElement(parameters).GetProperty("song"),
+                    candidates = Array.Empty<object>(),
+                    qualityPolicySignature = quality.GetProperty("signature").GetString(),
+                    authorizationRequired = false });
+            }
             if (method.StartsWith("music.official.", StringComparison.Ordinal))
                 return JsonSerializer.SerializeToElement(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
             if (method == "music.sources.list")
@@ -327,14 +344,14 @@ public static partial class MusicUiTests
                 if (request.GetProperty("quality").GetString() != "320k")
                     return JsonSerializer.SerializeToElement(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
                 True(request.GetProperty("installationId").GetString() == "recommendation-consumer-race" &&
-                    request.GetProperty("platform").GetString() == "wy" && request.GetProperty("generation").GetInt64() == 1,
+                    request.GetProperty("platform").GetString() == "wy",
                     "resolution uses the enabled fixture installation and its live declaration");
                 string policy = quality.GetProperty("signature").GetString()!;
                 var source = song.GetProperty("sources")[0];
                 var songNode = JsonNode.Parse(song.GetRawText())!.AsObject();
                 string cache = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v1"), ("policy", policy),
                     ("installation", request.GetProperty("installationId")), ("platform", request.GetProperty("platform")),
-                    ("revision", 1), ("generation", request.GetProperty("generation")),
+                    ("revision", 1), ("generation", Generation),
                     ("sourceKey", source.GetProperty("sourceKey")), ("recording", source.GetProperty("musicInfo")),
                     ("songId", songNode["songId"]),
                     ("duration", songNode["duration"]), ("quality", request.GetProperty("quality"))));
@@ -345,7 +362,7 @@ public static partial class MusicUiTests
                 return JsonSerializer.SerializeToElement(new
                 {
                     ok = true, installationId = request.GetProperty("installationId").GetString(),
-                    platform = request.GetProperty("platform").GetString(), generation = request.GetProperty("generation").GetInt64(),
+                    platform = request.GetProperty("platform").GetString(), generation = Generation,
                     songId = song.GetProperty("songId").GetString(), quality = request.GetProperty("quality").GetString(),
                     sourceKey = source.GetProperty("sourceKey").GetString(),
                     qualityPolicySignature = policy, qualityCacheSignature = cache, qualityVerified = false,
@@ -355,7 +372,7 @@ public static partial class MusicUiTests
             }
             if (method == "music.recommendations.get" && snapshot is { } value) return value.Clone();
             // Unsupported incidental calls are real bounded errors, not an
-            // invented success. Initialization/library/history remain native.
+            // invented success. Library/history remain native.
             return await library.ExecuteAsync(method, parameters, cancellationToken);
         }
     }

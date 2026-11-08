@@ -217,14 +217,15 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
         XCTAssertEqual(after, revision)
         await value.close()
     }
-    func testCoalescedFirstLogoutIsNotDroppedAndRetiresOldScopeSnapshot() async throws {
+    func testCoalescedFirstLogoutRetiresRequestCacheButKeepsDisplaySnapshot() async throws {
         let account = HomeObservationAccount(), store = HomeObservationStore()
         let value = try await service(account, store)
         _ = try await value.homePage(cursor: nil, refresh: true)
+        let saved = store.read()
         await account.coalesceLogout()
         var changes = 0
         for await _ in await value.homeChanges() { changes += 1 }
-        XCTAssertEqual(changes, 1); XCTAssertNil(store.read())
+        XCTAssertEqual(changes, 1); XCTAssertEqual(store.read(), saved)
         let cached = await value.homeCache
         XCTAssertNil(cached)
         await value.close()
@@ -240,10 +241,10 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
         }
         await gate.started()
         _ = try await value.homePage(cursor: nil, refresh: true)
-        XCTAssertNotNil(store.read())
+        let saved = store.read(); XCTAssertNotNil(saved)
         await account.coalesceLogout(); await gate.release()
         let changes = await observing.value
-        XCTAssertEqual(changes, 1); XCTAssertNil(store.read())
+        XCTAssertEqual(changes, 1); XCTAssertEqual(store.read(), saved)
         await value.close()
     }
     func testAccessRetirementDuringSubscriptionFinishesWithoutReplayingOldEvents() async throws {
