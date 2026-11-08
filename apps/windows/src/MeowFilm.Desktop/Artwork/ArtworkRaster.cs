@@ -11,9 +11,11 @@ internal static class ArtworkRaster
     {
         try
         {
+            if (bytes.Length >= 12 && bytes.AsSpan(0, 4).SequenceEqual("RIFF"u8) &&
+                bytes.AsSpan(8, 4).SequenceEqual("WEBP"u8))
+                return ArtworkWebP.Decode(bytes);
             var (width, height) = Dimensions(bytes);
-            if (width <= 0 || height <= 0 || width > 16384 || height > 16384 || (long)width * height > 32 * 1024 * 1024)
-                throw new ArtworkException("ARTWORK_LIMIT");
+            CheckDimensions(width, height);
             using var input = new MemoryStream(bytes, writable: false);
             var image = new BitmapImage();
             image.BeginInit();
@@ -41,6 +43,12 @@ internal static class ArtworkRaster
         }
         catch (ArtworkException) { throw; }
         catch { throw new ArtworkException("ARTWORK_FORMAT"); }
+    }
+
+    internal static void CheckDimensions(int width, int height)
+    {
+        if (width <= 0 || height <= 0 || width > 16384 || height > 16384 || (long)width * height > 32 * 1024 * 1024)
+            throw new ArtworkException("ARTWORK_LIMIT");
     }
 
     private static (int Width, int Height) Dimensions(ReadOnlySpan<byte> bytes)

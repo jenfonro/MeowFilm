@@ -37,6 +37,35 @@ internal static partial class PlatformSongs
     internal static string KwId(JsonNode raw) =>
         PJ.Id(JsonValue.Create(PJ.Scalar(Pick(raw, "MUSICRID", "id", "rid", "musicrid"))
             .Replace("MUSIC_", "", StringComparison.Ordinal)), PublicNumericId);
+    private static string KwCover(JsonNode raw)
+    {
+        foreach (var name in new[] { "pic", "img" })
+        {
+            var cover = PJ.Image(PJ.At(raw, name));
+            if (cover.Length is 0 or > 4096) continue;
+            var uri = new Uri(cover);
+            // Do not let a transport-ineligible candidate hide the next cover.
+            if (uri.Port is not (80 or 443)) continue;
+            var host = uri.Host.TrimEnd('.').ToLowerInvariant();
+            // Apply the durable metadata rules before selecting a candidate.
+            if (uri.Query.Length == 0 && uri.Fragment.Length == 0 && host is not ("local" or "localhost") &&
+                !host.EndsWith(".local", StringComparison.Ordinal) && !host.EndsWith(".localhost", StringComparison.Ordinal))
+                return cover;
+        }
+        var path = PJ.S(raw, "web_albumpic_short");
+        if (string.IsNullOrWhiteSpace(path) || path.StartsWith("/", StringComparison.Ordinal) ||
+            !Uri.TryCreate(path, UriKind.Relative, out _)) return "";
+        var address = PJ.Image(JsonValue.Create("http://img1.kwcdn.kuwo.cn/star/albumcover/" + path));
+        if (address.Length is 0 or > 4096) return "";
+        // This field is a relative path, never an origin, query or traversal.
+        foreach (var segment in path.Split('/'))
+        {
+            var decoded = Uri.UnescapeDataString(segment);
+            if (decoded is "." or ".." || decoded.Any(c => char.IsControl(c) || c is '/' or '\\' or '?' or '#'))
+                return "";
+        }
+        return address;
+    }
     internal static JsonObject Kw(JsonNode raw, bool requireQuality = true)
     {
         var id = KwId(raw);
@@ -78,7 +107,7 @@ internal static partial class PlatformSongs
         CopyPublicScalars(raw, native, "MUSICRID", "FORMATS", "formats", "hash", "md5", "PAY", "pay",
             "ONLINE", "online", "hasLossless", "isListenFee");
         return Song("kw", id, title, PublicText(Pick(raw, "ARTIST", "artist")).Replace("&", "、", StringComparison.Ordinal),
-            PublicText(Pick(raw, "ALBUM", "album")), duration, PJ.Image(Pick(raw, "pic", "img")), native);
+            PublicText(Pick(raw, "ALBUM", "album")), duration, KwCover(raw), native);
     }
     internal static JsonObject Mg(JsonNode raw)
     {

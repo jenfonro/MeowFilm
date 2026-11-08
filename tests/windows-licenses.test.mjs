@@ -27,6 +27,7 @@ const sources = [
   'quickjs-ng-LICENSE.txt', 'openssl-LICENSE.txt', 'zlib-LICENSE.txt',
   'quickjs-native-MIT.txt', 'Unicode-3.0.txt', 'catpawrunner-MIT.txt',
   'npm-node-compat-BSD-3-Clause.txt', 'npm-node-compat-ISC.txt', 'npm-node-compat-MIT.txt',
+  'SkiaSharp-MIT.txt', 'SkiaSharp-THIRD-PARTY-NOTICES.txt',
 ].map(name => ({ source: `LICENSES/${name}`, path: name }));
 function boundedPath(path) {
   const rel = relative(temporary, path);

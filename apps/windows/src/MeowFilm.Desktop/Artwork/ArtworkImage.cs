@@ -1,4 +1,6 @@
 using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -59,14 +61,14 @@ public sealed class ArtworkImage : Grid
     private Task? requestTask;
     private PresentationLease? presentation;
     private long epoch;
-    private bool loaded, attempted, failed, observingLayout;
+    private bool loaded, attempted, canRetry, observingLayout;
 
     public string Address { get => (string)GetValue(AddressProperty); set => SetValue(AddressProperty, value); }
     public Stretch Stretch { get => (Stretch)GetValue(StretchProperty); set => SetValue(StretchProperty, value); }
     public bool ShowRetry { get => (bool)GetValue(ShowRetryProperty); set => SetValue(ShowRetryProperty, value); }
     public ArtworkImage()
     {
-        ClipToBounds = true; Children.Add(image); Children.Add(retry);
+        ClipToBounds = true; Background = Brushes.Transparent; Children.Add(image); Children.Add(retry);
         System.Windows.Automation.AutomationProperties.SetName(retry, "重试图片");
         retry.Click += (_, args) => { args.Handled = true; Restart(); };
         Loaded += (_, _) =>
@@ -83,6 +85,8 @@ public sealed class ArtworkImage : Grid
         };
         IsVisibleChanged += (_, _) => UpdateVisibility();
     }
+    protected override AutomationPeer OnCreateAutomationPeer() => new FrameworkElementAutomationPeer(this);
+
     /// <summary>Prepare an imminent surface on the UI thread; its owner releases the lease when that presentation retires.</summary>
     public async Task<IDisposable> PrepareForPresentationAsync(CancellationToken cancellationToken = default)
     {
@@ -130,12 +134,13 @@ public sealed class ArtworkImage : Grid
     private void Retire()
     {
         epoch++;
-        var priorRequest = request; request = null; requestTask = null; attempted = failed = false;
+        var priorRequest = request; request = null; requestTask = null; attempted = canRetry = false;
         var priorLease = lease; lease = null;
         SetValue(SourcePropertyKey, null); SetValue(AspectRatioPropertyKey, 0d); SetValue(RawPaletteBrushPropertyKey, Brushes.DimGray);
         SetValue(PaletteBrushPropertyKey, Brushes.DimGray);
         SetValue(TopPaletteBrushPropertyKey, Brushes.DimGray);
         SetValue(HasTopPalettePropertyKey, false);
+        ClearValue(ToolTipProperty); ClearValue(AutomationProperties.HelpTextProperty);
         UpdateRetryVisibility();
         priorLease?.Dispose();
         // Cancellation may synchronously resume preparation; publish retirement before invoking it.
@@ -242,11 +247,24 @@ public sealed class ArtworkImage : Grid
                 SetValue(HasTopPalettePropertyKey, palettes.HasTopPalette);
             }
             catch (OperationCanceledException) { }
-            catch
+            catch (Exception error)
             {
                 if (stamp == epoch && !current.IsCancellationRequested && HasDemand())
                 {
-                    failed = true;
+                    string message;
+                    (canRetry, message) = (error as ArtworkException)?.Code switch
+                    {
+                        "ARTWORK_FORMAT" => (false, "图片格式不支持或已损坏"),
+                        "ARTWORK_LIMIT" => (false, "图片超出资源限制"),
+                        "ARTWORK_ADDRESS" => (false, "图片地址不可用"),
+                        "ARTWORK_REDIRECT" => (false, "图片重定向不可用"),
+                        "ARTWORK_DENIED" => (false, "图片访问被拒绝"),
+                        "ARTWORK_CLOSED" => (false, "图片服务已关闭"),
+                        "ARTWORK_NETWORK" => (true, "图片网络加载失败"),
+                        "ARTWORK_TIMEOUT" => (true, "图片加载超时"),
+                        _ => (true, "图片加载失败")
+                    };
+                    ToolTip = message; AutomationProperties.SetHelpText(this, message);
                     UpdateRetryVisibility();
                 }
             }
@@ -259,5 +277,5 @@ public sealed class ArtworkImage : Grid
         }
     }
     private void UpdateRetryVisibility() =>
-        retry.Visibility = failed && ShowRetry ? Visibility.Visible : Visibility.Collapsed;
+        retry.Visibility = canRetry && ShowRetry ? Visibility.Visible : Visibility.Collapsed;
 }

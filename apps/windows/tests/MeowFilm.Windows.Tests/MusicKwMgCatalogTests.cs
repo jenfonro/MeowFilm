@@ -23,6 +23,7 @@ public static class MusicKwMgCatalogTests
     {
         yield return Case("capabilities are public-only and do not acquire accounts", Capabilities);
         yield return Case("KW search retains precise recording quality and identity", KwSearch);
+        yield return Case("KW search artwork reaches song rows without detail requests", KwSearchArtwork);
         yield return Case("KW short search page against a larger total is terminal", () => ShortSearch("kw"));
         yield return Case("KW empty search page against a larger total is terminal", () => EmptySearch("kw"));
         yield return Case("KW single-quoted playlist card opens complete detail", KwQuotedPlaylist);
@@ -183,6 +184,101 @@ public static class MusicKwMgCatalogTests
         Check(S(native.GetProperty("_types").GetProperty("flac"), "size") == "12MB");
         Check(!song.TryGetProperty("id", out _) && !song.TryGetProperty("plugin_entry_path", out _) &&
             S(song, "songId").StartsWith("song:", StringComparison.Ordinal));
+    }
+    private static async Task KwSearchArtwork()
+    {
+        const string shortPath = "120/s4s12/76/3598052169.jpg";
+        const string shortCover = "http://img1.kwcdn.kuwo.cn/star/albumcover/120/s4s12/76/3598052169.jpg";
+        const string pic = "https://artwork.example/album.jpg";
+        const string img = "http://img1.kwcdn.kuwo.cn/star/albumcover/240/s4s12/76/3598052169.jpg";
+        (string Name, JsonObject Fields, string Cover)[] samples =
+        [
+            ("short only", O(new { web_albumpic_short = shortPath }), shortCover),
+            ("second observed short path", O(new { web_albumpic_short = "120/s4s43/64/2138370659.jpg" }),
+                "http://img1.kwcdn.kuwo.cn/star/albumcover/120/s4s43/64/2138370659.jpg"),
+            ("other path size and format", O(new { web_albumpic_short = "512/cover_name-2.webp" }),
+                "http://img1.kwcdn.kuwo.cn/star/albumcover/512/cover_name-2.webp"),
+            ("pic wins", O(new { pic, img, web_albumpic_short = shortPath }), pic),
+            ("img wins over short", O(new { img, web_albumpic_short = shortPath }), img),
+            ("empty pic falls through", O(new { pic = "", img, web_albumpic_short = shortPath }), img),
+            ("invalid pic falls through", O(new { pic = "not a URL", img, web_albumpic_short = shortPath }), img),
+            ("query pic falls through", O(new { pic = pic + "?token=SYNTHETIC", img }), img),
+            ("fragment pic falls through", O(new { pic = pic + "#cover", img }), img),
+            ("local pic falls through", O(new { pic = "https://artwork.local./cover.jpg", img }), img),
+            ("credential pic falls through", O(new { pic = "https://fixture@artwork.example/cover.jpg", img }), img),
+            ("IP pic falls through", O(new { pic = "https://192.0.2.1/cover.jpg", img }), img),
+            ("non-HTTP pic falls through", O(new { pic = "file:///cover.jpg", img }), img),
+            ("unsupported pic port falls through", O(new { pic = "https://artwork.example:8443/album.jpg", img }), img),
+            ("unsupported img port uses short", O(new { img = "http://artwork.example:8080/album.jpg",
+                web_albumpic_short = shortPath }), shortCover),
+            ("unsupported ports without fallback", O(new { pic = "https://artwork.example:8443/album.jpg",
+                img = "http://artwork.example:8080/album.jpg" }), ""),
+            ("empty candidates use short", O(new { pic = "", img = "", web_albumpic_short = shortPath }), shortCover),
+            ("invalid candidates use short", O(new { pic = "invalid", img = img + "?token=SYNTHETIC",
+                web_albumpic_short = shortPath }), shortCover),
+            ("non-string candidates use short", O(new { pic = new { url = pic }, img = 12,
+                web_albumpic_short = shortPath }), shortCover),
+            ("valid pic ignores invalid short", O(new { pic, web_albumpic_short = "//other.example/cover.jpg" }), pic),
+            ("absent artwork", new JsonObject(), ""),
+            ("null artwork", O(new { pic = (string?)null, img = (string?)null, web_albumpic_short = (string?)null }), ""),
+            ("empty artwork", O(new { pic = "", img = "", web_albumpic_short = "" }), ""),
+            ("whitespace artwork", O(new { pic = " ", img = " ", web_albumpic_short = " " }), ""),
+            ("invalid artwork", O(new { pic = "invalid", img = "file:///cover.jpg" }), ""),
+            ("absolute short URL", O(new { web_albumpic_short = "https://other.example/cover.jpg" }), ""),
+            ("authority short path", O(new { web_albumpic_short = "//other.example/cover.jpg" }), ""),
+            ("rooted short path", O(new { web_albumpic_short = "/120/cover.jpg" }), ""),
+            ("parent short path", O(new { web_albumpic_short = "../cover.jpg" }), ""),
+            ("nested parent short path", O(new { web_albumpic_short = "120/../../cover.jpg" }), ""),
+            ("encoded parent short path", O(new { web_albumpic_short = "%2e%2e/cover.jpg" }), ""),
+            ("backslash short path", O(new { web_albumpic_short = @"120\..\cover.jpg" }), ""),
+            ("encoded separator short path", O(new { web_albumpic_short = "120/%2f..%2fcover.jpg" }), ""),
+            ("query short path", O(new { web_albumpic_short = shortPath + "?token=SYNTHETIC" }), ""),
+            ("fragment short path", O(new { web_albumpic_short = shortPath + "#cover" }), ""),
+            ("encoded query short path", O(new { web_albumpic_short = shortPath + "%3ftoken=SYNTHETIC" }), ""),
+            ("control short path", O(new { web_albumpic_short = "120/\ncover.jpg" }), "")
+        ];
+        var rows = samples.Select((sample, index) =>
+        {
+            var raw = Kw(index + 1);
+            foreach (var field in sample.Fields) raw[field.Key] = field.Value?.DeepClone();
+            return raw;
+        }).ToArray();
+        using var f = new Fixture(r =>
+        {
+            Check(r.Method == HttpMethod.Get && r.RequestUri!.GetLeftPart(UriPartial.Path) == "http://search.kuwo.cn/r.s",
+                "Artwork mapping issued a non-search request");
+            var query = Query(r);
+            Check(query["all"] == "m3" && query["pn"] == "1" && query["rn"] == rows.Length.ToString());
+            return Json(new { TOTAL = (rows.Length * 3).ToString(), SHOW = "1", abslist = rows });
+        });
+        var result = await f.Catalog.SearchAsync(new("kw", "m3", Page: 2, Limit: rows.Length));
+        Check(N(result, "page") == 2 && N(result, "limit") == rows.Length && N(result, "total") == rows.Length * 3 &&
+            result.GetProperty("more").GetBoolean() && N(result.GetProperty("continuation"), "page") == 3);
+        var page = MusicSearchPage.Read(result, "kw", MusicSearchKind.Songs, 2);
+        Check(page.Items.Length == rows.Length && page.More && page.Next == 3 && page.Total == rows.Length * 3 &&
+            page.TotalUnit == "items");
+        for (int index = 0; index < samples.Length; index++)
+        {
+            var sample = samples[index];
+            var song = result.GetProperty("items")[index];
+            var native = MusicSongFixture.Info(song);
+            var id = (index + 1).ToString();
+            Check(S(song, "cover_url") == sample.Cover, sample.Name + ": catalog cover");
+            Check(sample.Cover.Length == 0 ? !native.TryGetProperty("img", out _) : S(native, "img") == sample.Cover,
+                sample.Name + ": source cover");
+            Check(NativeId(song) == id && S(native, "source") == "kw" &&
+                S(song.GetProperty("sources")[0], "sourceKey") == $"[\"kw\",\"{id}\",\"\"]",
+                sample.Name + ": recording identity");
+            Check(native.GetProperty("types").EnumerateArray().Select(t => S(t, "type")).SequenceEqual(["flac", "128k"]) &&
+                S(native.GetProperty("_types").GetProperty("flac"), "size") == "12MB",
+                sample.Name + ": recording quality");
+            var candidate = page.Items[index];
+            var row = SongRow.Read(E(candidate.Item));
+            Check(candidate.Rank == rows.Length + index + 1 && row.Id == S(song, "songId") &&
+                row.Title == "Synthetic track " + id && row.Artist == "A、B" && row.Album == "Synthetic album" &&
+                row.Cover == sample.Cover && row.Duration == "3:00", sample.Name + ": search consumer");
+        }
+        Check(f.Handler.Calls == 1, "Artwork mapping added requests to one search page");
     }
     private static async Task KwQuotedPlaylist()
     {

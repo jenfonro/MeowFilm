@@ -84,6 +84,7 @@ Invalidate
 - 根对象没有平台 `id`；平台录音身份只在 `sources` 中。
 - `sourceKey` 是当前规范 JSON 数组字符串，用于精确录音选择。
 - 搜索、歌单、推荐和频道返回的歌曲都经过同一 `NativeMusicSong` 校验，不能把原始平台对象直接送入 UI 或持久化。
+- 酷我歌曲封面依次选择符合现有公开持久元数据规范、且端口满足图片传输既有 `80/443` 规则的 `pic`、`img`；空值或无效地址不遮挡后续候选。两者均不可用时，将 `web_albumpic_short` 拼到已验证的 `http://img1.kwcdn.kuwo.cn/star/albumcover/` 下，短路径不得改写来源、越出目录或包含查询、片段、控制字符及其编码形式，不限定尺寸目录或图片后缀。结果同时进入 `cover_url` 与来源 `musicInfo.img`，搜索消费者和 `SongRow.Cover` 直接读取；确无有效封面时 `cover_url` 为空，来源不写 `img`。映射不增加逐首详情请求，不改变录音身份、音质、排序、分页或跨平台代表项选择。
 - 歌单卡片保留平台、原生 ID、名称、封面、数量、创建者和可用动作。个人目录额外返回绑定当前账号的 locator；locator 不是凭据或可转移授权。
 - 酷狗公开歌单使用真实全局 ID：搜索响应 `gid` 与详情响应 `global_collection_id` 对应同一身份；两字段同时出现须一致。`specialid`、个人 `listid` 或 LX `id_*` 不替代全局 ID。搜索 `img`／`song_count` 和详情 `pic` 直接归一到当前卡片字段，详情分页仍请求 `global_collection_id` 并核对响应身份。成员分页允许后续页缺少 `list_info`，此时以 `data.count` 为总量，名称和封面为空；分页 snapshot 只绑定平台、scope、请求 ID 和总量，不包含名称、版本或当前页内容。`list_info` 存在时，其 `global_collection_id` 若出现须等于请求 ID；其 `count` 与 `data.count` 同时出现时必须一致，缺少 `count` 时使用 `data.count`。
 - `ChannelsAsync` 发布中性描述符 `id/name/kind=channel/placement/available/pageCode`；`placement` 为 `primary|more`，各组沿响应数组顺序展示。网易专属 ID、上游种类与分组名单只存在于平台适配器，页面不据其筛选。

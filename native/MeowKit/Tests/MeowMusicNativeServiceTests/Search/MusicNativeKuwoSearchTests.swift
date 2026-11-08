@@ -38,6 +38,122 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
         await service.close()
     }
 
+    func testSearchArtworkSelectsFirstValidCandidateAndSurvivesNormalization() async throws {
+        let short = "120/s4s12/76/3598052169.jpg"
+        let cover = "https://img1.kuwo.cn/star/albumcover/120/s4s12/76/3598052169.jpg"
+        let pic = "https://artwork.example/album.jpg?size=large"
+        let img = "https://other.example/album.jpg"
+        let samples: [(name: String, fields: MJ, cover: String?)] = [
+            ("short only", .obj([("web_albumpic_short", .string(short))]), cover),
+            ("second observed path", .obj([("web_albumpic_short", .string("120/s4s43/64/2138370659.jpg"))]),
+                "https://img1.kuwo.cn/star/albumcover/120/s4s43/64/2138370659.jpg"),
+            ("other size and format", .obj([("web_albumpic_short", .string("512/cover_name-2.webp"))]),
+                "https://img1.kuwo.cn/star/albumcover/512/cover_name-2.webp"),
+            ("pic wins", .obj([("pic", .string(pic)), ("img", .string(img)), ("web_albumpic_short", .string(short))]), pic),
+            ("HTTP pic and public query", .obj([("pic", .string("http://artwork.example/album.jpg?size=large"))]), pic),
+            ("img wins", .obj([("img", .string(img)), ("web_albumpic_short", .string(short))]), img),
+            ("HTTP img", .obj([("img", .string("http://other.example/album.jpg"))]), img),
+            ("empty pic", .obj([("pic", .string("")), ("img", .string(img))]), img),
+            ("null pic", .obj([("pic", .null), ("img", .string(img))]), img),
+            ("invalid pic", .obj([("pic", .string("not a URL")), ("img", .string(img))]), img),
+            ("non-string pic", .obj([("pic", .n(42)), ("img", .string(img))]), img),
+            ("credential query pic", .obj([("pic", .string(pic + "&token=synthetic")), ("img", .string(img))]), img),
+            ("fragment pic", .obj([("pic", .string(pic + "#cover")), ("img", .string(img))]), img),
+            ("userinfo pic", .obj([("pic", .string("https://user@artwork.example/cover.jpg")), ("img", .string(img))]), img),
+            ("non-HTTP pic", .obj([("pic", .string("file:///cover.jpg")), ("img", .string(img))]), img),
+            ("unsupported port pic", .obj([("pic", .string("https://artwork.example:8443/a.jpg")), ("img", .string(img))]), img),
+            ("oversized pic", .obj([("pic", .string("https://artwork.example/" + String(repeating: "a", count: 4096))),
+                ("img", .string(img))]), img),
+            ("empty candidates", .obj([("pic", .string("")), ("img", .string("")), ("web_albumpic_short", .string(short))]), cover),
+            ("invalid candidates", .obj([("pic", .string("invalid")), ("img", .string(img + "?token=synthetic")),
+                ("web_albumpic_short", .string(short))]), cover),
+            ("non-string candidates", .obj([("pic", .obj()), ("img", .n(12)), ("web_albumpic_short", .string(short))]), cover),
+            ("whitespace candidates", .obj([("pic", .string(" ")), ("img", .string("\t")), ("web_albumpic_short", .string(short))]), cover),
+            ("valid pic ignores invalid short", .obj([("pic", .string(pic)), ("web_albumpic_short", .string("//other.example/a.jpg"))]), pic),
+            ("absent artwork", .obj(), nil),
+            ("null artwork", .obj([("pic", .null), ("img", .null), ("web_albumpic_short", .null)]), nil),
+            ("invalid artwork", .obj([("pic", .string("invalid")), ("img", .string("file:///a.jpg"))]), nil)
+        ]
+        try await assertSearchArtwork(samples)
+    }
+
+    func testSearchRejectsUnsafeShortArtworkWithoutDroppingSongsOrRequestingDetails() async throws {
+        let paths = [
+            "", " ", "/120/cover.jpg", "//other.example/cover.jpg", "https://other.example/cover.jpg",
+            "http:cover.jpg", ".", "..", "../cover.jpg", "120/../../cover.jpg", "120/./cover.jpg",
+            "%2e%2e/cover.jpg", "120/.%2E/cover.jpg", "120/%2f..%2fcover.jpg", "120/%5Ccover.jpg",
+            "120\\..\\cover.jpg", "120/cover.jpg?size=large", "120/cover.jpg#cover",
+            "120/cover.jpg%3fsize=large", "120/cover.jpg%23cover",
+            "120/\ncover.jpg", "120/\rcover.jpg", "120/\tcover.jpg", "120/\0cover.jpg",
+            "120/\u{007F}cover.jpg", "120/\u{0085}cover.jpg", "120/%00cover.jpg", "120/%0Acover.jpg",
+            "120/%7Fcover.jpg", "120/%C2%85cover.jpg", "120/%ZZcover.jpg", "120/cover%.jpg",
+            "120/" + String(repeating: "a", count: 4096) + ".jpg"
+        ]
+        let samples: [(name: String, fields: MJ, cover: String?)] = paths.enumerated().map { index, path in
+            ("unsafe short \(index)", .obj([("web_albumpic_short", .string(path))]), nil)
+        }
+        try await assertSearchArtwork(samples)
+    }
+
+    private func assertSearchArtwork(_ samples: [(name: String, fields: MJ, cover: String?)],
+                                     file: StaticString = #filePath, line: UInt = #line) async throws {
+        let rows = samples.enumerated().map { index, sample in
+            var raw = MusicNativeKuwoSearchFixture.song(id: String(1000 + index), title: "Artwork sample \(index)")
+            for (key, value) in sample.fields.fields { raw[key] = value }
+            return raw
+        }
+        let store = NativeMusicMemoryDocument()
+        let http = NativeMusicHTTPFixture([MusicNativeKuwoSearchFixture.page(rows, total: rows.count * 3)])
+        let service = try await NativeMusicFixture.service(store, http: http)
+        let page = try await service.search(platform: "kw", query: "m3", page: 2, limit: rows.count)
+        XCTAssertEqual(page.platform, "kw", file: file, line: line)
+        XCTAssertEqual(page.query, "m3", file: file, line: line)
+        XCTAssertEqual(page.page, 2, file: file, line: line)
+        XCTAssertEqual(page.limit, rows.count, file: file, line: line)
+        XCTAssertEqual(page.total, rows.count * 3, file: file, line: line)
+        XCTAssertEqual(page.nextPage, 3, file: file, line: line)
+        XCTAssertEqual(page.items.count, rows.count, file: file, line: line)
+        XCTAssertEqual(page.items.map(\.title), rows.indices.map { "Artwork sample \($0)" }, file: file, line: line)
+        XCTAssertEqual(page.items.map { $0.artwork?.absoluteString }, samples.map { $0.cover }, file: file, line: line)
+        XCTAssertEqual(store.snapshot().2, 0, "search remains read-only", file: file, line: line)
+        let playlist = try await service.createPlaylist(name: "Artwork samples", refs: page.items.map(\.ref))
+        let restored = try await service.tracks(in: playlist)
+        XCTAssertEqual(restored.map(\.songId), page.items.map(\.songId), file: file, line: line)
+        XCTAssertEqual(restored.map { $0.artwork?.absoluteString }, samples.map { $0.cover }, file: file, line: line)
+        let document = try MusicDocument(store.snapshot().0, runID: "fixture")
+        for (index, track) in page.items.enumerated() {
+            let sample = samples[index], id = String(1000 + index)
+            XCTAssertEqual(track.sources.map(\.platform), ["kw"], sample.name, file: file, line: line)
+            XCTAssertEqual(track.sources.map(\.nativeId), [id], sample.name, file: file, line: line)
+            XCTAssertEqual(track.sources.map(\.sourceKey), ["[\"kw\",\"\(id)\",\"\"]"], sample.name, file: file, line: line)
+            XCTAssertEqual(track.artist, "Fixture", sample.name, file: file, line: line)
+            XCTAssertEqual(track.album, "Synthetic album", sample.name, file: file, line: line)
+            XCTAssertEqual(track.duration, 180, sample.name, file: file, line: line)
+            let song = document.library["library"]["songs"][track.songId]
+            XCTAssertEqual(song["cover_url"].string, sample.cover ?? "", sample.name, file: file, line: line)
+            let info = try XCTUnwrap(song["sources"].array.first, sample.name, file: file, line: line)["musicInfo"]
+            if let cover = sample.cover {
+                XCTAssertEqual(info["img"].string, cover, sample.name, file: file, line: line)
+            } else {
+                XCTAssertFalse(info.contains("img"), sample.name, file: file, line: line)
+            }
+            XCTAssertEqual(info["songmid"].string, id, sample.name, file: file, line: line)
+            XCTAssertEqual(info["types"].array.map { $0["type"].string }, ["128k", "320k", "flac"], sample.name, file: file, line: line)
+            XCTAssertEqual(info["_types"]["flac"]["size"].string, "25MB", sample.name, file: file, line: line)
+        }
+        let calls = await http.calls()
+        XCTAssertEqual(calls.count, 1, "only the original search request", file: file, line: line)
+        let wire = try XCTUnwrap(calls.first, file: file, line: line)
+        XCTAssertEqual(wire.method, "GET", file: file, line: line)
+        XCTAssertEqual(wire.url.host, "search.kuwo.cn", file: file, line: line)
+        XCTAssertEqual(wire.url.path, "/r.s", file: file, line: line)
+        let query = try XCTUnwrap(URLComponents(url: wire.url, resolvingAgainstBaseURL: false)?.queryItems, file: file, line: line)
+        XCTAssertEqual(query.first { $0.name == "all" }?.value, "m3", file: file, line: line)
+        XCTAssertEqual(query.first { $0.name == "pn" }?.value, "1", file: file, line: line)
+        XCTAssertEqual(query.first { $0.name == "rn" }?.value, String(rows.count), file: file, line: line)
+        await service.close()
+    }
+
     func testSingleQuotedDataIsNotJavaScriptAndEntitiesAreDecodedOnlyOnce() throws {
         let body = #" {'TOTAL':'1','SHOW':'1','abslist':[{'MUSICRID':'MUSIC_123','SONGNAME':'Don\'t "stop" &amp;lt; &#x4e2d;','ARTIST':'One&amp;Two','ALBUM':'Album','DURATION':'180','N_MINFO':'level:h,bitrate:128,format:mp3,size:2Mb'}]} "#
         let page = try MusicNativeKuwoSearch.decode(Data(body.utf8), page: 1)

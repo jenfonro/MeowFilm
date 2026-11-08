@@ -55,6 +55,58 @@ public static class ArtworkTests
                 Check(ReferenceEquals(first.Image, second.Image)); Equal(1, handler.Count);
                 first.Dispose(); Check(second.Image.IsFrozen);
             }));
+        foreach (string format in new[] { "lossy", "lossless", "extended", "animated" })
+            yield return new("Native artwork WebP " + format + " decodes without a system codec and retains bounded pixels", () => Sta(async () =>
+            {
+                // Content type and suffix are intentionally generic: format is established from bytes.
+                var handler = new Handler((request, _) =>
+                {
+                    Check(request.Headers.Accept.Any(value => value.MediaType == "image/webp"));
+                    return Task.FromResult(Reply(WebP(format)));
+                });
+                await using var service = new ArtworkService(handler);
+                using var first = await service.AcquireAsync("https://art.example.test/cover");
+                var image = first.Image;
+                Equal(format == "lossy" ? 512 : 8, image.PixelWidth);
+                Equal(format == "lossy" ? 256 : 4, image.PixelHeight);
+                Check(image.IsFrozen); Equal(PixelFormats.Bgra32, image.Format);
+                var pixel = new byte[4];
+                image.CopyPixels(new Int32Rect(format == "animated" ? 3 : 1, 1, 1, 1), pixel, 4, 0);
+                if (format == "lossy")
+                {
+                    Check(pixel[2] > 200 && pixel[0] < 60 && pixel[1] < 40);
+                    Equal((byte)255, pixel[3]);
+                }
+                else
+                {
+                    Equal((byte)128, pixel[3]);
+                    if (format == "animated") Check(pixel[2] > 240 && pixel[1] < 30);
+                    else Check(pixel[0] > 190 && pixel[2] < 20);
+                    image.CopyPixels(new Int32Rect(0, 0, 1, 1), pixel, 4, 0);
+                    Equal((byte)0, pixel[3]);
+                }
+                using var second = await service.AcquireAsync("https://art.example.test/cover");
+                Check(ReferenceEquals(image, second.Image)); Equal(1, handler.Count);
+                first.Dispose(); Check(second.Image.IsFrozen);
+            }));
+        yield return new("Native artwork WebP truncated corrupt and oversized containers fail before display", () => Sta(async () =>
+        {
+            byte[] truncated = WebP("lossy")[..^12];
+            byte[] corrupt = WebP("lossless");
+            corrupt.AsSpan(20).Clear();
+            byte[] tooWide = WebP("animated");
+            // VP8X canvas width is 24-bit little endian, stored minus one.
+            tooWide[24] = 0x1f; tooWide[25] = 0x4e; tooWide[26] = 0; // 20000
+            foreach (var (bytes, code) in new[]
+            {
+                (truncated, "ARTWORK_FORMAT"), (corrupt, "ARTWORK_FORMAT"),
+                (WebP("tooManyPixels"), "ARTWORK_LIMIT"), (tooWide, "ARTWORK_LIMIT")
+            })
+            {
+                await using var service = new ArtworkService(new Handler((_, _) => Task.FromResult(Reply(bytes))));
+                await Code(code, () => service.AcquireAsync("https://art.example.test/invalid.webp"));
+            }
+        }));
         yield return new("Native artwork requests bounded NetEase thumbnails without changing stored identity or other URLs", () => Sta(async () =>
         {
             foreach (var (input, requested) in new[]
@@ -552,6 +604,46 @@ public static class ArtworkTests
         (bool)typeof(ArtworkImage).GetField("observingLayout",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(view)!;
     private static HttpResponseMessage Reply(byte[] bytes) => new(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+    // Synthetic solid-color fixtures encoded by Pillow 13 / libwebp, independently of the production decoder.
+    private static byte[] WebP(string kind) => Convert.FromBase64String(kind switch
+    {
+        "lossy" =>
+            "UklGRogCAABXRUJQVlA4IHwCAACwRgCdASogA5ABPm02mUmkIyKhIAgAgA2JaW7hd2Ee3AAAE9gHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D" +
+            "32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2T" +
+            "kPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77" +
+            "ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyH" +
+            "vtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99sn" +
+            "Ie+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32" +
+            "ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkP" +
+            "fbJyHvSAAP7/tLr//ugyzhwe///uyf/2yf/2yf+45XhQJJAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "lossless" =>
+            "UklGRiIAAABXRUJQVlA4TBUAAAAvB8AAEA8wFKMwyAMY8Lj/f0T/wwEA",
+        "extended" =>
+            "UklGRmgAAABXRUJQVlA4WAoAAAAQAAAABwAAAwAAQUxQSA0AAAABDzCAERHi/v8R/Q8HAFZQOCA0AAAAkAEAnQEqCAAEAAEAHCWgAnS6AAOYAP78" +
+            "HE/y2A7CqFP/nEX/ziL/5xF/5xF/i2kdCk8AAA==",
+        "animated" =>
+            "UklGRogAAABXRUJQVlA4WAoAAAASAAAABwAAAwAAQU5JTQYAAAAAAAAAAABBTk1GLAAAAAEAAAAAAAMAAAIAAGQAAAJWUDhMFAAAAC8DgAAQDzAU" +
+            "oz8eAxjwmIeI/ocBQU5NRigAAAAAAAAAAAAHAAADAABkAAAAVlA4TBAAAAAvB8AAAAdQ5KhM/wMR0f8A",
+        "tooManyPixels" =>
+            "UklGRj4FAABXRUJQVlA4TDIFAAAv/x8ABAdQssoUuf/BUtq2AZP+//aCpRGRuP4yBSRJ//+HEf1PoED8/UcRkfGf//7777///vvvv//++++///77" +
+            "77///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//+" +
+            "+++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777//" +
+            "/vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++/" +
+            "//7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvv" +
+            "v//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///77" +
+            "77///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//+" +
+            "+++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777//" +
+            "/vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++/" +
+            "//7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvv" +
+            "v//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///77" +
+            "77///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//+" +
+            "+++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777//" +
+            "/vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++/" +
+            "//7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvv" +
+            "v//++++///7777///vvvv//++++///7777///vvvv//++++///7777///vvvP//5z3/+85///Oc///nPf/7zn//85z//+c9//vOf//znP//5z3/+" +
+            "85///N8/",
+        _ => throw new ArgumentOutOfRangeException(nameof(kind))
+    });
     private static byte[] Encode(string kind, int width, int height)
     {
         var source = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, new byte[width * height * 4], width * 4);

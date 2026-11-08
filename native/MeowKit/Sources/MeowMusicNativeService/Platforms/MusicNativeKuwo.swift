@@ -81,9 +81,32 @@ enum MusicNativeKuwoSearch {
             ("name", .string(title)), ("singer", .string(artist)), ("albumName", .string(album)),
             ("albumId", .string(albumID)), ("duration", .n(duration)),
             ("interval", .string(String(format: "%02d:%02d", duration / 60, duration % 60))),
-            ("img", MusicModel.publicURL(raw["pic"])), ("types", .array(types)), ("_types", details)])
+            ("img", artwork(raw)), ("types", .array(types)), ("_types", details)])
         try musicRequire(native.bytes.count <= 16 * 1024, .limit)
         return .init(platform: "kw", data: native.bytes)
+    }
+    private static func artwork(_ raw: MJ) -> MJ {
+        for field in ["pic", "img"] {
+            let cover = MusicModel.publicURL(raw[field])
+            // Match the existing track artwork URL boundary before choosing a candidate.
+            if !cover.string.isEmpty && cover.string.utf8.count <= 4096 { return cover }
+        }
+        let path = raw["web_albumpic_short"].string
+        guard !path.isEmpty, !path.hasPrefix("/") else { return .string("") }
+        let cover = MusicModel.publicURL(.string("https://img1.kuwo.cn/star/albumcover/" + path))
+        guard !cover.string.isEmpty, cover.string.utf8.count <= 4096,
+              let relative = URLComponents(string: path), relative.scheme == nil, relative.host == nil,
+              relative.query == nil, relative.fragment == nil else { return .string("") }
+        // The short field supplies path segments, never an origin or traversal.
+        for segment in path.split(separator: "/", omittingEmptySubsequences: false) {
+            guard let decoded = String(segment).removingPercentEncoding,
+                  decoded != ".", decoded != "..",
+                  !decoded.contains(where: { "/\\?#".contains($0) }),
+                  !decoded.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+                return .string("")
+            }
+        }
+        return cover
     }
     static func text(_ value: MJ, maximum: Int, empty: Bool = false) throws -> String {
         if value == .null && empty { return "" }
