@@ -9,6 +9,7 @@ private final class ArtworkImageFixture: @unchecked Sendable {
         let status: Int
         let data: Data
         var held = false
+        var error: URLError?
     }
     let url = URL(string: "https://artwork-cdn.invalid/\(UUID().uuidString).png")!
     let started: (@Sendable (Int) -> Void)?
@@ -31,6 +32,11 @@ private final class ArtworkImageFixture: @unchecked Sendable {
         let count = reads, response = responses[min(reads - 1, responses.count - 1)]
         if response.held { active[ObjectIdentifier(instance)] = instance }
         lock.unlock()
+        if let error = response.error {
+            started?(count)
+            instance.client?.urlProtocol(instance, didFailWithError: error)
+            return
+        }
         let headers = ["Content-Type": "image/png", "X-Content-Type-Options": "nosniff"]
         let head = HTTPURLResponse(url: url, statusCode: response.status, httpVersion: "HTTP/1.1", headerFields: headers)!
         instance.client?.urlProtocol(instance, didReceive: head, cacheStoragePolicy: .notAllowed)
@@ -214,12 +220,12 @@ final class MusicArtworkImagesTests: XCTestCase {
         XCTAssertEqual(fixture.requestCount, 2)
     }
 
-    func testNewVisibleAttachmentRetriesDecodeFailureButHiddenAttachmentDoesNot() async throws {
-        let fixture = ArtworkImageFixture([.init(status: 200, data: Data([1, 2, 3])),
+    func testNewVisibleAttachmentRetriesNetworkFailureButHiddenAttachmentDoesNot() async throws {
+        let fixture = ArtworkImageFixture([.init(status: 503, data: Data()),
                                            .init(status: 200, data: png())])
         defer { fixture.close() }
         let artwork = MusicArtworkView(images: images())
-        let failed = expectation(description: "decode failed")
+        let failed = expectation(description: "network failed")
         artwork.onFailure = { _ in failed.fulfill() }
         artwork.load(fixture.url)
         await fulfillment(of: [failed], timeout: 3)
@@ -240,6 +246,199 @@ final class MusicArtworkImagesTests: XCTestCase {
         parent.addSubview(artwork)
         await fulfillment(of: [recovered], timeout: 3)
         XCTAssertNotNil(artwork.image); XCTAssertEqual(fixture.requestCount, 2)
+    }
+
+    func testDecodeFailureDoesNotRetryWhenShownOrRefreshedAndNewURLStillLoads() async throws {
+        let retried = expectation(description: "deterministic image is not requested again")
+        retried.isInverted = true
+        let invalid = ArtworkImageFixture([.init(status: 200, data: Data([1, 2, 3]))],
+            started: { if $0 > 1 { retried.fulfill() } })
+        let valid = ArtworkImageFixture([.init(status: 200, data: png(.blue))])
+        defer { invalid.close(); valid.close() }
+        let artwork = MusicArtworkView(images: images())
+        let failed = expectation(description: "decode failed")
+        artwork.onFailure = { _ in failed.fulfill() }
+        artwork.load(invalid.url)
+        await fulfillment(of: [failed], timeout: 3)
+        artwork.onFailure = { _ in XCTFail("A deterministic failure must not be requested again") }
+        let root = UIViewController()
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = scene.map { UIWindow(windowScene: $0) }
+            ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = root; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        artwork.frame = CGRect(x: 10, y: 10, width: 48, height: 48)
+        root.view.addSubview(artwork)
+        for _ in 0..<3 {
+            artwork.load(invalid.url)
+            artwork.retryFailedLoad()
+            MusicArtworkView.retryFailedLoads(in: root.view)
+            artwork.removeFromSuperview()
+            root.view.addSubview(artwork)
+        }
+        await fulfillment(of: [retried], timeout: 0.1)
+        XCTAssertEqual(invalid.requestCount, 1); XCTAssertNil(artwork.image)
+        let displayed = expectation(description: "new URL displayed")
+        artwork.onImage = { _, _ in displayed.fulfill() }
+        artwork.load(valid.url)
+        await fulfillment(of: [displayed], timeout: 3)
+        XCTAssertEqual(valid.requestCount, 1); XCTAssertNotNil(artwork.image)
+    }
+
+    func testDeterministicLoadErrorsDoNotRetryAndTransientErrorsRecover() async throws {
+        let fixed: [URLError.Code] = [
+            .badURL, .unsupportedURL, .cannotDecodeRawData, .cannotDecodeContentData,
+            .dataLengthExceedsMaximum
+        ]
+        let transient: [URLError.Code] = [.timedOut, .networkConnectionLost, .notConnectedToInternet, .unknown]
+        for code in fixed + transient {
+            let fixture = ArtworkImageFixture([
+                .init(status: 200, data: Data(), error: URLError(code)),
+                .init(status: 200, data: png())
+            ])
+            defer { fixture.close() }
+            let view = MusicArtworkView(images: images())
+            let failed = expectation(description: "failure \(code)")
+            view.onFailure = { _ in failed.fulfill() }
+            view.load(fixture.url)
+            await fulfillment(of: [failed], timeout: 3)
+            let recovered = expectation(description: "retry \(code)")
+            recovered.isInverted = fixed.contains(code)
+            view.onImage = { _, _ in recovered.fulfill() }
+            for _ in 0..<3 { view.load(fixture.url); view.retryFailedLoad() }
+            await fulfillment(of: [recovered], timeout: fixed.contains(code) ? 0.1 : 3)
+            XCTAssertEqual(fixture.requestCount, fixed.contains(code) ? 1 : 2, "\(code)")
+            XCTAssertEqual(view.image == nil, fixed.contains(code), "\(code)")
+        }
+    }
+
+    func testCancelledReadStaysNeutralAndCanLoadAgain() async throws {
+        let started = expectation(description: "cancelled transport started")
+        let fixture = ArtworkImageFixture([
+            .init(status: 200, data: Data(), error: URLError(.cancelled)),
+            .init(status: 200, data: png())
+        ], started: { if $0 == 1 { started.fulfill() } })
+        defer { fixture.close() }
+        let view = MusicArtworkView(images: images())
+        let failure = expectation(description: "cancellation does not report failure")
+        failure.isInverted = true
+        view.onFailure = { _ in failure.fulfill() }
+        view.load(fixture.url)
+        await fulfillment(of: [started], timeout: 3)
+        await fulfillment(of: [failure], timeout: 0.1)
+        XCTAssertEqual(fixture.requestCount, 1); XCTAssertNil(view.image)
+        let displayed = expectation(description: "load after cancellation")
+        view.onImage = { _, _ in displayed.fulfill() }
+        view.load(fixture.url)
+        await fulfillment(of: [displayed], timeout: 3)
+        XCTAssertEqual(fixture.requestCount, 2); XCTAssertNotNil(view.image)
+    }
+
+    func testCancellationErrorDoesNotReportArtworkFailure() async {
+        let images = ArtworkImages(maximumBytes: 1_024) { _ in throw CancellationError() }
+        let view = ArtworkView(images: images)
+        let failure = expectation(description: "CancellationError remains neutral")
+        failure.isInverted = true
+        view.onFailure = { _ in failure.fulfill() }
+        view.load(URL(string: "https://artwork-cdn.invalid/cancelled")!)
+        await fulfillment(of: [failure], timeout: 0.1)
+        XCTAssertNil(view.image)
+    }
+
+    func testWebPVariantsDecodeBoundedPixelsAndShareWarmImages() async throws {
+        for kind in ["lossy", "lossless", "extended", "animated"] {
+            let fixture = ArtworkImageFixture([.init(status: 200, data: webP(kind))])
+            defer { fixture.close() }
+            let images = images()
+            let (image, _) = try await images.read(fixture.url)
+            let cgImage = try XCTUnwrap(image.cgImage)
+            XCTAssertEqual(cgImage.width, kind == "lossy" ? 1_024 : 8)
+            XCTAssertEqual(cgImage.height, kind == "lossy" ? 512 : 4)
+            let (warm, _) = try await images.read(fixture.url)
+            XCTAssertTrue(warm === image); XCTAssertEqual(fixture.requestCount, 1)
+            let pixel = try rgba(cgImage, x: kind == "animated" ? 3 : 1, y: 1)
+            if kind == "lossy" {
+                XCTAssertGreaterThan(pixel[0], 200); XCTAssertLessThan(pixel[1], 40)
+                XCTAssertLessThan(pixel[2], 60); XCTAssertEqual(pixel[3], 255)
+            } else {
+                XCTAssertEqual(pixel[3], 128)
+                if kind == "animated" {
+                    XCTAssertGreaterThan(pixel[0], 120); XCTAssertLessThan(pixel[1], 15)
+                } else {
+                    XCTAssertGreaterThan(pixel[2], 95); XCTAssertLessThan(pixel[0], 10)
+                }
+                XCTAssertEqual(try rgba(cgImage, x: 0, y: 0)[3], 0)
+            }
+        }
+    }
+
+    private func rgba(_ image: CGImage, x: Int, y: Int) throws -> [UInt8] {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        try pixel.withUnsafeMutableBytes { bytes in
+            let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: 1, height: 1,
+                bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue))
+            context.setBlendMode(.copy)
+            // The context's origin is bottom-left; fixture coordinates are top-left.
+            context.draw(image, in: CGRect(x: -CGFloat(x), y: CGFloat(y + 1 - image.height),
+                                          width: CGFloat(image.width), height: CGFloat(image.height)))
+        }
+        return pixel
+    }
+
+    private func webP(_ kind: String) -> Data {
+        // Independent Pillow/libwebp fixtures: oversized opaque red, blue alpha,
+        // extended blue alpha, and a red first frame with a different later frame.
+        let encoded: String
+        switch kind {
+        case "lossy": encoded = """
+            UklGRjAJAABXRUJQVlA4ICQJAACQEAGdASpABiADPm02mUmkIyKhIAgAgA2JaW7hd2Ee3AAAE9gHvtk5D32ych77ZOQ99snIe+2T
+            kPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyH
+            vtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32
+            ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZO
+            Q99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe
+            +2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfb
+            JyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5
+            D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych7
+            7ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99s
+            nIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2Tk
+            PfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHv
+            tk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32y
+            ch77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ
+            99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+
+            2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJ
+            yHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D
+            32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77
+            ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99sn
+            Ie+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkP
+            fbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvt
+            k5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32yc
+            h77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ9
+            9snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2
+            TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJy
+            Hvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D3
+            2ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77Z
+            OQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snI
+            e+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPf
+            bJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk
+            5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOP4AAD+/7bUP/+tt383vA///fQD/vQD/vQD/BAAAAAAAAAAAAAAAAAAAAAA
+            AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+            AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+            """
+        case "lossless": encoded = """
+            UklGRiIAAABXRUJQVlA4TBUAAAAvB8AAEA8wFKMwyAMY8Lj/f0T/wwEA
+            """
+        case "extended": encoded = """
+            UklGRmgAAABXRUJQVlA4WAoAAAAQAAAABwAAAwAAQUxQSA0AAAABDzCAERHi/v8R/Q8HAFZQOCA0AAAAkAEAnQEqCAAEAAEAHCWg
+            AnS6AAOYAP78HE/y2A7CqFP/nEX/ziL/5xF/5xF/i2kdCk8AAA==
+            """
+        case "animated": encoded = """
+            UklGRogAAABXRUJQVlA4WAoAAAASAAAABwAAAwAAQU5JTQYAAAAAAAAAAABBTk1GLAAAAAEAAAAAAAMAAAIAAGQAAAJWUDhMFAAA
+            AC8DgAAQDzAUoz8eAxjwmIeI/ocBQU5NRigAAAAAAAAAAAAHAAADAABkAAAAVlA4TBAAAAAvB8AAAAdQ5KhM/wMR0f8A
+            """
+        default: preconditionFailure("Unknown WebP fixture")
+        }
+        return Data(base64Encoded: encoded, options: .ignoreUnknownCharacters)!
     }
 
     func testChangingURLCancelsOldReadWithoutOverwritingTheNewImage() async throws {

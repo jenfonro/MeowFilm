@@ -84,7 +84,7 @@ internal sealed class ArtworkHttp : IDisposable
             token.ThrowIfCancellationRequested(); _ = Parse(uri.AbsoluteUri);
             if (!visited.Add(uri.AbsoluteUri)) throw new ArtworkException("ARTWORK_REDIRECT");
             using var message = new HttpRequestMessage(HttpMethod.Get, uri);
-            message.Headers.Accept.ParseAdd("image/png,image/jpeg,image/gif");
+            message.Headers.Accept.ParseAdd("image/png,image/jpeg,image/gif,image/webp");
             using var response = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
             int status = (int)response.StatusCode;
             if (status is 301 or 302 or 303 or 307 or 308)

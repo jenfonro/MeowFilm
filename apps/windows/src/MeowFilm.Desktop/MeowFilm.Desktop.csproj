@@ -6,5 +6,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../MeowFilm.Core/MeowFilm.Core.csproj" />
+    <PackageReference Include="SkiaSharp" Version="[4.155.0]" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="[4.155.0]" />
   </ItemGroup>
 </Project>

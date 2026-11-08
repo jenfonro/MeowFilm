@@ -159,6 +159,19 @@ Adapted portions:
 - Feedback: the KG send path was audited but is unavailable; the position-contract patch over
   `e19a52a91b9ceb78d9acce768c357b61be9586d5` is not represented.
 
+## SkiaSharp and Skia — MIT and bundled third-party notices
+
+- Windows WebP artwork decoding uses NuGet `SkiaSharp` and
+  `SkiaSharp.NativeAssets.Win32` version `4.155.0`, source
+  `mono/SkiaSharp` commit `d25e7fa628a2576e50ecc42004cc4fd03c6657f5`.
+- Copyright Microsoft Corporation and the respective Skia and codec contributors.
+- `SkiaSharp-MIT.txt` is the unmodified package `LICENSE.txt`;
+  `SkiaSharp-THIRD-PARTY-NOTICES.txt` is the unmodified native package
+  `THIRD-PARTY-NOTICES.txt`, including Skia and libwebp attribution.
+- The Windows license bundle includes both files. Native runtime assets are
+  resolved from the pinned NuGet graph for `win-x64`; no system codec installation
+  or runtime download is used.
+
 ## LX Music Desktop — Apache-2.0
 
 - Source: `lyswhut/lx-music-desktop` `ad95d5091c9ed689fa72b5e5c849df65f5a679ce`.
