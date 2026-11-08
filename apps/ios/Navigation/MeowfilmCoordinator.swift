@@ -21,6 +21,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private weak var player: MusicPlayerViewController?
     private var accessGeneration: UUID?
     private var presentedError: String?
+    private var startupErrorAcknowledged = false
 
     init(window: UIWindow, assembly: MeowfilmAssembly,
          resetUserData: @escaping @MainActor () async throws -> Void) {
@@ -59,9 +60,8 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         }.store(in: &observations)
         assembly.$startupFailed.receive(on: RunLoop.main).sink { [weak self] failed in
             guard let self, failed, self.main == nil else { return }
-            let page = self.startupPage()
-            page.message = "本地数据不可用"
-            self.navigation.setViewControllers([page], animated: false)
+            (self.navigation.viewControllers.first as? MeowfilmStartupViewController)?.isLoading = false
+            self.showPendingError()
         }.store(in: &observations)
         if let model = assembly.music { install(model) }
     }
@@ -111,7 +111,9 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
 
     private func startupPage() -> MeowfilmStartupViewController {
         let page = MeowfilmStartupViewController(themeProvider: assembly.appearance)
+        page.isLoading = !assembly.startupFailed
         page.openSettings = { [weak self] in self?.showSettings() }
+        page.didFinishAppearing = { [weak self] in self?.showPendingError() }
         return page
     }
 
@@ -192,7 +194,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     private func install(_ model: MusicViewModel) {
-        guard main == nil else { return }
+        guard main == nil, model.isAvailable, !model.isClosed else { return }
         let appearance = assembly.appearance
         let factories: [@MainActor () -> UIViewController] = [
             { [weak self] in
@@ -266,12 +268,18 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     private func showPendingError() {
-        guard UIApplication.shared.applicationState == .active, let model = assembly.music,
-              let error = model.error, presentedError != error else { return }
+        guard UIApplication.shared.applicationState == .active else { return }
         let top = presenter()
         let page = (top as? UINavigationController)?.topViewController ?? top
-        if let page = page as? PageViewController,
-           page.showError(error, acknowledged: { [weak self, weak model] in
+        guard let page = page as? PageViewController else { return }
+        if assembly.startupFailed, !startupErrorAcknowledged {
+            page.showError("本地数据不可用", acknowledged: { [weak self] in
+                self?.startupErrorAcknowledged = true
+            })
+            return
+        }
+        guard let model = assembly.music, let error = model.error, presentedError != error else { return }
+        if page.showError(error, acknowledged: { [weak self, weak model] in
                if model?.error == error { model?.error = nil }
                self?.presentedError = nil
            }) {
@@ -288,8 +296,10 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
 
 @MainActor
 private final class MeowfilmStartupViewController: PageViewController {
-    var message: String?
+    var isLoading = true { didSet { if isViewLoaded { updateLoading() } } }
     var openSettings: (() -> Void)?
+    var didFinishAppearing: (() -> Void)?
+    private let activity = UIActivityIndicatorView(style: .medium)
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -297,17 +307,30 @@ private final class MeowfilmStartupViewController: PageViewController {
         settings.accessibilityIdentifier = "startup.settings"
         pageHeader.setTrailing([settings])
         pageHeader.applyTheme(theme)
-        view.accessibilityLabel = message ?? "加载中"
-        guard let message else { return }
-        let label = UILabel()
-        label.text = message
-        label.textAlignment = .center
-        label.textColor = UIColor(theme.ink)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(label)
+        activity.accessibilityIdentifier = "startup.loading"
+        activity.accessibilityLabel = "加载中"
+        activity.isAccessibilityElement = true
+        activity.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(activity)
         NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            label.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            activity.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            activity.centerYAnchor.constraint(equalTo: view.centerYAnchor),
         ])
+        updateLoading()
+    }
+
+    override func applyTheme() {
+        super.applyTheme()
+        activity.color = UIColor(theme.muted)
+    }
+
+    override func pageDidFinishAppearing() {
+        super.pageDidFinishAppearing()
+        didFinishAppearing?()
+    }
+
+    private func updateLoading() {
+        if isLoading { activity.startAnimating() }
+        else { activity.stopAnimating() }
     }
 }

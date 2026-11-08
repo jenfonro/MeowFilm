@@ -220,6 +220,13 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
         try musicRequire(result.sections.count <= 60 && result.sections.reduce(0, { count, section in
             count + (section.tabs.isEmpty ? section.items.count : section.tabs.reduce(0) { $0 + $1.items.count })
         }) <= 600, .limit)
+        return try convertedPublicSections(result, prefix: prefix, binding: binding)
+    }
+
+    /// Already validated pages may accumulate beyond a single response's
+    /// protocol limits. Conversion registers fresh handles, never authority.
+    func convertedPublicSections(_ result: MusicNativePublicBrowseDiscovery, prefix: String,
+                                 binding: MusicNativeHomeBinding? = nil) throws -> [MusicPublicBrowseSection] {
         return try result.sections.map { section -> MusicPublicBrowseSection in
             let tabs = try section.tabs.map { tab in
                 let pending = tab.items.contains { item in

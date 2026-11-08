@@ -13,7 +13,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigationSource, IDesktopGeneralSettingsSource
+public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupParticipant, IDesktopNavigationSource, IDesktopGeneralSettingsSource
 {
     private readonly IMusicApplication application;
     private readonly IMusicPlayback playback;
@@ -61,6 +61,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         playbackPresentation = new(this, property => Changed(property));
         audioFileCache = playbackCache;
         persistentChorus = new(store);
+        homeSnapshotStore = new(store);
         files = new(store, "music.files.v1", [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
         Lyrics.CollectionChanged += OnLyricRowsChanged;
         InitializeLibrarySync();
@@ -100,7 +101,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         IsArchives ? MusicContentPage.Archives : IsSearchSongs ? MusicContentPage.SearchSongs :
         ShowsSongTable ? MusicContentPage.Songs : MusicContentPage.Catalog;
     public string Heading => heading;
-    public string Status => status;
+    public string Status => catalogAccountNotice.Length > 0 ? catalogAccountNotice : status;
     public bool Busy => commands > 0 || loadCancellation is not null;
     public bool CanEdit => !stopping && !Busy;
     public bool IsHistory => location.Route == "history";
@@ -245,8 +246,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         if (success.ValueKind == JsonValueKind.False)
         {
             var code = MusicDto.Text(reply, "code");
-            // The existing catalog UI uses AUTH_REQUIRED as its canonical expiry
-            // state. Do not retain private display when a native port says expired.
+            // Catalog uses one login-required notice for missing/expired authority;
+            // the account owner, not cached display content, decides revocation.
             if (code == "AUTH_EXPIRED" && method.StartsWith("music.catalog.", StringComparison.Ordinal))
                 code = "AUTH_REQUIRED";
             throw new MusicOperationException(code);
@@ -265,7 +266,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         // Passive Sync refreshes share admission/drain, not foreground status ownership.
         var stamp = publishStatus ? ++statusEpoch : statusEpoch;
         commands++;
-        if (publishStatus) status = "";
+        if (publishStatus) { status = ""; catalogAccountNotice = ""; }
         RefreshBindings();
         return commandTail = Execute();
         async Task Execute()
@@ -885,6 +886,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         if (playbackSubscribed) return;
         application.ChorusInvalidated += ChorusAccountChanged;
         application.AccountDetailsInvalidated += OfficialAccountChanged;
+        application.AccountDetailsInvalidated += CatalogAccountChanged;
         playback.PropertyChanged += PlaybackChanged;
         playback.Started += PlaybackStarted; playback.Ended += PlaybackEnded; playback.Failed += PlaybackFailed;
         playbackSubscribed = true;
@@ -894,6 +896,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         if (!playbackSubscribed) return;
         application.ChorusInvalidated -= ChorusAccountChanged;
         application.AccountDetailsInvalidated -= OfficialAccountChanged;
+        application.AccountDetailsInvalidated -= CatalogAccountChanged;
         ClearChorus();
         playback.PropertyChanged -= PlaybackChanged;
         playback.Started -= PlaybackStarted; playback.Ended -= PlaybackEnded; playback.Failed -= PlaybackFailed;
@@ -907,6 +910,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         UnsubscribePlayback();
         loadCancellation?.Cancel(); // Only reads: never cancel admitted mutations/history writes.
         catalogSourceReadCancellation?.Cancel(); // The shared startup source read is independent of its waiters.
+        startupCancellation?.Cancel();
+        accountReadCancellation?.Cancel();
         collectionPageCancellation?.Cancel();
         // Resolution may be a network read; cancel it before waiting for commandTail.
         onlineCancellation?.Cancel(); RetireLyrics(); CancelMusicPreload();
@@ -918,7 +923,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         catch (Exception error) { settingsFailure ??= error; }
         try { await vipPage.PrepareShutdownAsync(); }
         catch (Exception error) { settingsFailure ??= error; }
-        await Task.WhenAll(commandTail, accountSettlement, Task.WhenAll(eventWrites.ToArray()),
+        await Task.WhenAll(commandTail, accountRead, accountSettlement, Task.WhenAll(eventWrites.ToArray()),
             Task.WhenAll(loadDrains.ToArray()), RetireSearchHistoryAsync());
         // A failure stays cached, sealed and observable. Do not tear down the
         // lifetime or any App-owned runtime/store/player before forced exit.

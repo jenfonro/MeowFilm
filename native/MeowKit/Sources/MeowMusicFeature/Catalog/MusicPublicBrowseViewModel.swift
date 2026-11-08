@@ -65,6 +65,13 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     private let service: any MusicPublicBrowsing
     @Published public private(set) var request: MusicPublicBrowseRequest
     private var generation = UUID(), pageEpoch = UUID(), actionEpoch = UUID()
+    private var loadEpoch = UUID()
+    private var homeNeedsRefresh = true
+    private var displayedHomeSource: MusicHomeSourceSelection?
+    private var isHome: Bool { request == .discovery(.home) }
+    /// Optional private artwork follows the settled home, not retained cards
+    /// that are about to be replaced. This never gates user actions.
+    var canLoadDisplayPreviews: Bool { !isHome || (!homeNeedsRefresh && !isLoading) }
     /// Module-local identity for page-owned presentations, never queue authority.
     var actionPageID: UUID { pageEpoch }
     private var available = false, visible = false, displayVisible = false
@@ -118,6 +125,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         var dailyStyle: MusicDailyStyleSelection?
         var consumed: Int?
         var detailMembers: [MusicPublicBrowseMember]?
+        var homeSource: MusicHomeSourceSelection?
     }
     public init(service: any MusicPublicBrowsing, request: MusicPublicBrowseRequest,
                 queuePage: (@MainActor (MusicRemoteQueueSource, String?) async throws -> MusicBrowsePage)? = nil,
@@ -185,7 +193,25 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             default: scoped = false
             }
             guard scoped else { continue }
-            invalidate(clear: true)
+            if isHome {
+                do {
+                    let source = try await home.homeSourceSelection()
+                    guard !Task.isCancelled, generation == access else { return }
+                    if let displayedHomeSource, displayedHomeSource != source {
+                        invalidate(clear: true)
+                    } else {
+                        invalidateHomeRead()
+                    }
+                    displayedHomeSource = source
+                    homeNeedsRefresh = true
+                } catch {
+                    guard !Task.isCancelled, generation == access else { return }
+                    self.error = MusicServiceError.sanitized(error)
+                    continue
+                }
+            } else {
+                invalidate(clear: true)
+            }
             if available && visible && displayVisible { await refresh() }
         }
     }
@@ -194,13 +220,14 @@ public struct MusicPublicBrowseActionIntent: Sendable {
               let home = service as? any MusicHomeBrowsing else { return }
         let own = pageEpoch, access = generation
         do {
+            let source = try await home.homeSourceSelection()
             let value = try await home.restoredHome()
             guard !Task.isCancelled, available, visible, !loaded, !isLoading,
                   pageEpoch == own, generation == access, let value else { return }
-            // Restored handles are freshly issued by the native owner; persisted
-            // continuations are forbidden even if a faulty adapter returns one.
-            guard value.cursor == nil, value.sections.count <= 60,
-                  value.sections.reduce(0, { $0 + $1.items.count }) <= 600 else { return }
+            // The snapshot may contain several successful response batches,
+            // but never a persisted continuation or account grant.
+            guard value.cursor == nil else { return }
+            displayedHomeSource = source
             sections = value.sections; notice = value.notice; loaded = true; contentIsCurrent = true
         } catch {
             // A disposable snapshot must not prevent the actual home request.
@@ -211,7 +238,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         invalidate(clear: true)
     }
     private func invalidate(clear: Bool) {
-        pageEpoch = UUID(); actionEpoch = UUID()
+        pageEpoch = UUID(); actionEpoch = UUID(); loadEpoch = UUID()
         issuedIntent = nil
         task?.cancel(); task = nil; actionTask?.cancel(); actionTask = nil
         tabTask?.cancel(); tabTask = nil
@@ -232,7 +259,24 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             dailyStyle = nil
             contentIsCurrent = false
             contentDay = nil
+            homeNeedsRefresh = true
+            displayedHomeSource = nil
         }
+    }
+    /// Home display and captured actions outlive a background read. Only a
+    /// navigation/source/access change retires their page identity.
+    private func invalidateHomeRead() {
+        loadEpoch = UUID()
+        task?.cancel(); task = nil
+        tabTask?.cancel(); tabTask = nil
+        isLoading = false; loadingCursor = nil
+        error = nil; errorDiagnosticID = nil
+        failedPage = nil; failedRequest = nil
+        loadedPages = [:]
+        currentCursor = nil; nextCursor = nil; back = []
+        cursorOffsets = ["": 0]; trackOffset = 0
+        trackPageOccurrences = [:]; detailSourcePositions = [:]
+        pageNumber = 1; requiresExplicitNext = false; usesPageNavigation = false
     }
     public func selectFilter(_ id: String) async {
         guard available, visible, !isActing, selectedFilter != id,
@@ -272,7 +316,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
               sections[index].selectedTab != id else { return }
         let old = sections[index]
         issuedIntent = nil; pageEpoch = UUID()
-        let own = pageEpoch, access = generation
+        let own = pageEpoch, access = generation, readEpoch = loadEpoch
         tabTask?.cancel()
         var items = tab.items
         let trace = MusicRequestTrace(.browse, platform: requestPlatform)
@@ -283,7 +327,8 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 tabTask = work
                 items = try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
             }
-            guard available, visible, generation == access, pageEpoch == own, !Task.isCancelled else { return }
+            guard available, visible, generation == access, pageEpoch == own,
+                  loadEpoch == readEpoch, !Task.isCancelled else { return }
             guard items.count <= 600, Set(items.map(\.id)).count == items.count else {
                 throw MusicServiceError.invalidResponse
             }
@@ -302,7 +347,8 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             }
             sectionDiagnosticIDs[sectionID] = nil
         } catch {
-            guard available, visible, generation == access, pageEpoch == own, !Task.isCancelled else { return }
+            guard available, visible, generation == access, pageEpoch == own,
+                  loadEpoch == readEpoch, !Task.isCancelled else { return }
             let failure = MusicServiceError.sanitized(error)
             guard failure != .cancelled else { return }
             trace.failed(error); sectionDiagnosticIDs[sectionID] = trace.logicalID
@@ -361,11 +407,16 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         return result
     }
     public func refresh() async {
-        let isHome = request == .discovery(.home)
         if isHome, isLoading, loadingCursor == nil {
             // Match the reference's single homeTask; repeated pull/activation
             // must not cancel and restart the same first-page request.
             if let task { _ = try? await task.value }
+            return
+        }
+        if isHome {
+            invalidateHomeRead()
+            homeNeedsRefresh = false
+            await load(cursor: nil, direction: 0, refresh: true)
             return
         }
         // Keep rows and scroll anchors, not an old queue source or admission.
@@ -386,6 +437,30 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         await load(cursor: nil, direction: 0, refresh: true)
     }
     public func loadIfNeeded() async {
+        if isHome, !isLoading, available, visible, displayVisible,
+           let displayed = displayedHomeSource, let home = service as? any MusicHomeBrowsing {
+            let access = generation, page = pageEpoch
+            do {
+                // Source changes during the initial read can precede the
+                // subscription. Reconcile locally on return, without reloading
+                // an unchanged home or mistaking account changes for navigation.
+                let current = try await home.homeSourceSelection()
+                guard !Task.isCancelled, available, visible, displayVisible,
+                      generation == access, pageEpoch == page, !isLoading else { return }
+                if current != displayed {
+                    invalidate(clear: true)
+                    displayedHomeSource = current
+                }
+            } catch {
+                guard !Task.isCancelled, generation == access, pageEpoch == page else { return }
+                self.error = MusicServiceError.sanitized(error)
+                return
+            }
+        }
+        if isHome, homeNeedsRefresh, !isLoading, available, visible, displayVisible {
+            await refresh()
+            return
+        }
         guard !loaded, !isLoading, error == nil else { return }
         await load(cursor: nil, direction: 0)
     }
@@ -464,7 +539,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     }
     public func retry() async {
         guard !isActing else { return }
-        if let failedPage { await load(cursor: failedPage.cursor, direction: failedPage.direction, requestOverride: failedRequest) }
+        if isHome, let failedPage, failedPage.cursor == nil {
+            await refresh()
+        } else if let failedPage { await load(cursor: failedPage.cursor, direction: failedPage.direction, requestOverride: failedRequest) }
         else if !loaded { await refresh() }
         else { await load(cursor: currentCursor, direction: 0) }
     }
@@ -586,7 +663,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         let trace = MusicRequestTrace(.browse, platform: requestPlatform)
         trace.record(.started)
         tabTask?.cancel(); tabTask = nil
-        pageEpoch = own; isLoading = true; loadingCursor = cursor; error = nil; errorDiagnosticID = nil
+        loadEpoch = own
+        if !isHome { pageEpoch = own }
+        isLoading = true; loadingCursor = cursor; error = nil; errorDiagnosticID = nil
         let newTask = Task<Loaded, Error> {
             try await MusicRequestTrace.$current.withValue(trace) {
             if var cached {
@@ -668,8 +747,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                              consumed: result.consumed, detailMembers: result.members)
             case .discovery(let destination):
                 if destination == .home, let home = service as? any MusicHomeBrowsing {
+                    let source = try await home.homeSourceSelection()
                     let page = try await home.homePage(cursor: cursor, refresh: refresh)
-                    return .init(page: page, consumed: page.consumed)
+                    return .init(page: page, consumed: page.consumed, homeSource: source)
                 }
                 if case .daily(let platform) = destination, let queuePage,
                    let provider = service as? any MusicRemoteQueueServing {
@@ -698,13 +778,13 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         var unpublished: MusicRemoteQueueSource?
         defer {
             if let unpublished, unpublished.id != remoteSource?.id { releaseSource(unpublished) }
-            if own == pageEpoch { task = nil; isLoading = false }
+            if own == loadEpoch { task = nil; isLoading = false }
         }
         do {
             let result = try await withTaskCancellationHandler { try await newTask.value } onCancel: { newTask.cancel() }
             unpublished = result.source
             try Task.checkCancellation()
-            guard available, visible, generation == access, pageEpoch == own else {
+            guard available, visible, generation == access, loadEpoch == own else {
                 return
             }
             if isDaily {
@@ -758,7 +838,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 notice = result.page.notice; loaded = true
                 // A failed tag read must not authorize retained pixels as the
                 // new selection. Section-local retries keep their old target.
-                if requestOverride == nil { contentIsCurrent = false }
+                if requestOverride == nil, !isHome { contentIsCurrent = false }
                 failedPage = (nil, 0); failedRequest = requestOverride
                 return
             }
@@ -805,6 +885,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 }
             }
             currentCursor = cursor; nextCursor = result.page.cursor; sections = merged
+            if let source = result.homeSource { displayedHomeSource = source }
             if requestOverride != nil { loadedPages = [:] }
             loadedPages[cursor ?? ""] = result
             self.request = request
@@ -821,13 +902,13 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             trace.record(.completed)
         } catch {
             trace.failed(error)
-            guard available, visible, generation == access, pageEpoch == own, !Task.isCancelled else { return }
+            guard available, visible, generation == access, loadEpoch == own, !Task.isCancelled else { return }
             let safe = MusicServiceError.sanitized(error)
             if safe != .cancelled {
                 self.error = safe; errorDiagnosticID = trace.logicalID
                 failedPage = (cursor, direction); failedRequest = requestOverride
             }
-            if safe.isAuthenticationFailure || [.accessUnavailable, .staleAccess, .staleResult, .notFound, .handleExpired].contains(safe) {
+            if !isHome, safe.isAuthenticationFailure || [.accessUnavailable, .staleAccess, .staleResult, .notFound, .handleExpired].contains(safe) {
                 loadedPages = [:]
                 if let remoteSource { releaseSource(remoteSource) }; remoteSource = nil
                 sections = []; notice = nil; nextCursor = nil; snapshot = nil; loaded = false
@@ -852,14 +933,14 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     /// Callback is explicit user intent. The existing queue/player owner must
     /// additionally fence its own transaction and playback after suspension.
     public func makeActionIntent() -> MusicPublicBrowseActionIntent? {
-        guard available, visible, contentIsCurrent, !isActing, !isLoading else { return nil }
+        guard available, visible, contentIsCurrent, !isActing, isHome || !isLoading else { return nil }
         let id = UUID(); issuedIntent = id
         return .init(id: id, page: pageEpoch, access: generation)
     }
     public func perform(intent: MusicPublicBrowseActionIntent, operation: String = "歌单操作",
                         kind: MusicRequestTrace.Operation = .library,
                         _ body: @escaping @MainActor () async throws -> Void) async {
-        guard available, visible, contentIsCurrent, !isActing, !isLoading, issuedIntent == intent.id,
+        guard available, visible, contentIsCurrent, !isActing, isHome || !isLoading, issuedIntent == intent.id,
               pageEpoch == intent.page, generation == intent.access else { return }
         issuedIntent = nil
         let own = UUID(), access = generation

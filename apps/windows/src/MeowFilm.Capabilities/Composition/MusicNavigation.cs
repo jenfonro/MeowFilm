@@ -40,10 +40,8 @@ public sealed partial class MusicCapability
         try
         {
             // Restore App state without navigating or publishing a content page.
+            await PrepareStartupAsync(token);
             await RefreshPlaylists(token);
-            try { await EnsureCatalogSourceSettingsAsync(token); }
-            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-            catch { /* No catalog request is admitted until its source has been restored. */ }
             await ReadMetadataSettings(token);
             await ReadQueue(token);
             if (stopping) return;
@@ -165,7 +163,7 @@ public sealed partial class MusicCapability
     private void RetireOperationStatus()
     {
         ++statusEpoch;
-        status = "";
+        status = ""; catalogAccountNotice = "";
         Changed(nameof(Status));
     }
     private async Task LoadUiAsync(Location target)

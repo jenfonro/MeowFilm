@@ -155,12 +155,18 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var lastAudioCacheScope: String?
     var homeCache: (source: MusicPublicBrowsePlatform, scope: String, revision: UUID,
                     expires: Date, page: MusicNativePublicBrowseDiscovery)?
+    var homeDisplay: (source: MusicPublicBrowsePlatform, page: MusicNativePublicBrowseDiscovery)?
+    var homeDisplayPrepared = false
+    var homeLoad: MusicNativeHomeLoad?
+    var homeFirstRead: MusicNativeHomeFirstRead?
     /// Last adopted durable `catalogSource`; nil until first read.
     var homeSource: (platform: MusicPublicBrowsePlatform, revision: Int)?
     var homeSourceRevision = UUID()
     var homeObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
     var anonymousHomeBindings: [MusicPublicBrowsePlatform: MusicNativeHomeBinding] = [:]
     var lastHomeScope: String?
+    var lastHomeObservation: MusicNativeCacheScope?
+    var lastHomeRefreshObservation: MusicNativeCacheScope?
     let ownedTransport: URLSessionMusicNativeHTTPTransport?
     let now: @Sendable () -> Date
     let random: @Sendable () -> Double
@@ -273,11 +279,16 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         audioCacheCaptures.removeAll()
         clearSimilarRuntime()
         homeCache = nil
+        homeLoad = nil
+        homeFirstRead?.task.cancel(); homeFirstRead = nil
+        homeDisplay = nil; homeDisplayPrepared = false
         for observer in homeObservers.values { observer.finish() }
         homeObservers.removeAll()
         for binding in anonymousHomeBindings.values { binding.authorization.revoke() }
         anonymousHomeBindings.removeAll()
         lastHomeScope = nil
+        lastHomeObservation = nil
+        lastHomeRefreshObservation = nil
         playbackFeedback.invalidate()
         playbackFeedbackAdmission = nil
         librarySyncRun?.cancel()

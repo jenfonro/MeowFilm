@@ -65,10 +65,13 @@ public sealed partial class MusicCapability
     {
         if (platform is "kw" or "mg") return "public/" + platform;
         var account = Accounts.Single(a => a.Platform == platform);
-        return $"{accountEpoch}/{platform}/{account.Generation}/{account.UserId}";
+        return $"{accountEpoch}/{CatalogAccountObservation(platform)}/{platform}/{account.Generation}/{account.UserId}";
     }
     private void RequireCatalogContent()
     {
+        // Home is a last-successful display, not a grant from a prior account.
+        // Its cards use their own identities and obtain current authority on use.
+        if (IsCatalogHome) return;
         if (IsSearchPage)
         {
             if (searchAccountEpoch != accountEpoch || !searchSnapshots.ContainsKey(searchKind))
@@ -286,7 +289,7 @@ public sealed partial class MusicCapability
     private async Task ReadCatalogAccountForRequestAsync(string platform, long generation, CancellationToken token)
     {
         long epoch = accountEpoch;
-        await EnsureAccountsForRequestAsync();
+        await EnsureAccountsForRequestAsync(token);
         token.ThrowIfCancellationRequested();
         if (stopping || generation != loadGeneration || epoch != accountEpoch) throw new OperationCanceledException(token);
         var currentAccount = Accounts.Single(a => a.Platform == platform);

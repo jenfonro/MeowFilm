@@ -232,27 +232,32 @@ public static partial class MusicUiTests
             True(playlist.CanOpen && playlist.Platform == "wy", "public playlist consumer");
             await f.Module.OpenSearchTabAsync("songs");
             Equal(1, f.Module.Songs.Count); Equal(2, f.Http.SearchRequests);
-            Equal(accountReads + 3, f.Store.AccountReads);
+            Equal(accountReads + 2, f.Store.AccountReads);
             Equal(0, f.Runtime.Calls.Count);
         });
-        yield return Case("duplicate visible search start shares one owner flight and one initial account observation", async () =>
+        yield return Case("duplicate visible search start shares one owner flight and one current account read after startup", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], [], automaticPlaylists: false);
             int accountReads = f.Store.AccountReads;
             var hold = f.Store.HoldNextAccountRead();
             var first = f.Search("单飞");
-            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            var duplicate = f.Module.SearchAsync("单飞", default);
-            await Drain();
-            Equal(accountReads + 1, f.Store.AccountReads);
-            Equal(0, f.Http.SearchRequests);
-            hold.Release();
-            await Task.WhenAll(first, duplicate).WaitAsync(TimeSpan.FromSeconds(5));
-            await SearchUntil(() => f.Module.Songs.Count == 1 &&
-                !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
-            Equal(1, f.Http.SearchRequests);
-            Equal(accountReads + 2, f.Store.AccountReads);
+            Task duplicate = Task.CompletedTask;
+            try
+            {
+                await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                duplicate = f.Module.SearchAsync("单飞", default);
+                await Drain();
+                Equal(accountReads + 1, f.Store.AccountReads);
+                Equal(0, f.Http.SearchRequests);
+                hold.Release();
+                await Task.WhenAll(first, duplicate).WaitAsync(TimeSpan.FromSeconds(5));
+                await SearchUntil(() => f.Module.Songs.Count == 1 &&
+                    !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
+                Equal(1, f.Http.SearchRequests);
+                Equal(accountReads + 1, f.Store.AccountReads);
+            }
+            finally { hold.Release(); await Task.WhenAll(first, duplicate); }
         });
         yield return Case("visible search resubmission uses page TTL while navigation only restores results", async () =>
         {

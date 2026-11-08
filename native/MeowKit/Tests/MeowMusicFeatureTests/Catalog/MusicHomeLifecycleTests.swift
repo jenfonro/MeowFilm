@@ -51,6 +51,7 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
     func restoredHome() -> MusicPublicBrowsePage? { snapshotReads += 1; return restored }
     func homePage(cursor: String?, refresh: Bool) async throws -> MusicPublicBrowsePage {
         calls.append((cursor, refresh))
+        let gate = gate; self.gate = nil
         if let gate { await gate.wait() }
         if let failure { throw failure }
         if cursor == nil, emptyFirstPage { return .init(sections: [], cursor: "next", consumed: 1) }
@@ -84,15 +85,18 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
         value.setAccess(available: true, generation: UUID()); value.appear()
         return value
     }
-    func testRefreshFailurePreservesLastSuccessfulHomeButAuthRejectionClearsIt() async {
+    func testRefreshFailurePreservesLastSuccessfulHomeIncludingAuthRejection() async {
         let service = HomeLifecycleFixture(), value = model(service)
         await value.refresh()
         await service.fail(.unavailable); await value.refresh()
         XCTAssertEqual(value.sections.first?.items.map(\.id), ["1"])
         XCTAssertTrue(value.loaded); XCTAssertEqual(value.error, .unavailable)
         await service.fail(.authRequired); await value.retry()
-        XCTAssertTrue(value.sections.isEmpty); XCTAssertFalse(value.loaded)
+        XCTAssertEqual(value.sections.first?.items.map(\.id), ["1"])
+        XCTAssertTrue(value.loaded); XCTAssertTrue(value.contentIsCurrent)
         XCTAssertNil(value.nextCursor); XCTAssertEqual(value.error, .authRequired)
+        let retried = await service.calls
+        XCTAssertTrue(retried.last?.1 == true, "Explicit first-page retry must not reuse the old response cache")
     }
     func testHomeContinuationMergesStableSectionsAndRefreshResetsPagination() async {
         let service = HomeLifecycleFixture(), value = model(service)
@@ -114,8 +118,167 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
         XCTAssertEqual(value.sections.first?.items.map(\.id), ["7"])
         XCTAssertNil(value.nextCursor)
         let calls = await service.calls; XCTAssertTrue(calls.isEmpty)
-        await value.refresh()
+        await value.loadIfNeeded()
         XCTAssertEqual(value.sections.first?.items.map(\.id), ["1"])
+        let refreshCalls = await service.calls
+        XCTAssertEqual(refreshCalls.count, 1); XCTAssertTrue(refreshCalls[0].1)
+        await value.loadIfNeeded()
+        let repeatedCalls = await service.calls
+        XCTAssertEqual(repeatedCalls.count, 1)
+    }
+    func testSlowStartupRefreshKeepsSnapshotActionableAndReplacesOnlyOnSuccess() async throws {
+        let service = HomeLifecycleFixture(), value = model(service), gate = HomeLifecycleGate()
+        await service.setSnapshot(HomeLifecycleFixture.page(["7"]))
+        await value.restoreHomeIfNeeded()
+        await service.hold(gate)
+        let refresh = Task { await value.loadIfNeeded() }
+        await gate.didStart()
+        XCTAssertEqual(value.sections.first?.items.map(\.id), ["7"])
+        XCTAssertTrue(value.isLoading)
+        let intent = try XCTUnwrap(value.makeActionIntent())
+        var opened: MusicPublicBrowseCollection?
+        guard case .collection(let collection) = value.sections[0].items[0].content else {
+            return XCTFail("Cached public collection must keep its own identity")
+        }
+        await value.perform(intent: intent) { opened = collection }
+        XCTAssertEqual(opened?.platform, .netease); XCTAssertEqual(opened?.nativeID, "7")
+        await gate.release(); await refresh.value
+        XCTAssertEqual(value.sections.first?.items.map(\.id), ["1"])
+        XCTAssertNil(value.actionError)
+    }
+    func testRefreshAndAppendDoNotRetireCapturedHomeActions() async throws {
+        let service = HomeLifecycleFixture(), value = model(service), gate = HomeLifecycleGate()
+        await value.loadIfNeeded()
+        let captured = try XCTUnwrap(value.makeActionIntent())
+        await value.appendNext()
+        var completed = false
+        let action = Task {
+            await value.perform(intent: captured) {
+                await gate.wait()
+                try Task.checkCancellation()
+                completed = true
+            }
+        }
+        await gate.didStart()
+        await value.refresh()
+        XCTAssertTrue(value.isActing)
+        await gate.release(); await action.value
+        XCTAssertTrue(completed); XCTAssertNil(value.actionError)
+        await value.perform(intent: captured) { XCTFail("Action intents remain single-use") }
+    }
+    func testAccountChangeKeepsDisplayAndCapturedActionWhileGuestHomeIsPending() async throws {
+        let service = HomeLifecycleFixture(), value = model(service), gate = HomeLifecycleGate()
+        await value.loadIfNeeded()
+        let captured = try XCTUnwrap(value.makeActionIntent())
+        let observation = Task { await value.observeHomeChanges() }
+        await service.waitForSubscription()
+        await service.hold(gate); await service.change()
+        await gate.didStart()
+        XCTAssertTrue(value.loaded); XCTAssertEqual(value.sections.first?.items.map(\.id), ["1"])
+        var acted = false
+        await value.perform(intent: captured) { acted = true }
+        XCTAssertTrue(acted)
+        await gate.release(); await service.end(); await observation.value
+        XCTAssertTrue(value.loaded); XCTAssertNil(value.error)
+        let calls = await service.calls
+        XCTAssertEqual(calls.count, 2)
+    }
+    func testPrivateActionFailureDoesNotClearHomeOrDiscardAuthenticationError() async throws {
+        let service = HomeLifecycleFixture(), value = model(service)
+        await value.loadIfNeeded()
+        let intent = try XCTUnwrap(value.makeActionIntent())
+        await value.perform(intent: intent) { throw MusicServiceError.authRequired }
+        XCTAssertEqual(value.actionError, .authRequired)
+        XCTAssertTrue(value.loaded); XCTAssertEqual(value.sections.first?.items.map(\.id), ["1"])
+    }
+    func testLateHomeTabDisplayCannotOverwriteNewFirstPage() async throws {
+        let service = HomeLifecycleFixture(), value = model(service), gate = HomeLifecycleGate()
+        let old = HomeLifecycleFixture.page(["7"]).sections[0].items
+        let late = HomeLifecycleFixture.page(["8"]).sections[0].items
+        await service.setSnapshot(.init(sections: [.init(id: "home:stable", title: "音乐", items: old,
+            layout: .playlistRail, tabs: [
+                .init(id: "first", title: "原栏目", items: old),
+                .init(id: "second", title: "其他栏目", items: [], loadItems: { await gate.wait(); return late }),
+            ], selectedTab: "first")]))
+        await value.restoreHomeIfNeeded()
+        let intent = try XCTUnwrap(value.makeActionIntent())
+        let tab = Task { await value.selectSectionTab("second", sectionID: "home:stable", intent: intent) }
+        await gate.didStart()
+        await value.refresh()
+        await gate.release(); await tab.value
+        XCTAssertEqual(value.sections.first?.items.map(\.id), ["1"])
+        XCTAssertTrue(value.sections.first?.tabs.isEmpty == true); XCTAssertNil(value.error)
+    }
+    func testSourceChangeRetiresCapturedActionWhileReplacementIsPending() async throws {
+        let service = HomeLifecycleFixture(), value = model(service), gate = HomeLifecycleGate()
+        await value.loadIfNeeded()
+        let intent = try XCTUnwrap(value.makeActionIntent())
+        let observation = Task { await value.observeHomeChanges() }
+        await service.waitForSubscription()
+        await service.hold(gate)
+        _ = try await service.selectHomeSource(.qq, ifRevision: 0)
+        await gate.didStart()
+        XCTAssertTrue(value.sections.isEmpty); XCTAssertFalse(value.loaded)
+        await value.perform(intent: intent) { XCTFail("A source change must retire the old action") }
+        await gate.release(); await service.end(); await observation.value
+        guard case .collection(let collection) = value.sections[0].items[0].content else {
+            return XCTFail("The new source must publish its own content")
+        }
+        XCTAssertEqual(collection.platform, .qq)
+    }
+    func testLateCancelledHomeReadCannotOverwriteReplacementOrItsError() async {
+        let service = HomeLifecycleFixture(), value = model(service), gate = HomeLifecycleGate()
+        await value.loadIfNeeded()
+        let observation = Task { await value.observeHomeChanges() }
+        await service.waitForSubscription()
+        await service.hold(gate)
+        let old = Task { await value.refresh() }
+        await gate.didStart()
+        await service.fail(.unavailable)
+        await service.change(); await service.end(); await observation.value
+        XCTAssertEqual(value.error, .unavailable); XCTAssertTrue(value.loaded)
+        await service.fail(nil)
+        await gate.release(); await old.value
+        XCTAssertEqual(value.error, .unavailable, "A cancelled old success cannot clear the replacement error")
+        XCTAssertEqual(value.sections.first?.items.map(\.id), ["1"])
+        XCTAssertFalse(value.isLoading)
+    }
+    func testHiddenAccountChangeRetainsDisplayAndRefreshesWhenVisibleAgain() async {
+        let service = HomeLifecycleFixture(), value = model(service)
+        await value.loadIfNeeded()
+        let observation = Task { await value.observeHomeChanges() }
+        await service.waitForSubscription()
+        value.setDisplayVisible(false)
+        await service.change(); await service.end(); await observation.value
+        XCTAssertTrue(value.loaded); XCTAssertEqual(value.sections.first?.items.map(\.id), ["1"])
+        let hiddenCalls = await service.calls; XCTAssertEqual(hiddenCalls.count, 1)
+        value.setDisplayVisible(true)
+        await value.loadIfNeeded()
+        let calls = await service.calls; XCTAssertEqual(calls.count, 2)
+    }
+    func testSourceChangeBeforeSubscriptionIsReconciledOnReturnWithoutReusingOldActions() async throws {
+        let service = HomeLifecycleFixture(), value = model(service), gate = HomeLifecycleGate()
+        await value.loadIfNeeded()
+        let intent = try XCTUnwrap(value.makeActionIntent())
+        value.setDisplayVisible(false)
+        _ = try await service.selectHomeSource(.qq, ifRevision: 0)
+        let observation = Task { await value.observeHomeChanges() }
+        await service.waitForSubscription()
+        await service.hold(gate)
+        value.setDisplayVisible(true)
+        let returned = Task { await value.loadIfNeeded() }
+        await gate.didStart()
+        XCTAssertTrue(value.sections.isEmpty); XCTAssertFalse(value.loaded)
+        await value.perform(intent: intent) { XCTFail("The missed source notification cannot preserve old actions") }
+        await gate.release(); await returned.value
+        guard case .collection(let collection) = value.sections.first?.items.first?.content else {
+            return XCTFail("Returning must load the durable source")
+        }
+        XCTAssertEqual(collection.platform, .qq)
+        await value.loadIfNeeded()
+        let calls = await service.calls
+        XCTAssertEqual(calls.count, 2, "An unchanged source must not start another network read")
+        await service.end(); await observation.value
     }
     func testAccountChangeDoesNotReloadRemovedHome() async {
         let service = HomeLifecycleFixture(), value = model(service)

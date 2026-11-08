@@ -195,15 +195,28 @@ public sealed partial class MusicCapability
         }
     }
 
-    private Task StartRecommendation(CatalogTarget target)
+    private async Task StartRecommendation(CatalogTarget target)
     {
-        if (stopping) return Task.CompletedTask;
+        if (stopping) return;
         InvalidateCatalogAction();
+        long action = catalogActionGeneration, navigation = navigationSubmission;
+        long observation = CatalogAccountObservation(target.Platform);
+        bool Current() => !stopping && action == catalogActionGeneration && navigation == navigationSubmission &&
+            observation == CatalogAccountObservation(target.Platform);
+        try
+        {
+            await EnsureAccountsForRequestAsync(recommendationLifetime.Token);
+            if (!Current()) return;
+            if (Accounts.Single(a => a.Platform == target.Platform).State is not ("saved" or "verified"))
+                throw new MusicOperationException("AUTH_REQUIRED");
+        }
+        catch (OperationCanceledException) { return; }
+        catch (Exception error) { if (Current()) PublishCatalogActionError(error); return; }
         var input = target.Parameters.EnumerateObject().ToDictionary(p => p.Name, p => (object?)p.Value.Clone());
         input["kind"] = target.Operation; input["platform"] = target.Platform; input["local"] = true; input["play"] = true;
         // Session identity and native recording IDs, never a synthesized title.
         if (target.Operation != "fm") input["continue"] = false;
-        return RecommendationCommand("music.recommendations.start", input);
+        await RecommendationCommand("music.recommendations.start", input);
     }
 
     private async Task RefreshRecommendationQueue(CancellationToken token)
