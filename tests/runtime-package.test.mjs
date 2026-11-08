@@ -119,7 +119,9 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   file('apps/runtime/modules/cat-script.mjs', sourceCode);
   file('apps/runtime/modules/source-runtime.mjs', sourceCode);
   file('apps/runtime/modules/pan-runtime.mjs', sourceCode);
-  for (const path of ['entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs']) {
+  for (const path of ['entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
+    'modules/metadata-data.mjs', 'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
+    'modules/metadata/tmdb.mjs', 'modules/metadata/douban.mjs']) {
     file(`apps/runtime/${path}`, sourceCode);
   }
   function saveLock() { write(root, 'package-lock.json', lock); }
@@ -179,7 +181,9 @@ test('common runtime packaging stages only the script dependency closure with ex
   assert.match(manifest.integrityScope, /not an upstream signature/);
   assert.deepEqual(manifest.files.filter(f => f.path.startsWith('app/')).map(f => f.path),
     ['app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/entry.mjs',
-      'app/modules/cat-script.mjs', 'app/modules/music-script.mjs',
+      'app/modules/cat-script.mjs', 'app/modules/metadata-data.mjs', 'app/modules/metadata/douban.mjs',
+      'app/modules/metadata/network.mjs', 'app/modules/metadata/settings.mjs', 'app/modules/metadata/tmdb.mjs',
+      'app/modules/music-script.mjs',
       'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs',
       'app/pan-entry.mjs']);
   assert.deepEqual(manifest.dependencies.map(p => p.path).sort(), [

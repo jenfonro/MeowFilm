@@ -13,6 +13,18 @@ cryptographic design. No device-registration bypass, anti-bot simulation,
 media-unlocking or challenge bypass is copied. The opt-in pan runtime's credential
 refresh protocols and their specific trust boundary are described below.
 
+## MeowFilm server — protocol reference
+
+The TMDB/Douban runtime's independently implemented Douban adapter follows the
+Rexxar request and HTML-search response contracts of the same-owner
+`jenfonro/meowfilm-server` repository, reference commit
+`934a03e5aeda7edbcef0cfb037734fed93bfe881`:
+`Meowfilm/backend/server/metadata/douban/{rexxar.go,search_html.go,proxy.go}`.
+No server executable, database/cache implementation or challenge solver is
+included. That reference snapshot contains no separate license notice; this
+entry records provenance, not a claim that it grants a third-party license.
+The new runtime implementation remains application source under GPL-3.0-only.
+
 ## iWebPlus / iWebPlayer — Apache-2.0
 
 - Source: `songloft-plugin-iwebplus` `b900c259d991a73768cc36a28b48539b31961668`.

@@ -6,6 +6,7 @@ import { createPanRuntimeModule } from './modules/pan-runtime.mjs';
 
 export { createMusicScriptModule, createCatScriptModule, createSourceRuntimeModule, createPanRuntimeModule };
 export { createPanRuntime, startPanRuntime } from './pan-entry.mjs';
+export { createTMDBDataModule, createDoubanDataModule } from './modules/metadata-data.mjs';
 export { createAppRuntime } from './bootstrap.mjs';
 export { createRuntimeClient } from './client.mjs';
 

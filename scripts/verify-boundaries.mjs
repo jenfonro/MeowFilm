@@ -90,7 +90,8 @@ export function verifyBoundaries(root = windowsRoot) {
   }
   const shared = join(root, 'apps/runtime');
   const sharedImports = new Set([
-    'node:buffer', 'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
+    'node:buffer', 'node:crypto', 'node:http', 'node:https',
+    '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
     '@meowfilm/pan-runtime',
   ]);
   if (existsSync(shared)) {
