@@ -1,4 +1,11 @@
 export const contracts = Object.freeze({
+  pan: { contract: 'pan.runtime.v1', version: '0.1.0', prefix: 'pan.',
+    operations: ['providers', 'settings.get', 'settings.set', 'settings.clear',
+      'login.start', 'login.poll', 'login.cancel', 'list', 'prepare', 'play', 'refresh'],
+    codes: new Set(['INVALID_REQUEST', 'UNSUPPORTED_OPERATION', 'NOT_CONFIGURED',
+      'AUTH_REQUIRED', 'AUTH_FAILED', 'CHALLENGE_REQUIRED', 'NOT_FOUND', 'UPSTREAM_HTTP',
+      'UPSTREAM_FORMAT', 'UPSTREAM_ERROR', 'NETWORK_ERROR', 'TIMEOUT', 'CANCELLED', 'CLOSED',
+      'STALE_ACCOUNT', 'STORAGE_ERROR', 'CORRUPT_STORAGE', 'LOGIN_EXPIRED', 'PAN_FAILURE']) },
   music: { contract: 'music.script.v3', version: '0.8.0', prefix: 'music.script.',
     operations: ['sources.list', 'sources.detail', 'sources.add', 'sources.download', 'sources.edit',
       'sources.update', 'sources.rollback', 'sources.enable', 'sources.disable', 'sources.remove',

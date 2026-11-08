@@ -42,7 +42,7 @@ function sourceFixture() {
   };
   for (const path of new Set(['package.json', 'package-lock.json', policyPath, receiptPath,
     artifactPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
-  for (const name of ['runtime-bridge', 'source-runtime', 'script-host']) {
+  for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime']) {
     const location = `packages/${name}`;
     copy(`${location}/package.json`);
     copy(`${location}/src`);
@@ -242,6 +242,35 @@ test('packaged entry starts HTTP and executes all three owners without repositor
   assert.equal(result.signal, null, result.stderr);
   assert.equal(result.status, 0, result.stderr || result.error?.message);
   assert.match(result.stdout, /PACKAGED_NATIVE_HTTP_THREE_OWNERS_OK/);
+});
+
+test('packaged pan entry imports and serves its contract without script engines or repository fallback', async t => {
+  const f = fixture(t);
+  await f.pack();
+  const result = runIsolated(f.output, `
+    import assert from 'node:assert/strict';
+    import { join } from 'node:path';
+    import { createPanRuntime, createRuntimeClient } from './app/pan-entry.mjs';
+    const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86', requestKey = 'a'.repeat(64);
+    const runtime = createPanRuntime({ sessionId, requestKey, dataRoot: join(process.cwd(), 'pan-data') });
+    let client;
+    try {
+      await runtime.start();
+      client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
+      assert.deepEqual((await client.describe()).value.modules.map(item => item.id), ['pan']);
+      assert.equal((await client.call('pan.providers')).value.providers.length, 7);
+      const saved = await client.call('pan.settings.set', {
+        provider: 'uc', credentials: { cookie: 'synthetic-offline-only' },
+      });
+      assert.equal(saved.ok, true);
+      assert.deepEqual(saved.value.fields, ['cookie']);
+      assert.deepEqual((await client.shutdown()).value, { closed: true, cleanupComplete: true });
+      console.log('PACKAGED_PAN_HTTP_OK');
+    } finally { await client?.close(); await runtime.close(); }
+  `);
+  assert.equal(result.signal, null, result.stderr);
+  assert.equal(result.status, 0, result.stderr || result.error?.message);
+  assert.match(result.stdout, /PACKAGED_PAN_HTTP_OK/);
 });
 
 for (const [field, value, code] of [

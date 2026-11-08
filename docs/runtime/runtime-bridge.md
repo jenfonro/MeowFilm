@@ -29,6 +29,8 @@ X-Meow-Request-Id: <UUID>
 
 成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。三模块为 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.2.0/source.runtime.v2`。
 
+受信 Node 装配还可显式加入 [pan.runtime.v1](pan-runtime.md)，使用 `POST /v1/pan/{operation}`；pan 不支持源码上传。`pan-entry.mjs` 提供同进程 pan-only 入口，或 `createRuntime({...,pan:{}})` 共用 aggregate HTTP 会话。默认 aggregate 与现有 iOS／Windows 三模块握手不变。
+
 合法请求正文与成功业务值各自按现有 64 层 JSON 契约校验；调用器的位置参数列表和内部结果信封不占业务值深度。普通业务对象即使包含 `ok/value` 字段也不豁免计深，65 层仍拒绝。此格式边界不同于脚本执行的真实栈限制。
 
 普通 JSON 没有总字节上限或大小分流；不增加正文摘要、压缩、加解密或预解析加工。请求与响应严格 UTF-8，业务 JSON 深度最多 64，支持不同码点序列的 Unicode 键并原样保留；重复解码键、孤立 surrogate、非有限数、不安全整数、循环、BigInt、getter 及其他非 JSON 值拒绝。信封本身不挤占业务值的 64 层深度。源码保持 1 至 16 MiB 的输入契约及各协议 BOM 行为；config/metadata 的独立格式边界不等于普通正文配额。
