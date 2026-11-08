@@ -10,7 +10,8 @@ are listed separately below. Public protocol keys, request-signing
 constants and device-profile parameters taken from these sources are client
 protocol parameters, not user credentials, and are not an endorsement of their
 cryptographic design. No device-registration bypass, anti-bot simulation,
-media-unlocking, challenge bypass or credential refresher is copied.
+media-unlocking or challenge bypass is copied. The opt-in pan runtime's credential
+refresh protocols and their specific trust boundary are described below.
 
 ## iWebPlus / iWebPlayer — Apache-2.0
 
@@ -203,8 +204,60 @@ Adapted portions:
 - Provider capture, Cat root-level extension and display metadata behavior in
   `pan-interceptor.js` and `cat-output.js` were informed by
   `runtimePanCapture.js`, `panmockDetailCodec.js` and `panDisplayMeta.js`.
-  Provider login, list, transfer, direct-link and playback SDK implementations are not
-  copied into the runner.
+  That script-capture layer does not include provider SDKs. The separately selectable
+  pan runtime below implements the provider protocols directly.
+
+## Built-in pan runtime — protocol references
+
+`packages/pan-runtime` was written for this application's Node service and lifecycle
+contract, after consulting `jenfonro/meowfilm-server` snapshot
+`934a03e5aeda7edbcef0cfb037734fed93bfe881`:
+
+- `CatPawRunner/src/plugins/api/pan{Baidu,Quark,Uc,189,139}.js` and the corresponding
+  `Meowfilm/backend/server/netdisk/{baidu,quark,uc,189,139}.go` protocol implementations.
+  The CatPawRunner copy declares MIT and author 道长 in its package metadata;
+  the existing `catpawrunner-MIT.txt` attribution applies to those adapted portions.
+  The snapshot above identifies the reference aggregation repository, not an
+  independently verified CatPawRunner upstream commit.
+- The consulted `panUc.js` attributes its TV configuration to OpenList
+  `drivers/quark_uc_tv`; that secondary source revision and license chain were not
+  verified here. No OpenList library or source file is bundled, and this notice
+  does not relabel that reference as MIT.
+- Provider endpoint paths, client/device constants, request/response fields, QR
+  authentication sequences, necessary selected-file transfers and playback mappings
+  follow those references. Mobile AES-CBC framing, the MD5 request-signing formula
+  and XML token refresh are protocol adaptations, not newly invented cryptography.
+  The implementation uses Node crypto, not copied AES/MD5/RSA library bodies.
+- Traversal, exact structured file references, service ownership, account revisions,
+  cancellation, shared in-flight work, plaintext atomic storage and offline regression
+  fixtures are implemented for the new contract. No reference server, database,
+  browser automation, daemon, script engine, daily directory deletion or media relay
+  is bundled.
+
+Baidu's exact transfer-result schema (`extra.list`, with `from`,
+`from_fs_id`, `to` and `to_fs_id`) was additionally checked against
+`komorebiCarry/BaiduPCS-Rust@2456e51bbeed66da13997d96b7dbd4859533f7cb`
+(`backend/src/netdisk/client.rs` and `backend/src/netdisk/share/common.rs`,
+Apache-2.0), and corroborated by
+`cool2528/GDownload@64a5b2bb2d7b23d32c99ccefc799effb357ec69d`
+(`plugins/baidu-netdisk/lib/baidu_api.js`, no license declaration found).
+These were schema references only; no Rust or GDownload source code was copied.
+Only the reference server's transfer request is implemented; no additional task-query
+endpoint is used when an exact transfer mapping is absent.
+
+No separate license text was found for the consulted Go reference tree; the
+CatPawRunner MIT declaration must not be presented as a license for that entire tree.
+This records the actual protocol references, not a completed redistribution audit.
+The pan runtime adds no npm or native dependency and does not alter the licensing
+of existing components.
+
+Quark TV and UC TV token refresh intentionally uses the reference third-party
+`http://api.extscreen.com/{quarkdrive,ucdrive}/token` service. Long-lived credentials
+are sent to that service over cleartext HTTP; the official file APIs use HTTPS.
+This is an explicitly selected interoperability path, not an endorsement of the
+third party or a claim of secure credential transport. Local account files are
+also intentionally plaintext. See `docs/runtime/pan-runtime.md` for the complete
+operational and verification boundaries.
 
 ## Node.js
 

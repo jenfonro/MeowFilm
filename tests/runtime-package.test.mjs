@@ -89,6 +89,7 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
     } }, true);
   add('packages/source-runtime', '@meowfilm/source-runtime', '0.1.0',
     { files: ['src'] }, true);
+  add('packages/pan-runtime', '@meowfilm/pan-runtime', '0.1.0', { files: ['src'] }, true);
   add('packages/unused-core', '@meowfilm/unused-core', '0.2.0',
     { dependencies: { 'music-lib': '~1.0.0' } }, true);
   add('packages/inactive-core', '@meowfilm/inactive-core', '0.1.0',
@@ -117,7 +118,8 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   file('apps/runtime/modules/music-script.mjs', sourceCode);
   file('apps/runtime/modules/cat-script.mjs', sourceCode);
   file('apps/runtime/modules/source-runtime.mjs', sourceCode);
-  for (const path of ['entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs']) {
+  file('apps/runtime/modules/pan-runtime.mjs', sourceCode);
+  for (const path of ['entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs']) {
     file(`apps/runtime/${path}`, sourceCode);
   }
   function saveLock() { write(root, 'package-lock.json', lock); }
@@ -178,10 +180,11 @@ test('common runtime packaging stages only the script dependency closure with ex
   assert.deepEqual(manifest.files.filter(f => f.path.startsWith('app/')).map(f => f.path),
     ['app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/entry.mjs',
       'app/modules/cat-script.mjs', 'app/modules/music-script.mjs',
-      'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs']);
+      'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs',
+      'app/pan-entry.mjs']);
   assert.deepEqual(manifest.dependencies.map(p => p.path).sort(), [
     'node_modules/@meowfilm/runtime-bridge', 'node_modules/@meowfilm/script-host',
-    'node_modules/@meowfilm/source-runtime',
+    'node_modules/@meowfilm/source-runtime', 'node_modules/@meowfilm/pan-runtime',
     'node_modules/shared', 'node_modules/host-lib', 'node_modules/peer-lib',
     'node_modules/fixture-lib', 'node_modules/fixture-lib/node_modules/shared', 'node_modules/@fixture/token',
     'node_modules/music-lib', 'node_modules/@meowfilm/script-host/node_modules/fixture-dom',

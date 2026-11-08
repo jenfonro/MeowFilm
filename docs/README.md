@@ -15,6 +15,7 @@
 - [source CatVod Spider 输入契约](runtime/cat-source-runtime.md)
 - [来源 capability ABI（共同契约唯一来源）](runtime/source-capability-abi.md)
 - [Runtime bridge](runtime/runtime-bridge.md)
+- [内置网盘能力 pan.runtime.v1](runtime/pan-runtime.md)
 - [外部 LX、CatNode 与 Reader／CatVod 来源动态验收](runtime/source-acceptance.md)
 
 ## iOS
