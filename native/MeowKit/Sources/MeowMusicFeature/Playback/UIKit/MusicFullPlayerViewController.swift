@@ -111,17 +111,25 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
         if model.isFMActive { openFMSettings(); return }
         let alert = UIAlertController(title: "播放模式", message: nil, preferredStyle: .actionSheet)
         let displayed = content.fence
-        let active = model.similarMode?.active == true, snapshot = model.similarMode?.id
         for mode in MusicPlaybackMode.allCases {
             alert.addAction(UIAlertAction(title: mode.title, style: .default) { [weak self] _ in
                 guard let self, self.isPageVisible else { return }
                 self.content.setMode(mode, expected: displayed)
             })
         }
-        alert.addAction(UIAlertAction(title: active ? "关闭推荐续播" : "推荐续播", style: .default) { [weak self] _ in
-            guard let self, self.isPageVisible else { return }
-            self.content.setSimilarMode(active: active, snapshot: snapshot, expected: displayed)
-        })
+        if let snapshot = model.similarMode, snapshot.active {
+            alert.addAction(UIAlertAction(title: snapshot.continueEnabled ? "关闭推荐续播" : "开启推荐续播", style: .default) {
+                [weak self] _ in
+                guard let self, self.isPageVisible else { return }
+                self.content.setSimilarContinue(!snapshot.continueEnabled, snapshot: snapshot.id, expected: displayed)
+            })
+        } else if let snapshot = model.queueRecommendations {
+            alert.addAction(UIAlertAction(title: snapshot.continueEnabled ? "关闭推荐续播" : "开启推荐续播", style: .default) {
+                [weak self] _ in
+                guard let self, self.isPageVisible else { return }
+                self.content.setQueueRecommendationContinue(!snapshot.continueEnabled, snapshot: snapshot.id, expected: displayed)
+            })
+        }
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
         presentPopover(alert, anchor: playerView.modeAnchor)
     }
@@ -129,6 +137,21 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
     private func showMore() {
         let alert = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
         let occurrence = content.model.current?.id, access = content.model.accountAccessGeneration
+        let displayed = content.fence, account = content.model.searchAccessGeneration
+        let heartbeat = UIAlertAction(title: "当前歌曲心动", style: .default) { [weak self] _ in
+            guard let self, self.isPageVisible else { return }
+            self.content.startCurrentHeartbeat(expected: displayed)
+        }
+        heartbeat.isEnabled = content.model.canEnterSimilarMode && !content.model.isChangingSimilarMode &&
+            !content.model.isChangingQueueRecommendations
+        alert.addAction(heartbeat)
+        if content.model.similarMode?.active == true || content.model.isChangingSimilarMode {
+            let snapshot = content.model.similarMode?.id
+            alert.addAction(UIAlertAction(title: "返回原队列", style: .default) { [weak self] _ in
+                guard let self, self.isPageVisible else { return }
+                self.content.returnFromRecommendations(snapshot: snapshot, expected: displayed)
+            })
+        }
         alert.addAction(UIAlertAction(title: "播放倍速", style: .default) { [weak self, weak alert] _ in
             guard let self, let alert else { return }
             self.dismissMenu(alert) { self.showRates() }
@@ -147,7 +170,11 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
         if content.model.isFMActive {
             alert.addAction(UIAlertAction(title: "私人漫游模式", style: .default) { [weak self, weak alert] _ in
                 guard let alert else { return }
-                self?.dismissMenu(alert) { self?.openFMSettings() }
+                self?.dismissMenu(alert) {
+                    guard let self, self.content.fence == displayed,
+                          self.content.model.searchAccessGeneration == account else { return }
+                    self.openFMSettings()
+                }
             })
         }
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
@@ -200,7 +227,7 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
     }
 
     private func openFMSettings() {
-        guard isPageVisible, presentedViewController == nil else { return }
+        guard content.model.isFMActive, content.isAvailable, isPageVisible, presentedViewController == nil else { return }
         let page = MusicFMSettingsViewController(model: content.model, appearance: appearance)
         let navigation = PageNavigationController(themeProvider: appearance)
         navigation.setViewControllers([page], animated: false)

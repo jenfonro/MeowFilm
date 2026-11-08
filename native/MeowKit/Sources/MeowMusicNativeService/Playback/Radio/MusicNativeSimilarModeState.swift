@@ -11,7 +11,6 @@ final class MusicNativeSimilarPreview {
     var sourceIDs: [String]
     let revision: Int
     let navigation: UUID
-    var auto: Bool
     var enterAfter = false
     var scope = ""
     var lease: MusicAccountQueueLease?
@@ -22,9 +21,9 @@ final class MusicNativeSimilarPreview {
     var error: MusicServiceError?
     var task: Task<Void, Never>?
     init(seed: MJ, entryID: String?, fromHome: Bool, provider: MusicSimilarModeProvider,
-         sourceIDs: [String], revision: Int, navigation: UUID, auto: Bool = false) {
+         sourceIDs: [String], revision: Int, navigation: UUID) {
         self.seed = seed; self.entryID = entryID; self.fromHome = fromHome; self.provider = provider
-        self.sourceIDs = sourceIDs; self.revision = revision; self.navigation = navigation; self.auto = auto
+        self.sourceIDs = sourceIDs; self.revision = revision; self.navigation = navigation
     }
 }
 
@@ -39,7 +38,8 @@ final class MusicNativeSimilarSession {
     let context: MusicSimilarHeartbeatContext?
     let scope: String
     let lease: MusicAccountQueueLease
-    var continueEnabled = true
+    var continueEnabled = false
+    var exhausted = false
     var batches: [MJ] = []
     var attempted = Set<String>()
     var status: MusicSimilarModeSnapshot.Status = .ready
@@ -70,29 +70,61 @@ final class MusicNativeSimilarSession {
 struct MusicNativeSimilarRuntime {
     var active: MusicNativeSimilarSession?
     var preview: MusicNativeSimilarPreview?
+    var queue: MusicNativeQueueRecommendations?
     var navigation = UUID()
     var restored = false
     var restoring: UUID?
+    var restorationCompletion: MusicNativeOperation<Void>?
     var playing: (attempt: String, occurrence: String)?
     var watchers: [UUID: Task<Void, Never>] = [:]
     var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
     var timedOut = Set<UUID>()
     var deadlines: [UUID: UInt64] = [:]
+    var retiring: [UUID: Task<Void, Never>] = [:]
+    var workers: [UUID: Task<Void, Never>] = [:]
+}
+
+final class MusicNativeQueueRecommendations {
+    var id = UUID()
+    var revision: Int
+    var currentEntryID: String
+    var continueEnabled = false
+    var lease: MusicAccountQueueLease?
+    var songs: [MJ] = []
+    var recommendations: [String: MJ] = [:]
+    var liveRecommendations: [String: MJ] = [:]
+    var status: MusicSimilarModeSnapshot.Status = .ready
+    var exhausted = false
+    var error: MusicServiceError?
+    var attempted = Set<String>()
+    var pending: Task<Void, Never>?
+    var pendingID: UUID?
+    var pendingToken: UUID?
+    var pendingTail: String?
+    init(revision: Int, currentEntryID: String) {
+        self.revision = revision; self.currentEntryID = currentEntryID
+    }
 }
 
 enum MusicNativeSimilarData {
     static func recommendations(_ items: [MusicNativeTrackData]) throws -> [String: MJ] {
         var result: [String: MJ] = [:]
         for item in items {
-            let raw = try MJ.parse(item.data, maximum: 64 * 1024)["_recommendation"]
+            let song = try MJ.parse(item.data, maximum: 64 * 1024), raw = song["_recommendation"]
             guard raw != .null else { continue }
-            try raw.requireFields(["songId", "alg", "source", "sourceId"], required: ["songId", "source"])
+            try raw.requireFields(["songId", "alg", "source", "sourceId", "feedbackSource"],
+                                  required: ["songId", "source", "feedbackSource"])
             let songID = raw["songId"].id, source = raw["source"].string
             try musicRequire(id(songID) && ["heartbeat", "similar", "moreRcmd"].contains(source), .invalidResponse)
             _ = try raw["alg"].text(8000, empty: true)
             try musicRequire(raw["alg"].string.utf16.count <= 2000, .invalidResponse)
-            if source == "heartbeat" { try musicRequire(id(raw["sourceId"].id), .invalidResponse) }
-            result[songID] = raw
+            _ = try raw["feedbackSource"].text(8000, empty: true)
+            try musicRequire(raw["feedbackSource"].string.utf16.count <= 2000 &&
+                item.platform == "wy" && song["songmid"].id == songID, .invalidResponse)
+            if source == "heartbeat" {
+                try musicRequire(id(raw["sourceId"].id) && raw["feedbackSource"].string == "aiMode", .invalidResponse)
+            } else { try musicRequire(raw["sourceId"].string.isEmpty, .invalidResponse) }
+            if result[songID] == nil { result[songID] = raw }
         }
         return result
     }
@@ -110,32 +142,32 @@ enum MusicNativeSimilarData {
         .init(title: song["title"].string, artist: song["artist"].string,
               album: song["album"].string, artwork: MusicNativePublicBrowseSupport.artwork(song["cover_url"]))
     }
-    static func same(_ a: MJ, _ b: MJ) -> Bool {
-        let left = Set((try? MusicModel.sources(a).map(\.sourceKey)) ?? [])
-        let right = Set((try? MusicModel.sources(b).map(\.sourceKey)) ?? [])
-        if !left.isDisjoint(with: right) { return true }
-        return a["songId"] == b["songId"] && (left.isEmpty || right.isEmpty || MusicModel.compatible(a, b))
+    static func unique(_ values: [MJ], excluding known: [MJ]) -> [MJ] {
+        var seen = Set(known.compactMap(nativeID))
+        return values.filter { value in
+            guard let id = nativeID(value) else { return false }
+            return seen.insert(id).inserted
+        }
     }
-    static func unique(_ values: [MJ], excluding known: [MJ], maximum: Int? = nil) -> [MJ] {
-        var result: [MJ] = []
-        var knownKeys = Set<Data>(), knownByID: [Data: [MJ]] = [:]
-        for value in known {
-            let id = Data(value["songId"].string.utf8)
-            knownByID[id, default: []].append(value)
-            for key in (try? MusicModel.sources(value).map(\.sourceKey)) ?? [] { knownKeys.insert(Data(key.utf8)) }
+    static func songs(_ response: MusicNativeSimilarModeBatch) throws -> [MJ] {
+        try musicRequire(response.items.allSatisfy { $0.platform == "wy" }, .invalidResponse)
+        let songs = try response.items.map(MusicModel.normalize)
+        try musicRequire(songs.allSatisfy { nativeID($0) != nil }, .invalidResponse)
+        return songs
+    }
+    /// Occurrences are retained, including repeated recordings. Only returned
+    /// recommendations are deduplicated; a mixed queue is never projected.
+    static func queueRequest(_ queue: MJ) -> MusicNativeSimilarModeRequest? {
+        let entries = queue["entries"].array
+        guard !entries.isEmpty,
+              let current = entries.first(where: { $0["id"] == queue["currentId"] }),
+              let currentID = nativeID(current["song"]) else { return nil }
+        var ids: [String] = []
+        for entry in entries {
+            guard let id = nativeID(entry["song"]) else { return nil }
+            ids.append(id)
         }
-        var seenKeys = Set<Data>(), seenByID: [Data: [MJ]] = [:]
-        if let maximum, maximum <= 0 { return [] }
-        for value in values where !value["title"].string.isEmpty {
-            let keys = Set(((try? MusicModel.sources(value).map(\.sourceKey)) ?? []).map { Data($0.utf8) })
-            let id = Data(value["songId"].string.utf8)
-            if !keys.isDisjoint(with: knownKeys) || knownByID[id]?.contains(where: { same($0, value) }) == true ||
-               !keys.isDisjoint(with: seenKeys) || seenByID[id]?.contains(where: { same($0, value) }) == true { continue }
-            result.append(value)
-            seenKeys.formUnion(keys); seenByID[id, default: []].append(value)
-            if let maximum, result.count == maximum { break }
-        }
-        return result
+        return .queueRecommendations(songIDs: ids, currentPlaySongID: currentID)
     }
     static func queueSnapshot(_ queue: MJ) -> MJ {
         .obj(["entries", "currentId", "priority", "history", "source"].map { ($0, MusicModel.durable(queue[$0])) })

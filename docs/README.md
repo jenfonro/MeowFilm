@@ -21,6 +21,7 @@
 
 - [架构与模块职责](ios/architecture.md)
 - [音乐能力与统一音源管理](ios/music.md)
+- [网易云漫游、心动与队列推荐](ios/music-recommendations.md)
 - [影视首页与详情](ios/film.md)
 - [影视设置、原生规则与来源管理](ios/film-settings.md)
 - [本地文档存储](ios/storage.md)

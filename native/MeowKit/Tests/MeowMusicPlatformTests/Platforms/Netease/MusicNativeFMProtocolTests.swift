@@ -5,6 +5,55 @@ import MeowMusicFeature
 
 final class MusicNativeFMProtocolTests: XCTestCase {
     private let fm = MusicHomeAction.fm(mode: .scene, submode: "ELECTRONIC", entry: .channel)
+    func testFourMainModesAndAllOfficialScenesReachWireWithoutFallback() async throws {
+        let scenes = [
+            "NIGHT_EMO", "EXERCISE", "SLEEP_HELP", "RELAX", "CHEERFUL", "LYRICAL", "CURE", "FOCUS",
+            "SWEET", "RHYTHM_BLUES", "RAINY", "GAMES", "RAP", "K_POP", "ORIGINAL_MUSICIAL", "ELECTRONIC", "COMMUTE",
+            "TAKE_SHOWER", "COFFEE_SHOP", "ROCK", "INSPIRATIONAL", "CHINESE", "ENGLISH", "YUEYU", "MANYAO", "JINGDIAN",
+            "LIGHT", "GUOFENG", "FOLK", "ACG", "GUDIAN", "JAZZ", "JAPANESE", "GLOBAL", "FRANCH", "BLUE", "DANCE",
+            "LATIN", "PUNK", "COUNTRY", "MUSICAL", "YINGSHI", "HOT_SONG"
+        ]
+        XCTAssertEqual(scenes.count, 43)
+        XCTAssertEqual(MusicNeteaseHomeActionRequest.scenes, Set(scenes))
+        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let path = "/eapi/v1/radio/get", binding = try await f.service.nativeHomeBinding()
+        await f.http.replies(path, [try MusicNeteaseFixture.response(["code": 200, "data": [MusicNeteaseFixture.song()]])])
+        let modes: [(MusicHomeAction.FMMode, String)] = [
+            (.default, "DEFAULT"), (.familiar, "FAMILIAR"), (.explore, "EXPLORE"), (.puzzle, "PUZZLE_MODE_RCMD")
+        ]
+        let actions = modes.map { MusicHomeAction.fm(mode: $0.0, submode: "", entry: nil) } +
+            scenes.map { MusicHomeAction.fm(mode: .scene, submode: $0, entry: .channel) }
+        for action in actions { _ = try await f.service.nativeFM(action, preview: false, binding: binding) }
+        let records = await f.http.recorded(), requests = records.filter { $0.request.url.path == path }
+        XCTAssertEqual(requests.count, actions.count)
+        let expected = modes.map { ($0.1, "") } + scenes.map { ("SCENE_RCMD", $0) }
+        for (request, wire) in zip(requests, expected) {
+            let payload = try MusicQQWire.decode(XCTUnwrap(request.payload))
+            XCTAssertEqual(payload["mode"] as? String, wire.0)
+            XCTAssertEqual(payload["subMode"] as? String, wire.1)
+            XCTAssertEqual(payload["limit"] as? Int, 3)
+            XCTAssertNil(payload["sourceIds"])
+        }
+        _ = await f.service.close()
+    }
+    func testRuleAndOfficialTabSelectorsStaySeparateOnWire() async throws {
+        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let path = "/eapi/tag/tab/fm/recommends", binding = try await f.service.nativeHomeBinding()
+        await f.http.replies(path, [try MusicNeteaseFixture.response(["code": 200, "data": [MusicNeteaseFixture.song()]])])
+        for (rule, tab) in [("40000", ""), ("", "electronic")] {
+            _ = try await f.service.nativeFM(.ruleFM(ruleID: rule, tabTagID: tab, sourceName: "合成频道"),
+                                           preview: false, binding: binding)
+        }
+        let records = await f.http.recorded(), requests = records.filter { $0.request.url.path == path }
+        XCTAssertEqual(requests.count, 2)
+        for (request, expected) in zip(requests, [("40000", ""), ("", "electronic")]) {
+            let payload = try MusicQQWire.decode(XCTUnwrap(request.payload))
+            XCTAssertEqual(payload["ruleId"] as? String, expected.0)
+            XCTAssertEqual(payload["tabTagId"] as? String, expected.1)
+            XCTAssertEqual(payload["ruleType"] as? Int, 1); XCTAssertEqual(payload["limit"] as? Int, 5)
+        }
+        _ = await f.service.close()
+    }
     func testGuestChannelPreviewUsesOneSongNoRegistrationAndNoLoginOrMembership() async throws {
         let f = try MusicNeteaseNativeFixture(restored: false); try await f.enable()
         let path = "/eapi/v1/radio/get"

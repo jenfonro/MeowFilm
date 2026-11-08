@@ -267,7 +267,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         case .channel(let value): router?.selectChannel(value)
         case .daily(let value): router?.showPublicBrowse(.discovery(.daily(value)), title: item.title)
         case .action(let value):
-            if value.isPersonalFM { play(item, section: section) }
+            if value.isPersonalFM || value == .heartbeat { play(item, section: section) }
             else { router?.showPublicBrowse(.homeAction(value, title: item.title), title: item.title) }
         case .track: play(item, section: section)
         case .unavailable: break
@@ -719,6 +719,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     private func play(_ item: MusicPublicBrowseItem, section: MusicPublicBrowseSection,
                       startingAt selected: MusicRemoteTrack? = nil) {
         guard let page else { return }
+        let account = model.searchAccessGeneration
         perform(operation: "播放歌曲") { [weak self] in
             guard let self else { return }
             try await self.model.performPrimaryPlayback(
@@ -752,7 +753,12 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                     let (source, _) = try await detail.playbackSource()
                     try await self.playSource(source, selected: selected)
                 case .action(let value):
-                    try await self.model.playHomeAction(value, title: item.title)
+                    guard self.model.searchAccessGeneration == account else { throw MusicServiceError.cancelled }
+                    do { try await self.model.playHomeAction(value, title: item.title) }
+                    catch {
+                        guard self.model.searchAccessGeneration == account else { throw MusicServiceError.cancelled }
+                        throw error
+                    }
                 case .daily(let value):
                     let source = try await self.model.openAccountQueue(
                         platform: value, kind: .recommendation(kind: "daily"), title: item.title)

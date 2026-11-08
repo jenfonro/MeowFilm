@@ -84,7 +84,7 @@ public final class MusicPlayerContentModel {
     var controlTheme: PageTheme { .init(palette: appearance.preferences.colorPalette, dark: false) }
     var fence: MusicReferencePlayerFence {
         .init(occurrence: model.current?.id, attempt: model.activeNativeAttemptID,
-              access: model.accountAccessGeneration, queueRevision: model.state.revision,
+              access: model.searchAccessGeneration, queueRevision: model.state.revision,
               settingsRevision: model.state.settingsRevision)
     }
 
@@ -96,9 +96,9 @@ public final class MusicPlayerContentModel {
         self.appearance = appearance
         self.presentation = presentation
         favorites = model.favorites
-        accessGeneration = model.accountAccessGeneration
+        accessGeneration = model.searchAccessGeneration
         foreground = UIApplication.shared.applicationState == .active
-        observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
+        observe(model.searchAccessChanges) { [weak self] in self?.reconcileAccess() }
         observe(model.playbackChanges) { [weak self] in self?.reconcilePlayback() }
         observe(model.queueChanges) { [weak self] in self?.queueUpdates.send() }
         observe(model.libraryChanges) { [weak self] in
@@ -193,10 +193,31 @@ public final class MusicPlayerContentModel {
         runModeCommand(expected: expected) { await $0.setMode(mode) }
     }
 
-    func setSimilarMode(active: Bool, snapshot: UUID?, expected: MusicReferencePlayerFence) {
+    func setSimilarContinue(_ enabled: Bool, snapshot: UUID, expected: MusicReferencePlayerFence) {
         runModeCommand(expected: expected) { model in
             guard model.similarMode?.id == snapshot else { return }
-            if active { await model.exitSimilarMode() } else { await model.enterSimilarMode() }
+            await model.setSimilarContinue(enabled, snapshotID: snapshot)
+        }
+    }
+
+    func setQueueRecommendationContinue(_ enabled: Bool, snapshot: UUID, expected: MusicReferencePlayerFence) {
+        runModeCommand(expected: expected) { model in
+            guard model.queueRecommendations?.id == snapshot else { return }
+            await model.setQueueRecommendationContinue(enabled, snapshotID: snapshot)
+        }
+    }
+
+    func startCurrentHeartbeat(expected: MusicReferencePlayerFence) {
+        runModeCommand(expected: expected) { model in
+            guard let occurrence = expected.occurrence else { return }
+            await model.startCurrentHeartbeat(occurrenceID: occurrence, expectedRevision: expected.queueRevision)
+        }
+    }
+
+    func returnFromRecommendations(snapshot: UUID?, expected: MusicReferencePlayerFence) {
+        runModeCommand(expected: expected) { model in
+            guard model.similarMode?.id == snapshot || model.isChangingSimilarMode else { return }
+            await model.exitSimilarMode()
         }
     }
 
@@ -207,10 +228,11 @@ public final class MusicPlayerContentModel {
     private func runModeCommand(expected: MusicReferencePlayerFence,
                                 operation: @escaping @MainActor (MusicViewModel) async -> Void) {
         guard expected.admits(fence, permitted: isAvailable) else { return }
-        let id = UUID(), model = model
+        let id = UUID(), model = model, account = model.searchAccessGeneration
         modeTasks[id] = Task { [weak self] in
             defer { self?.modeTasks[id] = nil }
-            guard !Task.isCancelled, self?.fence == expected, self?.isAvailable == true else { return }
+            guard !Task.isCancelled, self?.fence == expected, self?.isAvailable == true,
+                  model.searchAccessGeneration == account else { return }
             await operation(model)
         }
     }
@@ -235,7 +257,7 @@ public final class MusicPlayerContentModel {
     }
 
     private func reconcileAccess() {
-        if !isAvailable || accessGeneration != model.accountAccessGeneration {
+        if !isAvailable || accessGeneration != model.searchAccessGeneration {
             playbackTask?.cancel()
             for task in modeTasks.values { task.cancel() }
             collapseDock()
@@ -247,7 +269,7 @@ public final class MusicPlayerContentModel {
             for read in artworkReads.values { read.task.cancel() }
             artworkUpdates.send()
         }
-        accessGeneration = model.accountAccessGeneration
+        accessGeneration = model.searchAccessGeneration
         reconcilePlayback()
         accessUpdates.send()
     }

@@ -110,11 +110,16 @@ extension MusicViewModel {
         cancelFMNavigation()
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        guard !isChangingQueue, !isNavigating else {
+        guard !isChangingQueue, !isNavigating, !isChangingSimilarMode, !isChangingQueueRecommendations else {
             report(MusicServiceError.busy, epoch: epoch, operation: "更新播放队列", kind: .queue); return
         }
         playbackState.isChangingQueue = true
-        defer { if lifecycle == epoch { playbackState.isChangingQueue = false } }
+        defer {
+            if lifecycle == epoch {
+                playbackState.isChangingQueue = false
+                requestRecommendationRefresh()
+            }
+        }
         let token = selectionID
         do {
             await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()

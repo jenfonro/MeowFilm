@@ -195,4 +195,63 @@ import MeowMusicFeature
         XCTAssertThrowsError(try MusicAccountFeedbackKugouWire.ack(.init(status: 200, data: Data("not-json".utf8))))
         XCTAssertThrowsError(try MusicAccountFeedbackKugouWire.ack(MusicKugouFixture.response(["status": 1], status: 201)))
     }
+
+    func testNeteaseRecommendationWireRequiresLiveProofAndPreservesPerSongSource() async throws {
+        let f = try MusicNeteaseNativeFixture()
+        try await f.enable(); _ = try await f.service.validate(platform: .netease)
+        let baseline = await f.http.recorded()
+        let path = "/eapi/feedback/weblog"
+        await f.http.replies(path, [try MusicNeteaseFixture.response(["code": 200])])
+        for source in ["aiMode", "moreRcmd", "sourceMap-synthetic"] {
+            let authorization = MusicQueueAuthorization()
+            let sourceID = source == "aiMode" ? "501" : ""
+            let proof = MusicPlaybackRecommendationProof(occurrenceID: "entry-1", nativeID: "101",
+                source: source, sourceID: sourceID, algorithm: "synthetic-alg", authorization: authorization)
+            let target = MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "101",
+                source: source, sourceID: sourceID, algorithm: "synthetic-alg", recommendationProof: proof)
+            let report = MusicPlaybackFeedbackReport(instanceID: UUID(), target: target, event: .start,
+                duration: 180, listened: 0, mediaListened: 0, position: 0, rate: 1)
+            let lease = try await f.service.beginPlaybackFeedback(platform: .netease, authorization: .init())
+            let receipt = try await lease.report(report)
+            XCTAssertEqual(receipt, .confirmed)
+            let requests = await f.http.recorded()
+            let record = try XCTUnwrap(requests.last)
+            let payload = try MusicQQWire.decode(XCTUnwrap(record.payload))
+            let logs = try XCTUnwrap(payload["logs"] as? String)
+            let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(logs.utf8)) as? [[String: Any]])
+            let fields = try XCTUnwrap(rows.first?["json"] as? [String: Any])
+            XCTAssertEqual(fields["id"] as? String, "101")
+            XCTAssertEqual(fields["source"] as? String, source)
+            XCTAssertEqual(fields["sourceId"] as? String, sourceID)
+            XCTAssertEqual(fields["alg"] as? String, "synthetic-alg")
+            authorization.revoke()
+            XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(report))
+            lease.revoke()
+
+            let forged = MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "101",
+                source: source, sourceID: sourceID, algorithm: "synthetic-alg")
+            XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(.init(instanceID: UUID(),
+                target: forged, event: .start, duration: 180, listened: 0, mediaListened: 0, position: 0, rate: 1)))
+        }
+        let records = Array((await f.http.recorded()).dropFirst(baseline.count))
+        XCTAssertEqual(records.map { $0.request.url.path }, [path, path, path])
+        _ = await f.service.close()
+    }
+
+    func testRecommendationProofCannotBeReusedForAnotherRecordingOrAttribution() throws {
+        let authorization = MusicQueueAuthorization()
+        let proof = MusicPlaybackRecommendationProof(occurrenceID: "entry-1", nativeID: "101",
+            source: "sourceMap-synthetic", sourceID: "", algorithm: "synthetic-alg", authorization: authorization)
+        for target in [
+            MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "102", source: proof.source,
+                algorithm: proof.algorithm, recommendationProof: proof),
+            .init(platform: .netease, nativeID: "101", source: "aiMode", sourceID: "501",
+                algorithm: proof.algorithm, recommendationProof: proof),
+            .init(platform: .netease, nativeID: "101", source: proof.source,
+                algorithm: "changed", recommendationProof: proof)
+        ] {
+            XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(.init(instanceID: UUID(), target: target,
+                event: .start, duration: 180, listened: 0, mediaListened: 0, position: 0, rate: 1)))
+        }
+    }
 }

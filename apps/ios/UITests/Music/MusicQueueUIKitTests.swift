@@ -8,6 +8,120 @@ import MeowPlayback
 
 @MainActor
 final class MusicQueueUIKitTests: XCTestCase {
+    func testPlayerCurrentHeartbeatReturnAndAccountFenceUseExactOccurrence() async throws {
+        let service = QueueUIKitService()
+        await service.enableHeartbeat()
+        let model = await makeModel(service), playback = PlaybackController()
+        await model.loadSimilarMode()
+        let content = MusicPlayerContentModel(model: model, playback: playback,
+            appearance: MusicAppearancePreferencesStore(), presentation: MusicMiniPlayerPresentation())
+        let root = UIViewController(), window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = root; window.makeKeyAndVisible()
+        let full = MusicPlayerViewController(content: content, appearance: content.appearance)
+        root.present(full, animated: false)
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        await wait("full player visible") { full.isPageVisible && !full.isBeingPresented }
+        defer { release(full, root: root, window: window) }
+        let view = try XCTUnwrap(full.view as? MusicFullPlayerView)
+        view.onMore?()
+        let initialMenu = try XCTUnwrap(full.presentedViewController as? UIAlertController)
+        XCTAssertTrue(try XCTUnwrap(initialMenu.actions.first { $0.title == "当前歌曲心动" }).isEnabled)
+        XCTAssertFalse(initialMenu.actions.contains { $0.title == "返回原队列" })
+        await withCheckedContinuation { continuation in initialMenu.dismiss(animated: false) { continuation.resume() } }
+        let original = model.queue.map(\.id), displayed = content.fence
+        content.startCurrentHeartbeat(expected: displayed)
+        await wait("current heartbeat committed") { model.similarMode?.active == true && !model.isChangingSimilarMode }
+        let starts = await service.heartbeatStarts()
+        XCTAssertEqual(starts, [.currentHeartbeat(occurrenceID: "entry-1", expectedRevision: 7)])
+        let snapshot = try XCTUnwrap(model.similarMode)
+        XCTAssertFalse(snapshot.continueEnabled)
+        view.onMore?()
+        let activeMenu = try XCTUnwrap(full.presentedViewController as? UIAlertController)
+        XCTAssertTrue(activeMenu.actions.contains { $0.title == "返回原队列" })
+        await withCheckedContinuation { continuation in activeMenu.dismiss(animated: false) { continuation.resume() } }
+        content.setSimilarContinue(true, snapshot: snapshot.id, expected: content.fence)
+        await wait("heartbeat continuation enabled") { model.similarMode?.continueEnabled == true }
+        content.setSimilarContinue(false, snapshot: snapshot.id, expected: content.fence)
+        await wait("heartbeat continuation disabled") { model.similarMode?.continueEnabled == false }
+        XCTAssertEqual(model.similarMode?.id, snapshot.id, "Closing continuation must preserve the heartbeat session")
+        content.returnFromRecommendations(snapshot: snapshot.id, expected: content.fence)
+        await wait("explicit Return finished") { model.similarMode == nil && !model.isChangingSimilarMode }
+        XCTAssertEqual(model.queue.map(\.id), original)
+        XCTAssertEqual(model.current?.id, "entry-1")
+        let oldAccount = content.fence
+        model.accountSessionsChanged(.netease)
+        content.startCurrentHeartbeat(expected: oldAccount)
+        await updates()
+        let unchanged = await service.heartbeatStarts()
+        XCTAssertEqual(unchanged, starts, "A menu opened under the former account cannot restart heartbeat")
+        await model.close()
+    }
+
+    func testOrdinaryCandidatesAndContinuationUseIndependentQueueProtocol() async throws {
+        let service = QueueUIKitService()
+        await service.enableRecommendations()
+        let model = await makeModel(service)
+        let original = model.queue.map(\.id)
+        let (queue, root, window) = await mount(model)
+        defer { release(queue, root: root, window: window) }
+        await wait("ordinary candidates visible") { model.queueRecommendations?.candidates.count == 2 }
+        let pager = try XCTUnwrap(queue.children.first as? MusicQueuePagerViewController)
+        let page = try XCTUnwrap(pager.children.compactMap { $0 as? MusicQueueCurrentPage }.first)
+        await wait("ordinary controls rendered") {
+            page.continuePlaying.title(for: .normal) == "续播已关闭" && page.recommendations.numberOfRows(inSection: 0) == 2
+        }
+        XCTAssertFalse(page.continuePlaying.isHidden)
+        XCTAssertTrue(page.returnToQueue.isHidden)
+        XCTAssertEqual(model.queue.map(\.id), original)
+        XCTAssertEqual(model.current?.id, "entry-1")
+        let untouched = await service.statistics()
+        XCTAssertEqual(untouched.previewReads, 0, "Ordinary previews cannot call previewSimilarMode")
+        page.continuePlaying.sendActions(for: .touchUpInside)
+        await wait("ordinary continuation enabled") { model.queueRecommendations?.continueEnabled == true }
+        page.continuePlaying.sendActions(for: .touchUpInside)
+        await wait("ordinary continuation disabled") { model.queueRecommendations?.continueEnabled == false }
+        let token = try XCTUnwrap(model.queueRecommendations).id
+        page.tableView(page.recommendations, didSelectRowAt: IndexPath(row: 1, section: 0))
+        await wait("whole candidate batch appended") { model.queue.count == original.count + 2 }
+        XCTAssertEqual(model.queue.map(\.id), original + ["candidate-entry-a", "candidate-entry-b"])
+        XCTAssertEqual(model.current?.id, "candidate-entry-b")
+        let actions = await service.recommendationActions()
+        XCTAssertEqual(actions.tokens, [token])
+        XCTAssertEqual(actions.choices, ["candidate-b"])
+        XCTAssertEqual(actions.switches, [true, false])
+        XCTAssertEqual(actions.similarCalls, 0)
+        XCTAssertNil(model.similarMode)
+        await model.close()
+    }
+
+    func testOrdinaryRetryAndExhaustionRemainInQueueSheet() async throws {
+        let service = QueueUIKitService()
+        await service.enableRecommendations(failed: true)
+        let model = await makeModel(service)
+        let (queue, root, window) = await mount(model)
+        defer { release(queue, root: root, window: window) }
+        await wait("ordinary failed snapshot") { model.queueRecommendations?.canRetry == true }
+        let pager = try XCTUnwrap(queue.children.first as? MusicQueuePagerViewController)
+        let page = try XCTUnwrap(pager.children.compactMap { $0 as? MusicQueueCurrentPage }.first)
+        await wait("retry rendered") { !page.retry.isHidden }
+        XCTAssertEqual(page.recommendations.numberOfRows(inSection: 0), 0)
+        if let alert = queue.presentedViewController { alert.dismiss(animated: false) }
+        page.retry.sendActions(for: .touchUpInside)
+        await wait("retry delivered ready candidates") { model.queueRecommendations?.status == .ready }
+        let actions = await service.recommendationActions()
+        XCTAssertEqual(actions.retries, 1)
+        XCTAssertEqual(actions.similarCalls, 0)
+        await service.exhaustRecommendations()
+        await model.loadSimilarMode()
+        await wait("terminal status rendered") {
+            page.view.subviews.compactMap { $0 as? UILabel }.contains { $0.text == "推荐已结束" }
+        }
+        XCTAssertTrue(page.retry.isHidden)
+        XCTAssertTrue(page.recommendations.isHidden)
+        XCTAssertEqual(model.queue.count, 4)
+        await model.close()
+    }
+
     func testSharedHeaderHasStableSizesAndOneIndicatorFollowingPartialPaging() async throws {
         let service = QueueUIKitService(), model = await makeModel(service)
         let (queue, root, window) = await mount(model)
@@ -328,7 +442,7 @@ final class MusicQueueUIKitTests: XCTestCase {
     }
 }
 
-private actor QueueUIKitService: MusicServing, MusicSimilarModeServing, MusicHistoryManaging {
+private actor QueueUIKitService: MusicServing, MusicSimilarModeServing, MusicQueueRecommendationServing, MusicHistoryManaging {
     private var entries: [MusicQueueEntry] = (0..<4).map { index in
         let id = "entry-\(index)", song = index < 2 ? "same-song" : "song-\(index)"
         return .init(id: id, track: .init(ref: .init(kind: .queue, id: id), songId: song, title: song))
@@ -337,6 +451,19 @@ private actor QueueUIKitService: MusicServing, MusicSimilarModeServing, MusicHis
     private var historyReads = 0, previewReads = 0
     private var detailReads: [String] = [], reorders: [[String]] = []
     private var clears: [MusicHistoryCategory] = []
+    private var recommendationEnabled = false, recommendationFailed = false, recommendationExhausted = false
+    private var recommendationContinue = false, recommendationToken = UUID(), currentID = "entry-1"
+    private var recommendationTokens: [UUID] = [], recommendationChoices: [String] = [], recommendationSwitches: [Bool] = []
+    private var recommendationRetries = 0, similarCalls = 0
+    private var heartbeatEnabled = false, heartbeatSnapshot: MusicSimilarModeSnapshot?
+    private var heartbeatRequests: [MusicSimilarModeStart] = []
+    func enableHeartbeat() { heartbeatEnabled = true }
+    func heartbeatStarts() -> [MusicSimilarModeStart] { heartbeatRequests }
+    func enableRecommendations(failed: Bool = false) { recommendationEnabled = true; recommendationFailed = failed }
+    func exhaustRecommendations() { recommendationExhausted = true }
+    func recommendationActions() -> (tokens: [UUID], choices: [String], switches: [Bool], retries: Int, similarCalls: Int) {
+        (recommendationTokens, recommendationChoices, recommendationSwitches, recommendationRetries, similarCalls)
+    }
     private var reorderGate: QueueUIKitGate?, historyReadGate: QueueUIKitGate?
     func holdNextReorder(_ gate: QueueUIKitGate) { reorderGate = gate }
     func holdNextHistoryRead(_ gate: QueueUIKitGate) { historyReadGate = gate }
@@ -344,8 +471,8 @@ private actor QueueUIKitService: MusicServing, MusicSimilarModeServing, MusicHis
                           reorders: [[String]], clears: [MusicHistoryCategory]) {
         (historyReads, previewReads, detailReads, reorders, clears)
     }
-    func state() -> MusicPlaybackState { .init(revision: revision, currentId: "entry-1", total: entries.count) }
-    func queue() -> MusicQueueSnapshot { .init(revision: revision, currentId: "entry-1", entries: entries) }
+    func state() -> MusicPlaybackState { .init(revision: revision, currentId: currentID, total: entries.count) }
+    func queue() -> MusicQueueSnapshot { .init(revision: revision, currentId: currentID, entries: entries) }
     func changeQueue(_ change: MusicQueueChange, expectedRevision: Int) async throws -> MusicPlaybackState {
         let gate = reorderGate; reorderGate = nil
         if let gate { await gate.wait() }
@@ -378,18 +505,67 @@ private actor QueueUIKitService: MusicServing, MusicSimilarModeServing, MusicHis
     func removeHistory(detail: MusicHistoryDetail) throws { throw MusicServiceError.unsupported }
     func clearHistory(_ category: MusicHistoryCategory) { clears.append(category) }
     func restoreHistory(detail: MusicHistoryDetail, startIndex: Int?, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
-    func similarModeSnapshot() -> MusicSimilarModeSnapshot? { nil }
+    func similarModeSnapshot() -> MusicSimilarModeSnapshot? { heartbeatSnapshot }
     func similarModeChanges() -> AsyncStream<Void> { .init { $0.finish() } }
-    func canEnterSimilarMode() -> Bool { false }
+    func canEnterSimilarMode() -> Bool { heartbeatEnabled }
     func previewSimilarMode() throws -> MusicSimilarModeSnapshot? {
         previewReads += 1; throw MusicServiceError.authRequired
     }
-    func enterSimilarMode() throws -> MusicSimilarModeResult { throw MusicServiceError.authRequired }
-    func startSimilarMode(_ start: MusicSimilarModeStart) throws -> MusicSimilarModeResult { throw MusicServiceError.authRequired }
-    func exitSimilarMode() throws -> MusicSimilarModeResult { throw MusicServiceError.unsupported }
+    func enterSimilarMode() throws -> MusicSimilarModeResult { similarCalls += 1; throw MusicServiceError.authRequired }
+    func startSimilarMode(_ start: MusicSimilarModeStart) throws -> MusicSimilarModeResult {
+        guard heartbeatEnabled else { throw MusicServiceError.authRequired }
+        heartbeatRequests.append(start)
+        heartbeatSnapshot = .init(id: UUID(), active: true, status: .ready, seed: .init(title: "当前歌曲"),
+            seedEntryID: currentID, continueEnabled: false, candidates: [], batches: [], sourceIDs: [],
+            fromHome: false, provider: .heartbeat, error: nil, canRetry: false)
+        return .init(state: state(), action: .keepCurrent)
+    }
+    func exitSimilarMode() throws -> MusicSimilarModeResult {
+        similarCalls += 1
+        guard heartbeatEnabled else { throw MusicServiceError.unsupported }
+        heartbeatSnapshot = nil
+        return .init(state: state(), action: .restoreOnly)
+    }
     func playSimilarCandidate(snapshotID: UUID, candidateID: String) throws -> MusicSimilarModeResult { throw MusicServiceError.authRequired }
-    func setSimilarContinue(_ enabled: Bool, snapshotID: UUID) throws { throw MusicServiceError.unsupported }
-    func retrySimilarMode(snapshotID: UUID) throws -> MusicSimilarModeResult { throw MusicServiceError.unsupported }
+    func setSimilarContinue(_ enabled: Bool, snapshotID: UUID) throws {
+        similarCalls += 1
+        guard let value = heartbeatSnapshot, value.id == snapshotID else { throw MusicServiceError.unsupported }
+        heartbeatSnapshot = .init(id: value.id, active: true, status: .ready, seed: value.seed, seedEntryID: value.seedEntryID,
+            continueEnabled: enabled, candidates: [], batches: [], sourceIDs: [], fromHome: value.fromHome,
+            provider: .heartbeat, error: nil, canRetry: false)
+    }
+    func retrySimilarMode(snapshotID: UUID) throws -> MusicSimilarModeResult { similarCalls += 1; throw MusicServiceError.unsupported }
+    func queueRecommendationSnapshot() -> MusicQueueRecommendationSnapshot? {
+        guard recommendationEnabled else { return nil }
+        let candidates: [MusicSimilarModeCandidate] = recommendationFailed || recommendationExhausted ? [] :
+            ["a", "b"].map { .init(id: "candidate-" + $0, song: .init(title: "推荐 " + $0)) }
+        return .init(id: recommendationToken, status: recommendationFailed ? .error : .ready,
+            currentEntryID: currentID, continueEnabled: recommendationContinue, candidates: candidates,
+            exhausted: recommendationExhausted, error: recommendationFailed ? .upstreamFailed : nil,
+            canRetry: recommendationFailed)
+    }
+    func previewQueueRecommendations() -> MusicQueueRecommendationSnapshot? { queueRecommendationSnapshot() }
+    func cancelQueueRecommendationPreview() {}
+    func playQueueRecommendation(snapshotID: UUID, candidateID: String) throws -> MusicSimilarModeResult {
+        guard snapshotID == recommendationToken else { throw MusicServiceError.targetChanged }
+        recommendationTokens.append(snapshotID); recommendationChoices.append(candidateID)
+        entries += ["a", "b"].map {
+            .init(id: "candidate-entry-" + $0, track: .init(ref: .init(kind: .queue, id: "candidate-entry-" + $0),
+                songId: "candidate-" + $0, title: "推荐 " + $0))
+        }
+        currentID = candidateID == "candidate-b" ? "candidate-entry-b" : "candidate-entry-a"
+        revision += 1; recommendationEnabled = false
+        return .init(state: state(), action: .playCurrent)
+    }
+    func setQueueRecommendationContinue(_ enabled: Bool, snapshotID: UUID) throws {
+        guard snapshotID == recommendationToken else { throw MusicServiceError.targetChanged }
+        recommendationContinue = enabled; recommendationSwitches.append(enabled)
+    }
+    func retryQueueRecommendations(snapshotID: UUID) throws -> MusicSimilarModeResult {
+        guard snapshotID == recommendationToken else { throw MusicServiceError.targetChanged }
+        recommendationFailed = false; recommendationRetries += 1
+        return .init(state: state(), action: .keepCurrent)
+    }
     func cancelSimilarMode() {}
     func recordSimilarPlaybackFact(_ fact: MusicPlaybackFact) -> Bool { false }
     func pauseSimilarNavigation() {}
@@ -403,6 +579,7 @@ private actor QueueUIKitService: MusicServing, MusicSimilarModeServing, MusicHis
     func advance(_ direction: MusicDirection, reason: MusicAdvanceReason, expectedRevision: Int) throws -> MusicAdvanceResult { throw MusicServiceError.unsupported }
     func updateSettings(_ change: MusicSettingsChange) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
     func sourceAvailability(for ref: MusicReference) -> MusicSourceAvailability {
+        if !recommendationChoices.isEmpty { return .init(options: [], scriptState: .notConfigured) }
         XCTFail("Viewing/reordering cannot resolve media"); return .init(options: [], scriptState: .notConfigured)
     }
     func metadataPreferences() throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
