@@ -81,6 +81,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             if (Value(candidate, "queue") is JsonObject q) RestoreRuntime(q, false);
             else if (force) RestoreRuntime(Queue(candidate), false);
             document = candidate; fingerprint = saved.Fingerprint;
+            ObserveStoredSongs(candidate);
             if (pending is null && recommendationUnknown is null) RefreshOfficialSources(candidate);
         }
     }
@@ -142,6 +143,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             var result = await store.WriteAsync(DocumentNamespace, bytes, fingerprint, CancellationToken.None).ConfigureAwait(false);
             LJ.Require(result == expected, "COMMIT_UNKNOWN");
             document = candidate; fingerprint = result;
+            if (owner == PendingOwner.Sync) ObserveStoredSongs(candidate);
             if (owner == PendingOwner.OfficialSources) RefreshOfficialSources(candidate);
         }
         catch (Exception error)
@@ -192,6 +194,9 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
                 (method is "music.officialSources.settings.get" or "music.officialSources.settings.save" or
                     "music.catalogSource.settings.get" or "music.catalogSource.settings.save"))
             { throw new MusicLibraryException("INVALID_REQUEST"); }
+            // Load shared facts before entering the library gate: persistence acquires them
+            // in the other direction while reading local membership.
+            if (PrepareSongFacts is { } prepareFacts) await prepareFacts(token).ConfigureAwait(false);
             await EnterAsync(token).ConfigureAwait(false); entered = true;
             recommendationStage = null;
             LJ.Require(!closed && !preparing, "CLOSED");
@@ -206,7 +211,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             captured = true; previousVersion = queueVersion; previousHistory = shuffleHistory.ToList(); previousFailures = failedEntries.ToArray();
             var candidate = (JsonObject)document!.DeepClone();
             var outcome = await DispatchAsync(method, p, candidate, token, full).ConfigureAwait(false);
-            var response = LJ.Merge(LJ.Obj(("ok", true)), outcome.Result);
+            var response = LJ.Merge(LJ.Obj(("ok", true)), SongFactsProjection?.Invoke(outcome.Result) ?? outcome.Result);
             LJ.Require(LJ.Bytes(response).Length <= 512 * 1024, "LIMIT");
             if (outcome.Mutate) await CommitAsync(candidate, CommandOwner(method), token).ConfigureAwait(false);
             if (outcome.Mutate && recommendationStage is { } recommendation)

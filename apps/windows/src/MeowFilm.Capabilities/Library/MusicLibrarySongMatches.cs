@@ -4,6 +4,18 @@ namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
+    internal Action<IEnumerable<JsonObject>>? SongsObserved { get; set; }
+    internal Func<JsonObject, JsonObject>? SongFactsProjection { get; set; }
+    internal Func<CancellationToken, Task>? PrepareSongFacts { get; set; }
+
+    private void ObserveStoredSongs(JsonObject value)
+    {
+        if (SongsObserved is not { } observe) return;
+        var songs = LJ.Object(LJ.Object(LibraryState(value)["library"])["songs"]);
+        var queued = LJ.Array(Queue(value)["entries"]).OfType<JsonObject>().Select(entry => LJ.Object(entry["song"]));
+        observe(songs.Select(pair => LJ.Object(pair.Value)).Concat(queued));
+    }
+
     internal async Task<IReadOnlyList<JsonObject>> ReadMatchingSongsAsync(CancellationToken cancellationToken)
     {
         await EnterAsync(cancellationToken).ConfigureAwait(false);

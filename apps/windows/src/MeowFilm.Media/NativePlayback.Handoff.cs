@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using LibVLCSharp.Shared;
 
 namespace MeowFilm.Media;
@@ -9,6 +10,8 @@ namespace MeowFilm.Media;
 /// </summary>
 public interface INativePlaybackHandoff
 {
+    // Retire rejected output without replacing the logical occurrence or its controls.
+    Task StopOutputForHandoffAsync();
     Task PrepareHandoffAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token);
     Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token);
     double PreparedHandoffDurationSeconds { get; }
@@ -23,8 +26,12 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
     private CancellationTokenSource? _handoffOpening;
     private (string Owner, string Identity, long Generation)? _handoffTarget;
     private TaskCompletionSource? _handoffReady;
+    private TaskCompletionSource<string>? _handoffFailure;
     private Action? _handoffDetach;
+    private float _retiredHandoffRate = 1;
+    private bool _handoffDonorRetired;
 
+    public Task StopOutputForHandoffAsync() => DispatchAsync(StopOutputForHandoffCoreAsync);
     public Task PrepareHandoffAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token) =>
         DispatchAsync(() => PrepareHandoffCoreAsync(uri, headers, null, token));
     public double PreparedHandoffDurationSeconds => Math.Max(0, _handoffSession?.Player.Length ?? 0) / 1000d;
@@ -44,8 +51,9 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         ThrowIfDisposed();
         if (_releaseFaulted) throw Error(PlaybackError.ReleaseFailed);
         await DiscardHandoffCoreAsync();
-        var current = _session;
-        if (current is null || !IsCurrent(current) || _ownerId is null || _identity is null) throw Error(PlaybackError.Superseded);
+        if (_ownerId is null || _identity is null) throw Error(PlaybackError.Superseded);
+        var target = (_ownerId, _identity, _generation);
+        if (!HandoffScopeCurrent(target)) throw Error(PlaybackError.Superseded);
         Dictionary<string, string>? requestHeaders = null;
         if (readInput is null)
         {
@@ -55,7 +63,6 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         }
         else readInput.Validate();
         token.ThrowIfCancellationRequested();
-        var target = (_ownerId, _identity, _generation);
         var opening = CancellationTokenSource.CreateLinkedTokenSource(token);
         _handoffOpening = opening;
         _handoffTarget = target;
@@ -65,7 +72,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         void Check()
         {
             opening.Token.ThrowIfCancellationRequested();
-            if (_disposing || _generation != target.Item3 || !ReferenceEquals(_session, current) || !IsCurrent(current) ||
+            if (!HandoffScopeCurrent(target) ||
                 !ReferenceEquals(_handoffOpening, opening))
                 throw new OperationCanceledException(PlaybackError.Superseded, new CancellationToken(true));
         }
@@ -103,11 +110,18 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
             Check();
             prepared.Media.AddOption(":start-paused");
             var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var failure = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             _handoffReady = ready;
+            _handoffFailure = failure;
             var player = prepared.Player;
             EventHandler<EventArgs> paused = (_, _) => ready.TrySetResult();
-            EventHandler<EventArgs> failed = (_, _) => ready.TrySetException(Error(prepared.LastInputError ?? PlaybackError.OpenFailed));
-            Action<string> inputFailed = code => ready.TrySetException(Error(code));
+            void Fail(string code)
+            {
+                failure.TrySetResult(code);
+                ready.TrySetException(Error(code));
+            }
+            EventHandler<EventArgs> failed = (_, _) => Fail(prepared.LastInputError ?? PlaybackError.OpenFailed);
+            Action<string> inputFailed = Fail;
             player.Paused += paused; player.EncounteredError += failed; player.EndReached += failed;
             if (prepared.ReadInput is not null) prepared.ReadInput.Failed += inputFailed;
             if (prepared.Input is not null) prepared.Input.Failed += inputFailed;
@@ -124,6 +138,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
             if (!await Task.Run(player.Play)) throw Error(prepared.LastInputError ?? PlaybackError.OpenFailed);
             await ready.Task.WaitAsync(TimeSpan.FromSeconds(12), opening.Token);
             Check();
+            CheckHandoffInput(prepared, failure);
             // Position the paused input at the live time so the commit continues without a gap.
             double position = _positionSeconds;
             if (position > 0)
@@ -132,6 +147,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
                 await Task.Run(() => player.Time = (long)(position * 1000));
             }
             Check();
+            CheckHandoffInput(prepared, failure);
         }
         catch (Exception error)
         {
@@ -150,11 +166,10 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         ThrowIfDisposed();
         token.ThrowIfCancellationRequested();
         var prepared = _handoffSession;
-        var current = _session;
-        if (prepared is null || current is null || _handoffReady is not { Task.IsCompletedSuccessfully: true } ||
+        if (prepared is null || _handoffFailure is not { } failure ||
+            _handoffReady is not { Task.IsCompletedSuccessfully: true } ||
             _handoffOpening is not { IsCancellationRequested: false } ||
-            _handoffTarget is not { } target || target.Item3 != _generation || target.Item1 != _ownerId ||
-            target.Item2 != _identity || !IsCurrent(current))
+            _handoffTarget is not { } target || !HandoffScopeCurrent(target))
         {
             await DiscardHandoffCoreAsync();
             throw Error(PlaybackError.Superseded);
@@ -163,43 +178,45 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         await _commands.WaitAsync(token);
         try
         {
-            if (!ReferenceEquals(_session, current) || !ReferenceEquals(_handoffSession, prepared) ||
-                _generation != target.Item3 || !IsCurrent(current))
+            if (!ReferenceEquals(_handoffSession, prepared) || !HandoffScopeCurrent(target))
                 throw Error(PlaybackError.Superseded);
-            float rate = 1;
-            long time = 0;
+            CheckHandoffInput(prepared, failure);
+            var current = _session;
+            float rate = current is { Released: false } ? current.Player.Rate : _retiredHandoffRate;
             await Task.Run(() =>
             {
                 // Prepare all fallible controls while the accepted output is still untouched.
-                rate = current.Player.Rate;
                 if (rate > 0 && Math.Abs(rate - 1) > 0.001 && prepared.Player.SetRate(rate) != 0)
                     throw Error(PlaybackError.RateUnsupported);
                 prepared.Player.Volume = _volume;
-                time = Math.Max(0, current.Player.Time);
-                if (prepared.Player.IsSeekable && Math.Abs(prepared.Player.Time - time) > 250) prepared.Player.Time = time;
             });
+            long time = await SynchronizeHandoffAsync(prepared, target, failure, token);
             // Preparation yielded the dispatcher. Recheck cancellation and the latest intent
             // before the non-awaiting commit; a queued stop or replacement must win here.
             token.ThrowIfCancellationRequested();
-            if (!ReferenceEquals(_session, current) || !ReferenceEquals(_handoffSession, prepared) ||
+            if (!ReferenceEquals(_handoffSession, prepared) ||
                 _handoffOpening is not { IsCancellationRequested: false } ||
-                _generation != target.Item3 || !IsCurrent(current))
+                !HandoffScopeCurrent(target))
                 throw Error(PlaybackError.Superseded);
+            CheckHandoffInput(prepared, failure);
+            if (Math.Abs(prepared.Player.Time - HandoffPosition()) > 250)
+                throw Error(PlaybackError.ReadSeekFailed);
             bool keepPaused = _pauseRequested;
             prepared.Player.Volume = _volume;
             // These short controls and publication are one dispatcher turn. The old
             // output falls silent before the new one may sound; release remains async.
-            current.Player.Mute = true;
+            if (current is { Released: false }) current.Player.Mute = true;
             prepared.Player.Mute = false;
             _handoffDetach?.Invoke();
             _handoffDetach = null;
-            _handoffSession = null; _handoffReady = null; _handoffTarget = null;
+            _handoffSession = null; _handoffReady = null; _handoffFailure = null; _handoffTarget = null;
             var opening = _handoffOpening; _handoffOpening = null;
             opening?.Dispose();
             // Publish the prepared input as the session and fence everything the old one could still deliver.
-            current.Invalidate();
+            current?.Invalidate();
             _generation = prepared.Generation;
             _session = prepared;
+            _handoffDonorRetired = false;
             // Publish business provenance in this same dispatcher turn, before events or old-input release.
             committed();
             prepared.HasStarted = true;
@@ -225,7 +242,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
             Set(ref _durationSeconds, Math.Max(0, prepared.Player.Length) / 1000d, nameof(DurationSeconds));
             if (!keepPaused) prepared.Player.SetPause(false);
             Set(ref _isPlaying, !keepPaused, nameof(IsPlaying));
-            failed = await ReleaseNativeAsync(current, detachView: false);
+            if (current is not null) failed = await ReleaseNativeAsync(current, detachView: false);
         }
         finally { _commands.Release(); }
         if (failed)
@@ -235,11 +252,93 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         }
     }
 
+    private static void CheckHandoffInput(Session prepared, TaskCompletionSource<string> failure)
+    {
+        if (prepared.LastInputError is { } code) throw Error(code);
+        if (failure.Task.IsCompletedSuccessfully) throw Error(failure.Task.Result);
+        if (prepared.Player.State is VLCState.Error or VLCState.Ended or VLCState.Stopped)
+            throw Error(PlaybackError.OpenFailed);
+    }
+
+    private bool HandoffScopeCurrent((string Owner, string Identity, long Generation) target) =>
+        !_disposing && !_releaseFaulted && _generation == target.Generation && _ownerId == target.Owner &&
+        _identity == target.Identity && (_session is { } current && IsCurrent(current) ||
+            _handoffDonorRetired && _continuable && _continuationAuthority is { IsCancellationRequested: false } &&
+            _lastErrorCode is not (PlaybackError.ReadRevoked or PlaybackError.ResourceRevoked));
+
+    private long HandoffPosition() => _session is { Released: false } current && IsCurrent(current)
+        ? Math.Max(0, current.Player.Time) : (long)(_positionSeconds * 1000);
+
+    private void CaptureHandoffControls(Session session)
+    {
+        if (session.Released) return;
+        _retiredHandoffRate = session.Player.Rate;
+        long time = session.Player.Time;
+        if (time >= 0) Set(ref _positionSeconds, time / 1000d, nameof(PositionSeconds));
+    }
+
+    private async Task StopOutputForHandoffCoreAsync()
+    {
+        ThrowIfDisposed();
+        if (_releaseFaulted) throw Error(PlaybackError.ReleaseFailed);
+        var current = _session;
+        _handoffDonorRetired = true;
+        if (current is not null)
+        {
+            CaptureHandoffControls(current);
+            current.Player.Mute = true;
+            current.Invalidate();
+        }
+        _handoffOpening?.Cancel();
+        Set(ref _isPlaying, false, nameof(IsPlaying));
+        Set(ref _hasMedia, false, nameof(HasMedia));
+        long generation = _generation;
+        await _commands.WaitAsync();
+        try
+        {
+            if (_generation != generation) return;
+            await RetireAsync();
+        }
+        finally { _commands.Release(); }
+    }
+
+    private async Task<long> SynchronizeHandoffAsync(Session prepared,
+        (string Owner, string Identity, long Generation) scope,
+        TaskCompletionSource<string> failure, CancellationToken token)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (deadline.Elapsed < TimeSpan.FromSeconds(15))
+        {
+            token.ThrowIfCancellationRequested();
+            if (!HandoffScopeCurrent(scope) ||
+                !ReferenceEquals(_handoffSession, prepared) ||
+                _handoffOpening is not { IsCancellationRequested: false })
+                throw Error(PlaybackError.Superseded);
+            CheckHandoffInput(prepared, failure);
+            long target = HandoffPosition();
+            if (Math.Abs(prepared.Player.Time - target) <= 250) return Math.Max(0, prepared.Player.Time);
+            if (!prepared.Player.IsSeekable) throw Error(PlaybackError.NotSeekable);
+            await Task.Run(() => prepared.Player.Time = target, token);
+            // A successful setter only queues the seek. Read back the native clock
+            // before aligning again with a donor which may still be advancing.
+            while (Math.Abs(prepared.Player.Time - target) > 250)
+            {
+                if (!HandoffScopeCurrent(scope) || !ReferenceEquals(_handoffSession, prepared) ||
+                    _handoffOpening is not { IsCancellationRequested: false })
+                    throw Error(PlaybackError.Superseded);
+                CheckHandoffInput(prepared, failure);
+                if (deadline.Elapsed >= TimeSpan.FromSeconds(15)) throw Error(PlaybackError.ReadSeekFailed);
+                await Task.Delay(15, token);
+            }
+        }
+        throw Error(PlaybackError.ReadSeekFailed);
+    }
+
     private async Task DiscardHandoffCoreAsync()
     {
         var opening = _handoffOpening;
         var prepared = _handoffSession;
-        _handoffOpening = null; _handoffSession = null; _handoffReady = null; _handoffTarget = null;
+        _handoffOpening = null; _handoffSession = null; _handoffReady = null; _handoffFailure = null; _handoffTarget = null;
         _handoffDetach?.Invoke(); _handoffDetach = null;
         if (opening is not null) { try { opening.Cancel(); } catch (ObjectDisposedException) { } opening.Dispose(); }
         if (prepared is not null && await ReleaseNativeAsync(prepared, detachView: false)) _releaseFaulted = true;

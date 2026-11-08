@@ -14,8 +14,14 @@ public static class MusicSongMatcherTests
         yield return new("Song matching negative results retry only on demand after 24 hours or changed conditions", Negative);
         yield return new("Song matching request failure is not a negative result and retains existing mappings", Failure);
         yield return new("Song matching seven days never deletes or refetches a still usable mapping", Freshness);
+        yield return new("Song matching content failure rechecks existing mappings only at seven days", ContentFailure);
+        yield return new("Song matching content failure may check imported mappings without timestamp evidence", MissingTimestamp);
+        yield return new("Song matching failed rechecks retain mapping age and never become not found", RecheckFailure);
         yield return new("Song matching search evidence distinguishes searched empty failed and unsearched platforms", SearchEvidence);
         yield return new("Song matching broad search absence cannot suppress a different focused query", SearchConditions);
+        yield return new("Song matching later page absence cannot suppress a focused first-page query", LaterPage);
+        yield return new("Song matching a late older physical search cannot overwrite a newer observation", LateObservation);
+        yield return new("Song matching a cached empty page never renews its negative check time", CachedNegative);
         yield return new("Song matching persistence starts at local membership and survives restart without searching", Persistence);
         yield return new("Song matching removed membership evicts derived data without changing queue or history", Removal);
         yield return new("Song matching wrong recording exclusion is original-specific and survives subsequent discovery", Exclusion);
@@ -34,11 +40,17 @@ public static class MusicSongMatcherTests
     private static JsonElement Page(MusicSearchRequest request, params JsonObject[] songs) =>
         JsonSerializer.SerializeToElement(new { platform = request.Platform, page = request.Page,
             limit = request.Limit, items = songs, more = false });
-    private static JsonElement Observation(JsonObject song, string query, long at, params (string Platform, int Page, string Error)[] states) =>
+    private static JsonElement Observation(JsonObject song, string query, long at, long order,
+        params (string Platform, int Page, string Error)[] states) =>
         JsonSerializer.SerializeToElement(new { kind = "songs", keyword = query, cancelled = false,
             items = new[] { song }, platforms = states.Select(state => new {
                 platform = state.Platform, page = state.Page, error = state.Error,
                 loading = false, checkedAt = state.Page > 0 || state.Error.Length > 0 ? at : 0
+            }).ToArray(),
+            observations = states.Where(state => state.Page > 0 || state.Error.Length > 0).Select(state => new {
+                platform = state.Platform, page = Math.Max(1, state.Page), pages = 1, limit = 30,
+                checkedAt = at, order, generation = 0, cached = false, error = state.Error,
+                items = state.Error.Length == 0 && Has(song, state.Platform) ? new[] { song } : Array.Empty<JsonObject>()
             }).ToArray() });
     private sealed class Fixture : IAsyncDisposable
     {
@@ -59,8 +71,8 @@ public static class MusicSongMatcherTests
             }, Clock);
         }
         internal Task<MusicSongMatcher.MatchResult> Match(JsonObject song, string platform = "tx",
-            CancellationToken token = default) =>
-            Matcher.MatchAsync(song, platform, Context(platform), token);
+            CancellationToken token = default, bool contentFailed = false) =>
+            Matcher.MatchAsync(song, platform, Context(platform), token, contentFailed);
         internal async Task<JsonElement> Command(string method, object input)
         {
             var reply = await Library.ExecuteAsync(method, input);
@@ -141,7 +153,7 @@ public static class MusicSongMatcherTests
     {
         await using var f = new Fixture();
         var song = Song();
-        f.Matcher.ObserveSearch(Observation(song, MusicSongMatcher.Query(song), f.Clock.Now,
+        f.Matcher.ObserveSearch(Observation(song, MusicSongMatcher.Query(song), f.Clock.Now, f.Matcher.NextObservation(),
             ("wy", 1, ""), ("tx", 1, ""), ("kw", 0, "NETWORK_ERROR"), ("kg", 0, "")), Context);
         await f.Match(song);
         Check(f.Requests.Count == 0, "the searched-empty platform must not repeat");
@@ -150,18 +162,120 @@ public static class MusicSongMatcherTests
         Check(f.Requests.Select(request => request.Platform).SequenceEqual(["kw", "kg"]));
         var mapped = Song(); mapped["sources"]!.AsArray().Add(Song("tx", "from-search")["sources"]![0]!.DeepClone());
         f.Matcher.ObserveSearch(Observation(NativeMusicSong.Normalize(mapped), MusicSongMatcher.Query(song),
-            f.Clock.Now + 1, ("wy", 1, ""), ("tx", 1, "")), Context);
+            f.Clock.Now + 1, f.Matcher.NextObservation(), ("wy", 1, ""), ("tx", 1, "")), Context);
         Check(Has((await f.Match(song)).Song, "tx") && f.Requests.Count == 2);
     }
     private static async Task SearchConditions()
     {
         await using var f = new Fixture();
         var song = Song();
-        f.Matcher.ObserveSearch(Observation(song, "broad artist query", f.Clock.Now,
+        f.Matcher.ObserveSearch(Observation(song, "broad artist query", f.Clock.Now, f.Matcher.NextObservation(),
             ("wy", 1, ""), ("tx", 1, "")), Context);
         await f.Match(song);
         Check(f.Requests.Count == 1 && f.Requests[0].Keyword == MusicSongMatcher.Query(song),
             "a different bounded query may find a recording outside the broad first page");
+    }
+    private static async Task ContentFailure()
+    {
+        await using var f = new Fixture();
+        var song = Song();
+        await f.Favorite(song);
+        await f.Match(song);
+        f.Clock.Now += MusicSongMatcher.Freshness - 1;
+        await f.Match(song, contentFailed: true);
+        Check(f.Requests.Count == 1, "content failure cannot recheck a fresh accepted mapping");
+        f.Clock.Now++;
+        f.Reply = (request, _) => Task.FromResult(Page(request, Song("tx", "replacement")));
+        var rechecked = await f.Match(song, contentFailed: true);
+        Check(f.Requests.Count == 2 && rechecked.Song["sources"]!.AsArray().OfType<JsonObject>()
+            .Any(source => NativeMusicSong.NativeId(source) == "replacement"));
+        f.Clock.Now += MusicSongMatcher.Freshness + 1;
+        await f.Match(song);
+        Check(f.Requests.Count == 2, "elapsed age alone cannot trigger an existing mapping search");
+    }
+    private static async Task MissingTimestamp()
+    {
+        await using var f = new Fixture();
+        var song = Song("tx", "imported");
+        await f.Match(song);
+        Check(f.Requests.Count == 0);
+        await f.Match(song, contentFailed: true);
+        Check(f.Requests.Count == 1 && f.Requests[0].Platform == "tx");
+        f.Clock.Now++;
+        await f.Matcher.MatchAsync(song, "tx", NativeMusicSong.Hash("new-account"), default, contentFailed: true);
+        Check(f.Requests.Count == 2, "another authority cannot borrow a previous account's time evidence");
+    }
+    private static async Task RecheckFailure()
+    {
+        await using var f = new Fixture();
+        var song = Song();
+        await f.Favorite(song); await f.Match(song);
+        long matchedAt = LJ.I(f.Saved.Single()!["platforms"]!["tx"]!["checkedAt"]);
+        f.Clock.Now += MusicSongMatcher.Freshness;
+        f.Reply = (_, _) => throw new MusicPlatformException("NETWORK_ERROR");
+        var failure = await f.Match(song, contentFailed: true);
+        Check(failure.Error == "NETWORK_ERROR" && Has(failure.Song, "tx"));
+        var state = f.Saved.Single()!["platforms"]!["tx"]!;
+        Check(LJ.S(state["state"]) == "failed" && LJ.I(state["checkedAt"]) == f.Clock.Now &&
+            LJ.I(state["matchedAt"]) == matchedAt, "a failed request must not renew successful-match age");
+        await f.Match(song);
+        Check(f.Requests.Count == 2, "network failure alone cannot search an existing mapping");
+        f.Reply = (request, _) => Task.FromResult(Page(request));
+        await f.Match(song, contentFailed: true);
+        await f.Match(song, contentFailed: true);
+        Check(f.Requests.Count == 3 && LJ.S(f.Saved.Single()!["platforms"]!["tx"]!["state"]) == "notFound",
+            "only a real focused empty response enters the negative retry window");
+    }
+    private static async Task LaterPage()
+    {
+        await using var f = new Fixture();
+        var song = Song();
+        f.Matcher.ObserveSearch(Observation(song, MusicSongMatcher.Query(song), f.Clock.Now,
+            f.Matcher.NextObservation(), ("wy", 1, ""), ("tx", 2, "")), Context);
+        await f.Match(song);
+        Check(f.Requests.Count == 1 && f.Requests[0].Page == 1,
+            "page two says nothing about the recording's absence from the focused first page");
+    }
+    private static async Task LateObservation()
+    {
+        await using var f = new Fixture();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Reply = async (request, _) =>
+        {
+            entered.TrySetResult(); await release.Task;
+            return Page(request, Song("tx", "older"));
+        };
+        var pending = f.Match(Song());
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            f.Clock.Now++;
+            f.Matcher.ObserveSearch(Observation(Song("tx", "newer"), "Track Artist", f.Clock.Now,
+                f.Matcher.NextObservation(), ("tx", 1, "")), Context);
+            f.Clock.Now++;
+            release.TrySetResult();
+            var result = await pending.WaitAsync(TimeSpan.FromSeconds(3));
+            var ids = result.Song["sources"]!.AsArray().OfType<JsonObject>().Select(NativeMusicSong.NativeId).ToArray();
+            Check(ids.Contains("newer") && !ids.Contains("older"), "completion time cannot make an earlier request newer");
+        }
+        finally { release.TrySetResult(); }
+    }
+    private static async Task CachedNegative()
+    {
+        await using var f = new Fixture();
+        var song = Song();
+        long at = f.Clock.Now;
+        var observed = Observation(song, MusicSongMatcher.Query(song), at, f.Matcher.NextObservation(),
+            ("wy", 1, ""), ("tx", 1, ""));
+        f.Matcher.ObserveSearch(observed, Context);
+        f.Clock.Now += MusicSongMatcher.NotFoundRetry - 1;
+        f.Matcher.ObserveSearch(observed, Context);
+        await f.Match(song);
+        Check(f.Requests.Count == 0);
+        f.Clock.Now++;
+        await f.Match(song);
+        Check(f.Requests.Count == 1, "replaying cached evidence must not renew a 24-hour negative result");
     }
     private static async Task Persistence()
     {
@@ -203,6 +317,8 @@ public static class MusicSongMatcherTests
         Check(!Has(await f.Matcher.KnownAsync(original, default), "tx"));
         Check(!Has((await f.Match(original)).Song, "tx"),
             "a subsequent search must not immediately select the same wrong recording");
+        await f.Match(original);
+        Check(f.Requests.Count == 2, "an actual search which only returned excluded recordings must not repeat on every read");
         var anotherOriginal = Song("kg", "another-original");
         Check(Has((await f.Match(anotherOriginal)).Song, "tx"),
             "exclusion is not a global ban on the target recording");

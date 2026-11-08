@@ -31,6 +31,7 @@ public sealed partial class MusicNativeApplication
             // Stable search/matching owners retain the real operation through their
             // slot drain; catalog owns its deadline and account/shutdown invalidation.
             var result = await catalog.SearchAsync(request).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
             // Remembers the search authority for observed recording evidence; a retired session
             // leaves no context, so its late page cannot suppress a later matching request.
             if (frame.Session is not { } current || accounts.IsCurrent(current))
@@ -40,6 +41,30 @@ public sealed partial class MusicNativeApplication
         catch (MusicPlatformException error) when (error.Code is "AUTH_REQUIRED" or "AUTH_EXPIRED")
         {
             if (frame.Session is { } failed) accounts.Revoke(failed);
+            throw;
+        }
+    }
+
+    private async Task<JsonElement> SearchAndObserveCatalogAsync(MusicSearchRequest request, CancellationToken token)
+    {
+        await PrepareSongFactsAsync(token).ConfigureAwait(false);
+        using var frame = sessions.Begin();
+        var observation = songMatcher.BeginSearch(request.Platform);
+        try
+        {
+            var reply = await catalog.SearchAsync(request, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (frame.Session is { } session && !accounts.IsCurrent(session))
+                throw new MusicPlatformException("AUTH_CHANGED");
+            songMatcher.ObservePage(request, reply, "", MatchingContext(request.Platform, frame.Session), observation);
+            return reply;
+        }
+        catch (MusicPlatformException error)
+        {
+            if (error.Code is "AUTH_REQUIRED" or "AUTH_EXPIRED" && frame.Session is { } failed) accounts.Revoke(failed);
+            token.ThrowIfCancellationRequested();
+            if (frame.Session is not { } session || accounts.IsCurrent(session))
+                songMatcher.ObservePage(request, null, error.Code, MatchingContext(request.Platform, frame.Session), observation);
             throw;
         }
     }
@@ -95,6 +120,7 @@ public sealed partial class MusicNativeApplication
         // the policy snapshot below is always the one current at admission.
         var restored = await accounts.EnsureInitialObservationAsync(token).ConfigureAwait(false);
         if (!Okay(restored)) return restored;
+        await PrepareSongFactsAsync(token).ConfigureAwait(false);
         Task<JsonElement> start;
         await searchPolicyLane.WaitAsync(token).ConfigureAwait(false);
         try

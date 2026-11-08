@@ -48,6 +48,7 @@ public interface IMusicPlaybackRate
 internal sealed class NativeMusicPlayback(NativePlayback native) : IMusicPlayback, INativePlaybackContinuation,
     IMusicPlaybackRate, INativePlaybackHandoff
 {
+    public Task StopOutputForHandoffAsync() => native.StopOutputForHandoffAsync();
     public Task PrepareHandoffAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token) =>
         native.PrepareHandoffAsync(uri, headers, token);
     public Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token) => native.PrepareReadHandoffAsync(lease, token);

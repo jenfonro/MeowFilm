@@ -10,7 +10,8 @@ public sealed partial class MusicCapability
             platform = target.Platform, song = target.RecordingSong ?? song.Raw, originSong = song.Raw, sourceKey = target.SourceKey,
             quality = initial ? target.PolicyRequest : target.Quality,
             qualityPolicySignature = target.QualityPolicySignature,
-            scope = target.AccountScope, generation = target.Generation, refresh, cacheOnly
+            scope = target.AccountScope, generation = target.Generation, refresh, cacheOnly,
+            manualSource = target.ManualSource
         };
 
     // cacheOnly: complete file only. urlCacheOnly: a still-valid native URL receipt only, no media lookup.

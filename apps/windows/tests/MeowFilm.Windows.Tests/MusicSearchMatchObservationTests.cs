@@ -14,6 +14,9 @@ public static class MusicSearchMatchObservationTests
         yield return Case("later page failure updates already fused songs before other platforms settle", LaterFailure);
         yield return Case("later round source checks wait for their candidate fusion", LaterRoundFusion);
         yield return Case("get cached pages and repeated notices retain physical check times", CacheAge);
+        yield return Case("page evidence retains earlier hits and their time after a later empty page", PageEvidence);
+        yield return Case("empty focused searches update known facts even without displayed results", KnownEmpty);
+        yield return Case("search reads project known mappings acquired through another entry", KnownProjection);
         yield return Case("account invalidation excludes late physical results and permits fresh checks", AccountInvalidation);
         yield return Case("cancelled physical results produce no matching observations", Cancellation);
         yield return Case("query replacement excludes the old physical result", Replacement);
@@ -35,6 +38,8 @@ public static class MusicSearchMatchObservationTests
     private static JsonElement State(JsonElement value, string platform) => value.GetProperty("platforms")
         .EnumerateArray().Single(state => Text(state, "platform") == platform);
     private static long CheckedAt(JsonElement value, string platform) => State(value, platform).GetProperty("checkedAt").GetInt64();
+    private static JsonElement Observation(JsonElement value, string platform, int page) => value.GetProperty("observations")
+        .EnumerateArray().Single(row => Text(row, "platform") == platform && row.GetProperty("page").GetInt32() == page);
     private static bool HasSource(JsonElement value, string platform) => value.GetProperty("items").EnumerateArray()
         .Any(song => song.GetProperty("sources").EnumerateArray().Any(source => Text(source, "source") == platform));
     private static JsonObject Song(string platform, string id = "track") =>
@@ -159,12 +164,95 @@ public static class MusicSearchMatchObservationTests
             observed.Values.SelectMany(value => value.GetProperty("platforms").EnumerateArray())
                 .Select(state => state.GetProperty("checkedAt").GetInt64()).All(at => at == 0 || at == originalCheck),
             "CACHED_PAGE_RENEWED_PHYSICAL_CHECK_TIME");
+        Check(new[] { "wy", "tx" }.All(platform =>
+            Observation(cached, platform, 1).GetProperty("order").GetInt64() ==
+                Observation(first, platform, 1).GetProperty("order").GetInt64() &&
+            Observation(cached, platform, 1).GetProperty("checkedAt").GetInt64() == originalCheck &&
+            Observation(cached, platform, 1).GetProperty("cached").GetBoolean()),
+            "CACHED_PAGE_CHANGED_ITS_ORIGINAL_EVIDENCE_IDENTITY");
         f.Clock.Advance(TimeSpan.FromMinutes(41));
         long refreshedCheck = f.Clock.GetUtcNow().ToUnixTimeMilliseconds();
         string expiredId = Id(await f.Start(["wy", "tx"]));
         var expired = await observed.Until(value => Id(value) == expiredId && !Loading(value));
         Check(f.Catalog.Calls.Count == 4 && new[] { "wy", "tx" }.All(platform => CheckedAt(expired, platform) == refreshedCheck),
             "EXPIRED_PAGE_DID_NOT_RECORD_A_NEW_PHYSICAL_CHECK");
+    }
+
+    private static async Task PageEvidence()
+    {
+        var release = Signal();
+        await using var f = new Fixture();
+        f.Catalog.Handler = async (request, _) =>
+        {
+            if (request.Page == 1) return Page(request, [Song("tx")], more: true);
+            await release.Task; return Page(request, []);
+        };
+        using var observed = new Observations(f.Search);
+        try
+        {
+            string id = Id(await f.Start(["tx"], pages: 2));
+            var first = await observed.Until(value => Id(value) == id && HasSource(value, "tx"));
+            long original = Observation(first, "tx", 1).GetProperty("checkedAt").GetInt64();
+            f.Clock.Advance(TimeSpan.FromMilliseconds(100));
+            long empty = f.Clock.GetUtcNow().ToUnixTimeMilliseconds();
+            release.TrySetResult();
+            var settled = await observed.Until(value => Id(value) == id && !Loading(value));
+            Check(HasSource(settled, "tx") &&
+                Observation(settled, "tx", 1).GetProperty("checkedAt").GetInt64() == original &&
+                Observation(settled, "tx", 1).GetProperty("items").GetArrayLength() == 1 &&
+                Observation(settled, "tx", 2).GetProperty("checkedAt").GetInt64() == empty &&
+                Observation(settled, "tx", 2).GetProperty("items").GetArrayLength() == 0 &&
+                Observation(settled, "tx", 1).GetProperty("order").GetInt64() <
+                    Observation(settled, "tx", 2).GetProperty("order").GetInt64() && f.Catalog.Calls.Count == 2,
+                "LATER_EMPTY_PAGE_RELABELED_AN_EARLIER_HIT");
+            Check(!(await f.Call("get", id)).TryGetProperty("observations", out _),
+                "INTERNAL_EVIDENCE_CHANGED_PUBLIC_SEARCH_DTO");
+        }
+        finally { release.TrySetResult(); }
+    }
+
+    private static async Task KnownEmpty()
+    {
+        await using var f = new Fixture();
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var library = new MeowFilm.Capabilities.Library.MusicLibraryOwner(store);
+        int supplements = 0;
+        var facts = new MeowFilm.Capabilities.Library.MusicSongMatcher(library, new(store), (request, _) =>
+        { supplements++; return Task.FromResult(Page(request, [])); }, f.Clock);
+        var song = MusicSongFixture.Online("wy", "known", "Focused", "Artist", duration: 180);
+        await facts.KnownAsync(song, default);
+        f.Catalog.Handler = (request, _) => Task.FromResult(Page(request, []));
+        f.Search.MatchingObserved += value => facts.ObserveSearch(value,
+            platform => MeowFilm.Capabilities.Library.NativeMusicSong.Hash("observation:" + platform));
+        using var observed = new Observations(f.Search);
+        string id = Id(await f.Start(["tx"], keyword: "Focused Artist"));
+        var empty = await observed.Until(value => Id(value) == id && !Loading(value));
+        await facts.MatchAsync(song, "tx", MeowFilm.Capabilities.Library.NativeMusicSong.Hash("observation:tx"), default);
+        Check(empty.GetProperty("items").GetArrayLength() == 0 && supplements == 0 && f.Catalog.Calls.Count == 1,
+            "EMPTY_SEARCH_WITHOUT_DISPLAYED_SONG_LOST_ITS_KNOWN_RECORDING_EVIDENCE");
+    }
+
+    private static async Task KnownProjection()
+    {
+        await using var f = new Fixture();
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var library = new MeowFilm.Capabilities.Library.MusicLibraryOwner(store);
+        var facts = new MeowFilm.Capabilities.Library.MusicSongMatcher(library, new(store), (_, _) =>
+            throw new InvalidOperationException("search projection cannot supplement"), f.Clock);
+        var wy = MusicSongFixture.Online("wy", "original", "Synthetic recording", "Artist", duration: 180);
+        var tx = MusicSongFixture.Online("tx", "known-mapping", "Synthetic recording", "Artist", duration: 180);
+        await facts.KnownAsync(wy, default); await facts.KnownAsync(tx, default);
+        f.Search.SongFactsProjection = facts.ProjectKnownFacts;
+        f.Catalog.Handler = (request, _) => Task.FromResult(Page(request, [wy]));
+        string id = Id(await f.Start(["wy"]));
+        var first = await f.Idle(id);
+        Check(HasSource(first, "tx") && f.Catalog.Calls.Count == 1, "SEARCH_FIRST_READ_DID_NOT_QUERY_KNOWN_FACTS");
+        var kg = MusicSongFixture.Online("kg", "later-mapping", "Synthetic recording", "Artist", duration: 180);
+        await facts.KnownAsync(kg, default);
+        var later = await f.Call("get", id);
+        Check(HasSource(later, "kg") && later.GetProperty("items")[0].GetProperty("songId").GetString() ==
+            wy["songId"]!.GetValue<string>() && f.Catalog.Calls.Count == 1,
+            "SEARCH_READ_DID_NOT_SEE_AN_EXISTING_ALIAS_UPDATE");
     }
 
     private static async Task LaterRoundFusion()

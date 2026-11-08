@@ -154,8 +154,10 @@ public sealed class MusicScriptOwner : IAsyncDisposable
     /// caching belong to the playback selection session, not to this adapter.</summary>
     private async Task<JsonObject> ResolveAsync(JsonObject p, CancellationToken external)
     {
-        LJ.Fields(p, "installationId platform song sourceKey quality qualityPolicySignature qualityCacheSignature",
+        LJ.Fields(p, "installationId platform song sourceKey quality qualityPolicySignature qualityCacheSignature manualSource",
             "installationId platform song quality");
+        LJ.Require(p["manualSource"] is null || LJ.IsBool(p["manualSource"]));
+        bool manualSource = LJ.B(p["manualSource"]);
         string id = LJ.Text(p["installationId"], 128), platform = LJ.Text(p["platform"]);
         LJ.Require(NativeMusicSong.Platforms.Contains(platform));
         string quality = LJ.Text(p["quality"]);
@@ -168,7 +170,7 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         using var policy = await library.AcquireQualityAsync(external).ConfigureAwait(false);
         if (p.ContainsKey("qualityPolicySignature"))
             LJ.Require(LJ.Text(p["qualityPolicySignature"], 64) == policy.Signature, "QUALITY_POLICY_CHANGED");
-        LJ.Require(MusicQualityPolicy.Enabled(quality, policy.Policy), "QUALITY_DISABLED");
+        LJ.Require(manualSource || MusicQualityPolicy.Enabled(quality, policy.Policy), "QUALITY_DISABLED");
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
         using var timed = CancellationTokenSource.CreateLinkedTokenSource(external, policy.Token, deadline.Token);
         var token = timed.Token;
