@@ -32,6 +32,25 @@ private actor MusicSourceManagementFixture: MusicScriptSourceManaging {
         items = items.map { $0.id == id ? value : $0 }
         return value
     }
+    func scriptSourceDetail(_ id: String) throws -> MusicScriptSourceDetail {
+        .init(item: try XCTUnwrap(items.first { $0.id == id }), networkURL: nil, rollbackAvailable: true)
+    }
+    func editScriptSource(_ id: String, name: String, networkURL: String?) throws -> MusicScriptSourceItem {
+        let old = try XCTUnwrap(items.first { $0.id == id })
+        let value = MusicScriptSourceItem(id: id, name: name, version: old.version, origin: old.origin,
+            platforms: old.platforms, enabled: old.enabled, state: old.state, check: old.check)
+        items = items.map { $0.id == id ? value : $0 }; return value
+    }
+    func updateScriptSource(_ id: String) throws -> MusicScriptSourceItem { try XCTUnwrap(items.first { $0.id == id }) }
+    func updateScriptSource(_ id: String, data: Data, fileName: String) throws -> MusicScriptSourceItem { try updateScriptSource(id) }
+    func rollbackScriptSource(_ id: String) throws -> MusicScriptSourceItem { try updateScriptSource(id) }
+    func checkScriptSource(_ id: String) throws -> MusicScriptSourceItem {
+        let old = try XCTUnwrap(items.first { $0.id == id })
+        let value = MusicScriptSourceItem(id: id, name: old.name, version: old.version, origin: old.origin,
+            platforms: old.platforms, enabled: old.enabled, state: old.state,
+            check: .init(summary: "normal", checkedAt: Date(), platforms: ["tx": "ok"]))
+        items = items.map { $0.id == id ? value : $0 }; return value
+    }
     func removeScriptSource(_ id: String) { items.removeAll { $0.id == id } }
 }
 
@@ -45,6 +64,24 @@ private actor MusicSourceManagementFixture: MusicScriptSourceManaging {
 
 @MainActor
 final class MusicSourceManagementStateTests: XCTestCase {
+    func testBatchCheckDisabledScriptsDoesNotEnableAndEditKeepsInstallationIdentity() async throws {
+        let scripts = MusicSourceManagementFixture()
+        let item = await scripts.importScriptSource(musicScriptFixture, fileName: "fixture.js")
+        let service = try await NativeMusicFixture.service()
+        let model = MusicViewModel(service: service, player: SourceSettingsPlayer(), scriptSources: scripts)
+        await model.load()
+        let state = MusicSourceManagementState(model: model)
+        state.start(); await state.flush()
+        state.select(item.id); state.checkSelected(); await state.flush()
+        XCTAssertFalse(try XCTUnwrap(state.item(item.id)).enabled)
+        XCTAssertEqual(state.item(item.id)?.check?.platforms["tx"], "ok")
+        state.edit(item.id, name: "Renamed", url: nil); await state.flush()
+        XCTAssertEqual(state.item(item.id)?.name, "Renamed")
+        XCTAssertEqual(state.scripts.map(\.id), [item.id])
+        state.removeSelected(); await state.flush(); XCTAssertTrue(state.scripts.isEmpty)
+        state.close(); await model.close(); await service.close()
+    }
+
     func testPageUsesOneListAndConfirmedOwnerSettingsAndSupportsBothImportActionsEnableAndDelete() async throws {
         let scripts = MusicSourceManagementFixture(), store = NativeMusicMemoryDocument()
         let service = try await NativeMusicFixture.service(store)

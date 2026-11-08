@@ -136,15 +136,22 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                         OptionalText(input, "ruleId"), OptionalText(input, "tabTagId")), signal).ConfigureAwait(false); break;
                 case "music.catalog.similar":
                     Fields(input, ["platform", "sourceIds"]);
-                    result = await catalog.SimilarAsync(new(Platform(input), Strings(input, "sourceIds", 20)), signal).ConfigureAwait(false); break;
+                    var sourceIds = Strings(input, "sourceIds");
+                    Check(sourceIds.Length <= 20, "INVALID_REQUEST");
+                    result = await catalog.SimilarAsync(new(Platform(input), sourceIds), signal).ConfigureAwait(false); break;
                 case "music.catalog.heartbeat":
-                    Fields(input, ["platform", "playlistId", "startMusicId", "songId", "fromHome"],
-                        ["platform", "playlistId", "startMusicId", "songId"]);
-                    result = await catalog.HeartbeatAsync(new(Platform(input), Text(input, "playlistId"),
-                        Text(input, "startMusicId"), Text(input, "songId"), Flag(input, "fromHome")), signal).ConfigureAwait(false); break;
+                    Fields(input, ["platform", "entry", "songId"], ["platform", "entry"]);
+                    var entry = Text(input, "entry") switch
+                    {
+                        "favorites" => MusicHeartbeatEntry.Favorites, "current" => MusicHeartbeatEntry.CurrentSong,
+                        _ => throw new CatalogFailure("INVALID_REQUEST")
+                    };
+                    var heartbeatSongId = OptionalText(input, "songId");
+                    Check(entry == MusicHeartbeatEntry.CurrentSong ? heartbeatSongId is not null : heartbeatSongId is null, "INVALID_REQUEST");
+                    result = await catalog.HeartbeatAsync(new(Platform(input), entry, heartbeatSongId), signal).ConfigureAwait(false); break;
                 case "music.catalog.queueRecommendations":
                     Fields(input, ["platform", "songIds", "currentPlaySongId"]);
-                    result = await catalog.QueueRecommendationsAsync(new(Platform(input), Strings(input, "songIds", 1000),
+                    result = await catalog.QueueRecommendationsAsync(new(Platform(input), Strings(input, "songIds"),
                         Text(input, "currentPlaySongId")), signal).ConfigureAwait(false); break;
                 case "music.catalog.album":
                     Fields(input, ["platform", "id", "refresh"], ["platform", "id"]);
@@ -530,10 +537,10 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         Check(total is null or >= 0, "INVALID_REQUEST");
         return new(scope, kind, listId, total, OptionalText(value, "version"), OptionalText(value, "name"));
     }
-    private static string[] Strings(JsonElement value, string name, int max)
+    private static string[] Strings(JsonElement value, string name)
     {
         Check(value.TryGetProperty(name, out var array) && array.ValueKind == JsonValueKind.Array &&
-            array.GetArrayLength() > 0 && array.GetArrayLength() <= max, "INVALID_REQUEST");
+            array.GetArrayLength() > 0, "INVALID_REQUEST");
         return array.EnumerateArray().Select(item => StringValue(item, 2048)).ToArray();
     }
     private static string StringValue(JsonElement value, int max)

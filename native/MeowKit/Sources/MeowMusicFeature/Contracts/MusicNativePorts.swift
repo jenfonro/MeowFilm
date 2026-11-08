@@ -35,13 +35,16 @@ public struct MusicNativeAudio: Sendable {
     public let expiresAt: Date?
     public let fileCachePolicy: MusicAudioFileCachePolicy
     public let delivery: MusicAudioDelivery?
+    /// Media duration can be known even when the response cannot identify its quality.
+    public let duration: Double?
     public let playbackAuthorization: MusicQueueAuthorization?
     public init(url: URL, headers: [String: String] = [:], expiresAt: Date? = nil,
                 fileCachePolicy: MusicAudioFileCachePolicy = .denied, delivery: MusicAudioDelivery? = nil,
-                playbackAuthorization: MusicQueueAuthorization? = nil) {
+                playbackAuthorization: MusicQueueAuthorization? = nil, duration: Double? = nil) {
         self.url = url; self.headers = headers; self.expiresAt = expiresAt
         self.fileCachePolicy = fileCachePolicy
         self.delivery = delivery; self.playbackAuthorization = playbackAuthorization
+        self.duration = duration ?? delivery?.duration
     }
 }
 
@@ -196,14 +199,20 @@ public struct MusicScriptSourceDetail: Sendable {
     }
 }
 
-/// Script-source management for the settings page. Import and download only
-/// store a disabled installation. Explicit enable and execution/check may load it.
+/// Shared-module management. Import stores a disabled installation; enable,
+/// playback and explicit health checks may execute it. No native script writer.
 public protocol MusicScriptSourceManaging: Sendable {
     func scriptSources() async throws -> [MusicScriptSourceItem]
     func importScriptSource(_ data: Data, fileName: String) async throws -> MusicScriptSourceItem
     func downloadScriptSource(from url: URL) async throws -> MusicScriptSourceItem
     func setScriptSourceEnabled(_ id: String, enabled: Bool) async throws -> MusicScriptSourceItem
     func removeScriptSource(_ id: String) async throws
+    func scriptSourceDetail(_ id: String) async throws -> MusicScriptSourceDetail
+    func editScriptSource(_ id: String, name: String, networkURL: String?) async throws -> MusicScriptSourceItem
+    func updateScriptSource(_ id: String) async throws -> MusicScriptSourceItem
+    func updateScriptSource(_ id: String, data: Data, fileName: String) async throws -> MusicScriptSourceItem
+    func rollbackScriptSource(_ id: String) async throws -> MusicScriptSourceItem
+    func checkScriptSource(_ id: String) async throws -> MusicScriptSourceItem
 }
 
 /// Source-availability diagnostics for playback consumers.

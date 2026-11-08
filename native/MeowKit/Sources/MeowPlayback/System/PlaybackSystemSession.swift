@@ -21,10 +21,13 @@ final class PlaybackSystemSession {
     private let notificationObservers = PlaybackObservationScope()
     private let commandObservers = PlaybackObservationScope()
     private let navigationObservers = PlaybackObservationScope()
+    private let playPauseObservers = PlaybackObservationScope()
     private let onEvent: @MainActor (Event, UUID) -> Void
-    private let onCommand: @MainActor (PlaybackTransportCommand, UUID) -> Bool
+    private let onCommand: @MainActor (PlaybackTransportCommand, UUID, PlaybackPlayPauseRoute?) -> Bool
     private let onNavigation: @MainActor (PlaybackNavigationRoute) -> Bool
     private var navigation = PlaybackNavigationRoutes()
+    private var playPause: PlaybackPlayPauseRoute?
+    private var playPauseRevision: UUID?
     private var generation: UUID?
     private var isActive = false
     private var artworkData: Data?
@@ -33,7 +36,7 @@ final class PlaybackSystemSession {
 
     init(
         onEvent: @escaping @MainActor (Event, UUID) -> Void,
-        onCommand: @escaping @MainActor (PlaybackTransportCommand, UUID) -> Bool,
+        onCommand: @escaping @MainActor (PlaybackTransportCommand, UUID, PlaybackPlayPauseRoute?) -> Bool,
         onNavigation: @escaping @MainActor (PlaybackNavigationRoute) -> Bool
     ) {
         self.onEvent = onEvent
@@ -48,15 +51,15 @@ final class PlaybackSystemSession {
         notificationObservers.cancel()
         commandObservers.cancel()
         navigationObservers.cancel()
+        playPauseObservers.cancel()
         navigation = PlaybackNavigationRoutes()
+        playPause = nil; playPauseRevision = nil
         self.generation = generation
         installNotifications(generation: generation)
         let center = MPRemoteCommandCenter.shared()
         center.previousTrackCommand.isEnabled = false
         center.nextTrackCommand.isEnabled = false
-        register(center.playCommand, generation: generation, command: .play)
-        register(center.pauseCommand, generation: generation, command: .pause)
-        register(center.togglePlayPauseCommand, generation: generation, command: .toggle)
+        updatePlayPause(nil)
         register(center.stopCommand, generation: generation, command: .stop)
 
         let command = center.changePlaybackPositionCommand
@@ -66,7 +69,7 @@ final class PlaybackSystemSession {
                   position.isFinite, position >= 0 else { return .commandFailed }
             return Self.onMain {
                 guard let self, self.generation == generation else { return .noSuchContent }
-                return self.onCommand(.seek(position), generation) ? .success : .commandFailed
+                return self.onCommand(.seek(position), generation, nil) ? .success : .commandFailed
             }
         }
         let target = command.addTarget(handler: handler)
@@ -102,13 +105,14 @@ final class PlaybackSystemSession {
     func update(
         snapshot: PlaybackSnapshot, attempt: PlayAttempt?, metadata: PlaybackNowPlayingMetadata?,
         rate: Float, canSeek: Bool,
-        navigation: PlaybackNavigationRoutes
+        navigation: PlaybackNavigationRoutes, playPause: PlaybackPlayPauseRoute?
     ) {
         guard let attempt, attempt.id == generation,
               snapshot.owner == attempt.owner, snapshot.resourceID == attempt.resourceID,
               snapshot.phase != .idle, snapshot.phase != .failed else { return }
         MPRemoteCommandCenter.shared().changePlaybackPositionCommand.isEnabled = canSeek
         updateNavigation(navigation)
+        updatePlayPause(playPause)
         guard let metadata else {
             artworkData = nil; artwork = nil
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
@@ -166,13 +170,42 @@ final class PlaybackSystemSession {
         }
     }
 
+    func updatePlayPause(_ route: PlaybackPlayPauseRoute?) {
+        guard let generation else { return }
+        let next = route?.attempt.id == generation ? route : nil
+        guard playPauseRevision == nil || playPause != next else { return }
+        playPause = next
+        let revision = UUID()
+        playPauseRevision = revision
+        playPauseObservers.cancel()
+        let center = MPRemoteCommandCenter.shared()
+        for (command, action) in [
+            (center.playCommand, PlaybackTransportCommand.play),
+            (center.pauseCommand, .pause), (center.togglePlayPauseCommand, .toggle)
+        ] {
+            command.isEnabled = true
+            let handler: @Sendable (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { [weak self] _ in
+                Self.onMain {
+                    guard let self, self.generation == generation, self.playPauseRevision == revision else {
+                        return .noSuchContent
+                    }
+                    return self.onCommand(action, generation, next) ? .success : .commandFailed
+                }
+            }
+            let target = command.addTarget(handler: handler)
+            playPauseObservers.insert { command.removeTarget(target); command.isEnabled = false }
+        }
+    }
+
     func endSession() {
         let ownedMetadata = generation != nil
         generation = nil
         notificationObservers.cancel()
         commandObservers.cancel()
         navigationObservers.cancel()
+        playPauseObservers.cancel()
         navigation = PlaybackNavigationRoutes()
+        playPause = nil; playPauseRevision = nil
         artworkData = nil; artwork = nil
         if ownedMetadata { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil }
         deactivate()
@@ -190,7 +223,7 @@ final class PlaybackSystemSession {
         let handler: @Sendable (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { [weak self] _ in
             Self.onMain {
                 guard let self, self.generation == generation else { return .noSuchContent }
-                return self.onCommand(action, generation) ? .success : .commandFailed
+                return self.onCommand(action, generation, nil) ? .success : .commandFailed
             }
         }
         let target = command.addTarget(handler: handler)

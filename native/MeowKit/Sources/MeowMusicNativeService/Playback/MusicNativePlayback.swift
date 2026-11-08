@@ -77,9 +77,11 @@ extension NativeMusicService {
         if let scripts, !rows.isEmpty {
             let snapshots: [MusicScriptSource]
             do { snapshots = try await work { try await scripts.sources() } }
-            catch let e as MusicServiceError where [.unavailable, .sourceUnavailable, .scriptRuntimeUnavailable,
-                .closed, .timeout, .resolutionTimeout, .busy, .upstreamFailed, .upstreamInvalid].contains(e) {
-                try check(own); scriptState = .unavailable(e); snapshots = []
+            catch {
+                try check(own)
+                let failure = MusicServiceError.sanitized(error)
+                guard failure == .unavailable || MusicCandidateDiscoveryFailures.mayTryAnother(failure) else { throw failure }
+                scriptState = .unavailable(failure); snapshots = []
             }
             try musicRequire(Set(snapshots.map(\.installationID)).count == snapshots.count, .invalidResponse)
             for snapshot in snapshots where snapshot.isCandidate {
@@ -115,9 +117,14 @@ extension NativeMusicService {
                             siteId: value.siteId, sourceKey: row.sourceKey, qualities: qualities, title: value.title,
                             version: value.version, contentHash: value.contentHash)) }
                     }
-                } catch let e as MusicServiceError where e.isAuthenticationFailure || e == .unsupported {
+                } catch {
+                    try check(own)
+                    let failure = MusicServiceError.sanitized(error)
                     // A signed-out account is not an alternative-source failure.
                     // Only explicit selection performs media resolution.
+                    guard failure.isAuthenticationFailure || failure == .unavailable ||
+                        MusicCandidateDiscoveryFailures.mayTryAnother(failure) ||
+                        MusicCandidateDiscoveryFailures.isContentFailure(failure) else { throw failure }
                 }
             }
         }
@@ -125,6 +132,7 @@ extension NativeMusicService {
         let current = try read()
         _ = try self.song(ref, current)
         try musicRequire(current.playback["revision"] == d.playback["revision"], .staleRevision)
+        result = try result.filter { try !sourceExcluded(song, provider: $0.installationId, platform: $0.siteId) }
         return .init(options: result, scriptState: scriptState)
     }
     func media(_ value: MusicNativeAudio) throws -> MusicNativeAudio {
@@ -142,7 +150,7 @@ extension NativeMusicService {
         }
         if let expires = value.expiresAt { try musicRequire(expires > now() && expires.timeIntervalSince1970.isFinite, .invalidMediaCandidate) }
         return .init(url: url, headers: headers, expiresAt: value.expiresAt, fileCachePolicy: value.fileCachePolicy,
-                     delivery: value.delivery, playbackAuthorization: value.playbackAuthorization)
+                     delivery: value.delivery, playbackAuthorization: value.playbackAuthorization, duration: value.duration)
     }
     public func resolve(attemptId: String, occurrenceId: String, selection: MusicPlaybackSelection) async throws -> MusicPlaybackCandidate {
         try check()
@@ -150,6 +158,7 @@ extension NativeMusicService {
         let d = try read()
         try musicRequire(d.queue["currentId"].string == occurrenceId, .targetChanged)
         let song = try self.song(.init(kind: .queue, id: occurrenceId), d), (source, info) = try target(song, selection.sourceKey)
+        try admitSource(song, selection: selection)
         try musicRequire(source.platform == selection.siteId, .targetChanged)
         try requirePlatform(source.platform)
         try musicRequire(selectedQualityEnabled(selection, d.playback), .qualityDisabled)
@@ -198,7 +207,7 @@ extension NativeMusicService {
             try musicRequire(!selection.installationId.hasPrefix("official:") ||
                 Self.officialEnabled(source.platform, current.playback), .sourceUnavailable)
             let valid = try media(audio)
-            try validateDelivery(valid.delivery, song: song, playback: current.playback)
+            try validateDelivery(valid, song: song, playback: current.playback)
             let candidate = MusicPlaybackCandidate(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
                 url: valid.url, headers: valid.headers, title: song["title"].string, startPosition: start,
                 requestedQuality: selection.quality, resolvedSelection: resolvedSelection,
@@ -206,9 +215,15 @@ extension NativeMusicService {
                 delivery: valid.delivery, playbackAuthorization: valid.playbackAuthorization)
             _ = try candidate.resource()
             try await stageAudioCache(audio: valid, song: song, selection: resolvedSelection, attemptID: attemptId)
+            try await admitRecordingSource(song, sourceKey: selection.sourceKey)
             try check(own)
             try musicRequire(attempt?.id == attemptId, .staleResult)
-            try pinPlaybackRecovery(candidate: candidate, song: song, state: d)
+            let latest = try read()
+            try musicRequire(latest.queue["currentId"].string == occurrenceId &&
+                latest.queue["revision"] == d.queue["revision"] &&
+                latest.playback["revision"] == d.playback["revision"], .staleRevision)
+            try admitSource(song, selection: selection)
+            try pinPlaybackRecovery(candidate: candidate, song: song, state: latest)
             let publish = {
                 self.attempt?.authorization = valid.playbackAuthorization
                 self.attempt?.ready = true
@@ -223,6 +238,7 @@ extension NativeMusicService {
     }
     public func cancel(attemptId: String?) async throws {
         try check()
+        if let attemptId { discardSource(attemptID: attemptId) } else { clearPreparedSources() }
         if let recovery = cachedPlaybackRecovery,
            attemptId == nil || attemptId == recovery.previousAttemptID || attemptId == attempt?.id {
             let owned = attempt?.cacheRecoveryID == recovery.id
@@ -238,14 +254,19 @@ extension NativeMusicService {
     }
     public func record(_ fact: MusicPlaybackFact) async throws -> Bool {
         try check()
+        try musicRequire(fact.position.isFinite && (0...604_800).contains(fact.position) &&
+            (fact.duration == nil || fact.duration!.isFinite && (0...604_800).contains(fact.duration!)))
+        if ![.failed, .stopped].contains(fact.kind) {
+            let song = try song(.init(kind: .queue, id: fact.occurrenceId), read())
+            try musicRequire(MusicMediaDuration.matches(expected: song["duration"].number, actual: fact.duration), .invalidMediaCandidate)
+        }
+        try commitPreparedSource(fact)
         guard let current = attempt, current.ready, current.id == fact.attemptId, current.occurrence == fact.occurrenceId,
               fact.resourceId == "music:" + current.id else { throw MusicServiceError.staleResult }
         try current.authorization?.check()
         let fileAuthorization = audioCacheAttempt.flatMap {
             $0.attemptID == current.id && $0.audio == nil ? $0.authorization : nil
         }
-        try musicRequire(fact.position.isFinite && (0...604_800).contains(fact.position) &&
-            (fact.duration == nil || fact.duration!.isFinite && (0...604_800).contains(fact.duration!)))
         if current.ended { return false }
         let record = fact.kind == .playing && !current.started
         let areas: Set<String> = record ? ["history", "playback"] : fact.kind == .failed ? ["queue", "playback"] : ["playback"]
@@ -287,7 +308,12 @@ extension NativeMusicService {
         // Publish flags only after a successful CAS.
         if record { attempt?.started = true }
         if [.ended, .failed, .stopped].contains(fact.kind) { attempt?.ended = true }
-        if accepted { audioCacheAcceptedFact(fact) }
+        if accepted {
+            if fact.kind == .playing { attempt?.isPlaying = true }
+            else if [.paused, .ended, .failed, .stopped].contains(fact.kind) { attempt?.isPlaying = false }
+            attempt?.latestFact = fact
+            audioCacheAcceptedFact(fact)
+        }
         return accepted
     }
     public func lyrics(occurrenceId: String, sourceKey: String) async throws -> MusicLyricsSnapshot {

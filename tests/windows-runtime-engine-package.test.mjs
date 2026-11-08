@@ -67,7 +67,8 @@ function verifyManifest(output, manifest) {
   assert.deepEqual(paths.filter(path => path.startsWith('app/')), [
     'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/entry.mjs',
     'app/modules/cat-script.mjs', ...metadataFiles.map(file => `app/${file}`), 'app/modules/music-script.mjs',
-    'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs',
+    'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs',
+    'app/pan-entry.mjs',
     'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
   ]);
 }
@@ -81,7 +82,7 @@ function packagingFixture({
   const lock = { name: manifest.name, version: manifest.version, lockfileVersion: 3, packages: { '': { ...manifest } } };
   const inert = 'throw new Error("Synthetic fixture must not execute");\n';
   write(source, 'package.json', manifest);
-  for (const name of ['runtime-bridge', 'script-host', 'source-runtime', 'inactive-core']) {
+  for (const name of ['runtime-bridge', 'script-host', 'source-runtime', 'pan-runtime', 'inactive-core']) {
     const location = `packages/${name}`, installed = `node_modules/@meowfilm/${name}`;
     const pkg = {
       name: `@meowfilm/${name}`, version: '1.0.0', type: 'module', license: 'MIT', exports: './src/index.js',
@@ -96,7 +97,8 @@ function packagingFixture({
     symlinkSync(join(source, location), join(source, installed), process.platform === 'win32' ? 'junction' : 'dir');
   }
   write(source, 'package-lock.json', lock);
-  for (const file of ['bootstrap.mjs', 'entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs'])
+  for (const file of ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs',
+    'modules/pan-runtime.mjs', 'modules/source-candidates.mjs'])
     write(source, `apps/runtime/${file}`, inert);
   if (!missingCommonModule) {
     write(source, 'apps/runtime/modules/music-script.mjs', inert);
@@ -169,7 +171,7 @@ test('Windows packaging preserves common files byte-for-byte and is reproducible
   assert.deepEqual(first.files.filter(file => !file.path.startsWith('app/windows/')), shared.files);
   assert.deepEqual(first.dependencies, shared.dependencies);
   assert.deepEqual(first.omittedOptionalDependencies, shared.omittedOptionalDependencies);
-  for (const file of metadataFiles) {
+  for (const file of [...metadataFiles, 'modules/pan-runtime.mjs', 'pan-entry.mjs']) {
     const path = `apps/runtime/${file}`, bytes = readFileSync(join(f.root, path));
     assert.deepEqual(readFileSync(join(f.output, 'app', file)), bytes);
     assert.deepEqual(first.inputs.filter(input => input.path === path), [{ path, sha256: sha256(bytes) }]);
@@ -177,7 +179,7 @@ test('Windows packaging preserves common files byte-for-byte and is reproducible
   assert.ok(readFileSync(join(f.output, first.entry), 'utf8').includes("from '../../entry.mjs'"));
 });
 
-test('Windows packaging accepts the optional metadata closure and neutral HTTP imports', async () => {
+test('Windows packaging accepts optional metadata and pan closures and neutral HTTP imports', async () => {
   const f = packagingFixture();
   write(f.root, 'apps/runtime/modules/metadata-data.mjs', `
     import '../contracts.mjs';
@@ -194,11 +196,18 @@ test('Windows packaging accepts the optional metadata closure and neutral HTTP i
     import './settings.mjs';
     throw new Error('Metadata network fixture code must never execute');
   `);
+  write(f.root, 'apps/runtime/pan-entry.mjs',
+    "export { createPanRuntimeModule } from './modules/pan-runtime.mjs';");
+  write(f.root, 'apps/runtime/modules/pan-runtime.mjs', `
+    import '@meowfilm/pan-runtime';
+    import '../contracts.mjs';
+    throw new Error('Pan fixture code must never execute');
+  `);
   verifyManifest(f.output, await packageWindowsRuntime({ ...f, product: 'aggregate' }));
 });
 
 for (const [name, mutate, code] of [
-  ...metadataFiles.map(file => [`missing shared ${file}`, f =>
+  ...[...metadataFiles, 'modules/pan-runtime.mjs', 'pan-entry.mjs'].map(file => [`missing shared ${file}`, f =>
     rmSync(join(f.root, 'apps/runtime', file)), 'MISSING_SOURCE']),
   ...['unlisted', 'modules/unlisted', 'modules/metadata/unlisted'].map(path =>
     [`unlisted shared directory ${path}`, f =>
@@ -206,7 +215,7 @@ for (const [name, mutate, code] of [
   ...['unlisted-helper.mjs', 'modules/metadata/unlisted-helper.mjs'].map(file =>
     [`unlisted shared file ${file}`, f =>
       write(f.root, `apps/runtime/${file}`, 'export {};'), 'SHARED_CLOSURE']),
-  ...['node:net', 'node:fs', '@meowfilm/script-host/src/host.js',
+  ...['node:net', 'node:fs', '@meowfilm/script-host/src/host.js', '@meowfilm/pan-runtime/src/index.js',
     '../../../windows/runtime/bootstrap.mjs', '../../../ios/runtime/bootstrap.mjs'].map(specifier =>
     [`metadata import ${specifier}`, f =>
       write(f.root, 'apps/runtime/modules/metadata/network.mjs', `import '${specifier}';`), 'SHARED_IMPORT']),
@@ -273,7 +282,7 @@ function nativeFixture(t) {
     // Use actual build evidence. No fabricated addon, SDK, upstream hash or receipt can satisfy this fixture.
     for (const path of new Set(['package.json', 'package-lock.json', 'scripts/script-host-native.json',
       artifactPath, receiptPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
-    for (const name of ['runtime-bridge', 'source-runtime', 'script-host']) {
+    for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime']) {
       copy(`packages/${name}/package.json`);
       copy(`packages/${name}/src`);
       const installed = join(source, 'node_modules/@meowfilm', name);

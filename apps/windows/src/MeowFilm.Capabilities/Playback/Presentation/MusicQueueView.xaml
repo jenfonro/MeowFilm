@@ -32,8 +32,9 @@
   </ResourceDictionary>
  </UserControl.Resources>
  <Grid Margin="20,18,8,14">
-  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <desktop:NoticeOutlet Message="{Binding QueueSurfaceStatus}"/>
+  <desktop:NoticeOutlet Message="{Binding QueueRecommendationStatus}"/>
   <Grid Margin="0,0,12,14">
    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -130,5 +131,49 @@
     </Grid>
    </DataTemplate></ListBox.ItemTemplate>
   </ListBox>
+  <Grid Grid.Row="2" Margin="0,16,12,0"
+        Visibility="{Binding HasQueueRecommendations,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+   <DockPanel Margin="0,0,0,8">
+    <CheckBox DockPanel.Dock="Right" Content="续播" IsChecked="{Binding RecommendationContinue,Mode=OneWay}"
+              IsEnabled="{Binding CanChangeRecommendationContinue}" Click="Continue_Click"
+              VerticalAlignment="Center" Margin="12,0,0,0" AutomationProperties.Name="推荐续播"/>
+    <Button DockPanel.Dock="Right" Content="重试推荐" Click="RetryRecommendation_Click"
+            IsEnabled="{Binding CanRetryRecommendation}" Style="{StaticResource MeowFilm.QuietButton}"
+            Padding="6,4" Margin="8,0,0,0"/>
+    <Button DockPanel.Dock="Right" Content="核对保存结果" Click="ReconcileRecommendation_Click"
+            Visibility="{Binding CanReconcileRecommendation,Converter={StaticResource MeowFilm.BoolToVisibility}}"
+            Style="{StaticResource MeowFilm.QuietButton}" Padding="6,4"/>
+    <TextBlock Text="为你推荐" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+   </DockPanel>
+   <TextBlock Grid.Row="1" Text="{Binding QueueRecommendationEmptyText}" FontSize="13"
+              Foreground="{DynamicResource MeowFilm.Brush.Muted}"/>
+   <ListBox x:Name="RecommendationList" Grid.Row="2" ItemsSource="{Binding RecommendationCandidates}"
+            MaxHeight="232" BorderThickness="0" Background="Transparent"
+            ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
+            VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+            IsEnabled="{Binding CanChooseRecommendation}" AutomationProperties.Name="为你推荐候选">
+    <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem">
+     <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/>
+     <Setter Property="Focusable" Value="False"/>
+    </Style></ListBox.ItemContainerStyle>
+    <ListBox.ItemTemplate><DataTemplate>
+     <Button Tag="{Binding}" Click="Recommendation_Click" Style="{StaticResource MeowFilm.QuietButton}"
+             HorizontalContentAlignment="Stretch" Margin="0" Padding="0,8" AutomationProperties.Name="{Binding Title}">
+      <Grid>
+       <Grid.ColumnDefinitions><ColumnDefinition Width="48"/><ColumnDefinition/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
+       <art:ArtworkImage Address="{Binding Cover}" Width="40" Height="40" HorizontalAlignment="Left" local:CardClip.Radius="4"/>
+       <StackPanel Grid.Column="1" Margin="8,0" VerticalAlignment="Center">
+        <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14"/>
+        <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="12" Margin="0,3,0,0"
+                   Foreground="{DynamicResource MeowFilm.Brush.Muted}"/>
+       </StackPanel>
+       <TextBlock Grid.Column="2" Text="{Binding Duration}" FontSize="12" VerticalAlignment="Center"
+                  HorizontalAlignment="Right" Foreground="{DynamicResource MeowFilm.Brush.Muted}"/>
+      </Grid>
+     </Button>
+    </DataTemplate></ListBox.ItemTemplate>
+   </ListBox>
+  </Grid>
  </Grid>
 </UserControl>

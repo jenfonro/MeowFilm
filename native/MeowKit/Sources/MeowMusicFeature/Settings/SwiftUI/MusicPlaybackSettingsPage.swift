@@ -90,6 +90,18 @@ struct MusicQualitySettingsContent: View {
 
     var body: some View {
         List {
+            if !spatial {
+                Section {
+                    Picker("请求音质", selection: Binding(get: { state.value.requestQuality }, set: state.setRequestQuality)) {
+                        ForEach(MusicSourceQualityPolicy.qualities, id: \.self) { quality in
+                            Text(MusicQualityLabel.name(quality)).tag(quality)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(!state.available || state.busy)
+                    .modifier(MusicSettingsRowStyle(theme: theme))
+                }
+            }
             Section(spatial ? "空间／全景音频优先级" : "音质优先级") {
                 ForEach(order, id: \.self) { id in
                     Toggle(isOn: Binding(

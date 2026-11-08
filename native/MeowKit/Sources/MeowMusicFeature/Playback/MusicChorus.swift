@@ -9,7 +9,7 @@ public struct MusicChorusPoint: Codable, Sendable, Equatable {
         start.isFinite && end.isFinite && start >= 0 && end > start &&
         recordingDuration.isFinite && actualDuration.isFinite &&
         recordingDuration > 0 && actualDuration > 0 &&
-        abs(recordingDuration - actualDuration) <= max(3, min(recordingDuration, actualDuration) * 0.02) &&
+        MusicMediaDuration.matches(expected: recordingDuration, actual: actualDuration) &&
         end <= recordingDuration && end <= actualDuration
     }
 }
@@ -18,5 +18,5 @@ public protocol MusicChorusProviding: Sendable {
 }
 public protocol MusicNativeChorusProviding: Sendable {
     func nativeChorus(nativeID: String, selection: MusicPlaybackSelection,
-                      recordingDuration: Double, actualDuration: Double) async throws -> MusicChorusPoint?
+                      recordingDuration: Double, actualDuration: Double, cachedOnly: Bool) async throws -> MusicChorusPoint?
 }

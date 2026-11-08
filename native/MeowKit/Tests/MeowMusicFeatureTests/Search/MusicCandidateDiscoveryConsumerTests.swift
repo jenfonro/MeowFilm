@@ -122,7 +122,7 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
         XCTAssertEqual(facts.retained, result.candidate.attemptId)
     }
     func testAuthorizationAndRevisionFailuresAreNotFallbackPermission() async throws {
-        for failure in [MusicServiceError.authRequired, .verificationRequired, .rateLimited, .targetChanged, .staleRevision, .storageConflict] {
+        for failure in [MusicServiceError.authRequired, .verificationRequired, .targetChanged, .staleRevision, .storageConflict] {
             let a = MusicCandidateDiscoveryFixture.option("a"), b = MusicCandidateDiscoveryFixture.option("b")
             let session = MusicCandidateDiscoveryTestSession(known: MusicCandidateDiscoveryFixture.snapshot([a, b]), failures: [failure])
             let consumer = MusicCandidateDiscoveryConsumer(provider: MusicCandidateDiscoveryTestProvider(session: session))
@@ -131,6 +131,23 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
             let facts = await session.facts()
             XCTAssertEqual(facts.targets.count, 1); XCTAssertEqual(facts.commits, 0)
             XCTAssertEqual(facts.discoveries, 0)
+        }
+    }
+    func testProviderFailuresTryAnotherTargetWithoutTreatingThemAsContentFacts() async throws {
+        for failure in [MusicServiceError.connectionFailed, .networkOffline, .scriptFailed, .scriptRuntimeUnavailable,
+                        .rateLimited, .busy, .requestRejected] {
+            let a = MusicCandidateDiscoveryFixture.option("a", qualities: ["flac"])
+            let b = MusicCandidateDiscoveryFixture.option("b", qualities: ["flac"])
+            let session = MusicCandidateDiscoveryTestSession(
+                known: MusicCandidateDiscoveryFixture.snapshot([a, b]), failures: [failure])
+            let consumer = MusicCandidateDiscoveryConsumer(provider: MusicCandidateDiscoveryTestProvider(session: session))
+            let result = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1, mode: .automatic())
+            XCTAssertEqual(result.target.selection.installationId, "b")
+            XCTAssertEqual(result.issues.map(\.failure), [failure])
+            let facts = await session.facts()
+            XCTAssertEqual(facts.targets.map(\.selection.installationId), ["a", "b"])
+            XCTAssertEqual(facts.discoveries, 0)
+            XCTAssertFalse(MusicCandidateDiscoveryFailures.isContentFailure(failure))
         }
     }
     func testKnownCandidateDoesNotWaitForDiscoveryAndDoesNotCommitItsLateMetadata() async throws {

@@ -93,6 +93,7 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
             default: return .connectionFailed
             }
         }
+        if let error = error as? MusicSourceDeclarationFailure { return error.failure }
         return error as? MusicServiceError ?? .unavailable
     }
 
@@ -181,6 +182,7 @@ public struct MusicPlaybackState: Codable, Equatable, Sendable {
     public let revision: Int
     public let settingsRevision: Int
     public let mode: MusicPlaybackMode
+    public let requestQuality: String
     public let qualityEnabled: [String]
     public let qualityOrder: [String]
     public let spatialEnabled: [String]
@@ -210,8 +212,9 @@ public struct MusicPlaybackState: Codable, Equatable, Sendable {
                 total: Int = 0, position: Double = 0, canNext: Bool = false, canPrevious: Bool = false,
                 nextPreviewID: String? = nil, previousPreviewID: String? = nil,
                 fmNextPreviewID: String? = nil, fmPreviousPreviewID: String? = nil,
-                sourceCollectionID: String? = nil) {
+                sourceCollectionID: String? = nil, requestQuality: String = "flac") {
         self.revision = revision; self.settingsRevision = settingsRevision; self.mode = mode
+        self.requestQuality = requestQuality
         self.qualityEnabled = qualityEnabled; self.qualityOrder = qualityOrder
         self.spatialEnabled = spatialEnabled; self.spatialOrder = spatialOrder
         self.lyricsEnabled = lyricsEnabled; self.showTranslation = showTranslation
@@ -290,6 +293,7 @@ public struct MusicAdvanceResult: Sendable {
 public struct MusicSettingsChange: Sendable {
     public let ifRevision: Int
     public var mode: MusicPlaybackMode?
+    public var requestQuality: String?
     public var qualityEnabled: [String]?
     public var qualityOrder: [String]?
     public var spatialEnabled: [String]?
@@ -300,7 +304,8 @@ public struct MusicSettingsChange: Sendable {
     public init(ifRevision: Int, mode: MusicPlaybackMode? = nil, qualityEnabled: [String]? = nil,
                 qualityOrder: [String]? = nil, spatialEnabled: [String]? = nil, spatialOrder: [String]? = nil,
                 lyricsEnabled: Bool? = nil, showTranslation: Bool? = nil,
-                officialSources: [MusicAccountPlatform]? = nil) {
+                officialSources: [MusicAccountPlatform]? = nil, requestQuality: String? = nil) {
+        self.requestQuality = requestQuality
         self.ifRevision = ifRevision; self.mode = mode; self.qualityEnabled = qualityEnabled; self.qualityOrder = qualityOrder
         self.spatialEnabled = spatialEnabled; self.spatialOrder = spatialOrder
         self.lyricsEnabled = lyricsEnabled; self.showTranslation = showTranslation
@@ -383,7 +388,7 @@ public struct MusicPlaybackCandidate: Sendable {
               resolved.quality.utf8.elementsEqual(requested.quality.utf8),
               requestedQuality.utf8.elementsEqual(requested.quality.utf8),
               resolved.scriptIdentity == requested.scriptIdentity,
-              official || resolved.scriptIdentity != nil,
+              official || isCachedAudio && url.isFileURL || resolved.scriptIdentity != nil,
               resolved.generation > 0 && resolved.generation <= 9_007_199_254_740_991,
               resolved.generation == requested.generation || !official && requested.generation == 0 else {
             throw MusicServiceError.invalidResponse

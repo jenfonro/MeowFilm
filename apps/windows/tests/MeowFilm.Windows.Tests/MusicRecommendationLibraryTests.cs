@@ -25,6 +25,10 @@ public static class MusicRecommendationLibraryTests
         yield return new("Recommendation owner failed restore does not consume checkpoint", () => UnknownRestore(false));
         yield return new("Recommendation owner lost restore ACK consumes only after read reconcile", () => UnknownRestore(true));
         yield return new("Recommendation owner atomic append select and lost ACK never duplicates", Append);
+        yield return new("Recommendation owner append preserves original source context and selection", AppendUnselected);
+        yield return new("Recommendation owner append checks revision and returns tail occurrences without changing next priority", AppendTailAndVersion);
+        yield return new("Recommendation owner full enter and append retain complete native batches", FullBatches);
+        yield return new("Recommendation owner invalid append selection cannot mutate queue", AppendInvalidSelection);
         yield return new("Recommendation owner checkpoint private to owner cannot cold revive", OwnerScope);
         yield return new("Recommendation owner cancelled before admission no writes or captures", CancelBefore);
         yield return new("Recommendation owner cancellation after admission awaits physical CAS", CancelAfter);
@@ -171,13 +175,75 @@ public static class MusicRecommendationLibraryTests
     {
         var store = new Store(); await using var owner = new MusicLibraryOwner(store);
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1") }, index = 0 });
-        string nonce = Nonce(); var p = new { nonce, expectedVersion = N(await Queue(owner), "version"), songs = new[] { Song("2"), Song("3") }, selectFirst = true };
+        string nonce = Nonce(); var p = new { nonce, expectedVersion = N(await Queue(owner), "version"), songs = new[] { Song("2"), Song("3") }, selectIndex = 1 };
         int writes = store.Writes; store.Failure = 2;
         await Error(owner, "append", p, "COMMIT_UNKNOWN");
         Check(store.Writes == writes + 1);
         await Command(owner, "reconcile", new { nonce }); await Command(owner, "append", p);
         var q = await Queue(owner); Check(store.Writes == writes + 1 && N(q, "total") == 3 &&
-            MusicSongFixture.NativeId(q.GetProperty("current").GetProperty("song")) == "2");
+            MusicSongFixture.NativeId(q.GetProperty("current").GetProperty("song")) == "3");
+    }
+    private static async Task AppendUnselected()
+    {
+        var store = new Store(); await using var owner = new MusicLibraryOwner(store);
+        await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2") }, index = 1,
+            context = new { sourceTitle = "Original", sourceType = "search", searchKeyword = "needle",
+                queueSource = new { id = "source", title = "Original", kind = "search", platform = "wy" } } });
+        var before = await Queue(owner); int writes = store.Writes;
+        await Command(owner, "append", new { nonce = Nonce(), expectedVersion = N(before, "version"),
+            songs = new[] { Song("3"), Song("4") }, context = new { sourceTitle = "为你推荐" } });
+        var after = await Queue(owner);
+        Check(store.Writes == writes + 1 && N(after, "total") == 4 && Current(after) == Current(before));
+        Check(after.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText() &&
+            after.GetProperty("entries")[1].GetRawText() == before.GetProperty("entries")[1].GetRawText());
+    }
+    private static async Task AppendInvalidSelection()
+    {
+        var store = new Store(); await using var owner = new MusicLibraryOwner(store);
+        await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1") }, index = 0 });
+        var before = await Queue(owner); int writes = store.Writes;
+        var result = await owner.ExecuteAsync(Prefix + "append", new { nonce = Nonce(), expectedVersion = N(before, "version"),
+            songs = new[] { Song("2") }, selectIndex = 1 });
+        Check(!result.GetProperty("ok").GetBoolean() && store.Writes == writes &&
+            N(await Queue(owner), "version") == N(before, "version") && (await Queue(owner)).GetProperty("entries").GetRawText() ==
+            before.GetProperty("entries").GetRawText());
+    }
+    private static async Task AppendTailAndVersion()
+    {
+        var store = new Store(); await using var owner = new MusicLibraryOwner(store);
+        await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2") }, index = 0 });
+        var priority = await Ok(owner, "music.queue.append", new { songs = new[] { Song("9") }, next = true });
+        var before = await Queue(owner); int writes = store.Writes;
+        await Error(owner, "append", new { nonce = Nonce(), expectedVersion = N(before, "version") - 1,
+            songs = new[] { Song("3") } }, "REVISION_CONFLICT");
+        Check(store.Writes == writes && (await Queue(owner)).GetRawText() == before.GetRawText());
+        var parameters = new { nonce = Nonce(), expectedVersion = N(before, "version"),
+            songs = new[] { Song("3"), Song("4") } };
+        var result = await Command(owner, "append", parameters);
+        var after = await Queue(owner);
+        var entries = after.GetProperty("entries").EnumerateArray().ToArray();
+        Check(N(after, "total") == 5 && N(after, "version") == N(before, "version") + 1 &&
+            Current(after) == Current(before) && store.Writes == writes + 1);
+        Check(entries.Take(3).Select(e => e.GetRawText()).SequenceEqual(
+            before.GetProperty("entries").EnumerateArray().Select(e => e.GetRawText())));
+        Check(entries.Skip(3).Select(e => MusicSongFixture.NativeId(e.GetProperty("song"))).SequenceEqual(new[] { "3", "4" }));
+        Check(result.GetProperty("entryIds").EnumerateArray().Select(e => e.GetString()).SequenceEqual(
+            entries.Skip(3).Select(e => S(e, "id"))));
+        Check((await Command(owner, "append", parameters)).GetRawText() == result.GetRawText() && store.Writes == writes + 1);
+        var peek = await Ok(owner, "music.queue.peekNext");
+        Check(S(peek.GetProperty("next"), "id") == priority.GetProperty("entryIds")[0].GetString());
+    }
+    private static async Task FullBatches()
+    {
+        var store = new Store(); await using var owner = new MusicLibraryOwner(store);
+        var first = Enumerable.Range(1, 1001).Select(id => Song(id.ToString())).ToArray();
+        var entered = await Command(owner, "enter", new { nonce = Nonce(), expectedVersion = N(await Queue(owner), "version"), songs = first });
+        Check(entered.GetProperty("entryIds").GetArrayLength() == first.Length && N(await Queue(owner), "total") == first.Length);
+        string current = Current(await Queue(owner)); int writes = store.Writes;
+        var next = Enumerable.Range(1002, 1001).Select(id => Song(id.ToString())).ToArray();
+        var appended = await Command(owner, "append", new { nonce = Nonce(), expectedVersion = N(await Queue(owner), "version"), songs = next });
+        Check(appended.GetProperty("entryIds").GetArrayLength() == next.Length &&
+            N(await Queue(owner), "total") == first.Length + next.Length && Current(await Queue(owner)) == current && store.Writes == writes + 1);
     }
     private static async Task OwnerScope()
     {

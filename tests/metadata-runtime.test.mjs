@@ -6,7 +6,8 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, statSync }
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { createAppRuntime, createTMDBDataModule, createDoubanDataModule } from '../apps/runtime/entry.mjs';
+import { createAppRuntime, createTMDBDataModule, createDoubanDataModule,
+  createPanRuntimeModule } from '../apps/runtime/entry.mjs';
 import { createRuntimeClient } from '../apps/runtime/client.mjs';
 import { createMetadataSettings } from '../apps/runtime/modules/metadata/settings.mjs';
 
@@ -59,6 +60,50 @@ function image(owner, path, { authenticated = true, onData } = {}) {
 const json = (response, body) => {
   response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(body));
 };
+
+test('metadata and opt-in pan modules share one authenticated session without gaining source upload', async t => {
+  const dataRoot = area(t);
+  const identity = { sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex') };
+  let panClosed = 0;
+  const app = createAppRuntime({ ...identity, modules: [
+    createPanRuntimeModule({ dataRoot, transport: {
+      request() { assert.fail('unexpected pan upstream'); }, close() { panClosed++; },
+    } }),
+    createTMDBDataModule({ dataRoot }), createDoubanDataModule({ dataRoot }),
+  ] });
+  await app.start();
+  const client = createRuntimeClient({ ...identity, baseUrl: app.baseUrl });
+  t.after(async () => { await client.close(); await app.close(); });
+  assert.deepEqual(value(await client.describe()).modules.map(module => module.id), ['pan', 'tmdb', 'douban']);
+  assert.equal(value(await client.call('pan.providers')).providers.length, 7);
+  assert.equal(value(await client.call('tmdb.data.settings.get')).apiKeyConfigured, false);
+  assert.equal(value(await client.call('douban.data.settings.get')).cookieConfigured, false);
+  for (const id of ['pan', 'tmdb', 'douban']) {
+    await assert.rejects(client.upload(id, 'unused', 1, Buffer.from('no')), { code: 'METHOD_NOT_FOUND' });
+  }
+  assert.equal(value(await client.shutdown()).cleanupComplete, true);
+  assert.equal(panClosed, 1);
+});
+
+test('coassembled pan failures retain the pan contract without disrupting metadata reads', async t => {
+  const dataRoot = area(t);
+  const identity = { sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex') };
+  const app = createAppRuntime({ ...identity, modules: [
+    { id: 'pan', version: '0.1.0', contract: 'pan.runtime.v1', close() {}, methods: {
+      'pan.providers'() { throw new Error('not a public error'); },
+      'pan.settings.get'() { return { ok: false, contract: 'pan.runtime.v1', code: 'NOT_A_PUBLIC_CODE' }; },
+    } },
+    createTMDBDataModule({ dataRoot }), createDoubanDataModule({ dataRoot }),
+  ] });
+  await app.start();
+  const client = createRuntimeClient({ ...identity, baseUrl: app.baseUrl });
+  t.after(async () => { await client.close(); await app.close(); });
+  for (const method of ['pan.providers', 'pan.settings.get']) {
+    assert.deepEqual(await client.call(method), { ok: false, contract: 'pan.runtime.v1', code: 'PAN_FAILURE' });
+  }
+  assert.equal(value(await client.call('tmdb.data.settings.get')).apiKeyConfigured, false);
+  assert.equal(value(await client.call('douban.data.settings.get')).cookieConfigured, false);
+});
 
 test('metadata modules expose read-only operations without script upload or changing source data', async t => {
   const observed = [];

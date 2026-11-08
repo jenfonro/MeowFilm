@@ -40,10 +40,10 @@ internal static class FeedbackProtocolRequests
     }
     internal static HttpRequestMessage WyReport(MusicPlatformSession account, MusicFeedbackStart start, MusicFeedbackEnd? end, MusicWyClientContext client)
     {
-        string source = start.Source switch
+        string source = start.IsQueueRecommendation ? start.Source : start.Source switch
         {
             "playlist" or "likeMusic" => "list", "userfm" => "radio",
-            "album" or "search" or "dailySongRecommend" or "song" => start.Source, _ => ""
+            "album" or "search" or "dailySongRecommend" or "song" or "aiMode" or "moreRcmd" => start.Source, _ => ""
         };
         var json = new JsonObject { ["id"] = start.Recording.Id, ["type"] = "song" };
         if (source.Length > 0) { json["source"] = source; json["sourceId"] = start.SourceId; }

@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Feedback;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Capabilities.Recommendations;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -307,6 +308,42 @@ public static class MusicPlaybackFeedbackTests
                 Check(f.Protocol.Starts.Single().Source == "unknown" && f.Protocol.Starts.Single().SourceId == "");
             }
         });
+        foreach (var (kind, provider, source, expected, sourceId) in new[]
+        {
+            ("heartbeat", "heartbeat", "aiMode", "aiMode", "500"),
+            ("heartbeat", "queue-recommendations", "queue-heart-source", "queue-heart-source", ""),
+            ("queue", "queue-recommendations", "search_song_detail_page_song_rec", "search_song_detail_page_song_rec", ""),
+            ("queue", "queue-recommendations", "", "moreRcmd", "")
+        })
+            yield return Case("live-recommendation-source-" + provider + "-" + source, async () =>
+            {
+                await using var f = new Fixture(); await f.Enable("wy");
+                f.Controller.Select(Recommended(kind, provider, source));
+                f.Controller.Started("entry-1", 0, 200); await f.Drain();
+                var start = f.Protocol.Starts.Single();
+                Check(start.Source == expected && start.SourceId == sourceId && start.SourceType == "track" &&
+                    start.Algorithm == "fixture-alg" && start.IsQueueRecommendation == (provider == "queue-recommendations"));
+                Check(start.Mode == (kind == "heartbeat" ? "ai" : "circulation"));
+            });
+        yield return Case("recommendation-does-not-grant-feedback-consent", async () =>
+        {
+            await using var f = new Fixture();
+            f.Controller.Select(Recommended("queue", "queue-recommendations", "queue-source"));
+            f.Controller.Started("entry-1", 0, 200); await f.Drain();
+            Check(f.Protocol.Starts.IsEmpty && f.Sessions.Acquires == 0 && f.Store.Writes == 0);
+        });
+        foreach (string invalid in new[] { "stale", "wrong-entry", "persisted" })
+            yield return Case("recommendation-source-requires-live-proof-" + invalid, async () =>
+            {
+                await using var f = new Fixture(); await f.Enable("wy");
+                var selection = invalid == "persisted"
+                    ? Selection(context: new { sourcePlatform = "wy", sourceType = "queue", feedbackSource = "queue-source" })
+                    : Recommended("queue", "queue-recommendations", "queue-source",
+                        current: invalid != "stale", entry: invalid == "wrong-entry" ? "old-entry" : "entry-1");
+                f.Controller.Select(selection); f.Controller.Started("entry-1", 0, 200); await f.Drain();
+                var start = f.Protocol.Starts.Single();
+                Check(start.Source == "unknown" && !start.IsQueueRecommendation && start.Algorithm == "");
+            });
         foreach (string reason in new[] { "end", "error" })
             yield return Case("real-native-protocol-consumes-player-" + reason, async () =>
             {
@@ -368,6 +405,13 @@ public static class MusicPlaybackFeedbackTests
     private static JsonElement Merged() => Song(sources: [Raw("wy", "123"), Raw("tx", "mid123"), Raw("kg", new string('A', 32))]);
     private static MusicFeedbackSelection Selection(JsonElement? song = null, object? context = null) =>
         new("entry-1", song ?? Song(), context is null ? null : JsonSerializer.SerializeToElement(context));
+    private static MusicFeedbackSelection Recommended(string kind, string provider, string source,
+        bool current = true, string entry = "entry-1") =>
+        Selection() with
+        {
+            Recommendation = new(new MusicRecommendationFeedback("session", "batch", entry, "wy", kind, provider,
+                "playlist", "500", "fixture-alg", "", "", true, false, source), () => current)
+        };
 
     private sealed class Clock : TimeProvider
     {

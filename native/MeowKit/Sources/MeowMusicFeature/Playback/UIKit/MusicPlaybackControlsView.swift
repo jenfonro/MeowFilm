@@ -113,7 +113,7 @@ final class MusicPlaybackControlsView: UIView {
         }, for: .touchUpInside)
         mode.addAction(UIAction { [weak self] _ in self?.onMode?() }, for: .touchUpInside)
         more.addAction(UIAction { [weak self] _ in self?.onMore?() }, for: .touchUpInside)
-        quality.addAction(UIAction { [weak self] _ in self?.onSources?() }, for: .touchUpInside)
+        quality.showsMenuAsPrimaryAction = true
         progress.addAction(UIAction { [weak self] _ in
             guard let self else { return }
             self.content.holdDock()
@@ -295,15 +295,33 @@ final class MusicPlaybackControlsView: UIView {
             mode.setImage(UIImage(systemName: content.model.state.mode.symbol), for: .normal)
         }
         mode.accessibilityValue = content.model.state.mode.title
-        let qualityName = content.model.activeAudioDelivery.map { MusicQualityLabel.name($0.quality) }
-        if layout == .full {
-            quality.setTitle(qualityName, for: .normal)
-            quality.alpha = qualityName == nil ? 0 : 1
-            quality.accessibilityElementsHidden = qualityName == nil
-            quality.isUserInteractionEnabled = qualityName != nil
-        } else {
-            quality.setTitle(qualityName ?? "音质未知", for: .normal)
+        let model = content.model
+        let hasPlayback = model.activeResourceID != nil || model.isResolving
+        let qualityName = model.isResolving ? "匹配中" : model.activeAudioDelivery.map {
+            MusicSourceQualityPolicy.group($0.quality) == "spatial" ? "空间" : MusicQualityLabel.name($0.quality)
+        } ?? "音质未知"
+        quality.setTitle(qualityName, for: .normal)
+        quality.alpha = hasPlayback ? 1 : 0
+        quality.accessibilityElementsHidden = !hasPlayback
+        quality.isUserInteractionEnabled = hasPlayback
+        let occurrence = model.current?.id, access = model.accountAccessGeneration
+        func action(_ value: String) -> UIAction {
+            UIAction(title: MusicQualityLabel.name(value), state: model.activeAudioDelivery?.quality == value ? .on : .off) { [weak model] _ in
+                Task {
+                    guard let model, model.current?.id == occurrence, model.accountAccessGeneration == access else { return }
+                    await model.switchQuality(value)
+                }
+            }
         }
+        let enabled = MusicSourceQualityPolicy.ordered(model.state, automatic: false)
+        let spatial = enabled.filter { MusicSourceQualityPolicy.group($0) == "spatial" }
+        quality.menu = UIMenu(children: [
+            UIAction(title: "查看更多", image: UIImage(systemName: "list.bullet")) { [weak self] _ in self?.onSources?() },
+            UIMenu(options: .displayInline, children: enabled.filter {
+                MusicSourceQualityPolicy.group($0) != "spatial"
+            }.map(action)),
+            UIMenu(title: "空间", children: spatial.map(action)),
+        ])
         quality.accessibilityValue = content.model.activeAudioIsCached.map { $0 ? "本机缓存" : "网络音源" } ?? "未选择音源"
         updateFavorite()
         updateClock()

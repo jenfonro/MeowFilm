@@ -35,8 +35,8 @@ extension NativeMusicService {
                         }
                     } catch {
                         let failure = MusicServiceError.sanitized(error)
-                        guard [.authRequired, .sessionExpired, .unsupported, .sourceUnavailable, .unavailable, .scriptRuntimeUnavailable, .timeout,
-                               .upstreamFailed, .upstreamInvalid, .busy, .rateLimited, .verificationRequired].contains(failure) else { throw failure }
+                        guard MusicCandidateDiscoveryFailures.mayTryAnother(failure) ||
+                            failure.isAuthenticationFailure || [.verificationRequired, .unavailable].contains(failure) else { throw failure }
                         return .init(issues: [.init(stage: .capability, platform: platform, failure: failure)],
                             scriptState: platform == "lx" ? .unavailable(failure) : .notConfigured)
                     }
@@ -72,6 +72,7 @@ extension NativeMusicService {
         var rows: [MusicCandidateDiscoveryOption] = []
         for snapshot in snapshots where snapshot.isCandidate {
             for source in try MusicModel.sources(song) where platformEnabled(source.platform) && !excluded.contains(source.sourceKey) {
+                if try sourceExcluded(song, provider: snapshot.installationID, platform: source.platform) { continue }
                 guard snapshot.capabilities.contains(where: { $0.siteID == source.platform && $0.actions.contains("musicUrl") }) else { continue }
                 let capability = try validate(snapshot, site: source.platform)
                 let row = song["sources"].array.first { $0["sourceKey"].string == source.sourceKey } ?? .null

@@ -135,10 +135,10 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
                     }
                 }
             } catch {
-                // An unavailable script host narrows the scope; session failures stop.
+                // Declaration failures are not recording-content answers.
+                // Only recoverable source failures may narrow the scope.
                 let failure = MusicServiceError.sanitized(error)
-                if [.cancelled, .closed, .accessUnavailable, .staleAccess, .staleRevision, .targetChanged,
-                    .storageFailed, .corruptDocument].contains(failure) { throw failure }
+                guard MusicCandidateDiscoveryFailures.mayTryAnother(failure) else { throw failure }
             }
         }
         try candidateCheck(seed)
@@ -271,7 +271,8 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
             return result
         } catch {
             let platform = target.selection.siteId
-            if MusicCandidateDiscoveryFailures.isContentFailure(MusicServiceError.sanitized(error)) {
+            if !(error is MusicSourceDeclarationFailure),
+               MusicCandidateDiscoveryFailures.isContentFailure(MusicServiceError.sanitized(error)) {
                 contentFailed.insert(platform)
             } else { otherFailed.insert(platform) }
             await owner.cancelCandidateAttempt(attemptID)

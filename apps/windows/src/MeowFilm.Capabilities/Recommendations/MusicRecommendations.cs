@@ -3,6 +3,14 @@ using MeowFilm.Capabilities.Recommendations;
 
 namespace MeowFilm.Capabilities;
 
+public sealed record MusicRecommendationCandidate(string SessionId, string Id, SongRow Song)
+{
+    public string Title => Song.Title;
+    public string Artist => Song.Artist;
+    public string Cover => Song.Cover;
+    public string Duration => Song.Duration;
+}
+
 public sealed partial class MusicCapability
 {
     private IMusicRecommendationSource RecommendationSource => application;
@@ -17,13 +25,47 @@ public sealed partial class MusicCapability
     private Task recommendationPreparation = Task.CompletedTask;
     private long recommendationDisplayedVersion = -1, recommendationDesiredVersion = -1;
     private bool recommendationDisplayRunning;
+    private string recommendationCandidateContent = "";
+    public IReadOnlyList<MusicRecommendationCandidate> RecommendationCandidates { get; private set; } = [];
 
     public bool HasRecommendationSession => recommendationSnapshot is { } value &&
         (RecText(value, "id").Length > 0 || RecIds(value).Length > 0);
+    public bool HasRecommendationControls => HasRecommendationSession &&
+        (RecText(recommendationSnapshot!.Value, "kind") != "queue" || CanReconcileRecommendation);
+    public bool HasQueueRecommendations => HasActiveRecommendation &&
+        RecText(recommendationSnapshot!.Value, "kind") == "queue";
+    public bool CanChooseRecommendation => !stopping && HasQueueRecommendations && !RecommendationLoading &&
+        !CanReconcileRecommendation;
+    public string QueueRecommendationStatus => recommendationSnapshot is { } value &&
+        RecText(value, "kind") == "queue" ? RecommendationStatus : "";
+    public string QueueRecommendationEmptyText => !HasQueueRecommendations || RecommendationCandidates.Count > 0 ? "" :
+        RecommendationLoading ? "正在加载推荐" : recommendationSnapshot is { } value && RecBool(value, "exhausted")
+            ? "推荐已结束" : "暂无推荐";
     public bool HasActiveRecommendation => recommendationSnapshot is { } value && RecBool(value, "active");
     public bool RecommendationLoading => recommendationSnapshot is { } value && RecBool(value, "loading");
     public string RecommendationTitle => recommendationSnapshot is not { } value ? "" :
-        RecText(value, "kind") switch { "fm" => "私人 FM", "similar" => "相似推荐", "heartbeat" => "心动模式", _ => "推荐" };
+        RecText(value, "kind") switch { "fm" => "私人 FM", "similar" => "相似推荐", "heartbeat" => "心动模式",
+            "queue" => "为你推荐", _ => "推荐" };
+    public bool HasPlaybackFm => !stopping && HasActiveRecommendation && recommendationSnapshot is { } value &&
+        RecText(value, "platform") == "wy" && RecText(value, "kind") == "fm" && RecText(value, "mode").Length > 0;
+    public string PlaybackFmMode => HasPlaybackFm ? RecText(recommendationSnapshot!.Value, "mode") : "";
+    public string PlaybackFmScene => HasPlaybackFm ? RecText(recommendationSnapshot!.Value, "submode") : "";
+    public string PlaybackFmRuleId => HasPlaybackFm ? RecText(recommendationSnapshot!.Value, "ruleId") : "";
+    public string PlaybackFmTabTagId => HasPlaybackFm ? RecText(recommendationSnapshot!.Value, "tabTagId") : "";
+    public string PlaybackFmActionKey => HasPlaybackFm
+        ? RecText(recommendationSnapshot!.Value, "id") + ":" + recommendationCommandEpoch + ":" + accountEpoch +
+            ":" + PlaybackFmMode + ":" + PlaybackFmScene + ":" + PlaybackFmRuleId + ":" + PlaybackFmTabTagId
+        : "";
+    public string PlaybackModeText => !HasPlaybackFm ? ModeText :
+        PlaybackFmRuleId.Length > 0 || PlaybackFmTabTagId.Length > 0 ? "频道漫游" :
+        PlaybackFmMode == "scene" ? CatalogFmScenes.FirstOrDefault(choice => choice.Key == PlaybackFmScene)?.Name ?? "场景模式" :
+        PlaybackFmModes.FirstOrDefault(choice => choice.Key == PlaybackFmMode)?.Name ?? "私人漫游";
+    public string PlaybackModeGlyph => HasPlaybackFm ? "\uE700" : "\uE8EE";
+    public bool CanChangePlaybackMode => HasPlaybackFm ? !CanReconcileRecommendation : CanEdit;
+    public MusicCatalogChoice[] PlaybackFmModes { get; } =
+        [new("default", "默认模式"), new("familiar", "熟悉模式"), new("explore", "探索模式"), new("puzzle", "拼图模式")];
+    public bool CanHeartbeatCurrent => CanPlay && OwnsCurrent && playback.HasMedia &&
+        SongJson.Platform(current!.Raw) == "wy" && SongJson.NativeId(current.Raw).Length > 0;
     public string RecommendationStatus
     {
         get
@@ -67,7 +109,12 @@ public sealed partial class MusicCapability
     }
     private void RecommendationBindings()
     {
-        foreach (var name in new[] { nameof(HasRecommendationSession), nameof(HasActiveRecommendation),
+        foreach (var name in new[] { nameof(HasRecommendationSession), nameof(HasRecommendationControls),
+            nameof(HasQueueRecommendations), nameof(CanChooseRecommendation), nameof(RecommendationCandidates),
+            nameof(QueueRecommendationStatus), nameof(QueueRecommendationEmptyText), nameof(HasPlaybackFm),
+            nameof(PlaybackFmMode), nameof(PlaybackFmScene), nameof(PlaybackFmRuleId), nameof(PlaybackFmTabTagId),
+            nameof(PlaybackFmActionKey), nameof(PlaybackModeText), nameof(PlaybackModeGlyph), nameof(CanChangePlaybackMode),
+            nameof(CanHeartbeatCurrent), nameof(HasActiveRecommendation),
             nameof(RecommendationTitle), nameof(RecommendationStatus), nameof(RecommendationLoading),
             nameof(RecommendationContinue), nameof(CanChangeRecommendationContinue), nameof(CanRetryRecommendation),
             nameof(CanReturnRecommendation), nameof(CanCancelRecommendation), nameof(CanReconcileRecommendation) })
@@ -90,6 +137,18 @@ public sealed partial class MusicCapability
             revision < recommendationRevision) return;
         recommendationRevision = revision;
         recommendationSnapshot = value.Clone();
+        string content = RecText(value, "id") + ":" +
+            (value.TryGetProperty("candidates", out var candidates) && candidates.ValueKind == JsonValueKind.Array
+                ? candidates.GetRawText() : "");
+        if (content != recommendationCandidateContent)
+        {
+            recommendationCandidateContent = content;
+            RecommendationCandidates = RecText(value, "kind") == "queue" && RecBool(value, "active") &&
+                candidates.ValueKind == JsonValueKind.Array
+                ? candidates.EnumerateArray().Select(item => new MusicRecommendationCandidate(
+                    RecText(value, "id"), RecText(item, "id"), SongRow.Read(item.GetProperty("song")))).ToArray() : [];
+        }
+        if (!RecBool(value, "active")) RecommendationCandidates = [];
         recommendationError = "";
         RecommendationBindings();
         if (!RecBool(value, "loading") && value.TryGetProperty("queueVersion", out var queueVersion) &&
@@ -141,6 +200,7 @@ public sealed partial class MusicCapability
         if (stopping) return;
         var token = recommendationLifetime.Token;
         long command = ++recommendationCommandEpoch;
+        RecommendationBindings();
         try
         {
             var response = await application.ExecuteAsync(method, parameters, token);
@@ -177,6 +237,53 @@ public sealed partial class MusicCapability
     public Task ChangeRecommendationContinueAsync(bool enabled) => CanChangeRecommendationContinue
         ? RecommendationCommand("music.recommendations.continue", new { id = RecText(recommendationSnapshot!.Value, "id"), enabled })
         : Task.CompletedTask;
+    public Task ChooseRecommendationAsync(MusicRecommendationCandidate candidate) =>
+        CanChooseRecommendation && candidate.SessionId == RecText(recommendationSnapshot!.Value, "id") &&
+        RecommendationCandidates.Any(item => ReferenceEquals(item, candidate))
+            ? RecommendationCommand("music.recommendations.choose", new { id = candidate.SessionId, candidateId = candidate.Id })
+            : Task.CompletedTask;
+    public Task ChangePlaybackFmAsync(string mode, string submode, string actionKey)
+    {
+        if (!HasPlaybackFm || !CanChangePlaybackMode || actionKey != PlaybackFmActionKey ||
+            !(mode == "scene" ? CatalogFmScenes.Any(choice => choice.Key == submode) :
+                submode.Length == 0 && PlaybackFmModes.Any(choice => choice.Key == mode))) return Task.CompletedTask;
+        return StartRecommendation(Target("fm", "wy", "私人漫游", new { mode, submode }));
+    }
+    public Task HeartbeatCurrentAsync(string presentationKey)
+    {
+        if (!CanHeartbeatCurrent || presentationKey != PlaybackPresentationKey) return Task.CompletedTask;
+        return StartRecommendation(Target("heartbeat", "wy", "心动模式",
+            new { entry = "current", songId = SongJson.NativeId(current!.Raw), seedEntryId = current.EntryId }));
+    }
+
+    // Invoked only after an explicit ordinary playback action established a new
+    // queue. Playback observations and surface activation never start a preview.
+    private async Task StartQueueRecommendationPreviewAsync()
+    {
+        if (stopping || !OwnsCurrent || !playback.HasMedia || SongJson.Platform(current!.Raw) != "wy") return;
+        long command = recommendationCommandEpoch, queue = queueEpoch, account = accountEpoch;
+        string presentation = PlaybackPresentationKey;
+        var token = recommendationLifetime.Token;
+        bool Current() => !stopping && command == recommendationCommandEpoch && queue == queueEpoch &&
+            account == accountEpoch && presentation == PlaybackPresentationKey && OwnsCurrent && playback.HasMedia;
+        try
+        {
+            var actual = await application.ExecuteAsync("music.recommendations.get", new { }, token);
+            token.ThrowIfCancellationRequested();
+            if (!Current()) return;
+            if (!RecBool(actual, "ok")) throw new MusicOperationException(RecText(actual, "code"));
+            PublishRecommendation(actual);
+            if (!Current() || RecBool(actual, "active") || RecBool(actual, "requiresReconcile") || RecIds(actual).Length > 0) return;
+            await RecommendationCommand("music.recommendations.start",
+                new { kind = "queue", platform = "wy", @continue = false, local = true, play = true });
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            if (Current())
+            { recommendationError = ErrorText(error); RecommendationBindings(); }
+        }
+    }
     public Task ReconcileRecommendationAsync()
     {
         if (!CanReconcileRecommendation) return Task.CompletedTask;
@@ -199,10 +306,13 @@ public sealed partial class MusicCapability
     {
         if (stopping) return;
         InvalidateCatalogAction();
+        long command = ++recommendationCommandEpoch;
         long action = catalogActionGeneration, navigation = navigationSubmission;
         long observation = CatalogAccountObservation(target.Platform);
-        bool Current() => !stopping && action == catalogActionGeneration && navigation == navigationSubmission &&
+        bool Current() => !stopping && command == recommendationCommandEpoch &&
+            action == catalogActionGeneration && navigation == navigationSubmission &&
             observation == CatalogAccountObservation(target.Platform);
+        RecommendationBindings();
         try
         {
             await EnsureAccountsForRequestAsync(recommendationLifetime.Token);
@@ -350,6 +460,7 @@ public sealed partial class MusicCapability
     {
         recommendationLifetime.Dispose(); recommendationLifetime = new();
         recommendationSnapshot = null; recommendationError = ""; recommendationObservation = null;
+        recommendationCandidateContent = ""; RecommendationCandidates = [];
         recommendationRetryObservation = null;
         recommendationDisplayedVersion = recommendationDesiredVersion = -1;
         RecommendationBindings();

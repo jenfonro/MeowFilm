@@ -4,12 +4,13 @@ import UIKit
 import MeowUI
 
 enum MusicSettingsDestination: CaseIterable, Hashable {
-    case aggregation, sources, search, playback, appearance, metadata
+    case aggregation, sources, exclusions, search, playback, appearance, metadata
 
     var title: String {
         switch self {
         case .aggregation: return "平台账号"
         case .sources: return "音源管理"
+        case .exclusions: return "错源管理"
         case .search: return "搜索设置"
         case .playback: return "播放设置"
         case .appearance: return "偏好设置"
@@ -21,6 +22,7 @@ enum MusicSettingsDestination: CaseIterable, Hashable {
         switch self {
         case .aggregation: return "person.crop.circle"
         case .sources: return "music.note.list"
+        case .exclusions: return "speaker.slash"
         case .search: return "magnifyingglass"
         case .playback: return "play.circle"
         case .appearance: return "slider.horizontal.3"
@@ -32,6 +34,7 @@ enum MusicSettingsDestination: CaseIterable, Hashable {
         switch self {
         case .aggregation: return "music.settings.aggregation"
         case .sources: return "music.settings.sources"
+        case .exclusions: return "music.settings.exclusions"
         case .search: return "settings.search"
         case .playback: return "music.settings.playback"
         case .appearance: return "settings.preferences"
@@ -56,7 +59,7 @@ public struct MusicSettingsContent: View {
     public var body: some View {
         List {
             Section("音乐设置") {
-                ForEach([MusicSettingsDestination.aggregation, .sources, .search, .playback, .metadata], id: \.self) {
+                ForEach([MusicSettingsDestination.aggregation, .sources, .exclusions, .search, .playback, .metadata], id: \.self) {
                     destination in
                     destinationRow(destination)
                 }

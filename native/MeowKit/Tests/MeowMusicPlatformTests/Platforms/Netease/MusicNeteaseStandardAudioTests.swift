@@ -34,24 +34,19 @@ final class MusicNeteaseStandardAudioTests: XCTestCase {
         XCTAssertEqual(audio.playbackAuthorization?.isActive, false)
     }
 
-    func testNonMemberStandardDoesNotRepeatVIPCheckButHighQualityRemainsDenied() async throws {
+    func testNonMemberUsesResourceMetadataAndActualResponseWithoutVIPPreflight() async throws {
         let f = try MusicNeteaseNativeFixture(); try await f.enable()
-        let at = Int(f.clock.now().timeIntervalSince1970 * 1000)
-        await f.http.replies("/weapi/music-vip-membership/client/vip/info", [
-            try MusicNeteaseFixture.response(["code": 200, "data": [
-                "userId": 42, "now": at, "associator": ["expireTime": at - 1000]]])])
         let options = try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101")
-        XCTAssertEqual(options.first?.qualities, ["128k"])
-        let audio = try await f.service.nativeResolve(platform: .netease, nativeID: "101", selection: options[0].selection(quality: "128k"))
-        XCTAssertEqual(audio.delivery?.quality, "128k")
-        do {
-            _ = try await f.service.nativeResolve(platform: .netease, nativeID: "101", selection: options[0].selection(quality: "flac"))
-            XCTFail("Non-member obtained a premium candidate")
-        } catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+        XCTAssertTrue(options.first?.qualities.contains("flac") == true)
+        let standard = try await f.service.nativeResolve(platform: .netease, nativeID: "101", selection: options[0].selection(quality: "128k"))
+        XCTAssertEqual(standard.delivery?.quality, "128k")
+        await f.http.replies(playerPath, [try MusicNeteaseFixture.response(MusicNeteaseFixture.audio(level: "lossless"))])
+        let audio = try await f.service.nativeResolve(platform: .netease, nativeID: "101", selection: options[0].selection(quality: "flac"))
+        XCTAssertEqual(audio.delivery?.quality, "flac")
         let calls = await f.http.recorded()
-        XCTAssertEqual(calls.filter { $0.request.url.path.contains("vip/info") }.count, 1)
-        XCTAssertFalse(calls.contains { $0.request.url.path.contains("music/detail/get") })
-        XCTAssertEqual(calls.filter { $0.request.url.path == playerPath }.count, 1)
+        XCTAssertFalse(calls.contains { $0.request.url.path.contains("vip/info") })
+        XCTAssertTrue(calls.contains { $0.request.url.path.contains("music/detail/get") })
+        XCTAssertEqual(calls.filter { $0.request.url.path == playerPath }.count, 2)
         _ = await f.service.close()
     }
 

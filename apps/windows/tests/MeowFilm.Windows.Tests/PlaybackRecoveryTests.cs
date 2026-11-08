@@ -753,6 +753,61 @@ public static partial class PlaybackRecoveryTests
 
     private static IEnumerable<TestCase> UnifiedSourcesCases()
     {
+        foreach (var entry in new (double Expected, double? Receipt, bool Accepted)[]
+        {
+            (180, 185, true), (180, 190, true), (180, 191, false),
+            (180, 170, true), (180, 169, false), (1200, 1211, false),
+            (180, 0, true), (180, null, true), (0, 1211, true),
+        })
+            yield return Test($"script receipt duration {entry.Expected}->{entry.Receipt?.ToString() ?? "unknown"} is admitted before opening", async () =>
+            {
+                await using var f = await ControlledMusicFixture.Create(official: false, scripts: [new("duration-script")]);
+                f.App.ScriptDuration = entry.Receipt;
+                f.Output.SetDuration(0);
+                await PlayDurationSong(f, entry.Expected);
+                if (entry.Accepted) await Until(() => f.App.HistoryWrites == 1, "accepted script receipt");
+                Check(f.Output.NetworkOpens == (entry.Accepted ? 1 : 0) &&
+                    f.App.HistoryWrites == (entry.Accepted ? 1 : 0), "mismatched receipt must never open or record playback");
+                if (entry.Accepted)
+                    Check(f.Module.CurrentQualityLabel == "音质未知", "known duration is not proof of the requested quality");
+            });
+        foreach (var entry in new (double Expected, double Actual, bool Accepted)[]
+        {
+            (180, 185, true), (180, 190, true), (180, 191, false),
+            (180, 170, true), (180, 169, false), (1200, 1211, false),
+            (180, 0, true), (0, 1211, true),
+        })
+        {
+            yield return Test($"script prepared duration {entry.Expected}->{entry.Actual} uses ten seconds", async () =>
+            {
+                await using var f = await ControlledMusicFixture.Create(official: false,
+                    scripts: [new("original-script", quality: "master"), new("replacement-script", quality: "flac")],
+                    qualityRequest: "auto");
+                f.Output.SetDuration(0);
+                await PlayDurationSong(f, entry.Expected);
+                await Until(() => f.App.HistoryWrites == 1 && f.Module.CanSwitchSource, "healthy original script");
+                f.Output.PreparedDuration = entry.Actual;
+                f.Output.Plan();
+                await f.Module.SwitchQualityAsync("lossless");
+                Check(f.Output.Prepares == 1 && f.Output.Commits == (entry.Accepted ? 1 : 0) &&
+                    f.Output.Discards == (entry.Accepted ? 0 : 1) && f.Output.IsPlaying &&
+                    f.App.HistoryWrites == 1, "ten-second handoff boundary keeps a healthy original on rejection");
+                Check(f.Module.CurrentQualityLabel == "音质未知", "neither prepared duration nor requested quality proves quality");
+            });
+            yield return Test($"script duration event {entry.Expected}->{entry.Actual} uses ten seconds", async () =>
+            {
+                await using var f = await ControlledMusicFixture.Create(official: false, scripts: [new("duration-script")]);
+                f.Output.SetDuration(0);
+                await PlayDurationSong(f, entry.Expected);
+                await Until(() => f.App.HistoryWrites == 1 && f.Module.CanSwitchSource, "script awaiting duration");
+                f.Output.SetDuration(entry.Actual);
+                if (!entry.Accepted)
+                    await Until(() => !f.Output.HasMedia && f.Module.Status == "播放失败", "wrong script duration retired");
+                Check(f.Output.HasMedia == entry.Accepted && f.Output.NetworkOpens == 1 && f.Output.Reopens == 0,
+                    "mismatch retires the only source, while allowed and unknown duration never triggers a refresh");
+                if (entry.Accepted) Check(f.Module.CanSwitchSource, "allowed duration must not start recovery");
+            });
+        }
         yield return Test("manual quality requires its exact tier even when a provider returns a better one", async () =>
         {
             await using var f = await ControlledMusicFixture.Create(
@@ -1980,6 +2035,14 @@ public static partial class PlaybackRecoveryTests
     }
 
 
+    private static async Task PlayDurationSong(ControlledMusicFixture fixture, double duration)
+    {
+        var song = MusicSongFixture.Online("wy", "duration", "Duration boundary", "fixture", duration: duration);
+        var queued = await fixture.App.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 });
+        Check(queued.GetProperty("ok").GetBoolean(), "duration fixture queue");
+        await fixture.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
+        await fixture.Module.PlayQueueSurfaceItemAsync(fixture.Module.QueueSurfaceRows.Single());
+    }
     private static TestCase Test(string name, Func<Task> body) => new("playback-recovery: " + name, () => Sta(body));
     private static void Check(bool condition, string message)
     { if (!condition) throw new InvalidOperationException("Recovery assertion: " + message); }
@@ -2862,6 +2925,11 @@ public static partial class PlaybackRecoveryTests
             PositionSeconds = seconds;
             PropertyChanged?.Invoke(this, new(nameof(PositionSeconds)));
         }
+        internal void SetDuration(double seconds)
+        {
+            ActualDuration = seconds;
+            PropertyChanged?.Invoke(this, new(nameof(DurationSeconds)));
+        }
         internal void Close()
         {
             try { authority.Cancel(); }
@@ -2893,6 +2961,7 @@ public static partial class PlaybackRecoveryTests
         internal long? OfficialExpiry;
         internal Func<JsonElement, bool>? HoldResolution;
         internal Func<JsonElement, string?>? ResolutionFailure;
+        internal double? ScriptDuration;
         internal CancellationToken HeldResolutionToken;
         internal string? Poison;
         internal string? CacheableSongId;
@@ -3157,6 +3226,7 @@ public static partial class PlaybackRecoveryTests
                     qualityPolicySignature = policy, qualityCacheSignature = cache, qualityVerified = false,
                     expiresAt = expiry && (!fresh || RepeatExpiry) ? (long?)DateTimeOffset.UtcNow.AddSeconds(3).ToUnixTimeMilliseconds() : null,
                     playbackVerified = false }, Json)!.AsObject();
+                if (ScriptDuration is { } duration) result["duration"] = duration;
                 if (fresh && Poison is not null) result[Poison] = Poison == "generation" ? JsonValue.Create(8) : JsonValue.Create("other");
                 return JsonSerializer.SerializeToElement(result, Json);
             }

@@ -179,7 +179,9 @@ final class MeowfilmAssembly: ObservableObject {
 
     private func bindPlayback(_ model: MusicViewModel) {
         do {
-            lease = try playback.bind(owner: "music") { [weak self, weak model] event in
+            lease = try playback.bind(owner: "music", onPlayPause: { [weak model] attempt, command in
+                model?.acceptPlayPause(command, attempt: attempt) ?? false
+            }) { [weak self, weak model] event in
                 model?.onPlayback(event)
                 self?.refreshCommands()
             }

@@ -46,33 +46,17 @@ public struct MusicCandidateDiscoveryPolicy: MusicCandidateDiscoverySelecting {
             if $0.selection.installationId != $1.selection.installationId { return $0.selection.installationId < $1.selection.installationId }
             return $0.quality < $1.quality
         }
-        // Scout each delivery provider's best tier before digging deeper into a
-        // fast provider. Within an equal priority, rotate platforms and editions.
-        var scouts: [MusicCandidateDiscoveryTarget] = [], deeper: [MusicCandidateDiscoveryTarget] = []
-        for candidate in candidates {
-            if scouts.contains(where: { $0.selection.installationId == candidate.selection.installationId &&
-                $0.selection.sourceKey == candidate.selection.sourceKey }) { deeper.append(candidate) }
-            else { scouts.append(candidate) }
-        }
-        func fair(_ values: [MusicCandidateDiscoveryTarget]) -> [MusicCandidateDiscoveryTarget] {
-            var result: [MusicCandidateDiscoveryTarget] = []
-            for tier in Set(values.compactMap(priority)).sorted() {
-                for official in [true, false] {
-                    let matching = values.filter {
-                        priority($0) == tier && $0.selection.installationId.hasPrefix("official:") == official
-                    }
-                    var peers = Dictionary(grouping: matching, by: { $0.selection.siteId })
-                    while peers.values.contains(where: { !$0.isEmpty }) {
-                        for platform in peers.keys.sorted() {
-                            guard var rows = peers[platform], !rows.isEmpty else { continue }
-                            result.append(rows.removeFirst()); peers[platform] = rows
-                        }
-                    }
+        let requested = MusicSourceQualityPolicy.ordered(state, automatic: true)
+        var plan: [MusicCandidateDiscoveryTarget] = []
+        for quality in requested {
+            var peers = Dictionary(grouping: candidates.filter { $0.quality == quality }, by: { $0.selection.siteId })
+            while peers.values.contains(where: { !$0.isEmpty }) {
+                for platform in peers.keys.sorted() {
+                    guard var rows = peers[platform], !rows.isEmpty else { continue }
+                    plan.append(rows.removeFirst()); peers[platform] = rows
                 }
             }
-            return result
         }
-        var plan = fair(scouts) + fair(deeper)
         if let preferred, let index = plan.firstIndex(where: { $0.sameRequest(as: preferred) }) {
             plan.insert(plan.remove(at: index), at: 0)
         }

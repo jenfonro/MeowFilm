@@ -7,9 +7,10 @@ final class MusicCandidateDiscoveryPolicyTests: XCTestCase {
             qualities: ["128k", "192k", "320k", "flac", "flac24bit", "master", "dolby", "sky"])
         let script = MusicCandidateDiscoveryFixture.option(qualities: ["128k", "320k", "flac", "flac24bit"])
         let plan = try MusicCandidateDiscoveryPolicy().plan(MusicCandidateDiscoveryFixture.snapshot([script, official]))
-        XCTAssertEqual(plan.first?.quality, "master")
+        XCTAssertEqual(plan.first?.quality, "flac")
         XCTAssertEqual(plan.first?.selection.installationId, "official:fixture")
-        XCTAssertLessThan(try XCTUnwrap(plan.firstIndex { $0.quality == "sky" }), try XCTUnwrap(plan.firstIndex { $0.quality == "dolby" }))
+        XCTAssertFalse(plan.contains { ["master", "sky", "dolby", "flac24bit"].contains($0.quality) },
+                       "Automatic selection starts at default lossless, not a higher tier")
         let high = plan.filter { $0.selection.installationId == "official:fixture" && ["192k", "320k"].contains($0.quality) }
         XCTAssertEqual(high.map(\.quality), ["320k", "192k"])
         XCTAssertEqual(Set(plan.map(\.selection.installationId)), ["script-a", "official:fixture"])

@@ -101,9 +101,11 @@ public final class PlaybackController: ObservableObject {
         owner: String,
         enabled: Bool = true,
         commands: PlaybackNavigationCommands = .init(),
+        onPlayPause: (@MainActor (PlayAttempt, PlaybackPlayPauseCommand) -> Bool)? = nil,
         onEvent: @escaping @MainActor (PlaybackEvent) -> Void
     ) throws -> PlaybackOwnerLease {
-        try owners.bind(owner: owner, enabled: enabled, commands: commands, onEvent: onEvent)
+        try owners.bind(owner: owner, enabled: enabled, commands: commands,
+                        onPlayPause: onPlayPause, onEvent: onEvent)
     }
 
     /// Convenience playback command using the current owner's default policy.
@@ -179,6 +181,70 @@ public final class PlaybackController: ObservableObject {
         }
         installNetworkAsset(binding, generation: token)
         publish()
+        return attempt
+    }
+
+    /// The old item remains audible and commandable throughout readiness and seek.
+    public func prepareReplacement(resource: PlaybackResource, replacing: PlayAttempt) async throws -> PlaybackPreparedReplacement {
+        guard isCurrent(replacing), state.isPlayable else { throw NativePlaybackError.preparationFailed }
+        let prepared = PlaybackPreparedReplacement(resource: resource, replacing: replacing)
+        do {
+            try await prepared.prepare(budget: networkBudget)
+            return prepared
+        } catch { prepared.cancel(); throw error }
+    }
+
+    /// Call after asynchronous business admission, immediately before commit.
+    /// A scheduling gap can require another alignment, within the same budget.
+    public func synchronizeReplacement(_ prepared: PlaybackPreparedReplacement) async throws {
+        let deadline = prepared.synchronizationDeadline ?? ContinuousClock.now.advanced(by: .seconds(15))
+        prepared.synchronizationDeadline = deadline
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            guard !prepared.committed, isCurrent(prepared.replacing), state.isPlayable else {
+                throw NativePlaybackError.preparationFailed
+            }
+            let position = player.currentTime().seconds
+            try await prepared.seek(to: position.isFinite ? max(0, position) : snapshot.position, deadline: deadline)
+            guard isCurrent(prepared.replacing), state.isPlayable else { throw NativePlaybackError.preparationFailed }
+            let delta = abs(prepared.player.currentTime().seconds - player.currentTime().seconds)
+            if delta.isFinite, delta <= 0.25 { return }
+        }
+        throw NativePlaybackError.seekTimedOut
+    }
+
+    public func commitReplacement(_ prepared: PlaybackPreparedReplacement) throws -> PlayAttempt {
+        try Task.checkCancellation()
+        guard !prepared.committed, isCurrent(prepared.replacing), state.isPlayable,
+              let binding = prepared.binding, let item = prepared.player.currentItem, item.status == .readyToPlay else {
+            throw NativePlaybackError.preparationFailed
+        }
+        let position = item.currentTime().seconds, live = player.currentTime().seconds
+        guard position.isFinite, position >= 0, live.isFinite, abs(position - live) <= 0.25 else {
+            throw NativePlaybackError.seekFailed
+        }
+        let resource = try PlaybackResource(id: prepared.resource.id, url: prepared.resource.url,
+            title: prepared.resource.title, headers: prepared.resource.headers)
+        mutationDepth += 1
+        defer { finishMutation() }
+        sampleCurrentProgress()
+        let autoplay = state.wantsPlayback
+        let token = state.begin(resource: resource, owner: prepared.replacing.owner, autoplay: autoplay)
+        let attempt = PlayAttempt(id: token, owner: prepared.replacing.owner, resourceID: resource.id)
+        systemMetadata.begin(attempt); owners.updateContext(state.commandContext)
+        tearDownItem()
+        prepared.committed = true
+        prepared.failures.receive = { [weak self] in self?.fail($0, generation: token) }
+        networkAsset = binding; localMediaFetch = prepared.localMediaFetch
+        player = prepared.player
+        player.defaultRate = Float(preferredRate); player.volume = Float(volume)
+        #if os(iOS)
+        establishSystemSession(generation: token)
+        #endif
+        state.ready(generation: token, duration: item.duration.seconds, ranges: timeRanges(item))
+        state.progress(generation: token, position: position)
+        installItemObservers(item, generation: token)
+        drivePlayback()
         return attempt
     }
 
@@ -654,7 +720,8 @@ public final class PlaybackController: ObservableObject {
             currentSnapshot.error = currentError?.localizedDescription
             systemSession?.update(snapshot: currentSnapshot, attempt: state.attempt,
                                   metadata: nowPlayingMetadata, rate: player.rate,
-                                  canSeek: state.canSeek, navigation: owners.navigationRoutes)
+                                  canSeek: state.canSeek, navigation: owners.navigationRoutes,
+                                  playPause: owners.playPauseRoute)
             #endif
             if currentAttempt != state.attempt { currentAttempt = state.attempt }
             if needsPublication { continue }
@@ -694,6 +761,7 @@ public final class PlaybackController: ObservableObject {
         owners.updateContext(state.commandContext)
         #if os(iOS)
         systemSession?.updateNavigation(owners.navigationRoutes)
+        systemSession?.updatePlayPause(owners.playPauseRoute)
         #endif
     }
 
@@ -702,8 +770,8 @@ public final class PlaybackController: ObservableObject {
         if systemSession == nil {
             systemSession = PlaybackSystemSession(
                 onEvent: { [weak self] event, generation in self?.systemEvent(event, generation: generation) },
-                onCommand: { [weak self] command, generation in
-                    self?.systemCommand(command, generation: generation) ?? false
+                onCommand: { [weak self] command, generation, route in
+                    self?.systemCommand(command, generation: generation, route: route) ?? false
                 },
                 onNavigation: { [weak self] route in
                     guard let self, self.state.accepts(route.attempt.id) else { return false }
@@ -746,20 +814,27 @@ public final class PlaybackController: ObservableObject {
         }
     }
 
-    private func systemCommand(_ command: PlaybackTransportCommand, generation: UUID) -> Bool {
+    #endif
+
+    /// Shared by the system adapter and native command tests. Domain admission
+    /// may schedule asynchronous work; success means accepted, not yet audible.
+    func systemCommand(_ command: PlaybackTransportCommand, generation: UUID,
+                       route: PlaybackPlayPauseRoute? = nil) -> Bool {
         guard state.commandContext.accepts(command, generation: generation) else { return false }
+        let playPause: PlaybackPlayPauseCommand
         switch command {
-        case .play: resume()
-        case .pause: pause()
-        case .toggle: state.wantsPlayback ? pause() : resume()
-        case .stop: stop()
+        case .play: playPause = .play
+        case .pause: playPause = .pause
+        case .toggle: playPause = state.wantsPlayback ? .pause : .play
+        case .stop: stop(); return true
         case .seek(let time):
             guard time.isFinite, time >= 0, state.canSeek else { return false }
-            seek(to: time)
+            seek(to: time); return true
         }
+        if let route = route ?? owners.playPauseRoute { return owners.perform(playPause, route: route) }
+        if playPause == .play { resume() } else { pause() }
         return true
     }
-    #endif
 
     isolated deinit {
         // Explicit stop() is preferred for deterministic release. No Task

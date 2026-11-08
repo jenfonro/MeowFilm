@@ -23,6 +23,7 @@ public static class MusicScriptIntegrationTests
         yield return new("Native LX real HTTP: original local lyric protocol is parsed in native code", Lyrics);
         yield return new("Native LX real HTTP: explicit crashed-process recovery reloads only the requested source", Recover);
         yield return new("Native LX real HTTP: owner transports legal large recordings and source lists", LargeOwner);
+        yield return new("Native LX real HTTP: media receipts enforce ten seconds and retain independent duration", ReceiptDuration);
     }
     private const string SourceTemplate = """
         const label = __LABEL__;
@@ -192,6 +193,41 @@ public static class MusicScriptIntegrationTests
         listed = await Ok(f, "music.sources.list");
         Check(listed.GetProperty("items").EnumerateArray().Count(item => item.GetProperty("state").GetString() == "ready") == 1);
         _ = second;
+    }
+    private static async Task ReceiptDuration()
+    {
+        const string source = """
+            lx.on('request',async ({info})=>{
+              const result={url:'https://media.invalid/receipt.mp3'};
+              const value=info.musicInfo.songmid;
+              if(value!=='missing') result.duration=value==='null'?null:value==='zero'?0:Number(value);
+              return result;
+            });
+            lx.send('inited',{sources:{wy:{type:'music',actions:['musicUrl'],qualitys:['320k']}}});
+            """;
+        await using var f = new Fixture(Data());
+        string id = await InstallSource(f, source);
+        foreach (var entry in new (double Expected, string Receipt, double? Duration, bool Accepted)[]
+        {
+            (180, "185", 185, true), (180, "190", 190, true), (180, "191", null, false),
+            (180, "170", 170, true), (180, "169", null, false), (1200, "1211", null, false),
+            (180, "missing", null, true), (180, "null", null, true), (180, "zero", null, true),
+            (0, "1211", 1211, true),
+        })
+        {
+            var media = await f.Owner.ExecuteAsync("music.online.resolve", new { installationId = id,
+                platform = "wy", quality = "320k", song = MusicSongFixture.Online("wy", entry.Receipt, duration: entry.Expected) });
+            Check(media.GetProperty("ok").GetBoolean() == entry.Accepted, media.GetRawText());
+            if (!entry.Accepted)
+            {
+                Check(media.GetProperty("code").GetString() == "RECORDING_MISMATCH", media.GetRawText());
+                continue;
+            }
+            Check(entry.Duration is { } seconds ? media.GetProperty("duration").GetDouble() == seconds :
+                media.GetProperty("duration").ValueKind == JsonValueKind.Null, media.GetRawText());
+            Check(!media.GetProperty("qualityVerified").GetBoolean() && !media.GetProperty("playbackVerified").GetBoolean() &&
+                !media.TryGetProperty("actualQuality", out _) && media.GetProperty("requestedQuality").GetString() == "320k");
+        }
     }
     private static async Task LargeOwner()
     {

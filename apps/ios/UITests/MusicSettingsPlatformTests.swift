@@ -533,6 +533,12 @@ private actor MusicSettingsScriptFixture: MusicScriptSourceManaging {
     func importScriptSource(_ data: Data, fileName: String) throws -> MusicScriptSourceItem { throw MusicServiceError.unsupported }
     func downloadScriptSource(from url: URL) throws -> MusicScriptSourceItem { throw MusicServiceError.unsupported }
     func setScriptSourceEnabled(_ id: String, enabled: Bool) -> MusicScriptSourceItem { self.enabled = enabled; return item() }
+    func scriptSourceDetail(_ id: String) -> MusicScriptSourceDetail { .init(item: item(), networkURL: nil, rollbackAvailable: false) }
+    func editScriptSource(_ id: String, name: String, networkURL: String?) -> MusicScriptSourceItem { item() }
+    func updateScriptSource(_ id: String) -> MusicScriptSourceItem { item() }
+    func updateScriptSource(_ id: String, data: Data, fileName: String) -> MusicScriptSourceItem { item() }
+    func rollbackScriptSource(_ id: String) throws -> MusicScriptSourceItem { throw MusicServiceError.unsupported }
+    func checkScriptSource(_ id: String) -> MusicScriptSourceItem { item() }
     func removeScriptSource(_ id: String) throws { throw MusicServiceError.unsupported }
 }
 

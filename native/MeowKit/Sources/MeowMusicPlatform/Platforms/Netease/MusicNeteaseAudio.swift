@@ -38,38 +38,21 @@ extension NeteaseMusicAccountAdapter {
         return .init(qualities: remaining > 0 ? Array(Self.formats.prefix(high ? 10 : 6)).map { $0.quality } : [],
                      expires: current.addingTimeInterval(Double(remaining) / 1000))
     }
-    func resources(_ id: String, rights: Rights, context: MusicNeteaseContext) async throws -> Rights {
-        if rights.qualities.isEmpty { return rights }
+    func capabilities(mid: String, credential: AccountCredential) async throws -> [String] {
+        let id = try MusicNeteaseWire.id(mid), own = epoch, context = try context(credential)
         let root = try await request("/api/song/music/detail/get", data: ["songId": id], context: context)
+        try check(own)
         let raw = try MusicQQWire.object(root["data"])
         guard raw["songId"] != nil || raw["id"] != nil else { throw MusicServiceError.upstreamInvalid }
         for name in ["songId", "id"] {
             if let value = raw[name], try MusicNeteaseWire.id(value) != id { throw MusicServiceError.targetChanged }
         }
-        guard rights.expires > now() else { throw MusicServiceError.verificationRequired }
-        let qualities = try Self.formats.filter { entry in
-            guard rights.qualities.contains(entry.quality), let value = raw[entry.resource], !(value is NSNull) else { return false }
+        let values = try Self.formats.filter { entry in
+            guard let value = raw[entry.resource], !(value is NSNull) else { return false }
             if let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue }
-            // Resource metadata is not a URL grant. Reject new truthy scalars.
             _ = try MusicQQWire.object(value); return true
-        }.map { $0.quality }
-        return .init(qualities: qualities, expires: rights.expires)
-    }
-    func capabilities(mid: String, credential: AccountCredential) async throws -> [String] {
-        let id = try MusicNeteaseWire.id(mid), own = epoch, context = try context(credential)
-        do {
-            let membership = try await membership(context)
-            let rights = try await resources(id, rights: membership, context: context)
-            try check(own)
-            return ["128k"] + rights.qualities.filter { $0 != "128k" }
-        } catch {
-            try check(own)
-            // Standard is a request candidate, not membership/URL authority.
-            // A VIP-info outage must not hide public standard recordings.
-            guard [.verificationRequired, .upstreamFailed, .upstreamInvalid, .timeout, .unavailable]
-                .contains(MusicServiceError.sanitized(error)) else { throw error }
-            return ["128k"]
-        }
+        }.map(\.quality)
+        return ["128k"] + values.filter { $0 != "128k" }
     }
     static func mediaURL(_ text: String) throws -> URL {
         guard let url = URL(string: text), ["http", "https"].contains(url.scheme ?? ""),
@@ -93,26 +76,16 @@ extension NeteaseMusicAccountAdapter {
     func resolve(mid: String, quality: String, credential: AccountCredential) async throws -> JSONValue {
         let id = try MusicNeteaseWire.id(mid), own = epoch, context = try context(credential)
         guard let format = Self.formats.first(where: { $0.quality == quality }) else { throw MusicServiceError.qualityDisabled }
-        let license: Date?
-        if quality == "128k" { license = nil }
-        else {
-            let membership = try await membership(context)
-            let rights = try await resources(id, rights: membership, context: context)
-            guard rights.qualities.contains(quality), rights.expires > now() else { throw MusicServiceError.qualityDisabled }
-            license = rights.expires
-        }
         try check(own)
-        return try await resolveAudio(id: id, quality: quality, level: format.level, context: context, license: license)
+        return try await resolveAudio(id: id, quality: quality, level: format.level, context: context)
     }
-    func resolveAudio(id: String, quality: String, level: String, context: MusicNeteaseContext,
-                      license: Date?) async throws -> JSONValue {
+    func resolveAudio(id: String, quality: String, level: String, context: MusicNeteaseContext) async throws -> JSONValue {
         let own = epoch
         var data = ["ids": "[" + id + "]", "level": level, "encodeType": "flac"]
         if quality == "sky" { data["immerseType"] = "c51" }
         if quality == "vivid" { data["encodeType"] = "mp3" }
         let root = try await request("/api/song/enhance/player/url/v1", data: data, crypto: "xeapi", context: context)
         try check(own)
-        guard license == nil || license! > now() else { throw MusicServiceError.verificationRequired }
         let rows = try MusicNeteaseWire.rows(root["data"], maximum: 1)
         guard let row = rows.first else { throw MusicServiceError.audioUnavailable }
         guard try MusicNeteaseWire.id(row["id"]) == id else { throw MusicServiceError.targetChanged }
@@ -148,7 +121,7 @@ extension NeteaseMusicAccountAdapter {
         guard !rawURL.isEmpty else { throw MusicServiceError.audioUnavailable }
         let url = try Self.mediaURL(MusicQQWire.string(rawURL, maximum: 8192))
         let ttl = min(1800, try MusicQQWire.integer(row["expi"], maximum: Int(Int32.max)))
-        let expires = min(now().addingTimeInterval(Double(ttl)), license ?? .distantFuture)
+        let expires = now().addingTimeInterval(Double(ttl))
         guard expires > now() else { throw MusicServiceError.invalidMediaCandidate }
         return .object(["url": .string(url.absoluteString), "expiresAt": .number(expires.timeIntervalSince1970 * 1000),
                         "qualityVerified": .bool(actual != nil),
@@ -157,7 +130,7 @@ extension NeteaseMusicAccountAdapter {
                         "sampleRate": .number(Double(try MusicQQWire.integer(row["sr"] ?? 0, maximum: 768_000))),
                         "duration": .number(Double(try MusicQQWire.integer(row["time"] ?? 0, maximum: 604_800_000)) / 1000),
                         "cacheAllowed": .bool(true),
-                        "licenseExpiresAt": license.map { .number($0.timeIntervalSince1970 * 1000) } ?? .null])
+                        "licenseExpiresAt": .null])
     }
 }
 
@@ -184,7 +157,7 @@ extension NeteaseMusicAccountAdapter: MusicNeteasePublicAudioProvider {
     func publicStandardAudio(nativeID: String) async throws -> JSONValue {
         let id = try MusicNeteaseWire.id(nativeID)
         let context = try publicAudioRequestContext()
-        return try await resolveAudio(id: id, quality: "128k", level: "standard", context: context, license: nil)
+        return try await resolveAudio(id: id, quality: "128k", level: "standard", context: context)
     }
     func publicChorus(nativeID: String) async throws -> MusicChorusPoint? {
         let id = try MusicNeteaseWire.id(nativeID), own = epoch

@@ -71,6 +71,18 @@ struct MusicDocument {
             let value = playback["qualitySettings"][key]
             if value != .null { try musicRequire(value.isArray && Set(value.strings).count == value.array.count && value.strings.allSatisfy(allowed.contains), .corruptDocument) }
         }
+        if playback.contains("requestQuality") {
+            try musicRequire(MusicSourceQualityPolicy.qualities.contains(playback["requestQuality"].string), .corruptDocument)
+        }
+        if playback.contains("sourceExclusions") {
+            try musicRequire(playback["sourceExclusions"].isArray, .corruptDocument)
+            for row in playback["sourceExclusions"].array {
+                try row.requireFields(["id", "songID", "title", "artist", "provider", "platform"],
+                                      required: ["id", "songID", "title", "artist", "provider", "platform"])
+                try musicRequire(UUID(uuidString: row["id"].string) != nil && !row["songID"].string.isEmpty &&
+                    !row["provider"].string.isEmpty && MusicModel.sites.contains(row["platform"].string), .corruptDocument)
+            }
+        }
         let official = playback["officialSources"]
         try musicRequire(official.isArray && official.array.allSatisfy(\.isString) &&
             Set(official.strings).count == official.array.count &&
@@ -139,6 +151,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var audioCacheAttempt: MusicNativeAudioCacheAttempt?
     var audioCacheTask: Task<Void, Never>?
     var audioCacheCaptures: [UUID: Task<Void, Never>] = [:]
+    let scriptAudioCacheScope = MusicNativeCacheScope(scope: "script-history")
     var lastAudioCacheScope: String?
     var homeCache: (source: MusicPublicBrowsePlatform, scope: String, revision: UUID,
                     expires: Date, page: MusicNativePublicBrowseDiscovery)?
@@ -169,11 +182,20 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         var selection: MusicPlaybackSelection
         var scriptSource: MusicScriptSource? = nil
         var ready = false, started = false, ended = false, endedConsumed = false
+        var isPlaying = false
         var recovery: MusicNativePlaybackRecoveryPin? = nil
         var authorization: MusicQueueAuthorization? = nil
         var cacheRecoveryID: UUID? = nil
+        var latestFact: MusicPlaybackFact? = nil
     }
     var attempt: Attempt?
+    var currentSourceSession: (occurrence: String, session: MusicNativeSourceInspection)?
+    // Configuration invalidation also fences creation before a session exists.
+    var sourceSessionRevision = UUID()
+    var preparedSources: [String: MusicNativePreparedSource] = [:]
+    var preparedCacheSources: [String: MusicNativePreparedCacheSource] = [:]
+    var sourceResults: [String: [MusicNativeResolvedSource]] = [:]
+    var sourceResultOrder: [String] = []
     var cachedPlaybackRecovery: MusicNativeCacheRecoveryPin?
     var publicCollectionRevision = UUID()
     var publicCollectionRefreshes = 0
@@ -270,11 +292,14 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         playbackFeedback.invalidate()
         playbackFeedbackAdmission = nil
         librarySyncRun?.cancel()
+        if let currentSourceSession { Task { await currentSourceSession.session.close() } }
+        currentSourceSession = nil; clearPreparedSources(); sourceResults = [:]; sourceResultOrder = []
         handles.removeAll(); attempt = nil; spent.removeAll()
         parsedDocument = nil
         lyricEpoch = UUID()
     }
     func invalidatePlayback() {
+        clearPreparedSources()
         retireCachedPlaybackRecovery()
         retireAudioCacheAttempt()
         playbackFeedback.finishCurrent(reason: .ui)
@@ -371,7 +396,10 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         do {
             let value = try await withTaskCancellationHandler { try await gate.value() } onCancel: { cancel() }
             try check(own); return value
-        } catch { throw MusicServiceError.sanitized(error) }
+        } catch {
+            if !Task.isCancelled, let declaration = error as? MusicSourceDeclarationFailure { throw declaration }
+            throw MusicServiceError.sanitized(error)
+        }
     }
     func song(_ ref: MusicReference, _ state: MusicDocument) throws -> MJ {
         try musicRequire(!ref.id.isEmpty)

@@ -15,11 +15,12 @@
 | 个人歌单 | `music.catalog.personalPlaylists` | 明确平台、分页、账号代次 |
 | 歌单详情 | `music.catalog.playlist` | 原 locator 和 snapshot，不猜私有权限 |
 | 每日推荐 | `music.catalog.daily` | 网易云当前账号，按可见入口读取 |
-| 私人 FM | `music.catalog.fm` | 明确 mode／submode，不把未知卡片当默认 FM |
-| 相似歌曲 | `music.catalog.similar` | 使用当前录音的原平台身份 |
+| 私人 FM | 预览 `music.catalog.fm`；播放 `music.recommendations.start {kind:fm}` | 首页私人漫游默认模式，频道明确 mode／submode／ruleId／tabTagId 原样保留 |
+| 相似歌曲 | `music.recommendations.start {kind:similar}` | 使用当前录音的原平台身份 |
 | 专辑 | `music.catalog.album` | 使用明确 album id，不按标题搜索 |
-| 心动推荐 | `music.catalog.heartbeat` | 用户明确触发，绑定当前歌单与歌曲 |
-| 队列推荐 | `music.catalog.queueRecommendations` | 读取当前队列版本和当前歌曲 |
+| 首页／云喜欢心动 | `music.recommendations.start {kind:heartbeat,platform:wy,entry:favorites,continue:false}` | 平台根据同账号云喜欢上下文随机选择有效喜欢曲 |
+| 歌单曲／播放器当前曲心动 | `music.recommendations.start {kind:heartbeat,platform:wy,entry:current,songId,continue:false}` | 歌单使用点击歌曲；播放器使用真实当前曲并带真实 `seedEntryId` |
+| 普通队列推荐 | `music.recommendations.start {kind:queue,platform:wy,continue:false}` | native 从完整当前队列生成只读候选，不改变原队列 |
 
 ## 状态与交互
 
@@ -39,6 +40,17 @@
 - 点击某一首时同时核对目标歌曲身份和队列版本；用户在准备期间产生新播放意图会撤销旧动作。
 - 首页后台更新期间，公开歌单仍按卡片 `platform/id` 读取并准备完整成员；普通展示替换与追加不撤销已捕获的播放意图。私有入口重读当前账号资源，既有成员身份、完整分页、准备 token 和队列 CAS 校验继续保留。
 - 页面离开只清理页面请求和未提交动作，不停止已经由全局播放器接管的当前媒体。
+- 心动入口不提交浏览歌单 `playlistId`／`startMusicId`。云喜欢按钮依据已发布的 `kind:favorites`、`relationship:owned` 显示，不根据歌单标题猜测。任意浏览歌单歌曲的心动使用该曲 native ID；当前播放入口同时核对播放 presentation 与真实 occurrence，忽略页面选中歌曲。退出复用原队列 checkpoint，续播默认关闭。
+
+## 全局播放器与候选
+
+- 仅活跃网易云 FM 的底部原循环位置打开漫游弹层。四主模式按默认、熟悉、探索、拼图顺序竖排，下方为四列的 43 个官方场景；`FRANCH`、`PUNK` 保留官方键，`PUNK` 显示“放克”，包含 `HOT_SONG`“热歌”。使用现有弹层、系统字体和主题，无新增字体或图片依赖。
+- 底部名称与选中态来自 session snapshot 已提交的 `mode/submode/ruleId/tabTagId`。目录页草稿不改变该显示；切换等待／失败保持已提交项。新指令、会话变化、账号代次变化、隐藏和卸载关闭旧弹层；旧按钮捕获的弹层代次不能再提交。普通播放仍操作原 `music.queue.mode`。
+- 显式推荐启动在等待共享账号读取之前即登记推荐指令代次；取消、返回或更新指令会使旧启动失效，迟到账号成功／失败不得重新启动会话或覆盖操作后的提示，也不取消其他调用者共享的账号读取。
+- 首页歌曲栏目、单曲和搜索单曲成功建立普通队列后启动一次 queue 预览；播放位置事件及打开队列面板不重新启动。现存活跃 FM／心动／相似会话只能被显式推荐意图替换，普通预览会先读取 native 当前会话确认准入。
+- 预览准入读取的回执同时核对指令、队列、账号代次和当前媒体 presentation／所有权。停止媒体、切换媒体 owner 或发起账号变更后，旧回执不启动预览、不发布旧错误；暂停保留媒体时仍可读取候选。准入读取失败通过统一通知显示，即使尚未创建 session，也可从显式推荐入口重试。
+- 队列面板将“播放列表”和“为你推荐”分别绑定到真实队列和 `candidates:[{id,song}]`。候选展示不入队；点击以当前 `id`／批专有 `candidateId` 调用 `music.recommendations.choose`，整批追加并播放所选。替换批次和已结束会话的旧行不会提交。
+- “续播”使用既有 `continue {id,enabled}`，默认关闭；只有用户显式开启且真实播放到尾部才由 native 追加。关闭保留已入队内容；空批／重复／结束与失败重试由 session owner 负责。候选区显示实际加载／空／结束状态，错误走统一通知，未知提交保留显式核对入口。获取候选不会覆盖原列表 source 或原条目 context。
 
 ## 请求与预览
 

@@ -298,7 +298,7 @@ public static partial class MusicNativeCatalogTests
             "daily" => new { platform = "wy", branch = "style", refresh = true },
             "fm" => new { platform = "wy", mode = "scene", submode = "EXERCISE", preview = true },
             "similar" => new { platform = "wy", sourceIds = new[] { "1", "2" } },
-            "heartbeat" => new { platform = "wy", playlistId = "42", startMusicId = "1", songId = "2", fromHome = true },
+            "heartbeat" => new { platform = "wy", entry = "favorites" },
             "queueRecommendations" => new { platform = "wy", songIds = new[] { "1", "2" }, currentPlaySongId = "2" },
             "album" => new { platform = "wy", id = "12", refresh = true },
             _ => new { platform = "wy", id = "13", refresh = true }
@@ -314,7 +314,7 @@ public static partial class MusicNativeCatalogTests
             "daily" => request is MusicDailyRequest { Branch: MusicDailyBranch.Style, Refresh: true },
             "fm" => request is MusicFmRequest { Mode: MusicFmMode.Scene, Submode: "EXERCISE", Preview: true },
             "similar" => request is MusicSimilarRequest p && p.SourceIds.SequenceEqual(["1", "2"]),
-            "heartbeat" => request is MusicHeartbeatRequest { PlaylistId: "42", StartMusicId: "1", SongId: "2", FromHome: true },
+            "heartbeat" => request is MusicHeartbeatRequest { Entry: MusicHeartbeatEntry.Favorites, SongId: null },
             "queueRecommendations" => request is MusicQueueRecommendationsRequest { CurrentPlaySongId: "2" } p && p.SongIds.SequenceEqual(["1", "2"]),
             "album" => request is MusicAlbumRequest { Id: "12", Refresh: true },
             _ => request is MusicArtistRequest { Platform: "wy", Id: "13", Refresh: true }
@@ -323,6 +323,20 @@ public static partial class MusicNativeCatalogTests
         {
             Ok(await f.Run("fm", new { platform = "wy", ruleId = "9", preview = false }));
             Check(f.Platform.Calls[^1].Request is MusicFmRequest { Mode: MusicFmMode.Default, RuleId: "9", TabTagId: null });
+        }
+        if (route == "heartbeat")
+        {
+            Ok(await f.Run("heartbeat", new { platform = "wy", entry = "current", songId = "2" }));
+            Check(f.Platform.Calls[^1].Request is MusicHeartbeatRequest { Entry: MusicHeartbeatEntry.CurrentSong, SongId: "2" });
+            Check(f.Store.Writes == 0);
+        }
+        if (route == "queueRecommendations")
+        {
+            var ids = Enumerable.Range(1, 1201).Select(i => i.ToString()).ToArray();
+            Ok(await f.Run("queueRecommendations", new { platform = "wy", songIds = ids, currentPlaySongId = "1201" }));
+            Check(f.Platform.Calls[^1].Request is MusicQueueRecommendationsRequest { CurrentPlaySongId: "1201" } queue &&
+                queue.SongIds.SequenceEqual(ids));
+            Check(f.Store.Writes == 0);
         }
     }
     private static async Task ArtistCancellation()
@@ -355,6 +369,10 @@ public static partial class MusicNativeCatalogTests
             ("daily", new { }), ("daily", new { platform = "all" }), ("daily", new { platform = "wy", branch = "other" }),
             ("fm", new { platform = "wy", mode = "auto" }), ("personalPlaylists", new { platform = "tx", kind = "other" }),
             ("similar", new { platform = "wy", sourceIds = Array.Empty<string>() }),
+            ("heartbeat", new { platform = "wy" }),
+            ("heartbeat", new { platform = "wy", entry = "unknown" }),
+            ("heartbeat", new { platform = "wy", entry = "current" }),
+            ("heartbeat", new { platform = "wy", entry = "favorites", songId = "1" }),
             ("album", new { platform = "wy", id = "x", cookie = "synthetic-not-forwarded" }),
             ("artist", new { platform = "wy", id = "13", cookie = "synthetic-not-forwarded" }),
             ("search", new { platform = "wy", keyword = "x", kind = "unknown" }),

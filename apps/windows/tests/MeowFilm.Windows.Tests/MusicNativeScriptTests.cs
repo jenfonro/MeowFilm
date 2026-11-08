@@ -19,6 +19,7 @@ public static class MusicNativeScriptTests
         yield return new("Native LX: management forwards and selected bytes use one exact source candidate", Forwarding);
         yield return new("Native LX: a closed runtime is an unavailable script service, not missing sources", Unavailable);
         yield return new("Native LX: resolve asks one exact quality of one recording and proves refreshes", ExactResolve);
+        yield return new("Native LX: receipt duration survives projection without claiming measured quality", ReceiptDuration);
         yield return new("Native LX: lyric parsing remains native and respects persisted setting", Lyrics);
         yield return new("Native LX: shutdown cancels owned calls and never disposes borrowed owners", Shutdown);
         yield return new("Native LX: original complete bytes and basename reach the runtime", CompleteSource);
@@ -308,6 +309,28 @@ public static class MusicNativeScriptTests
             platform = "wy", quality = "128k", url = "https://media.invalid/b.mp3", headers = new { }, expiresAt = (long?)null };
         await Error(f.Owner, "music.online.resolve", new { installationId = Installation, platform = "wy", song = Song(),
             quality = "320k" }, "TARGET_CHANGED");
+    }
+    private static async Task ReceiptDuration()
+    {
+        await using var f = new Fixture();
+        foreach (double? duration in new double?[] { 185, 190, 180.125, null })
+        {
+            f.Runtime.Business = (method, p) =>
+            {
+                Check(method == "music.script.resolve" && p["musicInfo"]!["duration"]!.GetValue<double>() == 180 &&
+                    p["quality"]!.GetValue<string>() == "320k", "recording duration and request quality are unchanged");
+                return new { installationId = Installation, generation = 4, contentHash = new string('a', 64),
+                    platform = "wy", quality = "320k", url = "https://media.invalid/duration", headers = new { },
+                    expiresAt = (long?)null, duration };
+            };
+            var media = await Ok(f.Owner, "music.online.resolve", new { installationId = Installation, platform = "wy",
+                song = MusicSongFixture.Online("wy", "duration", duration: 180), quality = "320k" });
+            Check(duration is { } seconds ? media.GetProperty("duration").GetDouble() == seconds :
+                media.GetProperty("duration").ValueKind == JsonValueKind.Null, "known or unknown receipt duration is preserved");
+            Check(!media.GetProperty("qualityVerified").GetBoolean() && !media.GetProperty("playbackVerified").GetBoolean() &&
+                !media.TryGetProperty("actualQuality", out _) && media.GetProperty("requestedQuality").GetString() == "320k",
+                "duration does not turn the request into a measured quality");
+        }
     }
     private static async Task Lyrics()
     {

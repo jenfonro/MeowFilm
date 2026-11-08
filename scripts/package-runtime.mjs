@@ -13,16 +13,18 @@ const PRODUCTS = Object.freeze({
 });
 const MODULE_FILES = Object.freeze({
   music: 'modules/music-script.mjs', cat: 'modules/cat-script.mjs', source: 'modules/source-runtime.mjs',
+  pan: 'modules/pan-runtime.mjs',
 });
 const MANIFEST = 'runtime-manifest.json';
 const SHARED_SOURCE = 'apps/runtime';
-const SHARED_FILES = ['bootstrap.mjs', 'entry.mjs', 'client.mjs', 'contracts.mjs',
+const SHARED_FILES = ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs',
   'modules/source-candidates.mjs', ...Object.values(MODULE_FILES), 'modules/metadata-data.mjs',
   'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
   'modules/metadata/tmdb.mjs', 'modules/metadata/douban.mjs'];
 const SHARED_IMPORTS = new Set([
   'node:buffer', 'node:crypto', 'node:http', 'node:https',
   '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
+  '@meowfilm/pan-runtime',
 ]);
 const NATIVE_POLICY = 'scripts/script-host-native.json';
 const NATIVE_ARTIFACT = 'packages/script-host/build/Release/script_host_native.node';
@@ -576,7 +578,7 @@ function buildGraph(root, product, target) {
     check(isObject(value), 'INVALID_LOCK', `Invalid lock record: ${location}`);
     if (value.link) safeRelative(value.resolved);
   }
-  const selected = ['runtime-bridge', 'source-runtime', 'script-host'];
+  const selected = ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime'];
   const workspacePaths = new Map(selected.map(name => [`packages/${name}`, `node_modules/@meowfilm/${name}`]));
   const nodes = new Map(), edges = [], omitted = [];
   const inputs = [{ path: 'package.json', sha256: rootJSON.hash }, { path: 'package-lock.json', sha256: lockJSON.hash }];

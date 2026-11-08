@@ -1,7 +1,7 @@
 import Foundation
 
-/// A successfully resolved resource, not a catalogue capability. URLs stay in
-/// the account cache; choosing rechecks the same account and exact request.
+/// A resolved resource, not a catalogue capability. URLs stay in the native
+/// song session; choosing reuses or refreshes only this exact request.
 public struct MusicResolvedSource: Sendable, Equatable, Identifiable {
     public let id: String
     public let selection: MusicPlaybackSelection
@@ -21,9 +21,9 @@ public struct MusicResolvedSourcesSnapshot: Sendable {
     }
 }
 
-/// Inspection owns no playback attempt or listening fact. Each load advances a
-/// bounded quality layer. Only an explicit selection can adopt discovered
-/// recording mappings into the already-current queue occurrence.
+/// Inspection owns no playback attempt or listening fact. Opening observes
+/// existing song-session results without requests; explicit loads explore the
+/// next quality. A current-song page holds a lease, not the session lifetime.
 public protocol MusicSourceInspectionSession: Sendable {
     func updates() async -> AsyncThrowingStream<MusicResolvedSourcesSnapshot, Error>
     /// Advances dispatch eligibility immediately. Slow requests from an older

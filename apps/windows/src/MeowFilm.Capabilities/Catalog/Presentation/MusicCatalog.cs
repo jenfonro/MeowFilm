@@ -207,7 +207,7 @@ public sealed partial class MusicCapability
             return PlayCatalogSectionAsync(card);
         }
         if (card.Kind == "song") return PlayCatalogSongAsync(card);
-        if (card.Locator is not null || card.Kind is "daily" or "fm" or "similar" or "album" or "chart")
+        if (card.Locator is not null || card.Kind is "daily" or "fm" or "similar" or "heartbeat" or "album" or "chart")
             return OpenPersonalCatalogCardAsync(card);
         RememberCatalogLocation();
         var destination = "catalog-" + card.Kind + "/" + card.Platform + "/" + Uri.EscapeDataString(card.ActionId);
@@ -335,11 +335,14 @@ public sealed partial class MusicCapability
     // is shown again with an authoritative source; a hidden page issues no read.
     public Task ActivateCatalogLandingAsync()
     {
-        if (IsCatalogHome && homeRefreshRequired && !stopping && catalogSourceLoaded)
+        // Passive visibility must not replace initialization or an active navigation.
+        // The shell completes initialization before requesting its first destination.
+        if (stopping || !catalogSourceLoaded || loadCancellation is not null) return Task.CompletedTask;
+        if (IsCatalogHome && homeRefreshRequired)
             return NavigateHomeAsync(lifetime.Token);
-        if (!catalogSourceReload || stopping || !catalogSourceLoaded) return Task.CompletedTask;
+        if (!catalogSourceReload) return Task.CompletedTask;
         catalogSourceReload = false;
-        if (!IsCatalogLanding || catalogLoadedPlatform == catalogSourcePlatform || loadCancellation is not null)
+        if (!IsCatalogLanding || catalogLoadedPlatform == catalogSourcePlatform)
             return Task.CompletedTask;
         return LoadCatalogAsync(IsCatalogHome ? "catalog-home" : "catalog-channels", "", 1, null, lifetime.Token);
     }

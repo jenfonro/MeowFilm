@@ -218,9 +218,7 @@ extension QQMusicAccountAdapter {
         return (active ? true : known && !uncertain ? false : nil, boundary)
     }
     func capabilities(mid: String, credential: AccountCredential) async throws -> [String] {
-        let auth = try auth(credential), (vip, _) = try await membership(auth)
-        guard let vip else { throw MusicServiceError.verificationRequired }
-        guard vip else { return [] }
+        let auth = try auth(credential)
         let value = try song(await track(mid, auth: auth))
         guard case .object(let fields) = value, case .array(let levels)? = fields["types"] else { throw MusicServiceError.upstreamInvalid }
         return try levels.map { try MusicPlatformJSON.string($0) }
@@ -228,9 +226,7 @@ extension QQMusicAccountAdapter {
     func resolve(mid: String, quality: String, credential: AccountCredential) async throws -> JSONValue {
         let formats = ["128k": ("M500", "mp3"), "320k": ("M800", "mp3"), "flac": ("F000", "flac"), "master": ("AI00", "flac")]
         guard let (prefix, ext) = formats[quality] else { throw MusicServiceError.qualityDisabled }
-        let auth = try auth(credential), (vip, boundary) = try await membership(auth)
-        guard let vip else { throw MusicServiceError.verificationRequired }
-        guard vip else { throw MusicServiceError.qualityDisabled }
+        let auth = try auth(credential)
         let raw = try await track(mid, auth: auth), normalized = try song(raw)
         guard case .object(let fields) = normalized, case .array(let levels)? = fields["types"],
               levels.contains(.string(quality)) else { throw MusicServiceError.qualityDisabled }
@@ -256,10 +252,10 @@ extension QQMusicAccountAdapter {
               let host = url.host, host == "stream.qqmusic.qq.com" || host.hasSuffix(".stream.qqmusic.qq.com"),
               url.lastPathComponent.hasPrefix(prefix), url.pathExtension == ext else { throw MusicServiceError.invalidMediaCandidate }
         let ttl = min(120, try MusicQQWire.integer(data["expiration"], maximum: Int(Int32.max)))
-        let expires = min(now().addingTimeInterval(Double(ttl)), boundary ?? .distantFuture)
+        let expires = now().addingTimeInterval(Double(ttl))
         guard expires > now() else { throw MusicServiceError.invalidMediaCandidate }
         return .object(["url": .string(url.absoluteString), "expiresAt": .number(expires.timeIntervalSince1970 * 1000),
                         "qualityVerified": .bool(false), "cacheAllowed": .bool(true),
-                        "licenseExpiresAt": boundary.map { .number($0.timeIntervalSince1970 * 1000) } ?? .null])
+                        "licenseExpiresAt": .null])
     }
 }
