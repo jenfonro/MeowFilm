@@ -150,7 +150,9 @@ extension MusicViewModel {
                 cancelRemoteQueuePreparation(); cancelFMNavigation()
                 nativeAttempt = nil; pendingNativeResourceID = nil
             }
-            if [.paused, .stopped, .replaced].contains(event.kind) { pausePlaybackRecovery() }
+            if [.paused, .stopped, .replaced].contains(event.kind) {
+                pausePlaybackRecovery(continuePendingSource: event.kind == .paused)
+            }
             return
         }
         switch event.kind {

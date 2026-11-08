@@ -1,8 +1,11 @@
 import Foundation
 
-/// One quality ordering for automatic selection, explicit switches and result paging.
+/// Saved quality ordering belongs to automatic playback. Inspection has a
+/// stable order of its own and always reaches every supported quality.
 public enum MusicSourceQualityPolicy {
     public static let qualities = ["128k", "192k", "320k", "flac", "flac24bit", "master", "jyeffect", "dolby", "sky", "vivid"]
+    public static let inspectionQualities = ["flac", "flac24bit", "master", "320k", "192k", "128k",
+                                            "jyeffect", "dolby", "sky", "vivid"]
     public static let groups = ["master", "spatial", "enhanced", "hires", "lossless", "high", "standard"]
     public static func group(_ quality: String) -> String {
         ["128k": "standard", "192k": "high", "320k": "high", "flac": "lossless", "flac24bit": "hires",

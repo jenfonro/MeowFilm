@@ -9,9 +9,23 @@ extension MusicViewModel {
         guard fact.kind == .failed || invalidDuration,
               let provider = service as? any MusicSourcePlaybackServing,
               let service, let previous = candidate, let selection = lastSelection else { return false }
+        if sourceCommit?.attemptID == previous.attemptId {
+            sourceCommit?.failure = fact; sourceCommit?.invalidDuration = invalidDuration
+            return true
+        }
         guard sourceRecoveryTask == nil else { return true }
-        let pending = pendingSourceSelection
-        let epoch = lifecycle, token = selectionID, intent = pending?.intent ?? sourceIntent
+        if let pending = pendingSourceSelection {
+            // The running selection owns its match and preparation. A donor
+            // failure only changes how it will prepare/commit, never reissues it.
+            pendingSourceFailure = (pending.id, fact, invalidDuration)
+            sourceRecoveryWantsPlayback = phase != .paused
+            terminalAttempt = previous.attemptId
+            position = fact.position
+            playbackState.isResolving = true
+            if invalidDuration, let nativeAttempt { player?.pause(nativeAttempt) }
+            return true
+        }
+        let epoch = lifecycle, token = selectionID, intent = sourceIntent
         let automatic = feedbackAutomatic, prior = eventTail, operation = sourceSwitchID
         // A replacement can fail synchronously before its initial seek. Its
         // zero clock is not evidence that the original resume point was reached.
@@ -25,7 +39,7 @@ extension MusicViewModel {
         let key = selection.installationId + ":" + selection.siteId + ":" + selection.sourceKey + ":" + selection.quality
         // A known settings change retires this URL's old renewal pin, not the
         // user's intent. Continue through the session under the current policy.
-        let mayRenew = pending == nil && sourceCommittedSettingsRevision == state.settingsRevision &&
+        let mayRenew = sourceCommittedSettingsRevision == state.settingsRevision &&
             !invalidDuration && !previous.isCachedAudio &&
             selection.installationId.hasPrefix("official:") && !sourceRenewed.contains(key)
         sourceRenewed.insert(key)
@@ -51,7 +65,6 @@ extension MusicViewModel {
             var retiredPrevious = false
             var rejectedRenewal: MusicPlaybackRecovery?
             @MainActor func checkRecovery() throws {
-                guard pending?.lifetime.isActive != false else { throw MusicServiceError.cancelled }
                 try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: admission)
                 guard self.sourceRecoveryID == drainID, self.sourceSwitchID == operation,
                       retiredPrevious ? self.candidate == nil : self.candidate?.attemptId == previous.attemptId else {
@@ -118,11 +131,9 @@ extension MusicViewModel {
                 self.stopOwned()
                 self.position = recoveryPosition
                 await self.selectSource(intent: intent, automatic: automatic, admission: admission,
-                                        recovering: true, recoveryPosition: recoveryPosition,
-                                        selectionLifetime: pending?.lifetime)
+                                        recovering: true, recoveryPosition: recoveryPosition)
                 try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: admission)
                 guard self.sourceRecoveryID == drainID else { return }
-                guard pending?.lifetime.isActive != false else { throw MusicServiceError.cancelled }
                 if let native = self.nativeAttempt {
                     if !shouldResume { self.player?.pause(native) }
                 } else if self.phase == .failed {

@@ -98,6 +98,9 @@ private struct SourceHandoffBoundaryAccounts: MusicNativeAccountProviding, Music
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
         resources.append(resource); return .init(id: UUID(), resourceID: resource.id)
     }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        .init(duration: self.duration, synchronize: {}, commit: { self.play(resource) }, cancel: {})
+    }
     func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
         preparations.append(resource)
         if let gate { self.gate = nil; try await gate.wait() }

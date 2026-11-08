@@ -93,7 +93,7 @@ private actor RenewalPeerScripts: MusicScriptResolving {
     func calls() -> [MusicScriptRequest] { requests }
 }
 
-@MainActor private final class RenewalReceiptPlayer: MusicPlaybackDriving {
+@MainActor private final class RenewalReceiptPlayer: MusicPlaybackHandoffDriving {
     var resources: [PlaybackResource] = []
     var pausedAttempts: [MusicPlayerAttempt] = []
     var stoppedResources: [String] = []
@@ -101,6 +101,16 @@ private actor RenewalPeerScripts: MusicScriptResolving {
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
         resources.append(resource); onPlay?(resource)
         return .init(id: UUID(), resourceID: resource.id)
+    }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        .init(duration: 180, synchronize: {}, commit: {
+            let result = self.play(resource)
+            if !autoplay { self.pause(result) }
+            return result
+        }, cancel: {})
+    }
+    func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
+        try await preparePlayback(resource, autoplay: true)
     }
     func stop(_ attempt: MusicPlayerAttempt) { stoppedResources.append(attempt.resourceID) }
     func pause(_ attempt: MusicPlayerAttempt) { pausedAttempts.append(attempt) }

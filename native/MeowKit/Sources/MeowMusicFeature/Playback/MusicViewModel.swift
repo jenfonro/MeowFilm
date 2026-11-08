@@ -31,6 +31,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
 }
 @MainActor public protocol MusicPlaybackHandoffDriving: MusicPlaybackDriving {
     func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback
 }
 @MainActor private final class SharedMusicPlaybackDriver: MusicPlaybackHandoffDriving {
     let playback: PlaybackController
@@ -42,6 +43,15 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
         guard let current = target(replacing) else { throw MusicServiceError.staleResult }
         let prepared = try await playback.prepareReplacement(resource: resource, replacing: current)
+        return MusicPreparedPlayback(duration: prepared.duration, synchronize: { [playback] in
+            try await playback.synchronizeReplacement(prepared)
+        }, commit: { [playback] in
+            let attempt = try playback.commitReplacement(prepared)
+            return .init(id: attempt.id, resourceID: attempt.resourceID)
+        }, cancel: { prepared.cancel() })
+    }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        let prepared = try await playback.preparePlayback(resource: resource, owner: "music", autoplay: autoplay)
         return MusicPreparedPlayback(duration: prepared.duration, synchronize: { [playback] in
             try await playback.synchronizeReplacement(prepared)
         }, commit: { [playback] in
@@ -188,6 +198,10 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     var sourceIntent = MusicSourceIntent.automatic
     var sourceCommittedSettingsRevision: Int?
     var pendingSourceSelection: (id: UUID, intent: MusicSourceIntent, lifetime: MusicQueueAuthorization)?
+    var pendingSourceFailure: (id: UUID, fact: MusicPlaybackFact, invalidDuration: Bool)?
+    // Synchronous native commit can publish a failure before returning. Defer
+    // its recovery until the successful commit publishes the new intent.
+    var sourceCommit: (attemptID: String, failure: MusicPlaybackFact?, invalidDuration: Bool)?
     var sourceRenewed = Set<String>()
     var sourceRecoveryID = UUID()
     var sourceRecoveryTask: Task<Void, Never>?
@@ -367,6 +381,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         sourceRecoveryWantsPlayback = nil; sourceRecoveryID = UUID()
         if !retainsPlayback { sourceIntent = .automatic; sourceRenewed = [] }
         pendingSourceSelection?.lifetime.revoke(); pendingSourceSelection = nil
+        pendingSourceFailure = nil
         selectionID = UUID()
         resolutionTask?.cancel(); resolutionTask = nil
         candidateDiscoveryTask?.cancel(); candidateDiscoveryTask = nil

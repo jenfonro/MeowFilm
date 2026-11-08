@@ -215,6 +215,9 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
         resources.append(resource); attempts.append(attempt)
         return attempt
     }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
+    }
     func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
         handoffs.append(replacing)
         return .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})

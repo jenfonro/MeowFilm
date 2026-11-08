@@ -343,6 +343,9 @@ private final class RecordingPublicationDocument: MusicNativeDocumentStoring, @u
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
         resources.append(resource); return .init(id: UUID(), resourceID: resource.id)
     }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
+    }
     func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
         handoffs += 1
         return .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})

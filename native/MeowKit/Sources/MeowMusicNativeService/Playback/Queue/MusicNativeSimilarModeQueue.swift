@@ -177,6 +177,9 @@ extension NativeMusicService {
             try musicRequire(response.items.allSatisfy { $0.platform == "wy" }, .invalidResponse)
             let incoming = try response.items.map(MusicModel.normalize)
             let recommendations = try MusicNativeSimilarData.recommendations(response.items)
+            try await retainSongMetadata(incoming)
+            try check(own); try lease.authorization.check()
+            guard similarMode.active?.id == sessionID, session.pendingID == requestID, session.continueEnabled else { return }
             let songs = MusicNativeSimilarData.unique(incoming, excluding: d.queue["entries"].array.map { $0["song"] }, maximum: 3)
             let status: MusicSimilarModeSnapshot.Status = songs.isEmpty ? .empty : .ready
             let provider: MusicSimilarModeProvider = session.provider == .songRoaming ? .songRoaming : .queueRecommendations

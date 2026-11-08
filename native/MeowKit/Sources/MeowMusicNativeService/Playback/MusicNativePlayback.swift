@@ -23,12 +23,6 @@ extension NativeMusicService {
             return $0.offset < $1.offset
         }.map { $0.element }
     }
-    private func selectedQualityEnabled(_ selection: MusicPlaybackSelection, _ prefs: MJ) -> Bool {
-        if selection.installationId.hasPrefix("official:") {
-            return Self.officialQualities([selection.quality], prefs).count == 1
-        }
-        return MusicModel.qualities([selection.quality], prefs).count == 1
-    }
     func target(_ song: MJ, _ key: String) throws -> (MusicNativeSource, MJ) {
         guard let row = song["sources"].array.first(where: {
                   $0["sourceKey"].string.utf8.elementsEqual(key.utf8)
@@ -83,20 +77,8 @@ extension NativeMusicService {
                 guard failure == .unavailable || MusicCandidateDiscoveryFailures.mayTryAnother(failure) else { throw failure }
                 scriptState = .unavailable(failure); snapshots = []
             }
-            try musicRequire(Set(snapshots.map(\.installationID)).count == snapshots.count, .invalidResponse)
-            for snapshot in snapshots where snapshot.isCandidate {
-                for row in rows {
-                    guard snapshot.capabilities.contains(where: { $0.siteID == row.platform && $0.actions.contains("musicUrl") }) else { continue }
-                    let cap = try validate(snapshot, site: row.platform)
-                    let qualities = MusicModel.qualities(cap.qualities.filter { ["128k", "320k", "flac", "flac24bit"].contains($0) }, d.playback)
-                    if !qualities.isEmpty {
-                        result.append(.init(installationId: snapshot.installationID, generation: snapshot.generation,
-                            siteId: row.platform, sourceKey: row.sourceKey, qualities: qualities,
-                            title: cap.title, version: snapshot.version, contentHash: snapshot.contentHash,
-                            revisionHash: snapshot.revisionHash))
-                    }
-                }
-            }
+            result += try scriptOptions(song: song, playback: d.playback, snapshots: snapshots,
+                                        excluded: excluded, manual: true).map(\.playback)
         }
         if let accounts {
             for row in rows {
@@ -112,7 +94,7 @@ extension NativeMusicService {
                             value.qualities.count <= 10 && Set(value.qualities).count == value.qualities.count &&
                             value.qualities.allSatisfy { ["128k", "192k", "320k", "flac", "flac24bit", "master",
                                                          "jyeffect", "dolby", "sky", "vivid"].contains($0) }, .invalidResponse)
-                        let qualities = Self.officialQualities(value.qualities, d.playback)
+                        let qualities = value.qualities
                         if !qualities.isEmpty { result.append(.init(installationId: value.installationId, generation: value.generation,
                             siteId: value.siteId, sourceKey: row.sourceKey, qualities: qualities, title: value.title,
                             version: value.version, contentHash: value.contentHash)) }
@@ -161,7 +143,6 @@ extension NativeMusicService {
         try admitSource(song, selection: selection)
         try musicRequire(source.platform == selection.siteId, .targetChanged)
         try requirePlatform(source.platform)
-        try musicRequire(selectedQualityEnabled(selection, d.playback), .qualityDisabled)
         try musicRequire(!selection.installationId.hasPrefix("official:") ||
             Self.officialEnabled(source.platform, d.playback), .sourceUnavailable)
         retireCachedPlaybackRecovery()
@@ -203,11 +184,10 @@ extension NativeMusicService {
             try musicRequire(attempt?.id == attemptId && current.queue["currentId"].string == occurrenceId, .staleResult)
             attempt?.selection = resolvedSelection
             _ = try target(self.song(.init(kind: .queue, id: occurrenceId), current), selection.sourceKey)
-            try musicRequire(selectedQualityEnabled(selection, current.playback), .qualityDisabled)
             try musicRequire(!selection.installationId.hasPrefix("official:") ||
                 Self.officialEnabled(source.platform, current.playback), .sourceUnavailable)
             let valid = try media(audio)
-            try validateDelivery(valid, song: song, playback: current.playback)
+            try validateDelivery(valid, song: song, playback: current.playback, automaticQuality: false)
             let candidate = MusicPlaybackCandidate(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
                 url: valid.url, headers: valid.headers, title: song["title"].string, startPosition: start,
                 requestedQuality: selection.quality, resolvedSelection: resolvedSelection,

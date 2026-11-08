@@ -74,6 +74,11 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
         resources.append(resource); return .init(id: UUID(), resourceID: resource.id)
     }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        if let preparationError { throw preparationError }
+        if rejectedURLs.contains(resource.url) { throw MusicServiceError.invalidMediaCandidate }
+        return .init(duration: self.mediaDuration, synchronize: {}, commit: { self.play(resource) }, cancel: {})
+    }
     func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
         preparations.append(resource)
         if let preparationError { throw preparationError }
@@ -179,6 +184,8 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         XCTAssertTrue(originalRows.contains { $0.selection == donorSelection })
         let requestsBefore = await scripts.calls().count
         let searchesBefore = await qq.calls()
+        let discoveryBefore = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
+        XCTAssertFalse(discoveryBefore.values.flatMap(\.sources).isEmpty)
         player.preparationDuration = { [weak model, weak player] resource in
             XCTAssertEqual(model?.activeResourceID, donorResource, "Rejected media cannot retire the healthy donor")
             XCTAssertEqual(model?.activeNativeAttemptID, donorNative)
@@ -232,7 +239,12 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         let discovery = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
         XCTAssertTrue(exclusions.isEmpty)
         XCTAssertTrue(recordingExclusions.isEmpty)
-        XCTAssertTrue(discovery.isEmpty, "Media and network preparation failures cannot create content negative records")
+        XCTAssertEqual(discovery.mapValues(\.checkedAt), discoveryBefore.mapValues(\.checkedAt))
+        XCTAssertEqual(discovery.mapValues(\.observations), discoveryBefore.mapValues(\.observations))
+        XCTAssertEqual(discovery.mapValues(\.sources), discoveryBefore.mapValues(\.sources),
+                       "Media preparation must preserve acquired positive metadata")
+        XCTAssertFalse(discovery.values.flatMap(\.observations).contains { $0.outcome == .notFound },
+                       "Media and network preparation failures cannot create content negative records")
 
         player.preparationDuration = nil
         if exact && rejected {
@@ -431,7 +443,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         await service.close()
     }
 
-    func testCachedExactResultHonorsDisabledQuality() async throws {
+    func testManualQualityAndCachedExactResultIgnoreAutomaticQualitySettings() async throws {
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(), scripts: ReviewScripts(["a"]))
         let old = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
         _ = try await old.match(quality: "flac", sourceID: nil)
@@ -440,14 +452,12 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         let state = try await service.state()
         let changed = try await service.updateSettings(.init(ifRevision: state.settingsRevision, qualityEnabled: ["standard"]))
         let fresh = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: changed.revision)
-        do { _ = try await fresh.match(quality: "flac", sourceID: nil); XCTFail("Disabled quality admitted") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .qualityDisabled) }
-        var rejected = false
-        do {
-            let result = try await fresh.match(quality: "flac", sourceID: row.id)
-            print("REVIEW disabled_quality accepted=\(result.selection.quality) enabled=\(changed.qualityEnabled)")
-        } catch { rejected = error as? MusicServiceError == .qualityDisabled }
-        XCTAssertTrue(rejected, "Exact cached choice must not bypass the enabled-tier contract")
+        let manual = try await fresh.match(quality: "flac", sourceID: nil)
+        let exact = try await fresh.match(quality: "flac", sourceID: row.id)
+        XCTAssertEqual(manual.selection.quality, "flac")
+        XCTAssertEqual(exact.selection, row.selection)
+        let automatic = try await fresh.match(intent: .automatic)
+        XCTAssertEqual(automatic.selection.quality, "128k", "Only automatic selection applies the enabled-tier policy")
         await service.close()
     }
 
@@ -591,6 +601,13 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         publish()
         if synchronousFailures.contains(opened) { emitFailure() }
         return .init(id: id, resourceID: resource.id)
+    }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        .init(duration: 180, synchronize: {}, commit: {
+            let attempt = self.play(resource)
+            if !autoplay { self.pause(attempt) }
+            return attempt
+        }, cancel: {})
     }
     func emitPrepared(duration: Double) {
         guard let id = state.generation else { return }

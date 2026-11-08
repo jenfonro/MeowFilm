@@ -56,8 +56,9 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         } else { scope = Set(MusicNativeSearchProtocol.platforms) }
         let platforms = MusicNativeSearchProtocol.platforms.filter {
             platformEnabled($0) && (force || scope.contains($0)) &&
-                ((!recheckOnly && MusicNativeCandidateDiscoveryMerge.needsPlatform($0, song: staged, force: force, cache: cache[$0])) ||
-                    contentFailed.contains($0) && (state.entries[$0].map {
+                ((!recheckOnly && MusicNativeCandidateDiscoveryMerge.needsPlatform($0, song: staged, force: force, cache: cache[$0]) &&
+                    (force || !state.hasCurrentCheck($0, window: MusicSourceDiscoveryWindow.playback))) ||
+                    contentFailed.contains($0) && (state.checks[$0].map {
                         state.at - $0.checkedAt >= MusicSourceDiscoveryWindow.recheck
                     } ?? true))
         }
@@ -82,11 +83,6 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         try inspectionCheck(seed)
         let merged = try MusicNativeCandidateDiscoveryMerge.merge(staged, observations: observations,
                                                                   excluded: state.excluded).song
-        for observation in observations {
-            guard let page = observation.page else { continue }
-            await recordSourceDiscovery(staged, platform: observation.platform, page: page)
-            try inspectionCheck(seed)
-        }
         return (merged, Set(platforms))
     }
 
@@ -94,14 +90,30 @@ extension NativeMusicService: MusicResolvedSourcesServing {
                                   query: String, label: String) async throws -> MusicNativeTrackPage {
         try inspectionCheck(seed); try requirePlatform(platform)
         let port = publicPlatforms
-        let value = try await MusicCandidateDiscoveryDeadline.run(seconds: 12, timing: .init()) {
-            try await self.work(label: label) {
-                try await port.search(platform: platform, query: query, page: 1, limit: 30)
+        let request = beginSourceDiscoveryObservation(platform: platform, query: query)
+        do {
+            let value = try await MusicCandidateDiscoveryDeadline.run(seconds: 12, timing: .init()) {
+                try await self.work(label: label) {
+                    try await port.search(platform: platform, query: query, page: 1, limit: 30)
+                }
             }
+            try inspectionCheck(seed)
+            try musicRequire(value.total >= 0 && value.items.allSatisfy({ $0.platform == platform }), .upstreamInvalid)
+            let completed = finishSourceDiscoveryObservation(request)
+            await recordSourceDiscovery(seed.song, platform: platform, page: value, observation: completed)
+            try inspectionCheck(seed)
+            return value
+        } catch {
+            try inspectionCheck(seed)
+            let failure = MusicServiceError.sanitized(error)
+            if ![.cancelled, .closed, .accessUnavailable, .staleAccess, .staleRevision, .targetChanged,
+                 .storageFailed, .corruptDocument].contains(failure) {
+                let completed = finishSourceDiscoveryObservation(request, failure: failure)
+                await recordSourceDiscovery(seed.song, platform: platform, rows: [], observation: completed)
+                try inspectionCheck(seed)
+            }
+            throw failure
         }
-        try inspectionCheck(seed)
-        try musicRequire(value.total >= 0 && value.items.allSatisfy({ $0.platform == platform }), .upstreamInvalid)
-        return value
     }
 
     func inspectionOptions(_ seed: MusicSourceInspectionSeed, staged: MJ, label: String,
@@ -138,7 +150,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
             try musicRequire(options.count <= 1, .invalidResponse)
             return try options.compactMap { value in
                 try candidateValidateOfficial(value, source: source)
-                let qualities = Self.officialQualities(value.qualities, seed.playback)
+                let qualities = value.qualities
                 if !qualities.isEmpty {
                     return .init(installationId: value.installationId, generation: value.generation,
                         siteId: value.siteId, sourceKey: value.sourceKey, qualities: qualities,
@@ -164,7 +176,8 @@ extension NativeMusicService: MusicResolvedSourcesServing {
                 try await self.work(label: label) { try await scripts.sources() }
             }
             try inspectionCheck(seed)
-            return try scriptOptions(song: staged, playback: seed.playback, snapshots: snapshots, excluded: excluded).map(\.playback)
+            return try scriptOptions(song: staged, playback: seed.playback, snapshots: snapshots,
+                                     excluded: excluded, manual: true).map(\.playback)
         } catch {
             try inspectionCheck(seed)
             let failure = MusicServiceError.sanitized(error)
@@ -195,7 +208,8 @@ extension NativeMusicService: MusicResolvedSourcesServing {
                 try await self.work(label: label) { try await scripts.source(installationID: selection.installationId) }
             }
             try inspectionCheck(seed)
-            values = try scriptOptions(song: staged, playback: seed.playback, snapshots: [live], excluded: excluded).map(\.playback)
+            values = try scriptOptions(song: staged, playback: seed.playback, snapshots: [live],
+                                       excluded: excluded, manual: true).map(\.playback)
         }
         guard let value = values.first(where: {
             $0.installationId == selection.installationId && $0.siteId == selection.siteId &&
@@ -211,7 +225,8 @@ extension NativeMusicService: MusicResolvedSourcesServing {
     }
 
     func inspectionResolve(_ seed: MusicSourceInspectionSeed, staged: MJ,
-                           option: MusicPlaybackOption, quality: String, label: String) async throws -> MusicSourceInspectionResult {
+                           option: MusicPlaybackOption, quality: String, label: String,
+                           automaticQuality: Bool = false) async throws -> MusicSourceInspectionResult {
         try await admitRecordingSource(seed.song, sourceKey: option.sourceKey)
         try inspectionCheck(seed)
         let (source, info) = try target(staged, option.sourceKey)
@@ -234,13 +249,13 @@ extension NativeMusicService: MusicResolvedSourcesServing {
             guard let live = options.first, options.count == 1, live.installationId == option.installationId,
                   live.generation == option.generation, live.contentHash == option.contentHash,
                   live.version == option.version, live.qualities.contains(quality) else { throw MusicServiceError.targetChanged }
-            try musicRequire(option.qualities.contains(quality) && !Self.officialQualities([quality], seed.playback).isEmpty, .qualityDisabled)
+            try musicRequire(option.qualities.contains(quality), .sourceUnavailable)
             audio = try await work(label: label) {
                 try await accounts.nativeResolve(platform: platform, nativeID: source.nativeId, selection: selection)
             }
         } else {
             guard let scripts else { throw MusicServiceError.sourceUnavailable }
-            try musicRequire(option.qualities.contains(quality) && !MusicModel.qualities([quality], seed.playback).isEmpty, .qualityDisabled)
+            try musicRequire(option.qualities.contains(quality), .sourceUnavailable)
             let snapshot = try await sourceDeclaration(scripts, installationID: option.installationId, label: label)
             try inspectionCheck(seed)
             try inspectionScriptPin(snapshot, option: option, quality: quality)
@@ -260,7 +275,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         try inspectionCheck(seed)
         try admitSource(seed.song, selection: selection)
         let valid = try media(audio)
-        try validateDelivery(valid, song: staged, playback: seed.playback)
+        try validateDelivery(valid, song: staged, playback: seed.playback, automaticQuality: automaticQuality)
         // No attempt mutation, queue/history write, feedback, cache-body fill,
         // audio session or native playback admission on this inspection path.
         return .init(audio: valid, option: resolvedOption)

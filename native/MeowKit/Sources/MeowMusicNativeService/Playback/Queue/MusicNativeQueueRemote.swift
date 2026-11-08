@@ -66,11 +66,16 @@ extension NativeMusicService: MusicRemoteQueueServing {
     }
     public func remoteQueuePage(_ source: MusicRemoteQueueSource, cursor: String?) async throws -> MusicBrowsePage {
         try check(); try requirePlatform(source.context.platform)
+        let own = epoch
         let page = try await work { try await source.page(cursor: cursor) }
         try source.authorization.check()
+        let songs = try page.items.map(MusicModel.normalize)
+        try await retainSongMetadata(songs)
+        try check(own); try source.authorization.check()
         // Display handles remain short-lived; full queue collection below uses
         // the source snapshot, not the 600-handle cache or just visible rows.
-        return .init(items: try page.items.map { try remember(MusicModel.normalize($0)) },
+        // Keep its source keys: MusicRemoteQueueStart pins that raw identity.
+        return .init(items: try songs.map { try remember($0) },
                      cursor: page.cursor, dailyStyle: page.dailyStyle)
     }
     func remoteContext(_ source: MusicRemoteQueueSource) throws -> MJ {
@@ -113,6 +118,9 @@ extension NativeMusicService: MusicRemoteQueueServing {
             selectedKeys.count == start.sourceKeys.count &&
             zip(selectedKeys, start.sourceKeys).allSatisfy { musicSame($0.0, $0.1) }, .targetChanged)
         try await work { try await source.validate() }
+        try check(own); try intent.check(); try source.authorization.check()
+        try musicRequire(try read().queue["revision"].int == expectedRevision, .staleRevision)
+        try await retainSongMetadata(songs)
         try check(own)
         let result = try source.authorization.perform {
             try intent.perform {

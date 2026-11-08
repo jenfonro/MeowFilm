@@ -31,6 +31,14 @@ import Foundation
         return result
     }
 
+    func observeSearchPages(_ pages: [MusicSearchPage], references: [MusicReference]) async throws {
+        try checkSearchAccess()
+        guard let provider = accountBrowser as? any MusicSearchObserving else { return }
+        let generation = searchAccessGeneration
+        try await provider.observeSearchPages(pages, references: references)
+        try checkSearchAccess(generation)
+    }
+
     func searchPlaylistPage(platform: MusicPublicBrowsePlatform, query: String,
                             page: Int, limit: Int) async throws -> MusicPlaylistSearchPage {
         try checkSearchAccess()
