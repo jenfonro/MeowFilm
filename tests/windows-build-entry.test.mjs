@@ -63,8 +63,13 @@ test('Windows build entry propagates compilation failure as a nonzero process ex
   assert.equal(existsSync(join(scripts, 'bootstrap-marker')), true);
 }, { compile: "& (Join-Path $PSScriptRoot 'bootstrap.ps1'); throw 'build-fixture-failure'" }));
 
-for (const failRoot of [false, true]) {
-  test(`Windows Node entry selects its platform and ${failRoot ? 'propagates failure' : 'completes the gate'}`, t => {
+test('Windows build entry preserves the exact inner compilation exit code', () => fixture((result, scripts) => {
+  assert.equal(result.status, 23, result.stderr);
+  assert.equal(existsSync(join(scripts, 'bootstrap-marker')), true);
+}, { compile: "& (Join-Path $PSScriptRoot 'bootstrap.ps1'); exit 23" }));
+
+for (const failStage of ['', 'verify-dependency-lock', 'test-root', 'ensure-runtime-native']) {
+  test(`Windows Node entry selects its platform and ${failStage ? `propagates ${failStage} failure` : 'completes the gate'}`, t => {
     mkdirSync(temporaryRoot, { recursive: true });
     const root = mkdtempSync(join(temporaryRoot, 'windows-node-entry-'));
     t.after(() => rmSync(assertOwnedPath(temporaryRoot, root), { recursive: true, force: true }));
@@ -81,7 +86,7 @@ for (const failRoot of [false, true]) {
         $Stage = [IO.Path]::GetFileNameWithoutExtension($Arguments[0])
         $Record = [ordered]@{stage=$Stage; arguments=@($Arguments | Select-Object -Skip 1)}
         [IO.File]::WriteAllText((Join-Path $WindowsTestResults ($Stage + '.json')), ($Record | ConvertTo-Json -Compress))
-        if (${failRoot ? '$true' : '$false'} -and $Stage -eq 'test-root') { return 1 }
+        if ($Stage -eq '${failStage}') { return 23 }
         return 0
       }
     `);
@@ -89,8 +94,13 @@ for (const failRoot of [false, true]) {
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(scripts, 'test-node.ps1'), '-All'],
       { cwd: root, windowsHide: true, encoding: 'utf8', timeout: 30000 });
     assert.ifError(result.error);
-    assert.equal(result.status, failRoot ? 1 : 0, result.stderr);
-    for (const stage of ['verify-dependency-lock', 'test-packages', 'test-root', 'verify-boundaries']) {
+    assert.equal(result.status, failStage ? 23 : 0, result.stderr);
+    for (const stage of ['ensure-runtime-native', 'verify-dependency-lock', 'test-packages', 'test-root', 'verify-boundaries']) {
+      if (failStage === 'ensure-runtime-native' && stage !== failStage ||
+          failStage === 'verify-dependency-lock' && !['ensure-runtime-native', failStage].includes(stage)) {
+        assert.equal(existsSync(join(root, 'results', `${stage}.json`)), false);
+        continue;
+      }
       const record = JSON.parse(readFileSync(join(root, 'results', `${stage}.json`), 'utf8'));
       assert.equal(record.stage, stage);
       assert.deepEqual(record.arguments, stage === 'test-root' ? ['--platform', 'windows'] : []);

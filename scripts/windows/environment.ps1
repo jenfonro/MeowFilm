@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'paths.ps1')
 
-# Build and test tools come from the developer's PATH; no version is pinned here.
+# Resolve tools from PATH; native preparation and packaging verify their locked inputs.
 function Resolve-WindowsTool([string]$Name) {
     $Command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $Command) { throw "Windows development requires $Name on PATH." }

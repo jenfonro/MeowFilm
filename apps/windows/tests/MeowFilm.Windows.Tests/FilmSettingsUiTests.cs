@@ -718,6 +718,9 @@ public static class FilmSettingsUiTests
             "idle", null, 1, "ready", "fixture-hash", null,
             [new("site", $"测试视频源 {index + 1}", $"/fixture/{index}",
                 ["home", "category", "detail", "play", "search"], new Dictionary<string, string>())])).ToList();
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("The film settings fixture does not upload local sources.");
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -753,7 +756,7 @@ public static class FilmSettingsUiTests
         }
         private static Task<JsonElement> Reply(object value) => Task.FromResult(JsonSerializer.SerializeToElement(new
         {
-            ok = true, contract = "cat.script.v1", data = JsonSerializer.Serialize(value, Json)
+            ok = true, contract = "cat.script.v2", value
         }, Json));
     }
 

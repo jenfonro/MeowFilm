@@ -51,7 +51,12 @@ export async function run(command, args, cwd = root, capture = false, environmen
   return new Promise((resolveResult, reject) => {
     const child = spawn(command, args, {
       cwd, stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
-      env: { ...process.env, ...environment, PATH: `${dirname(process.execPath)}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}` },
+      env: {
+        ...process.env, ...environment,
+        PATH: `${dirname(process.execPath)}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`,
+        // node-gyp's Python sources are tracked inputs, not a bytecode cache.
+        PYTHONDONTWRITEBYTECODE: '1',
+      },
     });
     const output = [];
     if (capture) {
@@ -61,7 +66,8 @@ export async function run(command, args, cwd = root, capture = false, environmen
     child.on('error', reject);
     child.on('exit', (code, signal) => {
       const text = Buffer.concat(output).toString('utf8');
-      if (code !== 0) reject(new Error(`${command} ${args.join(' ')} exited ${code ?? signal}\n${text}`));
+      if (code !== 0) reject(Object.assign(
+        new Error(`${command} ${args.join(' ')} exited ${code ?? signal}\n${text}`), { exitCode: code ?? 1 }));
       else resolveResult(text.trim());
     });
   });
@@ -80,9 +86,11 @@ export async function files(directory, packageContents = false) {
   return result.sort();
 }
 export async function hashInputs(paths) {
-  const ordered = [...new Set(paths)].sort(), result = [];
-  for (let index = 0; index < ordered.length; index += 32) {
-    result.push(...await Promise.all(ordered.slice(index, index + 32).map(async path => {
+  const inputs = [...new Set(paths)].sort(), result = [];
+  // Limit open files even when dependency source trees are prepared in parallel.
+  const batchSize = 16;
+  for (let index = 0; index < inputs.length; index += batchSize) {
+    result.push(...await Promise.all(inputs.slice(index, index + batchSize).map(async path => {
       if (path.startsWith('../') || pathOf(path) !== path) throw new Error(`Invalid native input: ${path}`);
       const stat = await lstat(resolve(root, path));
       if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`Not a regular native input: ${path}`);
@@ -329,7 +337,10 @@ async function buildNative() {
     process.platform === 'win32' ? ['build_generated', 'libcrypto.lib'] : ['-j', parallel, 'build_generated', 'libcrypto.a'], opensslBuild);
   const library = resolve(opensslBuild, process.platform === 'win32' ? 'libcrypto.lib' : 'libcrypto.a');
   const packageRoot = resolve(root, 'packages/script-host');
-  await run(process.execPath, [gyp, 'configure', `--nodedir=${headers.root}`,
+  // Windows node-gyp's normal cache uses <arch>/node.lib. --nodedir instead
+  // means a Node source build and incorrectly selects Release/node.lib.
+  const headerArguments = process.platform === 'win32' ? [] : [`--nodedir=${headers.root}`];
+  await run(process.execPath, [gyp, 'configure', ...headerArguments,
     '--', `-Dopenssl_library=${library}`], packageRoot);
   await run(process.execPath, [gyp, 'build', '--jobs', parallel], packageRoot);
   const sdkResult = await buildSourceSDK();
@@ -403,4 +414,9 @@ async function buildNative() {
   console.log(`Built ${receipt.artifact.path} ${receipt.artifact.sha256}`);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await buildNative();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await buildNative().catch(error => {
+    console.error(error.message);
+    process.exitCode = error.exitCode ?? 1;
+  });
+}

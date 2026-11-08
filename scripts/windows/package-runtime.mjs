@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { packageRuntime } from '../package-runtime.mjs';
 
 const MANIFEST = 'runtime-manifest.json';
-const TRANSPORT = 'windows-named-pipe-v1';
+const TRANSPORT = 'windows-http-v1';
 const WINDOWS_SOURCE = 'apps/windows/runtime';
 const WINDOWS_OUTPUT = 'app/windows';
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
@@ -108,7 +108,7 @@ export async function packageWindowsRuntime({
 } = {}) {
   // Rejections here retain the shared packager's failed manifest, if it created
   // one. An existing output is never opened, adopted, altered or removed.
-  const manifest = await packageRuntime({ root, product, output, profile: 'windows-native' });
+  const manifest = await packageRuntime({ root, product, output, profile: 'common-native' });
   root = realpathSync(root);
   output = resolve(output);
   const identity = lstatSync(output);
@@ -165,6 +165,8 @@ export async function packageWindowsRuntime({
     manifest.fileHashExcludes = [MANIFEST];
     manifest.relocations = [];
     save();
+    check((manifest.trustedNative ?? []).every(native => native.platform === 'win32' && native.arch === 'x64'),
+      'NATIVE_TARGET_MISMATCH', 'Windows runtime requires the win-x64 native build');
     const occupied = audit();
     const allowedSources = new Set([
       'bootstrap.mjs', 'entries/aggregate.mjs',
@@ -207,14 +209,10 @@ export async function packageWindowsRuntime({
       ['node:net', 'node:net'],
       ['node:path', 'node:path'],
       ['@meowfilm/runtime-bridge', '@meowfilm/runtime-bridge'],
-      ['@meowfilm/runtime-bridge/descriptor', '@meowfilm/runtime-bridge/descriptor'],
-      ['../../runtime/bootstrap.mjs', '../bootstrap.mjs'],
     ]);
     const entryImports = new Map([
       ['../bootstrap.mjs', '../bootstrap.mjs'],
-      ['../../../runtime/modules/music-script.mjs', '../../modules/music-script.mjs'],
-      ['../../../runtime/modules/cat-script.mjs', '../../modules/cat-script.mjs'],
-      ['../../../runtime/modules/source-runtime.mjs', '../../modules/source-runtime.mjs'],
+      ['../../../runtime/entry.mjs', '../../entry.mjs'],
     ]);
     for (const [relative, imports, dynamicImports = new Map()] of [
       ['bootstrap.mjs', bootstrapImports], ['entries/aggregate.mjs', entryImports],

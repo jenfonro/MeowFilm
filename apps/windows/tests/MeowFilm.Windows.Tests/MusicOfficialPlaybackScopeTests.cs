@@ -708,6 +708,9 @@ public static class MusicOfficialPlaybackScopeTests
     }
     private sealed class NoNode : IRuntimeClient
     {
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
+        { throw new InvalidOperationException("Native business must not upload script sources"); }
         public Task<JsonElement> CallAsync(string method, object? parameters = null,
             CancellationToken cancellationToken = default) => throw new InvalidOperationException("NO_NODE_ALLOWED");
     }

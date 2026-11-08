@@ -51,8 +51,8 @@ public static class AppCompositionTests
         Check(AppIdentity.ScriptModules.Select(m => (m.Id, m.Version)).SequenceEqual(new[]
         {
             ("music", "0.8.0"),
-            ("cat", "0.1.0"),
-            ("source", "0.1.0")
+            ("cat", "0.2.0"),
+            ("source", "0.2.0")
         }));
         Check(AppIdentity.NativeCollections.Count == 0, "music sources are stored by the shared runtime module");
         Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v1"));
@@ -64,20 +64,16 @@ public static class AppCompositionTests
     {
         string data = DataRoot();
         await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
-        await using var documents = new ProtectedDocumentBridge(store, []);
-        IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>? methods = null;
         await using var runtime = new AppRuntimeClient(async token =>
             await NodeRuntime.StartAsync(Required("MEOWFILM_TEST_NODE"),
                 RuntimeBundle.Verify(Path.Combine(Required("MEOWFILM_TEST_RUNTIME_ROOT"), "aggregate"),
                     AppIdentity.RuntimeId, AppIdentity.ScriptModules), AppIdentity.ScriptModules,
-                methods ?? throw new InvalidOperationException("Capabilities not frozen"),
                 Path.Combine(data, "script-runtime"), token));
         await using var playback = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
         await using var music = new MusicCapability(runtime, store, playback);
         var lifecycle = new AppShutdown([music], []);
         try
         {
-            methods = AppLauncher.ComposeScriptCapabilities(documents.Methods, []);
             runtime.Start();
             await music.InitializeAsync(default);
             Check(music.Status.Length == 0);
@@ -89,12 +85,10 @@ public static class AppCompositionTests
             RenderComponent(music.View, 1050, 650);
             RenderComponent(music.SettingsView, 860, 650);
             Check(!playback.HasMedia, "native browsing does not start playback");
-            foreach (string ns in AppIdentity.NativeNamespaces.Concat(new[] { "unknown.namespace" }))
-                await DeniedDocument(documents, ns);
             var status = await runtime.CallAsync("music.script.sources.list", new { });
-            Check(status.GetProperty("ok").GetBoolean() && status.GetProperty("items").GetArrayLength() == 0 &&
+            Check(status.GetProperty("ok").GetBoolean() && status.GetProperty("value").GetProperty("items").GetArrayLength() == 0 &&
                 runtime.State == RuntimeConnectionState.Ready, "the App's runtime started with the App and runs no script");
-            foreach (string method in new[] { "music.library.list", "missing.method" })
+            foreach (string method in new[] { "music.library.list", "platform.documents.read.begin", "missing.method" })
                 await BridgeTests.Expect("METHOD_UNAVAILABLE", () => runtime.CallAsync(method, new { }));
             await lifecycle.CloseAsync();
         }
@@ -106,7 +100,6 @@ public static class AppCompositionTests
         for (int pass = 0; pass < 2; pass++)
         {
             await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
-            await using var documents = new ProtectedDocumentBridge(store, []);
             await using var runtime = new AppRuntimeClient(_ => throw new InvalidOperationException("Node unavailable"));
             runtime.Start();
             await using var owner = new MusicNativeApplication(store, runtime);
@@ -125,7 +118,6 @@ public static class AppCompositionTests
             Check(!sources.GetProperty("ok").GetBoolean() &&
                 sources.GetProperty("code").GetString() == "SCRIPT_RUNTIME_UNAVAILABLE",
                 "a failed runtime is reported as an unavailable script service, never as no scripts");
-            foreach (string ns in AppIdentity.NativeNamespaces) await DeniedDocument(documents, ns);
         }
     }
     private static async Task CurrentShellStartup()
@@ -282,12 +274,6 @@ public static class AppCompositionTests
                     """)
             });
         }
-    }
-    private static async Task DeniedDocument(ProtectedDocumentBridge bridge, string ns)
-    {
-        var value = await bridge.Methods["platform.documents.read.begin"](
-            BridgeCodec.Value(new { version = 1, @namespace = ns, token = Guid.NewGuid().ToString("D") }), default);
-        Check(!BridgeCodec.Value(value).GetProperty("ok").GetBoolean());
     }
     private static void RenderComponent(FrameworkElement view, int width, int height)
     {

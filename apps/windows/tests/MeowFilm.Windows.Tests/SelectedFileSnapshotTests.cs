@@ -21,7 +21,7 @@ internal sealed class SelectedSnapshotCases(bool script)
     private string Prefix => script ? "selected-script." : "selected-json.";
     private int MaximumBytes => script ? SelectedScriptSnapshot.MaximumBytes : SelectedJsonSnapshot.MaximumBytes;
     private static Type SharedType => typeof(SelectedJsonSnapshot).Assembly.GetType("MeowFilm.Platform.Files.SelectedFileSnapshot", throwOnError: true)!;
-    private sealed record Data(byte[] Bytes, string Sha256, string Basename);
+    private sealed record Data(byte[] Bytes, string Basename);
     private async Task<Data> ReadAsync(string path, CancellationToken token = default)
     {
         try
@@ -29,10 +29,11 @@ internal sealed class SelectedSnapshotCases(bool script)
             if (script)
             {
                 var data = await SelectedScriptSnapshot.ReadAsync(path, token).ConfigureAwait(false);
-                return new Data(data.Bytes, data.Sha256, data.Basename);
+                return new Data(data.Bytes, data.Basename);
             }
             var json = await SelectedJsonSnapshot.ReadAsync(path, token).ConfigureAwait(false);
-            return new Data(json.Bytes, json.Sha256, json.Basename);
+            Equal(Hash(json.Bytes), json.Sha256);
+            return new Data(json.Bytes, json.Basename);
         }
         catch (Exception error) when (error.GetType().FullName == "MeowFilm.Platform.Files.SelectedFileSnapshotException")
         {
@@ -41,7 +42,6 @@ internal sealed class SelectedSnapshotCases(bool script)
     }
     private static Data ToData(object value) => new(
         (byte[])value.GetType().GetProperty("Bytes")!.GetValue(value)!,
-        (string)value.GetType().GetProperty("Sha256")!.GetValue(value)!,
         (string)value.GetType().GetProperty("Basename")!.GetValue(value)!);
     private SelectedJsonSnapshotError? Code(Exception error)
     {
@@ -107,7 +107,7 @@ internal sealed class SelectedSnapshotCases(bool script)
     private IEnumerable<TestCase> FacadeCases()
     {
         yield return new(Prefix + "contract.dto-and-fixed-errors", Contract);
-        yield return new(Prefix + "exact-bytes-sha-basename-owned", Exact);
+        yield return new(Prefix + (script ? "exact-bytes-basename-owned" : "exact-bytes-sha-basename-owned"), Exact);
         yield return new(Prefix + "empty-and-invalid-content-remain-bytes", OpaqueBytes);
         yield return new(Prefix + (script ? "maximum-sixteen-mib" : "maximum-eight-mib"), Maximum);
         yield return new(Prefix + "extension-policies-do-not-overlap", ExtensionPolicy);
@@ -129,7 +129,8 @@ internal sealed class SelectedSnapshotCases(bool script)
                     BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!);
         else Equal(8 * 1024 * 1024, MaximumBytes);
         string[] properties = (script ? typeof(SelectedScriptSnapshotData) : typeof(SelectedJsonSnapshotData)).GetProperties().Select(property => property.Name).Order().ToArray();
-        Assert(properties.SequenceEqual(new[] { "Basename", "Bytes", "Sha256" }), "Snapshot exposes an unexpected property.");
+        Assert(properties.SequenceEqual(script ? new[] { "Basename", "Bytes" } : new[] { "Basename", "Bytes", "Sha256" }),
+            "Snapshot exposes an unexpected property.");
         foreach (var code in Enum.GetValues<SelectedJsonSnapshotError>())
         {
             Exception error = script ? new SelectedScriptSnapshotException((SelectedScriptSnapshotError)code) :
@@ -217,7 +218,6 @@ internal sealed class SelectedSnapshotCases(bool script)
         var before = File.GetLastWriteTimeUtc(path);
         var snapshot = await ReadAsync(path.Replace('\\', '/'));
         Bytes(data, snapshot.Bytes);
-        Equal(Hash(data), snapshot.Sha256);
         Equal("选择-资料-🎵" + Extension.ToUpperInvariant(), snapshot.Basename);
         Assert(snapshot.Bytes.Length == data.Length && snapshot.Bytes != data);
         snapshot.Bytes[0] ^= 1;
@@ -234,7 +234,6 @@ internal sealed class SelectedSnapshotCases(bool script)
             string path = fixture.Write("source" + Extension, data);
             var result = await ReadAsync(path);
             Bytes(data, result.Bytes);
-            Equal(Hash(data), result.Sha256);
             fixture.AssertReleased(path);
         }
     }
@@ -249,7 +248,6 @@ internal sealed class SelectedSnapshotCases(bool script)
         var result = await ReadAsync(path);
         Equal(length, result.Bytes.Length);
         Bytes(data, result.Bytes);
-        Equal(Hash(data), result.Sha256);
         fixture.AssertReleased(path);
     }
 
@@ -632,7 +630,7 @@ internal sealed class SelectedSnapshotCases(bool script)
         byte[] bytes = new byte[128 * 1024]; for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)(i * 31 + 7);
         string path = fixture.Write("source" + Extension, bytes);
         var snapshots = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => ReadAsync(path)));
-        foreach (var snapshot in snapshots) { Bytes(bytes, snapshot.Bytes); Equal(Hash(bytes), snapshot.Sha256); }
+        foreach (var snapshot in snapshots) Bytes(bytes, snapshot.Bytes);
         snapshots[0].Bytes[0] ^= 255;
         for (int i = 1; i < snapshots.Length; i++) Bytes(bytes, snapshots[i].Bytes);
         Bytes(bytes, File.ReadAllBytes(path));
@@ -678,7 +676,6 @@ internal sealed class SelectedSnapshotCases(bool script)
         var result = await ReadAsync(path);
         Equal(length, path.Length);
         Equal("snapshot" + Extension, result.Basename);
-        Equal(Hash(original), result.Sha256);
         Bytes(original, result.Bytes);
         Bytes(original, File.ReadAllBytes(path));
         fixture.AssertReleased(path);

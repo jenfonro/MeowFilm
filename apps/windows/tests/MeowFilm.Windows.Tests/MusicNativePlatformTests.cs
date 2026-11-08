@@ -3157,6 +3157,9 @@ public static partial class MusicNativePlatformTests
 
     private sealed class NoRuntime : IRuntimeClient
     {
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
+        { throw new InvalidOperationException("Native business must not upload script sources"); }
         public Task<JsonElement> CallAsync(string method, object? parameters = null,
             CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("VIP native path must not start Node");

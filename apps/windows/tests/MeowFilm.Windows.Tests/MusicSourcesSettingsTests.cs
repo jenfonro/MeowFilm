@@ -172,7 +172,7 @@ public static partial class MusicUiTests
             True(f.Module.Sources[^1].Version == "1" && f.Module.Sources[^1].Name == "改名", "rollback keeps the management name");
             await f.Module.RemoveSourceAsync(f.Module.Sources[^1]);
             await Until(() => f.Module.CanEdit);
-            True(f.Module.Sources.All(row => row.IsBuiltIn) && f.Calls.Count("music.sources.update") == 1 &&
+            True(f.Module.Sources.All(row => row.IsBuiltIn) && f.Runtime.Calls.Count(method => method == "music.script.sources.update") == 1 &&
                 f.Calls.Count("music.sources.edit") == 1 && f.Calls.Count("music.sources.rollback") == 1 &&
                 f.Calls.Count("music.sources.remove") == 1, "row actions reach the shared module");
         });

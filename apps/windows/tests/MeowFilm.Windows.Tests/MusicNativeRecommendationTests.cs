@@ -113,6 +113,9 @@ public static class MusicNativeRecommendationTests
     private sealed class Runtime : IRuntimeSession
     {
         internal int Calls, Disposals;
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
+        { Interlocked.Increment(ref Calls); throw new InvalidOperationException("Native business must not upload script sources"); }
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         { Interlocked.Increment(ref Calls); throw new InvalidOperationException("Node must not execute native recommendation business"); }
         public ValueTask DisposeAsync() { Disposals++; return ValueTask.CompletedTask; }

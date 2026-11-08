@@ -80,7 +80,7 @@ load 必填 `installationId,sourceRevision,revision,expectedRevision`；protocol
 
 初始化整体受同一截止信号约束，候选 HTML 和外部脚本请求按实际 I/O 所有权登记。同一安装的管理事务有序执行；动作可在 await 等待期间交错推进，各自保留请求身份、阶段上下文和取消 fence；不同安装可独立推进，status 不等待慢实例。HTTP abort/未完成 response close fence 结果，正常 finish 不取消完成工作。Reader DOM 文档/节点/字符串、分页、HTML 候选、外部脚本及规则解析预算保留；`maximumParseBytes` 只用于解析，不限制普通 HTTP body、变量、Cookie、storage 或路由状态。
 
-iOS 的三模块宿主包含 source，仍不代表已实现阅读 UI；平台装配与运行证据见[iOS 运行底座](../ios/runtime-preflight.md)。Windows 旧接入仍待迁移，不用旧后端或 wire 兼容路径掩盖；通用原生构建与定向回归的适用环境及未覆盖项见[通用验证范围](script-runtime.md#构建发布与验证边界)。
+iOS 与 Windows 的三模块宿主均通过当前 HTTP 装配 source，不新增阅读 UI；平台装配与验证边界分别见[iOS 运行底座](../ios/runtime-preflight.md)和[Windows 平台接入](../windows/app-runtime.md)。不提供旧后端或 wire 兼容路径；通用原生构建与定向回归已通过，适用环境及未覆盖项见[通用验证范围](script-runtime.md#构建发布与验证边界)。
 
 ## 兼容边界
 

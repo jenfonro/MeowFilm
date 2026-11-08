@@ -15,8 +15,8 @@ public static class AppIdentity
         Array.AsReadOnly(new[]
         {
             new RuntimeModule("music", "0.8.0"),
-            new RuntimeModule("cat", "0.1.0"),
-            new RuntimeModule("source", "0.1.0")
+            new RuntimeModule("cat", "0.2.0"),
+            new RuntimeModule("source", "0.2.0")
         });
     /// <summary>Trusted native content collections. Music sources are stored by the shared runtime module.</summary>
     public static IReadOnlyList<string> NativeCollections { get; } = Array.AsReadOnly(Array.Empty<string>());

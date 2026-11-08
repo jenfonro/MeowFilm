@@ -17,6 +17,9 @@ internal abstract class MusicApplicationTestDouble : IMusicApplication
     public virtual Task InitializeAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     public abstract Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
         CancellationToken cancellationToken = default);
+    public virtual Task<JsonElement> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
+        string? installationId = null, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Source import is not part of this fixture");
     public virtual Task PrepareShutdownAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     public virtual Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     public virtual Task AbortAsync(CancellationToken cancellationToken = default) => DisposeAsync().AsTask();
@@ -128,6 +131,9 @@ internal abstract class MusicApplicationForwarder(IMusicApplication inner) : Mus
     public override Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
         CancellationToken cancellationToken = default) =>
         Inner.ExecuteAsync(method, parameters, cancellationToken);
+    public override Task<JsonElement> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
+        string? installationId = null, CancellationToken cancellationToken = default) =>
+        Inner.ImportSourceAsync(source, basename, installationId, cancellationToken);
     public override Task PrepareShutdownAsync(CancellationToken cancellationToken = default) =>
         Inner.PrepareShutdownAsync(cancellationToken);
     public override Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default) =>

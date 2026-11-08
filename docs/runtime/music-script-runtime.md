@@ -4,7 +4,7 @@
 
 `apps/runtime/modules/music-script.mjs` 导出 `createMusicScriptModule({dataRoot, hostFactory, network, download, clock, setTimer, clearTimer})`，身份为 `music@0.8.0` / `music.script.v3`。通用 `apps/runtime` 入口提供本地 HTTP；构造与启动不读取安装目录、不执行脚本、不检测，管理首次使用才打开 `<dataRoot>/music`。
 
-成功响应为 `{ok:true,contract:"music.script.v3",value}`，失败为 `{ok:false,contract:"music.script.v3",code}`。错误只含固定分类，不泄漏源码、凭据或异常正文。音乐无需反向 callback 端点。iOS 薄适配与生命周期见[音源管理](../ios/music.md#音源管理)，Windows 旧启动、分片与客户端所有权接入仍待迁移；公共测试不代替平台 App 验证。
+成功响应为 `{ok:true,contract:"music.script.v3",value}`，失败为 `{ok:false,contract:"music.script.v3",code}`。错误只含固定分类，不泄漏源码、凭据或异常正文。音乐无需反向 callback 端点。iOS 薄适配与生命周期见[音源管理](../ios/music.md#音源管理)，Windows 的完整源码与原生消费者见[平台接入](../windows/music-script-runtime.md)；公共测试不代替平台 App 验证。
 
 ## 完整 HTTP 输入与业务方法
 

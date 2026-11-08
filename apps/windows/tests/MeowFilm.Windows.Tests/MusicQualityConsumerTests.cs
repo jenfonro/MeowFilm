@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Runtime.ExceptionServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -131,11 +130,9 @@ public static class MusicQualityConsumerTests
             }});
             """;
         byte[] bytes = Encoding.UTF8.GetBytes(source);
-        string token = (await Call("music.transfer.begin", new { kind = "script", basename = "quality-lx.js",
-            length = bytes.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)) })).GetProperty("token").GetString()!;
-        await Call("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) });
-        string id = (await Call("music.sources.add", new { token }))
-            .GetProperty("item").GetProperty("installationId").GetString()!;
+        var installed = await app.ImportSourceAsync(bytes, "quality-lx.js");
+        Check(installed.GetProperty("ok").GetBoolean(), installed.GetRawText());
+        string id = installed.GetProperty("item").GetProperty("installationId").GetString()!;
         await Call("music.sources.enable", new { installationId = id });
         foreach (string quality in new[] { "master", "192k" })
         {

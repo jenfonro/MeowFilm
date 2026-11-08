@@ -14,7 +14,10 @@
         "msvs_settings": {
           "VCCLCompilerTool": {
             "ExceptionHandling": 1,
-            "AdditionalOptions": ["/std:c++17", "/utf-8"]
+            "AdditionalOptions!": ["-std:c++20"],
+            "LanguageStandard": "stdcpp17",
+            "LanguageStandard_C": "stdc11",
+            "AdditionalOptions": ["/utf-8"]
           }
         }
       }],
@@ -83,6 +86,16 @@
           }
         }],
         ["OS=='win'", {
+          "msvs_settings": {
+            "VCCLCompilerTool": { "RuntimeTypeInfo": "true" }
+          },
+          "configurations": {
+            "Release": {
+              "msvs_settings": {
+                "VCCLCompilerTool": { "RuntimeTypeInfo": "true" }
+              }
+            }
+          },
           "libraries": ["ws2_32.lib", "crypt32.lib", "advapi32.lib", "user32.lib", "bcrypt.lib"]
         }]
       ]
