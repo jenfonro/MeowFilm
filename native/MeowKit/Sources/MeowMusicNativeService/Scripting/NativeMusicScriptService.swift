@@ -83,7 +83,11 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
         defer { pending[id] = nil }
         do {
             return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-        } catch { throw Self.failure(error) }
+        } catch {
+            if Task.isCancelled || task.isCancelled { throw MusicServiceError.cancelled }
+            if let declaration = error as? MusicSourceDeclarationFailure { throw declaration }
+            throw Self.failure(error)
+        }
     }
 
     private func transport() async throws -> MusicScriptTransport {
@@ -209,7 +213,10 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
         }
     }
     private func sourceSnapshot(installationID id: String) async throws -> MusicScriptSource {
-        try Self.snapshot(await row("sources.detail", ["installationId": .string(id)]))
+        do { return try Self.snapshot(await row("sources.detail", ["installationId": .string(id)])) }
+        catch MusicServiceError.permissionDenied {
+            throw MusicSourceDeclarationFailure(failure: .permissionDenied)
+        }
     }
     private func request(_ request: MusicScriptRequest, operation: String,
                          parameters: RuntimeObject) async throws -> MusicScriptResult<RuntimeValue> {
@@ -264,8 +271,14 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
                 guard let milliseconds = value.scriptInteger else { throw MusicServiceError.invalidMediaCandidate }
                 expires = Date(timeIntervalSince1970: Double(milliseconds) / 1000)
             }
+            let duration: Double?
+            switch result.scriptField("duration") {
+            case nil, .null?: duration = nil
+            case .number(let value)? where value.isFinite && value >= 0: duration = value > 0 ? value : nil
+            default: throw MusicServiceError.invalidMediaCandidate
+            }
             return .init(value: .init(url: try Self.mediaURL(url), headers: headers, expiresAt: expires,
-                                     fileCachePolicy: .denied), source: execution.source)
+                                     fileCachePolicy: .init(allowed: true), duration: duration), source: execution.source)
         }
     }
     public func lyrics(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeLyrics> {
@@ -391,9 +404,9 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
                 case "CORRUPT_STORAGE": return .corruptDocument
                 case "STORAGE_ERROR": return .storageFailed
                 case "SCRIPT_ENCODING", "SCRIPT_INTEGRITY", "SCRIPT_PROTOCOL_ERROR": return .invalidScript
-                case "INVALID_MEDIA_CANDIDATE", "MEDIA_UNAVAILABLE", "EXPIRED_MEDIA_CANDIDATE", "MEDIA_HEADERS_UNSUPPORTED":
+                case "INVALID_MEDIA_CANDIDATE", "MEDIA_UNAVAILABLE", "EXPIRED_MEDIA_CANDIDATE", "MEDIA_HEADERS_UNSUPPORTED", "RECORDING_MISMATCH":
                     return .invalidMediaCandidate
-                case "TARGET_CHANGED", "RECORDING_MISMATCH": return .targetChanged
+                case "TARGET_CHANGED": return .targetChanged
                 case "INVALID_SOURCE_URL": return .insecureScriptURL
                 case "SOURCE_DOWNLOAD_FAILED": return .scriptDownloadFailed
                 case "SOURCE_REDIRECT": return .scriptRedirect

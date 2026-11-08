@@ -57,6 +57,7 @@ public actor MusicCandidateDiscoveryConsumer {
         } catch {
             if let prepared { await prepared.session.close(retainingAttemptID: nil) }
             if token == own { pending = nil }
+            if let declaration = error as? MusicSourceDeclarationFailure { throw declaration.failure }
             throw error
         }
     }
@@ -112,6 +113,7 @@ public actor MusicCandidateDiscoveryConsumer {
                         break
                     } catch {
                         await session.cancel(attemptID: attempt)
+                        if error is MusicSourceDeclarationFailure { throw error }
                         let failure = MusicServiceError.sanitized(error)
                         issues.append(.init(stage: .resolution, platform: target.selection.siteId, failure: failure))
                         // A content answer for one recording (VIP-only, removed,

@@ -133,7 +133,7 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
         let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
         let file = MusicRecoveryTestFileCache(hit: .init(identity: .init(scope: String(repeating: "c", count: 64),
             songID: song["songId"].string, sourceKey: key, platform: "tx", nativeID: "101", requestedQuality: "flac",
-            playbackSignature: NativeMusicService.audioCacheSignature(song: song, playback: d.playback)),
+            playbackSignature: NativeMusicService.audioCacheSignature(song: song, playback: d.playback), provider: "official:recovery-synthetic"),
             fileURL: URL(fileURLWithPath: "/synthetic-cache/recording.flac"), duration: 180,
             measuredQuality: "flac", expiresAt: clock.now().addingTimeInterval(3600)))
         let cache = MusicNativeMemorySourceDiscoveryCache(clock: { clock.now() })

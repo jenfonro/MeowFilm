@@ -190,6 +190,7 @@ public sealed class MusicScriptOwner : IAsyncDisposable
                 ("songId", song["songId"]), ("sourceKey", selected.Key), ("installationId", id),
                 ("platform", platform), ("generation", generation), ("contentHash", result["contentHash"]),
                 ("quality", quality), ("requestedQuality", quality), ("expiresAt", result["expiresAt"]),
+                ("duration", result["duration"]),
                 ("playbackVerified", false), ("qualityVerified", false),
                 ("qualityPolicySignature", policy.Signature), ("qualityCacheSignature", signature));
         }

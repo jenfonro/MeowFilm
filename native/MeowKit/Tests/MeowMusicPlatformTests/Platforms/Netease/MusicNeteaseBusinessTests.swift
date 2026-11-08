@@ -205,7 +205,7 @@ final class MusicNeteaseBusinessTests: XCTestCase {
         XCTAssertFalse(before.contains { $0.request.url.path.contains("player/url") })
         let result = try await f.service.nativeResolve(platform: .netease, nativeID: "101", selection: option.selection(quality: "sky"))
         XCTAssertEqual(result.url.host, "m801.music.126.net"); XCTAssertTrue(result.headers.isEmpty)
-        XCTAssertEqual(result.expiresAt, f.clock.now().addingTimeInterval(300))
+        XCTAssertEqual(result.expiresAt, f.clock.now().addingTimeInterval(1800))
         let requests = await f.http.recorded()
         let player = try XCTUnwrap(requests.first { $0.request.url.path.contains("player/url") })
         let data = try MusicQQWire.decode(XCTUnwrap(player.payload))
@@ -213,6 +213,23 @@ final class MusicNeteaseBusinessTests: XCTestCase {
         XCTAssertEqual(data["ids"] as? String, "[101]")
         XCTAssertEqual(requests.filter { $0.request.url.path.contains("player/url") }.count, 1)
         _ = await f.service.close()
+    }
+    func testUnknownOfficialQualityStillPreservesResponseDuration() async throws {
+        let durations: [Double?] = [191, 190, 0, nil]
+        for duration in durations {
+            let f = try MusicNeteaseNativeFixture(); try await f.enable()
+            let options = try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101")
+            var response = MusicNeteaseFixture.audio(level: "unrecognized")
+            var rows = try XCTUnwrap(response["data"] as? [[String: Any]])
+            if let duration { rows[0]["time"] = duration * 1000 }
+            response["data"] = rows
+            await f.http.replies("/xeapi/song/enhance/player/url/v1", [try MusicNeteaseFixture.response(response)])
+            let audio = try await f.service.nativeResolve(platform: .netease, nativeID: "101",
+                selection: XCTUnwrap(options.first).selection(quality: "flac"))
+            XCTAssertNil(audio.delivery, "Unknown quality must not become the requested quality")
+            XCTAssertEqual(audio.duration, duration.flatMap { $0 > 0 ? $0 : nil })
+            _ = await f.service.close()
+        }
     }
     func testOfficialWrongIdentityActualTrialAndUnsafeURLNeverRetryOrReturnURL() async throws {
         var responses: [[String: Any]] = [
@@ -238,7 +255,7 @@ final class MusicNeteaseBusinessTests: XCTestCase {
             _ = await f.service.close()
         }
     }
-    func testUnknownExpiredMembershipOnlyOffersStandardAndWrongAccountIsRejected() async throws {
+    func testMembershipFactsDoNotReplaceResourceCapabilities() async throws {
         for mode in ["unknown", "expired", "wrong"] {
             let f = try MusicNeteaseNativeFixture(); try await f.enable()
             let at = Int(f.clock.now().timeIntervalSince1970 * 1000)
@@ -246,14 +263,10 @@ final class MusicNeteaseBusinessTests: XCTestCase {
             if mode != "unknown" { rights["associator"] = ["expireTime": mode == "expired" ? at - 1000 : at + 300_000] }
             await f.http.replies("/weapi/music-vip-membership/client/vip/info",
                                  [try MusicNeteaseFixture.response(["code": 200, "data": rights])])
-            do {
-                let options = try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101")
-                XCTAssertNotEqual(mode, "wrong"); XCTAssertEqual(options.first?.qualities, ["128k"])
-            } catch {
-                XCTAssertEqual(mode, "wrong"); XCTAssertEqual(error as? MusicServiceError, .targetChanged)
-            }
+            let options = try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101")
+            XCTAssertTrue(options.first?.qualities.contains("flac") == true)
             let requests = await f.http.recorded()
-            XCTAssertFalse(requests.contains { $0.request.url.path.contains("player/url") })
+            XCTAssertFalse(requests.contains { $0.request.url.path.contains("player/url") || $0.request.url.path.contains("vip/info") })
             _ = await f.service.close()
         }
     }

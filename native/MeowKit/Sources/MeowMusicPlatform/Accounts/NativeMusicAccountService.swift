@@ -90,6 +90,26 @@ extension NativeMusicAccountService: MusicNativeAccountProviding {
         return try authorizedAudio(value, platform: platform)
     }
 }
+extension NativeMusicAccountService: MusicOfficialSourceChecking {
+    public func checkOfficialSource(_ platform: MusicAccountPlatform) async throws {
+        let ids: [MusicAccountPlatform: String] = [.netease: "347230", .qq: "0039MnYb0qxYhV",
+            .kugou: "30ece05c17d4e9ec8ba0ef9f96e7a07c"]
+        guard let mid = ids[platform] else { throw MusicServiceError.unsupported }
+        let own = epoch
+        if platform == .netease, let provider = providers[platform] as? any MusicNeteasePublicAudioProvider {
+            let value = try await provider.publicStandardAudio(nativeID: mid)
+            try check(own)
+            _ = try MusicNativeAccountURLCache.audio(value)
+            return
+        }
+        let options = try await nativeOptions(platform: platform, nativeID: mid, sourceKey: platform.rawValue + ":" + mid)
+        guard options.first?.qualities.contains("128k") == true,
+              let grant = grants[GrantKey(platform: platform, nativeID: mid)] else { throw MusicServiceError.sourceUnavailable }
+        let value = try await resolveSharedAudio(platform: platform, mid: mid, quality: "128k", grant: grant, own: own)
+        try check(own)
+        _ = try MusicNativeAccountURLCache.audio(value)
+    }
+}
 // Local facts only: no restore, validation or request. A platform not yet
 // inspected may still restore a token, so it stays eligible (at most one search).
 extension NativeMusicAccountService: MusicNativeCandidateScopeProviding {
@@ -1529,7 +1549,8 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
         playbackAuthorizations[platform] = authorization
         try authorization.check()
         return .init(url: audio.url, headers: audio.headers, expiresAt: audio.expiresAt,
-            fileCachePolicy: audio.fileCachePolicy, delivery: audio.delivery, playbackAuthorization: authorization)
+            fileCachePolicy: audio.fileCachePolicy, delivery: audio.delivery, playbackAuthorization: authorization,
+            duration: audio.duration)
     }
     private func guestStandardOption(nativeID: String, sourceKey: String,
                                      binding: MusicNativeHomeBinding) throws -> MusicPlaybackOption {
@@ -2490,7 +2511,7 @@ extension NativeMusicAccountService: MusicNativeHomeActionQueueProviding {
 
 extension NativeMusicAccountService: MusicNativeChorusProviding {
     public func nativeChorus(nativeID: String, selection: MusicPlaybackSelection,
-                             recordingDuration: Double, actualDuration: Double) async throws -> MusicChorusPoint? {
+                             recordingDuration: Double, actualDuration: Double, cachedOnly: Bool) async throws -> MusicChorusPoint? {
         do {
             try check()
             guard let platform = MusicAccountPlatform(rawValue: selection.siteId), platform != .qq,
@@ -2506,7 +2527,7 @@ extension NativeMusicAccountService: MusicNativeChorusProviding {
             }
             // An offline cached-file grant may read metadata, never obtain a
             // credential or start network work on behalf of an old account.
-            if selection.installationId == "official:cached" { return nil }
+            if cachedOnly { return nil }
             if platform == .netease, isGuestAudioSelection(selection),
                let publicProvider = providers[platform] as? any MusicNeteasePublicAudioProvider {
                 let binding = try guestRecoveryBinding(selection)

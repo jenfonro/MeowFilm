@@ -41,7 +41,7 @@ public protocol MusicNativeCacheScopeProviding: Sendable {
 /// into the same account owner (its lifecycle barrier would deadlock).
 public enum MusicNativeCacheLifecycleEvent: Sendable, Equatable {
     /// Logout/login replacement, credential revision change
-    /// or observed external replacement. Clear this owner's complete-file cache.
+    /// or observed external replacement. Clear official complete files only.
     case accountChanged
     /// Protection generation changed. Cancel pending work, retain disk bytes.
     case accessChanged

@@ -29,12 +29,25 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     @discardableResult func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool
     func stop(_ attempt: MusicPlayerAttempt)
 }
-@MainActor private final class SharedMusicPlaybackDriver: MusicPlaybackDriving {
+@MainActor public protocol MusicPlaybackHandoffDriving: MusicPlaybackDriving {
+    func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback
+}
+@MainActor private final class SharedMusicPlaybackDriver: MusicPlaybackHandoffDriving {
     let playback: PlaybackController
     init(_ playback: PlaybackController) { self.playback = playback }
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
         let attempt = playback.playAttempt(resource: resource, owner: "music")
         return MusicPlayerAttempt(id: attempt.id, resourceID: attempt.resourceID)
+    }
+    func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
+        guard let current = target(replacing) else { throw MusicServiceError.staleResult }
+        let prepared = try await playback.prepareReplacement(resource: resource, replacing: current)
+        return MusicPreparedPlayback(duration: prepared.duration, synchronize: { [playback] in
+            try await playback.synchronizeReplacement(prepared)
+        }, commit: { [playback] in
+            let attempt = try playback.commitReplacement(prepared)
+            return .init(id: attempt.id, resourceID: attempt.resourceID)
+        }, cancel: { prepared.cancel() })
     }
     func target(_ attempt: MusicPlayerAttempt) -> PlayAttempt? {
         guard let current = playback.currentAttempt, current.owner == "music",
@@ -172,6 +185,18 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         didSet { searchResultsCache = MusicSearchResultsCache.make() }
     }
     var searchResultsCache = MusicSearchResultsCache.make()
+    var sourceIntent = MusicSourceIntent.automatic
+    var sourceCommittedSettingsRevision: Int?
+    var pendingSourceSelection: (id: UUID, intent: MusicSourceIntent, lifetime: MusicQueueAuthorization)?
+    var sourceRenewed = Set<String>()
+    var sourceRecoveryID = UUID()
+    var sourceRecoveryTask: Task<Void, Never>?
+    var sourceRecoveryWantsPlayback: Bool?
+    var sourceSwitchTask: Task<MusicPreparedSource, Error>?
+    var sourceSwitchID = UUID()
+    var playbackControlRevision = UUID()
+    var playPauseCommandTask: (id: UUID, attempt: MusicPlayerAttempt, task: Task<Void, Never>)?
+    var sourceMediaTask: Task<MusicPreparedPlayback, Error>?
     var resolutionTask: Task<MusicPlaybackCandidate, Error>?
     var candidateDiscoveryTask: Task<MusicCandidateDiscoveryResolution, Error>?
     var lyricTask: Task<MusicLyricsSnapshot, Error>?
@@ -323,6 +348,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         }
         let old = nativeAttempt
         nativeAttempt = nil; pendingNativeResourceID = nil; candidate = nil
+        sourceCommittedSettingsRevision = nil
         resolvingAttempt = nil; terminalAttempt = nil; lastProgressWrite = nil
         playbackState.phase = .idle
         // Stop can synchronously publish the old exit; it no longer owns the
@@ -330,18 +356,26 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         if let old { player?.stop(old) }
     }
     func invalidateSelection(stopMedia: Bool, preservingQueueIntent intent: MusicQueueAuthorization? = nil) {
+        let retainsPlayback = !stopMedia && isAvailable && !isClosed && nativeAttempt != nil &&
+            candidate?.occurrenceId == current?.id && terminalAttempt == nil
         if remoteQueueIntent !== intent { cancelRemoteQueuePreparation() }
         if fmAdvanceIntent !== intent { fmAdvanceIntent?.revoke(); fmAdvanceIntent = nil }
         feedbackConsumer.invalidate()
-        feedbackAutomatic = false
+        if !retainsPlayback { feedbackAutomatic = false }
+        sourceSwitchID = UUID(); sourceSwitchTask?.cancel(); sourceSwitchTask = nil; sourceMediaTask?.cancel(); sourceMediaTask = nil
+        sourceRecoveryTask?.cancel(); sourceRecoveryTask = nil
+        sourceRecoveryWantsPlayback = nil; sourceRecoveryID = UUID()
+        if !retainsPlayback { sourceIntent = .automatic; sourceRenewed = [] }
+        pendingSourceSelection?.lifetime.revoke(); pendingSourceSelection = nil
         selectionID = UUID()
         resolutionTask?.cancel(); resolutionTask = nil
         candidateDiscoveryTask?.cancel(); candidateDiscoveryTask = nil
         lyricTask?.cancel(); lyricTask = nil
         if metadataOccurrenceID != current?.id { playbackMetadata.clearSelection() }
         cachedAudioLookup?.cancel(); cachedAudioLookup = nil
-        cachedAudioRecoveryTask?.cancel(); cachedAudioRecoveryTask = nil; cachedAudioRecovery = nil
-        remoteAudioRecoveryTask?.cancel(); remoteAudioRecoveryTask = nil; remoteAudioRecoveryTried = false
+        cachedAudioRecoveryTask?.cancel(); cachedAudioRecoveryTask = nil
+        remoteAudioRecoveryTask?.cancel(); remoteAudioRecoveryTask = nil
+        if !retainsPlayback { cachedAudioRecovery = nil; remoteAudioRecoveryTried = false }
         playbackState.isResolving = false; playbackState.options = []; playbackState.scriptSourceError = nil
         if metadataOccurrenceID != current?.id { metadataState.lyricLines = []; metadataState.lyricState = "idle" }
         if stopMedia { stopOwned() }
@@ -352,6 +386,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     /// stopped here; new business operations also stop.
     public func setAvailable(_ available: Bool) {
         guard isAvailable != available, !isClosed else { return }
+        cancelPlayPauseCommands()
         notifyCollectionPages(.revoking)
         favoritesStorage?.suspend()
         // Unlike an already-held remote stream, a local cached file has an
@@ -408,23 +443,36 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         do { epoch = try enter() } catch { return }
         // A settings action supersedes an in-flight selection, not an already
         // playing resource. Do this before the first await, even if the write fails.
-        if isResolving { invalidateSelection(stopMedia: true) }
+        if isResolving { invalidateSelection(stopMedia: candidate == nil) }
         do {
-            let next = try await requireService().updateSettings(change); try check(epoch); playbackState.state = next
-            if !next.lyricsEnabled {
+            _ = try await requireService().updateSettings(change)
+            try await reconcilePlaybackFeedbackSettings(accessGeneration: epoch)
+            try check(epoch)
+            if !state.lyricsEnabled {
                 lyricTask?.cancel()
                 beginPlaybackMetadata(); metadataState.lyricLines = []; metadataState.lyricState = "disabled"
             }
             else if let current, candidate?.occurrenceId == current.id {
                 await loadLyrics(occurrenceId: current.id)
             }
-        } catch { report(error, epoch: epoch, operation: "保存播放设置", kind: .settings) }
+        } catch {
+            let failure = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
+            if [.commitUnconfirmed, .staleRevision, .storageConflict].contains(failure) {
+                do { try await reconcilePlaybackFeedbackSettings(accessGeneration: epoch) }
+                catch {
+                    if !Task.isCancelled { report(error, epoch: epoch, operation: "读取播放设置", kind: .settings) }
+                    return
+                }
+            }
+            if !Task.isCancelled { report(error, epoch: epoch, operation: "保存播放设置", kind: .settings) }
+        }
     }
     public func setMode(_ mode: MusicPlaybackMode) async {
         await updateSettings(MusicSettingsChange(ifRevision: state.settingsRevision, mode: mode))
     }
     public func close() async {
         guard !isClosed else { return }
+        cancelPlayPauseCommands()
         favoritesObservation?.cancel(); favoritesObservation = nil
         favoritesStorage?.suspend()
         accountObservation?.cancel(); accountObservation = nil
@@ -455,6 +503,8 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             accountObservation?.cancel()
             remoteQueueIntent?.revoke(); remoteQueueTask?.cancel()
             fmAdvanceIntent?.revoke(); fmRevocationTask?.cancel(); fmSource?.revoke()
+            sourceSwitchTask?.cancel(); sourceMediaTask?.cancel()
+            playPauseCommandTask?.task.cancel()
             resolutionTask?.cancel(); candidateDiscoveryTask?.cancel()
             lyricTask?.cancel(); eventTail?.cancel(); navigationTask?.cancel()
             metadataPreferencesRefreshTask?.cancel()

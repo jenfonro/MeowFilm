@@ -18,10 +18,11 @@ extension NativeMusicService: MusicChorusProviding {
         // Do not borrow WY's mapping for an actual QQ/KG delivery.
         let recorded = row["duration"].number > 0 ? row["duration"].number : info["duration"].number
         guard recorded.isFinite, recorded > 0, actualDuration.isFinite, actualDuration > 0,
-              abs(recorded - actualDuration) <= max(3, min(recorded, actualDuration) * 0.02) else { return nil }
+              MusicMediaDuration.matches(expected: recorded, actual: actualDuration) else { return nil }
+        let cachedOnly = audioCacheAttempt?.attemptID == attemptID && audioCacheAttempt?.audio == nil
         let point = try await work(label: "chorus") {
             try await owner.nativeChorus(nativeID: source.nativeId, selection: selection,
-                                         recordingDuration: recorded, actualDuration: actualDuration)
+                                         recordingDuration: recorded, actualDuration: actualDuration, cachedOnly: cachedOnly)
         }
         try check(own)
         guard attempt?.id == attemptID, attempt?.ready == true, attempt?.ended == false,

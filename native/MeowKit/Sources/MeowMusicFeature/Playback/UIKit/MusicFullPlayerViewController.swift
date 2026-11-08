@@ -128,21 +128,39 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
 
     private func showMore() {
         let alert = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+        let occurrence = content.model.current?.id, access = content.model.accountAccessGeneration
+        alert.addAction(UIAlertAction(title: "播放倍速", style: .default) { [weak self, weak alert] _ in
+            guard let self, let alert else { return }
+            self.dismissMenu(alert) { self.showRates() }
+        })
+        let sourceAttempt = content.model.activeNativeAttemptID
+        let wrongSource = UIAlertAction(title: "音源不对", style: .destructive) { [weak self] _ in
+            Task {
+                guard let self, self.content.model.current?.id == occurrence,
+                      self.content.model.activeNativeAttemptID == sourceAttempt,
+                      self.content.model.accountAccessGeneration == access else { return }
+                await self.content.model.rejectCurrentSource()
+            }
+        }
+        wrongSource.isEnabled = content.model.canRejectCurrentSource
+        alert.addAction(wrongSource)
+        if content.model.isFMActive {
+            alert.addAction(UIAlertAction(title: "私人漫游模式", style: .default) { [weak self, weak alert] _ in
+                guard let alert else { return }
+                self?.dismissMenu(alert) { self?.openFMSettings() }
+            })
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        presentPopover(alert, anchor: playerView.moreAnchor)
+    }
+
+    private func showRates() {
+        let alert = UIAlertController(title: "播放倍速", message: nil, preferredStyle: .actionSheet)
         let attempt = content.playback.currentAttempt
         for rate in [0.5, 0.75, 1, 1.25, 1.5, 2] {
             alert.addAction(UIAlertAction(title: "\(rate)x", style: .default) { [weak self] _ in
                 guard let self, let attempt, self.content.playback.currentAttempt == attempt else { return }
                 _ = self.content.playback.setPreferredRate(rate, attempt: attempt)
-            })
-        }
-        alert.addAction(UIAlertAction(title: "选择音源", style: .default) { [weak self, weak alert] _ in
-            guard let alert else { return }
-            self?.dismissMenu(alert) { self?.requestSources() }
-        })
-        if content.model.isFMActive {
-            alert.addAction(UIAlertAction(title: "私人漫游模式", style: .default) { [weak self, weak alert] _ in
-                guard let alert else { return }
-                self?.dismissMenu(alert) { self?.openFMSettings() }
             })
         }
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))

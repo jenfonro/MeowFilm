@@ -19,8 +19,7 @@ final class MusicKugouAudioTests: XCTestCase {
             let row = try MusicKugouFixture.object(value)
             XCTAssertEqual(Set(row.keys), ["url", "expiresAt", "qualityVerified", "cacheAllowed", "licenseExpiresAt"])
             XCTAssertEqual(row["cacheAllowed"], .bool(true))
-            XCTAssertEqual(row["licenseExpiresAt"], .number((s.clock.now().timeIntervalSince1970 + 600) * 1000),
-                           "The fixture grants a ten-minute license, independently of the unknown URL expiry")
+            XCTAssertEqual(row["licenseExpiresAt"], .null, "Membership is not an audio grant")
             XCTAssertEqual(row["expiresAt"], .null); XCTAssertEqual(row["qualityVerified"], .bool(false))
             XCTAssertNil(row["headers"])
             let text = String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
@@ -54,7 +53,7 @@ final class MusicKugouAudioTests: XCTestCase {
         let requests = await s.http.recorded()
         XCTAssertFalse(requests.contains { $0.url.path == "/v5/url" })
     }
-    func testUnknownExpiredAndNonVIPMembershipAreNotEntitlements() async throws {
+    func testUnknownExpiredAndNonVIPMembershipDoesNotPreventUpstreamResolution() async throws {
         for data in [
             [:] as [String: Any],
             ["userid": 42, "is_vip": 0],
@@ -65,18 +64,18 @@ final class MusicKugouAudioTests: XCTestCase {
             let s = MusicKugouTestSystem()
             await s.http.respond("/v1/get_union_vip", [try MusicKugouFixture.response(["status": 1, "data": data])])
             let capabilities = try await s.provider.capabilities(mid: MusicKugouFixture.baseHash, credential: MusicKugouFixture.credential())
-            XCTAssertTrue(capabilities.isEmpty)
-            do { _ = try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: "flac", credential: MusicKugouFixture.credential()); XCTFail("Unverified rights") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .qualityDisabled) }
+            XCTAssertTrue(capabilities.contains("flac"))
+            _ = try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: "flac", credential: MusicKugouFixture.credential())
             let requests = await s.http.recorded()
-            XCTAssertFalse(requests.contains { $0.url.path == "/v5/url" })
+            XCTAssertTrue(requests.contains { $0.url.path == "/v5/url" })
+            XCTAssertFalse(requests.contains { $0.url.path == "/v1/get_union_vip" })
         }
     }
     func testMembershipAndMetadataIdentityCannotCrossAccountsOrHashes() async throws {
         let s = MusicKugouTestSystem()
         await s.http.respond("/v1/get_union_vip", [try MusicKugouFixture.response(["status": 1, "data": ["userid": 99, "is_vip": 1]])])
-        do { _ = try await s.provider.capabilities(mid: MusicKugouFixture.baseHash, credential: MusicKugouFixture.credential()); XCTFail("Other account rights") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
+        let capabilities = try await s.provider.capabilities(mid: MusicKugouFixture.baseHash, credential: MusicKugouFixture.credential())
+        XCTAssertTrue(capabilities.contains("flac"), "Unrequested membership data is not playback authority")
         await s.http.respond("/v1/get_union_vip", [])
         var song = MusicKugouFixture.song(); song["hash"] = MusicKugouFixture.hqHash
         await s.http.respond("/v1/audio/audio", [try MusicKugouFixture.response(["errcode": 0, "data": [song]])])
@@ -136,7 +135,7 @@ final class MusicKugouAudioTests: XCTestCase {
         do { _ = try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: "flac", credential: MusicKugouFixture.credential()); XCTFail("Unsafe backup ignored") }
         catch { XCTAssertEqual(error as? MusicServiceError, .invalidMediaCandidate) }
     }
-    func testLicenseExpiryAndRevokeDuringTrackerRejectLateCandidate() async throws {
+    func testMembershipExpiryDoesNotRejectUpstreamAudioButRevokeStillRejectsLateCandidate() async throws {
         for expire in [true, false] {
             let s = MusicKugouTestSystem(), gate = MusicAccountTestGate()
             await s.http.hold("/v5/url", gate)
@@ -144,8 +143,14 @@ final class MusicKugouAudioTests: XCTestCase {
             await gate.started()
             if expire { s.clock.advance(601) } else { await s.provider.revoke() }
             await gate.release()
-            do { _ = try await task.value; XCTFail("Late media grant") }
-            catch { XCTAssertEqual(error as? MusicServiceError, expire ? .qualityDisabled : .staleResult) }
+            if expire {
+                let audio = try await task.value, value = try MusicKugouFixture.object(audio)
+                XCTAssertEqual(value["licenseExpiresAt"], .null)
+                XCTAssertNotNil(value["url"])
+            } else {
+                do { _ = try await task.value; XCTFail("Revoked media grant") }
+                catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+            }
         }
     }
     func testLicenseDatesHaveShanghaiSemanticsNotURLTTL() throws {

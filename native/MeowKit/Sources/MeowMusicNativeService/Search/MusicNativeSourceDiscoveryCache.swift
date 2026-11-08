@@ -426,7 +426,15 @@ extension NativeMusicService {
               song["sources"].array.first?["sourceKey"].string != sourceKey else { return }
         await sourceDiscovery.exclude(fingerprint: descriptor.fingerprint, duration: descriptor.duration,
                                       sourceKey: sourceKey)
+        let songID = song["songId"].string
+        sourceResults[songID]?.removeAll { $0.option.sourceKey == sourceKey }
         scheduleSourceDiscoveryPersist()
+    }
+
+    func admitRecordingSource(_ song: MJ, sourceKey: String) async throws {
+        let excluded = await sourceDiscoveryExcluded(song)
+        try check()
+        try musicRequire(!excluded.contains(sourceKey), .sourceUnavailable)
     }
 
     func compatibleSourceDiscoveryEntry(_ song: MJ, platform: String, entry: MusicSourceDiscoveryEntry,

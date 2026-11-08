@@ -48,6 +48,12 @@ public struct PlaybackNavigationCommands {
     }
 }
 
+/// Explicit system intent, not a toggle inferred again after an asynchronous
+/// domain admission. A handled request must not fall through to raw transport.
+public enum PlaybackPlayPauseCommand: Equatable, Sendable {
+    case play, pause
+}
+
 /// Retain in product assembly or a long-lived domain model, not in a player
 /// view. Cancelling/disable stops delivery, not the currently playing media.
 @MainActor
@@ -102,6 +108,12 @@ struct PlaybackNavigationRoutes: Equatable, Sendable {
     var next: PlaybackNavigationRoute?
 }
 
+struct PlaybackPlayPauseRoute: Equatable, Sendable {
+    let attempt: PlayAttempt
+    let bindingID: UUID
+    let revision: UUID
+}
+
 /// Foundation-only routing; no NotificationCenter, global bus, player, timer,
 /// network, AVAudioSession or knowledge of concrete business domains.
 @MainActor
@@ -112,6 +124,7 @@ final class PlaybackOwnerRouter {
         var commandRevision = UUID()
         var enabled: Bool
         var commands: PlaybackNavigationCommands
+        let onPlayPause: (@MainActor (PlayAttempt, PlaybackPlayPauseCommand) -> Bool)?
         let onEvent: @MainActor (PlaybackEvent) -> Void
     }
 
@@ -132,13 +145,15 @@ final class PlaybackOwnerRouter {
         owner: String,
         enabled: Bool = true,
         commands: PlaybackNavigationCommands = .init(),
+        onPlayPause: (@MainActor (PlayAttempt, PlaybackPlayPauseCommand) -> Bool)? = nil,
         onEvent: @escaping @MainActor (PlaybackEvent) -> Void
     ) throws -> PlaybackOwnerLease {
         guard !owner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ContractError.invalidIdentifier
         }
         let id = UUID()
-        bindings[owner] = Binding(id: id, enabled: enabled, commands: commands, onEvent: onEvent)
+        bindings[owner] = Binding(id: id, enabled: enabled, commands: commands,
+                                 onPlayPause: onPlayPause, onEvent: onEvent)
         let lease = PlaybackOwnerLease(router: self, owner: owner, id: id)
         onBindingsChanged?()
         return lease
@@ -179,6 +194,21 @@ final class PlaybackOwnerRouter {
     }
 
     func updateContext(_ context: PlaybackCommandContext) { self.context = context }
+
+    var playPauseRoute: PlaybackPlayPauseRoute? {
+        guard context.isActive, let attempt = context.attempt,
+              let binding = bindings[attempt.owner], binding.onPlayPause != nil else { return nil }
+        // Keep the disabled owner's route: its rejection is not permission to
+        // bypass domain admission via the default transport.
+        return .init(attempt: attempt, bindingID: binding.id, revision: binding.deliveryRevision)
+    }
+
+    func perform(_ command: PlaybackPlayPauseCommand, route: PlaybackPlayPauseRoute) -> Bool {
+        guard context.isActive, context.attempt == route.attempt,
+              let binding = bindings[route.attempt.owner], binding.id == route.bindingID,
+              binding.deliveryRevision == route.revision, binding.enabled else { return false }
+        return binding.onPlayPause?(route.attempt, command) ?? false
+    }
 
     var navigationRoutes: PlaybackNavigationRoutes {
         guard context.isActive, let attempt = context.attempt,

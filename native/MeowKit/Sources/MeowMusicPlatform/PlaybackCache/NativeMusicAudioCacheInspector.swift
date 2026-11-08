@@ -1,5 +1,6 @@
 import Foundation
 import AudioToolbox
+import MeowMusicFeature
 
 public protocol NativeMusicAudioCacheInspecting: Sendable {
     func inspect(_ file: NativeMusicAudioCacheFile, expectedDuration: Double) async throws -> NativeMusicAudioCacheInspection
@@ -33,7 +34,6 @@ public struct NativeMusicAudioCacheInspection: Codable, Sendable {
     static func supportedRequest(_ quality: String) -> Bool {
         ["128k", "192k", "320k", "flac", "flac24bit"].contains(aliases[quality] ?? quality)
     }
-    static func tolerance(_ expected: Double) -> Double { min(10, max(0.25, expected * 0.02)) }
 
     func quality(for requested: String, expectedDuration: Double) throws -> String {
         guard Self.supportedRequest(requested), complete, !protectedContent,
@@ -41,7 +41,7 @@ public struct NativeMusicAudioCacheInspection: Codable, Sendable {
               sampleRate.isFinite, (8_000...192_000).contains(sampleRate),
               decodedFrames > 0, (1...2).contains(channels), bitrate.isFinite, bitrate > 0,
               abs(Double(decodedFrames) / sampleRate - duration) <= 1 / sampleRate,
-              abs(expectedDuration - duration) <= Self.tolerance(expectedDuration) else {
+              MusicMediaDuration.matches(expected: expectedDuration, actual: duration) else {
             throw NativeMusicAudioCacheFailure.miss
         }
         let requested = Self.aliases[requested] ?? requested
@@ -169,7 +169,7 @@ public struct NativeMusicAudioCacheInspector: NativeMusicAudioCacheInspecting {
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: bytes, alignment: MemoryLayout<Float>.alignment)
         defer { buffer.deallocate() }
         var decoded: Int64 = 0
-        let maximumFrames = (expectedDuration + NativeMusicAudioCacheInspection.tolerance(expectedDuration) + 1) * source.mSampleRate
+        let maximumFrames = (expectedDuration + MusicMediaDuration.tolerance + 1) * source.mSampleRate
         guard maximumFrames.isFinite, maximumFrames < Double(Int64.max) else { throw NativeMusicAudioCacheFailure.miss }
         while true {
             try file.checkCancellation()
@@ -195,7 +195,7 @@ public struct NativeMusicAudioCacheInspector: NativeMusicAudioCacheInspecting {
         guard abs(decoded - nativeFrames) <= padding else { throw NativeMusicAudioCacheFailure.miss }
         if let frames = structure.frames, abs(decoded - frames) > padding { throw NativeMusicAudioCacheFailure.miss }
         let duration = Double(decoded) / source.mSampleRate
-        guard abs(duration - expectedDuration) <= NativeMusicAudioCacheInspection.tolerance(expectedDuration) else {
+        guard abs(duration - expectedDuration) <= MusicMediaDuration.tolerance else {
             throw NativeMusicAudioCacheFailure.miss
         }
         return .init(container: structure.container, codec: codec, duration: duration, decodedFrames: decoded,

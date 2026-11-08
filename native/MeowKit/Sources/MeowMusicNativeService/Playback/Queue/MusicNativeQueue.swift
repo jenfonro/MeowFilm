@@ -51,7 +51,8 @@ extension NativeMusicService {
             canNext: next != nil, canPrevious: previous != nil,
             nextPreviewID: randomNext ? nil : next, previousPreviewID: previous,
             fmNextPreviewID: fmNext(d, direction: .next), fmPreviousPreviewID: fmNext(d, direction: .previous),
-            sourceCollectionID: d.queue["source"]["id"].string.isEmpty ? nil : d.queue["source"]["id"].string)
+            sourceCollectionID: d.queue["source"]["id"].string.isEmpty ? nil : d.queue["source"]["id"].string,
+            requestQuality: d.playback["requestQuality"].isString ? d.playback["requestQuality"].string : "flac")
     }
     public func state() async throws -> MusicPlaybackState { stateDTO(try read()) }
     public func queue() async throws -> MusicQueueSnapshot {
@@ -243,6 +244,10 @@ extension NativeMusicService {
     public func updateSettings(_ change: MusicSettingsChange) async throws -> MusicPlaybackState {
         let result = try transaction(["playback"]) { d in
             try musicRequire(d.playback["revision"].int == change.ifRevision, .staleRevision)
+            if let quality = change.requestQuality {
+                try musicRequire(MusicSourceQualityPolicy.qualities.contains(quality))
+                d.playback["requestQuality"] = .string(quality)
+            }
             if let mode = change.mode { d.playback["mode"] = .n(mode.rawValue) }
             var settings = d.playback["qualitySettings"]
             for (key, values, allowed) in [

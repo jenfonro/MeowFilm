@@ -4,10 +4,12 @@ import Combine
 
 struct MusicQualitySettingsSnapshot: Equatable {
     let revision: Int
+    let requestQuality: String
     let qualityOrder, qualityEnabled, spatialOrder, spatialEnabled: [String]
 
     init(_ state: MusicPlaybackState) {
         revision = state.settingsRevision
+        requestQuality = state.requestQuality
         qualityOrder = MusicQualityTogglePolicy.ordered(state.qualityOrder, spatial: false)
         qualityEnabled = state.qualityEnabled
         spatialOrder = MusicQualityTogglePolicy.ordered(state.spatialOrder, spatial: true)
@@ -83,6 +85,11 @@ final class MusicQualitySettingsState: ObservableObject {
                      : .init(ifRevision: value.revision, qualityEnabled: values))
     }
 
+    func setRequestQuality(_ quality: String) {
+        guard quality != value.requestQuality else { return }
+        save(.init(ifRevision: value.revision, requestQuality: quality))
+    }
+
     func reorder(_ values: [String], spatial: Bool) {
         let order = spatial ? value.spatialOrder : value.qualityOrder
         guard values != order, values.count == order.count, Set(values) == Set(order) else { return }
@@ -98,6 +105,8 @@ final class MusicQualitySettingsState: ObservableObject {
         work?.cancel()
     }
 
+    func flush() async { await work?.value }
+
     private func save(_ change: MusicSettingsChange, movingOrder: MusicQualityOrderPreview? = nil) {
         guard active, available, work == nil, model.isAvailable, !model.isClosed,
               generation == model.accountAccessGeneration else { return }
@@ -108,7 +117,7 @@ final class MusicQualitySettingsState: ObservableObject {
             guard let self else { return }
             defer {
                 work = nil
-                reconcileSettings()
+                if active, available, access == model.accountAccessGeneration { reconcileSettings() }
                 self.movingOrder = nil
                 busy = false
             }

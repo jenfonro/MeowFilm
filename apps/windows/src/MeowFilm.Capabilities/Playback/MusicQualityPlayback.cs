@@ -38,6 +38,13 @@ public sealed partial class MusicCapability
             (target.QualityCacheSignature is null || cache == target.QualityCacheSignature) &&
             response.GetProperty("playbackVerified").ValueKind == JsonValueKind.False &&
             response.GetProperty("qualityVerified").ValueKind == JsonValueKind.False);
+        if (response.TryGetProperty("duration", out var duration) && duration.ValueKind != JsonValueKind.Null)
+        {
+            MusicDto.Require(duration.ValueKind == JsonValueKind.Number && duration.TryGetDouble(out var seconds) &&
+                double.IsFinite(seconds) && seconds >= 0);
+            if (MediaDurationMismatch(song, duration.GetDouble()))
+                throw new MusicOperationException("RECORDING_MISMATCH");
+        }
         // Catch a concurrent settings write after the resolver's last gate, too.
         // A subsequent refresh carries the immutable accepted signatures.
         var settings = await QualityCall("music.quality.settings.get", null, token);

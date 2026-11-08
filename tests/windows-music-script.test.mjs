@@ -201,7 +201,7 @@ test('resolve directs one installation and platform and returns the normalized m
   ]);
   assert.deepEqual(okay(replies[0]), { installationId: a.installationId,
     generation: a.generation, contentHash: a.contentHash, platform: 'kw', quality: '320k',
-    url: 'https://media.invalid/kw/320k/1?n=1', headers: {}, expiresAt: null });
+    url: 'https://media.invalid/kw/320k/1?n=1', headers: {}, expiresAt: null, duration: null });
   denied(await resolve(rpc, a, 'kw', {}, 'flac24bit'), 'CAPABILITY_UNAVAILABLE');
   denied(await resolve(rpc, a, 'wy'), 'CAPABILITY_UNAVAILABLE');
   denied(await resolve(rpc, a, 'local'), 'INVALID_REQUEST');
@@ -241,6 +241,53 @@ test('musicUrl results are checked once for playback: empty, malformed, restrict
   assert.equal(future.expiresAt, 4102444800000);
   assert.deepEqual(future.headers, { Referer: 'https://ref.invalid' });
   assert.equal(okay(await media({ case: 'interval', duration: 245.9 })).url, 'https://media.invalid/04:05');
+});
+
+test('musicUrl receipt duration uses an absolute ten-second boundary independent of requested quality', async t => {
+  const { rpc } = setup(t);
+  const item = await enabled(rpc, fixture({ handler: `async ({info}) => ({
+    url: 'https://media.invalid/duration', duration: info.musicInfo.receiptDuration
+  })` }));
+  for (const [expected, actual, accepted] of [
+    [180, 185, true], [180, 190, true], [180, 191, false],
+    [180, 175, true], [180, 170, true], [180, 169, false],
+    [1200, 1210, true], [1200, 1211, false], [1200, 1189, false],
+    [180, 180.125, true],
+  ]) {
+    for (const quality of ['320k', 'flac']) {
+      const reply = await resolve(rpc, item, 'kw', { duration: expected, receiptDuration: actual }, quality);
+      if (!accepted) { denied(reply, 'RECORDING_MISMATCH'); continue; }
+      const media = okay(reply);
+      assert.equal(media.duration, actual);
+      assert.equal(media.quality, quality);
+      assert.equal(Object.hasOwn(media, 'actualQuality'), false);
+      assert.equal(Object.hasOwn(media, 'qualityVerified'), false);
+    }
+  }
+});
+
+test('musicUrl unknown duration stays unknown without discarding known receipts or accepting malformed values', async t => {
+  const { rpc } = setup(t);
+  const item = await enabled(rpc, fixture({ handler: `async ({info}) => {
+    const media = { url: 'https://media.invalid/duration' };
+    if ('receiptDuration' in info.musicInfo) media.duration = info.musicInfo.receiptDuration;
+    return media;
+  }` }));
+  for (const expected of [undefined, null, 0, 180]) {
+    for (const actual of [undefined, null, 0]) {
+      const musicInfo = { ...(expected === undefined ? {} : { duration: expected }),
+        ...(actual === undefined ? {} : { receiptDuration: actual }) };
+      const media = okay(await resolve(rpc, item, 'kw', musicInfo));
+      assert.equal(media.duration, null);
+    }
+  }
+  for (const expected of [undefined, null, 0]) {
+    const media = okay(await resolve(rpc, item, 'kw',
+      { ...(expected === undefined ? {} : { duration: expected }), receiptDuration: 1211 }));
+    assert.equal(media.duration, 1211);
+  }
+  for (const actual of [-1, '185', true, {}])
+    denied(await resolve(rpc, item, 'kw', { duration: 180, receiptDuration: actual }), 'INVALID_MEDIA_CANDIDATE');
 });
 
 test('a failed directed invocation never falls through to another installation', async t => {

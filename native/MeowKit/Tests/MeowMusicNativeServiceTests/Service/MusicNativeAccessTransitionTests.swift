@@ -11,6 +11,7 @@ private actor AccessTransitionAudioCache: MusicAudioFileCaching {
     func touch(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion, confirmedAt: Date, authorization: MusicQueueAuthorization) {}
     func remove(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion) {}
     func cancelPending() async { await gate.wait() }
+    func clearOfficial() { clear() }
     func clear() {}
     func close() {}
 }

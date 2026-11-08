@@ -111,32 +111,34 @@ final class MusicQQProtocolTests: XCTestCase {
         }
     }
 
-    func testMissingOrUnknownMembershipDoesNotGrantOfficialPlayback() async throws {
+    func testMissingOrUnknownMembershipDoesNotPreemptOfficialPlayback() async throws {
         let memberships: [[String: Any]] = [[:], ["svip": 2], ["svip": true]]
         for membership in memberships {
             let f = try MusicNativeFixture(); try await f.enable()
             await f.http.replies("vip_login_base", try MusicAccountFixture.rpc(membership))
             let reply = try await f.invoke("capabilities", ["nativeId": .string(MusicAccountFixture.mid)])
-            XCTAssertEqual(reply["ok"], .bool(false)); XCTAssertEqual(reply["code"], .string("VERIFICATION_REQUIRED"))
+            XCTAssertNotNil(reply["qualities"])
+            XCTAssertNotEqual(reply["ok"], .bool(false))
             let requests = await f.http.recorded(), methods = try requests.map(MusicAccountTestHTTP.method)
-            XCTAssertFalse(methods.contains("UrlGetVkey")); _ = await f.service.close()
+            XCTAssertFalse(methods.contains("UrlGetVkey")); XCTAssertFalse(methods.contains("vip_login_base"))
+            _ = await f.service.close()
         }
     }
 
-    func testExpiredEntitlementNoOptionsAndFutureBoundaryClampsMediaTTL() async throws {
+    func testMembershipExpiryDoesNotOverrideUpstreamURLTTL() async throws {
         let f = try MusicNativeFixture(); try await f.enable()
         await f.http.replies("vip_login_base", try MusicAccountFixture.rpc([
             "svip": 1, "userinfo": ["expire": f.clock.now().timeIntervalSince1970 - 10]
         ]))
         let empty = try await f.invoke("capabilities", ["nativeId": .string(MusicAccountFixture.mid)])
-        XCTAssertEqual(empty["qualities"], .array([]))
+        XCTAssertNotEqual(empty["qualities"], .array([]))
         await f.http.replies("vip_login_base", try MusicAccountFixture.rpc([
             "svip": 1, "userinfo": ["expire": f.clock.now().timeIntervalSince1970 + 10]
         ]))
         let cap = try await f.invoke("capabilities", ["nativeId": .string(MusicAccountFixture.mid)])
         let reply = try await f.invoke("resolve", ["nativeId": .string(MusicAccountFixture.mid), "quality": .string("master"),
             "installationId": try XCTUnwrap(cap["installationId"]), "generation": try XCTUnwrap(cap["generation"])])
-        XCTAssertEqual(reply["expiresAt"], .number(f.clock.now().addingTimeInterval(10).timeIntervalSince1970 * 1000))
+        XCTAssertEqual(reply["expiresAt"], .number(f.clock.now().addingTimeInterval(120).timeIntervalSince1970 * 1000))
         _ = await f.service.close()
     }
 

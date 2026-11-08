@@ -238,7 +238,8 @@ function mediaCandidate(raw, clock, expected, duration = 0) {
       requireValue(Math.abs(duration - candidate.duration) <= 10,
         'RECORDING_MISMATCH');
   }
-  return { url, headers: mediaHeaders(candidate.headers), expiresAt };
+  return { url, headers: mediaHeaders(candidate.headers), expiresAt,
+    duration: candidate.duration > 0 ? candidate.duration : null };
 }
 /** LX musicInfo with the conventional mm:ss interval derived from a known duration. */
 function lxInfo(musicInfo) {
