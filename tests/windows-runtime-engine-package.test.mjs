@@ -62,8 +62,9 @@ function verifyManifest(output, manifest) {
   }
   assert.deepEqual(paths.filter(path => path.startsWith('app/')), [
     'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/entry.mjs',
-    'app/modules/cat-script.mjs', 'app/modules/music-script.mjs',
+    'app/modules/cat-script.mjs', 'app/modules/music-script.mjs', 'app/modules/pan-runtime.mjs',
     'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs',
+    'app/pan-entry.mjs',
     'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
   ]);
 }
@@ -77,7 +78,7 @@ function packagingFixture({
   const lock = { name: manifest.name, version: manifest.version, lockfileVersion: 3, packages: { '': { ...manifest } } };
   const inert = 'throw new Error("Synthetic fixture must not execute");\n';
   write(source, 'package.json', manifest);
-  for (const name of ['runtime-bridge', 'script-host', 'source-runtime', 'inactive-core']) {
+  for (const name of ['runtime-bridge', 'script-host', 'source-runtime', 'pan-runtime', 'inactive-core']) {
     const location = `packages/${name}`, installed = `node_modules/@meowfilm/${name}`;
     const pkg = {
       name: `@meowfilm/${name}`, version: '1.0.0', type: 'module', license: 'MIT', exports: './src/index.js',
@@ -92,7 +93,8 @@ function packagingFixture({
     symlinkSync(join(source, location), join(source, installed), process.platform === 'win32' ? 'junction' : 'dir');
   }
   write(source, 'package-lock.json', lock);
-  for (const file of ['bootstrap.mjs', 'entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs'])
+  for (const file of ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs',
+    'modules/pan-runtime.mjs', 'modules/source-candidates.mjs'])
     write(source, `apps/runtime/${file}`, inert);
   if (!missingCommonModule) {
     write(source, 'apps/runtime/modules/music-script.mjs', inert);
@@ -213,7 +215,7 @@ function nativeFixture(t) {
     // Use actual build evidence. No fabricated addon, SDK, upstream hash or receipt can satisfy this fixture.
     for (const path of new Set(['package.json', 'package-lock.json', 'scripts/script-host-native.json',
       artifactPath, receiptPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
-    for (const name of ['runtime-bridge', 'source-runtime', 'script-host']) {
+    for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime']) {
       copy(`packages/${name}/package.json`);
       copy(`packages/${name}/src`);
       const installed = join(source, 'node_modules/@meowfilm', name);

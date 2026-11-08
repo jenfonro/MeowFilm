@@ -30,7 +30,8 @@ export function createAppRuntime({ sessionId, requestKey,
       const contract = contracts[module?.id];
       if (!contract || owners.has(module.id) || module.version !== contract.version ||
           module.contract !== contract.contract || typeof module.close !== 'function' ||
-          typeof module.upload !== 'function' || !module.methods || typeof module.methods !== 'object') invalid();
+          (module.id !== 'pan' && typeof module.upload !== 'function') ||
+          !module.methods || typeof module.methods !== 'object') invalid();
       const entries = Object.entries(module.methods);
       for (const [name, handler] of entries) {
         if (!name.startsWith(contract.prefix) || !contract.operations.includes(name.slice(contract.prefix.length)) ||
@@ -63,7 +64,7 @@ export function createAppRuntime({ sessionId, requestKey,
     const parts = url.pathname.split('/');
     const module = owners.get(parts[2]), contract = contracts[parts[2]];
     if (!module || parts[1] !== 'v1') return;
-    if (method === 'PUT' && parts.length === 6 && parts[3] === 'sources') {
+    if (method === 'PUT' && parts.length === 6 && parts[3] === 'sources' && typeof module.upload === 'function') {
       let installationId, basename;
       try {
         installationId = decodeURIComponent(parts[4]);
@@ -87,12 +88,12 @@ export function createAppRuntime({ sessionId, requestKey,
         try {
           const reply = await handler(input, context);
           if (reply?.ok === false && reply.contract === contract.contract && !contract.codes.has(reply.code)) {
-            return { ok: false, contract: contract.contract, code: ({ music: 'SCRIPT_FAILURE', source: 'SOURCE_FAILURE', cat: 'SCRIPT_EXCEPTION' })[module.id] };
+            return { ok: false, contract: contract.contract, code: ({ music: 'SCRIPT_FAILURE', source: 'SOURCE_FAILURE', cat: 'SCRIPT_EXCEPTION', pan: 'PAN_FAILURE' })[module.id] };
           }
           return reply;
         } catch (error) {
           return { ok: false, contract: contract.contract, code: contract.codes.has(error?.code) ? error.code
-            : ({ music: 'SCRIPT_FAILURE', source: 'SOURCE_FAILURE', cat: 'SCRIPT_EXCEPTION' })[module.id] };
+            : ({ music: 'SCRIPT_FAILURE', source: 'SOURCE_FAILURE', cat: 'SCRIPT_EXCEPTION', pan: 'PAN_FAILURE' })[module.id] };
         }
       } };
   } });

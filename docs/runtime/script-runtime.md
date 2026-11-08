@@ -17,6 +17,8 @@ packages/source-runtime/
   Node-independent Reader 规则、CatVod Spider adapter 与 capability ABI 2
 packages/runtime-bridge/
   标准 Node HTTP、严格 JSON、反向调用和交换生命周期
+packages/pan-runtime/、apps/runtime/pan-entry.mjs
+  显式装配的内置网盘能力，不加载脚本引擎或额外 Worker
 ```
 
 通用运行器不依赖平台目录。官方账号、目录、曲库、歌词、播放等原生业务由调用方管理；脚本安装、源码、来源地址和私有数据由运行器持久管理。客户端可保存来源列表、检测结果等供原生界面直接读取的快照，不形成第二套安装管理或脚本存储。独立入口描述 `aggregate`，模块为：
@@ -26,6 +28,8 @@ packages/runtime-bridge/
 | `music@0.8.0` | `music.script.v3` | 原始 LX 音源 |
 | `cat@0.2.0` | `cat.script.v2` | CatNode、HTTP 服务、direct Spider、私有卷和管理同步 |
 | `source@0.2.0` | `source.runtime.v2` | Legado、异次元、轻悦时光、独立 CatVod Spider |
+
+受信调用方可显式启用 `pan@0.1.0/pan.runtime.v1` 的[网盘账号、分享与取址能力](pan-runtime.md)；默认三模块不变，平台 App 尚未接入。网盘属于 Node 内置业务，不是第四类脚本执行所有者。
 
 iOS 与 Windows 均已接入同一 HTTP 契约和三个模块。iOS 受信启动及内置原生 framework 见[iOS 运行底座](../ios/runtime-preflight.md)，Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)。通用运行器不保留旧 wire 或旧引擎。独立入口、平台 App 和设备运行须分别验证，不据此声明 Android 已接入。
 
