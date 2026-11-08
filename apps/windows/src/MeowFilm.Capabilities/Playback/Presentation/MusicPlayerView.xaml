@@ -290,6 +290,7 @@
             <StackPanel Grid.Column="1" Margin="8,0,0,0">
              <TextBlock Text="{Binding Quality}" FontWeight="SemiBold" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
              <TextBlock Margin="0,3,0,0" FontSize="12" TextTrimming="CharacterEllipsis" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"><Run Text="{Binding Platform,Mode=OneWay}"/><Run Text=" · "/><Run Text="{Binding Provider,Mode=OneWay}"/></TextBlock>
+             <TextBlock Text="{Binding Recording}" FontSize="11" TextTrimming="CharacterEllipsis" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
             </StackPanel>
             <TextBlock Grid.Column="2" Margin="12,0,0,0" FontSize="12" VerticalAlignment="Center" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}">
              <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Text" Value="{Binding State}"/><Style.Triggers><DataTrigger Binding="{Binding Current}" Value="True"><Setter Property="Text" Value="当前"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>

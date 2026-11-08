@@ -270,10 +270,12 @@ public struct MusicSearchPage: Sendable {
     public let total: Int
     public let nextPage: Int?
     public let items: [MusicRemoteTrack]
+    public let observation: MusicSearchObservation?
     public init(platform: String, query: String, page: Int, limit: Int = 30, total: Int, nextPage: Int?,
-                items: [MusicRemoteTrack]) {
+                items: [MusicRemoteTrack], observation: MusicSearchObservation? = nil) {
         self.platform = platform; self.query = query; self.page = page; self.limit = limit
         self.total = total; self.nextPage = nextPage; self.items = items
+        self.observation = observation
     }
 }
 

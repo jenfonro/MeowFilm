@@ -499,7 +499,9 @@ public static partial class MusicUiTests
             {
                 var request = JsonSerializer.SerializeToElement(parameters);
                 var input = JsonNode.Parse(request.GetRawText())!.AsObject();
-                LJ.Fields(input, "song quality qualityPolicySignature", "song quality qualityPolicySignature");
+                LJ.Fields(input, "song quality qualityPolicySignature manualSource", "song quality qualityPolicySignature");
+                LJ.Require(input["manualSource"] is null || LJ.IsBool(input["manualSource"]), "INVALID_REQUEST");
+                bool manualSource = LJ.B(input["manualSource"]);
                 _ = NativeMusicSong.Normalize(input["song"]);
                 string level = LJ.S(input["quality"]);
                 LJ.Require(level == "auto" || MusicQualityPolicy.OfficialTypes.Contains(level), "QUALITY_UNAVAILABLE");
@@ -508,8 +510,8 @@ public static partial class MusicUiTests
                 string signature = quality.GetProperty("signature").GetString()!;
                 LJ.Require(LJ.S(input["qualityPolicySignature"]) == signature, "QUALITY_POLICY_CHANGED");
                 var policy = JsonNode.Parse(quality.GetProperty("settings").GetRawText())!.AsObject();
-                LJ.Require(level == "auto" ? MusicQualityPolicy.HasEnabled(policy) :
-                    MusicQualityPolicy.Enabled(level, policy), "QUALITY_DISABLED");
+                LJ.Require(manualSource && level != "auto" || (level == "auto" ? MusicQualityPolicy.HasEnabled(policy) :
+                    MusicQualityPolicy.Enabled(level, policy)), "QUALITY_DISABLED");
                 return JsonSerializer.SerializeToElement(new { ok = true, song = request.GetProperty("song"),
                     candidates = Array.Empty<object>(), qualityPolicySignature = signature, authorizationRequired = false });
             }
@@ -519,10 +521,12 @@ public static partial class MusicUiTests
             {
                 var request = JsonSerializer.SerializeToElement(parameters);
                 var input = JsonNode.Parse(request.GetRawText())!.AsObject();
-                LJ.Fields(input, "song platforms", "song platforms");
+                LJ.Fields(input, "song platforms contentFailed", "song platforms");
                 _ = NativeMusicSong.Normalize(input["song"]);
                 var platforms = LJ.Array(input["platforms"]).Select(value => LJ.Text(value)).Distinct(StringComparer.Ordinal).ToArray();
                 LJ.Require(platforms.Length is > 0 and <= 5 && platforms.All(NativeMusicSong.Platforms.Contains));
+                if (input.ContainsKey("contentFailed"))
+                    LJ.Require(LJ.Array(input["contentFailed"]).Select(value => LJ.Text(value)).All(NativeMusicSong.Platforms.Contains));
                 return JsonSerializer.SerializeToElement(new { ok = true, song = request.GetProperty("song"),
                     failures = Array.Empty<object>() });
             }

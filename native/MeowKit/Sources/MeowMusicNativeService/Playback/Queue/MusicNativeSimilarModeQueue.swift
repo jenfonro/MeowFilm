@@ -194,6 +194,9 @@ extension NativeMusicService {
                   d.queue["revision"].int == revision, d.queue["currentId"].string == currentID else { return }
             let incoming = try MusicNativeSimilarData.songs(response)
             let recommendations = try MusicNativeSimilarData.recommendations(response.items)
+            try await retainSongMetadata(incoming)
+            try check(own); try lease.authorization.check()
+            guard similarMode.active?.id == sessionID, session.pendingID == requestID, session.continueEnabled else { return }
             let songs = MusicNativeSimilarData.unique(incoming, excluding: d.queue["entries"].array.map { $0["song"] })
             let status: MusicSimilarModeSnapshot.Status = songs.isEmpty ? .empty : .ready
             let provider: MusicSimilarModeProvider = session.provider == .songRoaming ? .songRoaming : .queueRecommendations

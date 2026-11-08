@@ -848,6 +848,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         public Task ResumeAsync() { IsPlaying = HasMedia; return Task.CompletedTask; }
         public Task SeekAsync(double seconds) => Task.CompletedTask;
         public double PreparedHandoffDurationSeconds => 0;
+        public Task StopOutputForHandoffAsync() => throw new InvalidOperationException("no handoff during exploration");
         public Task PrepareHandoffAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token) =>
             throw new InvalidOperationException("exploration must not prepare playback");
         public Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token) =>

@@ -245,16 +245,21 @@ extension NativeMusicService: MusicHomeBrowsing {
         }
     }
     public func restoredHome() async throws -> MusicPublicBrowsePage? {
-        let source = try currentHomeSource()
-        return try access.perform {
+        let source = try currentHomeSource(), own = epoch, revision = homeSourceRevision
+        let display = try access.perform {
             if !homeDisplayPrepared {
                 homeDisplayPrepared = true
                 if let data = try? homeSnapshot?.read() {
                     homeDisplay = try? MusicNativeHomeSnapshot.restore(data)
                 }
             }
-            guard let display = homeDisplay, display.source == source else { return nil }
-            return .init(sections: try convertedPublicSections(display.page, prefix: source.rawValue + ":home:"))
+            return homeDisplay
+        }
+        guard let display, display.source == source else { return nil }
+        let songs = try await publicSongMetadata(display.page)
+        try checkHomeSource(source, revision: revision, epoch: own)
+        return try access.perform {
+            .init(sections: try convertedPublicSections(display.page, prefix: source.rawValue + ":home:", songs: songs))
         }
     }
     public func homePage(cursor: String?, refresh: Bool) async throws -> MusicPublicBrowsePage {
@@ -299,9 +304,12 @@ extension NativeMusicService: MusicHomeBrowsing {
         let value = try await readHomeContent(destination, position: position, source: source, binding: binding)
         try await checkHomeBinding(binding, epoch: own)
         try checkHomeSource(source, revision: sourceRevision, epoch: own)
+        let songs = try await publicSongMetadata(value)
+        try await checkHomeBinding(binding, epoch: own)
+        try checkHomeSource(source, revision: sourceRevision, epoch: own)
         return try binding.authorization.perform {
             try finishHome(value, destination: destination, position: position, key: key,
-                           source: source, epoch: own, binding: binding)
+                           source: source, epoch: own, binding: binding, songs: songs)
         }
     }
 
@@ -435,13 +443,16 @@ extension NativeMusicService: MusicHomeBrowsing {
         else { value = try await readHomeContent(.home, position: position, source: load.source, binding: load.binding) }
         try await checkHomeBinding(load.binding, epoch: own)
         try checkHomeSource(load.source, revision: load.sourceRevision, epoch: own)
+        let songs = try await publicSongMetadata(value)
+        try await checkHomeBinding(load.binding, epoch: own)
+        try checkHomeSource(load.source, revision: load.sourceRevision, epoch: own)
         guard var current = homeLoad, current.id == load.id,
               cursor == nil || current.nextCursor == cursor else { throw MusicServiceError.staleResult }
         return try load.binding.authorization.perform {
             // finishHome checks access itself; never nest that check inside
             // the non-recursive access commit lock.
             let page = try finishHome(value, destination: .home, position: position, key: key,
-                                      source: load.source, epoch: own, binding: load.binding)
+                                      source: load.source, epoch: own, binding: load.binding, songs: songs)
             return try access.perform {
                 // Section errors are failed reads, never a new empty snapshot.
                 guard value.sections.allSatisfy({ $0.error == nil }) else { return page }
@@ -483,11 +494,11 @@ extension NativeMusicService: MusicHomeBrowsing {
     }
     private func finishHome(_ value: MusicNativePublicBrowseDiscovery, destination: MusicPublicBrowseDestination,
                             position: MusicNativePublicBrowseCursor, key: String, source: MusicPublicBrowsePlatform, epoch own: UUID,
-                            binding: MusicNativeHomeBinding) throws -> MusicPublicBrowsePage {
+                            binding: MusicNativeHomeBinding, songs: [Data: MJ]) throws -> MusicPublicBrowsePage {
         try check(own)
         try musicRequire(value.sections.count <= 60 && value.sections.reduce(0, { $0 + $1.items.count }) <= 600, .limit)
         let prefix = source.rawValue + ":" + MusicNativePublicBrowseDiscovery.key(destination) + ":"
-        let sections = try publicSections(value, prefix: prefix, binding: binding)
+        let sections = try publicSections(value, prefix: prefix, binding: binding, songs: songs)
         let consumed = value.consumed ?? sections.reduce(0) { $0 + $1.items.count }
         let next = try value.next.map { remote in
             try musicRequire(consumed > 0 && remote != position.remote, .limit)

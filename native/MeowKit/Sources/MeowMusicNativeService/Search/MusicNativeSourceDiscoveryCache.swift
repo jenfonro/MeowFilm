@@ -17,8 +17,11 @@ public struct MusicSourceDiscoverySource: Codable, Equatable, Sendable {
 public struct MusicSourceDiscoveryEntry: Equatable, Sendable {
     public let checkedAt: Double
     public let sources: [MusicSourceDiscoverySource]
-    public init(checkedAt: Double, sources: [MusicSourceDiscoverySource]) {
+    public let observations: [MusicSearchObservation]
+    public init(checkedAt: Double, sources: [MusicSourceDiscoverySource],
+                observations: [MusicSearchObservation] = []) {
         self.checkedAt = checkedAt; self.sources = sources
+        self.observations = observations
     }
 }
 
@@ -28,6 +31,20 @@ public struct MusicSourceDiscoveryRecording: Hashable, Sendable {
     public let duration: Double
     public init(fingerprint: String, duration: Double) {
         self.fingerprint = fingerprint; self.duration = duration
+    }
+}
+
+public struct MusicSourceDiscoveryMetadata: Sendable {
+    public let recording: MusicSourceDiscoveryRecording
+    public let platform: String
+    public let sources: [MusicSourceDiscoverySource]
+    public init(recording: MusicSourceDiscoveryRecording, platform: String, sources: [MusicSourceDiscoverySource]) {
+        self.recording = recording; self.platform = platform; self.sources = sources
+    }
+    func observation(_ request: MusicSearchObservation) -> MusicSearchObservation {
+        let outcome: MusicSearchObservation.Outcome = request.outcome == .failed ? .failed :
+            !sources.isEmpty ? .found : request.scope == .recording ? .notFound : .incomplete
+        return request.result(outcome, failure: request.failureCode.flatMap(MusicServiceError.init(rawValue:)))
     }
 }
 
@@ -41,10 +58,32 @@ public protocol MusicSourceDiscoveryCaching: Sendable {
     func entries(fingerprint: String, duration: Double) async -> [String: MusicSourceDiscoveryEntry]
     func record(fingerprint: String, duration: Double, platform: String, checkedAt: Double,
                 sources: [MusicSourceDiscoverySource]) async
+    /// Already acquired metadata adds positive facts without claiming a query.
+    @discardableResult func include(_ metadata: [MusicSourceDiscoveryMetadata]) async -> Bool
+    func observe(fingerprint: String, duration: Double, observation: MusicSearchObservation,
+                 sources: [MusicSourceDiscoverySource]) async
+    func observe(_ metadata: [MusicSourceDiscoveryMetadata], observation: MusicSearchObservation) async
     /// Source keys the user confirmed are not this recording.
     func excluded(fingerprint: String, duration: Double) async -> Set<String>
     func exclude(fingerprint: String, duration: Double, sourceKey: String) async
     func persist(retaining recordings: [MusicSourceDiscoveryRecording]) async
+}
+
+public extension MusicSourceDiscoveryCaching {
+    // Existing injected caches can keep their original discovery contract.
+    @discardableResult func include(_ metadata: [MusicSourceDiscoveryMetadata]) async -> Bool { false }
+    func observe(fingerprint: String, duration: Double, observation: MusicSearchObservation,
+                 sources: [MusicSourceDiscoverySource]) async {
+        guard observation.outcome == .found || observation.outcome == .notFound else { return }
+        await record(fingerprint: fingerprint, duration: duration, platform: observation.platform,
+                     checkedAt: observation.checkedAt, sources: sources)
+    }
+    func observe(_ metadata: [MusicSourceDiscoveryMetadata], observation: MusicSearchObservation) async {
+        for item in metadata where item.platform == observation.platform {
+            await observe(fingerprint: item.recording.fingerprint, duration: item.recording.duration,
+                          observation: item.observation(observation), sources: item.sources)
+        }
+    }
 }
 
 private enum MusicSourceDiscoveryLimits {
@@ -56,6 +95,17 @@ private enum MusicSourceDiscoveryLimits {
     }
 
     static func validKey(_ key: String) -> Bool { !key.isEmpty && key.utf8.count <= 1024 }
+
+    static func valid(_ observation: MusicSearchObservation, platform: String, at: Double) -> Bool {
+        observation.platform == platform && MusicNativeSearchProtocol.platforms.contains(platform) &&
+            observation.startedAt.isFinite && observation.startedAt > 0 &&
+            observation.checkedAt.isFinite && observation.checkedAt >= observation.startedAt &&
+            observation.checkedAt <= at && (1...100).contains(observation.limit) && observation.page > 0 &&
+            !observation.context.isEmpty && observation.context.utf8.count <= 1024 &&
+            observation.query.utf8.count <= 800 &&
+            observation.failureCode.map({ MusicServiceError(rawValue: $0) != nil }) != false &&
+            (observation.outcome != .notFound || observation.scope == .recording)
+    }
 
     static func durationCompatible(_ cached: Double, _ requested: Double) -> Bool {
         MusicRecordingIdentity(title: "", artist: "", duration: cached)
@@ -106,17 +156,27 @@ private struct SourceDiscoveryRecord: Codable {
 private struct SourceDiscoveryPlatform: Codable {
     var checkedAt: Double
     var sources: [MusicSourceDiscoverySource]
+    var observations: [MusicSearchObservation]
+    /// Sorted source keys whose full rows came from accepted query responses.
+    /// Snapshot imports cannot fill fields those responses removed.
+    var observedSourceKeys: [String]
 }
 
 private struct SourceDiscoveryEnvelope: Codable {
     var version = 1
     var records: [String: SourceDiscoveryRecord] = [:]
 
+    private func storedKey(fingerprint: String, duration: Double, candidates: [String]? = nil) -> String? {
+        guard MusicSourceDiscoveryLimits.valid(fingerprint: fingerprint, duration: duration) else { return nil }
+        let key = MusicRecordingIdentity.hash(fingerprint)
+        if let record = records[key], record.matches(fingerprint: fingerprint, duration: duration) { return key }
+        return (candidates ?? Array(records.keys)).sorted().first {
+            $0.hasPrefix(key + ":") && records[$0]?.matches(fingerprint: fingerprint, duration: duration) == true
+        }
+    }
+
     private func stored(fingerprint: String, duration: Double) -> SourceDiscoveryRecord? {
-        guard MusicSourceDiscoveryLimits.valid(fingerprint: fingerprint, duration: duration),
-              let record = records[MusicRecordingIdentity.hash(fingerprint)],
-              record.matches(fingerprint: fingerprint, duration: duration) else { return nil }
-        return record
+        storedKey(fingerprint: fingerprint, duration: duration).flatMap { records[$0] }
     }
 
     /// No age filter here: each consumer applies its own window to empty checks.
@@ -124,9 +184,10 @@ private struct SourceDiscoveryEnvelope: Codable {
         guard at.isFinite, let record = stored(fingerprint: fingerprint, duration: duration) else { return [:] }
         var result: [String: MusicSourceDiscoveryEntry] = [:]
         for (platform, value) in record.platforms {
-            guard value.checkedAt.isFinite, value.checkedAt > 0, value.checkedAt <= at,
+            guard value.checkedAt.isFinite, value.checkedAt >= 0, value.checkedAt <= at,
+                  value.observations.allSatisfy({ MusicSourceDiscoveryLimits.valid($0, platform: platform, at: at) }),
                   let sources = MusicSourceDiscoveryLimits.sources(value.sources, platform: platform) else { continue }
-            result[platform] = .init(checkedAt: value.checkedAt, sources: sources)
+            result[platform] = .init(checkedAt: value.checkedAt, sources: sources, observations: value.observations)
         }
         return result
     }
@@ -135,11 +196,12 @@ private struct SourceDiscoveryEnvelope: Codable {
         Set(stored(fingerprint: fingerprint, duration: duration)?.excluded ?? [])
     }
 
-    private func current(fingerprint: String, duration: Double, at: Double) -> SourceDiscoveryRecord {
+    private func current(fingerprint: String, duration: Double, at: Double,
+                         candidates: [String]? = nil) -> (String, SourceDiscoveryRecord) {
         let key = MusicRecordingIdentity.hash(fingerprint)
-        if let record = records[key], record.fingerprint == fingerprint,
-           MusicSourceDiscoveryLimits.durationCompatible(record.duration, duration) { return record }
-        return .init(fingerprint: fingerprint, duration: duration, updatedAt: at, platforms: [:], excluded: [])
+        if let found = storedKey(fingerprint: fingerprint, duration: duration, candidates: candidates) { return (found, records[found]!) }
+        let newKey = records[key] == nil ? key : key + ":" + MusicRecordingIdentity.hash(String(duration))
+        return (newKey, .init(fingerprint: fingerprint, duration: duration, updatedAt: at, platforms: [:], excluded: []))
     }
 
     mutating func record(fingerprint: String, duration: Double, platform: String, checkedAt: Double,
@@ -147,43 +209,169 @@ private struct SourceDiscoveryEnvelope: Codable {
         guard MusicSourceDiscoveryLimits.valid(fingerprint: fingerprint, duration: duration),
               checkedAt.isFinite, checkedAt > 0, checkedAt <= at,
               let sources = MusicSourceDiscoveryLimits.sources(sources, platform: platform) else { return false }
-        var record = current(fingerprint: fingerprint, duration: duration, at: checkedAt)
+        var (key, record) = current(fingerprint: fingerprint, duration: duration, at: checkedAt)
         if let existing = record.platforms[platform], existing.checkedAt > checkedAt { return false }
         // Preserve positive timing evidence: a later incomplete observation must
         // not relabel other platforms' successful checks as another recording.
         if record.duration <= 0 { record.duration = duration }
         record.updatedAt = max(record.updatedAt, checkedAt)
-        record.platforms[platform] = .init(checkedAt: checkedAt, sources: sources)
-        records[MusicRecordingIdentity.hash(fingerprint)] = record
+        record.platforms[platform] = .init(checkedAt: checkedAt, sources: sources, observations: [],
+                                           observedSourceKeys: sources.map(\.sourceKey).sorted())
+        records[key] = record
         return true
+    }
+
+    mutating func include(fingerprint: String, duration: Double, platform: String,
+                         sources: [MusicSourceDiscoverySource], at: Double, key: String) -> Bool {
+        guard MusicSourceDiscoveryLimits.valid(fingerprint: fingerprint, duration: duration),
+              at.isFinite, at > 0, !sources.isEmpty,
+              let incoming = MusicSourceDiscoveryLimits.sources(sources, platform: platform) else { return false }
+        var record = records[key] ?? .init(fingerprint: fingerprint, duration: duration,
+                                         updatedAt: at, platforms: [:], excluded: [])
+        var value = record.platforms[platform] ?? .init(checkedAt: 0, sources: [], observations: [], observedSourceKeys: [])
+        let previous = value.sources
+        value.sources = merging(value.sources, incoming: incoming, replacing: [],
+                                preserving: Set(value.observedSourceKeys))
+        guard value.sources != previous else { return false }
+        record.platforms[platform] = value
+        if record.duration <= 0 { record.duration = duration }
+        record.updatedAt = max(record.updatedAt, at)
+        records[key] = record
+        return true
+    }
+
+    mutating func observe(fingerprint: String, duration: Double, observation: MusicSearchObservation,
+                         sources: [MusicSourceDiscoverySource], at: Double, candidates: [String]? = nil) -> Bool {
+        guard MusicSourceDiscoveryLimits.valid(fingerprint: fingerprint, duration: duration),
+              MusicSourceDiscoveryLimits.valid(observation, platform: observation.platform, at: at),
+              let incoming = MusicSourceDiscoveryLimits.sources(sources, platform: observation.platform),
+              observation.outcome != .notFound || observation.scope == .recording && incoming.isEmpty,
+              observation.outcome != .found || !incoming.isEmpty else { return false }
+        var (key, record) = current(fingerprint: fingerprint, duration: duration,
+                                    at: observation.checkedAt, candidates: candidates)
+        var value = record.platforms[observation.platform] ??
+            .init(checkedAt: 0, sources: [], observations: [], observedSourceKeys: [])
+        if let previous = value.observations.first(where: { $0.sameEvidence(as: observation) }) {
+            guard observation.isNewer(than: previous) ||
+                observation.requestID == previous.requestID && observation.outcome != previous.outcome else { return false }
+        }
+        let newest = value.observations.max { $1.isNewer(than: $0) }
+        let latest = newest == nil || !newest!.isNewer(than: observation)
+        if observation.outcome == .found, latest {
+            value.sources = merging(value.sources, incoming: incoming, replacing: Set(incoming.map(\.sourceKey)),
+                                    preserving: [])
+            let accepted = value.sources.filter { incoming.contains($0) }.map(\.sourceKey)
+            value.observedSourceKeys = Set(value.observedSourceKeys).union(accepted).sorted()
+        }
+        value.observations.removeAll { $0.sameEvidence(as: observation) }
+        value.observations.append(observation)
+        if latest && (observation.outcome == .found || observation.outcome == .notFound) {
+            value.checkedAt = observation.checkedAt
+        }
+        record.platforms[observation.platform] = value
+        if record.duration <= 0 { record.duration = duration }
+        record.updatedAt = max(record.updatedAt, observation.checkedAt)
+        records[key] = record
+        return true
+    }
+
+    /// A real response replaces its accepted rows, including absent optional
+    /// fields. Only rows not yet observed by a query allow snapshot enrichment.
+    private func merging(_ known: [MusicSourceDiscoverySource], incoming: [MusicSourceDiscoverySource],
+                         replacing: Set<String>, preserving: Set<String>) -> [MusicSourceDiscoverySource] {
+        var result = known
+        for source in incoming {
+            if let index = result.firstIndex(where: { $0.sourceKey == source.sourceKey }) {
+                if result[index] == source { continue }
+                if !replacing.contains(source.sourceKey) && preserving.contains(source.sourceKey) { continue }
+                guard let old = MusicSourceDiscoveryLimits.row(result[index], platform: source.source),
+                      let new = MusicSourceDiscoveryLimits.row(source, platform: source.source),
+                      MusicModel.compatible(old, new, sameNative: true) else { continue }
+                if replacing.contains(source.sourceKey) {
+                    guard result.enumerated().allSatisfy({ position, known in
+                        guard position != index else { return true }
+                        guard let other = MusicSourceDiscoveryLimits.row(known, platform: known.source) else { return false }
+                        return MusicModel.compatible(other, new)
+                    }) else { continue }
+                    result[index] = source
+                    continue
+                }
+                let song = MJ.obj([("songId", .string("metadata")), ("title", MusicModel.sourceData(old)["name"]),
+                    ("artist", MusicModel.sourceData(old)["singer"]), ("album", .string("")),
+                    ("duration", .number(MusicModel.nativeNumber(MusicModel.sourceData(old)["duration"]))),
+                    ("sources", .array([old]))])
+                guard let merged = try? MusicModel.mergeSources(song, adding: [new]),
+                      let row = merged["sources"].array.first else { continue }
+                result[index] = .init(sourceKey: row["sourceKey"].string, source: source.source,
+                                      musicInfo: row["musicInfo"].json)
+            } else if result.count < MusicSourceDiscoveryLimits.maximumSources {
+                guard let row = MusicSourceDiscoveryLimits.row(source, platform: source.source),
+                      result.allSatisfy({ known in
+                          guard let other = MusicSourceDiscoveryLimits.row(known, platform: known.source) else { return false }
+                          return MusicModel.compatible(other, row)
+                      }) else { continue }
+                result.append(source)
+            }
+        }
+        return result
     }
 
     mutating func exclude(fingerprint: String, duration: Double, sourceKey: String, at: Double) -> Bool {
         guard MusicSourceDiscoveryLimits.valid(fingerprint: fingerprint, duration: duration),
               MusicSourceDiscoveryLimits.validKey(sourceKey), at.isFinite, at > 0 else { return false }
-        var record = current(fingerprint: fingerprint, duration: duration, at: at)
+        var (key, record) = current(fingerprint: fingerprint, duration: duration, at: at)
         var keys = Set(record.excluded)
         guard keys.insert(sourceKey).inserted else { return false }
         if record.duration <= 0 { record.duration = duration }
         record.excluded = keys.sorted()
         record.updatedAt = max(record.updatedAt, at)
-        records[MusicRecordingIdentity.hash(fingerprint)] = record
+        records[key] = record
         return true
     }
 
-    /// Merges an older durable document into newer memory: per platform the most
-    /// recent check wins and exclusions accumulate. A stored record of another
-    /// recording under the same key is older evidence and is discarded.
-    mutating func absorb(_ stored: SourceDiscoveryEnvelope) {
+    /// Request ordering, rather than a late response's completion time, decides
+    /// source precedence. Exclusions accumulate independently of query freshness.
+    mutating func absorb(_ stored: SourceDiscoveryEnvelope, at: Double) {
         for (key, disk) in stored.records {
             guard MusicSourceDiscoveryLimits.valid(fingerprint: disk.fingerprint, duration: disk.duration) else { continue }
             var clean = disk
             clean.excluded = MusicSourceDiscoveryLimits.keys(disk.excluded)
+            clean.platforms = disk.platforms.filter { platform, value in
+                value.checkedAt.isFinite && value.checkedAt >= 0 && value.checkedAt <= at &&
+                    MusicSourceDiscoveryLimits.sources(value.sources, platform: platform) != nil &&
+                    value.observations.allSatisfy { MusicSourceDiscoveryLimits.valid($0, platform: platform, at: at) }
+            }
             guard var memory = records[key] else { records[key] = clean; continue }
             guard memory.fingerprint == clean.fingerprint,
                   MusicSourceDiscoveryLimits.durationCompatible(memory.duration, clean.duration) else { continue }
-            for (platform, value) in clean.platforms where value.checkedAt > (memory.platforms[platform]?.checkedAt ?? 0) {
-                memory.platforms[platform] = value
+            for (platform, value) in clean.platforms {
+                guard let previous = memory.platforms[platform] else { memory.platforms[platform] = value; continue }
+                var merged = previous
+                let memoryFound = previous.observations.filter { $0.outcome == .found }.max { $1.isNewer(than: $0) }
+                let diskFound = value.observations.filter { $0.outcome == .found }.max { $1.isNewer(than: $0) }
+                let preferDisk: Bool
+                if let memoryFound { preferDisk = diskFound?.isNewer(than: memoryFound) == true }
+                else { preferDisk = diskFound != nil || value.checkedAt > previous.checkedAt }
+                let memoryObserved = Set(previous.observedSourceKeys), diskObserved = Set(value.observedSourceKeys)
+                let replacing = preferDisk ? diskObserved : diskObserved.subtracting(memoryObserved)
+                merged.sources = merging(previous.sources, incoming: value.sources,
+                                         replacing: replacing, preserving: memoryObserved)
+                let accepted = merged.sources.filter {
+                    diskObserved.contains($0.sourceKey) && value.sources.contains($0)
+                }.map(\.sourceKey)
+                merged.observedSourceKeys = memoryObserved.union(accepted).sorted()
+                merged.checkedAt = max(previous.checkedAt, value.checkedAt)
+                for observation in value.observations {
+                    if let old = merged.observations.first(where: { $0.sameEvidence(as: observation) }),
+                       !observation.isNewer(than: old) { continue }
+                    merged.observations.removeAll { $0.sameEvidence(as: observation) }
+                    merged.observations.append(observation)
+                }
+                if let latest = merged.observations.filter({ $0.outcome == .found || $0.outcome == .notFound })
+                    .max(by: { $1.isNewer(than: $0) }) {
+                    merged.checkedAt = latest.checkedAt
+                }
+                memory.platforms[platform] = merged
             }
             let keys = Set(memory.excluded).union(clean.excluded)
             memory.excluded = keys.sorted()
@@ -204,10 +392,48 @@ private struct SourceDiscoveryEnvelope: Codable {
 
     /// Applies a change only if the result still fits the byte budget (trimming
     /// the oldest recordings); otherwise memory is left unchanged.
-    mutating func apply(maximumBytes: Int, _ change: (inout SourceDiscoveryEnvelope) -> Bool) {
+    @discardableResult mutating func apply(maximumBytes: Int, _ change: (inout SourceDiscoveryEnvelope) -> Bool) -> Bool {
         var next = self
-        guard change(&next), SourceDiscoveryDocument.encode(&next, maximumBytes: maximumBytes) != nil else { return }
+        guard change(&next), SourceDiscoveryDocument.encode(&next, maximumBytes: maximumBytes) != nil else { return false }
         self = next
+        return true
+    }
+
+    mutating func include(_ metadata: [MusicSourceDiscoveryMetadata], at: Double) -> Bool {
+        var keys = Dictionary(grouping: records.keys) { records[$0]!.fingerprint }
+        var changed = false
+        for item in metadata {
+            let recording = item.recording
+            let (key, _) = current(fingerprint: recording.fingerprint, duration: recording.duration,
+                                   at: at, candidates: keys[recording.fingerprint] ?? [])
+            if include(fingerprint: item.recording.fingerprint, duration: item.recording.duration,
+                       platform: item.platform, sources: item.sources, at: at, key: key) {
+                changed = true
+                if keys[recording.fingerprint]?.contains(key) != true {
+                    keys[recording.fingerprint, default: []].append(key)
+                }
+            }
+        }
+        return changed
+    }
+
+    mutating func observe(_ metadata: [MusicSourceDiscoveryMetadata], observation: MusicSearchObservation,
+                          at: Double) -> Bool {
+        var keys = Dictionary(grouping: records.keys) { records[$0]!.fingerprint }
+        var changed = false
+        for item in metadata where item.platform == observation.platform {
+            let recording = item.recording, candidates = keys[item.recording.fingerprint] ?? []
+            let (key, _) = current(fingerprint: recording.fingerprint, duration: recording.duration,
+                                   at: at, candidates: candidates)
+            if observe(fingerprint: recording.fingerprint, duration: recording.duration,
+                       observation: item.observation(observation), sources: item.sources, at: at, candidates: candidates) {
+                changed = true
+                if !candidates.contains(key) {
+                    keys[recording.fingerprint, default: []].append(key)
+                }
+            }
+        }
+        return changed
     }
 }
 
@@ -285,7 +511,7 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
         if let data {
             if let stored = SourceDiscoveryDocument.load(data, maximumBytes: maximumBytes) {
                 var merged = envelope
-                merged.absorb(stored)
+                merged.absorb(stored, at: now().timeIntervalSince1970 * 1000)
                 if SourceDiscoveryDocument.encode(&merged, maximumBytes: maximumBytes) != nil { envelope = merged }
                 durable = data
             }
@@ -313,6 +539,27 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
             $0.record(fingerprint: fingerprint, duration: duration, platform: platform,
                       checkedAt: checkedAt, at: at, sources: sources)
         }
+    }
+    @discardableResult public func include(_ metadata: [MusicSourceDiscoveryMetadata]) async -> Bool {
+        guard !Task.isCancelled, !metadata.isEmpty else { return false }
+        _ = prepare()
+        let at = now().timeIntervalSince1970 * 1000
+        return envelope.apply(maximumBytes: maximumBytes) { $0.include(metadata, at: at) }
+    }
+    public func observe(fingerprint: String, duration: Double, observation: MusicSearchObservation,
+                        sources: [MusicSourceDiscoverySource]) async {
+        guard !Task.isCancelled else { return }
+        _ = prepare()
+        let at = now().timeIntervalSince1970 * 1000
+        envelope.apply(maximumBytes: maximumBytes) {
+            $0.observe(fingerprint: fingerprint, duration: duration, observation: observation, sources: sources, at: at)
+        }
+    }
+    public func observe(_ metadata: [MusicSourceDiscoveryMetadata], observation: MusicSearchObservation) async {
+        guard !Task.isCancelled, !metadata.isEmpty else { return }
+        _ = prepare()
+        let at = now().timeIntervalSince1970 * 1000
+        envelope.apply(maximumBytes: maximumBytes) { $0.observe(metadata, observation: observation, at: at) }
     }
     public func exclude(fingerprint: String, duration: Double, sourceKey: String) async {
         _ = prepare()
@@ -360,6 +607,24 @@ public actor MusicNativeMemorySourceDiscoveryCache: MusicSourceDiscoveryCaching 
                       checkedAt: checkedAt, at: at, sources: sources)
         }
     }
+    @discardableResult public func include(_ metadata: [MusicSourceDiscoveryMetadata]) async -> Bool {
+        guard !Task.isCancelled, !metadata.isEmpty else { return false }
+        let at = now().timeIntervalSince1970 * 1000
+        return envelope.apply(maximumBytes: maximumBytes) { $0.include(metadata, at: at) }
+    }
+    public func observe(fingerprint: String, duration: Double, observation: MusicSearchObservation,
+                        sources: [MusicSourceDiscoverySource]) async {
+        guard !Task.isCancelled else { return }
+        let at = now().timeIntervalSince1970 * 1000
+        envelope.apply(maximumBytes: maximumBytes) {
+            $0.observe(fingerprint: fingerprint, duration: duration, observation: observation, sources: sources, at: at)
+        }
+    }
+    public func observe(_ metadata: [MusicSourceDiscoveryMetadata], observation: MusicSearchObservation) async {
+        guard !Task.isCancelled, !metadata.isEmpty else { return }
+        let at = now().timeIntervalSince1970 * 1000
+        envelope.apply(maximumBytes: maximumBytes) { $0.observe(metadata, observation: observation, at: at) }
+    }
     public func exclude(fingerprint: String, duration: Double, sourceKey: String) async {
         let at = now().timeIntervalSince1970 * 1000
         envelope.apply(maximumBytes: maximumBytes) {
@@ -378,34 +643,82 @@ enum MusicSourceDiscoveryWindow {
     static let recheck: Double = 7 * 24 * 60 * 60 * 1000
 }
 
-/// Compatible, non-excluded cache evidence for one song.
+/// A successful query projected from the same owner, without admitting its rows.
+/// This transient value is never persisted or passed to a source merge.
+struct MusicSourceDiscoveryCheck: Sendable {
+    let checkedAt: Double
+    let observations: [MusicSearchObservation]
+}
+
+/// Source admission and executed query evidence are independent projections.
 struct MusicSourceDiscoveryState: Sendable {
     /// Original check times, including empty checks of any age.
     var entries: [String: MusicSourceDiscoveryEntry] = [:]
+    var checks: [String: MusicSourceDiscoveryCheck] = [:]
     /// Never contains the song's own primary source.
     var excluded: Set<String> = []
     var at: Double = 0
+    func hasCurrentCheck(_ platform: String, window: Double) -> Bool {
+        checks[platform].map { at - $0.checkedAt < window } ?? false
+    }
     func current(window: Double) -> [String: MusicSourceDiscoveryEntry] {
-        entries.filter { !$0.value.sources.isEmpty || at - $0.value.checkedAt < window }
+        entries.filter { _, value in
+            if !value.sources.isEmpty { return true }
+            if value.observations.isEmpty { return value.checkedAt > 0 && at - value.checkedAt < window }
+            return value.observations.contains {
+                $0.scope == .recording && $0.outcome == .notFound && at - $0.checkedAt < window
+            }
+        }
     }
 }
 
 extension NativeMusicService {
     /// Compatible, non-excluded cache evidence with original check times.
-    func sourceDiscoveryState(_ song: MJ) async -> MusicSourceDiscoveryState {
+    func sourceDiscoveryState(_ song: MJ, query: String? = nil, context: String = "public") async -> MusicSourceDiscoveryState {
+        let own = epoch
+        do {
+            try await retainLibrarySongMetadata()
+            try check(own)
+            try await retainSongMetadata([song])
+            try check(own)
+        } catch { return .init() }
+        return await cachedSourceDiscoveryState(song, query: query, context: context)
+    }
+
+    /// Projection after a batch has already imported its acquired metadata.
+    func cachedSourceDiscoveryState(_ song: MJ, query: String? = nil, context: String = "public") async -> MusicSourceDiscoveryState {
+        let own = epoch
+        guard (try? check(own)) != nil else { return .init() }
         let at = now().timeIntervalSince1970 * 1000
         let descriptor = MusicModel.descriptor(song), fingerprint = descriptor.fingerprint
         guard !fingerprint.isEmpty else { return .init(at: at) }
         let excluded = await sourceDiscoveryExcluded(song, descriptor: descriptor)
+        guard (try? check(own)) != nil else { return .init(at: at) }
         let stored = await sourceDiscovery.entries(fingerprint: fingerprint, duration: descriptor.duration)
+        guard (try? check(own)) != nil else { return .init(at: at) }
         var result: [String: MusicSourceDiscoveryEntry] = [:]
+        var checks: [String: MusicSourceDiscoveryCheck] = [:]
+        let query = MusicRecordingIdentity.normalize(query ?? sourceDiscoveryQuery(song))
         for (platform, value) in stored {
-            guard MusicNativeSearchProtocol.platforms.contains(platform),
-                  let entry = compatibleSourceDiscoveryEntry(song, platform: platform, entry: value, excluded: excluded)
+            guard MusicNativeSearchProtocol.platforms.contains(platform) else { continue }
+            let observations = value.observations.filter {
+                $0.context == context && ($0.outcome == .found ||
+                    $0.scope == .recording && MusicRecordingIdentity.normalize($0.query) == query)
+            }
+            let successful = observations.filter { $0.outcome == .found || $0.outcome == .notFound }
+            let checkedAt = value.observations.isEmpty ? value.checkedAt :
+                successful.max(by: { $1.isNewer(than: $0) })?.checkedAt ?? 0
+            if checkedAt.isFinite, checkedAt > 0, checkedAt <= at {
+                checks[platform] = .init(checkedAt: checkedAt, observations: successful)
+            }
+            let relevant = MusicSourceDiscoveryEntry(checkedAt: checkedAt, sources: value.sources,
+                                                      observations: observations)
+            guard !value.sources.isEmpty || value.observations.isEmpty || !observations.isEmpty,
+                  let entry = compatibleSourceDiscoveryEntry(song, platform: platform, entry: relevant, excluded: excluded)
             else { continue }
             result[platform] = entry
         }
-        return .init(entries: result, excluded: excluded, at: at)
+        return .init(entries: result, checks: checks, excluded: excluded, at: at)
     }
 
     /// The user's "not this song" decisions for this recording. The song's own
@@ -439,7 +752,7 @@ extension NativeMusicService {
 
     func compatibleSourceDiscoveryEntry(_ song: MJ, platform: String, entry: MusicSourceDiscoveryEntry,
                                         excluded: Set<String> = []) -> MusicSourceDiscoveryEntry? {
-        guard entry.checkedAt.isFinite, entry.checkedAt > 0,
+        guard entry.checkedAt.isFinite, entry.checkedAt >= 0,
               entry.sources.count <= MusicSourceDiscoveryLimits.maximumSources,
               entry.sources.allSatisfy({ $0.source == platform }) else { return nil }
         var accepted: [MusicSourceDiscoverySource] = [], rows: [MJ] = []
@@ -452,7 +765,10 @@ extension NativeMusicService {
                                   musicInfo: clean["musicInfo"].json))
             rows.append(clean)
         }
-        return .init(checkedAt: entry.checkedAt, sources: accepted)
+        // Incompatible or explicitly excluded positive rows are not evidence of
+        // a successful empty query for this recording.
+        guard entry.sources.isEmpty || !accepted.isEmpty else { return nil }
+        return .init(checkedAt: entry.checkedAt, sources: accepted, observations: entry.observations)
     }
 
     func mergeSourceDiscoveryCache(_ song: MJ, platform: String,
@@ -460,7 +776,17 @@ extension NativeMusicService {
         var result = song
         for source in entry.sources {
             guard let row = MusicSourceDiscoveryLimits.row(source, platform: platform),
-                  let merged = try? MusicModel.mergeSources(result, adding: [row]) else { continue }
+                  MusicModel.compatible(result, row),
+                  result["sources"].array.allSatisfy({ MusicModel.compatible($0, row) }) else { continue }
+            var rows = result["sources"].array
+            if let index = rows.firstIndex(where: { $0["sourceKey"] == row["sourceKey"] }) {
+                // The owner row is complete. Falling back to a display snapshot
+                // here would resurrect fields removed by a newer real response.
+                rows[index] = row
+            } else { rows.append(row) }
+            var projected = result
+            projected["sources"] = .array(rows)
+            guard let merged = try? MusicModel.cleanSong(projected) else { continue }
             result = merged
         }
         return result
@@ -477,21 +803,22 @@ extension NativeMusicService {
             for platform in platforms {
                 guard let entry = entries[platform], entry.sources.indices.contains(index) else { continue }
                 result = mergeSourceDiscoveryCache(result, platform: platform,
-                    entry: .init(checkedAt: entry.checkedAt, sources: [entry.sources[index]]))
+                    entry: .init(checkedAt: entry.checkedAt, sources: [entry.sources[index]],
+                                 observations: entry.observations))
             }
         }
         return result
     }
 
-    func recordSourceDiscovery(_ song: MJ, platform: String, rows: [MJ]) async {
+    func sourceDiscoveryMetadata(_ song: MJ, platform: String, rows: [MJ]) -> MusicSourceDiscoveryMetadata? {
         let descriptor = MusicModel.descriptor(song), fingerprint = descriptor.fingerprint
         guard !fingerprint.isEmpty,
-              MusicNativeSearchProtocol.platforms.contains(platform) else { return }
+              MusicNativeSearchProtocol.platforms.contains(platform) else { return nil }
         var stored: [MusicSourceDiscoverySource] = [], accepted: [MJ] = []
         var positions: [String: Int] = [:]
         for raw in rows {
             guard (try? MusicModel.rejectSecrets(raw)) != nil,
-                  let clean = try? MusicModel.cleanSource(raw), clean["source"].string == platform else { return }
+                  let clean = try? MusicModel.cleanSource(raw), clean["source"].string == platform else { return nil }
             guard MusicModel.compatible(song, clean),
                   song["sources"].array.allSatisfy({ MusicModel.compatible($0, clean) }),
                   accepted.allSatisfy({ MusicModel.compatible($0, clean) }) else { continue }
@@ -499,7 +826,7 @@ extension NativeMusicService {
                 var existing = song
                 existing["sources"] = .array([accepted[index]])
                 guard let merged = try? MusicModel.mergeSources(existing, adding: [clean], preferIncoming: true),
-                      let row = merged["sources"].array.first else { return }
+                      let row = merged["sources"].array.first else { return nil }
                 accepted[index] = row
                 stored[index] = .init(sourceKey: row["sourceKey"].string, source: platform, musicInfo: row["musicInfo"].json)
                 continue
@@ -510,13 +837,28 @@ extension NativeMusicService {
                                 musicInfo: clean["musicInfo"].json))
             accepted.append(clean)
         }
-        await sourceDiscovery.record(fingerprint: fingerprint, duration: descriptor.duration,
-            platform: platform, checkedAt: now().timeIntervalSince1970 * 1000,
-            sources: stored)
-        scheduleSourceDiscoveryPersist()
+        return .init(recording: .init(fingerprint: fingerprint, duration: descriptor.duration),
+                     platform: platform, sources: stored)
     }
 
-    func recordSourceDiscovery(_ song: MJ, platform: String, page: MusicNativeTrackPage) async {
+    func recordSourceDiscovery(_ song: MJ, platform: String, rows: [MJ],
+                               observation: MusicSearchObservation? = nil) async {
+        guard (try? check()) != nil,
+              let metadata = sourceDiscoveryMetadata(song, platform: platform, rows: rows) else { return }
+        let own = epoch, recording = metadata.recording
+        if let observation {
+            guard observation.platform == platform else { return }
+            await sourceDiscovery.observe(fingerprint: recording.fingerprint, duration: recording.duration,
+                observation: metadata.observation(observation), sources: metadata.sources)
+        } else {
+            await sourceDiscovery.record(fingerprint: recording.fingerprint, duration: recording.duration,
+                platform: platform, checkedAt: now().timeIntervalSince1970 * 1000, sources: metadata.sources)
+        }
+        if (try? check(own)) != nil { scheduleSourceDiscoveryPersist() }
+    }
+
+    func recordSourceDiscovery(_ song: MJ, platform: String, page: MusicNativeTrackPage,
+                               observation: MusicSearchObservation? = nil) async {
         guard page.total >= 0, page.items.allSatisfy({ $0.platform == platform }) else { return }
         var rows: [MJ] = []
         for value in page.items {
@@ -524,7 +866,7 @@ extension NativeMusicService {
                   let row = candidate["sources"].array.first else { return }
             rows.append(row)
         }
-        await recordSourceDiscovery(song, platform: platform, rows: rows)
+        await recordSourceDiscovery(song, platform: platform, rows: rows, observation: observation)
     }
 
     // MARK: Durable scope (aligned with Windows MusicSongMatcher)
@@ -544,6 +886,9 @@ extension NativeMusicService {
             sourceDiscoveryPersistPending = false
             // A locked/closed document keeps the request pending for the next trigger.
             guard let state = try? read() else { sourceDiscoveryPersistPending = true; return }
+            guard (try? await retainLibrarySongMetadata()) != nil else {
+                sourceDiscoveryPersistPending = true; return
+            }
             let memo = sourceDiscoveryRecordingMemo
             let (recordings, next) = await Self.sourceDiscoveryRecordings(state.library["library"], memo: memo)
             sourceDiscoveryRecordingMemo = next

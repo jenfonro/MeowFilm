@@ -28,7 +28,7 @@ extension NativeMusicService: MusicSearchDiscoveryProviding, MusicSearchHotPlayb
         try musicRequire(result.count == keywords.count &&
             result.allSatisfy { $0.platform == MusicPublicBrowsePlatform.netease.rawValue },
             .upstreamInvalid)
-        return try page(.init(items: result, total: result.count), maximumItems: 20).items
+        return try await metadataPage(.init(items: result, total: result.count), maximumItems: 20).items
     }
 }
 

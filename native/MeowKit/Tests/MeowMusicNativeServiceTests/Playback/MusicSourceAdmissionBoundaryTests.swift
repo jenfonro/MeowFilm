@@ -61,10 +61,15 @@ private actor SourceAdmissionBoundaryScripts: MusicScriptResolving {
 
 @MainActor private final class SourceAdmissionBoundaryPlayer: MusicPlaybackHandoffDriving {
     var resources: [PlaybackResource] = []
-    var commits = 0, stops = 0, syncs = 0
+    var preparationAutoplay: [Bool] = []
+    var commits = 0, stops = 0, syncs = 0, resumes = 0
     var synchronizationGate: SourceAdmissionBoundaryGate?
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
         resources.append(resource); return .init(id: UUID(), resourceID: resource.id)
+    }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        preparationAutoplay.append(autoplay)
+        return .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
     }
     func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
         let gate = synchronizationGate; synchronizationGate = nil
@@ -78,7 +83,7 @@ private actor SourceAdmissionBoundaryScripts: MusicScriptResolving {
     }
     func stop(_ attempt: MusicPlayerAttempt) { stops += 1 }
     func pause(_ attempt: MusicPlayerAttempt) {}
-    func resume(_ attempt: MusicPlayerAttempt) {}
+    func resume(_ attempt: MusicPlayerAttempt) { resumes += 1 }
     func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool { true }
 }
 
@@ -271,6 +276,8 @@ private actor SourceAdmissionBoundaryScripts: MusicScriptResolving {
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(), scripts: scripts)
         let player = SourceAdmissionBoundaryPlayer(), model = MusicViewModel(service: service, player: player)
         await model.load(); await model.prepareCurrent()
+        XCTAssertEqual(model.phase, .preparing)
+        XCTAssertEqual(model.position, 0, "Cold restoration does not restore elapsed playback time")
         let rejected = try XCTUnwrap(model.activePlaybackSelection?.installationId)
         await model.rejectCurrentSource()
         let replacement = try XCTUnwrap(model.activePlaybackSelection)
@@ -278,7 +285,11 @@ private actor SourceAdmissionBoundaryScripts: MusicScriptResolving {
         XCTAssertEqual(replacement.quality, "flac")
         XCTAssertEqual(player.stops, 1)
         XCTAssertEqual(player.commits, 0, "A rejected item is never a handoff donor")
-        XCTAssertEqual(model.phase, .preparing)
+        XCTAssertEqual(player.preparationAutoplay, [false], "Replacement stays silent until admission succeeds")
+        XCTAssertEqual(player.resumes, 1, "Play intent survives rejection before the first playback fact")
+        XCTAssertEqual(player.resources.count, 2)
+        XCTAssertEqual(model.candidate?.startPosition, 0)
+        XCTAssertNil(model.error)
         let rows = try await service.sourceExclusions()
         XCTAssertEqual(rows.map(\.provider), [rejected])
         await model.close(); await service.close()

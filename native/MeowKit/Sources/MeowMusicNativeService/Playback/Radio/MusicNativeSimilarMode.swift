@@ -285,6 +285,9 @@ extension NativeMusicService {
                 item.context = context
                 if item.fromHome { item.sourceIDs = [context.seedID] }
             }
+            try await retainSongMetadata(songs)
+            try check(own); try lease.authorization.check()
+            guard similarEntranceIsCurrent(item, try read()) else { return }
             item.scope = scope
             item.songs = MusicNativeSimilarData.unique(songs, excluding: [])
             item.status = item.songs.isEmpty ? .empty : .ready

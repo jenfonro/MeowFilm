@@ -6,8 +6,8 @@ import MeowJSON
 enum MusicPlatformJSON {
     static let maximumResponseBytes = 192 * 1024
     static let maximumInteger = 9_007_199_254_740_991
-    static let qualities: Set<String> = ["128k", "320k", "flac", "flac24bit", "master"]
-    static let officialQualities: Set<String> = qualities.union(["192k", "jyeffect", "dolby", "sky", "vivid"])
+    static let qualities: Set<String> = ["128k", "192k", "320k", "flac", "flac24bit", "master"]
+    static let officialQualities: Set<String> = qualities.union(["jyeffect", "dolby", "sky", "vivid"])
 
     static func number(_ value: Int) throws -> JSONValue {
         guard value >= 0, value <= maximumInteger else { throw MusicServiceError.invalidRequest }

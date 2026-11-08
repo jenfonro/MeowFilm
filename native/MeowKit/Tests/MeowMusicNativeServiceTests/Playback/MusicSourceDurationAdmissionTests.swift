@@ -35,7 +35,7 @@ private struct DurationAdmissionAccounts: MusicNativeAccountProviding {
 }
 
 final class MusicSourceDurationAdmissionTests: XCTestCase {
-    func testDisabledUpstreamDowngradeDoesNotBlockRequestedTierPeer() async throws {
+    func testInspectionShowsActualDisabledTierWhileManualMatchKeepsRequestedTier() async throws {
         let scripts = NativeMusicScriptFixture()
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(),
             scripts: scripts, accounts: DurationAdmissionAccounts(duration: 180, actualQuality: "128k"))
@@ -49,7 +49,10 @@ final class MusicSourceDurationAdmissionTests: XCTestCase {
             throw MusicServiceError.closed
         }
         XCTAssertFalse(snapshot.sources.isEmpty)
-        XCTAssertTrue(snapshot.sources.allSatisfy { $0.selection.installationId == NativeMusicFixture.installation })
+        XCTAssertTrue(snapshot.sources.contains {
+            $0.selection.installationId == "official:duration" && $0.selection.quality == "128k"
+        }, "Manual inspection displays actual media quality independently of automatic enablement")
+        XCTAssertTrue(snapshot.sources.contains { $0.selection.installationId == NativeMusicFixture.installation })
         let result = try await session.match(intent: .quality("flac"))
         XCTAssertEqual(result.selection.installationId, NativeMusicFixture.installation)
         XCTAssertEqual(result.selection.quality, "flac")

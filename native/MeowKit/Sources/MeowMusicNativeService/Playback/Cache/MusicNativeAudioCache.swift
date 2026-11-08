@@ -68,7 +68,8 @@ extension NativeMusicService: MusicCachedPlaybackServing {
                                  requestedQuality: nil, preparing: false)
     }
     func cachedPlayback(attemptID: String, occurrenceID: String, selection: MusicPlaybackSelection?,
-                        requestedQuality: String?, preparing: Bool) async throws -> MusicCachedPlayback? {
+                        requestedQuality: String?, preparing: Bool,
+                        automaticQuality: Bool = true) async throws -> MusicCachedPlayback? {
         try check()
         guard let audioFileCache else { return nil }
         let own = epoch, d = try read()
@@ -82,7 +83,9 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         let songID = song["songId"].string, playback = d.playback
         let exclusions = playback["sourceExclusions"].array.filter { $0["songID"].string == songID }
         let quality = selection?.quality ?? requestedQuality ?? (playback["requestQuality"].isString ? playback["requestQuality"].string : "flac")
-        guard !Self.officialQualities([quality], playback).isEmpty else { return nil }
+        // The session already chose an automatic tier or an explicit manual
+        // tier. Preparing that exact file must not apply automatic preferences.
+        guard preparing || selection != nil || !Self.officialQualities([quality], playback).isEmpty else { return nil }
         var found: (MusicAudioFileCacheHit, MusicNativeCacheScope)?
         // A usable script file does not consult official accounts at all.
         for official in [false, true] {
@@ -103,7 +106,8 @@ extension NativeMusicService: MusicCachedPlaybackServing {
             let signature = official ? Self.audioCacheSignature(song: song, playback: playback) : Self.scriptAudioSignature(song)
             let hit = await audioFileCache.lookup(scope: scope.scope, songID: songID, authorization: scope.authorization) { identity in
                 identity.scope == scope.scope && identity.songID == songID && identity.isOfficial == official &&
-                    identity.playbackSignature == signature && identity.requestedQuality == quality &&
+                    ((!automaticQuality || selection != nil) && official || identity.playbackSignature == signature) &&
+                    identity.requestedQuality == quality &&
                     sources.contains { $0.sourceKey == identity.sourceKey && $0.platform == identity.platform && $0.nativeId == identity.nativeID } &&
                     (!official || Self.officialEnabled(identity.platform, playback)) &&
                     !exclusions.contains { $0["provider"].string == MusicSourceExclusion.providerID(identity.provider, platform: identity.platform) &&

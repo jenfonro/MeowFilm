@@ -9,8 +9,7 @@ final class MusicNativeCachedPlaybackRecoveryTests: XCTestCase {
         let hit = try await f.service.cachedPlayback(attemptID: UUID().uuidString.lowercased(),
             occurrenceID: f.original.occurrenceId, selection: nil)
         let value = try XCTUnwrap(hit)
-        let expected = MusicPlaybackSelection(installationId: "official:cached", generation: 1,
-            siteId: f.selection.siteId, sourceKey: f.selection.sourceKey, quality: f.selection.quality)
+        let expected = f.selection
         XCTAssertEqual(value.selection, expected)
         XCTAssertEqual(value.candidate.resolvedSelection, expected)
         let attempt = await f.service.attempt

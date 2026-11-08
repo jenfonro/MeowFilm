@@ -151,14 +151,22 @@ extension NativeMusicService {
     public func tracks(in requested: MusicCollection) async throws -> [MusicRemoteTrack] {
         let d = try read(), c = try collection(requested.id, d)
         try musicRequire(c["revision"].int == requested.revision, .staleRevision)
-        return try c["order"].strings.map { try MusicModel.track(d.library["library"]["songs"][$0], .init(kind: .library, id: $0)) }
+        let ids = c["order"].strings
+        let songs = try await sharedSongMetadata(ids.map { d.library["library"]["songs"][$0] })
+        try musicRequire(try collection(requested.id, read())["revision"].int == requested.revision, .staleRevision)
+        return try zip(ids, songs).map { try MusicModel.track($0.1, .init(kind: .library, id: $0.0)) }
     }
     public func createPlaylist(name: String, refs: [MusicReference]) async throws -> MusicCollection {
         _ = try musicText(name, maximum: 600); try musicRequire(name.utf16.count <= 200)
+        let before = try read()
+        let originals = try refs.map { try song($0, before) }
+        let acquired = try await sharedSongMetadata(originals)
         let result = try transaction(["library"]) { d in
             var lib = d.library["library"]
             try musicRequire(lib["collections"].array.count < 2000, .limit)
-            let songs = try refs.map { try song($0, d) }, ids = try upsert(songs, library: &lib)
+            // Revalidate references after the metadata owner's suspensions.
+            try musicRequire(try refs.map { try song($0, d) } == originals, .targetChanged)
+            let ids = try upsert(acquired, library: &lib)
             var c = MusicModel.freshCollection("playlist:\(lib["nextId"].int)", name)
             lib["nextId"] = .n(lib["nextId"].int + 1)
             c["order"] = .strings(ids); c["manualOrder"] = .bool(true); c["locallyCreated"] = .bool(true); c["revision"] = .n(1)
@@ -171,12 +179,21 @@ extension NativeMusicService {
         return result
     }
     public func editPlaylist(_ requested: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) async throws -> MusicCollection {
+        let acquired: [MJ]?, originals: [MJ]?
+        if let refs {
+            let before = try read()
+            let songs = try refs.map { try song($0, before) }
+            originals = songs
+            acquired = try await sharedSongMetadata(songs)
+        } else { acquired = nil; originals = nil }
         let result = try transaction(["library"]) { d in
             var c = try collection(requested.id, d), lib = d.library["library"]
             try musicRequire(c["revision"].int == requested.revision, .revisionConflict)
             let previous = c["order"].strings
-            let songs = try refs.map { refs in try refs.map { try song($0, d) } }
-            var next = try songs.map { try upsert($0, library: &lib) } ?? previous
+            if let refs, let originals {
+                try musicRequire(try refs.map { try song($0, d) } == originals, .targetChanged)
+            }
+            var next = try acquired.map { try upsert($0, library: &lib) } ?? previous
             if let order {
                 try musicRequire(order.count == next.count && musicIDs(order).count == order.count && musicIDs(order) == musicIDs(next))
                 next = order

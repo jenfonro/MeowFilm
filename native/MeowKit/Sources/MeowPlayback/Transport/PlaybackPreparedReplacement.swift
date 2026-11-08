@@ -8,7 +8,10 @@ import MeowContracts
 @MainActor
 public final class PlaybackPreparedReplacement {
     let resource: PlaybackResource
-    let replacing: PlayAttempt
+    let replacing: PlayAttempt?
+    let owner: String
+    let admission: UUID
+    let autoplay: Bool
     let player = AVPlayer()
     var binding: NativePlaybackAsset?
     var route: HLSLoopbackRoute?
@@ -24,8 +27,9 @@ public final class PlaybackPreparedReplacement {
         guard let value = player.currentItem?.duration.seconds, value.isFinite, value > 0 else { return nil }
         return value
     }
-    init(resource: PlaybackResource, replacing: PlayAttempt) {
-        self.resource = resource; self.replacing = replacing
+    init(resource: PlaybackResource, replacing: PlayAttempt?, owner: String, admission: UUID, autoplay: Bool) {
+        self.resource = resource; self.replacing = replacing; self.owner = owner
+        self.admission = admission; self.autoplay = autoplay
         player.automaticallyWaitsToMinimizeStalling = true; player.actionAtItemEnd = .pause
     }
     func prepare(budget: PlaybackNetworkBudget) async throws {
@@ -75,8 +79,7 @@ public final class PlaybackPreparedReplacement {
         }
     }
     private func wait(until end: ContinuousClock.Instant = .now.advanced(by: .seconds(15)), _ start: () -> Void) async throws {
-        try Task.checkCancellation()
-        if let failure { throw failure }
+        try check()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 waiter = continuation
@@ -87,7 +90,14 @@ public final class PlaybackPreparedReplacement {
                 start()
             }
         } onCancel: { Task { @MainActor [weak self] in self?.fail(CancellationError()) } }
+        try check()
+    }
+    func check() throws {
         try Task.checkCancellation()
+        if let failure { throw failure }
+        if player.status == .failed || player.currentItem?.status == .failed {
+            throw NativePlaybackError.preparationFailed
+        }
     }
     private func finish() {
         deadline?.cancel(); deadline = nil

@@ -11,7 +11,11 @@ extension MusicViewModel {
         guard isAvailable, !isClosed else { return }
         if isChangingSimilarMode || isChangingQueueRecommendations || navigationPlaybackIntent != nil {
             recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
-            if let nativeAttempt { player?.pause(nativeAttempt) }
+            if !pausePlaybackRecovery() {
+                if pendingSourceSelection != nil, nativeAttempt == nil {
+                    invalidateSelection(stopMedia: true)
+                } else if let nativeAttempt { player?.pause(nativeAttempt) }
+            }
             playbackState.phase = .paused
             await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
             return
@@ -158,7 +162,9 @@ extension MusicViewModel {
                 cancelRemoteQueuePreparation(); cancelFMNavigation()
                 nativeAttempt = nil; pendingNativeResourceID = nil
             }
-            if [.paused, .stopped, .replaced].contains(event.kind) { pausePlaybackRecovery() }
+            if [.paused, .stopped, .replaced].contains(event.kind) {
+                pausePlaybackRecovery(continuePendingSource: event.kind == .paused)
+            }
             return
         }
         switch event.kind {

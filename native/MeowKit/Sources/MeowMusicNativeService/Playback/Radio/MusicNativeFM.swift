@@ -41,6 +41,9 @@ extension NativeMusicService {
             added = try batch.map(MusicModel.normalize)
         }
         try await work { try await source.validate() }
+        try check(own); try intent.check(); try source.authorization.check()
+        try musicRequire(try read().queue["revision"].int == expectedRevision, .staleRevision)
+        try await retainSongMetadata(added)
         try check(own)
         try musicRequire(attempt?.id == previousAttempt, .staleResult)
         let context = try remoteContext(source)

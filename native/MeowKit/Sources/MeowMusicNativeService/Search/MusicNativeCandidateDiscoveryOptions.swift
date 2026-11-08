@@ -64,10 +64,10 @@ extension NativeMusicService {
         return result
     }
 
-    /// The one rule for script playback options, shared by automatic candidates
-    /// and the explicit source picker: enabled, available, declared musicUrl, quality.
+    /// Script/recording admission is shared; only automatic candidates apply
+    /// the saved quality preferences.
     func scriptOptions(song: MJ, playback prefs: MJ, snapshots: [MusicScriptSource],
-                       excluded: Set<String>) throws -> [MusicCandidateDiscoveryOption] {
+                       excluded: Set<String>, manual: Bool = false) throws -> [MusicCandidateDiscoveryOption] {
         try musicRequire(Set(snapshots.map(\.installationID)).count == snapshots.count, .invalidResponse)
         var rows: [MusicCandidateDiscoveryOption] = []
         for snapshot in snapshots where snapshot.isCandidate {
@@ -77,9 +77,11 @@ extension NativeMusicService {
                 let capability = try validate(snapshot, site: source.platform)
                 let row = song["sources"].array.first { $0["sourceKey"].string == source.sourceKey } ?? .null
                 let declared = MusicModel.sourceData(row)["types"].array.map { $0["type"].string }
-                let qualities = MusicModel.qualities(capability.qualities.filter {
-                    ["128k", "320k", "flac", "flac24bit"].contains($0) && (declared.isEmpty || declared.contains($0))
-                }, prefs)
+                let supported = capability.qualities.filter {
+                    ["128k", "192k", "320k", "flac", "flac24bit", "master"].contains($0) &&
+                        (declared.isEmpty || declared.contains($0))
+                }
+                let qualities = manual ? supported : MusicModel.qualities(supported, prefs)
                 if !qualities.isEmpty {
                     rows.append(.init(playback: .init(installationId: snapshot.installationID, generation: snapshot.generation,
                         siteId: source.platform, sourceKey: source.sourceKey, qualities: qualities,

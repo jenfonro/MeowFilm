@@ -17,6 +17,8 @@ extension NativeMusicService: MusicRemoteCollectionServing {
         try musicRequire(raw.allSatisfy { $0.platform == source.context.platform }, .invalidResponse)
         let songs = try raw.map(MusicModel.normalize)
         try await work { try await source.validate() }
+        try check(own); try intent.check(); try source.authorization.check()
+        try await retainSongMetadata(songs)
         try check(own)
         // All suspended work is over. Account/source and UI intent revocation
         // serialize with the one existing protected-document transaction.
@@ -61,16 +63,20 @@ extension NativeMusicService: MusicRemoteCollectionServing {
         try musicRequire(raw.allSatisfy { $0.platform == source.context.platform }, .invalidResponse)
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
         var filtered: [MusicNativeTrackData] = []
+        var songs: [MJ] = []
         for row in raw {
             try intent.check()
             // Validate every row, even one the query would otherwise exclude.
             // Do not use identity normalization (NFKC/diacritic folding) for a
             // literal UI search, or merge repeated queue occurrences.
             let song = try MusicModel.normalize(row)
+            songs.append(song)
             if MusicRemoteCollectionFilter.matches(title: song["title"].string, artist: song["artist"].string,
                                                     album: song["album"].string, query: query) { filtered.append(row) }
         }
         try await work { try await source.validate() }
+        try check(own); try intent.check(); try source.authorization.check()
+        try await retainSongMetadata(songs)
         try check(own); try intent.check()
         try musicRequire(!filtered.isEmpty, .notFound)
         return try source.authorization.perform {

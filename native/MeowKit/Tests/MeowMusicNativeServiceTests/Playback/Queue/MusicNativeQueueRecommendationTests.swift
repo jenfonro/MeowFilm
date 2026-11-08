@@ -1,8 +1,70 @@
 import XCTest
 import MeowMusicFeature
+import MeowStorage
 @testable import MeowMusicNativeService
 
 final class MusicNativeQueueRecommendationTests: XCTestCase {
+    func testPreviewSharesAcquiredMetadataWithoutQueryEvidenceOrPersistingNonmembers() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let metadataDocument = try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
+        let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: { metadataDocument }, clock: { NativeMusicFixture.date })
+        let owner = SimilarModeAccountFixture([["301"]])
+        let qq = MusicNativeCandidateDiscoveryQQ(), http = MusicNativeCandidateDiscoveryHTTP()
+        let store = NativeMusicMemoryDocument(try document(["100"]))
+        let service = try await NativeMusicFixture.service(store, accounts: owner, qq: qq, http: http, sourceDiscovery: cache)
+        _ = try await service.createPlaylist(name: "Saved", refs: [.init(kind: .queue, id: "entry-1")])
+        await service.flushSourceDiscoveryPersist()
+        let persisted = try XCTUnwrap(metadataDocument.read(key: "records"))
+        let file = root.appendingPathComponent(MusicNativePersistentSourceDiscoveryCache.namespace)
+            .appendingPathComponent("records.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        let before = store.snapshot().0, writes = store.snapshot().2
+        let otherEntrance = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
+            "tx", id: "OtherMID", title: "Song 301", artist: "Synthetic"))
+        let unknown = await service.cachedSourceDiscoveryState(otherEntrance)
+        XCTAssertTrue(unknown.entries.isEmpty)
+
+        let previewValue = try await service.previewQueueRecommendations(), preview = try XCTUnwrap(previewValue)
+        XCTAssertEqual(preview.candidates.map(\.song.title), ["Song 301"])
+        let acquired = await service.cachedSourceDiscoveryState(otherEntrance)
+        XCTAssertEqual(Set(acquired.entries.keys), ["wy"])
+        let known = try XCTUnwrap(acquired.entries["wy"])
+        let recommended = try MusicModel.normalize(SimilarModeAccountFixture.track("301"))
+        XCTAssertEqual(known.sources.map(\.sourceKey), [recommended["sources"].array[0]["sourceKey"].string])
+        XCTAssertEqual(known.checkedAt, 0)
+        XCTAssertTrue(known.observations.isEmpty)
+        XCTAssertTrue(acquired.checks.isEmpty)
+
+        let reused = try await service.sharedSongMetadata(otherEntrance)
+        XCTAssertEqual(Set(reused["sources"].array.map { $0["source"].string }), ["tx", "wy"])
+        XCTAssertEqual(reused["sources"].array.first?["sourceKey"], otherEntrance["sources"].array.first?["sourceKey"])
+        let mapped = try XCTUnwrap(reused["sources"].array.first { $0["source"].string == "wy" })
+        XCTAssertEqual(mapped["sourceKey"], recommended["sources"].array[0]["sourceKey"])
+        let unchangedEvidence = await service.cachedSourceDiscoveryState(otherEntrance)
+        XCTAssertTrue(unchangedEvidence.entries.values.allSatisfy { $0.checkedAt == 0 && $0.observations.isEmpty })
+        XCTAssertTrue(unchangedEvidence.checks.isEmpty)
+        let cachedPreview = try await service.queueRecommendationSnapshot()
+        XCTAssertEqual(cachedPreview?.id, preview.id)
+        let requests = await owner.count(), qqCalls = await qq.calls(), httpCalls = await http.calls()
+        XCTAssertEqual(requests, 1)
+        XCTAssertTrue(qqCalls.isEmpty)
+        XCTAssertTrue(httpCalls.isEmpty)
+        XCTAssertEqual(store.snapshot().0, before)
+        XCTAssertEqual(store.snapshot().2, writes)
+
+        await service.flushSourceDiscoveryPersist()
+        XCTAssertEqual(try metadataDocument.read(key: "records"), persisted)
+        let reopened = MusicNativePersistentSourceDiscoveryCache(storeFactory: { metadataDocument }, clock: { NativeMusicFixture.date })
+        let unsaved = await reopened.entries(fingerprint: MusicModel.fingerprint(otherEntrance), duration: 180)
+        XCTAssertTrue(unsaved.isEmpty)
+        let local = try MusicModel.normalize(SimilarModeAccountFixture.track("100"))
+        let saved = await reopened.entries(fingerprint: MusicModel.fingerprint(local), duration: 180)
+        XCTAssertFalse(try XCTUnwrap(saved["wy"]).sources.isEmpty, "local membership is the durable positive control")
+        await service.close()
+    }
+
     func testPreviewIsReadOnlyAndClickAppendsCompleteNativeUniqueBatchWithoutChangingSource() async throws {
         let ids = ["100"] + Array(repeating: "200", count: 23)
         let owner = SimilarModeAccountFixture([["200", "301", "301", "302", "303", "304", "305"]],

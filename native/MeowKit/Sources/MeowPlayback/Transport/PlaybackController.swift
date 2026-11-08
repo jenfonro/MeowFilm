@@ -35,6 +35,9 @@ public final class PlaybackController: ObservableObject {
     @Published public private(set) var requiresLocalMediaFetch = false
 
     private var state = PlaybackStateMachine()
+    private var replacementAdmission = UUID()
+    private var replacementOwner: String?
+    private var failedReplacementAutoplay = false
     private var systemMetadata = PlaybackNowPlayingMetadataState()
     private let callbacks = PlaybackCallbackDelivery()
     private var owners: PlaybackOwnerRouter { callbacks.owners }
@@ -134,6 +137,9 @@ public final class PlaybackController: ObservableObject {
         mutationDepth += 1
         defer { finishMutation() }
         sampleCurrentProgress()
+        replacementAdmission = UUID()
+        replacementOwner = nil
+        failedReplacementAutoplay = false
         // Invalidate callbacks *before* removing/cancelling the old item.
         let token = state.begin(resource: resource, owner: owner, autoplay: autoplay, network: network)
         let attempt = PlayAttempt(id: token, owner: owner, resourceID: resource.id)
@@ -186,12 +192,49 @@ public final class PlaybackController: ObservableObject {
 
     /// The old item remains audible and commandable throughout readiness and seek.
     public func prepareReplacement(resource: PlaybackResource, replacing: PlayAttempt) async throws -> PlaybackPreparedReplacement {
-        guard isCurrent(replacing), state.isPlayable else { throw NativePlaybackError.preparationFailed }
-        let prepared = PlaybackPreparedReplacement(resource: resource, replacing: replacing)
+        guard isCurrent(replacing), state.isPlayable || state.snapshot.phase == .failed else {
+            throw NativePlaybackError.preparationFailed
+        }
+        let prepared = PlaybackPreparedReplacement(resource: resource, replacing: replacing, owner: replacing.owner,
+            admission: replacementAdmission, autoplay: state.wantsPlayback)
         do {
             try await prepared.prepare(budget: networkBudget)
             return prepared
         } catch { prepared.cancel(); throw error }
+    }
+
+    /// Prepare an explicit same-song recovery after its old output has stopped.
+    /// No attempt or playback fact is published until the prepared media commits.
+    public func preparePlayback(resource: PlaybackResource, owner: String, autoplay: Bool) async throws -> PlaybackPreparedReplacement {
+        guard !state.isPlayable, !owner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              state.attempt == nil || state.attempt?.owner == owner else {
+            throw NativePlaybackError.preparationFailed
+        }
+        if replacementOwner != owner {
+            replacementAdmission = UUID()
+            replacementOwner = owner
+        }
+        let prepared = PlaybackPreparedReplacement(resource: resource, replacing: nil, owner: owner,
+            admission: replacementAdmission, autoplay: autoplay)
+        do {
+            try await prepared.prepare(budget: networkBudget)
+            return prepared
+        } catch { prepared.cancel(); throw error }
+    }
+
+    private func acceptsReplacement(_ prepared: PlaybackPreparedReplacement) -> Bool {
+        guard prepared.admission == replacementAdmission else { return false }
+        if let replacing = prepared.replacing {
+            return isCurrent(replacing) && (state.isPlayable || state.snapshot.phase == .failed)
+        }
+        return !state.isPlayable && (state.attempt == nil || state.attempt?.owner == prepared.owner)
+    }
+
+    private func replacementPosition(_ prepared: PlaybackPreparedReplacement) -> Double {
+        guard prepared.replacing != nil else { return prepared.resource.startPosition }
+        if state.snapshot.phase == .failed { return state.snapshot.position }
+        let position = player.currentTime().seconds
+        return position.isFinite ? max(0, position) : state.snapshot.position
     }
 
     /// Call after asynchronous business admission, immediately before commit.
@@ -201,25 +244,24 @@ public final class PlaybackController: ObservableObject {
         prepared.synchronizationDeadline = deadline
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
-            guard !prepared.committed, isCurrent(prepared.replacing), state.isPlayable else {
+            guard !prepared.committed, acceptsReplacement(prepared) else {
                 throw NativePlaybackError.preparationFailed
             }
-            let position = player.currentTime().seconds
-            try await prepared.seek(to: position.isFinite ? max(0, position) : snapshot.position, deadline: deadline)
-            guard isCurrent(prepared.replacing), state.isPlayable else { throw NativePlaybackError.preparationFailed }
-            let delta = abs(prepared.player.currentTime().seconds - player.currentTime().seconds)
+            try await prepared.seek(to: replacementPosition(prepared), deadline: deadline)
+            guard acceptsReplacement(prepared) else { throw NativePlaybackError.preparationFailed }
+            let delta = abs(prepared.player.currentTime().seconds - replacementPosition(prepared))
             if delta.isFinite, delta <= 0.25 { return }
         }
         throw NativePlaybackError.seekTimedOut
     }
 
     public func commitReplacement(_ prepared: PlaybackPreparedReplacement) throws -> PlayAttempt {
-        try Task.checkCancellation()
-        guard !prepared.committed, isCurrent(prepared.replacing), state.isPlayable,
+        try prepared.check()
+        guard !prepared.committed, acceptsReplacement(prepared),
               let binding = prepared.binding, let item = prepared.player.currentItem, item.status == .readyToPlay else {
             throw NativePlaybackError.preparationFailed
         }
-        let position = item.currentTime().seconds, live = player.currentTime().seconds
+        let position = item.currentTime().seconds, live = replacementPosition(prepared)
         guard position.isFinite, position >= 0, live.isFinite, abs(position - live) <= 0.25 else {
             throw NativePlaybackError.seekFailed
         }
@@ -228,11 +270,20 @@ public final class PlaybackController: ObservableObject {
         mutationDepth += 1
         defer { finishMutation() }
         sampleCurrentProgress()
-        let autoplay = state.wantsPlayback
-        let token = state.begin(resource: resource, owner: prepared.replacing.owner, autoplay: autoplay)
-        let attempt = PlayAttempt(id: token, owner: prepared.replacing.owner, resourceID: resource.id)
+        let autoplay = prepared.replacing == nil ? prepared.autoplay :
+            state.snapshot.phase == .failed ? failedReplacementAutoplay : state.wantsPlayback
+        replacementAdmission = UUID()
+        replacementOwner = nil
+        failedReplacementAutoplay = false
+        let token = state.begin(resource: resource, owner: prepared.owner, autoplay: autoplay)
+        let attempt = PlayAttempt(id: token, owner: prepared.owner, resourceID: resource.id)
         systemMetadata.begin(attempt); owners.updateContext(state.commandContext)
         tearDownItem()
+        if controlsOwner != prepared.owner {
+            controlsOwner = prepared.owner; preferredRate = 1
+            let saved = volumePreferences?.volume(for: prepared.owner) ?? 1
+            volume = saved.isFinite && (0...1).contains(saved) ? saved : 1
+        }
         prepared.committed = true
         prepared.failures.receive = { [weak self] in self?.fail($0, generation: token) }
         networkAsset = binding; localMediaFetch = prepared.localMediaFetch
@@ -287,7 +338,10 @@ public final class PlaybackController: ObservableObject {
     public func pause() {
         mutationDepth += 1
         defer { finishMutation() }
-        guard state.isPlayable else { return }
+        guard state.isPlayable else {
+            if state.snapshot.phase == .failed { failedReplacementAutoplay = false }
+            return
+        }
         sampleCurrentProgress()
         state.pause()
         player.pause()
@@ -316,7 +370,10 @@ public final class PlaybackController: ObservableObject {
     public func stop(owner: String? = nil) {
         mutationDepth += 1
         defer { finishMutation() }
-        guard owner == nil || owner == state.snapshot.owner else { return }
+        guard owner == nil || owner == (state.snapshot.owner ?? replacementOwner) else { return }
+        replacementAdmission = UUID()
+        replacementOwner = nil
+        failedReplacementAutoplay = false
         sampleCurrentProgress()
         guard state.stop(owner: owner) else { return }
         systemMetadata.end()
@@ -330,7 +387,7 @@ public final class PlaybackController: ObservableObject {
 
     @discardableResult
     public func pause(attempt: PlayAttempt) -> Bool {
-        guard isCurrent(attempt), state.isPlayable else { return false }
+        guard isCurrent(attempt), state.isPlayable || state.snapshot.phase == .failed else { return false }
         pause()
         return true
     }
@@ -614,6 +671,7 @@ public final class PlaybackController: ObservableObject {
                           self.state.acceptsSeek(seek) else { return }
                     self.mutationDepth += 1
                     defer { self.finishMutation() }
+                    self.failedReplacementAutoplay = self.state.wantsPlayback
                     self.state.completeSeek(seek, finished: finished, actualPosition: actualPosition)
                     self.cancelSeekDeadline()
                     if self.state.snapshot.phase == .failed {
@@ -655,6 +713,7 @@ public final class PlaybackController: ObservableObject {
                   self.state.outstandingSeek?.id == seek.id else { return }
             self.mutationDepth += 1
             defer { self.finishMutation() }
+            self.failedReplacementAutoplay = self.state.wantsPlayback
             self.state.seekTimedOut(generation: seek.generation, id: seek.id)
             self.finishFailure()
         }
@@ -671,6 +730,7 @@ public final class PlaybackController: ObservableObject {
         defer { finishMutation() }
         guard state.accepts(generation) else { return }
         sampleCurrentProgress()
+        failedReplacementAutoplay = state.wantsPlayback
         state.fail(failure, generation: generation)
         owners.updateContext(state.commandContext)
         finishFailure()
@@ -809,6 +869,7 @@ public final class PlaybackController: ObservableObject {
             pause()
         case .mediaServicesReset:
             needsPlayerRecreation = true
+            failedReplacementAutoplay = state.wantsPlayback
             state.mediaServicesReset()
             finishFailure()
         }
