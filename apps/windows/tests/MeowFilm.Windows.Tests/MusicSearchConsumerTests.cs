@@ -8,6 +8,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using MeowFilm.Capabilities;
+using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -26,6 +27,79 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SearchConsumerCases()
     {
+        yield return Case("search overview second song menu preserves the complete section order and current index", async () =>
+        {
+            // Exercise the real search/menu/queue path with no available media sources.
+            var scripts = new QualityFixture.ScriptRuntime();
+            await using var f = await SearchScene.Create(scriptRuntime: scripts); await f.Policy(["wy"], []);
+            var sources = await f.Call("music.officialSources.settings.get");
+            await f.Call("music.officialSources.settings.save", new
+            {
+                ifRevision = sources.GetProperty("settings").GetProperty("revision").GetInt64(),
+                enabled = Array.Empty<string>()
+            });
+            f.Http.SearchResult = _ => new { code = 200, result = new { songCount = 3,
+                songs = Enumerable.Range(1001, 3).Select(id => SearchHttp.WyTrack(id, "歌曲" + id, "歌手", "专辑")).ToArray() } };
+            await f.Search("栏目播放");
+            await SearchUntil(() => !f.Module.SearchSongsLoading && f.Module.CatalogSections.Any(s => s.Items.Count == 3));
+            var section = f.Module.CatalogSections.Single(s => s.Items.Count == 3);
+            string id = section.Id;
+            True(!string.IsNullOrWhiteSpace(id), "real search producer supplies a queue source identity");
+            await f.Module.OpenSearchTabAsync("songs"); await f.Module.OpenSearchTabAsync("overview");
+            Equal(id, f.Module.CatalogSections.Single(s => s.Items.Count == 3).Id);
+            var cards = f.Module.CatalogSections.Single(s => s.Items.Count == 3).Items;
+            f.Module.SelectedSong = cards[0].Song;
+            var window = SearchPlaylistWindow(f.Module.View, 1042, 800);
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain();
+                var row = Visuals(f.Module.View).OfType<FrameworkElement>().First(e => e.IsVisible &&
+                    ReferenceEquals(e.DataContext, cards[1]) && e.ContextMenu is not null);
+                RaiseSongMenu(row);
+                var play = (MenuItem)row.ContextMenu.Items[0];
+                play.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                await SearchUntil(() => !f.Module.Busy && f.Module.HasCurrent);
+                var queue = await f.Call("music.queue.get", new { limit = 100 });
+                var entries = queue.GetProperty("entries").EnumerateArray().ToArray();
+                True(entries.Select(e => SongRow.Read(e.GetProperty("song")).Id)
+                    .SequenceEqual(cards.Select(c => c.Song!.Id)), "whole overview column retains source order");
+                Equal(entries[1].GetProperty("id").GetString(), queue.GetProperty("currentId").GetString());
+                Equal(id, queue.GetProperty("source").GetProperty("id").GetString());
+                Equal("未找到可用的完整音频", f.Module.Status);
+                True(scripts.Calls.SequenceEqual(["music.script.sources.list"]) && !f.Runtime.HasStarted,
+                    "only the empty script inventory is simulated; no legacy runtime or media resolution runs");
+            }
+            finally { window.Content = null; window.Close(); }
+        });
+        yield return Case("search song more and row menus open with shared templates and dynamic playlist styles", async () =>
+        {
+            await using var f = await SearchScene.Create(); await f.Policy(["wy"], []);
+            await f.Search("菜单歌曲"); await f.Module.OpenSearchTabAsync("songs");
+            await SearchUntil(() => f.Module.Songs.Count == 1 && !f.Module.SearchSongsLoading);
+            var window = SearchPlaylistWindow(f.Module.View, 900, 700);
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain();
+                var grid = (DataGrid)f.Module.View.FindName("SearchSongsGrid");
+                var row = (DataGridRow)grid.ItemContainerGenerator.ContainerFromIndex(0);
+                var more = Visuals(row).OfType<Button>().Single(b => AutomationProperties.GetName(b) == "更多");
+                SimulateFocus(row, UIElement.IsKeyboardFocusWithinProperty, true); row.UpdateLayout();
+                Click(more);
+                try
+                {
+                    await AssertOpenedSongMenuStyles(grid.ContextMenu, more);
+                    True(grid.ContextMenu.Items.OfType<MenuItem>().Single(i => i.Header as string == "添加到歌单").Items.Count > 0,
+                        "actual destination playlist children are covered");
+                }
+                finally { grid.ContextMenu.IsOpen = false; }
+                f.Module.SelectedSong = f.Module.Songs[0]; RaiseSongMenu(grid); grid.ContextMenu.IsOpen = true;
+                try { await AssertOpenedSongMenuStyles(grid.ContextMenu, grid); }
+                finally { grid.ContextMenu.IsOpen = false; }
+                True(!grid.ContextMenu.Items.OfType<MenuItem>().Single(i => i.Header as string == "移除").IsEnabled,
+                    "search songs retain removal permissions");
+            }
+            finally { window.Content = null; window.Close(); }
+        });
         yield return Case("captured local and online searches isolate identical path-like keywords", async () =>
         {
             foreach (string query in new[] { "同词", "search-local/catalog-search/词%2F/尾" })
@@ -860,14 +934,14 @@ public static partial class MusicUiTests
         internal readonly SearchHttp Http = new();
         internal readonly MusicNativeApplication App;
         internal readonly MusicCapability Module;
-        private SearchScene(TimeProvider? clock = null)
+        private SearchScene(TimeProvider? clock = null, IRuntimeClient? scriptRuntime = null)
         {
-            App = new(Store, Runtime, Http, null, null, clock);
+            App = new(Store, scriptRuntime ?? Runtime, Http, null, null, clock);
             Module = new(App, Store, new PlaybackProbe(), new Dialogs());
         }
-        internal static async Task<SearchScene> Create(TimeProvider? clock = null)
+        internal static async Task<SearchScene> Create(TimeProvider? clock = null, IRuntimeClient? scriptRuntime = null)
         {
-            var f = new SearchScene(clock);
+            var f = new SearchScene(clock, scriptRuntime);
             try { await f.Module.InitializeAsync(default); await Drain(); return f; }
             catch { await f.DisposeAsync(); throw; }
         }

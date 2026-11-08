@@ -126,6 +126,7 @@ public sealed partial class ShellWindow
         _queueSource = source;
         _queueSession = session;
         _queueOpen = true;
+        PlayerSurfaceInput.SetQueueOpen(this, true);
         var generation = ++_queueGeneration;
         QueueDismissSurface.Visibility = Visibility.Visible;
         QueueSurface.Visibility = Visibility.Visible;
@@ -148,6 +149,7 @@ public sealed partial class ShellWindow
     {
         if (!_queueOpen && QueueSurface.Visibility != Visibility.Visible) return Task.CompletedTask;
         _queueOpen = false;
+        PlayerSurfaceInput.SetQueueOpen(this, false);
         ++_queueGeneration;
         RetireActivation(ref _queueActivation);
         _queueSource?.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
@@ -257,6 +259,10 @@ public sealed partial class ShellWindow
         RunUiAction(CloseQueueAsync);
     }
 
+    private void OnQueueHostSizeChanged(object sender, SizeChangedEventArgs e) =>
+        QueueHost.Clip = new System.Windows.Media.RectangleGeometry(
+            new Rect(new Point(), e.NewSize), 11, 11);
+
     private static void RetireActivation(ref CancellationTokenSource? source)
     {
         var prior = source;
@@ -275,6 +281,7 @@ public sealed partial class ShellWindow
     {
         _playerDetailOpen = false;
         _queueOpen = false;
+        PlayerSurfaceInput.SetQueueOpen(this, false);
         RetireActivation(ref _playerDetailActivation);
         RetireActivation(ref _queueActivation);
         _playerDetailSource?.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);

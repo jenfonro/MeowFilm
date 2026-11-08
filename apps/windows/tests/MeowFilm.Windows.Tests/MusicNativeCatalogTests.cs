@@ -8,10 +8,11 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class MusicNativeCatalogTests
+public static partial class MusicNativeCatalogTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in NextCases()) yield return test;
         yield return new("Native catalog public boundary borrows platform and library", Boundary);
         yield return new("Native catalog base typed routes preserve UI DTO and continuation", BaseRoutes);
         foreach (string route in new[] { "personalPlaylists", "daily", "fm", "similar", "heartbeat", "queueRecommendations", "album", "artist" })

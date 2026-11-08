@@ -24,6 +24,7 @@ using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Platform.Storage;
+using MeowFilm.Platform.Files;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 using System.Windows.Media.Imaging;
@@ -32,10 +33,293 @@ namespace MeowFilm.Windows.Tests;
 
 // Real WPF + Native application/catalog/platform protocols + DPAPI. Synthetic
 // HttpMessageHandler replaces upstream; only explicit authored LX needs Node.
-public static class MusicCatalogTests
+public static partial class MusicCatalogTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in NextRecoveryCases()) yield return test;
+        yield return Case("playlist card next stages the complete list and never starts playback", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
+            var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.Kind == "playlist");
+            await f.Configure(new { total = 1205, nextDetail = 0 });
+            await f.Module.QueueCatalogCardAsync(card);
+            var queue = await f.Rpc("music.queue.get", new { limit = 1 });
+            Equal(1205, queue.GetProperty("total").GetInt32());
+            Equal(0, f.Playback.Opens.Count);
+            var commit = f.Client.Log.Single(call => call.Method == "music.catalog.playlist.commit").Parameters;
+            Equal("next", commit.GetProperty("action").GetString());
+            True(commit.EnumerateObject().Select(p => p.Name).OrderBy(n => n)
+                .SequenceEqual(new[] { "action", "expectedVersion", "token" }), "next sends only stage token and CAS version");
+            Equal(1, f.Client.Count("music.catalog.playlist.discard"));
+            Equal(0, f.Client.Count("music.queue.append"));
+        });
+        yield return Case("playlist card next preserves current occurrence mode and complete insertion order", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization;
+            await f.Module.CatalogEntryInitialization;
+            var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.Kind == "playlist");
+            await f.Rpc("music.queue.replace", new { songs = Enumerable.Range(1, 3)
+                .Select(i => MusicSongFixture.Online("wy", i.ToString())).ToArray(), index = 0 });
+            var before = await f.Rpc("music.queue.get", new { limit = 3 });
+            await f.Configure(new { nextDetail = 0 });
+            await f.Module.QueueCatalogCardAsync(card);
+            var after = await f.Rpc("music.queue.get", new { limit = 100 });
+            Equal(before.GetProperty("currentId").GetString(), after.GetProperty("currentId").GetString());
+            Equal(before.GetProperty("mode").GetRawText(), after.GetProperty("mode").GetRawText());
+            Equal(before.GetProperty("version").GetInt64() + 1, after.GetProperty("version").GetInt64());
+            var ids = new List<string>();
+            for (int offset = 0; offset < 208; offset += 100)
+            {
+                var page = await f.Rpc("music.queue.get", new { offset, limit = 100 });
+                ids.AddRange(page.GetProperty("entries").EnumerateArray()
+                    .Select(item => MusicSongFixture.NativeId(item.GetProperty("song"))));
+            }
+            True(ids.SequenceEqual(new[] { "1" }.Concat(Enumerable.Range(1001, 205).Select(i => i.ToString()))
+                .Concat(new[] { "2", "3" })), "entire playlist is one ordered segment after the unchanged current occurrence");
+            Equal(0, f.Playback.Opens.Count);
+        });
+        yield return Case("playlist card favorite copies all songs into a new local playlist each time", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
+            var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.Kind == "playlist");
+            await f.Configure(new { nextDetail = 0 });
+            await f.Module.FavoriteCatalogCardAsync(card);
+            await f.Configure(new { nextDetail = 0 });
+            await f.Module.FavoriteCatalogCardAsync(card);
+            var copies = f.Module.Playlists.Where(p => p.Kind == "playlist").ToArray();
+            Equal(2, copies.Length); True(copies[0].Id != copies[1].Id, "repeat favorite creates a distinct copy");
+            True(copies.All(p => p.Count == 205), "both copies contain the full playlist");
+            foreach (var copy in copies)
+            {
+                var tail = await f.Rpc("music.library.detail", new { id = copy.Id, offset = 200, limit = 100 });
+                Equal(5, tail.GetProperty("songs").GetArrayLength());
+            }
+            Equal(0, f.Playback.Opens.Count);
+        });
+        yield return Case("playlist card next retires preparation on navigation pause and queue conflict", async () =>
+        {
+            foreach (string change in new[] { "navigate", "pause", "queue" })
+            {
+                await using var f = await Fixture.Create();
+                await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
+                var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.Kind == "playlist");
+                await f.Configure(new { nextDetail = 0 });
+                var hold = f.Client.Hold("music.catalog.playlist.prepare");
+                var pending = f.Module.QueueCatalogCardAsync(card);
+                await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                if (change == "navigate") await f.Module.NavigateAsync("favorites", default);
+                else if (change == "pause") await f.Module.TogglePlaybackAsync();
+                else await f.Rpc("music.queue.clear", new { });
+                hold.Release(); await pending;
+                Equal(change == "queue" ? 1 : 0, f.Client.Count("music.catalog.playlist.commit"));
+                Equal(1, f.Client.Count("music.catalog.playlist.discard"));
+                Equal(0, (await f.Rpc("music.queue.get", new { })).GetProperty("total").GetInt32());
+                Equal(0, f.Playback.Opens.Count);
+            }
+        });
+        yield return Case("playlist template menu targets current card and rejects recycled or retired targets", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
+            var cards = f.Module.CatalogSections.SelectMany(s => s.Items).Where(c => c.Kind == "playlist").ToArray();
+            var first = cards[0]; var second = cards.Last();
+            var view = new MusicCatalogView { DataContext = f.Module };
+            using var source = new HwndSource(new HwndSourceParameters("catalog-target-menu-fixture")
+                { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                    Width = 700, Height = 400, PositionX = -32000, PositionY = -32000 });
+            source.RootVisual = view;
+            foreach (string key in new[] { "Catalog.PlaylistCard", "Catalog.PlaylistRow" })
+            {
+                var host = (Button)((DataTemplate)view.FindResource(key)).LoadContent();
+                view.Content = host; host.DataContext = first;
+                view.Measure(new(700, 400)); view.Arrange(new Rect(0, 0, 700, 400));
+                view.UpdateLayout(); await Drain();
+                True(host.IsLoaded && host.IsVisible, "playlist menu target is mounted and visible");
+                int calls = f.Client.Log.Count;
+                OpenContentMenu(host);
+                True(host.ContextMenu.Items.OfType<MenuItem>().Select(i => i.Header).SequenceEqual(
+                    new object[] { "查看歌单", "播放", "下一首播放", "收藏" }), "four business actions only");
+                Equal(calls, f.Client.Log.Count);
+                var stale = (MenuItem)host.ContextMenu.Items[3];
+                host.DataContext = second;
+                stale.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
+                Equal(calls, f.Client.Log.Count);
+                OpenContentMenu(host);
+                int commits = f.Client.Count("music.catalog.playlist.commit");
+                await f.Configure(new { nextDetail = 0 });
+                ((MenuItem)host.ContextMenu.Items[3]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                await Until(() => f.Client.Count("music.catalog.playlist.commit") > commits && !second.IsPreparing);
+                var prepare = f.Client.Log.Last(c => c.Method == "music.catalog.playlist.prepare").Parameters;
+                Equal(second.ActionId, prepare.GetProperty("id").GetString());
+                OpenContentMenu(host); stale = (MenuItem)host.ContextMenu.Items[2];
+                await f.Module.NavigateAsync("favorites", default);
+                calls = f.Client.Log.Count;
+                stale.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
+                Equal(calls, f.Client.Log.Count);
+                await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
+                first = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.Kind == "playlist");
+                second = f.Module.CatalogSections.SelectMany(s => s.Items).Last(c => c.Kind == "playlist");
+            }
+            var entry = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.Entry")).LoadContent();
+            True(entry.ContextMenu is null, "header entries do not gain content menus");
+        });
+        yield return Case("catalog song menu captures its row and keeps section playback and discovery actions", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.SetupSource();
+            await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization;
+            await f.Module.CatalogEntryInitialization;
+            var cards = Enumerable.Range(1001, 3).Select(id => new MusicCatalogCard(id.ToString(), "歌曲" + id,
+                "歌手", "", "song", "wy", SongRow.Read(MusicSongFixture.Element(MusicSongFixture.Online("wy", id.ToString()))),
+                ActionId: id.ToString())).ToArray();
+            f.Module.CatalogSections.Add(new MusicCatalogSection("菜单歌曲栏目", cards, Id: "menu-song-section", Type: "songs"));
+            foreach (var item in cards) f.Module.Songs.Add(item.Song!);
+            var card = cards[1]; f.Module.SelectedSong = cards[0].Song;
+            var view = new MusicCatalogView { DataContext = f.Module };
+            var row = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.SongRow")).LoadContent();
+            view.Content = row; row.DataContext = card;
+            using var source = new HwndSource(new HwndSourceParameters("catalog-song-menu-fixture")
+                { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                    Width = 700, Height = 400, PositionX = -32000, PositionY = -32000 });
+            source.RootVisual = view;
+            view.Measure(new(700, 400)); view.Arrange(new Rect(0, 0, 700, 400));
+            view.UpdateLayout(); await Drain();
+            True(row.IsLoaded && row.IsVisible, "song menu target is mounted and visible");
+            int calls = f.Client.Log.Count;
+            OpenContentMenu(row);
+            Equal(calls, f.Client.Log.Count);
+            True(row.ContextMenu.Items.OfType<MenuItem>().Select(i => i.Header).SequenceEqual(new object[]
+                { "播放", "下一首播放", "收藏", "添加到歌单", "移除", "相似歌曲", "专辑", "心动推荐" }),
+                "catalog rows share all search actions and preserve their discovery extensions");
+            True(!row.ContextMenu.Items.OfType<MenuItem>().Single(i => i.Header as string == "移除").IsEnabled,
+                "catalog content cannot be removed as a local collection member");
+            ((MenuItem)row.ContextMenu.Items[2]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await Until(() => !f.Module.Busy && f.Client.Count("music.library.addSongs") == 1, "song.favorite");
+            var favorite = await f.Rpc("music.library.detail", new { id = "favorites" });
+            Equal(card.Song!.Id, SongRow.Read(favorite.GetProperty("songs")[0]).Id);
+            OpenContentMenu(row);
+            ((MenuItem)row.ContextMenu.Items[0]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await Until(() => f.Playback.Opens.Count == 1, "song.play");
+            var replace = f.Client.Log.Last(c => c.Method == "music.queue.replace").Parameters;
+            Equal(cards.Length, replace.GetProperty("songs").GetArrayLength());
+            Equal(1, replace.GetProperty("index").GetInt32());
+        });
+        yield return Case("channel ordinary playlist cards expose four actions without adding tab menus", async () =>
+        {
+            await using var f = await Fixture.Create();
+            f.Client.Transform("music.catalog.channel", reply => Edit(reply, node =>
+                node["sections"] = JsonSerializer.SerializeToNode(new[] {
+                    new { id = "menu-playlists", title = "频道歌单", type = "playlists", items = new[] {
+                        new { id = "500", name = "频道歌单A", kind = "playlist", action = new { type = "playlist", id = "500" } },
+                        new { id = "501", name = "频道歌单B", kind = "playlist", action = new { type = "playlist", id = "501" } }
+                    } } })));
+            await f.Module.NavigateAsync("catalog-channel/wy/rock", default);
+            using var source = new HwndSource(new HwndSourceParameters("channel-menu-fixture")
+                { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                    Width = 1100, Height = 760, PositionX = -32000, PositionY = -32000 });
+            source.RootVisual = f.Module.View;
+            f.Module.View.Measure(new(1100, 760)); f.Module.View.Arrange(new Rect(0, 0, 1100, 760));
+            f.Module.View.UpdateLayout(); await Drain();
+            var second = f.Module.ChannelSections.Single().Items[1];
+            var host = Descendants<Button>(f.Module.View).Single(button => ReferenceEquals(button.Tag, second));
+            int reads = f.Client.Log.Count;
+            OpenContentMenu(host);
+            Equal(reads, f.Client.Log.Count);
+            True(host.ContextMenu.Items.OfType<MenuItem>().Select(i => i.Header).SequenceEqual(
+                new object[] { "查看歌单", "播放", "下一首播放", "收藏" }), "ordinary channel playlist has four content actions");
+            var routes = new List<string>(); f.Module.NavigationRequested += (_, e) => routes.Add(e.Route);
+            ((MenuItem)host.ContextMenu.Items[0]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await Until(() => routes.Count == 1); Equal("catalog-playlist/wy/501", routes.Single());
+            True(Descendants<Button>(f.Module.View).Where(button => button.Tag is MusicCatalogCard card &&
+                f.Module.ChannelTabs.Any(tab => ReferenceEquals(tab, card))).All(button => button.ContextMenu is null),
+                "channel navigation tabs retain their existing actions");
+        });
+        yield return Case("opened catalog more and playlist menus apply shared templates including destination children", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization;
+            await f.Module.CatalogEntryInitialization;
+            var song = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.Song is not null);
+            var playlist = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.Kind == "playlist");
+            var view = new MusicCatalogView { DataContext = f.Module };
+            using var source = new HwndSource(new HwndSourceParameters("catalog-open-menu-fixture")
+                { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                    Width = 700, Height = 400, PositionX = -32000, PositionY = -32000 });
+            source.RootVisual = view;
+            foreach (bool songMenu in new[] { true, false })
+            {
+                var card = (FrameworkElement)((DataTemplate)view.FindResource(songMenu ? "Catalog.SongRow" : "Catalog.PlaylistCard")).LoadContent();
+                card.DataContext = songMenu ? song : playlist; view.Content = card;
+                view.Measure(new(700, 400)); view.Arrange(new Rect(0, 0, 700, 400)); view.UpdateLayout(); await Drain();
+                ContextMenu menu; FrameworkElement target;
+                if (songMenu)
+                {
+                    // Synthetic WPF focus updates the CLR cache and DP before notifying CardMotion; no OS input.
+                    var focusKey = (DependencyPropertyKey)typeof(UIElement).GetField("IsKeyboardFocusWithinPropertyKey",
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
+                    var instanceFlags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                    var writeFlag = typeof(UIElement).GetMethod("WriteFlag", instanceFlags)!;
+                    var focusFlag = Enum.Parse(writeFlag.GetParameters()[0].ParameterType, "IsKeyboardFocusWithinCache");
+                    True(!card.IsKeyboardFocusWithin && !(bool)card.GetValue(UIElement.IsKeyboardFocusWithinProperty),
+                        "offscreen song row starts without keyboard focus");
+                    int focusChanges = 0;
+                    card.IsKeyboardFocusWithinChanged += (_, _) => focusChanges++;
+                    writeFlag.Invoke(card, [focusFlag, true]);
+                    card.SetValue(focusKey, true);
+                    True(card.IsKeyboardFocusWithin && (bool)card.GetValue(UIElement.IsKeyboardFocusWithinProperty),
+                        "synthetic focus synchronizes the WPF CLR cache and dependency property");
+                    typeof(UIElement).GetMethod("RaiseIsKeyboardFocusWithinChanged", instanceFlags)!.Invoke(card,
+                        [new DependencyPropertyChangedEventArgs(UIElement.IsKeyboardFocusWithinProperty, false, true)]);
+                    Equal(1, focusChanges);
+                    var more = Descendants<Button>(card).Single(b => AutomationProperties.GetName(b) == "歌曲操作");
+                    await Until(() => more.IsVisible, "templates.more-visible", () =>
+                        $"loaded={card.IsLoaded}; visible={card.IsVisible}; enabled={card.IsEnabled}; " +
+                        $"progress={CardMotion.GetProgress(card)}; " +
+                        $"moreVisible={more.IsVisible}; moreVisibility={more.Visibility}; " +
+                        $"parentVisibility={((FrameworkElement)VisualTreeHelper.GetParent(more)).Visibility}");
+                    more.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); menu = more.ContextMenu; target = more;
+                }
+                else
+                {
+                    OpenContentMenu(card); menu = card.ContextMenu; target = card; menu.IsOpen = true;
+                }
+                try
+                {
+                    await Until(() => menu.IsOpen, "templates.open", () =>
+                        $"songMenu={songMenu}; isOpen={menu.IsOpen}; targetVisible={target.IsVisible}; " +
+                        $"placementTarget={menu.PlacementTarget?.GetType().Name ?? "<null>"}; " +
+                        $"placementMatches={ReferenceEquals(menu.PlacementTarget, target)}");
+                    await Drain(); menu.ApplyTemplate(); menu.UpdateLayout();
+                    True(ReferenceEquals(menu.Style, target.FindResource("MeowFilm.ContextMenu")), "opened menu resolves the host shared style");
+                    var expected = new ContextMenu { Style = (Style)target.FindResource("MeowFilm.ContextMenu") };
+                    True(menu.Template is not null && ReferenceEquals(menu.Template, expected.Template), "opened menu uses the actual shared control template");
+                    True(Descendants<Border>(menu).Any(border => ReferenceEquals(border.Background,
+                        target.FindResource("MeowFilm.Brush.FloatingSurface"))), "opened panel resolves the host floating brush");
+                    foreach (var item in menu.Items.OfType<MenuItem>())
+                    {
+                        item.ApplyTemplate();
+                        var styled = new MenuItem { Style = (Style)target.FindResource("MeowFilm.MenuItem") };
+                        True(ReferenceEquals(item.Style, styled.Style) && item.Template is not null && ReferenceEquals(item.Template, styled.Template),
+                            "each actual menu item uses the shared style and template");
+                        if (item.Items.Count == 0) continue;
+                        item.IsSubmenuOpen = true; await Drain();
+                        foreach (var child in item.Items.OfType<MenuItem>())
+                        {
+                            child.ApplyTemplate();
+                            True(ReferenceEquals(child.Style, styled.Style) && ReferenceEquals(child.Template, styled.Template),
+                                "opened dynamic playlist children use the shared style and template");
+                        }
+                        item.IsSubmenuOpen = false;
+                    }
+                    if (songMenu) True(menu.Items.OfType<MenuItem>().Single(i => i.Header as string == "添加到歌单").Items.Count > 0,
+                        "dynamic playlist style coverage is not vacuous");
+                }
+                finally { menu.IsOpen = false; }
+            }
+        });
         yield return Case("cancel closing leaves mounted hidden settings and discovery inactive", async () =>
         {
             await using var f = await Fixture.Create();
@@ -2345,12 +2629,14 @@ public static class MusicCatalogTests
                 $"{label}: '{node.Text}' must have effective Display TextFormattingMode, actual {formatting}");
         }
     }
-    private static async Task Until(Func<bool> predicate, string failure = "Catalog UI condition did not settle")
+    private static async Task Until(Func<bool> predicate, string failure = "Catalog UI condition did not settle",
+        Func<string>? timeoutSnapshot = null)
     {
         var watch = Stopwatch.StartNew();
         while (!predicate())
         {
-            if (watch.Elapsed > TimeSpan.FromSeconds(8)) throw new TimeoutException(failure);
+            if (watch.Elapsed > TimeSpan.FromSeconds(8))
+                throw new TimeoutException(timeoutSnapshot is null ? failure : failure + ": " + timeoutSnapshot());
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             if (!predicate()) await Task.Delay(1);
         }
@@ -2467,11 +2753,17 @@ public static class MusicCatalogTests
         private readonly List<Held> holds = [];
         public readonly List<Invocation> Log = [];
         public bool FailHistory;
+        public Func<CancellationToken, Task>? BeforeNextCommit;
         public int Count(string method) => Log.Count(c => c.Method == method);
         public JsonElement Last(string method) => Log.Last(c => c.Method == method).Parameters;
         public Held Hold(string method)
         {
             var held = new Held(); holds.Add(held); rules.Add((method, held.Wait)); return held;
+        }
+        public void HoldReply(string method, Held held, Func<JsonElement, JsonElement> change)
+        {
+            holds.Add(held);
+            rules.Add((method, async (value, token) => change(await held.Wait(value, token))));
         }
         public void Transform(string method, Func<JsonElement, JsonElement> change) =>
             rules.Add((method, (value, _) => Task.FromResult(change(value))));
@@ -2484,6 +2776,11 @@ public static class MusicCatalogTests
             var index = rules.FindIndex(r => r.Method == method);
             Func<JsonElement, CancellationToken, Task<JsonElement>>? transform = null;
             if (index >= 0) { transform = rules[index].Apply; rules.RemoveAt(index); }
+            if (method == "music.catalog.playlist.commit" && BeforeNextCommit is { } before)
+            {
+                BeforeNextCommit = null;
+                await before(cancellationToken);
+            }
             var result = await Inner.ExecuteAsync(method, parameters ?? new { }, cancellationToken);
             return transform is null ? result : await transform(result, cancellationToken); // deliberately delayed old receipt
         }
@@ -2509,18 +2806,28 @@ public static class MusicCatalogTests
         public Task StopAsync() { HasMedia = false; return Task.CompletedTask; }
         public Task SeekAsync(double seconds) => Task.CompletedTask;
     }
+    private static void OpenContentMenu(FrameworkElement target)
+    {
+        var request = (ContextMenuEventArgs)typeof(ContextMenuEventArgs)
+            .GetConstructor(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, null,
+                [typeof(object), typeof(bool), typeof(double), typeof(double)], null)!
+            .Invoke([target, true, -1d, -1d]);
+        target.RaiseEvent(request);
+    }
+
     private sealed class Fixture : IAsyncDisposable
     {
         private readonly LocalDocumentStore store;
+        private readonly string root;
         private readonly NativeMusicScriptTestRuntime runtime = new();
         private readonly CatalogTransport transport = new();
         public Client Client { get; }
         public Output Playback { get; } = new();
         public MusicCapability Module { get; }
         public VipApplication? Vip { get; }
-        private Fixture(LocalDocumentStore store, bool vipAccount)
+        private Fixture(LocalDocumentStore store, bool vipAccount, string root)
         {
-            this.store = store;
+            this.store = store; this.root = root;
             var native = new MusicNativeApplication(store, runtime, transport);
             IMusicApplication application = native;
             if (vipAccount) application = Vip = new(native);
@@ -2532,7 +2839,7 @@ public static class MusicCatalogTests
             var dir = Path.Combine(data, "catalog-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
             var store = new LocalDocumentStore(dir, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
             await MusicClientContextFixture.SeedQqAsync(store);
-            var f = new Fixture(store, vipAccount);
+            var f = new Fixture(store, vipAccount, dir);
             try
             {
                 await f.Module.InitializeAsync(default);
@@ -2563,6 +2870,24 @@ public static class MusicCatalogTests
             foreach (var pair in JsonSerializer.SerializeToNode(state)!.AsObject())
                 transport.State[pair.Key] = pair.Value?.DeepClone();
             return Task.CompletedTask;
+        }
+        public void AssertNoScriptRuntime() => True(!runtime.HasStarted && runtime.Calls.IsEmpty,
+            "local media fixture never starts or calls the script runtime");
+        public async Task SetupLocalSongs()
+        {
+            var paths = Enumerable.Range(1, 2).Select(index =>
+            {
+                var path = Path.Combine(root, "current-media-" + index + ".wav");
+                File.WriteAllBytes(path, [0, 1, 2, 3]); // Native grant/resolve; Output does not decode bytes.
+                return path;
+            }).ToArray();
+            var grants = new GrantedMediaFiles(store, "music.files.v1", [".wav"]);
+            var files = await grants.GrantAsync(paths);
+            var favorite = await Rpc("music.library.detail", new { id = "favorites", limit = 1 });
+            await Rpc("music.library.addSongs", new { id = "favorites",
+                ifRevision = favorite.GetProperty("collection").GetProperty("revision").GetInt64(), songs = files.Select(file =>
+                MusicSongFixture.Local(file.Id, file.Title, "fixture", duration: 180)).ToArray() });
+            AssertNoScriptRuntime();
         }
         public async Task SetupSource()
         {

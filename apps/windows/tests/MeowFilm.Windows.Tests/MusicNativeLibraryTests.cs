@@ -14,6 +14,7 @@ public static partial class MusicNativeLibraryTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in FullAppendCases()) yield return test;
         foreach (var test in RecordingConsumerCases()) yield return test;
         foreach (var test in OnlineSettingsCases()) yield return test;
         yield return new("Native music library contract version and storage identity", Contract);

@@ -16,6 +16,7 @@ public static class MusicCatalogLayoutTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Case("section more retains full bounds at narrow and wide layouts across display scales", SectionMoreGeometry);
         yield return Case("first-load templates match real two-banner and card geometry without artwork", SkeletonGeometry);
         yield return Case("banner artwork dimensions drive full-image aspect ratio after asynchronous arrival", BannerAspect);
         yield return Case("two-banner paging retains final resources resize and indicator position", BannerPaging);
@@ -24,6 +25,47 @@ public static class MusicCatalogLayoutTests
 
     private static TestCase Case(string name, Func<Task> run) =>
         new("music-catalog-layout: " + name, () => MusicQualityConsumerTests.Sta(run));
+
+    private static async Task SectionMoreGeometry()
+    {
+        var view = new MusicCatalogView();
+        foreach (double width in new[] { 320d, 826d })
+        foreach (double scale in new[] { 1d, 1.5d, 2d })
+        {
+            var section = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.SectionsTemplate")).LoadContent();
+            section.DataContext = new MusicCatalogSection("单曲", []);
+            MusicCatalogSurface.SetIsOverview(section, true);
+            section.LayoutTransform = new ScaleTransform(scale, scale);
+            using var scene = new Scene(section, width * scale);
+            await Drain(); scene.Layout(width * scale);
+            var button = Descendants<Button>(section).Single(b => b.Content as string == "查看更多");
+            var header = (DockPanel)VisualTreeHelper.GetParent(button);
+            var bounds = button.TransformToAncestor(header).TransformBounds(new Rect(button.RenderSize));
+            Check(button.IsVisible && button.ActualHeight >= 30, "real more template measures at least 30 DIP");
+            Check(bounds.Top >= -.01 && bounds.Bottom <= header.ActualHeight + .01 &&
+                bounds.Left >= -.01 && bounds.Right <= header.ActualWidth + .01,
+                "the complete button fits inside the real header at every width and scale");
+            var border = Descendants<Border>(button).First();
+            var edge = border.TransformToAncestor(header).TransformBounds(new Rect(border.RenderSize));
+            Check(edge.Top >= -.01 && edge.Bottom <= header.ActualHeight + .01,
+                "rounded template edge is not cut by the header allocation");
+            Check(border.CornerRadius.TopLeft > 0 && border.CornerRadius.BottomLeft > 0,
+                "real template retains both rounded corners");
+            var bitmap = new RenderTargetBitmap((int)Math.Ceiling(width * scale),
+                (int)Math.Ceiling(section.ActualHeight * scale), 96, 96, PixelFormats.Pbgra32);
+            bitmap.Render(section);
+            Check(bitmap.PixelHeight >= Math.Ceiling(bounds.Bottom * scale), "render target includes the complete lower edge");
+            if (Environment.GetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT") is { } previews)
+            {
+                TestWorkspace.ValidatePath(TestWorkspace.DataRoot, previews);
+                System.IO.Directory.CreateDirectory(previews);
+                var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
+                using var file = System.IO.File.Create(System.IO.Path.Combine(previews,
+                    $"context-section-more-{width:0}-{scale * 96:0}.png"));
+                encoder.Save(file);
+            }
+        }
+    }
 
     private static async Task SkeletonGeometry()
     {

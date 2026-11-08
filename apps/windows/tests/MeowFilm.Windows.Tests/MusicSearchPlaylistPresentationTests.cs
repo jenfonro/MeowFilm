@@ -12,6 +12,51 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SearchPlaylistPresentationCases()
     {
+        yield return Case("search playlist real cards rebuild menus after recycling and route the clicked card", async () =>
+        {
+            await using var f = await CreateSearchPlaylistPresentationScene(120);
+            var window = SearchPlaylistWindow(f.Module.View, 802, 700);
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain();
+                var list = SearchPlaylistList(f.Module.View);
+                var scroll = SearchPlaylistScrollViewer(list);
+                var host = SearchPlaylistWheelOrigin(list, scroll);
+                var first = (MusicCatalogCard)host.DataContext;
+                await f.Module.OpenSearchTabAsync("overview"); window.UpdateLayout(); await Drain();
+                var overviewCard = Visuals(f.Module.View).OfType<Button>().First(button =>
+                    button.IsVisible && button.DataContext is MusicCatalogCard { Kind: "playlist" } && button.ContextMenu is not null);
+                RaiseSongMenu(overviewCard);
+                Equal(4, overviewCard.ContextMenu.Items.Count);
+                overviewCard.ContextMenu.IsOpen = true;
+                try { await AssertOpenedSongMenuStyles(overviewCard.ContextMenu, overviewCard); }
+                finally { overviewCard.ContextMenu.IsOpen = false; }
+                await f.Module.OpenSearchTabAsync("playlists"); window.UpdateLayout(); await Drain();
+                host = SearchPlaylistWheelOrigin(list, scroll); first = (MusicCatalogCard)host.DataContext;
+                var second = f.Module.CatalogSections.Single().Items.Last();
+                int reads = f.Http.SearchRequests;
+                RaiseSongMenu(host);
+                var stale = (MenuItem)host.ContextMenu.Items[0];
+                var routes = new List<string>();
+                f.Module.NavigationRequested += (_, e) => routes.Add(e.Route);
+                // Reuse a real generated template with a new card, as WPF recycling does.
+                host.DataContext = second;
+                stale.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
+                Equal(0, routes.Count);
+                RaiseSongMenu(host);
+                True(host.ContextMenu.Items.OfType<MenuItem>().Select(i => i.Header).SequenceEqual(
+                    new object[] { "查看歌单", "播放", "下一首播放", "收藏" }), "search cards expose all four actions");
+                Equal(reads, f.Http.SearchRequests);
+                host.ContextMenu.IsOpen = true;
+                try { await AssertOpenedSongMenuStyles(host.ContextMenu, host); }
+                finally { host.ContextMenu.IsOpen = false; }
+                ((MenuItem)host.ContextMenu.Items[0]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                await SearchUntil(() => routes.Count == 1);
+                Equal("catalog-playlist/" + second.Platform + "/" + Uri.EscapeDataString(second.ActionId), routes.Single());
+                True(first.ActionId != second.ActionId, "recycling fixture uses different business targets");
+            }
+            finally { window.Content = null; window.Close(); }
+        });
         yield return Case("search playlist virtualization preserves visible rows containers and offset on append", async () =>
         {
             await using var f = await CreateSearchPlaylistPresentationScene(240);

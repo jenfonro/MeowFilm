@@ -197,10 +197,11 @@ public sealed partial class MusicCapability
     }
     public Task FavoriteCatalogCardAsync(MusicCatalogCard card)
     {
-        if (!CanEdit || card?.Song is null || !card.CanFavorite || !ContainsCatalogCard(card)) return Task.CompletedTask;
+        if (!CanEdit || !ContainsCatalogCard(card)) return Task.CompletedTask;
+        if (card.Kind == "playlist") return CatalogPlaylistActionAsync("save", 0, entry: card);
+        if (card.Song is null || !card.CanFavorite) return Task.CompletedTask;
         try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
-        SelectedSong = card.Song;
-        return FavoriteAsync();
+        return FavoriteSongAsync(card.Song);
     }
     private async Task CatalogNavigateAsync(string route, CancellationToken token)
     {

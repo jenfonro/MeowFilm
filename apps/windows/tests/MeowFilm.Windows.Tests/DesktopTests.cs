@@ -19,6 +19,7 @@ public static partial class DesktopTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in ContextMenuCases()) yield return test;
         foreach (var test in VisualChromeCases()) yield return test;
         foreach (var test in PresentationCases()) yield return test;
         foreach (var test in HeaderPresentationCases()) yield return test;

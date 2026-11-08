@@ -4,6 +4,10 @@
     <!-- Semantic tokens are deliberately dynamic: a module can override them in its view resources. -->
     <SolidColorBrush x:Key="MeowFilm.Brush.Window" Color="#F7F8FA" />
     <x:Static x:Key="MeowFilm.Brush.AppBackground" Member="local:AppearanceColors.DefaultBackground"/>
+    <x:Static x:Key="MeowFilm.Brush.FloatingSurface" Member="local:AppearanceColors.FloatingSurface"/>
+    <x:Static x:Key="MeowFilm.Brush.ItemHover" Member="local:AppearanceColors.ItemHover"/>
+    <x:Static x:Key="MeowFilm.Brush.ItemSelected" Member="local:AppearanceColors.ItemSelected"/>
+    <x:Static x:Key="MeowFilm.Brush.InputSurface" Member="local:AppearanceColors.InputSurface"/>
     <SolidColorBrush x:Key="MeowFilm.Brush.Sidebar" Color="#66FFFFFF"/>
     <SolidColorBrush x:Key="MeowFilm.Brush.SidebarBorder" Color="#80E5E7EB"/>
     <SolidColorBrush x:Key="MeowFilm.Brush.Surface" Color="#FFFFFF" />
@@ -23,6 +27,87 @@
     <SolidColorBrush x:Key="MeowFilm.Brush.ErrorSurface" Color="#FFF0F0" />
     <FontFamily x:Key="MeowFilm.Font.Icons">Segoe Fluent Icons, Segoe MDL2 Assets, Segoe UI Symbol</FontFamily>
     <BooleanToVisibilityConverter x:Key="MeowFilm.BoolToVisibility" />
+
+    <Style x:Key="MeowFilm.FloatingSurface" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.FloatingSurface}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
+        <Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="10"/>
+        <Setter Property="Effect"><Setter.Value><DropShadowEffect BlurRadius="16" ShadowDepth="0" Opacity=".16" Color="Black"/></Setter.Value></Setter>
+        <Style.Triggers><Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+            <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+            <Setter Property="Effect" Value="{x:Null}"/>
+        </Trigger></Style.Triggers>
+    </Style>
+    <Style x:Key="MeowFilm.MenuItem" TargetType="MenuItem">
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+        <Setter Property="Background" Value="Transparent"/><Setter Property="Padding" Value="8,7"/>
+        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="MenuItem">
+            <Grid>
+                <Border x:Name="Row" Background="{TemplateBinding Background}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="14"/></Grid.ColumnDefinitions>
+                        <ContentPresenter x:Name="Icon" ContentSource="Icon" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="Check" Text="✓" Foreground="{TemplateBinding Foreground}" Visibility="Collapsed" VerticalAlignment="Center"/>
+                        <ContentPresenter x:Name="Header" Grid.Column="1" ContentSource="Header" RecognizesAccessKey="True" VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}"/>
+                        <TextBlock Grid.Column="2" Text="{TemplateBinding InputGestureText}" Foreground="{TemplateBinding Foreground}" Margin="4,0,0,0" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="Arrow" Grid.Column="3" Text="›" Foreground="{TemplateBinding Foreground}" Visibility="Collapsed" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                    </Grid>
+                </Border>
+                <!-- Inset both edges by shadow padding + 1 so screen-edge reversal also joins the row. -->
+                <Border x:Name="SubmenuAnchor" Margin="9,0" IsHitTestVisible="False"/>
+                <Popup x:Name="PART_Popup" PlacementTarget="{Binding ElementName=SubmenuAnchor}" Placement="Right" VerticalOffset="-8" AllowsTransparency="True" Focusable="False"
+                       IsOpen="{Binding IsSubmenuOpen,RelativeSource={RelativeSource TemplatedParent}}">
+                    <Border Padding="8" Background="Transparent">
+                        <Border Style="{StaticResource MeowFilm.FloatingSurface}" Padding="4">
+                            <ScrollViewer CanContentScroll="True" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+                                <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle" KeyboardNavigation.TabNavigation="Cycle"/>
+                            </ScrollViewer>
+                        </Border>
+                    </Border>
+                </Popup>
+            </Grid>
+            <ControlTemplate.Triggers>
+                <MultiTrigger><MultiTrigger.Conditions><Condition Property="IsChecked" Value="True"/><Condition Property="IsCheckable" Value="True"/></MultiTrigger.Conditions>
+                    <Setter TargetName="Check" Property="Visibility" Value="Visible"/><Setter TargetName="Icon" Property="Visibility" Value="Collapsed"/>
+                </MultiTrigger>
+                <Trigger Property="HasItems" Value="True"><Setter TargetName="Arrow" Property="Visibility" Value="Visible"/></Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate></Setter.Value></Setter>
+        <Style.Triggers>
+            <Trigger Property="IsHighlighted" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemHover}"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Disabled}"/></Trigger>
+            <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
+            <MultiTrigger><MultiTrigger.Conditions><Condition Property="local:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsHighlighted" Value="True"/></MultiTrigger.Conditions>
+                <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+            </MultiTrigger>
+            <MultiTrigger><MultiTrigger.Conditions><Condition Property="local:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsEnabled" Value="False"/></MultiTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></MultiTrigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="MeowFilm.ContextMenu" TargetType="ContextMenu">
+        <Setter Property="OverridesDefaultStyle" Value="True"/>
+        <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ContextMenu">
+            <Border Padding="8" Background="Transparent"><Border Style="{StaticResource MeowFilm.FloatingSurface}" Padding="4">
+                <ScrollViewer CanContentScroll="True" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle" KeyboardNavigation.TabNavigation="Cycle"/>
+                </ScrollViewer>
+            </Border></Border>
+        </ControlTemplate></Setter.Value></Setter>
+        <Style.Resources>
+            <Style TargetType="MenuItem" BasedOn="{StaticResource MeowFilm.MenuItem}"/>
+            <Style TargetType="Separator">
+                <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Border}"/>
+                <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Separator"><Border Height="1" Margin="8,4" Background="{TemplateBinding Background}"/></ControlTemplate></Setter.Value></Setter>
+                <Style.Triggers><Trigger Property="local:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger></Style.Triggers>
+            </Style>
+        </Style.Resources>
+    </Style>
+    <!-- Preserve WPF's automatic editor actions, command targets and spelling items. -->
+    <Style TargetType="ContextMenu" BasedOn="{StaticResource MeowFilm.ContextMenu}"/>
+    <Style TargetType="MenuItem" BasedOn="{StaticResource MeowFilm.MenuItem}"/>
 
     <Style x:Key="MeowFilm.SettingsArea" TargetType="RadioButton">
         <Setter Property="FontSize" Value="14" />

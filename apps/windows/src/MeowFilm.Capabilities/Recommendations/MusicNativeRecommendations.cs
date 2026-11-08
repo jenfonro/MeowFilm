@@ -312,11 +312,18 @@ public sealed partial class MusicNativeApplication
         if (method != "music.catalog.playlist.commit")
             return nativeCatalog.ExecuteAsync(method, parameters, token);
         var input = parameters is JsonElement element ? element : JsonSerializer.SerializeToElement(parameters);
-        // Saving a playlist does not replace the active queue. Both commit forms
-        // share the lane, but only an actual play intent fences recommendations.
-        return input.ValueKind == JsonValueKind.Object && input.TryGetProperty("action", out var action) &&
-            action.ValueKind == JsonValueKind.String && action.GetString() == "play"
-            ? recommendationQueue.ExecuteExternalAsync(MusicRecommendationQueueChange.Replace,
+        // Saving shares the lane without changing the queue; next is the same
+        // external append intent as an ordinary queue append.
+        MusicRecommendationQueueChange? change = input.ValueKind == JsonValueKind.Object &&
+            input.TryGetProperty("action", out var action) && action.ValueKind == JsonValueKind.String
+            ? action.GetString() switch
+            {
+                "play" => MusicRecommendationQueueChange.Replace,
+                "next" => MusicRecommendationQueueChange.Append,
+                _ => null
+            } : null;
+        return change is { } kind
+            ? recommendationQueue.ExecuteExternalAsync(kind,
                 ct => nativeCatalog.ExecuteAsync(method, parameters, ct), token)
             : recommendationQueue.InLaneAsync((_, ct) => nativeCatalog.ExecuteAsync(method, parameters, ct), token);
     }

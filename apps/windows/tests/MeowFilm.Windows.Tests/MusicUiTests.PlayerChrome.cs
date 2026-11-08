@@ -17,8 +17,297 @@ namespace MeowFilm.Windows.Tests;
 
 public static partial class MusicUiTests
 {
+    // Synthetic InputManager routing only; never injects physical mouse input or changes Handled.
+    internal static void ProcessBlankInput(Grid blank, RoutedEvent routed, Action<string, MouseButtonEventArgs> snapshot)
+    {
+        var input = new MouseButtonEventArgs(Mouse.PrimaryDevice,
+            Environment.TickCount, MouseButton.Left)
+        { RoutedEvent = routed, Source = blank };
+        var promotedEvent = routed == Mouse.PreviewMouseDownEvent ? Mouse.MouseDownEvent : Mouse.MouseUpEvent;
+        var stagingKey = new object();
+        void TargetPromotion(object sender, PreProcessInputEventArgs args)
+        {
+            if (ReferenceEquals(args.StagingItem.Input, input))
+                args.StagingItem.SetData(stagingKey, input);
+            else if (ReferenceEquals(args.StagingItem.GetData(stagingKey), input) &&
+                args.StagingItem.Input is MouseButtonEventArgs mouse && mouse.RoutedEvent == promotedEvent)
+            {
+                // WPF copies staging data, but not Source, when promoting preview input.
+                snapshot("promotion-before", mouse);
+                mouse.Source = blank;
+                snapshot("promotion-target", mouse);
+            }
+        }
+        var manager = InputManager.Current;
+        manager.PreProcessInput += TargetPromotion;
+        try
+        {
+            snapshot("submit", input);
+            manager.ProcessInput(input);
+            snapshot("complete", input);
+        }
+        finally { manager.PreProcessInput -= TargetPromotion; }
+    }
+
     private static IEnumerable<TestCase> PlayerChromeCases()
     {
+        yield return Case("player synthetic WPF input routes suppress actual popup dismissal and admit the next gesture", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            var player = (MusicPlayerView)f.Module.PlayerView;
+            var shell = new Window { Content = player, Width = 1110, Height = 100,
+                Left = -32000, Top = -32000, ShowActivated = false, ShowInTaskbar = false,
+                WindowStyle = WindowStyle.None };
+            // Offscreen fixture only. Active-state injection is not physical desktop activation.
+            var activeKey = typeof(Window).GetFields(
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
+                .Where(field => field.FieldType == typeof(DependencyPropertyKey))
+                .Select(field => (DependencyPropertyKey)field.GetValue(null)!)
+                .Single(key => key.DependencyProperty == Window.IsActiveProperty);
+            int requests = 0;
+            f.Module.GlobalSurfaceRequested += (_, args) =>
+            { if (args.Surface == DesktopGlobalSurface.PlayerDetail) requests++; };
+            var blank = (Grid)player.Content;
+            var routeTrace = new List<string>();
+            string phase = "load";
+            int previewDown = 0, bubbleDown = 0, previewUp = 0, bubbleUp = 0, viewDown = 0, viewUp = 0;
+            string Describe(object? value) => value is FrameworkElement element
+                ? element.GetType().Name + "#" + element.Name + (ReferenceEquals(element, blank) ? "(blank)" : "")
+                : value?.GetType().Name ?? "<null>";
+            void Snapshot(string point, MouseButtonEventArgs mouse) => routeTrace.Add(
+                $"{point}/{mouse.RoutedEvent.Name}: Source={Describe(mouse.Source)} OriginalSource={Describe(mouse.OriginalSource)} " +
+                $"Handled={mouse.Handled} IsActive={shell.IsActive} IsVisible={player.IsVisible} IsLoaded={player.IsLoaded} requests={requests}");
+            void ObserveRoute(object sender, MouseButtonEventArgs mouse)
+            {
+                if (mouse.RoutedEvent == Mouse.PreviewMouseDownEvent) previewDown++;
+                else if (mouse.RoutedEvent == Mouse.MouseDownEvent) bubbleDown++;
+                else if (mouse.RoutedEvent == Mouse.PreviewMouseUpEvent) previewUp++;
+                else if (mouse.RoutedEvent == Mouse.MouseUpEvent) bubbleUp++;
+                else if (mouse.RoutedEvent == UIElement.PreviewMouseLeftButtonDownEvent) viewDown++;
+                else if (mouse.RoutedEvent == UIElement.MouseLeftButtonUpEvent) viewUp++;
+                Snapshot("view", mouse);
+            }
+            var observedEvents = new[] { Mouse.PreviewMouseDownEvent, Mouse.MouseDownEvent, Mouse.PreviewMouseUpEvent,
+                Mouse.MouseUpEvent, UIElement.PreviewMouseLeftButtonDownEvent, UIElement.MouseLeftButtonUpEvent };
+            MouseButtonEventHandler observer = ObserveRoute;
+            foreach (var routed in observedEvents) blank.AddHandler(routed, observer, true);
+            try
+            {
+                shell.Show(); shell.UpdateLayout(); await Drain();
+                shell.SetValue(activeKey, true);
+                void Input(RoutedEvent routed) => ProcessBlankInput(blank, routed, Snapshot);
+                async Task Gesture(string label, Action? afterDown = null)
+                {
+                    phase = label; routeTrace.Clear();
+                    var before = (previewDown, bubbleDown, previewUp, bubbleUp, viewDown, viewUp);
+                    Input(Mouse.PreviewMouseDownEvent);
+                    afterDown?.Invoke();
+                    Input(Mouse.PreviewMouseUpEvent);
+                    await Drain();
+                    Equal((before.previewDown + 1, before.bubbleDown + 1, before.previewUp + 1,
+                        before.bubbleUp + 1, before.viewDown + 1, before.viewUp + 1),
+                        (previewDown, bubbleDown, previewUp, bubbleUp, viewDown, viewUp));
+                }
+                foreach (string name in new[] { "VolumePopup", "PlaylistPopup", "RatePopup", "SourcePopup", "QualityMenu", "MoreMenu" })
+                {
+                    phase = name + "/open"; routeTrace.Clear();
+                    System.Windows.Controls.Primitives.Popup? popup = null;
+                    ContextMenu? menu = null;
+                    if (name == "QualityMenu")
+                    {
+                        menu = (ContextMenu)player.FindName(name);
+                        menu.PlacementTarget = player; menu.IsOpen = true;
+                    }
+                    else if (name == "MoreMenu")
+                    {
+                        var more = (Button)player.FindName("MoreButton");
+                        more.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); menu = more.ContextMenu;
+                    }
+                    else
+                    {
+                        popup = (System.Windows.Controls.Primitives.Popup)player.FindName(name);
+                        if (name == "SourcePopup") f.Module.OpenSourceChoices();
+                        popup.IsOpen = true;
+                    }
+                    await Drain();
+                    True(menu?.IsOpen == true || popup?.IsOpen == true, name + " is an actual opened WPF layer");
+                    int before = requests;
+                    // Explicit close after processed Down isolates the contract from physical capture order.
+                    await Gesture(name + "/dismiss", () => { if (menu is not null) menu.IsOpen = false; if (popup is not null) popup.IsOpen = false; });
+                    Equal(before, requests);
+                    await Gesture(name + "/next"); Equal(before + 1, requests);
+                }
+                int queueDismissals = 0;
+                shell.AddHandler(PlayerSurfaceInput.DismissRequestedEvent, new RoutedEventHandler((_, _) =>
+                {
+                    queueDismissals++;
+                    PlayerSurfaceInput.SetQueueOpen(shell, false);
+                }));
+                PlayerSurfaceInput.SetQueueOpen(shell, true);
+                int beforeQueue = requests;
+                await Gesture("queue/dismiss"); Equal(1, queueDismissals); Equal(beforeQueue, requests);
+                await Gesture("queue/next"); Equal(beforeQueue + 1, requests);
+                int prior = requests;
+                phase = "orphan-up"; routeTrace.Clear();
+                Input(Mouse.PreviewMouseUpEvent); await Drain(); Equal(prior, requests);
+                phase = "unload-during-gesture"; routeTrace.Clear();
+                Input(Mouse.PreviewMouseDownEvent);
+                player.RaiseEvent(new RoutedEventArgs(FrameworkElement.UnloadedEvent));
+                Input(Mouse.PreviewMouseUpEvent); await Drain(); Equal(prior, requests);
+            }
+            catch (Exception error)
+            {
+                throw new InvalidOperationException(
+                    $"{phase}: {error.GetType().Name}: {error.Message}; IsActive={shell.IsActive}; requests={requests}; " +
+                    $"arrivals PreviewDown={previewDown}, BubbleDown={bubbleDown}, PreviewUp={previewUp}, BubbleUp={bubbleUp}, " +
+                    $"ViewDown={viewDown}, ViewUp={viewUp}\n" + string.Join("\n", routeTrace), error);
+            }
+            finally
+            {
+                foreach (var routed in observedEvents) blank.RemoveHandler(routed, observer);
+                shell.SetValue(activeKey, false);
+                player.Deactivate(); shell.Content = null; shell.Close();
+            }
+        });
+        yield return Case("queue hover covers deletion area and reveals playable artwork without disabling recycling", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
+            var queue = (MusicQueueView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayQueue);
+            Render(queue, 386, 420); await Drain();
+            var list = (ListBox)queue.FindName("QueueList");
+            var item = list.ItemContainerGenerator.ContainerFromIndex(1) as ListBoxItem ??
+                throw new InvalidOperationException("real queue data generates its real row template");
+            var row = Visuals(item).OfType<Grid>().Single(grid => grid.Name == "QueueRow");
+            var background = (Border)item.Template.FindName("RowSurface", item);
+            var overlay = Visuals(row).OfType<Border>().Single(border =>
+                border.Child is System.Windows.Shapes.Path);
+            var mouseKey = (DependencyPropertyKey)typeof(UIElement).GetField("IsMouseOverPropertyKey",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
+            Equal(0d, overlay.Opacity);
+            item.SetValue(mouseKey, true); row.SetValue(mouseKey, true);
+            Render(queue, 386, 420);
+            Equal(1d, overlay.Opacity);
+            True(ReferenceEquals(background.Background, queue.FindResource("MeowFilm.Brush.ItemHover")),
+                "whole container paints the hover including the remove column");
+            var remove = Visuals(row).OfType<Button>().Single(button =>
+                System.Windows.Automation.AutomationProperties.GetName(button) == "从播放列表移除");
+            var removeRect = new Rect(remove.TranslatePoint(new Point(), background), remove.RenderSize);
+            True(new Rect(background.RenderSize).Contains(removeRect), "delete hit area sits within row highlight geometry");
+            True(VirtualizingPanel.GetIsVirtualizing(list) &&
+                VirtualizingPanel.GetVirtualizationMode(list) == VirtualizationMode.Recycling,
+                "hover does not replace queue virtualization");
+            GeneralAppearanceTests.SavePreview(queue, "context-queue-hover", 386, 420);
+            item.SetValue(mouseKey, false); row.SetValue(mouseKey, false);
+            Render(queue, 386, 420); Equal(0d, overlay.Opacity);
+            var focusKey = (DependencyPropertyKey)typeof(UIElement).GetField("IsKeyboardFocusWithinPropertyKey",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
+            row.SetValue(focusKey, true); Render(queue, 386, 420); Equal(1d, overlay.Opacity);
+            row.SetValue(focusKey, false);
+            DesktopTheme.SetIsHighContrast(queue, true);
+            var texts = Visuals(row).OfType<TextBlock>().Where(text =>
+                BindingOperations.GetBinding(text, TextBlock.TextProperty)?.Path?.Path is "Title" or "Artist" or "Duration").ToArray();
+            True(texts.Length >= 3, "title artist and duration are real rendered text consumers");
+            Render(queue, 386, 420);
+            True(texts.All(text => ReferenceEquals(text.Foreground, SystemColors.WindowTextBrush)),
+                "unhighlighted high contrast row uses system window text");
+            item.SetValue(focusKey, true); row.SetValue(focusKey, true); Render(queue, 386, 420);
+            True(ReferenceEquals(background.Background, SystemColors.HighlightBrush) &&
+                texts.All(text => ReferenceEquals(text.Foreground, SystemColors.HighlightTextBrush)) &&
+                ReferenceEquals(remove.Foreground, SystemColors.HighlightTextBrush),
+                "keyboard focus high contrast colors include title artist duration and removal");
+            GeneralAppearanceTests.SavePreview(queue, "context-queue-high-contrast-keyboard", 386, 420);
+            item.SetValue(focusKey, false); row.SetValue(focusKey, false);
+            item.SetValue(mouseKey, true); row.SetValue(mouseKey, true); Render(queue, 386, 420);
+            True(ReferenceEquals(background.Background, SystemColors.HighlightBrush) &&
+                texts.All(text => ReferenceEquals(text.Foreground, SystemColors.HighlightTextBrush)),
+                "mouse high contrast uses the same readable row colors");
+            var currentItem = (ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(0);
+            True(Visuals(currentItem).OfType<TextBlock>().Any(text =>
+                text.Text == f.Module.QueueSurfaceRows[0].Title && text.FontWeight == FontWeights.SemiBold),
+                "current song retains a non-color indicator in high contrast");
+            DesktopTheme.SetIsHighContrast(queue, false);
+            item.SetValue(mouseKey, false); row.SetValue(mouseKey, false);
+            var play = Visuals(row).OfType<Button>().Single(button => Grid.GetColumnSpan(button) == 3);
+            string targetEntry = ((MusicQueueSurfaceRow)play.Tag).EntryId;
+            var refreshField = typeof(MusicCapability).GetField("queueSurfacePending",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            async Task SettleQueue(string phase)
+            {
+                try
+                {
+                    await Until(() => !f.Module.Busy);
+                    // Busy excludes this owner's existing refresh; do not issue another activation/read.
+                    if (refreshField.GetValue(f.Module) is Task refresh)
+                    {
+                        await Until(() => refresh.IsCompleted);
+                        await refresh;
+                    }
+                    await Drain();
+                }
+                catch (Exception error)
+                {
+                    throw new InvalidOperationException(
+                        $"queue {phase}: {error.Message}; Busy={f.Module.Busy}; Opens={f.Playback.Opens.Count}; " +
+                        $"Rows={f.Module.QueueSurfaceRows.Count}; removeRPC={f.Calls.Count("music.queue.remove")}", error);
+                }
+            }
+            int opens = f.Playback.Opens.Count;
+            play.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await SettleQueue("play");
+            Equal(opens + 1, f.Playback.Opens.Count);
+            Render(queue, 386, 420);
+            var currentRow = f.Module.QueueSurfaceRows.Single(value => value.EntryId == targetEntry);
+            var currentContainer = list.ItemContainerGenerator.ContainerFromItem(currentRow) as ListBoxItem ??
+                throw new InvalidOperationException("refreshed queue generates the played row's current container");
+            var currentRemove = Visuals(currentContainer).OfType<Button>().Single(button =>
+                System.Windows.Automation.AutomationProperties.GetName(button) == "从播放列表移除");
+            True(ReferenceEquals(currentRemove.Tag, currentRow), "remove targets the current owner row after refresh");
+            int count = f.Module.QueueSurfaceRows.Count;
+            int removals = f.Calls.Count("music.queue.remove");
+            currentRemove.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await SettleQueue("remove");
+            Equal(removals + 1, f.Calls.Count("music.queue.remove"));
+            await Until(() => !f.Module.Busy && f.Module.QueueSurfaceRows.Count == count - 1);
+            f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
+        });
+        yield return Case("player unload releases window input hooks and queue blank requests bubble to shell", async () =>
+        {
+            await using var f = await Fixture.Create();
+            var player = (MusicPlayerView)f.Module.PlayerView;
+            var window = new Window { Content = player, Width = 1110, Height = 100,
+                Left = -32000, Top = -32000, ShowActivated = false, ShowInTaskbar = false,
+                WindowStyle = WindowStyle.None };
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain();
+                True(player.IsLoaded && PresentationSource.FromVisual(player) is HwndSource,
+                    "offscreen player is really loaded into its HWND without activation");
+                var inputField = typeof(MusicPlayerView).GetField("surfaceInput",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+                var input = inputField.GetValue(player) as PlayerSurfaceInput ??
+                    throw new InvalidOperationException("loaded player obtains window-scoped input owner in the offscreen window");
+                var sourcesField = typeof(PlayerSurfaceInput).GetField("sources",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+                var registered = sourcesField.GetValue(input)!;
+                Equal(1, (int)registered.GetType().GetProperty("Count")!.GetValue(registered)!);
+                int dismiss = 0;
+                window.AddHandler(PlayerSurfaceInput.DismissRequestedEvent, new RoutedEventHandler((_, _) => dismiss++));
+                PlayerSurfaceInput.SetQueueOpen(window, true);
+                True(PlayerSurfaceInput.GetQueueOpen(player), "queue fact reaches player via inheritance");
+                var gesture = (SurfaceGesture)typeof(PlayerSurfaceInput).GetField("gesture",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(input)!;
+                gesture.Down(false, true); input.Press(true); Equal(0, dismiss);
+                gesture.Down(true, true);
+                input.Press(false); Equal(0, dismiss);
+                input.Press(true); Equal(1, dismiss);
+                True(!input.Release(true), "queue dismissal cannot open detail");
+                window.Content = null; await Drain();
+                True(!player.IsLoaded, "detaching the real host raises unload");
+                True(inputField.GetValue(player) is null, "unload drops the view's input subscription");
+                var sources = sourcesField.GetValue(input)!;
+                Equal(0, (int)sources.GetType().GetProperty("Count")!.GetValue(sources)!);
+            }
+            finally { player.Deactivate(); window.Content = null; window.Close(); await Drain(); }
+        });
         yield return Case("player first visible frame has prepared artwork and no secondary footer disc", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();

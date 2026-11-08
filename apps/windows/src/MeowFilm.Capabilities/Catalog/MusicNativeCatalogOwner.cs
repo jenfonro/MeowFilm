@@ -307,12 +307,18 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
     {
         Fields(input, ["token", "action", "index", "memberId", "expectedVersion", "expectedSongId", "name"], ["token", "action"]);
         var token = Text(input, "token"); var action = Text(input, "action");
-        Check(action is "save" or "play", "INVALID_REQUEST");
+        Check(action is "save" or "play" or "next", "INVALID_REQUEST");
         var name = OptionalText(input, "name");
         var memberId = OptionalText(input, "memberId");
         Check(name is null || name.Length <= 200, "INVALID_REQUEST");
         int index = 0; long version = 0;
-        if (action == "play")
+        if (action == "next")
+        {
+            Fields(input, ["token", "action", "expectedVersion"], ["token", "action", "expectedVersion"]);
+            version = Long(input, "expectedVersion");
+            Check(version >= 0, "INVALID_REQUEST");
+        }
+        else if (action == "play")
         {
             index = Number(input, "index", 0); version = Long(input, "expectedVersion");
             Check(index >= 0 && version >= 0 && !input.TryGetProperty("name", out _) &&
@@ -326,6 +332,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         {
             Prune(); Check(stages.TryGetValue(token, out var found), "CATALOG_TOKEN_EXPIRED"); item = found!;
             Check(item.Epoch == epoch && captured == epoch && !closed, "STALE_SESSION");
+            if (action == "next") Check(item.Songs.Length > 0, "INVALID_REQUEST");
             if (action == "play")
             {
                 if (memberId is not null) index = Array.IndexOf(item.Members, memberId);
@@ -349,7 +356,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 var context = JsonSerializer.SerializeToElement(new { sourceTitle = item.Name,
                     sourcePlatform = item.Platform, sourceType = "playlist", sourceId = item.Id,
                     queueSource = new { id = item.Id, title = item.Name, kind = "playlist", platform = item.Platform } });
-                result = await library.ReplaceQueueAsync(item.Songs, index, context, version, signal).ConfigureAwait(false);
+                result = action == "next"
+                    ? await library.AppendQueueAsync(item.Songs, context, version, signal).ConfigureAwait(false)
+                    : await library.ReplaceQueueAsync(item.Songs, index, context, version, signal).ConfigureAwait(false);
             }
             Check(result.ValueKind == JsonValueKind.Object && result.TryGetProperty("ok", out _), "INVALID_RESPONSE");
             if (result.GetProperty("ok").ValueKind != JsonValueKind.True)

@@ -32,6 +32,12 @@ Task<JsonElement> ReplaceQueueAsync(
     long expectedVersion,
     CancellationToken cancellationToken = default);
 
+Task<JsonElement> AppendQueueAsync(
+    IReadOnlyList<JsonElement> songs,
+    JsonElement? context,
+    long expectedVersion,
+    CancellationToken cancellationToken = default);
+
 Task ReconcileAsync(CancellationToken cancellationToken = default);
 Task PrepareShutdownAsync(CancellationToken cancellationToken = default);
 Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default);
@@ -40,6 +46,10 @@ ValueTask DisposeAsync();
 ```
 
 业务命令返回 `{ok:true,...}` 或 `{ok:false,code}`。可信的进程内事务端口直接抛出固定 `MusicLibraryException.Code`，不返回存储正文、凭据或内部异常文本。
+
+`AppendQueueAsync` 是完整歌单的进程内 next 入口，返回 `{ok:true,currentId,version,mode}`，不返回全量 entryIds。它在唯一串行边界核对 `expectedVersion`，创建独立 occurrence 并将整段按输入顺序插在当前曲之后，一次 CAS、一次版本递增；当前曲、模式及旧优先队列保留，新段优先于旧 priority。空队列选中首曲且 priority 为空，不调用媒体播放。失败不分批落盘；CAS 准入前取消不写入，准入后报告真实结果，未知写入使用既有 reconcile 机制，不重放。
+
+普通 `music.queue.append` 仍仅接受 `songs/context/next`，保持 `entryIds` 回执、最多 1000 首与 512KiB 输入边界，不接受 `expectedVersion`。完整入口取消歌曲数量上限，继续使用现有 16MiB 完整输入、8MiB 文档资源边界；空输入不允许。存储 schema 和其他平台契约不变。
 
 ## 唯一当前文档
 

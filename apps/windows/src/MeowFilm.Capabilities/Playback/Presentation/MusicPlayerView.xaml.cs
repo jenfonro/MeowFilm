@@ -6,6 +6,7 @@ using System.Windows.Media;
 using System.Windows.Data;
 using System.ComponentModel;
 using System.Windows.Automation;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
@@ -14,6 +15,7 @@ public partial class MusicPlayerView : UserControl
     private readonly MusicCapability module;
     private string? scrubKey;
     private int qualityRequest;
+    private PlayerSurfaceInput? surfaceInput;
     public MusicPlayerView(MusicCapability module, bool showArtwork = true)
     {
         InitializeComponent();
@@ -28,17 +30,30 @@ public partial class MusicPlayerView : UserControl
             RestoreProgress();
             if (key is not null && key == module.PlaybackPresentationKey) await module.SeekAsync(position);
         };
-        Loaded += (_, _) => { module.PropertyChanged -= OnPlaybackChanged; module.PropertyChanged += OnPlaybackChanged; };
+        Loaded += (_, _) =>
+        {
+            module.PropertyChanged -= OnPlaybackChanged; module.PropertyChanged += OnPlaybackChanged;
+            surfaceInput?.Dispose(); surfaceInput = null;
+            if (Window.GetWindow(this) is { } window) surfaceInput = new(window, this, LayersOpen);
+        };
+        foreach (var popup in new[] { SourcePopup, PlaylistPopup, VolumePopup, RatePopup })
+        {
+            popup.Opened += (_, _) => { if (popup.Child is Visual visual) surfaceInput?.Observe(visual); };
+            popup.Closed += (_, _) => { surfaceInput?.LayerClosed(); if (popup.Child is Visual visual) surfaceInput?.Forget(visual); };
+        }
+        QualityMenu.Opened += (_, _) => surfaceInput?.Observe(QualityMenu);
         IsVisibleChanged += (_, _) => { if (!IsVisible) Deactivate(); };
         Unloaded += (_, _) =>
         {
             module.PropertyChanged -= OnPlaybackChanged;
             Deactivate();
+            surfaceInput?.Dispose(); surfaceInput = null;
         };
         SizeChanged += (_, _) => MetadataText.MaxWidth = Math.Min(200, Math.Max(30, ActualWidth / 2 - 260));
     }
     internal void Deactivate()
     {
+        surfaceInput?.Cancel();
         qualityRequest++;
         QualityMenu.IsOpen = false;
         SourcePopup.IsOpen = false;
@@ -48,15 +63,22 @@ public partial class MusicPlayerView : UserControl
         if (MoreButton.ContextMenu is { } menu) menu.IsOpen = false;
         Progress.CancelScrub(); RestoreProgress();
     }
-    private async void Surface_MouseUp(object sender, MouseButtonEventArgs e)
+    private bool LayersOpen() => QualityMenu.IsOpen || SourcePopup.IsOpen || PlaylistPopup.IsOpen ||
+        VolumePopup.IsOpen || RatePopup.IsOpen || MoreButton.ContextMenu?.IsOpen == true;
+    private static bool IsBlank(object sender, MouseButtonEventArgs e)
     {
-        if (e.Handled) return;
         DependencyObject? node = e.OriginalSource as DependencyObject;
         while (node is not null && !ReferenceEquals(node, sender))
         {
-            if (node is ButtonBase or Slider or Thumb or TextBoxBase or ScrollBar) return;
+            if (node is ButtonBase or Slider or Thumb or TextBoxBase or ScrollBar) return false;
             node = node is FrameworkContentElement text ? text.Parent : VisualTreeHelper.GetParent(node);
         }
+        return node is not null;
+    }
+    private void Surface_MouseDown(object sender, MouseButtonEventArgs e) => surfaceInput?.Press(IsBlank(sender, e));
+    private async void Surface_MouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (surfaceInput?.Release(!e.Handled && IsBlank(sender, e)) != true) return;
         e.Handled = true;
         await module.OpenPlayerDetailAsync();
     }
@@ -102,16 +124,29 @@ public partial class MusicPlayerView : UserControl
         var submenu = new MenuItem
         {
             Header = MusicQualityLabels.Name("spatial"), IsChecked = spatial.Any(choice => choice.Current),
-            Style = (Style)FindResource("Player.QualityMenuItem")
+            Style = (Style)FindResource("Player.CurrentQualityItem")
         };
         AutomationProperties.SetName(submenu, MusicQualityLabels.Name("spatial"));
         foreach (var choice in spatial) submenu.Items.Add(QualityItem(choice));
+        Popup? observedPopup = null;
+        submenu.Loaded += (_, _) =>
+        {
+            if (submenu.Template.FindName("PART_Popup", submenu) is not Popup popup ||
+                ReferenceEquals(popup, observedPopup)) return;
+            observedPopup = popup;
+            popup.Opened += (_, _) => { if (popup.Child is Visual visual) surfaceInput?.Observe(visual); };
+            popup.Closed += (_, _) =>
+            {
+                surfaceInput?.LayerClosed();
+                if (popup.Child is Visual visual) surfaceInput?.Forget(visual);
+            };
+        };
         QualityMenu.Items.Add(submenu);
     }
     private MenuItem QualityItem(MusicQualityChoice choice)
     {
         var item = new MenuItem { Header = choice.Label, Tag = choice.Key, IsChecked = choice.Current,
-            Style = (Style)FindResource("Player.QualityMenuItem") };
+            Style = (Style)FindResource("Player.CurrentQualityItem") };
         item.SetBinding(IsEnabledProperty, new Binding(nameof(MusicCapability.CanSwitchSource)) { Source = module });
         AutomationProperties.SetName(item, choice.Label);
         item.Click += QualityChoice_Click;
@@ -146,13 +181,17 @@ public partial class MusicPlayerView : UserControl
     }
     private async void Quality_Closed(object? sender, RoutedEventArgs e)
     {
+        surfaceInput?.LayerClosed(); surfaceInput?.Forget(QualityMenu);
         qualityRequest++;
         await module.DeactivateQualityAsync();
     }
     /// <summary>The "more" menu: playback rate (its own panel) and "wrong source".</summary>
     private void More_Click(object sender, RoutedEventArgs e)
     {
-        var menu = new ContextMenu { PlacementTarget = MoreButton, Placement = PlacementMode.Top };
+        var menu = new ContextMenu { PlacementTarget = MoreButton, Placement = PlacementMode.Top,
+            Style = (Style)FindResource("MeowFilm.ContextMenu") };
+        menu.Opened += (_, _) => surfaceInput?.Observe(menu);
+        menu.Closed += (_, _) => { surfaceInput?.LayerClosed(); surfaceInput?.Forget(menu); };
         var rate = new MenuItem { Header = "播放倍速 · " + module.PlaybackRateText };
         rate.Click += (_, _) => { menu.IsOpen = false; RatePopup.IsOpen = true; };
         var wrong = new MenuItem { Header = "音源不对", IsEnabled = module.CanSwitchSource };

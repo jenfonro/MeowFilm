@@ -29,6 +29,42 @@ namespace MeowFilm.Windows.Tests;
 // separate evidence; no production storage fallback exists.
 public static partial class MusicUiTests
 {
+    private static ContextMenuEventArgs RaiseSongMenu(FrameworkElement target)
+    {
+        var request = (ContextMenuEventArgs)typeof(ContextMenuEventArgs)
+            .GetConstructor(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, null,
+                [typeof(object), typeof(bool), typeof(double), typeof(double)], null)!
+            .Invoke([target, true, -1d, -1d]);
+        target.RaiseEvent(request);
+        return request;
+    }
+
+    private static async Task AssertOpenedSongMenuStyles(ContextMenu menu, FrameworkElement host)
+    {
+        await Drain(); menu.ApplyTemplate(); menu.UpdateLayout();
+        var expected = new ContextMenu { Style = (Style)host.FindResource("MeowFilm.ContextMenu") };
+        True(menu.IsOpen && ReferenceEquals(menu.Style, expected.Style) && menu.Template is not null &&
+            ReferenceEquals(menu.Template, expected.Template), "open menu uses the actual shared style and template");
+        True(Visuals(menu).OfType<Border>().Any(border => ReferenceEquals(border.Background,
+            host.FindResource("MeowFilm.Brush.FloatingSurface"))), "opened panel resolves the actual host floating brush");
+        var expectedItem = new MenuItem { Style = (Style)host.FindResource("MeowFilm.MenuItem") };
+        foreach (var item in menu.Items.OfType<MenuItem>())
+        {
+            item.ApplyTemplate();
+            True(ReferenceEquals(item.Style, expectedItem.Style) && item.Template is not null &&
+                ReferenceEquals(item.Template, expectedItem.Template), "menu item uses the shared template");
+            if (item.Items.Count == 0) continue;
+            item.IsSubmenuOpen = true; await Drain();
+            foreach (var child in item.Items.OfType<MenuItem>())
+            {
+                child.ApplyTemplate();
+                True(ReferenceEquals(child.Style, expectedItem.Style) && ReferenceEquals(child.Template, expectedItem.Template),
+                    "dynamic playlist submenu uses the shared template");
+            }
+            item.IsSubmenuOpen = false;
+        }
+    }
+
     public static IEnumerable<TestCase> Cases()
     {
         foreach (var test in PlayerChromeCases()) yield return test;
@@ -674,19 +710,54 @@ public static partial class MusicUiTests
             f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
             await f.Module.NavigateAsync("history", default); Equal(day, f.Module.HistoryDate);
         });
+        yield return Case("song row menu captures right clicked target and rejects blank and retired actions", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection();
+            using var source = new System.Windows.Interop.HwndSource(new System.Windows.Interop.HwndSourceParameters("song-target-fixture")
+                { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                    Width = 900, Height = 700, PositionX = -32000, PositionY = -32000 });
+            source.RootVisual = f.Module.View; Render(f.Module.View, 900, 700);
+            var grid = (DataGrid)f.Module.View.FindName("SongsGrid");
+            f.Module.SelectedSong = f.Module.Songs[0];
+            var second = f.Module.Songs[1];
+            var row = (DataGridRow)grid.ItemContainerGenerator.ContainerFromIndex(1);
+            row.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Right)
+                { RoutedEvent = Mouse.PreviewMouseDownEvent });
+            True(ReferenceEquals(second, f.Module.SelectedSong), "right click selects its actual row");
+            RaiseSongMenu(grid);
+            var favorite = (MenuItem)grid.ContextMenu.Items[2];
+            f.Module.SelectedSong = f.Module.Songs[0];
+            favorite.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Until(() => !f.Module.Busy);
+            await f.Module.NavigateAsync("favorites", default);
+            Equal(second.Id, f.Module.Songs.Single().Id);
+            int writes = f.Calls.Count("music.library.addSongs");
+            favorite.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
+            Equal(writes, f.Calls.Count("music.library.addSongs"));
+            grid.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Right)
+                { RoutedEvent = Mouse.PreviewMouseDownEvent });
+            True(f.Module.SelectedSong is null && RaiseSongMenu(grid).Handled,
+                "empty area cannot reopen the previous target menu");
+        });
         yield return Case("row actions, transport, seek, volume and global queue confirmations", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection();
             var grid = (DataGrid)f.Module.View.FindName("SongsGrid");
+            using var menuSource = new System.Windows.Interop.HwndSource(new System.Windows.Interop.HwndSourceParameters("song-menu-fixture")
+                { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                    Width = 900, Height = 700, PositionX = -32000, PositionY = -32000 });
+            menuSource.RootVisual = f.Module.View;
             Render(f.Module.View, 640, 480);
             Render(f.Module.PlayerView, 860, 92);
             grid.ContextMenu.PlacementTarget = grid; grid.ContextMenu.GetBindingExpression(FrameworkElement.DataContextProperty)!.UpdateTarget();
             Equal(f.Module, grid.ContextMenu.DataContext); True(!grid.CanUserSortColumns, "presentation columns retain core order");
+            f.Module.SelectedSong = f.Module.Songs[1];
+            RaiseSongMenu(grid);
             True(grid.ContextMenu.Items.OfType<MenuItem>().Take(3).Select(item => item.Header).SequenceEqual(
                 new object[] { "播放", "下一首播放", "收藏" }), "song menu exposes the primary row actions");
             f.Module.SelectedSong = f.Module.Songs[1];
             ((MenuItem)grid.ContextMenu.Items[2]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Until(() => !f.Module.Busy);
             Equal(1, f.Module.Playlists.Single(p => p.Id == "favorites").Count);
+            f.Module.SelectedSong = f.Module.Songs[1]; RaiseSongMenu(grid);
             ((MenuItem)grid.ContextMenu.Items[1]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Until(() => !f.Module.Busy);
             Equal(1, f.Calls.Count("music.queue.append"));
             var row = (DataGridRow)grid.ItemContainerGenerator.ContainerFromIndex(0);
@@ -703,6 +774,7 @@ public static partial class MusicUiTests
             Click(rowButtons["更多"]);
             True(grid.ContextMenu.IsOpen && ReferenceEquals(rowButtons["更多"], grid.ContextMenu.PlacementTarget),
                 "more action opens the shared row context menu");
+            await AssertOpenedSongMenuStyles(grid.ContextMenu, rowButtons["更多"]);
             grid.ContextMenu.IsOpen = false;
             f.Module.SelectedSong = f.Module.Songs[0];
             var enter = RaiseKey(grid, Key.Enter); True(enter.Handled, "Enter plays selected row"); await Until(() => !f.Module.Busy);

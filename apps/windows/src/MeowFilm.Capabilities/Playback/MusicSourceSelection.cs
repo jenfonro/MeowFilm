@@ -7,7 +7,10 @@ namespace MeowFilm.Capabilities;
 
 /// <summary>One row of the current song's source list: a resolved or failed attempt of its session.</summary>
 public sealed record MusicSourceChoice(string Key, string Provider, string Platform, string Quality, string State,
-    bool Current, bool Selectable);
+    bool Current, bool Selectable)
+{
+    public string QualitySymbol { get; init; } = "";
+}
 /// <summary>One quality the player can switch the current playback to.</summary>
 public sealed record MusicQualityChoice(string Key, string Label, bool Current);
 
@@ -16,6 +19,8 @@ public sealed partial class MusicCapability
     private CancellationTokenSource? sourceExpansion;
     public ObservableCollection<MusicSourceChoice> SourceChoices { get; } = [];
     public bool HasSourceChoices => SourceChoices.Count > 0;
+    public bool HasConfirmedSourceChoices => SourceChoices.Any(choice => choice.Key != "auto" && choice.Selectable);
+    public MusicSourceChoice? AutomaticSourceChoice => SourceChoices.FirstOrDefault(choice => choice.Key == "auto");
     public bool CanLoadMoreSources => CanSwitchSource && musicRecovery?.Recovering == false && sourceExpansion is null &&
         (musicRecovery?.Session?.CanExpand == true || musicRecovery?.Session?.Revision != selectionSourcesRevision ||
             musicRecovery?.Session?.Signature != savedQualitySignature);
@@ -44,6 +49,15 @@ public sealed partial class MusicCapability
         MusicQualityPolicy.Spatial.Contains(level) ? level : MusicQualityPolicy.Category(level));
     public string CurrentSourceQuality => musicRecovery?.Media is { Target: not null } media && QualityVerified(media)
         ? LevelName(EffectiveLevel(media)) : "音质未知";
+    public string CurrentSourceSymbol => musicRecovery?.Media is { Target: not null } media && QualityVerified(media)
+        ? QualitySymbol(EffectiveLevel(media)) : "";
+    public string CurrentSourceDescription => musicRecovery?.Media?.Target is { Official: false } target
+        ? MusicSourceRow.PlatformName(target.Platform) + " · " + CurrentSource : CurrentSource;
+    private static string QualitySymbol(string level) => MusicQualityPolicy.Category(level) switch
+    {
+        "standard" => "SD", "high" => "HQ", "lossless" => "SQ", "hires" => "HR",
+        "master" => "M", "spatial" => "3D", "enhanced" => "E", _ => ""
+    };
     public bool IsLoadingSources => sourceExpansion is not null;
     /// <summary>Enabled categories, best first; spatial is offered through its own levels.</summary>
     public IReadOnlyList<MusicQualityChoice> QualityChoices()
@@ -105,10 +119,14 @@ public sealed partial class MusicCapability
                 bool selected = ok && state.Media is { } media && !state.Selection.Automatic &&
                     SourceIdentity(media.Target!) == SourceIdentity(attempt.Target) && media.Target!.Quality == attempt.Target.Quality;
                 SourceChoices.Add(new(attempt.Key, provider, MusicSourceRow.PlatformName(attempt.Target.Platform), quality,
-                    ok ? "可用" : "不可用", selected, ok));
+                    ok ? "可用" : "不可用", selected, ok)
+                {
+                    QualitySymbol = ok && QualityVerified(attempt.Media!) ? QualitySymbol(EffectiveLevel(attempt.Media!)) : ""
+                });
             }
         }
-        Changed(nameof(HasSourceChoices)); Changed(nameof(CanSwitchSource)); Changed(nameof(CanLoadMoreSources));
+        Changed(nameof(HasSourceChoices)); Changed(nameof(HasConfirmedSourceChoices)); Changed(nameof(AutomaticSourceChoice));
+        Changed(nameof(CanSwitchSource)); Changed(nameof(CanLoadMoreSources));
     }
     public void OpenSourceChoices() => UpdateSourceChoices();
     public void CloseSourceChoices()
@@ -116,7 +134,8 @@ public sealed partial class MusicCapability
         sourceExpansion?.Cancel();
         sourceExpansion = null;
         SourceChoices.Clear();
-        Changed(nameof(HasSourceChoices)); Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources));
+        Changed(nameof(HasSourceChoices)); Changed(nameof(HasConfirmedSourceChoices)); Changed(nameof(AutomaticSourceChoice));
+        Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources));
     }
     /// <summary>Explores the next automatic tier: every queued source of it, cache first.</summary>
     public Task LoadMoreSourcesAsync()

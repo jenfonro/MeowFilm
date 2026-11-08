@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Windows;
 using System.Windows.Media;
+using System.Windows.Data;
 
 namespace MeowFilm.Desktop;
 
@@ -11,6 +12,50 @@ public static class AppearanceColors
     private static readonly double[] Offsets = [0, .18, .38, .60, .80, 1];
     private static readonly double[] Tint = [.18, .12, .025, .10, .17, .22];
     public static Brush DefaultBackground { get; } = Background(DefaultColor);
+    // Theme.xaml is merged by independent views and detached popup roots. Sharing these
+    // brushes keeps the application's appearance consistent across those dictionaries.
+    [ThreadStatic] private static PaletteColor? floatingSurface;
+    [ThreadStatic] private static PaletteColor? itemHover;
+    [ThreadStatic] private static PaletteColor? itemSelected;
+    [ThreadStatic] private static PaletteColor? inputSurface;
+    private static PaletteColor Floating => floatingSurface ??= new(TintColor(DefaultColor, .10, 255));
+    private static PaletteColor Hover => itemHover ??= new(TintColor(DefaultColor, .16, 228));
+    private static PaletteColor Selected => itemSelected ??= new(TintColor(DefaultColor, .32, 202));
+    private static PaletteColor Input => inputSurface ??= new(TintColor(DefaultColor, .12, 250));
+    public static SolidColorBrush FloatingSurface => Floating.Brush;
+    public static SolidColorBrush ItemHover => Hover.Brush;
+    public static SolidColorBrush ItemSelected => Selected.Brush;
+    public static SolidColorBrush InputSurface => Input.Brush;
+
+    internal static void ApplyFloatingPalette(string color)
+    {
+        Floating.Color = TintColor(color, .10, 255);
+        Hover.Color = TintColor(color, .16, 228);
+        Selected.Color = TintColor(color, .32, 202);
+        Input.Color = TintColor(color, .12, 250);
+    }
+
+    private static Color TintColor(string value, double amount, byte neutral)
+    {
+        if (!TryParse(value, out var color)) throw new ArgumentException("Invalid color.", nameof(value));
+        byte Mix(byte channel) => (byte)Math.Round(neutral * (1 - amount) + channel * amount);
+        return Color.FromRgb(Mix(color.R), Mix(color.G), Mix(color.B));
+    }
+
+    private sealed class PaletteColor : DependencyObject
+    {
+        public static readonly DependencyProperty ColorProperty =
+            DependencyProperty.Register(nameof(Color), typeof(Color), typeof(PaletteColor));
+        public Color Color { get => (Color)GetValue(ColorProperty); set => SetValue(ColorProperty, value); }
+        public SolidColorBrush Brush { get; } = new();
+        public PaletteColor(Color color)
+        {
+            Color = color;
+            // A live binding prevents WPF from freezing the brush when styles/resources seal.
+            BindingOperations.SetBinding(Brush, SolidColorBrush.ColorProperty,
+                new Binding(nameof(Color)) { Source = this, Mode = BindingMode.OneWay });
+        }
+    }
 
     public static bool TryParse(string? value, out Color color)
     {
