@@ -4,7 +4,7 @@ import MeowRuntime
 
 /// The App's single embedded Node Mobile runtime. Node starts at most once per
 /// process. App startup requests Cat restoration through its shared session;
-/// merely starting the host does not execute disabled scripts.
+/// merely starting the host does not execute music scripts.
 enum MeowfilmScriptRuntime {
     static let launcher = RuntimeEmbeddedLauncher(
         payload: {

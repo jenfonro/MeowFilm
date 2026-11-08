@@ -160,7 +160,8 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var lyricEpoch = UUID()
     struct Attempt: Sendable {
         let id: String, occurrence: String, sourceKey: String
-        let selection: MusicPlaybackSelection
+        var selection: MusicPlaybackSelection
+        var scriptSource: MusicScriptSource? = nil
         var ready = false, started = false, ended = false, endedConsumed = false
         var recovery: MusicNativePlaybackRecoveryPin? = nil
         var authorization: MusicQueueAuthorization? = nil

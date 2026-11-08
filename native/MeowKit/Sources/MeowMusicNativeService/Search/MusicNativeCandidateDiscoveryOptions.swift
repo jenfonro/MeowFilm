@@ -35,7 +35,7 @@ extension NativeMusicService {
                         }
                     } catch {
                         let failure = MusicServiceError.sanitized(error)
-                        guard [.authRequired, .sessionExpired, .unsupported, .sourceUnavailable, .unavailable, .timeout,
+                        guard [.authRequired, .sessionExpired, .unsupported, .sourceUnavailable, .unavailable, .scriptRuntimeUnavailable, .timeout,
                                .upstreamFailed, .upstreamInvalid, .busy, .rateLimited, .verificationRequired].contains(failure) else { throw failure }
                         return .init(issues: [.init(stage: .capability, platform: platform, failure: failure)],
                             scriptState: platform == "lx" ? .unavailable(failure) : .notConfigured)
@@ -65,12 +65,12 @@ extension NativeMusicService {
     }
 
     /// The one rule for script playback options, shared by automatic candidates
-    /// and the explicit source picker: enabled, ready, declared musicUrl, quality.
+    /// and the explicit source picker: enabled, available, declared musicUrl, quality.
     func scriptOptions(song: MJ, playback prefs: MJ, snapshots: [MusicScriptSource],
                        excluded: Set<String>) throws -> [MusicCandidateDiscoveryOption] {
-        try musicRequire(snapshots.count <= 32 && Set(snapshots.map(\.installationID)).count == snapshots.count, .limit)
+        try musicRequire(Set(snapshots.map(\.installationID)).count == snapshots.count, .invalidResponse)
         var rows: [MusicCandidateDiscoveryOption] = []
-        for snapshot in snapshots where snapshot.enabled && snapshot.ready {
+        for snapshot in snapshots where snapshot.isCandidate {
             for source in try MusicModel.sources(song) where platformEnabled(source.platform) && !excluded.contains(source.sourceKey) {
                 guard snapshot.capabilities.contains(where: { $0.siteID == source.platform && $0.actions.contains("musicUrl") }) else { continue }
                 let capability = try validate(snapshot, site: source.platform)
@@ -82,7 +82,8 @@ extension NativeMusicService {
                 if !qualities.isEmpty {
                     rows.append(.init(playback: .init(installationId: snapshot.installationID, generation: snapshot.generation,
                         siteId: source.platform, sourceKey: source.sourceKey, qualities: qualities,
-                        title: capability.title, version: snapshot.version, contentHash: snapshot.contentHash),
+                        title: capability.title, version: snapshot.version, contentHash: snapshot.contentHash,
+                        revisionHash: snapshot.revisionHash),
                         revisionHash: snapshot.revisionHash))
                 }
             }

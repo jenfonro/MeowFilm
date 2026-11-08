@@ -147,6 +147,7 @@ actor MusicNativeCandidateDiscoveryHTTP: MusicNativeHTTPTransport {
 actor MusicNativeCandidateDiscoveryScripts: MusicScriptResolving {
     var generation = 1, version = "1", revision = String(repeating: "a", count: 64)
     var sites = ["tx", "wy", "kg", "kw", "mg"]
+    var state = MusicScriptSourceItem.State.ready
     var installations = [MusicNativeCandidateDiscoveryFixture.installation]
     var barrier: MusicNativeCandidateDiscoveryBarrier?
     var mutateAfterResolve = false
@@ -156,11 +157,12 @@ actor MusicNativeCandidateDiscoveryScripts: MusicScriptResolving {
         self.generation = generation; self.version = version; self.revision = revision
         self.barrier = barrier; self.mutateAfterResolve = mutateAfterResolve
     }
+    func directory(_ state: MusicScriptSourceItem.State) { self.state = state; if state != .ready { generation = 0 } }
     func supported(_ sites: [String]) { self.sites = sites }
     func installed(_ installations: [String]) { self.installations = installations }
     func sources() -> [MusicScriptSource] { installations.map { snapshot($0) } }
     func snapshot(_ installation: String) -> MusicScriptSource {
-        .init(installationID: installation, generation: generation, enabled: true, ready: true,
+        .init(installationID: installation, generation: generation, enabled: state != .disabled, state: state,
             version: version, contentHash: String(repeating: "a", count: 64), revisionHash: revision,
             capabilities: sites.map { .init(siteID: $0, title: "Same name", actions: ["musicUrl"], qualities: ["128k", "flac"]) })
     }
@@ -168,12 +170,15 @@ actor MusicNativeCandidateDiscoveryScripts: MusicScriptResolving {
         guard installations.contains(installationID) else { throw MusicServiceError.sourceUnavailable }
         return snapshot(installationID)
     }
-    func resolve(request: MusicScriptRequest) async throws -> MusicNativeAudio {
+    func resolve(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeAudio> {
         requests.append(request)
+        guard state != .failed && state != .disabled else { throw MusicServiceError.sourceUnavailable }
+        if state != .ready { generation = 7; state = .ready }
+        let executed = snapshot(request.installationID)
         if let barrier { await barrier.enter() }
         if mutateAfterResolve { revision = String(repeating: "b", count: 64) }
-        return .init(url: URL(string: "https://media.invalid/fixture.mp3?signature=synthetic")!)
+        return .init(value: .init(url: URL(string: "https://media.invalid/fixture.mp3?signature=synthetic")!), source: executed)
     }
-    func lyrics(request: MusicScriptRequest) -> MusicNativeLyrics { .init(text: "") }
+    func lyrics(request: MusicScriptRequest) -> MusicScriptResult<MusicNativeLyrics> { .init(value: .init(text: ""), source: request.source) }
     func calls() -> [MusicScriptRequest] { requests }
 }

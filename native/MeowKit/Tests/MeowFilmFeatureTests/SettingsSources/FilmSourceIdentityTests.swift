@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-import MeowJSON
+import MeowRuntime
 import MeowStorage
 @testable import MeowFilmFeature
 
@@ -9,11 +9,11 @@ final class FilmSourceIdentityTests: XCTestCase {
     private let decomposed = "e\u{0301}"
 
     private func setSites(_ keys: [String], runtime: SourcesRuntimeFixture) async throws {
-        var cat = try JSONDecoder().decode(FilmCatSource.self, from: JSONEncoder().encode(SourcesRuntimeFixture.cat("a")))
+        var cat = try parseFilmCat(SourcesRuntimeFixture.cat("a"))
         cat.sites = keys.map { key in
             FilmSourceSite(key: key, name: "Site", api: "/api/a", actions: ["home", "category", "detail", "play", "search"], methods: [:])
         }
-        await runtime.setCat(try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(cat)))
+        await runtime.setCat(try RuntimeJSON.decode(JSONEncoder().encode(cat)))
     }
 
     func testExactIdentityRetainsCompatibleCodableShape() throws {
@@ -39,7 +39,7 @@ final class FilmSourceIdentityTests: XCTestCase {
         let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
         let runtime = SourcesRuntimeFixture()
         try await setSites([composed, decomposed], runtime: runtime)
-        let transport = CatScriptTransport(rpc: { method, params, _ in try await runtime.rpc(method, params) })
+        let transport = runtime.transport
         var service = FilmSourceService(transport: transport, storeFactory: { store })
         let first = FilmSourceKey(installationId: "a", siteKey: composed)
         let second = FilmSourceKey(installationId: "a", siteKey: decomposed)
@@ -113,7 +113,7 @@ final class FilmSourceIdentityTests: XCTestCase {
             let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
             let runtime = SourcesRuntimeFixture()
             try await setSites([composed], runtime: runtime)
-            let service = FilmSourceService(transport: .init(rpc: { method, params, _ in try await runtime.rpc(method, params) }), storeFactory: { store })
+            let service = FilmSourceService(transport: runtime.transport, storeFactory: { store })
             let old = FilmSourceKey(installationId: "a", siteKey: composed)
             let new = FilmSourceKey(installationId: "a", siteKey: decomposed)
             try await service.refresh()

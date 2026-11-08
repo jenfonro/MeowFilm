@@ -2,15 +2,22 @@ import { join } from 'node:path';
 import { startIOSAppRuntime, reportIOSRuntimeStartFailure } from '../bootstrap.mjs';
 import { createMusicScriptModule } from '../../../runtime/modules/music-script.mjs';
 import { createCatScriptModule } from '../../../runtime/modules/cat-script.mjs';
+import { createSourceRuntimeModule } from '../../../runtime/modules/source-runtime.mjs';
 
-// Same wire identity as the other platform runtimes. The iOS assembly has no
-// source module: the release-sync asm.js engine has no task-context hook.
 try {
-  startIOSAppRuntime({
-    product: 'aggregate', assemble: ({ dataRoot }) => [
-      createMusicScriptModule({ dataRoot }),
-      createCatScriptModule({ dataRoot: join(dataRoot, 'cat') }),
-    ],
+  await startIOSAppRuntime({
+    product: 'aggregate', assemble: ({ dataRoot }) => {
+      const modules = [];
+      try {
+        modules.push(createMusicScriptModule({ dataRoot }));
+        modules.push(createCatScriptModule({ dataRoot: join(dataRoot, 'cat') }));
+        modules.push(createSourceRuntimeModule({ platform: 'ios' }));
+        return modules;
+      } catch (error) {
+        for (const module of modules) void Promise.resolve(module.close()).catch(() => {});
+        throw error;
+      }
+    },
   });
 } catch {
   reportIOSRuntimeStartFailure();

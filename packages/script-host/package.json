@@ -15,7 +15,8 @@
     "src",
     "build/Release/script_host_native.node",
     "build/Release/script-host-native.json",
-    "build/Release/source-sdk.js"
+    "build/Release/source-sdk.js",
+    "build/Release/cat-web-values.cjs"
   ],
   "scripts": {
     "test": "node --test test/*.test.js",

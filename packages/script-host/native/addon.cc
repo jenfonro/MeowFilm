@@ -1,5 +1,14 @@
 #include "engine.h"
 #include <array>
+#ifndef _WIN32
+#include <cerrno>
+#include <climits>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+#ifdef MEOW_IOS_FRAMEWORK
+#include "binding-identity.h"
+#endif
 
 namespace meow {
 using Owner = std::shared_ptr<Engine>;
@@ -168,6 +177,27 @@ static napi_value Create(napi_env env, napi_callback_info info) {
     return object;
   });
 }
+#ifndef _WIN32
+static napi_value DuplicateBootstrapDescriptor(napi_env env, napi_callback_info info) {
+  return Protect(env, [&] {
+    size_t argc = 2; napi_value argv[2];
+    NCheck(napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr));
+    Check(argc == 1);
+    double descriptor; NCheck(napi_get_value_double(env, argv[0], &descriptor));
+    Check(std::isfinite(descriptor) && descriptor >= 3 && descriptor <= INT_MAX &&
+          std::floor(descriptor) == descriptor);
+    int copy;
+    do { copy = fcntl(static_cast<int>(descriptor), F_DUPFD_CLOEXEC, 3); }
+    while (copy < 0 && errno == EINTR);
+    Check(copy >= 0, "DESCRIPTOR_UNAVAILABLE");
+    napi_value result;
+    napi_status status = napi_create_int32(env, copy, &result);
+    if (status != napi_ok) { close(copy); NCheck(status); }
+    // Only the returned copy changes owner. The launch thread retains the input.
+    return result;
+  });
+}
+#endif
 static napi_value Initialize(napi_env env, napi_value exports) {
   return Protect(env, [&] {
     napi_value create, abi, napi;
@@ -175,6 +205,22 @@ static napi_value Initialize(napi_env env, napi_value exports) {
     NCheck(napi_set_named_property(env, exports, "create", create));
     NCheck(napi_create_uint32(env, 1, &abi)); NCheck(napi_set_named_property(env, exports, "abi", abi));
     NCheck(napi_create_uint32(env, 8, &napi)); NCheck(napi_set_named_property(env, exports, "napi", napi));
+#ifndef _WIN32
+    napi_value duplicate;
+    NCheck(napi_create_function(env, "duplicateBootstrapDescriptor", NAPI_AUTO_LENGTH,
+      DuplicateBootstrapDescriptor, nullptr, &duplicate));
+    NCheck(napi_set_named_property(env, exports, "duplicateBootstrapDescriptor", duplicate));
+#endif
+#ifdef MEOW_IOS_FRAMEWORK
+    napi_value identity = ToNode(env, Value::Str(MEOW_BINDING_IDENTITY));
+    NCheck(napi_set_named_property(env, exports, "bindingIdentity", identity));
+    napi_value sdk = ToNode(env, Value::Str(MEOW_TARGET_SDK));
+    NCheck(napi_set_named_property(env, exports, "sdk", sdk));
+    napi_value arch = ToNode(env, Value::Str(MEOW_TARGET_ARCH));
+    NCheck(napi_set_named_property(env, exports, "arch", arch));
+    napi_value minimumOS = ToNode(env, Value::Str(MEOW_MINIMUM_OS));
+    NCheck(napi_set_named_property(env, exports, "minimumOS", minimumOS));
+#endif
     return exports;
   });
 }

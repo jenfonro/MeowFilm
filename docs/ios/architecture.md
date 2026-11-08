@@ -40,7 +40,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 
 原生源码检查仅覆盖 `apps/ios` 和 `native/MeowKit`，不遍历 Windows 专属源码。Node 根测试可用 `node scripts/test-root.mjs --platform ios` 选择 iOS 与共享契约测试；共享 packager 用例不读取 Windows 入口源码，iOS 入口及生成载荷由本端 wrapper 用例验证。
 
-平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器的 ASCII 对象键、安全整数、重复键和深度约束仅由 `MeowRuntime.RuntimeBridgeJSON` 在 RPC／脚本传输边界执行，不作为通用 JSON 限制。
+平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；严格 UTF-8、Unicode 标量、安全整数、重复键和业务深度遵循[公共 HTTP 契约](../runtime/runtime-bridge.md)。该边界不增加普通 JSON 总字节配额，也不改变平台／账号 DTO 的 JSON 语义。
 
 ## UI 技术选型
 

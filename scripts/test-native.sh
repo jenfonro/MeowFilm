@@ -42,7 +42,7 @@ settings=(-configuration Debug -sdk iphonesimulator -destination 'generic/platfo
 logged source-scope python3 -I -B scripts/check-source-scope.py || status=4
 logged swift-build swift build --build-tests --package-path native/MeowKit -j 2 || status=4
 # The App targets cannot build against absent or stale runtime inputs.
-logged runtime-inputs python3 -I -B scripts/prepare-ios-runtime.py || exit 4
+logged runtime-inputs python3 -I -B scripts/prepare-ios-runtime.py --sdk iphonesimulator --arch "$arch" || exit 4
 logged app-build xcodebuild -project apps/ios/Meowfilm.xcodeproj -scheme Meowfilm "${settings[@]}" build || status=4
 logged component-build xcodebuild -project apps/ios/Meowfilm.xcodeproj -scheme MeowfilmAcceptance "${settings[@]}" build-for-testing || status=4
 app="$(xcodebuild -project apps/ios/Meowfilm.xcodeproj -scheme Meowfilm "${settings[@]}" -showBuildSettings |

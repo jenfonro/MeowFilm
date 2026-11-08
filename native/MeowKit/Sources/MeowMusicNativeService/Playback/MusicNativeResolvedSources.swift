@@ -12,6 +12,11 @@ struct MusicSourceInspectionSeed: Sendable {
     let lifetime: MusicNativeCandidateDiscoveryLifetime
 }
 
+struct MusicSourceInspectionResult: Sendable {
+    let audio: MusicNativeAudio
+    let option: MusicPlaybackOption
+}
+
 extension NativeMusicService: MusicResolvedSourcesServing {
     public func inspectSources(for reference: MusicReference) async throws -> any MusicSourceInspectionSession {
         let d = try read()
@@ -153,25 +158,25 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         } catch {
             try inspectionCheck(seed)
             let failure = MusicServiceError.sanitized(error)
-            if ![.sourceUnavailable, .unavailable, .timeout, .resolutionTimeout, .busy].contains(failure) { throw failure }
+            if ![.sourceUnavailable, .unavailable, .scriptRuntimeUnavailable, .timeout, .resolutionTimeout, .busy].contains(failure) { throw failure }
             return []
         }
     }
 
     /// The live script must still be the exact load the option was built from.
     private func inspectionScriptPin(_ live: MusicScriptSource, option: MusicPlaybackOption, quality: String) throws {
-        try musicRequire(live.installationID == option.installationId && live.generation == option.generation &&
-            live.version == option.version && live.contentHash == option.contentHash, .targetChanged)
+        try pinScript(live, selection: option.selection(quality: quality))
         _ = try validate(live, site: option.siteId, quality: quality)
     }
 
     func inspectionResolve(_ seed: MusicSourceInspectionSeed, staged: MJ,
-                           option: MusicPlaybackOption, quality: String, label: String) async throws -> MusicNativeAudio {
+                           option: MusicPlaybackOption, quality: String, label: String) async throws -> MusicSourceInspectionResult {
         try inspectionCheck(seed)
         let (source, info) = try target(staged, option.sourceKey)
         try requirePlatform(source.platform)
         try musicRequire(source.platform == option.siteId, .targetChanged)
         let selection = option.selection(quality: quality)
+        var resolvedOption = option
         let audio: MusicNativeAudio
         if option.installationId.hasPrefix("official:") {
             guard let accounts, let platform = MusicAccountPlatform(rawValue: source.platform),
@@ -189,19 +194,24 @@ extension NativeMusicService: MusicResolvedSourcesServing {
             let snapshot = try await work(label: label) { try await scripts.source(installationID: option.installationId) }
             try inspectionCheck(seed)
             try inspectionScriptPin(snapshot, option: option, quality: quality)
-            let request = MusicScriptRequest(installationID: option.installationId, generation: option.generation,
+            let request = MusicScriptRequest(source: snapshot,
                 siteID: option.siteId, sourceKey: option.sourceKey, quality: quality, musicInfo: info.bytes)
-            audio = try await work(label: label) { try await scripts.resolve(request: request) }
+            let execution = try await work(label: label) { try await scripts.resolve(request: request) }
+            try executedScript(execution.source, from: snapshot)
             try inspectionCheck(seed)
             let live = try await work(label: label) { try await scripts.source(installationID: option.installationId) }
-            try sameSource(live, snapshot); try inspectionScriptPin(live, option: option, quality: quality)
+            try sameSource(live, execution.source); try inspectionScriptPin(live, option: option, quality: quality)
+            audio = execution.value
+            resolvedOption = .init(installationId: live.installationID, generation: live.generation,
+                siteId: option.siteId, sourceKey: option.sourceKey, qualities: option.qualities,
+                title: option.title, version: live.version, contentHash: live.contentHash, revisionHash: live.revisionHash)
         }
         try inspectionCheck(seed)
         let valid = try media(audio)
         try validateDelivery(valid.delivery, song: staged, playback: seed.playback)
         // No attempt mutation, queue/history write, feedback, cache-body fill,
         // audio session or native playback admission on this inspection path.
-        return valid
+        return .init(audio: valid, option: resolvedOption)
     }
 
     func inspectionAdopt(_ seed: MusicSourceInspectionSeed, staged: MJ, option: MusicPlaybackOption,
@@ -443,7 +453,7 @@ actor MusicNativeSourceInspection: MusicSourceInspectionSession {
             busy.insert(job.provider); scouted.insert(job.provider)
             maximumDispatchedTier = max(maximumDispatchedTier, job.tier)
             running[job.key] = Task { [weak self] in
-                let result: Result<MusicNativeAudio, Error>
+                let result: Result<MusicSourceInspectionResult, Error>
                 do {
                     let audio = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: .init()) {
                         try await owner.inspectionResolve(captured, staged: song, option: job.option,
@@ -455,11 +465,12 @@ actor MusicNativeSourceInspection: MusicSourceInspectionSession {
             }
         }
     }
-    private func finished(_ job: Job, result: Result<MusicNativeAudio, Error>, revision own: UUID) {
+    private func finished(_ job: Job, result: Result<MusicSourceInspectionResult, Error>, revision own: UUID) {
         guard !closed, own == revision else { return }
         running.removeValue(forKey: job.key); busy.remove(job.provider)
         switch result {
-        case .success(let audio):
+        case .success(let execution):
+            let audio = execution.audio, option = execution.option
             guard audio.playbackAuthorization?.isActive != false else { fail(MusicServiceError.staleAccess); return }
             guard staged["sources"].array.contains(where: { $0["sourceKey"].string == job.option.sourceKey }) else {
                 pump(); publish(); return
@@ -467,8 +478,8 @@ actor MusicNativeSourceInspection: MusicSourceInspectionSession {
             let unmeasured = job.option.installationId.hasPrefix("official:") ? "unknown" : "requested-" + job.quality
             let id = job.option.id + ":" + (audio.delivery?.quality ?? unmeasured)
             if !resolved.contains(where: { $0.choice.id == id }) {
-                resolved.append(.init(choice: .init(id: id, selection: job.option.selection(quality: job.quality),
-                    title: job.option.title, delivery: audio.delivery), option: job.option, audio: audio))
+                resolved.append(.init(choice: .init(id: id, selection: option.selection(quality: job.quality),
+                    title: option.title, delivery: audio.delivery), option: option, audio: audio))
                 observeAuthorization(audio.playbackAuthorization)
             }
             if let delivery = audio.delivery {

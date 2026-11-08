@@ -1,6 +1,7 @@
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fault, requireValue } from './errors.js';
+import { Headers } from './node-web-values.js';
 
 /** Native Web request/response values over the instance's managed HTTP
  * transport, so fetch shares listener mapping, adapters and cancellation. */

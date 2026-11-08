@@ -20,7 +20,7 @@ struct MeowfilmResources: Sendable {
     let musicPublicQQ: NativeMusicQQPublicService
     let musicClients: NativeMusicClientService
     let musicScripts: NativeMusicScriptService
-    let scriptSession: RuntimeBridgeSession
+    let scriptSession: RuntimeSession
     let filmRules: FilmRuleService
     let filmSourceSettings: FilmSourceService
 
@@ -52,9 +52,9 @@ struct MeowfilmResources: Sendable {
             maximumDocumentBytes: 4 * 1024 * 1024))
         musicHomeSnapshot = MusicNativeHomeSnapshotDocument(storeFactory: Self.documentFactory(
             base: cacheRoot, namespace: MusicNativeHomeSnapshotDocument.namespace))
-        let scriptSession = RuntimeBridgeSession(launcher: MeowfilmScriptRuntime.launcher)
+        let scriptSession = RuntimeSession(launcher: MeowfilmScriptRuntime.launcher)
         self.scriptSession = scriptSession
-        let connection: @Sendable () async throws -> RuntimeBridgeConnection = {
+        let connection: @Sendable () async throws -> RuntimeHTTPClient = {
             try await scriptSession.connection()
         }
         musicScripts = NativeMusicScriptService(connection: connection)

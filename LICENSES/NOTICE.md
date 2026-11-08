@@ -207,6 +207,18 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   `scripts/ios-node-mobile.json` and checked during build preparation.
 - This component and its license are not distributed by the Windows packager.
 
+## Undici Web values — MIT, iOS only
+
+- Source: `https://github.com/nodejs/undici`, npm version `6.29.1`, pinned as a
+  build-only dependency in the root package lock.
+- The iOS build bundles only the Request, Response, Headers and FormData value
+  modules and their pure JavaScript closure in `cat-web-values.cjs`. It does not
+  bundle Undici's fetch transport, dispatcher, llhttp or WebAssembly parser.
+  Network requests continue through the runner's managed Node HTTP transport.
+- The original package `LICENSE` is included as `Runtime/licenses/undici-LICENSE.txt`;
+  its hash, consumed source inputs and the bundle hash are recorded in the
+  iOS native build receipt. Other platforms retain their native Node Web values.
+
 ## Native QuickJS-NG — MIT
 
 - Source: https://github.com/quickjs-ng/quickjs, v0.18.0,
@@ -246,7 +258,9 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   `3c051980ab7e783dfbfb1c70c014ce5e05ecf24c`.
 - License: `quickjs-ng-LICENSE.txt`, unchanged upstream text and copyrights.
 - The common runtime compiles QuickJS as a native library in the Node-API 8
-  extension `script_host_native.node`. One library serves independent script
+  extension `script_host_native.node`; iOS embeds the same implementation in the
+  signed `MeowScriptHost.framework`, separate from the client's rule engine.
+  One library serves independent script
   runtimes and native execution threads; no WebAssembly or asm.js engine is shipped.
 - `packages/script-host/native/task-context.patch` preserves task identity across
   Promise reactions, native await, generators, finalizers and scheduled jobs. It
@@ -295,7 +309,8 @@ that inventory without building, fetching or changing the lock.
 
 The historical `quickjs-emscripten-LICENSE.txt` is retained for platform consumers
 that have not yet migrated. It is not a dependency or backend of the new common
-runtime. Windows/iOS packaging migration is separate from this runtime change.
+runtime or its iOS framework. The Windows packaging consumer is not migrated by
+the iOS adaptation, so its remaining attribution is retained.
 
 ## Node compatibility npm dependencies
 

@@ -47,8 +47,9 @@ enum NativeMusicFixture {
             ("types", .array([.obj([("type", .string("128k"))]), .obj([("type", .string("flac"))])]))]).bytes)
     }
     static func song(_ mid: String = "SyntheticMID") throws -> MJ { try MusicModel.normalize(track(mid)) }
-    static func source(generation: Int = 1, hash: String = String(repeating: "a", count: 64)) -> MusicScriptSource {
-        .init(installationID: installation, generation: generation, enabled: true, ready: true, version: "1",
+    static func source(generation: Int = 1, hash: String = String(repeating: "a", count: 64),
+                       state: MusicScriptSourceItem.State = .ready) -> MusicScriptSource {
+        .init(installationID: installation, generation: generation, enabled: true, state: state, version: "1",
               contentHash: hash, revisionHash: hash, capabilities: [.init(siteID: "tx", title: "LX synthetic", actions: ["musicUrl", "lyric"], qualities: ["128k", "flac"])])
     }
     static func service(_ store: NativeMusicMemoryDocument = .init(), scripts: (any MusicScriptResolving)? = nil,
@@ -86,17 +87,20 @@ actor NativeMusicScriptFixture: MusicScriptResolving {
         live = NativeMusicFixture.source(generation: generation, hash: String(repeating: changed ? "b" : "a", count: 64))
         self.gate = gate; self.error = error
     }
+    func coldStart() { live = NativeMusicFixture.source(generation: 0, state: .idle) }
     func sources() -> [MusicScriptSource] { [live] }
     func source(installationID: String) throws -> MusicScriptSource {
         guard installationID == live.installationID else { throw MusicServiceError.sourceUnavailable }; return live
     }
-    func resolve(request: MusicScriptRequest) async throws -> MusicNativeAudio {
+    func resolve(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeAudio> {
         requests.append(request)
+        if live.state == .idle { live = NativeMusicFixture.source(generation: 7) }
+        let executed = live
         if let gate { await gate.wait() }
         if let error { throw error }
-        return .init(url: URL(string: "https://media.invalid/synthetic.flac")!)
+        return .init(value: .init(url: URL(string: "https://media.invalid/synthetic.flac")!), source: executed)
     }
-    func lyrics(request: MusicScriptRequest) -> MusicNativeLyrics { .init(text: "[00:01.000]LX") }
+    func lyrics(request: MusicScriptRequest) -> MusicScriptResult<MusicNativeLyrics> { .init(value: .init(text: "[00:01.000]LX"), source: request.source) }
     func calls() -> [MusicScriptRequest] { requests }
 }
 actor NativeMusicHTTPFixture: MusicNativeHTTPTransport {

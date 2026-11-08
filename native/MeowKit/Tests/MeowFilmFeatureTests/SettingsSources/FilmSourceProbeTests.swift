@@ -1,12 +1,12 @@
 import Foundation
 import XCTest
-import MeowJSON
+import MeowRuntime
 @testable import MeowFilmFeature
 
 final class FilmSourceProbeTests: XCTestCase {
     private func probe(_ runtime: SourcesRuntimeFixture, actions: [String] = ["home", "category", "detail", "play", "search"]) throws -> FilmSourceProbe {
         let cat = try parseFilmCat(SourcesRuntimeFixture.cat("a"))
-        return FilmSourceProbe(transport: .init(rpc: { method, params, _ in try await runtime.rpc(method, params) }),
+        return FilmSourceProbe(transport: runtime.transport,
             cat: cat, site: .init(key: .init(installationId: "a", siteKey: "same"), name: "站点", api: "/api/a",
                 actions: actions, methods: [:]))
     }
@@ -41,6 +41,25 @@ final class FilmSourceProbeTests: XCTestCase {
         XCTAssertTrue(result.steps.contains(.init("play", "empty", "MISSING_PLAY_URL")))
         let actions = await runtime.invocations.map(\.0)
         XCTAssertFalse(actions.contains("search"))
+    }
+
+    func testSpiderBusinessJSONStringsKeepAllFiveProbeOperations() async throws {
+        let runtime = SourcesRuntimeFixture()
+        await runtime.setReply("home", .string(#"{"class":[{"type_id":"中文分类"}]}"#))
+        await runtime.setReply("category", .string(#"{"list":[{"vod_id":"中文影片"}]}"#))
+        await runtime.setReply("detail", .string(#"{"list":[{"vod_play_from":"线路","vod_play_url":"第一集$episode#第二集$ignored"}]}"#))
+        await runtime.setReply("play", .string(#"{"url":"https://example.invalid/video.m3u8"}"#))
+        await runtime.setReply("search", .string(#"{"list":[{"vod_id":"中文影片"}]}"#))
+        let result = try await probe(runtime).run()
+        XCTAssertEqual(result.result, "valid")
+        XCTAssertTrue(result.playbackResolved)
+        XCTAssertFalse(result.mediaPlaybackVerified)
+        XCTAssertEqual(result.steps.map(\.operation), ["home", "category", "detail", "play", "search"])
+        XCTAssertTrue(result.steps.allSatisfy { $0.state == "success" })
+        let invocations = await runtime.invocations
+        XCTAssertEqual(invocations[1].1.catField("id"), .string("中文分类"))
+        XCTAssertEqual(invocations[2].1.catField("id"), .string("中文影片"))
+        XCTAssertEqual(invocations[3].1.catField("id"), .string("episode"))
     }
 
     func testPanResourceIsUnsupportedAndNeverDeclaredMediaPlayback() async throws {
@@ -87,7 +106,7 @@ final class FilmSourceProbeTests: XCTestCase {
             let folder = folder("folder", action: "directory", payload: ["id": .string("folder"), "page": .number(1)])
             await runtime.setReply("detail", .object(["list": .array([folder])]))
             if repeated {
-                let leaf = JSONValue.object(["vod_id": .string("leaf")])
+                let leaf = RuntimeValue.object(["vod_id": .string("leaf")])
                 await runtime.setRoutedReply("directory", id: "folder", page: 1,
                     reply: .object(["list": .array([leaf]), "page": .number(1), "pagecount": .number(3)]))
                 await runtime.setRoutedReply("directory", id: "folder", page: 2,
@@ -101,7 +120,8 @@ final class FilmSourceProbeTests: XCTestCase {
         }
     }
 
-    private func folder(_ id: String, action: String, payload: [String: JSONValue]) -> JSONValue {
-        .object(["vod_id": .string(id), "vod_navigation": .object(["action": .string(action), "payload": .object(payload)])])
+    private func folder(_ id: String, action: String, payload: [String: RuntimeValue]) -> RuntimeValue {
+        .object(["vod_id": .string(id), "vod_navigation": .object([
+            "action": .string(action), "payload": .object(RuntimeObject(payload))])])
     }
 }

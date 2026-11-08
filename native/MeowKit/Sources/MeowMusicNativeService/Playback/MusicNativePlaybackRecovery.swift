@@ -24,6 +24,7 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
     func pinPlaybackRecovery(candidate: MusicPlaybackCandidate, song: MJ, state: MusicDocument) throws {
         try check()
         guard let current = attempt, current.id == candidate.attemptId,
+              current.selection == candidate.resolvedSelection,
               !current.ready, !current.ended else { throw MusicServiceError.staleResult }
         attempt?.recovery = nil
         let selection = current.selection
@@ -89,6 +90,7 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: pin.occurrenceID,
             resourceId: "music:" + attemptID, url: valid.url, headers: valid.headers,
             title: pin.song["title"].string, startPosition: position, requestedQuality: selection.quality,
+            resolvedSelection: selection,
             expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
             delivery: valid.delivery, playbackAuthorization: valid.playbackAuthorization)
         _ = try candidate.resource()

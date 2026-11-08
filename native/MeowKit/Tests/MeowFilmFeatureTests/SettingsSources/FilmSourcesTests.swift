@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-import MeowJSON
+import MeowRuntime
 import MeowStorage
 @testable import MeowFilmFeature
 
@@ -9,9 +9,7 @@ final class FilmSourcesTests: XCTestCase {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-        let owner = FilmSourceService(transport: .init(rpc: { method, params, _ in
-            try await runtime.rpc(method, params)
-        }), storeFactory: { store })
+        let owner = FilmSourceService(transport: runtime.transport, storeFactory: { store })
         return (owner, base, store)
     }
 
@@ -53,7 +51,7 @@ final class FilmSourcesTests: XCTestCase {
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: base) }
             let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-            let owner = FilmSourceService(transport: .init(rpc: { _, _, _ in throw FilmSourceError(code: "HOST_UNAVAILABLE") }),
+            let owner = FilmSourceService(transport: unavailableCatTransport("HOST_UNAVAILABLE"),
                 storeFactory: { store })
             let stream = await owner.snapshots()
             var iterator = stream.makeAsyncIterator()
@@ -82,6 +80,50 @@ final class FilmSourcesTests: XCTestCase {
         await owner.close()
     }
 
+    func testLocalAndNetworkImportsEnableByDefaultAndKeepCandidateRevisionSeparate() async throws {
+        let runtime = SourcesRuntimeFixture()
+        let (owner, base, _) = try makeOwner(runtime)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let source = "// 中文\n" + String(repeating: "x", count: 65_537)
+        let local = try await owner.importLocal(name: "Local", source: source, installationId: "local")
+        XCTAssertTrue(local.enabled)
+        XCTAssertEqual(local.sourceType, "local")
+        XCTAssertNil(local.sourceUrl)
+        let uploads = await runtime.uploads
+        let upload = try XCTUnwrap(uploads.first)
+        XCTAssertEqual(uploads.count, 1)
+        XCTAssertEqual(upload.0, "local")
+        XCTAssertEqual(upload.2, Data(source.utf8))
+        let requests = await runtime.requests
+        let install = try XCTUnwrap(requests.first { $0.0 == "install" }?.1)
+        XCTAssertEqual(install, .object(["installationId": .string("local"), "name": .string("Local"),
+            "sourceType": .string("local"), "sourceUrl": .null, "enabled": .bool(true),
+            "sourceRevision": .number(Double(upload.1))]))
+        let updated = try await owner.updateCat("local", source: "// replacement")
+        XCTAssertEqual(updated.sourceType, "local")
+        let updatedUploads = await runtime.uploads
+        XCTAssertEqual(updatedUploads.count, 2)
+        let updateRequests = await runtime.requests
+        XCTAssertEqual(updateRequests.first { $0.0 == "update" }?.1,
+            .object(["installationId": .string("local"), "sourceRevision": .number(Double(updatedUploads[1].1))]))
+        let network = try await owner.importNetwork(name: "Network", sourceURL: "https://example.invalid/source.js", installationId: "network")
+        XCTAssertTrue(network.enabled)
+        XCTAssertEqual(network.sourceType, "network")
+        _ = try await owner.editCat("network", name: "Edited", sourceURL: "https://example.invalid/edited.js")
+        _ = try await owner.updateCat("network")
+        let finalRequests = await runtime.requests
+        XCTAssertEqual(finalRequests.first { $0.0 == "import" }?.1,
+            .object(["installationId": .string("network"), "name": .string("Network"),
+                "sourceUrl": .string("https://example.invalid/source.js"), "enabled": .bool(true)]))
+        XCTAssertEqual(finalRequests.first { $0.0 == "edit" }?.1,
+            .object(["installationId": .string("network"), "name": .string("Edited"),
+                "sourceUrl": .string("https://example.invalid/edited.js")]))
+        XCTAssertEqual(finalRequests.last { $0.0 == "update" }?.1, .object(["installationId": .string("network")]))
+        let finalUploads = await runtime.uploads
+        XCTAssertEqual(finalUploads.count, 2, "Network imports and updates download inside the runtime")
+        await owner.close()
+    }
+
     func testOptionsOrderingTombstonesAndExplicitReimportAreLocalAndDurable() async throws {
         let runtime = SourcesRuntimeFixture()
         let (owner, base, store) = try makeOwner(runtime)
@@ -99,7 +141,7 @@ final class FilmSourcesTests: XCTestCase {
         _ = try await owner.restartCat("a")
         snapshot = await owner.snapshot
         XCTAssertEqual(snapshot.videos.map(\.key), [b])
-        let rebuilt = FilmSourceService(transport: .init(rpc: { method, params, _ in try await runtime.rpc(method, params) }),
+        let rebuilt = FilmSourceService(transport: runtime.transport,
             storeFactory: { store })
         try await rebuilt.initialize()
         let restored = await rebuilt.snapshot
@@ -169,15 +211,17 @@ final class FilmSourcesTests: XCTestCase {
         let before = await owner.snapshot
         guard case .object(var failedCat) = SourcesRuntimeFixture.cat("a") else { return XCTFail("Fixture") }
         failedCat["updateState"] = .string("failed")
-        failedCat["updateError"] = .string("UPDATE_FAILED")
+        failedCat["updateError"] = .string("SCRIPT_EXCEPTION")
+        failedCat["generation"] = .number(2)
         await runtime.setCat(.object(failedCat))
-        await runtime.failNext("update", code: "UPDATE_FAILED")
+        await runtime.failNext("update", code: "SCRIPT_EXCEPTION")
         do { _ = try await owner.updateCat("a"); XCTFail("Failed update") }
-        catch let error as FilmSourceError { XCTAssertEqual(error.code, "UPDATE_FAILED") }
+        catch let error as FilmSourceError { XCTAssertEqual(error.code, "SCRIPT_EXCEPTION") }
         let after = await owner.snapshot
         let cat = try XCTUnwrap(after.cats.first { $0.installationId == "a" })
         XCTAssertEqual(cat.updateState, "failed")
-        XCTAssertEqual(cat.updateError, "UPDATE_FAILED")
+        XCTAssertEqual(cat.updateError, "SCRIPT_EXCEPTION")
+        XCTAssertEqual(cat.generation, 2, "Recovery may restart the accepted source in a fresh generation")
         XCTAssertEqual(cat.sourceHash, before.cats.first?.sourceHash)
         XCTAssertEqual(cat.modifiedAt, before.cats.first?.modifiedAt)
         XCTAssertEqual(after.videos, before.videos)
@@ -186,6 +230,71 @@ final class FilmSourcesTests: XCTestCase {
         let restarted = await owner.snapshot
         XCTAssertEqual(restarted.cats.first?.modifiedAt, cat.modifiedAt)
         await owner.close()
+    }
+
+    func testCommittedManagementFailureReconcilesStatusWithoutRestoringTombstone() async throws {
+        for operation in ["update", "import"] {
+            let runtime = SourcesRuntimeFixture()
+            let (owner, base, store) = try makeOwner(runtime)
+            defer { try? FileManager.default.removeItem(at: base) }
+            try await owner.refresh()
+            let key = FilmSourceKey(installationId: "a", siteKey: "same")
+            try await owner.deleteVideo(key)
+            let before = try store.read(key: FilmSourceService.documentKey)
+            await runtime.failAfterCommit(operation, code: "COMMIT_UNKNOWN")
+            do {
+                if operation == "update" { _ = try await owner.updateCat("a") }
+                else { _ = try await owner.importNetwork(name: "Committed", sourceURL: "https://example.invalid/committed.js", installationId: "a") }
+                XCTFail("A committed error remains an error")
+            } catch let error as FilmSourceError { XCTAssertEqual(error.code, "COMMIT_UNKNOWN") }
+            let snapshot = await owner.snapshot
+            let cat = try XCTUnwrap(snapshot.cats.first { $0.installationId == "a" })
+            if operation == "update" {
+                XCTAssertEqual(cat.sourceHash, "committed-hash")
+                XCTAssertEqual(cat.updateState, "updated")
+            } else {
+                XCTAssertEqual(cat.name, "Committed")
+                XCTAssertEqual(cat.sourceUrl, "https://example.invalid/committed.js")
+            }
+            XCTAssertFalse(snapshot.videos.contains { $0.key == key }, "A failed import has no successful restore receipt")
+            XCTAssertNotEqual(try store.read(key: FilmSourceService.documentKey), before)
+            let calls = await runtime.calls
+            XCTAssertEqual(Array(calls.suffix(2)), [operation, "status"])
+            await owner.close()
+            let rebuilt = FilmSourceService(transport: runtime.transport, storeFactory: { store })
+            try await rebuilt.initialize()
+            let restored = await rebuilt.snapshot
+            XCTAssertEqual(restored.cats.first { $0.installationId == "a" }?.sourceHash, cat.sourceHash)
+            XCTAssertEqual(restored.cats.first { $0.installationId == "a" }?.name, cat.name)
+            XCTAssertFalse(restored.videos.contains { $0.key == key })
+            await rebuilt.close()
+        }
+    }
+
+    func testMalformedImportReceiptReconcilesCommittedStatusWithoutRestoringTombstone() async throws {
+        let runtime = SourcesRuntimeFixture()
+        let (owner, base, store) = try makeOwner(runtime)
+        defer { try? FileManager.default.removeItem(at: base) }
+        try await owner.refresh()
+        let key = FilmSourceKey(installationId: "a", siteKey: "same")
+        try await owner.deleteVideo(key)
+        await runtime.returnNext("import", value: .object(["instances": .array([SourcesRuntimeFixture.cat("a")])]))
+        do {
+            _ = try await owner.importNetwork(name: "Committed", sourceURL: "https://example.invalid/committed.js", installationId: "a")
+            XCTFail("Import must return its instance directly")
+        } catch let error as FilmSourceError { XCTAssertEqual(error.code, "INVALID_RESPONSE") }
+        let snapshot = await owner.snapshot
+        XCTAssertEqual(snapshot.cats.first { $0.installationId == "a" }?.name, "Committed")
+        XCTAssertFalse(snapshot.videos.contains { $0.key == key })
+        let calls = await runtime.calls
+        XCTAssertEqual(Array(calls.suffix(2)), ["import", "status"])
+        await owner.close()
+        let rebuilt = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), storeFactory: { store })
+        try await rebuilt.initialize()
+        let restored = await rebuilt.snapshot
+        XCTAssertEqual(restored.cats.first { $0.installationId == "a" }?.name, "Committed")
+        XCTAssertFalse(restored.videos.contains { $0.key == key })
+        await rebuilt.close()
     }
 
     func testNewDeletionWinsAgainstInFlightReimport() async throws {
@@ -245,7 +354,7 @@ final class FilmSourcesTests: XCTestCase {
         XCTAssertEqual(invocations[2].1, .object(["id": .string("v1"), "vod_id": .string("v1")]))
         XCTAssertEqual(invocations[3].1, .object(["flag": .string("线路"), "id": .string("episode"), "siteApi": .string("/api/a")]))
         XCTAssertEqual(invocations[4].1, .object(["wd": .string("斗破"), "page": .number(1)]))
-        let rebuilt = FilmSourceService(transport: .init(rpc: { _, _, _ in throw FilmSourceError(code: "OFFLINE") }), storeFactory: { store })
+        let rebuilt = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), storeFactory: { store })
         try await rebuilt.initialize()
         let snapshot = await rebuilt.snapshot
         XCTAssertEqual(snapshot.videos.first { $0.key == key }?.options, options)
@@ -279,6 +388,40 @@ final class FilmSourcesTests: XCTestCase {
             await closing?.value
             let snapshot = await owner.snapshot
             XCTAssertTrue(snapshot.videos.allSatisfy { $0.detection == nil })
+            await owner.close()
+        }
+    }
+
+    func testPrepareShutdownDrainsAdmittedUploadAndManagementRequest() async throws {
+        for operation in ["upload", "install"] {
+            let runtime = SourcesRuntimeFixture()
+            let (owner, base, store) = try makeOwner(runtime)
+            defer { try? FileManager.default.removeItem(at: base) }
+            try await owner.refresh()
+            let before = await owner.snapshot
+            let bytes = try store.read(key: FilmSourceService.documentKey)
+            await runtime.pause(operation)
+            let importing = Task { try await owner.importLocal(name: "Replacement", source: "source", installationId: "a") }
+            await runtime.waitUntilPaused()
+            let prepared = expectation(description: "Shutdown drained \(operation)")
+            prepared.isInverted = true
+            let preparing = Task { await owner.prepareShutdown(); prepared.fulfill() }
+            await runtime.waitUntilCancelled()
+            await fulfillment(of: [prepared], timeout: 0.05)
+            let admittedCalls = await runtime.calls
+            XCTAssertEqual(admittedCalls.filter { $0 == operation }.count, 1)
+            await runtime.release()
+            do { _ = try await importing.value; XCTFail("Cancelled import cannot publish") }
+            catch { XCTAssertTrue(error is CancellationError, "\(error)") }
+            await preparing.value
+            let snapshot = await owner.snapshot
+            XCTAssertEqual(snapshot, before)
+            XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), bytes)
+            let calls = await runtime.calls
+            XCTAssertEqual(calls.filter { $0 == "status" }.count, 1, "Cancellation must not admit reconciliation work")
+            XCTAssertEqual(calls.filter { $0 == "install" }.count, operation == "install" ? 1 : 0)
+            try await owner.resume()
+            try await owner.refresh()
             await owner.close()
         }
     }
@@ -325,22 +468,33 @@ actor SourcesRuntimeFixture {
     var cats = [SourcesRuntimeFixture.cat("a"), SourcesRuntimeFixture.cat("b")]
     var calls: [String] = []
     private var nextFailures: [String: String] = [:]
-    private var uploadOffset = 0
+    private var committedFailures: [String: String] = [:]
+    private var nextResults: [String: RuntimeValue] = [:]
+    var requests: [(String, RuntimeValue)] = []
+    var uploads: [(String, Int, Data)] = []
+    private var candidates: [String: Int] = [:]
+
+    nonisolated var transport: CatScriptTransport {
+        CatScriptTransport(request: { operation, params in try await self.request(operation, params) },
+            upload: { id, revision, source in try await self.upload(id, revision, source) })
+    }
     func failNext(_ operation: String, code: String) { nextFailures[operation] = code }
-    func setCat(_ cat: JSONValue) {
+    func failAfterCommit(_ operation: String, code: String) { committedFailures[operation] = code }
+    func returnNext(_ operation: String, value: RuntimeValue) { nextResults[operation] = value }
+    func setCat(_ cat: RuntimeValue) {
         let id = cat.catField("installationId")
         if let index = cats.firstIndex(where: { $0.catField("installationId") == id }) { cats[index] = cat }
         else { cats.append(cat) }
     }
-    var invocations: [(String, JSONValue)] = []
+    var invocations: [(String, RuntimeValue)] = []
     var invocationSiteKeys: [String] = []
     private var pausedOperation: String?
     private var paused = false
     private var entered: [CheckedContinuation<Void, Never>] = []
     private var pending: CheckedContinuation<Void, Never>?
-    var replies: [String: JSONValue] = [:]
-    private var routedReplies: [String: JSONValue] = [:]
-    func setRoutedReply(_ action: String, id: String, page: Int, reply: JSONValue) {
+    var replies: [String: RuntimeValue] = [:]
+    private var routedReplies: [String: RuntimeValue] = [:]
+    func setRoutedReply(_ action: String, id: String, page: Int, reply: RuntimeValue) {
         routedReplies["\(action):\(id):\(page)"] = reply
     }
     private var cancelled = false
@@ -354,18 +508,18 @@ actor SourcesRuntimeFixture {
         let waiting = cancelledWaiters; cancelledWaiters.removeAll(); waiting.forEach { $0.resume() }
     }
 
-    static func cat(_ id: String, state: String = "ready", enabled: Bool = true, generation: Int = 1) -> JSONValue {
+    static func cat(_ id: String, state: String = "ready", enabled: Bool = true, generation: Int = 1) -> RuntimeValue {
         .object(["installationId": .string(id), "name": .string(id.uppercased()), "sourceType": .string("network"),
             "sourceUrl": .string("https://example.invalid/\(id).js"), "enabled": .bool(enabled),
             "importedAt": .number(100), "updatedAt": .null, "updateState": .string("idle"), "updateError": .null,
             "generation": .number(Double(generation)), "state": .string(state), "sourceHash": .string("hash"), "error": .null,
             "sites": state == "ready" ? .array([.object(["key": .string("same"), "name": .string("站点"),
-                "api": .string("/api/\(id)"), "actions": .array(["home", "category", "detail", "play", "search"].map(JSONValue.string)),
+                "api": .string("/api/\(id)"), "actions": .array(["home", "category", "detail", "play", "search"].map(RuntimeValue.string)),
                 "methods": .object(["home": .string("GET"), "play": .string("POST")])])]) : .array([])])
     }
     func setState(_ state: String, id: String) { cats[cats.firstIndex { $0.catField("installationId") == .string(id) }!] = Self.cat(id, state: state) }
     func changeGeneration() { cats[0] = Self.cat("a", generation: 2) }
-    func setReply(_ operation: String, _ reply: JSONValue) { replies[operation] = reply }
+    func setReply(_ operation: String, _ reply: RuntimeValue) { replies[operation] = reply }
     func pause(_ operation: String) { pausedOperation = operation; paused = false }
     func waitUntilPaused() async {
         if paused { return }
@@ -373,9 +527,7 @@ actor SourcesRuntimeFixture {
     }
     func release() { pending?.resume(); pending = nil }
 
-    func rpc(_ method: String, _ params: JSONValue) async throws -> JSONValue {
-        let operation = String(method.dropFirst("cat.script.".count))
-        calls.append(operation)
+    private func suspendIfNeeded(_ operation: String) async {
         if pausedOperation == operation {
             pausedOperation = nil; paused = true
             await withTaskCancellationHandler {
@@ -385,26 +537,54 @@ actor SourcesRuntimeFixture {
                 }
             } onCancel: { Task { await self.recordCancellation() } }
         }
-        if let code = nextFailures.removeValue(forKey: operation) {
-            return .object(["ok": .bool(false), "contract": .string("cat.script.v1"), "code": .string(code)])
-        }
+    }
+
+    func upload(_ id: String, _ revision: Int, _ source: Data) async throws -> RuntimeValue {
+        calls.append("upload")
+        uploads.append((id, revision, source))
+        await suspendIfNeeded("upload")
+        if let code = nextFailures.removeValue(forKey: "upload") { throw RuntimeHTTPError.remote(code) }
+        candidates[id] = revision
+        return .object(["installationId": .string(id), "sourceRevision": .number(Double(revision)),
+            "sourceBytes": .number(Double(source.count)), "contentHash": .string("fixture-content")])
+    }
+
+    func request(_ operation: String, _ params: RuntimeValue) async throws -> RuntimeValue {
+        calls.append(operation)
+        requests.append((operation, params))
+        await suspendIfNeeded(operation)
+        if let code = nextFailures.removeValue(forKey: operation) { throw RuntimeHTTPError.remote(code) }
         let id = params.catField("installationId")?.catText ?? "a"
-        let result: JSONValue
+        let result: RuntimeValue
         switch operation {
-        case "stage.begin":
-            uploadOffset = 0
-            return .object(["ok": .bool(true), "contract": .string("cat.script.v1"),
-                "token": .string("fixture-upload"), "chunkBytes": .number(65_536)])
-        case "stage.chunk":
-            guard let encoded = params.catField("data")?.catText, let bytes = Data(base64Encoded: encoded),
-                  params.catField("offset")?.catInteger == uploadOffset else { throw FilmSourceError(code: "INVALID_UPLOAD") }
-            uploadOffset += bytes.count
-            return .object(["ok": .bool(true), "contract": .string("cat.script.v1"), "next": .number(Double(uploadOffset))])
-        case "stage.abort":
-            return .object(["ok": .bool(true), "contract": .string("cat.script.v1"), "released": .bool(true)])
         case "status": result = .object(["instances": .array(cats)])
         case "start": result = .object([:])
-        case "import", "install", "restart", "edit", "update": result = cats.first { $0.catField("installationId") == .string(id) }!
+        case "install", "import", "edit", "update", "restart":
+            var cat = cats.first { $0.catField("installationId") == .string(id) } ?? Self.cat(id)
+            if operation == "install" || (operation == "update" && cat.catField("sourceType") == .string("local")) {
+                guard params.catField("sourceRevision")?.catInteger == candidates[id], candidates[id] != nil else {
+                    throw RuntimeHTTPError.remote("NOT_FOUND")
+                }
+                candidates[id] = nil
+            }
+            if operation == "update", cat.catField("sourceType") == .string("network"), params.catField("sourceRevision") != nil {
+                throw RuntimeHTTPError.remote("INVALID_ARGUMENT")
+            }
+            if case .object(var fields) = cat {
+                for field in ["name", "sourceUrl", "enabled"] {
+                    if let value = params.catField(field) { fields[field] = value }
+                }
+                if operation == "install" { fields["sourceType"] = .string("local") }
+                if operation == "import" { fields["sourceType"] = .string("network") }
+                if operation == "update", committedFailures[operation] != nil {
+                    fields["sourceHash"] = .string("committed-hash")
+                    fields["updateState"] = .string("updated")
+                    fields["updatedAt"] = .number(200)
+                }
+                cat = .object(fields)
+            }
+            setCat(cat)
+            result = cat
         case "enable":
             let enabled = params.catField("enabled") == .bool(true)
             let cat = Self.cat(id, state: enabled ? "ready" : "disabled", enabled: enabled)
@@ -414,7 +594,8 @@ actor SourcesRuntimeFixture {
         case "invoke":
             invocationSiteKeys.append(params.catField("siteId")!.catText!)
             let action = params.catField("operation")!.catText!
-            let payload = try CatScriptTransport.parse(Data(params.catField("payload")!.catText!.utf8))
+            guard case .object? = params.catField("payload") else { throw RuntimeHTTPError.remote("INVALID_ARGUMENT") }
+            let payload = params.catField("payload")!
             invocations.append((action, payload))
             let routeID = payload.catField("id")?.catText ?? ""
             let page = payload.catField("pg")?.catInteger ?? payload.catField("page")?.catInteger ?? 1
@@ -430,11 +611,12 @@ actor SourcesRuntimeFixture {
             }
         default: throw FilmSourceError(code: "UNEXPECTED_CALL")
         }
-        return try Self.envelope(result)
+        if let code = committedFailures.removeValue(forKey: operation) { throw RuntimeHTTPError.remote(code) }
+        return nextResults.removeValue(forKey: operation) ?? result
     }
+}
 
-    static func envelope(_ value: JSONValue) throws -> JSONValue {
-        .object(["ok": .bool(true), "contract": .string("cat.script.v1"),
-            "data": .string(String(decoding: try JSONEncoder().encode(value), as: UTF8.self))])
-    }
+func unavailableCatTransport(_ code: String) -> CatScriptTransport {
+    CatScriptTransport(request: { _, _ in throw FilmSourceError(code: code) },
+        upload: { _, _, _ in throw FilmSourceError(code: code) })
 }

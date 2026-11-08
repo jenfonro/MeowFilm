@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "esbuild": "0.28.1",
-    "node-gyp": "11.5.0"
+    "node-gyp": "11.5.0",
+    "undici": "6.29.1"
   }
 }

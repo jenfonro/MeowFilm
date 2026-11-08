@@ -4,9 +4,11 @@
 
 `build-ios.sh` 是 iOS 产品构建入口：使用 Xcode 构建 Release／iphoneos／arm64 未签名 IPA，在 `tmp/` 暂存和校验，成功后整体替换 `build/ios/`。
 
-构建机需要 Node 24（参考 24.21.0）及根锁依赖 `npm ci --ignore-scripts`；客户端不需要用户安装 Node。`prepare-ios-runtime.py` 校验 `scripts/ios-node-mobile.json` 锁定的 Node Mobile 18.20.4 archive／许可，复用 `.cache/nodejs-mobile/ios/NodeMobile.xcframework`，并离线生成 `.cache/ios-runtime/Runtime`。后者由 `package-ios-runtime.mjs` 包装公共打包器，包含 `complete`／`ios-socketpair-v1` manifest、iOS entry、music/Cat 和 asmjs，不包含 Windows 入口、WASM 或 source 模块。
+构建机需要 Node 24（参考 24.21.0）及根锁依赖 `npm ci --ignore-scripts`；客户端不需要用户安装 Node。`prepare-ios-runtime.py` 校验 `scripts/ios-node-mobile.json` 锁定的 Node Mobile 18.20.4 archive／许可，复用 `.cache/nodejs-mobile/ios/NodeMobile.xcframework`，并按 iOS SDK／架构准备 `MeowScriptHost.framework` 和公共载荷。`package-ios-runtime.mjs` 包装公共 `common-native` 打包器，包含 `complete`／`runtime.http.v1` manifest、iOS entry、music／Cat／source 和规则 SDK，不包含 Windows 入口或 WASM／asm.js 引擎。
 
-`build-ios.sh`、`test-native.sh compile|all` 自动准备这些输入；直接运行 Xcode 前先执行 `python3 -I -B scripts/prepare-ios-runtime.py`。可用 `MEOWFILM_BUILD_NODE` 指定构建工具 Node 路径；它不改变 App 内嵌版本。工程将 NodeMobile.framework 链接并设为 CodeSignOnCopy，载荷及 Node Mobile 许可随 App 资源打包。影视规则另经本地 `MeowJavaScript` SwiftPM 包静态链接锁定 QuickJS-NG 派生 C 源码；`FilmRuleProgram` 携带唯一共享 JS，中央 `quickjs-native-MIT.txt` 和 `Unicode-3.0.txt` 由 Xcode 随 App 打包。准备工具同时校验 `scripts/quickjs-native.json`，不下载另一套规则引擎或现场应用补丁。CI 两个工作流均恢复锁定依赖，不使用系统已装 Node 的隐式状态。
+`build-ios.sh`、`test-native.sh compile|all` 自动准备这些输入；直接运行 Xcode 前先准备相同目标的载体与载荷。可用 `MEOWFILM_BUILD_NODE` 指定构建工具 Node 路径；它不改变 App 内嵌版本。工程嵌入并签名 NodeMobile 和 MeowScriptHost，载荷及适用许可随 App 分发。影视规则另经本地 `MeowJavaScript` SwiftPM 包静态链接锁定 QuickJS-NG 派生 C 源码；`FilmRuleProgram` 携带唯一共享 JS，中央 `quickjs-native-MIT.txt` 和 `Unicode-3.0.txt` 由 Xcode 随 App 打包。准备工具同时校验 `scripts/quickjs-native.json`，不下载另一套客户端规则引擎或现场应用补丁。CI 两个工作流均恢复锁定依赖，不使用系统已装 Node 的隐式状态。
+
+设备与模拟器目标分别校验，不能按构建机架构猜测产物平台。原生构建回执记录签名前文件身份；侧载重签后的运行校验依赖正式签名域及内置构建身份，不要求 Mach-O 签名区保持原始 hash。该规则只适用于 App 内置载体，不开放上传原生代码或削弱桌面引擎校验。详细边界见[运行底座预检](runtime-preflight.md)。
 
 `build/ios/` 只包含：
 

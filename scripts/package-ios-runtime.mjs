@@ -6,9 +6,10 @@ import { createHash } from 'node:crypto';
 import { join, posix, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { packageRuntime } from './package-runtime.mjs';
+import { iosTarget } from './quickjs/ios-target.mjs';
 
 const MANIFEST = 'runtime-manifest.json';
-const TRANSPORT = 'ios-socketpair-v1';
+const TRANSPORT = 'runtime.http.v1';
 const IOS_SOURCE = 'apps/ios/runtime';
 const IOS_OUTPUT = 'app/ios';
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
@@ -92,9 +93,10 @@ function relocate(source, imports) {
  * the result as a code-signed resource; Node Mobile is not part of this payload.
  */
 export async function packageIOSRuntime({
-  root = fileURLToPath(new URL('../', import.meta.url)), product, output,
+  root = fileURLToPath(new URL('../', import.meta.url)), product, output, sdk, arch,
 } = {}) {
-  const manifest = await packageRuntime({ root, product, output, profile: 'ios-embedded' });
+  const target = iosTarget(sdk, arch);
+  const manifest = await packageRuntime({ root, product, output, profile: 'common-native', target });
   root = realpathSync(root);
   output = resolve(output);
   const identity = lstatSync(output);
@@ -143,10 +145,13 @@ export async function packageIOSRuntime({
     check(stat.isFile() && opened.dev === stat.dev && opened.ino === stat.ino &&
       readFileSync(fd).equals(originalManifest),
     'MANIFEST_CHANGED', 'Shared runtime manifest changed before iOS packaging');
-    delete manifest.sharedEntry;
+    check(manifest.trustedNative.length === 1 && manifest.trustedNative[0].platform === 'ios'
+      && manifest.trustedNative[0].package === '@meowfilm/script-host',
+    'INVALID_NATIVE_RECEIPT', 'The iOS runtime requires the reviewed embedded framework');
     manifest.entry = `${IOS_OUTPUT}/entries/${product}.mjs`;
     manifest.platform = 'ios';
     manifest.transport = TRANSPORT;
+    manifest.target = target;
     manifest.status = 'building';
     // Self-hashing a manifest is undefined; every OTHER emitted file is hashed.
     manifest.fileHashExcludes = [MANIFEST];
@@ -188,27 +193,37 @@ export async function packageIOSRuntime({
       manifest.files.push({ path, bytes: bytes.length, sha256: digest(bytes) });
       delete manifest.incompleteFile;
     }
-    const bootstrapImports = new Map([
-      ['node:path', 'node:path'],
-      ['@meowfilm/runtime-bridge', '@meowfilm/runtime-bridge'],
-      ['@meowfilm/runtime-bridge/descriptor', '@meowfilm/runtime-bridge/descriptor'],
-      ['../../runtime/bootstrap.mjs', '../bootstrap.mjs'],
+    const platformImports = new Set([
+      'node:path', 'node:net', 'node:fs', 'node:crypto', 'node:buffer', 'node:util',
+      '@meowfilm/runtime-bridge',
     ]);
-    const entryImports = new Map([
-      ['node:path', 'node:path'],
-      ['../bootstrap.mjs', '../bootstrap.mjs'],
+    const sharedImports = new Map([
+      ['../../../packages/script-host/src/native-engine.js', '../../node_modules/@meowfilm/script-host/src/native-engine.js'],
+      ['../../runtime/bootstrap.mjs', '../bootstrap.mjs'],
       ['../../../runtime/modules/music-script.mjs', '../../modules/music-script.mjs'],
       ['../../../runtime/modules/cat-script.mjs', '../../modules/cat-script.mjs'],
+      ['../../../runtime/modules/source-runtime.mjs', '../../modules/source-runtime.mjs'],
+      ['../bootstrap.mjs', '../bootstrap.mjs'],
     ]);
-    for (const [relative, imports] of [['bootstrap.mjs', bootstrapImports], ['entries/aggregate.mjs', entryImports]]) {
+    for (const relative of ['bootstrap.mjs', 'entries/aggregate.mjs']) {
       const source = `${IOS_SOURCE}/${relative}`, path = `${IOS_OUTPUT}/${relative}`;
       const input = readStable(root, source);
       const text = new TextDecoder('utf-8', { fatal: true }).decode(input);
+      const imports = new Map();
+      for (const match of text.matchAll(/^import\s+\{[^{}]+\}\s+from\s+(['"])([^'"\r\n]+)\1;[ \t]*\r?$/gm)) {
+        const specifier = match[2];
+        check(!imports.has(specifier) && (sharedImports.has(specifier) || platformImports.has(specifier)),
+          'IOS_IMPORT', 'Unexpected or duplicate iOS runtime import');
+        imports.set(specifier, sharedImports.get(specifier) ?? specifier);
+      }
       const bytes = relocate(text, imports);
       sourceInputs.push({ path: source, sha256: digest(input) });
       appendFile(path, bytes);
       manifest.relocations.push({ source, path, imports: [...imports].map(([from, to]) => ({ from, to })) });
     }
+    const notice = readStable(root, 'LICENSES/NOTICE.md');
+    sourceInputs.push({ path: 'LICENSES/NOTICE.md', sha256: digest(notice) });
+    appendFile('licenses/NOTICE.md', notice);
     manifest.inputs.push(...sourceInputs);
     for (const input of manifest.inputs) {
       check(digest(readStable(root, input.path)) === input.sha256,
@@ -242,8 +257,8 @@ export async function packageIOSRuntime({
 async function main(args) {
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
-    check(['--product', '--output'].includes(args[i]) && args[i + 1] && !Object.hasOwn(options, args[i].slice(2)),
-      'CLI_USAGE', 'Usage: node scripts/package-ios-runtime.mjs --product aggregate --output <new absolute directory>');
+    check(['--product', '--output', '--sdk', '--arch'].includes(args[i]) && args[i + 1] && !Object.hasOwn(options, args[i].slice(2)),
+      'CLI_USAGE', 'Usage: node scripts/package-ios-runtime.mjs --product aggregate --sdk <sdk> --arch <arch> --output <new absolute directory>');
     options[args[i].slice(2)] = args[i + 1];
   }
   check(options.product && options.output, 'CLI_USAGE', 'Both --product and --output are required');

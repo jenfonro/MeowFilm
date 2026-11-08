@@ -538,7 +538,7 @@ private actor MusicPlatformScopeScripts: MusicScriptResolving {
     private var calls: [String] = []
     func events() -> [String] { calls }
     private func snapshot() -> MusicScriptSource {
-        .init(installationID: Self.installation, generation: 1, enabled: true, ready: true, version: "1",
+        .init(installationID: Self.installation, generation: 1, enabled: true, state: .ready, version: "1",
             contentHash: String(repeating: "a", count: 64), revisionHash: String(repeating: "a", count: 64),
             capabilities: MusicPublicBrowsePlatform.allCases.map {
                 .init(siteID: $0.rawValue, title: "Synthetic script", actions: ["musicUrl", "lyric"], qualities: ["128k"])
@@ -550,12 +550,12 @@ private actor MusicPlatformScopeScripts: MusicScriptResolving {
         guard installationID == Self.installation else { throw MusicServiceError.sourceUnavailable }
         return snapshot()
     }
-    func resolve(request: MusicScriptRequest) -> MusicNativeAudio {
+    func resolve(request: MusicScriptRequest) -> MusicScriptResult<MusicNativeAudio> {
         calls.append("resolve:" + request.siteID)
-        return .init(url: URL(string: "https://media.invalid/scoped.mp3")!)
+        return .init(value: .init(url: URL(string: "https://media.invalid/scoped.mp3")!), source: request.source)
     }
-    func lyrics(request: MusicScriptRequest) -> MusicNativeLyrics {
+    func lyrics(request: MusicScriptRequest) -> MusicScriptResult<MusicNativeLyrics> {
         calls.append("lyrics:" + request.siteID)
-        return .init(text: "[00:01.000]Synthetic")
+        return .init(value: .init(text: "[00:01.000]Synthetic"), source: request.source)
     }
 }

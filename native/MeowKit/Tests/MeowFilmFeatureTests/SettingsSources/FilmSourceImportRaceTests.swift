@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-import MeowJSON
+import MeowRuntime
 import MeowStorage
 @testable import MeowFilmFeature
 
@@ -13,7 +13,7 @@ final class FilmSourceImportRaceTests: XCTestCase {
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
         let runtime = SourcesRuntimeFixture()
-        let transport = CatScriptTransport(rpc: { method, params, _ in try await runtime.rpc(method, params) })
+        let transport = runtime.transport
         let service: FilmSourceService
         if let reader { service = FilmSourceService(transport: transport, storeFactory: { store }, readSourceFile: reader) }
         else { service = FilmSourceService(transport: transport, storeFactory: { store }) }
@@ -29,7 +29,7 @@ final class FilmSourceImportRaceTests: XCTestCase {
     }
 
     private func assertDeletedAfterRebuild(_ runtime: SourcesRuntimeFixture, store: DocumentStore) async throws {
-        let rebuilt = FilmSourceService(transport: .init(rpc: { method, params, _ in try await runtime.rpc(method, params) }),
+        let rebuilt = FilmSourceService(transport: runtime.transport,
             storeFactory: { store })
         try await rebuilt.initialize()
         let initial = await rebuilt.snapshot
@@ -76,9 +76,9 @@ final class FilmSourceImportRaceTests: XCTestCase {
         try await service.refresh()
         let oldDeletion = FilmSourceKey(installationId: "b", siteKey: "same")
         // Same parent: one deletion precedes admission, the other happens while reading.
-        var cat = try JSONDecoder().decode(FilmCatSource.self, from: JSONEncoder().encode(SourcesRuntimeFixture.cat("a")))
+        var cat = try parseFilmCat(SourcesRuntimeFixture.cat("a"))
         cat.sites.append(.init(key: "old", name: "Old", api: "/old", actions: [], methods: [:]))
-        await runtime.setCat(try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(cat)))
+        await runtime.setCat(try RuntimeJSON.decode(JSONEncoder().encode(cat)))
         try await service.refresh()
         let old = FilmSourceKey(installationId: "a", siteKey: "old")
         try await service.deleteVideo(old)

@@ -139,9 +139,11 @@ public actor MusicCandidateDiscoveryConsumer {
     private static func validate(_ candidate: MusicPlaybackCandidate, target: MusicCandidateDiscoveryTarget,
                                  attempt: String, occurrence: String, rejectedURLs: Set<URL>) throws {
         guard candidate.attemptId == attempt, candidate.occurrenceId == occurrence,
-              candidate.resourceId == "music:" + attempt, candidate.requestedQuality == target.quality else {
+              candidate.resourceId == "music:" + attempt,
+              target.option.revisionHash == target.selection.scriptIdentity?.revisionHash else {
             throw MusicServiceError.invalidResponse
         }
+        try candidate.validateResolvedSelection(for: target.selection)
         _ = try candidate.resource()
         // A syntactically valid URL that already failed is a resolution failure,
         // not a successful candidate. Automatic mode keeps its existing bounded

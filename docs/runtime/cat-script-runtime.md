@@ -10,7 +10,7 @@ version: 0.2.0
 contract: cat.script.v2
 ```
 
-`createCatScriptModule({dataRoot})` 接收受信调用方选定的稳定绝对数据目录。公共独立入口见 [Runtime HTTP](runtime-bridge.md)；模块负责完整源码候选、设置、安装、Node Worker、私有卷、服务端口、Cat 调用和关闭。Windows/iOS 的旧接入本轮未迁移，不提供旧 wire 兼容。
+`createCatScriptModule({dataRoot})` 接收受信调用方选定的稳定绝对数据目录。公共独立入口见 [Runtime HTTP](runtime-bridge.md)；模块负责完整源码候选、设置、安装、Node Worker、私有卷、服务端口、Cat 调用和关闭。iOS 接入见[影视设置](../ios/film-settings.md#猫源与公共宿主)，Windows 接入见[平台接入](../windows/app-runtime.md)；不提供旧 wire 兼容。
 
 ## HTTP 与完整导入
 
@@ -31,7 +31,7 @@ contract: cat.script.v2
 
 源码一次 `PUT /v1/cat/sources/{installationId}/{sourceRevision}`，body 为 `application/octet-stream`，不需要 basename；仅完整、有效的上传成为候选。`install` 指定 installationId/sourceRevision，config 直接为 object，version 缺省为 0.0.0，新安装 enabled 缺省 true，不增加 Cat revision CAS。`invoke.payload` 和 `management.sync.credentials` 直接为 object，不接受 JSON 字符串替代；invoke 的 generation 可选，payload 缺省空 object。
 
-普通请求一次 JSON POST，成功 `{ok:true,contract:"cat.script.v2",value}`；value 是原业务对象、数组、标量或 null。没有普通 JSON 大小分流、总字节配额、正文压缩或自动加工；旧 stage/control/blob、Base64、分片 token、TTL、offset 和传输 checksum 已删除。HTTP 取消和实际排空见 [公共传输](runtime-bridge.md#取消反向能力与清理)。
+普通请求一次 JSON POST，成功 `{ok:true,contract:"cat.script.v2",value}`；value 是原业务对象、数组、标量或 null。没有普通 JSON 大小分流、总字节配额、正文压缩或自动加工；旧 stage/control/blob、Base64、分片 token、TTL、offset 和传输 checksum 已删除。HTTP 取消和实际排空见 [公共传输](runtime-bridge.md#取消与清理)。
 
 源码保持 1 至 16 MiB、严格无 BOM UTF-8、非空。同 installation/sourceRevision 的仍持有内容幂等，内容冲突报 INVALID_ARGUMENT，不存在版本报 NOT_FOUND，编码错误报 SCRIPT_PROTOCOL_ERROR，超限报 RESOURCE_LIMIT。新完整上传只替换尚未采用候选，部分上传不能覆盖；字段前置拒绝不消费，安装取入后失败释放，重试须显式上传。当前执行版本、已取入操作及未采用候选各由实际所有者持有，不缓存全版本历史；卸载/关闭释放候选。
 
@@ -144,6 +144,8 @@ Buffer、typed arrays、KeyObject、X509Certificate、ECDH、Web 事件、Promis
 
 Cat `fetch` 仅对已支持的 Content-Encoding 执行解压；未知编码保留原字节、状态和响应头，不采用注入普通网络适配器的 `UNSUPPORTED_OPTION` 拒绝规则。
 
+iOS 的固定 NodeMobile 18 不通过内置 Web 值 getter 间接启动 Undici/WASM；构建只打包锁定的纯 Web 值模块，现有 managed HTTP、原生字节／流与取消资源归属不变，见 [iOS 运行底座](../ios/runtime-preflight.md)。其他平台继续使用其 Node 原生 Web 值。
+
 启动优先采用明确导出的 `start` 或函数入口，其次识别已求值函数的明确服务启动信号及其包装器。已有可选入口或直接导出的 spider 时不扫描整份 bundle；只有无法从已求值作用域找到入口的闭包包装器，才由 Acorn 一次词法索引、定向解析目标函数和单调用包装链。静态发现不执行表达式、不解析整份 bundle AST，不把字符串／注释内的代码当作声明，也不使用脚本名或作者名白名单。
 
 没有服务启动入口时，CommonJS 对象中明确导出的函数就是 direct spider 的 action 表面；不以少数核心动作白名单判断，扩展 action 同样发布，但 `start`、`stop` 和配置页面控制名不作为业务 action。direct `detail` 优先接收标准请求的 `id`；调用方只提供 `ids` 时仍原样传递该值。未发布的原型成员或任意路径不能被当作 action 调用。
@@ -251,4 +253,4 @@ TLS 证书链可保留循环引用，缓存的真实 KeyObject 可跨请求使�
 
 ## 构建与验证边界
 
-通用 payload 唯一 profile 为 `common-native`，入口 `app/entry.mjs`，使用同一 HTTP v1。原生引擎固定输入见 `scripts/script-host-native.json` 与 `scripts/quickjs/build-native.mjs`（LX/source 使用；Cat 不进入 QuickJS）。Windows/iOS 原 launcher 和旧调用接入属于后续迁移。当前整合的通用原生构建、payload 与定向回归由集中验证确认；真实第三方脚本未覆盖；适用环境及边界见[通用验证范围](script-runtime.md#构建发布与验证边界)。
+通用 payload 唯一 profile 为 `common-native`，独立入口 `app/entry.mjs`，使用同一 HTTP v1。原生引擎固定输入见 `scripts/script-host-native.json` 与 `scripts/quickjs/build-native.mjs`（LX/source 使用；Cat 不进入 QuickJS）。iOS 在同一闭包上增加平台受信启动与内置 framework；Windows 在公共产物上增加私密启动包装。通用构建、平台装配及真实第三方脚本须分别验证；适用环境及边界见[通用验证范围](script-runtime.md#构建发布与验证边界)、[iOS 运行底座](../ios/runtime-preflight.md)及[Windows 打包说明](../windows/runtime-packaging.md)。

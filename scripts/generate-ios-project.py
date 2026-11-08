@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 APPLICATION_DIRECTORIES = ("Application", "Composition", "Navigation", "Presentation")
 # Prepared by scripts/prepare-ios-runtime.py; regenerable inputs, not sources.
 NODE_MOBILE_FRAMEWORK = "../../.cache/nodejs-mobile/ios/NodeMobile.xcframework"
-RUNTIME_PAYLOAD = "../../.cache/ios-runtime/Runtime"
+RUNTIME_PAYLOAD = "../../.cache/ios-runtime/$(MEOW_RUNTIME_SDK)-$(MEOW_RUNTIME_ARCH)/Runtime"
+SCRIPT_HOST_FRAMEWORK = "../../.cache/ios-native/$(MEOW_RUNTIME_SDK)-$(MEOW_RUNTIME_ARCH)/MeowScriptHost.framework"
 NODE_MOBILE_LICENSE = "../../LICENSES/nodejs-mobile-LICENSE.txt"
 NATIVE_JAVASCRIPT_LICENSE = "../../LICENSES/quickjs-native-MIT.txt"
 NATIVE_UNICODE_LICENSE = "../../LICENSES/Unicode-3.0.txt"
@@ -75,6 +76,7 @@ def generate():
     runtime_test_name = "MeowfilmRuntimeTests"
     ids.update({key: identifier(f"{product}:{key}") for key in [
         "nodeFramework", "nodeFrameworkLink", "nodeFrameworkEmbed", "embedFrameworks",
+        "scriptHostFramework", "scriptHostFrameworkEmbed",
         "runtimePayload", "runtimePayloadBuild", "nodeLicense", "nodeLicenseBuild",
         "javascriptLicense", "javascriptLicenseBuild",
         "unicodeLicense", "unicodeLicenseBuild",
@@ -107,7 +109,9 @@ def generate():
     obj("nodeFramework", f'isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = NodeMobile.xcframework; path = {quoted(NODE_MOBILE_FRAMEWORK)}; sourceTree = "<group>";')
     obj("nodeFrameworkLink", f"isa = PBXBuildFile; fileRef = {ids['nodeFramework']};")
     obj("nodeFrameworkEmbed", f"isa = PBXBuildFile; fileRef = {ids['nodeFramework']}; settings = {{ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }};")
-    obj("embedFrameworks", f'isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 10; files = ({ids["nodeFrameworkEmbed"]},); name = "Embed Frameworks"; runOnlyForDeploymentPostprocessing = 0;')
+    obj("scriptHostFramework", f'isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MeowScriptHost.framework; path = {quoted(SCRIPT_HOST_FRAMEWORK)}; sourceTree = "<group>";')
+    obj("scriptHostFrameworkEmbed", f"isa = PBXBuildFile; fileRef = {ids['scriptHostFramework']}; settings = {{ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }};")
+    obj("embedFrameworks", f'isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 10; files = ({ids["nodeFrameworkEmbed"]}, {ids["scriptHostFrameworkEmbed"]},); name = "Embed Frameworks"; runOnlyForDeploymentPostprocessing = 0;')
     obj("runtimePayload", f'isa = PBXFileReference; lastKnownFileType = folder; name = Runtime; path = {quoted(RUNTIME_PAYLOAD)}; sourceTree = "<group>";')
     obj("runtimePayloadBuild", f"isa = PBXBuildFile; fileRef = {ids['runtimePayload']};")
     obj("nodeLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = nodejs-mobile-LICENSE.txt; path = {quoted(NODE_MOBILE_LICENSE)}; sourceTree = "<group>";')
@@ -118,7 +122,7 @@ def generate():
     obj("nodeLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['nodeLicense']};")
     obj("app", f'isa = PBXFileReference; explicitFileType = wrapper.application; path = {name}.app; sourceTree = BUILT_PRODUCTS_DIR;')
     obj("productsGroup", f'isa = PBXGroup; children = ({ids["app"]}, {ids["uiTests"]}, {ids["runtimeTests"]},); name = Products; sourceTree = "<group>";')
-    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + [ids["assets"], ids["nodeFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["javascriptLicense"], ids["unicodeLicense"], ids["uiTestGroup"], ids["runtimeTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
+    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + [ids["assets"], ids["nodeFramework"], ids["scriptHostFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["javascriptLicense"], ids["unicodeLicense"], ids["uiTestGroup"], ids["runtimeTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
     obj("sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = {seq(app_builds)}; runOnlyForDeploymentPostprocessing = 0;')
     package_ids, framework_ids = [], []
     for library in libraries:
@@ -171,6 +175,8 @@ def generate():
         f'"CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]" = {simulator_entitlements}; '
         'ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; '
         'LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; '
+        'MEOW_RUNTIME_SDK = iphoneos; "MEOW_RUNTIME_SDK[sdk=iphonesimulator*]" = iphonesimulator; '
+        'MEOW_RUNTIME_ARCH = "$(NATIVE_ARCH_ACTUAL)"; "MEOW_RUNTIME_ARCH[sdk=iphoneos*]" = arm64; '
     )
     # Swift Package modules remain in Xcode's shared products directory.
     target_settings += (

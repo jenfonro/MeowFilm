@@ -14,7 +14,7 @@
 
 Windows 默认生成 Release、win-x64 自包含版本；可选参数 `-Configuration Debug`、`-FrameworkDependent`。需要 PATH 上的 .NET SDK（10 或更高）、Node.js、npm、Git、CMake 3.20+ 与 Windows C 编译器。日志与暂存文件位于 `tmp/`。
 
-上述工具只用于开发与构建。Windows 部署需要完整的 `build/windows/`，不能只复制 `meowfilm.exe`；`-FrameworkDependent` 版本另外需要匹配的 .NET Desktop Runtime。Windows 启动、HTTP 消费者和平台包装接入通用原生运行器，构建工具链见[Windows 打包说明](docs/windows/runtime-packaging.md)；iOS 旧启动接入仍需独立迁移。
+上述工具只用于开发与构建。Windows 部署需要完整的 `build/windows/`，不能只复制 `meowfilm.exe`；`-FrameworkDependent` 版本另外需要匹配的 .NET Desktop Runtime。通用运行器使用原生引擎及 `runtime.http.v1`；iOS 通过内置 NodeMobile／MeowScriptHost framework 接入，构建与验证边界见[iOS 运行底座](docs/ios/runtime-preflight.md)。Windows 启动、HTTP 消费者和平台包装已接入，构建工具链见[Windows 打包说明](docs/windows/runtime-packaging.md)；公共或模拟器通过不等于所有平台可发布。
 
 客户端影视规则另由 `native/JavaScript` 构建原生 `meowfilm_js.dll` 随 App 输出，与通用脚本宿主引擎无关；目标电脑不需要 CMake 或编译器。
 

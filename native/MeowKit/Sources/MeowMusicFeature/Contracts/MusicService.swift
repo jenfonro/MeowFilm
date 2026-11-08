@@ -314,9 +314,13 @@ public struct MusicPlaybackSelection: Codable, Equatable, Sendable {
     public let siteId: String
     public let sourceKey: String
     public let quality: String
-    public init(installationId: String, generation: Int, siteId: String, sourceKey: String, quality: String) {
+    /// Present for LX selections; official accounts keep their own identity.
+    public let scriptIdentity: MusicScriptIdentity?
+    public init(installationId: String, generation: Int, siteId: String, sourceKey: String, quality: String,
+                scriptIdentity: MusicScriptIdentity? = nil) {
         self.installationId = installationId; self.generation = generation; self.siteId = siteId
         self.sourceKey = sourceKey; self.quality = quality
+        self.scriptIdentity = scriptIdentity
     }
 }
 public struct MusicPlaybackOption: Codable, Equatable, Sendable, Identifiable {
@@ -328,14 +332,19 @@ public struct MusicPlaybackOption: Codable, Equatable, Sendable, Identifiable {
     public let title: String
     public let version: String
     public let contentHash: String
+    public let revisionHash: String?
     public var id: String { installationId + ":" + siteId + ":" + sourceKey }
     public init(installationId: String, generation: Int, siteId: String, sourceKey: String,
-                qualities: [String], title: String, version: String, contentHash: String) {
+                qualities: [String], title: String, version: String, contentHash: String, revisionHash: String? = nil) {
         self.installationId = installationId; self.generation = generation; self.siteId = siteId; self.sourceKey = sourceKey
         self.qualities = qualities; self.title = title; self.version = version; self.contentHash = contentHash
+        self.revisionHash = revisionHash
     }
     public func selection(quality: String) -> MusicPlaybackSelection {
-        MusicPlaybackSelection(installationId: installationId, generation: generation, siteId: siteId, sourceKey: sourceKey, quality: quality)
+        MusicPlaybackSelection(installationId: installationId, generation: generation, siteId: siteId, sourceKey: sourceKey,
+            quality: quality, scriptIdentity: revisionHash.map {
+                .init(version: version, contentHash: contentHash, revisionHash: $0)
+            })
     }
 }
 public struct MusicPlaybackCandidate: Sendable {
@@ -347,20 +356,38 @@ public struct MusicPlaybackCandidate: Sendable {
     public let title: String
     public let startPosition: Double
     public let requestedQuality: String
+    /// Actual executed selection; a cold request is bound to its positive generation.
+    public let resolvedSelection: MusicPlaybackSelection
     public let expiresAt: Double?
     public let fileAuthorization: MusicQueueAuthorization?
     public let playbackAuthorization: MusicQueueAuthorization?
     public let delivery: MusicAudioDelivery?
     public var isCachedAudio: Bool { fileAuthorization != nil }
     public init(attemptId: String, occurrenceId: String, resourceId: String, url: URL, headers: [String: String] = [:],
-                title: String, startPosition: Double = 0, requestedQuality: String, expiresAt: Double? = nil,
+                title: String, startPosition: Double = 0, requestedQuality: String,
+                resolvedSelection: MusicPlaybackSelection, expiresAt: Double? = nil,
                 fileAuthorization: MusicQueueAuthorization? = nil, delivery: MusicAudioDelivery? = nil,
                 playbackAuthorization: MusicQueueAuthorization? = nil) {
         self.attemptId = attemptId; self.occurrenceId = occurrenceId; self.resourceId = resourceId; self.url = url
         self.headers = headers; self.title = title; self.startPosition = startPosition
         self.requestedQuality = requestedQuality; self.expiresAt = expiresAt
+        self.resolvedSelection = resolvedSelection
         self.fileAuthorization = fileAuthorization
         self.delivery = delivery; self.playbackAuthorization = playbackAuthorization
+    }
+    func validateResolvedSelection(for requested: MusicPlaybackSelection) throws {
+        let resolved = resolvedSelection, official = requested.installationId.hasPrefix("official:")
+        guard resolved.installationId.utf8.elementsEqual(requested.installationId.utf8),
+              resolved.siteId.utf8.elementsEqual(requested.siteId.utf8),
+              resolved.sourceKey.utf8.elementsEqual(requested.sourceKey.utf8),
+              resolved.quality.utf8.elementsEqual(requested.quality.utf8),
+              requestedQuality.utf8.elementsEqual(requested.quality.utf8),
+              resolved.scriptIdentity == requested.scriptIdentity,
+              official || resolved.scriptIdentity != nil,
+              resolved.generation > 0 && resolved.generation <= 9_007_199_254_740_991,
+              resolved.generation == requested.generation || !official && requested.generation == 0 else {
+            throw MusicServiceError.invalidResponse
+        }
     }
     public func resource() throws -> PlaybackResource {
         try fileAuthorization?.check()

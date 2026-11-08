@@ -6,11 +6,16 @@ import XCTest
 private actor MusicLyricFallbackScripts: MusicScriptResolving {
     let platform: String
     var requested: [String] = []
+    var cold = false
+    var loaded = Set<String>()
+    func coldStart() { cold = true }
     init(_ platform: String) { self.platform = platform }
     func sources() -> [MusicScriptSource] {
         // A disabled script and an undeclared action must never be called.
-        ["disabled", "no-lyric", "empty", "usable"].map { id in
-            .init(installationID: id, generation: 1, enabled: id != "disabled", ready: true, version: "1",
+        ["disabled", "failed", "no-lyric", "empty", "usable"].map { id in
+            .init(installationID: id, generation: id == "disabled" || id == "failed" || cold && !loaded.contains(id) ? 0 : 1,
+                enabled: id != "disabled", state: id == "disabled" ? .disabled : id == "failed" ? .failed :
+                    cold && !loaded.contains(id) ? .idle : .ready, version: "1",
                 contentHash: String(repeating: "a", count: 64), revisionHash: String(repeating: "b", count: 64),
                 capabilities: [.init(siteID: platform, title: id, actions: id == "no-lyric" ? ["musicUrl"] : ["lyric"], qualities: [])])
         }
@@ -18,10 +23,12 @@ private actor MusicLyricFallbackScripts: MusicScriptResolving {
     func source(installationID: String) throws -> MusicScriptSource {
         try XCTUnwrap(sources().first { $0.installationID == installationID })
     }
-    func resolve(request: MusicScriptRequest) throws -> MusicNativeAudio { throw MusicServiceError.unsupported }
-    func lyrics(request: MusicScriptRequest) -> MusicNativeLyrics {
+    func resolve(request: MusicScriptRequest) throws -> MusicScriptResult<MusicNativeAudio> { throw MusicServiceError.unsupported }
+    func lyrics(request: MusicScriptRequest) -> MusicScriptResult<MusicNativeLyrics> {
         requested.append(request.installationID)
-        return .init(text: request.installationID == "empty" ? "" : "[00:01.00]Script lyric")
+        loaded.insert(request.installationID)
+        let executed = sources().first { $0.installationID == request.installationID }!
+        return .init(value: .init(text: request.installationID == "empty" ? "" : "[00:01.00]Script lyric"), source: executed)
     }
     func calls() -> [String] { requested }
 }
@@ -29,12 +36,12 @@ private actor MusicLyricFallbackScripts: MusicScriptResolving {
 final class MusicScriptLyricFallbackTests: XCTestCase {
     func testEmptyNativeLyricsUseEnabledDeclaredSamePlatformScriptsInInstallationOrderOnlyForWYKWAndMG() async throws {
         for platform in ["wy", "tx", "kg", "kw", "mg"] {
-            do { try await checkFallback(platform) }
+            do { try await checkFallback(platform); try await checkFallback(platform, cold: true) }
             catch { XCTFail("Unexpected lyric failure for \(platform): \(error)") }
         }
     }
 
-    private func checkFallback(_ platform: String) async throws {
+    private func checkFallback(_ platform: String, cold: Bool = false) async throws {
             var track = MusicNativeCandidateDiscoveryFixture.track(platform,
                 id: platform == "kg" ? String(repeating: "A", count: 32) : "123")
             if platform == "mg" {
@@ -43,6 +50,7 @@ final class MusicScriptLyricFallbackTests: XCTestCase {
             }
             let store = try MusicNativeCandidateDiscoveryFixture.store(song: MusicModel.normalize(track))
             let scripts = MusicLyricFallbackScripts(platform)
+            if cold { await scripts.coldStart() }
             let responses: [MusicNativeHTTPResponse]
             switch platform {
             case "wy": responses = [.init(status: 200, data: Data(#"{"code":200,"lrc":{"lyric":""}}"#.utf8))]

@@ -12,6 +12,40 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
         }
     }
 
+    func testInspectionPublishesRealLazyLoadGenerationAndRejectsReloadBeforeAdoption() async throws {
+        for reload in [false, true] {
+            let song = try MusicNativeCandidateDiscoveryFixture.song()
+            let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+            for platform in MusicNativeSearchProtocol.platforms {
+                await cache.record(fingerprint: MusicModel.fingerprint(song), duration: 180, platform: platform,
+                    checkedAt: NativeMusicFixture.date.timeIntervalSince1970 * 1000, sources: [])
+            }
+            let scripts = MusicNativeCandidateDiscoveryScripts()
+            await scripts.supported(["tx"]); await scripts.directory(.idle)
+            let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
+            let service = try await NativeMusicFixture.service(store, scripts: scripts, sourceDiscovery: cache)
+            let inspection = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
+            let snapshot = try await settle(inspection)
+            let choice = try XCTUnwrap(snapshot.sources.first)
+            XCTAssertGreaterThan(choice.selection.generation, 0)
+            XCTAssertNotNil(choice.selection.scriptIdentity)
+            let requests = await scripts.calls()
+            XCTAssertEqual(requests.first?.source.state, .idle)
+            XCTAssertEqual(requests.first?.generation, 0)
+            if reload {
+                await scripts.configure(generation: choice.selection.generation + 1)
+                await scriptExpectFailure(.targetChanged) {
+                    try await inspection.adopt(sourceID: choice.id, occurrenceID: "entry-1", expectedQueueRevision: 1)
+                }
+            } else {
+                let selected = try await inspection.adopt(sourceID: choice.id, occurrenceID: "entry-1", expectedQueueRevision: 1)
+                XCTAssertEqual(selected, choice.selection)
+            }
+            let played = try await service.playedSongs(); XCTAssertTrue(played.isEmpty)
+            await inspection.close(); await service.close()
+        }
+    }
+
     func testInspectionMergesCachedSourcesWithoutSearchAndAdoptsThroughCurrentQueueCAS() async throws {
         let song = try MusicNativeCandidateDiscoveryFixture.song()
         let cached = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "cached"))

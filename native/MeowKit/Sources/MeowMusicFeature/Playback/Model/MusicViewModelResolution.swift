@@ -178,9 +178,10 @@ extension MusicViewModel {
         try checkSelection(epoch, token: token, occurrenceID: occurrenceID, admission: admission)
         guard let player else { throw MusicServiceError.unavailable }
         guard value.attemptId == attemptID, value.occurrenceId == occurrenceID,
-              value.resourceId == "music:" + attemptID, value.requestedQuality == selection.quality else {
+              value.resourceId == "music:" + attemptID else {
             throw MusicServiceError.invalidResponse
         }
+        try value.validateResolvedSelection(for: selection)
         if let expiry = value.expiresAt, expiry <= Date().timeIntervalSince1970 * 1000 {
             throw MusicServiceError.invalidMediaCandidate
         }
@@ -188,7 +189,7 @@ extension MusicViewModel {
         if admission?.source?.context.kind == .fm, admission?.intent != nil, !fmShouldPlay {
             playbackState.phase = .paused; return false
         }
-        candidate = value; lastSelection = selection; terminalAttempt = nil; lastProgressWrite = nil
+        candidate = value; lastSelection = value.resolvedSelection; terminalAttempt = nil; lastProgressWrite = nil
         playbackState.phase = .preparing
         // Native preparation/failure callbacks may synchronously re-enter.
         pendingNativeResourceID = value.resourceId
@@ -363,10 +364,11 @@ extension MusicViewModel {
             }
             MusicRequestTrace(.media).record(.cacheHit)
             guard hit.candidate.isCachedAudio, hit.candidate.url.isFileURL,
+                  hit.selection == hit.candidate.resolvedSelection,
                   selection == nil || selection == hit.selection else { throw MusicServiceError.invalidResponse }
             cachedAudioRecovery = CachedAudioRecovery(attemptID: attemptID, selection: selection,
                 automatic: automatic, admission: admission)
-            accepted = try acceptResolvedCandidate(hit.candidate, selection: hit.selection,
+            accepted = try acceptResolvedCandidate(hit.candidate, selection: selection ?? hit.selection,
                 attemptID: attemptID, occurrenceID: occurrenceID, epoch: epoch, token: token,
                 admission: admission, replacement: replacement)
             if accepted { beginPlaybackMetadata() }
@@ -432,13 +434,18 @@ extension MusicViewModel {
                 result = try await cache.recoverCachedPlayback(previousAttemptID: fact.attemptId,
                     selection: recovery.selection, position: fact.position)
                 try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: recovery.admission)
-                guard let result else { throw MusicServiceError.invalidResponse }
+                guard let result, result.selection == result.candidate.resolvedSelection else {
+                    throw MusicServiceError.invalidResponse
+                }
+                guard recovery.selection == nil || recovery.selection == result.selection else {
+                    throw MusicServiceError.invalidResponse
+                }
                 self.resolvingAttempt = result.candidate.attemptId
                 try await self.refreshCandidateQueue(service, epoch: epoch, token: token, before: before,
                     entries: entries, admission: recovery.admission)
                 self.stopOwned()
                 self.feedbackAutomatic = recovery.automatic
-                accepted = try self.acceptResolvedCandidate(result.candidate, selection: result.selection,
+                accepted = try self.acceptResolvedCandidate(result.candidate, selection: recovery.selection ?? result.selection,
                     attemptID: result.candidate.attemptId, occurrenceID: fact.occurrenceId,
                     epoch: epoch, token: token, admission: recovery.admission)
                 if accepted { self.beginPlaybackMetadata() }
@@ -485,9 +492,11 @@ extension MusicViewModel {
                 result = try await recovery.recoverPlayback(previousAttemptID: fact.attemptId,
                     attemptID: attemptID, rejectedURL: previous.url, position: fact.position)
                 try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: admission)
-                guard let result else { throw MusicServiceError.invalidResponse }
+                guard let result, result.selection == result.candidate.resolvedSelection else {
+                    throw MusicServiceError.invalidResponse
+                }
                 self.stopOwned()
-                accepted = try self.acceptResolvedCandidate(result.candidate, selection: result.selection,
+                accepted = try self.acceptResolvedCandidate(result.candidate, selection: previous.resolvedSelection,
                     attemptID: attemptID, occurrenceID: fact.occurrenceId, epoch: epoch, token: token, admission: admission)
                 if accepted {
                     self.beginPlaybackMetadata()

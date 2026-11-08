@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { createHash, createCipheriv, createDecipheriv, randomBytes, webcrypto } from 'node:crypto';
-import { mkdirSync, writeFileSync, readFileSync, openSync, fsyncSync, closeSync, rmSync } from 'node:fs';
+import { createHash, createCipheriv, createDecipheriv, randomBytes, webcrypto, createHmac, generateKeyPairSync, publicEncrypt, constants } from 'node:crypto';
+import { mkdirSync, writeFileSync, readFileSync, openSync, readSync, fsyncSync, closeSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { once } from 'node:events';
 import http from 'node:http';
 import { isUtf8 } from 'node:buffer';
+import { deflateSync } from 'node:zlib';
 
 const directory = process.argv[2];
 const report = {
@@ -25,16 +26,21 @@ async function check(name, run) {
   writeFileSync(join(directory, 'node-report.json'), JSON.stringify(report, null, 2));
 }
 
-await check('ios-asmjs-payload', async () => {
+await check('ios-native-framework-payload', async () => {
   assert.equal(process.platform, 'ios');
-  assert.equal(typeof WebAssembly, 'undefined');
   const manifest = JSON.parse(readFileSync(new URL('./runtime-manifest.json', import.meta.url), 'utf8'));
-  assert.equal(manifest.assemblyProfile, 'ios-embedded');
-  const backend = manifest.dependencies.find(value => value.name === '@jitl/quickjs-asmjs-mjs-release-sync');
-  assert.equal(backend?.version, '0.32.0');
-  assert.equal(manifest.dependencies.some(value => value.name === '@jitl/quickjs-wasmfile-release-sync'), false);
-  assert.equal(manifest.files.some(value => value.path.endsWith('.wasm')), false);
-  return { backend: backend.name, version: backend.version };
+  assert.equal(manifest.assemblyProfile, 'common-native');
+  assert.equal(manifest.transport, 'runtime.http.v1');
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source']);
+  assert.equal(manifest.trustedNative.length, 1);
+  const native = manifest.trustedNative[0];
+  assert.equal(native.path, 'Frameworks/MeowScriptHost.framework/MeowScriptHost');
+  assert.equal(native.platform, process.platform);
+  assert.equal(native.arch, process.arch);
+  assert.equal(native.abi, 1);
+  assert.equal(native.napi, 8);
+  assert.match(native.bindingIdentity, /^[a-f0-9]{64}$/);
+  return { target: native.target, bindingIdentity: native.bindingIdentity };
 });
 await check('strict-utf8', async () => {
   assert.equal(isUtf8(Buffer.from('中文🎵')), true);
@@ -52,6 +58,29 @@ await check('filesystem-fsync-rename', async () => {
   try { fsyncSync(parent); } finally { closeSync(parent); }
   assert.equal(readFileSync(final, 'utf8'), 'persistent');
   rmSync(final);
+});
+await check('native-bootstrap-descriptor-ownership', async () => {
+  const { duplicateBootstrapDescriptor } = await import('./node_modules/@meowfilm/script-host/src/native-engine.js');
+  const path = join(directory, 'descriptor.txt');
+  writeFileSync(path, 'native');
+  const original = openSync(path, 'r');
+  let copy;
+  try {
+    copy = duplicateBootstrapDescriptor(original);
+    assert.notEqual(copy, original);
+    assert.ok(copy >= 3);
+    const byte = Buffer.alloc(1);
+    assert.equal(readSync(copy, byte, 0, 1, null), 1);
+    assert.equal(byte.toString(), 'n');
+    closeSync(copy); copy = undefined;
+    assert.equal(readSync(original, byte, 0, 1, null), 1);
+    assert.equal(byte.toString(), 'a');
+    assert.throws(() => duplicateBootstrapDescriptor(-1), { code: 'INVALID_ARGUMENT' });
+  } finally {
+    if (copy !== undefined) closeSync(copy);
+    closeSync(original);
+    rmSync(path);
+  }
 });
 await check('crypto-and-webcrypto', async () => {
   assert.equal(createHash('sha256').update('abc').digest('hex'),
@@ -104,74 +133,79 @@ await check('worker-and-runaway-termination', async () => {
   } finally { await worker.terminate(); }
 });
 
-await check('native-descriptor-public-bridge', async () => {
-  const { createDescriptorPeer } = await import('@meowfilm/runtime-bridge/descriptor');
-  const { createAppRuntime } = await import('./app/bootstrap.mjs');
-  const runtime = createAppRuntime({
-    product: 'ios-preflight',
-    modules: [{ id: 'probe', version: '0.1.0', methods: { 'probe.echo': value => value }, close() {} }],
-    connect: options => createDescriptorPeer(Number(process.argv[3]), {
-      ...options, session: 'ios-preflight',
-    }),
-  });
+await check('public-three-module-http-and-source-sdk', async () => {
+  const { createRuntime, createRuntimeClient } = await import('./app/entry.mjs');
+  const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86', requestKey = randomBytes(32).toString('hex');
+  const runtime = createRuntime({ sessionId, requestKey, dataRoot: join(directory, 'three-modules'),
+    source: { platform: 'ios' } });
+  const okay = reply => { assert.equal(reply.ok, true, JSON.stringify(reply)); return reply.value; };
+  let client;
   try {
-    const value = { text: 'iOS→Node→iOS' };
-    assert.deepEqual(await runtime.peer.call('native.echo', value), value);
-  } finally { await runtime.close(); }
+    await runtime.start();
+    client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
+    const described = okay(await client.describe());
+    assert.equal(described.protocol, 'runtime.http.v1');
+    assert.deepEqual(described.modules.map(value => value.contract),
+      ['music.script.v3', 'cat.script.v2', 'source.runtime.v2']);
+    okay(await client.upload('source', 'preflight-source', 1, Buffer.from(
+      'export default { searchContent(keyword) { return {list:[{vod_id:keyword,vod_name:keyword}]}; } };'),
+      { basename: 'fixture.js' }));
+    const source = okay(await client.call('source.runtime.load', {
+      installationId: 'preflight-source', sourceRevision: 1, revision: 1, expectedRevision: 0, protocol: 'cat',
+    })).instance;
+    assert.deepEqual(okay(await client.call('source.runtime.invoke', {
+      installationId: source.installationId, revision: source.revision, generation: source.generation,
+      action: 'search', payload: { keyword: '中文' },
+    })), { list: [{ vod_id: '中文', vod_name: '中文' }] });
+    assert.deepEqual(okay(await client.shutdown()), { closed: true, cleanupComplete: true });
+  } finally { await runtime.close(); await client?.close(); }
 });
 
-await check('public-modules-import', async () => {
-  const { createMusicScriptModule } = await import('./app/modules/music-script.mjs');
-  const { createCatScriptModule } = await import('./app/modules/cat-script.mjs');
-  assert.equal(typeof createMusicScriptModule, 'function');
-  assert.equal(typeof createCatScriptModule, 'function');
-});
-
-await check('quickjs-engine-boundaries', async () => {
-  const { QuickJSEngine } = await import('./node_modules/@meowfilm/script-host/src/quickjs-engine.js');
-  const { SCRIPT_LIMITS } = await import('@meowfilm/script-host');
-  const source = `({
-    errorCode() { return 'SCRIPT_EXCEPTION'; },
-    watchStartup() {},
-    inspect() { return JSON.stringify({
-      integer: String(BigInt.asUintN(128, -1n)),
-      host: [typeof process, typeof require],
-      mark: globalThis.mark || null, job: globalThis.job || null,
-      escaped: (() => { try { return !!Function('return process')(); } catch { return false; } })()
-    }); },
-    bytes(input, frame) {
-      const reply = __meowBridge('bytes', input, frame);
-      return [JSON.stringify(JSON.parse(reply[0])), reply[1]];
-    }
-  })`;
+await check('native-thread-isolation-typed-tsfn-and-algorithms', async () => {
+  const { NativeEngine } = await import('./node_modules/@meowfilm/script-host/src/native-engine.js');
+  const source = `(() => { let count = 0; return {
+    next() { return ++count; },
+    inspect() { return [typeof process, typeof require, String(BigInt.asUintN(128, -1n))]; },
+    async echo(value) { return await __meowHost('echo', value); },
+    util(op, args) { return __meowNative(op, args); }
+  }; })()`;
   const engines = [];
   try {
-    for (let index = 0; index < 2; index++) engines.push(await QuickJSEngine.create({
-      source, limits: SCRIPT_LIMITS,
-      bridge(operation, value, frames, output) {
-        assert.equal(operation, 'bytes');
-        assert.deepEqual(value, { text: '字节' });
-        assert.deepEqual(frames[0], Buffer.from([1, 2, 3, 4]));
-        output.push(Buffer.from(frames[0]));
-        return { text: value.text };
-      },
-    }));
+    for (let i = 0; i < 2; i++) {
+      const engine = NativeEngine.create({ source, onHostCall: async (op, input) => {
+        assert.equal(op, 'echo'); await Promise.resolve(); return input;
+      } });
+      engines.push(engine); await engine.ready;
+    }
     const [first, second] = engines;
-    first.evaluate(`globalThis.mark='first'; globalThis.retained=new Uint8Array(20*1024*1024);
-      retained[retained.length-1]=7; Promise.resolve().then(()=>{globalThis.job=42;});`);
-    const inspected = first.callJSON('inspect', []);
-    assert.deepEqual(inspected, {
-      integer: String((1n << 128n) - 1n), host: ['undefined', 'undefined'],
-      mark: 'first', job: 42, escaped: false,
-    });
-    assert.equal(second.callJSON('inspect', []).mark, null);
-    const frame = Buffer.from([1, 2, 3, 4]);
-    const reply = first.callJSONFrames('bytes', [JSON.stringify({ text: '字节' })], [frame]);
-    assert.deepEqual(reply.value, { ok: true, value: { text: '字节' } });
-    assert.deepEqual(reply.frames, [Buffer.from([1, 2, 3, 4])]);
-    assert.deepEqual(frame, Buffer.alloc(4));
-    assert.ok(first.memoryUsage().heapUsed >= 20 * 1024 * 1024);
-  } finally { for (const engine of engines) engine.close(); }
+    assert.equal(await first.call('next'), 1);
+    assert.equal(await first.call('next'), 2);
+    assert.equal(await second.call('next'), 1);
+    assert.deepEqual(await first.call('inspect'), ['undefined', 'undefined', String((1n << 128n) - 1n)]);
+    const bytes = Buffer.from([0, 255, 65]);
+    assert.deepEqual(await first.call('echo', [{ text: '字节', bytes }], { scope: 42 }), { text: '字节', bytes });
+    const util = (op, args) => first.call('util', [op, args]);
+    assert.equal(await util('digest', ['sha256', bytes]), createHash('sha256').update(bytes).digest('hex'));
+    assert.equal(await util('hmac', ['sha256', 'key', bytes]), createHmac('sha256', 'key').update(bytes).digest('hex'));
+    const key = Buffer.alloc(16, 7), iv = Buffer.alloc(16, 9);
+    const cipher = createCipheriv('aes-128-cbc', key, iv);
+    const encrypted = Buffer.concat([cipher.update(bytes), cipher.final()]);
+    assert.deepEqual(await util('aes', [bytes, 'aes-128-cbc', key, iv]), encrypted);
+    assert.deepEqual(await util('aesDecrypt', [encrypted, 'aes-128-cbc', key, iv]), bytes);
+    const { publicKey } = generateKeyPairSync('rsa', { modulusLength: 1024 });
+    const padded = Buffer.alloc(128); bytes.copy(padded, 128 - bytes.length);
+    assert.deepEqual(await util('rsa', [bytes, publicKey.export({ type: 'spki', format: 'pem' })]),
+      publicEncrypt({ key: publicKey, padding: constants.RSA_NO_PADDING }, padded));
+    const compressed = await util('deflate', [bytes]);
+    assert.deepEqual(compressed, deflateSync(bytes));
+    assert.deepEqual(await util('inflate', [compressed]), bytes);
+    for (const engine of engines) {
+      const closed = await engine.stop();
+      for (const key of ['runtimeCount', 'contextCount', 'threadCount', 'activeCalls', 'hostCalls', 'timers'])
+        assert.equal(closed[key], 0, key);
+      assert.equal(closed.stopped, true);
+    }
+  } finally { await Promise.all(engines.map(engine => engine.stop())); }
 });
 await check('lx-stuck-guest-disable-and-reenable', async () => {
   const { createScriptHost } = await import('@meowfilm/script-host');
@@ -249,17 +283,96 @@ await check('public-cat-install-invoke-close', async () => {
     await runtime.install({
       installationId: 'ios-cat', config: { id: 'ios', protocol: 'old' }, enabled: true,
       source: `const http = require('http');
+        const streams = require('stream/web');
         let server;
+        async function web() {
+          const bytes = new Uint8Array([9, 0, 255, 65, 8]).subarray(1, 4);
+          const headers = new Headers({ 'X-Preflight': 'view', 'content-type': 'application/octet-stream' });
+          const request = new Request('http://127.0.0.1:9978/echo', {
+            method: 'POST', headers, body: bytes
+          });
+          const requestCopy = request.clone();
+          const requestBody = request.body instanceof streams.ReadableStream;
+          const requestCloneBody = requestCopy.body instanceof streams.ReadableStream;
+          const requestBytes = Array.from(new Uint8Array(await requestCopy.arrayBuffer()));
+          const blob = new Blob([bytes], { type: 'application/octet-stream' });
+          const form = new FormData();
+          form.append('text', '表单中文');
+          form.append('file', blob, 'bytes.bin');
+          const readForm = await new Response(form).formData();
+          const file = readForm.get('file');
+          const streamed = new Response(new streams.ReadableStream({ start(controller) {
+            controller.enqueue(new TextEncoder().encode('stream中文'));
+            controller.close();
+          } }));
+          const streamCopy = streamed.clone();
+          const streamBodies = [streamed, streamCopy].map(value => value.body instanceof streams.ReadableStream);
+          const response = await fetch(request);
+          const responseCopy = response.clone();
+          const responseBodies = [response, responseCopy].map(value => value.body instanceof streams.ReadableStream);
+          const detail = { value: 7 };
+          const custom = new CustomEvent('web', {
+            detail, bubbles: true, cancelable: true, composed: true
+          });
+          const target = new EventTarget();
+          let received, deliveries = 0;
+          target.addEventListener('web', event => {
+            deliveries++;
+            received = [event === custom, event.detail === detail,
+              event.target === target, event.currentTarget === target];
+            event.detail.value = 8;
+            event.preventDefault();
+          }, { once: true });
+          const dispatched = target.dispatchEvent(custom);
+          target.dispatchEvent(new CustomEvent('web'));
+          const plain = new CustomEvent('plain', { detail: false });
+          target.addEventListener('plain', event => event.preventDefault(), { once: true });
+          const plainDispatched = target.dispatchEvent(plain);
+          return {
+            constructors: [request instanceof Request, response instanceof Response,
+              headers instanceof Headers, request.headers instanceof Headers,
+              response.headers instanceof Headers, form instanceof FormData, blob instanceof Blob],
+            bodies: [requestBody, requestCloneBody, ...streamBodies, ...responseBodies],
+            request: { method: request.method, header: request.headers.get('x-preflight'), bytes: requestBytes },
+            streams: await Promise.all([streamed.text(), streamCopy.text()]),
+            form: { text: readForm.get('text'), blob: file instanceof Blob, name: file.name,
+              type: file.type, bytes: Array.from(new Uint8Array(await file.arrayBuffer())) },
+            fetch: { status: response.status, header: response.headers.get('x-preflight-echo'),
+              values: await Promise.all([response.json(), responseCopy.json()]) },
+            events: { native: [custom instanceof Event, target instanceof EventTarget],
+              identity: [custom.detail === detail, ...received], detail: detail.value,
+              flags: [custom.bubbles, custom.cancelable, custom.composed],
+              dispatched, prevented: custom.defaultPrevented, deliveries,
+              noncancelable: [plainDispatched, plain.defaultPrevented, plain.detail] }
+          };
+        }
         module.exports = {
           start() {
-            server = http.createServer((request, response) => {
+            server = http.createServer(async (request, response) => {
               response.setHeader('content-type', 'application/json');
               const path = new URL(request.url, 'http://127.0.0.1:9978').pathname;
               if (path === '/config' || path === '/full-config') {
                 response.end(JSON.stringify({ video: { sites: [{
-                  key: 'ios', name: 'iOS fixture', actions: ['home'],
+                  key: 'ios', name: 'iOS fixture', actions: ['home', 'web'],
                   api: 'http://127.0.0.1:9978/api/ios'
                 }] } }));
+              } else if (path === '/echo') {
+                const chunks = [];
+                for await (const chunk of request) chunks.push(chunk);
+                response.statusCode = 201;
+                response.setHeader('x-preflight-echo', 'local');
+                response.end(JSON.stringify({ method: request.method,
+                  bytes: Array.from(Buffer.concat(chunks)), header: request.headers['x-preflight'],
+                  loopback: request.socket.remoteAddress === '127.0.0.1' &&
+                    request.socket.localAddress === '127.0.0.1' &&
+                    request.socket.localPort === server.address().port,
+                  port: server.address().port }));
+              } else if (path === '/api/ios/web') {
+                try { response.end(JSON.stringify(await web())); }
+                catch (error) {
+                  response.statusCode = 500;
+                  response.end(JSON.stringify({ error: error.message }));
+                }
               } else response.end(JSON.stringify({ list: [] }));
             });
             server.listen(9978, '127.0.0.1');
@@ -272,7 +385,32 @@ await check('public-cat-install-invoke-close', async () => {
     assert.deepEqual(await runtime.invoke({
       installationId: 'ios-cat', siteId: 'ios', operation: 'home', payload: {},
     }), { list: [] });
+    const web = await runtime.invoke({
+      installationId: 'ios-cat', siteId: 'ios', operation: 'web', payload: {},
+    });
+    const port = web.fetch.values[0].port;
+    assert.ok(Number.isInteger(port) && port > 0 && port <= 65535);
+    const echo = { method: 'POST', bytes: [0, 255, 65], header: 'view', loopback: true, port };
+    assert.deepEqual(web, {
+      constructors: [true, true, true, true, true, true, true],
+      bodies: [true, true, true, true, true, true],
+      request: { method: 'POST', header: 'view', bytes: [0, 255, 65] },
+      streams: ['stream中文', 'stream中文'],
+      form: { text: '表单中文', blob: true, name: 'bytes.bin',
+        type: 'application/octet-stream', bytes: [0, 255, 65] },
+      fetch: { status: 201, header: 'local', values: [echo, echo] },
+      events: { native: [true, true], identity: [true, true, true, true, true], detail: 8,
+        flags: [true, true, true], dispatched: false, prevented: true, deliveries: 1,
+        noncancelable: [true, false, false] },
+    });
     await runtime.setEnabled('ios-cat', false);
+    assert.equal((await runtime.status()).instances[0].state, 'disabled');
+    await assert.rejects(new Promise((resolve, reject) => {
+      http.get(`http://127.0.0.1:${port}/echo`, response => {
+        response.resume(); resolve(response.statusCode);
+      }).on('error', reject);
+    }), { code: 'ECONNREFUSED' });
+    return { web: true, loopbackPort: port, listenerClosed: true };
   } finally { await runtime.close(); }
 });
 

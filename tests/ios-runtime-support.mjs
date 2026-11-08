@@ -1,63 +1,77 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { attachConnectedStream } from '@meowfilm/runtime-bridge/descriptor';
+import { decodeJSONValue, validateEndpoint } from '@meowfilm/runtime-bridge';
+import { createRuntimeClient } from '../apps/runtime/client.mjs';
 import { assertOwnedPath, temporaryRoot } from '../scripts/windows/working-paths.mjs';
 
-// Shared by the iOS runtime source and packaged-payload tests; not a test file.
 export const root = fileURLToPath(new URL('../', import.meta.url));
 export const contract = 'music.script.v3';
-const hash = value => createHash('sha256').update(value).digest('hex');
 
-// Desktop simulation of the iOS backend selection; not iOS device evidence.
+// Desktop execution of the iOS bootstrap with the desktop native engine.
+// Actual iOS framework loading belongs to the App host tests.
 export const simulatedIOS = `
-  Object.defineProperty(process, 'platform', { value: 'ios', configurable: false, writable: false });
   Object.defineProperty(globalThis, 'WebAssembly', { value: undefined, configurable: false, writable: false });
 `;
 
-export function spawnRuntime(t, { preload = simulatedIOS, argv, entry, cwd = root } = {}) {
+export function spawnRuntime(t, { preload = simulatedIOS, argv, entry, fixture, cwd = root,
+  configuration: changes = {}, sendConfiguration = true } = {}) {
   mkdirSync(temporaryRoot, { recursive: true });
   const area = mkdtempSync(join(temporaryRoot, 'ios-runtime-'));
   t.after(() => rmSync(assertOwnedPath(temporaryRoot, area), { recursive: true, force: true }));
-  const session = randomUUID();
-  const child = spawn(process.execPath, [
-    '--import', `data:text/javascript,${encodeURIComponent(preload)}`, entry,
-    ...(argv ?? ['--meow-fd', '3', '--meow-session', session, '--meow-data', join(area, 'scripts')]),
-  ], {
+  const configuration = { sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex'),
+    dataRoot: join(area, 'scripts'), ...changes };
+  if (fixture !== undefined) {
+    entry = join(area, 'entry.mjs');
+    writeFileSync(entry, fixture);
+  }
+  const args = ['--import', `data:text/javascript,${encodeURIComponent(preload)}`, entry,
+    ...(argv ?? ['--meow-bootstrap-fd', '3'])];
+  const child = spawn(process.execPath, args, {
     cwd, env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' },
     stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
   });
   let stdout = '', stderr = '';
   child.stdout.on('data', bytes => { stdout += bytes; });
   child.stderr.on('data', bytes => { stderr += bytes; });
-  const exited = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
-  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
-  return { child, session, area, exited, output: () => ({ stdout, stderr }) };
-}
-
-export function connect(runtime, methods = {}) {
-  let closed;
-  const done = new Promise(resolve => { closed = resolve; });
-  const peer = attachConnectedStream(runtime.child.stdio[3], {
-    session: runtime.session, timeout: 20000, methods, onClose: () => closed(),
+  const exited = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited; }
   });
-  return { peer, closed: done };
+  const channel = child.stdio[3];
+  const closed = new Promise(resolve => channel.once('close', resolve));
+  const endpoint = new Promise((resolve, reject) => {
+    let pending = Buffer.alloc(0), ready = false;
+    channel.on('error', () => { if (!ready) reject(new Error('BOOTSTRAP_CLOSED')); });
+    channel.once('close', () => { if (!ready) reject(new Error('BOOTSTRAP_CLOSED')); });
+    channel.on('data', bytes => {
+      if (ready) { channel.destroy(new Error('UNEXPECTED_BOOTSTRAP_DATA')); return; }
+      pending = Buffer.concat([pending, bytes]);
+      const newline = pending.indexOf(10);
+      if (newline === -1) return;
+      try {
+        assert.equal(newline, pending.length - 1);
+        const value = decodeJSONValue(pending.subarray(0, newline));
+        assert.deepEqual(Object.keys(value), ['baseUrl']);
+        validateEndpoint(value.baseUrl);
+        ready = true;
+        resolve(value.baseUrl);
+      } catch (error) { ready = true; reject(error); channel.destroy(); }
+    });
+  });
+  endpoint.catch(() => {});
+  if (sendConfiguration) channel.write(`${JSON.stringify(configuration)}\n`);
+  return { child, area, args, configuration, channel, endpoint, closed, exited, output: () => ({ stdout, stderr }) };
 }
 
-/** Tripwire: guest storage belongs to the shared module, never to native documents. */
-export function nativeStorage() {
-  const calls = [];
-  const methods = {};
-  for (const operation of ['get', 'set', 'delete']) {
-    methods[`platform.musicScript.storage.${operation}`] = async message => {
-      calls.push({ operation, message });
-      return { ok: false, code: 'PERMISSION_DENIED' };
-    };
-  }
-  return { calls, methods };
+export async function connect(runtime) {
+  const baseUrl = await runtime.endpoint;
+  const { sessionId, requestKey } = runtime.configuration;
+  const client = createRuntimeClient({ baseUrl, sessionId, requestKey, timeout: 20000 });
+  return { client, baseUrl, closed: runtime.closed };
 }
 
 export const script = `/**
@@ -75,22 +89,18 @@ lx.send(lx.EVENT_NAMES.inited, { sources: {
 } });
 `;
 
-export function okay(reply) {
+export function okay(reply, expectedContract = contract) {
   assert.equal(reply.ok, true, JSON.stringify(reply));
-  assert.equal(reply.contract, contract);
-  return reply;
+  assert.equal(reply.contract, expectedContract);
+  assert.deepEqual(Object.keys(reply).sort(), ['contract', 'ok', 'value']);
+  return reply.value;
 }
 
-export async function stage(peer) {
-  const bytes = Buffer.from(script);
-  const stage = okay(await peer.call('music.script.stage.begin',
-    { basename: 'source.js', length: bytes.length, sha256: hash(bytes) }));
-  okay(await peer.call('music.script.stage.chunk', { token: stage.token, offset: 0, data: bytes.toString('base64') }));
-  return stage.token;
-}
-
-/** Import and enable the fixture through the shared management commands. */
-export async function load(peer) {
-  const item = okay(await peer.call('music.script.sources.add', { token: await stage(peer) })).item;
-  return peer.call('music.script.sources.enable', { installationId: item.installationId });
+/** One raw upload followed by the current installation commands. */
+export async function load(client) {
+  const installationId = randomUUID(), sourceRevision = 1;
+  okay(await client.upload('music', installationId, sourceRevision, Buffer.from(script), { basename: 'source.js' }));
+  const added = okay(await client.call('music.script.sources.add', { installationId, sourceRevision })).item;
+  assert.equal(added.enabled, false);
+  return client.call('music.script.sources.enable', { installationId });
 }

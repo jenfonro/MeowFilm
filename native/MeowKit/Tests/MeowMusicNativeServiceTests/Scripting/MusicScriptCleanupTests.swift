@@ -1,31 +1,29 @@
 import Foundation
-import MeowJSON
 import MeowMusicFeature
 import MeowRuntime
 import XCTest
 @testable import MeowMusicNativeService
 
-private actor MusicCleanupFailedLauncher: RuntimeBridgeLaunching {
+private actor MusicCleanupFailedLauncher: RuntimeLaunching {
     private(set) var calls = 0
-    func connect(handlers: [String: RuntimeBridgeConnection.Handler]) throws -> RuntimeBridgeConnection {
+    func connect() throws -> RuntimeHTTPClient {
         calls += 1
         throw RuntimeLaunchError.payloadUnavailable
     }
+    func close() {}
     func waitForExit() {}
 }
 
 final class MusicScriptCleanupTests: XCTestCase {
-    private func started(_ runtime: MusicScriptTestRuntime) async throws -> (RuntimeBridgeSession, NativeMusicScriptService) {
-        let session = RuntimeBridgeSession(launcher: runtime)
-        try await session.configure(handlers: [:])
+    private func started(_ runtime: MusicScriptTestRuntime) async throws -> (RuntimeSession, NativeMusicScriptService) {
+        let session = RuntimeSession(launcher: runtime)
         let service = NativeMusicScriptService(connection: { try await session.connection() })
         await service.start()
         return (session, service)
     }
 
     func testFailedLaunchCloseDoesNotRetryOrInventMusicCleanupFailure() async throws {
-        let launcher = MusicCleanupFailedLauncher(), session = RuntimeBridgeSession(launcher: launcher)
-        try await session.configure(handlers: [:])
+        let launcher = MusicCleanupFailedLauncher(), session = RuntimeSession(launcher: launcher)
         let service = NativeMusicScriptService(connection: { try await session.connection() })
         await scriptExpectFailure(.scriptRuntimeUnavailable) { try await service.scriptSources() }
         let before = await launcher.calls; XCTAssertEqual(before, 0)
@@ -40,8 +38,7 @@ final class MusicScriptCleanupTests: XCTestCase {
     }
 
     func testPassiveCloseDoesNotBorrowOrStartTheSession() async throws {
-        let runtime = MusicScriptTestRuntime(), session = RuntimeBridgeSession(launcher: runtime)
-        try await session.configure(handlers: [:])
+        let runtime = MusicScriptTestRuntime(), session = RuntimeSession(launcher: runtime)
         let service = NativeMusicScriptService(connection: { try await session.connection() })
         try await service.close(); try await service.close()
         await service.start()
@@ -136,9 +133,9 @@ final class MusicScriptCleanupTests: XCTestCase {
             let items = try await service.scriptSources(); XCTAssertEqual(items, [item])
             let live = try await service.sources(); XCTAssertTrue(live.isEmpty)
             let connection = try await session.connection()
-            let detail = try MusicScriptTransport.success(await connection.call("music.script.sources.detail",
-                .object(["installationId": .string(item.id)])))
-            XCTAssertEqual(detail["item"]?["generation"], .number(0))
+            let detail = try await connection.call(module: .music, operation: "sources.detail",
+                parameters: .object(["installationId": .string(item.id)]))
+            XCTAssertEqual(detail.scriptField("item")?.scriptField("generation"), .number(0))
             if confirmed { try await service.close() }
             else { await scriptExpectFailure(.scriptCleanupFailed) { try await service.close() } }
             let calls = await runtime.metrics().calls
@@ -289,7 +286,7 @@ final class MusicScriptCleanupTests: XCTestCase {
             let item = try await service.importScriptSource(musicScriptFixture, fileName: "source.js")
             _ = try await service.setScriptSourceEnabled(item.id, enabled: true)
             let source = try await service.source(installationID: item.id)
-            let request = MusicScriptRequest(installationID: item.id, generation: source.generation,
+            let request = MusicScriptRequest(source: source,
                 siteID: "tx", sourceKey: "test", quality: "128k", musicInfo: Data("{}".utf8))
             let workGate = NativeMusicGate(), closeGate = NativeMusicGate()
             let cancelled = expectation(description: "in-flight \(method) cancelled")
@@ -316,75 +313,63 @@ final class MusicScriptCleanupTests: XCTestCase {
         }
     }
 
-    func testCloseDrainsCancelledUploadIncludingUncancelledStageRelease() async throws {
-        for method in ["stage.chunk", "sources.add"] {
+    func testCloseCancelsRawUploadAndManagementThenWaitsForModuleReceipt() async throws {
+        for method in ["upload", "sources.add"] {
             let runtime = MusicScriptTestRuntime()
             let (session, service) = try await started(runtime)
-            let workGate = NativeMusicGate(), releaseGate = NativeMusicGate()
-            let cancelled = expectation(description: "upload \(method) cancelled")
+            let workGate = NativeMusicGate(), closeGate = NativeMusicGate()
+            let cancelled = expectation(description: "HTTP \(method) cancelled")
             await runtime.hold(method, workGate, onCancel: { cancelled.fulfill() })
-            let releaseCancelled = expectation(description: "stage release must not inherit cancellation")
-            releaseCancelled.isInverted = true
-            await runtime.hold("stage.abort", releaseGate, onCancel: { releaseCancelled.fulfill() })
-            let finished = expectation(description: "upload must wait for its stage release")
-            finished.isInverted = true
+            await runtime.hold("close", closeGate)
             let upload = Task {
-                defer { finished.fulfill() }
-                return try await service.importScriptSource(Data(repeating: 65, count: 128 * 1024 + 1), fileName: "source.js")
+                try await service.importScriptSource(Data(repeating: 65, count: 128 * 1024 + 1), fileName: "source.js")
             }
             await workGate.started()
-            let closing = Task { try await service.close() }
+            let premature = expectation(description: "close waits for the module terminal receipt")
+            premature.isInverted = true
+            let closing = Task { defer { premature.fulfill() }; try await service.close() }
             await fulfillment(of: [cancelled], timeout: 1)
-            await releaseGate.started()
-            await fulfillment(of: [releaseCancelled, finished], timeout: 0.05)
-            let beforeRelease = await runtime.metrics().calls
-            XCTAssertFalse(beforeRelease.contains("close"))
+            await scriptExpectFailure(.cancelled) { try await upload.value }
+            await closeGate.started()
+            await fulfillment(of: [premature], timeout: 0.05)
             await scriptExpectFailure(.closed) { try await service.scriptSources() }
             try await scriptAssertCatAvailable(try await session.connection())
-            await workGate.release(); await releaseGate.release()
-            await scriptExpectFailure(.cancelled) { try await upload.value }
+            await workGate.release(); await closeGate.release()
             try await closing.value
-            let stages = await runtime.stages; XCTAssertTrue(stages.isEmpty)
             let calls = await runtime.metrics().calls
-            XCTAssertEqual(calls.filter { $0 == "stage.abort" }.count, 1)
+            XCTAssertEqual(calls.filter { $0 == method }.count, 1)
             XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
-            XCTAssertLessThan(try XCTUnwrap(calls.firstIndex(of: "stage.abort")), try XCTUnwrap(calls.firstIndex(of: "close")))
-            if method == "stage.chunk" {
-                XCTAssertEqual(calls.filter { $0 == "stage.chunk" }.count, 1)
-                XCTAssertFalse(calls.contains("sources.add"))
-            }
+            if method == "upload" { XCTAssertFalse(calls.contains("sources.add")) }
+            try await scriptAssertCatAvailable(try await session.connection())
             await session.close(); await runtime.close()
         }
     }
 
-    func testCallerCancellationDuringStageReleaseStillLeavesWorkForCloseToDrain() async throws {
+    func testCallerCancellationOfRawUploadDoesNotCancelTerminalModuleCleanup() async throws {
         let runtime = MusicScriptTestRuntime()
         let (session, service) = try await started(runtime)
-        let gate = NativeMusicGate()
-        let releaseCancelled = expectation(description: "release survives both caller and owner cancellation")
-        releaseCancelled.isInverted = true
-        await runtime.hold("stage.abort", gate, onCancel: { releaseCancelled.fulfill() })
-        let finished = expectation(description: "cancelled upload still waits for release")
-        finished.isInverted = true
-        let upload = Task {
-            defer { finished.fulfill() }
-            return try await service.importScriptSource(musicScriptFixture, fileName: "source.js")
-        }
-        await gate.started()
+        let workGate = NativeMusicGate(), closeGate = NativeMusicGate()
+        let cancelled = expectation(description: "caller cancellation reaches HTTP upload")
+        let closeCancelled = expectation(description: "terminal cleanup survives caller cancellation")
+        closeCancelled.isInverted = true
+        await runtime.hold("upload", workGate, onCancel: { cancelled.fulfill() })
+        await runtime.hold("close", closeGate, onCancel: { closeCancelled.fulfill() })
+        let upload = Task { try await service.importScriptSource(musicScriptFixture, fileName: "source.js") }
+        await workGate.started()
         upload.cancel()
-        let closing = Task { try await service.close() }
-        await fulfillment(of: [releaseCancelled, finished], timeout: 0.05)
-        let beforeRelease = await runtime.metrics().calls
-        XCTAssertTrue(beforeRelease.contains("sources.add"))
-        XCTAssertFalse(beforeRelease.contains("close"))
-        await gate.release()
+        await fulfillment(of: [cancelled], timeout: 1)
         await scriptExpectFailure(.cancelled) { try await upload.value }
-        try await closing.value
-        let stages = await runtime.stages; XCTAssertTrue(stages.isEmpty)
+        let closing = Task { try await service.close() }
+        await closeGate.started()
+        closing.cancel()
+        await fulfillment(of: [closeCancelled], timeout: 0.05)
         let calls = await runtime.metrics().calls
-        XCTAssertEqual(calls.filter { $0 == "stage.abort" }.count, 1)
+        XCTAssertFalse(calls.contains("sources.add"))
         XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
         try await scriptAssertCatAvailable(try await session.connection())
+        await workGate.release(); await closeGate.release()
+        try await closing.value
+        try await service.close()
         await session.close(); await runtime.close()
     }
 }

@@ -30,6 +30,7 @@ extension NativeMusicService {
             cacheRecoveryID: seed.cacheRecovery?.id)
         do {
             let audio: MusicNativeAudio
+            let resolvedSelection: MusicPlaybackSelection
             if official {
                 guard let accounts, let platform = MusicAccountPlatform(rawValue: source.platform) else { throw MusicServiceError.sourceUnavailable }
                 try musicRequire(target.option.revisionHash == nil, .targetChanged)
@@ -39,29 +40,38 @@ extension NativeMusicService {
                 }
                 try candidateAttemptCheck(seed, attemptID: attemptID)
                 try await candidateOfficialPin(target, source: source, seed: seed, attemptID: attemptID)
+                resolvedSelection = selection
             } else {
                 guard let scripts else { throw MusicServiceError.sourceUnavailable }
                 let snapshot = try await work(label: "playback") { try await scripts.source(installationID: selection.installationId) }
                 try candidateAttemptCheck(seed, attemptID: attemptID)
                 try candidateScriptPin(snapshot, target: target)
-                let request = MusicScriptRequest(installationID: selection.installationId, generation: selection.generation,
+                let request = MusicScriptRequest(source: snapshot,
                     siteID: selection.siteId, sourceKey: selection.sourceKey, quality: selection.quality, musicInfo: info.bytes)
-                audio = try await work(label: "playback") { try await scripts.resolve(request: request) }
+                let execution = try await work(label: "playback") { try await scripts.resolve(request: request) }
+                try executedScript(execution.source, from: snapshot)
                 try candidateAttemptCheck(seed, attemptID: attemptID)
                 let live = try await work(label: "playback") { try await scripts.source(installationID: selection.installationId) }
                 try candidateAttemptCheck(seed, attemptID: attemptID)
-                try sameSource(live, snapshot); try candidateScriptPin(live, target: target)
+                try sameSource(live, execution.source); try candidateScriptPin(live, target: target)
+                attempt?.scriptSource = live
+                resolvedSelection = .init(installationId: live.installationID, generation: live.generation,
+                    siteId: selection.siteId, sourceKey: selection.sourceKey, quality: selection.quality,
+                    scriptIdentity: live.identity)
+                audio = execution.value
             }
             try candidateAttemptCheck(seed, attemptID: attemptID)
+            attempt?.selection = resolvedSelection
             let valid = try media(audio)
             try validateDelivery(valid.delivery, song: seed.song, playback: d.playback)
             let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: seed.occurrenceID, resourceId: "music:" + attemptID,
                 url: valid.url, headers: valid.headers, title: seed.song["title"].string,
                 startPosition: seed.cacheRecovery?.position ?? d.playback["position"]["seconds"].number,
-                requestedQuality: selection.quality, expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
+                requestedQuality: selection.quality, resolvedSelection: resolvedSelection,
+                expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
                 delivery: valid.delivery, playbackAuthorization: valid.playbackAuthorization)
             _ = try candidate.resource()
-            try await stageAudioCache(audio: valid, song: seed.song, selection: selection, attemptID: attemptID)
+            try await stageAudioCache(audio: valid, song: seed.song, selection: resolvedSelection, attemptID: attemptID)
             try candidateAttemptCheck(seed, attemptID: attemptID)
             try pinPlaybackRecovery(candidate: candidate, song: seed.song, state: d)
             let publish = {
@@ -86,8 +96,8 @@ extension NativeMusicService {
     }
     private func candidateScriptPin(_ live: MusicScriptSource, target: MusicCandidateDiscoveryTarget) throws {
         let option = target.option.playback
-        try musicRequire(live.installationID == option.installationId && live.generation == option.generation &&
-            live.version == option.version && live.contentHash == option.contentHash &&
+        try pinScript(live, selection: option.selection(quality: target.quality))
+        try musicRequire(live.version == option.version && live.contentHash == option.contentHash &&
             live.revisionHash == target.option.revisionHash, .targetChanged)
         _ = try validate(live, site: option.siteId, quality: target.quality)
     }

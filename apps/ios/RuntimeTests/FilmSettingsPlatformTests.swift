@@ -3,7 +3,7 @@ import XCTest
 import UIKit
 import Combine
 import UniformTypeIdentifiers
-import MeowJSON
+import MeowRuntime
 import MeowStorage
 @testable import MeowFilmFeature
 @testable import MeowUI
@@ -153,7 +153,9 @@ final class FilmSettingsPlatformTests: XCTestCase {
         XCTAssertEqual(alert.actions.map(\.title), ["取消", "重试"])
         await eventually { !alert.isBeingPresented && alert.view.window != nil }
         try fixture.sourceStore.write(bytes, key: FilmSourceService.documentKey)
-        let rebuilt = FilmSourceService(transport: .init(rpc: { _, _, _ in throw FilmSourceError(code: "OFFLINE") }),
+        let rebuilt = FilmSourceService(transport: .init(
+            request: { _, _ in throw FilmSourceError(code: "OFFLINE") },
+            upload: { _, _, _ in throw FilmSourceError(code: "OFFLINE") }),
                                        storeFactory: { fixture.sourceStore })
         try await rebuilt.initialize()
         let snapshot = await rebuilt.snapshot
@@ -254,7 +256,15 @@ final class FilmSettingsPlatformTests: XCTestCase {
                     }
                     page.table.scrollToRow(at: last, at: .bottom, animated: false)
                     page.table.layoutIfNeeded()
-                    XCTAssertGreaterThan(page.table.contentOffset.y, 0)
+                    // Trailing section spacing can overflow while the last row
+                    // already fits. Check content reachability, not a positive offset.
+                    let lastFrame = page.table.rectForRow(at: last)
+                    let viewport = page.table.bounds.inset(by: page.table.adjustedContentInset)
+                    let context = "page=\(index), width=\(width)"
+                    XCTAssertLessThanOrEqual(lastFrame.maxY, viewport.maxY + 1, context)
+                    if lastFrame.height <= viewport.height {
+                        XCTAssertGreaterThanOrEqual(lastFrame.minY, viewport.minY - 1, context)
+                    }
                     XCTAssertTrue(page.table.indexPathsForVisibleRows?.contains(last) == true)
                     attach(page, "film-settings-\(index)-\(Int(width))-AXXXL-bottom")
                 }
@@ -548,7 +558,9 @@ final class FilmSettingsPlatformTests: XCTestCase {
             XCTAssertEqual(saved.cats.map(\.installationId), ["a", "b"])
             XCTAssertEqual(saved.videos.map(\.key.installationId), ["a", "b"])
             XCTAssertTrue(saved.cats.allSatisfy(\.enabled))
-            let rebuilt = FilmSourceService(transport: .init(rpc: { _, _, _ in throw FilmSourceError(code: "OFFLINE") }),
+            let rebuilt = FilmSourceService(transport: .init(
+                request: { _, _ in throw FilmSourceError(code: "OFFLINE") },
+                upload: { _, _, _ in throw FilmSourceError(code: "OFFLINE") }),
                                            storeFactory: { fixture.sourceStore })
             try await rebuilt.initialize()
             let persisted = await rebuilt.snapshot
@@ -654,7 +666,9 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let snapshot = await fixture.sources.snapshot
         XCTAssertEqual(snapshot.cats.map(\.installationId), ["b"])
         XCTAssertEqual(snapshot.videos.map(\.key.installationId), ["b"])
-        let rebuilt = FilmSourceService(transport: .init(rpc: { _, _, _ in throw FilmSourceError(code: "OFFLINE") }),
+        let rebuilt = FilmSourceService(transport: .init(
+            request: { _, _ in throw FilmSourceError(code: "OFFLINE") },
+            upload: { _, _, _ in throw FilmSourceError(code: "OFFLINE") }),
                                        storeFactory: { fixture.sourceStore })
         try await rebuilt.initialize()
         let persisted = await rebuilt.snapshot
@@ -776,7 +790,9 @@ private struct FilmSettingsFixture: Sendable {
         rules = try FilmRuleService(store: rulesStore)
         runtime = FilmSettingsRPCFixture()
         let runtime = runtime, store = sourceStore
-        sources = FilmSourceService(transport: .init(rpc: { method, params, _ in try await runtime.rpc(method, params) }),
+        sources = FilmSourceService(transport: .init(
+            request: { operation, params in try await runtime.call(operation, params) },
+            upload: { id, revision, bytes in try await runtime.upload(id, revision, bytes) }),
                                     storeFactory: { store })
     }
     func removeFiles() { try? FileManager.default.removeItem(at: base) }
@@ -864,6 +880,7 @@ private actor FilmSettingsRPCFixture {
     private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
     private var probeCancelled = false
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var candidates: [String: (revision: Int, bytes: Data)] = [:]
     func waitForProbeCancellation() async {
         if probeCancelled { return }
         await withCheckedContinuation { cancellationWaiters.append($0) }
@@ -878,13 +895,19 @@ private actor FilmSettingsRPCFixture {
         await withCheckedContinuation { enteredWaiters.append($0) }
     }
     func releaseProbe() { waiter?.resume(); waiter = nil }
-    func rpc(_ method: String, _ params: JSONValue) async throws -> JSONValue {
-        let method = String(method.dropFirst("cat.script.".count)); calls.append(method)
-        let fields: [String: JSONValue]
+    func upload(_ id: String, _ revision: Int, _ bytes: Data) throws -> RuntimeValue {
+        guard revision > 0, !bytes.isEmpty else { throw FilmSourceError(code: "INVALID_ARGUMENT") }
+        candidates[id] = (revision, bytes)
+        return .object(["installationId": .string(id), "sourceRevision": .number(Double(revision)),
+            "sourceBytes": .number(Double(bytes.count))])
+    }
+    func call(_ method: String, _ params: RuntimeValue) async throws -> RuntimeValue {
+        calls.append(method)
+        let fields: RuntimeObject
         if case .object(let values) = params { fields = values } else { fields = [:] }
         let id: String
         if case .string(let value)? = fields["installationId"] { id = value } else { id = "a" }
-        let value: JSONValue
+        let value: RuntimeValue
         switch method {
         case "status":
             if failNextStatus { failNextStatus = false; throw FilmSourceError(code: "STATUS_FAILED") }
@@ -905,17 +928,13 @@ private actor FilmSettingsRPCFixture {
                 statusFailureAfterDeletion = nil; failNextStatus = true
             }
             value = .object(["failures": .array([])])
-        case "stage.begin":
-            return .object(["contract": .string("cat.script.v1"), "ok": .bool(true),
-                            "token": .string("upload"), "chunkBytes": .number(65536)])
-        case "stage.chunk":
-            guard case .string(let encoded)? = fields["data"], let bytes = Data(base64Encoded: encoded),
-                  case .number(let offset)? = fields["offset"] else { throw FilmSourceError(code: "INVALID_CHUNK") }
-            return .object(["contract": .string("cat.script.v1"), "ok": .bool(true),
-                            "next": .number(offset + Double(bytes.count))])
-        case "stage.abort":
-            return .object(["contract": .string("cat.script.v1"), "ok": .bool(true)])
         case "update":
+            if local.contains(id) {
+                guard case .number(let revision)? = fields["sourceRevision"],
+                      candidates[id]?.revision == Int(revision) else {
+                    throw FilmSourceError(code: "NOT_FOUND")
+                }
+            } else if fields["sourceRevision"] != nil { throw FilmSourceError(code: "INVALID_ARGUMENT") }
             updates.append(id)
             if updatePaused {
                 updatePaused = false; updateEntered = true
@@ -933,7 +952,13 @@ private actor FilmSettingsRPCFixture {
                 throw FilmSourceError(code: "RESTART_FAILED")
             }
             value = cat(id)
-        case "edit", "install", "import": value = cat(id)
+        case "install":
+            guard case .number(let revision)? = fields["sourceRevision"],
+                  candidates[id]?.revision == Int(revision) else {
+                throw FilmSourceError(code: "NOT_FOUND")
+            }
+            value = cat(id)
+        case "edit", "import": value = cat(id)
         case "invoke":
             if pause {
                 pause = false; entered = true
@@ -945,10 +970,9 @@ private actor FilmSettingsRPCFixture {
             value = .object(["list": .array([]), "class": .array([])])
         default: throw FilmSourceError(code: "UNEXPECTED_\(method)")
         }
-        return .object(["contract": .string("cat.script.v1"), "ok": .bool(true),
-                        "data": .string(String(decoding: try JSONEncoder().encode(value), as: UTF8.self))])
+        return value
     }
-    private func cat(_ id: String) -> JSONValue {
+    private func cat(_ id: String) -> RuntimeValue {
         .object(["installationId": .string(id), "name": .string("测试猫源 " + id),
                  "sourceType": .string(local.contains(id) ? "local" : "network"), "sourceUrl": local.contains(id) ? .null : .string("https://example.invalid/\(id).js"),
                  "enabled": .bool(!disabled.contains(id)), "generation": .number(1),

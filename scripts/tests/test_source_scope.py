@@ -33,6 +33,12 @@ class SourceScopeTests(unittest.TestCase):
             ("MeowfilmAcceptanceUITests", ["UITests/Fixture.swift"]),
             ("MeowfilmRuntimeTests", ["RuntimeTests/Fixture.swift"]),
         ]
+        reference, embed, embed_phase = identity("native:ref"), identity("native:embed"), identity("native:phase")
+        objects.extend([
+            f'{reference} = {{ isa = PBXFileReference; name = MeowScriptHost.framework; path = "../../.cache/ios-native/$(MEOW_RUNTIME_SDK)-$(MEOW_RUNTIME_ARCH)/MeowScriptHost.framework"; }};',
+            f'{embed} = {{ isa = PBXBuildFile; fileRef = {reference}; settings = {{ ATTRIBUTES = (CodeSignOnCopy,); }}; }};',
+            f'{embed_phase} = {{ isa = PBXCopyFilesBuildPhase; dstSubfolderSpec = 10; files = ({embed},); }};',
+        ])
         for target, paths in target_sources:
             builds = []
             for path in paths:
@@ -43,7 +49,8 @@ class SourceScopeTests(unittest.TestCase):
                 builds.append(build)
             phase = identity(target + ":sources")
             objects.append(f"{phase} = {{ isa = PBXSourcesBuildPhase; files = ({','.join(builds)},); }};")
-            objects.append(f"{identity(target)} = {{ isa = PBXNativeTarget; name = {target}; buildPhases = ({phase},); }};")
+            phases = f"{phase},{embed_phase}," if target == "Meowfilm" else f"{phase},"
+            objects.append(f"{identity(target)} = {{ isa = PBXNativeTarget; name = {target}; buildPhases = ({phases}); }};")
         self.write("apps/ios/Meowfilm.xcodeproj/project.pbxproj", "\n".join(objects))
 
     def write(self, name, text):

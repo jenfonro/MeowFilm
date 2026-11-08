@@ -1,61 +1,125 @@
+import { closeSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import { BridgeError } from '@meowfilm/runtime-bridge';
-import { createDescriptorPeer } from '@meowfilm/runtime-bridge/descriptor';
+import { Socket } from 'node:net';
+import { BridgeError, decodeJSONValue, validateSession } from '@meowfilm/runtime-bridge';
+import { duplicateBootstrapDescriptor } from '../../../packages/script-host/src/native-engine.js';
 import { createAppRuntime } from '../../runtime/bootstrap.mjs';
 
-const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
-const sessionPattern = new RegExp(`^${uuid}$(?![\\s\\S])`);
-const descriptorPattern = /^[1-9][0-9]{0,8}$(?![\s\S])/;
-
-/**
- * The native launcher passes exactly one connected AF_UNIX descriptor, the
- * runtime session generation and the App-owned script data directory. The
- * session UUID is a generation, NOT proof of identity or an auth secret.
- */
+/** The only launch argument is an App-owned, connected private descriptor. */
 export function parseIOSLaunchArguments(argv) {
-  if (!Array.isArray(argv) || argv.length !== 6 || argv.some(value => typeof value !== 'string') ||
-      argv[0] !== '--meow-fd' || !descriptorPattern.test(argv[1]) || Number(argv[1]) < 3 ||
-      argv[2] !== '--meow-session' || !sessionPattern.test(argv[3]) ||
-      argv[4] !== '--meow-data' || !isAbsolute(argv[5]) || /[\u0000-\u001f\u007f]/.test(argv[5])) {
-    throw new BridgeError('INVALID_MESSAGE');
+  if (!Array.isArray(argv) || argv.length !== 2 || argv[0] !== '--meow-bootstrap-fd' ||
+      typeof argv[1] !== 'string' || !/^[1-9][0-9]*$(?![\s\S])/.test(argv[1]) ||
+      !Number.isSafeInteger(Number(argv[1])) || Number(argv[1]) < 3 || Number(argv[1]) > 0x7fffffff) {
+    throw new BridgeError('INVALID_REQUEST');
   }
-  return Object.freeze({ descriptor: Number(argv[1]), session: argv[3], dataRoot: argv[5] });
+  return Object.freeze({ descriptor: Number(argv[1]) });
 }
 
-/**
- * Node runs inside the App process, so an escaped runtime failure must close
- * this runtime instead of terminating the App. The native owner observes the
- * closed descriptor and keeps scripts unavailable for the rest of this run.
- */
+export function parseIOSConfiguration(bytes) {
+  const value = decodeJSONValue(bytes);
+  if (value === null || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).length !== 3 || !Object.hasOwn(value, 'sessionId') ||
+      !Object.hasOwn(value, 'requestKey') || !Object.hasOwn(value, 'dataRoot') ||
+      typeof value.dataRoot !== 'string' || !isAbsolute(value.dataRoot) ||
+      /[\u0000-\u001f\u007f]/.test(value.dataRoot)) throw new BridgeError('INVALID_REQUEST');
+  validateSession({ sessionId: value.sessionId, key: value.requestKey });
+  return Object.freeze(value);
+}
+
+/** An escaped script failure drains this runtime without terminating the App. */
 export function installIOSFailureBoundary(runtime, { target = process, report = reportIOSRuntimeFailure } = {}) {
   let failed = false;
   const fail = () => {
     if (failed) return;
     failed = true;
-    try { report(); } catch { /* Reporting must not mask the shutdown. */ }
+    try { report(); } catch { /* Reporting must not mask shutdown. */ }
     void Promise.resolve().then(() => runtime.close()).catch(() => {});
   };
   target.on('uncaughtException', fail);
+  target.on('unhandledRejection', fail);
   return fail;
 }
 
-/** Platform launch/transport only; shared assembly owns script modules and their instances. */
-export function startIOSAppRuntime({ product, assemble, argv = process.argv.slice(2) } = {}) {
-  const launch = parseIOSLaunchArguments(argv);
-  if (typeof assemble !== 'function') throw new BridgeError('INVALID_MESSAGE');
-  // Factories are passive and run only after the descriptor is attached.
-  const runtime = createAppRuntime({
-    product, assemble: options => assemble({ ...options, dataRoot: launch.dataRoot }),
-    connect: options => createDescriptorPeer(launch.descriptor, { ...options, session: launch.session }),
-  });
-  installIOSFailureBoundary(runtime);
-  return runtime;
+/** One configuration, one endpoint, then EOF. Business traffic is HTTP only. */
+export async function startIOSAppRuntime({ product, assemble, argv = process.argv.slice(2) } = {}) {
+  const { descriptor } = parseIOSLaunchArguments(argv);
+  const duplicate = duplicateBootstrapDescriptor(descriptor);
+  let channel;
+  try {
+    channel = new Socket({ fd: duplicate, readable: true, writable: true, allowHalfOpen: true });
+  } catch (error) {
+    closeSync(duplicate);
+    throw error;
+  }
+  let runtime, stopping, ended = false;
+  const close = () => stopping ??= (async () => {
+    ended = true;
+    try { await runtime?.close(); }
+    finally { channel.destroy(); }
+  })();
+  const stop = () => { void close().catch(() => {}); };
+  channel.once('end', stop);
+  channel.once('close', stop);
+  channel.on('error', stop);
+  installIOSFailureBoundary({ close });
+  try {
+    if (typeof assemble !== 'function') throw new BridgeError('INVALID_REQUEST');
+    const configuration = await readConfiguration(channel);
+    if (ended) throw new BridgeError('CLOSED');
+    runtime = createAppRuntime({ product,
+      sessionId: configuration.sessionId, requestKey: configuration.requestKey,
+      assemble: () => assemble({ dataRoot: configuration.dataRoot }),
+    });
+    await runtime.start();
+    if (ended) throw new BridgeError('CLOSED');
+    await new Promise((resolve, reject) => {
+      channel.write(`${JSON.stringify({ baseUrl: runtime.baseUrl })}\n`, error => error ? reject(error) : resolve());
+    });
+    return Object.freeze({
+      get baseUrl() { return runtime.baseUrl; },
+      get state() { return runtime.state; },
+      close,
+    });
+  } catch (error) {
+    await close().catch(() => {});
+    throw error;
+  }
 }
 
-function reportIOSRuntimeFailure() {
-  // No argv, provider error message, stack, URL, business data or credentials.
-  process.stderr.write('IOS_RUNTIME_FAILED\n');
+function readConfiguration(channel) {
+  return new Promise((resolve, reject) => {
+    let chunks = [], length = 0, settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      channel.off('data', data);
+      channel.off('end', failed);
+      channel.off('close', failed);
+      channel.off('error', failed);
+      chunks = [];
+      if (error) reject(error); else resolve(value);
+    };
+    const failed = () => finish(new BridgeError('CLOSED'));
+    const data = bytes => {
+      chunks.push(bytes); length += bytes.length;
+      const newline = bytes.indexOf(10);
+      if (newline === -1) return;
+      try {
+        if (newline !== bytes.length - 1) throw new BridgeError('INVALID_REQUEST');
+        const value = parseIOSConfiguration(Buffer.concat(chunks, length).subarray(0, -1));
+        // Once configured, the channel only accepts the native owner's EOF.
+        channel.on('data', () => channel.destroy());
+        finish(undefined, value);
+      } catch (error) { finish(error); }
+    };
+    channel.on('data', data);
+    channel.once('end', failed);
+    channel.once('close', failed);
+    channel.once('error', failed);
+  });
 }
+
+function reportIOSRuntimeFailure() { process.stderr.write('IOS_RUNTIME_FAILED\n'); }
 
 export function reportIOSRuntimeStartFailure() {
   process.stderr.write('IOS_RUNTIME_START_FAILED\n');

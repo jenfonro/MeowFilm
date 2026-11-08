@@ -38,16 +38,55 @@ private actor MusicCandidateIntegrationScripts: MusicScriptResolving {
         guard installationID == NativeMusicFixture.installation else { throw MusicServiceError.targetChanged }
         return NativeMusicFixture.source()
     }
-    func resolve(request: MusicScriptRequest) async -> MusicNativeAudio {
+    func resolve(request: MusicScriptRequest) async -> MusicScriptResult<MusicNativeAudio> {
         requests.append(request)
         if let gate { self.gate = nil; await gate.wait() }
-        return .init(url: URL(string: "https://media.invalid/synthetic.flac")!)
+        return .init(value: .init(url: URL(string: "https://media.invalid/synthetic.flac")!), source: request.source)
     }
-    func lyrics(request: MusicScriptRequest) -> MusicNativeLyrics { .init(text: "") }
+    func lyrics(request: MusicScriptRequest) -> MusicScriptResult<MusicNativeLyrics> { .init(value: .init(text: ""), source: request.source) }
 }
 
 
 final class MusicCandidateIntegrationTests: XCTestCase {
+    @MainActor func testColdOrdinaryAndAutomaticPlaybackPublishTheActualSelectionAndRejectItsOldGeneration() async throws {
+        for automatic in [false, true] {
+            let scripts = NativeMusicScriptFixture()
+            await scripts.coldStart()
+            let service = try await NativeMusicFixture.service(try MusicNativeCandidateDiscoveryFixture.store(), scripts: scripts)
+            let options = try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1")).options
+            let requested = try XCTUnwrap(options.first).selection(quality: "flac")
+            XCTAssertEqual(requested.generation, 0)
+            let player = MusicCandidateIntegrationPlayer(), model = MusicViewModel(service: service, player: player)
+            await model.load()
+            if automatic { await model.togglePlayback() }
+            else { await model.choose(requested) }
+            let live = try await scripts.source(installationID: requested.installationId)
+            let actual = MusicPlaybackSelection(installationId: live.installationID, generation: 7,
+                siteId: requested.siteId, sourceKey: requested.sourceKey, quality: requested.quality,
+                scriptIdentity: live.identity)
+            let candidate = try XCTUnwrap(model.candidate)
+            let attempt = await service.attempt
+            XCTAssertEqual(live.generation, 7)
+            XCTAssertEqual(candidate.resolvedSelection, actual)
+            XCTAssertEqual(attempt?.selection, actual)
+            XCTAssertEqual(attempt?.scriptSource, live)
+            XCTAssertEqual(model.lastSelection, actual)
+            XCTAssertEqual(model.activePlaybackSelection, actual)
+            XCTAssertEqual(player.resources.count, 1)
+            let calls = await scripts.calls(); XCTAssertEqual(calls.count, 1)
+            let history = try await service.playedSongs(); XCTAssertTrue(history.isEmpty)
+
+            await scripts.configure(generation: 8)
+            await model.choose(actual)
+            XCTAssertNotNil(model.error)
+            XCTAssertEqual(player.resources.count, 1, "An old positive generation never cold-binds again")
+            XCTAssertNil(model.activePlaybackSelection)
+            let afterReload = await scripts.calls(); XCTAssertEqual(afterReload.count, 1)
+            let rejected = await service.attempt; XCTAssertNil(rejected)
+            await model.close(); await service.close()
+        }
+    }
+
     @MainActor func testNativeServiceDiscoveryCASViewModelPlayerAndFactOwnerAreOneChain() async throws {
         let store = try MusicNativeCandidateDiscoveryFixture.store(), scripts = MusicNativeCandidateDiscoveryScripts()
         await scripts.supported(["wy"]) // Seed is tx; the existing-only picker cannot resolve it.

@@ -87,12 +87,12 @@ actor MusicCandidateViewModelService: MusicServing, MusicCandidateDiscoveryServi
         if let failure = automaticFailure { throw failure }
         ready = attempt
         if let gate = resolveGate { resolveGate = nil; await gate.wait() }
-        return value(attempt, occurrence: occurrence, quality: target.quality)
+        return value(attempt, occurrence: occurrence, selection: target.selection)
     }
-    func value(_ attempt: String, occurrence: String, quality: String) -> MusicPlaybackCandidate {
+    func value(_ attempt: String, occurrence: String, selection: MusicPlaybackSelection) -> MusicPlaybackCandidate {
         .init(attemptId: attempt, occurrenceId: occurrence, resourceId: "music:" + attempt,
             url: URL(string: "https://media.invalid/candidate.mp3")!, title: "Synthetic",
-            startPosition: 23, requestedQuality: quality)
+            startPosition: 23, requestedQuality: selection.quality, resolvedSelection: selection)
     }
     func closeSession(_ id: UUID, retaining: String?) {
         closed.insert(id)
@@ -115,7 +115,7 @@ actor MusicCandidateViewModelService: MusicServing, MusicCandidateDiscoveryServi
         counts.manual += 1
         if let manualFailure { throw manualFailure }
         ready = attemptId
-        return value(attemptId, occurrence: occurrenceId, quality: selection.quality)
+        return value(attemptId, occurrence: occurrenceId, selection: selection)
     }
     func changeQueue(_ change: MusicQueueChange, expectedRevision: Int) throws -> MusicPlaybackState {
         guard revision == expectedRevision else { throw MusicServiceError.staleRevision }

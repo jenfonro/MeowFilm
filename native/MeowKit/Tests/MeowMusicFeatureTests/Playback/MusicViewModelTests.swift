@@ -8,8 +8,10 @@ import MeowStorage
 @testable import MeowMusicFeature
 
 private let musicSourceKey = "[\"wy\",\"123\",\"\"]"
+private let musicScriptIdentity = MusicScriptIdentity(version: "1.0", contentHash: String(repeating: "a", count: 64),
+    revisionHash: String(repeating: "b", count: 64))
 private let musicSelection = MusicPlaybackSelection(installationId: "selected-lx", generation: 1,
-    siteId: "wy", sourceKey: musicSourceKey, quality: "128k")
+    siteId: "wy", sourceKey: musicSourceKey, quality: "128k", scriptIdentity: musicScriptIdentity)
 private let musicOfficialSelection = MusicPlaybackSelection(installationId: "official:synthetic", generation: 1,
     siteId: "wy", sourceKey: musicSourceKey, quality: "128k")
 
@@ -40,13 +42,16 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     var hasCachedAudio = false, hasLyrics = false
     var availability = MusicSourceAvailability(options: [
         MusicPlaybackOption(installationId: "selected-lx", generation: 1, siteId: "wy", sourceKey: musicSourceKey,
-            qualities: ["128k"], title: "合成音源", version: "1.0", contentHash: String(repeating: "a", count: 64))
+            qualities: ["128k"], title: "合成音源", version: "1.0", contentHash: String(repeating: "a", count: 64),
+            revisionHash: musicScriptIdentity.revisionHash)
     ], scriptState: .ready)
     var availabilityGate: MusicCollectionGate?
     var metadataEnabled: Set<MusicPublicBrowsePlatform> = [.netease]
     var metadataFailure: MusicServiceError?
     var lyricSourceKeys: [String] = []
     var cacheLookups = 0, cacheDiscards = 0, resolveCalls = 0, lyricCalls = 0
+    var resultSelection: @Sendable (MusicPlaybackSelection) -> MusicPlaybackSelection = { $0 }
+    var resolvedAttempts: [String] = [], cancelledAttempts: [String?] = []
     let cachedFileAuthorization = MusicQueueAuthorization()
     var remoteAuthorization: MusicQueueAuthorization?
     var recordGate: MusicCollectionGate?
@@ -56,13 +61,16 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     }
     func enableCaches(audio: Bool, lyrics: Bool) { hasCachedAudio = audio; hasLyrics = lyrics }
     func cacheCounts() -> [Int] { [cacheLookups, cacheDiscards, resolveCalls, lyricCalls] }
+    func returnSelection(_ selection: MusicPlaybackSelection) { resultSelection = { _ in selection } }
+    func resolutionFacts() -> (resolved: [String], cancelled: [String?]) { (resolvedAttempts, cancelledAttempts) }
     func cachedPlayback(attemptID: String, occurrenceID: String,
                         selection: MusicPlaybackSelection?) async throws -> MusicCachedPlayback? {
         cacheLookups += 1
         guard hasCachedAudio, selection == nil || selection == musicOfficialSelection else { return nil }
         let value = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: occurrenceID,
             resourceId: "music:" + attemptID, url: URL(fileURLWithPath: "/synthetic-cache/complete.mp3"),
-            title: "合成歌曲", requestedQuality: "128k", fileAuthorization: cachedFileAuthorization)
+            title: "合成歌曲", requestedQuality: "128k", resolvedSelection: selection ?? musicOfficialSelection,
+            fileAuthorization: cachedFileAuthorization)
         return .init(candidate: value, selection: selection ?? musicOfficialSelection)
     }
     func discardCachedPlayback(attemptID: String) async { cacheDiscards += 1; hasCachedAudio = false }
@@ -211,17 +219,18 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
         return selection
     }
     func resolve(attemptId: String, occurrenceId: String, selection: MusicPlaybackSelection) async throws -> MusicPlaybackCandidate {
-        resolveCalls += 1
+        resolveCalls += 1; resolvedAttempts.append(attemptId)
         let candidate = MusicPlaybackCandidate(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
             url: URL(string: "https://media.invalid/synthetic.mp3")!, headers: headers,
-            title: "合成歌曲", requestedQuality: selection.quality, playbackAuthorization: remoteAuthorization)
+            title: "合成歌曲", requestedQuality: selection.quality, resolvedSelection: resultSelection(selection),
+            playbackAuthorization: remoteAuthorization)
         if holdNextResolve {
             holdNextResolve = false
             return await withCheckedContinuation { value in held = (candidate, value); beganResolve?() }
         }
         return candidate
     }
-    func cancel(attemptId: String?) async throws {}
+    func cancel(attemptId: String?) async throws { cancelledAttempts.append(attemptId) }
     func record(_ fact: MusicPlaybackFact) async throws -> Bool {
         if let gate = recordGate { recordGate = nil; await gate.wait() }
         facts.append(fact); return true
@@ -298,6 +307,34 @@ private actor MusicModelAccountSessions: MusicAccountsServing, MusicAccountSessi
 }
 
 final class MusicViewModelTests: XCTestCase {
+    @MainActor func testPinnedResolutionRejectsMismatchedResultSelectionBeforePlayingAndCancelsTheExactAttempt() async throws {
+        let selections: [MusicPlaybackSelection] = [
+            .init(installationId: "different-lx", generation: 1, siteId: "wy", sourceKey: musicSourceKey,
+                quality: "128k", scriptIdentity: musicScriptIdentity),
+            .init(installationId: "selected-lx", generation: 1, siteId: "tx", sourceKey: musicSourceKey,
+                quality: "128k", scriptIdentity: musicScriptIdentity),
+            .init(installationId: "selected-lx", generation: 1, siteId: "wy", sourceKey: "another-source",
+                quality: "128k", scriptIdentity: musicScriptIdentity),
+            .init(installationId: "selected-lx", generation: 1, siteId: "wy", sourceKey: musicSourceKey,
+                quality: "flac", scriptIdentity: musicScriptIdentity),
+            .init(installationId: "selected-lx", generation: 1, siteId: "wy", sourceKey: musicSourceKey, quality: "128k"),
+            .init(installationId: "selected-lx", generation: 2, siteId: "wy", sourceKey: musicSourceKey,
+                quality: "128k", scriptIdentity: musicScriptIdentity),
+        ]
+        for actual in selections {
+            let (service, player, model) = setup()
+            await service.returnSelection(actual)
+            await model.load(); await model.choose(musicSelection)
+            XCTAssertNotNil(model.error)
+            XCTAssertTrue(player.resources.isEmpty)
+            XCTAssertNil(model.activePlaybackSelection); XCTAssertNil(model.candidate)
+            let facts = await service.resolutionFacts()
+            XCTAssertEqual(facts.resolved.count, 1)
+            XCTAssertEqual(facts.cancelled, facts.resolved.map { Optional($0) })
+            await model.close()
+        }
+    }
+
     @MainActor func testMetadataPreferenceRefreshCoalescesBehindOnePhysicalRead() async {
         let (service, _, model) = setup()
         let entered = expectation(description: "metadata state read entered")
@@ -473,6 +510,8 @@ final class MusicViewModelTests: XCTestCase {
         await service.enableCaches(audio: true, lyrics: false)
         await model.load(); await model.choose(musicOfficialSelection)
         XCTAssertEqual(model.activeAudioIsCached, true)
+        XCTAssertEqual(model.activePlaybackSelection, musicOfficialSelection)
+        XCTAssertEqual(model.candidate?.resolvedSelection, musicOfficialSelection)
         let counts = await service.cacheCounts(), facts = await service.recordedFacts()
         XCTAssertEqual(counts[0], 1); XCTAssertEqual(counts[2], 0)
         XCTAssertEqual(player.resources.count, 1); XCTAssertTrue(player.resources[0].url.isFileURL)
@@ -495,6 +534,8 @@ final class MusicViewModelTests: XCTestCase {
         XCTAssertEqual(model.current?.id, occurrence)
         XCTAssertEqual(player.resources.count, 2); XCTAssertFalse(player.resources[1].url.isFileURL)
         XCTAssertEqual(model.activeAudioIsCached, false)
+        XCTAssertEqual(model.activePlaybackSelection, musicOfficialSelection)
+        XCTAssertEqual(model.candidate?.resolvedSelection, musicOfficialSelection)
         XCTAssertFalse(facts.contains { $0.kind == .failed }, "a bad cache file is not proof the song failed")
         await model.close()
     }
@@ -541,7 +582,7 @@ final class MusicViewModelTests: XCTestCase {
         XCTAssertEqual(model.lyricLines.first?.text, "合成歌词")
         let differentAudio = MusicPlaybackSelection(installationId: musicSelection.installationId,
             generation: musicSelection.generation, siteId: musicSelection.siteId,
-            sourceKey: musicSelection.sourceKey, quality: "flac")
+            sourceKey: musicSelection.sourceKey, quality: "flac", scriptIdentity: musicSelection.scriptIdentity)
         await model.choose(differentAudio)
         await model.loadLyrics(occurrenceId: "entry-1")
         let requested = await service.requestedLyricSources()

@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, lstatSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { constants } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
@@ -21,6 +23,49 @@ function loadBinding() {
   const receiptStat = lstatSync(manifestFile);
   if (!receiptStat.isFile() || receiptStat.isSymbolicLink()) throw fault('NATIVE_ARTIFACT_INVALID');
   const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
+  if (process.platform === 'ios') {
+    const target = manifest.target;
+    if (manifest.schemaVersion !== 1 || manifest.abi !== 1 || manifest.napi !== 8
+        || Number(process.versions.napi) < 8
+        || manifest.platform !== 'ios' || manifest.arch !== process.arch
+        || !['iphoneos', 'iphonesimulator'].includes(target?.sdk)
+        || target.arch !== process.arch || target.minimumOS !== '17.0'
+        || (target.sdk === 'iphoneos' && target.arch !== 'arm64')
+        || !['arm64', 'x64'].includes(target.arch)
+        || !/^[a-f0-9]{64}$/.test(manifest.bindingIdentity ?? '')
+        || manifest.artifact?.path !== `.cache/ios-native/${target.sdk}-${target.arch === 'x64' ? 'x86_64' : target.arch}/MeowScriptHost.framework/MeowScriptHost`) {
+      throw fault('NATIVE_ARTIFACT_INVALID');
+    }
+    const self = fileURLToPath(import.meta.url);
+    const suffix = '/Runtime/node_modules/@meowfilm/script-host/src/native-engine.js';
+    if (!self.endsWith(suffix)) throw fault('NATIVE_ARTIFACT_INVALID');
+    const app = self.slice(0, -suffix.length);
+    if (!app.endsWith('.app')) throw fault('NATIVE_ARTIFACT_INVALID');
+    const appStat = lstatSync(app);
+    if (!appStat.isDirectory() || appStat.isSymbolicLink()) throw fault('NATIVE_ARTIFACT_INVALID');
+    // Derive the only executable location from this signed bundle resource.
+    // No business argument, environment variable or receipt path chooses code.
+    for (const relative of ['Runtime', 'Runtime/node_modules', 'Runtime/node_modules/@meowfilm',
+      'Runtime/node_modules/@meowfilm/script-host', 'Runtime/node_modules/@meowfilm/script-host/src',
+      'Frameworks', 'Frameworks/MeowScriptHost.framework']) {
+      const entry = lstatSync(join(app, relative));
+      if (!entry.isDirectory() || entry.isSymbolicLink()) throw fault('NATIVE_ARTIFACT_INVALID');
+    }
+    const executable = join(app, 'Frameworks/MeowScriptHost.framework/MeowScriptHost');
+    const stat = lstatSync(executable);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw fault('NATIVE_ARTIFACT_INVALID');
+    const module = { exports: {} };
+    process.dlopen(module, executable, constants.dlopen.RTLD_NOW | constants.dlopen.RTLD_LOCAL);
+    const loaded = module.exports;
+    if (loaded.abi !== 1 || loaded.napi !== 8 || loaded.bindingIdentity !== manifest.bindingIdentity
+        || loaded.sdk !== target.sdk || loaded.arch !== target.arch || loaded.minimumOS !== target.minimumOS) {
+      throw fault('NATIVE_ABI_MISMATCH');
+    }
+    // Code integrity after embedding/re-signing belongs to the App signature.
+    // The unsigned Mach-O hash remains a build/package check in the receipt.
+    binding = loaded;
+    return binding;
+  }
   const stat = lstatSync(artifact);
   const bytes = readFileSync(artifact);
   if (!stat.isFile() || stat.isSymbolicLink() || manifest.schemaVersion !== 1 ||
@@ -35,6 +80,13 @@ function loadBinding() {
   if (loaded.abi !== 1 || loaded.napi !== 8) throw fault('NATIVE_ABI_MISMATCH');
   binding = loaded;
   return binding;
+}
+
+/** Internal launch handoff: the caller owns the copy, never the input descriptor. */
+export function duplicateBootstrapDescriptor(descriptor) {
+  const loaded = loadBinding();
+  if (typeof loaded.duplicateBootstrapDescriptor !== 'function') throw fault('NATIVE_ABI_MISMATCH');
+  return loaded.duplicateBootstrapDescriptor(descriptor);
 }
 
 /**
