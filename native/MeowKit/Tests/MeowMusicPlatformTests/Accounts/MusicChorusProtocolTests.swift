@@ -35,13 +35,16 @@ final class MusicChorusProtocolTests: XCTestCase {
         let options = try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101")
         let selection = options[0].selection(quality: "128k")
         _ = try await f.service.nativeResolve(platform: .netease, nativeID: "101", selection: selection)
+        let cold = try await f.service.nativeChorus(nativeID: "101", selection: selection,
+            recordingDuration: 180, actualDuration: 180, cachedOnly: true)
+        XCTAssertNil(cold, "A real provider identity on a file is not permission for network metadata")
         await f.http.replies("/weapi/song/chorus", [try MusicNeteaseFixture.response([
             "code": 200, "chorus": [["id": 101, "startTime": 71_200, "endTime": 122_200]]])])
         let point = try await f.service.nativeChorus(nativeID: "101", selection: selection,
-                                                     recordingDuration: 180, actualDuration: 180)
+                                                     recordingDuration: 180, actualDuration: 180, cachedOnly: false)
         XCTAssertEqual(point?.start, 71.2)
         _ = try await f.service.nativeChorus(nativeID: "101", selection: selection,
-                                           recordingDuration: 180, actualDuration: 180)
+                                           recordingDuration: 180, actualDuration: 180, cachedOnly: true)
         let calls = await f.http.recorded()
         XCTAssertEqual(calls.filter { $0.request.url.path == "/weapi/song/chorus" }.count, 1)
         XCTAssertFalse(calls.contains {

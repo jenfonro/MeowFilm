@@ -63,23 +63,24 @@ enum MusicPlatformJSON {
         if let value = fields["licenseExpiresAt"], value != .null {
             licenseExpiresAt = Date(timeIntervalSince1970: try real(value, maximum: Double(maximumInteger)) / 1000)
         } else { licenseExpiresAt = nil }
+        func optional(_ key: String, maximum: Double) throws -> Double? {
+            guard let value = fields[key], value != .null else { return nil }
+            let number = try real(value, maximum: maximum)
+            return number > 0 ? number : nil
+        }
+        let duration = try optional("duration", maximum: 604_800)
         let delivery: MusicAudioDelivery?
         if fields["qualityVerified"] == .bool(true) {
             guard let quality = try? string(fields["actualQuality"], maximum: 16),
                   officialQualities.contains(quality) else { throw MusicServiceError.invalidMediaCandidate }
-            func optional(_ key: String, maximum: Double) throws -> Double? {
-                guard let value = fields[key], value != .null else { return nil }
-                let number = try real(value, maximum: maximum)
-                return number > 0 ? number : nil
-            }
             delivery = try .init(quality: quality, evidence: .officialResponse,
                 bitrate: optional("bitrate", maximum: 100_000_000),
                 sampleRate: optional("sampleRate", maximum: 768_000),
-                duration: optional("duration", maximum: 604_800))
+                duration: duration)
         } else { delivery = nil }
         return .init(url: url, expiresAt: expiresAt,
                      fileCachePolicy: .init(allowed: fields["cacheAllowed"] == .bool(true),
-                                            licenseExpiresAt: licenseExpiresAt), delivery: delivery)
+                                            licenseExpiresAt: licenseExpiresAt), delivery: delivery, duration: duration)
     }
     static func object(_ value: JSONValue?, keys: Set<String>) throws -> [String: JSONValue] {
         guard case .object(let fields)? = value, Set(fields.keys) == keys else { throw MusicServiceError.invalidResponse }

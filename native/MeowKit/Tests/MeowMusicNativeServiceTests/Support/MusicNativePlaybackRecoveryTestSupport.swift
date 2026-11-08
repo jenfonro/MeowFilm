@@ -29,6 +29,7 @@ actor MusicRecoveryTestAccounts: MusicNativeAccountProviding, MusicNativePlaybac
     private var qualities = ["flac", "128k"]
     private var grantValid = false
     private var optionsCount = 0, resolves = 0
+    private var scopeReads = 0
     private var refreshes: [Request] = []
     private var refreshGate: NativeMusicGate?
     private var resolveGate: NativeMusicGate?
@@ -37,6 +38,7 @@ actor MusicRecoveryTestAccounts: MusicNativeAccountProviding, MusicNativePlaybac
     private var optionsGates: [Int: NativeMusicGate] = [:]
     private var optionsError: MusicServiceError?, refreshError: MusicServiceError?
     private var replacementURL = MusicRecoveryTestAccounts.renewedURL
+    private var qualityURLs: [String: URL] = [:]
     private var rotationOnReturn = false, withdrawOnReturn = false
     private var expiration: Date?
     init(platform: MusicAccountPlatform, nativeID: String, clock: MusicRecoveryTestClock) {
@@ -49,7 +51,8 @@ actor MusicRecoveryTestAccounts: MusicNativeAccountProviding, MusicNativePlaybac
         playbackAuthorization = authorization
         return authorization
     }
-    func nativeCacheScope() throws -> MusicNativeCacheScope { try scope.authorization.check(); return scope }
+    func nativeCacheScope() throws -> MusicNativeCacheScope { scopeReads += 1; try scope.authorization.check(); return scope }
+    func scopeReadCount() -> Int { scopeReads }
     func checkNativeCacheScope(_ value: MusicNativeCacheScope) throws {
         try value.authorization.check()
         guard value == scope else { throw MusicServiceError.staleAccess }
@@ -66,6 +69,7 @@ actor MusicRecoveryTestAccounts: MusicNativeAccountProviding, MusicNativePlaybac
     func allow(_ qualities: [String]) { self.qualities = qualities }
     func failOptions(_ error: MusicServiceError) { optionsError = error }
     func failRefresh(_ error: MusicServiceError) { refreshError = error }
+    func setResolveURL(_ url: URL, quality: String) { qualityURLs[quality] = url }
     func setResult(_ url: URL, expiresAt: Date? = nil) { replacementURL = url; expiration = expiresAt }
     func changeAfterRefresh(account: Bool) { rotationOnReturn = account; withdrawOnReturn = !account }
     func counts() -> (options: Int, resolves: Int, refreshes: Int) { (optionsCount, resolves, refreshes.count) }
@@ -103,7 +107,7 @@ actor MusicRecoveryTestAccounts: MusicNativeAccountProviding, MusicNativePlaybac
         }
         resolves += 1
         if let gate = resolveGate { resolveGate = nil; await gate.wait() }
-        return .init(url: Self.originalURL, expiresAt: clock.now().addingTimeInterval(60),
+        return .init(url: qualityURLs[selection.quality] ?? Self.originalURL, expiresAt: clock.now().addingTimeInterval(60),
                      playbackAuthorization: playbackAuthorization)
     }
     func nativeRefreshAudio(platform: MusicAccountPlatform, nativeID: String,
@@ -157,7 +161,7 @@ struct MusicRecoveryTestFixture {
         let file = MusicRecoveryTestFileCache(hit: .init(identity: .init(scope: String(repeating: "c", count: 64),
             songID: song["songId"].string, sourceKey: source.sourceKey, platform: platform.rawValue,
             nativeID: nativeID, requestedQuality: "flac",
-            playbackSignature: NativeMusicService.audioCacheSignature(song: song, playback: d.playback)),
+            playbackSignature: NativeMusicService.audioCacheSignature(song: song, playback: d.playback), provider: "official:recovery-synthetic"),
             fileURL: URL(fileURLWithPath: "/synthetic-cache/recording.flac"), duration: 180,
             measuredQuality: "flac", expiresAt: clock.now().addingTimeInterval(3600)))
         let service = NativeMusicService(document: store, accounts: accounts, qq: NativeMusicQQFixture(),
@@ -205,6 +209,8 @@ struct MusicRecoveryTestFixture {
 
 actor MusicRecoveryTestFileCache: MusicAudioFileCaching {
     var hit: MusicAudioFileCacheHit?
+    private var removalFails = false
+    func failRemoval() { removalFails = true }
     init(hit: MusicAudioFileCacheHit) { self.hit = hit }
     func lookup(scope: String, songID: String, authorization: MusicQueueAuthorization,
                 accepts: @escaping @Sendable (MusicAudioFileCacheIdentity) -> Bool) -> MusicAudioFileCacheHit? {
@@ -214,8 +220,11 @@ actor MusicRecoveryTestFileCache: MusicAudioFileCaching {
     }
     func storeAfterPlayback(_ request: MusicAudioFileCacheRequest) -> MusicAudioFileCacheVersion? { nil }
     func touch(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion, confirmedAt: Date, authorization: MusicQueueAuthorization) {}
-    func remove(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion) { if hit?.identity == identity, hit?.version == version { hit = nil } }
+    func remove(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion) {
+        if !removalFails, hit?.identity == identity, hit?.version == version { hit = nil }
+    }
     func cancelPending() {}
     func clear() { hit = nil }
+    func clearOfficial() { if hit?.identity.isOfficial == true { hit = nil } }
     func close() {}
 }

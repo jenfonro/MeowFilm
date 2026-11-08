@@ -1,6 +1,7 @@
 import Foundation
 
-/// A media-only port. There is deliberately no account/header/cookie parameter.
+/// A media-only port. Script presentation headers are sanitized separately;
+/// account credentials and cookies are never accepted.
 /// Injected transports must call `accept` before bytes and `finishBody` ONLY
 /// after a successful transport EOF (not just after receiving Content-Length).
 public protocol NativeMusicAudioCacheTransport: Sendable {
@@ -11,7 +12,11 @@ public protocol NativeMusicAudioCacheTransport: Sendable {
 public struct NativeMusicAudioCacheHTTPRequest: Sendable {
     public let url: URL
     public let platform: String
-    public init(url: URL, platform: String) { self.url = url; self.platform = platform }
+    public let scriptMedia: Bool
+    public let headers: [String: String]
+    public init(url: URL, platform: String, scriptMedia: Bool = false, headers: [String: String] = [:]) {
+        self.url = url; self.platform = platform; self.scriptMedia = scriptMedia; self.headers = headers
+    }
 }
 
 public struct NativeMusicAudioCacheHTTPResponse: Sendable {
@@ -35,30 +40,30 @@ enum NativeMusicAudioCacheHTTPPolicy {
 
     // Deliberately narrower than general account/image hosts. Unknown official
     // CDN aliases remain misses; this list is not an arbitrary host allow-list.
-    static func permits(_ url: URL, platform: String) -> Bool {
+    static func permits(_ url: URL, platform: String, scriptMedia: Bool = false) -> Bool {
         let domains: [String]
         switch platform {
         case "wy": domains = ["music.126.net"]
         case "tx": domains = ["stream.qqmusic.qq.com"]
         case "kg": domains = ["kugou.com", "kugou.net", "kgimg.com"]
-        default: return false
+        default: domains = []
         }
         guard url.absoluteString.utf8.count <= 16_384,
               !url.absoluteString.utf8.contains(where: { $0 <= 32 || $0 == 127 || $0 == 92 }),
               let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               parts.scheme == "https", parts.user == nil, parts.password == nil,
-              parts.fragment == nil, parts.port == nil || parts.port == 443,
+              parts.fragment == nil, parts.port == nil || (scriptMedia ? (1...65535).contains(parts.port!) : parts.port == 443),
               let host = parts.host?.lowercased(), !host.hasSuffix("."),
               host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy({
                   !$0.isEmpty && $0.utf8.allSatisfy {
                       (97...122).contains($0) || (48...57).contains($0) || $0 == 45
                   }
               }) else { return false }
-        return domains.contains { host == $0 || host.hasSuffix("." + $0) }
+        return scriptMedia || domains.contains { host == $0 || host.hasSuffix("." + $0) }
     }
 
     static func request(_ value: NativeMusicAudioCacheHTTPRequest) throws -> URLRequest {
-        guard permits(value.url, platform: value.platform) else { throw NativeMusicAudioCacheFailure.miss }
+        guard permits(value.url, platform: value.platform, scriptMedia: value.scriptMedia) else { throw NativeMusicAudioCacheFailure.miss }
         var request = URLRequest(url: value.url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
                                  timeoutInterval: transferIdle)
         request.httpMethod = "GET"
@@ -69,15 +74,28 @@ enum NativeMusicAudioCacheHTTPPolicy {
             "Accept": "audio/*, application/octet-stream, application/mp4",
             "Accept-Encoding": "identity"
         ]
+        if value.scriptMedia {
+            // Only the media owner's admitted presentation headers, never an
+            // account credential/cookie or a persisted secret.
+            for (key, value) in value.headers where ["referer", "user-agent"].contains(key.lowercased()) {
+                guard value.utf8.count <= 2048, !value.utf8.contains(where: { $0 < 32 || $0 == 127 }) else {
+                    throw NativeMusicAudioCacheFailure.miss
+                }
+                request.setValue(value, forHTTPHeaderField: key)
+            }
+        }
         return request
     }
 
     static func redirect(_ response: HTTPURLResponse, proposed: URLRequest,
-                         platform: String, count: Int) throws -> URLRequest {
+                         platform: String, count: Int, scriptMedia: Bool = false, headers: [String: String] = [:]) throws -> URLRequest {
         guard (1...5).contains(count), [301, 302, 303, 307, 308].contains(response.statusCode),
-              let origin = response.url, permits(origin, platform: platform),
+              let origin = response.url, permits(origin, platform: platform, scriptMedia: scriptMedia),
               let destination = proposed.url else { throw NativeMusicAudioCacheFailure.miss }
-        return try request(.init(url: destination, platform: platform))
+        let sameOrigin = origin.host?.lowercased() == destination.host?.lowercased() &&
+            origin.scheme == destination.scheme && (origin.port ?? 443) == (destination.port ?? 443)
+        return try request(.init(url: destination, platform: platform, scriptMedia: scriptMedia,
+                                 headers: sameOrigin ? headers : [:]))
     }
 
     static func configuration() -> URLSessionConfiguration {
@@ -90,8 +108,8 @@ enum NativeMusicAudioCacheHTTPPolicy {
         return value
     }
 
-    static func length(_ response: NativeMusicAudioCacheHTTPResponse, platform: String) throws -> Int64 {
-        guard [200, 206].contains(response.status), permits(response.url, platform: platform),
+    static func length(_ response: NativeMusicAudioCacheHTTPResponse, platform: String, scriptMedia: Bool = false) throws -> Int64 {
+        guard [200, 206].contains(response.status), permits(response.url, platform: platform, scriptMedia: scriptMedia),
               response.headers.count <= 128 else { throw NativeMusicAudioCacheFailure.miss }
         var headers: [String: String] = [:]
         for (key, value) in response.headers {
@@ -149,7 +167,7 @@ public struct URLSessionNativeMusicAudioCacheTransport: NativeMusicAudioCacheTra
     public func transfer(_ request: NativeMusicAudioCacheHTTPRequest,
                          into sink: NativeMusicAudioCacheSink) async throws {
         let prepared = try NativeMusicAudioCacheHTTPPolicy.request(request)
-        let operation = NativeMusicAudioCacheHTTPTransfer(platform: request.platform, sink: sink)
+        let operation = NativeMusicAudioCacheHTTPTransfer(request: request, sink: sink)
         try await withTaskCancellationHandler {
             try Task.checkCancellation()
             try sink.checkReceivingAuthorization()
@@ -160,7 +178,7 @@ public struct URLSessionNativeMusicAudioCacheTransport: NativeMusicAudioCacheTra
 
 private final class NativeMusicAudioCacheHTTPTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
-    private let platform: String
+    private let request: NativeMusicAudioCacheHTTPRequest
     private let sink: NativeMusicAudioCacheSink
     private var session: URLSession?
     private var continuation: CheckedContinuation<Void, Error>?
@@ -169,8 +187,8 @@ private final class NativeMusicAudioCacheHTTPTransfer: NSObject, URLSessionDataD
     private var redirects = 0
     private var responseTask: Task<Void, Never>?
 
-    init(platform: String, sink: NativeMusicAudioCacheSink) {
-        self.platform = platform; self.sink = sink
+    init(request: NativeMusicAudioCacheHTTPRequest, sink: NativeMusicAudioCacheSink) {
+        self.request = request; self.sink = sink
     }
 
     func run(_ request: URLRequest) async throws {
@@ -255,7 +273,8 @@ private final class NativeMusicAudioCacheHTTPTransfer: NSObject, URLSessionDataD
         let allowed = !finished && !receivedResponse && count <= 5
         lock.unlock()
         guard allowed, let sanitized = try? NativeMusicAudioCacheHTTPPolicy.redirect(
-            response, proposed: request, platform: platform, count: count)
+            response, proposed: request, platform: self.request.platform, count: count,
+            scriptMedia: self.request.scriptMedia, headers: task.currentRequest?.allHTTPHeaderFields ?? [:])
         else { completionHandler(nil); cancel(); return }
         completionHandler(sanitized)
     }

@@ -29,7 +29,6 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         attempt?.recovery = nil
         let selection = current.selection
         guard selection.installationId.hasPrefix("official:"),
-              selection.installationId != "official:cached",
               !candidate.isCachedAudio, !candidate.url.isFileURL else { return }
         try musicRequire(candidate.occurrenceId == current.occurrence &&
             candidate.resourceId == "music:" + current.id &&
@@ -59,8 +58,7 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
               pin.refreshAttemptID == nil else { throw MusicServiceError.staleResult }
         try previous.authorization?.check()
         try musicRequire(pin.url == rejectedURL && !rejectedURL.isFileURL, .invalidMediaCandidate)
-        try musicRequire(pin.selection.installationId.hasPrefix("official:") &&
-            pin.selection.installationId != "official:cached", .unsupported)
+        try musicRequire(pin.selection.installationId.hasPrefix("official:"), .unsupported)
         try checkPlaybackRecoveryAttempt(pin, activeAttemptID: previousAttemptID, reservedAttemptID: nil, ready: true)
         guard let authorizing = accounts as? any MusicNativePlaybackRecoveryAuthorizing,
               let platform = MusicAccountPlatform(rawValue: pin.selection.siteId) else {
@@ -85,7 +83,10 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         try checkPlaybackRecoveryAttempt(pin, activeAttemptID: previousAttemptID,
             reservedAttemptID: attemptID, ready: true)
         let valid = try media(audio)
-        try validateDelivery(valid.delivery, song: pin.song, playback: try read().playback)
+        try validateDelivery(valid, song: pin.song, playback: try read().playback)
+        // Renewal refreshes this tier's URL, not the selection policy. Only
+        // the source session may exhaust peers and then downgrade automatic play.
+        try musicRequire(valid.delivery?.quality == nil || valid.delivery?.quality == selection.quality, .invalidMediaCandidate)
         try musicRequire(valid.url != rejectedURL, .invalidMediaCandidate)
         let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: pin.occurrenceID,
             resourceId: "music:" + attemptID, url: valid.url, headers: valid.headers,

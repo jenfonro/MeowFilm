@@ -36,7 +36,9 @@ Content-Type: application/octet-stream
 
 `invoke` 的 HTTP `value` 就是脚本结果，包括普通 `blob`、`token`、`value` 字段；不再包一层安装身份。调用选择当前启用内容，执行前捕获 generation，返回前核对未退休。客户端不传外部 CAS、grant、config 或 permissions；旧 load/unload/status 与手工分片接口不提供兼容路径。
 
-`resolve` 的 `value` 包含 installationId、generation、contentHash、platform、quality、url、headers、expiresAt。URL 必须为 HTTP(S)，拒绝凭据 URL、试听/加密标志、禁止请求头、过期时间及相反目标身份。候选与已知录音时长均为正数时，绝对差不超过10秒通过时长校验，超过10秒返回 `RECORDING_MISMATCH`；任一时长未知时不判录音不匹配。不补搜、不换源、不降级；请求音质不代表已实测音质。
+`resolve` 的 `value` 包含 installationId、generation、contentHash、platform、quality、url、headers、expiresAt、duration。URL 必须为 HTTP(S)，拒绝凭据 URL、试听/加密标志、禁止请求头、过期时间及相反目标身份。脚本提供的正有限时长以秒返回；候选与已知录音时长均为正数时，绝对差不超过10秒通过时长校验，超过10秒返回 `RECORDING_MISMATCH`。未提供、null 或 0 返回 `duration:null`，任一时长未知时不判录音不匹配；非数字或负时长返回 `INVALID_MEDIA_CANDIDATE`。非有限数值先由原生 `RuntimeValue` 边界拒绝，不转换为未知时长。
+
+时长独立于音质，无法确认实测音质时仍保留已知时长供原生媒体准入检查。`quality` 只回显请求档位，不代表已实测音质。不补搜、不换源、不降级；元数据融合的百分比容差不适用于媒体回执。
 
 公开请求与业务结果遵守64层 JSON 契约，65层拒绝；控制信封和内部 KV 文档包装不占用业务值深度。完整 JSON 不设独立总字节上限，不使用应用层 stage/control/blob、Base64 分片或 TTL 暂存。
 

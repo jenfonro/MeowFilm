@@ -1,6 +1,6 @@
 import Foundation
 import MeowMusicFeature
-import MeowRuntime
+@testable import MeowRuntime
 import XCTest
 @testable import MeowMusicNativeService
 
@@ -260,7 +260,7 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         await service.start()
         let errors: [(String, MusicServiceError)] = [
             ("INVALID_SOURCE_URL", .insecureScriptURL), ("SOURCE_DOWNLOAD_FAILED", .scriptDownloadFailed),
-            ("SOURCE_REDIRECT", .scriptRedirect), ("TARGET_CHANGED", .targetChanged), ("RECORDING_MISMATCH", .targetChanged),
+            ("SOURCE_REDIRECT", .scriptRedirect), ("TARGET_CHANGED", .targetChanged), ("RECORDING_MISMATCH", .invalidMediaCandidate),
             ("EXPIRED_MEDIA_CANDIDATE", .invalidMediaCandidate), ("MEDIA_HEADERS_UNSUPPORTED", .invalidMediaCandidate),
             ("PERMISSION_DENIED", .permissionDenied), ("SCRIPT_PROTOCOL_ERROR", .invalidScript),
         ]
@@ -295,4 +295,699 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         try await service.close(); await session.close()
     }
 
+}
+
+extension NativeMusicScriptServiceTests {
+    func testResolveProjectsReceiptDurationWithoutInventingMeasuredQuality() async throws {
+        let runtime = ScriptMediaReceiptRuntime()
+        let session = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+        let service = NativeMusicScriptService(connection: { try await session.connection() })
+        await service.start()
+        let source = try await service.source(installationID: ScriptMediaReceiptRuntime.id)
+        let request = MusicScriptRequest(source: source, siteID: "tx", sourceKey: "recording", quality: "flac",
+            musicInfo: Data(#"{"duration":180,"songmid":"123"}"#.utf8))
+        let durations: [RuntimeValue?] = [.number(185), .number(190), .number(180.125), .number(0), .null, nil]
+        for duration in durations {
+            await runtime.reply(duration: duration)
+            let execution = try await service.resolve(request: request), audio = execution.value
+            let expected: Double?
+            if case .number(let value)? = duration, value > 0 { expected = value } else { expected = nil }
+            XCTAssertEqual(audio.duration, expected)
+            XCTAssertNil(audio.delivery, "The requested flac level is not measured quality.")
+            XCTAssertEqual(audio.url.absoluteString, "https://media.invalid/receipt.mp3")
+            XCTAssertEqual(audio.headers, ["X-Test": "receipt"])
+            XCTAssertEqual(audio.expiresAt, Date(timeIntervalSince1970: 1900000000))
+            XCTAssertTrue(audio.fileCachePolicy.allowed)
+            XCTAssertEqual(execution.source.state, .ready)
+            XCTAssertGreaterThan(execution.source.generation, 0)
+            XCTAssertEqual(execution.source.identity, source.identity)
+        }
+        let requests = await runtime.requests
+        XCTAssertEqual(requests.count, 6)
+        for parameters in requests {
+            XCTAssertEqual(parameters.scriptField("musicInfo")?.scriptField("duration"), .number(180))
+            XCTAssertEqual(parameters.scriptField("quality"), .string("flac"))
+        }
+        try await service.close(); await session.close()
+    }
+
+    func testResolveRejectsMalformedReceiptDurationAndOwnerRecordingMismatchAsMediaFailures() async throws {
+        let runtime = ScriptMediaReceiptRuntime()
+        let session = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+        let service = NativeMusicScriptService(connection: { try await session.connection() })
+        await service.start()
+        let source = try await service.source(installationID: ScriptMediaReceiptRuntime.id)
+        let request = MusicScriptRequest(source: source, siteID: "tx", sourceKey: "recording", quality: "flac",
+            musicInfo: Data(#"{"duration":180}"#.utf8))
+        let durations: [RuntimeValue] = [.number(-1), .string("185"), .bool(true), .object([:])]
+        for duration in durations {
+            await runtime.reply(duration: duration)
+            await scriptExpectFailure(.invalidMediaCandidate) { try await service.resolve(request: request) }
+        }
+        await runtime.reply(code: "RECORDING_MISMATCH")
+        await scriptExpectFailure(.invalidMediaCandidate) { try await service.resolve(request: request) }
+        try await service.close(); await session.close()
+    }
+
+    func testResolveRejectsWrongReceiptIdentityAfterFirstLazyLoad() async throws {
+        let mismatches: [(String, RuntimeValue)] = [
+            ("installationId", .string("22222222-2222-4222-8222-222222222222")),
+            ("generation", .number(2)), ("contentHash", .string(String(repeating: "c", count: 64))),
+        ]
+        for (field, value) in mismatches {
+            let runtime = ScriptMediaReceiptRuntime()
+            await runtime.receiptIdentity(field, value: value)
+            let session = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+            let service = NativeMusicScriptService(connection: { try await session.connection() })
+            await service.start()
+            let cold = try await service.source(installationID: ScriptMediaReceiptRuntime.id)
+            XCTAssertEqual(cold.state, .idle); XCTAssertEqual(cold.generation, 0)
+            await scriptExpectFailure(.sourceUnavailable) {
+                try await service.resolve(request: .init(source: cold, siteID: "tx", sourceKey: "recording",
+                    quality: "flac", musicInfo: Data("{}".utf8)))
+            }
+            let loaded = try await service.source(installationID: cold.installationID)
+            XCTAssertEqual(loaded.state, .ready); XCTAssertEqual(loaded.generation, 1)
+            let requests = await runtime.requests
+            XCTAssertEqual(requests.count, 1)
+            try await service.close(); await session.close()
+        }
+    }
+
+    func testResolveRejectsConcurrentContentGenerationOrDisableAfterFirstLazyLoad() async throws {
+        for change in ["content", "generation", "disable"] {
+            let gate = NativeMusicGate(), runtime = ScriptMediaReceiptRuntime()
+            await runtime.hold(gate)
+            let session = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+            let service = NativeMusicScriptService(connection: { try await session.connection() })
+            await service.start()
+            let cold = try await service.source(installationID: ScriptMediaReceiptRuntime.id)
+            let request = MusicScriptRequest(source: cold, siteID: "tx", sourceKey: "recording",
+                quality: "flac", musicInfo: Data("{}".utf8))
+            let pending = Task { try await service.resolve(request: request) }
+            await gate.started()
+            await runtime.change(change)
+            await gate.release()
+            await scriptExpectFailure(.sourceUnavailable) { try await pending.value }
+            let requests = await runtime.requests
+            XCTAssertEqual(requests.count, 1)
+            try await service.close(); await session.close()
+        }
+    }
+
+    func testEnabledSourcesAbortGlobalFailuresWithoutReturningPartialResults() async throws {
+        let failures: [(String, MusicServiceError)] = [
+            ("CANCELLED", .cancelled), ("PERMISSION_DENIED", .permissionDenied),
+            ("CORRUPT_STORAGE", .corruptDocument), ("STORAGE_ERROR", .storageFailed),
+            ("SCRIPT_PROTOCOL_ERROR", .invalidScript), ("INVALID_REQUEST", .invalidRequest),
+            ("TARGET_CHANGED", .targetChanged), ("CLOSED", .scriptRuntimeUnavailable),
+        ]
+        for operation in ["sources.list", "sources.detail"] {
+            for (code, expected) in failures {
+                let runtime = EnabledSourcesRuntime(operation: operation, fault: .code(code))
+                let session = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+                let service = NativeMusicScriptService(connection: { try await session.connection() })
+                await service.start()
+                await scriptExpectDeclarationFailure(expected, wrapped: operation == "sources.detail" && code == "PERMISSION_DENIED") {
+                    if operation == "sources.list" { _ = try await service.sources() }
+                    else { _ = try await service.source(installationID: EnabledSourcesRuntime.bad) }
+                }
+                let requested = await runtime.details, methods = await runtime.methods
+                XCTAssertEqual(requested, operation == "sources.detail" ? [EnabledSourcesRuntime.bad] : [])
+                XCTAssertFalse(methods.contains("sources.enable"))
+                XCTAssertFalse(methods.contains("resolve"))
+                try await service.close(); await session.close()
+            }
+        }
+    }
+
+    func testEnabledSourcesAbortMalformedResponsesAtListAndDetail() async throws {
+        for operation in ["sources.list", "sources.detail"] {
+            for fault in [EnabledSourcesRuntime.Fault.envelope, .item, .snapshot, .capabilities] {
+                let runtime = EnabledSourcesRuntime(operation: operation, fault: fault)
+                let session = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+                let service = NativeMusicScriptService(connection: { try await session.connection() })
+                await service.start()
+                await scriptExpectFailure(.invalidResponse) {
+                    if operation == "sources.list" { _ = try await service.sources() }
+                    else { _ = try await service.source(installationID: EnabledSourcesRuntime.bad) }
+                }
+                let requested = await runtime.details, methods = await runtime.methods
+                XCTAssertEqual(requested, operation == "sources.detail" ? [EnabledSourcesRuntime.bad] : [])
+                XCTAssertFalse(methods.contains("sources.enable"))
+                try await service.close(); await session.close()
+            }
+        }
+    }
+
+    func testEnabledSourcesIsolateBrokenScriptsAndKeepHealthySources() async throws {
+        let failures: [(String, MusicServiceError)] = [
+            ("SCRIPT_FAILURE", .scriptFailed), ("SCRIPT_ENCODING", .invalidScript), ("SCRIPT_INTEGRITY", .invalidScript),
+            ("SCRIPT_PROTOCOL_ERROR", .invalidScript), ("LIMIT", .limit), ("SCRIPT_CLEANUP", .scriptCleanupFailed),
+            ("NETWORK_ERROR", .upstreamFailed), ("UPSTREAM_HTTP", .upstreamFailed), ("UPSTREAM_FORMAT", .upstreamInvalid),
+            ("TIMEOUT", .timeout), ("STALE_SOURCE", .sourceUnavailable), ("SOURCE_NOT_FOUND", .sourceUnavailable),
+            ("SOURCE_DISABLED", .sourceUnavailable), ("CAPABILITY_UNAVAILABLE", .sourceUnavailable),
+            ("INVALID_MEDIA_CANDIDATE", .invalidMediaCandidate), ("MEDIA_UNAVAILABLE", .invalidMediaCandidate),
+        ]
+        for failure in [Optional<(String, MusicServiceError)>.none] + failures.map({ Optional($0) }) {
+            let runtime = EnabledSourcesRuntime(operation: "resolve", fault: failure.map { .code($0.0) })
+            let session = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+            let service = NativeMusicScriptService(connection: { try await session.connection() })
+            await service.start()
+            let initial = try await service.sources()
+            XCTAssertEqual(initial.filter(\.isCandidate).map(\.installationID), EnabledSourcesRuntime.ids)
+            let source = try XCTUnwrap(initial.first { $0.installationID == EnabledSourcesRuntime.bad })
+            let request = MusicScriptRequest(source: source, siteID: "tx", sourceKey: "recording",
+                quality: "128k", musicInfo: Data("{}".utf8))
+            let expectedCandidates: [String], expectedState: MusicScriptSourceItem.State
+            if let failure {
+                await scriptExpectFailure(failure.1) { try await service.resolve(request: request) }
+                expectedCandidates = [EnabledSourcesRuntime.before, EnabledSourcesRuntime.after]
+                expectedState = .failed
+            } else {
+                _ = try await service.resolve(request: request)
+                expectedCandidates = EnabledSourcesRuntime.ids
+                expectedState = .ready
+            }
+            let sources = try await service.sources()
+            XCTAssertEqual(sources.map(\.installationID), EnabledSourcesRuntime.ids)
+            XCTAssertEqual(sources.filter(\.isCandidate).map(\.installationID), expectedCandidates)
+            XCTAssertEqual(sources.first { $0.installationID == EnabledSourcesRuntime.bad }?.state, expectedState)
+            let methods = await runtime.methods
+            XCTAssertEqual(methods.filter { $0 == "resolve" }.count, 1)
+            XCTAssertFalse(methods.contains("sources.enable"))
+            try await service.close(); await session.close()
+        }
+    }
+
+    func testEnabledSourcesTaskCancellationAbortsPendingListAndDetail() async throws {
+        for operation in ["sources.list", "sources.detail"] {
+            let gate = NativeMusicGate()
+            let runtime = EnabledSourcesRuntime(operation: operation, gate: gate)
+            let session = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+            let service = NativeMusicScriptService(connection: { try await session.connection() })
+            await service.start()
+            let task = Task {
+                if operation == "sources.list" { _ = try await service.sources() }
+                else { _ = try await service.source(installationID: EnabledSourcesRuntime.bad) }
+            }
+            await gate.started()
+            task.cancel()
+            await scriptExpectFailure(.cancelled) { try await task.value }
+            await gate.release()
+            let requested = await runtime.details, methods = await runtime.methods
+            XCTAssertEqual(requested, operation == "sources.detail" ? [EnabledSourcesRuntime.bad] : [])
+            XCTAssertFalse(methods.contains("sources.enable"))
+            try await service.close(); await session.close()
+        }
+    }
+
+    func testDiscoveryScopePropagatesTransientDeclarationFailuresBeforeSearchOrResolve() async throws {
+        let failures: [(EnabledSourcesRuntime.Fault, MusicServiceError)] = [
+            (.snapshot, .invalidResponse), (.code("SCRIPT_PROTOCOL_ERROR"), .invalidScript),
+            (.code("INVALID_REQUEST"), .invalidRequest), (.code("PERMISSION_DENIED"), .permissionDenied),
+        ]
+        for entry in ScopeEntry.allCases {
+            for (fault, expected) in failures {
+                try await discoveryScope(entry, fault: fault, expectedFailure: expected)
+            }
+        }
+    }
+
+    func testDiscoveryScopeKeepsHealthyOfficialAfterScriptOrHostFailure() async throws {
+        for entry in ScopeEntry.allCases {
+            for code in ["SCRIPT_FAILURE", "CLOSED"] {
+                try await discoveryScope(entry, fault: .code(code), expectedFailure: nil)
+            }
+        }
+    }
+
+    private enum ScopeEntry: CaseIterable { case legacy, automatic, explicit }
+    private func discoveryScope(_ entry: ScopeEntry, fault: EnabledSourcesRuntime.Fault,
+                                expectedFailure: MusicServiceError?) async throws {
+        // Scope reads the complete directory now; it never implicitly enables
+        // or probes each installation through sources.detail.
+        let scopeListing = entry == .automatic ? 2 : 1
+        let runtime = EnabledSourcesRuntime(operation: "sources.list", fault: fault, faultOnListing: scopeListing)
+        let runtimeSession = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+        let scripts = NativeMusicScriptService(connection: { try await runtimeSession.connection() })
+        await scripts.start()
+        let clock = MusicRecoveryTestClock()
+        let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
+        let qq = MusicNativeCandidateDiscoveryQQ(items: [MusicNativeCandidateDiscoveryFixture.track("tx", id: "101")])
+        let http = MusicNativeCandidateDiscoveryHTTP()
+        let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("kw", id: "123"))
+        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song),
+            scripts: scripts, accounts: accounts, qq: qq, enabledPlatforms: [.qq, .kuwo],
+            transport: http, clock: { clock.now() })
+        try await service.setAccess(available: true, generation: 1)
+        let context = "\(entry) \(String(describing: fault))"
+        var selection: MusicPlaybackSelection?
+        do {
+            switch entry {
+            case .legacy:
+                let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
+                do {
+                    let snapshot = try await session.snapshot(discover: true, force: false)
+                    let option = try XCTUnwrap(snapshot.options.first { $0.playback.installationId.hasPrefix("official:") })
+                    try await session.commitDiscovery()
+                    let target = option.target(quality: "flac")
+                    _ = try await session.resolve(target, attemptID: UUID().uuidString.lowercased())
+                    selection = target.selection
+                    await session.close(retainingAttemptID: nil)
+                } catch {
+                    await session.close(retainingAttemptID: nil)
+                    throw error
+                }
+            case .automatic, .explicit:
+                let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
+                if entry == .explicit {
+                    let updates = await session.updates()
+                    _ = try await session.loadMore(refresh: false)
+                    try await MusicCandidateDiscoveryDeadline.run(seconds: 3, timing: .init()) {
+                        for try await value in updates where !value.isLoading && !value.sources.isEmpty { return }
+                        throw MusicServiceError.closed
+                    }
+                }
+                let result = try await session.match(intent: .automatic)
+                selection = result.selection
+                await service.discardSource(attemptID: result.candidate.attemptId)
+            }
+            XCTAssertNil(expectedFailure, "Declaration failure was swallowed: \(context)")
+            XCTAssertEqual(selection?.siteId, "tx", context)
+            XCTAssertEqual(selection?.quality, "flac", context)
+            XCTAssertTrue(selection?.installationId.hasPrefix("official:") == true, context)
+        } catch {
+            XCTAssertEqual(MusicServiceError.sanitized(error), expectedFailure, context)
+        }
+        let searches = await qq.calls(), otherSearches = await http.calls()
+        let accountsCalls = await accounts.counts(), scriptResolves = await runtime.resolutions
+        let injected = await runtime.faultsApplied, listings = await runtime.listings
+        XCTAssertEqual(injected, 1, "The fault must reach the first scope enumeration: \(context)")
+        XCTAssertTrue(otherSearches.isEmpty, context)
+        XCTAssertEqual(scriptResolves, 0, context)
+        if expectedFailure != nil {
+            XCTAssertTrue(searches.isEmpty, "A declaration contract/permission failure cannot authorize search: \(context)")
+            XCTAssertEqual(accountsCalls.resolves, 0, context)
+            XCTAssertEqual(listings, scopeListing, "Do not hide the failure behind a second enumeration: \(context)")
+            XCTAssertNil(selection, context)
+        } else {
+            XCTAssertEqual(searches.count, 1, context)
+            XCTAssertEqual(accountsCalls.resolves, 1, context)
+            XCTAssertNotNil(selection, context)
+        }
+        let history = try await service.playedSongs(), exclusions = try await service.sourceExclusions()
+        XCTAssertTrue(history.isEmpty, context)
+        XCTAssertTrue(exclusions.isEmpty, context)
+        let recovered = try await scripts.sources()
+        XCTAssertEqual(recovered.map(\.installationID), EnabledSourcesRuntime.ids, context)
+        let methods = await runtime.methods
+        XCTAssertFalse(methods.contains("sources.enable"), context)
+        await service.close(); try await scripts.close(); await runtimeSession.close()
+    }
+}
+
+private func scriptExpectDeclarationFailure<T>(_ expected: MusicServiceError, wrapped: Bool,
+    file: StaticString = #filePath, line: UInt = #line, _ body: () async throws -> T) async {
+    do { _ = try await body(); XCTFail("Expected \(expected)", file: file, line: line) }
+    catch {
+        XCTAssertEqual(MusicServiceError.sanitized(error), expected, file: file, line: line)
+        XCTAssertEqual(error is MusicSourceDeclarationFailure, wrapped, file: file, line: line)
+    }
+}
+
+private actor ScriptMediaReceiptRuntime {
+    static let id = "11111111-1111-4111-8111-111111111111"
+    private var duration: RuntimeValue?
+    private var code: String?
+    private var identity: RuntimeObject = [:]
+    private var enabled = true, generation = 0
+    private var content = String(repeating: "a", count: 64)
+    private var gate: NativeMusicGate?
+    var requests: [RuntimeValue] = []
+    func reply(duration: RuntimeValue? = nil, code: String? = nil) { self.duration = duration; self.code = code }
+    func receiptIdentity(_ field: String, value: RuntimeValue) { identity[field] = value }
+    func hold(_ gate: NativeMusicGate) { self.gate = gate }
+    func change(_ change: String) {
+        if change == "content" { content = String(repeating: "c", count: 64) }
+        else if change == "generation" { generation += 1 }
+        else { enabled = false; generation = 0 }
+    }
+    func respond(_ method: String, _ value: RuntimeValue) async throws -> RuntimeValue {
+        if method == "sources.detail" {
+            return MusicScriptHTTPTestRuntime.success(.object(["item": .object([
+                "installationId": .string(Self.id), "version": .string("1"), "enabled": .bool(enabled),
+                "state": .string(!enabled ? "disabled" : generation == 0 ? "idle" : "ready"),
+                "generation": .number(Double(generation)), "contentHash": .string(content),
+                "executionHash": .string(String(repeating: "b", count: 64)),
+                "sites": .object(["tx": .object(["actions": .array([.string("musicUrl")]),
+                    "qualitys": .array([.string("flac")])])]),
+            ])]))
+        }
+        guard method == "resolve" else { throw RuntimeHTTPError.invalidRequest }
+        requests.append(value)
+        if generation == 0 { generation = 1 }
+        if let code { return MusicScriptHTTPTestRuntime.failure(code) }
+        var fields: RuntimeObject = [
+            "installationId": .string(Self.id), "generation": .number(Double(generation)),
+            "contentHash": .string(content), "platform": value.scriptField("platform")!,
+            "quality": value.scriptField("quality")!, "url": .string("https://media.invalid/receipt.mp3"),
+            "headers": .object(["X-Test": .string("receipt")]), "expiresAt": .number(1900000000000),
+        ]
+        fields["duration"] = duration
+        for (key, value) in identity { fields[key] = value }
+        let result = MusicScriptHTTPTestRuntime.success(.object(fields))
+        if let gate { await gate.wait(); try Task.checkCancellation() }
+        return result
+    }
+}
+
+private actor EnabledSourcesRuntime {
+    enum Fault: Sendable { case code(String), envelope, item, snapshot, capabilities }
+    static let before = "11111111-1111-4111-8111-111111111111"
+    static let bad = "22222222-2222-4222-8222-222222222222"
+    static let after = "33333333-3333-4333-8333-333333333333"
+    static let ids = [before, bad, after]
+    private let operation: String
+    private let fault: Fault?
+    private let gate: NativeMusicGate?
+    private let faultOnListing: Int?
+    private var failed = false
+    var details: [String] = [], methods: [String] = []
+    var listings = 0, resolutions = 0, faultsApplied = 0
+
+    init(operation: String, fault: Fault? = nil, gate: NativeMusicGate? = nil, faultOnListing: Int? = nil) {
+        self.operation = operation; self.fault = fault; self.gate = gate; self.faultOnListing = faultOnListing
+    }
+    private func item(_ id: String) -> RuntimeObject {
+        let bad = id == Self.bad && failed
+        return [
+            "installationId": .string(id), "name": .string("Synthetic source"), "version": .string("1"),
+            "origin": .object(["kind": .string("file")]), "enabled": .bool(true),
+            "state": .string(bad ? "failed" : "ready"), "generation": .number(bad ? 0 : 1),
+            "contentHash": .string(String(repeating: "a", count: 64)),
+            "executionHash": .string(String(repeating: "b", count: 64)),
+            "sites": .object(["tx": .object([
+                "actions": .array([.string("musicUrl")]), "qualitys": .array([.string("128k")]),
+            ])]),
+        ]
+    }
+    func respond(_ method: String, _ parameters: RuntimeValue) async throws -> RuntimeValue {
+        methods.append(method)
+        if method == "sources.list" { listings += 1 }
+        if method == "resolve" { resolutions += 1 }
+        let id = parameters.scriptField("installationId")?.scriptText ?? Self.bad
+        if method == "sources.detail" { details.append(id) }
+        var value = item(id)
+        if method == operation && (method == "sources.list" || id == Self.bad) &&
+            (faultOnListing == nil || listings == faultOnListing) {
+            faultsApplied += 1
+            if let gate { await gate.wait(); try Task.checkCancellation() }
+            switch fault {
+            case .code(let code)?:
+                if method == "resolve" { failed = true }
+                return MusicScriptHTTPTestRuntime.failure(code)
+            case .envelope?: return .object(["ok": .bool(true), "value": .object([:])])
+            case .item?:
+                if method == "sources.list" {
+                    return MusicScriptHTTPTestRuntime.success(.object(["items": .array([.object(item(Self.before)), .null,
+                        .object(item(Self.after))])]))
+                }
+                return MusicScriptHTTPTestRuntime.success(.object(["item": .null]))
+            case .snapshot?: value["generation"] = nil
+            case .capabilities?: value["sites"] = .object(["tx": .object(["actions": .array([]), "qualitys": .number(1)])])
+            case nil: break
+            }
+        }
+        if method == "sources.list" {
+            return MusicScriptHTTPTestRuntime.success(.object(["items": .array(Self.ids.map {
+                $0 == Self.bad ? .object(value) : .object(item($0))
+            })]))
+        }
+        if method == "resolve" {
+            return MusicScriptHTTPTestRuntime.success(.object([
+                "installationId": .string(id), "generation": .number(1),
+                "contentHash": .string(String(repeating: "a", count: 64)),
+                "platform": parameters.scriptField("platform")!, "quality": parameters.scriptField("quality")!,
+                "url": .string("https://media.invalid/healthy.mp3"), "headers": .object([:]),
+            ]))
+        }
+        return MusicScriptHTTPTestRuntime.success(.object(["item": .object(value)]))
+    }
+}
+
+extension NativeMusicScriptServiceTests {
+    func testColdDeclarationAndExplicitDisableKeepUserOrderWithoutBlockingOtherInstallations() async throws {
+        for heldMethod in ["sources.detail", "resolve"] {
+            let gate = NativeMusicGate(), runtime = DeclarationOrderRuntime(heldMethod: heldMethod, gate: gate)
+            let session = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+            let service = NativeMusicScriptService(connection: { try await session.connection() })
+            await service.start()
+            let initial: MusicScriptSource?
+            if heldMethod == "resolve" { initial = try await service.source(installationID: DeclarationOrderRuntime.first) }
+            else { initial = nil }
+            let loading = Task {
+                if let initial {
+                    let execution = try await service.resolve(request: .init(source: initial, siteID: "tx", sourceKey: "recording",
+                        quality: "flac", musicInfo: Data("{}".utf8)))
+                    return execution.source
+                }
+                return try await service.source(installationID: DeclarationOrderRuntime.first)
+            }
+            await gate.started()
+            let disabled = try await service.setScriptSourceEnabled(DeclarationOrderRuntime.first, enabled: false)
+            XCTAssertFalse(disabled.enabled)
+            let other = try await service.setScriptSourceEnabled(DeclarationOrderRuntime.second, enabled: true)
+            XCTAssertTrue(other.enabled)
+            await gate.release()
+            if heldMethod == "resolve" {
+                await scriptExpectFailure(.sourceUnavailable) { try await loading.value }
+            } else {
+                let staleRead = try await loading.value
+                XCTAssertEqual(staleRead.state, .idle); XCTAssertEqual(staleRead.generation, 0)
+                await scriptExpectFailure(.sourceUnavailable) {
+                    try await service.resolve(request: .init(source: staleRead, siteID: "tx", sourceKey: "recording",
+                        quality: "flac", musicInfo: Data("{}".utf8)))
+                }
+            }
+            let detail = try await service.scriptSourceDetail(DeclarationOrderRuntime.first)
+            XCTAssertFalse(detail.item.enabled); XCTAssertEqual(detail.item.state, .disabled)
+            let snapshot = try await service.source(installationID: DeclarationOrderRuntime.first)
+            XCTAssertFalse(snapshot.isCandidate); XCTAssertEqual(snapshot.generation, 0)
+            let calls = await runtime.firstCalls
+            XCTAssertEqual(calls, heldMethod == "resolve" ?
+                ["sources.detail", "sources.detail", "resolve", "sources.disable", "sources.detail", "sources.detail", "sources.detail"] :
+                ["sources.detail", "sources.disable", "sources.detail", "sources.detail", "sources.detail"])
+            XCTAssertFalse(calls.contains("sources.enable"))
+            try await service.close(); await session.close()
+        }
+    }
+
+    func testDeclarationSubmittedAfterDisableCannotReloadTheInstallation() async throws {
+        let gate = NativeMusicGate(), runtime = DeclarationOrderRuntime(heldMethod: "sources.disable", gate: gate)
+        let session = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+        let service = NativeMusicScriptService(connection: { try await session.connection() })
+        await service.start()
+        let disabling = Task { try await service.setScriptSourceEnabled(DeclarationOrderRuntime.first, enabled: false) }
+        await gate.started()
+        let reading = try await service.source(installationID: DeclarationOrderRuntime.first)
+        XCTAssertEqual(reading.state, .idle); XCTAssertEqual(reading.generation, 0)
+        let other = try await service.setScriptSourceEnabled(DeclarationOrderRuntime.second, enabled: true)
+        XCTAssertTrue(other.enabled)
+        await gate.release()
+        let disabled = try await disabling.value
+        XCTAssertFalse(disabled.enabled)
+        let after = try await service.source(installationID: DeclarationOrderRuntime.first)
+        XCTAssertFalse(after.isCandidate); XCTAssertEqual(after.state, .disabled)
+        await scriptExpectFailure(.sourceUnavailable) {
+            try await service.resolve(request: .init(source: reading, siteID: "tx", sourceKey: "recording",
+                quality: "flac", musicInfo: Data("{}".utf8)))
+        }
+        let calls = await runtime.firstCalls
+        XCTAssertEqual(calls, ["sources.disable", "sources.detail", "sources.detail", "sources.detail"])
+        try await service.close(); await session.close()
+    }
+
+    func testCancelledConcurrentDeclarationDoesNotLoadAndDoesNotBlockLaterDisable() async throws {
+        let firstGate = NativeMusicGate(), waitingGate = NativeMusicGate()
+        let runtime = DeclarationOrderRuntime(heldMethod: "sources.detail", gate: firstGate)
+        let session = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+        let service = NativeMusicScriptService(connection: { try await session.connection() })
+        await service.start()
+        let loading = Task { try await service.source(installationID: DeclarationOrderRuntime.first) }
+        await firstGate.started()
+        await runtime.hold("sources.detail", waitingGate)
+        let waiting = Task { try await service.source(installationID: DeclarationOrderRuntime.first) }
+        await waitingGate.started()
+        _ = try await service.scriptSourceDetail(DeclarationOrderRuntime.second)
+        waiting.cancel()
+        await scriptExpectFailure(.cancelled) { try await waiting.value }
+        let disabled = try await service.setScriptSourceEnabled(DeclarationOrderRuntime.first, enabled: false)
+        XCTAssertFalse(disabled.enabled)
+        await firstGate.release(); await waitingGate.release()
+        let staleRead = try await loading.value
+        XCTAssertEqual(staleRead.state, .idle)
+        let live = try await service.source(installationID: DeclarationOrderRuntime.first)
+        XCTAssertFalse(live.isCandidate); XCTAssertEqual(live.state, .disabled)
+        let calls = await runtime.firstCalls
+        XCTAssertEqual(calls, ["sources.detail", "sources.detail", "sources.disable", "sources.detail"])
+        try await service.close(); await session.close()
+    }
+
+    func testCancellationDuringColdDetailDoesNotImplicitlyEnable() async throws {
+        let gate = NativeMusicGate(), runtime = DeclarationOrderRuntime(heldMethod: "sources.detail", gate: gate)
+        let session = RuntimeSession(launcher: MusicScriptHTTPTestRuntime { try await runtime.respond($0, $1) })
+        let service = NativeMusicScriptService(connection: { try await session.connection() })
+        await service.start()
+        let loading = Task { try await service.source(installationID: DeclarationOrderRuntime.first) }
+        await gate.started(); loading.cancel()
+        await scriptExpectFailure(.cancelled) { try await loading.value }
+        await gate.release()
+        _ = try await service.setScriptSourceEnabled(DeclarationOrderRuntime.first, enabled: false)
+        let calls = await runtime.firstCalls
+        XCTAssertEqual(calls, ["sources.detail", "sources.disable"])
+        try await service.close(); await session.close()
+    }
+}
+
+private actor DeclarationOrderRuntime {
+    static let first = "11111111-1111-4111-8111-111111111111"
+    static let second = "22222222-2222-4222-8222-222222222222"
+    private var gates: [String: [NativeMusicGate]]
+    private var enabled = [DeclarationOrderRuntime.first: true, DeclarationOrderRuntime.second: false]
+    private var generations = [DeclarationOrderRuntime.first: 0, DeclarationOrderRuntime.second: 0]
+    var firstCalls: [String] = []
+    init(heldMethod: String, gate: NativeMusicGate) { gates = [heldMethod: [gate]] }
+    func hold(_ method: String, _ gate: NativeMusicGate) { gates[method, default: []].append(gate) }
+    func respond(_ method: String, _ value: RuntimeValue) async throws -> RuntimeValue {
+        let id = try XCTUnwrap(value.scriptField("installationId")?.scriptText)
+        if id == Self.first { firstCalls.append(method) }
+        if method == "resolve" && generations[id] == 0 { generations[id] = 1 }
+        let detail = item(id)
+        let result = MusicScriptHTTPTestRuntime.success(.object([
+            "installationId": .string(id), "generation": .number(Double(generations[id] ?? 0)),
+            "contentHash": .string(String(repeating: "a", count: 64)),
+            "platform": .string("tx"), "quality": .string("flac"),
+            "url": .string("https://media.invalid/order.flac"), "headers": .object([:]),
+        ]))
+        if id == Self.first, var waiting = gates[method], !waiting.isEmpty {
+            let gate = waiting.removeFirst()
+            gates[method] = waiting
+            await gate.wait()
+            try Task.checkCancellation()
+        }
+        if method == "sources.enable" { enabled[id] = true; generations[id, default: 0] += 1 }
+        if method == "sources.disable" { enabled[id] = false; generations[id] = 0 }
+        if method == "resolve" { return result }
+        return MusicScriptHTTPTestRuntime.success(.object(["item": method == "sources.detail" ? detail : item(id)]))
+    }
+    private func item(_ id: String) -> RuntimeValue {
+        let generation = generations[id] ?? 0
+        return .object([
+            "installationId": .string(id), "name": .string("Fixture"), "version": .string("1"),
+            "enabled": .bool(enabled[id] == true), "origin": .object(["kind": .string("file")]),
+            "state": .string(enabled[id] == true ? (generation > 0 ? "ready" : "idle") : "disabled"),
+            "generation": .number(Double(generation)),
+            "contentHash": .string(String(repeating: "a", count: 64)),
+            "executionHash": .string(String(repeating: "b", count: 64)),
+            "sites": .object(["tx": .object(["actions": .array([.string("musicUrl")]),
+                "qualitys": .array([.string("flac")])])]),
+        ])
+    }
+}
+
+/// Uses the same complete HTTP envelopes, URLSession cancellation and shared
+/// RuntimeSession as MusicScriptTestRuntime, with per-scenario business replies.
+actor MusicScriptHTTPTestRuntime: RuntimeLaunching {
+    typealias Response = @Sendable (String, RuntimeValue) async throws -> RuntimeValue
+    private let response: Response
+    private let sessionID = UUID().uuidString.lowercased()
+    private var client: RuntimeHTTPClient?
+    init(_ response: @escaping Response) { self.response = response }
+    func connect() throws -> RuntimeHTTPClient {
+        MusicScriptRegressionURLProtocol.registry.set(self, session: sessionID)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MusicScriptRegressionURLProtocol.self]
+        let client = try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43210")!,
+            sessionID: sessionID, requestKey: String(repeating: "a", count: 64), configuration: configuration)
+        self.client = client
+        return client
+    }
+    func close() async {
+        await client?.close()
+        MusicScriptRegressionURLProtocol.registry.set(nil, session: sessionID)
+    }
+    func waitForExit() {}
+    static func success(_ value: RuntimeValue, contract: String = "music.script.v3") -> RuntimeValue {
+        .object(["ok": .bool(true), "contract": .string(contract), "value": value])
+    }
+    static func failure(_ code: String) -> RuntimeValue {
+        .object(["ok": .bool(false), "contract": .string("music.script.v3"), "code": .string(code)])
+    }
+    func respond(_ request: URLRequest) async throws -> RuntimeValue {
+        if request.url!.path == "/v1/describe" {
+            return Self.success(.object(["protocol": .string("runtime.http.v1"), "modules": .array([
+                .object(["id": .string("music"), "version": .string("0.8.0"), "contract": .string("music.script.v3")]),
+            ])]), contract: "runtime.http.v1")
+        }
+        if request.url!.path == "/v1/music/close" {
+            return Self.success(.object(["closed": .bool(true), "cleanupComplete": .bool(true)]))
+        }
+        let bytes: Data
+        if let body = request.httpBody { bytes = body }
+        else if let stream = request.httpBodyStream {
+            stream.open(); defer { stream.close() }
+            var data = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count <= 0 { break }
+                data.append(contentsOf: buffer.prefix(count))
+            }
+            bytes = data
+        } else { bytes = Data() }
+        return try await response(request.url!.lastPathComponent, RuntimeJSON.decode(bytes))
+    }
+}
+
+private final class MusicScriptRegressionHTTPRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var runtimes: [String: MusicScriptHTTPTestRuntime] = [:]
+    func set(_ runtime: MusicScriptHTTPTestRuntime?, session: String) {
+        lock.lock(); defer { lock.unlock() }; runtimes[session] = runtime
+    }
+    func runtime(_ session: String) -> MusicScriptHTTPTestRuntime? {
+        lock.lock(); defer { lock.unlock() }; return runtimes[session]
+    }
+}
+
+private final class MusicScriptRegressionURLProtocol: URLProtocol, @unchecked Sendable {
+    static let registry = MusicScriptRegressionHTTPRegistry()
+    private let lock = NSLock()
+    private var loading: Task<Void, Never>?
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        lock.lock(); defer { lock.unlock() }
+        loading = Task {
+            do {
+                let id = request.value(forHTTPHeaderField: "X-Meow-Session") ?? ""
+                guard let runtime = Self.registry.runtime(id) else { throw RuntimeHTTPError.closed }
+                let response = try await runtime.respond(request)
+                try Task.checkCancellation()
+                let data = try RuntimeJSON.encode(response)
+                let http = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json",
+                        "X-Meow-Request-Id": request.value(forHTTPHeaderField: "X-Meow-Request-Id")!])!
+                client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: data)
+                client?.urlProtocolDidFinishLoading(self)
+            } catch {
+                if !Task.isCancelled { client?.urlProtocol(self, didFailWithError: error) }
+            }
+        }
+    }
+    override func stopLoading() {
+        lock.lock(); let task = loading; loading = nil; lock.unlock()
+        task?.cancel()
+    }
 }

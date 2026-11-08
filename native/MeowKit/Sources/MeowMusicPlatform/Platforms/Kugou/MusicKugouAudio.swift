@@ -83,17 +83,14 @@ extension KugouMusicAccountAdapter {
     }
     func capabilities(mid: String, credential: AccountCredential) async throws -> [String] {
         let hash = try MusicKugouWire.hash(mid), context = try context(credential)
-        let rights = try await membership(context), song = try await audioDetail(hash, context: context)
+        let song = try await audioDetail(hash, context: context)
         try check(context)
-        guard rights.vip == true, rights.observedUntil > now() else { return [] }
         return MusicKugouSong.qualities.filter { song.resources[$0] != nil }
     }
     func resolve(mid: String, quality: String, credential: AccountCredential) async throws -> JSONValue {
         let hash = try MusicKugouWire.hash(mid), context = try context(credential)
         let formats = ["128k": "128", "320k": "320", "flac": "flac", "flac24bit": "high"]
         guard let wireQuality = formats[quality] else { throw MusicServiceError.qualityDisabled }
-        let rights = try await membership(context)
-        guard rights.vip == true, rights.observedUntil > now() else { throw MusicServiceError.qualityDisabled }
         let song = try await audioDetail(hash, context: context)
         guard let resource = song.resources[quality] else { throw MusicServiceError.qualityDisabled }
         let queryHash = resource.hash.lowercased()
@@ -106,14 +103,11 @@ extension KugouMusicAccountAdapter {
         ]
         let root = try await request(.url, context: context, query: query)
         try check(context)
-        guard rights.observedUntil > now(), rights.licenseExpires == nil || rights.licenseExpires! > now() else {
-            throw MusicServiceError.qualityDisabled
-        }
         guard case .object(var result) = try Self.audioResult(root, song: song, resource: resource, context: context) else {
             throw MusicServiceError.invalidMediaCandidate
         }
         result["cacheAllowed"] = .bool(true)
-        result["licenseExpiresAt"] = rights.licenseExpires.map { .number($0.timeIntervalSince1970 * 1000) } ?? .null
+        result["licenseExpiresAt"] = .null
         return .object(result)
     }
     static func audioResult(_ root: [String: Any], song: MusicKugouSong, resource: MusicKugouResource,

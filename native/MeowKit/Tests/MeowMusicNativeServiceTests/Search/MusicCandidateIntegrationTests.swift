@@ -5,16 +5,25 @@ import MeowContracts
 @testable import MeowMusicFeature
 @testable import MeowMusicNativeService
 
-@MainActor private final class MusicCandidateIntegrationPlayer: MusicPlaybackDriving {
+@MainActor private class MusicCandidateIntegrationPlayer: MusicPlaybackDriving {
     var resources: [PlaybackResource] = []
     var stopped: [MusicPlayerAttempt] = []
+    var onStop: (() -> Void)?
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
         resources.append(resource); return .init(id: UUID(), resourceID: resource.id)
     }
     func pause(_ attempt: MusicPlayerAttempt) {}
     func resume(_ attempt: MusicPlayerAttempt) {}
     func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool { false }
-    func stop(_ attempt: MusicPlayerAttempt) { stopped.append(attempt) }
+    func stop(_ attempt: MusicPlayerAttempt) { stopped.append(attempt); onStop?() }
+}
+
+@MainActor private final class MusicCandidateIntegrationHandoffPlayer: MusicCandidateIntegrationPlayer, MusicPlaybackHandoffDriving {
+    var handoffs: [MusicPlayerAttempt] = []
+    func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
+        handoffs.append(replacing)
+        return .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
+    }
 }
 
 private actor MusicCandidateIntegrationGate {
@@ -48,7 +57,7 @@ private actor MusicCandidateIntegrationScripts: MusicScriptResolving {
 
 
 final class MusicCandidateIntegrationTests: XCTestCase {
-    @MainActor func testColdOrdinaryAndAutomaticPlaybackPublishTheActualSelectionAndRejectItsOldGeneration() async throws {
+    @MainActor func testColdOrdinaryAndAutomaticPlaybackCommitActualIdentityAfterFactsAndRefreshExactGeneration() async throws {
         for automatic in [false, true] {
             let scripts = NativeMusicScriptFixture()
             await scripts.coldStart()
@@ -56,7 +65,7 @@ final class MusicCandidateIntegrationTests: XCTestCase {
             let options = try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1")).options
             let requested = try XCTUnwrap(options.first).selection(quality: "flac")
             XCTAssertEqual(requested.generation, 0)
-            let player = MusicCandidateIntegrationPlayer(), model = MusicViewModel(service: service, player: player)
+            let player = MusicCandidateIntegrationHandoffPlayer(), model = MusicViewModel(service: service, player: player)
             await model.load()
             if automatic { await model.togglePlayback() }
             else { await model.choose(requested) }
@@ -68,21 +77,48 @@ final class MusicCandidateIntegrationTests: XCTestCase {
             let attempt = await service.attempt
             XCTAssertEqual(live.generation, 7)
             XCTAssertEqual(candidate.resolvedSelection, actual)
-            XCTAssertEqual(attempt?.selection, actual)
-            XCTAssertEqual(attempt?.scriptSource, live)
+            XCTAssertNil(attempt, "Preparation cannot create an actual playback fact owner")
             XCTAssertEqual(model.lastSelection, actual)
             XCTAssertEqual(model.activePlaybackSelection, actual)
             XCTAssertEqual(player.resources.count, 1)
             let calls = await scripts.calls(); XCTAssertEqual(calls.count, 1)
             let history = try await service.playedSongs(); XCTAssertTrue(history.isEmpty)
+            model.onPlayback(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+                resourceId: candidate.resourceId, kind: .playing, position: 23, duration: 180))
+            await model.flushPlaybackFacts()
+            let committed = await service.attempt
+            XCTAssertEqual(committed?.id, candidate.attemptId)
+            XCTAssertEqual(committed?.selection, actual)
+            XCTAssertEqual(committed?.selection.scriptIdentity, live.identity)
+            let played = try await service.playedSongs(); XCTAssertEqual(played.count, 1)
 
             await scripts.configure(generation: 8)
             await model.choose(actual)
-            XCTAssertNotNil(model.error)
-            XCTAssertEqual(player.resources.count, 1, "An old positive generation never cold-binds again")
-            XCTAssertNil(model.activePlaybackSelection)
-            let afterReload = await scripts.calls(); XCTAssertEqual(afterReload.count, 1)
-            let rejected = await service.attempt; XCTAssertNil(rejected)
+            let refreshed = MusicPlaybackSelection(installationId: actual.installationId, generation: 8,
+                siteId: actual.siteId, sourceKey: actual.sourceKey, quality: actual.quality,
+                scriptIdentity: live.identity)
+            let replacement = try XCTUnwrap(model.candidate)
+            XCTAssertNil(model.error)
+            XCTAssertEqual(player.resources.count, 2)
+            XCTAssertEqual(player.handoffs.count, 1); XCTAssertTrue(player.stopped.isEmpty)
+            XCTAssertNotEqual(replacement.attemptId, candidate.attemptId)
+            XCTAssertEqual(replacement.resolvedSelection, refreshed)
+            XCTAssertEqual(model.activePlaybackSelection, refreshed)
+            let afterReload = await scripts.calls(); XCTAssertEqual(afterReload.count, 2)
+            XCTAssertEqual(afterReload.last?.source.generation, 8)
+            XCTAssertEqual(afterReload.last?.installationID, actual.installationId)
+            XCTAssertEqual(afterReload.last?.siteID, actual.siteId)
+            XCTAssertEqual(afterReload.last?.sourceKey, actual.sourceKey)
+            XCTAssertEqual(afterReload.last?.quality, actual.quality)
+            let beforeReplacementFact = await service.attempt
+            XCTAssertEqual(beforeReplacementFact?.id, candidate.attemptId)
+            XCTAssertEqual(beforeReplacementFact?.selection, actual)
+            model.onPlayback(.init(attemptId: replacement.attemptId, occurrenceId: replacement.occurrenceId,
+                resourceId: replacement.resourceId, kind: .playing, position: 23, duration: 180))
+            await model.flushPlaybackFacts()
+            let replaced = await service.attempt
+            XCTAssertEqual(replaced?.id, replacement.attemptId)
+            XCTAssertEqual(replaced?.selection, refreshed)
             await model.close(); await service.close()
         }
     }
@@ -178,6 +214,63 @@ final class MusicCandidateIntegrationTests: XCTestCase {
             }
             await model.close(); await service.close()
         }
+    }
+
+    @MainActor func testRetiringOldMediaDuringFMAdvanceDoesNotRevokeNewQueueIntent() async throws {
+        for lateFact in [false, true] {
+            try await advanceAfterOldMediaRevocation(revokeFM: false, lateFact: lateFact)
+        }
+    }
+    @MainActor func testFMSourceRevocationStillStopsAdvanceAfterOldMediaRetirement() async throws {
+        for lateFact in [false, true] {
+            try await advanceAfterOldMediaRevocation(revokeFM: true, lateFact: lateFact)
+        }
+    }
+    @MainActor private func advanceAfterOldMediaRevocation(revokeFM: Bool, lateFact: Bool) async throws {
+        let service = try await NativeMusicFixture.service(scripts: MusicCandidateIntegrationScripts())
+        let player = MusicCandidateIntegrationPlayer(), model = MusicViewModel(service: service, player: player)
+        await model.load()
+        let pages = MusicAccountQueuePages(roots: [
+            [NativeMusicFixture.track("First")], [NativeMusicFixture.track("Second")]
+        ])
+        let source = MusicAccountQueueFixture.source(pages, kind: .fm)
+        let start = try await MusicAccountQueueFixture.start(service, source)
+        await model.playRemoteQueue(source, start: start)
+        let old = try XCTUnwrap(model.candidate)
+        let oldAuthorization = try XCTUnwrap(old.playbackAuthorization)
+        let gate = NativeMusicGate()
+        await pages.hold("root", gate: gate)
+        let task = Task { await model.next() }
+        await gate.started()
+        let stopped = expectation(description: "old media retired")
+        player.onStop = { stopped.fulfill() }
+        oldAuthorization.revoke()
+        if lateFact {
+            // Synchronously deliver before the asynchronous revocation observer.
+            model.onPlayback(.init(attemptId: old.attemptId, occurrenceId: old.occurrenceId,
+                resourceId: old.resourceId, kind: .playing, position: 1, duration: 180))
+        }
+        await fulfillment(of: [stopped], timeout: 2)
+        player.onStop = nil
+        XCTAssertNil(model.activeResourceID)
+        XCTAssertEqual(player.stopped.count, 1)
+        XCTAssertTrue(model.isChangingQueue, "Old media cannot cancel the new queue transaction")
+        let history = try await service.playedSongs()
+        XCTAssertTrue(history.isEmpty, "Revoked late facts must not become valid plays")
+        if revokeFM { source.revoke() }
+        await gate.release(); await task.value
+        XCTAssertFalse(model.isChangingQueue)
+        if revokeFM {
+            XCTAssertEqual(player.resources.count, 1)
+            XCTAssertNil(model.activeResourceID)
+        } else {
+            XCTAssertNil(model.error)
+            XCTAssertEqual(model.queue.count, 2)
+            XCTAssertEqual(model.current?.id, model.queue[1].id)
+            XCTAssertEqual(player.resources.count, 2)
+            XCTAssertNotNil(model.activeResourceID)
+        }
+        await model.close(); await service.close()
     }
 
     @MainActor func testRejectingThePlayingSourceExcludesItAndSelectsAnotherAutomatically() async throws {

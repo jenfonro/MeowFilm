@@ -119,7 +119,6 @@ final class MusicSourcesViewController: MusicPageViewController,
                 }
                 self?.session = value
                 let updates = await value.updates()
-                self?.loadMore(refresh: false)
                 do {
                     for try await snapshot in updates {
                         guard !Task.isCancelled, let self, self.request == own else { break }
@@ -130,7 +129,7 @@ final class MusicSourcesViewController: MusicPageViewController,
                         }
                         if self.selecting, self.model.current?.id == self.fence.occurrence,
                            self.model.accountAccessGeneration == self.fence.access, self.originIsCurrent() {
-                            if snapshot.sources.isEmpty { self.snapshot = snapshot; self.render() }
+                            self.snapshot = snapshot; self.render()
                             continue
                         }
                         guard self.admitted else {
@@ -193,7 +192,11 @@ final class MusicSourcesViewController: MusicPageViewController,
     private func configure(_ cell: UITableViewCell, source: MusicResolvedSource) {
         var content = cell.defaultContentConfiguration()
         content.text = source.title
-        content.secondaryText = MusicQualityLabel.name(source.selection.quality)
+        let platform = MusicPublicBrowsePlatform(rawValue: source.selection.siteId)?.title ?? source.selection.siteId
+        let quality = source.delivery.map { MusicQualityLabel.name($0.quality) }
+            ?? "请求\(MusicQualityLabel.name(source.selection.quality)) · 实际音质未确认"
+        content.secondaryText = platform + " · " + quality + "\n录音 " + source.selection.sourceKey
+        content.secondaryTextProperties.numberOfLines = 0
         content.textProperties.color = UIColor(theme.ink)
         content.secondaryTextProperties.color = UIColor(theme.muted)
         cell.contentConfiguration = content
@@ -209,7 +212,7 @@ final class MusicSourcesViewController: MusicPageViewController,
             guard let self else { return }
             guard !Task.isCancelled, self.request == own, self.admitted, !self.selecting else { return }
             self.selecting = true
-            defer { self.selecting = false }
+            defer { self.selecting = false; self.renderState() }
             let occurrence = self.fence.occurrence, access = self.fence.access
             await self.model.chooseInspectedSource(source, session: session)
             guard !Task.isCancelled, self.request == own else { return }
@@ -293,7 +296,7 @@ final class MusicSourcesViewController: MusicPageViewController,
     private func renderState() {
         guard isViewLoaded else { return }
         more.isHidden = snapshot?.hasMore != true
-        more.isEnabled = admitted && !loading && !selecting && !rejecting
+        more.isEnabled = admitted && !loading && snapshot?.isLoading != true && !selecting && !rejecting
         more.tintColor = UIColor(theme.ink)
         let status = inspecting && snapshot == nil || snapshot?.isLoading == true ? "正在获取音源" :
             snapshot?.sources.isEmpty == true ? "暂无可用音源" : nil
@@ -315,7 +318,7 @@ final class MusicSourcesViewController: MusicPageViewController,
     }
 
     private func loadMore(refresh: Bool) {
-        guard admitted, !loading, let session else { return }
+        guard admitted, !loading, snapshot?.isLoading != true, let session else { return }
         let own = request
         runPageTask { [weak self] in
             guard let self else { return }

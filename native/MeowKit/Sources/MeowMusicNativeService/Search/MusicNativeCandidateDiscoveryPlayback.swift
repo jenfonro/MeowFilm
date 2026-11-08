@@ -7,6 +7,7 @@ extension NativeMusicService {
     func candidateResolve(_ target: MusicCandidateDiscoveryTarget, attemptID: String,
         seed: MusicNativeCandidateDiscoverySeed, label: String) async throws -> MusicPlaybackCandidate {
         let d = try candidateCheck(seed), selection = target.selection
+        try admitSource(seed.song, selection: selection)
         try musicRequire(UUID(uuidString: attemptID)?.uuidString.lowercased() == attemptID && !spent.contains(attemptID), .staleResult)
         let (source, info) = try self.target(seed.song, selection.sourceKey)
         try musicRequire(source.platform == selection.siteId && target.option.playback.qualities.contains(selection.quality), .targetChanged)
@@ -43,7 +44,7 @@ extension NativeMusicService {
                 resolvedSelection = selection
             } else {
                 guard let scripts else { throw MusicServiceError.sourceUnavailable }
-                let snapshot = try await work(label: "playback") { try await scripts.source(installationID: selection.installationId) }
+                let snapshot = try await sourceDeclaration(scripts, installationID: selection.installationId, label: "playback")
                 try candidateAttemptCheck(seed, attemptID: attemptID)
                 try candidateScriptPin(snapshot, target: target)
                 let request = MusicScriptRequest(source: snapshot,
@@ -51,7 +52,7 @@ extension NativeMusicService {
                 let execution = try await work(label: "playback") { try await scripts.resolve(request: request) }
                 try executedScript(execution.source, from: snapshot)
                 try candidateAttemptCheck(seed, attemptID: attemptID)
-                let live = try await work(label: "playback") { try await scripts.source(installationID: selection.installationId) }
+                let live = try await sourceDeclaration(scripts, installationID: selection.installationId, label: "playback")
                 try candidateAttemptCheck(seed, attemptID: attemptID)
                 try sameSource(live, execution.source); try candidateScriptPin(live, target: target)
                 attempt?.scriptSource = live
@@ -63,7 +64,7 @@ extension NativeMusicService {
             try candidateAttemptCheck(seed, attemptID: attemptID)
             attempt?.selection = resolvedSelection
             let valid = try media(audio)
-            try validateDelivery(valid.delivery, song: seed.song, playback: d.playback)
+            try validateDelivery(valid, song: seed.song, playback: d.playback)
             let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: seed.occurrenceID, resourceId: "music:" + attemptID,
                 url: valid.url, headers: valid.headers, title: seed.song["title"].string,
                 startPosition: seed.cacheRecovery?.position ?? d.playback["position"]["seconds"].number,
@@ -72,8 +73,10 @@ extension NativeMusicService {
                 delivery: valid.delivery, playbackAuthorization: valid.playbackAuthorization)
             _ = try candidate.resource()
             try await stageAudioCache(audio: valid, song: seed.song, selection: resolvedSelection, attemptID: attemptID)
-            try candidateAttemptCheck(seed, attemptID: attemptID)
-            try pinPlaybackRecovery(candidate: candidate, song: seed.song, state: d)
+            try await admitRecordingSource(seed.song, sourceKey: selection.sourceKey)
+            let latest = try candidateAttemptCheck(seed, attemptID: attemptID)
+            try admitSource(seed.song, selection: selection)
+            try pinPlaybackRecovery(candidate: candidate, song: seed.song, state: latest)
             let publish = {
                 self.attempt?.authorization = valid.playbackAuthorization
                 self.attempt?.ready = true
@@ -87,12 +90,15 @@ extension NativeMusicService {
             return candidate
         } catch {
             if attempt?.id == attemptID { retireAudioCacheAttempt(); attempt = nil }
+            if error is MusicSourceDeclarationFailure { throw error }
             throw MusicServiceError.sanitized(error)
         }
     }
-    private func candidateAttemptCheck(_ seed: MusicNativeCandidateDiscoverySeed, attemptID: String) throws {
-        try candidateCheck(seed)
+    @discardableResult
+    private func candidateAttemptCheck(_ seed: MusicNativeCandidateDiscoverySeed, attemptID: String) throws -> MusicDocument {
+        let d = try candidateCheck(seed)
         try musicRequire(attempt?.id == attemptID, .staleResult)
+        return d
     }
     private func candidateScriptPin(_ live: MusicScriptSource, target: MusicCandidateDiscoveryTarget) throws {
         let option = target.option.playback

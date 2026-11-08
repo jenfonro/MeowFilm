@@ -39,7 +39,7 @@ actor MusicAccountAccessGate {
             urlCacheStore: urlCacheStore, cacheLifecycle: { event in
                 switch event {
                 case .accountChanged:
-                    await audioCache?.clear()
+                    await audioCache?.clearOfficial()
                     await displayCache?.clear()
                 case .accessChanged, .closed:
                     await audioCache?.cancelPending()

@@ -610,7 +610,7 @@ struct AudioCacheTestFixture: Sendable {
                  authorization: MusicQueueAuthorization = MusicQueueAuthorization(),
                  playbackAuthorization: MusicQueueAuthorization = MusicQueueAuthorization()) -> MusicAudioFileCacheRequest {
         .init(identity: .init(scope: "test-account-scope", songID: song, sourceKey: "official:" + platform,
-                              platform: platform, nativeID: song, requestedQuality: quality, playbackSignature: signature),
+                              platform: platform, nativeID: song, requestedQuality: quality, playbackSignature: signature, provider: "official:" + platform),
               audio: .init(url: url, headers: ["Cookie": "synthetic-cookie", "Authorization": "synthetic-bearer"],
                            expiresAt: urlExpiry, fileCachePolicy: policy),
               expectedDuration: duration, confirmedAt: confirmedAt ?? clock.now(), authorization: authorization,

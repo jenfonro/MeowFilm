@@ -33,6 +33,10 @@ extension MusicViewModel {
         // Ordinary play/resume/navigation explicitly opts into the music
         // business policy, independently of the feedback `automatic` flag.
         // A picker/manual request never enters this path, even after failure.
+        if !forceSelection, service is any MusicSourcePlaybackServing {
+            await selectSource(intent: .automatic, automatic: automatic, admission: admission)
+            return
+        }
         if !forceSelection, let provider = service as? any MusicCandidateDiscoveryServing {
             await prepareAutomaticCandidate(provider, epoch: epoch, automatic: automatic, admission: admission)
             return
@@ -190,6 +194,7 @@ extension MusicViewModel {
             playbackState.phase = .paused; return false
         }
         candidate = value; lastSelection = value.resolvedSelection; terminalAttempt = nil; lastProgressWrite = nil
+        sourceCommittedSettingsRevision = state.settingsRevision
         playbackState.phase = .preparing
         // Native preparation/failure callbacks may synchronously re-enter.
         pendingNativeResourceID = value.resourceId
@@ -219,7 +224,7 @@ extension MusicViewModel {
         }
         observeAudioAuthorization(value, native: started)
         capturePrimaryPlayback()
-        playbackState.isResolving = false; resolvingAttempt = nil
+        playbackState.isResolving = sourceRecoveryTask != nil; resolvingAttempt = nil
         return true
     }
 
@@ -251,6 +256,10 @@ extension MusicViewModel {
     }
     func chooseInspectedSource(_ source: MusicResolvedSource, session: any MusicSourceInspectionSession) async {
         guard let current, let service else { return }
+        if service is any MusicSourcePlaybackServing {
+            await selectSource(intent: .exact(source.selection))
+            return
+        }
         let own = lifecycle, token = selectionID, before = state, entries = queue
         let admission = fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         do {
@@ -274,6 +283,7 @@ extension MusicViewModel {
         let own = lifecycle, token = selectionID, before = state, entries = queue
         let admission = fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         let key = source.selection.sourceKey
+        let operation = sourceSwitchID
         let playing = nativeAttempt != nil && candidate?.occurrenceId == current.id && lastSelection?.sourceKey == key
         let replacement = playing ? SourceReplacementIntent(occurrenceID: current.id, position: position,
                                                             remainsPaused: phase == .paused) : nil
@@ -282,10 +292,22 @@ extension MusicViewModel {
             try checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
             try await session.reject(sourceKey: key, occurrenceID: current.id, expectedQueueRevision: before.revision)
             try checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
+            guard sourceSwitchID == operation else { return }
+            let livePosition = position
             try await refreshCandidateQueue(service, epoch: own, token: token, before: before,
                                             entries: entries, admission: admission)
+            guard sourceSwitchID == operation else { return }
+            if playing { position = livePosition }
         } catch { report(error, epoch: own); return }
-        guard playing, let provider = service as? any MusicCandidateDiscoveryServing else { return }
+        guard playing else { return }
+        if service is any MusicSourcePlaybackServing {
+            // Recording exclusion is distinct from provider exclusion, but its
+            // replacement still belongs to the current song's shared session.
+            await replaceExcludedSource(intent: .automatic,
+                resumeControl: phase == .paused ? nil : playbackControlRevision)
+            return
+        }
+        guard let provider = service as? any MusicCandidateDiscoveryServing else { return }
         await prepareAutomaticCandidate(provider, epoch: own, automatic: false, admission: admission,
                                         replacement: replacement)
     }
@@ -301,6 +323,10 @@ extension MusicViewModel {
     }
     func chooseRequest(_ selection: MusicPlaybackSelection, automatic: Bool, admission: QueuePlaybackAdmission?,
                                useAudioCache: Bool) async {
+        if service is any MusicSourcePlaybackServing {
+            await selectSource(intent: .exact(selection), automatic: automatic, admission: admission)
+            return
+        }
         let admission = admission ?? fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         let epoch: UUID
         do { epoch = try enter() } catch { return }
@@ -387,8 +413,20 @@ extension MusicViewModel {
         }
     }
 
+    func retireRevokedAudio() {
+        // A committed queue change retires the old prepared/file grant before
+        // its acknowledgement reaches MainActor. Stop that media, not the new
+        // transaction; its own source/access/intent fences govern admission.
+        if isChangingQueue { stopOwned() }
+        else { invalidateSelection(stopMedia: true) }
+    }
+
     func observeAudioAuthorization(_ value: MusicPlaybackCandidate, native: MusicPlayerAttempt) {
         cachedAudioObservation?.cancel(); cachedAudioObservation = nil
+        // play/commit can synchronously fail and start the next recovery.
+        // That recovery already owns retirement of this terminal preparation;
+        // observing its own discard would cancel the successor as stale access.
+        guard terminalAttempt != value.attemptId else { return }
         guard let authorization = value.playbackAuthorization ?? value.fileAuthorization else { return }
         let events = authorization.revocations()
         cachedAudioObservation = Task { [weak self] in
@@ -398,8 +436,9 @@ extension MusicViewModel {
                 // account fence still owns THIS native attempt, not the page
                 // lifecycle. Never stop a newer admitted attempt.
                 guard !Task.isCancelled, let self, self.nativeAttempt == native else { return }
-                self.invalidateSelection(stopMedia: true)
-                if self.isAvailable { self.error = MusicServiceError.staleAccess.localizedDescription }
+                let changingQueue = self.isChangingQueue
+                self.retireRevokedAudio()
+                if !changingQueue, self.isAvailable { self.error = MusicServiceError.staleAccess.localizedDescription }
                 if let service = self.service {
                     await self.releaseUnacceptedAttempt(value.attemptId, service: service)
                 }
@@ -520,7 +559,7 @@ extension MusicViewModel {
         // A user's pause wins over an automatic recovery, before any actor
         // suspension. Do not interpret a failed native item as "start again"
         // while its replacement is still being resolved.
-        guard cachedAudioRecoveryTask != nil || remoteAudioRecoveryTask != nil else { return false }
+        guard sourceRecoveryTask != nil || cachedAudioRecoveryTask != nil || remoteAudioRecoveryTask != nil else { return false }
         let attempts = Set([candidate?.attemptId, resolvingAttempt].compactMap { $0 })
         fmShouldPlay = false
         invalidateSelection(stopMedia: true)

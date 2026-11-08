@@ -20,6 +20,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     private var pending: [UUID: Pending] = [:]
     private var closed = false
     private var captureCutoff: Date?
+    private var officialCaptureCutoff: Date?
     private static let lifetime: TimeInterval = 30 * 86_400
 
     private struct Pending {
@@ -69,9 +70,10 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
             return try authorization.perform {
                 let directory = try open()
                 try prune(directory)
-                guard let entry = entries[Self.key(scope, songID)],
-                      accepts(entry.identity), authorization.isActive, !Task.isCancelled,
-                      try directory.matches(entry.file, stamp: entry.stamp) else { return nil }
+                let matches = entries.values.filter { $0.identity.scope == scope && $0.identity.songID == songID && accepts($0.identity) }
+                guard let entry = try matches.sorted(by: { Self.oldest($1, $0) }).first(where: {
+                    try directory.matches($0.file, stamp: $0.stamp)
+                }), authorization.isActive, !Task.isCancelled else { return nil }
                 // Neither wall time nor lastPlayedAt is updated by a read.
                 return .init(identity: entry.identity, fileURL: directory.url.appendingPathComponent(entry.file),
                              duration: entry.inspection.duration, measuredQuality: entry.quality,
@@ -83,20 +85,22 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     @discardableResult public func storeAfterPlayback(_ request: MusicAudioFileCacheRequest) async -> MusicAudioFileCacheVersion? {
         let now = clock()
         guard !closed, !Task.isCancelled, request.authorization.isActive, request.playbackAuthorization.isActive,
+              request.audio.playbackAuthorization?.isActive != false,
               captureCutoff.map({ request.confirmedAt > $0 }) ?? true,
+              !request.identity.isOfficial || (officialCaptureCutoff.map({ request.confirmedAt > $0 }) ?? true),
               Self.valid(request.identity), Self.confirmed(request.confirmedAt, now: now),
               request.expectedDuration.isFinite, request.expectedDuration > 0,
               request.audio.fileCachePolicy.allowed,
               Self.licenseValid(request.audio.fileCachePolicy.licenseExpiresAt, now: now),
               Self.expiry(request.confirmedAt, request.audio.fileCachePolicy.licenseExpiresAt) > now,
               NativeMusicAudioCacheInspection.supportedRequest(request.audio.delivery?.quality ?? request.identity.requestedQuality),
-              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url, platform: request.identity.platform)
+              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url, platform: request.identity.platform, scriptMedia: !request.identity.isOfficial)
         else { return nil }
         // A URL expiry is only a fetch eligibility check. It is NEVER persisted
         // or used to expire already captured audio.
         if let expiry = request.audio.expiresAt,
            !expiry.timeIntervalSince1970.isFinite || expiry <= now { return nil }
-        let key = Self.key(request.identity.scope, request.identity.songID)
+        let key = Self.key(request.identity)
         do {
             let directory = try open()
             try prune(directory)
@@ -125,12 +129,13 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
             let id = UUID(), fence = NativeMusicAudioCacheFence(authorization: request.authorization, timing: timing)
             let sink = try NativeMusicAudioCacheSink(directory: directory, fence: fence,
                 playbackAuthorization: request.playbackAuthorization,
-                platform: request.identity.platform) { [weak self] length in
+                platform: request.identity.platform, scriptMedia: !request.identity.isOfficial) { [weak self] length in
                     guard let self else { throw NativeMusicAudioCacheFailure.miss }
                     try await self.reserve(id: id, bytes: length)
                 }
             pending[id] = Pending(id: id, key: key, identity: request.identity, fence: fence, sink: sink)
-            let http = NativeMusicAudioCacheHTTPRequest(url: request.audio.url, platform: request.identity.platform)
+            let http = NativeMusicAudioCacheHTTPRequest(url: request.audio.url, platform: request.identity.platform,
+                scriptMedia: !request.identity.isOfficial, headers: request.audio.headers)
             let transport = self.transport, inspector = self.inspector
             let task = Task<MusicAudioFileCacheVersion?, Never> {
                 defer { self.finished(id: id) }
@@ -187,7 +192,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
             try authorization.perform {
                 let directory = try open()
                 try prune(directory)
-                let key = Self.key(identity.scope, identity.songID)
+                let key = Self.key(identity)
                 guard var entry = entries[key], entry.identity == identity, entry.file == version.rawValue,
                       try directory.matches(entry.file, stamp: entry.stamp) else { return }
                 entry.lastPlayedAt = max(entry.lastPlayedAt, confirmedAt)
@@ -203,7 +208,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         // Pending fills have no published file revision yet. Retiring an old
         // failed file must not cancel a new same-recording replacement.
         do {
-            let directory = try open(), key = Self.key(identity.scope, identity.songID)
+            let directory = try open(), key = Self.key(identity)
             guard entries[key]?.identity == identity, entries[key]?.file == version.rawValue else { return }
             var next = entries; next.removeValue(forKey: key)
             try commitIndex(next, directory: directory)
@@ -223,6 +228,17 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
             let directory = try open()
             try commitIndex([:], directory: directory)
             try directory.recover(keeping: [], activeTemporaries: Set(pending.values.map(\.sink.name)))
+        } catch {}
+    }
+
+    public func clearOfficial() async {
+        guard !closed else { return }
+        let now = clock()
+        officialCaptureCutoff = max(officialCaptureCutoff ?? now, now)
+        for value in pending.values where value.identity.isOfficial { cancelCapture(value) }
+        do {
+            let directory = try open()
+            try commitIndex(entries.filter { !$0.value.identity.isOfficial }, directory: directory)
         } catch {}
     }
 
@@ -347,9 +363,9 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         if let bytes = try value.readIndex() {
             // A corrupt/old index is not authority to touch arbitrary paths.
             if let index = try? JSONDecoder().decode(NativeMusicAudioCacheIndex.self, from: bytes),
-               index.version == 1, index.entries.count <= 4096 {
+               index.version == 2, index.entries.count <= 4096 {
                 for entry in index.entries {
-                    guard Self.valid(entry.identity), entry.key == Self.key(entry.identity.scope, entry.identity.songID),
+                    guard Self.valid(entry.identity), entry.key == Self.key(entry.identity),
                           loaded[entry.key] == nil, Self.confirmed(entry.lastPlayedAt, now: clock()),
                           Self.licenseValid(entry.licenseExpiresAt, now: clock()), entry.expiresAt > clock(),
                           entry.expiresAt == Self.expiry(entry.lastPlayedAt, entry.licenseExpiresAt),
@@ -372,9 +388,9 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
 
     private func prune(_ directory: NativeMusicAudioCacheDirectory) throws {
         let now = clock()
-        let next = try entries.filter { _, entry in
+        let next = entries.filter { _, entry in
             guard entry.expiresAt > now, Self.licenseValid(entry.licenseExpiresAt, now: now) else { return false }
-            return try directory.matches(entry.file, stamp: entry.stamp)
+            return (try? directory.matches(entry.file, stamp: entry.stamp)) == true
         }
         if next.count != entries.count { try commitIndex(next, directory: directory) }
     }
@@ -392,7 +408,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
 
     private static func encode(_ entries: [String: NativeMusicAudioCacheEntry]) throws -> Data {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        let bytes = try encoder.encode(NativeMusicAudioCacheIndex(version: 1,
+        let bytes = try encoder.encode(NativeMusicAudioCacheIndex(version: 2,
             entries: entries.values.sorted { $0.key < $1.key }))
         guard bytes.count <= NativeMusicAudioCacheDirectory.indexLimit else { throw NativeMusicAudioCacheFailure.miss }
         return bytes
@@ -400,9 +416,10 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     private static func oldest(_ a: NativeMusicAudioCacheEntry, _ b: NativeMusicAudioCacheEntry) -> Bool {
         a.lastPlayedAt == b.lastPlayedAt ? a.key < b.key : a.lastPlayedAt < b.lastPlayedAt
     }
-    private static func key(_ scope: String, _ songID: String) -> String {
-        // Length-delimited identity; no caller-controlled path components.
-        let bytes = Data("\(scope.utf8.count):\(scope)\(songID.utf8.count):\(songID)".utf8)
+    private static func key(_ value: MusicAudioFileCacheIdentity) -> String {
+        // Distinct providers/recordings/qualities share one capacity, not one slot.
+        let fields = [value.scope, value.songID, value.provider, value.platform, value.sourceKey, value.requestedQuality]
+        let bytes = Data(fields.map { "\($0.utf8.count):\($0)" }.joined().utf8)
         return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
     private static func text(_ value: String) -> Bool {
@@ -412,7 +429,8 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     }
     private static func valid(_ value: MusicAudioFileCacheIdentity) -> Bool {
         [value.scope, value.songID, value.sourceKey, value.nativeID, value.requestedQuality,
-         value.playbackSignature].allSatisfy(text) && ["wy", "tx", "kg"].contains(value.platform)
+         value.playbackSignature, value.provider].allSatisfy(text) && value.generation > 0 &&
+            (value.isOfficial ? ["wy", "tx", "kg"] : ["wy", "tx", "kg", "kw", "mg"]).contains(value.platform)
     }
     private static func confirmed(_ date: Date, now: Date) -> Bool {
         date.timeIntervalSince1970.isFinite && date.timeIntervalSince1970 > 0 &&
@@ -493,6 +511,7 @@ public final class NativeMusicAudioCacheSink: @unchecked Sendable {
     private let fence: NativeMusicAudioCacheFence
     private let playbackAuthorization: MusicQueueAuthorization
     private let platform: String
+    private let scriptMedia: Bool
     private let reserve: @Sendable (Int64) async throws -> Void
     let name: String
     private var descriptor: Int32
@@ -505,9 +524,9 @@ public final class NativeMusicAudioCacheSink: @unchecked Sendable {
     private var sealedStamp: NativeMusicAudioCacheStamp?
 
     init(directory: NativeMusicAudioCacheDirectory, fence: NativeMusicAudioCacheFence,
-         playbackAuthorization: MusicQueueAuthorization, platform: String,
+         playbackAuthorization: MusicQueueAuthorization, platform: String, scriptMedia: Bool = false,
          reserve: @escaping @Sendable (Int64) async throws -> Void) throws {
-        self.directory = directory; self.fence = fence; self.platform = platform; self.reserve = reserve
+        self.directory = directory; self.fence = fence; self.platform = platform; self.scriptMedia = scriptMedia; self.reserve = reserve
         self.playbackAuthorization = playbackAuthorization
         let temporary = UUID().uuidString.lowercased() + ".part"
         name = temporary
@@ -515,7 +534,7 @@ public final class NativeMusicAudioCacheSink: @unchecked Sendable {
     }
     public func accept(_ response: NativeMusicAudioCacheHTTPResponse) async throws {
         try checkReceivingAuthorization()
-        let length = try NativeMusicAudioCacheHTTPPolicy.length(response, platform: platform)
+        let length = try NativeMusicAudioCacheHTTPPolicy.length(response, platform: platform, scriptMedia: scriptMedia)
         try await reserve(length)
         try accepted(length)
     }

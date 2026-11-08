@@ -73,7 +73,7 @@ actor MusicAccountFeedbackChannel {
             }
             guard value.listened <= max(0, clock() - startedAt) + 2 else { throw MusicServiceError.invalidRequest }
             if platform == .kugou {
-                guard abs(start.duration - value.duration) <= max(3, min(start.duration, value.duration) * 0.02),
+                guard MusicMediaDuration.matches(expected: start.duration, actual: value.duration),
                       value.mediaListened <= value.listened * 16 + 1,
                       value.mediaListened + 1 >= value.listened * 0.25 else { throw MusicServiceError.invalidRequest }
             }

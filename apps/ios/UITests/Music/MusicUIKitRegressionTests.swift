@@ -773,6 +773,77 @@ final class MusicUIKitRegressionTests: XCTestCase {
         await owner.close()
     }
 
+    func testSourceSelectionFailureWithdrawsBadRowAndRestoresMoreWithoutLoading() async throws {
+        let entered = expectation(description: "source A selection is awaiting adoption")
+        let gate = MusicUIKitSearchGate { entered.fulfill() }
+        try await withSourceSelectionPage(gate: gate) { page, model, table, more, session in
+            let rows = try XCTUnwrap(table.dataSource as? UITableViewDiffableDataSource<Int, String>)
+            XCTAssertEqual(rows.snapshot().itemIdentifiers, ["a", "b"])
+            XCTAssertTrue(more.isEnabled); XCTAssertFalse(more.isHidden)
+            let selected = try XCTUnwrap(rows.indexPath(for: "a"))
+            table.delegate?.tableView?(table, didSelectRowAt: selected)
+            await self.fulfillment(of: [entered], timeout: 3)
+
+            await session.publish(["b"])
+            await self.waitForResult {
+                table.layoutIfNeeded()
+                return rows.snapshot().itemIdentifiers == ["b"] &&
+                    table.numberOfRows(inSection: 0) == 1 && !more.isEnabled
+            }
+            let survivingCell = try XCTUnwrap(table.cellForRow(at: IndexPath(row: 0, section: 0)))
+            XCTAssertEqual((survivingCell.contentConfiguration as? UIListContentConfiguration)?.text, "B")
+            XCTAssertFalse(more.isHidden, "The withdrawal still advertises another source layer")
+            XCTAssertFalse(more.isEnabled, "Selection must keep paging busy while adoption awaits")
+            XCTAssertNil(model.error)
+            let waitingSelections = await session.adoptedSourceIDs
+            let waitingLoads = await session.loadMoreRequests
+            XCTAssertEqual(waitingSelections, ["a"]); XCTAssertEqual(waitingLoads, [])
+
+            await gate.release()
+            await self.waitForResult {
+                page.presentedViewController is UIAlertController && more.isEnabled
+            }
+            XCTAssertNotNil(model.error)
+            XCTAssertTrue(page.isPageActive)
+            XCTAssertNotNil(page.view.window, "Failed exact selection must leave the source page open")
+            XCTAssertFalse(page.isBeingDismissed)
+            XCTAssertEqual(model.current?.id, "source-occurrence")
+            XCTAssertEqual(rows.snapshot().itemIdentifiers, ["b"])
+            XCTAssertEqual(table.numberOfRows(inSection: 0), 1)
+            let finalCell = try XCTUnwrap(table.cellForRow(at: IndexPath(row: 0, section: 0)))
+            XCTAssertEqual((finalCell.contentConfiguration as? UIListContentConfiguration)?.text, "B")
+            XCTAssertFalse(more.isHidden); XCTAssertTrue(more.isEnabled)
+            let completedSelections = await session.adoptedSourceIDs
+            let completedLoads = await session.loadMoreRequests
+            XCTAssertEqual(completedSelections, ["a"], "Failure must not silently select healthy B")
+            XCTAssertEqual(completedLoads, [], "Neither loadMore nor refresh may be needed to withdraw A")
+        }
+    }
+
+    func testRevokedSourceSelectionRejectsLateNonemptyUpdate() async throws {
+        let entered = expectation(description: "source selection is waiting before access revocation")
+        let gate = MusicUIKitSearchGate { entered.fulfill() }
+        try await withSourceSelectionPage(gate: gate) { page, model, table, more, session in
+            let rows = try XCTUnwrap(table.dataSource as? UITableViewDiffableDataSource<Int, String>)
+            let selected = try XCTUnwrap(rows.indexPath(for: "a"))
+            table.delegate?.tableView?(table, didSelectRowAt: selected)
+            await self.fulfillment(of: [entered], timeout: 3)
+            model.setAvailable(false)
+            await session.publish(["b"])
+            await self.waitForResult {
+                !page.isPageActive && page.view.window == nil &&
+                    rows.snapshot().itemIdentifiers.isEmpty
+            }
+            XCTAssertFalse(model.isAvailable)
+            XCTAssertEqual(table.numberOfRows(inSection: 0), 0)
+            XCTAssertFalse(more.isEnabled)
+            XCTAssertNil(page.presentedViewController)
+            let selections = await session.adoptedSourceIDs
+            let loads = await session.loadMoreRequests
+            XCTAssertEqual(selections, ["a"]); XCTAssertEqual(loads, [])
+        }
+    }
+
     func testFMArtworkOnlyUpdatesForEffectiveCoverWithoutReconfiguringCard() async throws {
         let action = MusicHomeAction.fm(mode: .default, submode: "", entry: nil)
         let appearance = MusicAppearancePreferencesStore()
@@ -3464,6 +3535,61 @@ final class MusicUIKitRegressionTests: XCTestCase {
             playlistPlatforms: [.netease])), forKey: key)
         return { defaults.set(saved, forKey: key) }
     }
+    private func withSourceSelectionPage(gate: MusicUIKitSearchGate,
+        run: (MusicSourcesViewController, MusicViewModel, UITableView, UIButton,
+              MusicUIKitSourceSelectionSession) async throws -> Void) async throws {
+        let track = resultTrack("tx", "source-recording")
+        let session = MusicUIKitSourceSelectionSession(sourceKey: track.sources[0].sourceKey, gate: gate)
+        let service = MusicUIKitRegressionService(sourceSelection: (
+            entry: .init(id: "source-occurrence", track: track), session: session
+        ))
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        await model.load()
+        XCTAssertNil(model.error); XCTAssertEqual(model.current?.id, "source-occurrence")
+        let appearance = MusicAppearancePreferencesStore()
+        let page = MusicSourcesViewController(model: model, tracks: [track], appearance: appearance)
+        let navigation = PageNavigationController(themeProvider: appearance)
+        navigation.setViewControllers([page], animated: false)
+        let host = UIViewController(), window = mount(host)
+        defer { release(host, window: window) }
+        await withCheckedContinuation { continuation in
+            host.present(navigation, animated: false) { continuation.resume() }
+        }
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        let outcome: Result<Void, Error>
+        do {
+            let table = try XCTUnwrap(page.view.subviews.compactMap { $0 as? UITableView }.first)
+            let rows = try XCTUnwrap(table.dataSource as? UITableViewDiffableDataSource<Int, String>)
+            let more = try XCTUnwrap(table.tableFooterView as? UIButton)
+            await session.publish(["a"])
+            await waitForResult {
+                table.layoutIfNeeded()
+                return page.canPresentPageAlert && rows.snapshot().itemIdentifiers == ["a"]
+            }
+            await session.publish(["a", "b"])
+            await waitForResult {
+                table.layoutIfNeeded()
+                return rows.snapshot().itemIdentifiers == ["a", "b"] &&
+                    table.numberOfRows(inSection: 0) == 2 && table.visibleCells.count == 2 && more.isEnabled
+            }
+            XCTAssertEqual((0..<2).compactMap { row in
+                let cell = table.cellForRow(at: IndexPath(row: row, section: 0))
+                return (cell?.contentConfiguration as? UIListContentConfiguration)?.text
+            }, ["A", "B"], "Ordinary nonempty updates must reach the actual source table before selection")
+            try await run(page, model, table, more, session)
+            outcome = .success(())
+        } catch { outcome = .failure(error) }
+        PageViewController.invalidatePages(in: navigation)
+        await gate.release()
+        await session.close()
+        await model.close()
+        if host.presentedViewController != nil {
+            await withCheckedContinuation { continuation in
+                host.dismiss(animated: false) { continuation.resume() }
+            }
+        }
+        try outcome.get()
+    }
     private func mount(_ controller: UIViewController) -> UIWindow {
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
         let window = scene.map { UIWindow(windowScene: $0) }
@@ -4127,6 +4253,7 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private var resolvedResultTracks: [MusicReference: MusicRemoteTrack] = [:]
     private var resultFavorites: [MusicRemoteTrack] = []
     private let resultInspection = MusicUIKitResultInspectionSession()
+    private let sourceSelection: (entry: MusicQueueEntry, session: MusicUIKitSourceSelectionSession)?
     private var homeContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
     private var homeSubscriptionObserver: (@Sendable () -> Void)?
     private var homeChangeCompletionObserver: (@Sendable () -> Void)?
@@ -4148,13 +4275,15 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
          channelBrowse: MusicPublicBrowsePage? = nil,
          localTracks: [MusicRemoteTrack] = [], collectionKind: String = "playlist",
          details: [String: [MusicPublicBrowseDetail]] = [:],
-         discoveryGate: MusicUIKitSearchGate? = nil) {
+         discoveryGate: MusicUIKitSearchGate? = nil,
+         sourceSelection: (entry: MusicQueueEntry, session: MusicUIKitSourceSelectionSession)? = nil) {
         self.discovery = discovery; self.browse = browse; self.nextBrowse = nextBrowse
         self.restoredHomePage = restoredHome
         self.detail = detail; self.nextDetail = nextDetail
         self.channelBrowse = channelBrowse
         self.localTracks = localTracks; self.collectionKind = collectionKind
         self.details = details; self.discoveryGate = discoveryGate
+        self.sourceSelection = sourceSelection
     }
     func counts() -> (discovery: Int, browse: Int, tracks: Int, details: Int) {
         (discoveryCalls, browseCalls, trackCalls, requestedDetails.count)
@@ -4194,6 +4323,7 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         return .init()
     }
     func inspectSources(for reference: MusicReference) throws -> any MusicSourceInspectionSession {
+        if let sourceSelection { return sourceSelection.session }
         guard songResultPages != nil else { throw MusicServiceError.unsupported }
         return resultInspection
     }
@@ -4331,7 +4461,10 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func recommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicBrowsePage { throw MusicServiceError.unsupported }
     func accountCollections(platform: MusicAccountPlatform, cursor: String?) throws -> MusicAccountCollectionPage { throw MusicServiceError.unsupported }
     func accountTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicBrowsePage { throw MusicServiceError.unsupported }
-    func state() -> MusicPlaybackState { .init() }
+    func state() -> MusicPlaybackState {
+        if let sourceSelection { return .init(currentId: sourceSelection.entry.id, total: 1) }
+        return .init()
+    }
     func platforms() -> [MusicPlatform] { [] }
     func search(platform: String, query: String, page: Int, limit: Int) async throws -> MusicSearchPage {
         guard let observe = resultSearchObserver else { throw MusicServiceError.unsupported }
@@ -4371,7 +4504,12 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         return collection
     }
     func removePlaylist(_ collection: MusicCollection) throws { throw MusicServiceError.unsupported }
-    func queue() -> MusicQueueSnapshot { .init(revision: 0, currentId: nil, entries: []) }
+    func queue() -> MusicQueueSnapshot {
+        if let sourceSelection {
+            return .init(revision: 0, currentId: sourceSelection.entry.id, entries: [sourceSelection.entry])
+        }
+        return .init(revision: 0, currentId: nil, entries: [])
+    }
     func changeQueue(_ change: MusicQueueChange, expectedRevision: Int) throws -> MusicPlaybackState {
         if let localQueueObserver, case .append(let refs, _) = change {
             localQueueReferences = refs; localQueueObserver(); return .init()
@@ -4392,6 +4530,36 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func playedSongs() -> [MusicPlayedSong] { [] }
     func playedPlaylists() -> [MusicPlayedPlaylist] { [] }
     func restoreHistory(id: String, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
+}
+
+private actor MusicUIKitSourceSelectionSession: MusicSourceInspectionSession {
+    private let pair = AsyncThrowingStream<MusicResolvedSourcesSnapshot, Error>.makeStream()
+    private let sourceKey: String
+    private let gate: MusicUIKitSearchGate
+    private(set) var adoptedSourceIDs: [String] = []
+    private(set) var loadMoreRequests: [Bool] = []
+    init(sourceKey: String, gate: MusicUIKitSearchGate) { self.sourceKey = sourceKey; self.gate = gate }
+    func updates() -> AsyncThrowingStream<MusicResolvedSourcesSnapshot, Error> { pair.stream }
+    func publish(_ ids: [String]) {
+        pair.continuation.yield(.init(sources: ids.map { id in
+            .init(id: id, selection: .init(installationId: "fixture:" + id, generation: 1,
+                siteId: "tx", sourceKey: sourceKey, quality: "flac"), title: id.uppercased(), delivery: nil)
+        }, hasMore: true))
+    }
+    func loadMore(refresh: Bool) -> MusicResolvedSourcesSnapshot {
+        loadMoreRequests.append(refresh)
+        return .init(sources: [], hasMore: false)
+    }
+    func adopt(sourceID: String, occurrenceID: String,
+               expectedQueueRevision: Int) async throws -> MusicPlaybackSelection {
+        adoptedSourceIDs.append(sourceID)
+        await gate.wait()
+        throw MusicServiceError.invalidMediaCandidate
+    }
+    func reject(sourceKey: String, occurrenceID: String, expectedQueueRevision: Int) throws {
+        throw MusicServiceError.unsupported
+    }
+    func close() { pair.continuation.finish() }
 }
 
 private actor MusicUIKitObservedHomeChanges {
