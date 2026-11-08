@@ -5,6 +5,7 @@ namespace MeowFilm.Capabilities;
 public sealed partial class MusicCapability
 {
     private CancellationTokenSource? catalogActionCancellation;
+    private (string Platform, long Observation)? catalogActionAuthority;
     private long catalogActionGeneration;
     private MusicCatalogCard? preparingCatalogCard;
 
@@ -12,6 +13,7 @@ public sealed partial class MusicCapability
     public void InvalidateCatalogAction()
     {
         catalogActionGeneration++;
+        catalogActionAuthority = null;
         if (catalogActionCancellation is { IsCancellationRequested: false } active)
         {
             active.Cancel();
@@ -197,7 +199,7 @@ public sealed partial class MusicCapability
             RequireCatalogContent();
             await RunAsync(async () =>
             {
-                if (!current() || !ContainsCatalogCard(card)) return;
+                if (!current()) return;
                 RequireCatalogContent();
                 queueEpoch++;
                 try
@@ -214,9 +216,14 @@ public sealed partial class MusicCapability
     private Task CatalogSectionPlaylistAsync(MusicCatalogCard card, string playlistId) =>
         CatalogPlaylistActionAsync("play", 0, card.Song!.Id, entry: card, sourcePlaylistId: playlistId);
 
-    private Task PlayCatalogSongAsync(MusicCatalogCard card) =>
-        PlayCatalogSongAsync(card.Platform, card.ActionId,
-            () => ContainsCatalogCard(card), requireCatalogContent: true);
+    private Task PlayCatalogSongAsync(MusicCatalogCard card)
+    {
+        bool fromHome = IsCatalogHome;
+        long navigation = navigationSubmission;
+        return PlayCatalogSongAsync(card.Platform, card.ActionId,
+            () => fromHome ? IsCatalogHome && navigation == navigationSubmission && card.Platform == catalogSourcePlatform :
+                ContainsCatalogCard(card), requireCatalogContent: true);
+    }
 
     private Task PlayCatalogSongAsync(string platform, string id, Func<bool> sourceCurrent,
         bool requireCatalogContent = false) => TrackCatalogAction(async (signal, currentAction) =>
@@ -241,18 +248,29 @@ public sealed partial class MusicCapability
     private void PublishCatalogActionError(Exception error)
     {
         string code = error is MusicOperationException e ? e.Code : error is OperationCanceledException ? "CANCELLED" : "INVALID_RESPONSE";
-        if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "FORBIDDEN" or "STALE_SESSION" or "SESSION_CHANGED" or "INVALID_CREDENTIALS")
+        if (!IsCatalogHome && code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "STALE_SESSION" or "SESSION_CHANGED")
             RetireCatalogSession();
         status = MusicCatalogDto.ErrorText(code); Changed(nameof(Status));
+        if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED")
+        {
+            PublishCatalogAccountNotice(code);
+            RecoverHomeAfterAuthenticationFailure();
+        }
     }
     private Task TrackCatalogAction(Func<CancellationToken, Func<bool>, Task> action, string? loadingStatus = null, MusicCatalogCard? card = null)
     {
         if (stopping) return Task.CompletedTask;
+        catalogAccountNotice = ""; Changed(nameof(Status));
         InvalidateCatalogAction();
         var generation = catalogActionGeneration; var locationGeneration = loadGeneration;
+        bool fromHome = IsCatalogHome;
+        var navigation = navigationSubmission;
+        var actionPlatform = card?.Platform ?? catalogLoadedPlatform;
+        var observation = CatalogAccountObservation(actionPlatform);
         var playGeneration = playbackEpoch;
         var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         catalogActionCancellation = request;
+        catalogActionAuthority = (actionPlatform, observation);
         var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         loadDrains.Add(drained.Task);
         preparingCatalogCard = card;
@@ -261,11 +279,18 @@ public sealed partial class MusicCapability
         CatalogBindings();
         return Execute();
         bool Current() => !stopping && !request.IsCancellationRequested && generation == catalogActionGeneration &&
-            locationGeneration == loadGeneration;
+            observation == CatalogAccountObservation(actionPlatform) &&
+            (fromHome ? IsCatalogHome && navigation == navigationSubmission : locationGeneration == loadGeneration);
         async Task Execute()
         {
             try
             {
+                if (IsPrivateCatalogCard(card))
+                {
+                    await EnsureAccountsForRequestAsync(request.Token);
+                    if (!Current()) return;
+                    RequireCatalogAccount(card);
+                }
                 // Public user-intent hooks cancel immediately; epoch adds a guard
                 // against native playback changes while content is being fetched.
                 await action(request.Token, () => Current() && playGeneration == playbackEpoch);
@@ -280,6 +305,7 @@ public sealed partial class MusicCapability
                 if (ReferenceEquals(catalogActionCancellation, request))
                 {
                     catalogActionCancellation = null;
+                    catalogActionAuthority = null;
                     if (preparingCatalogCard is { } source) source.IsPreparing = false;
                     preparingCatalogCard = null;
                 }

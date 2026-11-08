@@ -1,8 +1,8 @@
 import Foundation
 
-/// A revocable display/cache scope, not an account ID or a credential.
-/// Persist scope with a home snapshot, but obtain a fresh binding before using
-/// it. revision is owner-issued and changes on access/account invalidation.
+/// A revocable live-request/cache scope, not an account ID or a credential.
+/// This binding is never persisted in the last-success display snapshot.
+/// revision is owner-issued and changes on access/account invalidation.
 /// Final synchronous publication/persistence must use authorization.perform.
 /// Scope survives cold restore, protection changes and validation when the
 /// configured identity and persisted credential revision are unchanged. A real
@@ -25,11 +25,11 @@ public struct MusicNativeHomeBinding: Sendable, Equatable {
     }
 }
 
-/// Stored-snapshot display scope, separate from the live request binding.
+/// Local account observation scope, separate from the live request binding.
 /// Acquisition/checking MUST NOT verify an account or contact a provider.
-/// A local unvalidated record may select its previously saved snapshot but
-/// cannot set loggedIn, mint a request binding, or authorize a displayed action.
-/// Guest display also has an owner-issued, revocable scope.
+/// A local unvalidated record cannot set loggedIn, mint a request binding, or
+/// authorize a displayed action. Display snapshots are not scoped by this value.
+/// Guest observation also has an owner-issued, revocable scope.
 public protocol MusicNativeHomeDisplayProviding: MusicNativeHomeProviding {
     func nativeHomeDisplayScope() async throws -> MusicNativeCacheScope
     func checkNativeHomeDisplayScope(_ scope: MusicNativeCacheScope) async throws
@@ -96,8 +96,8 @@ public protocol MusicNativeHomeProviding: Sendable {
     /// Replays an initial invalidation; buffer 1 coalesces changes, not an
     /// audit log. Do not skip the first element: it can already be a real change.
     /// Reacquire current binding on every notification, including after a
-    /// failed/busy reload; only an observed scope change retires a persisted
-    /// snapshot. A delayed notification does not invalidate a newer binding.
+    /// failed/busy reload. A scope change retires requests, not the persisted
+    /// display snapshot. A delayed notification does not invalidate a newer binding.
     /// Cancellation removes that subscription; close finishes all subscriptions.
     /// No global notification center is involved.
     func nativeHomeChanges() async -> AsyncStream<Void>

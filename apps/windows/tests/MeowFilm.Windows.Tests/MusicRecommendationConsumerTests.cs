@@ -100,30 +100,76 @@ public static partial class MusicUiTests
             await f.Module.NavigateAsync("catalog-fm", default);
             f.Http.Hold = true;
             var play = f.Module.PlayCatalogPlaylistAsync();
-            await f.Http.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await RecommendationUntil(() => f.Module.CanCancelRecommendation);
-            var cancel = f.Module.CancelRecommendationAsync();
-            await f.Http.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
-            True(!cancel.IsCompleted && !play.IsCompleted, "real handler still owns the read");
-            f.Http.Release.TrySetResult(); await Task.WhenAll(play, cancel);
-            Equal(0, (await f.Queue()).GetProperty("total").GetInt32()); Equal(0, f.Playback.Opens.Count);
-            True(!f.Runtime.HasStarted && !f.Module.HasActiveRecommendation, "late read not a queue or Node request");
+            var retired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            string? session = null;
+            void Cancelled(JsonElement snapshot)
+            {
+                if (snapshot.GetProperty("id").GetString() == session &&
+                    snapshot.GetProperty("status").GetString() == "cancelled" && !snapshot.GetProperty("active").GetBoolean())
+                    retired.TrySetResult();
+            }
+            Task cancel = Task.CompletedTask;
+            f.App.Changed += Cancelled;
+            try
+            {
+                await f.Http.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await RecommendationUntil(() => f.Module.CanCancelRecommendation);
+                session = (await f.Call("music.recommendations.get")).GetProperty("id").GetString();
+                cancel = f.Module.CancelRecommendationAsync();
+                await retired.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
+                True(!f.Http.Cancelled.Task.IsCompleted, "session retirement does not cancel admitted Catalog HTTP");
+                True(!f.Http.Settled.Task.IsCompleted && !cancel.IsCompleted && !play.IsCompleted,
+                    "retirement notification is not the real handler's physical settlement");
+                f.Http.Release.TrySetResult();
+                await f.Http.Settled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await Task.WhenAll(play, cancel);
+                True(!f.Http.Cancelled.Task.IsCompleted, "the admitted read settles without HTTP cancellation");
+                Equal(0, (await f.Queue()).GetProperty("total").GetInt32()); Equal(0, f.Playback.Opens.Count);
+                True(!f.Runtime.HasStarted && !f.Module.HasActiveRecommendation, "late read not a queue or Node request");
+            }
+            finally
+            {
+                f.App.Changed -= Cancelled;
+                f.Http.Release.TrySetResult();
+                await Task.WhenAll(play, cancel);
+            }
         });
         yield return Case("recommendation module close retires actual batch before waiting command tail and resumes without autoplay", async () =>
         {
             await using var f = await RecommendationScene.Create();
             await f.Module.NavigateAsync("catalog-fm", default);
             f.Http.Hold = true; var play = f.Module.PlayCatalogPlaylistAsync();
-            await f.Http.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            var close = f.Module.PrepareShutdownAsync();
-            await f.Http.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
-            True(!close.IsCompleted, "physical request outstanding");
-            f.Http.Release.TrySetResult(); await Task.WhenAll(play, close);
-            int calls = f.Http.Batches;
-            await f.Module.CancelShutdownPreparationAsync();
-            Equal(calls, f.Http.Batches); Equal(0, f.Playback.Opens.Count);
-            True(!f.Module.HasActiveRecommendation, "closed recommendation is not restored");
-            await f.Call("music.library.create", new { name = "恢复后的本地歌单" });
+            Task close = Task.CompletedTask;
+            try
+            {
+                await f.Http.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                string? session = (await f.Call("music.recommendations.get")).GetProperty("id").GetString();
+                close = f.Module.PrepareShutdownAsync();
+                // Closing seals observer delivery; its public state remains readable.
+                var retired = await f.Call("music.recommendations.get");
+                Equal(session, retired.GetProperty("id").GetString());
+                Equal("closing", retired.GetProperty("status").GetString());
+                True(!retired.GetProperty("active").GetBoolean(), "the exact session is retired before close drains");
+                await Drain();
+                True(!f.Http.Cancelled.Task.IsCompleted, "narrow recommendation preparation leaves admitted Catalog HTTP running");
+                True(!f.Http.Settled.Task.IsCompleted && !close.IsCompleted && !play.IsCompleted,
+                    "closing cannot complete before the physical request settles");
+                f.Http.Release.TrySetResult();
+                await f.Http.Settled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await Task.WhenAll(play, close);
+                True(!f.Http.Cancelled.Task.IsCompleted, "the admitted read settles before global shutdown continues");
+                int calls = f.Http.Batches;
+                await f.Module.CancelShutdownPreparationAsync();
+                Equal(calls, f.Http.Batches); Equal(0, f.Playback.Opens.Count);
+                Equal(0, (await f.Queue()).GetProperty("total").GetInt32());
+                True(!f.Runtime.HasStarted && !f.Module.HasActiveRecommendation, "closed recommendation is not restored");
+                await f.Call("music.library.create", new { name = "恢复后的本地歌单" });
+            }
+            finally
+            {
+                f.Http.Release.TrySetResult();
+                await Task.WhenAll(play, close);
+            }
         });
         yield return Case("recommendation external native queue replacement fences delayed batch without replay", async () =>
         {
@@ -328,24 +374,31 @@ public static partial class MusicUiTests
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Cancelled = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource Settled = new(TaskCreationOptions.RunContinuationsAsynchronously);
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             var uri = request.RequestUri!;
             True(uri.Scheme == "https" && uri.Host is "music.163.com" or "interfacepc.music.163.com", "fixed native platform");
-            object response;
-            if (uri.AbsolutePath.EndsWith("/w/nuser/account/get", StringComparison.Ordinal))
-                response = new { code = 200, account = new { id = "900" }, profile = new { userId = "900", nickname = "合成账号" } };
-            else
+            bool held = false;
+            try
             {
-                True(uri.AbsolutePath.EndsWith("/v1/radio/get", StringComparison.Ordinal), "exact recommendation API");
-                int batch = Interlocked.Increment(ref Batches);
-                using var registration = token.Register(() => Cancelled.TrySetResult());
-                if (Hold) { Entered.TrySetResult(); await Release.Task; }
-                response = new { code = 200, data = Enumerable.Range(batch * 1000 + 1, 3).Select(id => new {
-                    id, name = "推荐歌曲" + id, ar = new[] { new { id = 1, name = "合成歌手" } },
-                    al = new { id = 2, name = "合成专辑", picUrl = "" }, dt = 180000, fee = 0, alg = "native-recommendation-alg" }) };
+                object response;
+                if (uri.AbsolutePath.EndsWith("/w/nuser/account/get", StringComparison.Ordinal))
+                    response = new { code = 200, account = new { id = "900" }, profile = new { userId = "900", nickname = "合成账号" } };
+                else
+                {
+                    True(uri.AbsolutePath.EndsWith("/v1/radio/get", StringComparison.Ordinal), "exact recommendation API");
+                    int batch = Interlocked.Increment(ref Batches);
+                    using var registration = token.Register(() => Cancelled.TrySetResult());
+                    held = Hold;
+                    if (held) { Entered.TrySetResult(); await Release.Task; }
+                    response = new { code = 200, data = Enumerable.Range(batch * 1000 + 1, 3).Select(id => new {
+                        id, name = "推荐歌曲" + id, ar = new[] { new { id = 1, name = "合成歌手" } },
+                        al = new { id = 2, name = "合成专辑", picUrl = "" }, dt = 180000, fee = 0, alg = "native-recommendation-alg" }) };
+                }
+                return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(response), Encoding.UTF8, "application/json") };
             }
-            return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(response), Encoding.UTF8, "application/json") };
+            finally { if (held) Settled.TrySetResult(); }
         }
     }
     private sealed class RecommendationReports : IMusicFeedbackProtocol

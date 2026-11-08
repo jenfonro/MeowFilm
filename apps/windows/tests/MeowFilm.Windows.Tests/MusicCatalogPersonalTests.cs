@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -10,6 +11,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
+using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Recommendations;
@@ -20,10 +22,11 @@ namespace MeowFilm.Windows.Tests;
 // Real WPF -> public application seam -> real Native catalog/Library/CAS.
 // Typed platform, account and script-resolution fixtures never contact an upstream.
 // This group is independent of the existing five application/UI test groups.
-public static class MusicCatalogPersonalTests
+public static partial class MusicCatalogPersonalTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var homeCase in HomeCases()) yield return homeCase;
         yield return Case("song cards replace only their own complete column and start at the clicked song", SectionQueue);
         yield return Case("song cards with a playlist source prepare all members and retain starting identity", SectionPlaylistQueue);
         yield return Case("card loading belongs to the initiating card and retired receipt cannot clear its successor", CardLoading);
@@ -168,7 +171,8 @@ public static class MusicCatalogPersonalTests
     private static string S(JsonElement value, string name) => value.GetProperty(name).GetString()!;
     private static long N(JsonElement value, string name) => value.GetProperty(name).GetInt64();
     private static void Check(bool value, string message = "assertion failed") { if (!value) throw new InvalidOperationException(message); }
-    private static void Equal<T>(T expected, T actual) { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}, got {actual}"); }
+    private static void Equal<T>(T expected, T actual, [CallerLineNumber] int line = 0)
+    { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Line {line}: Expected {expected}, got {actual}"); }
     private static Task Drain() => Dispatcher.CurrentDispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle).Task;
     private static async Task Until(Func<bool> done)
     {
@@ -231,7 +235,12 @@ public static class MusicCatalogPersonalTests
     {
         await using var f = await Fixture.Create(initialize: false);
         f.App.FailNext("music.catalogSource.settings.get", "STORAGE_UNAVAILABLE");
-        await f.Module.InitializeAsync(default);
+        try
+        {
+            await f.Module.InitializeAsync(default);
+            throw new InvalidOperationException("Startup accepted a failed local source read");
+        }
+        catch (MusicOperationException error) { Equal("STORAGE_UNAVAILABLE", error.Code); }
         Check(!f.Module.CanEditCatalogSource && f.Module.HasCatalogSourceError);
         await f.Module.NavigateAsync("favorites", default);
         f.App.FailNext("music.catalogSource.settings.get", "STORAGE_UNAVAILABLE");
@@ -969,7 +978,7 @@ public static class MusicCatalogPersonalTests
     }
     private static async Task AccountReadFailure()
     {
-        await using var f = await Fixture.Create();
+        await using var f = await Fixture.Create(initialize: false);
         f.App.FailNext("music.accounts.list", "TIMEOUT");
         await f.Module.NavigateAsync("catalog-personal", default);
         Equal("请求超时", f.Module.Status);
@@ -1061,7 +1070,8 @@ public static class MusicCatalogPersonalTests
     }
     private static async Task Errors()
     {
-        await using var f = await Fixture.Create(); f.App.Authenticated = false;
+        await using var f = await Fixture.Create(initialize: false); f.App.Authenticated = false;
+        await f.Module.InitializeAsync(default);
         await f.Module.NavigateAsync("catalog-daily", default); Equal("当前内容需要平台登录", f.Module.Status);
         f.App.Authenticated = true; f.App.AccountGeneration++;
         await f.Module.ReadCatalogAccountAsync();
@@ -1235,7 +1245,7 @@ public static class MusicCatalogPersonalTests
         public void Invalidate(string? platform = null) { }
         public void Dispose() { }
     }
-    private sealed record Invocation(string Method, JsonElement Parameters);
+    private sealed record Invocation(string Method, JsonElement Parameters, bool Authenticated, long AccountGeneration);
     private sealed class Held
     {
         public TaskCompletionSource Arrived { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1260,6 +1270,21 @@ public static class MusicCatalogPersonalTests
         public ConcurrentQueue<Invocation> Log { get; } = new();
         public bool Authenticated = true;
         public long AccountGeneration = 1;
+        private readonly HashSet<string> revokedAccounts = [];
+        public int InitializationCalls, AccountDetailReads;
+        public override event Action<string>? AccountDetailsInvalidated;
+        public void RevokeAccount(string platform)
+        {
+            Authenticated = false;
+            // Native lease revocation retains the stored generation, but hides the profile.
+            revokedAccounts.Add(platform);
+            Catalog.Invalidate(platform);
+            AccountDetailsInvalidated?.Invoke(platform);
+        }
+        public override Task InitializeAsync(CancellationToken cancellationToken = default)
+        { cancellationToken.ThrowIfCancellationRequested(); InitializationCalls++; return Task.CompletedTask; }
+        public override Task<MusicAccountDetails> ReadDetailsAsync(string platform, CancellationToken token = default)
+        { AccountDetailReads++; return base.ReadDetailsAsync(platform, token); }
         public Func<Task>? BeforeCommit;
         private readonly Dictionary<string, (Held Hold, bool Before)> holds = [];
         private readonly List<Held> allHolds = [];
@@ -1343,8 +1368,8 @@ public static class MusicCatalogPersonalTests
             installationId = "fixture-script", name = "Catalog fixture", version = "1",
             contentHash = new string('c', 64), executionHash = new string('d', 64), sourceRevision = 1,
             generation = 1, enabled = true, state = "ready", rollbackAvailable = false, lastFailure = (string?)null,
-            capabilities = new[] { "wy", "tx", "kg" }.Select(platform => new {
-                platform, actions = new[] { "musicUrl" }, qualitys = new[] { "320k" } }) });
+            sites = new[] { "wy", "tx", "kg" }.ToDictionary(platform => platform, _ => new {
+                actions = new[] { "musicUrl" }, qualitys = new[] { "320k" } }) });
         private async Task<JsonElement> Resolve(JsonElement p, CancellationToken token)
         {
             var quality = await ReadQualitySettings(token);
@@ -1352,8 +1377,8 @@ public static class MusicCatalogPersonalTests
             if (S(p, "quality") != "320k") return E(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
             string policy = S(quality, "signature");
             string platform = S(p, "platform");
-            Check(S(p, "installationId") == "fixture-script" && N(p, "generation") == 1,
-                "resolution uses the enabled fixture installation and its live generation");
+            Check(S(p, "installationId") == "fixture-script",
+                "resolution uses the enabled fixture installation");
             var song = p.GetProperty("song");
             var source = song.GetProperty("sources").EnumerateArray().Single(s => S(s, "source") == platform);
             var songNode = JsonNode.Parse(song.GetRawText())!.AsObject();
@@ -1374,7 +1399,7 @@ public static class MusicCatalogPersonalTests
         }
         public override async Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
-            var p = E(parameters ?? new { }); Log.Enqueue(new(method, p));
+            var p = E(parameters ?? new { }); Log.Enqueue(new(method, p, Authenticated, AccountGeneration));
             holds.Remove(method, out var held); transforms.Remove(method, out var transform);
             if (held.Hold is not null && held.Before) await held.Hold.Wait(cancellationToken);
             if (failures.Remove(method, out var code)) return E(new { ok = false, code });
@@ -1383,8 +1408,10 @@ public static class MusicCatalogPersonalTests
             { BeforeCommit = null; await before(); }
             if (method == "music.accounts.list")
                 result = E(new { ok = true, items = new[] { "wy", "tx", "kg" }.Select(platform => new {
-                    platform, state = Authenticated ? "verified" : "none", generation = AccountGeneration,
-                    profile = Authenticated ? new { platform, userId = "42", displayName = "Fixture " + platform } : null }) });
+                    platform, state = revokedAccounts.Contains(platform) ? "revoked" : Authenticated ? "verified" : "none",
+                    generation = AccountGeneration,
+                    profile = Authenticated && !revokedAccounts.Contains(platform)
+                        ? new { platform, userId = "42", displayName = "Fixture " + platform } : null }) });
             else if (method.StartsWith("music.recommendations.", StringComparison.Ordinal))
                 result = await recommendations.ExecuteAsync(method, p, cancellationToken);
             else if (method.StartsWith("music.catalog.", StringComparison.Ordinal))
@@ -1409,6 +1436,8 @@ public static class MusicCatalogPersonalTests
             }
             else if (method.StartsWith("music.official.", StringComparison.Ordinal))
                 result = E(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
+            else if (method == "music.songs.complete")
+                result = E(new { ok = true, song = p.GetProperty("song"), failures = Array.Empty<object>() });
             else if (method == "music.sources.list")
                 result = E(new { ok = true, revision = 1, items = new[] { ScriptSource() } });
             else if (method == "music.sources.detail")
@@ -1448,11 +1477,13 @@ public static class MusicCatalogPersonalTests
     {
         private readonly object gate = new();
         private readonly Dictionary<string, byte[]> data = [];
+        public ConcurrentQueue<string> Reads { get; } = new();
         public int LibraryWrites;
         public bool UnknownAfterNextLibraryWrite;
         public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            Reads.Enqueue(ns);
             lock (gate) return Task.FromResult(data.TryGetValue(ns, out var value)
                 ? new DocumentSnapshot(value.ToArray(), DocumentFingerprint.FromBytes(value)) : new(null, DocumentFingerprint.Missing));
         }

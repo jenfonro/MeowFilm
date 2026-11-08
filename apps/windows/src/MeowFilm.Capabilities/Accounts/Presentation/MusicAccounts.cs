@@ -17,7 +17,7 @@ public sealed record MusicPlatformAccount(string Platform, string Name, string S
 
 public sealed partial class MusicCapability
 {
-    private readonly record struct AccountReadResult(long Epoch, string? ErrorCode);
+    private readonly record struct AccountReadResult(long Epoch, long Observation, string? ErrorCode);
 
     // Selection identity is independent from hydrated account snapshots. Replacing
     // a snapshot must not make WPF clear the selected platform mid-publication.
@@ -43,7 +43,10 @@ public sealed partial class MusicCapability
     private long accountEpoch;
     private string accountStatus = "";
     private bool accountSaveUncertain;
-    private Task<AccountReadResult> accountRead = Task.FromResult(new AccountReadResult(-1, null));
+    private long accountObservation;
+    private long loadedAccountObservation = -1;
+    private CancellationTokenSource? accountReadCancellation;
+    private Task<AccountReadResult> accountRead = Task.FromResult(new AccountReadResult(-1, -1, null));
     private bool accountsLoaded;
     public MusicPlatformAccount? SelectedAccount
     {
@@ -127,11 +130,17 @@ public sealed partial class MusicCapability
     {
         _ = await StartAccountRead(force: false);
     }
-    private async Task EnsureAccountsForRequestAsync()
+    private async Task EnsureAccountsForRequestAsync(CancellationToken token = default)
     {
-        var result = await StartAccountRead(force: false);
-        if (result.Epoch == accountEpoch && result.ErrorCode is { } code)
-            throw new MusicOperationException(code);
+        while (true)
+        {
+            token.ThrowIfCancellationRequested();
+            var result = await StartAccountRead(force: false).WaitAsync(token);
+            if (stopping) throw new OperationCanceledException(token);
+            if (result.Epoch != accountEpoch || result.Observation != Volatile.Read(ref accountObservation)) continue;
+            if (result.ErrorCode is { } code) throw new MusicOperationException(code);
+            return;
+        }
     }
     public async Task ReadAccountsAsync()
     {
@@ -140,28 +149,38 @@ public sealed partial class MusicCapability
     private Task<AccountReadResult> StartAccountRead(bool force, bool allowStopping = false)
     {
         if (!accountRead.IsCompleted) return accountRead;
-        if (!force && accountsLoaded) return Task.FromResult(new AccountReadResult(accountEpoch, null));
-        if (stopping && !allowStopping) return Task.FromResult(new AccountReadResult(accountEpoch, "CANCELLED"));
+        if (!force && accountsLoaded && loadedAccountObservation == Volatile.Read(ref accountObservation))
+            return Task.FromResult(new AccountReadResult(accountEpoch, loadedAccountObservation, null));
+        if (stopping && !allowStopping) return Task.FromResult(new AccountReadResult(accountEpoch, Volatile.Read(ref accountObservation), "CANCELLED"));
+        var priorCommands = commandTail;
         return accountRead = Observe();
 
         async Task<AccountReadResult> Observe()
         {
             await Task.Yield(); // Publish accountRead before callbacks can request another read.
+            if (!allowStopping) await priorCommands;
+            if (stopping && !allowStopping)
+                return new(accountEpoch, Volatile.Read(ref accountObservation), "CANCELLED");
+            using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+            accountReadCancellation = request;
             long epoch = -1;
+            long observation = -1;
             string? errorCode = "CANCELLED";
             async Task Read()
             {
                 epoch = accountEpoch;
+                observation = Volatile.Read(ref accountObservation);
                 try
                 {
-                    var reply = await Call("music.accounts.list", cancellationToken: lifetime.Token);
+                    var reply = await Call("music.accounts.list", cancellationToken: request.Token);
                     var items = reply.GetProperty("items");
                     MusicDto.Require(items.ValueKind == JsonValueKind.Array && items.GetArrayLength() == 3);
                     var rows = items.EnumerateArray().Select(AccountRow).ToArray();
                     MusicDto.Require(rows.Select(item => item.Platform).Distinct().Count() == 3);
-                    if (epoch != accountEpoch || stopping && !allowStopping) return;
+                    if (epoch != accountEpoch || observation != Volatile.Read(ref accountObservation) || stopping && !allowStopping) return;
                     foreach (var row in rows) UpdateAccount(row);
                     accountsLoaded = true;
+                    loadedAccountObservation = observation;
                     accountSaveUncertain = false;
                     accountStatus = "";
                     errorCode = null;
@@ -176,16 +195,19 @@ public sealed partial class MusicCapability
                         OperationCanceledException => "CANCELLED",
                         _ => "INVALID_RESPONSE"
                     };
-                    if ((!stopping || allowStopping) && epoch == accountEpoch)
+                    if ((!stopping || allowStopping) && epoch == accountEpoch &&
+                        observation == Volatile.Read(ref accountObservation))
                     {
                         accountStatus = AccountError(error);
                         AccountBindings();
                     }
                 }
             }
-            if (allowStopping) await Read();
-            else await RunAsync(Read, publishStatus: false);
-            return new(epoch, errorCode);
+            // Wait for prior mutations, but do not occupy the foreground command
+            // lane. A later mutation fences this read with accountEpoch.
+            try { await Read(); }
+            finally { if (ReferenceEquals(accountReadCancellation, request)) accountReadCancellation = null; }
+            return new(epoch, observation, errorCode);
         }
     }
     public Task ImportAccountAsync(string cookie)
@@ -215,6 +237,7 @@ public sealed partial class MusicCapability
     private async Task ChangeAccountAsync(string platform, string operation, object parameters,
         MusicPlatformAccount? expectedAccount = null, CancellationToken token = default)
     {
+        bool changedAccount = false;
         var epoch = ++accountEpoch;
         accountCancellation?.Cancel();
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, token);
@@ -253,11 +276,12 @@ public sealed partial class MusicCapability
                 var row = AccountRow(reply.GetProperty("account"));
                 MusicDto.Require(row.Platform == platform);
                 UpdateAccount(row);
+                accountsLoaded = false;
+                changedAccount = true;
                 if (operation == "sms.login") ClearAccountSms();
                 accountSaveUncertain = false;
                 accountStatus = operation == "logout" ? "已退出" : "会话验证成功";
-                // Retire account-scoped visual data immediately. Old private
-                // recommendations must not remain after changing credentials.
+                // Retire request authority, not the last successful home display.
                 RetireCatalogSession();
                 RetireLyrics();
             }
@@ -285,6 +309,7 @@ public sealed partial class MusicCapability
                 accountSmsOperation = false; accountSmsSending = false;
             }
             AccountBindings();
+            if (changedAccount) BeginHomeAccountRecovery(forceRead: true);
         }
     }
     public Task CancelAccountAsync()
@@ -316,7 +341,8 @@ public sealed partial class MusicCapability
                 {
                     result = await StartAccountRead(force: true, allowStopping: true);
                 }
-                while (epoch == accountEpoch && result.Epoch != epoch);
+                while (epoch == accountEpoch && (result.Epoch != epoch ||
+                    result.Observation != Volatile.Read(ref accountObservation)));
                 if (epoch != accountEpoch) return;
                 if (result.ErrorCode is { } code) throw new MusicOperationException(code);
                 accountStatus = accountSaveUncertain ? "取消结果待核对，请读取账号状态" :

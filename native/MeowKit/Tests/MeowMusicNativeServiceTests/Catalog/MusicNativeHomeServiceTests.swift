@@ -6,7 +6,9 @@ import MeowStorage
 private final class HomeSnapshotFixture: MusicHomeSnapshotStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var data: Data?
-    func read() -> Data? { lock.lock(); defer { lock.unlock() }; return data }
+    private var reads = 0
+    func read() -> Data? { lock.lock(); defer { lock.unlock() }; reads += 1; return data }
+    func readCount() -> Int { lock.lock(); defer { lock.unlock() }; return reads }
     func write(_ value: Data) { lock.lock(); data = value; lock.unlock() }
     func clear() { lock.lock(); data = nil; lock.unlock() }
 }
@@ -169,6 +171,8 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let after = await account.calls.count; XCTAssertEqual(before, after)
         let encoded = try XCTUnwrap(store.read()), text = String(decoding: encoded, as: UTF8.self)
         XCTAssertFalse(text.contains("cursor")); XCTAssertFalse(text.contains("\"ref\"")); XCTAssertFalse(text.contains("authorization"))
+        XCTAssertFalse(text.contains("\"scope\"")); XCTAssertFalse(text.contains("\"revision\""))
+        XCTAssertFalse(text.contains("synthetic-account"))
         let snapshot = try await value.restoredHome()
         let restored = try XCTUnwrap(snapshot)
         XCTAssertNil(restored.cursor)
@@ -181,15 +185,53 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         _ = try await value.homePage(cursor: nil, refresh: true)
         let refreshed = await account.calls.count; XCTAssertEqual(refreshed, before * 2)
     }
-    func testAccountChangeRejectsOldContinuationAndMismatchedSnapshot() async throws {
+    func testAccountChangeKeepsDisplaySnapshotButRejectsOldContinuation() async throws {
         let account = HomeAccountFixture(), store = HomeSnapshotFixture()
         let value = try await service(account, store: store)
         let first = try await value.homePage(cursor: nil, refresh: true)
         let cursor = try XCTUnwrap(first.cursor)
+        let saved = store.read()
         await account.changeAccount()
-        let restored = try await value.restoredHome(); XCTAssertNil(restored)
+        let restored = try await value.restoredHome()
+        XCTAssertEqual(restored?.sections.map(\.id), first.sections.map(\.id))
+        XCTAssertNil(restored?.cursor); XCTAssertEqual(store.read(), saved)
         do { _ = try await value.homePage(cursor: cursor, refresh: false); XCTFail("old account cursor accepted") }
         catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+        let restarted = try await service(account, store: store)
+        let crossAccount = try await restarted.restoredHome()
+        XCTAssertEqual(crossAccount?.sections.map(\.id), first.sections.map(\.id))
+        await value.close(); await restarted.close()
+    }
+    func testSnapshotPreloadIsReusedWithoutReadingOrValidatingAccounts() async throws {
+        let account = HomeAccountFixture(), store = HomeSnapshotFixture()
+        let previous = try await service(account, store: store)
+        _ = try await previous.homePage(cursor: nil, refresh: true)
+        await previous.close()
+        let restarted = try await service(account, store: store)
+        let before = store.readCount(), bindingCalls = await account.bindingCalls
+        let preload = try await restarted.restoredHome()
+        XCTAssertNotNil(preload); XCTAssertEqual(store.readCount(), before + 1)
+        await account.changeAccount(); await account.failBinding(.storageFailed)
+        store.clear()
+        let reused = try await restarted.restoredHome()
+        XCTAssertEqual(reused?.sections.map(\.id), preload?.sections.map(\.id))
+        XCTAssertEqual(store.readCount(), before + 1)
+        let after = await account.bindingCalls; XCTAssertEqual(after, bindingCalls)
+        let cache = await restarted.homeCache; XCTAssertNil(cache, "Display data is never a request cache")
+        await restarted.close()
+    }
+    func testSourceRoundTripKeepsOneSnapshotButNeverDisplaysAnotherSource() async throws {
+        let account = HomeAccountFixture(), store = HomeSnapshotFixture()
+        let value = try await service(account, store: store)
+        let first = try await value.homePage(cursor: nil, refresh: true), saved = store.read()
+        _ = try await value.selectHomeSource(.kugou, ifRevision: 0)
+        let foreign = try await value.restoredHome()
+        XCTAssertNil(foreign); XCTAssertEqual(store.read(), saved)
+        _ = try await value.selectHomeSource(.netease, ifRevision: 1)
+        let restored = try await value.restoredHome()
+        XCTAssertEqual(restored?.sections.map(\.id), first.sections.map(\.id))
+        XCTAssertEqual(store.read(), saved)
+        await value.close()
     }
     func testColdOfflineSnapshotAndObservationNeverAcquireLiveAccountBinding() async throws {
         let account = HomeAccountFixture(), store = HomeSnapshotFixture()
@@ -226,12 +268,32 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let action = MusicHomeAction.similar(sourceIDs: ["1", "2"], sourceName: "艺人")
         let page = MusicNativePublicBrowseDiscovery(sections: [.init(id: "entries", title: "",
             items: [.init(id: "similar", title: "相似漫游", content: .action(action))], layout: .featureRail)])
-        let data = try MusicNativeHomeSnapshot.encode(page, source: .netease, scope: "synthetic")
-        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease, scope: "synthetic"))
+        let data = try MusicNativeHomeSnapshot.encode(page, source: .netease)
+        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease))
         if case .action(let value) = restored.sections[0].items[0].content { XCTAssertEqual(value, action) }
         else { XCTFail("action was downgraded") }
         var raw = try MJ.parse(data); raw["url"] = .string("https://invalid.example/executable")
-        XCTAssertThrowsError(try MusicNativeHomeSnapshot.decode(raw.bytes, source: .netease, scope: "synthetic"))
+        XCTAssertThrowsError(try MusicNativeHomeSnapshot.decode(raw.bytes, source: .netease))
+    }
+    func testSnapshotHasOnlyDisplaySchemaAndUsesDocumentByteBoundary() throws {
+        let title = String(repeating: "a", count: 1000)
+        let items = (1...650).map { id in
+            MusicNativePublicBrowseItem(id: "playlist-\(id)", title: title,
+                content: .collection(.init(platform: .netease, nativeID: String(id), title: title)))
+        }
+        let page = MusicNativePublicBrowseDiscovery(sections: [.init(id: "large", title: "", items: items)])
+        let encoded = try MusicNativeHomeSnapshot.encode(page, source: .netease)
+        XCTAssertGreaterThan(encoded.count, 400_000)
+        XCTAssertLessThan(encoded.count, MusicNativeHomeSnapshot.maximumBytes)
+        let decoded = try XCTUnwrap(MusicNativeHomeSnapshot.decode(encoded, source: .netease))
+        XCTAssertEqual(decoded.sections.first?.items.count, 650)
+        let root = try MJ.parse(encoded)
+        XCTAssertEqual(Set(root.fields.map(\.0)), ["schema", "source", "sections"])
+        XCTAssertEqual(root["schema"], .n(3))
+        let document = MusicNativeHomeSnapshotDocument { throw MusicServiceError.unavailable }
+        XCTAssertThrowsError(try document.write(Data(count: MusicNativeHomeSnapshot.maximumBytes + 1))) {
+            XCTAssertEqual($0 as? MusicServiceError, .limit)
+        }
     }
     func testImageQueriesSurviveNormalizationLibraryCleaningAndHomeSnapshotRestore() throws {
         let image = "http://p1.music.126.net/cover.jpg?param=800y800&quality=90&extra=a%2Fb"
@@ -251,8 +313,8 @@ final class MusicNativeHomeServiceTests: XCTestCase {
             .init(id: "playlist", title: "歌单", artwork: collection.artwork, content: .collection(collection))
         ]
         let page = MusicNativePublicBrowseDiscovery(sections: [.init(id: "s", title: "", items: items)])
-        let encoded = try MusicNativeHomeSnapshot.encode(page, source: .netease, scope: "synthetic")
-        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(encoded, source: .netease, scope: "synthetic"))
+        let encoded = try MusicNativeHomeSnapshot.encode(page, source: .netease)
+        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(encoded, source: .netease))
         XCTAssertEqual(restored.sections[0].items.compactMap { $0.artwork?.absoluteString }, [expected, expected])
         guard case .song(let restoredTrack) = restored.sections[0].items[0].content,
               case .collection(let restoredCollection) = restored.sections[0].items[1].content else {
@@ -288,11 +350,11 @@ final class MusicNativeHomeServiceTests: XCTestCase {
             .init(id: "playlist", title: "歌单", artwork: image, content: .collection(collection)),
             .init(id: "private", title: "歌单", artwork: secret, content: .collection(collection))
         ])])
-        try document.write(MusicNativeHomeSnapshot.encode(page, source: .netease, scope: "synthetic"))
+        try document.write(MusicNativeHomeSnapshot.encode(page, source: .netease))
         let reopened = MusicNativeHomeSnapshotDocument(storeFactory: factory)
         let data = try XCTUnwrap(reopened.read())
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("synthetic-private"))
-        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease, scope: "synthetic"))
+        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease))
         let expected = "https://independent-cdn.invalid/cover.jpg?param=800y800&extra=a%2Fb"
         XCTAssertEqual(restored.sections[0].items[0].artwork?.absoluteString, expected)
         XCTAssertNil(restored.sections[0].items[1].artwork)
@@ -392,12 +454,12 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let after = await account.calls
         XCTAssertEqual(before, after); XCTAssertEqual(store.read(), saved)
         let data = try XCTUnwrap(saved)
-        XCTAssertNil(try MusicNativeHomeSnapshot.decode(data, source: .qq, scope: "synthetic-account-a"))
+        XCTAssertNil(try MusicNativeHomeSnapshot.decode(data, source: .qq))
         var root = try MJ.parse(data)
         var sections = root["sections"].array
         sections[1]["channel"]["platform"] = .string("tx")
         root["sections"] = .array(sections)
-        XCTAssertThrowsError(try MusicNativeHomeSnapshot.decode(root.bytes, source: .netease, scope: "synthetic-account-a"))
+        XCTAssertThrowsError(try MusicNativeHomeSnapshot.decode(root.bytes, source: .netease))
         await value.close()
     }
 
@@ -411,6 +473,23 @@ final class MusicNativeHomeServiceTests: XCTestCase {
             } catch { XCTAssertEqual(error as? MusicServiceError, .unsupported) }
         }
         let calls = await http.calls(); XCTAssertTrue(calls.isEmpty)
+        await value.close()
+    }
+
+    func testVIPRejectsNonNilCursorEvenWhenItEncodesAnEmptyFirstPosition() async throws {
+        let account = HomeAccountFixture(), http = NativeMusicHTTPFixture([])
+        let value = try await service(account, http: http)
+        _ = try await value.homeSourceSelection()
+        let binding = try await value.currentHomeBinding()
+        let destination = MusicPublicBrowseDestination.channel(.init(id: "vip", title: "VIP", kind: .vip), tag: "")
+        let revision = await value.homeSourceRevision, epoch = await value.epoch
+        let key = MusicPublicBrowsePlatform.netease.rawValue + ":" + MusicNativePublicBrowseDiscovery.key(destination) +
+            ":" + revision.uuidString + ":" + binding.revision.uuidString
+        let position = try MusicNativePublicBrowseCursor.read(nil, key: key, epoch: epoch, now: NativeMusicFixture.date)
+        let cursor = try position.encode(key: key, epoch: epoch, offset: 0)
+        await assertMusicFailure(.invalidRequest) { _ = try await value.publicDiscovery(destination, cursor: cursor) }
+        let payloads = await account.calls, requests = await http.calls()
+        XCTAssertTrue(payloads.isEmpty); XCTAssertTrue(requests.isEmpty)
         await value.close()
     }
 

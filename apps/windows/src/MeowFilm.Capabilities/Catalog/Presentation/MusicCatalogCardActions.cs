@@ -72,6 +72,11 @@ public sealed partial class MusicCapability
                 await catalogPreviewSlots.WaitAsync(token); entered = true;
                 using var request = CancellationTokenSource.CreateLinkedTokenSource(token);
                 request.CancelAfter(TimeSpan.FromSeconds(8));
+                if (IsPrivateCatalogCard(card))
+                {
+                    await EnsureAccountsForRequestAsync(request.Token);
+                    RequireCatalogAccount(card);
+                }
                 RequireCatalogContent();
                 string method = "music.catalog." + card.Kind;
                 var reply = ValidateReply(method, await application.ExecuteAsync(method, parameters, request.Token));
@@ -88,7 +93,8 @@ public sealed partial class MusicCapability
     }
     public Task PlayCatalogCardAsync(MusicCatalogCard card)
     {
-        if (!IsCatalogPage || loadCancellation is not null || !CanCatalogBrowse || !card.CanPlay || !ContainsCatalogCard(card)) return Task.CompletedTask;
+        if (!IsCatalogPage || !IsCatalogHome && loadCancellation is not null ||
+            !CanCatalogBrowse || !card.CanPlay || !ContainsCatalogCard(card)) return Task.CompletedTask;
         if (card.Kind == "playlist") return CatalogPlaylistActionAsync("play", 0, entry: card);
         if (card.Kind is not ("daily" or "album")) return OpenCatalogCardAsync(card);
         return TrackCatalogAction(async (signal, currentAction) =>

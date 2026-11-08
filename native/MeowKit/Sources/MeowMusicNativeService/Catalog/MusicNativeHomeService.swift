@@ -1,6 +1,30 @@
 import Foundation
 import MeowMusicFeature
 
+struct MusicNativeHomeLoad {
+    let id: UUID
+    let source: MusicPublicBrowsePlatform
+    let sourceRevision: UUID
+    let binding: MusicNativeHomeBinding
+    var nextCursor: String?
+    var sections: [MusicNativePublicBrowseSection] = []
+}
+
+struct MusicNativeHomeReadResult: Sendable {
+    let id: UUID
+    let result: Result<MusicPublicBrowsePage, MusicServiceError>
+}
+
+struct MusicNativeHomeFirstRead {
+    let load: MusicNativeHomeLoad
+    let task: Task<MusicNativeHomeReadResult, Never>
+    var completed = false
+    var delivered = false
+    var notificationHandled = false
+    /// One notification may transfer a result to a replacement page waiter.
+    var handoff = false
+}
+
 extension NativeMusicService: MusicHomeBrowsing {
     /// Implemented home/channel catalogue providers, in settings order.
     static let homeSources: [MusicPublicBrowsePlatform] = [.netease, .kugou]
@@ -46,13 +70,14 @@ extension NativeMusicService: MusicHomeBrowsing {
         homeSource = value
         if let previous, previous.platform != value.platform || previous.revision != value.revision { retireHomeSource() }
     }
-    /// Retires the previous source's pages, cursors, snapshot and in-flight
-    /// home reads. Never call inside access/authorization perform.
+    /// Retires request caches and cursors. The single display snapshot retains
+    /// its own source identity. Never call inside access/authorization perform.
     private func retireHomeSource() {
         homeSourceRevision = UUID()
-        homeCache = nil; lastHomeScope = nil
+        homeCache = nil; homeLoad = nil
+        homeFirstRead?.task.cancel(); homeFirstRead = nil
+        lastHomeRefreshObservation = nil
         cancelWork("musicHome")
-        try? access.perform { try homeSnapshot?.clear() }
         for observer in homeObservers.values { observer.yield(()) }
     }
     func currentHomeSource() throws -> MusicPublicBrowsePlatform {
@@ -88,38 +113,16 @@ extension NativeMusicService: MusicHomeBrowsing {
             // those may verify/refresh credentials or wait on provider HTTP.
             value = try await owner.nativeHomeDisplayScope()
         } else if source == .netease, accounts is any MusicNativeHomeProviding {
-            // Owners without display-scope support cannot serve this cached view.
-            // A disk-cache miss is preferable to silently doing network work.
+            // Account observation cannot fall back to live binding acquisition.
             throw MusicServiceError.unsupported
         } else {
             let guest = anonymousHomeBinding(source)
             value = .init(scope: guest.scope, revision: guest.revision, authorization: guest.authorization)
         }
         try check(own)
-        guard source == .netease else { return value }
-        return try value.authorization.perform {
-            try access.perform {
-                if let previous = lastHomeScope, previous != value.scope {
-                    if homeCache?.source == .netease { homeCache = nil }
-                    if homeSource?.platform != .kugou { try? homeSnapshot?.clear() }
-                }
-                lastHomeScope = value.scope
-                return value
-            }
-        }
-    }
-    private func checkHomeDisplayScope(_ value: MusicNativeCacheScope, source: MusicPublicBrowsePlatform,
-                                       epoch own: UUID) async throws {
-        try check(own); try value.authorization.check()
-        if source == .netease, let owner = accounts as? any MusicNativeHomeDisplayProviding {
-            try await owner.checkNativeHomeDisplayScope(value)
-        } else {
-            guard let guest = anonymousHomeBindings[source], guest.scope == value.scope,
-                  guest.revision == value.revision, guest.authorization === value.authorization else {
-                throw MusicServiceError.staleResult
-            }
-        }
-        try check(own); try value.authorization.check()
+        try value.authorization.check()
+        if source == .netease { lastHomeScope = value.scope }
+        return value
     }
     func currentHomeBinding(source: MusicPublicBrowsePlatform = .netease) async throws -> MusicNativeHomeBinding {
         try check(); try requireHomeSource(source)
@@ -129,13 +132,7 @@ extension NativeMusicService: MusicHomeBrowsing {
             binding = try await work(label: "musicHome") { try await owner.nativeHomeBinding() }
         } else { binding = anonymousHomeBinding(source) }
         try check(own); try binding.authorization.check()
-        if source == .netease {
-            if let previous = lastHomeScope, previous != binding.scope {
-                if homeCache?.source == .netease { homeCache = nil }
-                if homeSource?.platform != .kugou { try? access.perform { try homeSnapshot?.clear() } }
-            }
-            lastHomeScope = binding.scope
-        }
+        if source == .netease { lastHomeScope = binding.scope }
         return binding
     }
     func checkHomeBinding(_ binding: MusicNativeHomeBinding, epoch own: UUID) async throws {
@@ -154,8 +151,7 @@ extension NativeMusicService: MusicHomeBrowsing {
         let task: Task<Void, Never>?
         if let owner = accounts as? any MusicNativeHomeProviding {
             let previousScope = lastHomeScope
-            let previousRevision = homeCache?.source == .netease && homeCache?.expires == .distantPast
-                ? homeCache?.revision : nil
+            let previousObservation = lastHomeObservation
             let hasDisplayScope = accounts is any MusicNativeHomeDisplayProviding
             // Sample before subscribing; the owner's replay closes this gap.
             // The same subscription also receives explicit source changes;
@@ -164,7 +160,8 @@ extension NativeMusicService: MusicHomeBrowsing {
             if hasDisplayScope { baseline = try? await currentHomeDisplayScope() }
             else { baseline = nil }
             let initialChange = previousScope != nil && (previousScope != baseline?.scope ||
-                (previousRevision != nil && previousRevision != baseline?.revision))
+                (previousObservation != nil && previousObservation != baseline))
+            if let baseline { lastHomeObservation = baseline }
             let stream = await owner.nativeHomeChanges()
             task = Task { [weak self] in
                 var previous = baseline, pending = initialChange
@@ -198,8 +195,6 @@ extension NativeMusicService: MusicHomeBrowsing {
         -> (binding: MusicNativeCacheScope?, changed: Bool) {
         guard epoch == own, available, !closed else { return (previous, false) }
         let knownScope = lastHomeScope
-        let knownRevision = homeCache?.source == .netease && homeCache?.expires == .distantPast
-            ? homeCache?.revision : nil
         do {
             let current = try await currentHomeDisplayScope()
             try check(own); try current.authorization.check()
@@ -207,47 +202,59 @@ extension NativeMusicService: MusicHomeBrowsing {
             // Its recorded scope/revision must still participate in detecting
             // a logout coalesced into the first notification.
             let recoveredChange = previous == nil && knownScope != nil &&
-                (knownScope != current.scope || (knownRevision != nil && knownRevision != current.revision))
+                knownScope != current.scope
             let changed = pending || recoveredChange || (previous != nil && previous != current)
-            // Display and live-request revisions are deliberately independent.
-            // Fresh pages retain their live binding checks; a display change
-            // cannot evict a newer network result for the same durable scope.
+            lastHomeObservation = current
+            // Observation can retire a revoked request cache, never display
+            // data. Its local revision is not the live binding's revision.
             if let cached = homeCache, cached.source == .netease,
                cached.scope != current.scope ||
-                (cached.expires == .distantPast && cached.revision != current.revision) { homeCache = nil }
-            return (current, changed && homeSource?.platform != .kugou)
+                homeLoad?.binding.authorization.isActive == false { homeCache = nil }
+            guard changed, homeSource?.platform != .kugou else { return (current, false) }
+            if var read = homeFirstRead, read.load.source == .netease,
+               read.load.sourceRevision == homeSourceRevision, !read.load.binding.loggedIn,
+               read.load.binding.scope == current.scope, read.load.binding.authorization.isActive {
+                // A late account notification must not start another guest
+                // read after success or failure was already delivered. If the
+                // old page is still waiting, transfer this same task once.
+                if read.delivered || read.notificationHandled { return (current, false) }
+                read.handoff = true; read.notificationHandled = true; homeFirstRead = read
+            }
+            lastHomeRefreshObservation = current
+            return (current, true)
         } catch {
             guard epoch == own, !Task.isCancelled else { return (previous, false) }
             let failure = MusicServiceError.sanitized(error)
             let revoked = previous?.authorization.isActive == false
             let changed = pending || revoked ||
                 failure.isAuthenticationFailure || [.staleAccess, .staleResult, .accessUnavailable].contains(failure)
-            if changed, let previous, let cached = homeCache, cached.source == .netease,
-               cached.expires == .distantPast,
-               cached.scope == previous.scope, cached.revision == previous.revision { homeCache = nil }
+            if changed, homeLoad?.binding.authorization.isActive == false,
+               homeCache?.source == .netease { homeCache = nil }
+            if changed, homeSource?.platform != .kugou,
+               var read = homeFirstRead, read.load.source == .netease,
+               read.load.sourceRevision == homeSourceRevision, !read.load.binding.loggedIn,
+               read.load.binding.authorization.isActive {
+                // A transient local observation failure can retire a waiter
+                // too. Hand off the active guest task before yielding.
+                if read.delivered || read.notificationHandled { return (previous, false) }
+                read.handoff = true; read.notificationHandled = true; homeFirstRead = read
+            }
             // Busy/network failures are not guest success. Keep the baseline
             // so the next real notification can still detect its replacement.
             return (previous, changed && homeSource?.platform != .kugou)
         }
     }
     public func restoredHome() async throws -> MusicPublicBrowsePage? {
-        let own = epoch, source = try currentHomeSource(), revision = homeSourceRevision
-        let binding: MusicNativeCacheScope
-        do { binding = try await currentHomeDisplayScope(source: source) }
-        catch MusicServiceError.unsupported { return nil }
-        try await checkHomeDisplayScope(binding, source: source, epoch: own)
-        try checkHomeSource(source, revision: revision, epoch: own)
-        return try binding.authorization.perform {
-            try access.perform {
-                guard let data = try? homeSnapshot?.read(),
-                      let restored = try? MusicNativeHomeSnapshot.decode(data, source: source, scope: binding.scope) else { return nil }
-                // Remember the restored revision for observer baseline merging,
-                // but never let a disk snapshot masquerade as a fresh response.
-                if homeCache == nil || homeCache?.source != source || homeCache?.scope != binding.scope || homeCache!.expires <= now() {
-                    homeCache = (source, binding.scope, binding.revision, .distantPast, restored)
+        let source = try currentHomeSource()
+        return try access.perform {
+            if !homeDisplayPrepared {
+                homeDisplayPrepared = true
+                if let data = try? homeSnapshot?.read() {
+                    homeDisplay = try? MusicNativeHomeSnapshot.restore(data)
                 }
-                return .init(sections: try publicSections(restored, prefix: source.rawValue + ":home:"))
             }
+            guard let display = homeDisplay, display.source == source else { return nil }
+            return .init(sections: try convertedPublicSections(display.page, prefix: source.rawValue + ":home:"))
         }
     }
     public func homePage(cursor: String?, refresh: Bool) async throws -> MusicPublicBrowsePage {
@@ -263,60 +270,216 @@ extension NativeMusicService: MusicHomeBrowsing {
         }
         let binding = try await currentHomeBinding(source: source)
         try checkHomeSource(source, revision: sourceRevision, epoch: own)
+        if destination == .home {
+            if cursor == nil {
+                let read = beginHomeFirstRead(source: source, sourceRevision: sourceRevision,
+                                             binding: binding, refresh: refresh, epoch: own)
+                return try await waitForHomeFirstRead(read, epoch: own)
+            }
+            guard let load = homeLoad, load.source == source, load.sourceRevision == sourceRevision,
+                  load.binding == binding, load.nextCursor == cursor else { throw MusicServiceError.staleResult }
+            do { return try await readHomeBatch(load, cursor: cursor, epoch: own) }
+            catch {
+                let failure = MusicServiceError.sanitized(error)
+                if failure.isAuthenticationFailure, binding.loggedIn, source == .netease {
+                    // A continuation caller must never append guest page one
+                    // to its old account's tail. Transfer replacement to the
+                    // observed first-page refresh instead.
+                    _ = try await recoverHomeFirstRead(after: load, epoch: own, notify: true)
+                }
+                throw failure
+            }
+        }
         let name = source.rawValue + ":" + MusicNativePublicBrowseDiscovery.key(destination)
         let key = name + ":" + sourceRevision.uuidString + ":" + binding.revision.uuidString
         let position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own, now: now())
-        let isHome = destination == .home
-        if isHome, cursor == nil, !refresh, let cached = homeCache,
-           cached.source == source, cached.scope == binding.scope, cached.revision == binding.revision, cached.expires > now() {
-            try await checkHomeBinding(binding, epoch: own)
-            try checkHomeSource(source, revision: sourceRevision, epoch: own)
-            return try binding.authorization.perform { try finishHome(cached.page, destination: destination,
-                position: position, key: key, source: source, epoch: own, binding: binding) }
+        if source == .netease, case .channel(let channel, let tag) = destination, channel.kind == .vip {
+            try musicRequire(cursor == nil && tag.isEmpty, .invalidRequest)
         }
+        let value = try await readHomeContent(destination, position: position, source: source, binding: binding)
+        try await checkHomeBinding(binding, epoch: own)
+        try checkHomeSource(source, revision: sourceRevision, epoch: own)
+        return try binding.authorization.perform {
+            try finishHome(value, destination: destination, position: position, key: key,
+                           source: source, epoch: own, binding: binding)
+        }
+    }
+
+    private func readHomeContent(_ destination: MusicPublicBrowseDestination, position: MusicNativePublicBrowseCursor,
+                                 source: MusicPublicBrowsePlatform, binding: MusicNativeHomeBinding) async throws
+        -> MusicNativePublicBrowseDiscovery {
         let port = publicPlatforms, account = accounts as? any MusicNativeHomeProviding
-        do {
-            let value = try await work(label: "musicHome") {
-                if source == .netease, case .channel(let channel, let tag) = destination, channel.kind == .vip {
-                    try musicRequire(cursor == nil && tag.isEmpty, .invalidRequest)
-                    return try await port.browseVIP(account: account, binding: binding)
-                }
-                if source == .netease, let account, binding.loggedIn {
-                    return try await port.browseAccountHome(destination, remote: position.remote,
-                        account: account, binding: binding)
-                }
-                if source == .netease, case .channel(let channel, _) = destination,
-                   channel.kind == .artistActivity { return .init() }
-                return try await port.browseDiscovery(destination, source: source,
-                    remote: position.remote, offset: position.offset)
+        return try await work(label: "musicHome") {
+            if source == .netease, case .channel(let channel, _) = destination, channel.kind == .vip {
+                return try await port.browseVIP(account: account, binding: binding)
             }
-            try await checkHomeBinding(binding, epoch: own)
-            try checkHomeSource(source, revision: sourceRevision, epoch: own)
-            return try binding.authorization.perform {
-                let page = try finishHome(value, destination: destination, position: position, key: key,
-                    source: source, epoch: own, binding: binding)
-                if isHome, cursor == nil {
-                    homeCache = (source, binding.scope, binding.revision, now().addingTimeInterval(600), value)
-                    if let data = try? MusicNativeHomeSnapshot.encode(value, source: source, scope: binding.scope) {
-                        // Cache failure does not turn successful music content
-                        // into an error or overwrite the previous usable file.
-                        try? access.perform { try homeSnapshot?.write(data) }
-                    }
+            if source == .netease, let account, binding.loggedIn {
+                return try await port.browseAccountHome(destination, remote: position.remote,
+                    account: account, binding: binding)
+            }
+            if source == .netease, case .channel(let channel, _) = destination,
+               channel.kind == .artistActivity { return .init() }
+            return try await port.browseDiscovery(destination, source: source,
+                remote: position.remote, offset: position.offset)
+        }
+    }
+
+    private func beginHomeFirstRead(source: MusicPublicBrowsePlatform, sourceRevision: UUID,
+                                    binding: MusicNativeHomeBinding, refresh: Bool, epoch own: UUID)
+        -> MusicNativeHomeFirstRead {
+        // Callers have fenced the source after acquiring this binding. A late
+        // binding acquisition alone must never evict a newer source's cache.
+        if let cached = homeCache, cached.source == source,
+           cached.scope != binding.scope || cached.revision != binding.revision { homeCache = nil }
+        if var read = homeFirstRead, read.load.source == source, read.load.sourceRevision == sourceRevision,
+           read.load.binding == binding, !read.completed || read.handoff {
+            read.handoff = false; homeFirstRead = read
+            return read
+        }
+        let cached: MusicNativePublicBrowseDiscovery?
+        if !refresh, let value = homeCache, value.source == source, value.scope == binding.scope,
+           value.revision == binding.revision, value.expires > now() { cached = value.page }
+        else { cached = nil }
+        // Even the same account's first-page replay gets its own cursor chain.
+        let load = MusicNativeHomeLoad(id: UUID(), source: source, sourceRevision: sourceRevision,
+                                       binding: binding, nextCursor: nil)
+        homeLoad = load
+        let task = Task { await self.runHomeFirstRead(load, cached: cached, epoch: own) }
+        let notified = !binding.loggedIn && lastHomeRefreshObservation?.scope == binding.scope &&
+            lastHomeRefreshObservation?.authorization.isActive == true
+        let read = MusicNativeHomeFirstRead(load: load, task: task, notificationHandled: notified)
+        homeFirstRead = read
+        return read
+    }
+
+    private func runHomeFirstRead(_ load: MusicNativeHomeLoad, cached: MusicNativePublicBrowseDiscovery?,
+                                  epoch own: UUID) async -> MusicNativeHomeReadResult {
+        defer {
+            if homeFirstRead?.load.id == load.id { homeFirstRead?.completed = true }
+        }
+        do {
+            let page = try await readHomeBatch(load, cursor: nil, cached: cached, epoch: own)
+            return .init(id: load.id, result: .success(page))
+        } catch {
+            let failure = MusicServiceError.sanitized(error)
+            if failure.isAuthenticationFailure, load.binding.loggedIn, load.source == .netease {
+                do {
+                    let guest = try await recoverHomeFirstRead(after: load, epoch: own, notify: false)
+                    return await guest.task.value
+                } catch {
+                    return .init(id: load.id, result: .failure(MusicServiceError.sanitized(error)))
+                }
+            }
+            return .init(id: load.id, result: .failure(failure))
+        }
+    }
+
+    private func recoverHomeFirstRead(after failed: MusicNativeHomeLoad, epoch own: UUID, notify: Bool) async throws
+        -> MusicNativeHomeFirstRead {
+        let binding = try await currentHomeBinding(source: failed.source)
+        try checkHomeSource(failed.source, revision: failed.sourceRevision, epoch: own)
+        try musicRequire(!binding.loggedIn && binding != failed.binding, .staleResult)
+        // Account observation may have already started this exact guest read
+        // while binding acquisition suspended. Reuse success and failure once.
+        let read: MusicNativeHomeFirstRead
+        if let current = homeFirstRead, current.load.source == failed.source,
+           current.load.sourceRevision == failed.sourceRevision, current.load.binding == binding {
+            read = current
+        } else {
+            try musicRequire(homeLoad?.id == failed.id, .staleResult)
+            read = beginHomeFirstRead(source: failed.source, sourceRevision: failed.sourceRevision,
+                                      binding: binding, refresh: true, epoch: own)
+        }
+        if notify, !read.delivered, !read.notificationHandled, homeFirstRead?.load.id == read.load.id {
+            homeFirstRead?.handoff = true; homeFirstRead?.notificationHandled = true
+            for observer in homeObservers.values { observer.yield(()) }
+        }
+        return read
+    }
+
+    private func waitForHomeFirstRead(_ read: MusicNativeHomeFirstRead, epoch own: UUID) async throws -> MusicPublicBrowsePage {
+        // The service owns the read; a UI retirement only releases this waiter.
+        // Source/access retirement still cancels physical musicHome work.
+        let waiter = MusicNativeOperation<MusicNativeHomeReadResult>()
+        let task = Task { waiter.finish(.success(await read.task.value)) }
+        defer { task.cancel() }
+        let result = try await withTaskCancellationHandler {
+            try await waiter.value()
+        } onCancel: {
+            task.cancel(); waiter.finish(.failure(MusicServiceError.cancelled))
+        }
+        try check(own)
+        try musicRequire(homeLoad?.id == result.id, .staleResult)
+        if case .success = result.result, let load = homeLoad {
+            try await checkHomeBinding(load.binding, epoch: own)
+            try checkHomeSource(load.source, revision: load.sourceRevision, epoch: own)
+            try musicRequire(homeLoad?.id == result.id, .staleResult)
+            return try load.binding.authorization.perform {
+                if homeFirstRead?.load.id == result.id { homeFirstRead?.delivered = true }
+                return try result.result.get()
+            }
+        }
+        if homeFirstRead?.load.id == result.id { homeFirstRead?.delivered = true }
+        return try result.result.get()
+    }
+
+    private func readHomeBatch(_ load: MusicNativeHomeLoad, cursor: String?,
+                               cached: MusicNativePublicBrowseDiscovery? = nil, epoch own: UUID) async throws -> MusicPublicBrowsePage {
+        try checkHomeSource(load.source, revision: load.sourceRevision, epoch: own)
+        try musicRequire(homeLoad?.id == load.id, .staleResult)
+        let key = load.source.rawValue + ":home:" + load.sourceRevision.uuidString + ":" +
+            load.binding.revision.uuidString + ":" + load.id.uuidString
+        let position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own, now: now())
+        let value: MusicNativePublicBrowseDiscovery
+        if let cached { value = cached }
+        else { value = try await readHomeContent(.home, position: position, source: load.source, binding: load.binding) }
+        try await checkHomeBinding(load.binding, epoch: own)
+        try checkHomeSource(load.source, revision: load.sourceRevision, epoch: own)
+        guard var current = homeLoad, current.id == load.id,
+              cursor == nil || current.nextCursor == cursor else { throw MusicServiceError.staleResult }
+        return try load.binding.authorization.perform {
+            // finishHome checks access itself; never nest that check inside
+            // the non-recursive access commit lock.
+            let page = try finishHome(value, destination: .home, position: position, key: key,
+                                      source: load.source, epoch: own, binding: load.binding)
+            return try access.perform {
+                // Section errors are failed reads, never a new empty snapshot.
+                guard value.sections.allSatisfy({ $0.error == nil }) else { return page }
+                current.nextCursor = page.cursor
+                current.sections = cursor == nil ? value.sections : mergeHomeSections(current.sections, value.sections)
+                homeLoad = current
+                // Reusing the real first-response cache is not a newer
+                // successful network batch; keep the display, but seed only
+                // this new chain's first page for its later continuations.
+                if cached != nil { return page }
+                let display = MusicNativePublicBrowseDiscovery(sections: current.sections)
+                homeDisplay = (load.source, display); homeDisplayPrepared = true
+                if cursor == nil {
+                    homeCache = (load.source, load.binding.scope, load.binding.revision,
+                                 now().addingTimeInterval(600), value)
+                }
+                if let data = try? MusicNativeHomeSnapshot.encode(display, source: load.source) {
+                    // Serialization/storage failure keeps the previous durable
+                    // success without discarding the usable in-memory display.
+                    try? homeSnapshot?.write(data)
                 }
                 return page
             }
-        } catch {
-            let failure = MusicServiceError.sanitized(error)
-            if failure.isAuthenticationFailure || [.staleAccess, .staleResult, .accessUnavailable].contains(failure),
-               epoch == own, homeSourceRevision == sourceRevision, let cached = homeCache,
-               cached.source == source, cached.scope == binding.scope, cached.revision == binding.revision {
-                homeCache = nil
-            }
-            // Revision invalidation is not account replacement: a newer
-            // revision may already have saved a same-scope snapshot. Only
-            // currentHomeBinding's observed scope change can retire that file.
-            throw failure
         }
+    }
+
+    private func mergeHomeSections(_ previous: [MusicNativePublicBrowseSection], _ next: [MusicNativePublicBrowseSection])
+        -> [MusicNativePublicBrowseSection] {
+        var result = previous
+        for section in next {
+            if let index = result.firstIndex(where: { $0.id == section.id && $0.layout == section.layout }) {
+                var ids = Set(result[index].items.map(\.id))
+                var merged = section
+                merged.items = result[index].items + section.items.filter { ids.insert($0.id).inserted }
+                result[index] = merged
+            } else { result.append(section) }
+        }
+        return result
     }
     private func finishHome(_ value: MusicNativePublicBrowseDiscovery, destination: MusicPublicBrowseDestination,
                             position: MusicNativePublicBrowseCursor, key: String, source: MusicPublicBrowsePlatform, epoch own: UUID,
