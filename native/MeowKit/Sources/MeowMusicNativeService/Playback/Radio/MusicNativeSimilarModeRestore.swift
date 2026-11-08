@@ -10,9 +10,14 @@ extension NativeMusicService {
         try musicRequire(similarMode.restoring == nil, .busy)
         let restoration = UUID(), own = epoch
         similarMode.restoring = restoration
+        let completion = MusicNativeOperation<Void>()
+        similarMode.restorationCompletion = completion
         defer {
+            completion.finish(.success(()))
             similarMode.deadlines.removeValue(forKey: restoration)
-            if similarMode.restoring == restoration { similarMode.restoring = nil }
+            if similarMode.restoring == restoration {
+                similarMode.restoring = nil; similarMode.restorationCompletion = nil
+            }
         }
         var acquired: MusicAccountQueueLease?
         do {

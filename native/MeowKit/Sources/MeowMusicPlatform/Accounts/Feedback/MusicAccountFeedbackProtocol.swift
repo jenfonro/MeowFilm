@@ -83,11 +83,20 @@ actor MusicAccountFeedbackChannel {
         let authorization = self.authorization
         let task = Task {
             try await authorization.check()
-            return try await provider.feedback(value, credential: credential, session: state, guard: authorization)
+            try value.target.recommendationProof?.check(nativeID: value.target.nativeID, source: value.target.source,
+                sourceID: value.target.sourceID, algorithm: value.target.algorithm)
+            let result = try await provider.feedback(value, credential: credential, session: state, guard: authorization)
+            try value.target.recommendationProof?.authorization.check()
+            return result
         }
         do { try authorization.register(id) { task.cancel() } }
         catch { task.cancel() } // Still await the physical worker below.
-        defer { authorization.remove(id) }
+        do { try value.target.recommendationProof?.authorization.register(id) { task.cancel() } }
+        catch { task.cancel() }
+        defer {
+            authorization.remove(id)
+            value.target.recommendationProof?.authorization.remove(id)
+        }
         let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
         try await authorization.check()
         if value.event == .start { startReceipt = result.receipt; session = result.session }
@@ -98,6 +107,9 @@ actor MusicAccountFeedbackChannel {
 
 enum MusicAccountFeedbackWire {
     static func validate(_ value: MusicPlaybackFeedbackReport) throws {
+        guard value.target.recommendationProof == nil || value.target.platform == .netease else {
+            throw MusicServiceError.invalidRequest
+        }
         guard [value.duration, value.listened, value.mediaListened, value.position].allSatisfy({
             $0.isFinite && (0...86400).contains($0)
         }), value.rate.isFinite, value.rate > 0, value.rate <= 16,
@@ -109,13 +121,20 @@ enum MusicAccountFeedbackWire {
         case .qq: _ = try MusicQQWire.id(value.target.nativeID, mid: true)
         case .netease:
             _ = try MusicNeteaseWire.id(value.target.nativeID)
-            guard ["", "list", "album", "search", "dailySongRecommend", "song", "radio", "aiMode", "moreRcmd"].contains(value.target.source),
-                  value.target.algorithm.utf16.count <= 2000 else { throw MusicServiceError.invalidRequest }
-            if ["list", "album"].contains(value.target.source) { _ = try MusicNeteaseWire.id(value.target.sourceID) }
-            else if value.target.source == "aiMode" { _ = try MusicQQWire.id(value.target.sourceID) }
-            else if value.target.source == "search" { _ = try MusicQQWire.string(value.target.sourceID, maximum: 2048, empty: true) }
-            // moreRcmd and unattributed seeded SIMILAR have no reporting source ID.
-            else { guard value.target.sourceID.isEmpty else { throw MusicServiceError.invalidRequest } }
+            guard value.target.algorithm.utf16.count <= 2000 else { throw MusicServiceError.invalidRequest }
+            if let proof = value.target.recommendationProof {
+                try proof.check(nativeID: value.target.nativeID, source: value.target.source,
+                                sourceID: value.target.sourceID, algorithm: value.target.algorithm)
+                _ = try MusicQQWire.string(value.target.source, maximum: 2000, empty: true)
+                if !value.target.sourceID.isEmpty { _ = try MusicNeteaseWire.id(value.target.sourceID) }
+            } else {
+                guard ["", "list", "album", "search", "dailySongRecommend", "song", "radio"].contains(value.target.source) else {
+                    throw MusicServiceError.invalidRequest
+                }
+                if ["list", "album"].contains(value.target.source) { _ = try MusicNeteaseWire.id(value.target.sourceID) }
+                else if value.target.source == "search" { _ = try MusicQQWire.string(value.target.sourceID, maximum: 2048, empty: true) }
+                else { guard value.target.sourceID.isEmpty else { throw MusicServiceError.invalidRequest } }
+            }
         case .kugou:
             guard try MusicKugouWire.hash(value.target.nativeID) == value.target.nativeID,
                   value.duration > 0, value.rate >= 0.25 else { throw MusicServiceError.invalidRequest }

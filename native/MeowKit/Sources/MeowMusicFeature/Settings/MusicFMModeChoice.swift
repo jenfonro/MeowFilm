@@ -16,8 +16,8 @@ public struct MusicFMModeChoice: Identifiable, Equatable, Sendable {
         .init(title: "拼图模式", mode: .puzzle, submode: "")
     ]
     public static let scenes: [MusicFMModeChoice] = {
-        let names = "伤感|运动|助眠|放松|欢快|抒情|治愈|专注|情歌|R&B|下雨天|打游戏|说唱|K-Pop|宝藏原创|电音|出行|洗澡|咖啡馆|摇滚|励志|华语|欧美|粤语|慢摇DJ|经典|轻音乐|国风|民谣|二次元|古典|爵士|日语|全球|法语|蓝调|舞蹈|拉丁|放克|乡村乐|音乐剧|影视".components(separatedBy: "|")
-        let codes = "NIGHT_EMO EXERCISE SLEEP_HELP RELAX CHEERFUL LYRICAL CURE FOCUS SWEET RHYTHM_BLUES RAINY GAMES RAP K_POP ORIGINAL_MUSICIAL ELECTRONIC COMMUTE TAKE_SHOWER COFFEE_SHOP ROCK INSPIRATIONAL CHINESE ENGLISH YUEYU MANYAO JINGDIAN LIGHT GUOFENG FOLK ACG GUDIAN JAZZ JAPANESE GLOBAL FRANCH BLUE DANCE LATIN PUNK COUNTRY MUSICAL YINGSHI".components(separatedBy: " ")
+        let names = "伤感|运动|助眠|放松|欢快|抒情|治愈|专注|情歌|R&B|下雨天|打游戏|说唱|K-Pop|宝藏原创|电音|出行|洗澡|咖啡馆|摇滚|励志|华语|欧美|粤语|慢摇DJ|经典|轻音乐|国风|民谣|二次元|古典|爵士|日语|全球|法语|蓝调|舞蹈|拉丁|放克|乡村乐|音乐剧|影视|热歌".components(separatedBy: "|")
+        let codes = "NIGHT_EMO EXERCISE SLEEP_HELP RELAX CHEERFUL LYRICAL CURE FOCUS SWEET RHYTHM_BLUES RAINY GAMES RAP K_POP ORIGINAL_MUSICIAL ELECTRONIC COMMUTE TAKE_SHOWER COFFEE_SHOP ROCK INSPIRATIONAL CHINESE ENGLISH YUEYU MANYAO JINGDIAN LIGHT GUOFENG FOLK ACG GUDIAN JAZZ JAPANESE GLOBAL FRANCH BLUE DANCE LATIN PUNK COUNTRY MUSICAL YINGSHI HOT_SONG".components(separatedBy: " ")
         return zip(names, codes).map { .init(title: $0.0, mode: .scene, submode: $0.1) }
     }()
     public static func title(for action: MusicHomeAction?) -> String {

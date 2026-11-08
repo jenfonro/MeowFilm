@@ -17,8 +17,10 @@ public enum MusicNativeSimilarModeRequest: Sendable, Equatable {
 public struct MusicNativeSimilarModeBatch: Sendable {
     public let items: [MusicNativeTrackData]
     public let heartbeatContext: MusicSimilarHeartbeatContext?
-    public init(items: [MusicNativeTrackData], heartbeatContext: MusicSimilarHeartbeatContext? = nil) {
-        self.items = items; self.heartbeatContext = heartbeatContext
+    public let hasMore: Bool?
+    public init(items: [MusicNativeTrackData], heartbeatContext: MusicSimilarHeartbeatContext? = nil,
+                hasMore: Bool? = nil) {
+        self.items = items; self.heartbeatContext = heartbeatContext; self.hasMore = hasMore
     }
 }
 
@@ -94,6 +96,7 @@ public struct MusicSimilarModeSnapshot: Sendable, Identifiable {
 
 public enum MusicSimilarModeStart: Sendable, Equatable {
     case heartbeat
+    case currentHeartbeat(occurrenceID: String, expectedRevision: Int)
     case songRoaming(sourceIDs: [String], sourceName: String)
 }
 

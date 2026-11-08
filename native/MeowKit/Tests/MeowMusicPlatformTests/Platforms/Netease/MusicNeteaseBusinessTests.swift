@@ -6,6 +6,34 @@ import MeowJSON
 @testable import MeowMusicPlatform
 
 final class MusicNeteaseBusinessTests: XCTestCase {
+    func testCompleteCollectionAcceptsEitherCloudCountConventionAndHydratesEmptyArtists() async throws {
+        for trackCount in [3, 2] {
+            let f = try MusicNeteaseNativeFixture(); try await f.enable()
+            var entry = MusicNeteaseFixture.collection()
+            entry["trackCount"] = trackCount; entry["cloudTrackCount"] = 1
+            var row = entry
+            row["trackIds"] = [103, 101, 102].map { ["id": $0] }
+            var missingArtist = MusicNeteaseFixture.song(103); missingArtist["ar"] = []
+            row["tracks"] = [missingArtist, MusicNeteaseFixture.song(101), MusicNeteaseFixture.song(102)]
+            await f.http.replies("/weapi/user/playlist", [
+                try MusicNeteaseFixture.response(["code": 200, "more": false, "playlist": [entry]])
+            ])
+            await f.http.replies("/eapi/v6/playlist/detail", [
+                try MusicNeteaseFixture.response(["code": 200, "playlist": row])
+            ])
+            await f.http.replies("/weapi/v3/song/detail", [
+                try MusicNeteaseFixture.response(["code": 200, "songs": [MusicNeteaseFixture.song(103)]])
+            ])
+            let page = try await f.service.nativeTracks(platform: .netease, collectionID: "501", cursor: nil)
+            let songs = try page.items.map { try MusicQQWire.decode($0.data) }
+            XCTAssertEqual(page.total, 3); XCTAssertNil(page.cursor)
+            XCTAssertEqual(songs.compactMap { $0["songmid"] as? String }, ["103", "101", "102"])
+            XCTAssertEqual(songs.first?["singer"] as? String, "合成歌手")
+            let records = await f.http.recorded()
+            XCTAssertEqual(records.filter { $0.request.url.path == "/weapi/v3/song/detail" }.count, 1)
+            _ = await f.service.close()
+        }
+    }
     func testAccountCollectionRetainsAlbumArtworkAndItsImageParameters() async throws {
         let f = try MusicNeteaseNativeFixture(); try await f.enable()
         let image = "http://p1.music.126.net/album.jpg?param=800y800&quality=90"

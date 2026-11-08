@@ -9,6 +9,14 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     private let model: MusicViewModel
     private weak var router: (any MusicUIRouting)?
     private lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: UICollectionViewFlowLayout())
+    private lazy var heartbeat = PageHeaderTextButton(title: "云喜欢心动") { [weak self] in
+        guard let self, self.isPageActive else { return }
+        let account = self.model.searchAccessGeneration
+        self.runPageTask { [weak self] in
+            guard let self, self.model.searchAccessGeneration == account else { return }
+            await self.model.startHeartbeat()
+        }
+    }
     private var dataSource: UICollectionViewDiffableDataSource<Int, Data>!
     private var items: [Data: MusicCollection] = [:]
     private var access: UUID?
@@ -22,6 +30,9 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     }
     public override func viewDidLoad() {
         super.viewDidLoad()
+        heartbeat.accessibilityIdentifier = "music.library.heartbeat"
+        view.addSubview(heartbeat)
+        heartbeat.translatesAutoresizingMaskIntoConstraints = false
         collection.backgroundColor = .clear
         collection.delegate = self
         collection.alwaysBounceVertical = true
@@ -42,11 +53,15 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         NSLayoutConstraint.activate([
             collection.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             collection.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            collection.topAnchor.constraint(equalTo: contentTopAnchor),
+            heartbeat.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            heartbeat.topAnchor.constraint(equalTo: contentTopAnchor, constant: PageLayoutMetrics.contentGap),
+            heartbeat.heightAnchor.constraint(equalToConstant: 44),
+            collection.topAnchor.constraint(equalTo: heartbeat.bottomAnchor, constant: 8),
             collection.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         observe(model.libraryChanges) { [weak self] in self?.render() }
         observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
+        observe(model.playbackChanges) { [weak self] in self?.renderHeartbeat() }
         observe(appearance.$preferences.map(\.playlistView).removeDuplicates().dropFirst().eraseToAnyPublisher()) {
             [weak self] _ in
             self?.collection.collectionViewLayout.invalidateLayout()
@@ -68,6 +83,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     public override func applyTheme() {
         super.applyTheme()
         if isViewLoaded {
+            renderHeartbeat()
             updateVisibleCells()
         }
     }
@@ -144,6 +160,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
 
     private func render() {
         guard dataSource != nil else { return }
+        renderHeartbeat()
         let values = model.isAvailable && !model.isClosed ? model.collections : []
         let previous = items
         items = Dictionary(uniqueKeysWithValues: values.map { (Data($0.id.utf8), $0) })
@@ -157,6 +174,12 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             dataSource.apply(snapshot, animatingDifferences: false)
         }
         renderState()
+    }
+
+    private func renderHeartbeat() {
+        heartbeat.isEnabled = model.isAvailable && !model.isClosed && !model.isChangingSimilarMode &&
+            !model.isChangingQueueRecommendations && !model.isChangingQueue && !model.isNavigating
+        heartbeat.applyTheme(theme)
     }
 
     private func updateVisibleCells() {

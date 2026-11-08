@@ -106,6 +106,13 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
 
     private func publishAccountSessionChanges(_ platforms: [MusicAccountPlatform]) {
         searchAccessGeneration = UUID()
+        if platforms.contains(.netease) {
+            cancelRecommendationOperation()
+            navigationPlaybackIntent?.revoke()
+            cancelQueueRecommendationPreview()
+            clearRecommendationSnapshots()
+            stopFM()
+        }
         for platform in platforms { accountEvents.send(platform) }
     }
 
@@ -236,6 +243,17 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     }
     var similarObservation: Task<Void, Never>?
     var similarObservationID = UUID()
+    var recommendationReadID = UUID()
+    var recommendationPreviewReadID: UUID?
+    var queuePreviewCancellation: Task<Void, Never>?
+    var recommendationQueueRevision: Int?
+    var recommendationAccount: UUID?
+    var recommendationCommandID = UUID()
+    var recommendationReturnID: UUID?
+    var recommendationTask: Task<MusicSimilarModeResult, Error>?
+    var recommendationIntent: MusicQueueAuthorization?
+    var recommendationPlaybackIntent: MusicQueueAuthorization?
+    var navigationPlaybackIntent: MusicQueueAuthorization?
     var remoteQueueTask: Task<MusicPlaybackState, Error>?
     var remoteQueueIntent: MusicQueueAuthorization?
     var remoteQueueRequest = UUID()
@@ -291,7 +309,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     }
     public var canNavigate: Bool {
         isAvailable && !isClosed && service != nil && player != nil && current != nil &&
-        !isResolving && !isNavigating && !isChangingQueue
+        !isResolving && !isNavigating && !isChangingQueue && !isChangingSimilarMode && !isChangingQueueRecommendations
     }
     public var canNext: Bool {
         guard canNavigate else { return false }
@@ -359,6 +377,8 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         let retainsPlayback = !stopMedia && isAvailable && !isClosed && nativeAttempt != nil &&
             candidate?.occurrenceId == current?.id && terminalAttempt == nil
         if remoteQueueIntent !== intent { cancelRemoteQueuePreparation() }
+        if recommendationIntent !== intent && recommendationPlaybackIntent !== intent { recommendationPlaybackIntent?.revoke() }
+        if navigationPlaybackIntent !== intent { navigationPlaybackIntent?.revoke() }
         if fmAdvanceIntent !== intent { fmAdvanceIntent?.revoke(); fmAdvanceIntent = nil }
         feedbackConsumer.invalidate()
         if !retainsPlayback { feedbackAutomatic = false }
@@ -434,6 +454,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
                 if candidate == nil { position = nextState.position; playbackState.phase = .paused }
                 beginPlaybackMetadata(restoreOnly: candidate == nil)
                 observeSimilarMode()
+                await loadRecommendationState(refreshQueue: false)
             }
         } catch { report(error, epoch: epoch, operation: "读取曲库与播放状态", kind: .library) }
     }

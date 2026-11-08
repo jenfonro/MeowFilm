@@ -12,13 +12,14 @@ final class MusicFMSettingsViewModel: ObservableObject {
     private var available = false
     private var closed = false
     private var work: Task<Void, Never>?
+    private var workID: UUID?
     private var lastFailure: String?
 
     init(owner: MusicViewModel) { self.owner = owner }
 
     var pendingChoice: String? { request?.choice }
     var hasAccess: Bool {
-        !closed && available && generation == owner.accountAccessGeneration && owner.isAvailable && !owner.isClosed
+        !closed && available && generation == owner.searchAccessGeneration && owner.isAvailable && !owner.isClosed
     }
 
     func setAccess(available: Bool, generation: UUID) {
@@ -31,17 +32,18 @@ final class MusicFMSettingsViewModel: ObservableObject {
     func select(_ choice: MusicFMModeChoice) {
         guard hasAccess, work == nil, owner.isFMActive,
               !choice.matches(owner.activeHomeFM) || lastFailure != nil else { return }
-        let id = UUID(), access = owner.accountAccessGeneration
+        let id = UUID(), access = owner.searchAccessGeneration
         request = (id, access, choice.id)
+        workID = id
         error = nil
         lastFailure = nil
         selectionCompleted = false
         work = Task { [weak self] in
             guard let self else { return }
             defer {
-                if request?.id == id {
+                if workID == id {
                     request = nil
-                    work = nil
+                    work = nil; workID = nil
                 }
             }
             guard current(id, access: access) else { return }
@@ -64,21 +66,22 @@ final class MusicFMSettingsViewModel: ObservableObject {
     }
 
     func acknowledgeSelection() { selectionCompleted = false }
+    func finishPending() async { await work?.value }
 
     func close() {
+        guard !closed else { return }
         closed = true
         invalidate()
     }
 
     private func current(_ id: UUID, access: UUID) -> Bool {
         hasAccess && !Task.isCancelled && request?.id == id && request?.access == access &&
-            owner.accountAccessGeneration == access
+            owner.searchAccessGeneration == access && owner.isFMActive
     }
 
     private func invalidate() {
         request = nil
         work?.cancel()
-        work = nil
         error = nil
         lastFailure = nil
         selectionCompleted = false

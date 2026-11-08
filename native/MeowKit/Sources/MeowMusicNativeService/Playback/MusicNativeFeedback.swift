@@ -8,6 +8,33 @@ struct MusicNativeFeedbackAdmission {
 }
 
 extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedbackSettingsServing {
+    func similarFeedbackTargets(entry: MJ, context: MJ, selectedSourceKey: String? = nil) throws -> [MusicPlaybackFeedbackTarget] {
+        let selectedNativeID = entry["song"]["sources"].array.first { $0["sourceKey"].string == selectedSourceKey }
+            .flatMap { MusicNativeFeedbackMapping.recording($0, platform: .netease)?.nativeID }
+        guard let live = liveRecommendation(entryID: entry["id"].string), live.lease.authorization.isActive else {
+            return try MusicNativeFeedbackMapping.targets(song: entry["song"], context: context, preferredNativeID: selectedNativeID)
+        }
+        return try live.lease.authorization.perform {
+            let recommendation = live.value
+            let nativeID = recommendation["songId"].id
+            let targets = try MusicNativeFeedbackMapping.targets(song: entry["song"], context: context,
+                preferredNativeID: selectedNativeID ?? nativeID)
+            return targets.map { target in
+                guard target.platform == .netease, target.nativeID == nativeID,
+                      selectedNativeID == nil || selectedNativeID == nativeID else { return target }
+                let kind = recommendation["source"].string
+                let source = recommendation["feedbackSource"].string
+                let sourceID = kind == "heartbeat" ? recommendation["sourceId"].id : ""
+                let algorithm = recommendation["alg"].string
+                let proof = MusicPlaybackRecommendationProof(occurrenceID: entry["id"].string, nativeID: nativeID,
+                    source: source, sourceID: sourceID, algorithm: algorithm, authorization: live.lease.authorization)
+                return .init(platform: target.platform, nativeID: nativeID, mixsongID: target.mixsongID,
+                    source: source, sourceID: sourceID, algorithm: algorithm, automatic: target.automatic,
+                    recommendationProof: proof)
+            }
+        }
+    }
+
     public func playbackFeedbackSettings() async throws -> MusicPlaybackFeedbackSettings {
         try MusicNativeFeedbackSettings.decode(read().playback)
     }
@@ -50,7 +77,7 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 var context = entry["context"]
                 if let automatic = sample.automatic { context["automatic"] = .bool(automatic) }
                 admission = .init(attemptID: attempt.id, settings: try MusicNativeFeedbackSettings.decode(draft.playback),
-                    targets: try similarFeedbackTargets(entry: entry, context: context)
+                    targets: try similarFeedbackTargets(entry: entry, context: context, selectedSourceKey: attempt.sourceKey)
                         .filter { platformEnabled($0.platform.rawValue) })
                 playbackFeedbackAdmission = admission
             }
@@ -133,7 +160,7 @@ enum MusicNativeFeedbackMapping {
               !(songmid.range(of: "^[A-F0-9]{32}$", options: .regularExpression) != nil && songmid != hash) else { return nil }
         return .init(platform: platform, nativeID: hash, mixsongID: ids.first)
     }
-    static func targets(song: MJ, context: MJ) throws -> [MusicPlaybackFeedbackTarget] {
+    static func targets(song: MJ, context: MJ, preferredNativeID: String? = nil) throws -> [MusicPlaybackFeedbackTarget] {
         // The authoritative source array, including an empty one, wins. Never
         // invent another recording from delivery provider or candidate order.
         _ = try MusicModel.sources(song)
@@ -150,14 +177,13 @@ enum MusicNativeFeedbackMapping {
                 values.removeAll { $0.mixsongID == nil && known.contains($0.nativeID) }
             }
             let primary = recording(song, platform: platform)
-            let preferred = context["recommendation"]["songId"].id
-            let chosen = values.first { platform == .netease && $0.nativeID == preferred } ??
+            let chosen = values.first { platform == .netease && $0.nativeID == preferredNativeID } ??
                 values.first { $0 == primary } ??
                 (values.count == 1 ? values.first : nil) ??
                 (platform == .kugou && !values.isEmpty && values.allSatisfy { $0.mixsongID != nil } &&
                     Set(values.compactMap(\.mixsongID)).count == 1 ? values.sorted { $0.nativeID < $1.nativeID }.first : nil)
             guard let chosen else { continue }
-            var source = "", sourceID = "", algorithm = ""
+            var source = "", sourceID = ""
             if platform == .netease {
                 let native = song["sources"].array.contains {
                     MusicModel.sourceData($0)["source"].string == "wy"
@@ -175,12 +201,9 @@ enum MusicNativeFeedbackMapping {
                         source = "search"; sourceID = query
                     }
                 } else if type == "song" { source = "song" }
-                if preferred == chosen.nativeID, context["recommendation"]["alg"].string.utf16.count <= 2000 {
-                    algorithm = context["recommendation"]["alg"].string
-                }
             }
             result.append(.init(platform: platform, nativeID: chosen.nativeID, mixsongID: chosen.mixsongID,
-                source: source, sourceID: sourceID, algorithm: algorithm, automatic: context["automatic"].bool))
+                source: source, sourceID: sourceID, automatic: context["automatic"].bool))
         }
         return result
     }

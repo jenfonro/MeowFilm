@@ -31,7 +31,7 @@ enum MusicNeteaseHomeActionRequest {
         "SWEET", "RHYTHM_BLUES", "RAINY", "GAMES", "RAP", "K_POP", "ORIGINAL_MUSICIAL", "ELECTRONIC", "COMMUTE",
         "TAKE_SHOWER", "COFFEE_SHOP", "ROCK", "INSPIRATIONAL", "CHINESE", "ENGLISH", "YUEYU", "MANYAO", "JINGDIAN",
         "LIGHT", "GUOFENG", "FOLK", "ACG", "GUDIAN", "JAZZ", "JAPANESE", "GLOBAL", "FRANCH", "BLUE", "DANCE",
-        "LATIN", "PUNK", "COUNTRY", "MUSICAL", "YINGSHI"
+        "LATIN", "PUNK", "COUNTRY", "MUSICAL", "YINGSHI", "HOT_SONG"
     ]
     static func specification(_ action: MusicHomeAction) throws -> (String, [String: Any], String)? {
         try action.validate()
@@ -72,30 +72,9 @@ extension NeteaseMusicAccountAdapter: MusicAccountHomeActionProvider {
             let ids = declared.filter { seen.insert($0).inserted }
             raw = try await homeActionMetadata(ids, context: context, own: own, authorize: authorize)
         } else if case .heartbeat = action {
-            // The star card's resourceId is never a seed. Read this account's
-            // actual liked list, then its first real song, as in heartbeatContext.
-            let directory = try await request("/api/user/playlist",
-                data: ["uid": context.accountID, "limit": 100, "offset": 0, "includeVideo": true],
-                crypto: "weapi", context: context)
-            try await authorize(); try check(own)
-            let lists = try MusicNeteaseWire.rows(directory["playlist"], maximum: 100)
-            guard let liked = lists.first(where: { (try? MusicQQWire.integer($0["specialType"] ?? 0)) == 5 }) else {
-                throw MusicServiceError.notFound
-            }
-            let pid = try MusicNeteaseWire.id(liked["id"])
-            let detail = try await detail(pid, context: context)
-            try await authorize(); try check(own)
-            let seedValue = (detail["trackIds"] as? [[String: Any]])?.first?["id"] ??
-                (detail["tracks"] as? [[String: Any]])?.first?["id"]
-            let sid = try MusicNeteaseWire.id(seedValue)
-            try MusicHomeAction.similar(sourceIDs: [pid, sid], sourceName: "").validate()
-            let result = try await request("/api/playmode/intelligence/list",
-                data: ["playlistId": pid, "startMusicId": sid, "songId": sid, "type": "fromPlayAll", "count": 100],
-                context: context)
-            try await authorize(); try check(own)
-            raw = try MusicNeteaseWire.rows(result["data"], maximum: 100).map {
-                ($0["songInfo"] as? [String: Any]) ?? ["id": $0["id"] as Any]
-            }
+            let batch = try await similarMode(.heartbeat(lastID: nil, fromHome: true, context: nil),
+                                              credential: credential, authorize: authorize)
+            return .init(rows: try batch.items.map { try JSONDecoder().decode(JSONValue.self, from: $0.data) }, nextPage: nil)
         } else if let (path, data, crypto) = specification {
             let result = try await request(path, data: data, crypto: crypto, context: context)
             try await authorize(); try check(own)

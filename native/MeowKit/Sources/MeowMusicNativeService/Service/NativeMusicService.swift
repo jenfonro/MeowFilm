@@ -247,6 +247,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         generation = next; available = value; epoch = UUID()
         clearTransient()
         for cancel in operations.values { cancel() }
+        await drainSimilarWork()
         await publicPlatforms.revoke()
         await audioFileCache?.cancelPending()
     }
@@ -258,6 +259,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         access.revoke(generation: generation, close: true)
         closed = true; available = false; epoch = UUID(); clearTransient()
         for cancel in operations.values { cancel() }
+        await drainSimilarWork()
         await publicPlatforms.revoke()
         await audioFileCache?.close()
         ownedTransport?.close()
@@ -372,7 +374,8 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     func cancelWork(_ label: String) {
         for (id, value) in operationLabels where value == label { operations[id]?() }
     }
-    func work<T: Sendable>(label: String? = nil, _ body: @escaping @Sendable () async throws -> T) async throws -> T {
+    func work<T: Sendable>(label: String? = nil, draining: Bool = false,
+                          _ body: @escaping @Sendable () async throws -> T) async throws -> T {
         try check()
         let own = epoch, id = UUID(), gate = MusicNativeOperation<T>()
         let task = Task {
@@ -383,11 +386,13 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
             operations.removeValue(forKey: id)
             operationLabels.removeValue(forKey: id)
             access.remove(id)
+            if draining { similarMode.workers.removeValue(forKey: id) }
         }
         let cancel: @Sendable () -> Void = { task.cancel(); gate.finish(.failure(MusicServiceError.cancelled)) }
         operations[id] = cancel
         operationLabels[id] = label
         access.register(id, cancel: cancel)
+        if draining { similarMode.workers[id] = task }
         let timer = Task {
             do { try await Task.sleep(nanoseconds: 30_000_000_000) } catch { return }
             gate.finish(.failure(MusicServiceError.timeout)); task.cancel()
@@ -395,8 +400,10 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         defer { timer.cancel() }
         do {
             let value = try await withTaskCancellationHandler { try await gate.value() } onCancel: { cancel() }
+            if draining { await task.value }
             try check(own); return value
         } catch {
+            if draining { await task.value }
             if !Task.isCancelled, let declaration = error as? MusicSourceDeclarationFailure { throw declaration }
             throw MusicServiceError.sanitized(error)
         }

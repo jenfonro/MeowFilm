@@ -77,4 +77,33 @@ import MeowMusicFeature
             }
         }
     }
+
+    func testRecommendationRevocationKeepsPhysicalFeedbackRegisteredUntilWorkerFinishes() async throws {
+        let provider = MusicAccountFeedbackProviderFixture()
+        let queue = MusicQueueAuthorization(), authorization = MusicPlaybackFeedbackAuthorization()
+        let proof = MusicPlaybackRecommendationProof(occurrenceID: "entry-1", nativeID: "101",
+            source: "moreRcmd", sourceID: "", algorithm: "synthetic-alg", authorization: queue)
+        let target = MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "101",
+            source: "moreRcmd", algorithm: "synthetic-alg", recommendationProof: proof)
+        let channel = MusicAccountFeedbackChannel(platform: .netease, provider: provider,
+            credential: try MusicUpdateProvider.credential(), authorization: authorization)
+        let gate = MusicAccountFeedbackGate(expectation(description: "recommendation feedback in flight"))
+        await provider.holdFeedback(gate)
+        let report = MusicPlaybackFeedbackReport(instanceID: UUID(), target: target, event: .start,
+            duration: 180, listened: 0, mediaListened: 0, position: 0, rate: 1)
+        let task = Task { try await channel.report(report) }
+        await fulfillment(of: [gate.entered], timeout: 3)
+        XCTAssertEqual(authorization.inFlight, 1)
+        queue.revoke()
+        XCTAssertEqual(authorization.inFlight, 1, "cancel is not physical completion")
+        await gate.release()
+        do { _ = try await task.value; XCTFail("revoked recommendation cannot confirm late feedback") }
+        catch {
+            let failure = error as? MusicServiceError
+            XCTAssertTrue(failure == .staleAccess || failure == .cancelled)
+        }
+        XCTAssertEqual(authorization.inFlight, 0)
+        let sent = await provider.received()
+        XCTAssertEqual(sent, [report])
+    }
 }

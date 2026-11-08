@@ -136,4 +136,35 @@ final class MusicNativeFeedbackControllerTests: XCTestCase {
         count = await accounts.beginCount(); XCTAssertEqual(count, 2)
         controller.invalidate()
     }
+
+    func testRecommendationProofKeepsConsentAndOccurrenceGatesAndRevokesPendingFeedback() async {
+        let controller = MusicNativeFeedbackController(), accounts = NativeFeedbackAccounts()
+        let authorization = MusicQueueAuthorization(), gate = NativeMusicGate()
+        let proof = MusicPlaybackRecommendationProof(occurrenceID: "entry-1", nativeID: "101",
+            source: "moreRcmd", sourceID: "", algorithm: "synthetic-alg", authorization: authorization)
+        let target = MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "101",
+            source: "moreRcmd", algorithm: "synthetic-alg", recommendationProof: proof)
+        let enabled = MusicPlaybackFeedbackSettings(revision: 1, platforms: [.netease: .init(enabled: true, generation: 1)])
+        controller.consume(NativeFeedbackFixture.sample(1, at: 0, position: 0, kind: .playing),
+            settings: .init(revision: 0, platforms: [:]), targets: [target], accounts: accounts) { _, _ in }
+        await controller.flush()
+        var starts = await accounts.beginCount(); XCTAssertEqual(starts, 0)
+        controller.consume(NativeFeedbackFixture.sample(1, at: 0, position: 0, kind: .playing,
+            attempt: "foreign", occurrence: "entry-2"), settings: enabled, targets: [target], accounts: accounts) { _, _ in }
+        await controller.flush()
+        starts = await accounts.beginCount(); XCTAssertEqual(starts, 0)
+
+        await accounts.configure(result: .confirmed, gate: gate)
+        controller.consume(NativeFeedbackFixture.sample(1, at: 0, position: 0, kind: .playing,
+            attempt: "live"), settings: enabled, targets: [target], accounts: accounts) { _, _ in }
+        await gate.started()
+        authorization.revoke()
+        await gate.release(); await controller.flush()
+        controller.consume(NativeFeedbackFixture.sample(2, at: 1, position: 1, kind: .stopped,
+            running: false, attempt: "live"), settings: enabled, targets: [target], accounts: accounts) { _, _ in }
+        await controller.flush()
+        let reports = await accounts.recorded(), active = await accounts.activeCount()
+        XCTAssertEqual(reports.map(\.event), [.start], "a revoked pending start cannot later authorize an end")
+        XCTAssertEqual(active, 0)
+    }
 }
