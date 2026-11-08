@@ -96,6 +96,16 @@ public static partial class MusicUiTests
                 Equal(0, requests); Equal(0, sources.Count);
                 Input(Mouse.PreviewMouseDownEvent); Input(Mouse.PreviewMouseUpEvent); await Drain();
                 Equal(1, requests);
+                var menu = (ContextMenu)player.FindName("ModeMenu");
+                ((Button)player.FindName("ModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
+                True(menu.IsOpen, "ordinary mode uses the same observed floating input boundary");
+                Equal(1, sources.Count);
+                var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                menu.Closed += (_, _) => closed.TrySetResult();
+                Input(Mouse.PreviewMouseDownEvent); menu.IsOpen = false;
+                Input(Mouse.PreviewMouseUpEvent);
+                await closed.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
+                Equal(1, requests); Equal(0, sources.Count);
                 surface.RootVisual = null; window.Content = null; await Drain();
                 True(inputField.GetValue(player) is null, "unload releases the input owner");
                 Equal(0, sources.Count);
@@ -367,15 +377,35 @@ public static partial class MusicUiTests
         {
             await using var f = await Fixture.Create();
             var footer = (MusicPlayerView)f.Module.PlayerView;
-            Render(footer, 1000, 100);
+            using var source = new HwndSource(new HwndSourceParameters("player-mode-menu-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                PositionX = -32000, PositionY = -32000, Width = 1000, Height = 100
+            });
+            source.RootVisual = footer; Render(footer, 1000, 100); await Drain();
             var mode = (Button)footer.FindName("ModeButton");
+            var menu = (ContextMenu)footer.FindName("ModeMenu");
             var popup = (System.Windows.Controls.Primitives.Popup)footer.FindName("FmPopup");
             Equal(f.Module.ModeText, System.Windows.Automation.AutomationProperties.GetName(mode));
             True(!f.Module.HasPlaybackFm && !f.Module.CanHeartbeatCurrent, "no active recording implies no current-song heartbeat");
             mode.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            await Drain();
+            Equal(0, f.Calls.Count("music.queue.mode"));
+            True(menu.IsOpen && !popup.IsOpen, "opening ordinary choices does not change the queue");
+            Equal("心动模式,列表循环,单曲循环,随机播放", string.Join(',', menu.Items.OfType<MenuItem>()
+                .Select(System.Windows.Automation.AutomationProperties.GetName)));
+            True(!menu.Items.OfType<MenuItem>().First().IsEnabled, "no current song disables heartbeat");
+            var random = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2));
+            ((IInvokeProvider)new MenuItemAutomationPeer(random).GetPattern(PatternInterface.Invoke)).Invoke();
             await Until(() => f.Calls.Count("music.queue.mode") == 1 && !f.Module.Busy);
             Equal(2, f.Module.Mode);
-            True(!popup.IsOpen, "ordinary mode keeps the native loop command");
+            True(!menu.IsOpen && !popup.IsOpen, "choosing a mode closes its menu");
+            mode.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
+            True(menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2)).IsChecked, "saved random mode is selected");
+            random.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
+            Equal(1, f.Calls.Count("music.queue.mode"));
+            menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 3)).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await Until(() => f.Module.Mode == 3 && !f.Module.Busy);
             await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             True(!f.Module.HasPlaybackFm && !f.Module.CanHeartbeatCurrent, "local recording is never sent to WY heartbeat");
             var more = (Button)footer.FindName("MoreButton");
@@ -383,6 +413,12 @@ public static partial class MusicUiTests
             var heartbeat = more.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "从当前歌曲开始心动"));
             True(!heartbeat.IsEnabled, "disabled native entry remains clearly named");
             more.ContextMenu.IsOpen = false;
+            mode.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
+            var retired = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 1));
+            source.RootVisual = null; await Drain();
+            True(!menu.IsOpen, "unload closes the ordinary mode menu");
+            retired.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
+            Equal(2, f.Calls.Count("music.queue.mode"));
         });
         yield return Case("player first visible frame has prepared artwork and no secondary footer disc", async () =>
         {

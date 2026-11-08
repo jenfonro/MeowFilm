@@ -196,7 +196,8 @@ public sealed partial class MusicRecommendationCoordinator
                 lock (gate) Require(CurrentLocked(s) && s.Returning && s.Navigation == navigation && queue.Epoch == epoch, "STALE_SESSION");
                 var operation = new PendingOperation(Guid.NewGuid().ToString("D"), "restore", [], null, "", false, false, epoch);
                 var result = await owner.ExecuteAsync("music.queue.recommendation.restore",
-                    new { nonce = operation.Nonce, expectedVersion = before.Version, checkpoint = s.Checkpoint }, ct).ConfigureAwait(false);
+                    new { nonce = operation.Nonce, expectedVersion = before.Version, checkpoint = s.Checkpoint,
+                        retainCurrent = s.Config.Kind == "heartbeat" }, ct).ConfigureAwait(false);
                 if (!result.GetProperty("ok").GetBoolean())
                 {
                     string code = Text(result, "code");

@@ -15,6 +15,11 @@ public static class MusicRecommendationLibraryTests
         yield return new("Recommendation owner empty checkpoint restored by one CAS", () => Restore(0));
         yield return new("Recommendation owner singleton retains occurrence context and selection", () => Restore(1));
         yield return new("Recommendation owner full paged queue restore preserves all occurrences", () => Restore(120));
+        yield return new("Recommendation owner heartbeat restore inserts only E after checkpoint B in one CAS", () => RestoreCurrent("middle"));
+        yield return new("Recommendation owner heartbeat restore never duplicates the same occurrence", () => RestoreCurrent("same"));
+        yield return new("Recommendation owner heartbeat restore keeps distinct occurrences of the same recording", () => RestoreCurrent("duplicate"));
+        yield return new("Recommendation owner heartbeat empty checkpoint retains only the current occurrence", () => RestoreCurrent("empty"));
+        yield return new("Recommendation owner heartbeat restore removes retained current from saved next priority", RestoreCurrentPriority);
         yield return new("Recommendation owner enter preserves current seed and one envelope CAS", Seed);
         yield return new("Recommendation owner nonce receipt replay does not write again", Replay);
         yield return new("Recommendation owner unrelated reads preserve a reconciled receipt", UnacceptedReceipt);
@@ -24,6 +29,8 @@ public static class MusicRecommendationLibraryTests
         yield return new("Recommendation owner lost enter ACK explicitly restores real runtime", () => UnknownEnter(true));
         yield return new("Recommendation owner failed restore does not consume checkpoint", () => UnknownRestore(false));
         yield return new("Recommendation owner lost restore ACK consumes only after read reconcile", () => UnknownRestore(true));
+        yield return new("Recommendation owner failed heartbeat restore retains checkpoint and current for retry", () => UnknownRestore(false, true));
+        yield return new("Recommendation owner lost heartbeat restore ACK reconciles retained occurrence without another CAS", () => UnknownRestore(true, true));
         yield return new("Recommendation owner atomic append select and lost ACK never duplicates", Append);
         yield return new("Recommendation owner append preserves original source context and selection", AppendUnselected);
         yield return new("Recommendation owner append checks revision and returns tail occurrences without changing next priority", AppendTailAndVersion);
@@ -69,6 +76,59 @@ public static class MusicRecommendationLibraryTests
             result.AddRange(page.GetProperty("entries").EnumerateArray().Select(x => x.Clone()));
         }
         return J(new { currentId = Current(first), entries = result, mode = N(first, "mode") }).GetRawText();
+    }
+    private static async Task RestoreCurrent(string original)
+    {
+        var store = new Store(); await using var owner = new MusicLibraryOwner(store);
+        if (original != "empty")
+            await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2"), Song(original == "duplicate" ? "5" : "3") },
+                index = 1, context = new { sourceTitle = "Original", sourceType = "search", searchKeyword = "needle",
+                    queueSource = new { id = "source", title = "Original", kind = "search", platform = "wy" } } });
+        var before = await Queue(owner);
+        var entered = await Command(owner, "enter", new { nonce = Nonce(), expectedVersion = N(before, "version"),
+            seedEntryId = original == "empty" ? null : Current(before), songs = new[] { Song("4"), Song("5"), Song("6") },
+            context = new { sourceTitle = "心动模式", sourceType = "playlist", sourceId = "100" } });
+        string current = original == "same" ? Current(before) : entered.GetProperty("entryIds")[1].GetString()!;
+        await Ok(owner, "music.queue.select", new { id = current });
+        var recommendation = await Queue(owner); int writes = store.Writes;
+        var parameters = new { nonce = Nonce(), expectedVersion = N(recommendation, "version"),
+            checkpoint = S(entered, "checkpoint"), retainCurrent = true };
+        await Error(owner, "restore", new { parameters.nonce, expectedVersion = parameters.expectedVersion - 1,
+            parameters.checkpoint, parameters.retainCurrent }, "REVISION_CONFLICT");
+        Check(store.Writes == writes && (await Queue(owner)).GetRawText() == recommendation.GetRawText());
+        var result = await Command(owner, "restore", parameters);
+        var after = await Queue(owner);
+        JsonElement[] expected = original switch
+        {
+            "empty" => [recommendation.GetProperty("current")],
+            "same" => before.GetProperty("entries").EnumerateArray().ToArray(),
+            _ => [before.GetProperty("entries")[0], before.GetProperty("entries")[1],
+                recommendation.GetProperty("current"), before.GetProperty("entries")[2]]
+        };
+        Check(after.GetProperty("entries").EnumerateArray().Select(e => e.GetRawText()).SequenceEqual(expected.Select(e => e.GetRawText())));
+        Check(Current(after) == current && after.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText());
+        Check(store.Writes == writes + 1 && N(after, "version") == N(recommendation, "version") + 1);
+        Check((await Command(owner, "restore", parameters)).GetRawText() == result.GetRawText() && store.Writes == writes + 1);
+        await Error(owner, "restore", new { parameters.nonce, parameters.expectedVersion,
+            parameters.checkpoint, retainCurrent = false }, "INVALID_NONCE");
+        Check(store.Writes == writes + 1);
+    }
+    private static async Task RestoreCurrentPriority()
+    {
+        var store = new Store(); await using var owner = new MusicLibraryOwner(store);
+        await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2") }, index = 0 });
+        var appended = await Ok(owner, "music.queue.append", new { songs = new[] { Song("3") }, next = true });
+        string retained = appended.GetProperty("entryIds")[0].GetString()!;
+        var before = await Queue(owner);
+        var captured = await Command(owner, "capture", new { nonce = Nonce(), expectedVersion = N(before, "version") });
+        await Ok(owner, "music.queue.select", new { id = retained });
+        await Command(owner, "enter", new { nonce = Nonce(), expectedVersion = N(await Queue(owner), "version"),
+            checkpoint = S(captured, "checkpoint"), seedEntryId = retained, songs = new[] { Song("4") } });
+        await Command(owner, "restore", new { nonce = Nonce(), expectedVersion = N(await Queue(owner), "version"),
+            checkpoint = S(captured, "checkpoint"), retainCurrent = true });
+        var after = await Queue(owner);
+        Check(Current(after) == retained && after.GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText());
+        Check(SongId((await Ok(owner, "music.queue.peekNext")).GetProperty("next").GetProperty("song")) == "2");
     }
     private static async Task Seed()
     {
@@ -154,22 +214,29 @@ public static class MusicRecommendationLibraryTests
         if (applied) await Command(owner, "restore", new { nonce = Nonce(), expectedVersion = N(await Queue(owner), "version"), checkpoint = S(confirmed, "checkpoint") });
         var previous = await Ok(owner, "music.queue.previous"); Check(S(previous, "targetId") == a, "runtime shuffle history survives reconcile");
     }
-    private static async Task UnknownRestore(bool applied)
+    private static async Task UnknownRestore(bool applied, bool retainCurrent = false)
     {
         var store = new Store(); await using var owner = new MusicLibraryOwner(store);
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1") }, index = 0 });
         var entered = await Enter(owner); string checkpoint = S(entered, "checkpoint"), nonce = Nonce();
-        var p = new { nonce, expectedVersion = N(await Queue(owner), "version"), checkpoint };
+        var recommendation = await Queue(owner);
+        var p = new { nonce, expectedVersion = N(recommendation, "version"), checkpoint, retainCurrent };
         store.Failure = applied ? 2 : 1; await Error(owner, "restore", p, "COMMIT_UNKNOWN");
         await Error(owner, "discard", new { checkpoint }, "PENDING_WRITE");
         int writes = store.Writes;
         var confirmed = await Command(owner, "reconcile", new { nonce });
         Check(confirmed.GetProperty("applied").GetBoolean() == applied && store.Writes == writes);
-        Check((await Command(owner, "restore", p)).GetProperty("applied").GetBoolean() == applied);
-        var again = new { nonce = Nonce(), expectedVersion = N(await Queue(owner), "version"), checkpoint };
+        Check((await Command(owner, "restore", p)).GetProperty("applied").GetBoolean() == applied && store.Writes == writes);
+        if (!applied) Check((await Queue(owner)).GetProperty("entries").GetRawText() == recommendation.GetProperty("entries").GetRawText() &&
+            Current(await Queue(owner)) == Current(recommendation));
+        var again = new { nonce = Nonce(), expectedVersion = N(await Queue(owner), "version"), checkpoint, retainCurrent };
         if (applied) await Error(owner, "restore", again, "CHECKPOINT_NOT_FOUND");
         else await Command(owner, "restore", again);
-        Check(MusicSongFixture.NativeId((await Queue(owner)).GetProperty("current").GetProperty("song")) == "1");
+        var after = await Queue(owner);
+        Check(SongId(after.GetProperty("current").GetProperty("song")) == (retainCurrent ? "900" : "1"));
+        Check(N(after, "total") == (retainCurrent ? 2 : 1) && store.Writes == writes + (applied ? 0 : 1));
+        if (retainCurrent) Check(Current(after) == Current(recommendation) &&
+            after.GetProperty("entries")[1].GetRawText() == recommendation.GetProperty("current").GetRawText());
     }
     private static async Task Append()
     {
