@@ -35,6 +35,14 @@ public extension MusicViewModel {
     var similarMode: MusicSimilarModeSnapshot? { playbackState.similarMode }
     var canEnterSimilarMode: Bool { playbackState.canEnterSimilarMode }
     var isChangingSimilarMode: Bool { playbackState.isChangingSimilarMode }
+    var isChangingQueueRecommendations: Bool { playbackState.isChangingQueueRecommendations }
+    var queueRecommendations: MusicQueueRecommendationSnapshot? {
+        guard recommendationQueueRevision == state.revision,
+              recommendationAccount == searchAccessGeneration,
+              playbackState.queueRecommendations?.currentEntryID == current?.id,
+              !isFMActive, similarMode?.active != true else { return nil }
+        return playbackState.queueRecommendations
+    }
     var activeHomeFM: MusicHomeAction? { playbackState.activeHomeFM }
 }
 #endif

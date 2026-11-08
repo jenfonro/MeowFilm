@@ -13,7 +13,9 @@ export function createRuntimeClient({ baseUrl, sessionId, requestKey, timeout } 
       return client.request({ ...options, path: `/v1/${id}/${operation}`, body: params, contract, codes });
     },
     upload(module, installationId, sourceRevision, bytes, { basename, ...options } = {}) {
-      if (!Object.hasOwn(contracts, module)) return Promise.reject(new BridgeError('METHOD_NOT_FOUND'));
+      if (!Object.hasOwn(contracts, module) || !contracts[module].upload) {
+        return Promise.reject(new BridgeError('METHOD_NOT_FOUND'));
+      }
       const { contract, codes } = contracts[module];
       return client.request({ ...options, method: 'PUT', raw: true,
         path: `/v1/${module}/sources/${encodeURIComponent(installationId)}/${sourceRevision}` +

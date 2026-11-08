@@ -4,6 +4,12 @@ import Foundation
 import MeowMusicFeature
 
 extension NativeMusicService {
+    var recommendationPendingTail: String? {
+        if let session = similarMode.active, session.continueEnabled, session.pending != nil { return session.pendingTail }
+        if let item = similarMode.queue, item.continueEnabled, item.pending != nil { return item.pendingTail }
+        return nil
+    }
+
     func nextID(_ d: MusicDocument, direction: MusicDirection, reason: MusicAdvanceReason = .manual, preview: Bool = false) -> String? {
         let q = d.queue, rows = q["entries"].array, current = q["currentId"].string, mode = d.playback["mode"].int
         let failed = Set(q["failed"].strings)
@@ -12,8 +18,8 @@ extension NativeMusicService {
         if rows.isEmpty || valid.isEmpty { return nil }
         if direction == .previous && mode == 2 { return q["history"].strings.reversed().first { $0 != current && validSet.contains($0) } }
         if direction == .next, let priority = q["priority"].strings.first(where: validSet.contains) { return priority }
-        if direction == .next, mode == 1, similarMode.active?.pending != nil,
-           similarMode.active?.pendingTail == current, rows.last?["id"].string == current { return nil }
+        if direction == .next, mode == 1, recommendationPendingTail == current,
+           rows.last?["id"].string == current { return nil }
         if direction == .next && mode == 3 && reason == .ended && valid.contains(current) { return current }
         if mode == 2 {
             let options = valid.filter { $0 != current }
@@ -37,6 +43,8 @@ extension NativeMusicService {
         let policy = MusicModel.policy(d.playback), id = d.queue["currentId"].string
         let next = nextID(d, direction: .next, preview: true)
         let previous = nextID(d, direction: .previous, preview: true)
+        let waitingForRecommendations = recommendationPendingTail == id &&
+            d.queue["entries"].array.last?["id"].string == id && [0, 1].contains(d.playback["mode"].int)
         // Availability may inspect a deterministic candidate, but a visual
         // preview must never pretend it is shuffle's eventual random result.
         let priority = Set(d.queue["priority"].strings)
@@ -48,7 +56,7 @@ extension NativeMusicService {
             lyricsEnabled: d.playback["lyricsEnabled"].bool, showTranslation: d.playback["showTranslation"].bool,
             officialSources: MusicModel.officialSources(d.playback), currentId: id.isEmpty ? nil : id, total: d.queue["entries"].array.count,
             position: d.playback["position"]["seconds"].number,
-            canNext: next != nil, canPrevious: previous != nil,
+            canNext: next != nil || waitingForRecommendations, canPrevious: previous != nil,
             nextPreviewID: randomNext ? nil : next, previousPreviewID: previous,
             fmNextPreviewID: fmNext(d, direction: .next), fmPreviousPreviewID: fmNext(d, direction: .previous),
             sourceCollectionID: d.queue["source"]["id"].string.isEmpty ? nil : d.queue["source"]["id"].string,

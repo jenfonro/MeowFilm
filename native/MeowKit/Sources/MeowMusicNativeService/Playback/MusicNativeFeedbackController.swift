@@ -17,7 +17,11 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         init(target: MusicPlaybackFeedbackTarget, setting: MusicPlaybackFeedbackSetting,
              authorization: MusicPlaybackFeedbackAuthorization) {
             self.target = target; self.setting = setting; self.authorization = authorization
+            try? target.recommendationProof?.authorization.register(id) { [weak authorization] in
+                authorization?.revoke()
+            }
         }
+        deinit { target.recommendationProof?.authorization.remove(id) }
         func revoke() { authorization.revoke(); lease?.revoke() }
     }
     private let lock = NSLock()
@@ -175,7 +179,15 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                     let setting = settings.platforms[target.platform] ?? .init()
                     guard setting.enabled, active[target.platform] == nil, spent[target.platform] != setting.generation,
                           target.platform != .kugou || sample.duration > 0 && sample.rate >= 0.25 else { continue }
-                    let gate = MusicPlaybackFeedbackAuthorization { try await authorize(target.platform, setting.generation) }
+                    if let proof = target.recommendationProof {
+                        guard proof.occurrenceID == sample.occurrenceID, proof.authorization.isActive else { continue }
+                    }
+                    let gate = MusicPlaybackFeedbackAuthorization {
+                        try target.recommendationProof?.check(nativeID: target.nativeID, source: target.source,
+                            sourceID: target.sourceID, algorithm: target.algorithm)
+                        try await authorize(target.platform, setting.generation)
+                        try target.recommendationProof?.authorization.check()
+                    }
                     let item = Listen(target: target, setting: setting, authorization: gate)
                     active[target.platform] = item; work[item.id] = item
                     spent[target.platform] = setting.generation

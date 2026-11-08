@@ -15,12 +15,15 @@
 - [source CatVod Spider 输入契约](runtime/cat-source-runtime.md)
 - [来源 capability ABI（共同契约唯一来源）](runtime/source-capability-abi.md)
 - [Runtime bridge](runtime/runtime-bridge.md)
+- [TMDB／豆瓣只读数据、持久设置与图片流](runtime/metadata-data.md)
+- [内置网盘能力 pan.runtime.v1](runtime/pan-runtime.md)
 - [外部 LX、CatNode 与 Reader／CatVod 来源动态验收](runtime/source-acceptance.md)
 
 ## iOS
 
 - [架构与模块职责](ios/architecture.md)
 - [音乐能力与统一音源管理](ios/music.md)
+- [网易云漫游、心动与队列推荐](ios/music-recommendations.md)
 - [影视首页与详情](ios/film.md)
 - [影视设置、原生规则与来源管理](ios/film-settings.md)
 - [本地文档存储](ios/storage.md)

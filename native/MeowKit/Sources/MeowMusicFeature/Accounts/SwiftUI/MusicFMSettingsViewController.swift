@@ -6,6 +6,7 @@ import MeowUI
 public final class MusicFMSettingsViewController: HostingPageViewController<MusicFMSettingsContent> {
     private let owner: MusicViewModel
     private let model: MusicFMSettingsViewModel
+    private let account: UUID
     private var icons: [String: UIImage] = [:]
     private var rendered: (MusicFMSettingsState, PageTheme)?
     var onSelected: @MainActor () -> Void
@@ -16,6 +17,7 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
         onSelected: @escaping @MainActor () -> Void = {}
     ) {
         owner = model
+        account = model.searchAccessGeneration
         self.model = MusicFMSettingsViewModel(owner: model)
         self.onSelected = onSelected
         super.init(
@@ -34,7 +36,7 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
             image: PageIcon.image(.close, size: 18), accessibilityLabel: "关闭"
         ) { [weak self] in self?.close() })
         observe(model) { [weak self] in self?.render() }
-        observe(owner.accessChanges) { [weak self] in self?.syncAccess() }
+        observe(owner.searchAccessChanges) { [weak self] in self?.syncAccess() }
         observe(owner.playbackChanges) { [weak self] in self?.render() }
         rendered = nil
         render()
@@ -45,7 +47,7 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
     public override func pageDidBecomeVisible() { render() }
 
     public override func pageDidFinishAppearing() {
-        if model.error != nil { render() }
+        render()
     }
 
     public override func pageDidBecomeInactive() { model.close() }
@@ -59,13 +61,18 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
         guard isPageActive else { return }
         model.setAccess(
             available: owner.isAvailable && !owner.isClosed,
-            generation: owner.accountAccessGeneration
+            generation: owner.searchAccessGeneration
         )
         render()
     }
 
     private func render() {
         guard isViewLoaded else { return }
+        if account != owner.searchAccessGeneration || !owner.isAvailable || owner.isClosed || !owner.isFMActive {
+            model.close()
+            if isPageVisible { close() }
+            return
+        }
         let state = MusicFMSettingsState(
             active: model.hasAccess ? owner.activeHomeFM : nil,
             available: model.hasAccess && owner.isFMActive,
@@ -81,9 +88,9 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
             ))
         }
         if model.hasAccess, let error = model.error {
-            let access = owner.accountAccessGeneration
+            let access = owner.searchAccessGeneration
             showError(error, acknowledged: { [weak self] in
-                guard let self, self.owner.accountAccessGeneration == access else { return }
+                guard let self, self.owner.searchAccessGeneration == access else { return }
                 self.model.dismissError(error)
             })
         }
@@ -93,6 +100,11 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
         }
     }
 
-    private func close() { dismiss(animated: true) }
+    private func close() {
+        let container = navigationController ?? self
+        guard !container.isBeingPresented, !container.isBeingDismissed,
+              let presenter = container.presentingViewController else { return }
+        presenter.dismiss(animated: true)
+    }
 }
 #endif

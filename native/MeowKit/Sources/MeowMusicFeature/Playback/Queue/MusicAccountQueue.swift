@@ -50,6 +50,15 @@ public final class MusicQueueAuthorization: @unchecked Sendable, CustomStringCon
     public func check() throws {
         try perform {}
     }
+    /// The owner removes this registration only after its physical worker has
+    /// finished. Revocation cancels work but does not stand in for that drain.
+    public func register(_ id: UUID, cancel: @escaping @Sendable () -> Void) throws {
+        do { try perform { children[id] = cancel } }
+        catch { cancel(); throw error }
+    }
+    public func remove(_ id: UUID) {
+        removeChild(id)
+    }
     public func perform<T>(_ operation: () throws -> T) throws -> T {
         if let parent { return try parent.perform { try performLocal(operation) } }
         return try performLocal(operation)

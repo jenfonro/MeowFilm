@@ -31,9 +31,9 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         let pending = await service.similarMode.active?.pending
         await pending?.value
         let queue = try await service.queue(), saved = try MusicDocument(store.snapshot().0, runID: "saved")
-        XCTAssertEqual(queue.entries.count, 2004)
+        XCTAssertEqual(queue.entries.count, 2005)
         XCTAssertEqual(queue.entries.prefix(2001).map(\.id), original.map { $0["id"].string })
-        XCTAssertEqual(queue.entries.suffix(3).compactMap { $0.track.sources.first?.nativeId }, ["301", "302", "303"])
+        XCTAssertEqual(queue.entries.suffix(4).compactMap { $0.track.sources.first?.nativeId }, ["301", "302", "303", "304"])
         XCTAssertEqual(saved.queue["similar"]["batches"].array.count, 2002)
         XCTAssertEqual(saved.queue["similar"]["attempted"].array.count, 2002)
         let requests = await owner.requests
@@ -61,6 +61,66 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         XCTAssertEqual(store.snapshot().2, before.2 + 1)
         let queue = try await service.queue()
         XCTAssertEqual(queue.entries.count, 2002)
+        await service.close()
+    }
+
+    func testCurrentHeartbeatUsesActualOccurrenceDespiteMetadataCollisionAndHomeSessionShortcut() async throws {
+        let owner = SimilarModeAccountFixture([["201", "202"], ["301", "202", "302", "303", "304"]],
+                                              metadata: true)
+        let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try fixtureDocument()), accounts: owner)
+        let home = try await service.startSimilarMode(.heartbeat)
+        let homeQueue = try await service.queue(), current = try XCTUnwrap(homeQueue.entries.last)
+        let selected = try await service.changeQueue(.select(current.id), expectedRevision: home.state.revision)
+        let playing = try await resolve(service, id: current.id)
+        _ = try await service.recordSimilarPlaybackFact(fact(playing, .playing))
+        await owner.rename("202", to: "Changed response title")
+        let result = try await service.startSimilarMode(.currentHeartbeat(occurrenceID: current.id,
+                                                                         expectedRevision: selected.revision))
+        let queue = try await service.queue()
+        XCTAssertEqual(result.action, .keepCurrent)
+        XCTAssertEqual(queue.currentId, current.id)
+        XCTAssertEqual(queue.entries.count, 5)
+        XCTAssertEqual(queue.entries[1].id, current.id)
+        XCTAssertEqual(queue.entries[1].track.title, current.track.title)
+        let retained = await service.attempt?.id
+        XCTAssertEqual(retained, playing.attemptId)
+        let snapshot = try await service.similarModeSnapshot()
+        XCTAssertFalse(try XCTUnwrap(snapshot).continueEnabled)
+        let requests = await owner.requests
+        XCTAssertEqual(requests, [.heartbeat(lastID: nil, fromHome: true, context: nil),
+                                  .heartbeat(lastID: "202", fromHome: false, context: nil)])
+        let live = await service.liveRecommendation(entryID: current.id)
+        XCTAssertEqual(live?.value["feedbackSource"].string, "aiMode")
+        let returned = try await service.exitSimilarMode()
+        XCTAssertEqual(returned.action, .restoreOnly, "returning to a different checkpoint must not keep current audio")
+        let original = try await service.queue()
+        XCTAssertEqual(original.entries.map(\.id), ["entry-1", "entry-2"])
+        XCTAssertEqual(original.currentId, "entry-1")
+        await service.close()
+    }
+
+    func testCurrentHeartbeatRejectsWrongOccurrenceAndRevisionAndDoesNotGrantUnreturnedSeedProof() async throws {
+        let owner = SimilarModeAccountFixture([["301", "302", "303", "304"]], metadata: true)
+        let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try fixtureDocument()), accounts: owner)
+        let before = try await service.state()
+        for start in [MusicSimilarModeStart.currentHeartbeat(occurrenceID: "entry-2", expectedRevision: before.revision),
+                      .currentHeartbeat(occurrenceID: "entry-1", expectedRevision: before.revision + 1)] {
+            do { _ = try await service.startSimilarMode(start); XCTFail("stale entrance") }
+            catch { XCTAssertTrue([MusicServiceError.targetChanged, .staleRevision].contains(MusicServiceError.sanitized(error))) }
+        }
+        let unopened = await owner.openings
+        XCTAssertEqual(unopened, 0)
+        let result = try await service.startSimilarMode(.currentHeartbeat(occurrenceID: "entry-1",
+                                                                         expectedRevision: before.revision))
+        XCTAssertEqual(result.state.total, 5)
+        let seedProof = await service.liveRecommendation(entryID: "entry-1")
+        XCTAssertNil(seedProof, "retaining current audio does not claim it was in the response")
+        let queue = try await service.queue()
+        for entry in queue.entries.dropFirst() {
+            let proof = await service.liveRecommendation(entryID: entry.id)
+            XCTAssertEqual(proof?.value["songId"].id, entry.track.sources.first?.nativeId)
+            XCTAssertEqual(proof?.value["feedbackSource"].string, "aiMode")
+        }
         await service.close()
     }
 
@@ -114,7 +174,8 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         let before = try await service.queue()
         let previewValue = try await service.previewSimilarMode()
         let preview = try XCTUnwrap(previewValue)
-        XCTAssertFalse(preview.active); XCTAssertEqual(preview.candidates.count, 2)
+        XCTAssertFalse(preview.active); XCTAssertFalse(preview.continueEnabled)
+        XCTAssertEqual(preview.candidates.count, 3, "the first batch includes the actual current recording")
         let entered = try await service.enterSimilarMode()
         XCTAssertEqual(entered.action, .keepCurrent); XCTAssertEqual(entered.state.currentId, "entry-1")
         let attempt = await service.attempt?.id
@@ -122,6 +183,7 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         let liveValue = try await service.similarModeSnapshot()
         let live = try XCTUnwrap(liveValue)
         XCTAssertTrue(live.active); XCTAssertEqual(live.batches.count, 1)
+        XCTAssertFalse(live.continueEnabled)
         let exited = try await service.exitSimilarMode()
         XCTAssertEqual(exited.action, .keepCurrent)
         let restored = try await service.queue(), retained = await service.attempt?.id
@@ -139,6 +201,8 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
             qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         _ = try await service.startSimilarMode(.heartbeat)
+        let enabledValue = try await service.similarModeSnapshot()
+        try await service.setSimilarContinue(true, snapshotID: XCTUnwrap(enabledValue).id)
         let queue = try await service.queue(), tail = try XCTUnwrap(queue.entries.last)
         _ = try await service.changeQueue(.select(tail.id), expectedRevision: queue.revision)
         let candidate = try await resolve(service, id: tail.id)
@@ -159,7 +223,7 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         controlledStore.afterNextRead { Task { await gate.release() } }
         let result = try await service.advance(.next, reason: .ended, expectedRevision: state.revision)
         let after = try await service.queue()
-        XCTAssertEqual(after.entries.count, 5, "tail adds at most three fresh songs")
+        XCTAssertEqual(after.entries.count, 6, "the complete fresh tail batch is appended")
         XCTAssertEqual(result.selectedId, after.entries[2].id)
         let requests = await owner.requests
         XCTAssertEqual(requests.last, .queueRecommendations(songIDs: ["201", "202"], currentPlaySongID: "202"))
@@ -173,6 +237,8 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         let owner = SimilarModeAccountFixture([["201"], ["301"], ["401"]])
         let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try fixtureDocument()), accounts: owner)
         _ = try await service.startSimilarMode(.songRoaming(sourceIDs: ["100"], sourceName: "Seed"))
+        let enabledValue = try await service.similarModeSnapshot()
+        try await service.setSimilarContinue(true, snapshotID: XCTUnwrap(enabledValue).id)
         let queue = try await service.queue(), candidate = try await resolve(service, id: XCTUnwrap(queue.currentId))
         let gate = NativeMusicGate(); await owner.suspendNext(gate)
         _ = try await service.recordSimilarPlaybackFact(fact(candidate, .playing))
@@ -288,21 +354,33 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
     }
 }
 
-private actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativeSimilarModeProviding {
+actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativeSimilarModeProviding {
     var requests: [MusicNativeSimilarModeRequest] = []
     var batches: [[String]]
     var nextGate: NativeMusicGate?
     var leases: [UUID: MusicAccountQueueLease] = [:]
     var openings = 0
-    init(_ batches: [[String]]) { self.batches = batches }
-    nonisolated static func track(_ id: String) -> MusicNativeTrackData {
-        .init(platform: "wy", data: MJ.obj([("songmid", .string(id)),
-            ("name", .string("Song " + id)), ("singer", .string("Synthetic")),
+    var endings = 0
+    var activeRequests = 0
+    var hasMore: [Bool?]
+    let metadata: Bool
+    var names: [String: String]
+    var nextFailure: MusicServiceError?
+    init(_ batches: [[String]], hasMore: [Bool?] = [], metadata: Bool = false, names: [String: String] = [:]) {
+        self.batches = batches; self.hasMore = hasMore; self.metadata = metadata; self.names = names
+    }
+    nonisolated static func track(_ id: String, name: String? = nil, recommendation: MJ = .null) -> MusicNativeTrackData {
+        var song = MJ.obj([("songmid", .string(id)),
+            ("name", .string(name ?? "Song " + id)), ("singer", .string("Synthetic")),
             ("albumName", .string("Album")), ("duration", .n(180)),
-            ("types", .array([.obj([("type", .string("128k"))])]))]).bytes)
+            ("types", .array([.obj([("type", .string("128k"))])]))])
+        if recommendation != .null { song["_recommendation"] = recommendation }
+        return .init(platform: "wy", data: song.bytes)
     }
     func count() -> Int { requests.count }
     func suspendNext(_ gate: NativeMusicGate) { nextGate = gate }
+    func failNext(_ error: MusicServiceError) { nextFailure = error }
+    func rename(_ id: String, to name: String) { names[id] = name }
     func revoke() { for lease in leases.values { lease.revoke() } }
     func beginAccountQueue(platform: MusicAccountPlatform) -> MusicAccountQueueLease {
         openings += 1
@@ -312,17 +390,40 @@ private actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativ
         guard leases[lease.id] === lease else { throw MusicServiceError.staleAccess }
         try lease.authorization.check()
     }
-    func endAccountQueue(_ lease: MusicAccountQueueLease) { leases.removeValue(forKey: lease.id)?.revoke() }
+    func endAccountQueue(_ lease: MusicAccountQueueLease) {
+        endings += 1; leases.removeValue(forKey: lease.id)?.revoke()
+    }
     func similarModeScope(_ lease: MusicAccountQueueLease) throws -> String {
         try checkAccountQueue(lease); return "synthetic-scope"
     }
     func similarModeBatch(_ lease: MusicAccountQueueLease, request: MusicNativeSimilarModeRequest) async throws -> MusicNativeSimilarModeBatch {
         try checkAccountQueue(lease); requests.append(request)
         let ids = batches.isEmpty ? [] : batches.removeFirst(), gate = nextGate; nextGate = nil
+        let more = hasMore.isEmpty ? nil : hasMore.removeFirst()
+        let failure = nextFailure; nextFailure = nil
+        activeRequests += 1
+        defer { activeRequests -= 1 }
         if let gate { await gate.wait() }
+        if let failure { throw failure }
         // Deliberately noncooperative response: NativeMusicService's lease and
         // request identity must still reject this if it was revoked/cancelled.
-        return .init(items: ids.map(Self.track), heartbeatContext: .init(playlistID: "900", seedID: "100"))
+        let source: String, feedbackSource: String, sourceID: String
+        let context: MusicSimilarHeartbeatContext?
+        switch request {
+        case .heartbeat:
+            source = "heartbeat"; feedbackSource = "aiMode"; sourceID = "900"
+            context = .init(playlistID: "900", seedID: "100")
+        case .songRoaming:
+            source = "similar"; feedbackSource = ""; sourceID = ""; context = nil
+        case .queueRecommendations:
+            source = "moreRcmd"; feedbackSource = "synthetic_source_map"; sourceID = ""; context = nil
+        }
+        return .init(items: ids.map { id in
+            Self.track(id, name: names[id], recommendation: metadata ? .obj([
+                ("songId", .string(id)), ("alg", .string("alg-" + id)), ("source", .string(source)),
+                ("sourceId", .string(sourceID)), ("feedbackSource", .string(feedbackSource))
+            ]) : .null)
+        }, heartbeatContext: context, hasMore: more)
     }
     func accountQueuePage(_ lease: MusicAccountQueueLease, kind: MusicAccountQueueKind,
                           cursor: String?) throws -> MusicNativeTrackPage { throw MusicServiceError.unsupported }
@@ -339,7 +440,7 @@ private actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativ
 }
 
 /// Deterministic read/commit boundaries, without timers or scheduling guesses.
-private final class SimilarModeControlledDocument: MusicNativeDocumentStoring, @unchecked Sendable {
+final class SimilarModeControlledDocument: MusicNativeDocumentStoring, @unchecked Sendable {
     private let backing: NativeMusicMemoryDocument
     private let lock = NSLock()
     private var cancelNext = false

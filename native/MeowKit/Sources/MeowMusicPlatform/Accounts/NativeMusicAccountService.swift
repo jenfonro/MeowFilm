@@ -397,7 +397,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         for operation in operations.values where operation.platform == platform { operation.cancel() }
         notifyAccountSession(platform)
     }
-    private func run<T: Sendable>(_ platform: MusicAccountPlatform,
+    private func run<T: Sendable>(_ platform: MusicAccountPlatform, queueAuthorization: MusicQueueAuthorization? = nil,
                                   _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
         try check()
         let id = UUID(), own = epoch, gate = MusicAccountOperation<T>()
@@ -412,6 +412,11 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             task.cancel(); gate.finish(.failure(MusicServiceError.cancelled))
         }
         operations[id] = (platform, cancel)
+        if let queueAuthorization {
+            do { try queueAuthorization.register(id, cancel: cancel) }
+            catch { cancel(); await task.value; throw safe(error) }
+        }
+        defer { queueAuthorization?.remove(id) }
         let timeout = Task {
             do { try await Task.sleep(nanoseconds: 30_000_000_000) }
             catch { return }
@@ -420,8 +425,13 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         defer { timeout.cancel() }
         do {
             let result = try await withTaskCancellationHandler { try await gate.value() } onCancel: { cancel() }
+            if let queueAuthorization {
+                await task.value
+                try queueAuthorization.check()
+            }
             try check(own); return result
         } catch {
+            if queueAuthorization != nil { await task.value }
             if let sms = error as? MusicSMSFailure { throw sms }
             throw safe(error)
         }
@@ -440,8 +450,9 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         await drainCacheLifecycle()
     }
     private func authenticated<T: Sendable>(_ platform: MusicAccountPlatform, token: AccountSessionToken, own: UUID, revision: Int,
+                                            queueAuthorization: MusicQueueAuthorization? = nil,
                                             _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
-        do { return try await run(platform, operation) }
+        do { return try await run(platform, queueAuthorization: queueAuthorization, operation) }
         catch {
             if safe(error).isAuthenticationFailure, epoch == own, revisions[platform, default: 0] == revision,
                tokens[platform] == token, validated.contains(platform) {
@@ -1464,8 +1475,10 @@ extension NativeMusicAccountService: MusicNativeAccountQueueProviding {
                   observed.credential == entry.credential.credential else { throw MusicServiceError.staleResult }
         } catch {
             // A forged object with a copied UUID cannot revoke the real lease.
-            if accountQueueBindings[lease.id]?.lease === lease { endAccountQueue(lease) }
-            throw safe(error)
+            // Cancelling one read does not invalidate its account binding.
+            let failure = safe(error)
+            if failure != .cancelled, accountQueueBindings[lease.id]?.lease === lease { endAccountQueue(lease) }
+            throw failure
         }
     }
 
@@ -2724,7 +2737,8 @@ extension NativeMusicAccountService: MusicNativeSimilarModeProviding {
             // Fresh provider work on this exact lease. No home-action page
             // cache, session(), refresh, replacement account, or fallback FM.
             let result = try await authenticated(lease.platform, token: entry.credential.token,
-                                                own: entry.epoch, revision: entry.revision) {
+                                                own: entry.epoch, revision: entry.revision,
+                                                queueAuthorization: lease.authorization) {
                 try await provider.similarMode(request, credential: entry.credential.credential) { [weak self] in
                     guard let self else { throw MusicServiceError.closed }
                     try await self.checkAccountQueue(lease)
@@ -2733,7 +2747,6 @@ extension NativeMusicAccountService: MusicNativeSimilarModeProviding {
             try await checkAccountQueue(lease)
             return try lease.authorization.perform {
                 _ = try similarModeBinding(lease)
-                guard result.items.count <= 1000 else { throw MusicServiceError.limit }
                 var bytes = 0
                 for item in result.items {
                     guard item.platform == "wy" else { throw MusicServiceError.targetChanged }

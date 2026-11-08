@@ -5,6 +5,11 @@ import { dirname, join } from 'node:path';
 import { verifyAppStructure } from '../scripts/windows/verify-app-structure.mjs';
 import { temporaryRoot, assertOwnedPath } from '../scripts/windows/working-paths.mjs';
 
+const metadataFiles = [
+  'modules/metadata-data.mjs', 'modules/metadata/douban.mjs', 'modules/metadata/network.mjs',
+  'modules/metadata/settings.mjs', 'modules/metadata/tmdb.mjs',
+];
+
 function fixture(t) {
   mkdirSync(temporaryRoot, { recursive: true });
   const source = mkdtempSync(join(temporaryRoot, 'app-structure-'));
@@ -18,12 +23,15 @@ function fixture(t) {
   };
   write('apps/runtime/bootstrap.mjs', "import './modules/music-script.mjs';");
   write('apps/runtime/entry.mjs', "export { createRuntime } from './bootstrap.mjs';");
+  write('apps/runtime/pan-entry.mjs', 'export {};');
   write('apps/runtime/client.mjs', 'export {};');
   write('apps/runtime/contracts.mjs', 'export {};');
   write('apps/runtime/modules/source-candidates.mjs', 'export {};');
   write('apps/runtime/modules/music-script.mjs', 'export {};');
   write('apps/runtime/modules/cat-script.mjs', 'export {};');
   write('apps/runtime/modules/source-runtime.mjs', 'export {};');
+  write('apps/runtime/modules/pan-runtime.mjs', 'export {};');
+  for (const file of metadataFiles) write(`apps/runtime/${file}`, 'export {};');
   write('apps/windows/runtime/bootstrap.mjs', "import { Socket } from 'node:net';");
   write('apps/windows/runtime/entries/aggregate.mjs',
     "import '../bootstrap.mjs';\nimport '../../../runtime/entry.mjs';");
@@ -38,6 +46,66 @@ test('checks relative imports and resources in the declared source tree', t => {
   assert.equal(result.relativeImports, 4);
   assert.equal(result.resourceReferences, 1);
 });
+
+test('shared metadata sources and neutral HTTP imports fit the exact runtime inventory', t => {
+  const f = fixture(t);
+  f.write('apps/runtime/modules/metadata-data.mjs', `
+    import '../contracts.mjs';
+    import './metadata/settings.mjs';
+    import './metadata/network.mjs';
+    import './metadata/tmdb.mjs';
+    import './metadata/douban.mjs';
+  `);
+  f.write('apps/runtime/modules/metadata/network.mjs', `
+    import 'node:http';
+    import 'node:https';
+    import '@meowfilm/script-host';
+  `);
+  const result = verifyAppStructure(f.source);
+  assert.equal(result.relativeImports, 9);
+  assert.deepEqual(result.sourceFiles.filter(path => path.startsWith('apps/runtime/')), [
+    'apps/runtime/bootstrap.mjs', 'apps/runtime/client.mjs', 'apps/runtime/contracts.mjs', 'apps/runtime/entry.mjs',
+    'apps/runtime/modules/cat-script.mjs', ...metadataFiles.map(file => `apps/runtime/${file}`),
+    'apps/runtime/modules/music-script.mjs', 'apps/runtime/modules/pan-runtime.mjs',
+    'apps/runtime/modules/source-candidates.mjs', 'apps/runtime/modules/source-runtime.mjs',
+    'apps/runtime/pan-entry.mjs',
+  ]);
+});
+
+test('shared pan entry and public workspace import coexist with metadata sources', t => {
+  const f = fixture(t);
+  f.write('apps/runtime/pan-entry.mjs',
+    "export { createPanRuntimeModule } from './modules/pan-runtime.mjs';");
+  f.write('apps/runtime/modules/pan-runtime.mjs', `
+    import '@meowfilm/pan-runtime';
+    import '../contracts.mjs';
+  `);
+  assert.equal(verifyAppStructure(f.source).relativeImports, 6);
+});
+
+for (const file of [...metadataFiles, 'modules/pan-runtime.mjs', 'pan-entry.mjs']) {
+  test(`shared runtime inventory requires ${file}`, t => {
+    const f = fixture(t);
+    rmSync(join(f.source, 'apps/runtime', file));
+    assert.throws(() => verifyAppStructure(f.source), /missing runtime source: apps\/runtime/);
+  });
+}
+
+for (const directory of ['unlisted', 'modules/unlisted', 'modules/metadata/unlisted']) {
+  test(`shared runtime rejects the empty unlisted directory ${directory}`, t => {
+    const f = fixture(t);
+    mkdirSync(join(f.source, 'apps/runtime', directory));
+    assert.throws(() => verifyAppStructure(f.source), /unexpected runtime source: apps\/runtime/);
+  });
+}
+
+for (const file of ['unlisted-helper.mjs', 'modules/metadata/unlisted-helper.mjs']) {
+  test(`shared runtime rejects the unlisted file ${file}`, t => {
+    const f = fixture(t);
+    f.write(`apps/runtime/${file}`, 'export {};');
+    assert.throws(() => verifyAppStructure(f.source), /unexpected runtime source: apps\/runtime/);
+  });
+}
 
 test('Windows scope ignores other-platform sources and generated-runtime templates', t => {
   const f = fixture(t);
@@ -133,6 +201,25 @@ test('shared runtime cannot create a platform transport directly', t => {
   f.write('apps/runtime/modules/music-script.mjs', "import { Socket } from 'node:net';");
   assert.throws(() => verifyAppStructure(f.source), /shared runtime platform import/);
 });
+
+for (const specifier of ['node:net', 'node:fs', 'node:child_process',
+  '@meowfilm/script-host/src/host.js', '@meowfilm/pan-runtime/src/index.js']) {
+  test(`metadata helpers cannot bypass public imports with ${specifier}`, t => {
+    const f = fixture(t);
+    f.write('apps/runtime/modules/metadata/network.mjs', `import '${specifier}';`);
+    assert.throws(() => verifyAppStructure(f.source), /shared runtime platform import/);
+  });
+}
+
+for (const platform of ['windows', 'ios']) {
+  test(`metadata helpers cannot import the ${platform} transport`, t => {
+    const f = fixture(t);
+    f.write(`apps/${platform}/runtime/bootstrap.mjs`, 'export {};');
+    f.write('apps/runtime/modules/metadata/network.mjs',
+      `import '../../../${platform}/runtime/bootstrap.mjs';`);
+    assert.throws(() => verifyAppStructure(f.source), /shared runtime platform dependency/);
+  });
+}
 
 test('Windows runtime contains only the platform bootstrap and thin entry', t => {
   const f = fixture(t);

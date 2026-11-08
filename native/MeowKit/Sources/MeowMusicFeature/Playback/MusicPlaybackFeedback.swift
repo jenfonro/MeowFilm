@@ -49,16 +49,41 @@ public protocol MusicPlaybackFeedbackSettingsServing: Sendable {
                              expectedRevision: Int) async throws -> MusicPlaybackFeedbackSettings
 }
 
+/// Non-persistent provenance for one actually admitted queue occurrence. The
+/// recommendation owner supplies this only after its protected queue commit.
+public final class MusicPlaybackRecommendationProof: Sendable, Equatable {
+    public let occurrenceID: String, nativeID: String
+    public let source: String, sourceID: String, algorithm: String
+    public let authorization: MusicQueueAuthorization
+    public init(occurrenceID: String, nativeID: String, source: String, sourceID: String,
+                algorithm: String, authorization: MusicQueueAuthorization) {
+        self.occurrenceID = occurrenceID; self.nativeID = nativeID
+        self.source = source; self.sourceID = sourceID; self.algorithm = algorithm
+        self.authorization = authorization
+    }
+    public func check(nativeID: String, source: String, sourceID: String, algorithm: String) throws {
+        try authorization.check()
+        guard self.nativeID == nativeID, self.source == source,
+              self.sourceID == sourceID, self.algorithm == algorithm else { throw MusicServiceError.targetChanged }
+    }
+    public static func == (lhs: MusicPlaybackRecommendationProof, rhs: MusicPlaybackRecommendationProof) -> Bool {
+        lhs === rhs
+    }
+}
+
 public struct MusicPlaybackFeedbackTarget: Sendable, Equatable {
     public let platform: MusicAccountPlatform
     public let nativeID: String
     public let mixsongID: String?
     public let source: String, sourceID: String, algorithm: String
     public let automatic: Bool
+    public let recommendationProof: MusicPlaybackRecommendationProof?
     public init(platform: MusicAccountPlatform, nativeID: String, mixsongID: String? = nil,
-                source: String = "", sourceID: String = "", algorithm: String = "", automatic: Bool = false) {
+                source: String = "", sourceID: String = "", algorithm: String = "", automatic: Bool = false,
+                recommendationProof: MusicPlaybackRecommendationProof? = nil) {
         self.platform = platform; self.nativeID = nativeID; self.mixsongID = mixsongID
         self.source = source; self.sourceID = sourceID; self.algorithm = algorithm; self.automatic = automatic
+        self.recommendationProof = recommendationProof
     }
 }
 public struct MusicPlaybackFeedbackReport: Sendable, Equatable {

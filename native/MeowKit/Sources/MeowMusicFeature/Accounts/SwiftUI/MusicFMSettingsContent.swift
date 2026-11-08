@@ -67,6 +67,7 @@ public struct MusicFMSettingsContent: View {
         .buttonStyle(.plain)
         .disabled(!state.available || state.pendingChoice != nil)
         .accessibilityLabel(choice.title)
+        .accessibilityIdentifier("music.fm.choice." + choice.id)
         .accessibilityValue(state.pendingChoice == choice.id ? "正在切换" : "")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }

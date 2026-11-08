@@ -6,7 +6,8 @@
   "workspaces": [
     "packages/runtime-bridge",
     "packages/script-host",
-    "packages/source-runtime"
+    "packages/source-runtime",
+    "packages/pan-runtime"
   ],
   "engines": {
     "node": "^24.0.0"

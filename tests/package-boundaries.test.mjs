@@ -78,6 +78,33 @@ test('shared runtime may use its own modules and data-only builtins', t => {
   assert.deepEqual(verifyBoundaries(f.root), { packages: 2 });
 });
 
+test('metadata helpers may use neutral HTTP imports and public workspace capabilities', t => {
+  const f = fixture(t);
+  f.write('packages/script-host/package.json', { name: '@meowfilm/script-host' });
+  f.write('apps/runtime/modules/metadata-data.mjs', `
+    import './metadata/settings.mjs';
+    import './metadata/network.mjs';
+    import './metadata/tmdb.mjs';
+    import './metadata/douban.mjs';
+  `);
+  f.write('apps/runtime/modules/metadata/settings.mjs', "import { PrivateDocuments } from '@meowfilm/script-host';");
+  f.write('apps/runtime/modules/metadata/network.mjs', `
+    import http from 'node:http';
+    import https from 'node:https';
+    import { createNodeNetwork } from '@meowfilm/script-host';
+    import './settings.mjs';
+  `);
+  f.write('apps/runtime/modules/metadata/tmdb.mjs', 'export {};');
+  f.write('apps/runtime/modules/metadata/douban.mjs', "import { isUtf8 } from 'node:buffer';");
+  assert.deepEqual(verifyBoundaries(f.root), { packages: 3 });
+});
+
+test('metadata settings cannot use an undeclared public workspace', t => {
+  const f = fixture(t);
+  f.write('apps/runtime/modules/metadata/settings.mjs', "import '@meowfilm/script-host';");
+  assert.throws(() => verifyBoundaries(f.root), /undeclared shared runtime package/);
+});
+
 for (const owner of ['packages/a/src/index.js', 'apps/runtime/modules/cat-script.mjs']) {
   test(`${owner} can contain import vocabulary without declaring a dependency`, t => {
     const f = fixture(t);
@@ -96,25 +123,29 @@ for (const owner of ['packages/a/src/index.js', 'apps/runtime/modules/cat-script
 }
 
 for (const platform of ['windows', 'ios']) {
-  for (const source of [
-    `import '../../${platform}/runtime/bootstrap.mjs';`,
-    `export * from '../../${platform}/runtime/bootstrap.mjs';`,
-    `export { value } from '../../${platform}/runtime/bootstrap.mjs';`,
-    `const runtime = import('../../${platform}/runtime/bootstrap.mjs');`,
-    `const runtime = require('../../${platform}/runtime/bootstrap.mjs');`,
-  ]) {
-    test(`shared runtime rejects ${platform} source dependency: ${source}`, t => {
-      const f = fixture(t);
-      f.write('apps/runtime/modules/music-script.mjs', source);
-      assert.throws(() => verifyBoundaries(f.root), /shared runtime depends on platform source/);
-    });
+  for (const [owner, prefix] of [['modules/music-script.mjs', '../..'], ['modules/metadata/network.mjs', '../../..']]) {
+    for (const source of [
+      `import '${prefix}/${platform}/runtime/bootstrap.mjs';`,
+      `export * from '${prefix}/${platform}/runtime/bootstrap.mjs';`,
+      `export { value } from '${prefix}/${platform}/runtime/bootstrap.mjs';`,
+      `const runtime = import('${prefix}/${platform}/runtime/bootstrap.mjs');`,
+      `const runtime = require('${prefix}/${platform}/runtime/bootstrap.mjs');`,
+    ]) {
+      test(`shared runtime ${owner} rejects ${platform} source dependency: ${source}`, t => {
+        const f = fixture(t);
+        f.write(`apps/runtime/${owner}`, source);
+        assert.throws(() => verifyBoundaries(f.root), /shared runtime depends on platform source/);
+      });
+    }
   }
 }
 
-for (const specifier of ['node:net', 'node:child_process', '@meowfilm/script-host/src/host.js']) {
-  test(`shared runtime rejects platform/private import: ${specifier}`, t => {
-    const f = fixture(t);
-    f.write('apps/runtime/modules/music-script.mjs', `import '${specifier}';`);
-    assert.throws(() => verifyBoundaries(f.root), /shared runtime platform\/private import/);
-  });
+for (const owner of ['modules/music-script.mjs', 'modules/metadata/network.mjs']) {
+  for (const specifier of ['node:net', 'node:fs', 'node:child_process', '@meowfilm/script-host/src/host.js']) {
+    test(`shared runtime ${owner} rejects platform/private import: ${specifier}`, t => {
+      const f = fixture(t);
+      f.write(`apps/runtime/${owner}`, `import '${specifier}';`);
+      assert.throws(() => verifyBoundaries(f.root), /shared runtime platform\/private import/);
+    });
+  }
 }

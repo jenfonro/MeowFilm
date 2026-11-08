@@ -37,8 +37,10 @@ public final class MusicPlaybackFeatureState: ObservableObject {
     @Published public internal(set) var isPreparingRemoteQueue = false
     @Published public internal(set) var isFMActive = false
     @Published public internal(set) var similarMode: MusicSimilarModeSnapshot?
+    @Published public internal(set) var queueRecommendations: MusicQueueRecommendationSnapshot?
     @Published public internal(set) var canEnterSimilarMode = false
     @Published public internal(set) var isChangingSimilarMode = false
+    @Published public internal(set) var isChangingQueueRecommendations = false
     @Published public internal(set) var activeHomeFM: MusicHomeAction?
 }
 
@@ -140,7 +142,9 @@ public extension MusicViewModel {
                distinctChanges(playbackState.$isChangingQueue),
                distinctChanges(playbackState.$isFMActive),
                changed(playbackState.$similarMode),
+               changed(playbackState.$queueRecommendations),
                distinctChanges(playbackState.$isChangingSimilarMode),
+               distinctChanges(playbackState.$isChangingQueueRecommendations),
                distinctChanges(notices.$queueNotice))
     }
 

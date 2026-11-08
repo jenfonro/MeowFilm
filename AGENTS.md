@@ -65,11 +65,12 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/windows/tests/` — Windows 原生测试
-- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`entry.mjs` 管理三个模块，契约为 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.2.0。iOS 与 Windows 均已接入 runtime.http.v1，保留各自平台受信启动，不保留旧运行器协议回退。
+- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`entry.mjs` 默认管理三个模块，契约为 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.2.0；另导出可组合的 tmdb.data.v1／douban.data.v1，只读数据和图片契约见 `docs/runtime/metadata-data.md`。iOS 与 Windows 均已接入 runtime.http.v1，保留各自平台受信启动，不保留旧运行器协议回退；两端尚未装配元数据模块。
 - `apps/windows/runtime/` — 仅 Windows 私密启动／存活管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
 - `packages/script-host/` — 统一实例生命周期；LX 与 portable 来源使用共享原生绑定、逐实例线程／QuickJS Runtime，CatNode 使用逐实例 Node Worker 与原生 Node 能力。
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层
 - `packages/runtime-bridge/` — runtime.http.v1 完整 HTTP 请求／响应、取消与连接生命周期
+- `packages/pan-runtime/` — 可显式装配的内置网盘账号、分享与取址能力；同进程异步 I/O，不创建脚本执行环境，默认平台三模块不变
 - `scripts/` — iOS 工程生成、结构检查、测试、构建打包与发布，`scripts/tests/` 为脚本测试；Node 共用工具
 - `scripts/windows/` — Windows 构建、测试、打包与结构检查
 - `tests/` — Node 测试

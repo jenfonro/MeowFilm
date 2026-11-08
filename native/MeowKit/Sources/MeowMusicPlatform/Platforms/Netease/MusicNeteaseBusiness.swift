@@ -26,10 +26,10 @@ private struct MusicNeteaseCollectionDisplay: @unchecked Sendable {
     let epoch: UUID
 }
 extension NeteaseMusicAccountAdapter {
-    private static func hasDisplayFields(_ row: [String: Any]?) -> Bool {
+    static func hasDisplayFields(_ row: [String: Any]?) -> Bool {
         guard let row, let name = row["name"] as? String,
               !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let artists = (row["ar"] ?? row["artists"]) as? [[String: Any]] else { return false }
+              let artists = (row["ar"] ?? row["artists"]) as? [[String: Any]], !artists.isEmpty else { return false }
         return artists.allSatisfy {
             ($0["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         }
@@ -149,8 +149,11 @@ extension NeteaseMusicAccountAdapter {
     }
     static func orderedIDs(_ row: [String: Any]) throws -> [String] {
         let ids = try MusicNeteaseWire.rows(row["trackIds"]).map { try MusicNeteaseWire.id($0["id"]) }
-        guard Set(ids).count == ids.count,
-              try MusicQQWire.integer(row["trackCount"]) == ids.count else { throw MusicServiceError.upstreamInvalid }
+        let count = try MusicQQWire.integer(row["trackCount"])
+        let cloud = try MusicQQWire.integer(row["cloudTrackCount"] ?? 0)
+        guard Set(ids).count == ids.count, ids.count == count || ids.count == count + cloud else {
+            throw MusicServiceError.upstreamInvalid
+        }
         return ids
     }
     func metadata(_ ids: [String], context: MusicNeteaseContext) async throws -> [[String: Any]] {

@@ -10,6 +10,86 @@ import MeowPlayback
 
 @MainActor
 final class MusicUIKitRegressionTests: XCTestCase {
+    func testHomeAndCloudLikesExposeDirectHeartbeatActions() async throws {
+        let service = MusicUIKitRegressionService(browse: .init(sections: [
+            .init(id: "heartbeat", title: "", items: [
+                .init(id: "heartbeat", title: "心动模式", content: .action(.heartbeat))
+            ], layout: .featureRail)
+        ]))
+        await service.enableHeartbeat()
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let appearance = MusicAppearancePreferencesStore(), router = MusicUIKitRegressionRouter()
+        let home = MusicBrowseViewController(title: "推荐", model: model, browser: service,
+            request: .discovery(.home), appearance: appearance, router: router, embedded: true)
+        let homeWindow = mount(home)
+        let collection = try XCTUnwrap(home.view.subviews.compactMap { $0 as? UICollectionView }.first)
+        await waitForResult { collection.numberOfSections > 0 && collection.numberOfItems(inSection: 0) == 1 }
+        home.collectionView(collection, didSelectItemAt: IndexPath(item: 0, section: 0))
+        await waitForResult { model.similarMode?.active == true && !model.isChangingSimilarMode }
+        let first = await service.heartbeatStarts()
+        XCTAssertEqual(first, [.heartbeat])
+        XCTAssertFalse(try XCTUnwrap(model.similarMode).continueEnabled)
+        release(home, window: homeWindow)
+
+        let library = MusicLibraryViewController(model: model, appearance: appearance, router: router)
+        let libraryWindow = mount(library)
+        defer { release(library, window: libraryWindow) }
+        await waitForResult { library.isPageActive }
+        let heartbeat = try XCTUnwrap(descendants(library.view).compactMap { $0 as? UIButton }
+            .first { $0.accessibilityIdentifier == "music.library.heartbeat" })
+        XCTAssertEqual(heartbeat.title(for: .normal), "云喜欢心动")
+        XCTAssertGreaterThan(heartbeat.bounds.height, 0)
+        let finished = expectation(description: "cloud heartbeat finished")
+        await service.observeHeartbeatStart { finished.fulfill() }
+        heartbeat.sendActions(for: .touchUpInside)
+        await fulfillment(of: [finished], timeout: 3)
+        await waitForResult { !model.isChangingSimilarMode }
+        let starts = await service.heartbeatStarts()
+        XCTAssertEqual(starts, [.heartbeat, .heartbeat])
+        await model.close()
+    }
+
+    func testFMSelectorUsesExistingHostingChoicesAndClosesOnExitOrAccountChange() async throws {
+        for accountChange in [false, true] {
+            let service = MusicUIKitRegressionService()
+            let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+            model.playbackState.isFMActive = true
+            model.playbackState.activeHomeFM = MusicFMModeChoice.main[0].action
+            let appearance = MusicAppearancePreferencesStore(), root = UIViewController()
+            let window = mount(root)
+            let page = MusicFMSettingsViewController(model: model, appearance: appearance)
+            let navigation = PageNavigationController(themeProvider: appearance)
+            navigation.setViewControllers([page], animated: false)
+            navigation.modalPresentationStyle = .fullScreen
+            await withCheckedContinuation { continuation in root.present(navigation, animated: false) { continuation.resume() } }
+            NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+            await waitForResult { page.isPageVisible }
+            let hosting = try XCTUnwrap(page.children.compactMap { $0 as? UIHostingController<MusicFMSettingsContent> }.first)
+            XCTAssertTrue(hosting.rootView.state.available)
+            XCTAssertEqual(hosting.rootView.state.active, MusicFMModeChoice.main[0].action)
+            XCTAssertEqual(MusicFMModeChoice.main.count, 4)
+            XCTAssertEqual(hosting.rootView.icons.count, 43)
+            XCTAssertNotNil(hosting.rootView.icons["HOT_SONG"])
+            let hotSong = try XCTUnwrap(MusicFMModeChoice.scenes.first { $0.submode == "HOT_SONG" })
+            let requested = expectation(description: "hot-song selection reached service")
+            await service.observeFMChoice { requested.fulfill() }
+            hosting.rootView.select(hotSong)
+            await fulfillment(of: [requested], timeout: 3)
+            await deliverMainRunLoop()
+            await waitForResult { hosting.rootView.state.pendingChoice == nil }
+            let choices = await service.fmChoices()
+            XCTAssertEqual(choices, [hotSong.action])
+            XCTAssertEqual(hosting.rootView.state.active, MusicFMModeChoice.main[0].action,
+                           "Failed selection keeps the committed mode")
+            if accountChange { model.accountSessionsChanged(.netease) }
+            else { model.stopFM() }
+            await waitForResult { root.presentedViewController == nil }
+            XCTAssertFalse(page.isPageActive)
+            release(root, window: window)
+            await model.close()
+        }
+    }
+
     func testHiddenHomeRetainsSameSourceRowsAndDefersRefillAndFMPreviewUntilReturn() async throws {
         let action = MusicHomeAction.fm(mode: .default, submode: "", entry: nil)
         func home(_ id: String) -> MusicPublicBrowsePage {
@@ -4216,7 +4296,7 @@ private final class MusicUIKitRegressionRouter: MusicUIRouting {
 
 private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, MusicPublicBrowsing, MusicPublicPlaylistSearching,
     MusicSearchDiscoveryProviding, MusicSearchHotPlaybackProviding, MusicChorusProviding, MusicHomeBrowsing,
-    MusicSearchBatchPlaying, MusicResolvedSourcesServing, MusicFMPreviewServing {
+    MusicSearchBatchPlaying, MusicResolvedSourcesServing, MusicFMPreviewServing, MusicSimilarModeServing, MusicHomeActionQueueServing {
     struct ResultRead: Equatable, Sendable {
         let section: MusicSearchSection
         let platform: String
@@ -4255,6 +4335,49 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private let resultInspection = MusicUIKitResultInspectionSession()
     private let sourceSelection: (entry: MusicQueueEntry, session: MusicUIKitSourceSelectionSession)?
     private var homeContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
+    private var heartbeatEnabled = false
+    private var heartbeatRequests: [MusicSimilarModeStart] = []
+    private var heartbeatSnapshot: MusicSimilarModeSnapshot?
+    private var heartbeatObserver: (@Sendable () -> Void)?
+    private var fmRequests: [MusicHomeAction] = []
+    private var fmObserver: (@Sendable () -> Void)?
+    private var fmChoiceEnabled = false
+    func enableHeartbeat() { heartbeatEnabled = true }
+    func heartbeatStarts() -> [MusicSimilarModeStart] { heartbeatRequests }
+    func observeHeartbeatStart(_ observer: @escaping @Sendable () -> Void) { heartbeatObserver = observer }
+    func fmChoices() -> [MusicHomeAction] { fmRequests }
+    func observeFMChoice(_ observer: @escaping @Sendable () -> Void) { fmChoiceEnabled = true; fmObserver = observer }
+    func openHomeActionQueue(_ action: MusicHomeAction, title: String) throws -> MusicRemoteQueueSource {
+        guard fmChoiceEnabled else { throw MusicServiceError.unsupported }
+        fmRequests.append(action); fmObserver?(); fmObserver = nil
+        throw MusicServiceError.upstreamFailed
+    }
+    func similarModeSnapshot() -> MusicSimilarModeSnapshot? { heartbeatSnapshot }
+    func similarModeChanges() -> AsyncStream<Void> { .init { $0.finish() } }
+    func canEnterSimilarMode() -> Bool { heartbeatEnabled }
+    func previewSimilarMode() -> MusicSimilarModeSnapshot? { heartbeatSnapshot }
+    func enterSimilarMode() throws -> MusicSimilarModeResult { throw MusicServiceError.unsupported }
+    func startSimilarMode(_ start: MusicSimilarModeStart) throws -> MusicSimilarModeResult {
+        guard heartbeatEnabled else { throw MusicServiceError.authRequired }
+        heartbeatRequests.append(start)
+        heartbeatSnapshot = .init(id: UUID(), active: true, status: .ready, seed: .init(title: "喜欢种子"),
+            seedEntryID: nil, continueEnabled: false, candidates: [], batches: [], sourceIDs: [],
+            fromHome: start == .heartbeat, provider: .heartbeat, error: nil, canRetry: false)
+        heartbeatObserver?(); heartbeatObserver = nil
+        return .init(state: state(), action: .keepCurrent)
+    }
+    func exitSimilarMode() -> MusicSimilarModeResult { heartbeatSnapshot = nil; return .init(state: state(), action: .restoreOnly) }
+    func playSimilarCandidate(snapshotID: UUID, candidateID: String) throws -> MusicSimilarModeResult { throw MusicServiceError.unsupported }
+    func setSimilarContinue(_ enabled: Bool, snapshotID: UUID) throws {
+        guard let value = heartbeatSnapshot, value.id == snapshotID else { throw MusicServiceError.targetChanged }
+        heartbeatSnapshot = .init(id: value.id, active: true, status: .ready, seed: value.seed, seedEntryID: value.seedEntryID,
+            continueEnabled: enabled, candidates: [], batches: [], sourceIDs: [], fromHome: value.fromHome,
+            provider: .heartbeat, error: nil, canRetry: false)
+    }
+    func retrySimilarMode(snapshotID: UUID) throws -> MusicSimilarModeResult { throw MusicServiceError.unsupported }
+    func cancelSimilarMode() { heartbeatSnapshot = nil }
+    func recordSimilarPlaybackFact(_ fact: MusicPlaybackFact) -> Bool { false }
+    func pauseSimilarNavigation() {}
     private var homeSubscriptionObserver: (@Sendable () -> Void)?
     private var homeChangeCompletionObserver: (@Sendable () -> Void)?
     private var homeGate: MusicUIKitSearchGate?

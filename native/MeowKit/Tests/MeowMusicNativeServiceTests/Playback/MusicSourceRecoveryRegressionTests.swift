@@ -10,7 +10,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
     var sites: [String: [String]]
     var requests: [MusicScriptRequest] = []
     var fails = Set<String>()
-    var sourceGate: NativeMusicGate?, writeGate: NativeMusicGate?
+    var sourceGate: NativeMusicGate?, writeGate: NativeMusicGate?, resolveGate: NativeMusicGate?
     var sourceDuration: Double = 180
     init(_ ids: [String] = ["a", "b"], enabled: Bool = true, sites: [String: [String]] = [:]) {
         self.enabled = Dictionary(uniqueKeysWithValues: ids.map { ($0, enabled) }); self.sites = sites
@@ -18,6 +18,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
     func fail(_ keys: Set<String>) { fails = keys }
     func holdSource(_ gate: NativeMusicGate) { sourceGate = gate }
     func holdWriteReceipt(_ gate: NativeMusicGate) { writeGate = gate }
+    func holdResolve(_ gate: NativeMusicGate) { resolveGate = gate }
     func setDuration(_ value: Double) { sourceDuration = value }
     func snapshot(_ id: String) -> MusicScriptSource {
         .init(installationID: id, generation: 1, enabled: enabled[id] == true,
@@ -31,8 +32,9 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         guard enabled[installationID] != nil else { throw MusicServiceError.sourceUnavailable }
         return snapshot(installationID)
     }
-    func resolve(request: MusicScriptRequest) throws -> MusicScriptResult<MusicNativeAudio> {
+    func resolve(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeAudio> {
         requests.append(request)
+        if let gate = resolveGate { resolveGate = nil; await gate.wait() }
         if fails.contains(request.installationID + ":" + request.quality) { throw MusicServiceError.audioUnavailable }
         return .init(value: .init(url: URL(string: "https://media.invalid/\(request.installationID).\(request.quality)")!,
                      delivery: .init(quality: request.quality, evidence: .officialResponse, duration: sourceDuration)),
@@ -66,6 +68,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
 @MainActor private final class ReviewPlayer: MusicPlaybackHandoffDriving {
     var resources: [PlaybackResource] = [], preparations: [PlaybackResource] = []
     var commits = 0, stops = 0, pauses = 0
+    var standalonePreparations = 0, resumes = 0
     var failFirstPreparation = false
     var preparationError: MusicServiceError?
     var rejectedURLs = Set<URL>()
@@ -75,6 +78,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         resources.append(resource); return .init(id: UUID(), resourceID: resource.id)
     }
     func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        standalonePreparations += 1
         if let preparationError { throw preparationError }
         if rejectedURLs.contains(resource.url) { throw MusicServiceError.invalidMediaCandidate }
         return .init(duration: self.mediaDuration, synchronize: {}, commit: { self.play(resource) }, cancel: {})
@@ -92,7 +96,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
     }
     func stop(_ attempt: MusicPlayerAttempt) { stops += 1 }
     func pause(_ attempt: MusicPlayerAttempt) { pauses += 1 }
-    func resume(_ attempt: MusicPlayerAttempt) {}
+    func resume(_ attempt: MusicPlayerAttempt) { resumes += 1 }
     func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool { true }
 }
 
@@ -113,6 +117,107 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
             for try await value in await session.updates() where !value.isLoading { return value }
             throw MusicServiceError.closed
         }
+    }
+
+    func testPauseWhileRecommendationOrNavigationWaitsCancelsRecoveryAfterNativeRetires() async throws {
+        for navigating in [false, true] {
+            try await pauseRetiredSource(navigating: navigating, excluding: false)
+        }
+    }
+
+    func testPauseWhileRecommendationWaitsCancelsNativeLessSelectionAndKeepsExclusion() async throws {
+        try await pauseRetiredSource(navigating: false, excluding: true)
+    }
+
+    private func pauseRetiredSource(navigating: Bool, excluding: Bool) async throws {
+        let song = try MusicModel.normalize(SimilarModeAccountFixture.track("100"))
+        let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
+        let controlled = SimilarModeControlledDocument(store)
+        let scripts = ReviewScripts(sites: ["a": ["wy"], "b": ["wy"]])
+        let accounts = SimilarModeAccountFixture(navigating ? [["301"]] : [[], ["301"]])
+        let service = NativeMusicService(document: controlled, scripts: scripts, accounts: accounts,
+            qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+        try await service.setAccess(available: true, generation: 1)
+        let initial = try await service.state()
+        _ = try await service.updateSettings(.init(ifRevision: initial.settingsRevision,
+                                                   officialSources: [], requestQuality: "128k"))
+        let player = ReviewPlayer(), model = MusicViewModel(service: service, player: player)
+        await model.load(); await model.prepareCurrent()
+        let previous = try XCTUnwrap(model.candidate)
+        model.onPlayback(.init(attemptId: previous.attemptId, occurrenceId: previous.occurrenceId,
+            resourceId: previous.resourceId, kind: .playing, position: 37, duration: 180))
+        await model.flushPlaybackFacts()
+        let occurrence = try XCTUnwrap(model.current?.id)
+        let recommendationGate = NativeMusicGate()
+        let command: Task<Void, Never>
+        if navigating {
+            await model.loadSimilarMode()
+            let snapshot = try XCTUnwrap(model.queueRecommendations)
+            await accounts.suspendNext(recommendationGate)
+            await model.setQueueRecommendationContinue(true, snapshotID: snapshot.id)
+            await recommendationGate.started()
+            let entered = expectation(description: "navigation reached service after acquiring its audio intent")
+            command = Task {
+                controlled.afterNextRead { entered.fulfill() }
+                await model.next()
+            }
+            await fulfillment(of: [entered], timeout: 2)
+            XCTAssertNotNil(model.navigationPlaybackIntent)
+        } else {
+            await model.previewQueueRecommendations()
+            let snapshot = try XCTUnwrap(model.queueRecommendations)
+            XCTAssertTrue(snapshot.canRetry)
+            await accounts.suspendNext(recommendationGate)
+            command = Task { await model.retryQueueRecommendations(snapshotID: snapshot.id) }
+            await recommendationGate.started()
+            XCTAssertTrue(model.isChangingQueueRecommendations)
+        }
+        let audioIntent = try XCTUnwrap(navigating ? model.navigationPlaybackIntent : model.recommendationPlaybackIntent)
+        let mediaGate = NativeMusicGate()
+        await scripts.holdResolve(mediaGate)
+        let replacement: Task<Void, Never>?
+        if excluding {
+            replacement = Task { await model.rejectCurrentSource() }
+        } else {
+            replacement = nil
+            model.onPlayback(.init(attemptId: previous.attemptId, occurrenceId: previous.occurrenceId,
+                resourceId: previous.resourceId, kind: .failed, position: 37, duration: 180))
+        }
+        await mediaGate.started()
+        XCTAssertNil(model.activeNativeAttemptID, "the late result must have no native pause event to rely on")
+        XCTAssertNotNil(model.pendingSourceSelection)
+        XCTAssertEqual(model.sourceRecoveryTask != nil, !excluding)
+        let exclusions = try await service.sourceExclusions()
+        XCTAssertEqual(exclusions.count, excluding ? 1 : 0)
+        let played = player.resources.count, prepared = player.standalonePreparations
+        let handoffs = player.preparations.count, resumed = player.resumes
+
+        await model.togglePlayback()
+        XCTAssertFalse(audioIntent.isActive)
+        XCTAssertNil(model.pendingSourceSelection)
+        XCTAssertNil(model.sourceRecoveryTask)
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(model.position, 37)
+        await mediaGate.release()
+        await replacement?.value
+        await model.flushPlaybackFacts()
+        XCTAssertEqual(player.resources.count, played)
+        XCTAssertEqual(player.standalonePreparations, prepared, "pause must prevent preparation of the late recovery")
+        XCTAssertEqual(player.preparations.count, handoffs)
+        XCTAssertEqual(player.resumes, resumed)
+        XCTAssertNil(model.activeNativeAttemptID)
+        await recommendationGate.release()
+        await command.value
+        await model.flushPlaybackFacts()
+        let queue = try await service.queue(), retainedExclusions = try await service.sourceExclusions()
+        XCTAssertEqual(queue.currentId, occurrence)
+        XCTAssertEqual(model.current?.id, occurrence)
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(model.position, 37)
+        XCTAssertEqual(retainedExclusions, exclusions)
+        XCTAssertEqual(player.resources.count, played)
+        XCTAssertEqual(player.resumes, resumed)
+        await model.close(); await service.close()
     }
 
     func testBadMediaPreparationContinuesSameQualityCandidates() async throws {

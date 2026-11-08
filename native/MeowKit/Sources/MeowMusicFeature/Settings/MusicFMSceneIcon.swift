@@ -67,8 +67,25 @@ enum MusicFMSceneIcon {
         case "COUNTRY": COUNTRY(in: context)
         case "MUSICAL": MUSICAL(in: context)
         case "YINGSHI": YINGSHI(in: context)
+        case "HOT_SONG": HOT_SONG(in: context)
         default: break
         }
+    }
+    private static func HOT_SONG(in context: CGContext) {
+        let path = CGMutablePath()
+        path.move(to: .init(x: 18, y: 2))
+        path.addCurve(to: .init(x: 9, y: 15), control1: .init(x: 18, y: 8), control2: .init(x: 10, y: 9))
+        path.addLine(to: .init(x: 6, y: 11))
+        path.addCurve(to: .init(x: 5, y: 21), control1: .init(x: 4, y: 14), control2: .init(x: 3, y: 18))
+        path.addCurve(to: .init(x: 27, y: 21), control1: .init(x: 7, y: 33), control2: .init(x: 25, y: 33))
+        path.addCurve(to: .init(x: 18, y: 2), control1: .init(x: 30, y: 12), control2: .init(x: 21, y: 5))
+        path.closeSubpath()
+        path.move(to: .init(x: 16, y: 16))
+        path.addCurve(to: .init(x: 12, y: 23), control1: .init(x: 16, y: 19), control2: .init(x: 12, y: 20))
+        path.addCurve(to: .init(x: 21, y: 23), control1: .init(x: 12, y: 29), control2: .init(x: 21, y: 29))
+        path.addCurve(to: .init(x: 16, y: 16), control1: .init(x: 22, y: 20), control2: .init(x: 18, y: 18))
+        path.closeSubpath()
+        context.addPath(path); context.fillPath(using: .evenOdd)
     }
     private static func NIGHT_EMO(in context: CGContext) {
         do {

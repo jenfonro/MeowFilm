@@ -96,6 +96,7 @@ extension MusicViewModel {
         catch { source.revoke(); await source.close(); throw error }
     }
     public func playHomeAction(_ action: MusicHomeAction, title: String, forceReload: Bool = false) async throws {
+        let epoch = try enter(), account = searchAccessGeneration
         switch action {
         case .similar(let ids, let name):
             try await performSimilarMode { try await $0.startSimilarMode(.songRoaming(sourceIDs: ids, sourceName: name)) }
@@ -111,11 +112,16 @@ extension MusicViewModel {
         }
         let source = try await openHomeActionQueue(action, title: title)
         defer { releaseRemoteQueueSource(source) }
+        try check(epoch)
+        guard searchAccessGeneration == account else { throw MusicServiceError.cancelled }
         let first = try await remoteQueuePage(source, cursor: nil)
-        try Task.checkCancellation()
+        try check(epoch)
+        guard searchAccessGeneration == account else { throw MusicServiceError.cancelled }
         guard let track = first.items.first else { throw MusicServiceError.notFound }
         try await prepareRemoteQueue(source, start: .init(index: 0, track: track))
-        if fmSource?.id == source.id { playbackState.activeHomeFM = action }
+        try check(epoch)
+        guard searchAccessGeneration == account else { throw MusicServiceError.cancelled }
+        if fmSource?.id == source.id, source.authorization.isActive { playbackState.activeHomeFM = action }
     }
     /// Only the current occurrence of this exact live radio session can supply
     /// an entrance cover; an inserted/selected song is not implicitly an FM song.
@@ -187,7 +193,8 @@ extension MusicViewModel {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let own: UUID
         do { own = try enter() } catch { return }
-        guard !isChangingQueue, !isNavigating, let service, player != nil else {
+        guard !isChangingQueue, !isNavigating, !isChangingSimilarMode, !isChangingQueueRecommendations,
+              let service, player != nil else {
             report(MusicServiceError.busy, epoch: own); return
         }
         let request = UUID(), intent = MusicQueueAuthorization(), selection = selectionID
@@ -198,6 +205,7 @@ extension MusicViewModel {
             if remoteQueueRequest == request {
                 remoteQueueTask = nil; remoteQueueIntent = nil; remoteQueueSourceID = nil
                 playbackState.isPreparingRemoteQueue = false; playbackState.isChangingQueue = false
+                requestRecommendationRefresh()
             }
         }
         do {
@@ -236,7 +244,8 @@ extension MusicViewModel {
     func prepareRemoteQueue(_ source: MusicRemoteQueueSource, start: MusicRemoteQueueStart) async throws {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let epoch = try enter()
-        guard !isChangingQueue, !isNavigating, let service, let remoteQueueService, player != nil else {
+        guard !isChangingQueue, !isNavigating, !isChangingSimilarMode, !isChangingQueueRecommendations,
+              let service, let remoteQueueService, player != nil else {
             throw MusicServiceError.busy
         }
         let request = UUID(), intent = MusicQueueAuthorization(), selection = selectionID
@@ -249,6 +258,7 @@ extension MusicViewModel {
             if remoteQueueRequest == request {
                 remoteQueueTask = nil; remoteQueueIntent = nil; remoteQueueSourceID = nil
                 remoteQueueIsFM = false; playbackState.isPreparingRemoteQueue = false; playbackState.isChangingQueue = false
+                requestRecommendationRefresh()
             }
         }
         do {
@@ -340,24 +350,34 @@ extension MusicViewModel {
                          onSelection: (@MainActor (MusicQueueEntry) -> Void)? = nil) async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        guard !isChangingQueue else { return }
+        guard !isChangingQueue, !isChangingSimilarMode, !isChangingQueueRecommendations else { return }
+        let account = searchAccessGeneration
         playbackState.isChangingQueue = true
         let navigation = navigationID
         navigationQueueID = navigation
         defer {
             if navigationQueueID == navigation { navigationQueueID = nil }
-            if lifecycle == epoch, navigationID == navigation { playbackState.isChangingQueue = false }
+            if lifecycle == epoch, navigationID == navigation {
+                playbackState.isChangingQueue = false
+                requestRecommendationRefresh()
+            }
         }
         let token = selectionID
         let fm = fmSource
         let intent = MusicQueueAuthorization()
+        if fm == nil { navigationPlaybackIntent = intent }
         if fm != nil { fmAdvanceIntent = intent; fmShouldPlay = true }
-        defer { intent.revoke(); if fmAdvanceIntent === intent { fmAdvanceIntent = nil } }
+        defer {
+            intent.revoke()
+            if navigationPlaybackIntent === intent { navigationPlaybackIntent = nil }
+            if fmAdvanceIntent === intent { fmAdvanceIntent = nil }
+        }
         do {
             await flushPlaybackFacts(); try check(epoch)
-            guard navigationID == navigation else { return }
+            guard navigationID == navigation, searchAccessGeneration == account else { return }
             let service = try requireService(), before = try await service.state()
-            try check(epoch); guard navigationID == navigation, token == selectionID else { return }
+            try check(epoch)
+            guard navigationID == navigation, token == selectionID, searchAccessGeneration == account else { return }
             let result: MusicAdvanceResult
             if let fm {
                 guard let remoteQueueService else { throw MusicServiceError.unavailable }
@@ -368,23 +388,26 @@ extension MusicViewModel {
             } else {
                 result = try await service.advance(direction, reason: reason, expectedRevision: before.revision)
             }
-            try check(epoch); guard navigationID == navigation, token == selectionID else { return }
+            try check(epoch)
+            guard navigationID == navigation, token == selectionID, searchAccessGeneration == account else { return }
             if result.selectedId != nil { invalidateSelection(stopMedia: true, preservingQueueIntent: intent) }
             let committedSelection = selectionID
-            let admission = fm.map { QueuePlaybackAdmission(source: $0, intent: intent) }
+            let admission = QueuePlaybackAdmission(source: fm, intent: intent)
             playbackState.state = result.state; try await refreshQueue(service, epoch: epoch, selection: committedSelection)
-            try admission?.check()
-            guard navigationID == navigation else { return }
+            guard navigationID == navigation, searchAccessGeneration == account else { return }
+            try fm?.authorization.check()
             if let selected = result.selectedId, let entry = current, entry.id == selected {
                 // A visual transition receives the actual committed occurrence,
                 // before URL resolution. It never selects a preview itself.
                 onSelection?(entry)
             }
-            if result.selectedId != nil, fm == nil || fmShouldPlay {
+            if result.selectedId != nil, intent.isActive, fm == nil || fmShouldPlay {
                 await prepareCurrent(forceSelection: false, automatic: reason == .ended, admission: admission)
             }
             else if result.selectedId != nil { playbackState.phase = .paused }
-        } catch { if navigationID == navigation { report(error, epoch: epoch) } }
+        } catch {
+            if navigationID == navigation, searchAccessGeneration == account { report(error, epoch: epoch) }
+        }
     }
     /// Synchronous admission for the product's system-command closures.
     /// True means accepted/scheduled, never "audio already played".
@@ -406,7 +429,10 @@ extension MusicViewModel {
         navigationTask = Task { [weak self] in
             guard let self, !Task.isCancelled, self.navigationID == token else { return }
             await self.advance(direction, reason: reason, onSelection: onSelection)
-            if self.navigationID == token { self.navigationTask = nil; playbackState.isNavigating = false }
+            if self.navigationID == token {
+                self.navigationTask = nil; playbackState.isNavigating = false
+                self.requestRecommendationRefresh()
+            }
             onCompletion?()
         }
         return true

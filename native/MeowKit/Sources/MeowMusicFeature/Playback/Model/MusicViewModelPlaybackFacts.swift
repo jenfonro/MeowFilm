@@ -9,6 +9,17 @@ extension MusicViewModel {
     public func togglePlayback() async {
         cancelPlayPauseCommands()
         guard isAvailable, !isClosed else { return }
+        if isChangingSimilarMode || isChangingQueueRecommendations || navigationPlaybackIntent != nil {
+            recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
+            if !pausePlaybackRecovery() {
+                if pendingSourceSelection != nil, nativeAttempt == nil {
+                    invalidateSelection(stopMedia: true)
+                } else if let nativeAttempt { player?.pause(nativeAttempt) }
+            }
+            playbackState.phase = .paused
+            await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
+            return
+        }
         if pausePlaybackRecovery() { return }
         if pendingSourceSelection != nil, nativeAttempt == nil {
             invalidateSelection(stopMedia: true)
@@ -47,6 +58,7 @@ extension MusicViewModel {
         cancelPlayPauseCommands()
         if command == .pause {
             fmShouldPlay = false
+            recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
             if !pausePlaybackRecovery() { player?.pause(nativeAttempt) }
             return true
         }

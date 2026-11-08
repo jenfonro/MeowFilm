@@ -35,6 +35,8 @@ public final class MusicQueueViewController: MusicPageViewController,
     private var reorderTask: Task<Void, Never>?
     private var historyAccess: UUID?
     private var shownSimilarError: UUID?
+    private var previewedQueue: MusicReferenceQueueIntent?
+    private var previewAccount: UUID?
     private var selected: String { pager.selectedID }
 
     public init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore) {
@@ -138,18 +140,45 @@ public final class MusicQueueViewController: MusicPageViewController,
         }
         current.mode.addAction(UIAction { [weak self] _ in self?.cycleMode() }, for: .touchUpInside)
         current.continuePlaying.addAction(UIAction { [weak self] _ in
-            guard let self, let snapshot = self.model.similarMode, snapshot.active else { return }
-            self.runSimilar(snapshot) {
-                await self.model.setSimilarContinue(!snapshot.continueEnabled, snapshotID: snapshot.id)
+            guard let self else { return }
+            if let snapshot = self.model.similarMode, snapshot.active {
+                self.runSimilar(snapshot) {
+                    await self.model.setSimilarContinue(!snapshot.continueEnabled, snapshotID: snapshot.id)
+                }
+            } else if let snapshot = self.model.queueRecommendations {
+                self.runQueueRecommendation(snapshot) {
+                    await self.model.setQueueRecommendationContinue(!snapshot.continueEnabled, snapshotID: snapshot.id)
+                }
             }
         }, for: .touchUpInside)
         current.retry.addAction(UIAction { [weak self] _ in
-            guard let self, let snapshot = self.model.similarMode, snapshot.active, snapshot.canRetry else { return }
-            self.runSimilar(snapshot) { await self.model.retrySimilarMode(snapshotID: snapshot.id) }
+            guard let self else { return }
+            if let snapshot = self.model.similarMode, snapshot.active, snapshot.canRetry {
+                self.runSimilar(snapshot) { await self.model.retrySimilarMode(snapshotID: snapshot.id) }
+            } else if let snapshot = self.model.queueRecommendations, snapshot.canRetry {
+                self.runQueueRecommendation(snapshot) { await self.model.retryQueueRecommendations(snapshotID: snapshot.id) }
+            }
         }, for: .touchUpInside)
-        observe(model.queueChanges) { [weak self] in self?.renderQueue(); self?.renderChrome() }
+        current.returnToQueue.addAction(UIAction { [weak self] _ in
+            guard let self, self.isPageActive, self.selected == "current" else { return }
+            let account = self.model.searchAccessGeneration, snapshot = self.model.similarMode?.id
+            self.runPageTask { [weak self] in
+                guard let self, self.model.searchAccessGeneration == account,
+                      self.model.similarMode?.id == snapshot || self.model.isChangingSimilarMode else { return }
+                await self.model.exitSimilarMode()
+            }
+        }, for: .touchUpInside)
+        current.onCandidate = { [weak self] snapshotID, candidateID in
+            guard let self, let snapshot = self.model.queueRecommendations, snapshot.id == snapshotID else { return }
+            self.runQueueRecommendation(snapshot) {
+                await self.model.playQueueRecommendation(snapshotID: snapshotID, candidateID: candidateID)
+            }
+        }
+        observe(model.queueChanges) { [weak self] in
+            self?.renderQueue(); self?.renderChrome(); self?.previewRecommendationsIfNeeded()
+        }
         observe(model.historyChanges) { [weak self] in self?.renderHistory() }
-        observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
+        observe(model.searchAccessChanges) { [weak self] in self?.reconcileAccess() }
         observe(favorites) { [weak self] in self?.updateVisiblePlayback(); self?.showFavoriteError() }
         renderQueue(); renderHistory(); renderChrome()
     }
@@ -185,6 +214,7 @@ public final class MusicQueueViewController: MusicPageViewController,
         reorder?.cancel()
         dragIntent = nil
         histories.removeAll()
+        model.cancelQueueRecommendationPreview()
     }
     public override func pageDidFinishAppearing() { showFavoriteError(); showSimilarError() }
     public override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
@@ -282,12 +312,30 @@ public final class MusicQueueViewController: MusicPageViewController,
         reorder?.cancel(); dragIntent = nil
         renderQueue(force: true); renderHistory()
         guard model.isAvailable, !model.isClosed else { historyAccess = nil; return }
+        previewRecommendationsIfNeeded()
         let access = model.accountAccessGeneration
         guard historyAccess != access else { return }
         historyAccess = access
         runPageTask { [weak self, model] in
             guard !Task.isCancelled, self?.historyAccess == access else { return }
             await model.loadHistory()
+        }
+    }
+
+    private func previewRecommendationsIfNeeded() {
+        guard isPageActive, model.isAvailable, !model.isClosed, !model.isChangingQueue, !model.isNavigating,
+              !model.isChangingSimilarMode, !model.isChangingQueueRecommendations, !model.isFMActive,
+              model.similarMode?.active != true, model.current != nil else { return }
+        let intent = MusicReferenceQueueIntent(access: model.accountAccessGeneration,
+            revision: model.state.revision, ids: model.queue.map(\.id))
+        let account = model.searchAccessGeneration
+        guard previewAccount != account || previewedQueue != intent else { return }
+        previewedQueue = intent; previewAccount = account
+        runPageTask { [weak self] in
+            guard let self, self.model.searchAccessGeneration == account,
+                  intent.admits(access: self.model.accountAccessGeneration, revision: self.model.state.revision,
+                                ids: self.model.queue.map(\.id), permitted: self.isPageActive) else { return }
+            await self.model.previewQueueRecommendations()
         }
     }
 
@@ -384,7 +432,9 @@ public final class MusicQueueViewController: MusicPageViewController,
         dots.numberOfPages = model.playedPlaylists.count
         dots.currentPage = model.playedPlaylists.firstIndex(where: { "history:" + $0.id == selected }) ?? 0
         dots.isHidden = category != .playlists || model.playedPlaylists.isEmpty
-        current.configure(snapshot: model.similarMode, count: entries.count, modeTitle: model.state.mode.title,
+        current.configure(snapshot: model.similarMode, recommendations: model.queueRecommendations,
+                          changing: model.isChangingSimilarMode || model.isChangingQueueRecommendations,
+                          returning: model.isChangingSimilarMode, count: entries.count, modeTitle: model.state.mode.title,
                           theme: theme)
         emptyHistory.setEmpty("还没有已播歌单", theme: theme)
         positionIndicator(pager.categoryPosition)
@@ -488,8 +538,23 @@ public final class MusicQueueViewController: MusicPageViewController,
 
     private func runSimilar(_ snapshot: MusicSimilarModeSnapshot, operation: @escaping @MainActor () async -> Void) {
         guard let intent = captureQueueIntent() else { return }
+        let account = model.searchAccessGeneration
         runPageTask { [weak self] in
             guard let self, self.selected == "current", self.model.similarMode?.id == snapshot.id,
+                  !self.model.isChangingSimilarMode, self.model.searchAccessGeneration == account,
+                  intent.admits(access: self.model.accountAccessGeneration, revision: self.model.state.revision,
+                                ids: self.model.queue.map(\.id), permitted: self.isPageActive) else { return }
+            await operation()
+        }
+    }
+
+    private func runQueueRecommendation(_ snapshot: MusicQueueRecommendationSnapshot,
+                                        operation: @escaping @MainActor () async -> Void) {
+        guard let intent = captureQueueIntent() else { return }
+        let account = model.searchAccessGeneration
+        runPageTask { [weak self] in
+            guard let self, self.selected == "current", self.model.queueRecommendations?.id == snapshot.id,
+                  self.model.searchAccessGeneration == account, !self.model.isChangingQueueRecommendations,
                   !self.model.isChangingSimilarMode,
                   intent.admits(access: self.model.accountAccessGeneration, revision: self.model.state.revision,
                                 ids: self.model.queue.map(\.id), permitted: self.isPageActive) else { return }
@@ -498,13 +563,15 @@ public final class MusicQueueViewController: MusicPageViewController,
     }
 
     private func cycleMode() {
-        guard let snapshot = model.similarMode, snapshot.active, !model.isFMActive,
+        guard !model.isFMActive,
               let index = MusicPlaybackMode.allCases.firstIndex(of: model.state.mode) else { return }
         let mode = MusicPlaybackMode.allCases[(index + 1) % MusicPlaybackMode.allCases.count]
         let revision = model.state.settingsRevision
-        runSimilar(snapshot) {
+        let operation: @MainActor () async -> Void = {
             if self.model.state.settingsRevision == revision { await self.model.setMode(mode) }
         }
+        if let snapshot = model.similarMode, snapshot.active { runSimilar(snapshot, operation: operation) }
+        else if let snapshot = model.queueRecommendations { runQueueRecommendation(snapshot, operation: operation) }
     }
 
     private func showFavoriteError() {
@@ -512,13 +579,18 @@ public final class MusicQueueViewController: MusicPageViewController,
     }
 
     private func showSimilarError() {
-        guard let snapshot = model.similarMode, snapshot.active, snapshot.status == .error else {
+        let id: UUID, error: MusicServiceError?
+        if let snapshot = model.similarMode, snapshot.active, snapshot.status == .error {
+            id = snapshot.id; error = snapshot.error
+        } else if let snapshot = model.queueRecommendations, snapshot.status == .error {
+            id = snapshot.id; error = snapshot.error
+        } else {
             shownSimilarError = nil
             return
         }
-        guard selected == "current", shownSimilarError != snapshot.id else { return }
-        if showError(snapshot.error?.localizedDescription ?? "相似推荐加载失败") {
-            shownSimilarError = snapshot.id
+        guard selected == "current", shownSimilarError != id else { return }
+        if showError(error?.localizedDescription ?? "推荐加载失败") {
+            shownSimilarError = id
         }
     }
 

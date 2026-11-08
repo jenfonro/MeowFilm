@@ -11,6 +11,10 @@ public static partial class MusicCatalogPersonalTests
 
     private static IEnumerable<TestCase> HomeCases()
     {
+        yield return Case("startup initialization survives single and repeated passive home activation", StartupPassiveHomeActivation);
+        yield return Case("Shell first loaded startup survives repeated passive home activation", StartupShellPassiveHomeActivation);
+        yield return Case("startup caller cancellation survives passive home activation and retries normally", StartupCallerCancellation);
+        yield return Case("explicit home refresh before navigation survives repeated passive activation", HomeRefreshDuringPassiveActivation);
         yield return Case("startup preparation reads only local accounts source and home snapshot", PrepareLocalHome);
         yield return Case("concurrent startup preparation shares account read and isolates cancelled waiter", PrepareSharedAccounts);
         foreach (bool cancel in new[] { false, true })
