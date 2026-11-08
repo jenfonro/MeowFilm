@@ -1,7 +1,6 @@
 import UIKit
 import MeowUI
 import MeowMusicFeature
-import MeowFilmFeature
 
 /// The App owns primary chrome. Domain controllers own content and business
 /// tasks; retained containment forwards only the visible page's UIKit lifecycle.
@@ -92,27 +91,26 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
             self?.openMenu()
         })
         switch page {
-        case .recommend:
-            let entries = makeEntries(selected: page)
+        case .recommend, .film:
             let search = makeSearchField()
-            header.setTitleView(Self.titleRow(entries, detail: search))
-            header.setTrailing([Self.iconButton(.recognize, label: "更多功能", identifier: "app.feature")])
+            header.setTitleView(search)
+            if page == .recommend {
+                header.setTrailing([Self.iconButton(.recognize, label: "更多功能", identifier: "app.feature")])
+            }
             primary.themeHeader = { theme in
-                Self.colorEntries(entries, theme: theme)
                 search.tintColor = UIColor(theme.muted)
                 search.configuration?.baseForegroundColor = UIColor(theme.muted)
                 search.backgroundColor = UIColor(theme.control)
                 search.layer.borderColor = UIColor(theme.border).cgColor
             }
         case .channels:
-            let entries = makeEntries(selected: page)
             let switcher = (content as? MusicChannelsViewController)?.channelSwitcherView ?? UIView()
             let search = PageHeaderButton(
                 image: PageIcon.image(.search, size: 22), accessibilityLabel: "搜索"
             ) { [weak self] in self?.openSearch() }
             search.layer.cornerRadius = 22
             search.accessibilityIdentifier = "search.open"
-            header.setTitleView(Self.titleRow(entries, detail: switcher))
+            header.setTitleView(switcher)
             header.setTrailing([
                 Self.iconButton(.channels, label: "选择频道", identifier: "app.channels") { [weak self] in
                     guard self?.selectedPage == .channels else { return }
@@ -121,11 +119,8 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
                 search,
             ])
             primary.themeHeader = { theme in
-                Self.colorEntries(entries, theme: theme)
                 search.backgroundColor = UIColor(theme.control)
             }
-        case .film:
-            header.setTitleView((content as? FilmHomeViewController)?.sourceSwitcherView ?? UIView())
         case .library:
             let title = PageHeaderTextButton(title: page.title) {}
             title.contentHorizontalAlignment = .leading
@@ -143,40 +138,6 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
 
     private func index(of page: MeowfilmPrimaryPage) -> Int {
         MeowfilmPrimaryPage.allCases.firstIndex(of: page)!
-    }
-
-    /// Entries use the channel tabs' 17pt type; only the selected title takes
-    /// the accent colour, without a border or underline.
-    private func makeEntries(selected: MeowfilmPrimaryPage) -> [PageHeaderTextButton] {
-        [MeowfilmPrimaryPage.recommend, .channels].map { page in
-            let button = PageHeaderTextButton(title: page.title) { [weak self] in self?.select(page) }
-            button.accessibilityIdentifier = "app.header.\(page.rawValue)"
-            button.isSelected = page == selected
-            button.titleLabel?.font = .systemFont(ofSize: 17, weight: page == selected ? .semibold : .regular)
-            return button
-        }
-    }
-
-    private static func colorEntries(_ entries: [PageHeaderTextButton], theme: PageTheme) {
-        for entry in entries {
-            entry.setTitleColor(UIColor(entry.isSelected ? theme.accent : theme.muted), for: .normal)
-        }
-    }
-
-    /// The entries keep their width; the page's own control takes the rest.
-    private static func titleRow(_ entries: [UIView], detail: UIView) -> UIView {
-        let switcher = UIStackView(arrangedSubviews: entries)
-        switcher.axis = .horizontal
-        switcher.setContentHuggingPriority(.required, for: .horizontal)
-        switcher.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let host = UIView()
-        host.addSubview(detail)
-        detail.pinEdges(to: host)
-        host.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let row = UIStackView(arrangedSubviews: [switcher, host])
-        row.axis = .horizontal
-        row.spacing = 8
-        return row
     }
 
     private func makeSearchField() -> PageHeaderTextButton {

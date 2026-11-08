@@ -333,17 +333,15 @@ final class FilmUIKitTests: XCTestCase {
         let window = mount(page)
         defer { release(page, window: window); model.close() }
         let collection = try homeCollection(in: page)
-        let switcher = try XCTUnwrap(page.sourceSwitcherView as? UIButton)
         var selected: FilmCategoryModel?
         page.onSelectCategory = { selected = $0 }
         for id in ["empty-category", "other", "empty-category", "other"] {
             if model.selectedSourceID != id {
-                invoke(try menuAction(id == "other" ? "其他源" : "分类源", in: switcher))
+                model.selectSource(id: id)
             }
             await waitFor("source snapshot rendered: \(id)") {
                 collection.layoutIfNeeded()
-                guard !model.isLoading, switcher.configuration?.title ==
-                    (id == "other" ? "影视 · 其他源" : "影视 · 分类源"),
+                guard !model.isLoading, model.selectedSourceID == id,
                     let header = collection.supplementaryView(
                         forElementKind: UICollectionView.elementKindSectionHeader, at: IndexPath(item: 0, section: 0))
                 else { return false }
@@ -488,7 +486,7 @@ final class FilmUIKitTests: XCTestCase {
         XCTAssertTrue(zeroHeight.translation.isFinite)
     }
 
-    func testHomeSourceMenuRendersBothSourcesAndRestoresLoadedSourceWithoutRequestingAgain() async throws {
+    func testHomeSourceSelectionRendersBothSourcesAndRestoresLoadedSourceWithoutRequestingAgain() async throws {
         let firstItem = FilmItem(sourceID: "first", id: "shared", title: "第一源影片", score: "8.1")
         let secondItem = FilmItem(sourceID: "second", id: "shared", title: "第二源影片", score: "9.2")
         let first = FilmUIKitSource(id: "first", title: "第一源", sections: [
@@ -505,7 +503,6 @@ final class FilmUIKitTests: XCTestCase {
         let window = mount(navigation)
         defer { release(navigation, window: window) }
         let collection = try homeCollection(in: page)
-        let switcher = try XCTUnwrap(page.sourceSwitcherView as? UIButton)
         page.additionalSafeAreaInsets.left = 12
         page.additionalSafeAreaInsets.right = 18
         await waitFor("first source rendered") {
@@ -517,11 +514,8 @@ final class FilmUIKitTests: XCTestCase {
         let safeFrame = page.view.safeAreaLayoutGuide.layoutFrame
         XCTAssertEqual(collectionFrame.minX, safeFrame.minX, accuracy: 0.5)
         XCTAssertEqual(collectionFrame.maxX, safeFrame.maxX, accuracy: 0.5)
-        XCTAssertTrue(switcher.showsMenuAsPrimaryAction)
-        XCTAssertEqual(switcher.configuration?.title, "影视 · 第一源")
-        XCTAssertEqual(switcher.menu?.children.compactMap { ($0 as? UIAction)?.title }, ["第一源", "第二源"])
-        XCTAssertEqual(try menuAction("第一源", in: switcher).state, .on)
-        XCTAssertEqual(try menuAction("第二源", in: switcher).state, .off)
+        try assertText("影视", in: page.pageHeader)
+        XCTAssertEqual(model.selectedSourceID, "first")
         try assertText("第一源栏目", in: collection)
         try assertText(firstItem.title, in: collection)
         var firstReads = await first.loadCount
@@ -529,28 +523,26 @@ final class FilmUIKitTests: XCTestCase {
         XCTAssertEqual(firstReads, 1)
         XCTAssertEqual(secondReads, 0)
 
-        invoke(try menuAction("第二源", in: switcher))
+        model.selectSource(id: "second")
         await waitFor("second source rendered") {
             collection.layoutIfNeeded()
             return self.identified("film.poster.second.shared", in: collection) != nil
         }
-        XCTAssertEqual(switcher.configuration?.title, "影视 · 第二源")
-        XCTAssertEqual(switcher.accessibilityLabel, "影视数据源，第二源")
-        XCTAssertEqual(try menuAction("第一源", in: switcher).state, .off)
-        XCTAssertEqual(try menuAction("第二源", in: switcher).state, .on)
+        try assertText("影视", in: page.pageHeader)
+        XCTAssertEqual(model.selectedSourceID, "second")
         try assertText("第二源栏目", in: collection)
         try assertText(secondItem.title, in: collection)
         XCTAssertNil(identified("film.poster.first.shared", in: collection))
 
-        invoke(try menuAction("第一源", in: switcher))
+        model.selectSource(id: "first")
         await waitFor("cached first source rendered") {
             collection.layoutIfNeeded()
             return self.identified("film.poster.first.shared", in: collection) != nil
         }
         try assertText(firstItem.title, in: collection)
         XCTAssertNil(identified("film.poster.second.shared", in: collection))
-        XCTAssertEqual(switcher.configuration?.title, "影视 · 第一源")
-        XCTAssertEqual(try menuAction("第一源", in: switcher).state, .on)
+        try assertText("影视", in: page.pageHeader)
+        XCTAssertEqual(model.selectedSourceID, "first")
         firstReads = await first.loadCount
         secondReads = await second.loadCount
         XCTAssertEqual(firstReads, 1)
