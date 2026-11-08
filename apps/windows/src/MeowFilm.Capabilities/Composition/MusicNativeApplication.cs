@@ -110,10 +110,26 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         sessions = new(accounts);
         catalog = new(sessions, http, clients, clientProtocol: clientProtocol, authenticationFailed: failed => accounts.Revoke(failed));
         songMatcher = new(library, new(store), SearchCatalogAsync, searchClock);
-        nativeCatalog = new(catalog, library);
+        library.SongsObserved = songMatcher.ObserveSongs;
+        library.SongFactsProjection = songMatcher.ProjectKnownFacts;
+        library.PrepareSongFacts = PrepareSongFactsAsync;
+        nativeCatalog = new(catalog, library)
+        {
+            SongsObserved = songMatcher.ObserveSongs,
+            SongFactsProjection = songMatcher.ProjectFacts,
+            KnownSongFactsProjection = songMatcher.ProjectKnownFacts,
+            PrepareSongFacts = PrepareSongFactsAsync,
+            SearchSongs = SearchAndObserveCatalogAsync
+        };
         recommendationQueue = new(library);
-        recommendations = new(catalog, recommendationQueue, SelectRecommendationAsync, readAsync: ReadRecommendationsAsync);
-        searchCoordinator = new(catalog, searchClock, searchAsync: SearchCatalogAsync);
+        recommendations = new(catalog, recommendationQueue, SelectRecommendationAsync, readAsync: async (request, token) =>
+        {
+            await PrepareSongFactsAsync(token).ConfigureAwait(false);
+            var result = await ReadRecommendationsAsync(request, token).ConfigureAwait(false);
+            return token.IsCancellationRequested ? result : songMatcher.ProjectFacts(result);
+        });
+        searchCoordinator = new(catalog, searchClock, SearchCatalogAsync, songMatcher.NextObservation);
+        searchCoordinator.SongFactsProjection = songMatcher.ProjectKnownFacts;
         searchCoordinator.MatchingObserved += ObserveSongMatches;
         var discoverySessions = new DiscoverySessions(accounts);
         discovery = discoveryFactory?.Invoke(discoverySessions, http) ?? new NativeMusicSearchDiscovery(discoverySessions, http, clients);
@@ -161,6 +177,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         // acquisition never replays or automatically clears an unknown write.
         if (clients.NeedsReconciliation) await clients.ReloadAsync(request.Token).ConfigureAwait(false);
         await clients.InitializeAsync(request.Token).ConfigureAwait(false);
+        await PrepareSongFactsAsync(request.Token).ConfigureAwait(false);
         await librarySync.StartAsync(request.Token).ConfigureAwait(false);
     }
 

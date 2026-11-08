@@ -48,11 +48,17 @@ public static class MusicSongMatchStoreTests
         ["checkedAt"] = at,
         ["context"] = context,
         ["query"] = "歌曲 Artist 🎵",
-        ["code"] = ""
+        ["code"] = "",
+        ["page"] = 1, ["pages"] = 1, ["limit"] = 30,
+        ["matchedAt"] = state == "matched" ? JsonValue.Create(at) : null
     };
 
     private static byte[] Document(params JsonObject[] entries) => JsonSerializer.SerializeToUtf8Bytes(
-        new JsonObject { ["version"] = 1, ["entries"] = LJ.Arr(entries) }, LJ.Json);
+        new JsonObject { ["version"] = 2, ["entries"] = LJ.Arr(entries) }, LJ.Json);
+    private static JsonArray Excluded(params string[] sources) => new(new JsonObject
+    {
+        ["key"] = NativeMusicSong.Hash("original-recording"), ["sources"] = LJ.Arr(sources)
+    });
     private static string Key(JsonObject entry) => entry["key"]!.GetValue<string>();
     private static JsonObject Observation(JsonObject entry) => entry["platforms"]!["wy"]!.AsObject();
 
@@ -121,14 +127,14 @@ public static class MusicSongMatchStoreTests
         entry["platforms"]!["kw"]!["code"] = "NETWORK_FAILURE";
         entry["platforms"]!["tx"]!["query"] = new string('q', 256);
         entry["platforms"]!["tx"]!["code"] = new string('c', 80);
-        entry["excluded"] = new JsonArray(NativeMusicSong.SourceKey(
+        entry["excluded"] = Excluded(NativeMusicSong.SourceKey(
             MusicSongFixture.Online("tx", "rejected-recording", "Other recording", "Artist")));
         var expected = entry.DeepClone();
         await cache.WriteAsync([entry], default);
         Check(store.WriteCalls == 1 && store.WrittenNamespaces.SequenceEqual(new[] { "music.song-matches.v1" }));
         var root = JsonNode.Parse(store.Bytes(MusicSongMatchStore.Namespace)!)!.AsObject();
         Check(root.Select(field => field.Key).SequenceEqual(new[] { "version", "entries" }) &&
-            root["version"]!.GetValue<int>() == 1 && root["entries"]!.AsArray().Count == 1);
+            root["version"]!.GetValue<int>() == 2 && root["entries"]!.AsArray().Count == 1);
         entry["song"]!["title"] = "Changed caller";
         var first = (await new MusicSongMatchStore(store).ReadAsync(default)).Single();
         Check(JsonNode.DeepEquals(first, expected) && Key(first).Length == 16);
@@ -171,7 +177,7 @@ public static class MusicSongMatchStoreTests
             entry => Observation(entry)["query"] = "https://media.invalid/audio?token=synthetic",
             entry => Observation(entry)["code"] = "https://media.invalid/audio",
             entry => entry["results"] = new JsonArray(MusicSongFixture.Online("tx", "candidate")),
-            entry => entry["excluded"] = new JsonArray("[\"tx\",\"blob:synthetic\",\"\"]"),
+            entry => entry["excluded"] = Excluded("[\"tx\",\"blob:synthetic\",\"\"]"),
             entry =>
             {
                 var source = entry["song"]!["sources"]![0]!.AsObject();
@@ -212,13 +218,27 @@ public static class MusicSongMatchStoreTests
             entry => Observation(entry)["checkedAt"] = -1,
             entry => Observation(entry)["checkedAt"] = 0.5,
             entry => Observation(entry)["checkedAt"] = "1",
+            entry => Observation(entry).Remove("matchedAt"),
+            entry => Observation(entry)["matchedAt"] = -1,
+            entry => Observation(entry)["matchedAt"] = 1,
+            entry => Observation(entry)["matchedAt"] = "0",
+            entry => Observation(entry)["page"] = 0,
+            entry => Observation(entry)["pages"] = 0,
+            entry => Observation(entry)["pages"] = 4,
+            entry => Observation(entry)["limit"] = 101,
+            entry => { Observation(entry)["page"] = int.MaxValue; Observation(entry)["pages"] = 2; },
             entry => Observation(entry)["context"] = new string('a', 32),
             entry => Observation(entry)["context"] = new string('A', 16),
             entry => Observation(entry)["query"] = new string('q', 257),
             entry => Observation(entry)["code"] = new string('c', 81),
             entry => entry["excluded"] = new JsonArray(123),
             entry => entry["excluded"] = new JsonArray("not-a-source-key"),
-            entry => entry["excluded"] = new JsonArray("[\"tx\",\"id\",\"unexpected\"]")
+            entry => entry["excluded"] = Excluded("not-a-source-key"),
+            entry => entry["excluded"] = Excluded("[\"tx\",\"id\",\"unexpected\"]"),
+            entry => entry["excluded"] = Excluded("[\"tx\",\"id\",\"\"]", "[\"tx\",\"id\",\"\"]"),
+            entry => { var scopes = Excluded("[\"tx\",\"id\",\"\"]"); scopes.Add(scopes[0]!.DeepClone()); entry["excluded"] = scopes; },
+            entry => entry["excluded"] = new JsonArray(new JsonObject { ["key"] = "invalid", ["sources"] = new JsonArray() }),
+            entry => entry["excluded"] = new JsonArray(new JsonObject { ["key"] = NativeMusicSong.Hash("scope"), ["sources"] = null })
         ];
         foreach (var defect in defects) { var entry = Entry("invalid"); defect(entry); yield return entry; }
     }
@@ -248,18 +268,19 @@ public static class MusicSongMatchStoreTests
     {
         (byte[] Bytes, DocumentStoreError Error)[] documents =
         [
-            ("{\"version\":2,\"entries\":[]}"u8.ToArray(), DocumentStoreError.UnsupportedVersion),
-            ("{\"version\":\"1\",\"entries\":[]}"u8.ToArray(), DocumentStoreError.UnsupportedVersion),
-            ("{\"version\":1,\"entries\":[],\"unknown\":true}"u8.ToArray(), DocumentStoreError.Corrupt),
-            ("{\"version\":1,\"version\":1,\"entries\":[]}"u8.ToArray(), DocumentStoreError.Corrupt),
-            ("{\"version\":1,\"entries\":null}"u8.ToArray(), DocumentStoreError.Corrupt),
-            ("{\"version\":1,\"entries\":{}}"u8.ToArray(), DocumentStoreError.Corrupt),
-            ("{\"version\":1,\"entries\":[null]}"u8.ToArray(), DocumentStoreError.Corrupt),
+            ("{\"version\":3,\"entries\":[]}"u8.ToArray(), DocumentStoreError.UnsupportedVersion),
+            ("{\"version\":1,\"entries\":[]}"u8.ToArray(), DocumentStoreError.UnsupportedVersion),
+            ("{\"version\":\"2\",\"entries\":[]}"u8.ToArray(), DocumentStoreError.UnsupportedVersion),
+            ("{\"version\":2,\"entries\":[],\"unknown\":true}"u8.ToArray(), DocumentStoreError.Corrupt),
+            ("{\"version\":2,\"version\":2,\"entries\":[]}"u8.ToArray(), DocumentStoreError.Corrupt),
+            ("{\"version\":2,\"entries\":null}"u8.ToArray(), DocumentStoreError.Corrupt),
+            ("{\"version\":2,\"entries\":{}}"u8.ToArray(), DocumentStoreError.Corrupt),
+            ("{\"version\":2,\"entries\":[null]}"u8.ToArray(), DocumentStoreError.Corrupt),
             ("[]"u8.ToArray(), DocumentStoreError.Corrupt),
             ("{"u8.ToArray(), DocumentStoreError.Corrupt),
             ([], DocumentStoreError.Corrupt),
             (Document(Entry("duplicate"), Entry("duplicate")), DocumentStoreError.Corrupt),
-            (Encoding.UTF8.GetBytes("{\"version\":1,\"entries\":[]}" + new string(' ', MaximumBytes)), DocumentStoreError.Limit)
+            (Encoding.UTF8.GetBytes("{\"version\":2,\"entries\":[]}" + new string(' ', MaximumBytes)), DocumentStoreError.Limit)
         ];
         foreach (var (bytes, expected) in documents)
         {
@@ -333,7 +354,7 @@ public static class MusicSongMatchStoreTests
         (byte[] Bytes, DocumentStoreError? Error)[] outcomes =
         [
             (Document(Entry("winner")), null),
-            ("{\"version\":2,\"entries\":[]}"u8.ToArray(), DocumentStoreError.UnsupportedVersion),
+            ("{\"version\":3,\"entries\":[]}"u8.ToArray(), DocumentStoreError.UnsupportedVersion),
             ("{"u8.ToArray(), DocumentStoreError.Corrupt)
         ];
         foreach (var (winner, error) in outcomes)

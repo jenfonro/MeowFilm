@@ -2,12 +2,13 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
 
-/// <summary>Disposable matching observations, separate from canonical library and playback data.</summary>
+/// <summary>Disposable recording facts and scoped observations, separate from local membership and playback data.</summary>
 internal sealed class MusicSongMatchStore(IDocumentStore store)
 {
     internal const string Namespace = "music.song-matches.v1";
@@ -44,7 +45,7 @@ internal sealed class MusicSongMatchStore(IDocumentStore store)
                 cancellationToken.ThrowIfCancellationRequested();
                 var expected = DocumentFingerprint.FromBytes(encoded);
                 if (before.Fingerprint == expected ||
-                    before.Fingerprint == DocumentFingerprint.Missing && encoded.AsSpan().SequenceEqual("{\"version\":1,\"entries\":[]}"u8))
+                    before.Fingerprint == DocumentFingerprint.Missing && encoded.AsSpan().SequenceEqual("{\"version\":2,\"entries\":[]}"u8))
                     return;
                 DocumentFingerprint receipt;
                 try
@@ -91,7 +92,7 @@ internal sealed class MusicSongMatchStore(IDocumentStore store)
             var root = document.RootElement;
             CheckJson(root);
             Fields(root, "version", "entries");
-            if (root.GetProperty("version").GetRawText() != "1")
+            if (root.GetProperty("version").GetRawText() != "2")
                 throw MusicPlaybackCacheDataException.UnsupportedVersion();
             var entries = root.GetProperty("entries");
             if (entries.ValueKind != JsonValueKind.Array) throw MusicPlaybackCacheDataException.Corrupt();
@@ -116,7 +117,7 @@ internal sealed class MusicSongMatchStore(IDocumentStore store)
     private static byte[] Encode(IReadOnlyList<JsonObject> entries, CancellationToken token)
     {
         var retained = new Queue<byte[]>();
-        long length = "{\"version\":1,\"entries\":[]}"u8.Length;
+        long length = "{\"version\":2,\"entries\":[]}"u8.Length;
         var keys = new HashSet<string>(StringComparer.Ordinal);
         try
         {
@@ -146,7 +147,7 @@ internal sealed class MusicSongMatchStore(IDocumentStore store)
             using (var writer = new Utf8JsonWriter(output))
             {
                 writer.WriteStartObject();
-                writer.WriteNumber("version", 1);
+                writer.WriteNumber("version", 2);
                 writer.WriteStartArray("entries");
                 foreach (byte[] entry in retained) writer.WriteRawValue(entry, skipInputValidation: true);
                 writer.WriteEndArray();
@@ -199,7 +200,7 @@ internal sealed class MusicSongMatchStore(IDocumentStore store)
         {
             if (!NativeMusicSong.Platforms.Contains(platform.Name)) throw MusicPlaybackCacheDataException.Corrupt();
             var status = platform.Value;
-            Fields(status, "state", "checkedAt", "context", "query", "code");
+            Fields(status, "state", "checkedAt", "context", "query", "code", "page", "pages", "limit", "matchedAt");
             if (Text(status.GetProperty("state"), 8) is not ("matched" or "notFound" or "failed"))
                 throw MusicPlaybackCacheDataException.Corrupt();
             var at = status.GetProperty("checkedAt");
@@ -209,22 +210,42 @@ internal sealed class MusicSongMatchStore(IDocumentStore store)
             if (context.Length > 0) Hash(context);
             _ = Text(status.GetProperty("query"), 256);
             _ = Text(status.GetProperty("code"), 80);
+            int page = Positive(status.GetProperty("page")), pages = Positive(status.GetProperty("pages"));
+            int limit = Positive(status.GetProperty("limit"));
+            var paging = MusicSearchPaging.For(platform.Name);
+            if (pages > paging.PagesPerRequest || (long)limit * pages > MusicSearchPaging.MaxItemsPerRequest ||
+                page + (long)pages - 1 > int.MaxValue) throw MusicPlaybackCacheDataException.Corrupt();
+            var matched = status.GetProperty("matchedAt");
+            if (matched.ValueKind != JsonValueKind.Null &&
+                (matched.ValueKind != JsonValueKind.Number || !matched.TryGetInt64(out long matchedAt) ||
+                    matchedAt < 0 || matchedAt > checkedAt)) throw MusicPlaybackCacheDataException.Corrupt();
         }
         var excluded = entry.GetProperty("excluded");
         if (excluded.ValueKind != JsonValueKind.Array) throw MusicPlaybackCacheDataException.Corrupt();
-        foreach (var source in excluded.EnumerateArray())
+        var scopes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var scope in excluded.EnumerateArray())
         {
-            string sourceKey = Text(source, 2048);
-            using var parsed = JsonDocument.Parse(sourceKey, new JsonDocumentOptions { MaxDepth = 2 });
-            var parts = parsed.RootElement;
-            if (parts.ValueKind != JsonValueKind.Array || parts.GetArrayLength() != 3 ||
-                !NativeMusicSong.Platforms.Contains(Text(parts[0], 2)) ||
-                !LJ.Id(Text(parts[1], 2048)) ||
-                parts[0].GetString() != "kg" && Text(parts[2], 2048).Length != 0 ||
-                LJ.Stringify(JsonNode.Parse(sourceKey)) != sourceKey)
-                throw MusicPlaybackCacheDataException.Corrupt();
-            _ = Text(parts[2], 2048);
-            RejectUrls(parts);
+            Fields(scope, "key", "sources");
+            string owner = Text(scope.GetProperty("key"), 16); Hash(owner);
+            if (!scopes.Add(owner)) throw MusicPlaybackCacheDataException.Corrupt();
+            var sources = scope.GetProperty("sources");
+            if (sources.ValueKind != JsonValueKind.Array) throw MusicPlaybackCacheDataException.Corrupt();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var source in sources.EnumerateArray())
+            {
+                string sourceKey = Text(source, 2048);
+                if (!seen.Add(sourceKey)) throw MusicPlaybackCacheDataException.Corrupt();
+                using var parsed = JsonDocument.Parse(sourceKey, new JsonDocumentOptions { MaxDepth = 2 });
+                var parts = parsed.RootElement;
+                if (parts.ValueKind != JsonValueKind.Array || parts.GetArrayLength() != 3 ||
+                    !NativeMusicSong.Platforms.Contains(Text(parts[0], 2)) ||
+                    !LJ.Id(Text(parts[1], 2048)) ||
+                    parts[0].GetString() != "kg" && Text(parts[2], 2048).Length != 0 ||
+                    LJ.Stringify(JsonNode.Parse(sourceKey)) != sourceKey)
+                    throw MusicPlaybackCacheDataException.Corrupt();
+                _ = Text(parts[2], 2048);
+                RejectUrls(parts);
+            }
         }
         // Canonical songs already whitelist public artwork locators. Do not confuse those
         // stable metadata URLs with playback URLs or credentials.
@@ -276,6 +297,13 @@ internal sealed class MusicSongMatchStore(IDocumentStore store)
         if (value.ValueKind != JsonValueKind.String || value.GetString() is not { } text || text.Length > maximum)
             throw MusicPlaybackCacheDataException.Corrupt();
         return text;
+    }
+
+    private static int Positive(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out int number) || number <= 0)
+            throw MusicPlaybackCacheDataException.Corrupt();
+        return number;
     }
 
     private static void Hash(string value)

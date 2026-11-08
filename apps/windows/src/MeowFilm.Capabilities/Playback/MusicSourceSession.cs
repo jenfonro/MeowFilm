@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Media;
 
 namespace MeowFilm.Capabilities;
 
@@ -50,6 +51,13 @@ public sealed partial class MusicCapability
         "MEDIA_HEADERS_UNSUPPORTED" or "SOURCE_DISABLED" or "SOURCE_NOT_FOUND" or "STALE_SOURCE" or
         "UPSTREAM_HTTP" or "UPSTREAM_FORMAT" or "TARGET_CHANGED" or "TARGET_REQUIRED" or
         "SCRIPT_RUNTIME_UNAVAILABLE";
+    // A transport/login/runtime error is not evidence that a platform's recording
+    // mapping is stale. The metadata owner alone decides whether content evidence
+    // is old enough to justify rechecking it.
+    private static bool ContentSourceFailure(string code) => code is
+        "RECORDING_UNAVAILABLE" or "MEDIA_UNAVAILABLE" or "FORBIDDEN" or "PLAYBACK_RESTRICTED" or
+        "TRIAL_ONLY" or "QUALITY_UNAVAILABLE" or "RECORDING_QUALITY_UNAVAILABLE" or
+        "RECORDING_MISMATCH" or "IDENTITY_MISMATCH" or "MEDIA_MISMATCH" or PlaybackError.HttpNotFound;
 
     /// <summary>The level a resolved media actually represents: verified official quality, else its request.</summary>
     private static string EffectiveLevel(ResolvedMusic media) =>
@@ -93,6 +101,9 @@ public sealed partial class MusicCapability
         private readonly HashSet<string> exhausted = new(StringComparer.Ordinal);
         private readonly HashSet<string> rejected = new(StringComparer.Ordinal);
         private readonly HashSet<string> mismatchedRecordings = new(StringComparer.Ordinal);
+        private readonly HashSet<string> contentFailed = new(StringComparer.Ordinal);
+        private readonly HashSet<string> otherFailed = new(StringComparer.Ordinal);
+        private readonly HashSet<string> checkedContent = new(StringComparer.Ordinal);
         private readonly SemaphoreSlim selection = new(1);
         private HashSet<SourceExclusion> exclusions = [];
         private long exclusionsRevision = -1;
@@ -105,7 +116,7 @@ public sealed partial class MusicCapability
             preferredPlatform = preferredKey = null;
             official.Clear(); exhausted.Clear();
         }
-        private bool RecordingAllowed(string platform, string? key) => !recordingRequired ||
+        private bool RecordingAllowed(string platform, string? key, bool manualSource = false) => manualSource || !recordingRequired ||
             platform == preferredPlatform && key == preferredKey;
         internal readonly SourceScript[] Scripts = scripts;
         internal string? Failure;
@@ -129,7 +140,7 @@ public sealed partial class MusicCapability
                 var target = new MusicOnlineTarget(MusicDto.Text(info, "installationId"), MusicDto.Text(info, "platform"),
                     0, MusicDto.Text(info, "sourceKey"), level, level, RecordingSong: expanded,
                     ProviderName: MusicDto.Text(info, "providerName"));
-                if (!RecordingAllowed(target.Platform, target.SourceKey) || Excluded(target) || Rejected(target)) continue;
+                if (Excluded(target) || Rejected(target)) continue;
                 string key = AttemptKey(target, level);
                 // A complete representation is preferable to its expiring network receipt.
                 Attempts[key] = new(key, target) { State = SourceAttemptState.Ok,
@@ -181,8 +192,15 @@ public sealed partial class MusicCapability
                 Fresh(attempt) && Accepts(tier, media, exact))
             .Select(attempt => attempt.Media).FirstOrDefault();
         internal void Reject(ResolvedMusic media, string code) => Reject(media.Target!, code);
+        internal void ObserveFailure(MusicOnlineTarget target, string code)
+        {
+            // Local file damage/misses are representation facts, not catalog facts.
+            if (code != "CACHE_MISS" && !code.StartsWith("MEDIA_READ_", StringComparison.Ordinal))
+                (ContentSourceFailure(code) ? contentFailed : otherFailed).Add(target.Platform);
+        }
         private void Reject(MusicOnlineTarget target, string code)
         {
+            ObserveFailure(target, code);
             // A bad representation does not prove that this provider's other qualities
             // are unusable. Only contradictory recording identity applies across tiers.
             if (code is "RECORDING_MISMATCH" or "IDENTITY_MISMATCH" or "MEDIA_MISMATCH")
@@ -192,11 +210,12 @@ public sealed partial class MusicCapability
             { attempt.State = SourceAttemptState.Unavailable; attempt.Code = code; attempt.Media = null; }
         }
 
-        private async Task<MusicOnlineTarget[]> OfficialAsync(string level, CancellationToken token)
+        private async Task<MusicOnlineTarget[]> OfficialAsync(string level, CancellationToken token, bool manualSource = false)
         {
-            if (official.TryGetValue(level, out var known)) return known;
+            string cacheKey = level + (manualSource ? ":manual" : ":automatic");
+            if (official.TryGetValue(cacheKey, out var known)) return known;
             var reply = await owner.QualityCall("music.official.candidates",
-                new { song = expanded, quality = level, qualityPolicySignature = Signature }, token);
+                new { song = expanded, quality = level, qualityPolicySignature = Signature, manualSource }, token);
             MusicDto.Require(MusicDto.Text(reply, "qualityPolicySignature") == Signature);
             var decorated = SongRow.Read(reply.GetProperty("song"), Song.EntryId);
             MusicDto.Require(decorated.Id == Song.Id);
@@ -206,18 +225,18 @@ public sealed partial class MusicCapability
             if (preference.Length == 0) preference = candidates.Select(row => MusicDto.Text(row, "sourceKey")).ToArray();
             var targets = candidates.Select(row => new MusicOnlineTarget(null, MusicDto.Text(row, "platform"),
                     MusicDto.Integer(row, "generation"), MusicDto.Text(row, "sourceKey"), level, level, Signature,
-                    AccountScope: MusicDto.Text(row, "scope"), RecordingSong: expanded))
-                .Where(target => RecordingAllowed(target.Platform, target.SourceKey))
+                    AccountScope: MusicDto.Text(row, "scope"), RecordingSong: expanded, ManualSource: manualSource))
+                .Where(target => RecordingAllowed(target.Platform, target.SourceKey, manualSource))
                 .OrderBy(target => target.Platform == preferredPlatform && target.SourceKey == preferredKey ? 0 : 1)
                 .ToArray();
-            official[level] = targets;
+            official[cacheKey] = targets;
             return targets;
         }
-        private IEnumerable<MusicOnlineTarget> ScriptTargets(string level)
+        private IEnumerable<MusicOnlineTarget> ScriptTargets(string level, bool manualSource = false)
         {
             if (officialOnly || !MusicQualityPolicy.LxTypes.Contains(level)) yield break;
             var recordings = expanded.GetProperty("sources").EnumerateArray()
-                .Where(row => RecordingAllowed(MusicDto.Text(row, "source"), MusicDto.Text(row, "sourceKey")))
+                .Where(row => RecordingAllowed(MusicDto.Text(row, "source"), MusicDto.Text(row, "sourceKey"), manualSource))
                 .OrderBy(row => MusicDto.Text(row, "source") == preferredPlatform && MusicDto.Text(row, "sourceKey") == preferredKey ? 0 : 1)
                 .ThenBy(row => Array.IndexOf(preference, MusicDto.Text(row, "sourceKey")) is var index && index >= 0 ? index : int.MaxValue);
             foreach (var recording in recordings)
@@ -236,21 +255,21 @@ public sealed partial class MusicCapability
                         site.GetProperty("qualitys").EnumerateArray().Any(quality => quality.GetString() == level)))
                         continue;
                     yield return new(script.Installation, platform, 0, key, level, level, Signature,
-                        RecordingSong: expanded, ProviderName: script.Name, SourceRevision: Revision);
+                        RecordingSong: expanded, ProviderName: script.Name, SourceRevision: Revision, ManualSource: manualSource);
                 }
             }
         }
         private async Task<(MusicOnlineTarget Target, string Level)[]> CandidatesAsync(MusicQualityPolicy.Tier tier,
-            CancellationToken token)
+            CancellationToken token, bool manualSource = false)
         {
             var result = new List<(MusicOnlineTarget, string)>();
             foreach (string level in tier.Levels)
             {
-                foreach (var target in await OfficialAsync(level, token)) result.Add((target, level));
-                foreach (var target in ScriptTargets(level)) result.Add((target, level));
+                foreach (var target in await OfficialAsync(level, token, manualSource)) result.Add((target, level));
+                foreach (var target in ScriptTargets(level, manualSource)) result.Add((target, level));
             }
             return result.Where(pair => !Excluded(pair.Item1) && !Rejected(pair.Item1) &&
-                !Capped(pair.Item1, pair.Item2)).ToArray();
+                (manualSource || !Capped(pair.Item1, pair.Item2))).ToArray();
         }
         /// <summary>A built-in provider that already answered a better request with a lower level
         /// cannot offer a level in between; asking again would only repeat that answer.</summary>
@@ -348,32 +367,38 @@ public sealed partial class MusicCapability
             internal void Throw() => System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
         }
 
-        /// <summary>Searches the platforms the song has no accepted mapping for, once per session,
-        /// limited to platforms some enabled provider can actually resolve.</summary>
-        private async Task<bool> CompleteAsync(CancellationToken token)
+        /// <summary>Reads shared metadata and completes supported platforms. Existing mappings
+        /// are rechecked only with unambiguous content-failure evidence; the owner enforces age.</summary>
+        private async Task<bool> CompleteAsync(CancellationToken token, bool manualSource)
         {
-            if (completed || officialOnly || recordingRequired) return false;
-            var known = expanded.GetProperty("sources").EnumerateArray().Select(row => MusicDto.Text(row, "source"))
-                .ToHashSet(StringComparer.Ordinal);
-            var targets = Library.NativeMusicSong.Platforms.Where(platform => !known.Contains(platform) &&
+            if (officialOnly || recordingRequired && !manualSource) return false;
+            var failures = contentFailed.Except(otherFailed).Except(checkedContent).ToArray();
+            if (completed && failures.Length == 0) return false;
+            var targets = Library.NativeMusicSong.Platforms.Where(platform =>
+                    (!completed || failures.Contains(platform)) &&
                     (officialEnabled.Contains(platform) || Scripts.Any(script => script.Sites is not { } sites ||
-                        sites.TryGetProperty(platform, out _))))
+                        sites.TryGetProperty(platform, out var site) &&
+                        site.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "musicUrl"))))
                 .ToArray();
             if (targets.Length == 0) { completed = true; return false; }
-            var reply = await owner.Call("music.songs.complete", new { song = expanded, platforms = targets }, token);
+            var reply = await owner.Call("music.songs.complete",
+                new { song = expanded, platforms = targets, contentFailed = failures.Intersect(targets).ToArray() }, token);
+            token.ThrowIfCancellationRequested();
             var merged = SongRow.Read(reply.GetProperty("song"), Song.EntryId);
             MusicDto.Require(merged.Id == Song.Id);
-            int before = known.Count;
+            string before = expanded.GetProperty("sources").GetRawText();
             expanded = merged.Raw.Clone();
             // Cancelled/failed requests are not a completed negative search.
             completed = true;
+            checkedContent.UnionWith(failures);
             official.Clear();
-            return expanded.GetProperty("sources").EnumerateArray().Select(row => MusicDto.Text(row, "source"))
-                .Distinct(StringComparer.Ordinal).Count() > before;
+            bool changed = expanded.GetProperty("sources").GetRawText() != before;
+            if (changed) exhausted.Clear();
+            return changed;
         }
 
         internal async Task<ResolvedMusic?> TierAsync(MusicQualityPolicy.Tier tier, bool collect, bool complete,
-            CancellationToken token, bool exact = false, ResolvedMusic? resolved = null)
+            CancellationToken token, bool exact = false, ResolvedMusic? resolved = null, bool manualSource = false)
         {
             await selection.WaitAsync(token);
             try
@@ -388,17 +413,17 @@ public sealed partial class MusicCapability
                     Accepts(tier, resolved, exact)) return resolved;
                 async Task<(MusicOnlineTarget Target, string Level)[]> Candidates()
                 {
-                    var candidates = await CandidatesAsync(tier, token);
+                    var candidates = await CandidatesAsync(tier, token, manualSource);
                     if (resolved is null) return candidates;
                     string resolvedKey = AttemptKey(resolved.Target!, resolved.Target!.PolicyRequest);
                     return candidates.Where(pair => AttemptKey(pair.Target, pair.Level) != resolvedKey).ToArray();
                 }
                 var found = await PassAsync(tier, await Candidates(), collect, exact, token);
-                if ((found is null || collect) && complete && await CompleteAsync(token))
+                if ((found is null || collect) && complete && await CompleteAsync(token, manualSource))
                     found = await PassAsync(tier, await Candidates(), collect, exact, token) ?? found;
-                // A winning automatic request leaves the remaining same-tier work queued.
-                // Only a collection pass or a definite miss exhausts this tier.
-                if (collect || found is null) exhausted.Add(tier.Category + ":" + string.Join(",", tier.Levels));
+                // Only the manual browser tracks visited groups. Automatic selection
+                // keeps its own unchanged tiers and per-candidate attempt deduplication.
+                if (collect && manualSource) exhausted.Add(tier.Category + ":" + string.Join(",", tier.Levels));
                 return found;
             }
             finally { selection.Release(); }
@@ -408,10 +433,21 @@ public sealed partial class MusicCapability
         {
             if (Tiers.Length == 0) throw new MusicOperationException("QUALITY_DISABLED");
             foreach (var tier in Tiers)
-                if (await TierAsync(tier, collect: false, complete: true, token, resolved: resolved) is { } media) return media;
+                if (await TierAsync(tier, collect: false, complete: true, token, resolved: resolved) is { } media)
+                    return media.Target!.ManualSource ? media with { Target = media.Target with { ManualSource = false } } : media;
             throw new MusicOperationException(Failure ?? "PLAYBACK_UNAVAILABLE");
         }
         internal async Task<ResolvedMusic> RefreshAsync(MusicOnlineTarget target, CancellationToken token)
+        {
+            try { return await RefreshTargetAsync(target, token); }
+            catch (MusicOperationException error) when (UnavailableSourceCandidate(error.Code))
+            {
+                Reject(target, error.Code);
+                Failure ??= error.Code;
+                throw;
+            }
+        }
+        private async Task<ResolvedMusic> RefreshTargetAsync(MusicOnlineTarget target, CancellationToken token)
         {
             await LoadExclusionsAsync(token);
             if (Excluded(target)) throw new MusicOperationException("SOURCE_EXCLUDED");
@@ -419,7 +455,8 @@ public sealed partial class MusicCapability
             // Historical media has no current script authority. New parsing must obtain it afresh.
             if (!target.Official && (target.QualityPolicySignature != Signature || target.Generation == 0 || target.SourceRevision != Revision))
             {
-                var eligible = ScriptTargets(target.Quality).FirstOrDefault(value => SourceIdentity(value) == SourceIdentity(target));
+                var eligible = ScriptTargets(target.Quality, target.ManualSource)
+                    .FirstOrDefault(value => SourceIdentity(value) == SourceIdentity(target));
                 if (eligible is null) throw new MusicOperationException("SOURCE_DISABLED");
                 media = await owner.ResolveMusicQualityTarget(Song, eligible, token, initial: true);
             }
@@ -429,7 +466,7 @@ public sealed partial class MusicCapability
             {
                 // A listed result may outlive the account that issued it. Keep its
                 // recording/request identity, but acquire current official authority.
-                var eligible = (await OfficialAsync(target.PolicyRequest, token))
+                var eligible = (await OfficialAsync(target.PolicyRequest, token, target.ManualSource))
                     .FirstOrDefault(value => SourceIdentity(value) == SourceIdentity(target));
                 if (eligible is null) throw new MusicOperationException("RECORDING_UNAVAILABLE");
                 media = await owner.ResolveOfficialTarget(Song, eligible, token, initial: true, useCache: false);
@@ -449,19 +486,34 @@ public sealed partial class MusicCapability
                 State = SourceAttemptState.Ok, Media = media, At = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
         }
+        internal void Adopt(ResolvedMusic media)
+        {
+            string key = AttemptKey(media.Target!, media.Target!.PolicyRequest);
+            if (!Attempts.TryGetValue(key, out var previous)) { Remember(media); return; }
+            // Publishing a handoff/intent clone must share later file evidence
+            // with this attempt, without renewing the original URL's lifetime.
+            Attempts[key] = new(key, media.Target) { State = SourceAttemptState.Ok, Media = media, At = previous.At };
+        }
 
         /// <summary>One exact tier, never another: manual quality and wrong-source replacement.</summary>
-        internal Task<ResolvedMusic?> ExactAsync(MusicQualityPolicy.Tier tier, CancellationToken token, ResolvedMusic? resolved = null) =>
-            TierAsync(tier, collect: false, complete: true, token, exact: true, resolved: resolved);
-        /// <summary>The next automatic tier with queued candidates, collecting every result of it.</summary>
+        internal async Task<ResolvedMusic?> ExactAsync(MusicQualityPolicy.Tier tier, CancellationToken token,
+            ResolvedMusic? resolved = null, bool manualSource = false)
+        {
+            var media = await TierAsync(tier, collect: false, complete: true, token,
+                exact: true, resolved: resolved, manualSource: manualSource);
+            return media is null || media.Target!.ManualSource == manualSource ? media :
+                media with { Target = media.Target with { ManualSource = manualSource } };
+        }
+        /// <summary>The next manual-browser group, independent of automatic preference or enablement.</summary>
         internal async Task<bool> ExpandAsync(CancellationToken token)
         {
-            var tier = Tiers.FirstOrDefault(value => !exhausted.Contains(value.Category + ":" + string.Join(",", value.Levels)));
+            var tier = MusicQualityPolicy.SourceTiers.FirstOrDefault(value => !exhausted.Contains(value.Category + ":" + string.Join(",", value.Levels)));
             if (tier is null) return false;
-            await TierAsync(tier, collect: true, complete: true, token);
+            await TierAsync(tier, collect: true, complete: true, token, exact: true, manualSource: true);
             return true;
         }
-        internal bool CanExpand => Tiers.Any(value => !exhausted.Contains(value.Category + ":" + string.Join(",", value.Levels)));
+        internal bool CanExpand => MusicQualityPolicy.SourceTiers.Any(value =>
+            !exhausted.Contains(value.Category + ":" + string.Join(",", value.Levels)));
         internal void Exclude(string provider, string platform)
         {
             exclusions.Add(new(provider, platform));

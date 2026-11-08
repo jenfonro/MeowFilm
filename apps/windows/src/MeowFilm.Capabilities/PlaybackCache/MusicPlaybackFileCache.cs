@@ -60,6 +60,8 @@ public sealed partial class MusicCapability
             if (info is not null && CurrentRecovery(state) && ReferenceEquals(state.Media, accepted) && state.Media is { } media)
             {
                 state.Media = media with { Receipt = JsonSerializer.SerializeToElement(info), File = identity };
+                if (state.Selection.Source is not null)
+                    state.Selection = state.Selection with { Source = state.Media };
                 if (state.Session is { } session)
                     foreach (var attempt in session.Attempts.Values.Where(attempt => ReferenceEquals(attempt.Media, accepted)))
                         attempt.Media = state.Media;
@@ -82,9 +84,10 @@ public sealed partial class MusicCapability
         MusicSourceSession session, ResolvedMusic media, MusicSelection selection, CancellationToken token)
     {
         if (audioFileCache is null || media.Target is not { } target) return null;
+        bool manualSource = selection.Manual;
         await session.LoadExclusionsAsync(token);
         if (!session.CanReuse(media) || target.Official &&
-            (target.QualityPolicySignature != session.Signature || target.AccountScope is not { } scope ||
+            (!manualSource && target.QualityPolicySignature != session.Signature || target.AccountScope is not { } scope ||
                 !application.IsOfficialPlaybackCurrent(target.Platform, scope, target.Generation))) return null;
         var identity = FileIdentity(media);
         if (identity is null && !target.Official)
@@ -97,8 +100,11 @@ public sealed partial class MusicCapability
         if (info is null) return null;
         var cached = media with { Uri = null, Headers = new Dictionary<string, string>(), ExpiresAt = null,
             File = identity, Receipt = JsonSerializer.SerializeToElement(info) };
+        if (manualSource)
+            cached = cached with { Target = target with { ManualSource = true,
+                QualityPolicySignature = target.Official ? session.Signature : target.QualityPolicySignature } };
         await session.LoadExclusionsAsync(token);
-        return session.CanReuse(cached) && MusicQualityPolicy.Enabled(EffectiveLevel(cached), session.Policy) &&
+        return session.CanReuse(cached) && (manualSource || MusicQualityPolicy.Enabled(EffectiveLevel(cached), session.Policy)) &&
             selection.Allows(cached) ? cached : null;
     }
 

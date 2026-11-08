@@ -33,6 +33,7 @@ public static partial class PlaybackRecoveryTests
         foreach (var test in SourceLifecycleRegressionCases()) yield return test;
         foreach (var test in PlaybackBoundaryRegressionCases()) yield return test;
         foreach (var test in PlaybackInteractionRegressionCases()) yield return test;
+        foreach (var test in SmartPlaybackParityCases()) yield return test;
         yield return Test("native explicit empty HTTP headers retain controlled failure classification without sending account credentials", async () =>
         {
             await using var origin = WaveOrigin(); await using var native = Player(origin);
@@ -890,9 +891,10 @@ public static partial class PlaybackRecoveryTests
                 var script = new ScriptSource("target-script", platforms: ["tx"]) { Generation = 19 };
                 await using var f = await ControlledMusicFixture.Create(official: false, scripts: [script]);
                 f.App.MatchMissing = true;
-                var song = MusicSongFixture.Online("wy", "Original", "目标平台", "fixture");
+                // This is healthy mapping reuse, not duration-mismatch recovery.
+                var song = MusicSongFixture.Online("wy", "Original", "目标平台", "fixture", duration: 120);
                 if (mapped)
-                    song["sources"]!.AsArray().Add(MusicSongFixture.Online("tx", "Matched", "目标平台", "fixture")
+                    song["sources"]!.AsArray().Add(MusicSongFixture.Online("tx", "Matched", "目标平台", "fixture", duration: 120)
                         ["sources"]![0]!.DeepClone());
                 Check((await f.App.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }))
                     .GetProperty("ok").GetBoolean(), "target recording queue");
@@ -1257,36 +1259,47 @@ public static partial class PlaybackRecoveryTests
                 await f.Play();
                 await f.Module.ReportWrongSourceAsync();
                 await f.Module.RefreshSourceExclusionsAsync();
-                Check(f.Module.SourceExclusions.Count == 1 && f.Output.PauseRequested && !f.Output.IsPlaying && f.Output.HasMedia,
-                    "durable exclusion succeeded and absence of alternatives paused this occurrence");
+                Check(f.Module.SourceExclusions.Count == 1 && f.Output.PauseRequested && !f.Output.IsPlaying && !f.Output.HasMedia,
+                    "durable exclusion succeeded and absence of alternatives retained a paused occurrence with retired wrong audio");
                 var lyric = new MusicLyricRow(25, "fixture", "");
                 f.Module.Lyrics.Add(lyric);
                 int before = f.App.Resolutions.Count;
                 string? identity = f.Output.Identity;
-                async Task Resume()
+                async Task Resume(int expectedSystemPlays)
                 {
                     if (entry == "button") await f.Module.TogglePlaybackAsync();
                     else if (entry == "lyric") await f.Module.SeekLyricAsync(lyric);
                     else
                     {
                         var backend = new Backend();
-                        var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        int plays = 0;
                         await using var system = new SystemMediaSession(f.Output, backend,
-                            [new("music", Play: async _ => { await f.Module.ResumePlaybackAsync(); accepted.TrySetResult(); })]);
+                            [new("music", Play: async _ => { plays++; await f.Module.ResumePlaybackAsync(); })]);
                         backend.Send(SystemPlaybackCommand.Play);
-                        await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                        await Until(() => (int)Field(system, "pending")! == 0, "system Play command settled");
+                        Check(system.LastErrorCode is null && plays == expectedSystemPlays,
+                            "system Play calls its owner only when media was explicitly prepared");
                     }
                 }
-                await Resume();
+                await Resume(expectedSystemPlays: 0);
                 Check(!f.Output.IsPlaying && f.Output.PauseRequested && f.Output.Identity == identity &&
-                    f.App.Resolutions.Count == before && f.Module.SourceExclusions.Count == 1 &&
-                    f.Module.Status.Contains("已排除", StringComparison.Ordinal),
-                    "Play neither clears the exclusion nor resumes the wrong input, and reports why");
+                    f.App.Resolutions.Count == before && f.Module.SourceExclusions.Count == 1,
+                    "Play cannot clear the exclusion or resume wrong audio");
+                if (entry == "button")
+                    Check(f.Module.Status.Contains("已排除", StringComparison.Ordinal), "button resume reports the exclusion");
+                else if (entry == "lyric")
+                    Check(!f.Module.CanSeek, "a retired input also disables lyric seek");
                 await f.Module.RestoreSourceExclusionAsync(f.Module.SourceExclusions.Single());
-                Check(!f.Output.IsPlaying && f.Module.SourceExclusions.Count == 0, "restore alone never plays");
-                await Resume();
-                Check(f.Output.IsPlaying && f.Output.Identity == identity && f.App.Resolutions.Count == before,
-                    "a later explicit resume may use the now-restored input");
+                Check(!f.Output.IsPlaying && !f.Output.HasMedia && f.Module.SourceExclusions.Count == 0,
+                    "restore alone never revives the retired wrong input");
+                f.Module.OpenSourceChoices();
+                f.Output.Plan();
+                await f.Module.SelectSourceChoiceAsync(f.Module.SourceChoices.Single(row => row.Key == "auto"));
+                Check(!f.Output.IsPlaying && f.Output.HasMedia && f.Output.Commits == 1 &&
+                    f.App.Resolutions.Count == before + 1, "explicitly prepare a fresh restored source while retaining pause");
+                await Resume(expectedSystemPlays: 1);
+                Check(f.Output.IsPlaying && f.Output.Identity == identity && f.App.Resolutions.Count == before + 1,
+                    "a later explicit resume uses the newly prepared restored source");
             });
         foreach (var (action, intent) in new[] { ("enabled", "automatic"), ("disable", "automatic"),
             ("remove", "automatic"), ("disable", "quality"), ("remove", "source") })
@@ -1859,7 +1872,7 @@ public static partial class PlaybackRecoveryTests
             f.App.ReleaseRefresh.TrySetResult();
             await wrong.WaitAsync(TimeSpan.FromSeconds(5));
             await f.Module.RefreshSourceExclusionsAsync();
-            Check(f.Output.PauseRequested && !f.Output.IsPlaying && f.Output.HasMedia &&
+            Check(f.Output.PauseRequested && !f.Output.IsPlaying && !f.Output.HasMedia &&
                 f.Output.Reopens == 0 && f.Output.Commits == 0 && f.Module.SourceExclusions.Count == 1,
                 "wrong-source replacement never recovers the excluded old input or forgets the pause intent");
         });
@@ -1912,7 +1925,7 @@ public static partial class PlaybackRecoveryTests
             await f.Play();
             f.Module.OpenSourceChoices();
             var chosen = f.Module.SourceChoices.Single(row => row.Key != "auto" && row.Selectable);
-            Check(chosen.Quality == "高音质", "listed result quality");
+            Check(chosen.Level == "320k" && chosen.Quality == "320 kbps", "listed result identifies its exact quality");
             await f.Module.ActivateQualitySettingsAsync();
             await f.Module.SetPlaybackQualityRequestAsync("128k");
             f.App.OfficialQuality = "128k";
@@ -1948,7 +1961,8 @@ public static partial class PlaybackRecoveryTests
             Check(f.Output.ReadOpens == 1, "history is loaded");
             f.Module.OpenSourceChoices();
             var choice = f.Module.SourceChoices.Single(row => row.Provider == "lifecycle-cleared" && row.Selectable);
-            await f.Module.LoadMoreSourcesAsync();
+            while (!f.Module.SourceChoices.Any(row => row.Provider == "lifecycle-other" && row.Selectable) &&
+                f.Module.CanLoadMoreSources) await f.Module.LoadMoreSourcesAsync();
             var other = f.Module.SourceChoices.Single(row => row.Provider == "lifecycle-other" && row.Selectable);
             f.Output.Plan();
             await f.Module.SelectSourceChoiceAsync(other);
@@ -1967,7 +1981,8 @@ public static partial class PlaybackRecoveryTests
                 scripts: [new(wrong), new(enabled, enabled: false)]);
             await f.Play();
             await f.Module.ReportWrongSourceAsync();
-            Check(!f.Output.IsPlaying && f.Output.HasMedia, "wrong source without alternative pauses");
+            Check(!f.Output.IsPlaying && !f.Output.HasMedia && f.Output.PauseRequested,
+                "wrong source without alternative retires audio and pauses the retained occurrence");
             await f.Module.RefreshSourceExclusionsAsync();
             Check(f.Module.SourceExclusions.Single().Provider == wrong, "wrong source durably excluded");
             await f.Module.RefreshSourceManagementAsync();
@@ -2201,6 +2216,7 @@ public static partial class PlaybackRecoveryTests
         public async ValueTask DisposeAsync()
         {
             App.ReleaseRefresh.TrySetResult();
+            App.ReleaseExclusion.TrySetResult();
             try { await Module.DisposeAsync(); }
             finally { await Native.DisposeAsync(); await Origin.DisposeAsync(); }
         }
@@ -2310,7 +2326,7 @@ public static partial class PlaybackRecoveryTests
                     Check(output.ReadOpens == 1 && output.NetworkOpens == 0 && app.Resolutions.Count == 0 &&
                         module.CurrentSource == id && output.IsPlaying, "restart reuses complete historical bytes and saved provenance");
                     await module.ReportWrongSourceAsync();
-                    Check(!output.IsPlaying && output.HasMedia && output.ReadOpens == 1,
+                    Check(!output.IsPlaying && !output.HasMedia && output.ReadOpens == 1,
                         "persistent wrong-source exclusion wins over historical bytes; no alternative means pause");
                     await module.RefreshSourceExclusionsAsync();
                     await module.RestoreSourceExclusionAsync(module.SourceExclusions.Single());
@@ -2667,6 +2683,7 @@ public static partial class PlaybackRecoveryTests
         public async ValueTask DisposeAsync()
         {
             App.ReleaseRefresh.TrySetResult();
+            App.ReleaseExclusion.TrySetResult();
             App.PlaylistNext?.ReleasePeek.TrySetResult();
             App.PlaylistNext?.ReleaseQueueRead.TrySetResult();
             ValidationRelease.TrySetResult();
@@ -2694,8 +2711,16 @@ public static partial class PlaybackRecoveryTests
         internal bool HoldCommit;
         internal readonly TaskCompletionSource Committed = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource ReleaseCommit = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal int Prepares, Commits, Discards;
+        internal int Prepares, Commits, Discards, OutputStops;
         internal bool FailNetworkHandoff, StartAfterPreparation;
+        public Task StopOutputForHandoffAsync()
+        {
+            OutputStops++;
+            HasMedia = false; IsPlaying = false;
+            PropertyChanged?.Invoke(this, new(nameof(HasMedia)));
+            PropertyChanged?.Invoke(this, new(nameof(IsPlaying)));
+            return Task.CompletedTask;
+        }
         // A prepared input is invisible until commit: the old input keeps playing and publishing.
         public async Task PrepareHandoffAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token)
         {
@@ -2719,9 +2744,10 @@ public static partial class PlaybackRecoveryTests
         public async Task CommitHandoffAsync(Action committed, CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
-            if (prepared is null || !HasMedia) throw new MusicOperationException(PlaybackError.Superseded);
+            if (prepared is null || prepared.Token.IsCancellationRequested || OwnerId is null ||
+                Identity is null || authority.IsCancellationRequested) throw new MusicOperationException(PlaybackError.Superseded);
             prepared = null; Commits++;
-            generation++; LastErrorCode = null; IsPlaying = !PauseRequested;
+            generation++; HasMedia = true; LastErrorCode = null; IsPlaying = !PauseRequested;
             committed();
             PropertyChanged?.Invoke(this, new(nameof(HasMedia)));
             Committed.TrySetResult();
@@ -2776,9 +2802,10 @@ public static partial class PlaybackRecoveryTests
             PropertyChanged?.Invoke(this, new(nameof(IsPlaying)));
             Started?.Invoke(this, EventArgs.Empty);
         }
-        internal void Fail(string code)
+        internal void Fail(string code, bool retire = false)
         {
             LastErrorCode = code; IsPlaying = false;
+            if (retire) { HasMedia = false; PropertyChanged?.Invoke(this, new(nameof(HasMedia))); }
             PropertyChanged?.Invoke(this, new(nameof(LastErrorCode)));
             PropertyChanged?.Invoke(this, new(nameof(IsPlaying)));
             Failed?.Invoke(this, EventArgs.Empty);
@@ -2946,6 +2973,11 @@ public static partial class PlaybackRecoveryTests
         internal bool RepeatExpiry;
         internal bool MatchMissing;
         internal readonly List<string> MatchPlatforms = [];
+        internal readonly List<JsonElement> Completions = [];
+        internal Func<JsonElement, JsonObject>? CompletionSong;
+        internal bool HoldExclusion;
+        internal readonly TaskCompletionSource ExclusionEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource ReleaseExclusion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal int Discoveries;
         internal bool HoldCompletion;
         internal readonly TaskCompletionSource CompletionEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -3038,6 +3070,11 @@ public static partial class PlaybackRecoveryTests
         public override async Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
             var input = Element(parameters ?? new { });
+            if (method == "music.sourceExclusions.add" && HoldExclusion)
+            {
+                ExclusionEntered.TrySetResult();
+                await ReleaseExclusion.Task.WaitAsync(cancellationToken);
+            }
             if (PlaylistNext is { } probe)
             {
                 if (method == "music.queue.peekNext" && probe.HoldPeek)
@@ -3117,6 +3154,7 @@ public static partial class PlaybackRecoveryTests
                 // The one supplementary search of a selection: an alternate tx recording and,
                 // for scripts, a matched recording of each requested missing platform.
                 Discoveries++;
+                Completions.Add(input.Clone());
                 if (HoldCompletion)
                 {
                     CompletionEntered.TrySetResult();
@@ -3136,7 +3174,8 @@ public static partial class PlaybackRecoveryTests
                     var compatible = new NativeMusicSong.Recordings(raw);
                     if (compatible.TryAddSource(other["sources"]![0]!.AsObject())) raw = compatible.ToSong();
                 }
-                return Element(new { ok = true, song = NativeMusicSong.Normalize(raw), failures = Array.Empty<object>() });
+                return Element(new { ok = true, song = NativeMusicSong.Normalize(CompletionSong?.Invoke(input) ?? raw),
+                    failures = Array.Empty<object>() });
             }
             if (method == "music.official.resolve")
             {

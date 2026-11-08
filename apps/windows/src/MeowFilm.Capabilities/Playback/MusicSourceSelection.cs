@@ -10,6 +10,8 @@ public sealed record MusicSourceChoice(string Key, string Provider, string Platf
     bool Current, bool Selectable)
 {
     public string QualitySymbol { get; init; } = "";
+    public string Recording { get; init; } = "";
+    public string Level { get; init; } = "";
 }
 /// <summary>One quality the player can switch the current playback to.</summary>
 public sealed record MusicQualityChoice(string Key, string Label, bool Current);
@@ -105,23 +107,24 @@ public sealed partial class MusicCapability
         if (musicRecovery is { Session: { } session, Media.Target: not null } state && CurrentRecovery(state))
         {
             SourceChoices.Add(new("auto", "自动选择", "", "", "", state.Selection.Automatic, true));
-            var policy = session.Policy;
             foreach (var attempt in session.Attempts.Values
                 .Where(attempt => attempt.State != SourceAttemptState.Pending)
-                .OrderBy(attempt => attempt.State == SourceAttemptState.Ok ? 0 : 1)
-                .ThenBy(attempt => attempt.Media is { } media ? MusicQualityPolicy.Priority(EffectiveLevel(media), policy) : int.MaxValue))
+                .OrderBy(attempt => attempt.State == SourceAttemptState.Ok ? 0 : 1))
             {
                 string provider = attempt.Target.Official ? MusicSourceRow.OfficialName(attempt.Target.Platform)
                     : attempt.Target.ProviderName is { Length: > 0 } name ? name : "JS 音源";
                 bool ok = attempt.State == SourceAttemptState.Ok && attempt.Media is not null;
-                string quality = ok ? LevelName(EffectiveLevel(attempt.Media!)) + (QualityVerified(attempt.Media!) ? "" : "?")
-                    : LevelName(attempt.Target.Quality);
+                string level = ok ? EffectiveLevel(attempt.Media!) : attempt.Target.Quality;
+                string quality = level is "128k" or "192k" or "320k" ? level[..^1] + " kbps" : LevelName(level);
+                if (ok && !QualityVerified(attempt.Media!)) quality += "?";
                 bool selected = ok && state.Media is { } media && !state.Selection.Automatic &&
                     SourceIdentity(media.Target!) == SourceIdentity(attempt.Target) && media.Target!.Quality == attempt.Target.Quality;
                 SourceChoices.Add(new(attempt.Key, provider, MusicSourceRow.PlatformName(attempt.Target.Platform), quality,
                     ok ? "可用" : "不可用", selected, ok)
                 {
-                    QualitySymbol = ok && QualityVerified(attempt.Media!) ? QualitySymbol(EffectiveLevel(attempt.Media!)) : ""
+                    QualitySymbol = ok && QualityVerified(attempt.Media!) ? QualitySymbol(EffectiveLevel(attempt.Media!)) : "",
+                    Recording = attempt.Target.SourceKey ?? "",
+                    Level = level
                 });
             }
         }
@@ -137,7 +140,7 @@ public sealed partial class MusicCapability
         Changed(nameof(HasSourceChoices)); Changed(nameof(HasConfirmedSourceChoices)); Changed(nameof(AutomaticSourceChoice));
         Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources));
     }
-    /// <summary>Explores the next automatic tier: every queued source of it, cache first.</summary>
+    /// <summary>Explores the next group of declared source qualities, cache first.</summary>
     public Task LoadMoreSourcesAsync()
     {
         if (!CanLoadMoreSources || musicRecovery is not { Session: not null } state) return Task.CompletedTask;
@@ -175,7 +178,7 @@ public sealed partial class MusicCapability
         return SwitchAsync(state, async (current, token) =>
         {
             await current.LoadExclusionsAsync(token);
-            if (current.Excluded(media.Target!) || !MusicQualityPolicy.Enabled(EffectiveLevel(media), current.Policy)) return null;
+            if (current.Excluded(media.Target!)) return null;
             if (ReferenceEquals(media, state.Media) && MusicSourceSession.Fresh(attempt) &&
                 (!media.Target!.Official || media.Target.QualityPolicySignature == current.Signature) &&
                 current.CanReuse(media) && HealthyCurrentInput(state)) return media;
@@ -183,7 +186,7 @@ public sealed partial class MusicCapability
             if (!MusicSourceSession.Fresh(attempt) || media.Target is { Official: true } official &&
                 (official.QualityPolicySignature != current.Signature || official.AccountScope is not { } scope ||
                     !application.IsOfficialPlaybackCurrent(official.Platform, scope, official.Generation)))
-                media = await current.RefreshAsync(media.Target!, token);
+                media = await current.RefreshAsync(media.Target! with { ManualSource = true }, token);
             return media;
         }, selection, "当前歌曲暂无可用音源", pauseWhenMissing: false,
             accepted: next => RememberRecording(new(state.Song.Id, next.Target!.SourceKey ?? "", next.Target.Platform, "")));
@@ -209,6 +212,11 @@ public sealed partial class MusicCapability
         {
             state.Switching?.Cancel();
             state.Selection = new(Tier: tier);
+            if (playing.Target!.ManualSource)
+            {
+                state.Media = playing with { Target = playing.Target with { ManualSource = false } };
+                state.Session.Adopt(state.Media);
+            }
             state.RecoveryDisabled = false;
             if (SourceChoices.Count > 0) UpdateSourceChoices();
             return Task.CompletedTask;
@@ -230,23 +238,33 @@ public sealed partial class MusicCapability
         string provider = target.Installation ?? MusicLibraryOwner.OfficialProvider;
         string name = target.Official ? MusicSourceRow.OfficialName(target.Platform) : target.ProviderName ?? "JS 音源";
         string level = EffectiveLevel(state.Media!);
-        var tier = MusicQualityPolicy.Exact(MusicQualityPolicy.Category(level) == "spatial" ? level : MusicQualityPolicy.Category(level),
-            savedQualityPolicy!) ?? new MusicQualityPolicy.Tier(MusicQualityPolicy.Category(level), [level]);
-        bool excluded = false;
+        var tier = MusicQualityPolicy.Category(level) == "spatial" ? new MusicQualityPolicy.Tier("spatial", [level]) :
+            MusicQualityPolicy.SourceTiers.FirstOrDefault(value => value.Levels.Contains(level)) ??
+                new MusicQualityPolicy.Tier(MusicQualityPolicy.Category(level), [level]);
+        state.Switching?.Cancel();
+        sourceExpansion?.Cancel();
+        state.Expiry?.Cancel();
+        // Fence every resume path before the first asynchronous write or search.
+        state.Session.Exclude(provider, target.Platform);
+        var stopped = ((INativePlaybackHandoff)playback).StopOutputForHandoffAsync();
+        var persisted = PersistExclusion();
         return SwitchAsync(state, async (session, token) =>
         {
-            if (!excluded)
-            {
-                await CallSettledReceipt("music.sourceExclusions.add", new { songId = state.Song.Id, provider,
-                    platform = target.Platform, providerName = name, title = state.Song.Title, artist = state.Song.Artist }, token);
-                exclusionsRevision++;
-                session.Exclude(provider, target.Platform);
-                session.ReleaseRecording();
-                ForgetRecording(state.Song.Id);
-                excluded = true;
-            }
-            return await session.ExactAsync(tier, token);
-        }, new(Tier: tier), "未找到同音质的其他音源，已暂停", pauseWhenMissing: true);
+            session.Exclude(provider, target.Platform);
+            session.ReleaseRecording();
+            return await session.ExactAsync(tier, token, manualSource: target.ManualSource);
+        }, new(Tier: tier, ManualSource: target.ManualSource), "未找到同音质的其他音源，已暂停",
+            pauseWhenMissing: true, beforeSelection: persisted);
+        async Task PersistExclusion()
+        {
+            await stopped;
+            // A newer source choice may cancel the replacement, not the user's durable report.
+            await CallSettledReceipt("music.sourceExclusions.add", new { songId = state.Song.Id, provider,
+                platform = target.Platform, providerName = name, title = state.Song.Title, artist = state.Song.Artist }, lifetime.Token);
+            exclusionsRevision++;
+            state.Session!.Exclude(provider, target.Platform);
+            ForgetRecording(state.Song.Id);
+        }
     }
     private Task Notify(string message)
     {
@@ -255,11 +273,12 @@ public sealed partial class MusicCapability
     }
 
     /// <summary>
-    /// Resolve while the old stream keeps playing; hand off only to a prepared, positioned input.
-    /// A failed or missing replacement leaves the old playback untouched.
+    /// Hand off only to a prepared, positioned input. A failed normal replacement leaves the
+    /// old stream untouched; a wrong-source report has already stopped its rejected output.
     /// </summary>
     private Task SwitchAsync(MusicRecovery state, Func<MusicSourceSession, CancellationToken, Task<ResolvedMusic?>> select,
-        MusicSelection selection, string missing, bool pauseWhenMissing, Action<ResolvedMusic>? accepted = null)
+        MusicSelection selection, string missing, bool pauseWhenMissing, Action<ResolvedMusic>? accepted = null,
+        Task? beforeSelection = null)
     {
         if (!CurrentRecovery(state) || state.Recovering && state.Switching is null) return Task.CompletedTask;
         state.Switching?.Cancel();
@@ -275,6 +294,7 @@ public sealed partial class MusicCapability
             bool committed = false;
             try
             {
+                if (beforeSelection is not null) await beforeSelection;
                 request.Token.ThrowIfCancellationRequested();
                 request.CancelAfter(TimeSpan.FromSeconds(60));
                 var session = await CurrentSourceSession(state, request.Token);
@@ -283,14 +303,14 @@ public sealed partial class MusicCapability
                 {
                     var next = fileRetry is { } refreshed
                         ? selection.Automatic ? await session.AutomaticAsync(request.Token, refreshed)
-                            : selection.Tier is { } tier ? await session.ExactAsync(tier, request.Token, refreshed) : refreshed
+                            : selection.Tier is { } tier ? await session.ExactAsync(tier, request.Token, refreshed, selection.Manual) : refreshed
                         : await select(session, request.Token);
                     fileRetry = null;
                     request.Token.ThrowIfCancellationRequested();
                     if (!CurrentRecovery(state)) throw new OperationCanceledException(request.Token);
                     if (next is null || !selection.Allows(next))
                     {
-                        if (pauseWhenMissing && OwnsCurrent) await playback.PauseAsync();
+                        if (pauseWhenMissing && ReferenceEquals(state.Switching, request) && OwnsCurrent) await playback.PauseAsync();
                         status = missing; Changed(nameof(Status));
                         return;
                     }
@@ -302,11 +322,18 @@ public sealed partial class MusicCapability
                         committed = true;
                         state.Selection = selection;
                         state.RecoveryDisabled = false;
+                        if (state.Media?.Target is { } currentTarget && currentTarget.ManualSource != selection.Manual)
+                        {
+                            state.Media = state.Media with { Target = currentTarget with { ManualSource = selection.Manual } };
+                            state.Session!.Adopt(state.Media);
+                        }
                         accepted?.Invoke(next);
                     }
                     if (ReferenceEquals(next, state.Media) && HealthyCurrentInput(state)) { Accepted(); return; }
                     if (next.Uri is not null)
                         next = await CompletedPlaybackFileAsync(state, session, next, selection, request.Token) ?? next;
+                    if (selection.Manual)
+                        next = next with { Target = next.Target! with { ManualSource = true } };
                     try { await HandoffAsync(state, next, request.Token, Accepted); return; }
                     catch (Exception error) when (!published && next.Uri is null &&
                         UnusablePlaybackFile(error) && CurrentRecovery(state))
@@ -325,11 +352,20 @@ public sealed partial class MusicCapability
                         session.Reject(next, error is PlaybackException native ? native.Code : ((MusicOperationException)error).Code);
                         // This source failed before publication. Keep the old stream and try every other same-tier candidate.
                     }
+                    catch (Exception error) when (!published && selection.Source is not null &&
+                        error is not OperationCanceledException && CurrentRecovery(state) &&
+                        (error is PlaybackException mediaError && RetryablePreparation(mediaError.Code) ||
+                            error is MusicOperationException operation && RetryablePreparation(operation.Code)))
+                    {
+                        session.Reject(next, error is PlaybackException native ? native.Code : ((MusicOperationException)error).Code);
+                        throw;
+                    }
                 }
             }
             catch
             {
-                if (pauseWhenMissing && CurrentRecovery(state) && OwnsCurrent) await playback.PauseAsync();
+                if (pauseWhenMissing && ReferenceEquals(state.Switching, request) && CurrentRecovery(state) && OwnsCurrent)
+                    await playback.PauseAsync();
                 throw;
             }
             finally
@@ -393,7 +429,6 @@ public sealed partial class MusicCapability
             await port.CommitHandoffAsync(() =>
             {
                 if (!CommitPendingMedia(state, pending, out _, published: true)) return;
-                if (next.Uri is null) state.Session.Remember(next);
                 accepted();
                 if (changedSource && recorded) CompleteFeedback("source-change");
                 AcceptOfficialSong(state.Song, next.Target);

@@ -4,11 +4,13 @@ namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private static JsonObject[] Songs(JsonObject p, bool empty, bool full = false)
+    private JsonObject[] Songs(JsonObject p, bool empty, bool full = false)
     {
         var a = p["songs"] is null && empty ? new JsonArray() : LJ.Array(p["songs"]);
         LJ.Require((full || a.Count <= 1000) && (empty || a.Count > 0), "LIMIT");
-        return a.Select(NativeMusicSong.Normalize).ToArray();
+        var songs = a.Select(NativeMusicSong.Normalize).ToArray();
+        SongsObserved?.Invoke(songs);
+        return songs;
     }
     internal static NativeMusicSongGroups IndexLibrarySongs(JsonObject library, CancellationToken token = default)
     {
@@ -101,7 +103,8 @@ public sealed partial class MusicLibraryOwner
             LJ.Fields(p, allowed, "id ifRevision"); var c = AtRevision(); var before = Order(c); string[] next = before;
             if (method == "music.library.edit") LJ.Require(p.ContainsKey("name") || p.ContainsKey("songs") || p.ContainsKey("order"));
             if (p.ContainsKey("songs")) next = AddSongs(library, method == "music.library.addSongs" ?
-                before.Select(id => LJ.Object(LJ.Object(library["songs"])[id])).Concat(Songs(p, false, full)) : Songs(p, true, full));
+                before.Select(id => LJ.Object(LJ.Object(library["songs"])[id])).Concat(Songs(p, false, full)) :
+                Songs(p, true, full));
             else LJ.Require(method != "music.library.addSongs");
             if (method == "music.library.removeSong")
             {
