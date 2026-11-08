@@ -10,7 +10,6 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
     public private(set) var form = Form.compact
     public var onPresent: ((MusicPlaybackDestination) -> Void)?
     public var onMore: (() -> Void)?
-    public var onMode: (() -> Void)?
     public var onSources: (() -> Void)?
     public var onSizeChanged: (() -> Void)?
     private let content: MusicPlayerContentModel
@@ -23,7 +22,6 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
     private var foreground = false
     private var outsideInteraction: MusicDockInteractionObserver?
     public var moreAnchor: UIView { controls.moreAnchor }
-    public var modeAnchor: UIView { controls.modeAnchor }
 
     public init(content: MusicPlayerContentModel) {
         self.content = content
@@ -55,7 +53,6 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         addSubview(controls)
         controls.onPresent = { [weak self] in self?.onPresent?($0) }
         controls.onMore = { [weak self] in self?.onMore?() }
-        controls.onMode = { [weak self] in self?.onMode?() }
         controls.onSources = { [weak self] in self?.onSources?() }
         controls.onCollapse = { [weak self] in self?.collapse() }
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) {

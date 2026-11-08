@@ -40,7 +40,7 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
         playerView.onClose = { [weak self] in self?.requestClose() }
         playerView.onPresent = { [weak self] destination in self?.onPresent?(destination) }
         playerView.onMore = { [weak self] in self?.showMore() }
-        playerView.onMode = { [weak self] in self?.chooseMode() }
+        playerView.onFMSettings = { [weak self] in self?.openFMSettings() }
         playerView.onSources = { [weak self] in self?.requestSources() }
         observe(content.accessChanges) { [weak self] in self?.reconcileAccess() }
     }
@@ -106,40 +106,13 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
         onDismiss?()
     }
 
-    private func chooseMode() {
-        let model = content.model
-        if model.isFMActive { openFMSettings(); return }
-        let alert = UIAlertController(title: "播放模式", message: nil, preferredStyle: .actionSheet)
-        let displayed = content.fence
-        for mode in MusicPlaybackMode.allCases {
-            alert.addAction(UIAlertAction(title: mode.title, style: .default) { [weak self] _ in
-                guard let self, self.isPageVisible else { return }
-                self.content.setMode(mode, expected: displayed)
-            })
-        }
-        if let snapshot = model.similarMode, snapshot.active {
-            alert.addAction(UIAlertAction(title: snapshot.continueEnabled ? "关闭推荐续播" : "开启推荐续播", style: .default) {
-                [weak self] _ in
-                guard let self, self.isPageVisible else { return }
-                self.content.setSimilarContinue(!snapshot.continueEnabled, snapshot: snapshot.id, expected: displayed)
-            })
-        } else if let snapshot = model.queueRecommendations {
-            alert.addAction(UIAlertAction(title: snapshot.continueEnabled ? "关闭推荐续播" : "开启推荐续播", style: .default) {
-                [weak self] _ in
-                guard let self, self.isPageVisible else { return }
-                self.content.setQueueRecommendationContinue(!snapshot.continueEnabled, snapshot: snapshot.id, expected: displayed)
-            })
-        }
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        presentPopover(alert, anchor: playerView.modeAnchor)
-    }
-
     private func showMore() {
         let alert = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
         let occurrence = content.model.current?.id, access = content.model.accountAccessGeneration
         let displayed = content.fence, account = content.model.searchAccessGeneration
+        let command = content.model.recommendationCommandID
         let heartbeat = UIAlertAction(title: "当前歌曲心动", style: .default) { [weak self] _ in
-            guard let self, self.isPageVisible else { return }
+            guard let self, self.isPageVisible, self.content.model.recommendationCommandID == command else { return }
             self.content.startCurrentHeartbeat(expected: displayed)
         }
         heartbeat.isEnabled = content.model.canEnterSimilarMode && !content.model.isChangingSimilarMode &&
@@ -148,8 +121,21 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
         if content.model.similarMode?.active == true || content.model.isChangingSimilarMode {
             let snapshot = content.model.similarMode?.id
             alert.addAction(UIAlertAction(title: "返回原队列", style: .default) { [weak self] _ in
-                guard let self, self.isPageVisible else { return }
+                guard let self, self.isPageVisible, self.content.model.recommendationCommandID == command else { return }
                 self.content.returnFromRecommendations(snapshot: snapshot, expected: displayed)
+            })
+        }
+        if let snapshot = content.model.similarMode, snapshot.active {
+            alert.addAction(UIAlertAction(title: snapshot.continueEnabled ? "关闭推荐续播" : "开启推荐续播", style: .default) {
+                [weak self] _ in
+                guard let self, self.isPageVisible, self.content.model.recommendationCommandID == command else { return }
+                self.content.setSimilarContinue(!snapshot.continueEnabled, snapshot: snapshot.id, expected: displayed)
+            })
+        } else if let snapshot = content.model.queueRecommendations {
+            alert.addAction(UIAlertAction(title: snapshot.continueEnabled ? "关闭推荐续播" : "开启推荐续播", style: .default) {
+                [weak self] _ in
+                guard let self, self.isPageVisible, self.content.model.recommendationCommandID == command else { return }
+                self.content.setQueueRecommendationContinue(!snapshot.continueEnabled, snapshot: snapshot.id, expected: displayed)
             })
         }
         alert.addAction(UIAlertAction(title: "播放倍速", style: .default) { [weak self, weak alert] _ in
@@ -229,10 +215,7 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
     private func openFMSettings() {
         guard content.model.isFMActive, content.isAvailable, isPageVisible, presentedViewController == nil else { return }
         let page = MusicFMSettingsViewController(model: content.model, appearance: appearance)
-        let navigation = PageNavigationController(themeProvider: appearance)
-        navigation.setViewControllers([page], animated: false)
-        navigation.modalPresentationStyle = .fullScreen
-        present(navigation, animated: true)
+        present(page, animated: !UIAccessibility.isReduceMotionEnabled)
     }
 }
 #endif

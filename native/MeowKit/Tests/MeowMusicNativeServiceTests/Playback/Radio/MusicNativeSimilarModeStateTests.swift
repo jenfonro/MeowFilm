@@ -46,7 +46,8 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         let exited = try await cold.exitSimilarMode(), returningQueue = try await cold.queue()
         XCTAssertEqual(exited.state.total, 2001)
         XCTAssertEqual(returningQueue.entries.map(\.id), original.map { $0["id"].string })
-        XCTAssertEqual(returningQueue.currentId, returning["currentId"].string)
+        XCTAssertEqual(returningQueue.currentId, "entry-2001")
+        XCTAssertEqual(exited.action, .keepCurrent)
         let after = await owner.count()
         XCTAssertEqual(after, 1, "cold restore and exit do not fetch another recommendation")
         await cold.close()
@@ -92,10 +93,12 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         let live = await service.liveRecommendation(entryID: current.id)
         XCTAssertEqual(live?.value["feedbackSource"].string, "aiMode")
         let returned = try await service.exitSimilarMode()
-        XCTAssertEqual(returned.action, .restoreOnly, "returning to a different checkpoint must not keep current audio")
+        XCTAssertEqual(returned.action, .keepCurrent)
         let original = try await service.queue()
-        XCTAssertEqual(original.entries.map(\.id), ["entry-1", "entry-2"])
-        XCTAssertEqual(original.currentId, "entry-1")
+        XCTAssertEqual(original.entries.map(\.id), ["entry-1", current.id, "entry-2"])
+        XCTAssertEqual(original.currentId, current.id)
+        let returnedAttempt = await service.attempt?.id
+        XCTAssertEqual(returnedAttempt, playing.attemptId)
         await service.close()
     }
 
@@ -277,7 +280,8 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         let played = try await service.playSimilarCandidate(snapshotID: preview.id, candidateID: preview.candidates[1].id)
         XCTAssertEqual(played.action, .playCurrent)
         let exited = try await service.exitSimilarMode()
-        XCTAssertEqual(exited.action, .restoreOnly)
+        XCTAssertEqual(exited.action, .keepCurrent)
+        XCTAssertEqual(exited.state.currentId, played.state.currentId)
         let state = try await service.changeQueue(.replace([.init(kind: .queue, id: "entry-1")], index: 0),
                                                    expectedRevision: exited.state.revision)
         XCTAssertEqual(state.total, 1)
@@ -362,6 +366,7 @@ actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativeSimilar
     var openings = 0
     var endings = 0
     var activeRequests = 0
+    var resolutions = 0
     var hasMore: [Bool?]
     let metadata: Bool
     var names: [String: String]
@@ -435,7 +440,8 @@ actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativeSimilar
                qualities: ["128k"], title: "Synthetic", version: "1", contentHash: String(repeating: "a", count: 64))]
     }
     func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) -> MusicNativeAudio {
-        .init(url: URL(string: "https://m701.music.126.net/synthetic.mp3")!)
+        resolutions += 1
+        return .init(url: URL(string: "https://m701.music.126.net/synthetic.mp3")!)
     }
 }
 

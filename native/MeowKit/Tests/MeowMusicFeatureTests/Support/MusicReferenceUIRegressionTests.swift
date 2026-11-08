@@ -22,6 +22,17 @@ final class MusicReferenceUIRegressionTests: XCTestCase {
         XCTAssertEqual(MusicReferencePlayerLabels.quality(requestedLabel: nil), "音源与音质")
     }
 
+    func testFMHeaderUsesReferenceModeNamesAndKeepsSceneDetailsOutOfTheShortTitle() {
+        XCTAssertEqual(MusicFMModeChoice.main.map { MusicReferencePlayerLabels.fmSource($0.action) },
+                       ["FM·默认", "FM·熟悉", "FM·探索", "FM·拼图"])
+        for scene in MusicFMModeChoice.scenes {
+            XCTAssertEqual(MusicReferencePlayerLabels.fmSource(scene.action), "FM·场景")
+        }
+        XCTAssertEqual(MusicReferencePlayerLabels.fmSource(.ruleFM(ruleID: "1", tabTagID: "", sourceName: "深夜")),
+                       "FM·深夜")
+        XCTAssertEqual(MusicReferencePlayerLabels.fmSource(nil), "FM·私人漫游")
+    }
+
     func testLastEffectiveQualityIsLockedBeforeAnyWrite() {
         XCTAssertTrue(MusicQualityTogglePolicy.locksQuality("standard", qualities: ["standard"], spatial: []))
         XCTAssertFalse(MusicQualityTogglePolicy.locksQuality("high", qualities: ["standard"], spatial: []))

@@ -22,7 +22,7 @@ final class MusicPlaybackControlsView: UIView {
 
     var onPresent: ((MusicPlaybackDestination) -> Void)?
     var onMore: (() -> Void)?
-    var onMode: (() -> Void)?
+    var onFMSettings: (() -> Void)?
     var onSources: (() -> Void)?
     var onCollapse: (() -> Void)?
     private let content: MusicPlayerContentModel
@@ -44,8 +44,18 @@ final class MusicPlaybackControlsView: UIView {
     private var fullSafeHeight: CGFloat?
     private var titleFont = UIFont.systemFont(ofSize: 14, weight: .semibold)
     private var displayedTheme: PageTheme?
+    private struct ModeMenuState: Equatable {
+        let fence: MusicReferencePlayerFence
+        let command: UUID
+        let snapshot: UUID?
+        let mode: MusicPlaybackMode
+        let fm: String?
+        let heartbeat: Bool
+        let canHeartbeat: Bool
+        let available: Bool
+    }
+    private var displayedMode: ModeMenuState?
     var moreAnchor: UIView { more }
-    var modeAnchor: UIView { mode }
     var miniLayout: MusicMiniPlayerLayout {
         .init(titleLineHeight: Double(titleFont.lineHeight), artistLineHeight: Double(artist.font.lineHeight),
               lyricLineHeight: Double(lyricPreview.font.lineHeight + 4))
@@ -88,6 +98,7 @@ final class MusicPlaybackControlsView: UIView {
             button.accessibilityLabel = label
         }
         mode.accessibilityLabel = "播放模式"
+        mode.preferredMenuElementOrder = .fixed
         let prefix = layout == .full ? "music.player" : "music.miniPlayer"
         play.accessibilityIdentifier = "\(prefix).play"
         queue.accessibilityIdentifier = "\(prefix).queue"
@@ -111,7 +122,10 @@ final class MusicPlaybackControlsView: UIView {
         queue.addAction(UIAction { [weak self] _ in
             self?.onPresent?(.queue)
         }, for: .touchUpInside)
-        mode.addAction(UIAction { [weak self] _ in self?.onMode?() }, for: .touchUpInside)
+        mode.addAction(UIAction { [weak self] _ in
+            guard let self, self.rendering, self.content.isAvailable, self.content.model.isFMActive else { return }
+            self.onFMSettings?()
+        }, for: .touchUpInside)
         more.addAction(UIAction { [weak self] _ in self?.onMore?() }, for: .touchUpInside)
         quality.showsMenuAsPrimaryAction = true
         progress.addAction(UIAction { [weak self] _ in
@@ -127,6 +141,7 @@ final class MusicPlaybackControlsView: UIView {
         progress.addAction(UIAction { [weak self] _ in self?.cancelSeek() }, for: .touchCancel)
         subscriptions = [
             content.playbackChanges.sink { [weak self] in self?.updatePlayback() },
+            content.queueChanges.sink { [weak self] in self?.updateMode() },
             content.accessChanges.sink { [weak self] in self?.updatePlayback() },
             content.metadataChanges.sink { [weak self] in self?.updateMetadata() },
             content.favoriteChanges.sink { [weak self] in self?.updateFavorite() },
@@ -170,7 +185,10 @@ final class MusicPlaybackControlsView: UIView {
     func setRendering(_ rendering: Bool) {
         guard self.rendering != rendering else { return }
         self.rendering = rendering
-        if !rendering { cancelSeek() }
+        if !rendering {
+            cancelSeek()
+            mode.contextMenuInteraction?.dismissMenu()
+        }
         configureTitle()
         updateClock()
     }
@@ -287,14 +305,7 @@ final class MusicPlaybackControlsView: UIView {
         queue.isEnabled = content.isAvailable
         progress.isEnabled = content.isAvailable && content.model.activeNativeAttemptID != nil
         quality.isEnabled = content.isAvailable && content.model.current != nil
-        if layout == .full {
-            let configuration = UIImage.SymbolConfiguration(pointSize: 24, weight: .regular)
-            mode.setImage(UIImage(systemName: content.model.state.mode.symbol,
-                                  withConfiguration: configuration), for: .normal)
-        } else {
-            mode.setImage(UIImage(systemName: content.model.state.mode.symbol), for: .normal)
-        }
-        mode.accessibilityValue = content.model.state.mode.title
+        updateMode()
         let model = content.model
         let hasPlayback = model.activeResourceID != nil || model.isResolving
         let qualityName = model.isResolving ? "匹配中" : model.activeAudioDelivery.map {
@@ -325,6 +336,58 @@ final class MusicPlaybackControlsView: UIView {
         quality.accessibilityValue = content.model.activeAudioIsCached.map { $0 ? "本机缓存" : "网络音源" } ?? "未选择音源"
         updateFavorite()
         updateClock()
+    }
+
+    private func updateMode() {
+        guard layout == .full else { return }
+        let model = content.model
+        let heartbeat = model.similarMode?.active == true && model.similarMode?.provider == .heartbeat
+        let state = ModeMenuState(fence: content.fence, command: model.recommendationCommandID,
+            snapshot: model.similarMode?.id, mode: model.state.mode,
+            fm: model.isFMActive ? MusicFMModeChoice.title(for: model.activeHomeFM) : nil,
+            heartbeat: heartbeat,
+            canHeartbeat: (heartbeat || model.canEnterSimilarMode) &&
+                !model.isChangingSimilarMode && !model.isChangingQueueRecommendations,
+            available: content.isAvailable)
+        guard displayedMode != state else { return }
+        displayedMode = state
+        mode.contextMenuInteraction?.dismissMenu()
+        let ordinaryIcon: MusicPlaybackModeIcon.Kind
+        switch state.mode {
+        case .order: ordinaryIcon = .order
+        case .loop: ordinaryIcon = .loop
+        case .single: ordinaryIcon = .single
+        case .shuffle: ordinaryIcon = .shuffle
+        }
+        mode.setImage(MusicPlaybackModeIcon.image(state.fm != nil ? .fm :
+            state.heartbeat ? .heartbeat : ordinaryIcon), for: .normal)
+        mode.accessibilityValue = state.fm.map { "FM · " + $0 } ??
+            (state.heartbeat ? "心动，" + state.mode.title : state.mode.title)
+        mode.isEnabled = state.available
+        mode.showsMenuAsPrimaryAction = state.fm == nil
+        guard state.fm == nil else { mode.menu = nil; return }
+        let heart = UIAction(title: "心动", image: MusicPlaybackModeIcon.image(.heartbeat),
+            attributes: state.canHeartbeat ? [] : .disabled, state: state.heartbeat ? .on : .off) { [weak self] _ in
+            guard let self, self.admitsModeAction(state) else { return }
+            self.content.toggleHeartbeat(snapshot: state.snapshot, expected: state.fence)
+        }
+        let modes: [(MusicPlaybackMode, MusicPlaybackModeIcon.Kind)] = [
+            (.loop, .loop), (.single, .single), (.shuffle, .shuffle)
+        ]
+        mode.menu = UIMenu(children: [heart] + modes.map { choice, icon in
+            UIAction(title: choice.title, image: MusicPlaybackModeIcon.image(icon),
+                state: state.mode == choice ? .on : .off) { [weak self] _ in
+                guard let self, self.admitsModeAction(state) else { return }
+                self.content.setMode(choice, expected: state.fence)
+            }
+        })
+    }
+
+    private func admitsModeAction(_ state: ModeMenuState) -> Bool {
+        let model = content.model
+        return state.fence.admits(content.fence, permitted: rendering && content.isAvailable) &&
+            !model.isFMActive && model.similarMode?.id == state.snapshot &&
+            model.recommendationCommandID == state.command
     }
 
     private func updateFavorite() {
