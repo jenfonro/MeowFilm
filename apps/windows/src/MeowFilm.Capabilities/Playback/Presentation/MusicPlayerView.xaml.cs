@@ -18,6 +18,8 @@ public partial class MusicPlayerView : UserControl
     private PlayerSurfaceInput? surfaceInput;
     private string fmActionKey = "";
     private long fmPopupGeneration;
+    private string modeActionKey = "";
+    private long modeMenuGeneration;
     private long moreGeneration;
     public MusicPlayerView(MusicCapability module, bool showArtwork = true)
     {
@@ -25,6 +27,7 @@ public partial class MusicPlayerView : UserControl
         if (!showArtwork) { MetadataPanel.Children.Remove(ArtworkButton); ArtworkButton.Content = null; }
         this.module = module; DataContext = module;
         QualityMenu.DataContext = module;
+        ModeMenu.DataContext = module;
         Progress.ScrubStarted += (_, _) => BeginProgress();
         Progress.ScrubCancelled += (_, _) => RestoreProgress();
         Progress.ScrubCommitted += async (_, _) =>
@@ -45,6 +48,7 @@ public partial class MusicPlayerView : UserControl
             popup.Closed += (_, _) => { surfaceInput?.LayerClosed(); if (popup.Child is Visual visual) surfaceInput?.Forget(visual); };
         }
         QualityMenu.Opened += (_, _) => surfaceInput?.Observe(QualityMenu);
+        ModeMenu.Opened += (_, _) => surfaceInput?.Observe(ModeMenu);
         IsVisibleChanged += (_, _) => { if (!IsVisible) Deactivate(); };
         Unloaded += (_, _) =>
         {
@@ -60,6 +64,8 @@ public partial class MusicPlayerView : UserControl
         qualityRequest++;
         moreGeneration++;
         QualityMenu.IsOpen = false;
+        ModeMenu.IsOpen = false;
+        modeActionKey = ""; modeMenuGeneration++;
         SourcePopup.IsOpen = false;
         PlaylistPopup.IsOpen = false;
         VolumePopup.IsOpen = false;
@@ -69,7 +75,7 @@ public partial class MusicPlayerView : UserControl
         if (MoreButton.ContextMenu is { } menu) menu.IsOpen = false;
         Progress.CancelScrub(); RestoreProgress();
     }
-    private bool LayersOpen() => QualityMenu.IsOpen || SourcePopup.IsOpen || PlaylistPopup.IsOpen ||
+    private bool LayersOpen() => QualityMenu.IsOpen || ModeMenu.IsOpen || SourcePopup.IsOpen || PlaylistPopup.IsOpen ||
         VolumePopup.IsOpen || RatePopup.IsOpen || FmPopup.IsOpen || MoreButton.ContextMenu?.IsOpen == true;
     private static bool IsBlank(object sender, MouseButtonEventArgs e)
     {
@@ -218,9 +224,29 @@ public partial class MusicPlayerView : UserControl
     private async void Play_Click(object sender, RoutedEventArgs e) => await module.TogglePlaybackAsync();
     private async void Previous_Click(object sender, RoutedEventArgs e) => await module.StepAsync(false);
     private async void Next_Click(object sender, RoutedEventArgs e) => await module.StepAsync(true);
-    private async void Mode_Click(object sender, RoutedEventArgs e)
+    private void Mode_Click(object sender, RoutedEventArgs e) => OpenModeChoices();
+    private void Mode_ContextMenuOpening(object sender, ContextMenuEventArgs e)
     {
-        if (!module.HasPlaybackFm) { await module.ChangeModeAsync((module.Mode + 1) % 4); return; }
+        e.Handled = true;
+        if (!ModeMenu.IsOpen && !FmPopup.IsOpen) OpenModeChoices();
+    }
+    private void OpenModeChoices()
+    {
+        if (!module.CanChangePlaybackMode) return;
+        if (!module.HasPlaybackFm)
+        {
+            if (ModeMenu.IsOpen) { ModeMenu.IsOpen = false; return; }
+            modeActionKey = module.PlaybackModeActionKey;
+            modeMenuGeneration++;
+            ModeMenu.Items.Clear();
+            ModeMenu.Items.Add(ModeChoice("心动模式", "heartbeat", null, module.HasPlaybackHeartbeat));
+            ModeMenu.Items.Add(ModeChoice("列表循环", "repeat", 1, module.Mode == 1));
+            ModeMenu.Items.Add(ModeChoice("单曲循环", "single", 3, module.Mode == 3));
+            ModeMenu.Items.Add(ModeChoice("随机播放", "shuffle", 2, module.Mode == 2));
+            ModeMenu.PlacementTarget = ModeButton;
+            ModeMenu.IsOpen = true;
+            return;
+        }
         if (FmPopup.IsOpen) { FmPopup.IsOpen = false; return; }
         fmActionKey = module.PlaybackFmActionKey;
         fmPopupGeneration++;
@@ -233,6 +259,40 @@ public partial class MusicPlayerView : UserControl
         var choices = FmModeChoices.Children.OfType<Button>().Concat(FmSceneChoices.Children.OfType<Button>());
         (choices.FirstOrDefault(button => AutomationProperties.GetItemStatus(button) == "已选中") ?? choices.First()).Focus();
     }
+    private MenuItem ModeChoice(string name, string iconKey, int? mode, bool selected)
+    {
+        var content = new StackPanel { Orientation = Orientation.Horizontal };
+        var icon = new MusicPlaybackIcon { Key = iconKey, Width = 18, Height = 18, Margin = new(0, 0, 10, 0) };
+        var label = new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center };
+        content.Children.Add(icon);
+        content.Children.Add(label);
+        // Native MenuItem closes on PreviewClick, before Click; keep it open until the guarded handler closes it.
+        var item = new MenuItem { Header = content, StaysOpenOnClick = true, Tag = mode is { } value ? value : "heartbeat",
+            IsChecked = selected, Style = (Style)FindResource("Player.CurrentQualityItem") };
+        icon.SetBinding(Control.ForegroundProperty, new Binding(nameof(Foreground)) { Source = item });
+        label.SetBinding(TextBlock.ForegroundProperty, new Binding(nameof(Foreground)) { Source = item });
+        item.SetBinding(IsEnabledProperty, new Binding(mode is null
+            ? nameof(MusicCapability.CanTogglePlaybackHeartbeat) : nameof(MusicCapability.CanEdit)) { Source = module });
+        AutomationProperties.SetName(item, name);
+        string actionKey = modeActionKey;
+        long generation = modeMenuGeneration;
+        item.Click += async (_, e) =>
+        {
+            e.Handled = true;
+            if (!ModeMenu.IsOpen || !item.IsEnabled || !IsLoaded || !IsVisible ||
+                generation != modeMenuGeneration || actionKey != module.PlaybackModeActionKey || module.HasPlaybackFm) return;
+            ModeMenu.IsOpen = false;
+            if (mode is { } next) await module.ChangeModeAsync(next);
+            else await module.TogglePlaybackHeartbeatAsync(actionKey);
+        };
+        return item;
+    }
+    private void ModeMenu_Closed(object? sender, RoutedEventArgs e)
+    {
+        surfaceInput?.LayerClosed(); surfaceInput?.Forget(ModeMenu);
+        modeActionKey = ""; modeMenuGeneration++;
+        if (IsLoaded && IsVisible) ModeButton.Focus();
+    }
     private Button FmChoice(MusicCatalogChoice choice, bool scene)
     {
         bool selected = module.PlaybackFmRuleId.Length == 0 && module.PlaybackFmTabTagId.Length == 0 &&
@@ -242,13 +302,34 @@ public partial class MusicPlayerView : UserControl
         long generation = fmPopupGeneration;
         var button = new Button
         {
-            Content = choice.Name, Tag = choice,
-            Style = (Style)FindResource("Player.FmChoice"),
+            Tag = choice,
+            Style = (Style)FindResource(scene ? "Player.FmScene" : "Player.FmChoice"),
             HorizontalContentAlignment = HorizontalAlignment.Center
         };
+        var content = new StackPanel();
+        if (scene)
+        {
+            var icon = new MusicPlaybackIcon { Key = choice.Key, Width = 25, Height = 25,
+                HorizontalAlignment = HorizontalAlignment.Center, Margin = new(0, 0, 0, 10) };
+            icon.SetBinding(Control.ForegroundProperty, new Binding(nameof(Foreground)) { Source = button });
+            content.Children.Add(icon);
+        }
+        var label = new TextBlock { Text = choice.Name, TextAlignment = TextAlignment.Center,
+            FontWeight = scene ? FontWeights.Normal : FontWeights.Medium };
+        label.SetBinding(TextBlock.ForegroundProperty, new Binding(nameof(Foreground)) { Source = button });
+        content.Children.Add(label);
+        if (!scene)
+        {
+            var description = new TextBlock { Text = choice.Key switch {
+                "default" => "沿着目前喜好继续聆听", "familiar" => "喜欢过的歌曲与相似推荐",
+                "explore" => "偏好曲风与潜力好歌", _ => "发现新的旋律" },
+                FontSize = 12, TextAlignment = TextAlignment.Center, Margin = new(0, 4, 0, 0),
+                Style = (Style)FindResource("Player.FmDescription") };
+            content.Children.Add(description);
+        }
+        button.Content = content;
         AutomationProperties.SetName(button, choice.Name);
         AutomationProperties.SetItemStatus(button, selected ? "已选中" : "");
-        if (!scene) { button.MinHeight = 48; button.FontWeight = FontWeights.SemiBold; }
         button.Click += async (_, e) =>
         {
             e.Handled = true;
@@ -280,6 +361,8 @@ public partial class MusicPlayerView : UserControl
     {
         if (SourcePopup.IsOpen && !module.HasSourceChoices) SourcePopup.IsOpen = false;
         if (!module.HasQualityButton) QualityMenu.IsOpen = false;
+        if (ModeMenu.IsOpen && (modeActionKey != module.PlaybackModeActionKey || !module.CanChangePlaybackMode))
+            ModeMenu.IsOpen = false;
         if (FmPopup.IsOpen && fmActionKey != module.PlaybackFmActionKey) FmPopup.IsOpen = false;
         if (scrubKey is not null && (scrubKey != module.PlaybackPresentationKey || !module.CanSeek))
         { Progress.CancelScrub(); RestoreProgress(); }

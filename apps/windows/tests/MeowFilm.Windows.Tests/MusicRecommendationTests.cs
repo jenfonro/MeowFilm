@@ -31,10 +31,16 @@ public static class MusicRecommendationTests
         yield return new("Recommendation heartbeat favorites uses resolved context and defaults continuation off", HeartbeatFavorites);
         yield return new("Recommendation heartbeat current rejects stale recording before provider read", HeartbeatStale);
         yield return new("Recommendation heartbeat current preserves actual repeated recording occurrence", HeartbeatOccurrence);
+        yield return new("Recommendation heartbeat returns ABC from B as ABEC without a media selection", () => HeartbeatReturn(true));
+        yield return new("Recommendation heartbeat return preserves paused intent and retires feedback proof", () => HeartbeatReturn(false));
+        yield return new("Recommendation heartbeat return preserves different occurrences of the same recording", () => HeartbeatReturn(true, true));
+        yield return new("Recommendation heartbeat failed return preserves media and can retry after reconcile", () => HeartbeatReturnUnknown(false));
+        yield return new("Recommendation heartbeat lost return ACK reconciles ABEC without media selection or another write", () => HeartbeatReturnUnknown(true));
+        yield return new("Recommendation heartbeat return waiting for lane cannot restore over an ordinary replacement", HeartbeatReturnStale);
         foreach (string queue in new[] { "empty", "different-wy", "non-wy" })
         {
             string original = queue;
-            yield return new("Recommendation heartbeat browser seed accepts " + original + " queue and restores checkpoint",
+            yield return new("Recommendation heartbeat browser seed accepts " + original + " queue and returns with current occurrence",
                 () => HeartbeatBrowser(original));
         }
         yield return new("Recommendation heartbeat explicit seed rejects noncurrent duplicate occurrence", HeartbeatStaleOccurrence);
@@ -276,8 +282,14 @@ public static class MusicRecommendationTests
         Check(f.Catalog.Calls.Single().Heartbeat is { Entry: MusicHeartbeatEntry.Favorites, SongId: null });
         Check(N(await f.Q(), "total") == 4 && Current(await f.Q()) != Current(before) && !state.GetProperty("continue").GetBoolean());
         Check(f.Rec.GetFeedback(Current(await f.Q())) is { FromHome: true, FeedbackSource: "aiMode", SourceId: "100" });
+        var recommendation = await f.Q(); int selections = f.Selections.Count;
         await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(state, "id") });
-        Check((await f.Q()).GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText());
+        var restored = await f.Q();
+        Check(restored.GetProperty("entries").EnumerateArray().Select(e => e.GetRawText()).SequenceEqual(
+            new[] { before.GetProperty("entries")[0], recommendation.GetProperty("current"), before.GetProperty("entries")[1] }
+                .Select(e => e.GetRawText())));
+        Check(Current(restored) == Current(recommendation) && f.Selections.Count == selections &&
+            f.Rec.GetFeedback(Current(restored)) is null);
     }
     private static async Task HeartbeatStale()
     {
@@ -322,9 +334,97 @@ public static class MusicRecommendationTests
             f.Rec.GetFeedback(Current(after)) is { FromHome: false, FeedbackSource: "aiMode", SourceId: "100" });
         var returned = await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(state, "id") });
         var restored = await f.Q();
-        Check(S(returned, "status") == "returned" && Current(restored) == Current(before) &&
-            restored.GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText() &&
+        JsonElement[] expected = original switch
+        {
+            "empty" => [after.GetProperty("current")],
+            "different-wy" => [before.GetProperty("entries")[0], after.GetProperty("current"), before.GetProperty("entries")[1]],
+            _ => [before.GetProperty("entries")[0], after.GetProperty("current")]
+        };
+        Check(S(returned, "status") == "returned" && Current(restored) == Current(after) &&
+            restored.GetProperty("entries").EnumerateArray().Select(e => e.GetRawText()).SequenceEqual(expected.Select(e => e.GetRawText())) &&
             restored.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText());
+        Check(f.Selections.Count == 1 && f.Rec.GetFeedback(Current(restored)) is null);
+    }
+    private static async Task HeartbeatReturn(bool playing, bool duplicate = false)
+    {
+        await using var f = new Fixture();
+        await Ok(f.Library, "music.queue.replace", new { songs = new[] { Song("2"), Song("1"), Song(duplicate ? "11" : "3") },
+            index = 1, context = new { sourceTitle = "Original", sourceType = "search", searchKeyword = "needle",
+                queueSource = new { id = "source", title = "Original", kind = "search", platform = "wy" } } });
+        var before = await f.Q();
+        f.Catalog.Reply("heartbeat", "10", "11", "12"); var state = await f.Heartbeat();
+        string current = S((await f.Q()).GetProperty("entries")[2], "id");
+        await f.Port.ExecuteAsync("music.queue.select", new { id = current });
+        await f.Wait(s => S(s, "currentId") == current);
+        await f.Rec.OnPlaybackAsync(new(current, playing, true, true));
+        var recommendation = await f.Q(); int writes = f.Store.Writes;
+        Check(f.Rec.GetFeedback(current) is { Kind: "heartbeat" });
+        var returned = await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(state, "id") });
+        var restored = await f.Q();
+        Check(S(returned, "status") == "returned" && !returned.GetProperty("active").GetBoolean() &&
+            !returned.GetProperty("canReturn").GetBoolean() && returned.GetProperty("play").GetBoolean() == playing);
+        Check(Current(restored) == current && S(returned, "currentId") == current &&
+            N(returned, "queueVersion") == N(restored, "version") && N(returned, "count") == 4);
+        Check(restored.GetProperty("entries").EnumerateArray().Select(e => e.GetRawText()).SequenceEqual(
+            new[] { before.GetProperty("entries")[0], before.GetProperty("entries")[1],
+                recommendation.GetProperty("current"), before.GetProperty("entries")[2] }.Select(e => e.GetRawText())));
+        Check(restored.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText() &&
+            f.Store.Writes == writes + 1 && f.Selections.IsEmpty);
+        Check(recommendation.GetProperty("entries").EnumerateArray().All(e => f.Rec.GetFeedback(S(e, "id")) is null));
+    }
+    private static async Task HeartbeatReturnUnknown(bool applied)
+    {
+        await using var f = new Fixture();
+        await Ok(f.Library, "music.queue.replace", new { songs = new[] { Song("2"), Song("1"), Song("3") }, index = 1 });
+        var before = await f.Q();
+        f.Catalog.Reply("heartbeat", "10", "11", "12"); var state = await f.Heartbeat(true);
+        string current = S((await f.Q()).GetProperty("entries")[2], "id");
+        await f.Port.ExecuteAsync("music.queue.select", new { id = current });
+        await f.Wait(s => S(s, "currentId") == current);
+        await f.Rec.OnPlaybackAsync(new(current, true, true, true));
+        var recommendation = await f.Q();
+        var proof = f.Rec.GetFeedback(current); Check(proof is not null);
+        int writes = f.Store.Writes; f.Store.Failure = applied ? 2 : 1;
+        var pending = await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(state, "id") });
+        Check(S(pending, "status") == "commit-unknown" && pending.GetProperty("requiresReconcile").GetBoolean() &&
+            pending.GetProperty("active").GetBoolean() && pending.GetProperty("play").GetBoolean());
+        Check(f.Store.Writes == writes + 1 && f.Selections.IsEmpty && f.Rec.GetFeedback(current) == proof);
+        var blocked = await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(state, "id") });
+        Check(!blocked.GetProperty("ok").GetBoolean() && S(blocked, "code") == "COMMIT_UNKNOWN" && f.Store.Writes == writes + 1);
+        var settled = await f.Rec.ExecuteAsync("music.recommendations.reconcile", new { id = S(state, "id") });
+        Check(!settled.GetProperty("requiresReconcile").GetBoolean() && settled.GetProperty("play").GetBoolean() &&
+            f.Store.Writes == writes + 1 && f.Selections.IsEmpty);
+        if (!applied)
+        {
+            Check(S(settled, "status") == "not-applied" && settled.GetProperty("canReturn").GetBoolean() &&
+                f.Rec.GetFeedback(current) == proof && Current(await f.Q()) == current &&
+                (await f.Q()).GetProperty("entries").GetRawText() == recommendation.GetProperty("entries").GetRawText());
+            settled = await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(state, "id") });
+        }
+        var restored = await f.Q();
+        Check(S(settled, "status") == "returned" && !settled.GetProperty("active").GetBoolean() &&
+            !settled.GetProperty("continue").GetBoolean() && !settled.GetProperty("waiting").GetBoolean() &&
+            Current(restored) == current && f.Rec.GetFeedback(current) is null && f.Selections.IsEmpty);
+        Check(restored.GetProperty("entries").EnumerateArray().Select(e => e.GetRawText()).SequenceEqual(
+            new[] { before.GetProperty("entries")[0], before.GetProperty("entries")[1],
+                recommendation.GetProperty("current"), before.GetProperty("entries")[2] }.Select(e => e.GetRawText())));
+        Check(f.Store.Writes == writes + (applied ? 1 : 2));
+    }
+    private static async Task HeartbeatReturnStale()
+    {
+        await using var f = new Fixture(); await f.Replace("1", "2");
+        f.Catalog.Reply("heartbeat", "10", "11"); var state = await f.Heartbeat();
+        var entered = NewSignal(); var release = NewSignal();
+        var lane = f.Port.InLaneAsync(async (_, _) => { entered.TrySetResult(); await release.Task; return true; }, CancellationToken.None);
+        await entered.Task;
+        int writes = f.Store.Writes;
+        var returning = f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(state, "id") });
+        var replacement = f.Port.ExecuteAsync("music.queue.replace", new { songs = new[] { Song("99") }, index = 0 });
+        release.TrySetResult();
+        await lane; await returning; await replacement; await f.Rec.PrepareCloseAsync();
+        var actual = await f.Q();
+        Check(N(actual, "total") == 1 && SongId(actual.GetProperty("current").GetProperty("song")) == "99" &&
+            f.Store.Writes == writes + 1 && f.Selections.IsEmpty);
     }
     private static async Task HeartbeatStaleOccurrence()
     {

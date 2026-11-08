@@ -376,7 +376,11 @@ public sealed partial class MusicRecommendationCoordinator
                         recipient.Config = recipient.Config with { Fm = fm };
                     ApplyCommitted(recipient, pending!, result, after, pending!.QueueEpoch);
                     if (CurrentLocked(recipient)) recipient.Status = "ready";
-                    if (pending.Action == "restore") { s.Returning = false; s.Active = false; s.Status = "returned"; s.Feedback.Clear(); }
+                    if (pending.Action == "restore")
+                    {
+                        s.Returning = false; s.Active = false; s.Status = "returned"; s.Feedback.Clear();
+                        if (s.Config.Kind == "heartbeat") { s.Continue = false; s.Waiting = false; }
+                    }
                 }
                 else
                 {
@@ -384,9 +388,12 @@ public sealed partial class MusicRecommendationCoordinator
                     if (recipient.PreviousConfiguration is { } previousConfig)
                     { recipient.Config = previousConfig; recipient.PreviousConfiguration = null; recipient.InitialPending = false; }
                 }
-                s.Pending = null; unresolved.Remove(s); s.Queue = after; s.Error = ""; s.Play = false;
-                recipient.Queue = after; recipient.QueueEpoch = queue.Epoch; recipient.Error = ""; recipient.Play = false;
-                recipient.MediaIntent++;
+                s.Pending = null; unresolved.Remove(s); s.Queue = after; s.Error = "";
+                recipient.Queue = after; recipient.QueueEpoch = queue.Epoch; recipient.Error = "";
+                if (pending!.Action != "restore" || s.Config.Kind != "heartbeat")
+                {
+                    s.Play = false; recipient.Play = false; recipient.MediaIntent++;
+                }
                 if (!s.Active && s.TransferTo is { } next && CurrentLocked(next) && next.Checkpoint.Length == 0)
                 { next.Checkpoint = s.Checkpoint; s.Checkpoint = ""; }
                 if (ReferenceEquals(recipient, session)) PublishLocked();
