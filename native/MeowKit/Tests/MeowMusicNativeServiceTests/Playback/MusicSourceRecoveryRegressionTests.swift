@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import XCTest
 import MeowContracts
@@ -10,7 +11,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
     var sites: [String: [String]]
     var requests: [MusicScriptRequest] = []
     var fails = Set<String>()
-    var sourceGate: NativeMusicGate?, writeGate: NativeMusicGate?, resolveGate: NativeMusicGate?
+    var sourceGate: NativeMusicGate?, writeGate: NativeMusicGate?
     var sourceDuration: Double = 180
     init(_ ids: [String] = ["a", "b"], enabled: Bool = true, sites: [String: [String]] = [:]) {
         self.enabled = Dictionary(uniqueKeysWithValues: ids.map { ($0, enabled) }); self.sites = sites
@@ -18,7 +19,6 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
     func fail(_ keys: Set<String>) { fails = keys }
     func holdSource(_ gate: NativeMusicGate) { sourceGate = gate }
     func holdWriteReceipt(_ gate: NativeMusicGate) { writeGate = gate }
-    func holdResolve(_ gate: NativeMusicGate) { resolveGate = gate }
     func setDuration(_ value: Double) { sourceDuration = value }
     func snapshot(_ id: String) -> MusicScriptSource {
         .init(installationID: id, generation: 1, enabled: enabled[id] == true,
@@ -32,9 +32,8 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         guard enabled[installationID] != nil else { throw MusicServiceError.sourceUnavailable }
         return snapshot(installationID)
     }
-    func resolve(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeAudio> {
+    func resolve(request: MusicScriptRequest) throws -> MusicScriptResult<MusicNativeAudio> {
         requests.append(request)
-        if let gate = resolveGate { resolveGate = nil; await gate.wait() }
         if fails.contains(request.installationID + ":" + request.quality) { throw MusicServiceError.audioUnavailable }
         return .init(value: .init(url: URL(string: "https://media.invalid/\(request.installationID).\(request.quality)")!,
                      delivery: .init(quality: request.quality, evidence: .officialResponse, duration: sourceDuration)),
@@ -150,8 +149,14 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         let occurrence = try XCTUnwrap(model.current?.id)
         let recommendationGate = NativeMusicGate()
         let command: Task<Void, Never>
+        let published = expectation(description: "the requested recommendation snapshot is published")
+        let observation = model.playbackState.$queueRecommendations.compactMap { $0 }
+            .filter { $0.currentEntryID == occurrence && (navigating || $0.canRetry) }.prefix(1)
+            .sink { _ in published.fulfill() }
+        defer { observation.cancel() }
         if navigating {
             await model.loadSimilarMode()
+            await fulfillment(of: [published], timeout: 2)
             let snapshot = try XCTUnwrap(model.queueRecommendations)
             await accounts.suspendNext(recommendationGate)
             await model.setQueueRecommendationContinue(true, snapshotID: snapshot.id)
@@ -165,6 +170,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
             XCTAssertNotNil(model.navigationPlaybackIntent)
         } else {
             await model.previewQueueRecommendations()
+            await fulfillment(of: [published], timeout: 2)
             let snapshot = try XCTUnwrap(model.queueRecommendations)
             XCTAssertTrue(snapshot.canRetry)
             await accounts.suspendNext(recommendationGate)
@@ -174,7 +180,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         }
         let audioIntent = try XCTUnwrap(navigating ? model.navigationPlaybackIntent : model.recommendationPlaybackIntent)
         let mediaGate = NativeMusicGate()
-        await scripts.holdResolve(mediaGate)
+        await scripts.holdSource(mediaGate)
         let replacement: Task<Void, Never>?
         if excluding {
             replacement = Task { await model.rejectCurrentSource() }
