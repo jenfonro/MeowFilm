@@ -499,12 +499,6 @@
    <ComboBox ItemsSource="{Binding CatalogDailyBranches}" DisplayMemberPath="Name" SelectedValuePath="Key"
     SelectedValue="{Binding CatalogDailyBranch}" SelectionChanged="Options_Changed" Width="130" Margin="0,0,12,8"
     Visibility="{Binding IsCatalogDaily,Converter={StaticResource Visible}}" IsEnabled="{Binding CanCatalogBrowse}" AutomationProperties.Name="每日推荐类型"/>
-   <ComboBox ItemsSource="{Binding CatalogFmModes}" DisplayMemberPath="Name" SelectedValuePath="Key"
-    SelectedValue="{Binding CatalogFmMode}" SelectionChanged="Options_Changed" Width="110" Margin="0,0,12,8"
-    Visibility="{Binding IsCatalogFm,Converter={StaticResource Visible}}" IsEnabled="{Binding CanCatalogBrowse}" AutomationProperties.Name="FM 模式"/>
-   <ComboBox ItemsSource="{Binding CatalogFmScenes}" DisplayMemberPath="Name" SelectedValuePath="Key"
-    SelectedValue="{Binding CatalogFmScene}" SelectionChanged="Options_Changed" Width="110" Margin="0,0,12,8"
-    Visibility="{Binding IsCatalogFmScene,Converter={StaticResource Visible}}" IsEnabled="{Binding CanCatalogBrowse}" AutomationProperties.Name="FM 场景"/>
    <ComboBox ItemsSource="{Binding CatalogSearchKinds}" SelectedItem="{Binding CatalogSearchKind}" Width="96"
     SelectionChanged="Kind_Changed" Margin="0,0,12,8" IsEnabled="{Binding CanCatalogBrowse}" AutomationProperties.Name="搜索类型"/>
    <Button Content="上一页" Tag="-1" Click="Page_Click" IsEnabled="{Binding CanCatalogPrevious}"/>

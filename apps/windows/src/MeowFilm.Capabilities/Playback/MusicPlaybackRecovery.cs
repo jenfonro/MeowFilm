@@ -290,6 +290,7 @@ public sealed partial class MusicCapability
             catch (Exception error) when (error is PlaybackException native && RecoverableMusicError(state, native.Code) ||
                 error is MusicOperationException operation && RecoverableMusicError(state, operation.Code))
             {
+                if (!recorded) searchRecommendationStart = null;
                 state.Opening = false;
                 if (!await RecoverMusic(state, expired: false)) throw;
             }

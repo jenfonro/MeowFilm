@@ -71,8 +71,14 @@ public static partial class MusicUiTests
             Equal(Path.GetFileName(f.Dialogs.ScriptPath), f.Runtime.Uploads.Single().Basename);
             var requests = f.Calls.Log.Where(call => call.Method == "music.online.resolve").ToArray();
             Equal(source.InstallationId, requests.Single().Parameters.GetProperty("installationId").GetString());
+            var identity = f.Playback.Identity;
+            int opens = f.Playback.Opens.Count;
             await f.Module.SetSourceEnabledAsync(ScriptRow(f), false); await Until(() => f.Module.CanEdit);
-            True(!f.Playback.HasMedia, "source disable stops owned media");
+            True(!ScriptRow(f).Enabled, "source disable prevents new parsing");
+            True(f.Playback.HasMedia && f.Playback.IsPlaying && f.Playback.Identity == identity,
+                "source disable preserves already accepted historical media");
+            Equal(opens, f.Playback.Opens.Count);
+            Equal(requests.Length, f.Calls.Count("music.online.resolve"));
         });
         yield return Case("late online resolver cannot open after its playback retires; no synthetic history", async () =>
         {

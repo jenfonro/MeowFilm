@@ -122,6 +122,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
             SearchSongs = SearchAndObserveCatalogAsync
         };
         recommendationQueue = new(library);
+        fmPreferences = new(store);
         recommendations = new(catalog, recommendationQueue, SelectRecommendationAsync, readAsync: async (request, token) =>
         {
             await PrepareSongFactsAsync(token).ConfigureAwait(false);
@@ -529,9 +530,11 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     private sealed class CatalogSessions(MusicAccountOwner owner) : IMusicPlatformSessionSource
     {
         private readonly AsyncLocal<Frame?> current = new();
-        internal Frame Begin(bool awaitPhysical = false)
+        internal Frame Begin(bool awaitPhysical = false, bool inheritLease = false)
         {
-            var frame = new Frame(this, current.Value, awaitPhysical);
+            var previous = current.Value;
+            var frame = new Frame(this, previous, awaitPhysical);
+            if (inheritLease) previous?.TransferLeaseTo(frame);
             current.Value = frame; return frame;
         }
         public async ValueTask<MusicPlatformSession?> AcquireAsync(string platform, CancellationToken cancellationToken)
@@ -552,6 +555,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         {
             internal bool AwaitPhysical { get; } = awaitPhysical;
             private bool captured;
+            private int transferred;
             internal bool Captured => captured;
             internal MusicPlatformSession? Session { get; private set; }
             internal string? Platform { get; private set; }
@@ -565,6 +569,13 @@ public sealed partial class MusicNativeApplication : IMusicApplication
             {
                 if (captured) return;
                 Platform = platform; Session = session; captured = true;
+            }
+            internal void TransferLeaseTo(Frame next)
+            {
+                // Only the initial read consumes a startup lease. Async callbacks
+                // inheriting the old execution context must acquire afresh.
+                if (captured && Interlocked.Exchange(ref transferred, 1) == 0)
+                    next.Capture(Platform!, Session);
             }
             // Retiring a subscription must not clear the lease of a still-running child read.
             public void Dispose() { source.current.Value = previous; }

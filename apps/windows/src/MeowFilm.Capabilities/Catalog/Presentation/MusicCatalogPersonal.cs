@@ -211,12 +211,17 @@ public sealed partial class MusicCapability
         {
             if (!action.TryGetProperty("sourceIds", out var ids) || ids.ValueKind != JsonValueKind.Array)
                 return CatalogBusinessError("INVALID_REQUEST");
-            return StartRecommendation(Target("similar", card.Platform, card.Title, new { sourceIds = ids.Clone() }));
+            return StartRecommendation(Target("similar", card.Platform, card.Title,
+                new { sourceIds = ids.Clone(), sourceType = MusicCatalogDto.Text(action, "sourceType") }));
         }
         if (card.Kind == "heartbeat")
-            return StartRecommendation(Target("heartbeat", card.Platform, card.Title, new { entry = "favorites" }));
+            return StartRecommendation(Target("heartbeat", card.Platform, card.Title,
+                new { entry = "favorites", songId = MusicCatalogDto.Text(action, "songId") }));
         if (card.Kind == "fm")
         {
+            if (IsCatalogHome && MusicCatalogDto.Text(action, "ruleId").Length == 0 &&
+                MusicCatalogDto.Text(action, "tabTagId").Length == 0)
+                return StartRecommendation(Target("fm", card.Platform, card.Title, new { }));
             var mode = MusicCatalogDto.Text(action, "mode").ToLowerInvariant();
             mode = mode switch { "" => "default", "scene_rcmd" => "scene", "puzzle_mode_rcmd" => "puzzle", _ => mode };
             var p = new Dictionary<string, object?> { ["mode"] = mode, ["submode"] = MusicCatalogDto.Text(action, "submode") };
@@ -232,7 +237,8 @@ public sealed partial class MusicCapability
     {
         if (!CanCatalogBrowse || !ContainsCatalogCard(card) || !card.CanSimilar) return Task.CompletedTask;
         try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
-        return StartRecommendation(Target("similar", card.Platform, "相似歌曲", new { sourceIds = new[] { card.ActionId } }));
+        return StartRecommendation(Target("similar", "wy", "相似歌曲",
+            new { sourceIds = new[] { Recommendations.RecommendationJson.NativeId(card.Song!.Raw) }, sourceType = "song" }));
     }
     public Task AlbumCatalogCardAsync(MusicCatalogCard card)
     {
@@ -249,13 +255,6 @@ public sealed partial class MusicCapability
         try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
         return AppendSongNextAsync(card.Song);
     }
-    public Task HeartbeatCatalogCardAsync(MusicCatalogCard card)
-    {
-        if (!CanCatalogBrowse || !IsCatalogPlaylist || !ContainsCatalogCard(card) || !card.CanSimilar) return Task.CompletedTask;
-        try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
-        return StartRecommendation(Target("heartbeat", card.Platform, "心动推荐", new {
-            entry = "current", songId = card.ActionId }));
-    }
     public Task HeartbeatFavoritesCatalogCardAsync(MusicCatalogCard card)
     {
         if (!CanCatalogBrowse || !ContainsCatalogCard(card) || !card.CanHeartbeatFavorites) return Task.CompletedTask;
@@ -269,7 +268,7 @@ public sealed partial class MusicCapability
         async Task OpenQueueRecommendations()
         {
             if (HasQueueRecommendations) await RetryRecommendationAsync();
-            else await StartRecommendation(Target("queue", "wy", "为你推荐", new { }));
+            else await RecommendCurrentAsync(PlaybackPresentationKey);
             if (HasQueueRecommendations) await OpenPlayQueueAsync();
         }
     }

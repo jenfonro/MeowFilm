@@ -873,7 +873,7 @@ public static partial class MusicUiTests
             await Cancelled(loading);
             Equal(0, f.Playback.Subscribers);
             True(!preparation.IsCompleted, "admitted writes still draining");
-            await f.Module.ChangeModeAsync(0); await f.Module.RefreshAsync();
+            await f.Module.ChangeModeAsync(1); await f.Module.RefreshAsync();
             await f.Module.InitializeAsync(default); await f.Module.NavigateAsync("favorites", default); await f.Module.SearchAsync("ignored", default);
             await f.Module.OpenPlaylistAsync("favorites"); await f.Module.OpenPlayQueueAsync();
             f.Playback.End(); f.Playback.Start(); f.Playback.Fail();
@@ -911,7 +911,7 @@ public static partial class MusicUiTests
                 Equal(0, f.Playback.Subscribers); Equal(0, f.Calls.DisposeCalls);
                 True(!f.Module.CanEdit, "failure does not reopen business admission");
                 var count = f.Calls.Log.Count;
-                await f.Module.ChangeModeAsync(0);
+                await f.Module.ChangeModeAsync(1);
                 await f.Module.InitializeAsync(default); await f.Module.NavigateAsync("favorites", default); await f.Module.SearchAsync("ignored", default);
                 await f.Module.OpenPlayQueueAsync(); f.Playback.Start(); f.Playback.End();
                 Equal(count, f.Calls.Log.Count);

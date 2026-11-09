@@ -136,7 +136,7 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
             target.Rate = nextRate; target.Running = isPlaying;
         }
         position = nextPosition; duration = nextDuration; rate = nextRate; running = isPlaying;
-        mode = nextMode is >= 0 and <= 3 ? new[] { "order", "circulation", "random", "single" }[nextMode] : "";
+        mode = nextMode switch { 1 => "circulation", 2 => "random", 3 => "single", _ => "" };
     }
 
     private bool Authorized(Target target) => !target.Cancelled && settings.IsEnabled(target.Platform) &&

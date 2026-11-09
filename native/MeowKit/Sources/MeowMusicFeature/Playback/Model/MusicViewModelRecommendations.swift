@@ -11,7 +11,8 @@ extension MusicViewModel {
         recommendationPreviewReadID = nil
         recommendationQueueRevision = nil; recommendationAccount = nil
         playbackState.similarMode = nil; playbackState.queueRecommendations = nil
-        playbackState.canEnterSimilarMode = false
+        playbackState.canEnterSimilarMode = false; playbackState.canEnterSongRecommendations = false
+        playbackState.fmPlayback = nil
     }
     func cancelRecommendationOperation() {
         recommendationCommandID = UUID()
@@ -103,6 +104,10 @@ extension MusicViewModel {
             try admitted()
             let canEnter = try await similar?.canEnterSimilarMode() ?? false
             try admitted()
+            let canRecommend = try await similar?.canEnterSongRecommendations() ?? false
+            try admitted()
+            let radio = try await (service as? any MusicFMPlaybackServing)?.fmPlaybackSnapshot()
+            try admitted()
             let batch: MusicQueueRecommendationSnapshot?
             if previewQueue, let ordinary {
                 // Closing a previous sheet owns its cancel/drain. A new sheet
@@ -125,9 +130,17 @@ extension MusicViewModel {
             } else if next.revision != state.revision || next.currentId != state.currentId { return }
             playbackState.similarMode = mode
             playbackState.canEnterSimilarMode = canEnter
+            playbackState.canEnterSongRecommendations = canRecommend
+            playbackState.fmPlayback = radio
             recommendationQueueRevision = next.revision; recommendationAccount = account
             playbackState.queueRecommendations = mode?.active != true && !isFMActive &&
                 batch?.currentEntryID == next.currentId ? batch : nil
+            let failureID = mode?.errorID ?? batch?.errorID ?? radio?.errorID
+            if let failureID, failureID != lastRecommendationFailure,
+               let failure = mode?.error ?? batch?.error ?? radio?.error {
+                lastRecommendationFailure = failureID
+                report(failure, epoch: own, operation: "读取后续歌曲")
+            }
         } catch {
             do { try admitted() } catch { return }
             let failure = MusicServiceError.sanitized(error)
@@ -168,7 +181,6 @@ extension MusicViewModel {
                   recommendationCommandID == command else { throw MusicServiceError.cancelled }
         }
         cancelRemoteQueuePreparation(); cancelFMNavigation()
-        await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
         await flushPlaybackFacts()
         try admitted()
         guard selectionID == selection else { throw MusicServiceError.cancelled }
@@ -229,6 +241,30 @@ extension MusicViewModel {
         do { try await playHomeAction(.heartbeat, title: "心动模式") }
         catch {
             if searchAccessGeneration == account, !Task.isCancelled { report(error, epoch: own, operation: "开启心动模式") }
+        }
+    }
+    public func startSongRecommendations(occurrenceID: String, expectedRevision: Int) async {
+        let own = lifecycle, account = searchAccessGeneration
+        guard current?.id == occurrenceID, state.revision == expectedRevision else { return }
+        do {
+            try await performSimilarMode {
+                try await $0.startSimilarMode(.recommendations(occurrenceID: occurrenceID, expectedRevision: expectedRevision))
+            }
+        } catch {
+            if searchAccessGeneration == account, !Task.isCancelled { report(error, epoch: own, operation: "开启单曲推荐") }
+        }
+    }
+    public func setFMContinue(_ enabled: Bool, sessionID: UUID) async {
+        let own = lifecycle, account = searchAccessGeneration
+        guard isAvailable, !isClosed, fmPlayback?.id == sessionID,
+              let provider = service as? any MusicFMPlaybackServing else { return }
+        do {
+            try await provider.setFMContinue(enabled, sessionID: sessionID)
+            try check(own)
+            guard searchAccessGeneration == account else { return }
+            await loadRecommendationState()
+        } catch {
+            if searchAccessGeneration == account, !Task.isCancelled { report(error, epoch: own, operation: "保存漫游续播设置", kind: .settings) }
         }
     }
     public func startCurrentHeartbeat(occurrenceID: String, expectedRevision: Int) async {

@@ -267,7 +267,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         case .channel(let value): router?.selectChannel(value)
         case .daily(let value): router?.showPublicBrowse(.discovery(.daily(value)), title: item.title)
         case .action(let value):
-            if value.isPersonalFM || value == .heartbeat { play(item, section: section) }
+            if value.isPersonalFM || value.isHeartbeat || value.isSimilar { play(item, section: section) }
             else { router?.showPublicBrowse(.homeAction(value, title: item.title), title: item.title) }
         case .track: play(item, section: section)
         case .unavailable: break

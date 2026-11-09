@@ -24,6 +24,10 @@ extension NativeMusicService: MusicRemoteQueueServing {
     public func openAccountQueue(platform: MusicAccountPlatform, kind: MusicAccountQueueKind,
                                  title: String) async throws -> MusicRemoteQueueSource {
         try check(); try requirePlatform(platform.rawValue)
+        if platform == .netease, kind == .recommendation(kind: "fm") {
+            let action = try await rememberedFM()
+            return try await openHomeActionQueue(action, title: title)
+        }
         guard let owner = accounts as? any MusicNativeAccountQueueProviding else { throw MusicServiceError.unavailable }
         _ = try musicText(title, maximum: 600)
         let context: MusicRemoteQueueContext
@@ -108,6 +112,17 @@ extension NativeMusicService: MusicRemoteQueueServing {
         let own = epoch
         try musicRequire(try read().queue["revision"].int == expectedRevision, .staleRevision)
         let context = try remoteContext(source)
+        let oldFM = fmPlayback
+        let changingFM = source.context.kind == .fm && oldFM?.source.authorization.isActive == true
+        let action = source.fmAction
+        if source.context.kind == .fm { try musicRequire(action?.isPersonalFM == true, .invalidRequest) }
+        let preference: (scope: String, value: MJ)?
+        if source.context.kind == .fm, accounts is any MusicNativeFMProviding {
+            let binding = try await currentHomeBinding()
+            let scope = try await fmPreferenceScope(binding)
+            try await checkHomeBinding(binding, epoch: own)
+            preference = (scope, try MJ.parse(JSONEncoder().encode(action!)))
+        } else { preference = nil }
         let raw = try await work { try await source.completeTracks(intent: intent) }
         try musicRequire(raw.allSatisfy { $0.platform == source.context.platform }, .invalidResponse)
         let songs = try raw.map(MusicModel.normalize)
@@ -128,11 +143,12 @@ extension NativeMusicService: MusicRemoteQueueServing {
                     try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
                     let old = d.queue
                     let rows = try makeEntries(songs, queue: &d.queue, context: context)
-                    archive(old, into: &d)
-                    d.queue["entries"] = .array(rows); d.queue["currentId"] = rows[start.index]["id"]
+                    if !changingFM { archive(old, into: &d) }
+                    d.queue["entries"] = .array((changingFM ? old["entries"].array : []) + rows); d.queue["currentId"] = rows[start.index]["id"]
                     for key in ["priority", "history", "failed"] { d.queue[key] = .array([]) }
                     d.queue["source"] = context; d.queue["source"]["title"] = .string(source.context.title)
                     similarWillChangeQueue(.replace, queue: &d.queue)
+                    if let preference { d.playback["fmSelections"][preference.scope] = preference.value }
                     d.queue["revision"] = .n(expectedRevision + 1); d.resetPosition()
                     return stateDTO(d)
                 }
@@ -140,6 +156,10 @@ extension NativeMusicService: MusicRemoteQueueServing {
         }
         invalidatePlayback()
         similarDidChangeQueue(.replace)
+        if source.context.kind == .fm {
+            fmPlayback = .init(source: source, action: action!, continueEnabled: changingFM ? oldFM!.continueEnabled : true)
+            emitSimilar()
+        }
         return result
     }
 }

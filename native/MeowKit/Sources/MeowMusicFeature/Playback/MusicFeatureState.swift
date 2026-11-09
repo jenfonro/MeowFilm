@@ -39,6 +39,8 @@ public final class MusicPlaybackFeatureState: ObservableObject {
     @Published public internal(set) var similarMode: MusicSimilarModeSnapshot?
     @Published public internal(set) var queueRecommendations: MusicQueueRecommendationSnapshot?
     @Published public internal(set) var canEnterSimilarMode = false
+    @Published public internal(set) var canEnterSongRecommendations = false
+    @Published public internal(set) var fmPlayback: MusicFMPlaybackSnapshot?
     @Published public internal(set) var isChangingSimilarMode = false
     @Published public internal(set) var isChangingQueueRecommendations = false
     @Published public internal(set) var activeHomeFM: MusicHomeAction?
@@ -81,7 +83,7 @@ private struct MusicSettingsProjection: Equatable {
 
 /// Only visual queue facts, not a storage revision or persisted position.
 private struct MusicQueueProjection: Equatable {
-    let current, next, previous, fmNext, fmPrevious, collection: String?
+    let current, next, previous, collection, sourceTitle: String?
     let mode: MusicPlaybackMode
     let total: Int
     let canNext, canPrevious: Bool
@@ -90,9 +92,8 @@ private struct MusicQueueProjection: Equatable {
         current = state.currentId
         next = state.nextPreviewID
         previous = state.previousPreviewID
-        fmNext = state.fmNextPreviewID
-        fmPrevious = state.fmPreviousPreviewID
         collection = state.sourceCollectionID
+        sourceTitle = state.queueSourceTitle
         mode = state.mode
         total = state.total
         canNext = state.canNext
@@ -143,6 +144,9 @@ public extension MusicViewModel {
                distinctChanges(playbackState.$isFMActive),
                changed(playbackState.$similarMode),
                changed(playbackState.$queueRecommendations),
+               changed(playbackState.$fmPlayback),
+               distinctChanges(playbackState.$canEnterSongRecommendations),
+               distinctChanges(playbackState.$canEnterSimilarMode),
                distinctChanges(playbackState.$isChangingSimilarMode),
                distinctChanges(playbackState.$isChangingQueueRecommendations),
                distinctChanges(notices.$queueNotice))

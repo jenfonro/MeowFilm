@@ -85,7 +85,5 @@ public sealed partial class MusicCapability
         menu.Items.Add(new Separator());
         ContentMenuItem(menu, "相似歌曲", Current() && card.CanSimilar, () => Run(() => SimilarCatalogCardAsync(card)));
         ContentMenuItem(menu, "专辑", Current() && card.CanAlbum, () => Run(() => AlbumCatalogCardAsync(card)));
-        ContentMenuItem(menu, "心动推荐", Current() && card.CanSimilar && IsCatalogPlaylist,
-            () => Run(() => HeartbeatCatalogCardAsync(card)));
     }
 }

@@ -15,10 +15,13 @@ final class MusicNativeSimilarPreview {
     var scope = ""
     var lease: MusicAccountQueueLease?
     var context: MusicSimilarHeartbeatContext?
+    var offset = 0
+    var exhausted = false
     var songs: [MJ] = []
     var recommendations: [String: MJ] = [:]
     var status: MusicSimilarModeSnapshot.Status = .loading
     var error: MusicServiceError?
+    var errorID: UUID?
     var task: Task<Void, Never>?
     init(seed: MJ, entryID: String?, fromHome: Bool, provider: MusicSimilarModeProvider,
          sourceIDs: [String], revision: Int, navigation: UUID) {
@@ -39,15 +42,18 @@ final class MusicNativeSimilarSession {
     let scope: String
     let lease: MusicAccountQueueLease
     var continueEnabled = false
+    var offset = 0
     var exhausted = false
     var batches: [MJ] = []
     var attempted = Set<String>()
     var status: MusicSimilarModeSnapshot.Status = .ready
     var error: MusicServiceError?
+    var errorID: UUID?
     var pending: Task<Void, Never>?
     var pendingID: UUID?
     var pendingTail: String?
     var liveRecommendations: [String: MJ] = [:]
+    var buffered: MusicNativeSimilarModeBatch?
     init(seed: MJ, seedEntryID: String?, returnQueue: MJ, fromHome: Bool, provider: MusicSimilarModeProvider,
          sourceIDs: [String], context: MusicSimilarHeartbeatContext?, scope: String, lease: MusicAccountQueueLease) {
         self.seed = seed; self.seedEntryID = seedEntryID; self.returnQueue = returnQueue; self.fromHome = fromHome
@@ -61,7 +67,7 @@ final class MusicNativeSimilarSession {
             ("seedEntryId", seedEntryID.map(MJ.string) ?? .null), ("returnQueue", returnQueue),
             ("sourceIds", .strings(sourceIDs)), ("fromHome", .bool(fromHome)),
             ("provider", .string(provider.rawValue)), ("providerContext", context),
-            ("continue", .bool(continueEnabled)), ("batches", .array(batches)),
+            ("continue", .bool(continueEnabled)), ("offset", .n(offset)), ("exhausted", .bool(exhausted)), ("batches", .array(batches)),
             ("attempted", .strings(attempted.sorted())), ("scope", .string(scope)),
             ("status", .string(status == .error || status == .empty ? status.rawValue : "ready"))])
     }
@@ -76,6 +82,9 @@ struct MusicNativeSimilarRuntime {
     var restoring: UUID?
     var restorationCompletion: MusicNativeOperation<Void>?
     var playing: (attempt: String, occurrence: String)?
+    var playbackEvent: String?
+    var eventOccurrence: String?
+    var randomFetch = false
     var watchers: [UUID: Task<Void, Never>] = [:]
     var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
     var timedOut = Set<UUID>()
@@ -85,10 +94,14 @@ struct MusicNativeSimilarRuntime {
 }
 
 final class MusicNativeQueueRecommendations {
-    var id = UUID()
+    let seed: MJ
+    var active = false
+    var offset = 0
+    let id = UUID()
+    var candidateID = UUID()
     var revision: Int
     var currentEntryID: String
-    var continueEnabled = false
+    var continueEnabled = true
     var lease: MusicAccountQueueLease?
     var songs: [MJ] = []
     var recommendations: [String: MJ] = [:]
@@ -96,13 +109,15 @@ final class MusicNativeQueueRecommendations {
     var status: MusicSimilarModeSnapshot.Status = .ready
     var exhausted = false
     var error: MusicServiceError?
+    var errorID: UUID?
     var attempted = Set<String>()
     var pending: Task<Void, Never>?
     var pendingID: UUID?
     var pendingToken: UUID?
     var pendingTail: String?
-    init(revision: Int, currentEntryID: String) {
+    init(revision: Int, currentEntryID: String, seed: MJ) {
         self.revision = revision; self.currentEntryID = currentEntryID
+        self.seed = seed; self.continueEnabled = true
     }
 }
 
@@ -155,20 +170,6 @@ enum MusicNativeSimilarData {
         try musicRequire(songs.allSatisfy { nativeID($0) != nil }, .invalidResponse)
         return songs
     }
-    /// Occurrences are retained, including repeated recordings. Only returned
-    /// recommendations are deduplicated; a mixed queue is never projected.
-    static func queueRequest(_ queue: MJ) -> MusicNativeSimilarModeRequest? {
-        let entries = queue["entries"].array
-        guard !entries.isEmpty,
-              let current = entries.first(where: { $0["id"] == queue["currentId"] }),
-              let currentID = nativeID(current["song"]) else { return nil }
-        var ids: [String] = []
-        for entry in entries {
-            guard let id = nativeID(entry["song"]) else { return nil }
-            ids.append(id)
-        }
-        return .queueRecommendations(songIDs: ids, currentPlaySongID: currentID)
-    }
     static func queueSnapshot(_ queue: MJ) -> MJ {
         .obj(["entries", "currentId", "priority", "history", "source"].map { ($0, MusicModel.durable(queue[$0])) })
     }
@@ -176,16 +177,16 @@ enum MusicNativeSimilarData {
         try musicRequire(saved["schema"] == .n(2) && saved["seed"].isObject &&
             saved["batches"].isArray && saved["attempted"].isArray &&
             saved["attempted"].array.allSatisfy(\.isString) &&
-            saved["continue"].isBool && saved["fromHome"].isBool, .corruptDocument)
-        try validateQueue(saved["returnQueue"])
+            saved["continue"].isBool && saved["fromHome"].isBool &&
+            saved["offset"].isInteger && saved["offset"].int >= 0 && saved["exhausted"].isBool, .corruptDocument)
+        if saved["returnQueue"] != .null { try validateQueue(saved["returnQueue"]) }
         let maximum = saved["returnQueue"]["entries"].array.compactMap { Int($0["id"].string.dropFirst(6)) }.max() ?? 0
         try musicRequire(serial >= maximum, .corruptDocument)
         let sourceIDs = saved["sourceIds"]
         try musicRequire(sourceIDs.isArray && sourceIDs.array.allSatisfy(\.isString) &&
             !sourceIDs.array.isEmpty && sourceIDs.array.count <= 20 &&
             sourceIDs.strings.allSatisfy(id), .corruptDocument)
-        guard let provider = MusicSimilarModeProvider(rawValue: saved["provider"].string),
-              provider != .queueRecommendations else { throw MusicServiceError.corruptDocument }
+        guard MusicSimilarModeProvider(rawValue: saved["provider"].string) != nil else { throw MusicServiceError.corruptDocument }
         for batch in saved["batches"].array {
             try musicRequire(batch.isObject && !batch["id"].string.isEmpty &&
                 batch["basedOn"].isObject && batch["entryIds"].isArray &&

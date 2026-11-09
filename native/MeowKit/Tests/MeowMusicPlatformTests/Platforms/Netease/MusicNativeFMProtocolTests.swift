@@ -31,7 +31,9 @@ final class MusicNativeFMProtocolTests: XCTestCase {
             let payload = try MusicQQWire.decode(XCTUnwrap(request.payload))
             XCTAssertEqual(payload["mode"] as? String, wire.0)
             XCTAssertEqual(payload["subMode"] as? String, wire.1)
-            XCTAssertEqual(payload["limit"] as? Int, 3)
+            XCTAssertEqual(payload["limit"] as? String, "3")
+            XCTAssertEqual(payload["unplaySongIds"] as? String, "[]"); XCTAssertNil(payload["unplaySonIds"])
+            XCTAssertEqual(payload["openAidj"] as? String, "false"); XCTAssertEqual(payload["aidjReqTimes"] as? String, "0")
             XCTAssertNil(payload["sourceIds"])
         }
         _ = await f.service.close()
@@ -68,7 +70,7 @@ final class MusicNativeFMProtocolTests: XCTestCase {
         let calls = await f.http.recorded(), request = try XCTUnwrap(calls.last)
         XCTAssertEqual(calls.map { $0.request.url.path }, [path])
         let payload = try MusicQQWire.decode(XCTUnwrap(request.payload))
-        XCTAssertEqual(payload["limit"] as? Int, 1); XCTAssertEqual(payload["mode"] as? String, "SCENE_RCMD")
+        XCTAssertEqual(payload["limit"] as? String, "1"); XCTAssertEqual(payload["mode"] as? String, "SCENE_RCMD")
         XCTAssertEqual(payload["subMode"] as? String, "ELECTRONIC"); XCTAssertNil(payload["sourceIds"])
         XCTAssertFalse(request.request.headers["Cookie"]?.contains("MUSIC_U") == true)
         XCTAssertTrue(MusicNeteaseHomeActionRoute.permits(request.request))
@@ -97,7 +99,7 @@ final class MusicNativeFMProtocolTests: XCTestCase {
         XCTAssertEqual(batch.tracks.count, 5)
         let records = await f.http.recorded()
         for record in records where record.request.url.path == "/eapi/v1/radio/get" {
-            XCTAssertEqual(try MusicQQWire.decode(XCTUnwrap(record.payload))["limit"] as? Int, 3)
+            XCTAssertEqual(try MusicQQWire.decode(XCTUnwrap(record.payload))["limit"] as? String, "3")
         }
         let coverCall = try XCTUnwrap(records.first { $0.request.url.path == "/eapi/tag/tab/fm/cover" })
         let data = try MusicQQWire.decode(XCTUnwrap(coverCall.payload))

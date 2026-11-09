@@ -46,7 +46,8 @@ extension NativeMusicService: MusicSearchBatchPlaying {
                 document.queue["entries"] = .array(rows)
                 document.queue["currentId"] = rows[request.startIndex]["id"]
                 for key in ["history", "priority", "failed"] { document.queue[key] = .array([]) }
-                document.queue["source"] = .null
+                document.queue["source"] = .obj([("sourceType", .string(songs.count == 1 ? "search-song" : "search")), ("sourceTitle", .string("搜索"))])
+                if songs.count == 1 { document.queue["source"]["seedEntryId"] = rows[0]["id"] }
                 similarWillChangeQueue(.replace, queue: &document.queue)
                 document.queue["revision"] = .n(expectedRevision + 1)
                 document.resetPosition()
@@ -55,6 +56,10 @@ extension NativeMusicService: MusicSearchBatchPlaying {
         }
         invalidatePlayback()
         similarDidChangeQueue(.replace)
+        if songs.count == 1, platformEnabled("wy"), accounts is any MusicNativeSimilarModeProviding,
+           MusicNativeSimilarData.nativeID(songs[0]) != nil {
+            similarMode.queue = .init(revision: result.revision, currentEntryID: result.currentId!, seed: songs[0])
+        }
         return result
     }
 

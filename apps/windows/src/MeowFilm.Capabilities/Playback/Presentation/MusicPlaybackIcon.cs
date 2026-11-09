@@ -83,9 +83,6 @@ public sealed class MusicPlaybackIcon : Control
         var repeatArrow = Fill("F1 M 18.8 1.9 L 22.5 5 L 18.8 8.1 Z");
         return new Dictionary<string, Icon>(StringComparer.Ordinal)
         {
-            ["order"] = new(24, [
-                Stroke("M 2 6 L 20 6 M 2 18 L 20 18", 1.6),
-                Fill("F1 M 18 3 L 22 6 L 18 9 Z M 18 15 L 22 18 L 18 21 Z")]),
             ["repeat"] = new(24, [repeat, repeatArrow]),
             ["single"] = new(24, [repeat, repeatArrow,
                 Text("1", 12, 17, 10, FontWeights.Bold, FontStyles.Normal)]),

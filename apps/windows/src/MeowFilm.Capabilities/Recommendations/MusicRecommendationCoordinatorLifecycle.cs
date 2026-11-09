@@ -45,24 +45,26 @@ public sealed partial class MusicRecommendationCoordinator
     private void RetireLocked(Session s, string reason, bool stopPlayback = false)
     {
         if (!s.Active) return;
-        bool ownsPlayback = s.Queue is { } current && s.Feedback.ContainsKey(current.CurrentId);
-        s.Active = false; s.Waiting = false; s.Continue = false; s.Status = reason;
+        var source = s.InitialPending ? s.PreviousSession : s;
+        string ownedEntry = source?.Queue is { } current && source.Feedback.ContainsKey(current.CurrentId)
+            ? current.CurrentId : "";
+        if (s.PreviousSession is { } previous)
+        {
+            s.PreviousSession = null;
+            if (previous.Checkpoint == s.Checkpoint) s.Checkpoint = "";
+            RetireLocked(previous, reason);
+        }
+        s.Active = false; s.Continue = false; s.Status = reason;
         s.Generation++; s.Navigation++; s.Feedback.Clear(); s.Candidates = null; CancelLocked(s.Cancellation);
-        var flight = s.Flight; var advance = s.Advance;
+        var flight = s.Flight;
         s.Cleanup = LaunchLocked(async () =>
         {
             await flight.ConfigureAwait(false);
-            await advance.ConfigureAwait(false);
-            lock (gate)
-            {
-                if (s.Pending is null && s.TransferTo is { } next && CurrentLocked(next) && next.Checkpoint.Length == 0)
-                { next.Checkpoint = s.Checkpoint; s.Checkpoint = ""; }
-            }
             await DiscardAsync(s).ConfigureAwait(false);
         });
-        if (stopPlayback && ownsPlayback && s.Queue is { } q)
+        if (stopPlayback && ownedEntry.Length > 0)
         {
-            var selection = SelectionLocked(s, q.CurrentId, false, false, false, MusicRecommendationPlaybackAction.Stop, inactive: true);
+            var selection = SelectionLocked(s, ownedEntry, false, false, false, MusicRecommendationPlaybackAction.Stop, inactive: true);
             _ = LaunchLocked(() => SelectAsync(s, selection, CancellationToken.None));
         }
         if (ReferenceEquals(s, session)) PublishLocked();
@@ -74,7 +76,7 @@ public sealed partial class MusicRecommendationCoordinator
         lock (gate)
         {
             if (closed || session is not { Active: true } s || platform is not null && s.Config.Platform != platform) return;
-            RetireLocked(s, "account-invalidated", stopPlayback: s.Batch > 0);
+            RetireLocked(s, "account-invalidated", stopPlayback: true);
         }
     }
     private void QueueChanging(MusicRecommendationQueueChange change)
@@ -82,16 +84,13 @@ public sealed partial class MusicRecommendationCoordinator
         lock (gate)
         {
             if (session is not { } s || !CurrentLocked(s)) return;
-            if (s.Batch == 0 && s.Config.Kind != "queue" || s.Returning || change is MusicRecommendationQueueChange.Replace or
-                MusicRecommendationQueueChange.Clear or MusicRecommendationQueueChange.Restore or MusicRecommendationQueueChange.Reset)
+            if (s.Returning || change is MusicRecommendationQueueChange.Replace or MusicRecommendationQueueChange.Clear or
+                MusicRecommendationQueueChange.Restore or MusicRecommendationQueueChange.Reset ||
+                s.Config.Kind == "queue" && !s.RecommendationStarted && change == MusicRecommendationQueueChange.Append)
             { RetireLocked(s, "queue-replaced"); return; }
-            s.Generation++; s.Navigation++; s.Waiting = false; s.Candidates = null;
-            CancelLocked(s.Cancellation); s.Status = "ready";
-            if (s.Pending is null && s.PreviousConfiguration is { } previousConfig)
-            { s.Config = previousConfig; s.PreviousConfiguration = null; s.InitialPending = false; }
-            // An edit changes the actual tail/request input. It is not permission
-            // for the prior whole-queue response to append later.
-            s.Attempted.Clear(); PublishLocked();
+            if (change != MusicRecommendationQueueChange.Mode) s.Navigation++;
+            if (change == MusicRecommendationQueueChange.Selection) s.Playback = null;
+            PublishLocked();
         }
     }
     private void QueueChanged(MusicRecommendationQueueChange change)
@@ -109,8 +108,14 @@ public sealed partial class MusicRecommendationCoordinator
                     {
                         if (!CurrentLocked(s) || queue.Epoch != epoch) return;
                         s.Queue = snapshot; s.QueueEpoch = epoch;
+                        if (s.PreviousSession is { } previous) previous.Queue = snapshot;
+                        if (s.Config.Kind == "queue" && !s.RecommendationStarted &&
+                            !snapshot.Entries.Any(e => e.Id == s.Config.Seed))
+                        { RetireLocked(s, "queue-replaced"); return; }
                         var ids = snapshot.Entries.Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
                         foreach (string old in s.Feedback.Keys.Where(id => !ids.Contains(id)).ToArray()) s.Feedback.Remove(old);
+                        if (s.Config.Kind == "queue" && s.Feedback.ContainsKey(snapshot.CurrentId))
+                            s.RecommendationStarted = true;
                         s.Anchor = snapshot.Tail;
                         if (snapshot.Entries.Length == 0) RetireLocked(s, "queue-empty");
                         else { PublishLocked(); MaybeBeginLocked(s); }
@@ -174,7 +179,8 @@ public sealed partial class MusicRecommendationCoordinator
                 {
                     await DrainWorkAsync().ConfigureAwait(false);
                     lock (gate) { closed = true; notice = null; session = null; }
-                    queue.Changing -= QueueChanging; queue.Changed -= QueueChanged;
+                    queue.Changing -= QueueChanging; queue.Changed -= QueueChanged; queue.Selected -= QueueSelected;
+                    queue.SelectionSource = null;
                     physical.Dispose();
                 });
             task = disposal;

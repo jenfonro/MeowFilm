@@ -1,73 +1,115 @@
 import Foundation
 import MeowMusicFeature
 
-extension NativeMusicService {
-    /// FM always walks forward/backward without wrapping, independently of the
-    /// user's saved loop/shuffle/single mode. Insert-next priorities still win.
-    func fmNext(_ d: MusicDocument, direction: MusicDirection) -> String? {
-        let q = d.queue, rows = q["entries"].array, current = q["currentId"].string
-        let failed = Set(q["failed"].strings)
-        if direction == .next, !q["priority"].strings.isEmpty {
-            let priorities = q["priority"].strings
-            let ids = Set(rows.compactMap { $0["id"].string })
-            if let priority = priorities.first(where: { id in
-                id != current && !failed.contains(id) && ids.contains(id)
-            }) { return priority }
+final class MusicNativeFMSession {
+    let source: MusicRemoteQueueSource
+    let action: MusicHomeAction
+    var continueEnabled: Bool
+    var attempted = Set<String>()
+    var pending: Task<Void, Never>?
+    var buffered: [MJ] = []
+    var exhausted = false
+    var error: MusicServiceError?
+    var errorID: UUID?
+    init(source: MusicRemoteQueueSource, action: MusicHomeAction, continueEnabled: Bool) {
+        self.source = source; self.action = action; self.continueEnabled = continueEnabled
+    }
+}
+
+extension NativeMusicService: MusicFMPlaybackServing {
+    public func rememberedFM() async throws -> MusicHomeAction {
+        let own = epoch
+        let binding = try await currentHomeBinding()
+        let scope = try await fmPreferenceScope(binding)
+        try await checkHomeBinding(binding, epoch: own)
+        let saved = try read().playback["fmSelections"][scope]
+        guard saved != .null else { return .fm(mode: .default, submode: "", entry: nil) }
+        let action = try JSONDecoder().decode(MusicHomeAction.self, from: saved.bytes)
+        try musicRequire(action.isPersonalFM, .corruptDocument)
+        return action
+    }
+    public func fmPlaybackSnapshot() async throws -> MusicFMPlaybackSnapshot? {
+        try check()
+        guard let session = fmPlayback, session.source.authorization.isActive else { return nil }
+        return .init(id: session.source.id, action: session.action, continueEnabled: session.continueEnabled,
+                     loading: session.pending != nil, error: session.error, errorID: session.errorID)
+    }
+    public func setFMContinue(_ enabled: Bool, sessionID: UUID) async throws {
+        try check()
+        guard let session = fmPlayback, session.source.id == sessionID else { throw MusicServiceError.targetChanged }
+        try session.source.authorization.check()
+        session.continueEnabled = enabled
+        emitSimilar()
+        if enabled { try fmBoundary() }
+    }
+    func fmPreferenceScope(_ binding: MusicNativeHomeBinding) async throws -> String {
+        guard let owner = accounts as? any MusicNativeFMProviding else { throw MusicServiceError.unsupported }
+        let scope = try await owner.nativeFMPreferenceScope(binding)
+        try musicRequire(!scope.isEmpty && scope.utf8.count <= 512, .invalidResponse)
+        return scope
+    }
+    func clearFMPlayback() {
+        guard let session = fmPlayback else { return }
+        fmPlayback = nil
+        session.pending?.cancel()
+        if let pending = session.pending { retainSimilarDrain(pending) }
+    }
+    func fmBoundary() throws {
+        guard let session = fmPlayback, session.continueEnabled, session.pending == nil, !session.exhausted,
+              continuationIsDue(try read()) else { return }
+        let d = try read()
+        let event = d.playback["mode"].int == MusicPlaybackMode.shuffle.rawValue ? similarMode.playbackEvent ?? "" :
+            d.queue["entries"].array.last?["id"].string ?? ""
+        guard !session.buffered.isEmpty || !session.attempted.contains(event) else { return }
+        try session.source.authorization.check()
+        session.attempted.insert(event); session.error = nil; session.errorID = nil
+        if !session.buffered.isEmpty {
+            try appendFMBatch(session, songs: session.buffered)
+            session.buffered = []
+            emitSimilar()
+            return
         }
-        guard let index = rows.firstIndex(where: { $0["id"].string == current }) else { return nil }
-        if direction == .next {
-            return rows.dropFirst(index + 1).lazy.map { $0["id"].string }
-                .first { !failed.contains($0) }
+        session.pending = Task { await loadFMBatch(session) }
+        emitSimilar()
+    }
+    func loadFMBatch(_ session: MusicNativeFMSession) async {
+        defer { session.pending = nil; if fmPlayback === session { emitSimilar() } }
+        let own = epoch, source = session.source
+        do {
+            let batch = try await work(label: "fmBatch", draining: true) { try await source.nextFMBatch(intent: source.authorization) }
+            try musicRequire(batch.allSatisfy { $0.platform == source.context.platform }, .invalidResponse)
+            let songs = try batch.map(MusicModel.normalize)
+            try await source.validate()
+            try check(own); try source.authorization.check()
+            guard fmPlayback === session, !Task.isCancelled else { return }
+            try await retainSongMetadata(songs)
+            try check(own); try source.authorization.check()
+            guard fmPlayback === session, !Task.isCancelled else { return }
+            session.exhausted = songs.isEmpty
+            if session.continueEnabled { try appendFMBatch(session, songs: songs) }
+            else { session.buffered = songs }
+        } catch {
+            guard fmPlayback === session, epoch == own, source.authorization.isActive else { return }
+            let failure = MusicServiceError.sanitized(error)
+            if failure != .cancelled { session.error = failure; session.errorID = UUID() }
         }
-        return rows.prefix(index).reversed().lazy.map { $0["id"].string }
-            .first { !failed.contains($0) }
+    }
+    func appendFMBatch(_ session: MusicNativeFMSession, songs: [MJ]) throws {
+        guard !songs.isEmpty else { return }
+        let context = try remoteContext(session.source)
+        try session.source.authorization.perform {
+            try similarQueueTransaction(["queue"]) { d in
+                try musicRequire(d.queue["source"]["remoteSession"].string == session.source.id.uuidString.lowercased(), .targetChanged)
+                let rows = try makeEntries(songs, queue: &d.queue, context: context)
+                d.queue["entries"] = .array(d.queue["entries"].array + rows)
+                d.queue["revision"] = .n(d.queue["revision"].int + 1)
+            }
+        }
     }
     public func advanceFM(_ source: MusicRemoteQueueSource, direction: MusicDirection, reason: MusicAdvanceReason,
                           expectedRevision: Int, intent: MusicQueueAuthorization) async throws -> MusicAdvanceResult {
-        try intent.check(); try source.authorization.check()
-        try check(); try requirePlatform(source.context.platform)
-        let own = epoch, before = try read(), previousAttempt = attempt?.id
-        let session = source.id.uuidString.lowercased()
-        try musicRequire(source.context.kind == .fm &&
-            before.queue["source"]["remoteSession"].string == session, .targetChanged)
-        try musicRequire(before.queue["revision"].int == expectedRevision, .staleRevision)
-        if reason == .ended {
-            try musicRequire(direction == .next && attempt?.ended == true && attempt?.endedConsumed == false, .staleResult)
-        }
-        var added: [MJ] = []
-        if direction == .next && fmNext(before, direction: .next) == nil {
-            let batch = try await work { try await source.nextFMBatch(intent: intent) }
-            try musicRequire(batch.allSatisfy { $0.platform == source.context.platform }, .invalidResponse)
-            added = try batch.map(MusicModel.normalize)
-        }
-        try await work { try await source.validate() }
-        try check(own); try intent.check(); try source.authorization.check()
-        try musicRequire(try read().queue["revision"].int == expectedRevision, .staleRevision)
-        try await retainSongMetadata(added)
-        try check(own)
-        try musicRequire(attempt?.id == previousAttempt, .staleResult)
-        let context = try remoteContext(source)
-        let result = try source.authorization.perform {
-            try intent.perform {
-                try musicRequire(try read().queue["revision"].int == expectedRevision, .staleRevision)
-                if direction == .previous && fmNext(before, direction: .previous) == nil {
-                    return MusicAdvanceResult(state: stateDTO(before), selectedId: nil)
-                }
-                return try transaction(["queue", "playback"]) { d in
-                    try musicRequire(d.queue["revision"].int == expectedRevision &&
-                        d.queue["source"]["remoteSession"].string == session, .staleRevision)
-                    if !added.isEmpty {
-                        let rows = try makeEntries(added, queue: &d.queue, context: context)
-                        d.queue["entries"] = .array(d.queue["entries"].array + rows)
-                    }
-                    guard let next = fmNext(d, direction: direction) else { throw MusicServiceError.upstreamInvalid }
-                    select(next, queue: &d.queue); d.resetPosition(); d.queue["revision"] = .n(expectedRevision + 1)
-                    return MusicAdvanceResult(state: stateDTO(d), selectedId: next)
-                }
-            }
-        }
-        if reason == .ended { attempt?.endedConsumed = true }
-        if result.selectedId != nil { invalidatePlayback() }
-        return result
+        try intent.check(); try source.authorization.check(); try check()
+        try musicRequire(try read().queue["source"]["remoteSession"].string == source.id.uuidString.lowercased(), .targetChanged)
+        return try await advance(direction, reason: reason, expectedRevision: expectedRevision)
     }
 }

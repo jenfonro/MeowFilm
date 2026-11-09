@@ -53,6 +53,61 @@ private actor MusicSearchBatchQQ: MusicPublicQQProviding {
         }
         return targets
     }
+    func testDirectSearchClickUsesOnlyClickedSongAndItsFixedRecommendationSeed() async throws {
+        let songs: [MJ] = [(101, "弑仙"), (102, "重生")].map { id, name in
+            .obj([("id", .n(id)), ("name", .string(name)), ("dt", .n(180_000)),
+                ("ar", .array([.obj([("name", .string("Synthetic"))])])),
+                ("al", .obj([("id", .n(10)), ("name", .string("Album"))]))])
+        }
+        let http = NativeMusicHTTPFixture([.obj([("code", .n(200)),
+            ("result", .obj([("songCount", .n(2)), ("songs", .array(songs))]))])])
+        let owner = SimilarModeAccountFixture([["301"]]), store = NativeMusicMemoryDocument()
+        let service = try await NativeMusicFixture.service(store, accounts: owner, http: http)
+        let results = try await service.search(platform: "wy", query: "弑仙", page: 1, limit: 30)
+        let clicked = try XCTUnwrap(results.items.last)
+        let state = try await service.replaceSearchBatch(.init(query: "弑仙",
+            targets: [.init(platform: .netease, page: 1, track: clicked)]), expectedRevision: 0, intent: .init())
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.entries.map(\.track.title), ["重生"])
+        XCTAssertEqual(queue.entries.first?.track.sources.first?.nativeId, "102")
+        let saved = try MusicDocument(store.read(), runID: "fixture")
+        XCTAssertEqual(saved.queue["source"]["sourceType"].string, "search-song")
+        XCTAssertEqual(saved.queue["source"]["seedEntryId"].string, state.currentId)
+        let beforePlaying = await owner.count(); XCTAssertEqual(beforePlaying, 0)
+        let availability = try await service.sourceAvailability(for: XCTUnwrap(queue.entries.first).track.ref)
+        let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(),
+            occurrenceId: XCTUnwrap(state.currentId), selection: XCTUnwrap(availability.options.first).selection(quality: "128k"))
+        _ = try await service.recordSimilarPlaybackFact(.init(attemptId: candidate.attemptId,
+            occurrenceId: candidate.occurrenceId, resourceId: candidate.resourceId, kind: .playing, position: 1))
+        let preview = try await service.previewQueueRecommendations()
+        XCTAssertEqual(preview?.candidates.map(\.song.title), ["Song 301"])
+        XCTAssertTrue(try XCTUnwrap(preview).continueEnabled)
+        let requests = await owner.requests
+        XCTAssertEqual(requests, [.songRecommendations(seedID: "102", offset: 0)])
+        let unchanged = try await service.queue()
+        XCTAssertEqual(unchanged.entries.map(\.id), queue.entries.map(\.id))
+        XCTAssertEqual(unchanged.currentId, state.currentId)
+        await service.close()
+    }
+    func testDirectNeteaseSearchWithoutRecommendationCapabilityDoesNotCreateCandidateSession() async throws {
+        let song: MJ = .obj([("id", .n(101)), ("name", .string("Song")),
+            ("dt", .n(180_000)), ("ar", .array([.obj([("name", .string("Artist"))])])),
+            ("al", .obj([("id", .n(10)), ("name", .string("Album"))]))])
+        let http = NativeMusicHTTPFixture([.obj([("code", .n(200)),
+            ("result", .obj([("songCount", .n(1)), ("songs", .array([song]))]))])])
+        let service = try await NativeMusicFixture.service(http: http)
+        let results = try await service.search(platform: "wy", query: "Song", page: 1, limit: 30)
+        let track = try XCTUnwrap(results.items.first)
+        _ = try await service.replaceSearchBatch(.init(query: "Song",
+            targets: [.init(platform: .netease, page: 1, track: track)]),
+            expectedRevision: 0, intent: .init())
+        let snapshot = try await service.queueRecommendationSnapshot()
+        XCTAssertNil(snapshot)
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.entries.map(\.track.title), ["Song"])
+        await service.close()
+    }
+
     func testRealOwnerCommitsMoreThanHandleCapacityWithAllOldHandlesExpiredInOneCAS() async throws {
         let (service, document, qq, clock) = try await setup(650)
         let targets = try await capture(service, count: 650)

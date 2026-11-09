@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
@@ -5,17 +6,20 @@ namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
+    // Live provenance is queried at the sole selection writer, never restored
+    // from an entry's durable context as a new recommendation session.
+    internal Func<string, JsonElement?>? QueueSelectionSource { get; set; }
     private readonly HashSet<string> failedEntries = [];
     private (long Version, string Current, int Mode, string Target)? preloadNext;
     private JsonObject Queue(JsonObject doc) => Value(doc, "queue") as JsonObject ??
         LJ.Obj(("schema", 1), ("entries", new JsonArray()), ("currentId", null), ("priority", new JsonArray()), ("source", null));
     private JsonObject History(JsonObject doc) => Value(doc, "history") as JsonObject ?? LJ.Obj(("schema", 1), ("playlists", new JsonArray()), ("days", new JsonArray()));
-    private int Mode(JsonObject doc) => Value(doc, "playback-settings") is JsonObject m ? (int)LJ.I(m["mode"], 0, 3) : 1;
+    private int Mode(JsonObject doc) => Value(doc, "playback-settings") is JsonObject m ? (int)LJ.I(m["mode"], 1, 3) : 1;
     private JsonObject Position(JsonObject q, JsonObject doc) => LJ.Obj(("currentId", q["currentId"]), ("version", queueVersion), ("mode", Mode(doc)));
     private static JsonObject Context(JsonNode? value)
     {
         var p = value is null ? new JsonObject() : LJ.Object(value);
-        LJ.Fields(p, "playlistId sourceTitle playlist queueSource sourcePlatform sourceType sourceId searchKeyword dailyBranch"); var output = new JsonObject();
+        LJ.Fields(p, "playlistId sourceTitle playlist queueSource sourcePlatform sourceType sourceId searchKeyword dailyBranch heartbeatPlaylistId heartbeatAccountId"); var output = new JsonObject();
         foreach (string k in new[] { "playlistId", "sourceTitle", "playlist" }) if (p[k] is not null) output[k] = LJ.Text(p[k]);
         if (p["queueSource"] is not null)
         {
@@ -27,7 +31,7 @@ public sealed partial class MusicLibraryOwner
     }
     private static void CopyFeedbackContext(JsonObject input, JsonObject output)
     {
-        foreach (string field in new[] { "sourcePlatform", "sourceType", "sourceId", "searchKeyword", "dailyBranch" })
+        foreach (string field in new[] { "sourcePlatform", "sourceType", "sourceId", "searchKeyword", "dailyBranch", "heartbeatPlaylistId", "heartbeatAccountId" })
             if (input[field] is not null)
             {
                 string text = LJ.Text(input[field], field == "searchKeyword" ? 512 : 128);
@@ -191,7 +195,8 @@ public sealed partial class MusicLibraryOwner
             LJ.Fields(p, "offset limit");
             return (LJ.Merge(LJ.Page(entries.Select(EntryView), p, "entries"),
                 LJ.Merge(Position(q, doc), LJ.Obj(("current", entries.FirstOrDefault(e => LJ.S(e?["id"]) == current) is { } e ? EntryView(e) : null),
-                    ("source", SourceView(q["source"])), ("persistence", LJ.Obj(("state", "saved")))))), false);
+                    ("source", SourceView(q["source"])), ("hasPriority", LJ.Array(q["priority"]).Count > 0),
+                    ("persistence", LJ.Obj(("state", "saved")))))), false);
         }
         if (method == "music.queue.mode" && p["mode"] is null) { LJ.Fields(p, "mode"); return (Position(q, doc), false); }
         if (method == "music.queue.peekNext")
@@ -209,13 +214,12 @@ public sealed partial class MusicLibraryOwner
                 var pool = ids.Where(Valid).ToArray();
                 if (pool.Length > 0) next = pool[Random.Shared.Next(pool.Length)];
             }
-            if (next is null && mode is 0 or 1)
+            if (next is null && mode == 1)
             {
                 int index = System.Array.IndexOf(ids, current);
                 for (int i = 1; i <= ids.Length; i++)
                 {
                     int at = index + i;
-                    if (at >= ids.Length && mode == 0) break;
                     string candidate = ids[at % ids.Length];
                     if (Valid(candidate)) { next = candidate; break; }
                 }
@@ -228,7 +232,7 @@ public sealed partial class MusicLibraryOwner
         switch (method)
         {
             case "music.queue.mode":
-                LJ.Fields(p, "mode"); Set(doc, "playback-settings", LJ.Obj(("schema", 1), ("mode", LJ.I(p["mode"], 0, 3)))); break;
+                LJ.Fields(p, "mode"); Set(doc, "playback-settings", LJ.Obj(("schema", 1), ("mode", LJ.I(p["mode"], 1, 3)))); break;
             case "music.queue.playCollection":
             case "music.queue.replace":
             {
@@ -296,7 +300,7 @@ public sealed partial class MusicLibraryOwner
                 bool step = method.EndsWith(".step", StringComparison.Ordinal);
                 LJ.Fields(p, step ? "direction mode reason" : method.EndsWith(".next", StringComparison.Ordinal) ? "reason" : "", step ? "direction mode" : "");
                 int direction = step ? (int)LJ.I(p["direction"], -1, 1) : method.EndsWith(".previous", StringComparison.Ordinal) ? -1 : 1;
-                LJ.Require(direction != 0); int mode = step ? (int)LJ.I(p["mode"], 0, 3) : Mode(doc); string reason = LJ.S(p["reason"], "manual");
+                LJ.Require(direction != 0); int mode = step ? (int)LJ.I(p["mode"], 1, 3) : Mode(doc); string reason = LJ.S(p["reason"], "manual");
                 LJ.Require(reason is "manual" or "ended"); var ids = entries.Select(e => LJ.S(e?["id"])).ToArray();
                 bool Valid(string id) => ids.Contains(id) && !failedEntries.Contains(id);
                 string? target = null;
@@ -321,7 +325,6 @@ public sealed partial class MusicLibraryOwner
                     for (int i = 1; i <= ids.Length; i++)
                     {
                         int next = index + i * direction;
-                        if ((next < 0 || next >= ids.Length) && mode == 0) break;
                         next = (next % ids.Length + ids.Length) % ids.Length;
                         if (Valid(ids[next])) { target = ids[next]; break; }
                     }
@@ -331,6 +334,10 @@ public sealed partial class MusicLibraryOwner
             }
             default: throw new MusicLibraryException("INVALID_REQUEST");
         }
+        if ((method is "music.queue.select" or "music.queue.next" or "music.queue.previous" or
+            "music.queue.step" or "music.queue.remove") &&
+            QueueSelectionSource?.Invoke(LJ.S(q["currentId"])) is { } source)
+            q["source"] = JsonNode.Parse(source.GetRawText());
         Set(doc, "queue", q);
         return (LJ.Merge(result ?? new JsonObject(), Position(q, doc)), true);
     }

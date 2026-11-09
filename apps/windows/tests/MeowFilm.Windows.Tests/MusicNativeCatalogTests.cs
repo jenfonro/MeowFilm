@@ -297,9 +297,9 @@ public static partial class MusicNativeCatalogTests
             "personalPlaylists" => new { platform = "kg", kind = "created", page = 2, limit = 23, continuation = new { a = new { b = 3 } }, refresh = false },
             "daily" => new { platform = "wy", branch = "style", refresh = true },
             "fm" => new { platform = "wy", mode = "scene", submode = "EXERCISE", preview = true },
-            "similar" => new { platform = "wy", sourceIds = new[] { "1", "2" } },
+            "similar" => new { platform = "wy", sourceIds = new[] { "1", "2" }, sourceType = "artist" },
             "heartbeat" => new { platform = "wy", entry = "favorites" },
-            "queueRecommendations" => new { platform = "wy", songIds = new[] { "1", "2" }, currentPlaySongId = "2" },
+            "queueRecommendations" => new { platform = "wy", seedSongId = "2", offset = 15 },
             "album" => new { platform = "wy", id = "12", refresh = true },
             _ => new { platform = "wy", id = "13", refresh = true }
         };
@@ -313,9 +313,9 @@ public static partial class MusicNativeCatalogTests
                 p.Continuation!.Value.GetProperty("a").GetProperty("b").GetInt32() == 3,
             "daily" => request is MusicDailyRequest { Branch: MusicDailyBranch.Style, Refresh: true },
             "fm" => request is MusicFmRequest { Mode: MusicFmMode.Scene, Submode: "EXERCISE", Preview: true },
-            "similar" => request is MusicSimilarRequest p && p.SourceIds.SequenceEqual(["1", "2"]),
+            "similar" => request is MusicSimilarRequest { SourceType: "artist" } p && p.SourceIds.SequenceEqual(["1", "2"]),
             "heartbeat" => request is MusicHeartbeatRequest { Entry: MusicHeartbeatEntry.Favorites, SongId: null },
-            "queueRecommendations" => request is MusicQueueRecommendationsRequest { CurrentPlaySongId: "2" } p && p.SongIds.SequenceEqual(["1", "2"]),
+            "queueRecommendations" => request is MusicQueueRecommendationsRequest { SeedSongId: "2", Offset: 15 },
             "album" => request is MusicAlbumRequest { Id: "12", Refresh: true },
             _ => request is MusicArtistRequest { Platform: "wy", Id: "13", Refresh: true }
         });
@@ -326,16 +326,16 @@ public static partial class MusicNativeCatalogTests
         }
         if (route == "heartbeat")
         {
-            Ok(await f.Run("heartbeat", new { platform = "wy", entry = "current", songId = "2" }));
+            Ok(await f.Run("heartbeat", new { platform = "wy", entry = "favorites", songId = "77" }));
+            Check(f.Platform.Calls[^1].Request is MusicHeartbeatRequest { Entry: MusicHeartbeatEntry.Favorites, SongId: "77" });
+            Ok(await f.Run("heartbeat", new { platform = "wy", entry = "current", songId = "2", playlistId = "77" }));
             Check(f.Platform.Calls[^1].Request is MusicHeartbeatRequest { Entry: MusicHeartbeatEntry.CurrentSong, SongId: "2" });
             Check(f.Store.Writes == 0);
         }
         if (route == "queueRecommendations")
         {
-            var ids = Enumerable.Range(1, 1201).Select(i => i.ToString()).ToArray();
-            Ok(await f.Run("queueRecommendations", new { platform = "wy", songIds = ids, currentPlaySongId = "1201" }));
-            Check(f.Platform.Calls[^1].Request is MusicQueueRecommendationsRequest { CurrentPlaySongId: "1201" } queue &&
-                queue.SongIds.SequenceEqual(ids));
+            Ok(await f.Run("queueRecommendations", new { platform = "wy", seedSongId = "1201", offset = 30 }));
+            Check(f.Platform.Calls[^1].Request is MusicQueueRecommendationsRequest { SeedSongId: "1201", Offset: 30 });
             Check(f.Store.Writes == 0);
         }
     }
@@ -368,11 +368,13 @@ public static partial class MusicNativeCatalogTests
         {
             ("daily", new { }), ("daily", new { platform = "all" }), ("daily", new { platform = "wy", branch = "other" }),
             ("fm", new { platform = "wy", mode = "auto" }), ("personalPlaylists", new { platform = "tx", kind = "other" }),
-            ("similar", new { platform = "wy", sourceIds = Array.Empty<string>() }),
+            ("similar", new { platform = "wy", sourceIds = Array.Empty<string>(), sourceType = "song" }),
+            ("similar", new { platform = "wy", sourceIds = new[] { "1" } }),
+            ("similar", new { platform = "wy", sourceIds = new[] { "1" }, sourceType = "" }),
             ("heartbeat", new { platform = "wy" }),
             ("heartbeat", new { platform = "wy", entry = "unknown" }),
             ("heartbeat", new { platform = "wy", entry = "current" }),
-            ("heartbeat", new { platform = "wy", entry = "favorites", songId = "1" }),
+            ("heartbeat", new { platform = "wy", entry = "favorites", songId = "" }),
             ("album", new { platform = "wy", id = "x", cookie = "synthetic-not-forwarded" }),
             ("artist", new { platform = "wy", id = "13", cookie = "synthetic-not-forwarded" }),
             ("search", new { platform = "wy", keyword = "x", kind = "unknown" }),
@@ -413,6 +415,9 @@ public static partial class MusicNativeCatalogTests
         Check(N(queue, "total") == 235 && S(queue, "currentId") == S(reply, "currentId") && N(reply, "version") == 1 && N(reply, "mode") == 1);
         Check(MusicSongFixture.NativeId(queue.GetProperty("current").GetProperty("song")) == NativeId("wy", 101));
         Check(S(queue.GetProperty("source"), "platform") == "wy" && f.Store.Writes == 1);
+        var context = queue.GetProperty("current").GetProperty("context");
+        Check(!context.TryGetProperty("heartbeatPlaylistId", out _) &&
+            !context.TryGetProperty("heartbeatAccountId", out _), "ordinary playlists carry no official heartbeat qualification");
     }
     private static async Task CompleteQueueByIdentity()
     {

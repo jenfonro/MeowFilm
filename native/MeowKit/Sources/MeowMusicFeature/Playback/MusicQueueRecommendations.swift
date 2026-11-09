@@ -6,17 +6,19 @@ public struct MusicQueueRecommendationSnapshot: Sendable, Identifiable {
     public let id: UUID
     public let status: MusicSimilarModeSnapshot.Status
     public let currentEntryID: String
+    public let active: Bool
     public let continueEnabled: Bool
     public let candidates: [MusicSimilarModeCandidate]
     public let exhausted: Bool
     public let error: MusicServiceError?
+    public let errorID: UUID?
     public let canRetry: Bool
     public init(id: UUID, status: MusicSimilarModeSnapshot.Status, currentEntryID: String,
                 continueEnabled: Bool, candidates: [MusicSimilarModeCandidate], exhausted: Bool,
-                error: MusicServiceError?, canRetry: Bool) {
+                error: MusicServiceError?, canRetry: Bool, active: Bool = false, errorID: UUID? = nil) {
         self.id = id; self.status = status; self.currentEntryID = currentEntryID
-        self.continueEnabled = continueEnabled; self.candidates = candidates
-        self.exhausted = exhausted; self.error = error; self.canRetry = canRetry
+        self.active = active; self.continueEnabled = continueEnabled; self.candidates = candidates
+        self.exhausted = exhausted; self.error = error; self.errorID = errorID; self.canRetry = canRetry
     }
 }
 

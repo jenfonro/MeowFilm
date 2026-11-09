@@ -453,13 +453,17 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
     func testSystemPlayReopensEndedCurrentSongInsteadOfResumingTerminalAttempt() async throws {
         let f = try await fixture(paused: false), original = try attempt(f.model)
         let oldNative = try XCTUnwrap(f.player.attempts.first)
-        // Use the real queue's sequential tail, not a fake rejected ended fact,
-        // to prevent automatic navigation from replacing the terminal owner.
+        // All global loops now wrap. Retire automatic navigation as a newer
+        // source-return intent would, but keep the real accepted ended fact.
         await f.model.removeOccurrence("entry-2")
-        await f.model.updateSettings(.init(ifRevision: f.model.state.settingsRevision, mode: .order))
+        await f.model.updateSettings(.init(ifRevision: f.model.state.settingsRevision, mode: .loop))
         XCTAssertEqual(f.model.queue.map(\.id), ["entry-1"])
-        XCTAssertFalse(f.model.canNext)
-        try await fact(f, .ended, position: 180)
+        XCTAssertTrue(f.model.canNext)
+        let candidate = try XCTUnwrap(f.model.candidate)
+        f.model.onPlayback(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+            resourceId: candidate.resourceId, kind: .ended, position: 180, duration: 180))
+        f.model.retirePlaybackNavigation()
+        await f.model.flushPlaybackFacts()
         await f.model.flushNavigation()
         XCTAssertEqual(f.model.phase, .ended)
         XCTAssertEqual(f.model.activeNativeAttemptID, original.id)

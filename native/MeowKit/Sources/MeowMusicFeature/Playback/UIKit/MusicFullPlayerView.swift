@@ -781,7 +781,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         let model = content.model
         let title = MusicReferencePlayerLabels.source(
             fm: model.isFMActive ? MusicReferencePlayerLabels.fmSource(model.activeHomeFM) : nil,
-            context: model.current?.sourceTitle,
+            context: model.playbackSourceTitle,
             collection: model.collections.first { $0.id == model.state.sourceCollectionID }?.title,
             track: model.displayTrack?.title ?? "")
         sourceButton.configuration?.title = title
