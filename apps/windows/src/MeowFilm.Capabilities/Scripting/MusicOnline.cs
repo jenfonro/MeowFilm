@@ -74,6 +74,7 @@ public sealed partial class MusicCapability
     {
         Changed(nameof(IsLyrics)); Changed(nameof(LyricStatus));
         LyricTimingBindings();
+        DesktopLyricBindings();
         SourceBindings();
     }
     private CancellationTokenSource BeginOnline(CancellationToken token)

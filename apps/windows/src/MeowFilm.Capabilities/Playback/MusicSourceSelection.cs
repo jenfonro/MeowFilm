@@ -446,7 +446,7 @@ public sealed partial class MusicCapability
             DiscardPendingMedia(state);
             throw;
         }
-        if (IsLyrics) _ = RestoreLyricsAsync();
+        if (NeedsLyrics) _ = RestoreLyricsAsync();
         // A handed-off input emits no second Started; confirm the newly playing source here.
         ConfirmRecoveredSourceStarted(state);
     }

@@ -25,6 +25,7 @@
     <RadioButton Content="外观" Tag="appearance" IsChecked="True" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>
     <RadioButton Content="首页数据源" Tag="sources" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>
     <RadioButton Content="缓存控制" Tag="cache" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>
+    <RadioButton x:Name="ShortcutsArea" Content="快捷键" Tag="shortcuts" Visibility="Collapsed" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>
    </StackPanel>
   </Border>
   <ScrollViewer x:Name="SettingsScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
@@ -46,6 +47,7 @@
     </StackPanel>
     <StackPanel x:Name="HomeSourceContributions" Visibility="Collapsed"/>
     <StackPanel x:Name="CacheContributions" Visibility="Collapsed"/>
+    <ContentControl x:Name="ShortcutsPage" Visibility="Collapsed" HorizontalContentAlignment="Stretch"/>
    </Grid>
   </ScrollViewer>
  </Grid>

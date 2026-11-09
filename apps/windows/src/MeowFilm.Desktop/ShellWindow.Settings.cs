@@ -41,7 +41,7 @@ public sealed partial class ShellWindow
     {
         if (appearance is null) return;
         _generalSettingsHost.Content = new GeneralSettingsView(appearance,
-            _sessions.Select(session => session.Module).OfType<IDesktopGeneralSettingsSource>());
+            _sessions.Select(session => session.Module).OfType<IDesktopGeneralSettingsSource>(), MediaControls);
         ContentDeck.Children.Add(_generalSettingsHost);
         string? appliedColor = null;
         void Apply()

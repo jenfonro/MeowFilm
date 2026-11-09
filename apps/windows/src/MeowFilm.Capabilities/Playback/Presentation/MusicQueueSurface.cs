@@ -82,7 +82,7 @@ public sealed partial class MusicCapability : IDesktopGlobalSurfaceSource
             case DesktopGlobalSurface.PlayerDetail:
                 playerDetailOpen = false;
                 Presentation.DeactivateDetail();
-                CancelLyrics();
+                if (!NeedsLyrics) CancelLyrics();
                 break;
             case DesktopGlobalSurface.PlayQueue:
                 queueSurfaceOpen = false;

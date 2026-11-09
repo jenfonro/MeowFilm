@@ -57,12 +57,12 @@ public sealed partial class ShellWindow : Window
 
     public ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
         Func<Task> shutdown, Func<Task> forceShutdown, Func<Task>? cancelShutdown = null,
-        IDesktopAppearance? appearance = null)
-        : this(modules, pages, shutdown, forceShutdown, cancelShutdown, TimeProvider.System, appearance) { }
+        IDesktopAppearance? appearance = null, IDesktopMediaControlSettings? mediaControls = null)
+        : this(modules, pages, shutdown, forceShutdown, cancelShutdown, TimeProvider.System, appearance, mediaControls) { }
 
     internal ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
         Func<Task> shutdown, Func<Task>? forceShutdown, Func<Task>? cancelShutdown, TimeProvider timeProvider,
-        IDesktopAppearance? appearance = null)
+        IDesktopAppearance? appearance = null, IDesktopMediaControlSettings? mediaControls = null)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
         _timeProvider = timeProvider;
@@ -84,6 +84,7 @@ public sealed partial class ShellWindow : Window
         _forceShutdown = forceShutdown;
         _cancelShutdown = cancelShutdown;
         _shutdown = shutdown;
+        MediaControls = mediaControls;
         InitializeComponent();
         InitializeGeneralSettings(appearance);
         AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, e) =>
@@ -130,6 +131,7 @@ public sealed partial class ShellWindow : Window
     /// Completion is not permission to exit: on failure/timeout the shell requires an explicit decision.
     /// </summary>
     public Task ShutdownCompletion => _shutdownCompletion.Task;
+    public IDesktopMediaControlSettings? MediaControls { get; }
 
     /// <summary>True only after an active wait observes actual successful cleanup, never merely a timeout or forced exit.</summary>
     public bool ShutdownSucceeded { get; private set; }

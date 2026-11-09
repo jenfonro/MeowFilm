@@ -1,6 +1,8 @@
-using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using System.Windows;
 using MeowFilm.Media;
+
+[assembly: InternalsVisibleTo("MeowFilm.Windows.Tests")]
 
 namespace MeowFilm.SystemMedia;
 
@@ -11,22 +13,34 @@ public sealed class SystemMediaWindowAttachment : IAsyncDisposable
     private bool disposed;
 
     public SystemMediaWindowAttachment(Window window, NativePlayback playback,
-        IEnumerable<SystemPlaybackOwner> owners)
+        IEnumerable<SystemPlaybackOwner> owners, bool enabled = true)
+        : this(window, CreateSession(window, playback, owners, enabled)) { }
+
+    internal SystemMediaWindowAttachment(Window window, SystemMediaSession session)
     {
         this.window = window;
-        var backend = new WindowsSystemMediaBackend(window);
-        try { session = new SystemMediaSession(playback, backend, owners, window.Dispatcher); }
-        catch { backend.Dispose(); throw; }
-        window.Closing += Closing;
+        this.session = session;
+        window.Closed += Closed;
     }
 
-    private void Closing(object? sender, CancelEventArgs args) => session.Suspend();
+    private static SystemMediaSession CreateSession(Window window, NativePlayback playback,
+        IEnumerable<SystemPlaybackOwner> owners, bool enabled)
+    {
+        var backend = new WindowsSystemMediaBackend(window);
+        try { return new SystemMediaSession(playback, backend, owners, window.Dispatcher, enabled); }
+        catch { backend.Dispose(); throw; }
+    }
+
+    // Shell can cancel Closing after its event handlers have run.
+    private void Closed(object? sender, EventArgs args) => session.Suspend();
+
+    public void SetEnabled(bool enabled) => session.SetEnabled(enabled);
 
     public async ValueTask DisposeAsync()
     {
         if (disposed) return;
         disposed = true;
-        window.Closing -= Closing;
+        window.Closed -= Closed;
         await session.DisposeAsync();
     }
 }
