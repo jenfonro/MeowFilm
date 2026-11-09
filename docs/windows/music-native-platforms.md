@@ -64,14 +64,17 @@ Invalidate
 
 ## 网易云漫游与推荐
 
-- 首页私人漫游进入 `DEFAULT`；显式 `ruleId`／`tabTagId` 卡仍按规则入口处理，频道卡保留声明的 mode/subMode 或规则。频道的私人漫游链接保留链接声明的 `DEFAULT`，Cube 父标签不覆盖该动作。同一区块的漫游入口按完整动作身份去重，不合并不同模式／场景／规则。四个主模式为 `DEFAULT`、`FAMILIAR`、`EXPLORE`、`PUZZLE_MODE_RCMD`；场景为 `SCENE_RCMD`，白名单包含 `HOT_SONG` 及原有官方 `FRANCH`、`PUNK` 等键，共 43 项。普通 FM 每批 3 首、规则 FM 每批 5 首、预览 1 首是现有请求配方。
-- 首页心动卡声明 `action.type=heartbeat, entry=favorites`，需要当前账号；匿名卡保留账号需求但不可见、不可执行。平台契约为 `MusicHeartbeatRequest(string Platform, MusicHeartbeatEntry Entry, string? SongId = null)`，枚举为 `Favorites`／`CurrentSong`。native catalog 命令 `music.catalog.heartbeat` 只接收 `platform`、`entry=favorites|current` 和当前曲入口的 `songId`；不接受浏览歌单 ID、起始喜欢曲或旧 fromHome 参数。
-- 心动由同一个已准入读取及账号 lease 完成目录、成员、缺失详情和推荐请求。云喜欢歌单以 `specialType=5` 且 creator/userId 属于当前账号识别，不按名称猜测；完整唯一成员数接受 `trackCount` 或 `trackCount + cloudTrackCount` 两种既有口径，`cloudTrackCount` 缺失按 0，存在时须为合法非负计数。不截断云盘成员，请求及响应 context 的 count 始终取实际完整成员长度。没有 `trackIds` 时仅接受符合相同计数口径的完整 `tracks`；没有成员数据且云盘计数非零时不能伪造空列表。详情中的歌曲前缀仅作为已有元数据，缺失条目按原生 ID 分批补全，每次详情请求最多 100 首，累计喜欢列表不设数量截断。
-- 喜欢入口在具有有效原生 ID、真实显示名称且通过现有网易云歌曲解析的喜欢曲中随机选择种子，发 `fromPlayAll`；缺失名称先按 ID 补详情，仍无名称的条目不作为种子。当前曲入口使用调用者传入的实际当前网易云歌曲 ID，发 `fromPlayOne`，该曲可以不属于喜欢列表。两者的 `startMusicId` 都取首个有效喜欢曲，`count` 都取完整喜欢列表实际长度。没有喜欢歌单、空喜欢或没有有效种子返回 `NOT_FOUND`；身份不一致、成员不完整、账号失效分别明确失败。
-- `/api/playmode/intelligence/list` 首批完整返回，不固定请求 100 首，不裁成 3 首。结果缺 `songInfo` 时仅按该条 ID 从已读喜欢列表补真实元数据；无法解析、无标题或身份不一致直接失败，不造占位歌曲。响应 `context` 为 `playlistId/startMusicId/songId/fromHome/count`，其中 count 为喜欢列表长度，顶层 count 为推荐结果长度。
-- 普通队列推荐继续使用 Windows 已证实的 `/api/homepage/more/rcmd/song`，请求仅含当前完整网易云队列的 `songIds` 数值数组字符串、实际 `currentPlaySongId` 和 `source=curlist_more_rcmd`（另由传输添加加密包络）。当前 ID 必须属于队列；数组保留顺序及精确整数，不按 1000 条截断或拒绝。此接口没有 offset，不生成分页游标，不调用 Android `homepage/scene/more/rcmd/song`。
-- `data.songList` 完整解码；`algMap` 和 `sourceMap` 同时支持对象或 JSON 对象字符串，算法映射优先于歌曲内 alg。`recommendations[].source` 继续表示 provider（`heartbeat`／`queue-recommendations`），独立的 `feedbackSource` 在心动为 `aiMode`，普通推荐使用该曲 sourceMap 值、缺失时为 `moreRcmd`。原列表来源继续由会话／队列所有者保存，读取候选本身不入队或发送反馈。
-- 普通推荐响应带 `hasMore`：保留上游明确布尔值，上游缺失时以本批非空为 true；空／重复批次的自动续播终止由会话 owner 处理。心动和普通队列读取不缓存、不写账号／云收藏，沿用同一账号失效、物理请求收尾、4 MiB 原始响应及调用截止时间边界。
+入口／循环／恢复行为见[播放来源、队列与自动续播](../common/music/playback-sessions.md)，本节只记录本端真实请求和解析边界。
+
+- FM：`POST EAPI /api/v1/radio/get`，普通 `mode=DEFAULT|FAMILIAR|EXPLORE|PUZZLE_MODE_RCMD`，场景 `SCENE_RCMD` + `subMode`（含 `GAMES/ELECTRONIC`）；`limit="3"/openAidj="false"/aidjReqTimes="0"/unplaySongIds`。预览 limit 为 1；规则 `ruleId/tabTagId` 使用原 `tag/tab/fm` 配方、每批 5 首。43 个场景保留官方 `FRANCH/PUNK/HOT_SONG` 等键。首页不带 mode 的私人 FM 由本机账号选择存储恢复，不改动卡片的动作身份。
+- 相似：同一路径的 WEAPI，`mode=SIMILAR/sourceType=artist|song/sourceIds/limit="3"/unplaySonIds`。这里的 `unplaySonIds` 少一个 g，与普通 FM 不混用。
+- 心动：`MusicHeartbeatRequest(Platform, Entry, SongId, PlaylistId)`；首页 `entry=favorites` 保留卡片 `songId`，current 带实际 `songId/playlistId`。同一个账号 lease 解析 `specialType=5` 且归属当前账号的真实喜欢歌单，不按标题或本地收藏猜测，也不接受普通远端歌单替代此上下文。
+- 喜欢成员完整读取，唯一成员数接受 `trackCount` 或 `trackCount+cloudTrackCount` 的已有口径；缺详情按 ID 每请求至多 100 首补齐，不按累计数量截断。`startMusicId` 与实际入口种子 `songId` 相同，使用首页展示曲或当前曲，不替换成喜欢列表首曲；current 核对其确为该歌单成员。
+- `/api/playmode/intelligence/list` 使用真实 `playlistId/songId/startMusicId/type/count`，type 为 `fromPlayAll/fromPlayOne`，count 为完整成员长度，不作为结果硬容量。完整消费返回结果；`songInfo=null` 时用顶层 id 从已读元数据或 `/api/v3/song/detail` 补齐，身份／标题不一致明确失败。响应 context 为 `playlistId/startMusicId/songId/fromHome/count`，顶层 count 是结果长度。没有经过验证的心动后续读取能力。
+- 单曲推荐：`MusicQueueRecommendationsRequest(Platform, SeedSongId, Offset)` → `POST EAPI /api/homepage/scene/more/rcmd/song`。参数固定为 `currentPlaySongId="<seed>"/songIds="[<seed数值>]"/songCount="1"/offset="<游标>"/source="curlist_more_rcmd"/extJson="{}"`。首次 offset 0，后续只使用响应 offset，seed 两字段不随插歌／当前推荐曲变化；没有旧路由 fallback 或伪造搜索上下文。
+- scene 响应读取 `data.songList/algMap/sourceMap/offset/hasMore`；offset 必须为非负整数，hasMore 必须为布尔值，仍有更多时游标必须前移。完整解码 songList，algMap／sourceMap 接受对象或 JSON 对象字符串，算法映射优先于曲内 alg。明确缺游标／耗尽字段时失败，不猜测分页。
+- `recommendations[].source` 表示 provider；独立 feedbackSource 在心动为 aiMode，单曲推荐使用逐曲 sourceMap、缺失为 moreRcmd。读取候选本身不入队或发送反馈。
+- 以上读取不缓存、不写账号／云收藏；沿用当前账号失效、物理请求收尾、4 MiB 原始响应和调用截止时间边界。固定参数分页已验证可用，但不据此承诺算法只由 seed 决定或永不耗尽。
 
 ## 当前输出
 

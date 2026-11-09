@@ -121,7 +121,7 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(action is "enter" or "append" or "select" or "restore", "INVALID_REQUEST");
         LJ.Fields(p, action switch
         {
-            "enter" => "nonce expectedVersion checkpoint seedEntryId songs context",
+            "enter" => "nonce expectedVersion checkpoint seedEntryId songs context capture",
             "append" => "nonce expectedVersion songs context selectIndex",
             "select" => "nonce expectedVersion id",
             _ => "nonce expectedVersion checkpoint retainCurrent"
@@ -157,6 +157,7 @@ public sealed partial class MusicLibraryOwner
                 var ids = LJ.Array(response["entryIds"]);
                 int index = (int)LJ.I(p["selectIndex"], 0, ids.Count - 1);
                 var selected = QueueCommand("music.queue.select", LJ.Obj(("id", ids[index])), doc, false);
+                if (Context(p["context"])["queueSource"] is { } source) Queue(doc)["source"] = source.DeepClone();
                 response = LJ.Merge(response, selected.Result);
             }
         }
@@ -168,12 +169,13 @@ public sealed partial class MusicLibraryOwner
             var retained = seed.Length == 0 ? null : LJ.Array(old["entries"]).OfType<JsonObject>()
                 .SingleOrDefault(e => LJ.S(e["id"]) == seed && LJ.S(old["currentId"]) == seed);
             LJ.Require(seed.Length == 0 || retained is not null, "STALE_QUEUE");
-            if (checkpoint.Length == 0)
+            bool capture = p["capture"] is null || LJ.B(p["capture"]);
+            if (checkpoint.Length == 0 && capture)
             {
                 captured = CaptureRecommendation(doc);
                 checkpoint = Guid.NewGuid().ToString("D");
             }
-            else LJ.Require(recommendationCheckpoints.ContainsKey(checkpoint), "CHECKPOINT_NOT_FOUND");
+            else if (checkpoint.Length > 0) LJ.Require(recommendationCheckpoints.ContainsKey(checkpoint), "CHECKPOINT_NOT_FOUND");
             Archive(old, doc);
             var added = songs.Select(s => MakeEntry(s, context)).ToArray();
             var entries = new JsonArray();

@@ -95,11 +95,22 @@ extension MusicViewModel {
         do { try check(epoch); return source }
         catch { source.revoke(); await source.close(); throw error }
     }
-    public func playHomeAction(_ action: MusicHomeAction, title: String, forceReload: Bool = false) async throws {
+    public func playHomeAction(_ requested: MusicHomeAction, title: String, forceReload: Bool = false) async throws {
         let epoch = try enter(), account = searchAccessGeneration
+        let action: MusicHomeAction
+        if !forceReload, case .fm(.default, "", nil) = requested,
+           let owner = service as? any MusicFMPlaybackServing {
+            action = try await owner.rememberedFM()
+        } else { action = requested }
         switch action {
         case .similar(let ids, let name):
             try await performSimilarMode { try await $0.startSimilarMode(.songRoaming(sourceIDs: ids, sourceName: name)) }
+            return
+        case .similarArtist(let ids, let name):
+            try await performSimilarMode { try await $0.startSimilarMode(.artistRoaming(sourceIDs: ids, sourceName: name)) }
+            return
+        case .heartbeatSong(let id):
+            try await performSimilarMode { try await $0.startSimilarMode(.heartbeatSong(songID: id)) }
             return
         case .heartbeat:
             try await performSimilarMode { try await $0.startSimilarMode(.heartbeat) }
@@ -326,7 +337,7 @@ extension MusicViewModel {
         playbackState.activeHomeFM = nil
         fmRevocationTask?.cancel(); fmRevocationTask = nil
         fmAdvanceIntent?.revoke(); fmAdvanceIntent = nil
-        let source = fmSource; fmSource = nil; playbackState.isFMActive = false
+        let source = fmSource; fmSource = nil; playbackState.isFMActive = false; playbackState.fmPlayback = nil
         if let source { source.revoke(); Task { await source.close() } }
     }
     func cancelFMNavigation() {

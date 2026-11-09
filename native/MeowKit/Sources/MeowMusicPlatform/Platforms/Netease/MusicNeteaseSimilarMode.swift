@@ -23,12 +23,12 @@ enum MusicNeteaseSimilarModeRequest {
         case .heartbeat(let last, _, let context):
             if let last { try id(last) }
             if let context { try id(context.playlistID); try id(context.seedID) }
-        case .songRoaming(let ids):
+        case .songRoaming(let ids), .artistRoaming(let ids):
             guard (1...20).contains(ids.count) else { throw MusicServiceError.invalidRequest }
             try ids.forEach(id)
-        case .queueRecommendations(let ids, let current):
-            guard !ids.isEmpty, ids.contains(current) else { throw MusicServiceError.invalidRequest }
-            try ids.forEach(id); try id(current)
+        case .songRecommendations(let seed, let offset):
+            try id(seed)
+            guard offset >= 0 else { throw MusicServiceError.invalidRequest }
         }
     }
     static func specification(_ value: MusicNativeSimilarModeRequest, heartbeatCount: Int) throws -> (path: String, data: [String: Any], crypto: String)? {
@@ -46,10 +46,16 @@ enum MusicNeteaseSimilarModeRequest {
                 "limit": "3", "mode": "SIMILAR", "sourceType": "song",
                 "sourceIds": "[" + ids.joined(separator: ",") + "]", "unplaySonIds": "[]"
             ], "weapi")
-        case .queueRecommendations(let ids, let current):
-            return ("/api/homepage/more/rcmd/song", [
-                "songIds": "[" + ids.joined(separator: ",") + "]",
-                "currentPlaySongId": current, "source": "curlist_more_rcmd"
+        case .artistRoaming(let ids):
+            return ("/api/v1/radio/get", [
+                "limit": "3", "mode": "SIMILAR", "sourceType": "artist",
+                "sourceIds": "[" + ids.joined(separator: ",") + "]", "unplaySonIds": "[]"
+            ], "weapi")
+        case .songRecommendations(let seed, let offset):
+            return ("/api/homepage/scene/more/rcmd/song", [
+                "currentPlaySongId": seed, "songIds": "[" + seed + "]",
+                "songCount": "1", "offset": String(offset),
+                "source": "curlist_more_rcmd", "extJson": "{}"
             ], "eapi")
         }
     }
@@ -70,19 +76,22 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
         try await authorize(); try check(own)
         let account = try context(credential)
         var resolved = value, memberCount = 0
+        var heartbeatSeed: [String: Any]?
         if case .heartbeat(let last, let fromHome, let supplied) = value {
             let liked = try await heartbeatLikes(account, own: own, authorize: authorize)
             memberCount = liked.ids.count
-            let context = MusicSimilarHeartbeatContext(playlistID: liked.playlistID, seedID: liked.validIDs[0])
-            guard supplied == nil || supplied == context else { throw MusicServiceError.targetChanged }
             let songID: String
-            if fromHome {
+            if let last {
+                guard fromHome || liked.validIDs.contains(last) else { throw MusicServiceError.sourceUnavailable }
+                songID = last
+            } else {
+                guard fromHome else { throw MusicServiceError.invalidRequest }
                 songID = chooseLikedSong(liked.validIDs)
                 guard liked.validIDs.contains(songID) else { throw MusicServiceError.invalidRequest }
-            } else {
-                guard let last else { throw MusicServiceError.invalidRequest }
-                songID = last
             }
+            let context = MusicSimilarHeartbeatContext(playlistID: liked.playlistID, seedID: songID)
+            guard supplied == nil || supplied == context else { throw MusicServiceError.targetChanged }
+            heartbeatSeed = liked.songs[songID]
             resolved = .heartbeat(lastID: songID, fromHome: fromHome, context: context)
         }
         guard let spec = try MusicNeteaseSimilarModeRequest.specification(resolved, heartbeatCount: memberCount) else {
@@ -95,22 +104,25 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
         let raw: [[String: Any]], source: String, sourceID: String
         let heartbeat: MusicSimilarHeartbeatContext?
         var algorithms: [String: Any] = [:], sources: [String: Any] = [:]
-        var hasMore: Bool?
+        var hasMore: Bool?, offset: Int?
         switch resolved {
         case .heartbeat(_, _, let context):
             guard let context else { throw MusicServiceError.invalidRequest }
             raw = try MusicNeteaseWire.rows(result["data"])
             source = "heartbeat"; sourceID = context.playlistID; heartbeat = context
-        case .songRoaming:
+        case .songRoaming, .artistRoaming:
             let data = result["data"], body = data as? [String: Any]
             raw = try MusicNeteaseWire.rows(body?["songs"] ?? data, maximum: 1000)
             source = "similar"; sourceID = ""; heartbeat = nil
-        case .queueRecommendations:
+        case .songRecommendations(_, let requestedOffset):
             let body = try MusicQQWire.object(result["data"])
-            raw = try MusicNeteaseWire.rows(body["songList"] ?? [])
+            raw = try MusicNeteaseWire.rows(body["songList"])
             algorithms = try Self.recommendationMap(body["algMap"])
             sources = try Self.recommendationMap(body["sourceMap"])
-            if let value = body["hasMore"], !(value is NSNull) { hasMore = try MusicNeteaseWire.bool(value) }
+            let more = try MusicNeteaseWire.bool(body["hasMore"])
+            let next = try MusicQQWire.integer(body["offset"])
+            guard !more || next > requestedOffset else { throw MusicServiceError.upstreamInvalid }
+            hasMore = more; offset = next
             source = "moreRcmd"; sourceID = ""; heartbeat = nil
         }
 
@@ -127,6 +139,8 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
             else if requested.insert(id).inserted { missing.append(id) }
         }
         missing.removeAll { metadata[$0] != nil }
+        if case .heartbeat(let selected?, _, _) = resolved, heartbeatSeed == nil,
+           metadata[selected] == nil, requested.insert(selected).inserted { missing.append(selected) }
         for offset in stride(from: 0, to: missing.count, by: 100) {
             try await authorize(); try check(own)
             let ids = Array(missing.dropFirst(offset).prefix(100))
@@ -141,7 +155,7 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
             }
         }
         var bytes = 0
-        let items = try ordered.map { item -> MusicNativeTrackData in
+        var items = try ordered.map { item -> MusicNativeTrackData in
             guard let song = metadata[item.id] else { throw MusicServiceError.targetChanged }
             guard case .object(var row) = try Self.song(song, id: item.id) else { throw MusicServiceError.upstreamInvalid }
             // Credential-free attribution for the existing feedback consumer;
@@ -165,8 +179,19 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
             guard bytes <= 4 * 1024 * 1024 else { throw MusicServiceError.limit }
             return .init(platform: "wy", data: data)
         }
+        if case .heartbeat(let selected, _, _) = resolved, let selected {
+            if let index = ordered.firstIndex(where: { $0.id == selected }) {
+                let first = items.remove(at: index); items.insert(first, at: 0)
+            } else {
+                guard let song = heartbeatSeed ?? metadata[selected] else {
+                    throw MusicServiceError.upstreamInvalid
+                }
+                let data = try JSONEncoder().encode(Self.song(song, id: selected))
+                items.insert(.init(platform: "wy", data: data), at: 0)
+            }
+        }
         try await authorize(); try check(own)
-        return .init(items: items, heartbeatContext: heartbeat, hasMore: hasMore)
+        return .init(items: items, heartbeatContext: heartbeat, hasMore: hasMore, offset: offset)
     }
 
     private static func recommendationMap(_ value: Any?) throws -> [String: Any] {
@@ -179,7 +204,7 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
 
     private func heartbeatLikes(_ account: MusicNeteaseContext, own: UUID,
                                 authorize: @escaping @Sendable () async throws -> Void) async throws
-        -> (playlistID: String, ids: [String], validIDs: [String]) {
+        -> (playlistID: String, ids: [String], validIDs: [String], songs: [String: [String: Any]]) {
         var offset = 0, seen = Set<String>(), favorites: [String] = []
         while true {
             try await authorize(); try check(own)
@@ -240,7 +265,7 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
         }
         let valid = ids.filter { songs[$0] != nil }
         guard !valid.isEmpty else { throw MusicServiceError.notFound }
-        return (pid, ids, valid)
+        return (pid, ids, valid, songs)
     }
 
     private static func isOwnHeartbeatList(_ row: [String: Any], accountID: String) throws -> Bool {

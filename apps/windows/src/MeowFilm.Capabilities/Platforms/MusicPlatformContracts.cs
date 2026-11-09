@@ -81,11 +81,14 @@ public sealed record MusicPersonalPlaylistsRequest(string Platform,
 public sealed record MusicDailyRequest(string Platform = "wy",
     MusicDailyBranch Branch = MusicDailyBranch.Default, bool Refresh = false);
 public sealed record MusicFmRequest(string Platform = "wy", MusicFmMode Mode = MusicFmMode.Default,
-    string Submode = "", bool Preview = false, string? RuleId = null, string? TabTagId = null);
-public sealed record MusicSimilarRequest(string Platform, IReadOnlyList<string> SourceIds);
-public sealed record MusicHeartbeatRequest(string Platform, MusicHeartbeatEntry Entry, string? SongId = null);
+    string Submode = "", bool Preview = false, string? RuleId = null, string? TabTagId = null,
+    IReadOnlyList<string>? UnplaySongIds = null);
+public sealed record MusicSimilarRequest(string Platform, IReadOnlyList<string> SourceIds,
+    string SourceType = "song", IReadOnlyList<string>? UnplaySongIds = null);
+public sealed record MusicHeartbeatRequest(string Platform, MusicHeartbeatEntry Entry, string? SongId = null,
+    string? PlaylistId = null);
 public sealed record MusicQueueRecommendationsRequest(string Platform,
-    IReadOnlyList<string> SongIds, string CurrentPlaySongId);
+    string SeedSongId, int Offset = 0);
 public sealed record MusicAlbumRequest(string Platform, string Id, bool Refresh = false);
 public sealed record MusicArtistRequest(string Platform, string Id, bool Refresh = false);
 

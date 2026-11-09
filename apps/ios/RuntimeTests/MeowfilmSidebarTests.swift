@@ -665,7 +665,8 @@ private final class SidebarFilmFixture {
             request: { method, _ in try await transport.call(method) },
             upload: { _, _, _ in try await transport.call("upload") }), storeFactory: { store })
         rules = try FilmRuleService(store: DocumentStore(baseURL: directory, namespace: FilmRuleService.documentNamespace))
-        model = FilmSettingsModel(rules: rules, sources: sources)
+        model = FilmSettingsModel(rules: rules, sources: sources,
+            tmdb: FilmTMDBSettingsModel(service: FilmTMDBService(connection: { throw FilmSearchError.unavailable }), didSave: {}))
     }
 
     static func cats(for videos: [FilmVideoSource]) -> [FilmCatSource] {

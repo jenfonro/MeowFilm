@@ -25,9 +25,9 @@ final class MusicNativeHomeActionTests: XCTestCase {
             return
         }
     }
-    private func similarURL(_ ids: MJ, sourceName: String = "") -> String {
+    private func similarURL(_ ids: MJ, sourceName: String = "", sourceType: String = "song") -> String {
         var url = URLComponents(string: "orpheus://nm/play/similarFM")!
-        url.queryItems = [.init(name: "sourceType", value: "song"), .init(name: "sourceId", value: ids.json)]
+        url.queryItems = [.init(name: "sourceType", value: sourceType), .init(name: "sourceId", value: ids.json)]
         if !sourceName.isEmpty { url.queryItems?.append(.init(name: "sourceName", value: sourceName)) }
         return url.string!
     }
@@ -139,6 +139,22 @@ final class MusicNativeHomeActionTests: XCTestCase {
         XCTAssertEqual(try MJ.parse(JSONEncoder().encode(decoded)), .obj([("type", .string("heartbeat"))]))
     }
 
+    func testHeartbeatCardKeepsDisplayedSongRatherThanCardOrPlaylistIdentity() throws {
+        let row = try json(#"""
+        {"type":"star","resourceId":"987","playlistId":"42","title":"心动",
+         "resourceExtInfo":{"songData":{"id":1348461130,"name":"展示歌曲"}}}
+        """#)
+        XCTAssertEqual(try descriptor(row), .heartbeatSong(songID: "1348461130"))
+        XCTAssertEqual(try item(row).id, "heartbeat:1348461130")
+        let encoded = try JSONEncoder().encode(try descriptor(row))
+        XCTAssertEqual(try JSONDecoder().decode(MusicHomeAction.self, from: encoded),
+                       .heartbeatSong(songID: "1348461130"))
+        guard case .action(let guestAction) =
+            try MusicNativePublicBrowseParser.resource(row, index: "anonymous", loggedIn: false)?.content
+        else { return XCTFail("an identified entrance must remain available for the login prompt") }
+        XCTAssertEqual(guestAction, .heartbeatSong(songID: "1348461130"))
+    }
+
     func testSimilarUsesOnlyBoundedOrderedSongSeedsAndPreservesSourceName() throws {
         let url = similarURL(.array([.string("9"), .n(2), .string("9")]), sourceName: "官方来源 / 测试歌曲")
         let expected = MusicHomeAction.similar(sourceIDs: ["9", "2", "9"], sourceName: "官方来源 / 测试歌曲")
@@ -160,6 +176,18 @@ final class MusicNativeHomeActionTests: XCTestCase {
                        .similar(sourceIDs: (1...20).map(String.init), sourceName: ""))
     }
 
+    func testSimilarArtistKeepsActualSourceTypeIDsAndName() throws {
+        let url = similarURL(.array([.n(9), .string("2")]), sourceName: "实际艺人", sourceType: "artist")
+        let row = MJ.obj([("type", .string("similarArtist")), ("resourceId", .n(99)), ("action", .string(url))])
+        XCTAssertEqual(try descriptor(row), .similarArtist(sourceIDs: ["9", "2"], sourceName: "实际艺人"))
+        XCTAssertEqual(try item(row).id, "similar:artist:9,2")
+        guard case .action(let guestAction) =
+            try MusicNativePublicBrowseParser.resource(row, index: "anonymous", loggedIn: false)?.content
+        else { return XCTFail("a valid artist entrance must not be hidden solely for missing login") }
+        XCTAssertEqual(guestAction, .similarArtist(sourceIDs: ["9", "2"], sourceName: "实际艺人"))
+        try unavailable(.obj([("type", .string("similarArtist"))]))
+    }
+
     func testMalformedSimilarDeclarationNeverFallsThroughToDetailPreviewOrFM() throws {
         let valid = similarURL(.array([.n(3), .n(7)]))
         let badSeeds: [MJ] = [.array([]), .null, .n(1), .string("1"), .obj(), .array(Array(repeating: .n(1), count: 21))] +
@@ -170,7 +198,7 @@ final class MusicNativeHomeActionTests: XCTestCase {
                     valid + "&sourceName=a&sourceName=b", valid + "#extra",
                     valid.replacingOccurrences(of: "nm/", with: "user@nm/"),
                     valid.replacingOccurrences(of: "nm/", with: "nm:99/"),
-                    "orpheus://privatefm", "orpheus://song/3",
+                    "orpheus://privatefm", "orpheus://songrcmd?tab=style", "orpheus://song/3",
                     "orpheus://nm/play/similarFM?sourceId=not-json&sourceType=song"]
         for url in invalid {
             let row = MJ.obj([("type", .string("similarSong")), ("resourceId", .n(99)), ("action", .string(url)),
@@ -178,7 +206,8 @@ final class MusicNativeHomeActionTests: XCTestCase {
                 ("resourceExtInfo", .obj([("songData", .obj([("id", .n(3))]))]))])
             try unavailable(row)
         }
-        try unavailable(.obj([("type", .string("similarArtist")), ("action", .string(valid))]))
+        XCTAssertEqual(try descriptor(.obj([("type", .string("similarArtist")), ("action", .string(valid))])),
+                       .similar(sourceIDs: ["3", "7"], sourceName: ""), "the declared protocol, not the display kind, owns sourceType")
         let alternate = MJ.obj([("clickAction", .string("https://invalid.test")), ("url", .string(valid))])
         try unavailable(.obj([("type", .string("similarSong")), ("action", alternate)]))
         XCTAssertEqual(try descriptor(.obj([("type", .string("similarSong")),
@@ -221,7 +250,9 @@ final class MusicNativeHomeActionTests: XCTestCase {
             .ruleFM(ruleID: "40000", tabTagID: "", sourceName: "规则频道"),
             .ruleFM(ruleID: "", tabTagID: "electronic", sourceName: ""),
             .similar(sourceIDs: ["3", "1", "3"], sourceName: "相似来源"),
-            .daily(branch: .default), .daily(branch: .style), .heartbeat, .songCollection(ids: ["3", "1"])
+            .similarArtist(sourceIDs: ["9"], sourceName: "相似艺人"),
+            .daily(branch: .default), .daily(branch: .style), .heartbeat, .heartbeatSong(songID: "42"),
+            .songCollection(ids: ["3", "1"])
         ]
         for value in values {
             try value.validate()
@@ -233,7 +264,7 @@ final class MusicNativeHomeActionTests: XCTestCase {
         }
         XCTAssertEqual(Set(values).count, values.count)
         for invalid in [
-            #"{"type":"similar","sourceType":"artist","sourceIds":["3"]}"#,
+            #"{"type":"similar","sourceType":"album","sourceIds":["3"]}"#,
             #"{"type":"similar","sourceType":"song","sourceIds":["9007199254740992"]}"#,
             #"{"type":"similar","sourceType":"song","sourceIds":[]}"#,
             #"{"type":"fm","provider":"other","mode":"DEFAULT","submode":""}"#,

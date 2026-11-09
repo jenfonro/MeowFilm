@@ -392,9 +392,10 @@ public static partial class MusicUiTests
             await Drain();
             Equal(0, f.Calls.Count("music.queue.mode"));
             True(menu.IsOpen && !popup.IsOpen, "opening ordinary choices does not change the queue");
-            Equal("心动模式,列表循环,单曲循环,随机播放", string.Join(',', menu.Items.OfType<MenuItem>()
+            Equal("列表循环,单曲循环,随机播放", string.Join(',', menu.Items.OfType<MenuItem>()
                 .Select(System.Windows.Automation.AutomationProperties.GetName)));
-            True(!menu.Items.OfType<MenuItem>().First().IsEnabled, "no current song disables heartbeat");
+            True(menu.Items.OfType<MenuItem>().All(item => item.IsEnabled),
+                "the global loop choices do not depend on source eligibility");
             var random = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2));
             ((IInvokeProvider)new MenuItemAutomationPeer(random).GetPattern(PatternInterface.Invoke)).Invoke();
             await Until(() => f.Calls.Count("music.queue.mode") == 1 && !f.Module.Busy);
@@ -408,11 +409,13 @@ public static partial class MusicUiTests
             await Until(() => f.Module.Mode == 3 && !f.Module.Busy);
             await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             True(!f.Module.HasPlaybackFm && !f.Module.CanHeartbeatCurrent, "local recording is never sent to WY heartbeat");
-            var more = (Button)footer.FindName("MoreButton");
-            more.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
-            var heartbeat = more.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "从当前歌曲开始心动"));
-            True(!heartbeat.IsEnabled, "disabled native entry remains clearly named");
-            more.ContextMenu.IsOpen = false;
+            var sourceButton = (Button)footer.FindName("PlaybackSourceButton");
+            sourceButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
+            var sourceMenu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
+            True(sourceMenu.IsOpen && sourceMenu.Items.OfType<MenuItem>().All(item =>
+                !Equals(item.Header, "从当前歌曲进入心动") && !Equals(item.Header, "从当前歌曲进入推荐")),
+                "the separate source menu hides unsupported local-recording entries");
+            sourceMenu.IsOpen = false;
             mode.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
             var retired = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 1));
             source.RootVisual = null; await Drain();

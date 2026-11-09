@@ -28,7 +28,7 @@ extension NeteaseMusicAccountAdapter: MusicNeteaseFMProvider {
             }
         case .fm(_, _, let entry):
             coverOnly = false
-            if preview && entry == .channel { specification.1["limit"] = 1 }
+            if preview && entry == .channel { specification.1["limit"] = "1" }
         default: throw MusicServiceError.invalidRequest
         }
         try await authorize(); try check(own)

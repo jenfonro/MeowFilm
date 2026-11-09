@@ -104,13 +104,15 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let first = try await value.replaceDisplayedQueue([stale, stale], index: 1,
             origin: .section(title: "原版推荐栏目"), expectedRevision: 0, intent: .init())
         XCTAssertEqual(first.total, 2)
+        XCTAssertEqual(first.queueSourceTitle, "原版推荐栏目")
         let rows = try await value.queue()
         XCTAssertNotEqual(rows.entries[0].id, rows.entries[1].id)
         XCTAssertEqual(rows.currentId, rows.entries[1].id)
         let after = await account.calls.count
         XCTAssertEqual(calls, after, "an owned display snapshot does not require a new network catalogue")
-        _ = try await value.replaceDisplayedQueue([stale], index: 0, origin: .song,
+        let single = try await value.replaceDisplayedQueue([stale], index: 0, origin: .song,
             expectedRevision: first.revision, intent: .init())
+        XCTAssertNil(single.queueSourceTitle, "a new song entry must not retain the previous section title")
         let root = try MJ.parse(XCTUnwrap(document.snapshot().0))
         XCTAssertEqual(root["records"][MusicModel.key("history")]["playlists"].array.first?["title"].string, "原版推荐栏目")
         XCTAssertEqual(root["records"][MusicModel.key("queue")]["entries"].array.first?["context"]["sourceType"].string, "song")
@@ -429,8 +431,15 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let value = try await service(account, http: http)
         let page = try await value.homePage(cursor: nil, refresh: true)
         XCTAssertEqual(page.sections.map(\.layout), [.featureRail, .songColumns])
-        guard case .action(let action) = page.sections[0].items[0].content else { return XCTFail("anonymous FM required") }
-        XCTAssertEqual(action, .fm(mode: .default, submode: "", entry: nil))
+        let actions = page.sections[0].items.compactMap { item -> MusicHomeAction? in
+            guard case .action(let action) = item.content else { return nil }
+            return action
+        }
+        XCTAssertEqual(page.sections[0].items.count, 3)
+        XCTAssertEqual(actions, [
+            .heartbeat, .similar(sourceIDs: ["41"], sourceName: ""),
+            .fm(mode: .default, submode: "", entry: nil)
+        ], "valid account entrances remain visible; execution requests login")
         XCTAssertEqual(page.sections[1].items.count, 1)
         let calls = await account.calls
         XCTAssertTrue(calls.isEmpty, "Guest home must not read account recommendations or artist activity")

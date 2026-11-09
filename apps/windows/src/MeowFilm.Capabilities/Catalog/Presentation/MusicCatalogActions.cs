@@ -92,7 +92,6 @@ public sealed partial class MusicCapability
                             if (action == "play" && currentAction())
                             {
                                 await StartCurrent(signal);
-                                _ = TrackRecommendation(StartQueueRecommendationPreviewAsync());
                             }
                         }
                         else
@@ -168,7 +167,6 @@ public sealed partial class MusicCapability
                         if (currentAction())
                         {
                             await StartCurrent(signal);
-                            _ = TrackRecommendation(StartQueueRecommendationPreviewAsync());
                         }
                     }
                     else
@@ -220,7 +218,6 @@ public sealed partial class MusicCapability
                 if (current())
                 {
                     await StartCurrent(signal);
-                    _ = TrackRecommendation(StartQueueRecommendationPreviewAsync());
                 }
             });
         }, card: card);
@@ -257,7 +254,6 @@ public sealed partial class MusicCapability
             if (currentAction() && sourceCurrent())
             {
                 await StartCurrent(signal);
-                _ = TrackRecommendation(StartQueueRecommendationPreviewAsync());
             }
         });
     }, "正在加载歌曲");

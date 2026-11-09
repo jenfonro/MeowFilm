@@ -125,6 +125,7 @@ public sealed partial class MusicCapability
         // Publish after the collection replacement has finished its selection
         // transaction, otherwise ComboBox can clear the newly rebound selection.
         AccountBindings();
+        RecommendationBindings();
     }
     private async Task EnsureAccountsAsync()
     {

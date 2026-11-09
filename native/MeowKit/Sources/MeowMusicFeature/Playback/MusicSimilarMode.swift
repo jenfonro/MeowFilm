@@ -11,16 +11,18 @@ public struct MusicSimilarHeartbeatContext: Sendable, Equatable, Codable {
 public enum MusicNativeSimilarModeRequest: Sendable, Equatable {
     case heartbeat(lastID: String?, fromHome: Bool, context: MusicSimilarHeartbeatContext?)
     case songRoaming(sourceIDs: [String])
-    case queueRecommendations(songIDs: [String], currentPlaySongID: String)
+    case artistRoaming(sourceIDs: [String])
+    case songRecommendations(seedID: String, offset: Int)
 }
 
 public struct MusicNativeSimilarModeBatch: Sendable {
     public let items: [MusicNativeTrackData]
     public let heartbeatContext: MusicSimilarHeartbeatContext?
     public let hasMore: Bool?
+    public let offset: Int?
     public init(items: [MusicNativeTrackData], heartbeatContext: MusicSimilarHeartbeatContext? = nil,
-                hasMore: Bool? = nil) {
-        self.items = items; self.heartbeatContext = heartbeatContext; self.hasMore = hasMore
+                hasMore: Bool? = nil, offset: Int? = nil) {
+        self.items = items; self.heartbeatContext = heartbeatContext; self.hasMore = hasMore; self.offset = offset
     }
 }
 
@@ -28,9 +30,8 @@ public protocol MusicNativeSimilarModeProviding: MusicNativeAccountQueueProvidin
     /// Stable opaque account scope, not credential bytes/hash. Validate the
     /// lease before/after suspended work; it must match the scope of its owner.
     func similarModeScope(_ lease: MusicAccountQueueLease) async throws -> String
-    /// Fresh bounded batch each call, including repeated seed IDs. Heartbeat
-    /// uses fromPlayOne except the explicit home entry's fromPlayAll. Heartbeat
-    /// tail continuation uses queueRecommendations, never personal FM.
+    /// Requests remain bound to their original seed and exact account lease.
+    /// Heartbeat generates one list; it has no automatic continuation request.
     func similarModeBatch(_ lease: MusicAccountQueueLease,
                           request: MusicNativeSimilarModeRequest) async throws -> MusicNativeSimilarModeBatch
 }
@@ -38,6 +39,7 @@ public protocol MusicNativeSimilarModeProviding: MusicNativeAccountQueueProvidin
 public enum MusicSimilarModeProvider: String, Sendable, Codable {
     case heartbeat
     case songRoaming = "song-roaming"
+    case artistRoaming = "artist-roaming"
     case queueRecommendations = "queue-recommendations"
 }
 
@@ -82,22 +84,26 @@ public struct MusicSimilarModeSnapshot: Sendable, Identifiable {
     public let fromHome: Bool
     public let provider: MusicSimilarModeProvider
     public let error: MusicServiceError?
+    public let errorID: UUID?
     public let canRetry: Bool
     public init(id: UUID, active: Bool, status: Status, seed: MusicSimilarModeSong, seedEntryID: String?,
                 continueEnabled: Bool, candidates: [MusicSimilarModeCandidate], batches: [MusicSimilarModeBatch],
                 sourceIDs: [String], fromHome: Bool, provider: MusicSimilarModeProvider,
-                error: MusicServiceError?, canRetry: Bool) {
+                error: MusicServiceError?, canRetry: Bool, errorID: UUID? = nil) {
         self.id = id; self.active = active; self.status = status; self.seed = seed; self.seedEntryID = seedEntryID
         self.continueEnabled = continueEnabled; self.candidates = candidates; self.batches = batches
         self.sourceIDs = sourceIDs; self.fromHome = fromHome; self.provider = provider
-        self.error = error; self.canRetry = canRetry
+        self.error = error; self.errorID = errorID; self.canRetry = canRetry
     }
 }
 
 public enum MusicSimilarModeStart: Sendable, Equatable {
     case heartbeat
+    case heartbeatSong(songID: String)
+    case recommendations(occurrenceID: String, expectedRevision: Int)
     case currentHeartbeat(occurrenceID: String, expectedRevision: Int)
     case songRoaming(sourceIDs: [String], sourceName: String)
+    case artistRoaming(sourceIDs: [String], sourceName: String)
 }
 
 /// The service never creates a player or manufactures a playing fact.
@@ -119,6 +125,7 @@ public protocol MusicSimilarModeServing: Sendable {
     func similarModeSnapshot() async throws -> MusicSimilarModeSnapshot?
     func similarModeChanges() async -> AsyncStream<Void>
     func canEnterSimilarMode() async throws -> Bool
+    func canEnterSongRecommendations() async throws -> Bool
     func previewSimilarMode() async throws -> MusicSimilarModeSnapshot?
     func enterSimilarMode() async throws -> MusicSimilarModeResult
     func startSimilarMode(_ start: MusicSimilarModeStart) async throws -> MusicSimilarModeResult
@@ -136,6 +143,16 @@ public protocol MusicSimilarModeServing: Sendable {
 }
 
 public extension MusicSimilarModeSnapshot {
+    var canRestoreQueue: Bool { active && (provider == .heartbeat || provider == .queueRecommendations) }
+    var supportsContinuation: Bool { provider != .heartbeat }
+    var sourceTitle: String {
+        switch provider {
+        case .heartbeat: return "心动"
+        case .songRoaming: return "相似歌曲"
+        case .artistRoaming: return "相似艺人"
+        case .queueRecommendations: return "推荐"
+        }
+    }
     /// Group labels follow contiguous actual queue occurrences; do not reorder
     /// the queue into batches. Empty labels omit headings inside the same group.
     func headings(for entryIDs: [String]) -> [String: String] {

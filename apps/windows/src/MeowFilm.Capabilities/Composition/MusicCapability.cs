@@ -30,6 +30,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private string status = "", heading = "推荐";
     private PlaylistRow? collection;
     private SongRow? current, selectedSong;
+    private JsonElement? queueSource;
+    private long playbackEvent;
     private int total, mode = 1, commands;
     private long queueEpoch, queueRead, playbackEpoch, endedEpoch = -1, statusEpoch;
     private bool stopping, disposed, recorded, queueSaved = true, playbackSubscribed;
@@ -182,7 +184,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         ? TimeSpan.FromSeconds(value).ToString(value >= 3600 ? @"h\:mm\:ss" : @"m\:ss") : "0:00";
     public int Volume { get => playback.Volume; set { if (!stopping) { volumeEdit++; playback.Volume = Math.Clamp(value, 0, 100); } Changed(); } }
     public int Mode => mode;
-    public string ModeText => new[] { "顺序播放", "列表循环", "随机播放", "单曲循环" }[mode];
+    public string ModeText => mode switch { 1 => "列表循环", 2 => "随机播放", _ => "单曲循环" };
     public event PropertyChangedEventHandler? PropertyChanged;
     public event EventHandler<DesktopNavigationRequestEventArgs>? NavigationRequested;
     private void Changed([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new(property));
@@ -515,6 +517,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         InvalidateCatalogAction();
         onlineCancellation?.Cancel();
         var song = selectedSong; var selected = collection;
+        bool searchDirect = IsSearchPage;
         var queueContext = CaptureFeedbackContext();
         var index = song is null ? -1 : location.Offset + Songs.IndexOf(song);
         return RunAsync(async () =>
@@ -522,8 +525,21 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             if (song is null || index < 0) return;
             if (selected is not null) await QueueCall("music.queue.playCollection", new { id = selected.Id, ifRevision = selected.Revision, index });
             else await QueueCall("music.queue.replace", new { songs = new[] { song.Raw }, index = 0, context = queueContext });
-            await ReadQueue(lifetime.Token); await StartCurrent(lifetime.Token);
-            _ = TrackRecommendation(StartQueueRecommendationPreviewAsync());
+            await ReadQueue(lifetime.Token);
+            long searchPlayback = -1;
+            try
+            {
+                await StartCurrent(lifetime.Token, ownsEpoch: searchDirect ? epoch =>
+                {
+                    searchPlayback = epoch;
+                    AwaitSearchRecommendationStart(epoch);
+                } : null);
+            }
+            catch
+            {
+                if (searchPlayback == playbackEpoch) searchRecommendationStart = null;
+                throw;
+            }
         });
     }
     public Task PlayCollectionAsync()
@@ -633,7 +649,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         InvalidateCatalogAction();
         return RunAsync(async () =>
         {
-            if (value is < 0 or > 3) throw new MusicOperationException("INVALID_REQUEST");
+            if (value is < 1 or > 3) throw new MusicOperationException("INVALID_REQUEST");
             var reply = await QueueCall("music.queue.mode", new { mode = value });
             mode = MusicDto.Mode(reply);
         });
@@ -653,6 +669,10 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private async Task<JsonElement> QueueCall(string method, object? parameters = null)
     {
         queueEpoch++;
+        if (method is "music.queue.replace" or "music.queue.playCollection" or "music.queue.clear" or "music.history.restorePlaylist" ||
+            method == "music.queue.append" && (!JsonSerializer.SerializeToElement(parameters ?? new { }).TryGetProperty("next", out var next) ||
+                next.ValueKind != JsonValueKind.True))
+            searchRecommendationStart = null;
         try
         {
             var result = await Call(method, parameters, lifetime.Token);
@@ -679,7 +699,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         if (stopping || epoch != queueEpoch || serial != queueRead) return;
         ApplyQueue(state);
     }
-    private sealed record QueueState(SongRow? Current, int Mode, bool Saved, JsonElement? FeedbackContext = null);
+    private sealed record QueueState(SongRow? Current, int Mode, bool Saved, JsonElement? FeedbackContext = null, JsonElement? Source = null);
     private static QueueState ParseQueue(JsonElement reply)
     {
         var mode = MusicDto.Mode(reply);
@@ -694,7 +714,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         JsonElement? feedbackContext = value.ValueKind == JsonValueKind.Object &&
             value.TryGetProperty("context", out var sourceContext) && sourceContext.ValueKind == JsonValueKind.Object
             ? sourceContext.Clone() : null;
-        return new(current, mode, persistence == "saved", feedbackContext);
+        return new(current, mode, persistence == "saved", feedbackContext,
+            reply.TryGetProperty("source", out var source) && source.ValueKind == JsonValueKind.Object ? source.Clone() : null);
     }
     private void ApplyQueue(QueueState state)
     {
@@ -704,7 +725,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             current.Raw.GetRawText() == state.Current.Raw.GetRawText())
             state = state with { Current = current };
         var changedCurrent = !ReferenceEquals(current, state.Current);
-        current = state.Current; mode = state.Mode; queueSaved = state.Saved;
+        current = state.Current; queueSource = state.Source; mode = state.Mode; queueSaved = state.Saved;
         currentFeedbackContext = state.FeedbackContext; UpdateFeedbackSelection();
         UpdateRecordingCandidates(); UpdateLyricSources(); RefreshQueueSurfaceCurrent(); RefreshBindings();
         if (changedCurrent) { PublishFavorite(false); _ = RefreshCurrentFavoriteAsync(); }
@@ -724,7 +745,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         ClearChorus();
         RetireLyrics();
         onlineCancellation?.Cancel(); onlineGeneration++;
-        playbackEpoch++; openedEntry = null; recorded = false;
+        playbackEpoch++; openedEntry = null; recorded = false; searchRecommendationStart = null;
         Changed(nameof(PlaybackPresentationKey));
         playbackInstallation = null; Lyrics.Clear(); lyricStatus = ""; OnlineBindings();
         if (playback.OwnerId == Id) await playback.StopAsync();
@@ -771,6 +792,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     {
         if (stopping) return;
         if (!OwnsCurrent || !playback.HasMedia) playbackRateReceipt = null;
+        if ((!OwnsCurrent || !playback.HasMedia) && musicRecovery is not { Opening: true } ||
+            args.PropertyName == nameof(IMusicPlayback.OwnerId) && playback.OwnerId is not null && playback.OwnerId != Id)
+            searchRecommendationStart = null;
         if (args.PropertyName == nameof(IMusicPlayback.OwnerId) && playback.OwnerId != Id &&
             musicRecovery is { Opening: false })
             TrackMusicRecovery(RetireMusicRecovery());
@@ -785,7 +809,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             if (args.PropertyName == nameof(IMusicPlayback.DurationSeconds)) CheckMediaDuration();
             playbackPresentation.Refresh();
             Changed(nameof(CanHeartbeatCurrent));
-            Changed(nameof(CanTogglePlaybackHeartbeat));
+            Changed(nameof(CanRecommendCurrent));
         }
     }
     private void PlaybackStarted(object? sender, EventArgs args)
@@ -825,11 +849,13 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             state.RestartFeedbackOnStart = false;
         }
         var entry = openedEntry; var epoch = playbackEpoch; var stamp = statusEpoch;
-        recorded = true;
+        recorded = true; playbackEvent++;
         ConfirmOfficialPlayback();
         ConfirmPlaybackFileCache();
         StartFeedback();
         ObserveRecommendationPlayback();
+        if (searchRecommendationStart is { } searchPreview)
+            _ = TrackRecommendation(StartQueueRecommendationPreviewAsync(searchPreview));
         var task = Record();
         eventWrites.Add(task); _ = Observe();
         async Task Record()
@@ -859,6 +885,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     }
     private void PlaybackFailed(object? sender, EventArgs args)
     {
+        if (playback.OwnerId == Id && playback.Identity == openedEntry && !recorded)
+            searchRecommendationStart = null;
         if (TryMusicRecovery()) return;
         if (!stopping && playback.OwnerId == Id && playback.Identity == openedEntry)
         { FinishFeedback("error"); status = "播放失败"; Changed(nameof(Status)); }

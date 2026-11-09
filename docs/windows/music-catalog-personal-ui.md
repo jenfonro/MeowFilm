@@ -1,6 +1,6 @@
 # 个人目录与目录页面契约
 
-共同规则分别见[页面数据请求](../common/pages/data-requests.md)和[平台客户端上下文](../common/music/platform-client-context.md)。本文件只补充 Windows 页面入口、投影和实际交互契约。
+共同规则分别见[页面数据请求](../common/pages/data-requests.md)、[播放来源、队列与自动续播](../common/music/playback-sessions.md)和[平台客户端上下文](../common/music/platform-client-context.md)。本文件只补充 Windows 页面入口、投影和实际交互契约。
 
 ## 页面归属
 
@@ -15,12 +15,12 @@
 | 个人歌单 | `music.catalog.personalPlaylists` | 明确平台、分页、账号代次 |
 | 歌单详情 | `music.catalog.playlist` | 原 locator 和 snapshot，不猜私有权限 |
 | 每日推荐 | `music.catalog.daily` | 网易云当前账号，按可见入口读取 |
-| 私人 FM | 预览 `music.catalog.fm`；播放 `music.recommendations.start {kind:fm}` | 首页私人漫游默认模式，频道明确 mode／submode／ruleId／tabTagId 原样保留 |
-| 相似歌曲 | `music.recommendations.start {kind:similar}` | 使用当前录音的原平台身份 |
+| 私人 FM | 预览 `music.catalog.fm`；播放 `music.recommendations.start {kind:fm}` | 首页恢复本机同账号上次选择，首次 DEFAULT；频道明确 mode／submode／ruleId／tabTagId 原样保留 |
+| 相似艺人／歌曲 | `music.recommendations.start {kind:similar,sourceType,sourceIds}` | 使用真实艺人／歌曲种子；共享网易 ID 可用 |
 | 专辑 | `music.catalog.album` | 使用明确 album id，不按标题搜索 |
-| 首页／云喜欢心动 | `music.recommendations.start {kind:heartbeat,platform:wy,entry:favorites,continue:false}` | 平台根据同账号云喜欢上下文随机选择有效喜欢曲 |
-| 歌单曲／播放器当前曲心动 | `music.recommendations.start {kind:heartbeat,platform:wy,entry:current,songId,continue:false}` | 歌单使用点击歌曲；播放器使用真实当前曲并带真实 `seedEntryId` |
-| 普通队列推荐 | `music.recommendations.start {kind:queue,platform:wy,continue:false}` | native 从完整当前队列生成只读候选，不改变原队列 |
+| 首页／云喜欢心动 | `music.recommendations.start {kind:heartbeat,platform:wy,entry:favorites,songId?}` | 首页带展示曲，平台解析同账号真实喜欢上下文 |
+| 播放器当前曲心动 | `music.recommendations.start {kind:heartbeat,platform:wy,entry:current,songId,playlistId,seedEntryId}` | 仅已传播的官方账号歌单上下文，普通网络歌单不开放 |
+| 单曲推荐 | `music.recommendations.start {kind:queue,platform:wy,seedEntryId,restore}` | 搜索自动候选 restore=false；歌单主动进入 restore=true |
 
 ## 状态与交互
 
@@ -40,18 +40,18 @@
 - 点击某一首时同时核对目标歌曲身份和队列版本；用户在准备期间产生新播放意图会撤销旧动作。
 - 首页后台更新期间，公开歌单仍按卡片 `platform/id` 读取并准备完整成员；普通展示替换与追加不撤销已捕获的播放意图。私有入口重读当前账号资源，既有成员身份、完整分页、准备 token 和队列 CAS 校验继续保留。
 - 页面离开只清理页面请求和未提交动作，不停止已经由全局播放器接管的当前媒体。
-- 心动入口不提交浏览歌单 `playlistId`／`startMusicId`。云喜欢按钮依据已发布的 `kind:favorites`、`relationship:owned` 显示，不根据歌单标题猜测。任意浏览歌单歌曲的心动使用该曲 native ID；当前播放入口同时核对播放 presentation 与真实 occurrence，忽略页面选中歌曲。退出恢复原队列 checkpoint，并把当前播放的推荐 occurrence 插到原当前曲之后；原队列已有该 occurrence 时不重复插入，其他推荐曲不带回。例如 A/B/C 从 B 进入心动、播放 E 时退出得到 A/B/E/C，E 的媒体、进度及播放／暂停状态保持。续播默认关闭。
+- 目录 prepare／commit 传播平台已经验证的 `heartbeatAccountId` 到条目 `heartbeatPlaylistId/heartbeatAccountId`；当前曲心动资格检查真实账号、来源与共享网易身份，不按本地收藏或浏览页面推断。云喜欢按钮依据 owned favorites 动作，普通歌单不出现任意歌曲心动菜单。
+- 仅缺登录时保留有资格的来源入口，操作通过共享账号观察提示登录；已知网易账号与条目官方上下文不一致时不显示心动入口，账号读取结算同步刷新来源菜单动作身份。
 
 ## 全局播放器与候选
 
-- 普通状态下底部模式按钮打开与音质共用样式的菜单，依次为心动模式、列表循环、单曲循环、随机播放；打开菜单不写队列。循环／单曲／随机分别使用原 `music.queue.mode` 的 1／3／2；原顺序模式 0 及双横线箭头图标仍可显示。心动项在首批提交成功后选中，再次点击按上述规则返回；循环模式与心动会话独立，选择普通模式不退出心动。
-- 仅活跃网易云 FM 的底部模式位置显示横向 ∞ 并打开漫游弹层。进入／退出由首页、频道推荐入口和建立普通队列的播放入口负责，模式菜单不增加 FM 进出项。四主模式按默认、熟悉、探索、拼图顺序竖排，名称与说明沿用 iwebplus；下方为四列的 43 个官方场景，图标在上、名称在下。`FRANCH`、`PUNK` 保留官方键，`PUNK` 显示“放克”，包含 `HOT_SONG`“热歌”。图形使用原生 WPF 矢量绘制，保留系统字体、主题、高对比度与键盘操作，无新增字体或图片依赖。
-- 底部名称、图标与选中态来自已提交的普通模式和 session snapshot 的心动批次或 `mode/submode/ruleId/tabTagId`。目录页草稿不改变该显示；切换等待／失败保持已提交项。新指令、会话变化、账号代次变化、隐藏和卸载关闭旧菜单或弹层；旧选项捕获的代次与动作身份不能再提交。关闭浮层不误触播放器详情。
-- 显式推荐启动在等待共享账号读取之前即登记推荐指令代次；取消、返回或更新指令会使旧启动失效，迟到账号成功／失败不得重新启动会话或覆盖操作后的提示，也不取消其他调用者共享的账号读取。
-- 首页歌曲栏目、单曲和搜索单曲成功建立普通队列后启动一次 queue 预览；播放位置事件及打开队列面板不重新启动。现存活跃 FM／心动／相似会话只能被显式推荐意图替换，普通预览会先读取 native 当前会话确认准入。
-- 预览准入读取的回执同时核对指令、队列、账号代次和当前媒体 presentation／所有权。停止媒体、切换媒体 owner 或发起账号变更后，旧回执不启动预览、不发布旧错误；暂停保留媒体时仍可读取候选。准入读取失败通过统一通知显示，即使尚未创建 session，也可从显式推荐入口重试。
-- 队列面板将“播放列表”和“为你推荐”分别绑定到真实队列和 `candidates:[{id,song}]`。候选展示不入队；点击以当前 `id`／批专有 `candidateId` 调用 `music.recommendations.choose`，整批追加并播放所选。替换批次和已结束会话的旧行不会提交。
-- “续播”使用既有 `continue {id,enabled}`，默认关闭；只有用户显式开启且真实播放到尾部才由 native 追加。关闭保留已入队内容；空批／重复／结束与失败重试由 session owner 负责。候选区显示实际加载／空／结束状态，错误走统一通知，未知提交保留显式核对入口。获取候选不会覆盖原列表 source 或原条目 context。
+- `MusicPlayerView.ModeButton` 位于上一曲左侧，始终只打开列表循环、单曲循环、随机播放三项（1／3／2），不显示来源图标或第四种互斥模式。
+- `PlaybackSourceButton` 标为“来源／自动续播”，显示真实来源并提供当前曲推荐／心动、续播、返回原队列、重试和核对等适用项。只有保存过原队列的心动／主动推荐提供返回；FM、相似及搜索推荐通过普通播放来源替换退出。使用既有 WPF 菜单主题；旧菜单项捕获动作身份，关闭或身份变化后不能再提交。
+- 只有 `HasPlaybackFm` 显示独立 `FmChannelButton`，打开四主模式及四列 43 个场景的原生弹层。保留主题、高对比度、键盘操作与官方键；全局循环按钮不再复用为 FM 频道。首页头顶旧 FM 切换块已删除，其他栏目不变。
+- `PlaybackFmMode/Scene/RuleId/TabTagId` 来自已提交 snapshot，目录草稿不改变频道显示。切频道在途／失败保持已提交项；来源替换、账号变化、隐藏和卸载会使旧动作失效。
+- 推荐启动先登记指令代次，再等待同一次共享账号读取；取消／返回或新指令使旧启动失效，不取消其他调用者的账号观察。搜索直接播放在 Open 前绑定该 occurrence／播放 epoch，真实首次 Started 后才异步准备首批；Open 完成不等于开播。尚未 Started 的失败、来源替换、账号或媒体所有权失效会退休该意图；已 Started 后暂停保留候选资格。PlayNext 与循环变化不使有效 preview 失效。
+- 只有搜索直接单曲播放自动建立候选；普通首页、歌单、单首普通队列和浏览搜索不推断推荐身份。候选在 `MusicQueueView` 独立于 QueueList 展示，以 session id／candidateId 调用 choose；点击整批入队并选择目标。队列候选区保留实际歌曲、续播、重试和未知提交核对，不保留成功／退出专用状态块。
+- 全局循环、来源恢复、候选保留和自动续取遵守共同契约；平台请求、存储及事务实现见[原生持续推荐](music-recommendations.md)。真实失败经现有 Status／NoticeOutlet，正常操作仅更新控件及队列。
 
 ## 请求与预览
 

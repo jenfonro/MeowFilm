@@ -149,7 +149,7 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
                     document.queue["entries"] = .array(entries)
                     document.queue["currentId"] = entries[index]["id"]
                     for key in ["history", "priority", "failed"] { document.queue[key] = .array([]) }
-                    document.queue["source"] = .null
+                    document.queue["source"] = context
                     self.similarWillChangeQueue(.replace, queue: &document.queue)
                     document.queue["revision"] = .n(expectedRevision + 1); document.resetPosition()
                     return self.stateDTO(document)

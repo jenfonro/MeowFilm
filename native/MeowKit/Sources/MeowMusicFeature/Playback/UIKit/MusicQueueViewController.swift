@@ -34,7 +34,6 @@ public final class MusicQueueViewController: MusicPageViewController,
     private var dragIntent: MusicReferenceQueueIntent?
     private var reorderTask: Task<Void, Never>?
     private var historyAccess: UUID?
-    private var shownSimilarError: UUID?
     private var previewedQueue: MusicReferenceQueueIntent?
     private var previewAccount: UUID?
     private var selected: String { pager.selectedID }
@@ -141,7 +140,12 @@ public final class MusicQueueViewController: MusicPageViewController,
         current.mode.addAction(UIAction { [weak self] _ in self?.cycleMode() }, for: .touchUpInside)
         current.continuePlaying.addAction(UIAction { [weak self] _ in
             guard let self else { return }
-            if let snapshot = self.model.similarMode, snapshot.active {
+            if let radio = self.model.fmPlayback {
+                self.runPageTask { [weak self] in
+                    guard let self, self.model.fmPlayback?.id == radio.id else { return }
+                    await self.model.setFMContinue(!radio.continueEnabled, sessionID: radio.id)
+                }
+            } else if let snapshot = self.model.similarMode, snapshot.active {
                 self.runSimilar(snapshot) {
                     await self.model.setSimilarContinue(!snapshot.continueEnabled, snapshotID: snapshot.id)
                 }
@@ -216,7 +220,7 @@ public final class MusicQueueViewController: MusicPageViewController,
         histories.removeAll()
         model.cancelQueueRecommendationPreview()
     }
-    public override func pageDidFinishAppearing() { showFavoriteError(); showSimilarError() }
+    public override func pageDidFinishAppearing() { showFavoriteError() }
     public override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         reorder?.cancel(); sheet.cancelInteraction()
         super.viewWillTransition(to: size, with: coordinator)
@@ -325,7 +329,7 @@ public final class MusicQueueViewController: MusicPageViewController,
     private func previewRecommendationsIfNeeded() {
         guard isPageActive, model.isAvailable, !model.isClosed, !model.isChangingQueue, !model.isNavigating,
               !model.isChangingSimilarMode, !model.isChangingQueueRecommendations, !model.isFMActive,
-              model.similarMode?.active != true, model.current != nil else { return }
+              model.similarMode?.active != true, model.current != nil, model.queueRecommendations != nil else { return }
         let intent = MusicReferenceQueueIntent(access: model.accountAccessGeneration,
             revision: model.state.revision, ids: model.queue.map(\.id))
         let account = model.searchAccessGeneration
@@ -435,11 +439,10 @@ public final class MusicQueueViewController: MusicPageViewController,
         current.configure(snapshot: model.similarMode, recommendations: model.queueRecommendations,
                           changing: model.isChangingSimilarMode || model.isChangingQueueRecommendations,
                           returning: model.isChangingSimilarMode, count: entries.count, modeTitle: model.state.mode.title,
-                          theme: theme)
+                          theme: theme, fm: model.fmPlayback)
         emptyHistory.setEmpty("还没有已播歌单", theme: theme)
         positionIndicator(pager.categoryPosition)
         view.setNeedsLayout()
-        showSimilarError()
     }
 
     private func positionIndicator(_ position: CGFloat) {
@@ -563,8 +566,7 @@ public final class MusicQueueViewController: MusicPageViewController,
     }
 
     private func cycleMode() {
-        guard !model.isFMActive,
-              let index = MusicPlaybackMode.allCases.firstIndex(of: model.state.mode) else { return }
+        guard let index = MusicPlaybackMode.allCases.firstIndex(of: model.state.mode) else { return }
         let mode = MusicPlaybackMode.allCases[(index + 1) % MusicPlaybackMode.allCases.count]
         let revision = model.state.settingsRevision
         let operation: @MainActor () async -> Void = {
@@ -572,27 +574,13 @@ public final class MusicQueueViewController: MusicPageViewController,
         }
         if let snapshot = model.similarMode, snapshot.active { runSimilar(snapshot, operation: operation) }
         else if let snapshot = model.queueRecommendations { runQueueRecommendation(snapshot, operation: operation) }
+        else { runPageTask { await operation() } }
     }
 
     private func showFavoriteError() {
         _ = showError(favorites.error?.localizedDescription) { [weak self] in self?.favorites.clearError() }
     }
 
-    private func showSimilarError() {
-        let id: UUID, error: MusicServiceError?
-        if let snapshot = model.similarMode, snapshot.active, snapshot.status == .error {
-            id = snapshot.id; error = snapshot.error
-        } else if let snapshot = model.queueRecommendations, snapshot.status == .error {
-            id = snapshot.id; error = snapshot.error
-        } else {
-            shownSimilarError = nil
-            return
-        }
-        guard selected == "current", shownSimilarError != id else { return }
-        if showError(error?.localizedDescription ?? "推荐加载失败") {
-            shownSimilarError = id
-        }
-    }
 
     private func page(_ id: String) -> UIViewController? {
         if id == "current" { return current }

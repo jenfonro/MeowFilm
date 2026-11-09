@@ -91,7 +91,7 @@ public sealed partial class MusicLibraryOwner
             if (HasValue(doc, "playback-settings"))
             {
                 var mode = LJ.Object(Value(doc, "playback-settings"), "CORRUPT_STORAGE"); LJ.Fields(mode, "schema mode", "schema mode");
-                LJ.Require(LJ.I(mode["schema"]) == 1, "CORRUPT_STORAGE"); _ = LJ.I(mode["mode"], 0, 3);
+                LJ.Require(LJ.I(mode["schema"]) == 1, "CORRUPT_STORAGE"); _ = LJ.I(mode["mode"], 1, 3);
             }
         }
         catch (MusicLibraryException e) when (e.Code == "INVALID_REQUEST") { throw new MusicLibraryException("CORRUPT_STORAGE"); }

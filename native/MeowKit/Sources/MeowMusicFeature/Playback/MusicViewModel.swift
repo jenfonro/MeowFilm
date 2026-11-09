@@ -255,6 +255,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         let position: Double
         let remainsPaused: Bool
     }
+    var lastRecommendationFailure: UUID?
     var similarObservation: Task<Void, Never>?
     var similarObservationID = UUID()
     var recommendationReadID = UUID()
@@ -323,22 +324,20 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     }
     public var canNavigate: Bool {
         isAvailable && !isClosed && service != nil && player != nil && current != nil &&
+        fmSource?.authorization.isActive != false &&
         !isResolving && !isNavigating && !isChangingQueue && !isChangingSimilarMode && !isChangingQueueRecommendations
     }
     public var canNext: Bool {
         guard canNavigate else { return false }
-        if let fmSource { return fmSource.authorization.isActive }
         return state.canNext
     }
     public var canPrevious: Bool {
         guard canNavigate else { return false }
-        if let fmSource { return fmSource.authorization.isActive && queue.first?.id != state.currentId }
         return state.canPrevious
     }
     func recordPreview(_ direction: MusicDirection) -> MusicQueueEntry? {
         let id: String?
-        if isFMActive { id = direction == .next ? state.fmNextPreviewID : state.fmPreviousPreviewID }
-        else { id = direction == .next ? state.nextPreviewID : state.previousPreviewID }
+        id = direction == .next ? state.nextPreviewID : state.previousPreviewID
         return id.flatMap { selected in queue.first { $0.id == selected } }
     }
     public var activeResourceID: String? { candidate?.resourceId }

@@ -28,7 +28,7 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music current song contract rejects unowned fields credentials and resource URLs", RejectTransientSong);
         yield return new("Native music catalog full collection handoff uses expected queue version", FullCollection);
         yield return new("Native music duplicate queue occurrences and next priority", Occurrences);
-        yield return new("Native music queue sequential mode boundaries", () => Modes(0));
+        yield return new("Native music queue rejects modes outside the three global loop choices", InvalidMode);
         yield return new("Native music queue loop mode boundaries", () => Modes(1));
         yield return new("Native music queue single repeats ended only", () => Modes(3));
         yield return new("Native music queue shuffle previous uses runtime history", Shuffle);
@@ -297,6 +297,13 @@ public static partial class MusicNativeLibraryTests
         await Ok(o, "music.queue.mode", new { mode = 3 });
         Check((await Ok(o, "music.queue.next", new { reason = "ended" })).GetProperty("targetId").GetString() == next);
     }
+    private static async Task InvalidMode()
+    {
+        await using var f = new Fixture(); var o = f.Owner();
+        foreach (int mode in new[] { -1, 0, 4 })
+            await Error(o, "music.queue.mode", new { mode }, "INVALID_REQUEST");
+        Check((await Ok(o, "music.queue.get")).GetProperty("mode").GetInt32() == 1);
+    }
     private static async Task Modes(int mode)
     {
         await using var f = new Fixture(); var o = f.Owner();
@@ -304,10 +311,10 @@ public static partial class MusicNativeLibraryTests
         var q = await Ok(o, "music.queue.get"); string a = q.GetProperty("entries")[0].GetProperty("id").GetString()!, b = q.GetProperty("currentId").GetString()!;
         await Ok(o, "music.queue.mode", new { mode });
         var result = await Ok(o, "music.queue.next", new { reason = "ended" });
-        Check(result.GetProperty("targetId").GetString() == (mode == 0 ? null : mode == 1 ? a : b));
+        Check(result.GetProperty("targetId").GetString() == (mode == 1 ? a : b));
         if (mode == 3) Check((await Ok(o, "music.queue.next")).GetProperty("targetId").GetString() == a);
         await Ok(o, "music.queue.select", new { id = a });
-        Check((await Ok(o, "music.queue.previous")).GetProperty("targetId").GetString() == (mode == 0 ? null : b));
+        Check((await Ok(o, "music.queue.previous")).GetProperty("targetId").GetString() == b);
     }
     private static async Task Shuffle()
     {
@@ -358,11 +365,11 @@ public static partial class MusicNativeLibraryTests
     private static async Task Restart()
     {
         await using var f = new Fixture(); var o = f.Owner();
-        await Ok(o, "music.queue.replace", new { songs = new[] { Song("a"), Song("b") }, index = 1 }); await Ok(o, "music.queue.mode", new { mode = 0 });
+        await Ok(o, "music.queue.replace", new { songs = new[] { Song("a"), Song("b") }, index = 1 }); await Ok(o, "music.queue.mode", new { mode = 2 });
         string id = (await Ok(o, "music.queue.get")).GetProperty("currentId").GetString()!;
         await Ok(o, "music.history.recordPlayed", new { entryId = id, at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
         await o.DisposeAsync(); Check(!f.Store.Disposed); var restored = f.Owner();
-        var q = await Ok(restored, "music.queue.get"); Check(q.GetProperty("mode").GetInt32() == 0 && q.GetProperty("currentId").GetString() == id);
+        var q = await Ok(restored, "music.queue.get"); Check(q.GetProperty("mode").GetInt32() == 2 && q.GetProperty("currentId").GetString() == id);
         Check(!f.Store.State("queue").ContainsKey("history") && !Encoding.UTF8.GetString(f.Store.Bytes!).Contains("currentTime"));
     }
     private static async Task PlainFiles()

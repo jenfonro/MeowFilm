@@ -63,10 +63,10 @@ internal static class PlatformDiscovery
         if (path is "nm/luna/privatefm" or "privatefm" or "privatefm/") return PJ.Obj(("type", "fm"), ("mode", "DEFAULT"), ("submode", ""));
         if (path == "nm/play/similarFM")
         {
-            if (Q("sourceType") != "song" || (q.TryGetValue("sourceName", out var names) && names.Length > 1)) return null;
+            if (Q("sourceType") is not ("song" or "artist") || (q.TryGetValue("sourceName", out var names) && names.Length > 1)) return null;
             if (Nested(JsonValue.Create(Q("sourceId"))) is not JsonArray ids || ids.Count is 0 or > 20 ||
                 ids.Any(n => !Regex.IsMatch(PJ.Scalar(n), "^[1-9][0-9]{0,19}$"))) return null;
-            return PJ.Obj(("type", "similar"), ("sourceType", "song"), ("sourceIds", ids.Select(PJ.Scalar).ToArray()), ("sourceName", Q("sourceName")));
+            return PJ.Obj(("type", "similar"), ("sourceType", Q("sourceType")), ("sourceIds", ids.Select(PJ.Scalar).ToArray()), ("sourceName", Q("sourceName")));
         }
         if (path is "rnpage" or "rnpage/")
         {
@@ -134,9 +134,18 @@ internal static class PlatformDiscovery
         if (kind is "similarsong" or "similarartist" || S(click, "type") == "similar")
         {
             var declared = Action(primary ?? A(play, "detailUrl"));
-            if (kind == "similarartist" || S(declared, "type") != "similar") return Unsupported();
-            result["id"] = "similar:song:" + string.Join(",", PJ.Array(A(declared, "sourceIds")).Select(PJ.Scalar));
+            if (S(declared, "type") != "similar") return Unsupported();
+            result["id"] = "similar:" + S(declared, "sourceType") + ":" + string.Join(",", PJ.Array(A(declared, "sourceIds")).Select(PJ.Scalar));
             return Finish("similar", declared!);
+        }
+        if (kind == "star" || S(r, "lunaItemType") == "heartRcmd")
+        {
+            var rawSong = PJ.First(A(ext, "songData"), A(ext, "song"), A(r, "songData"), A(r, "songInfo"));
+            if (rawSong is null) return Unsupported();
+            var song = NativeSong(rawSong, Cover(r));
+            result["entrySong"] = song;
+            return Finish("collection", PJ.Obj(("type", "heartbeat"), ("entry", "favorites"),
+                ("songId", NativeMusicSong.NativeId(song))));
         }
         if (A(ext, "songData") is not null || A(ext, "song") is not null || kind == "song" || S(click, "type") == "song")
         {
@@ -158,8 +167,6 @@ internal static class PlatformDiscovery
                 result["subtitle"] = Regex.Replace(caption, "^" + Regex.Escape(S(result, "name")) + @"\s*\|\s*", "");
             return Finish("collection", PJ.Obj(("type", "daily"), ("branch", S(click, "branch") == "style" ? "style" : "default")));
         }
-        if (kind == "star" || S(r, "lunaItemType") == "heartRcmd")
-            return Finish("collection", PJ.Obj(("type", "heartbeat"), ("entry", "favorites")));
         if (kind == "fm" || S(click, "type") == "fm")
         {
             var mode = S(r, "mode"); var submode = PJ.Text(Pick(r, "subMode", "submode"));

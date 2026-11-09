@@ -918,21 +918,23 @@ public static partial class MusicNativePlatformTests
                 J(new { resourceType = "similarsong", name = "相似歌曲",
                     action = "orpheus://nm/play/similarFM?sourceType=song&sourceId=%5B%221%22%5D" }),
                 J(new { resourceType = "fm", name = "私人漫游", mode = "DEFAULT" }),
-                J(new { resourceType = "star", name = "心动模式" }),
+                J(new { resourceType = "star", name = "心动模式", resourceExtInfo = new { songData = Wy("77") } }),
+                J(new { resourceType = "similarartist", name = "相似艺人",
+                    action = "orpheus://nm/play/similarFM?sourceType=artist&sourceId=%5B%2230%22%5D" }),
                 J(new { resourceType = "similarartist", name = "相似艺人" })));
             var entries = (await f.Catalog.HomeAsync(new("wy"))).GetProperty("entries").EnumerateArray().ToArray();
-            Equal(7, entries.Length);
-            var presentations = entries.ToDictionary(
-                entry => entry.GetProperty("action").GetProperty("type").GetString()!,
-                entry => entry.GetProperty("presentation").GetString()!,
-                StringComparer.Ordinal);
-            Equal("preview", presentations["playlist"]);
-            Equal("preview", presentations["daily"]);
-            Equal("preview", presentations["album"]);
-            Equal("overlay", presentations["similar"]);
-            Equal("animated", presentations["fm"]);
-            Equal("animated", presentations["heartbeat"]);
-            Equal("static", presentations["unsupported"]);
+            Equal(8, entries.Length);
+            True(entries.Select(entry => entry.GetProperty("presentation").GetString())
+                .SequenceEqual(["preview", "preview", "preview", "overlay", "animated", "animated", "overlay", "static"]));
+            Equal("artist", entries[6].GetProperty("action").GetProperty("sourceType").GetString());
+            Equal("30", entries[6].GetProperty("action").GetProperty("sourceIds")[0].GetString());
+            Equal("77", entries[5].GetProperty("action").GetProperty("songId").GetString());
+            foreach (int index in new[] { 3, 4, 5, 6 })
+            {
+                True(entries[index].GetProperty("display").GetBoolean() && entries[index].GetProperty("available").GetBoolean());
+                True(entries[index].GetProperty("requiresAccount").GetBoolean());
+                Equal("AUTH_REQUIRED", entries[index].GetProperty("errorCode").GetString());
+            }
         });
         yield return Case("home private FM defaults while rule and channel entries retain their context", async () =>
         {
@@ -940,7 +942,7 @@ public static partial class MusicNativePlatformTests
                 J(new { resourceType = "fm", resourceId = "99", name = "私人漫游", mode = "FAMILIAR", subMode = "NIGHT_EMO" }),
                 J(new { resourceType = "fm", resourceId = "99", name = "规则漫游", mode = "DEFAULT", ruleId = "9" }),
                 J(new { resourceType = "fm", resourceId = "99", name = "标签漫游", mode = "DEFAULT", tabTagId = "rap" }),
-                J(new { resourceType = "star", name = "心动模式" })), Session("wy"));
+                J(new { resourceType = "star", name = "心动模式", resourceExtInfo = new { songData = Wy("77") } })), Session("wy"));
             var entries = (await f.Catalog.HomeAsync(new("wy"))).GetProperty("entries");
             Equal(4, entries.GetArrayLength());
             Equal("DEFAULT", entries[0].GetProperty("action").GetProperty("mode").GetString());
@@ -949,13 +951,16 @@ public static partial class MusicNativePlatformTests
             Equal("9", entries[1].GetProperty("action").GetProperty("ruleId").GetString());
             Equal("rap", entries[2].GetProperty("action").GetProperty("tabTagId").GetString());
             Equal("favorites", entries[3].GetProperty("action").GetProperty("entry").GetString());
+            Equal("77", entries[3].GetProperty("action").GetProperty("songId").GetString());
+            Song(entries[3].GetProperty("entrySong"), "wy", "77");
             True(entries[3].GetProperty("available").GetBoolean());
             True(entries[3].GetProperty("requiresAccount").GetBoolean());
             Equal(4, entries.EnumerateArray().Select(e => e.GetProperty("key").GetString()).Distinct().Count());
-            using var anonymous = new Fixture(_ => Home(false, "1", J(new { resourceType = "star", name = "心动模式" })));
-            var hidden = (await anonymous.Catalog.HomeAsync(new("wy"))).GetProperty("entries")[0];
-            True(!hidden.GetProperty("available").GetBoolean() && !hidden.GetProperty("display").GetBoolean());
-            Equal("AUTH_REQUIRED", hidden.GetProperty("errorCode").GetString());
+            using var anonymous = new Fixture(_ => Home(false, "1",
+                J(new { resourceType = "star", name = "心动模式", resourceExtInfo = new { songData = Wy("77") } })));
+            var guest = (await anonymous.Catalog.HomeAsync(new("wy"))).GetProperty("entries")[0];
+            True(guest.GetProperty("available").GetBoolean() && guest.GetProperty("display").GetBoolean());
+            Equal("AUTH_REQUIRED", guest.GetProperty("errorCode").GetString());
 
             using var channel = new Fixture(req => req.RequestUri!.AbsolutePath.Contains("position/show", StringComparison.Ordinal)
                 ? Directory() : Home(false, "1",
@@ -1645,11 +1650,13 @@ public static partial class MusicNativePlatformTests
             {
                 var (path, body) = Eapi(req); Equal("/api/v1/radio/get", path);
                 Equal("FAMILIAR", S(body["mode"])); Equal("3", S(body["limit"]));
+                Equal("false", S(body["openAidj"])); Equal("0", S(body["aidjReqTimes"]));
+                Equal("[7,8]", S(body["unplaySongIds"])); True(body["unplaySonIds"] is null);
                 Equal("SYNTHETIC_ONLY", S(body["header"]!["MUSIC_U"]));
                 return Json(J(new { code = 200, data = new[] { Wy("1"), Wy(Huge) } }));
             }, Session("wy"));
-            var first = await f.Catalog.FmAsync(new(Mode: MusicFmMode.Familiar));
-            var second = await f.Catalog.FmAsync(new(Mode: MusicFmMode.Familiar));
+            var first = await f.Catalog.FmAsync(new(Mode: MusicFmMode.Familiar, UnplaySongIds: ["7", "8"]));
+            var second = await f.Catalog.FmAsync(new(Mode: MusicFmMode.Familiar, UnplaySongIds: ["7", "8"]));
             Equal(2, f.Calls); Equal(2, first.GetProperty("items").GetArrayLength()); True(!second.GetProperty("empty").GetBoolean());
             True(!second.TryGetProperty("more", out _));
         });
@@ -1758,24 +1765,23 @@ public static partial class MusicNativePlatformTests
                         return HeartbeatPlaylist(["1", "2"], [Wy("1"), favorite]);
                     }
                     Equal("/api/playmode/intelligence/list", path);
-                    Equal("500", S(body["playlistId"])); Equal("1", S(body["startMusicId"])); Equal("2", S(body["count"]));
+                    Equal("500", S(body["playlistId"])); Equal("2", S(body["startMusicId"])); Equal("2", S(body["count"]));
                     Equal(entry == MusicHeartbeatEntry.Favorites ? "fromPlayAll" : "fromPlayOne", S(body["type"]));
-                    if (entry == MusicHeartbeatEntry.Favorites) True(S(body["songId"]) is "1" or "2");
-                    else Equal(Huge, S(body["songId"]));
+                    Equal("2", S(body["songId"]));
                     return Json(J(new { code = 200, data = new object[] {
                         new { id = "2", alg = "liked" }, new { id = Huge, songInfo = Wy(Huge), alg = "new" }
                     } }));
                 }, Session("wy"));
-                var result = await f.Catalog.HeartbeatAsync(new("wy", entry, entry == MusicHeartbeatEntry.CurrentSong ? Huge : null));
+                var result = await f.Catalog.HeartbeatAsync(new("wy", entry, "2", "500"));
                 Equal("heartbeat", result.GetProperty("kind").GetString()); Equal(2, result.GetProperty("count").GetInt32());
                 Song(result.GetProperty("items")[0], "wy", "2"); Song(result.GetProperty("items")[1], "wy", Huge);
                 Equal("喜欢曲二", result.GetProperty("items")[0].GetProperty("title").GetString());
                 Equal(231d, result.GetProperty("items")[0].GetProperty("duration").GetDouble());
                 var context = result.GetProperty("context");
-                Equal("500", context.GetProperty("playlistId").GetString()); Equal("1", context.GetProperty("startMusicId").GetString());
+                Equal("500", context.GetProperty("playlistId").GetString()); Equal("2", context.GetProperty("startMusicId").GetString());
                 Equal(entry == MusicHeartbeatEntry.Favorites, context.GetProperty("fromHome").GetBoolean());
                 Equal(2, context.GetProperty("count").GetInt32());
-                if (entry == MusicHeartbeatEntry.CurrentSong) Equal(Huge, context.GetProperty("songId").GetString());
+                Equal("2", context.GetProperty("songId").GetString());
                 foreach (var metadata in result.GetProperty("recommendations").EnumerateArray())
                 {
                     Equal("heartbeat", metadata.GetProperty("source").GetString());
@@ -1784,6 +1790,36 @@ public static partial class MusicNativePlatformTests
                 Equal("liked", result.GetProperty("recommendations")[0].GetProperty("alg").GetString());
                 Equal(3, f.Calls);
             }
+        });
+        yield return Case("heartbeat keeps an oversized batch and resolves missing real rows and displayed home seed", async () =>
+        {
+            using var f = new Fixture(req =>
+            {
+                string route = req.RequestUri!.AbsolutePath;
+                if (route == "/weapi/user/playlist") return HeartbeatDirectory();
+                if (route == "/weapi/v3/song/detail")
+                {
+                    Weapi(req, route);
+                    return Json(J(new { code = 200, songs = new[] { Wy("2"), Wy("77") } }));
+                }
+                var (path, body) = Eapi(req);
+                if (path == "/api/v6/playlist/detail") return HeartbeatPlaylist(["1"], [Wy("1")]);
+                Equal("/api/playmode/intelligence/list", path);
+                Equal("1", S(body["count"])); Equal("77", S(body["songId"])); Equal("77", S(body["startMusicId"]));
+                return Json(J(new { code = 200, data = new object[] {
+                    new { id = "1", songInfo = Wy("1") },
+                    new { id = "2", songInfo = (object?)null },
+                    new { id = "3", songInfo = Wy("3") }
+                } }));
+            }, Session("wy"));
+            var result = await f.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.Favorites, "77"));
+            Equal(3, result.GetProperty("items").GetArrayLength());
+            Equal(3, result.GetProperty("recommendations").GetArrayLength());
+            Song(result.GetProperty("items")[1], "wy", "2");
+            Song(result.GetProperty("items")[2], "wy", "3");
+            Song(result.GetProperty("entrySong"), "wy", "77");
+            Equal("77", result.GetProperty("context").GetProperty("startMusicId").GetString());
+            Equal(4, f.Calls);
         });
         yield return Case("heartbeat accepts both cloud count conventions and complete tracks for both entries", async () =>
         {
@@ -1821,10 +1857,10 @@ public static partial class MusicNativePlatformTests
                     Equal("4", S(body["count"])); Equal("1", S(body["startMusicId"]));
                     Equal(entry == MusicHeartbeatEntry.Favorites ? "fromPlayAll" : "fromPlayOne", S(body["type"]));
                     if (entry == MusicHeartbeatEntry.Favorites) True(ids.Contains(S(body["songId"]), StringComparer.Ordinal));
-                    else Equal(Huge, S(body["songId"]));
+                    else Equal("1", S(body["songId"]));
                     return Json(J(new { code = 200, data = ids.Select(id => new { id }).ToArray() }));
                 }, Session("wy"));
-                var result = await f.Catalog.HeartbeatAsync(new("wy", entry, entry == MusicHeartbeatEntry.CurrentSong ? Huge : null));
+                var result = await f.Catalog.HeartbeatAsync(new("wy", entry, entry == MusicHeartbeatEntry.CurrentSong ? "1" : null, "500"));
                 True(sentHeartbeat); Equal(convention == "additional" && !embeddedOnly ? 4 : 3, f.Calls);
                 Equal(4, result.GetProperty("context").GetProperty("count").GetInt32());
                 Equal(4, result.GetProperty("items").GetArrayLength());
@@ -1878,7 +1914,7 @@ public static partial class MusicNativePlatformTests
                 var expected = failure == "duplicate" || !embeddedOnly && (failure is "short" or "intermediate" or "long")
                     ? "INCOMPLETE_PLAYLIST" : "INVALID_RESPONSE";
                 await Error(expected,
-                    () => f.Catalog.HeartbeatAsync(new("wy", entry, entry == MusicHeartbeatEntry.CurrentSong ? Huge : null)));
+                    () => f.Catalog.HeartbeatAsync(new("wy", entry, entry == MusicHeartbeatEntry.CurrentSong ? "1" : null, "500")));
                 True(!sentHeartbeat); Equal(2, f.Calls);
             }
         });
@@ -1999,7 +2035,7 @@ public static partial class MusicNativePlatformTests
                     if (req.RequestUri!.AbsolutePath == "/weapi/user/playlist")
                         return failure == "missing-favorites" ? Json(J(new { code = 200, more = false, playlist = Array.Empty<object>() })) : HeartbeatDirectory();
                     if (req.RequestUri.AbsolutePath == "/weapi/v3/song/detail")
-                        return Json(J(new { code = 200, songs = new[] { nameless } }));
+                        return Json(J(new { code = 200, songs = failure == "unresolved" ? Array.Empty<JsonObject>() : new[] { nameless } }));
                     var path = Eapi(req).Path;
                     if (path == "/api/v6/playlist/detail")
                         return failure switch
@@ -2022,13 +2058,13 @@ public static partial class MusicNativePlatformTests
                 {
                     "missing-favorites" or "empty" or "no-title" => "NOT_FOUND",
                     "wrong-owner" or "wrong-song" => "IDENTITY_MISMATCH",
-                    "incomplete" => "INCOMPLETE_PLAYLIST", _ => "INVALID_RESPONSE"
-                }, () => f.Catalog.HeartbeatAsync(new("wy", entry, entry == MusicHeartbeatEntry.CurrentSong ? Huge : null)));
+                    "incomplete" or "unresolved" => "INCOMPLETE_PLAYLIST", _ => "INVALID_RESPONSE"
+                }, () => f.Catalog.HeartbeatAsync(new("wy", entry, entry == MusicHeartbeatEntry.CurrentSong ? "1" : null, "500")));
                 Equal(failure is "unresolved" or "wrong-song" or "missing-response-title", sentHeartbeat);
             }
             using var invalid = new Fixture(_ => throw new InvalidOperationException("Invalid input dispatched"), Session("wy"));
             await Error("INVALID_REQUEST", () => invalid.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.CurrentSong)));
-            await Error("INVALID_REQUEST", () => invalid.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.Favorites, "1")));
+            await Error("INVALID_REQUEST", () => invalid.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.Favorites, "invalid")));
             await Error("INVALID_REQUEST", () => invalid.Catalog.HeartbeatAsync(new("wy", (MusicHeartbeatEntry)99)));
             Equal(0, invalid.Calls);
         });
@@ -2103,43 +2139,54 @@ public static partial class MusicNativePlatformTests
                     "/weapi/v3/song/detail" => 3, _ => 4 }, f.Calls);
             }
         });
-        yield return Case("queue recommendations numeric array lossless and current must be in queue", async () =>
+        yield return Case("queue recommendations fixed seed scene recipe and response pagination", async () =>
         {
+            int page = 0;
             using var f = new Fixture(req =>
             {
-                var (path, body) = Eapi(req); Equal("/api/homepage/more/rcmd/song", path);
+                var (path, body) = Eapi(req); Equal("/api/homepage/scene/more/rcmd/song", path);
                 Equal("[" + Huge + "]", S(body["songIds"])); Equal(Huge, S(body["currentPlaySongId"]));
-                Equal("curlist_more_rcmd", S(body["source"])); True(body["offset"] is null);
-                return Json(J(new { code = 200, data = new { songList = new[] { Wy("1") } } }));
+                Equal("1", S(body["songCount"])); Equal((page * 15).ToString(), S(body["offset"]));
+                Equal("curlist_more_rcmd", S(body["source"])); Equal("{}", S(body["extJson"]));
+                True(body["searchTransmissionInfo"] is null && body["searchId"] is null);
+                return Json(J(new { code = 200, data = new { songList = new[] { Wy((++page).ToString()) },
+                    offset = page * 15, hasMore = page < 3 } }));
             }, Session("wy"));
-            var result = await f.Catalog.QueueRecommendationsAsync(new("wy", [Huge], Huge));
-            Equal(1, result.GetProperty("count").GetInt32()); True(result.GetProperty("hasMore").GetBoolean());
-            Equal("queue-recommendations", result.GetProperty("recommendations")[0].GetProperty("source").GetString());
-            Equal("moreRcmd", result.GetProperty("recommendations")[0].GetProperty("feedbackSource").GetString());
-            await Error("INVALID_REQUEST", () => f.Catalog.QueueRecommendationsAsync(new("wy", ["1"], "2")));
+            int offset = 0;
+            for (int i = 0; i < 3; i++)
+            {
+                var result = await f.Catalog.QueueRecommendationsAsync(new("wy", Huge, offset));
+                Equal(1, result.GetProperty("count").GetInt32()); Equal(i < 2, result.GetProperty("hasMore").GetBoolean());
+                offset = result.GetProperty("offset").GetInt32(); Equal((i + 1) * 15, offset);
+                Equal("queue-recommendations", result.GetProperty("recommendations")[0].GetProperty("source").GetString());
+                Equal("moreRcmd", result.GetProperty("recommendations")[0].GetProperty("feedbackSource").GetString());
+            }
+            await Error("INVALID_REQUEST", () => f.Catalog.QueueRecommendationsAsync(new("wy", "invalid")));
+            await Error("INVALID_REQUEST", () => f.Catalog.QueueRecommendationsAsync(new("wy", "1", -1)));
+            Equal(3, f.Calls);
         });
-        yield return Case("queue recommendations preserve complete queues maps and explicit exhaustion", async () =>
+        yield return Case("queue recommendations preserve complete result maps and explicit exhaustion", async () =>
         {
-            var ids = Enumerable.Range(1, 1201).Select(i => i.ToString()).Append("1").Append(Huge).ToArray();
             foreach (var encoded in new[] { false, true })
             {
                 using var f = new Fixture(req =>
                 {
                     var (path, body) = Eapi(req);
-                    Equal("/api/homepage/more/rcmd/song", path); Equal("[" + string.Join(",", ids) + "]", S(body["songIds"]));
-                    Equal(Huge, S(body["currentPlaySongId"])); Equal("curlist_more_rcmd", S(body["source"]));
+                    Equal("/api/homepage/scene/more/rcmd/song", path); Equal("[" + Huge + "]", S(body["songIds"]));
+                    Equal(Huge, S(body["currentPlaySongId"])); Equal("30", S(body["offset"]));
                     var rows = Enumerable.Range(2000, 1001).Select(i => Wy(i.ToString())).ToArray();
                     rows[0]["alg"] = "inline"; rows[1]["alg"] = "inline-only";
                     var alg = J(new Dictionary<string, string> { ["2000"] = "mapped", ["3000"] = "tail-alg" });
                     var source = J(new Dictionary<string, string> { ["2000"] = "desktopSource", ["3000"] = "tailSource" });
                     return Json(J(new { code = 200, data = new {
                         songList = rows, algMap = encoded ? (object)alg.ToJsonString() : alg,
-                        sourceMap = encoded ? (object)source.ToJsonString() : source, hasMore = false
+                        sourceMap = encoded ? (object)source.ToJsonString() : source, offset = 45, hasMore = false
                     } }));
                 }, Session("wy"));
-                var result = await f.Catalog.QueueRecommendationsAsync(new("wy", ids, Huge));
+                var result = await f.Catalog.QueueRecommendationsAsync(new("wy", Huge, 30));
                 Equal(1001, result.GetProperty("items").GetArrayLength()); True(!result.GetProperty("hasMore").GetBoolean());
-                Equal(ids.Length, result.GetProperty("context").GetProperty("songIds").GetArrayLength());
+                Equal(Huge, result.GetProperty("context").GetProperty("seedSongId").GetString());
+                Equal(45, result.GetProperty("offset").GetInt32());
                 var first = result.GetProperty("recommendations")[0]; var last = result.GetProperty("recommendations")[1000];
                 Equal("mapped", first.GetProperty("alg").GetString()); Equal("desktopSource", first.GetProperty("feedbackSource").GetString());
                 Equal("queue-recommendations", first.GetProperty("source").GetString());
@@ -2148,23 +2195,27 @@ public static partial class MusicNativePlatformTests
                 Equal("moreRcmd", result.GetProperty("recommendations")[1].GetProperty("feedbackSource").GetString());
             }
         });
-        yield return Case("queue recommendations distinguish absent exhaustion from invalid maps and metadata", async () =>
+        yield return Case("queue recommendations require real cursor and exhaustion metadata", async () =>
         {
-            foreach (var count in new[] { 0, 5 })
-                foreach (var more in new bool?[] { null, true, false })
-                {
-                    var data = J(new { songList = Enumerable.Range(1, count).Select(i => Wy(i.ToString())).ToArray() });
-                    if (more is not null) data["hasMore"] = more.Value;
-                    using var f = new Fixture(_ => Json(J(new { code = 200, data })), Session("wy"));
-                    var result = await f.Catalog.QueueRecommendationsAsync(new("wy", ["1"], "1"));
-                    Equal(more ?? count > 0, result.GetProperty("hasMore").GetBoolean());
-                    Equal(count, result.GetProperty("count").GetInt32());
-                }
-            foreach (var field in new[] { "algMap", "sourceMap", "hasMore" })
+            foreach (int count in new[] { 0, 5 })
+            foreach (bool more in new[] { true, false })
             {
-                var data = J(new { songList = new[] { Wy("1") } }); data[field] = "invalid";
+                using var f = new Fixture(_ => Json(J(new { code = 200, data = new {
+                    songList = Enumerable.Range(1, count).Select(i => Wy(i.ToString())).ToArray(), offset = 15, hasMore = more
+                } })), Session("wy"));
+                var result = await f.Catalog.QueueRecommendationsAsync(new("wy", "1"));
+                Equal(more, result.GetProperty("hasMore").GetBoolean()); Equal(count, result.GetProperty("count").GetInt32());
+            }
+            foreach (string failure in new[] { "algMap", "sourceMap", "hasMore", "offset", "missing-more", "missing-offset", "stalled" })
+            {
+                var data = J(new { songList = new[] { Wy("1") }, hasMore = true, offset = 15 });
+                if (failure == "missing-more") data.Remove("hasMore");
+                else if (failure == "missing-offset") data.Remove("offset");
+                else if (failure == "stalled") data["offset"] = 0;
+                else data[failure] = "invalid";
                 using var f = new Fixture(_ => Json(J(new { code = 200, data })), Session("wy"));
-                await Error("INVALID_RESPONSE", () => f.Catalog.QueueRecommendationsAsync(new("wy", ["1"], "1")));
+                await Error(failure == "stalled" ? "PAGINATION_STALLED" : "INVALID_RESPONSE",
+                    () => f.Catalog.QueueRecommendationsAsync(new("wy", "1")));
             }
         });
         yield return Case("album verified endpoint and exact identity", async () =>
@@ -3097,7 +3148,7 @@ public static partial class MusicNativePlatformTests
             "home" => "/eapi/link/page/rcmd/resource/show", "directory" => directory,
             "fm" => "/eapi/v1/radio/get", "fm-rule" => "/eapi/tag/tab/fm/recommends",
             "fm-preview" => "/eapi/tag/tab/fm/cover", "similar" => "/weapi/v1/radio/get",
-            "heartbeat" => "/eapi/playmode/intelligence/list", "queue" => "/eapi/homepage/more/rcmd/song",
+            "heartbeat" => "/eapi/playmode/intelligence/list", "queue" => "/eapi/homepage/scene/more/rcmd/song",
             "personal" => "/weapi/user/playlist", "rankings" or "vip-rankings" => rankings,
             "new-songs" => "/weapi/v1/discovery/new/songs", "square" => "/weapi/playlist/square/block/page",
             "artists" => "/weapi/v1/artist/list", "cube-layout" => cube, "cube-tags" => tags, "cube-feed" => feed,
@@ -3140,7 +3191,7 @@ public static partial class MusicNativePlatformTests
                     "fm" or "fm-rule" or "similar" or "new-songs" => J(new { code = 200, data = new[] { Wy("1") } }),
                     "fm-preview" => J(new { code = 200, data = new { cover = "https://images.invalid/fm.jpg" } }),
                     "heartbeat" => J(new { code = 200, data = new[] { new { songInfo = Wy("1") } } }),
-                    "queue" => J(new { code = 200, data = new { songList = new[] { Wy("1") } } }),
+                    "queue" => J(new { code = 200, data = new { songList = new[] { Wy("1") }, offset = 15, hasMore = false } }),
                     "personal" => J(new { code = 200, playlist = new[] { Playlist() }, more = false }),
                     "rankings" or "vip-rankings" => Rankings(),
                     "artists" => J(new { code = 200, artists = new[] { new { id = "1", name = "合成歌手" } }, more = false }),
@@ -3174,8 +3225,8 @@ public static partial class MusicNativePlatformTests
             "home" => f.Catalog.HomeAsync(new("wy")), "directory" => f.Catalog.ChannelsAsync(new("wy")),
             "fm" => f.Catalog.FmAsync(new()), "fm-rule" => f.Catalog.FmAsync(new(RuleId: "123")),
             "fm-preview" => f.Catalog.FmAsync(new(Preview: true, RuleId: "123")),
-            "similar" => f.Catalog.SimilarAsync(new("wy", ["1"])), "heartbeat" => f.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.CurrentSong, "1")),
-            "queue" => f.Catalog.QueueRecommendationsAsync(new("wy", ["1"], "1")), "personal" => f.Catalog.PersonalPlaylistsAsync(new("wy")),
+            "similar" => f.Catalog.SimilarAsync(new("wy", ["1"])), "heartbeat" => f.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.CurrentSong, "1", "500")),
+            "queue" => f.Catalog.QueueRecommendationsAsync(new("wy", "1", 0)), "personal" => f.Catalog.PersonalPlaylistsAsync(new("wy")),
             "rankings" => f.Catalog.ChannelAsync(new("wy", "chart")), "new-songs" => f.Catalog.ChannelAsync(new("wy", "newsong")),
             "square" => f.Catalog.ChannelAsync(new("wy", "playlist")), "artists" => f.Catalog.ChannelAsync(new("wy", "artist")),
             "cube-layout" or "cube-tags" or "cube-feed" => f.Catalog.ChannelAsync(new("wy", "rock")),

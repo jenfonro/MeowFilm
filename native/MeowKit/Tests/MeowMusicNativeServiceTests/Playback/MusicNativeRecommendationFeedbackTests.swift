@@ -4,7 +4,7 @@ import MeowMusicFeature
 
 final class MusicNativeRecommendationFeedbackTests: XCTestCase {
     func testHeartbeatProofOnlyBelongsToCommittedOccurrenceAndDoesNotSurviveColdRestore() async throws {
-        let store = NativeMusicMemoryDocument(try document())
+        let store = NativeMusicMemoryDocument(try document(heartbeat: true))
         let owner = RecommendationFeedbackAccounts()
         let service = try await NativeMusicFixture.service(store, accounts: owner)
         let result = try await service.enterSimilarMode()
@@ -59,11 +59,15 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         let service = try await NativeMusicFixture.service(store, accounts: owner)
         let bytes = store.snapshot().0
         let before = try MusicDocument(bytes, runID: "preview")
+        let options = (try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))).options
+        let audio = try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: "entry-1",
+            selection: XCTUnwrap(options.first).selection(quality: "128k"))
+        _ = try await service.recordSimilarPlaybackFact(.init(attemptId: audio.attemptId, occurrenceId: audio.occurrenceId,
+            resourceId: audio.resourceId, kind: .playing, position: 0))
         let previewValue = try await service.previewQueueRecommendations()
         let preview = try XCTUnwrap(previewValue)
-        XCTAssertFalse(preview.continueEnabled)
+        XCTAssertTrue(preview.continueEnabled)
         let previewDocument = try MusicDocument(store.snapshot().0, runID: "preview")
-        XCTAssertEqual(store.snapshot().0, bytes)
         XCTAssertEqual(previewDocument.queue, before.queue)
         let original = try XCTUnwrap(before.queue["entries"].array.first)
         let originalTargets = try await service.similarFeedbackTargets(entry: original, context: original["context"])
@@ -72,7 +76,7 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         let chosen = try XCTUnwrap(preview.candidates.first)
         _ = try await service.playQueueRecommendation(snapshotID: preview.id, candidateID: chosen.id)
         let saved = try MusicDocument(store.snapshot().0, runID: "committed")
-        XCTAssertEqual(saved.queue["source"], before.queue["source"])
+        XCTAssertEqual(saved.queue["source"]["sourceType"].string, "queue-recommendations")
         XCTAssertEqual(saved.queue["entries"].array.first?["context"], original["context"])
         let entry = try XCTUnwrap(saved.queue["entries"].array.last)
         let targets = try await service.similarFeedbackTargets(entry: entry, context: entry["context"])
@@ -100,7 +104,7 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         XCTAssertNil(target.recommendationProof)
     }
 
-    private func document() throws -> Data {
+    private func document(heartbeat: Bool = false) throws -> Data {
         var document = try MusicDocument(nil, runID: "fixture")
         let song = try MusicModel.normalize(RecommendationFeedbackAccounts.track("100"))
         document.queue["entries"] = .array([.obj([
@@ -108,6 +112,14 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
             ("context", .obj([("sourceType", .string("search-song")), ("searchKeyword", .string("Synthetic"))]))
         ])])
         document.queue["currentId"] = .string("entry-1"); document.queue["serial"] = .n(1)
+        if heartbeat {
+            var rows = document.queue["entries"].array
+            rows[0]["context"]["platform"] = .string("wy")
+            rows[0]["context"]["sourceId"] = .string("favorites")
+            document.queue["entries"] = .array(rows)
+        }
+        document.queue["source"] = heartbeat ? .obj([("platform", .string("wy")), ("sourceId", .string("favorites"))]) :
+            .obj([("sourceType", .string("search-song")), ("seedEntryId", .string("entry-1"))])
         return try document.encode(changed: ["queue", "history", "playback"])
     }
 }
@@ -148,9 +160,9 @@ private actor RecommendationFeedbackAccounts: MusicNativeAccountProviding, Music
         case .heartbeat:
             return .init(items: [Self.track("301", source: "heartbeat")],
                 heartbeatContext: .init(playlistID: "900", seedID: "100"))
-        case .queueRecommendations:
-            return .init(items: [Self.track("401", source: "moreRcmd")], hasMore: false)
-        case .songRoaming: throw MusicServiceError.unsupported
+        case .songRecommendations(_, let offset):
+            return .init(items: [Self.track("401", source: "moreRcmd")], hasMore: false, offset: offset + 15)
+        case .songRoaming, .artistRoaming: throw MusicServiceError.unsupported
         }
     }
     func accountQueuePage(_ lease: MusicAccountQueueLease, kind: MusicAccountQueueKind,
@@ -164,8 +176,11 @@ private actor RecommendationFeedbackAccounts: MusicNativeAccountProviding, Music
     func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicNativeTrackPage {
         throw MusicServiceError.unsupported
     }
-    func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) -> [MusicPlaybackOption] { [] }
+    func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) -> [MusicPlaybackOption] {
+        [.init(installationId: "official:synthetic", generation: 1, siteId: "wy", sourceKey: sourceKey,
+            qualities: ["128k"], title: "Synthetic", version: "1", contentHash: String(repeating: "a", count: 64))]
+    }
     func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) throws -> MusicNativeAudio {
-        throw MusicServiceError.unsupported
+        .init(url: URL(string: "https://m701.music.126.net/synthetic.mp3")!)
     }
 }

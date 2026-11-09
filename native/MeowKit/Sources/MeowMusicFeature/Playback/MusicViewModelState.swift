@@ -34,6 +34,14 @@ public extension MusicViewModel {
     var isFMActive: Bool { playbackState.isFMActive }
     var similarMode: MusicSimilarModeSnapshot? { playbackState.similarMode }
     var canEnterSimilarMode: Bool { playbackState.canEnterSimilarMode }
+    var canEnterSongRecommendations: Bool { playbackState.canEnterSongRecommendations }
+    var fmPlayback: MusicFMPlaybackSnapshot? { playbackState.fmPlayback }
+    var playbackSourceTitle: String {
+        if isFMActive { return "私人漫游" }
+        if let snapshot = similarMode, snapshot.active { return snapshot.sourceTitle }
+        if queueRecommendations?.active == true { return "推荐" }
+        return state.queueSourceTitle ?? "普通列表"
+    }
     var isChangingSimilarMode: Bool { playbackState.isChangingSimilarMode }
     var isChangingQueueRecommendations: Bool { playbackState.isChangingQueueRecommendations }
     var queueRecommendations: MusicQueueRecommendationSnapshot? {

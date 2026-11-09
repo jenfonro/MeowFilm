@@ -118,23 +118,73 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         }
     }
 
-    func testPauseWhileRecommendationOrNavigationWaitsCancelsRecoveryAfterNativeRetires() async throws {
-        for navigating in [false, true] {
-            try await pauseRetiredSource(navigating: navigating, excluding: false)
-        }
+    func testPauseWhileRecommendationWaitsCancelsRecoveryAfterNativeRetires() async throws {
+        try await pauseRetiredSource(excluding: false)
     }
 
     func testPauseWhileRecommendationWaitsCancelsNativeLessSelectionAndKeepsExclusion() async throws {
-        try await pauseRetiredSource(navigating: false, excluding: true)
+        try await pauseRetiredSource(excluding: true)
     }
 
-    private func pauseRetiredSource(navigating: Bool, excluding: Bool) async throws {
-        let song = try MusicModel.normalize(SimilarModeAccountFixture.track("100"))
-        let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
-        let controlled = SimilarModeControlledDocument(store)
+    func testPauseDuringRecommendationNavigationCancelsNativeLessAudioSelection() async throws {
+        let store = try recommendationStore()
         let scripts = ReviewScripts(sites: ["a": ["wy"], "b": ["wy"]])
-        let accounts = SimilarModeAccountFixture(navigating ? [["301"]] : [[], ["301"]])
-        let service = NativeMusicService(document: controlled, scripts: scripts, accounts: accounts,
+        let service = NativeMusicService(document: store, scripts: scripts, accounts: SimilarModeAccountFixture([["301"]]),
+            qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+        try await service.setAccess(available: true, generation: 1)
+        let initial = try await service.state()
+        _ = try await service.updateSettings(.init(ifRevision: initial.settingsRevision,
+                                                   officialSources: [], requestQuality: "128k"))
+        let player = ReviewPlayer(), model = MusicViewModel(service: service, player: player)
+        await model.load(); await model.prepareCurrent()
+        let published = expectation(description: "search candidates reach the observable model")
+        let observation = model.playbackState.$queueRecommendations
+            .compactMap { $0 }.filter { $0.candidates.count == 1 }.prefix(1)
+            .sink { _ in published.fulfill() }
+        defer { observation.cancel() }
+        try await fact(model, .playing)
+        await model.previewQueueRecommendations()
+        await fulfillment(of: [published], timeout: 2)
+        XCTAssertEqual(model.queueRecommendations?.candidates.count, 1)
+        let mediaGate = NativeMusicGate()
+        await scripts.holdSource(mediaGate)
+        let navigation = Task { await model.next() }
+        await mediaGate.started()
+        let intent = try XCTUnwrap(model.navigationPlaybackIntent)
+        let selected = try XCTUnwrap(model.current?.id)
+        XCTAssertNotEqual(selected, "entry-1")
+        XCTAssertNil(model.activeNativeAttemptID)
+        XCTAssertNotNil(model.pendingSourceSelection)
+        let played = player.resources.count, prepared = player.standalonePreparations
+        await model.togglePlayback()
+        XCTAssertFalse(intent.isActive)
+        XCTAssertNil(model.pendingSourceSelection)
+        XCTAssertEqual(model.phase, .paused)
+        await mediaGate.release(); await navigation.value
+        await model.flushPlaybackFacts()
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.currentId, selected, "pause keeps the already committed navigation")
+        XCTAssertEqual(model.current?.id, selected)
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(model.position, 0)
+        XCTAssertEqual(player.resources.count, played)
+        XCTAssertEqual(player.standalonePreparations, prepared)
+        XCTAssertNil(model.activeNativeAttemptID)
+        await model.close(); await service.close()
+    }
+
+    private func recommendationStore() throws -> NativeMusicMemoryDocument {
+        let song = try MusicModel.normalize(SimilarModeAccountFixture.track("100"))
+        var document = try MusicDocument(MusicNativeCandidateDiscoveryFixture.store(song: song).read(), runID: "fixture")
+        document.queue["source"] = .obj([("sourceType", .string("search-song")), ("seedEntryId", .string("entry-1"))])
+        return NativeMusicMemoryDocument(try document.encode(changed: ["queue", "playback"]))
+    }
+
+    private func pauseRetiredSource(excluding: Bool) async throws {
+        let store = try recommendationStore()
+        let scripts = ReviewScripts(sites: ["a": ["wy"], "b": ["wy"]])
+        let accounts = SimilarModeAccountFixture([[], ["301"]])
+        let service = NativeMusicService(document: store, scripts: scripts, accounts: accounts,
             qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let initial = try await service.state()
@@ -151,34 +201,18 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         let command: Task<Void, Never>
         let published = expectation(description: "the requested recommendation snapshot is published")
         let observation = model.playbackState.$queueRecommendations.compactMap { $0 }
-            .filter { $0.currentEntryID == occurrence && (navigating || $0.canRetry) }.prefix(1)
+            .filter { $0.currentEntryID == occurrence && $0.canRetry }.prefix(1)
             .sink { _ in published.fulfill() }
         defer { observation.cancel() }
-        if navigating {
-            await model.loadSimilarMode()
-            await fulfillment(of: [published], timeout: 2)
-            let snapshot = try XCTUnwrap(model.queueRecommendations)
-            await accounts.suspendNext(recommendationGate)
-            await model.setQueueRecommendationContinue(true, snapshotID: snapshot.id)
-            await recommendationGate.started()
-            let entered = expectation(description: "navigation reached service after acquiring its audio intent")
-            command = Task {
-                controlled.afterNextRead { entered.fulfill() }
-                await model.next()
-            }
-            await fulfillment(of: [entered], timeout: 2)
-            XCTAssertNotNil(model.navigationPlaybackIntent)
-        } else {
-            await model.previewQueueRecommendations()
-            await fulfillment(of: [published], timeout: 2)
-            let snapshot = try XCTUnwrap(model.queueRecommendations)
-            XCTAssertTrue(snapshot.canRetry)
-            await accounts.suspendNext(recommendationGate)
-            command = Task { await model.retryQueueRecommendations(snapshotID: snapshot.id) }
-            await recommendationGate.started()
-            XCTAssertTrue(model.isChangingQueueRecommendations)
-        }
-        let audioIntent = try XCTUnwrap(navigating ? model.navigationPlaybackIntent : model.recommendationPlaybackIntent)
+        await model.previewQueueRecommendations()
+        await fulfillment(of: [published], timeout: 2)
+        let snapshot = try XCTUnwrap(model.queueRecommendations)
+        XCTAssertTrue(snapshot.canRetry)
+        await accounts.suspendNext(recommendationGate)
+        command = Task { await model.retryQueueRecommendations(snapshotID: snapshot.id) }
+        await recommendationGate.started()
+        XCTAssertTrue(model.isChangingQueueRecommendations)
+        let audioIntent = try XCTUnwrap(model.recommendationPlaybackIntent)
         let mediaGate = NativeMusicGate()
         await scripts.holdSource(mediaGate)
         let replacement: Task<Void, Never>?

@@ -3,12 +3,12 @@ using MeowFilm.Capabilities.Platforms;
 
 namespace MeowFilm.Capabilities.Recommendations;
 
-public enum MusicRecommendationQueueChange { Selection, Append, Remove, Reorder, Replace, Clear, Restore, Mode, Reset }
+public enum MusicRecommendationQueueChange { Selection, PlayNext, Append, Remove, Reorder, Replace, Clear, Restore, Mode, Reset }
 public enum MusicRecommendationPlaybackAction { Select, Stop }
 
 /// <summary>Only actual local media observations. A queue selection is not a Started event.</summary>
 public sealed record MusicRecommendationPlaybackState(string EntryId, bool IsPlaying,
-    bool HasStarted, bool MediaReady, bool IsLocal = true);
+    bool HasStarted, bool MediaReady, bool IsLocal = true, long PlaybackEvent = 0);
 
 /// <summary>Ephemeral provenance of an entry actually admitted by this live coordinator.</summary>
 public sealed record MusicRecommendationFeedback(string SessionId, string BatchId, string EntryId,
@@ -105,22 +105,7 @@ internal static class RecommendationJson
         if (!ok.GetBoolean()) throw new RecommendationException(Text(value, "code", "INVALID_RESPONSE", 128));
         return value;
     }
-    internal static string NativeId(JsonElement song)
-    {
-        if (song.TryGetProperty("sources", out var sources) && sources.ValueKind == JsonValueKind.Array)
-            foreach (var row in sources.EnumerateArray())
-                if (Text(row, "source") == "wy" && row.TryGetProperty("musicInfo", out var data) &&
-                    FromData(data) is { Length: > 0 } id) return id;
-        return "";
-    }
-    private static string FromData(JsonElement data)
-    {
-        if (data.ValueKind != JsonValueKind.Object || Text(data, "source") != "wy") return "";
-        if (!data.TryGetProperty("songmid", out var value)) return "";
-        string id = value.ValueKind == JsonValueKind.String ? value.GetString()! :
-            value.ValueKind == JsonValueKind.Number ? value.GetRawText() : "";
-        return ValidId(id) ? id : "";
-    }
+    internal static string NativeId(JsonElement song) => Feedback.MusicFeedbackIdentity.Resolve(song, "wy")?.Id ?? "";
     internal static bool ValidId(string id) => id.Length is > 0 and <= 16 && id[0] != '0' &&
         id.All(char.IsAsciiDigit) && long.TryParse(id, out var n) && n is > 0 and <= 9007199254740991;
 }

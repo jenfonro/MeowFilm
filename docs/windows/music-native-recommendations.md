@@ -61,7 +61,7 @@ music.queue.playCollection
 music.queue.clear
 music.queue.mode
 music.history.restorePlaylist
-music.catalog.playlist.commit action=play
+music.catalog.playlist.commit action=play|next
 ```
 
 `music.catalog.playlist.commit action=save` 不替换当前队列，但仍与同一个 library owner 串行。
@@ -76,19 +76,19 @@ music.catalog.playlist.commit action=play
 - 未绑定播放 consumer 时 start 返回 `PLAYBACK_UNAVAILABLE`。
 - 同一完整配置的重复 start、同一 session 的重复读取、继续加载和自然结束推进由协调器去重；在途 start 复用同一物理读取及最终快照，不通过 UI 绑定或集合变化递归触发。
 
-## 原生命令与投影
+## 消费者投影
 
-`MusicNativeApplication.ExecuteAsync` 将全部 `music.recommendations.*` 命令交由同一 native coordinator，包含 `choose {id,candidateId}`；UI 不直接调用私有 `music.queue.recommendation.*`。
+业务行为只引用[播放来源、队列与自动续播](../common/music/playback-sessions.md)；协调器命令、参数、存储与资源边界见[原生持续推荐](music-recommendations.md)。
 
-- `kind=queue` 的 start 从完整队列提取网易云 native IDs 与实际 current ID，只读返回 `candidates:[{id,song}]` 和 `exhausted`。start／retry／自动续播均要求整队每条歌曲有有效网易云 ID；混合或缺少 ID 时返回 `NATIVE_ID_REQUIRED`，不向平台发送过滤后的子集。候选 token 只属于当前候选批，retry、队列编辑、会话替换和账号失效都会使旧 token 失效。
-- choose 在同一 lane 核对队列版本／current 后，将完整新曲批次 append，并以私有 `selectIndex` 选中候选；一次 envelope CAS 后才派发一个媒体 selection。自动尾部 append 不带 `selectIndex`，不抢当前播放。
-- 自动尾部追加优先消费已有候选批，沿用该批队列版本／epoch 和同一 CAS，不另发请求；未消费的最后一批候选不会因 `hasMore=false` 被提前标记 exhausted。消费后按该批 hasMore 决定是否结束；后续请求仍按原队列 occurrence 顺序保留重复 native ID。
-- continue 关闭后不再准入旧请求结果；已准入的 CAS 仍等实际结算。快速关闭／重开和初始预览转入尾部追加时，next／Ended 的等待跟随实际后继 flight，不先停止或漏过新批次。
-- 心动 native 参数为 `entry=favorites|current` 和 current 的 `songId`／可选 `seedEntryId`。只有显式播放器 `seedEntryId` 要求严格匹配实际当前 occurrence 和歌曲 ID；浏览歌曲无此参数时允许空队列或不同当前曲，实际匹配的当前 occurrence 可自动复用。平台响应的真实喜欢列表 context 用于队列 context 和反馈来源；完整首批入队，默认关闭续播。
-- 心动各返回入口共用 `music.recommendations.return`，在 owner 的一次 restore CAS 中恢复原 checkpoint 并仅带回当前 occurrence，插入原选择之后；已存在不重复，空原队列保留当前，同录音不同 occurrence 不合并。返回保持 currentId，不发送 selection，现有 UI 队列刷新保留媒体实例、进度及播放／暂停状态，同时撤销已退休会话的反馈 proof。相似推荐仍恢复原队列与原选择。
-- FM snapshot 的 `mode/submode/ruleId/tabTagId` 是已提交配置；尚未提交、切换失败和旧响应不污染播放器显示。
+- `MusicCapability.PlaySelectionAsync` 捕获真实搜索直接播放动作，在打开媒体前登记 occurrence／播放 epoch；该动作真实首次 Started 后才异步调用 preview，不以 Open 返回替代 Started。暂停恢复、seek、同 occurrence 换源不重建；未开播便失败或被替换不会请求。普通首页／歌单播放、浏览搜索页及队列长度不产生推荐来源。
+- `MusicRecommendationQueueChange.PlayNext` 与 `Append` 分开分类；catalog `action=next` 同样走前者。模式不改 epoch，替换／清空／历史恢复改 epoch 并退休来源。
+- `RecommendationCandidates` 只投影真实候选 token 和歌曲；`ChooseRecommendationAsync` 校验行身份与当前 session，再交唯一协调器处理。
+- `PlaybackQueueSourceText` 读取队列 source 和已提交 session；`PlaybackModeIcon/Text` 只读取全局循环；`HasPlaybackFm/PlaybackFmTitle` 单独控制 FM 频道按钮。没有推荐成功／退出专用状态块、事件或视图。
+- 真实失败通过既有 `Status`／`NoticeOutlet` 提醒；用户取消、被替换的旧请求与正常耗尽不生成通知。未知提交的核对操作仍在来源菜单可达。
+- `MusicRecommendationPlaybackState.PlaybackEvent` 随真正开播增加；媒体观察投影去重，UI 重绘和 seek 不创造新的随机取歌事件。`TryAdvanceAsync` 返回 false 后仍执行现有 queue.next，不等待网络。
+- 主动推荐与心动 retainCurrent restore 后只刷新实际队列与反馈证明，不重开、Stop 或 Resume 相同音频。相似没有返回动作。
 
-逐曲反馈通过 `MusicRecommendationFeedback` 的 `Provider/Algorithm/FeedbackSource` 与 session／batch／entry proof 传递。候选读取及原队列条目不凭推荐标签获得 proof；只有当前活会话实际入队的 occurrence 可读取。sourceMap 缺失为 `moreRcmd`，心动首批为 `aiMode`；反馈 consent 和账号校验仍由既有反馈职责拥有。请求配方、结束条件和资源边界见[原生持续推荐](music-recommendations.md)。
+`MusicRecommendationFeedback` 的 Provider／Algorithm／FeedbackSource 与 session／batch／entry proof 只在活会话中有效，不从持久 queue context 恢复；反馈授权和账号校验仍属于既有反馈职责。
 
 ## 未知提交
 

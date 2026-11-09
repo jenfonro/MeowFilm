@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import XCTest
+import Combine
 import MeowContracts
 import MeowMusicFeature
 @testable import MeowMusicNativeService
@@ -54,12 +55,17 @@ final class MusicFMConsumerTests: XCTestCase {
         model.releaseRemoteQueueSource(source)
         XCTAssertTrue(source.authorization.isActive)
         model.onPlayback(try fact(model, kind: .playing)); await model.flushPlaybackFacts()
+        let initialFill = await service.fmPlayback?.pending; await initialFill?.value
+        await model.loadSimilarMode()
         let oldEnd = try fact(model, kind: .ended)
         model.onPlayback(oldEnd); await model.flushPlaybackFacts(); await model.flushNavigation()
         XCTAssertEqual(model.queue.count, 2); XCTAssertEqual(model.current?.id, model.queue[1].id)
         XCTAssertEqual(player.resources.count, 2)
         model.onPlayback(oldEnd); await model.flushPlaybackFacts(); await model.flushNavigation()
         let afterDuplicate = await loader.events(); XCTAssertEqual(afterDuplicate, ["root", "root"])
+        model.onPlayback(try fact(model, kind: .playing)); await model.flushPlaybackFacts()
+        let secondFill = await service.fmPlayback?.pending; await secondFill?.value
+        await model.loadSimilarMode()
         await model.next()
         XCTAssertEqual(model.queue.count, 3); XCTAssertEqual(player.resources.count, 3)
         await model.close()
@@ -71,15 +77,23 @@ final class MusicFMConsumerTests: XCTestCase {
         let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("A")], [NativeMusicFixture.track("B")]])
         let source = MusicAccountQueueFixture.source(loader, kind: .fm)
         try await begin(model, service: service, source: source)
+        let projected = expectation(description: "accepted FM batch is published without changing the paused song")
+        let observation = model.playbackState.$queue.filter { $0.count == 2 }.prefix(1)
+            .sink { _ in projected.fulfill() }
+        defer { observation.cancel() }
         let gate = NativeMusicGate(); await loader.hold("root", gate: gate)
-        let task = Task { await model.next() }
+        model.onPlayback(try fact(model, kind: .playing)); await model.flushPlaybackFacts()
         await gate.started()
+        let pending = await service.fmPlayback?.pending
         await model.togglePlayback()
-        await gate.release(); await task.value
-        XCTAssertEqual(model.queue.count, 2); XCTAssertEqual(model.current?.id, model.queue[1].id)
+        model.onPlayback(try fact(model, kind: .paused)); await model.flushPlaybackFacts()
+        await gate.release(); await pending?.value
+        await model.loadSimilarMode()
+        await fulfillment(of: [projected], timeout: 2)
+        XCTAssertEqual(model.queue.count, 2); XCTAssertEqual(model.current?.id, model.queue[0].id)
         XCTAssertEqual(player.resources.count, 1); XCTAssertEqual(model.phase, .paused)
         await model.togglePlayback()
-        XCTAssertEqual(player.resources.count, 2)
+        XCTAssertEqual(player.resources.count, 1, "resume reuses the same audio")
         XCTAssertEqual(model.requestedQuality, "128k")
         await model.close()
     }
@@ -107,18 +121,26 @@ final class MusicFMConsumerTests: XCTestCase {
         await model.close()
     }
 
-    @MainActor func testFMFailureDoesNotWrapRetryOrPlayAndExplicitRetryCanContinue() async throws {
+    @MainActor func testFMFailureReportsOnceAndManualNextStillLoopsExistingQueue() async throws {
         let (service, player, model) = try await setup()
         let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("A")], [NativeMusicFixture.track("B")]])
         let source = MusicAccountQueueFixture.source(loader, kind: .fm)
         try await begin(model, service: service, source: source)
+        let reported = expectation(description: "failed FM batch reaches the shared error notice")
+        let observation = model.notices.$error.compactMap { $0 }.prefix(1)
+            .sink { _ in reported.fulfill() }
+        defer { observation.cancel() }
+        await loader.fail("root")
+        model.onPlayback(try fact(model, kind: .playing)); await model.flushPlaybackFacts()
+        let pending = await service.fmPlayback?.pending; await pending?.value
+        await model.loadSimilarMode()
+        await fulfillment(of: [reported], timeout: 2)
+        XCTAssertNotNil(model.error)
         let before = model.queue, current = model.state.currentId
-        await loader.fail("root"); await model.next()
+        await model.next()
         XCTAssertEqual(model.queue, before); XCTAssertEqual(model.state.currentId, current)
-        XCTAssertEqual(player.resources.count, 1); XCTAssertNotNil(model.error)
+        XCTAssertEqual(player.resources.count, 2, "network failure cannot gate existing loop playback")
         let calls = await loader.events(); XCTAssertEqual(calls, ["root", "root"])
-        await loader.fail(nil); await model.next()
-        XCTAssertEqual(model.queue.count, 2); XCTAssertEqual(player.resources.count, 2)
         await model.close()
     }
 
@@ -154,6 +176,9 @@ final class MusicFMConsumerTests: XCTestCase {
             [NativeMusicFixture.track("A")], [NativeMusicFixture.track("B")]
         ]), kind: .fm)
         try await begin(model, service: service, source: source)
+        model.onPlayback(try fact(model, kind: .playing)); await model.flushPlaybackFacts()
+        let pending = await service.fmPlayback?.pending; await pending?.value
+        await model.loadSimilarMode()
         let gate = NativeMusicGate(); await scripts.configure(gate: gate)
         let task = Task { await model.next() }
         await gate.started()
@@ -174,6 +199,9 @@ final class MusicFMConsumerTests: XCTestCase {
             [NativeMusicFixture.track("A")], [NativeMusicFixture.track("B")]
         ]), kind: .fm)
         try await begin(model, service: service, source: source)
+        model.onPlayback(try fact(model, kind: .playing)); await model.flushPlaybackFacts()
+        let pending = await service.fmPlayback?.pending; await pending?.value
+        await model.loadSimilarMode()
         let gate = NativeMusicGate(); await scripts.configure(gate: gate)
         let task = Task { await model.next() }
         await gate.started()
