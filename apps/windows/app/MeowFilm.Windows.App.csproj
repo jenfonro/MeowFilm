@@ -7,6 +7,7 @@
     <AssemblyName>meowfilm</AssemblyName>
     <ApplicationIcon>Assets/AppIcon.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>../src/MeowFilm.Desktop/Assets/Meowfilm.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../src/MeowFilm.AppHost/MeowFilm.AppHost.csproj" />

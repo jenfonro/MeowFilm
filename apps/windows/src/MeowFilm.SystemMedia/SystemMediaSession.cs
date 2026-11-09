@@ -185,7 +185,7 @@ public sealed class SystemMediaSession : IAsyncDisposable
         finally { if (entered) commands.Release(); }
     }
 
-    /// <summary>Call on window Closing, before capability shutdown starts.</summary>
+    /// <summary>Irreversibly retires commands; called by DisposeAsync, not cancellable window Closing.</summary>
     public void Suspend()
     {
         dispatcher.VerifyAccess();
@@ -232,7 +232,7 @@ public sealed class SystemMediaSession : IAsyncDisposable
         }
     }
 
-    private sealed class NativeSource(NativePlayback native) : ISystemPlayback
+    internal sealed class NativeSource(NativePlayback native) : ISystemPlayback
     {
         public SystemPlaybackState State => new(native.OwnerId, native.Identity, native.Title,
             native.HasMedia || native.ContinuationPending, native.IsPlaying, native.PositionSeconds, native.DurationSeconds);
