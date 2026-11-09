@@ -42,11 +42,14 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Contracts、JSON、Accounts、Storage |
 | `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、JSON、Feature、Runtime、Storage |
-| `MeowFilmFeature` | 影视页面、规则及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | UI、JSON、Storage、Runtime、MeowJavaScript、FilmRuleProgram |
+| `MeowFilmFeature` | 影视页面、搜索会话、规则及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | UI、JSON、Storage、Runtime、MeowJavaScript、FilmRuleProgram、FilmSearchProgram |
 | `native/JavaScript` | 锁源 QuickJS 原生 C ABI 与后台 Swift JSON 引擎 | 无业务依赖 |
 | `packages/film-rules` | 同一份规则 JS 的 SwiftPM 资源包 | 无原生业务依赖 |
+| `packages/film-search` | 影视搜索整合 JS 的 SwiftPM 静态资源包 | 无原生业务依赖 |
 
 共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。
+
+全局搜索的音乐／影视关系由 `MeowfilmSearchComposition` 装配。`MeowUI` 仅提供目标选择和附加结果内容契约；音乐搜索分页容器按契约承载内容，不导入影视、不承载影视取数或整合策略。影视搜索、真实详情导航与关闭 ownership 见[影视搜索](film-search.md)。
 
 原生源码检查仅覆盖 `apps/ios` 和 `native/MeowKit`，不遍历 Windows 专属源码。Node 根测试可用 `node scripts/test-root.mjs --platform ios` 选择 iOS 与共享契约测试；共享 packager 用例不读取 Windows 入口源码，iOS 入口及生成载荷由本端 wrapper 用例验证。
 

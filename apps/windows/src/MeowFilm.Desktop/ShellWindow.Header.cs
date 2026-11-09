@@ -5,9 +5,18 @@ namespace MeowFilm.Desktop;
 public sealed partial class ShellWindow
 {
     private ModuleSession? _searchOwnerSession;
+    private IDesktopSearchPage? _searchPage;
+    private string? _searchContext;
 
     private void InitializeHeaderPresentation()
     {
+        _searchPage = _pages.Select(item => item.Page).OfType<IDesktopSearchPage>().SingleOrDefault();
+        if (_searchPage is { } searchPage)
+        {
+            SearchTargetPicker.ItemsSource = searchPage.Targets;
+            SearchTargetPicker.Visibility = Visibility.Visible;
+            SearchBox.Padding = new(104, 4, 12, 4);
+        }
         // Construct navigation in the window's namescope, then mount that same tree
         // in the component. UserControl XAML cannot register its children's names
         // in the containing window's compile-time namescope.
@@ -32,7 +41,7 @@ public sealed partial class ShellWindow
                 : new DesktopHeaderContribution(current.Module.Title);
         bool settings = _currentPage is null && current.IsSettingsOpen;
         var additionalActions = settings
-            ? _pages.Where(item => !item.Page.ShowInSidebar).Select(target => new DesktopHeaderAction(
+            ? _pages.Where(item => !item.Page.ShowInSidebar && item.Page is not IDesktopSearchPage).Select(target => new DesktopHeaderAction(
                 "page/" + target.Page.Id, target.Page.Title,
                 token =>
                 {
@@ -55,6 +64,17 @@ public sealed partial class ShellWindow
     private void ApplyHeaderContext(ModuleSession current, DesktopHeaderContribution contribution)
     {
         var previousSearchOwner = _searchOwnerSession;
+        if (_searchPage is { } searchPage && !current.IsSettingsOpen)
+        {
+            string? target = contribution.SearchTargetId;
+            string context = _currentPage is { } page ? "page/" + page.Page.Id + "/" + contribution.SearchContextId + "/" + target
+                : "module/" + current.Module.Id + "/" + current.Module.CaptureNavigationLocation() + "/" + target;
+            if (context != _searchContext && target is not null && searchPage.Targets.Any(item => item.Id == target))
+            {
+                _searchContext = context;
+                SearchTargetPicker.SelectedValue = target;
+            }
+        }
         if (_currentPage is null && !current.IsSettingsOpen && current.Mounted &&
             contribution.SearchVisible && contribution.SearchEnabled)
             _searchOwnerSession = current;
@@ -63,7 +83,7 @@ public sealed partial class ShellWindow
 
         var searchAvailable = !current.IsSettingsOpen && _searchOwnerSession is not null;
         SearchInput.Visibility = searchAvailable ? Visibility.Visible : Visibility.Collapsed;
-        SearchBox.IsEnabled = SearchButton.IsEnabled = searchAvailable;
+        SearchBox.IsEnabled = SearchButton.IsEnabled = SearchTargetPicker.IsEnabled = searchAvailable;
         var title = string.IsNullOrWhiteSpace(contribution.Title) ? current.Module.Title : contribution.Title;
         System.Windows.Automation.AutomationProperties.SetName(ContentDeck, title);
         Title = string.IsNullOrWhiteSpace(title) ? "meowfilm" : $"meowfilm · {title}";

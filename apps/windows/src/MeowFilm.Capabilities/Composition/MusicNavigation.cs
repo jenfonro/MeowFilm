@@ -160,6 +160,34 @@ public sealed partial class MusicCapability
         var target = new Location("search", query);
         await LoadAsync(locations.GetValueOrDefault(target.Key) ?? target, cancellationToken, publishStatus: false);
     }
+
+    /// <summary>Public search entry always targets online comprehensive music, including from a library page.</summary>
+    public async Task SearchOnlineAsync(string query, CancellationToken token)
+    {
+        if (stopping) return;
+        query = query.Trim();
+        if (query.Length is < 1 or > 200 || query.Any(char.IsControl))
+            throw new ArgumentException("Invalid query", nameof(query));
+        RetireOperationStatus();
+        InvalidateCatalogAction();
+        RememberLocation();
+        long submission = ++searchSubmission;
+        if (IsDiscovery || discoveryRequest is not null) await RetireDiscoveryPageAsync();
+        token.ThrowIfCancellationRequested();
+        if (stopping || submission != searchSubmission) return;
+        await RecordSearchHistory(query, true, token);
+        token.ThrowIfCancellationRequested();
+        if (stopping || submission != searchSubmission) return;
+        if (HasSearchSession && searchKeyword == query && searchAccountEpoch == accountEpoch)
+        {
+            await RestoreSearchAsync(token);
+            await OpenSearchTabAsync(SearchOverview);
+            return;
+        }
+        searchView = SearchOverview;
+        searchKind = "songs";
+        await BeginSearchAsync(query, token);
+    }
     private void RetireOperationStatus()
     {
         ++statusEpoch;

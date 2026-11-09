@@ -23,6 +23,7 @@ struct MeowfilmResources: Sendable {
     let scriptSession: RuntimeSession
     let filmRules: FilmRuleService
     let filmSourceSettings: FilmSourceService
+    let filmMetadata: FilmTMDBService
 
     init() throws {
         // A sideloading host may rewrite the installed bundle identifier while
@@ -58,6 +59,7 @@ struct MeowfilmResources: Sendable {
             try await scriptSession.connection()
         }
         musicScripts = NativeMusicScriptService(connection: connection)
+        filmMetadata = FilmTMDBService(connection: connection)
         filmRules = try FilmRuleService(store: Self.documentFactory(
             base: libraryRoot, namespace: FilmRuleService.documentNamespace)())
         filmSourceSettings = FilmSourceService(transport: CatScriptTransport(connectionProvider: connection),

@@ -14,6 +14,8 @@ SCRIPT_HOST_FRAMEWORK = "../../.cache/ios-native/$(MEOW_RUNTIME_SDK)-$(MEOW_RUNT
 NODE_MOBILE_LICENSE = "../../LICENSES/nodejs-mobile-LICENSE.txt"
 NATIVE_JAVASCRIPT_LICENSE = "../../LICENSES/quickjs-native-MIT.txt"
 NATIVE_UNICODE_LICENSE = "../../LICENSES/Unicode-3.0.txt"
+PROJECT_NOTICES = "../../LICENSES/NOTICE.md"
+PROJECT_LICENSE = "../../LICENSES/GPL-3.0-only.txt"
 
 
 def source_paths(root, directories):
@@ -80,6 +82,7 @@ def generate():
         "runtimePayload", "runtimePayloadBuild", "nodeLicense", "nodeLicenseBuild",
         "javascriptLicense", "javascriptLicenseBuild",
         "unicodeLicense", "unicodeLicenseBuild",
+        "projectNotices", "projectNoticesBuild", "projectLicense", "projectLicenseBuild",
         "runtimeTests", "runtimeTestGroup", "runtimeTestTarget", "runtimeTestSources",
         "runtimeTestConfigs", "runtimeTestDebug", "runtimeTestRelease", "runtimeTestDependency", "runtimeTestProxy",
     ]})
@@ -119,10 +122,14 @@ def generate():
     obj("javascriptLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['javascriptLicense']};")
     obj("unicodeLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = Unicode-3.0.txt; path = {quoted(NATIVE_UNICODE_LICENSE)}; sourceTree = "<group>";')
     obj("unicodeLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['unicodeLicense']};")
+    obj("projectNotices", f'isa = PBXFileReference; lastKnownFileType = text; name = NOTICE.md; path = {quoted(PROJECT_NOTICES)}; sourceTree = "<group>";')
+    obj("projectNoticesBuild", f"isa = PBXBuildFile; fileRef = {ids['projectNotices']};")
+    obj("projectLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = GPL-3.0-only.txt; path = {quoted(PROJECT_LICENSE)}; sourceTree = "<group>";')
+    obj("projectLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['projectLicense']};")
     obj("nodeLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['nodeLicense']};")
     obj("app", f'isa = PBXFileReference; explicitFileType = wrapper.application; path = {name}.app; sourceTree = BUILT_PRODUCTS_DIR;')
     obj("productsGroup", f'isa = PBXGroup; children = ({ids["app"]}, {ids["uiTests"]}, {ids["runtimeTests"]},); name = Products; sourceTree = "<group>";')
-    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + [ids["assets"], ids["nodeFramework"], ids["scriptHostFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["javascriptLicense"], ids["unicodeLicense"], ids["uiTestGroup"], ids["runtimeTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
+    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + [ids["assets"], ids["nodeFramework"], ids["scriptHostFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["javascriptLicense"], ids["unicodeLicense"], ids["projectNotices"], ids["projectLicense"], ids["uiTestGroup"], ids["runtimeTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
     obj("sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = {seq(app_builds)}; runOnlyForDeploymentPostprocessing = 0;')
     package_ids, framework_ids = [], []
     for library in libraries:
@@ -133,7 +140,7 @@ def generate():
         objects.append(f"\t\t{dependency_id} = {{ isa = XCSwiftPackageProductDependency; package = {ids['package']}; productName = {library}; }};")
         objects.append(f"\t\t{build_id} = {{ isa = PBXBuildFile; productRef = {dependency_id}; }};")
     obj("frameworks", f"isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = {seq(framework_ids + [ids['nodeFrameworkLink']])}; runOnlyForDeploymentPostprocessing = 0;")
-    obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({ids["assetsBuild"]}, {ids["runtimePayloadBuild"]}, {ids["nodeLicenseBuild"]}, {ids["javascriptLicenseBuild"]}, {ids["unicodeLicenseBuild"]},); runOnlyForDeploymentPostprocessing = 0;')
+    obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({ids["assetsBuild"]}, {ids["runtimePayloadBuild"]}, {ids["nodeLicenseBuild"]}, {ids["javascriptLicenseBuild"]}, {ids["unicodeLicenseBuild"]}, {ids["projectNoticesBuild"]}, {ids["projectLicenseBuild"]},); runOnlyForDeploymentPostprocessing = 0;')
     obj("package", 'isa = XCLocalSwiftPackageReference; relativePath = ../../native/MeowKit;')
     common_project = "CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0;"
     conditions = "FEATURE_MUSIC"

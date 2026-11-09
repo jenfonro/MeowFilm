@@ -15,7 +15,7 @@ Windows 包装使用当前 `common-native` 通用运行器；仅 `--product aggr
 
 ## 输入闭包与信任边界
 
-模块为 `music@0.8.0`、`cat@0.2.0`、`source@0.2.0`，契约分别为 `music.script.v3`、`cat.script.v2`、`source.runtime.v2`。完整 HTTP 源码/JSON 不使用平台业务分片。
+Windows 平台模块为 `music@0.8.0`、`cat@0.2.0`、`source@0.2.0`、`tmdb@0.1.0`，契约分别为 `music.script.v3`、`cat.script.v2`、`source.runtime.v2`、`tmdb.data.v1`；平台 manifest 与实际 entry、原生 describe 严格一致。通用默认 `createRuntime` 仍为原三模块。完整 HTTP 源码/JSON 不使用平台业务分片。
 
 载荷包含公共 `app/` 入口及模块、`app/windows/` 两个包装文件，以及 `@meowfilm/{runtime-bridge,script-host,source-runtime}` 和根锁解析的运行依赖。`script-host/build/Release/` 的原生 addon、SDK、构建回执只按公共策略精确路径及哈希放行，不加载 WASM/asm.js 或任意附加 native binary。
 

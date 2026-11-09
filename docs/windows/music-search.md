@@ -7,6 +7,7 @@
 - `MusicLibraryOwner` 是搜索偏好与搜索历史的唯一 writer。
 - `MusicNativeApplication` 在每次物理平台请求内取得精确账号 lease，并在认证失效时只撤销该 lease。
 - 页面只投影当前 snapshot，不自行启动第二套平台请求、轮询或结果融合。
+- App 的[统一搜索结果页](film-search.md)复用同一 `MusicView`／snapshot。页头音乐提交通过 `SearchOnlineAsync` 明确进入在线综合，不受进入前的曲库位置或旧单类标签影响；原独立曲库 `SearchAsync` 入口保留。影视由独立 Film owner 管理，不进入 `MusicSearchCoordinator`。
 
 ## 搜索偏好
 

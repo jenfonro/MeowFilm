@@ -78,9 +78,13 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     func showSearch() {
-        guard let model = assembly.music else { return }
+        guard let model = assembly.music, let service = assembly.filmSearch else { return }
+        let category = MeowfilmSearchComposition.category(service: service, images: assembly.filmImages,
+            themeProvider: assembly.appearance) { [weak self] in self?.showFilmSearchResult($0) }
         navigation.pushViewController(MusicSearchViewController(
-            model: model, appearance: assembly.appearance, router: self
+            model: model, appearance: assembly.appearance, router: self,
+            primaryTarget: MeowfilmSearchComposition.music, additionalCategory: category,
+            initialTargetID: MeowfilmSearchComposition.defaultTarget(on: main?.selectedPage ?? .recommend)
         ), animated: true)
     }
 
@@ -182,6 +186,16 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private func showFilm(_ item: FilmItem) {
         let page = FilmDetailViewController(detail: FilmDetail(item: item), library: assembly.filmLibrary,
             images: assembly.filmImages, themeProvider: assembly.appearance)
+        presentFilmDetail(page)
+    }
+
+    func showFilmSearchResult(_ context: FilmSearchContext) {
+        let page = FilmDetailViewController(searchContext: context, library: assembly.filmLibrary,
+            images: assembly.filmImages, themeProvider: assembly.appearance)
+        presentFilmDetail(page)
+    }
+
+    private func presentFilmDetail(_ page: FilmDetailViewController) {
         page.onSelectItem = { [weak self] in self?.showFilm($0) }
         page.onPlay = { [weak self, weak page] url in
             guard let self, let page, self.navigation.topViewController === page else { return }

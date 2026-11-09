@@ -66,7 +66,7 @@ public static class MusicScriptIntegrationTests
                     ?? throw new InvalidOperationException("Packaged runtime root required.");
                 string node = Environment.GetEnvironmentVariable("MEOWFILM_TEST_NODE")
                     ?? throw new InvalidOperationException("Verified Node required.");
-                RuntimeModule[] modules = [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0")];
+                RuntimeModule[] modules = [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0"), new("tmdb", "0.1.0")];
                 return Child = await NodeRuntime.StartAsync(node,
                     RuntimeBundle.Verify(System.IO.Path.Combine(bundles, "aggregate"), "aggregate", modules),
                     modules,

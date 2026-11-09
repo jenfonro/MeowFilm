@@ -25,6 +25,8 @@ public sealed record DesktopHeaderContribution(
 
     // Automatic preserves existing consumers: beside a visible heading, otherwise before actions.
     public DesktopHeaderSlotPlacement SlotPlacement { get; init; } = DesktopHeaderSlotPlacement.Automatic;
+    public string? SearchTargetId { get; init; }
+    public string? SearchContextId { get; init; }
 }
 
 public enum DesktopHeaderSlotPlacement { Automatic, Leading, Trailing }

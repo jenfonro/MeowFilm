@@ -54,6 +54,71 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         try await request(method: "GET", path: "/v1/describe")
     }
 
+    /// Validate the actual App assembly, not the generic runtime's default.
+    public func validateAppModules() async throws {
+        guard case .object(let description) = try await describe(),
+              description["protocol"] == .string(Self.protocolName),
+              description["product"] == .string("aggregate"),
+              case .array(let modules)? = description["modules"], modules.count == 4 else {
+            throw RuntimeHTTPError.invalidResponse
+        }
+        let expected: [(RuntimeModule, String)] = [(.music, "0.8.0"), (.cat, "0.2.0"),
+                                                   (.source, "0.2.0"), (.tmdb, "0.1.0")]
+        for (module, version) in expected {
+            let matches = modules.filter {
+                guard case .object(let fields) = $0 else { return false }
+                return fields["id"] == .string(module.rawValue) &&
+                    fields["version"] == .string(version) && fields["contract"] == .string(module.contract)
+            }
+            guard matches.count == 1 else { throw RuntimeHTTPError.invalidResponse }
+            if module == .tmdb {
+                guard case .object(let fields) = matches[0], case .array(let methods)? = fields["methods"],
+                      methods.count == 3, Set(methods.compactMap {
+                          if case .string(let value) = $0 { return value }; return nil
+                      }) == ["tmdb.data.request", "tmdb.data.settings.get", "tmdb.data.settings.update"] else {
+                    throw RuntimeHTTPError.invalidResponse
+                }
+            }
+        }
+    }
+
+    /// The relative reference is both the public image identity and cache key.
+    /// Never accept a URL capable of replacing the trusted session endpoint.
+    public static func tmdbImageURL(_ path: String) -> URL? {
+        guard path.range(of: #"^/v1/tmdb/images/(original|[wh][1-9][0-9]*)/[A-Za-z0-9_-]+\.[A-Za-z0-9]+$"#,
+                         options: .regularExpression)?.upperBound == path.endIndex else { return nil }
+        return URL(string: path)
+    }
+
+    public func readTMDBImage(_ reference: URL) async throws -> Data {
+        guard reference.baseURL == nil, reference.scheme == nil,
+              Self.tmdbImageURL(reference.absoluteString) == reference else { throw RuntimeHTTPError.invalidRequest }
+        guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
+        let requestID = UUID().uuidString.lowercased()
+        var request = URLRequest(url: URL(string: reference.absoluteString, relativeTo: baseURL)!.absoluteURL,
+                                 cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
+        request.httpShouldHandleCookies = false
+        request.setValue("Bearer \(requestKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(sessionID, forHTTPHeaderField: "X-Meow-Session")
+        request.setValue(requestID, forHTTPHeaderField: "X-Meow-Request-Id")
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+        let read = RuntimeHTTPImageRead(requestID: requestID, state: state)
+        let outgoing = request
+        let data: Data = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                state.start(continuation: continuation) {
+                    let task = session.dataTask(with: outgoing)
+                    task.delegate = read
+                    read.install(task, continuation: continuation)
+                    task.resume()
+                }
+            }
+        } onCancel: { read.cancel() }
+        guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
+        guard !isClosed else { throw RuntimeHTTPError.closed }
+        return data
+    }
+
     public func call(module: RuntimeModule, operation: String,
                      parameters: RuntimeValue = .object([:])) async throws -> RuntimeValue {
         guard operation.range(of: #"^[a-z]+(?:\.[a-z]+)?$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
@@ -147,11 +212,12 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         return try result.get()
     }
 
-    private static func value(data: Data, response: HTTPURLResponse, requestID: String,
-                              module: RuntimeModule?) throws -> RuntimeValue {
+    fileprivate static func value(data: Data, response: HTTPURLResponse, requestID: String,
+                                  module: RuntimeModule?, imageFailure: Bool = false) throws -> RuntimeValue {
         guard response.value(forHTTPHeaderField: "X-Meow-Request-Id") == requestID,
               response.value(forHTTPHeaderField: "Content-Type") == "application/json",
-              [200, 400, 401, 403, 404, 413, 415].contains(response.statusCode),
+              ([200, 400, 401, 403, 404, 413, 415].contains(response.statusCode) ||
+                imageFailure && response.statusCode == 502),
               let decoded = try? RuntimeJSON.envelope(data), case .object(let fields) = decoded,
               fields.count == 3, case .bool(let ok)? = fields["ok"],
               case .string(let contract)? = fields["contract"] else { throw RuntimeHTTPError.invalidResponse }
@@ -214,7 +280,7 @@ private final class RuntimeHTTPState: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return closed
     }
-    func start(continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>, body: () -> Void) {
+    func start<T>(continuation: CheckedContinuation<T, Error>, body: () -> Void) {
         lock.lock()
         if closed { lock.unlock(); continuation.resume(throwing: RuntimeHTTPError.closed); return }
         body()
@@ -241,6 +307,95 @@ private final class RuntimeHTTPState: @unchecked Sendable {
         waiters.removeAll()
         lock.unlock()
         for waiter in pending { waiter.resume() }
+    }
+}
+
+/// A task delegate on the same owner session: budget and failure stop the read,
+/// but its continuation settles only in didComplete, never at cancel().
+private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private static let maximumBytes = 4 * 1_024 * 1_024
+    private let lock = NSLock()
+    private let requestID: String
+    private let state: RuntimeHTTPState
+    private var task: URLSessionDataTask?
+    private var continuation: CheckedContinuation<Data, Error>?
+    private var response: HTTPURLResponse?
+    private var bytes = Data()
+    private var failure: Error?
+    private var cancelled = false
+    init(requestID: String, state: RuntimeHTTPState) { self.requestID = requestID; self.state = state }
+    func install(_ task: URLSessionDataTask, continuation: CheckedContinuation<Data, Error>) {
+        lock.lock()
+        self.task = task; self.continuation = continuation
+        let cancelled = cancelled
+        lock.unlock()
+        if cancelled { task.cancel() }
+    }
+    func cancel() {
+        lock.lock(); cancelled = true; let task = task; lock.unlock()
+        task?.cancel()
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        lock.lock()
+        if let response = response as? HTTPURLResponse,
+           response.value(forHTTPHeaderField: "X-Meow-Request-Id") == requestID {
+            self.response = response
+            let type = response.mimeType?.lowercased() ?? ""
+            if response.expectedContentLength > Self.maximumBytes {
+                failure = URLError(.dataLengthExceedsMaximum)
+            } else if response.statusCode == 200 && type.hasPrefix("image/") {
+                // Native ImageIO still validates and decodes the complete image.
+            } else if type != "application/json" || response.statusCode == 200 {
+                failure = RuntimeHTTPError.invalidResponse
+            }
+        } else { failure = RuntimeHTTPError.invalidResponse }
+        let allow = failure == nil && !cancelled
+        lock.unlock()
+        completionHandler(allow ? .allow : .cancel)
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        guard !cancelled, failure == nil else { lock.unlock(); return }
+        if data.count > Self.maximumBytes - bytes.count {
+            failure = URLError(.dataLengthExceedsMaximum)
+            lock.unlock(); dataTask.cancel(); return
+        }
+        bytes.append(data)
+        lock.unlock()
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        guard let continuation else { lock.unlock(); return }
+        self.continuation = nil; self.task = nil
+        let result: Result<Data, Error>
+        if state.isClosed { result = .failure(RuntimeHTTPError.closed) }
+        else if cancelled { result = .failure(RuntimeHTTPError.cancelled) }
+        else if let failure { result = .failure(failure) }
+        else if let error {
+            result = .failure((error as NSError).code == NSURLErrorTimedOut
+                ? RuntimeHTTPError.timeout : RuntimeHTTPError.invalidResponse)
+        } else if let response {
+            result = Result {
+                guard !bytes.isEmpty, response.expectedContentLength < 0 ||
+                    response.expectedContentLength == bytes.count else { throw RuntimeHTTPError.invalidResponse }
+                if response.statusCode != 200 {
+                    _ = try RuntimeHTTPClient.value(data: bytes, response: response, requestID: requestID,
+                                                    module: .tmdb, imageFailure: true)
+                    throw RuntimeHTTPError.invalidResponse
+                }
+                return bytes
+            }
+        } else { result = .failure(RuntimeHTTPError.invalidResponse) }
+        bytes.removeAll()
+        lock.unlock()
+        continuation.resume(with: result)
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        lock.lock(); failure = RuntimeHTTPError.invalidResponse; lock.unlock()
+        completionHandler(nil)
     }
 }
 

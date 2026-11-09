@@ -55,12 +55,19 @@ internal static class ArtworkRaster
     {
         if (bytes.Length >= 33 && bytes[..8].SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }) &&
             BinaryPrimitives.ReadUInt32BigEndian(bytes[8..]) == 13 && bytes.Slice(12, 4).SequenceEqual("IHDR"u8))
+        {
+            RequireCompletePng(bytes);
             return (checked((int)BinaryPrimitives.ReadUInt32BigEndian(bytes[16..])),
                 checked((int)BinaryPrimitives.ReadUInt32BigEndian(bytes[20..])));
+        }
         if (bytes.Length >= 13 && (bytes[..6].SequenceEqual("GIF87a"u8) || bytes[..6].SequenceEqual("GIF89a"u8)))
+        {
+            if (bytes[^1] != 0x3b) throw new ArtworkException("ARTWORK_FORMAT");
             return (BinaryPrimitives.ReadUInt16LittleEndian(bytes[6..]), BinaryPrimitives.ReadUInt16LittleEndian(bytes[8..]));
+        }
         if (bytes.Length >= 4 && bytes[0] == 255 && bytes[1] == 216)
         {
+            if (bytes[^2] != 255 || bytes[^1] != 217) throw new ArtworkException("ARTWORK_FORMAT");
             int position = 2;
             while (position < bytes.Length)
             {
@@ -81,6 +88,28 @@ internal static class ArtworkRaster
                 }
                 position += size;
             }
+        }
+        throw new ArtworkException("ARTWORK_FORMAT");
+    }
+
+    private static void RequireCompletePng(ReadOnlySpan<byte> bytes)
+    {
+        // WIC may return usable pixels after IDAT even when the PNG tail is missing.
+        // Walk declared chunks, not a byte-pattern search that could match compressed data.
+        int position = 8;
+        bool imageData = false;
+        while (position <= bytes.Length - 12)
+        {
+            uint length = BinaryPrimitives.ReadUInt32BigEndian(bytes[position..]);
+            if (length > bytes.Length - position - 12L) break;
+            var type = bytes.Slice(position + 4, 4);
+            position += checked((int)length + 12);
+            if (type.SequenceEqual("IEND"u8))
+            {
+                if (length == 0 && imageData && position == bytes.Length) return;
+                break;
+            }
+            if (type.SequenceEqual("IDAT"u8)) imageData = true;
         }
         throw new ArtworkException("ARTWORK_FORMAT");
     }

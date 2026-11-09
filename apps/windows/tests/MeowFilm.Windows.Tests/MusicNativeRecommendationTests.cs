@@ -122,6 +122,9 @@ public static class MusicNativeRecommendationTests
     }
     private sealed class Runtime : IRuntimeSession
     {
+        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Image requests are not part of this fixture.");
+
         internal int Calls, Disposals;
         public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
             ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)

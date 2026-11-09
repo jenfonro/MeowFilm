@@ -152,6 +152,27 @@ class SourceScopeTests(unittest.TestCase):
         self.write("native/MeowKit/Sources/MeowUI/Fixture.swift", "import FilmRuleProgram\n")
         self.assertTrue(any("Undeclared imports for MeowUI" in error for error in scope.check(self.root)))
 
+    def test_local_search_resource_requires_its_exact_package_and_dependency(self):
+        path = self.root / "native/MeowKit/Package.swift"
+        original = path.read_text()
+        declared = original.replace('.target(name: "MeowMusicPlatform", dependencies: [])',
+            '.target(name: "MeowMusicPlatform", dependencies: [.product(name: "FilmSearchProgram", package: "film-search")])')
+        path.write_text('.package(path: "../../packages/film-search")\n' + declared)
+        self.write("native/MeowKit/Sources/MeowMusicPlatform/Fixture.swift", "import FilmSearchProgram\n")
+        self.assertEqual(scope.check(self.root), [])
+        path.write_text('.package(path: "../../packages/other-search")\n' + declared)
+        self.assertTrue(any("Unapproved" in error for error in scope.check(self.root)))
+        path.write_text('.package(path: "../../packages/film-search")\n' + original)
+        self.assertTrue(any("Undeclared imports for MeowMusicPlatform" in error for error in scope.check(self.root)))
+
+    def test_shared_ui_cannot_own_film_search_rules(self):
+        path = self.root / "native/MeowKit/Package.swift"
+        declared = path.read_text().replace('.target(name: "MeowUI", dependencies: [])',
+            '.target(name: "MeowUI", dependencies: [.product(name: "FilmSearchProgram", package: "film-search")])')
+        path.write_text('.package(path: "../../packages/film-search")\n' + declared)
+        self.write("native/MeowKit/Sources/MeowUI/Fixture.swift", "import FilmSearchProgram\n")
+        self.assertIn("Shared target depends on business: MeowUI", scope.check(self.root))
+
 
 
 if __name__ == "__main__":

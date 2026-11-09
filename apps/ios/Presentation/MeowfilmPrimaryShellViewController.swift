@@ -126,6 +126,9 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
             }
         case .film:
             header.setTitleView((content as? FilmHomeViewController)?.sourceSwitcherView ?? UIView())
+            header.setTrailing([Self.iconButton(.search, label: "搜索", identifier: "search.open") { [weak self] in
+                self?.openSearch()
+            }])
         case .library:
             let title = PageHeaderTextButton(title: page.title) {}
             title.contentHorizontalAlignment = .leading

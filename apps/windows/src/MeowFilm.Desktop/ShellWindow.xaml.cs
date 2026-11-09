@@ -267,12 +267,41 @@ public sealed partial class ShellWindow : Window
         ApplyHeaderPresentation(current);
         ApplyGlobalSurfacePresentation(current);
         _state.CanGoBack = _queueOpen || _playerDetailOpen || _currentPage is not null ||
-            current.IsSettingsOpen || _history.Count > 1;
+            current.IsSettingsOpen || _returnPage is not null || _history.Count > 1;
         ApplySearchPresentation();
         foreach (var page in _pages) page.Host.Visibility = ReferenceEquals(page, _currentPage) ? Visibility.Visible : Visibility.Collapsed;
         AutomationProperties.SetName(SettingsButton, "设置");
         AutomationProperties.SetName(NavigationList, "内容导航");
         RestoreNavigationSelection();
+        UpdateNavigationRetention();
+    }
+
+    private void UpdateNavigationRetention()
+    {
+        foreach (var session in _sessions)
+        {
+            if (session.Module is not IDesktopNavigationRetention owner) continue;
+            var locations = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var entry in _history)
+                if (ReferenceEquals(entry.Session, session)) Retain(entry.Destination);
+            if (_currentPage is null && ReferenceEquals(_current, session)) Retain(session.Current);
+            if (ReferenceEquals(_settingsReturn, session)) Retain(session.Current);
+            RetainOrigin(_currentPage);
+            RetainOrigin(_returnPage);
+            foreach (var request in _requests)
+                if (request.Plan.IsBack && ReferenceEquals(request.Plan.Session, session)) Retain(request.Plan.Destination);
+            if (_retryPlan is { IsBack: true } retry && ReferenceEquals(retry.Session, session)) Retain(retry.Destination);
+            owner.RetainNavigationLocations(locations);
+
+            void Retain(Destination? destination)
+            {
+                if (destination?.Location is { } location) locations.Add(location);
+            }
+            void RetainOrigin(PageSession? page)
+            {
+                if (page?.Origin is { } origin && ReferenceEquals(origin.Session, session)) Retain(origin.Destination);
+            }
+        }
     }
 
     private void ApplyPlayerPresentation(ModuleSession current)
@@ -333,7 +362,7 @@ public sealed partial class ShellWindow : Window
 
     private void ApplySearchPresentation(bool force = false)
     {
-        if (_searchOwnerSession is not { } owner) return;
+        if (_currentPage?.Page is IDesktopSearchPage || _searchOwnerSession is not { } owner) return;
         var destination = _activeRequest is { } request && ReferenceEquals(request.Plan.Session, owner)
             ? request.Plan.Destination
             : owner.Current;
@@ -392,7 +421,7 @@ public sealed partial class ShellWindow : Window
         {
             // A queued request from an old presentation must not navigate after switching away/back.
             if (!MayNavigate(session, args.FromPlayer) || generation != Interlocked.Read(ref _presentationGeneration)) return;
-            RunUiAction(() => NavigateFromUiAsync(session, route));
+            RunUiAction(() => NavigateFromUiAsync(session, route, fromContent: !args.FromPlayer));
         });
     }
 
@@ -402,11 +431,15 @@ public sealed partial class ShellWindow : Window
         return fromPlayer
             ? current is { IsSettingsOpen: false } &&
                 ReferenceEquals(Volatile.Read(ref _playerSession), session)
-            : Volatile.Read(ref _currentPage) is null && ReferenceEquals(current, session);
+             : Volatile.Read(ref _currentPage) is { Page: IDesktopSearchPage search }
+                ? ReferenceEquals(search.ContentOwner, session.Module)
+                : Volatile.Read(ref _currentPage) is null && ReferenceEquals(current, session);
     }
 
-    private Task NavigateFromUiAsync(ModuleSession session, string route)
+    private Task NavigateFromUiAsync(ModuleSession session, string route, bool fromContent = false)
     {
+        if (fromContent && _currentPage?.Page is IDesktopSearchPage) _returnPage = _currentPage;
+        else if (!fromContent) _returnPage = null;
         if (_isClosing) return Task.CompletedTask;
         _settingsReturn = null;
         if (_current is { } previous) previous.IsSettingsOpen = false;
@@ -439,6 +472,7 @@ public sealed partial class ShellWindow : Window
 
     private void OnSettingsClick(object sender, RoutedEventArgs e) => RunUiAction(async () =>
     {
+        if (_currentPage?.Page is IDesktopSearchPage) await GoBackAsync();
         if (_current is not { } current) return;
         if (_playerDetailOpen) await ClosePlayerDetailAsync();
         if (current.IsSettingsOpen && _currentPage is null) { ApplyPresentation(); return; }
@@ -468,12 +502,18 @@ public sealed partial class ShellWindow : Window
         if (_queueOpen) { await CloseQueueAsync(); return; }
         if (_playerDetailOpen) { await ClosePlayerDetailAsync(); return; }
         if (_current is not { } current) return;
-        if (_currentPage is not null)
+        if (_currentPage is { } page)
         {
             LeavePublicPage();
+            if (page.Origin is { } origin)
+            {
+                page.Origin = null;
+                PreparePresentation(origin.Session);
+                await RunRequestAsync(new(origin.Session, origin.Destination, IsBack: true));
+            }
             SetStatus();
             ApplyPresentation();
-            return; // Retain capability state/history/player; no navigation replay.
+            return;
         }
         if (current.IsSettingsOpen)
         {
@@ -498,6 +538,14 @@ public sealed partial class ShellWindow : Window
             if (!restore.Initialized) await RunRequestAsync(new(restore));
             return;
         }
+        if (_returnPage is { } returnPage)
+        {
+            _returnPage = null;
+            if (returnPage.Origin is { } origin && _history.Count > origin.HistoryDepth)
+                _history.RemoveRange(origin.HistoryDepth, _history.Count - origin.HistoryDepth);
+            await ActivatePageAsync(returnPage);
+            return;
+        }
         if (_history.Count > 1)
         {
             var previous = _history[^2];
@@ -514,7 +562,9 @@ public sealed partial class ShellWindow : Window
     }
     private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
     {
-        if (!_suppressSearch && _searchSession is { } owner)
+        if (_suppressSearch) return;
+        if (_currentPage is { Page: IDesktopSearchPage } page) page.SearchDraft = SearchBox.Text;
+        else if (_searchSession is { } owner)
             owner.SearchDrafts[owner.ActiveSearchKey] = SearchBox.Text;
     }
 
@@ -530,6 +580,18 @@ public sealed partial class ShellWindow : Window
 
     private Task SearchAsync()
     {
+        if (!_isClosing && _current is { IsSettingsOpen: false } && _searchPage is { } searchPage &&
+            SearchBox.IsEnabled && !string.IsNullOrWhiteSpace(SearchBox.Text) &&
+            SearchTargetPicker.SelectedValue is string target)
+        {
+            string query = SearchBox.Text.Trim();
+            var page = _pages.Single(item => ReferenceEquals(item.Page, searchPage));
+            page.SearchDraft = SearchBox.Text;
+            if (!ReferenceEquals(_currentPage, page) && _current?.Current is { } destination)
+                page.Origin = (_current, destination, _history.Count);
+            _returnPage = null;
+            return ActivatePageAsync(page, token => searchPage.SubmitAsync(query, target, token));
+        }
         if (_current is not { } current || current.IsSettingsOpen ||
             _searchOwnerSession is not { } owner || !SearchBox.IsEnabled ||
             string.IsNullOrWhiteSpace(SearchBox.Text)) return Task.CompletedTask;
@@ -717,6 +779,7 @@ public sealed partial class ShellWindow : Window
         await ShellRequest.ObserveAsync(request.Cancellation);
         _requests.Remove(request);
         request.Dispose();
+        if (!_isClosing) UpdateNavigationRetention();
     }
 
     private bool IsCurrent(ShellRequest request) => !_isClosing && _currentPage is null && ReferenceEquals(_activeRequest, request) &&

@@ -13,7 +13,7 @@ python3 -I -B scripts/ios-node-preflight.py --simulator <UDID>
 
 预检工具先分别调用准备工具，为本机构建架构的 simulator 和 device arm64 准备输入，再构建诊断 App；准备失败即停止，不用旧载荷继续构建。准备工具复用已校验的 NodeMobile archive／解包缓存，按明确的 iOS SDK 和架构准备原生引擎及载荷。device arm64 与 simulator arm64／x86_64 是不同目标，不能把 macOS arm64 二进制或另一种 iOS variant 改清单后使用；缓存按实际目标复用，不按测试轮次新建。
 
-`common-native` 公共闭包含 music、Cat、source 三模块、规则 SDK 和锁定依赖。iOS 包装只增加受信启动及平台产物接线，完整 manifest 为 `platform: ios`、`transport: runtime.http.v1`，入口为 `app/ios/entries/aggregate.mjs`。旧帧协议、分片、asm.js／WASM 后端及“iOS 不装 source”的例外不保留。
+`common-native` 公共闭包含业务模块、规则 SDK 和锁定依赖。通用默认入口仍为 music／cat／source；iOS 实际 entry 显式增加 tmdb。完整 manifest 为 `platform: ios`、`transport: runtime.http.v1`、精确 `modules: ["music","cat","source","tmdb"]`，入口为 `app/ios/entries/aggregate.mjs`。App 在唯一 launcher 发布连接前严格校验 describe 的 music@0.8.0／music.script.v3、cat@0.2.0／cat.script.v2、source@0.2.0／source.runtime.v2、tmdb@0.1.0／tmdb.data.v1 及 TMDB 方法；不装配 douban／pan。旧帧协议、分片、asm.js／WASM 后端及“iOS 不装 source”的例外不保留。
 
 App 嵌入两个 framework：
 
@@ -36,9 +36,10 @@ NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网
 
 独立预检覆盖实际 Node／N-API／目标身份、正式 framework 加载、异步原生回调、typed bytes、明确脚本算法、线程取消及真实退出；同时保留有用途的文件、Node crypto、HTTP 和 Worker 能力检查。正式 App 宿主覆盖：
 
-- 当前三模块 describe；LX 导入、启用、取链、请求私有 KV、歌词、停用、删除。
+- 当前 App 四模块精确 describe；LX 导入、启用、取链、请求私有 KV、歌词、停用、删除。
 - Cat 实际 HTTP 五阶段请求、私有卷、客户端选项、删除标记及结果返回后管理换代。
 - source 的实际原生装载、调用、卸载，以及 Reader 的统一结果，不新增阅读 UI。
+- TMDB 真实模块经可控 HTTP 上游验证设置／实际 Film adapter 搜索与详情／受信二进制图片／实际 Artwork 消费者，精确选择见[影视搜索](film-search.md#真实-tmdb-宿主)。合成上游不是公网账号验证。
 - 同进程客户端规则引擎与运行器引擎共存；Unicode 原样 JSON 键及业务 `blob`／`token` 字段。
 - 音乐模块关闭后 Cat 仍可用，App 最终关 listener 和全部执行资源并等 Node 线程返回。
 

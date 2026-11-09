@@ -28,3 +28,10 @@ public interface IDesktopModule : INotifyPropertyChanged, IDesktopShutdownPartic
     // Only fixed, user-facing business errors; never return the raw exception message.
     string OperationErrorText(Exception error) => "暂时无法完成操作";
 }
+
+/// <summary>UI-dispatcher snapshot of opaque locations still reachable through shell navigation.
+/// The owner also retains its currently selected resource and decides how to release unreachable state.</summary>
+public interface IDesktopNavigationRetention
+{
+    void RetainNavigationLocations(IReadOnlySet<string> locations);
+}

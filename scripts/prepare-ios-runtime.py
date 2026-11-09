@@ -167,7 +167,8 @@ def payload(node, selected):
         manifest = json.loads((staging / "runtime-manifest.json").read_text(encoding="utf-8"))
         if (manifest.get("status") != "complete" or manifest.get("platform") != "ios"
                 or manifest.get("assemblyProfile") != "common-native" or manifest.get("target") != selected
-                or manifest.get("transport") != "runtime.http.v1" or manifest.get("modules") != ["music", "cat", "source"]
+                or manifest.get("transport") != "runtime.http.v1"
+                or manifest.get("modules") != ["music", "cat", "source", "tmdb"]
                 or len(manifest.get("trustedNative", [])) != 1):
             raise ValueError("The iOS runtime payload is not complete")
         if runtime.exists():

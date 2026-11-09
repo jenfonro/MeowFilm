@@ -116,6 +116,48 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                 self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), {"status": "complete"})
                 self.assertEqual([p.name for p in target.parent.iterdir()], ["Runtime"])
 
+    def test_payload_requires_the_exact_four_module_app_before_replacing_previous_payload(self):
+        expected_modules = ["music", "cat", "source", "tmdb"]
+        for modules in [
+            expected_modules, ["music", "cat", "source"], ["music", "cat", "source", "douban"],
+            ["music", "cat", "source", "pan"], ["music", "cat", "source", "unknown"],
+            expected_modules + ["douban"], expected_modules + ["pan"], expected_modules + ["tmdb"],
+            ["tmdb", "music", "cat", "source"],
+        ]:
+            with self.subTest(modules=modules), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                selected = prepare.target("iphonesimulator", "x86_64")
+                target = root / ".cache/ios-runtime/iphonesimulator-x86_64/Runtime"
+                target.mkdir(parents=True)
+                previous = {"status": "previous-complete"}
+                (target / "runtime-manifest.json").write_text(json.dumps(previous))
+                (root / "node_modules/@meowfilm/script-host").mkdir(parents=True)
+                manifest = {"status": "complete", "platform": "ios", "assemblyProfile": "common-native",
+                            "target": selected, "transport": "runtime.http.v1", "modules": modules,
+                            "trustedNative": [{"platform": "ios"}]}
+                commands = []
+                def run(command, **kwargs):
+                    commands.append(command)
+                    if "--version" in command:
+                        return prepare.subprocess.CompletedProcess(command, 0, stdout="v24.21.0\n")
+                    staging = Path(command[command.index("--output") + 1])
+                    staging.mkdir()
+                    (staging / "runtime-manifest.json").write_text(json.dumps(manifest))
+                    return prepare.subprocess.CompletedProcess(command, 0)
+                with patch.dict(prepare.payload.__globals__, ROOT=root), patch.object(prepare.subprocess, "run", run):
+                    if modules == expected_modules:
+                        self.assertEqual(prepare.payload("node", selected), target)
+                        self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), manifest)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "payload is not complete"):
+                            prepare.payload("node", selected)
+                        self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), previous)
+                self.assertEqual(commands[1][1:],
+                                 [str(root / "scripts/package-ios-runtime.mjs"), "--product", "aggregate",
+                                  "--sdk", "iphonesimulator", "--arch", "x64",
+                                  "--output", str(target.parent / "Runtime.partial")])
+                self.assertEqual([path.name for path in target.parent.iterdir()], ["Runtime"])
+
 
 if __name__ == "__main__":
     unittest.main()

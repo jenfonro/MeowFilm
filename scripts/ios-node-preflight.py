@@ -36,7 +36,7 @@ def validate_runtime(directory, selected=None):
             or manifest.get("platform") != "ios" or manifest.get("transport") != "runtime.http.v1"
             or manifest.get("assemblyProfile") != "common-native"
             or manifest.get("entry") != "app/ios/entries/aggregate.mjs"
-            or manifest.get("modules") != ["music", "cat", "source"]):
+            or manifest.get("modules") != ["music", "cat", "source", "tmdb"]):
         raise ValueError("Expected a prepared common-native iOS HTTP payload.")
     native = manifest.get("trustedNative", [])
     if (len(native) != 1 or native[0].get("platform") != "ios" or native[0].get("abi") != 1

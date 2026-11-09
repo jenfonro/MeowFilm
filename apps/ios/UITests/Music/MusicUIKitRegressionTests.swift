@@ -10,6 +10,113 @@ import MeowPlayback
 
 @MainActor
 final class MusicUIKitRegressionTests: XCTestCase {
+    func testAdditionalSearchCategoryIsLazyAndTargetSubmissionAlwaysSelectsRequestedCategory() async throws {
+        let service = MusicUIKitRegressionService()
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        await model.load()
+        await service.allowResultSearch {}
+        let additional = SearchCategoryUIKitFixture()
+        let target = SearchTargetOption(id: "film", title: "影视", placeholder: "搜索影视")
+        let root = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
+            router: MusicUIKitRegressionRouter(), additionalCategory: .init(target: target) { additional })
+        let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
+        navigation.setViewControllers([root], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
+        root.query = "保留输入"
+        let filmChoice = try XCTUnwrap(root.searchTargetButton.menu?.children.compactMap { $0 as? UIAction }.first { $0.title == "影视" })
+        invoke(filmChoice)
+        XCTAssertEqual(root.query, "保留输入")
+        XCTAssertTrue(additional.submissions.isEmpty, "Changing target does not perform a request")
+        let shown = expectation(description: "result page shown")
+        navigation.didShowPage = { page in if page !== root { shown.fulfill() } }
+        root.onSubmit?("保留输入")
+        await fulfillment(of: [shown], timeout: 3)
+        navigation.didShowPage = nil
+        let results = try XCTUnwrap(navigation.topViewController as? SearchPageViewController)
+        XCTAssertEqual(results.searchTargetID, "film")
+        XCTAssertEqual(additional.submissions, ["保留输入"])
+        let beforeMusic = await service.resultReads()
+        XCTAssertTrue(beforeMusic.isEmpty, "Film submission must not start music result requests")
+        let musicChoice = try XCTUnwrap(results.searchTargetButton.menu?.children.compactMap { $0 as? UIAction }.first { $0.title == "音乐" })
+        invoke(musicChoice)
+        results.applyTheme()
+        XCTAssertEqual(results.searchTargetID, "music", "Rendering cannot reset a manual target")
+        XCTAssertEqual(results.query, "保留输入")
+        XCTAssertEqual(additional.submissions.count, 1)
+        results.onSubmit?("保留输入")
+        let all = try resultButton(id: "music.search.results.tab.0", in: results.view)
+        XCTAssertTrue(all.accessibilityTraits.contains(.selected))
+        let song = try resultButton(id: "music.search.results.tab.1", in: results.view)
+        song.sendActions(for: .touchUpInside)
+        await waitForResult { song.accessibilityTraits.contains(.selected) }
+        let playlist = try resultButton(id: "music.search.results.tab.2", in: results.view)
+        playlist.sendActions(for: .touchUpInside)
+        await waitForResult { playlist.accessibilityTraits.contains(.selected) }
+        results.onSubmit?("保留输入")
+        XCTAssertTrue(all.accessibilityTraits.contains(.selected), "Music same-word submission returns to 综合 from 单曲／歌单")
+        XCTAssertEqual(additional.submissions.count, 1, "综合／单曲／歌单 never trigger the additional domain")
+        let film = try resultButton(id: "music.search.results.tab.3", in: results.view)
+        film.sendActions(for: .touchUpInside)
+        await waitForResult { film.accessibilityTraits.contains(.selected) }
+        XCTAssertEqual(results.searchTargetID, "film")
+        XCTAssertEqual(additional.submissions, ["保留输入"], "Category return reuses the same query")
+        await model.close()
+    }
+
+    func testNewMusicSubmissionDuringPendingAdditionalSwipeDoesNotStartSupersededDomain() async throws {
+        let service = MusicUIKitRegressionService()
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        await model.load()
+        await service.allowResultSearch {}
+        let content = SearchCategoryUIKitFixture()
+        let page = MusicSearchResultsViewController(model: model, query: "旧词", appearance: MusicAppearancePreferencesStore(),
+            router: nil, history: SearchHistoryStore(), additionalCategory: .init(target: .init(id: "film", title: "影视", placeholder: "搜索影视")) { content })
+        let navigation = PageNavigationController(themeProvider: page.themeProvider)
+        navigation.setViewControllers([page], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
+        let pager = try XCTUnwrap(page.children.compactMap { $0 as? UIPageViewController }.first)
+        let previous = try XCTUnwrap(pager.viewControllers)
+        page.pageViewController(pager, willTransitionTo: [content])
+        page.query = "新音乐词"
+        page.searchTargetID = "music"
+        page.onSubmit?("新音乐词")
+        pager.setViewControllers([content], direction: .forward, animated: false)
+        page.pageViewController(pager, didFinishAnimating: true, previousViewControllers: previous, transitionCompleted: true)
+        let all = try resultButton(id: "music.search.results.tab.0", in: page.view)
+        await waitForResult { all.accessibilityTraits.contains(.selected) }
+        XCTAssertEqual(page.searchTargetID, "music")
+        XCTAssertEqual(page.query, "新音乐词")
+        XCTAssertTrue(content.submissions.isEmpty, "A superseded film transition must not submit the new music word")
+        await model.close()
+    }
+
+    func testGlobalSearchAddsAllFourCategoriesWhenMusicPlaylistSearchIsDisabled() async throws {
+        let key = MusicSearchPreferencesStore.preferencesKey
+        let previous = UserDefaults.standard.object(forKey: key)
+        UserDefaults.standard.set(try JSONEncoder().encode(MusicSearchPreferences(searchPlaylists: false)), forKey: key)
+        defer { UserDefaults.standard.set(previous, forKey: key) }
+        let service = MusicUIKitRegressionService()
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        await model.load()
+        let content = SearchCategoryUIKitFixture()
+        let page = MusicSearchResultsViewController(model: model, query: "影视词", appearance: MusicAppearancePreferencesStore(),
+            router: nil, history: SearchHistoryStore(), additionalCategory: .init(target: .init(id: "film", title: "影视", placeholder: "搜索影视")) { content },
+            initialAdditional: true)
+        let navigation = PageNavigationController(themeProvider: page.themeProvider)
+        navigation.setViewControllers([page], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
+        for (index, title) in ["综合", "单曲", "歌单", "影视"].enumerated() {
+            XCTAssertEqual(try resultButton(id: "music.search.results.tab.\(index)", in: page.view).title(for: .normal), title)
+        }
+        XCTAssertEqual(page.searchTargetID, "film")
+        PageViewController.invalidatePages(in: page)
+        XCTAssertEqual(content.closes, 1)
+        await model.close()
+    }
+
     func testHomeAndCloudLikesExposeDirectHeartbeatActions() async throws {
         let service = MusicUIKitRegressionService(browse: .init(sections: [
             .init(id: "heartbeat", title: "", items: [
@@ -4765,5 +4872,18 @@ private actor MusicUIKitSearchGate {
         if !released { await withCheckedContinuation { waiter = $0 } }
     }
     func release() { released = true; waiter?.resume(); waiter = nil }
+}
+#endif
+
+#if os(iOS)
+@MainActor
+private final class SearchCategoryUIKitFixture: UIViewController, SearchResultContent {
+    var controller: UIViewController { self }
+    var submissions: [String] = []
+    var closes = 0
+    func submit(_ query: String) { if submissions.last != query { submissions.append(query) } }
+    func applyTheme(_ theme: PageTheme) {}
+    func cancel() {}
+    func close() { closes += 1 }
 }
 #endif

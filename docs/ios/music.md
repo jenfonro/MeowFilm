@@ -32,7 +32,7 @@
   管理地址、类型、平台声明和检测由公共模块持有；iOS 管理与选源见[音源管理与选源](music-sources.md)。
 - 自动与手动调用继续核对 installation、generation、site 和录音；HTTP 音频升级 HTTPS，不新增 ATS 豁免，实测音质不由请求推断。
 - 原生歌词优先；仅 `wy`、`kw`、`mg` 的原生结果为空时，依安装顺序尝试同平台、已启用并声明 `lyric` 的脚本。`tx`／`kg` 保持原生歌词；原生错误不视为空结果。LX `search`／`musicSearch` 无统一结果契约，本端不接入原生搜索。
-- App 内嵌 Node Mobile 18.20.4、`MeowScriptHost.framework` 与三模块公共运行器，由 App 的 `RuntimeSession` 持有；音乐和猫源借用同一个 `RuntimeHTTPClient`，每个进程只启动一次 Node。LX／source 共享原生绑定并逐实例使用独立 QuickJS Runtime／线程，Cat 使用独立 Node Worker，不嵌套 WASM。冷启动恢复猫源及音乐目录，音乐首次 invoke／resolve／check 才惰性加载；普通来源读取不调用 enable，也不重建 failed 实例。候选与调用保留内容身份及真实执行代次检查，不把 idle 伪装成 ready。
+- App 内嵌 Node Mobile 18.20.4、`MeowScriptHost.framework` 与公共运行器，实际 App entry 显式装配 music@0.8.0／music.script.v3、cat@0.2.0／cat.script.v2、source@0.2.0／source.runtime.v2、tmdb@0.1.0／tmdb.data.v1 四模块；通用默认仍为前三模块，不装配 douban／pan。App 的 `RuntimeSession` 唯一持有运行器，音乐、猫源与 [TMDB 搜索／设置／图片](film-search.md)借用同一个 `RuntimeHTTPClient`，每个进程只启动一次 Node。LX／source 共享原生绑定并逐实例使用独立 QuickJS Runtime／线程，Cat 使用独立 Node Worker，不嵌套 WASM。冷启动恢复猫源及音乐目录，音乐首次 invoke／resolve／check 才惰性加载；普通来源读取不调用 enable，也不重建 failed 实例。候选与调用保留内容身份及真实执行代次检查，不把 idle 伪装成 ready。
 - 启动失败不阻断原生官方业务；关闭／不可恢复退出后本次运行内脚本不可用，不自动重启。音乐关闭取消并排空自身调用，通过 `music.script.close` 的真实终态确认收口，不关闭共享 HTTP 客户端。App 最后关闭运行器 listener、工作线程及启动通道，并等待 `node_start` 返回；HTTP 成功回执本身不代表 Node 已退出。风险及独立诊断工具见[运行底座预检](runtime-preflight.md)。
 
 ## 播放与音质
@@ -124,7 +124,8 @@ App 通过 `MeowfilmResources` 与 `MeowfilmAssembly` 注入受保护客户端�
 
 ## 搜索发现
 
-- 搜索框及提交行为不变；本地历史仍按完整 UTF-8 关键词身份去重置顶，最多 60 条。历史胶囊默认折叠一行，按实际宽度显示展开控件；猜你喜欢最多两列三行，只轮换已加载热词，不读取默认搜索词或个性化推荐。
+- 全局搜索复用本页和结果分页外壳；App 通过中性 `SearchResultCategory` 注入影视分类并装配音乐／影视目标，入口、路由及分类联动遵守[共同搜索契约](../common/film/search.md)。音乐提交进入在线综合，不受进入前曲库或旧结果分类影响；音乐三个分类不触发附加业务取数，普通渲染不覆盖手选目标，切目标保留输入且不自动提交。影视端侧类型及接通边界见[影视](film-search.md)，歌曲／歌单算法不依赖影视。
+- 本地历史仍按完整 UTF-8 关键词身份去重置顶，最多 60 条。历史胶囊默认折叠一行，按实际宽度显示展开控件；猜你喜欢最多两列三行，只轮换已加载热词，不读取默认搜索词或个性化推荐。
 - `MusicSearchDiscoveryProviding` 只读取所选的 `.hot`／`.charts` 目标。热搜使用 `/eapi/search/pc/chart/list` 的 `HOT_SEARCH_SONG#@#`，优先消费内联成员，仅在其为空时补读一次 `/eapi/search/pc/chart/detail`；返回最多 20 个热词、真实 `needPlay`、当前 `/eapi/toplist` 顺序的前三个榜单摘要及目标级失败。热词在去重前保留真实排名，成员行仍提交关键词搜索。
 - 词池和目录由原生平台 owner 分别以 `AsyncValueCache` 缓存纯数据 600 秒，合并同范围在途执行；快照有效期取实际成功值的最早到期时间，缓存命中不滑动续期。失败不缓存为成功空结果，重试仅读取失败目标；账号／保护代次变化清除对应成功值与在途资格。
 - 每张音乐卡的成员区域与横纵滚动及安全区后的真实可用视口相交，才准入缺少的成员读取。只有标题露出不读成员；页面至多串行执行一个成员页读取。布局、主题和本地操作不刷新成功内容，失败也不因布局或返回自动重试。

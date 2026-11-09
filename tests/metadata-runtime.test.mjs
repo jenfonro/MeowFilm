@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http, { createServer } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -10,6 +11,7 @@ import { createAppRuntime, createTMDBDataModule, createDoubanDataModule,
   createPanRuntimeModule } from '../apps/runtime/entry.mjs';
 import { createRuntimeClient } from '../apps/runtime/client.mjs';
 import { createMetadataSettings } from '../apps/runtime/modules/metadata/settings.mjs';
+import { checkTestSummary } from '../scripts/run-tests.mjs';
 
 function area(t) {
   const root = fileURLToPath(new URL('../tmp/test-results/tmdb-douban-data/', import.meta.url));
@@ -60,6 +62,62 @@ function image(owner, path, { authenticated = true, onData } = {}) {
 const json = (response, body) => {
   response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(body));
 };
+
+test('TMDB App assembly serves requests and images when the unused Douban provider cannot parse', t => {
+  const dataRoot = area(t), entry = join(dataRoot, 'provider-isolation.test.mjs');
+  writeFileSync(entry, `
+    import test from 'node:test';
+    import assert from 'node:assert/strict';
+    import { randomBytes, randomUUID } from 'node:crypto';
+    import { registerHooks } from 'node:module';
+    import { verifyTMDBAssembly } from ${JSON.stringify(new URL('./tmdb-runtime-assembly-support.mjs', import.meta.url).href)};
+    const provider = ${JSON.stringify(new URL('../apps/runtime/modules/metadata/douban.mjs', import.meta.url).href)};
+    let providerLoads = 0;
+    registerHooks({ load(url, context, next) {
+      if (url === provider) {
+        providerLoads++;
+        throw new SyntaxError('DOUBAN_PROVIDER_UNAVAILABLE');
+      }
+      return next(url, context);
+    } });
+    test('the public four-module assembly stays independent of the unused provider', async t => {
+      const { createAppRuntime, createRuntimeClient, createMusicScriptModule, createCatScriptModule,
+        createSourceRuntimeModule, createTMDBDataModule } =
+        await import(${JSON.stringify(new URL('../apps/runtime/entry.mjs', import.meta.url).href)});
+      const dataRoot = ${JSON.stringify(dataRoot)};
+      const identity = { sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex') };
+      const app = createAppRuntime({ ...identity, modules: [
+        createMusicScriptModule({ dataRoot }), createCatScriptModule({ dataRoot: dataRoot + '/cat' }),
+        createSourceRuntimeModule(), createTMDBDataModule({ dataRoot }),
+      ] });
+      let client;
+      t.after(async () => { await client?.close(); await app.close(); });
+      await app.start();
+      client = createRuntimeClient({ ...identity, baseUrl: app.baseUrl });
+      const described = await client.describe();
+      assert.equal(described.ok, true);
+      assert.deepEqual(described.value.modules.map(module => [module.id, module.version, module.contract]), [
+        ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
+        ['source', '0.2.0', 'source.runtime.v2'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
+      ]);
+      await verifyTMDBAssembly(t, { client, baseUrl: app.baseUrl, ...identity });
+      assert.equal((await client.shutdown()).ok, true);
+      assert.equal(providerLoads, 0);
+      await assert.rejects(import(provider), { name: 'SyntaxError', message: 'DOUBAN_PROVIDER_UNAVAILABLE' });
+      assert.equal(providerLoads, 1);
+    });
+  `);
+  const env = { ...process.env, NODE_OPTIONS: '', NODE_PATH: '', FORCE_COLOR: '0' };
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', entry], {
+    encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true, env,
+  });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.signal, null, result.stderr);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(result.stderr, '');
+  assert.equal(checkTestSummary(result.stdout, 'TMDB provider isolation'), 1);
+});
 
 test('metadata and opt-in pan modules share one authenticated session without gaining source upload', async t => {
   const dataRoot = area(t);
@@ -217,6 +275,35 @@ test('invalid settings and damaged documents fail without rewriting previous per
   assert.throws(() => restarted.get(), { code: 'CORRUPT_STORAGE' });
   assert.throws(() => restarted.update({ cookie: '' }), { code: 'CORRUPT_STORAGE' });
   assert.deepEqual(readFileSync(path), corrupt);
+});
+
+test('metadata settings restart preserves valid UTF-8 and BOM but rejects malformed bytes without rewriting', t => {
+  const root = area(t);
+  for (const [id, secret] of [['tmdb', 'apiKey'], ['douban', 'cookie']]) {
+    const store = createMetadataSettings(root, id);
+    store.update({ [secret]: '合成🎬\ufffd' });
+    const path = join(root, id, 'settings.json'), original = readFileSync(path);
+    for (const bytes of [original, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), original])]) {
+      writeFileSync(path, bytes);
+      const restarted = createMetadataSettings(root, id);
+      assert.equal(restarted.read()[secret], '合成🎬\ufffd');
+      assert.equal(restarted.get()[secret + 'Configured'], true);
+      assert.deepEqual(readFileSync(path), bytes, 'Reading must not rewrite valid persisted bytes');
+    }
+    const document = JSON.parse(original);
+    document.settings[secret] = 'UTF8_MARKER';
+    const template = Buffer.from(JSON.stringify(document));
+    const start = template.indexOf('UTF8_MARKER');
+    for (const invalid of [[0x80], [0xc0, 0xaf], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80], [0xe2, 0x82]]) {
+      const bytes = Buffer.concat([template.subarray(0, start), Buffer.from(invalid),
+        template.subarray(start + 'UTF8_MARKER'.length)]);
+      writeFileSync(path, bytes);
+      const restarted = createMetadataSettings(root, id);
+      assert.throws(() => restarted.get(), { code: 'CORRUPT_STORAGE' });
+      assert.throws(() => restarted.update({ [secret]: '' }), { code: 'CORRUPT_STORAGE' });
+      assert.deepEqual(readFileSync(path), bytes, 'Invalid UTF-8 cannot be repaired or replaced silently');
+    }
+  }
 });
 
 test('both sources retain stable image identity across proxy change and runtime restart', async t => {
@@ -452,23 +539,29 @@ test('image cancellation before response headers closes the pending upstream req
   assert.equal(owner.app.state.active, 0);
 });
 
-test('module close waits for admitted metadata work and rejects new calls', async t => {
+for (const [id, factory, path] of [
+  ['tmdb', createTMDBDataModule, '/3/movie/42'],
+  ['douban', createDoubanDataModule, '/rexxar/api/v2/movie/42'],
+]) test(`${id} module close waits for admitted metadata work and rejects new calls`, async t => {
   let enter, release;
   const entered = new Promise(done => { enter = done; });
   const pending = new Promise(done => { release = done; });
-  const module = createTMDBDataModule({ dataRoot: area(t), request: async (_url, { signal }) => {
-    enter(signal); await pending;
+  const module = factory({ dataRoot: area(t), request: async (url, { signal }) => {
+    enter({ url, signal }); await pending;
     return { status: 200, headers: {}, body: Buffer.from('{"id":42}') };
   } });
-  const work = module.methods['tmdb.data.request']({ path: '/3/movie/42' });
-  const signal = await entered;
+  value(await module.methods[id + '.data.settings.update']({ apiBase: 'http://metadata.invalid/initial' }));
+  const work = module.methods[id + '.data.request']({ path });
+  value(await module.methods[id + '.data.settings.update']({ apiBase: 'http://metadata.invalid/next' }));
+  const { url, signal } = await entered;
+  assert.equal(url, 'http://metadata.invalid/initial' + path);
   let closed = false;
   const closing = module.close().then(() => { closed = true; });
   await new Promise(done => setImmediate(done));
   assert.equal(signal.aborted, true);
   assert.equal(closed, false);
-  assert.deepEqual(await module.methods['tmdb.data.settings.get']({}), {
-    ok: false, contract: 'tmdb.data.v1', code: 'CLOSED',
+  assert.deepEqual(await module.methods[id + '.data.settings.get']({}), {
+    ok: false, contract: id + '.data.v1', code: 'CLOSED',
   });
   release();
   assert.equal((await work).code, 'CANCELLED');

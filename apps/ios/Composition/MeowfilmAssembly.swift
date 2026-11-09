@@ -21,11 +21,16 @@ final class MeowfilmAssembly: ObservableObject {
     let filmLibrary = FilmLibrary()
     let filmSources: [any FilmSource] = [DoubanFilmSource()]
     private let filmHTTP = FilmHTTP()
-    lazy var filmImages = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { [filmHTTP] in
-        try await filmHTTP.readArtwork($0)
+    lazy var filmImages = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { [weak self, filmHTTP] in
+        if $0.scheme == nil {
+            guard let metadata = await self?.resources?.filmMetadata else { throw FilmSearchError.unavailable }
+            return try await metadata.readImage($0)
+        }
+        return try await filmHTTP.readArtwork($0)
     }
     @Published private(set) var music: MusicViewModel?
     @Published private(set) var filmSettings: FilmSettingsModel?
+    private(set) var filmSearch: FilmSearchService?
     @Published private(set) var startupFailed = false
     @Published private(set) var shutdownError: String?
     private(set) var resources: MeowfilmResources?
@@ -97,9 +102,15 @@ final class MeowfilmAssembly: ObservableObject {
             return
         }
         self.resources = resources
+        do { filmSearch = try FilmSearchService(sources: resources.filmSourceSettings, rules: resources.filmRules,
+                                               metadata: resources.filmMetadata) }
+        catch { failedStartup(); return }
         let publicQQ = resources.musicPublicQQ
         self.publicQQ = publicQQ
-        let filmSettings = FilmSettingsModel(rules: resources.filmRules, sources: resources.filmSourceSettings)
+        let tmdb = FilmTMDBSettingsModel(service: resources.filmMetadata) { [weak filmSearch = self.filmSearch] in
+            filmSearch?.metadataSettingsChanged()
+        }
+        let filmSettings = FilmSettingsModel(rules: resources.filmRules, sources: resources.filmSourceSettings, tmdb: tmdb)
         self.filmSettings = filmSettings
         filmSettings.start()
         guard !closed, !Task.isCancelled else { return }
@@ -244,8 +255,10 @@ final class MeowfilmAssembly: ObservableObject {
         let model = music, service = service, publicQQ = publicQQ
         let resources = resources, pendingScripts = scriptStartup, lease = lease
         let pendingStartup = startup
+        let filmSearch = filmSearch
         stopping = Task { [weak self] in
             await pendingStartup?.value
+            await filmSearch?.close()
             if let resources {
                 async let rules: Void = resources.filmRules.close()
                 async let sources: Void = resources.filmSourceSettings.close()
@@ -286,12 +299,13 @@ final class MeowfilmAssembly: ObservableObject {
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         startup?.cancel(); scriptStartup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
         let service = service, publicQQ = publicQQ, resources = resources
-        let pendingScripts = scriptStartup, stopping = stopping
+        let pendingScripts = scriptStartup, stopping = stopping, filmSearch = filmSearch
         service?.revokeAccess(generation: musicAccessGeneration)
         publicQQ?.revokeAccess(generation: musicAccessGeneration)
         resources?.musicClients.close()
         Task {
             if let stopping { await stopping.value; return }
+            await filmSearch?.close()
             if let resources {
                 await resources.filmRules.close()
                 await resources.filmSourceSettings.close()

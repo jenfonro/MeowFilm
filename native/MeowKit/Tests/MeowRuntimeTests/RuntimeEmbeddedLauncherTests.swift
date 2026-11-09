@@ -55,7 +55,7 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
     private func manifest(_ root: URL, changes: [String: Any] = [:]) throws {
         var value: [String: Any] = ["schemaVersion": 1, "status": "complete", "product": "aggregate",
             "entry": "app/ios/entries/aggregate.mjs", "platform": "ios", "transport": "runtime.http.v1",
-            "assemblyProfile": "common-native", "modules": ["music", "cat", "source"]]
+            "assemblyProfile": "common-native", "modules": ["music", "cat", "source", "tmdb"]]
         value.merge(changes) { $1 }
         try JSONSerialization.data(withJSONObject: value).write(to: root.appendingPathComponent("runtime-manifest.json"))
     }
@@ -256,12 +256,13 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
         await session.close()
     }
 
-    func testPayloadRequiresTheCompleteThreeModuleHTTPAssembly() throws {
+    func testPayloadRequiresTheCompleteFourModuleHTTPAssembly() throws {
         let root = try payload()
         XCTAssertEqual(try RuntimePayload(root: root).entry.lastPathComponent, "aggregate.mjs")
         for fields: [String: Any] in [
             ["status": "platform-pending"], ["platform": "win32"], ["transport": "other"],
             ["assemblyProfile": "other"], ["modules": ["music", "cat"]],
+            ["modules": ["music", "cat", "source"]], ["modules": ["music", "cat", "source", "tmdb", "douban"]],
             ["entry": "../outside.mjs"], ["entry": "/tmp/aggregate.mjs"],
             ["entry": "app/ios/entries/missing.mjs"], ["entry": "app/ios/entries"], ["schemaVersion": 2]
         ] {

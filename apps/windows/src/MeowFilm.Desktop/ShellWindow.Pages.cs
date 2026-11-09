@@ -10,6 +10,8 @@ public sealed partial class ShellWindow
         public IDesktopPage Page { get; } = page;
         public ContentControl Host { get; } = new() { Visibility = Visibility.Collapsed };
         public SemaphoreSlim Gate { get; } = new(1, 1);
+        public (ModuleSession Session, Destination Destination, int HistoryDepth)? Origin { get; set; }
+        public string? SearchDraft { get; set; }
     }
     private sealed class PageRequest
     {
@@ -24,7 +26,7 @@ public sealed partial class ShellWindow
         }
     }
     private readonly PageSession[] _pages;
-    private PageSession? _currentPage, _retryPage;
+    private PageSession? _currentPage, _retryPage, _returnPage;
     private PageRequest? _pageRequest;
 
     private void OnPublicPageSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -33,7 +35,7 @@ public sealed partial class ShellWindow
         if (PublicNavigationList.SelectedItem is IDesktopPage page)
             RunUiAction(() => ActivatePageAsync(_pages.Single(item => ReferenceEquals(item.Page, page))));
     }
-    private async Task ActivatePageAsync(PageSession session)
+    private async Task ActivatePageAsync(PageSession session, Func<CancellationToken, Task>? operation = null)
     {
         if (_isClosing) return;
         CancelActive();
@@ -46,6 +48,15 @@ public sealed partial class ShellWindow
         Volatile.Write(ref _currentPage, session);
         var generation = Interlocked.Increment(ref _presentationGeneration);
         ApplyPresentation(); // Hide the capability surface even if a supplied page getter fails.
+        if (session.Page is IDesktopSearchPage searchPage)
+        {
+            _suppressSearch = true;
+            try { SearchBox.Text = session.SearchDraft ?? searchPage.Query; }
+            finally { _suppressSearch = false; }
+            var owner = _sessions.Single(item => ReferenceEquals(item.Module, searchPage.ContentOwner));
+            // One retained visual can be projected into a public page, then returned on exit.
+            owner.MainHost.Content = null;
+        }
         if (!ContentDeck.Children.Contains(session.Host))
         {
             var view = session.Page.View ?? throw new InvalidOperationException();
@@ -85,7 +96,26 @@ public sealed partial class ShellWindow
         async Task ExecuteAsync()
         {
             await session.Gate.WaitAsync(token);
-            try { token.ThrowIfCancellationRequested(); await session.Page.ActivateAsync(token); }
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                if (session.Page is IDesktopSearchPage search)
+                {
+                    var owner = _sessions.Single(item => ReferenceEquals(item.Module, search.ContentOwner));
+                    await owner.Gate.WaitAsync(token);
+                    try
+                    {
+                        if (!owner.Initialized)
+                        {
+                            await owner.Module.InitializeAsync(token);
+                            owner.Initialized = true;
+                        }
+                    }
+                    finally { owner.Gate.Release(); }
+                }
+                if (operation is not null) await operation(token);
+                else await session.Page.ActivateAsync(token);
+            }
             finally { session.Gate.Release(); }
         }
         async Task ReapAsync()
@@ -107,6 +137,7 @@ public sealed partial class ShellWindow
     private void LeavePublicPage()
     {
         if (_currentPage is not { } page) return;
+        if (page.Page is IDesktopSearchPage) page.SearchDraft = SearchBox.Text;
         RetireHeaderPresentation();
         CancelPageActivation();
         Volatile.Write(ref _currentPage, null);
@@ -119,6 +150,7 @@ public sealed partial class ShellWindow
 
     private void UnmountPage(PageSession session)
     {
+        session.Page.Deactivate();
         session.Host.Visibility = Visibility.Collapsed;
         session.Host.Content = null;
         ContentDeck.Children.Remove(session.Host);

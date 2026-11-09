@@ -121,14 +121,42 @@ public final class ArtworkImages {
     }
 
     nonisolated private static func decode(_ data: Data) -> UIImage? {
+        guard hasCompletePNGContainer(data) else { return nil }
+        // ImageIO can produce a thumbnail from a partial container. Check both
+        // statuses after decoding, before the image can reach the shared cache.
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceThumbnailMaxPixelSize: 1_024,
                 kCGImageSourceCreateThumbnailWithTransform: true,
                 kCGImageSourceShouldCacheImmediately: true,
-              ] as CFDictionary) else { return nil }
+              ] as CFDictionary),
+              CGImageSourceGetStatus(source) == .statusComplete,
+              CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete else { return nil }
         return UIImage(cgImage: image)
+    }
+
+    nonisolated private static func hasCompletePNGContainer(_ data: Data) -> Bool {
+        // ImageIO may accept PNG pixels without IEND. Walk declared chunks,
+        // not a byte pattern that could match compressed data. Other formats
+        // retain the ImageIO checks above.
+        data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            guard bytes.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) else { return true }
+            var position = 8
+            var imageData = false
+            while position <= bytes.count - 12 {
+                let length = Int(bytes[position]) << 24 | Int(bytes[position + 1]) << 16 |
+                    Int(bytes[position + 2]) << 8 | Int(bytes[position + 3])
+                guard length <= bytes.count - position - 12 else { return false }
+                let type = bytes[(position + 4)..<(position + 8)]
+                position += length + 12
+                if type.elementsEqual([0x49, 0x45, 0x4e, 0x44]) {
+                    return length == 0 && imageData && position == bytes.count
+                }
+                if type.elementsEqual([0x49, 0x44, 0x41, 0x54]) { imageData = true }
+            }
+            return false
+        }
     }
 }
 #endif

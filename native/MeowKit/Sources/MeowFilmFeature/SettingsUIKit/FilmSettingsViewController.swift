@@ -23,7 +23,8 @@ public final class FilmSettingsViewController: PageViewController {
             switch destination {
             case 0: page = FilmRulesViewController(owner: model.rules, themeProvider: themeProvider)
             case 1: page = FilmCatSourcesViewController(service: model.sources, themeProvider: themeProvider)
-            default: page = FilmVideoSourcesViewController(service: model.sources, themeProvider: themeProvider)
+            case 2: page = FilmVideoSourcesViewController(service: model.sources, themeProvider: themeProvider)
+            default: page = FilmTMDBSettingsViewController(model: model.tmdb, themeProvider: themeProvider)
             }
             navigationController?.pushViewController(page, animated: true)
         }
@@ -58,7 +59,7 @@ private final class FilmSettingsMenuController: FilmSettingsListController {
     override var usesPageHeader: Bool { false }
     override func viewDidLoad() {
         super.viewDidLoad()
-        sections = [.init(title: "", rows: zip(["魔法规则", "猫源", "视频源"], ["rules", "cats", "videos"])
+        sections = [.init(title: "", rows: zip(["魔法规则", "猫源", "视频源", "TMDB"], ["rules", "cats", "videos", "tmdb"])
             .enumerated().map { index, pair in
                 .init(title: pair.0, id: "film.settings.\(pair.1)", disclosure: true,
                       action: { [weak self] in self?.open?(index) })

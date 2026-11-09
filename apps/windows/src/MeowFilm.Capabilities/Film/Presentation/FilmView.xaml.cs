@@ -22,7 +22,7 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
     }
 
     public DesktopHeaderContribution Header =>
-        new(module.Heading, SearchVisible: false, SearchEnabled: false);
+        new(module.Heading) { SearchTargetId = "film" };
 
     public event EventHandler? HeaderChanged;
 

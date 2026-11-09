@@ -66,7 +66,7 @@ public static class RuntimeHttpClientTests
                 await exchange.ReplyAsync(Success(Description(), RuntimeHttpProtocol.Name));
             }
             var declared = RuntimeHttpProtocol.ValidateDescription((await describe).GetProperty("value"), "aggregate", Modules);
-            BridgeTests.Equal(32, declared.Count);
+            BridgeTests.Equal(35, declared.Count);
             var close = client.ShutdownAsync();
             await using (var exchange = await server.AcceptAsync())
             {
@@ -87,6 +87,10 @@ public static class RuntimeHttpClientTests
             ("missing method", root => root["modules"]![0]!["methods"]!.AsArray().RemoveAt(0)),
             ("duplicate method", root => root["modules"]![0]!["methods"]!.AsArray().Add("music.script.invoke")),
             ("unknown method", root => root["modules"]![0]!["methods"]!.AsArray().Add("music.script.unknown")),
+            ("missing TMDB module", root => root["modules"]!.AsArray().RemoveAt(3)),
+            ("TMDB old version", root => root["modules"]![3]!["version"] = "0.0.1"),
+            ("TMDB wrong contract", root => root["modules"]![3]!["contract"] = "douban.data.v1"),
+            ("TMDB missing operation", root => root["modules"]![3]!["methods"]!.AsArray().RemoveAt(2)),
         })
             yield return new("runtime-http: description rejects " + name, () =>
             {
@@ -261,7 +265,7 @@ public static class RuntimeHttpClientTests
         });
     }
 
-    private static RuntimeModule[] Modules => [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0")];
+    private static RuntimeModule[] Modules => [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0"), new("tmdb", "0.1.0")];
     internal static object Description() => new
     {
         protocol = "runtime.http.v1", product = "aggregate", modules = new[]
@@ -282,6 +286,10 @@ public static class RuntimeHttpClientTests
             new { id = "source", version = "0.2.0", contract = "source.runtime.v2", methods = new[]
             {
                 "source.runtime.load", "source.runtime.unload", "source.runtime.invoke", "source.runtime.status", "source.runtime.close"
+            } },
+            new { id = "tmdb", version = "0.1.0", contract = "tmdb.data.v1", methods = new[]
+            {
+                "tmdb.data.settings.get", "tmdb.data.settings.update", "tmdb.data.request"
             } }
         }
     };
@@ -295,7 +303,7 @@ public static class RuntimeHttpClientTests
         BridgeTests.Equal(false, exchange.Path.Contains(Key, StringComparison.Ordinal));
     }
 
-    private sealed class Server : IAsyncDisposable
+    internal sealed class Server : IAsyncDisposable
     {
         private readonly TcpListener listener = new(IPAddress.Loopback, 0);
         public string BaseUrl { get; }
@@ -311,7 +319,7 @@ public static class RuntimeHttpClientTests
         public ValueTask DisposeAsync() { listener.Stop(); return ValueTask.CompletedTask; }
     }
 
-    private sealed class Exchange(TcpClient socket, string method, string path,
+    internal sealed class Exchange(TcpClient socket, string method, string path,
         Dictionary<string, string> headers, byte[] body) : IAsyncDisposable
     {
         public string Method => method;
@@ -345,13 +353,32 @@ public static class RuntimeHttpClientTests
         public async Task ReplyAsync(byte[] bytes, int status = 200, string? requestId = null,
             string contentType = "application/json", string extraHeaders = "", int? declaredBytes = null)
         {
-            var id = requestId ?? Headers["X-Meow-Request-Id"];
+            var id = requestId ?? Headers.GetValueOrDefault("X-Meow-Request-Id", "");
             if (requestId == "duplicate") id = Headers["X-Meow-Request-Id"] + "\r\nX-Meow-Request-Id: " + Headers["X-Meow-Request-Id"];
             var header = Encoding.ASCII.GetBytes($"HTTP/1.1 {status} Fixture\r\nContent-Type: {contentType}\r\n" +
                 $"X-Meow-Request-Id: {id}\r\nContent-Length: {declaredBytes ?? bytes.Length}\r\nConnection: close\r\n{extraHeaders}\r\n");
             await socket.GetStream().WriteAsync(header);
             await socket.GetStream().WriteAsync(bytes);
             await socket.GetStream().FlushAsync();
+            socket.Dispose();
+        }
+        internal async Task BeginImageAsync(int length)
+        {
+            var header = Encoding.ASCII.GetBytes($"HTTP/1.1 200 Fixture\r\nContent-Type: image/png\r\n" +
+                $"X-Meow-Request-Id: {Headers.GetValueOrDefault("X-Meow-Request-Id", "")}\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n");
+            await socket.GetStream().WriteAsync(header);
+            await socket.GetStream().FlushAsync();
+        }
+        internal async Task ReplyChunkedAsync(byte[] bytes)
+        {
+            var header = Encoding.ASCII.GetBytes($"HTTP/1.1 200 Fixture\r\nContent-Type: image/png\r\n" +
+                $"X-Meow-Request-Id: {Headers.GetValueOrDefault("X-Meow-Request-Id", "")}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+            var stream = socket.GetStream();
+            await stream.WriteAsync(header);
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(bytes.Length.ToString("X", CultureInfo.InvariantCulture) + "\r\n"));
+            await stream.WriteAsync(bytes);
+            await stream.WriteAsync("\r\n0\r\n\r\n"u8.ToArray());
+            await stream.FlushAsync();
             socket.Dispose();
         }
         public async Task AssertDisconnectedAsync()

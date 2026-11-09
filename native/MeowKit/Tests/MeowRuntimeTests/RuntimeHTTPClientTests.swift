@@ -35,15 +35,19 @@ private final class RuntimeTestURLProtocol: URLProtocol, @unchecked Sendable {
         catch { client?.urlProtocol(self, didFailWithError: error) }
     }
     func respond(data: Data, status: Int = 200, headers: [String: String] = [:]) throws {
+        try startResponse(status: status, headers: headers)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    func startResponse(status: Int = 200, headers: [String: String] = [:]) throws {
         var fields = ["Content-Type": "application/json",
                       "X-Meow-Request-Id": request.value(forHTTPHeaderField: "X-Meow-Request-Id")!]
         fields.merge(headers) { $1 }
         let response = try XCTUnwrap(HTTPURLResponse(url: request.url!, statusCode: status,
                                                     httpVersion: "HTTP/1.1", headerFields: fields))
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: data)
-        client?.urlProtocolDidFinishLoading(self)
     }
+    func send(_ data: Data) { client?.urlProtocol(self, didLoad: data) }
     func fail(_ code: Int) { client?.urlProtocol(self, didFailWithError: NSError(domain: NSURLErrorDomain, code: code)) }
 
     func body() -> Data {
@@ -291,6 +295,137 @@ final class RuntimeHTTPClientTests: XCTestCase {
         await client.close()
     }
 
+    func testTMDBImagesUseRelativeIdentityAndCurrentSessionHeaders() async throws {
+        let client = try client(), bytes = Data([137, 80, 78, 71])
+        RuntimeTestURLProtocol.fixture.set { [sessionID, key] request, transport in
+            XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:43210/v1/tmdb/images/w500/poster.jpg")
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(key)")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Meow-Session"), sessionID)
+            XCTAssertNotNil(UUID(uuidString: request.value(forHTTPHeaderField: "X-Meow-Request-Id") ?? ""))
+            XCTAssertNil(request.url?.query); XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+            try! transport.respond(data: bytes, headers: ["Content-Type": "image/png", "Content-Length": "4"])
+        }
+        let relative = try XCTUnwrap(RuntimeHTTPClient.tmdbImageURL("/v1/tmdb/images/w500/poster.jpg"))
+        XCTAssertNil(relative.scheme); XCTAssertNil(relative.baseURL)
+        let actual = try await client.readTMDBImage(relative)
+        XCTAssertEqual(actual, bytes)
+        for path in ["https://example.invalid/v1/tmdb/images/w500/a.jpg", "//example.invalid/a.jpg",
+                     "/v1/tmdb/images/w500/../a.jpg", "/v1/tmdb/images/w500/%2e%2e/a.jpg",
+                     "/v1/tmdb/images/w500/a.jpg?key=x", "/v1/douban/images/a.jpg"] {
+            XCTAssertNil(RuntimeHTTPClient.tmdbImageURL(path))
+            do { _ = try await client.readTMDBImage(try XCTUnwrap(URL(string: path))); XCTFail(path) }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidRequest) }
+        }
+        await client.close()
+    }
+
+    func testTMDBImageIdentitySurvivesRuntimePortAndSessionChange() async throws {
+        let relative = try XCTUnwrap(RuntimeHTTPClient.tmdbImageURL("/v1/tmdb/images/w500/poster.jpg"))
+        var requestIDs = Set<String>()
+        for (port, id, key) in [(43210, sessionID, key),
+                                (43212, "22222222-2222-4222-8222-222222222222", String(repeating: "b", count: 64))] {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [RuntimeTestURLProtocol.self]
+            let client = try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!,
+                sessionID: id, requestKey: key, configuration: configuration)
+            let received = RuntimeImageRequestIdentity()
+            RuntimeTestURLProtocol.fixture.set { request, transport in
+                XCTAssertEqual(request.url?.port, port)
+                XCTAssertEqual(request.url?.path, relative.absoluteString)
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(key)")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "X-Meow-Session"), id)
+                received.set(request.value(forHTTPHeaderField: "X-Meow-Request-Id") ?? "")
+                try! transport.respond(data: Data([137, 80]), headers: ["Content-Type": "image/png"])
+            }
+            _ = try await client.readTMDBImage(relative)
+            XCTAssertTrue(requestIDs.insert(received.value).inserted)
+            await client.close()
+        }
+        XCTAssertEqual(relative.absoluteString, "/v1/tmdb/images/w500/poster.jpg")
+    }
+
+    func testTMDBImageErrorsWrongIdentityTruncationAndBudgetNeverReturnBytes() async throws {
+        let client = try client()
+        let relative = try XCTUnwrap(RuntimeHTTPClient.tmdbImageURL("/v1/tmdb/images/w500/a.jpg"))
+        let failure: RuntimeValue = .object(["ok": .bool(false), "contract": .string("tmdb.data.v1"), "code": .string("UPSTREAM_HTTP")])
+        for mode in ["remote", "identity", "json", "redirect", "truncated", "length", "stream"] {
+            RuntimeTestURLProtocol.fixture.set { _, transport in
+                switch mode {
+                case "remote": transport.respond(failure, status: 502)
+                case "identity":
+                    try! transport.respond(data: Data([1]), headers: ["Content-Type": "image/png", "X-Meow-Request-Id": UUID().uuidString])
+                case "json": transport.respond(.object(["error": .string("not an image")]))
+                case "redirect":
+                    try! transport.respond(data: Data(), status: 302,
+                        headers: ["Location": "https://external.invalid/poster.png"])
+                case "truncated":
+                    try! transport.startResponse(headers: ["Content-Type": "image/png", "Content-Length": "100"])
+                    transport.send(Data([137, 80])); transport.fail(NSURLErrorNetworkConnectionLost)
+                case "length":
+                    // Complete the custom URLProtocol response so Foundation delivers
+                    // its headers. One byte cannot trigger the body budget; the declared
+                    // length must still be rejected before truncated-image validation.
+                    try! transport.respond(data: Data([0]),
+                        headers: ["Content-Type": "image/png", "Content-Length": "4194305"])
+                default:
+                    try! transport.startResponse(headers: ["Content-Type": "image/png"])
+                    transport.send(Data(repeating: 0, count: 4 * 1_024 * 1_024 + 1))
+                }
+            }
+            do { _ = try await client.readTMDBImage(relative); XCTFail(mode) }
+            catch {
+                if mode == "remote" { XCTAssertEqual(error as? RuntimeHTTPError, .remote("UPSTREAM_HTTP")) }
+                else if mode == "length" || mode == "stream" {
+                    XCTAssertEqual((error as? URLError)?.code, .dataLengthExceedsMaximum, mode)
+                } else { XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
+            }
+        }
+        await client.close()
+    }
+
+    func testTMDBImageCancellationAndOwnerCloseStopActualURLSessionTasks() async throws {
+        for ownerClose in [false, true] {
+            let client = try client()
+            let entered = expectation(description: "image request accepted"), stopped = expectation(description: "physical image read stopped")
+            RuntimeTestURLProtocol.fixture.set { _, transport in
+                transport.onStop { stopped.fulfill() }
+                try! transport.startResponse(headers: ["Content-Type": "image/png"])
+                transport.send(Data([137, 80])); entered.fulfill()
+            }
+            let read = Task { try await client.readTMDBImage(URL(string: "/v1/tmdb/images/w500/a.jpg")!) }
+            await fulfillment(of: [entered], timeout: 3)
+            if ownerClose { await client.close() } else { read.cancel() }
+            do { _ = try await read.value; XCTFail("Pending bytes cannot succeed") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, ownerClose ? .closed : .cancelled) }
+            await fulfillment(of: [stopped], timeout: 3)
+            await client.close()
+        }
+    }
+
+    func testAppDescribeRequiresExactFourModuleVersionsContractsAndTMDBMethods() async throws {
+        let client = try client()
+        let modules: [RuntimeValue] = [
+            .object(["id": .string("music"), "version": .string("0.8.0"), "contract": .string("music.script.v3")]),
+            .object(["id": .string("cat"), "version": .string("0.2.0"), "contract": .string("cat.script.v2")]),
+            .object(["id": .string("source"), "version": .string("0.2.0"), "contract": .string("source.runtime.v2")]),
+            .object(["id": .string("tmdb"), "version": .string("0.1.0"), "contract": .string("tmdb.data.v1"),
+                "methods": .array(["request", "settings.get", "settings.update"].map { .string("tmdb.data." + $0) })])
+        ]
+        let invalidTMDB: RuntimeValue = .object(["id": .string("tmdb"), "version": .string("0.2.0"), "contract": .string("tmdb.data.v1")])
+        for (index, supplied) in [modules, Array(modules.prefix(3)), modules + [modules[3]],
+                                  Array(modules.prefix(3)) + [invalidTMDB], Array(modules.prefix(3)) + [modules[0]]].enumerated() {
+            RuntimeTestURLProtocol.fixture.set { _, transport in
+                transport.respond(.object(["ok": .bool(true), "contract": .string("runtime.http.v1"), "value": .object([
+                    "protocol": .string("runtime.http.v1"), "product": .string("aggregate"), "modules": .array(supplied)
+                ])]))
+            }
+            do { try await client.validateAppModules(); XCTAssertEqual(index, 0) }
+            catch { XCTAssertNotEqual(index, 0); XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
+        }
+        await client.close()
+    }
+
     func testRejectsUntrustedEndpointsAndCredentials() throws {
         for address in ["https://127.0.0.1:1", "http://localhost:1", "http://127.0.0.1", "http://127.0.0.1:1/path",
                         "http://user@127.0.0.1:1", "http://127.0.0.1:1?key=value", "http://127.0.0.1:1#fragment"] {
@@ -299,4 +434,11 @@ final class RuntimeHTTPClientTests: XCTestCase {
         XCTAssertThrowsError(try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:1")!, sessionID: "invalid", requestKey: key))
         XCTAssertThrowsError(try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:1")!, sessionID: sessionID, requestKey: "invalid"))
     }
+}
+
+private final class RuntimeImageRequestIdentity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = ""
+    var value: String { lock.lock(); defer { lock.unlock() }; return current }
+    func set(_ value: String) { lock.lock(); current = value; lock.unlock() }
 }

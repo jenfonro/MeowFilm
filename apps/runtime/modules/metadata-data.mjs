@@ -2,7 +2,6 @@ import { contracts } from '../contracts.mjs';
 import { createMetadataSettings, metadataFailure, object } from './metadata/settings.mjs';
 import { createMetadataRequest, openMetadataImage } from './metadata/network.mjs';
 import { requestTMDB, tmdbImageTarget } from './metadata/tmdb.mjs';
-import { requestDouban, searchDouban, doubanImageTarget } from './metadata/douban.mjs';
 
 function createMetadataModule(id, { dataRoot, request = createMetadataRequest() } = {}) {
   if (typeof request !== 'function') throw metadataFailure('INVALID_REQUEST');
@@ -39,17 +38,24 @@ function createMetadataModule(id, { dataRoot, request = createMetadataRequest() 
     return store.get();
   });
   method('settings.update', input => store.update(input));
-  method('request', (input, signal) => (id === 'tmdb' ? requestTMDB : requestDouban)(input,
-    { settings: store.read(), request, signal }));
-  if (id === 'douban') method('search', (input, signal) => searchDouban(input,
-    { settings: store.read(), request, signal }));
+  method('request', async (input, signal) => {
+    const settings = store.read();
+    return (id === 'douban' ? (await import('./metadata/douban.mjs')).requestDouban : requestTMDB)(input,
+      { settings, request, signal });
+  });
+  if (id === 'douban') method('search', async (input, signal) => {
+    const settings = store.read();
+    return (await import('./metadata/douban.mjs')).searchDouban(input, { settings, request, signal });
+  });
   return Object.freeze({
     id, version: spec.version, contract: spec.contract, methods,
     image(path, context) {
       return track((async () => {
         try {
           const signal = signalFor(context);
-          const target = (id === 'tmdb' ? tmdbImageTarget : doubanImageTarget)(path, store.read());
+          const settings = store.read();
+          const target = (id === 'douban' ? (await import('./metadata/douban.mjs')).doubanImageTarget
+            : tmdbImageTarget)(path, settings);
           const result = await openMetadataImage(target, signal);
           const dispose = () => {
             const done = result.dispose();

@@ -143,7 +143,7 @@
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
     <RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
    <Grid>
-     <StackPanel Visibility="{Binding IsSearchPage,Converter={StaticResource Visible}}" Margin="0,4,0,24">
+     <StackPanel x:Name="SearchHeading" Visibility="{Binding IsSearchPage,Converter={StaticResource Visible}}" Margin="0,4,0,24">
       <TextBlock Text="{Binding Heading}" FontSize="23" FontWeight="SemiBold"
                  Foreground="{DynamicResource MeowFilm.Brush.Text}" TextTrimming="CharacterEllipsis"/>
       <StackPanel Orientation="Horizontal" Margin="0,14,0,0">

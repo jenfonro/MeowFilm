@@ -53,7 +53,7 @@ function verifyManifest(output, manifest) {
   assert.equal(manifest.platform, 'win32');
   assert.equal(manifest.entry, 'app/windows/entries/aggregate.mjs');
   assert.equal(manifest.assemblyProfile, 'common-native');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'tmdb']);
   const paths = manifest.files.map(file => file.path);
   assert.deepEqual(paths, [...paths].sort());
   assert.equal(new Set(paths.map(path => path.normalize('NFC').toLowerCase())).size, paths.length);
@@ -168,6 +168,7 @@ test('Windows packaging preserves common files byte-for-byte and is reproducible
   const second = await packageWindowsRuntime({ root: f.root, product: 'aggregate', output: join(f.area, 'second') });
   assert.deepEqual(first, second);
   const shared = await packageRuntime({ root: f.root, product: 'aggregate', output: join(f.area, 'common'), profile: 'common-native' });
+  assert.deepEqual(shared.modules, ['music', 'cat', 'source']);
   assert.deepEqual(first.files.filter(file => !file.path.startsWith('app/windows/')), shared.files);
   assert.deepEqual(first.dependencies, shared.dependencies);
   assert.deepEqual(first.omittedOptionalDependencies, shared.omittedOptionalDependencies);

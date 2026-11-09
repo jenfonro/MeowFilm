@@ -19,12 +19,13 @@ public sealed class ArtworkException(string code) : Exception(code)
     public string Code { get; } = code;
 }
 
-/// <summary>One explicitly owned App cache for public, noncredentialed artwork.</summary>
+/// <summary>One App cache; public URLs and host-injected trusted relative resources share pixel ownership.</summary>
 public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
 {
     public const int MaximumBytes = 4 * 1024 * 1024, CacheBytes = 32 * 1024 * 1024;
     private readonly object gate = new();
     private readonly ArtworkHttp http;
+    private readonly Func<string, int, CancellationToken, Task<byte[]>>? readTrusted;
     private readonly CancellationTokenSource lifetime = new();
     private readonly Dictionary<string, Flight> flights = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Entry> cache = new(StringComparer.Ordinal);
@@ -57,13 +58,17 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
                 Interlocked.Exchange(ref service, null)!.Release(key, prior);
         }
     }
-    public ArtworkService(HttpMessageHandler? handler = null) => http = new(handler);
+    public ArtworkService(HttpMessageHandler? handler = null,
+        Func<string, int, CancellationToken, Task<byte[]>>? readTrusted = null)
+    { http = new(handler); this.readTrusted = readTrusted; }
 
     public async Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var uri = ArtworkHttp.Parse(address);
-        string key = uri.AbsoluteUri;
+        bool trusted = address.StartsWith("/", StringComparison.Ordinal);
+        if (trusted && readTrusted is null) throw new ArtworkException("ARTWORK_ADDRESS");
+        var uri = trusted ? null : ArtworkHttp.Parse(address);
+        string key = uri?.AbsoluteUri ?? address;
         Flight flight;
         lock (gate)
         {
@@ -111,7 +116,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         }
     }
 
-    private async Task<Entry> LoadAsync(string key, Uri uri, Flight flight)
+    private async Task<Entry> LoadAsync(string key, Uri? uri, Flight flight)
     {
         await Task.Yield(); // Register the flight and its first consumer before starting physical work.
         var request = flight.Cancellation;
@@ -119,9 +124,15 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         try
         {
             request.Token.ThrowIfCancellationRequested();
-            byte[] encoded = await http.ReadAsync(uri, request.Token).ConfigureAwait(false);
+            byte[] encoded = uri is null
+                ? await readTrusted!(key, MaximumBytes, request.Token).ConfigureAwait(false)
+                : await http.ReadAsync(uri, request.Token).ConfigureAwait(false);
             BitmapSource image;
-            try { image = await Task.Run(() => ArtworkRaster.Decode(encoded), request.Token).ConfigureAwait(false); }
+            try
+            {
+                if (encoded.Length > MaximumBytes) throw new ArtworkException("ARTWORK_LIMIT");
+                image = await Task.Run(() => ArtworkRaster.Decode(encoded), request.Token).ConfigureAwait(false);
+            }
             finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(encoded); }
             request.Token.ThrowIfCancellationRequested();
             long cost = checked((long)image.PixelWidth * image.PixelHeight * 4);

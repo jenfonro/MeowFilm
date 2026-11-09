@@ -4,7 +4,7 @@ namespace MeowFilm.Capabilities;
 
 public sealed class FilmPlaybackPage : INotifyPropertyChanged
 {
-    private FilmEpisodeItem selectedEpisode;
+    private FilmEpisodeItem? selectedEpisode;
     private bool isListLayout, overviewExpanded, isFavorite;
 
     internal FilmPlaybackPage(
@@ -21,20 +21,18 @@ public sealed class FilmPlaybackPage : INotifyPropertyChanged
         ArgumentNullException.ThrowIfNull(item);
         ArgumentNullException.ThrowIfNull(episodes);
         ArgumentNullException.ThrowIfNull(recommendations);
-        if (episodes.Count == 0)
-            throw new ArgumentException("A playback page requires an episode.", nameof(episodes));
-
         Item = item;
+        NavigationIdentity = item.SearchContext is null ? item.Id : "search:" + Guid.NewGuid().ToString("N");
         Metadata = metadata;
         Genres = genres;
         Directors = directors;
         Cast = cast;
-        Overview = overview;
+        this.overview = overview;
         SeasonLabel = seasonLabel;
         Episodes = Array.AsReadOnly(episodes.Select((episode, index) => new FilmEpisodeItem(
             this, index + 1, episode.Title, episode.Overview, episode.Image, episode.Duration)).ToArray());
         Recommendations = Array.AsReadOnly(recommendations.ToArray());
-        selectedEpisode = Episodes[0];
+        selectedEpisode = Episodes.FirstOrDefault();
     }
 
     public FilmCardItem Item { get; private set; }
@@ -44,10 +42,17 @@ public sealed class FilmPlaybackPage : INotifyPropertyChanged
     public string Genres { get; }
     public string Directors { get; }
     public string Cast { get; }
-    public string Overview { get; }
+    private readonly string overview;
+    public string Overview => SearchContext is { } context
+        ? context.Metadata is { } metadata ? FilmSearchJson.Text(metadata, "overview") : "" : overview;
+    public bool HasOverview => Overview.Length > 0;
+    public bool HasDirectors => Directors.Length > 0;
+    public bool HasCast => Cast.Length > 0;
+    public bool HasEpisodes => Episodes.Count > 0;
+    public bool HasRecommendations => Recommendations.Count > 0;
     public IReadOnlyList<FilmEpisodeItem> Episodes { get; }
     public IReadOnlyList<FilmCardItem> Recommendations { get; }
-    public FilmEpisodeItem SelectedEpisode => selectedEpisode;
+    public FilmEpisodeItem? SelectedEpisode => selectedEpisode;
     public bool IsListLayout => isListLayout;
     public bool IsHorizontalLayout => !IsListLayout;
     public bool OverviewExpanded => overviewExpanded;
@@ -63,9 +68,29 @@ public sealed class FilmPlaybackPage : INotifyPropertyChanged
         }
     }
     public string SeasonLabel { get; }
-    public string EpisodeCountLabel => $"共{Episodes.Count}集";
+    public string EpisodeCountLabel => Episodes.Count > 0 ? $"共{Episodes.Count}集" : "暂无剧集";
+    public FilmSearchContext? SearchContext => Item.SearchContext;
+    public string NavigationIdentity { get; }
+
+    internal static FilmPlaybackPage FromSearch(FilmCardItem item)
+    {
+        var context = item.SearchContext ?? throw new ArgumentException("Missing search context.", nameof(item));
+        var detail = context.Metadata;
+        var page = new FilmPlaybackPage(item, item.TextBadge, "", "", "", detail is { } metadata
+            ? FilmSearchJson.Text(metadata, "overview") : "", "", [], []);
+        context.Session.Changed += page.SearchChanged;
+        return page;
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
+    private void SearchChanged(object? sender, EventArgs e)
+    {
+        Changed(nameof(Overview)); Changed(nameof(HasOverview));
+    }
+    internal void ReleaseSearch()
+    {
+        if (SearchContext is { } context) context.Session.Changed -= SearchChanged;
+    }
 
     internal void UpdateItem(FilmCardItem item)
     {
@@ -85,7 +110,7 @@ public sealed class FilmPlaybackPage : INotifyPropertyChanged
 
         var previous = selectedEpisode;
         selectedEpisode = episode;
-        previous.NotifySelectionChanged();
+        previous?.NotifySelectionChanged();
         episode.NotifySelectionChanged();
         Changed(nameof(SelectedEpisode));
     }

@@ -3,6 +3,7 @@ import { startIOSAppRuntime, reportIOSRuntimeStartFailure } from '../bootstrap.m
 import { createMusicScriptModule } from '../../../runtime/modules/music-script.mjs';
 import { createCatScriptModule } from '../../../runtime/modules/cat-script.mjs';
 import { createSourceRuntimeModule } from '../../../runtime/modules/source-runtime.mjs';
+import { createTMDBDataModule } from '../../../runtime/modules/metadata-data.mjs';
 
 try {
   await startIOSAppRuntime({
@@ -12,6 +13,7 @@ try {
         modules.push(createMusicScriptModule({ dataRoot }));
         modules.push(createCatScriptModule({ dataRoot: join(dataRoot, 'cat') }));
         modules.push(createSourceRuntimeModule({ platform: 'ios' }));
+        modules.push(createTMDBDataModule({ dataRoot }));
         return modules;
       } catch (error) {
         for (const module of modules) void Promise.resolve(module.close()).catch(() => {});

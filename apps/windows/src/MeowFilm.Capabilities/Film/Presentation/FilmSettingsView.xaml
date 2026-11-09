@@ -28,9 +28,45 @@
      <RadioButton Content="魔法匹配" Tag="rules" GroupName="FilmSettingsSection" IsChecked="True" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="魔法匹配"/>
      <RadioButton Content="猫源管理" Tag="cats" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="猫源管理"/>
      <RadioButton Content="视频源管理" Tag="videos" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="视频源管理"/>
+     <RadioButton Content="TMDB" Tag="tmdb" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="TMDB 设置" Visibility="{Binding HasMetadataSettings,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
     </StackPanel>
    </ScrollViewer>
   </Border>
+  <Grid x:Name="MetadataPage" Grid.Row="1" Visibility="Collapsed">
+   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
+   <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+    <TextBlock Text="正在处理 TMDB 设置…" VerticalAlignment="Center" Visibility="{Binding MetadataBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
+    <Button Content="重试" Click="MetadataRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding MetadataFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{Binding MetadataIdle}" AutomationProperties.Name="重新读取 TMDB 设置"/>
+   </StackPanel>
+   <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="TMDB 配置">
+    <Border Style="{StaticResource Settings.Section}" IsEnabled="{Binding CanEditMetadata}" Visibility="{Binding MetadataLoaded,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+     <StackPanel>
+      <TextBlock Text="TMDB" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,12"/>
+      <TextBlock Text="API 基址" Margin="0,0,0,8"/>
+      <TextBox x:Name="MetadataApiBase" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB API 基址"/>
+      <TextBlock Text="图片基址" Margin="0,12,0,8"/>
+      <TextBox x:Name="MetadataImageBase" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 图片基址"/>
+      <DockPanel Margin="0,12,0,8">
+       <TextBlock DockPanel.Dock="Right" Text="{Binding ApiKeyState}" Foreground="{DynamicResource MeowFilm.Brush.Muted}" AutomationProperties.Name="API key 配置状态"/>
+       <TextBlock Text="API key"/>
+      </DockPanel>
+      <DockPanel>
+       <Button DockPanel.Dock="Right" Content="清除" Tag="apiKey" Click="MetadataClear_Click" Style="{StaticResource Settings.DangerButton}" Margin="12,0,0,0" AutomationProperties.Name="清除 TMDB API key"/>
+       <PasswordBox x:Name="MetadataApiKey" PasswordChanged="MetadataCredential_Changed" Style="{StaticResource FilmSettings.Password}" AutomationProperties.Name="TMDB API key"/>
+      </DockPanel>
+      <DockPanel Margin="0,12,0,8">
+       <TextBlock DockPanel.Dock="Right" Text="{Binding AccessTokenState}" Foreground="{DynamicResource MeowFilm.Brush.Muted}" AutomationProperties.Name="Access Token 配置状态"/>
+       <TextBlock Text="Access Token"/>
+      </DockPanel>
+      <DockPanel>
+       <Button DockPanel.Dock="Right" Content="清除" Tag="accessToken" Click="MetadataClear_Click" Style="{StaticResource Settings.DangerButton}" Margin="12,0,0,0" AutomationProperties.Name="清除 TMDB Access Token"/>
+       <PasswordBox x:Name="MetadataAccessToken" PasswordChanged="MetadataCredential_Changed" Style="{StaticResource FilmSettings.Password}" AutomationProperties.Name="TMDB Access Token"/>
+      </DockPanel>
+      <Button x:Name="MetadataSave" Content="保存" Click="MetadataSave_Click" Style="{StaticResource Settings.PrimaryButton}" HorizontalAlignment="Right" Margin="0,16,0,0" AutomationProperties.Name="保存 TMDB 设置"/>
+     </StackPanel>
+    </Border>
+   </ScrollViewer>
+  </Grid>
   <Grid x:Name="RulesPage" Grid.Row="1">
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">

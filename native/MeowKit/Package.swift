@@ -20,7 +20,8 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../JavaScript"),
-        .package(path: "../../packages/film-rules")
+        .package(path: "../../packages/film-rules"),
+        .package(path: "../../packages/film-search")
     ],
     targets: [
         .target(name: "MeowContracts", dependencies: []),
@@ -35,7 +36,8 @@ let package = Package(
         .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowRuntime", "MeowStorage"], linkerSettings: [.linkedLibrary("z")]),
         .target(name: "MeowFilmFeature", dependencies: ["MeowUI", "MeowJSON", "MeowStorage", "MeowRuntime",
             .product(name: "MeowJavaScript", package: "javascript"),
-            .product(name: "FilmRuleProgram", package: "film-rules")]),
+            .product(name: "FilmRuleProgram", package: "film-rules"),
+            .product(name: "FilmSearchProgram", package: "film-search")]),
         .testTarget(name: "MeowJSONTests", dependencies: ["MeowJSON"]),
         .testTarget(name: "MeowAccountTests", dependencies: ["MeowAccounts", "MeowContracts"]),
         .testTarget(name: "MeowCoreTests", dependencies: ["MeowContracts", "MeowStorage"]),

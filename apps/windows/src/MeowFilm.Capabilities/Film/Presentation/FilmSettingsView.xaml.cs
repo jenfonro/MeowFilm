@@ -13,16 +13,18 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
 {
     private readonly FilmRuleService rules;
     private readonly FilmSourceService sources;
+    private readonly FilmMetadataService? metadata;
     private string section = "rules";
     private bool initialized, observingSources;
     private long activation;
     private Func<Task>? popupAction;
     private FrameworkElement? popupAnchor;
 
-    public FilmSettingsView(FilmRuleService rules, FilmSourceService sources)
+    public FilmSettingsView(FilmRuleService rules, FilmSourceService sources, FilmMetadataService? metadata = null)
     {
         this.rules = rules ?? throw new ArgumentNullException(nameof(rules));
         this.sources = sources ?? throw new ArgumentNullException(nameof(sources));
+        this.metadata = metadata;
         InitializeComponent();
         DataContext = this;
         foreach (var editor in RuleEditors)
@@ -64,6 +66,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         activation++;
         ruleOperation?.Cancel();
         sourceOperation?.Cancel();
+        metadataOperation?.Cancel();
         ClosePopup(restoreFocus: false);
     }
 
@@ -73,6 +76,10 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         if (section == "rules")
         {
             if ((!RulesLoaded || rulesReloadPending) && !RulesBusy && !RulesFailed) await LoadRulesAsync();
+        }
+        else if (section == "tmdb")
+        {
+            if (!MetadataLoaded && !MetadataBusy && !MetadataFailed) await LoadMetadataAsync();
         }
         else if (!SourcesBusy && !SourcesFailed)
         {
@@ -90,6 +97,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         RulesPage.Visibility = key == "rules" ? Visibility.Visible : Visibility.Collapsed;
         CatsPage.Visibility = key == "cats" ? Visibility.Visible : Visibility.Collapsed;
         VideosPage.Visibility = key == "videos" ? Visibility.Visible : Visibility.Collapsed;
+        MetadataPage.Visibility = key == "tmdb" ? Visibility.Visible : Visibility.Collapsed;
         anchor.Focus(); anchor.BringIntoView();
         await ActivateCurrentAsync();
     }
@@ -97,7 +105,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private void Section_KeyDown(object sender, KeyEventArgs e)
     {
         if (sender is not RadioButton current || e.Key is not (Key.Home or Key.End or Key.Left or Key.Right)) return;
-        var anchors = SettingsNavigation.Children.OfType<RadioButton>().ToArray();
+        var anchors = SettingsNavigation.Children.OfType<RadioButton>().Where(anchor => anchor.IsVisible).ToArray();
         int index = Array.IndexOf(anchors, current);
         int next = e.Key switch { Key.Home => 0, Key.End => anchors.Length - 1,
             Key.Left => (index + anchors.Length - 1) % anchors.Length, _ => (index + 1) % anchors.Length };

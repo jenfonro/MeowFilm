@@ -1,6 +1,6 @@
 # iOS 影视设置
 
-设置先分为音乐／影视；影视下提供魔法规则、猫源、视频源三个页面。沿既有 UIKit 页头、导航、原生表单与动态字体，手机以列表和详情承载管理字段，不使用桌面横表。返回主页面保持位置；规则草稿由 App 持有的 `FilmSettingsModel.rules` 保留，不随页面销毁。
+设置先分为音乐／影视；影视下提供魔法规则、猫源、视频源和 TMDB 四个入口。沿既有 UIKit 页头、导航、原生表单与动态字体，手机以列表和详情承载管理字段，不使用桌面横表。返回主页面保持位置；规则草稿由 App 持有的 `FilmSettingsModel.rules` 保留，不随页面销毁。
 
 ## 原生规则
 
@@ -28,7 +28,7 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 ## 客户端视频清单
 
-`FilmSourceService` 是持久化事实来源，以 `installationId + siteKey` 标识条目，按公开协议的原始字符串精确区分，不合并 Unicode 规范等价但码点不同的 key；不以运行端口或 generation 作持久身份。保存四选项、排序、检测结果和删除记录，聚合图片全表单选。四选项当前没有首页／搜索消费者，但完整保存；检测不修改它们。列表进入详情可修改开关和排序，行操作只有检测／删除。
+`FilmSourceService` 是持久化事实来源，以 `installationId + siteKey` 标识条目，按公开协议的原始字符串精确区分，不合并 Unicode 规范等价但码点不同的 key；不以运行端口或 generation 作持久身份。保存四选项、排序、检测结果和删除记录，聚合图片全表单选。[影视搜索](film-search.md)消费启用／允许搜索、来源顺序和聚合图片选项，并观察源代次／禁用；首页可见选项尚无首页消费者。检测不修改这些选项。列表进入详情可修改开关和排序，行操作只有检测／删除。
 
 普通更新、重启、同步、App 重建不会恢复用户删除项。只有明确且成功的重新导入，按本次 ready 回执中该父源包含的条目恢复；失败、starting、迟到导入都不能抹掉新删除。同步失败不把空清单当成功，未 ready 的猫源保留已知清单。
 
@@ -37,6 +37,16 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 完整结果返回后，检测在管理串行边界读取一次宿主权威 status，再检查原检测资格、原 generation 和站点存在性才保存。响应完成与本地落盘之间仍可能发生独立管理换代，因此不能仅使用检测开始前的本地代次；最终确认失败也不发布检测。此确认只属于显式检测，不新增后台轮询或让页面展示逐次请求运行器。
 
 ## 生命周期与验证边界
+
+### TMDB 设置
+
+`FilmTMDBSettingsModel`／`FilmTMDBSettingsViewController` 通过 App 的 `FilmTMDBService` 编辑 API 基址、图片基址、API Key、Access Token。设置和存储契约见[元数据运行器](../runtime/metadata-data.md#设置与凭据)：本端不新增持久文件、启动回灌、默认代理或认证信息；文件沿用运行器应用私有目录机制，不声称 Keychain 加密。
+
+密码字段仅用于输入，不从 get 回填原值；界面显示 configured 状态。空字段保存时省略、保留旧凭据；明确「清除 API Key／Access Token」才提交空字符串，重新输入非空值则替换。成功保存清空输入框，失败保留整份输入和原 saved 状态，错误与重试使用既有浮层。已提交保存取得真实回执，不因离开页面误报取消。
+
+只有成功回执调用 `FilmSearchService.metadataSettingsChanged()`，撤销旧会话和共享详情缓存的复用资格，取消并跟踪旧工作到物理结算；不自动搜索。实际旧详情继续持有原快照，下一次显式同词使用新会话。相对图片缓存身份不因设置或运行器端口改变；接线和精确验证入口见[影视搜索](film-search.md)。
+
+### 既有 owner 与专用验证
 
 页面隐藏取消规则测试／检测及页面订阅，不销毁 App owner。已提交的管理操作取得真实回执，返回后不继续尚未交接的批量更新或改变导航；批量重启重试保留已成功项，只继续剩余项。批量及单项删除都依据已提交本地事实协调重试，删除后的同步失败仍显示原错误，不从已删除项重新执行，也不迟到退出用户随后进入的其他页面。
 
@@ -47,5 +57,6 @@ App 关闭先停止接纳并排空本地规则／来源任务；音乐薄适配�
 - `MeowfilmFilmSettingsHostTests`：真实 App 资源／静态引擎、NodeMobile Cat HTTP 五阶段参数与客户端持久化、完整响应返回后落盘前通过独立管理命令换代并拒绝旧检测，以及前台 App 窗口中的确认／失败弹窗。显式重启回归不是实际内存超限实验；后台 UI runner 的视图快照不能替代系统弹窗合成截图。`MeowfilmRuntimeHostTests` 使用同一 App 音乐 owner 验证 LX，并在同进程并发调用原生 source 和独立影视规则引擎，不能另启一个运行器。
 - `MeowfilmScriptShutdownHostTests` 仅设 `TEST_RUNNER_MEOWFILM_SCRIPT_SHUTDOWN=1` 后单独运行：真实音乐模块关闭后 Cat 仍可访问，App 最终关闭共享连接并等待 Node 退出；该测试会终止本进程装配，默认跳过，不能与其他宿主业务用例放在同次调用。
 - 冷启动必须分两次独立 `xcodebuild test`／`test-without-building`，同一专用模拟器：先仅运行 `MeowfilmCatColdStartPrepareTests` 并设置 `TEST_RUNNER_MEOWFILM_CAT_COLD_PHASE=prepare`，结束宿主进程后再仅运行 `MeowfilmCatColdStartRestoreTests`，设为 `restore`。脚本私有卷计数证明启用项恢复一次、停用项未执行、没有自动检测且 tombstone 未复活；restore 清理两条测试安装。普通测试运行跳过这两个显式跨进程场景，不能把跳过当作冷启动通过。
+- TMDB 配置冷启动也必须独立两进程，scheme `MeowfilmAcceptance`：先 `-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBColdStartPrepareTests/testSaveSyntheticSettingsForNextAppProcess`，环境 `TEST_RUNNER_MEOWFILM_TMDB_COLD_PHASE=prepare`；结束宿主后，再 `-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBColdStartRestoreTests/testNextAppProcessRestoresSettingsWithoutEchoingSecretsOrNativeWriteback`，环境改 `restore`。使用同一个专用模拟器和原 App 数据，不卸载或清数据。prepare 只接受默认基址且无凭据的测试目录；restore 先核对合成设置再断言恢复／不回显，并清除合成凭据恢复运行器默认基址，不读取真实秘密。未设置环境会显式跳过，不能算恢复通过。真实设置 UI 的保存、保留／替换／清除、失败与截图见 `MeowfilmTMDBHostTests`。
 
-不接未来首页／搜索业务，不提供任意第三方脚本兼容保证，不以模拟器结果宣称真机后台或实际媒体播放已验证。
+设置不承载首页／搜索业务策略；搜索通过既有 owner 消费其快照。仍不提供任意第三方脚本兼容保证，不以模拟器结果宣称真机后台或实际媒体播放已验证。

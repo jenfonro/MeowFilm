@@ -14,6 +14,21 @@ public static class BridgeTests
 
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("bridge: metadata safe errors and image limits preserve codes while unknown errors stay internal", () =>
+        {
+            foreach (string code in new[] { "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR",
+                "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE",
+                "RESOURCE_LIMIT" })
+            {
+                var error = new BridgeException(code);
+                Equal(code, error.Code);
+                Equal(code, error.Message);
+            }
+            var unknown = new BridgeException("synthetic-private-provider-message");
+            Equal("INTERNAL", unknown.Code);
+            Equal("INTERNAL", unknown.Message);
+            return Task.CompletedTask;
+        });
         yield return new("bridge: strict JSON roundtrips Unicode scalar values and keys", () =>
         {
             var value = new Dictionary<string, object?>

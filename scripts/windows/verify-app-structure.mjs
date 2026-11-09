@@ -69,6 +69,7 @@ export function verifyAppStructure(directory = root) {
   }
 
   let imports = 0, resources = 0;
+  const embeddedResources = [];
   function sourceTarget(owner, specifier) {
     if (!specifier.startsWith('.')) return;
     const target = resolve(dirname(join(directory, owner)), specifier);
@@ -86,6 +87,24 @@ export function verifyAppStructure(directory = root) {
     imports++;
   }
   for (const file of files) {
+    if (file.endsWith('.csproj')) {
+      const text = readFileSync(join(directory, file), 'utf8');
+      const names = new Set();
+      for (const match of text.matchAll(/<EmbeddedResource\b([^>]*)\/?>/g)) {
+        const include = /\bInclude="([^"]+)"/.exec(match[1])?.[1];
+        const logicalName = /\bLogicalName="([^"]+)"/.exec(match[1])?.[1];
+        if (!include) continue;
+        const target = resolve(dirname(join(directory, file)), include.replaceAll('\\', '/'));
+        const source = relative(directory, target).split(sep).join('/');
+        if (!inside(directory, target) || !isWindowsSource(source) || !existsSync(target) ||
+            !lstatSync(target).isFile() || lstatSync(target).isSymbolicLink() || !samePath(realpathSync(target), target))
+          fail('missing/unsafe embedded resource: ' + file + ' -> ' + include);
+        if (logicalName && names.has(logicalName)) fail('duplicate embedded resource identity: ' + file + ' -> ' + logicalName);
+        if (logicalName) names.add(logicalName);
+        embeddedResources.push({ project: file, source, logicalName: logicalName ?? null });
+        resources++;
+      }
+    }
     if (/\.(?:mjs|js)$/.test(file) && !/(?:^|\/)(?:test|tests|fixtures)\//.test(file.replace(/^tests\/baselines\//, 'baseline/'))) {
       const text = readFileSync(join(directory, file), 'utf8');
       const specs = [
@@ -120,7 +139,7 @@ export function verifyAppStructure(directory = root) {
       }
     }
   }
-  return { relativeImports: imports, resourceReferences: resources, sourceFiles: files.sort() };
+  return { relativeImports: imports, resourceReferences: resources, embeddedResources, sourceFiles: files.sort() };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
