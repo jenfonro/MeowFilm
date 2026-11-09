@@ -214,9 +214,20 @@ public final class MusicPlayerContentModel {
         }
     }
 
+    func toggleHeartbeat(snapshot: UUID?, expected: MusicReferencePlayerFence) {
+        runModeCommand(expected: expected) { model in
+            guard !model.isFMActive, model.similarMode?.id == snapshot else { return }
+            if model.similarMode?.active == true, model.similarMode?.provider == .heartbeat {
+                await model.exitSimilarMode()
+            } else if let occurrence = expected.occurrence {
+                await model.startCurrentHeartbeat(occurrenceID: occurrence, expectedRevision: expected.queueRevision)
+            }
+        }
+    }
+
     func returnFromRecommendations(snapshot: UUID?, expected: MusicReferencePlayerFence) {
         runModeCommand(expected: expected) { model in
-            guard model.similarMode?.id == snapshot || model.isChangingSimilarMode else { return }
+            guard model.similarMode?.id == snapshot else { return }
             await model.exitSimilarMode()
         }
     }
@@ -229,10 +240,11 @@ public final class MusicPlayerContentModel {
                                 operation: @escaping @MainActor (MusicViewModel) async -> Void) {
         guard expected.admits(fence, permitted: isAvailable) else { return }
         let id = UUID(), model = model, account = model.searchAccessGeneration
+        let command = model.recommendationCommandID
         modeTasks[id] = Task { [weak self] in
             defer { self?.modeTasks[id] = nil }
             guard !Task.isCancelled, self?.fence == expected, self?.isAvailable == true,
-                  model.searchAccessGeneration == account else { return }
+                  model.searchAccessGeneration == account, model.recommendationCommandID == command else { return }
             await operation(model)
         }
     }

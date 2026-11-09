@@ -64,11 +64,12 @@ extension NativeMusicService {
     }
     public func state() async throws -> MusicPlaybackState { stateDTO(try read()) }
     public func queue() async throws -> MusicQueueSnapshot {
-        let d = try read()
+        let d = try read(), rows = d.queue["entries"].array
+        let projected = try await sharedSongMetadata(rows.map { $0["song"] })
         var tracks: [Data: (song: MJ, track: MusicRemoteTrack)] = [:]
         return .init(revision: d.queue["revision"].int, currentId: d.queue["currentId"] == .null ? nil : d.queue["currentId"].string,
-            entries: try d.queue["entries"].array.map { entry in
-                let id = entry["id"].string, song = entry["song"]
+            entries: try zip(rows, projected).map { entry, song in
+                let id = entry["id"].string
                 let title = MusicModel.firstText(entry["context"]["sourceTitle"], entry["context"]["playlist"],
                                                 d.queue["source"]["title"])
                 let ref = MusicReference(kind: .queue, id: id)
@@ -87,7 +88,7 @@ extension NativeMusicService {
                     sourceTitle: title.isEmpty ? nil : title,
                     remoteSessionID: UUID(uuidString: entry["context"]["remoteSession"].string),
                     displayIdentity: MusicNativeQueueDisplayIdentity.make(
-                        song: song, occurrence: id, context: entry["context"]))
+                        song: entry["song"], occurrence: id, context: entry["context"]))
             })
     }
     func archive(_ queue: MJ, into d: inout MusicDocument) {

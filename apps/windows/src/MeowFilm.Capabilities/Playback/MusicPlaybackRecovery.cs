@@ -9,7 +9,7 @@ public sealed partial class MusicCapability
         string? SourceKey, string PolicyRequest, string Quality,
         string? QualityPolicySignature = null, string? QualityCacheSignature = null,
         string? AccountScope = null, JsonElement? RecordingSong = null,
-        string? ProviderName = null, long SourceRevision = 0)
+        string? ProviderName = null, long SourceRevision = 0, bool ManualSource = false)
     {
         internal bool Official => Installation is null;
     }
@@ -18,14 +18,19 @@ public sealed partial class MusicCapability
         MusicFileIdentity? File = null);
     private sealed record MusicFileIdentity(string Scope, string Signature);
     // User intent outlives every resolved URL and every recovery attempt.
-    private sealed record MusicSelection(MusicQualityPolicy.Tier? Tier = null, ResolvedMusic? Source = null)
+    private sealed record MusicSelection(MusicQualityPolicy.Tier? Tier = null, ResolvedMusic? Source = null,
+        bool ManualSource = false)
     {
         internal bool Automatic => Tier is null && Source is null;
+        internal bool Manual => ManualSource || Source is not null;
         internal bool Allows(ResolvedMusic media) =>
             (Tier is null || Tier.Levels.Contains(EffectiveLevel(media))) &&
             (Source is null || SourceIdentity(Source.Target!) == SourceIdentity(media.Target!) &&
                 Source.Target!.PolicyRequest == media.Target!.PolicyRequest &&
-                Source.Target.Quality == media.Target.Quality && EffectiveLevel(Source) == EffectiveLevel(media));
+                Source.Target.Quality == media.Target.Quality &&
+                // A request label is not measured quality. Keep the exact target,
+                // and reject a changed actual level only when both receipts prove it.
+                (!QualityVerified(Source) || !QualityVerified(media) || EffectiveLevel(Source) == EffectiveLevel(media)));
     }
     private static MusicFileIdentity? FileIdentity(ResolvedMusic media) => media.File ??
         (media.Target is { Official: true, AccountScope: not null, QualityCacheSignature: not null } target
@@ -79,7 +84,7 @@ public sealed partial class MusicCapability
     {
         CancelMusicPreload();
         if (musicRecovery is { Media.Target.QualityPolicySignature: not null } state &&
-            state.Media.Target.QualityPolicySignature != signature)
+            state.Media.Target.QualityPolicySignature != signature && !state.Selection.Manual)
         {
             state.RecoveryDisabled = true;
             CancelPendingMedia(state, "QUALITY_POLICY_CHANGED");
@@ -141,6 +146,7 @@ public sealed partial class MusicCapability
             : !CurrentPendingMedia(state, pending)) return false;
         alreadyStarted = pending.SourceStarted;
         state.Media = pending.Media;
+        state.Session?.Adopt(pending.Media);
         playbackInstallation = pending.Media.Target?.Installation;
         if (pending.Media.Target?.Official == true)
             state.AccountEpoch = Interlocked.Read(ref officialAccountEpoch);
@@ -377,6 +383,7 @@ public sealed partial class MusicCapability
             return false;
         var continuation = port.CaptureContinuation();
         if (continuation is null) return false;
+        string? originalFailure = expired ? null : port.LastErrorCode;
         // A mismatched recording is never refreshed: a different source must replace it.
         bool refreshExact = !mismatch && !state.Attempted && (expired || RefreshableMusicError(port.LastErrorCode));
         bool rejectCurrent = !refreshExact;
@@ -389,12 +396,13 @@ public sealed partial class MusicCapability
         ResolvedMusic? fileRetry = null, refreshedReceipt = null;
         try
         {
+            var sourceSession = await CurrentSourceSession(state, request.Token);
+            if (originalFailure is not null) sourceSession.ObserveFailure(state.Media.Target, originalFailure);
             if (state.Cached) await InvalidatePlaybackFileCache(state);
             // A failed URL says nothing about the complete bytes already stored for it.
             // Try those before spending the one exact network refresh, even for a retired script.
             ResolvedMusic? completedFile = !state.Cached && !mismatch
-                ? await CompletedPlaybackFileAsync(state, await CurrentSourceSession(state, request.Token),
-                    state.Media!, state.Selection, request.Token)
+                ? await CompletedPlaybackFileAsync(state, sourceSession, state.Media!, state.Selection, request.Token)
                 : null;
             while (true)
             {
@@ -415,7 +423,7 @@ public sealed partial class MusicCapability
                         var session = await CurrentSourceSession(state, request.Token);
                         refreshed = state.Selection.Automatic ? await session.AutomaticAsync(request.Token, retry) :
                             state.Selection.Tier is { } tier
-                                ? await session.ExactAsync(tier, request.Token, retry) ??
+                                ? await session.ExactAsync(tier, request.Token, retry, state.Selection.Manual) ??
                                     throw new MusicOperationException("QUALITY_UNAVAILABLE") : retry;
                     }
                     else if (refreshExact)
@@ -440,7 +448,7 @@ public sealed partial class MusicCapability
                         if (state.Selection.Source is not null) throw new MusicOperationException("PLAYBACK_UNAVAILABLE");
                         var session = await CurrentSourceSession(state, request.Token);
                         refreshed = state.Selection.Tier is { } tier
-                            ? await session.ExactAsync(tier, request.Token, refreshedReceipt) ??
+                            ? await session.ExactAsync(tier, request.Token, refreshedReceipt, state.Selection.Manual) ??
                                 throw new MusicOperationException(session.Failure ?? "PLAYBACK_UNAVAILABLE")
                             : await session.AutomaticAsync(request.Token, refreshedReceipt);
                     }
@@ -465,7 +473,6 @@ public sealed partial class MusicCapability
                         throw new MusicOperationException("RECORDING_MISMATCH");
                     if (!CommitPendingMedia(state, pending, out bool alreadyStarted))
                         throw new OperationCanceledException(request.Token);
-                    if (cachedAttempt) state.Session!.Remember(refreshed);
                     if (changedSource && recorded) CompleteFeedback("source-change");
                     AcceptOfficialSong(state.Song, refreshed.Target);
                     if (changedSource) SelectFeedback(state.Song, currentFeedbackAutomatic, currentRecommendationFeedback);

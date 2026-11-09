@@ -204,7 +204,57 @@ final class MusicRecommendationModelTests: XCTestCase {
         await model.exitSimilarMode()
         XCTAssertEqual(model.queue.map(\.id), original); XCTAssertEqual(model.current?.id, current)
         XCTAssertNil(model.similarMode)
-        XCTAssertTrue(player.resources.isEmpty, "restoreOnly cannot resolve or play the checkpoint")
+        XCTAssertTrue(player.resources.isEmpty, "Returning an unopened current seed does not start audio")
+        await model.close()
+    }
+
+    func testHeartbeatReturnKeepsPlayingSeedWithoutAudioCommands() async throws {
+        try await returnCurrentSeed(paused: false)
+    }
+
+    func testHeartbeatReturnKeepsPausedSeedWithoutAudioCommands() async throws {
+        try await returnCurrentSeed(paused: true)
+    }
+
+    private func returnCurrentSeed(paused: Bool) async throws {
+        let service = RecommendationModelService(), player = RecommendationModelPlayer()
+        let model = MusicViewModel(service: service, player: player)
+        await model.load()
+        let original = model.queue.map(\.id)
+        model.lastSelection = RecommendationModelService.selection
+        await model.prepareCurrent()
+        let candidate = try XCTUnwrap(model.candidate)
+        let playing = MusicPlaybackFact(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+            resourceId: candidate.resourceId, kind: .playing, position: 43, duration: 180)
+        model.onPlayback(playing)
+        await model.flushPlaybackFacts()
+        await model.startCurrentHeartbeat(occurrenceID: candidate.occurrenceId, expectedRevision: model.state.revision)
+        XCTAssertTrue(try XCTUnwrap(model.similarMode).active)
+        if paused {
+            await model.togglePlayback()
+            model.onPlayback(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+                resourceId: candidate.resourceId, kind: .paused, position: 43, duration: 180))
+            await model.flushPlaybackFacts()
+        }
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.phase, paused ? .paused : .playing)
+        let media = try XCTUnwrap(model.nativeAttempt), phase = model.phase
+        let plays = player.resources.count, stops = player.stops, pauses = player.pauses, resumes = player.resumes, seeks = player.seeks
+        let resolutions = await service.calls().resolutions
+
+        await model.exitSimilarMode()
+
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.queue.map(\.id), original)
+        XCTAssertEqual(model.current?.id, candidate.occurrenceId)
+        XCTAssertEqual(model.activeResourceID, candidate.resourceId)
+        XCTAssertEqual(model.nativeAttempt, media); XCTAssertEqual(model.phase, phase)
+        XCTAssertEqual(model.position, 43); XCTAssertEqual(model.state.position, 43)
+        XCTAssertEqual(player.resources.count, plays); XCTAssertEqual(player.stops, stops)
+        XCTAssertEqual(player.pauses, pauses); XCTAssertEqual(player.resumes, resumes); XCTAssertEqual(player.seeks, seeks)
+        let calls = await service.calls()
+        XCTAssertEqual(calls.resolutions, resolutions); XCTAssertEqual(calls.exits, 1)
+        XCTAssertNil(model.similarMode)
         await model.close()
     }
 
@@ -528,7 +578,7 @@ final class MusicRecommendationModelTests: XCTestCase {
 private actor RecommendationModelService: MusicServing, MusicSimilarModeServing, MusicQueueRecommendationServing,
     MusicDisplayedQueuePlaying, MusicSearchBatchPlaying, MusicHomeActionQueueServing, MusicRemoteQueueServing {
     struct Calls: Sendable {
-        var previews = 0, queueWrites = 0, enters = 0, exits = 0, retries = 0, displayed = 0, searches = 0
+        var previews = 0, queueWrites = 0, enters = 0, exits = 0, retries = 0, displayed = 0, searches = 0, resolutions = 0
         var choices: [String] = [], queueSwitches: [Bool] = [], starts: [MusicSimilarModeStart] = []
     }
     static let selection = MusicPlaybackSelection(installationId: "official:synthetic", generation: 1,
@@ -541,6 +591,7 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
         .init(id: "original-\($0.offset + 1)", track: track($0.element))
     }
     private var current = "original-2", revision = 3, token = UUID(), continuation = false
+    private var position: Double = 0
     private var mode: MusicSimilarModeSnapshot?, checkpoint: ([MusicQueueEntry], String)?
     private var status = MusicSimilarModeSnapshot.Status.ready
     private var candidates: [MusicSimilarModeCandidate] = []
@@ -572,7 +623,7 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
     func failRecommendations() { status = .error }
     @discardableResult func rotateToken() -> UUID { token = UUID(); return token }
     func state() -> MusicPlaybackState {
-        .init(revision: revision, currentId: current, total: entries.count, canNext: true,
+        .init(revision: revision, currentId: current, total: entries.count, position: position, canNext: true,
               sourceCollectionID: "original-list")
     }
     func queue() -> MusicQueueSnapshot { .init(revision: revision, currentId: current, entries: entries) }
@@ -644,7 +695,7 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
         counts.exits += 1
         if let checkpoint { entries = checkpoint.0; current = checkpoint.1; revision += 1 }
         checkpoint = nil; mode = nil
-        return .init(state: state(), action: .restoreOnly)
+        return .init(state: state(), action: .keepCurrent)
     }
     func playSimilarCandidate(snapshotID: UUID, candidateID: String) throws -> MusicSimilarModeResult { throw MusicServiceError.unsupported }
     func setSimilarContinue(_ enabled: Bool, snapshotID: UUID) throws {
@@ -655,7 +706,7 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
     }
     func retrySimilarMode(snapshotID: UUID) throws -> MusicSimilarModeResult { throw MusicServiceError.unsupported }
     func cancelSimilarMode() { mode = nil }
-    func recordSimilarPlaybackFact(_ fact: MusicPlaybackFact) -> Bool { true }
+    func recordSimilarPlaybackFact(_ fact: MusicPlaybackFact) -> Bool { record(fact) }
     func pauseSimilarNavigation() async {
         let gate = pauseGate; pauseGate = nil
         if let gate { await gate.wait() }
@@ -718,7 +769,8 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
         throw MusicServiceError.unsupported
     }
     func resolve(attemptId: String, occurrenceId: String, selection: MusicPlaybackSelection) -> MusicPlaybackCandidate {
-        .init(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
+        counts.resolutions += 1
+        return .init(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
             url: URL(string: "https://media.invalid/synthetic.mp3")!, title: "合成歌曲", requestedQuality: "128k",
             resolvedSelection: selection)
     }
@@ -734,7 +786,7 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
     func updateMetadataPreferences(_ change: MusicMetadataPreferencesChange) throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
     func metadataCandidates(occurrenceID: String) throws -> MusicMetadataCandidates { throw MusicServiceError.unsupported }
     func cancel(attemptId: String?) {}
-    func record(_ fact: MusicPlaybackFact) -> Bool { true }
+    func record(_ fact: MusicPlaybackFact) -> Bool { position = fact.position; return true }
     func lyrics(occurrenceId: String, sourceKey: String) -> MusicLyricsSnapshot { .init(occurrenceId: occurrenceId, state: .none, lines: []) }
     func playedSongs() -> [MusicPlayedSong] { [] }
     func playedPlaylists() -> [MusicPlayedPlaylist] { [] }
@@ -743,12 +795,14 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
 
 @MainActor private final class RecommendationModelPlayer: MusicPlaybackDriving {
     var resources: [PlaybackResource] = []
+    var pauses = 0, resumes = 0, stops = 0
+    var seeks: [Double] = []
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
         resources.append(resource); return .init(id: UUID(), resourceID: resource.id)
     }
-    func pause(_ attempt: MusicPlayerAttempt) {}
-    func resume(_ attempt: MusicPlayerAttempt) {}
-    func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool { false }
-    func stop(_ attempt: MusicPlayerAttempt) {}
+    func pause(_ attempt: MusicPlayerAttempt) { pauses += 1 }
+    func resume(_ attempt: MusicPlayerAttempt) { resumes += 1 }
+    func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool { seeks.append(position); return false }
+    func stop(_ attempt: MusicPlayerAttempt) { stops += 1 }
 }
 #endif

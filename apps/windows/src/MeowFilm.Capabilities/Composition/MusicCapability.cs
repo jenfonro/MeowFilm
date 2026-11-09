@@ -562,11 +562,11 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             playback is INativePlaybackContinuation intent && (playback.HasMedia || musicRecovery?.Recovering == true))
         {
             // Admission is synchronous: a queued/awaiting resolver cannot delay Pause.
-            if (intent.PauseRequested && CurrentPlaybackExcluded) return ResumePlaybackAsync();
             if (!intent.PauseRequested) ObserveExplicitRecommendationPause();
             var command = intent.PauseRequested ? ResumePlaybackAsync() : playback.PauseAsync();
             return RunAsync(() => command);
         }
+        if (CurrentPlaybackExcluded) return ResumePlaybackAsync();
         onlineCancellation?.Cancel();
         return RunAsync(async () =>
         {
@@ -785,6 +785,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             if (args.PropertyName == nameof(IMusicPlayback.DurationSeconds)) CheckMediaDuration();
             playbackPresentation.Refresh();
             Changed(nameof(CanHeartbeatCurrent));
+            Changed(nameof(CanTogglePlaybackHeartbeat));
         }
     }
     private void PlaybackStarted(object? sender, EventArgs args)

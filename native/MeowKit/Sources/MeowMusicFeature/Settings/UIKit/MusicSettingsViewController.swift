@@ -12,12 +12,7 @@ public final class MusicSettingsViewController: HostingPageViewController<MusicS
     private var requestingReset = false
     private var renderedTheme: PageTheme?
     private var renderedPreference: String?
-    private var catalogSource: MusicHomeSourceSelection?
-    private var savingCatalogSource = false
-    /// Latest read/save; an older or other-scope completion never publishes.
-    private var catalogSourceRequest: UUID?
-    /// Same NativeMusicService behind the public browse port; no new owner.
-    private var homeBrowser: (any MusicHomeBrowsing)? { model.publicBrowser as? any MusicHomeBrowsing }
+    private let sourceSettings: MusicHomeSourceSettingsModel
 
     public init(
         model: MusicViewModel,
@@ -29,11 +24,13 @@ public final class MusicSettingsViewController: HostingPageViewController<MusicS
         self.appearance = appearance
         self.router = router
         self.resetUserData = resetUserData
+        sourceSettings = MusicHomeSourceSettingsModel(model: model)
         super.init(
             themeProvider: appearance,
             content: MusicSettingsContent(theme: PageTheme(palette: appearance.pageColorway))
         )
         pageTitle = "设置"
+        sourceSettings.onError = { [weak self] in self?.showError($0) }
     }
 
     public override func viewDidLoad() {
@@ -43,24 +40,22 @@ public final class MusicSettingsViewController: HostingPageViewController<MusicS
             guard let self, renderedPreference != preferenceValue else { return }
             render()
         }
-        observe(model.accessChanges) { [weak self] in
-            guard let self else { return }
-            // A new access scope never shows the previous scope's value.
-            catalogSource = nil; savingCatalogSource = false; catalogSourceRequest = nil
-            render()
-            if isPageVisible { readCatalogSource() }
-        }
+        observe(sourceSettings) { [weak self] in self?.render() }
     }
 
     public override func pageDidBecomeVisible() {
         super.pageDidBecomeVisible()
-        readCatalogSource()
+        sourceSettings.activate()
+    }
+
+    public override func pageDidBecomeHidden() {
+        super.pageDidBecomeHidden()
+        sourceSettings.deactivate()
     }
 
     public override func pageDidBecomeInactive() {
         super.pageDidBecomeInactive()
-        // Page tasks are cancelled; the next visit reads the durable value again.
-        savingCatalogSource = false; catalogSourceRequest = nil
+        sourceSettings.deactivate()
     }
 
     public override func applyTheme() {
@@ -76,56 +71,10 @@ public final class MusicSettingsViewController: HostingPageViewController<MusicS
         renderedPreference = value
         setContent(MusicSettingsContent(theme: theme, preferenceValue: value,
             canResetUserData: resetUserData != nil, requestingReset: requestingReset,
-            catalogSource: catalogSource, savingCatalogSource: savingCatalogSource,
+            catalogSource: sourceSettings.selection, savingCatalogSource: sourceSettings.isSaving,
             open: { [weak self] in self?.open($0) },
             resetUserData: { [weak self] in self?.confirmUserDataReset() },
-            selectCatalogSource: { [weak self] in self?.saveCatalogSource($0) }))
-    }
-
-    /// Reads the durable choice each time the page is shown.
-    private func readCatalogSource() {
-        guard let homeBrowser, !savingCatalogSource else { return }
-        let request = UUID(), access = model.accountAccessGeneration
-        catalogSourceRequest = request
-        runPageTask { [weak self] in
-            guard let self, model.isAvailable, !model.isClosed else { return }
-            let result: Result<MusicHomeSourceSelection, Error>
-            do { result = .success(try await homeBrowser.homeSourceSelection()) }
-            catch { result = .failure(error) }
-            guard catalogSourceRequest == request, model.accountAccessGeneration == access else { return }
-            switch result {
-            case .success(let value): catalogSource = value; render()
-            case .failure(let error):
-                catalogSource = nil; render()
-                let failure = MusicServiceError.sanitized(error)
-                if failure != .cancelled { showError(failure.message(operation: "读取数据源")) }
-            }
-        }
-    }
-
-    private func saveCatalogSource(_ platform: MusicPublicBrowsePlatform) {
-        guard let homeBrowser, let current = catalogSource, current.selected != platform,
-              !savingCatalogSource, model.isAvailable, !model.isClosed else { return }
-        let request = UUID(), access = model.accountAccessGeneration
-        catalogSourceRequest = request
-        savingCatalogSource = true; render()
-        runPageTask { [weak self] in
-            let result: Result<MusicHomeSourceSelection, Error>
-            do { result = .success(try await homeBrowser.selectHomeSource(platform, ifRevision: current.revision)) }
-            catch { result = .failure(error) }
-            guard let self, catalogSourceRequest == request, model.accountAccessGeneration == access else { return }
-            switch result {
-            case .success(let value):
-                savingCatalogSource = false; catalogSource = value; render()
-            case .failure(let error):
-                // Conflicts and failures show the durable value, not the attempted one.
-                let reread = try? await homeBrowser.homeSourceSelection()
-                guard catalogSourceRequest == request, model.accountAccessGeneration == access else { return }
-                savingCatalogSource = false; catalogSource = reread; render()
-                let failure = MusicServiceError.sanitized(error)
-                if failure != .cancelled { showError(failure.message(operation: "保存数据源")) }
-            }
-        }
+            selectCatalogSource: { [weak self] in self?.sourceSettings.select($0) }))
     }
 
     func confirmUserDataReset() {

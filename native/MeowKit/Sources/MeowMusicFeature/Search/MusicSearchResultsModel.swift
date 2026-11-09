@@ -18,6 +18,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     public typealias SongRead = @MainActor @Sendable (MusicPublicBrowsePlatform, String, Int, Int) async throws -> MusicSearchPage
     public typealias PlaylistRead = @MainActor @Sendable (MusicPublicBrowsePlatform, String, Int, Int) async throws -> MusicPlaylistSearchPage
     public typealias RecordingRead = @MainActor @Sendable (MusicSearchBatchRequest) async throws -> MusicRemoteTrack
+    public typealias ObservationWrite = @MainActor @Sendable ([MusicSearchPage], [MusicReference]) async throws -> Void
     @Published public private(set) var query = ""
     @Published public private(set) var requestID = UUID()
     @Published public private(set) var preferences = MusicSearchPreferences()
@@ -41,6 +42,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         var items: [Item] = []
         var ranks: [String: Int] = [:]
         var origins: [MusicReference: SongOrigin] = [:]
+        var pages: [MusicSearchPage] = []
         var roundItems: [Item] = []
         var lastPage = 0
         var next: Int? = 1
@@ -51,6 +53,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     private let readSongs: SongRead
     private let readPlaylists: PlaylistRead
     private let readRecording: RecordingRead
+    private let writeObservations: ObservationWrite
     private let timing: MusicCandidateDiscoveryTiming
     private let cacheProvider: @MainActor () -> MusicSearchResultsCache.Storage
     private var songStates: [MusicPublicBrowsePlatform: PlatformState<MusicRemoteTrack>] = [:]
@@ -67,16 +70,20 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
 
     public convenience init(readSongs: @escaping SongRead, readPlaylists: @escaping PlaylistRead,
                 readRecording: @escaping RecordingRead,
+                writeObservations: @escaping ObservationWrite = { _, _ in },
                 timing: MusicCandidateDiscoveryTiming = .init(),
                 clock: @escaping @Sendable () -> Date = { Date() }) {
         self.init(readSongs: readSongs, readPlaylists: readPlaylists, readRecording: readRecording,
-                  timing: timing, cacheProvider: { MusicSearchResultsCache.make(clock: clock) })
+                  writeObservations: writeObservations, timing: timing,
+                  cacheProvider: { MusicSearchResultsCache.make(clock: clock) })
     }
     init(readSongs: @escaping SongRead, readPlaylists: @escaping PlaylistRead,
-         readRecording: @escaping RecordingRead, timing: MusicCandidateDiscoveryTiming = .init(),
+         readRecording: @escaping RecordingRead, writeObservations: @escaping ObservationWrite = { _, _ in },
+         timing: MusicCandidateDiscoveryTiming = .init(),
          cacheProvider: @escaping @MainActor () -> MusicSearchResultsCache.Storage) {
         self.readSongs = readSongs; self.readPlaylists = readPlaylists
         self.readRecording = readRecording
+        self.writeObservations = writeObservations
         self.timing = timing; self.cacheProvider = cacheProvider; cache = cacheProvider()
     }
     convenience init(owner: MusicViewModel) {
@@ -89,6 +96,9 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         }, readRecording: { [weak owner] request in
             guard let owner else { throw MusicServiceError.closed }
             return try await owner.searchRecording(request)
+        }, writeObservations: { [weak owner] pages, references in
+            guard let owner else { throw MusicServiceError.closed }
+            try await owner.observeSearchPages(pages, references: references)
         }, cacheProvider: { [weak owner] in
             owner?.searchResultsCache ?? MusicSearchResultsCache.make()
         })
@@ -209,7 +219,10 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         }
         var origins: [MusicSearchBatchOrigin] = []
         for platform in platforms {
-            var candidates = row.variants.filter { $0.sources.contains { $0.platform == platform.rawValue } }
+            var candidates = row.variants.filter { track in
+                track.sources.contains { $0.platform == platform.rawValue } &&
+                    songStates[platform]?.origins[track.ref] != nil
+            }
             guard !candidates.isEmpty else { continue }
             guard let state = songStates[platform] else { throw MusicServiceError.staleResult }
             if let preferred, let index = candidates.firstIndex(of: preferred) {
@@ -268,6 +281,16 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
                             request: request, generation: generation, token: own, first: first)
                     }
                 }
+            }
+            guard self.accepts(request, generation), self.songToken == own else { return }
+            let pages = self.preferences.songPlatforms.flatMap { self.songStates[$0]?.pages ?? [] }
+            let references = Array(Set(self.preferences.songPlatforms.flatMap {
+                self.songStates[$0]?.items.map(\.ref) ?? []
+            }))
+            do { try await self.writeObservations(pages, references) }
+            catch {
+                // The executed request already owns its facts. Expired display
+                // references cannot turn a successful page into a failed search.
             }
             guard self.accepts(request, generation), self.songToken == own else { return }
             self.publishSongs(first: first)
@@ -332,6 +355,8 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
             state.items.append(item); state.roundItems.append(item)
         }
         state.lastPage = range.page; state.next = page.nextPage
+        state.pages.removeAll { $0.page == page.page && $0.limit == page.limit }
+        state.pages.append(page)
         songStates[platform] = state; songsLoaded = true
         if first { publishSongs(first: true) }
     }

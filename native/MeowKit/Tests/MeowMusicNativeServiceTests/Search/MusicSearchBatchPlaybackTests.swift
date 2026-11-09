@@ -217,11 +217,17 @@ private actor MusicSearchBatchQQ: MusicPublicQQProviding {
             let page = try await service.search(platform: platform.rawValue, query: "original query", page: 1, limit: 30)
             targets.append(.init(platform: platform, page: 1, track: try XCTUnwrap(page.items.first)))
         }
+        let searchesBefore = await http.calls(), qqBefore = await qq.log()
         _ = try await service.replaceSearchBatch(.init(query: "original query", targets: targets),
             expectedRevision: 0, intent: .init())
         let queue = try await service.queue()
         XCTAssertEqual(queue.entries.map(\.track.songId), targets.map(\.track.songId))
-        XCTAssertEqual(queue.entries.map(\.track.sources), targets.map(\.track.sources))
+        let hash = String(repeating: "A", count: 32)
+        let kg = MusicNativeSource(sourceKey: MJ.strings(["kg", hash, hash.lowercased()]).json, platform: "kg", nativeId: hash)
+        let tx = MusicNativeSource(sourceKey: MJ.strings(["tx", "Track0", ""]).json, platform: "tx", nativeId: "Track0")
+        let wy = MusicNativeSource(sourceKey: MJ.strings(["wy", "321", ""]).json, platform: "wy", nativeId: "321")
+        XCTAssertEqual(queue.entries.map(\.track.sources), [[kg, wy], [tx], [wy, kg]])
+        XCTAssertEqual(queue.entries.map { $0.track.sources.first?.platform }, ["kg", "tx", "wy"])
         XCTAssertEqual(document.snapshot().2, 1)
         let saved = try MusicDocument(document.snapshot().0, runID: "fixture")
         XCTAssertTrue(saved.queue["entries"].array.allSatisfy {
@@ -234,6 +240,9 @@ private actor MusicSearchBatchQQ: MusicPublicQQProviding {
         XCTAssertEqual(singleSaved.queue["entries"].array.count, 1)
         XCTAssertEqual(singleSaved.queue["entries"].array.first?["context"]["sourceType"].string, "search-song")
         XCTAssertEqual(singleSaved.queue["entries"].array.first?["context"]["searchKeyword"].string, "original query")
+        let searchesAfter = await http.calls(), qqAfter = await qq.log()
+        XCTAssertEqual(searchesAfter, searchesBefore, "Shared projection and batch adoption must not search")
+        XCTAssertEqual(qqAfter, qqBefore)
         await service.close()
     }
     func testFusedRecordingPersistsAllFiveRealPlatformIDsForQueueAndFavorites() async throws {

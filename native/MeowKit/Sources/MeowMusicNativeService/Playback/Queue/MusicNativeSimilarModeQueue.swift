@@ -92,16 +92,26 @@ extension NativeMusicService {
             return .init(state: stateDTO(try read()), action: .keepCurrent)
         }
         try session.lease.authorization.check()
-        let before = try read(), keep = before.queue["currentId"] == session.returnQueue["currentId"]
-        let state = try session.lease.authorization.perform {
+        let (state, keep) = try session.lease.authorization.perform {
             try similarQueueTransaction(["queue", "playback", "history"]) { d in
                 let old = d.queue
                 try restoreSimilarQueue(session.returnQueue, into: &d.queue)
+                if session.provider == .heartbeat,
+                   let current = old["entries"].array.first(where: { $0["id"] == old["currentId"] }) {
+                    var rows = d.queue["entries"].array
+                    if !rows.contains(where: { $0["id"] == current["id"] }) {
+                        let anchor = rows.firstIndex { $0["id"] == d.queue["currentId"] } ?? -1
+                        rows.insert(current, at: anchor + 1)
+                        d.queue["entries"] = .array(rows)
+                    }
+                    select(current["id"].string, queue: &d.queue, remember: false)
+                }
+                let keep = d.queue["currentId"] == old["currentId"]
                 archive(old, into: &d)
                 d.queue["similar"] = .null
                 d.queue["revision"] = .n(d.queue["revision"].int + 1)
                 if !keep { d.resetPosition() }
-                return stateDTO(d)
+                return (stateDTO(d), keep)
             }
         }
         let playing = similarMode.playing
@@ -194,6 +204,9 @@ extension NativeMusicService {
                   d.queue["revision"].int == revision, d.queue["currentId"].string == currentID else { return }
             let incoming = try MusicNativeSimilarData.songs(response)
             let recommendations = try MusicNativeSimilarData.recommendations(response.items)
+            try await retainSongMetadata(incoming)
+            try check(own); try lease.authorization.check()
+            guard similarMode.active?.id == sessionID, session.pendingID == requestID, session.continueEnabled else { return }
             let songs = MusicNativeSimilarData.unique(incoming, excluding: d.queue["entries"].array.map { $0["song"] })
             let status: MusicSimilarModeSnapshot.Status = songs.isEmpty ? .empty : .ready
             let provider: MusicSimilarModeProvider = session.provider == .songRoaming ? .songRoaming : .queueRecommendations

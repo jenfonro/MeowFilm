@@ -10,9 +10,11 @@ private actor PlaybackInteractionScripts: MusicScriptResolving {
     var ids: [String]
     var held: (String, NativeMusicGate)?
     var requests: [String] = []
+    var failures = Set<String>()
     init(_ ids: [String] = ["a", "b"]) { self.ids = ids }
     func add(_ id: String) { ids.append(id) }
     func hold(_ key: String, gate: NativeMusicGate) { held = (key, gate) }
+    func fail(_ keys: Set<String>) { failures = keys }
     func sources() -> [MusicScriptSource] { ids.map(snapshot) }
     func snapshot(_ id: String) -> MusicScriptSource {
         .init(installationID: id, generation: 1, enabled: true, state: .ready, version: "1",
@@ -26,7 +28,8 @@ private actor PlaybackInteractionScripts: MusicScriptResolving {
         requests.append(key)
         if let (match, gate) = held, key == match { held = nil; await gate.wait() }
         try Task.checkCancellation()
-        return .init(value: .init(url: URL(string: "https://media.invalid/\(request.installationID).\(request.quality)")!,
+        if failures.contains(key) { throw MusicServiceError.audioUnavailable }
+        return .init(value: .init(url: URL(string: "https://media.invalid/\(request.installationID).\(request.quality)/\(request.sourceKey)")!,
                      delivery: .init(quality: request.quality, evidence: .officialResponse, duration: 180)), source: executed)
     }
     func lyrics(request: MusicScriptRequest) -> MusicScriptResult<MusicNativeLyrics> {
@@ -37,20 +40,41 @@ private actor PlaybackInteractionScripts: MusicScriptResolving {
 
 @MainActor private class PlaybackInteractionPlayer: MusicPlaybackHandoffDriving {
     var resources: [PlaybackResource] = []
-    var resumes = 0, pauses = 0
+    var resumes = 0, pauses = 0, stops = 0
+    var preparations: [PlaybackResource] = []
+    var preparationFailure: MusicServiceError?
+    var commitFailure: MusicServiceError?
+    var committedAutoplay: [Bool] = []
+    private var wantsPlayback = true
+    var onCommit: (() -> Void)?
     var gate: NativeMusicGate?
     var onPause: (() -> Void)?
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
+        wantsPlayback = true
         resources.append(resource)
         return .init(id: UUID(), resourceID: resource.id)
     }
     func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
+        preparations.append(resource)
         if let gate { self.gate = nil; await gate.wait(); try Task.checkCancellation() }
-        return .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
+        if let preparationFailure { throw preparationFailure }
+        return .init(duration: 180, synchronize: {}, commit: {
+            try self.commit(resource, autoplay: self.wantsPlayback)
+        }, cancel: {})
     }
-    func stop(_ attempt: MusicPlayerAttempt) {}
-    func pause(_ attempt: MusicPlayerAttempt) { pauses += 1; onPause?() }
-    func resume(_ attempt: MusicPlayerAttempt) { resumes += 1 }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        .init(duration: 180, synchronize: {}, commit: { try self.commit(resource, autoplay: autoplay) }, cancel: {})
+    }
+    private func commit(_ resource: PlaybackResource, autoplay: Bool) throws -> MusicPlayerAttempt {
+        onCommit?()
+        if let commitFailure { throw commitFailure }
+        let result = play(resource)
+        wantsPlayback = autoplay; committedAutoplay.append(autoplay)
+        return result
+    }
+    func stop(_ attempt: MusicPlayerAttempt) { stops += 1 }
+    func pause(_ attempt: MusicPlayerAttempt) { wantsPlayback = false; pauses += 1; onPause?() }
+    func resume(_ attempt: MusicPlayerAttempt) { wantsPlayback = true; resumes += 1 }
     func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool { true }
 }
 
@@ -75,12 +99,18 @@ private actor PlaybackInteractionScripts: MusicScriptResolving {
         let gate = NativeMusicGate(); player.gate = gate
         let choice = Task { await model.switchQuality("flac") }
         await gate.started()
+        let before = await scripts.calls()
         emit(model, .failed)
+        if case .automatic = model.sourceIntent {} else { XCTFail("Pending B must not become committed intent") }
         // Failure is delivered while the explicit flac request owns a prepared
         // candidate but has not committed. No timing sleep determines intent.
         await gate.release(); await choice.value; await model.flushPlaybackFacts()
         print("REGRESSION E1 quality=\(model.lastSelection?.quality ?? "nil") intent=\(model.sourceIntent) opened=\(player.resources.count) error=\(model.error ?? "nil")")
         XCTAssertEqual(model.lastSelection?.quality, "flac", "Latest explicit quality must survive the old stream's failure")
+        let after = await scripts.calls()
+        XCTAssertEqual(after, before, "Donor failure must not restart B's resolution")
+        XCTAssertEqual(player.preparations.count, 1, "The already preparing B must remain the same media")
+        XCTAssertEqual(model.candidate?.startPosition, 23)
         await model.close(); await service.close()
     }
     func testManualQualityWithoutDonorFailureControl() async throws {
@@ -90,6 +120,36 @@ private actor PlaybackInteractionScripts: MusicScriptResolving {
         XCTAssertEqual(model.lastSelection?.quality, "flac")
         await model.close(); await service.close()
     }
+    func testCommittedIntentIsPublishedOnlyAfterNativeCommitReturns() async throws {
+        let player = PlaybackInteractionPlayer()
+        let (service, model) = try await setup(PlaybackInteractionScripts(), player: player)
+        var commits = 0
+        player.onCommit = {
+            commits += 1
+            if case .automatic = model.sourceIntent {} else { XCTFail("B is not committed during native admission") }
+        }
+        await model.switchQuality("flac")
+        XCTAssertEqual(commits, 1)
+        if case .quality("flac") = model.sourceIntent {} else { XCTFail("Successful B commits its intent") }
+        player.onCommit = nil
+        await model.close(); await service.close()
+    }
+    func testRejectedNativeCommitsKeepHealthyAAndItsIntent() async throws {
+        let player = PlaybackInteractionPlayer()
+        let (service, model) = try await setup(PlaybackInteractionScripts(), player: player)
+        let old = model.activePlaybackSelection, resource = model.activeResourceID
+        player.commitFailure = .invalidMediaCandidate
+        player.onCommit = {
+            if case .automatic = model.sourceIntent {} else { XCTFail("Rejected B must not publish its intent") }
+        }
+        await model.switchQuality("flac")
+        XCTAssertEqual(player.preparations.count, 2, "Each real flac peer is admitted once")
+        XCTAssertEqual(model.activeResourceID, resource); XCTAssertEqual(model.activePlaybackSelection, old)
+        XCTAssertEqual(player.resources.count, 1); XCTAssertEqual(model.phase, .playing)
+        if case .automatic = model.sourceIntent {} else { XCTFail("A keeps its committed intent") }
+        player.onCommit = nil
+        await model.close(); await service.close()
+    }
     func testPlayCannotResumeConfirmedWrongSource() async throws {
         let player = PlaybackInteractionPlayer()
         let (service, model) = try await setup(PlaybackInteractionScripts(["a"]), player: player)
@@ -97,6 +157,7 @@ private actor PlaybackInteractionScripts: MusicScriptResolving {
         await model.rejectCurrentSource(); await model.flushPlaybackFacts()
         let excluded = try await service.sourceExclusions()
         XCTAssertEqual(excluded.count, 1); XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(model.position, 23, "No same-tier replacement must keep the saved position")
         let old = model.activeResourceID
         await model.togglePlayback()
         print("REGRESSION E2 excluded=\(excluded.count) resumes=\(player.resumes) oldRetained=\(old == model.activeResourceID) occurrence=\(model.current?.id ?? "nil")")
@@ -141,6 +202,28 @@ private actor PlaybackInteractionScripts: MusicScriptResolving {
         XCTAssertEqual(model.current?.id, "entry-1")
         await model.close(); await service.close()
     }
+    func testRejectingPlayingNonPrimaryRecordingStopsBeforeSameTierReplacement() async throws {
+        let primary = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "primary"))
+        let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "peer"))
+        let song = try MusicModel.mergeSources(primary, adding: peer["sources"].array)
+        let service = try await NativeMusicFixture.service(
+            MusicNativeCandidateDiscoveryFixture.store(song: song), scripts: PlaybackInteractionScripts(["a"]))
+        let player = PlaybackInteractionPlayer(), model = MusicViewModel(service: service, player: player)
+        await model.load()
+        let key = peer["sources"].array[0]["sourceKey"].string
+        await model.choose(.init(installationId: "a", generation: 1, siteId: "tx", sourceKey: key, quality: "128k"))
+        emit(model, .playing); await model.flushPlaybackFacts()
+        let selected = try XCTUnwrap(model.activePlaybackSelection)
+        let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: model.state.revision)
+        await model.rejectInspectedSource(.init(id: "playing", selection: selected, title: "Playing", delivery: nil),
+                                         session: session)
+        XCTAssertEqual(player.stops, 1)
+        XCTAssertEqual(model.activePlaybackSelection?.quality, "128k", "Recording rejection must not jump to preferred flac")
+        XCTAssertEqual(model.activePlaybackSelection?.sourceKey, primary["sources"].array[0]["sourceKey"].string)
+        XCTAssertEqual(model.candidate?.startPosition, 23); XCTAssertEqual(player.resumes, 1)
+        XCTAssertEqual(model.current?.id, "entry-1")
+        await model.close(); await service.close()
+    }
     func testPauseWhileWrongSourceReplacementIsResolvingCancelsIt() async throws {
         let scripts = PlaybackInteractionScripts(["a"]), player = PlaybackInteractionPlayer()
         let (service, model) = try await setup(scripts, player: player)
@@ -168,6 +251,107 @@ private actor PlaybackInteractionScripts: MusicScriptResolving {
         await gate.started(); emit(model, .failed)
         await gate.release(); await task.value; await model.flushPlaybackFacts()
         XCTAssertEqual(model.activePlaybackSelection, row.selection)
+        await model.close(); await service.close()
+    }
+    func testPendingSearchContinuesOnceAfterDonorFailure() async throws {
+        let scripts = PlaybackInteractionScripts(["a"]), player = PlaybackInteractionPlayer()
+        let (service, model) = try await setup(scripts, player: player)
+        let gate = NativeMusicGate()
+        await scripts.hold("a:flac", gate: gate)
+        let task = Task { await model.switchQuality("flac") }
+        await gate.started()
+        emit(model, .failed)
+        XCTAssertTrue(model.isResolving)
+        XCTAssertNotNil(model.activeResourceID, "Keep the failed attempt scope until B settles")
+        if case .automatic = model.sourceIntent {} else { XCTFail("A remains the committed intent") }
+        await gate.release(); await task.value; await model.flushPlaybackFacts()
+        let calls = await scripts.calls()
+        XCTAssertEqual(calls.filter { $0 == "a:flac" }.count, 1)
+        XCTAssertEqual(model.activePlaybackSelection?.quality, "flac")
+        XCTAssertEqual(player.preparations.count, 1)
+        XCTAssertEqual(model.candidate?.startPosition, 23)
+        XCTAssertNil(model.error)
+        await model.close(); await service.close()
+    }
+    func testPauseAfterDonorFailureKeepsPreparedBButNeverResumesIt() async throws {
+        let scripts = PlaybackInteractionScripts(["a"]), player = PlaybackInteractionPlayer()
+        let (service, model) = try await setup(scripts, player: player)
+        let gate = NativeMusicGate(); player.gate = gate
+        let task = Task { await model.switchQuality("flac") }
+        await gate.started(); emit(model, .failed)
+        await model.togglePlayback()
+        XCTAssertEqual(model.phase, .paused); XCTAssertTrue(model.isResolving)
+        await gate.release(); await task.value; await model.flushPlaybackFacts()
+        let calls = await scripts.calls()
+        XCTAssertEqual(calls.filter { $0 == "a:flac" }.count, 1)
+        XCTAssertEqual(player.preparations.count, 1)
+        XCTAssertEqual(model.activePlaybackSelection?.quality, "flac")
+        XCTAssertEqual(model.phase, .paused); XCTAssertEqual(model.candidate?.startPosition, 23)
+        XCTAssertEqual(player.committedAutoplay.last, false); XCTAssertEqual(player.resumes, 0)
+        await model.close(); await service.close()
+    }
+    func testPauseAfterDonorFailureKeepsPendingBSearchButNeverResumesIt() async throws {
+        let scripts = PlaybackInteractionScripts(["a"]), player = PlaybackInteractionPlayer()
+        let (service, model) = try await setup(scripts, player: player)
+        let gate = NativeMusicGate()
+        await scripts.hold("a:flac", gate: gate)
+        let task = Task { await model.switchQuality("flac") }
+        await gate.started(); emit(model, .failed)
+        await model.togglePlayback()
+        await gate.release(); await task.value; await model.flushPlaybackFacts()
+        let calls = await scripts.calls()
+        XCTAssertEqual(calls.filter { $0 == "a:flac" }.count, 1)
+        XCTAssertEqual(model.activePlaybackSelection?.quality, "flac")
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(player.committedAutoplay.last, false); XCTAssertEqual(player.resumes, 0)
+        await model.close(); await service.close()
+    }
+    func testPausedPendingBFailureRestoresCommittedAWithoutResuming() async throws {
+        let scripts = PlaybackInteractionScripts(["a"]), player = PlaybackInteractionPlayer()
+        let (service, model) = try await setup(scripts, player: player)
+        player.onPause = { [weak model] in if let model { self.emit(model, .paused) } }
+        await model.switchQuality("128k")
+        emit(model, .playing); await model.flushPlaybackFacts()
+        let gate = NativeMusicGate()
+        await scripts.hold("a:flac", gate: gate); await scripts.fail(["a:flac", "b:flac"])
+        let task = Task { await model.switchQuality("flac") }
+        await gate.started(); await scripts.add("b"); emit(model, .failed)
+        await model.togglePlayback()
+        await gate.release(); await task.value; await model.flushPlaybackFacts()
+        let calls = await scripts.calls()
+        XCTAssertEqual(calls.filter { $0 == "a:flac" }.count, 1)
+        XCTAssertEqual(calls.filter { $0 == "b:flac" }.count, 1)
+        XCTAssertEqual(model.activePlaybackSelection?.installationId, "b")
+        XCTAssertEqual(model.activePlaybackSelection?.quality, "128k")
+        if case .quality("128k") = model.sourceIntent {} else { XCTFail("Only A's committed intent may recover") }
+        XCTAssertEqual(model.phase, .paused); XCTAssertEqual(model.candidate?.startPosition, 23)
+        XCTAssertEqual(player.committedAutoplay.last, false); XCTAssertEqual(player.resumes, 0)
+        await model.close(); await service.close()
+    }
+    func testFailedPendingBRecoversCommittedAIntentOnlyAfterBExhausts() async throws {
+        let scripts = PlaybackInteractionScripts(["a"]), player = PlaybackInteractionPlayer()
+        let (service, model) = try await setup(scripts, player: player)
+        await model.switchQuality("128k")
+        emit(model, .playing); await model.flushPlaybackFacts()
+        let old = try XCTUnwrap(model.activePlaybackSelection)
+        let gate = NativeMusicGate()
+        await scripts.hold("a:flac", gate: gate)
+        await scripts.fail(["a:flac", "b:flac"])
+        let task = Task { await model.switchQuality("flac") }
+        await gate.started()
+        await scripts.add("b")
+        emit(model, .failed)
+        if case .quality("128k") = model.sourceIntent {} else { XCTFail("A remains committed while B is pending") }
+        XCTAssertEqual(player.resources.count, 2, "No parallel A recovery may open while B is pending")
+        await gate.release(); await task.value; await model.flushPlaybackFacts()
+        let calls = await scripts.calls()
+        XCTAssertEqual(calls.filter { $0 == "a:flac" }.count, 1)
+        XCTAssertEqual(calls.filter { $0 == "b:flac" }.count, 1, "Exhaust each B candidate once before restoring A")
+        if case .quality("128k") = model.sourceIntent {} else { XCTFail("B exhaustion must restore the committed A intent") }
+        XCTAssertEqual(model.activePlaybackSelection?.installationId, "b")
+        XCTAssertEqual(model.activePlaybackSelection?.quality, old.quality)
+        XCTAssertEqual(model.candidate?.startPosition, 23)
+        XCTAssertNil(model.error)
         await model.close(); await service.close()
     }
     func testPendingQualitySupersedesOfficialURLRenewal() async throws {
@@ -319,6 +503,15 @@ private actor PlaybackInteractionScripts: MusicScriptResolving {
                 self.commitFailure = nil
                 return .init(id: next.id, resourceID: next.resourceID)
             } catch { self.commitFailure = error; throw error }
+        }, cancel: { prepared.cancel() })
+    }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        let prepared = try await controller.preparePlayback(resource: local(resource), owner: "music", autoplay: autoplay)
+        return .init(duration: prepared.duration, synchronize: {
+            try await self.controller.synchronizeReplacement(prepared)
+        }, commit: {
+            let next = try self.controller.commitReplacement(prepared)
+            return .init(id: next.id, resourceID: next.resourceID)
         }, cancel: { prepared.cancel() })
     }
     func stop(_ attempt: MusicPlayerAttempt) { controller.stop(owner: "music") }

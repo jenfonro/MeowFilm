@@ -111,7 +111,9 @@ public static class MusicQualityPolicyTests
         stale["ifRevision"] = 0;
         await f.Error("music.quality.settings.save", stale, "REVISION_CONFLICT");
         Check(f.Store.Writes == 2);
-        Check(f.Store.Names.All(n => n == "music.library.v1"));
+        Check(f.Store.WriteNames.SetEquals(["music.library.v1"]), "settings only write the library document");
+        Check(f.Store.Names.SetEquals(["music.library.v1", "music.song-matches.v1"]),
+            "library access also reads the shared song facts owner without writing its document");
     }
     private static async Task Restart()
     {
@@ -439,6 +441,7 @@ internal sealed class QualityFixture : IAsyncDisposable
         private readonly object gate = new();
         internal readonly Dictionary<string, byte[]> Data = [];
         internal readonly HashSet<string> Names = [];
+        internal readonly HashSet<string> WriteNames = [];
         internal int Writes;
         internal bool Fault, FaultAfter, Disposed;
         internal string? FaultNamespace, HoldNamespace;
@@ -459,7 +462,7 @@ internal sealed class QualityFixture : IAsyncDisposable
             { Check(!token.CanBeCanceled, "CAS must physically settle"); Entered.TrySetResult(); await Release.Task; }
             lock (gate)
             {
-                Names.Add(ns); Writes++;
+                Names.Add(ns); WriteNames.Add(ns); Writes++;
                 bool fault = Fault && ns == FaultNamespace;
                 if (fault) Fault = false;
                 if (fault && !FaultAfter) throw new InvalidOperationException("synthetic before CAS receipt loss");

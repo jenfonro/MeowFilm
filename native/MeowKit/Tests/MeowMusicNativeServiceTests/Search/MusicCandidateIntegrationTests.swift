@@ -20,6 +20,9 @@ import MeowContracts
 
 @MainActor private final class MusicCandidateIntegrationHandoffPlayer: MusicCandidateIntegrationPlayer, MusicPlaybackHandoffDriving {
     var handoffs: [MusicPlayerAttempt] = []
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
+    }
     func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
         handoffs.append(replacing)
         return .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
@@ -273,7 +276,7 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         await model.close(); await service.close()
     }
 
-    @MainActor func testRejectingThePlayingSourceExcludesItAndSelectsAnotherAutomatically() async throws {
+    @MainActor func testRejectingThePlayingSourceExcludesItAndSelectsSameTierReplacement() async throws {
         var song = try MusicNativeCandidateDiscoveryFixture.song()
         let first = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "501"))
         let second = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "502"))
@@ -285,24 +288,25 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
         let service = try await NativeMusicFixture.service(store, scripts: scripts, qq: MusicNativeCandidateDiscoveryQQ(),
             http: MusicNativeCandidateDiscoveryHTTP(), sourceDiscovery: cache)
-        let player = MusicCandidateIntegrationPlayer(), model = MusicViewModel(service: service, player: player)
+        let player = MusicCandidateIntegrationHandoffPlayer(), model = MusicViewModel(service: service, player: player)
         await model.load()
         await model.togglePlayback()
         var calls = await scripts.calls()
         XCTAssertEqual(calls.map(\.sourceKey), [rejected]); XCTAssertEqual(player.resources.count, 1)
         let current = try XCTUnwrap(model.current)
+        // Opening inspection is read-only; rejection requests the same-tier replacement.
         let session = try await model.inspectSources(for: current.track.ref)
+        let openingCalls = await scripts.calls()
+        XCTAssertEqual(openingCalls.count, calls.count)
         let source = MusicResolvedSource(id: "rejected", selection: .init(installationId: MusicNativeCandidateDiscoveryFixture.installation,
             generation: 1, siteId: "wy", sourceKey: rejected, quality: "128k"), title: "Same name", delivery: nil)
         await model.rejectInspectedSource(source, session: session)
         XCTAssertNil(model.error)
         calls = await scripts.calls()
-        // The open inspector also probes the remaining script qualities. Check
-        // the accepted playback, not the combined playback + inspection count.
         let replacement = try XCTUnwrap(model.activePlaybackSelection)
         XCTAssertEqual(replacement.installationId, MusicNativeCandidateDiscoveryFixture.installation)
         XCTAssertEqual(replacement.siteId, "wy"); XCTAssertEqual(replacement.sourceKey, kept)
-        XCTAssertEqual(replacement.quality, "flac", "automatic replacement keeps the quality-first policy")
+        XCTAssertEqual(replacement.quality, "flac", "Replacement keeps the playing source's quality tier")
         XCTAssertEqual(calls.filter { $0.sourceKey == rejected }.count, 1)
         XCTAssertTrue(calls.dropFirst().allSatisfy { $0.sourceKey == kept })
         XCTAssertEqual(player.resources.count, 2); XCTAssertEqual(player.stopped.count, 1)

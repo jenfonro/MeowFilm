@@ -15,22 +15,24 @@ extension NativeMusicService: MusicSearchBatchPlaying {
     public func searchRecording(_ request: MusicSearchBatchRequest) async throws -> MusicRemoteTrack {
         try request.validate()
         try musicRequire(request.targets.count == 1, .invalidRequest)
-        let retained = try retainedSearchOrigins(request), port = publicPlatforms
+        let retained = try retainedSearchOrigins(request), port = publicPlatforms, owner = self, own = epoch
         let songs = try await work(label: "searchRecording") {
-            try await Self.searchBatchSongs(request, retained: retained, port: port, intent: nil)
+            try await Self.searchBatchSongs(request, retained: retained, port: port, intent: nil, owner: owner, epoch: own)
         }
-        return try remember(songs[0])
+        let shared = try await projectSongMetadata(songs)
+        return try remember(shared[0])
     }
 
     public func replaceSearchBatch(_ request: MusicSearchBatchRequest, expectedRevision: Int,
                                    intent: MusicQueueAuthorization) async throws -> MusicPlaybackState {
         try request.validate()
         try check(); try intent.check()
-        let retained = try retainedSearchOrigins(request), own = epoch, port = publicPlatforms
+        let retained = try retainedSearchOrigins(request), own = epoch, port = publicPlatforms, owner = self
         try musicRequire(try read().queue["revision"].int == expectedRevision, .staleRevision)
-        let songs = try await work(label: "searchBatch") {
-            try await Self.searchBatchSongs(request, retained: retained, port: port, intent: intent)
+        let acquired = try await work(label: "searchBatch") {
+            try await Self.searchBatchSongs(request, retained: retained, port: port, intent: intent, owner: owner, epoch: own)
         }
+        let songs = try await projectSongMetadata(acquired)
         try check(own); try intent.check()
         let result = try intent.perform {
             try similarQueueTransaction(["queue", "playback", "history"]) { document in
@@ -75,7 +77,7 @@ extension NativeMusicService: MusicSearchBatchPlaying {
     /// merging. No query-wide hidden catalogue or DTO-to-song conversion.
     private nonisolated static func searchBatchSongs(_ request: MusicSearchBatchRequest,
         retained: [MusicSearchOriginID: MJ], port: MusicNativePlatforms,
-        intent: MusicQueueAuthorization?) async throws -> [MJ] {
+        intent: MusicQueueAuthorization?, owner: NativeMusicService, epoch: UUID) async throws -> [MJ] {
         let origins: [(MusicSearchOriginID, MusicSearchBatchOrigin)] = request.targets.enumerated().flatMap { targetIndex, target in
             target.origins.enumerated().map { originIndex, origin in
                 (MusicSearchOriginID(target: targetIndex, origin: originIndex), origin)
@@ -88,7 +90,7 @@ extension NativeMusicService: MusicSearchBatchPlaying {
                 guard !selected.isEmpty else { continue }
                 group.addTask {
                     try await Self.renewSearchOrigins(selected, platform: platform,
-                        query: request.query, port: port, intent: intent)
+                        query: request.query, port: port, intent: intent, owner: owner, epoch: epoch)
                 }
             }
             var collected = retained, bytes = retained.values.reduce(0) { $0 + $1.bytes.count }
@@ -119,7 +121,7 @@ extension NativeMusicService: MusicSearchBatchPlaying {
 
     private nonisolated static func renewSearchOrigins(_ origins: [(MusicSearchOriginID, MusicSearchBatchOrigin)],
         platform: MusicPublicBrowsePlatform, query: String, port: MusicNativePlatforms,
-        intent: MusicQueueAuthorization?) async throws -> [(MusicSearchOriginID, MJ)] {
+        intent: MusicQueueAuthorization?, owner: NativeMusicService, epoch: UUID) async throws -> [(MusicSearchOriginID, MJ)] {
         var uniqueRanges = Set<MusicSearchOriginRange>()
         for (_, origin) in origins {
             uniqueRanges.insert(.init(page: origin.page, limit: origin.limit))
@@ -131,8 +133,18 @@ extension NativeMusicService: MusicSearchBatchPlaying {
         var values: [(MusicSearchOriginID, MJ)] = [], bytes = 0
         for range in ranges {
             try Task.checkCancellation(); try intent?.check()
-            let result = try await port.search(platform: platform.rawValue, query: query,
-                                               page: range.page, limit: range.limit)
+            let observation = await owner.beginSourceDiscoveryObservation(platform: platform.rawValue, query: query,
+                page: range.page, limit: range.limit, scope: .page)
+            let result: MusicNativeTrackPage
+            do {
+                result = try await port.search(platform: platform.rawValue, query: query,
+                                                page: range.page, limit: range.limit)
+            } catch {
+                if (try? await owner.check(epoch)) != nil {
+                    await owner.recordSearchFailure(observation, failure: MusicServiceError.sanitized(error))
+                }
+                throw error
+            }
             try Task.checkCancellation(); try intent?.check()
             guard result.total >= 0,
                   (platform == .migu || result.items.count <= range.limit),
@@ -146,6 +158,9 @@ extension NativeMusicService: MusicSearchBatchPlaying {
                 try musicRequire(song.bytes.count <= 64 * 1024, .limit)
                 return (song, try MusicModel.track(song, .init(kind: .library, id: song["songId"].string)))
             }
+            try await owner.check(epoch)
+            let completed = await owner.finishSourceDiscoveryObservation(observation)
+            try await owner.recordSearchPage(result, observation: completed)
             for (id, origin) in origins where origin.page == range.page && origin.limit == range.limit {
                 guard let match = candidates.first(where: { origin.matches($0.1) }) else {
                     throw MusicServiceError.targetChanged

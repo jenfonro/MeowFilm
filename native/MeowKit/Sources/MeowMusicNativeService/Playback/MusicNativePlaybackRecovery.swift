@@ -83,7 +83,7 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         try checkPlaybackRecoveryAttempt(pin, activeAttemptID: previousAttemptID,
             reservedAttemptID: attemptID, ready: true)
         let valid = try media(audio)
-        try validateDelivery(valid, song: pin.song, playback: try read().playback)
+        try validateDelivery(valid, song: pin.song, playback: try read().playback, automaticQuality: false)
         // Renewal refreshes this tier's URL, not the selection policy. Only
         // the source session may exhaust peers and then downgrade automatic play.
         try musicRequire(valid.delivery?.quality == nil || valid.delivery?.quality == selection.quality, .invalidMediaCandidate)
@@ -161,7 +161,6 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         try musicRequire(source.platform == pin.selection.siteId &&
             musicSame(try MusicModel.sourceKey(info), pin.selection.sourceKey), .targetChanged)
         try requirePlatform(source.platform)
-        try musicRequire(!Self.officialQualities([pin.selection.quality], d.playback).isEmpty, .qualityDisabled)
         try musicRequire(Self.officialEnabled(source.platform, d.playback), .sourceUnavailable)
     }
 

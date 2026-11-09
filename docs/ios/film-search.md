@@ -62,4 +62,3 @@ scheme `MeowfilmAcceptance` 的新增精确 `only-testing`：
 实际图片 owner 关闭另起进程执行 `-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBShutdownHostTests/testAppShutdownDrainsPendingActualArtwork`，环境 `TEST_RUNNER_MEOWFILM_TMDB_SHUTDOWN=1`；不能与复用 App 的其他业务用例同次运行。用真实上游挂起图片，先恢复合成设置，再关闭 App；观察上游断开、共享 runtime 关闭及 Artwork 无成功缓存。未设环境会跳过，不算关闭通过。
 
 Swift、UIKit、真实宿主、独立生命周期和 App 构建须分别记录实际验证结果，不能互相替代。真实公网端点／凭据未提供，合成 HTTP 上游的真实接线也不能冒充公网账号／代理可用性；豆瓣搜索、智能匹配和真实播放仍不在范围。
-

@@ -387,7 +387,12 @@ final class MusicSourceSessionTests: XCTestCase {
         let history = try await service.playedSongs(), exclusions = try await service.sourceExclusions()
         let discovery = await service.sourceDiscoveryState(song)
         XCTAssertTrue(history.isEmpty); XCTAssertTrue(exclusions.isEmpty)
-        XCTAssertTrue(discovery.entries.isEmpty); XCTAssertTrue(discovery.excluded.isEmpty)
+        XCTAssertEqual(Set(discovery.entries.keys), ["tx"])
+        let known = try XCTUnwrap(discovery.entries["tx"])
+        XCTAssertEqual(known.sources.map(\.source), ["tx"])
+        XCTAssertEqual(known.sources.map(\.sourceKey), song["sources"].array.map { $0["sourceKey"].string })
+        XCTAssertEqual(known.checkedAt, 0); XCTAssertTrue(known.observations.isEmpty)
+        XCTAssertTrue(discovery.excluded.isEmpty)
         XCTAssertEqual(try MusicDocument(store.read(), runID: "session-cancellation").history, historyBefore)
         await service.discardSource(attemptID: retried.candidate.attemptId)
         await service.close()
@@ -415,7 +420,12 @@ final class MusicSourceSessionTests: XCTestCase {
         let history = try await service.playedSongs(), exclusions = try await service.sourceExclusions()
         let discovery = await service.sourceDiscoveryState(song)
         XCTAssertTrue(history.isEmpty); XCTAssertTrue(exclusions.isEmpty)
-        XCTAssertTrue(discovery.entries.isEmpty); XCTAssertTrue(discovery.excluded.isEmpty)
+        XCTAssertEqual(Set(discovery.entries.keys), ["tx"])
+        let known = try XCTUnwrap(discovery.entries["tx"])
+        XCTAssertEqual(known.sources.map(\.source), ["tx"])
+        XCTAssertEqual(known.sources.map(\.sourceKey), song["sources"].array.map { $0["sourceKey"].string })
+        XCTAssertEqual(known.checkedAt, 0); XCTAssertTrue(known.observations.isEmpty)
+        XCTAssertTrue(discovery.excluded.isEmpty)
         XCTAssertEqual(try MusicDocument(store.read(), runID: "session-publication").history, historyBefore)
         await service.discardSource(attemptID: first.candidate.attemptId)
         await service.discardSource(attemptID: reused.candidate.attemptId)
@@ -429,6 +439,10 @@ final class MusicSourceSessionTests: XCTestCase {
     var fail = false
     var gate: NativeMusicGate?
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt { resources.append(resource); return .init(id: UUID(), resourceID: resource.id) }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        if fail { throw MusicServiceError.invalidMediaCandidate }
+        return .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
+    }
     func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
         if let gate { self.gate = nil; await gate.wait(); try Task.checkCancellation() }
         if fail { throw MusicServiceError.invalidMediaCandidate }

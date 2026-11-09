@@ -15,6 +15,7 @@ public sealed partial class MusicCapability
             ["installationId"] = target.Installation ?? throw new MusicOperationException("TARGET_REQUIRED"), ["platform"] = target.Platform,
             ["song"] = target.RecordingSong ?? song.Raw, ["quality"] = target.Quality
         };
+        if (target.ManualSource) parameters["manualSource"] = true;
         if (target.SourceKey is not null) parameters["sourceKey"] = target.SourceKey;
         if (target.QualityPolicySignature is not null) parameters["qualityPolicySignature"] = target.QualityPolicySignature;
         if (target.QualityCacheSignature is not null) parameters["qualityCacheSignature"] = target.QualityCacheSignature;

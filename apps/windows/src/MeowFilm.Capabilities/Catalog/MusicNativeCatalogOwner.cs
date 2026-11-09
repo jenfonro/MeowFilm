@@ -26,6 +26,11 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
     private int pending;
     private bool closed;
     private Task? disposal;
+    internal Action<IEnumerable<JsonObject>>? SongsObserved { get; set; }
+    internal Func<JsonElement, JsonElement>? SongFactsProjection { get; set; }
+    internal Func<JsonElement, JsonElement>? KnownSongFactsProjection { get; set; }
+    internal Func<CancellationToken, Task>? PrepareSongFacts { get; set; }
+    internal Func<MusicSearchRequest, CancellationToken, Task<JsonElement>>? SearchSongs { get; set; }
     private sealed record Stage(string Platform, string Id, string Name, string Snapshot,
         JsonElement[] Songs, string[] Members, long Bytes, DateTimeOffset Expires, long Epoch);
     private static string NativeId(JsonElement song)
@@ -63,6 +68,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
             }
             var signal = operation.Token;
             Guard(signal, captured);
+            if (PrepareSongFacts is { } prepareFacts) await prepareFacts(signal).ConfigureAwait(false);
             JsonElement result;
             switch (method)
             {
@@ -72,9 +78,10 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                     Fields(input, ["platform", "keyword", "kind", "page", "limit", "refresh"], ["platform", "keyword"]);
                     var kind = Text(input, "kind", "songs");
                     Check(kind is "songs" or "playlists", "INVALID_REQUEST");
-                    result = await catalog.SearchAsync(new(Platform(input, publicCatalog: true), Text(input, "keyword"),
+                    var search = new MusicSearchRequest(Platform(input, publicCatalog: true), Text(input, "keyword"),
                         kind == "songs" ? MusicSearchKind.Songs : MusicSearchKind.Playlists,
-                        Number(input, "page", 1), Number(input, "limit", 30), Flag(input, "refresh")), signal).ConfigureAwait(false);
+                        Number(input, "page", 1), Number(input, "limit", 30), Flag(input, "refresh"));
+                    result = await (SearchSongs?.Invoke(search, signal) ?? catalog.SearchAsync(search, signal)).ConfigureAwait(false);
                     break;
                 case "music.catalog.chorus":
                     Fields(input, ["platform", "id"], ["platform", "id"]);
@@ -184,6 +191,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 default: throw new CatalogFailure("METHOD_UNAVAILABLE");
             }
             Guard(signal, captured);
+            var projection = method == "music.catalog.search" && SearchSongs is not null
+                ? KnownSongFactsProjection : SongFactsProjection;
+            if (projection is { } project) result = project(result);
             var response = Okay(result);
             returned = true;
             return response;
@@ -239,6 +249,8 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 Guard(signal, captured);
                 var identities = ValidatePage(result, platform, id, page, pageSize, snapshot, total,
                     memberIds, personal?.Kind == MusicPersonalPlaylistKind.KugouOwned);
+                SongsObserved?.Invoke(result.GetProperty("items").EnumerateArray()
+                    .Select(song => NativeMusicSong.Normalize(JsonNode.Parse(song.GetRawText()))));
                 snapshot ??= Text(result, "snapshot"); name ??= Text(result, "name"); total ??= Number(result, "total");
                 if (page == 1) { strength = OptionalText(result, "snapshotStrength"); memberIds = result.TryGetProperty("memberIds", out _); }
                 Check(Text(result, "name") == name, "SNAPSHOT_CHANGED");

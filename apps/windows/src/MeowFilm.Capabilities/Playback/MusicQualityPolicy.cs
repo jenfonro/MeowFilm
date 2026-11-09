@@ -69,6 +69,14 @@ internal static class MusicQualityPolicy
         _ => []
     };
     internal sealed record Tier(string Category, string[] Levels);
+    // The source browser has its own fixed traversal. Saved automatic preferences
+    // never remove a declared request from this manual exploration.
+    internal static readonly Tier[] SourceTiers =
+    [
+        new("high", ["320k", "192k"]), new("lossless", ["flac"]), new("hires", ["flac24bit"]),
+        new("master", ["master"]), new("standard", ["128k"]),
+        new("spatial", ["dolby", "sky", "vivid"]), new("enhanced", ["jyeffect"])
+    ];
     /// <summary>
     /// Automatic order: the preferred category (auto: the first), then every later enabled
     /// category of the saved order. A category is exhausted across all sources before the next.

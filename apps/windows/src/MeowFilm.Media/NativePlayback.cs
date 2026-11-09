@@ -440,14 +440,20 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         if (error is null && await TryRecoverLiveAsync(session)) return;
         if (!IsCurrent(session) || session.Terminal) return;
         error = session.LastInputError ?? error;
+        if (!session.HasStarted && error is null) error = PlaybackError.OpenFailed;
+        CaptureHandoffControls(session);
+        _handoffDonorRetired = error is not null &&
+            error is not (PlaybackError.ReadRevoked or PlaybackError.ResourceRevoked);
         session.Terminal = true;
         session.Invalidate();
-        if (!session.HasStarted && error is null) error = PlaybackError.OpenFailed;
         await _commands.WaitAsync();
         try
         {
             if (_session != session || _generation != session.Generation || _disposing) return;
-            try { await RetireAsync(); }
+            try
+            {
+                await RetireAsync(preserveHandoff: _handoffDonorRetired);
+            }
             catch { error = PlaybackError.ReleaseFailed; }
             if (_generation != session.Generation || _disposing || Volatile.Read(ref session.Cancelled) != 0) return;
             Set(ref _isPlaying, false, nameof(IsPlaying));
@@ -463,9 +469,9 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         else Failed?.Invoke(this, EventArgs.Empty);
     }
 
-    private async Task RetireAsync()
+    private async Task RetireAsync(bool preserveHandoff = false)
     {
-        await DiscardHandoffCoreAsync();
+        if (!preserveHandoff) await DiscardHandoffCoreAsync();
         var session = _session;
         if (session is null) return;
         bool failed;
@@ -670,6 +676,8 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
 
     private long BeginReplacement()
     {
+        _handoffDonorRetired = false;
+        _retiredHandoffRate = 1;
         _handoffOpening?.Cancel(); // A prepared input never outlives the playback it was prepared for.
         RevokeContinuation();
         ++_intentSequence;

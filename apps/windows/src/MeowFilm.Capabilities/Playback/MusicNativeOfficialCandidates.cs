@@ -19,7 +19,9 @@ public sealed partial class MusicNativeApplication
         {
             var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
             LJ.Require(LJ.Bytes(input).Length <= 512 * 1024, "LIMIT");
-            LJ.Fields(input, "song quality qualityPolicySignature", "song quality qualityPolicySignature");
+            LJ.Fields(input, "song quality qualityPolicySignature manualSource", "song quality qualityPolicySignature");
+            LJ.Require(input["manualSource"] is null || LJ.IsBool(input["manualSource"]), "INVALID_REQUEST");
+            bool manualSource = LJ.B(input["manualSource"]);
             var song = NativeMusicSong.Normalize(input["song"]);
             var originalSong = song;
             string songId = LJ.S(song["songId"]), request = LJ.S(input["quality"]);
@@ -29,13 +31,13 @@ public sealed partial class MusicNativeApplication
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, policy.Token, officialPolicy.Token);
             token = linked.Token;
             LJ.Require(LJ.S(input["qualityPolicySignature"]) == policy.Signature, "QUALITY_POLICY_CHANGED");
-            LJ.Require(request == "auto" ? MusicQualityPolicy.HasEnabled(policy.Policy) :
-                MusicQualityPolicy.Enabled(request, policy.Policy), "QUALITY_DISABLED");
+            LJ.Require(manualSource && request != "auto" || (request == "auto" ? MusicQualityPolicy.HasEnabled(policy.Policy) :
+                MusicQualityPolicy.Enabled(request, policy.Policy)), "QUALITY_DISABLED");
             var owners = new Dictionary<string, MusicPlatformSession?>(StringComparer.Ordinal);
             foreach (string platform in new[] { "wy", "tx", "kg" })
                 if (officialPolicy.IsEnabled(platform))
                     owners[platform] = await accounts.AcquireOfficialAsync(platform,
-                        request is "128k" or "auto" && MusicQualityPolicy.Enabled("128k", policy.Policy), token).ConfigureAwait(false);
+                        request is "128k" or "auto" && (manualSource || MusicQualityPolicy.Enabled("128k", policy.Policy)), token).ConfigureAwait(false);
             void Current()
             {
                 token.ThrowIfCancellationRequested();

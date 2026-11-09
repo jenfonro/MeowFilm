@@ -202,8 +202,12 @@ extension NativeMusicService {
             let d = try read()
             guard queueRecommendationsAreCurrent(item, d) else { return }
             let songs = try MusicNativeSimilarData.songs(response)
-            let unique = MusicNativeSimilarData.unique(songs, excluding: d.queue["entries"].array.map { $0["song"] })
             let recommendations = try MusicNativeSimilarData.recommendations(response.items)
+            try await retainSongMetadata(songs)
+            try check(own); try lease.authorization.check()
+            guard similarMode.queue === item, item.id == token, item.pendingID == requestID,
+                  queueRecommendationsAreCurrent(item, try read()) else { return }
+            let unique = MusicNativeSimilarData.unique(songs, excluding: d.queue["entries"].array.map { $0["song"] })
             item.songs = unique; item.recommendations = recommendations
             item.exhausted = response.hasMore == false || item.songs.isEmpty
             item.status = item.songs.isEmpty ? .empty : .ready

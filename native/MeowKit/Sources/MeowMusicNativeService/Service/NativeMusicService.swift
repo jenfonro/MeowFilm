@@ -146,6 +146,8 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var sourceDiscoveryPersistPending = false
     /// Descriptor inputs -> recording for current library members only.
     var sourceDiscoveryRecordingMemo: [String: MusicSourceDiscoveryRecording] = [:]
+    var sourceDiscoveryLibraryRevision: Int?
+    var sourceDiscoveryObservationOrder: UInt64 = 0
     let homeSnapshot: (any MusicHomeSnapshotStoring)?
     let audioFileCache: (any MusicAudioFileCaching)?
     var audioCacheAttempt: MusicNativeAudioCacheAttempt?
@@ -440,17 +442,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         let songs = try value.items.map(MusicModel.normalize)
         let sizes = songs.map { $0.bytes.count }, bytes = sizes.reduce(0, +)
         try musicRequire(sizes.allSatisfy { $0 <= 64 * 1024 } && bytes <= 4 * 1024 * 1024, .limit)
-        // Reserve the complete expanded page before returning any handles.
-        // Otherwise a Migu edition page (or an equal-timestamp eviction tie)
-        // could evict its own first rows while later rows are being registered.
-        handles = handles.filter { now().timeIntervalSince($0.value.at) < 600 }
-        let capacity = max(600, songs.count)
-        while handles.count + songs.count > capacity ||
-            handles.values.reduce(0, { $0 + $1.bytes }) + bytes > 4 * 1024 * 1024 {
-            guard let oldest = handles.min(by: { $0.value.at < $1.value.at })?.key else { throw MusicServiceError.limit }
-            handles.removeValue(forKey: oldest)
-        }
-        return .init(items: try songs.map { try remember($0, maximumHandles: capacity) }, cursor: value.cursor)
+        return try metadataHandles(songs, cursor: value.cursor)
     }
     public func platforms() async throws -> [MusicPlatform] {
         try check()
@@ -461,28 +453,43 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     }
     public func search(platform: String, query: String, page: Int, limit: Int) async throws -> MusicSearchPage {
         try check(); try requirePlatform(platform)
+        let own = epoch
         _ = try musicText(query, maximum: 800)
         guard let kind = MusicPublicBrowsePlatform(rawValue: platform) else { throw MusicServiceError.unsupported }
         _ = try MusicSearchPagination.offset(platform: kind, page: page, limit: limit)
+        try await retainLibrarySongMetadata()
+        try check(own)
+        let request = beginSourceDiscoveryObservation(platform: platform, query: query, page: page, limit: limit, scope: .page)
         let port = publicPlatforms
-        let result = try await work {
-            try await port.search(platform: platform, query: query, page: page, limit: limit)
+        do {
+            let result = try await work {
+                try await port.search(platform: platform, query: query, page: page, limit: limit)
+            }
+            try musicRequire(result.total >= 0 &&
+                (kind == .migu || result.items.count <= limit) &&
+                result.items.allSatisfy { $0.platform == platform } &&
+                MusicSearchPagination.validNextPage(page: page, limit: limit,
+                    next: result.nextPage, hasItems: !result.items.isEmpty), .invalidResponse)
+            let observation = finishSourceDiscoveryObservation(request)
+            let observed = try await recordSearchPage(result, observation: observation)
+            let projected = try await projectSongMetadata(observed)
+            try check(own)
+            let items = try metadataHandles(projected).items
+            return .init(platform: platform, query: query, page: page, limit: limit, total: result.total,
+                         nextPage: result.nextPage, items: items, observation: observation)
+        } catch {
+            if (try? check(own)) != nil {
+                await recordSearchFailure(request, failure: MusicServiceError.sanitized(error))
+            }
+            throw error
         }
-        try musicRequire(result.total >= 0 &&
-            (kind == .migu || result.items.count <= limit) &&
-            result.items.allSatisfy { $0.platform == platform } &&
-            MusicSearchPagination.validNextPage(page: page, limit: limit,
-                next: result.nextPage, hasItems: !result.items.isEmpty), .invalidResponse)
-        let items = try self.page(result, maximumItems: result.items.count).items
-        return .init(platform: platform, query: query, page: page, limit: limit, total: result.total,
-                     nextPage: result.nextPage, items: items)
     }
     public func recommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) async throws -> MusicBrowsePage {
         try check(); try requirePlatform(platform.rawValue)
         guard let accounts else { throw MusicServiceError.unavailable }
         let result = try await work { try await accounts.nativeRecommendations(platform: platform, kind: kind, cursor: cursor) }
         try musicRequire(result.items.allSatisfy { $0.platform == platform.rawValue }, .invalidResponse)
-        return try page(result)
+        return try await metadataPage(result)
     }
     public func accountCollections(platform: MusicAccountPlatform, cursor: String?) async throws -> MusicAccountCollectionPage {
         try check(); try requirePlatform(platform.rawValue)
@@ -501,7 +508,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         guard let accounts else { throw MusicServiceError.unavailable }
         let result = try await work { try await accounts.nativeTracks(platform: platform, collectionID: collectionID, cursor: cursor) }
         try musicRequire(result.items.allSatisfy { $0.platform == platform.rawValue }, .invalidResponse)
-        return try page(result)
+        return try await metadataPage(result)
     }
 }
 

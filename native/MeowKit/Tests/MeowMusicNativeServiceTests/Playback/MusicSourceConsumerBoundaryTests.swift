@@ -94,6 +94,9 @@ private struct ConsumerBoundaryEmptyCache: MusicAudioFileCaching {
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
         resources.append(resource); return .init(id: UUID(), resourceID: resource.id)
     }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
+    }
     func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
         handoffs += 1
         return .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
@@ -161,7 +164,7 @@ private struct ConsumerBoundaryEmptyCache: MusicAudioFileCaching {
         if playingPeer {
             XCTAssertNotEqual(model.activeResourceID, old)
             XCTAssertEqual(model.candidate?.startPosition, 41)
-            if case .automatic = model.sourceIntent {} else { XCTFail("Recording replacement must use the automatic session policy") }
+            if case .quality("flac") = model.sourceIntent {} else { XCTFail("Recording replacement must keep the same flac tier") }
             if paused { XCTAssertEqual(model.phase, .paused) }
         } else { XCTAssertEqual(model.activeResourceID, old) }
         let exclusions = try await service.sourceExclusions()

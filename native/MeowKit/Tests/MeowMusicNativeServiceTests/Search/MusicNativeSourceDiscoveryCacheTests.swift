@@ -96,7 +96,7 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         XCTAssertEqual(hit["tx"]?.checkedAt, second)
     }
 
-    func testIncompatibleDurationWriteDiscardsEarlierPlatformChecks() async throws {
+    func testIncompatibleDurationsKeepSeparatePlatformChecks() async throws {
         let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
         let song = try row().song
         await record(cache, song: song, sources: [])
@@ -105,7 +105,7 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         await record(cache, song: changed, platform: "tx", sources: [])
         let hit = await entry(cache, changed), old = await entry(cache, song)
         XCTAssertEqual(Set(hit.keys), ["tx"])
-        XCTAssertTrue(old.isEmpty)
+        XCTAssertEqual(Set(old.keys), ["wy"], "another recording cannot erase the earlier recording's facts")
     }
 
     func testIncompleteDurationWriteKeepsEarlierRecordingTimingEvidence() async throws {
@@ -650,7 +650,9 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         favorites = try await service.editPlaylist(favorites, name: nil, refs: [.init(kind: .queue, id: "entry-1")], order: nil)
         await service.flushSourceDiscoveryPersist()
         let saved = await entry(reopened(), seed)
-        XCTAssertEqual(Set(saved.keys), ["wy", "kg", "kw", "mg"], "saving persists the checks made before it")
+        XCTAssertEqual(Set(saved.keys), ["wy", "tx", "kg", "kw", "mg"],
+                       "saving retains acquired native metadata as well as executed platform checks")
+        XCTAssertEqual(saved["tx"]?.checkedAt, 0, "the original platform was acquired without executing a search")
         _ = try await service.editPlaylist(favorites, name: nil, refs: [], order: nil)
         await service.flushSourceDiscoveryPersist()
         let removed = await entry(reopened(), seed)

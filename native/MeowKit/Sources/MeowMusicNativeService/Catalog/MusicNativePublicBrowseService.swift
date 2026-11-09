@@ -113,7 +113,9 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             offset: position.offset + consumed, snapshot: result.snapshot) : nil
         // Reserve the full bounded page before registering any handles. Cached
         // native data never grants the lifetime of a previously issued handle.
-        let rows = try page(.init(items: result.tracks)).items
+        let rows = try await metadataPage(.init(items: result.tracks)).items
+        try check(own)
+        try musicRequire(revision == publicCollectionRevision, .staleResult)
         let members = try zip(result.sourcePositions, rows).map { sourcePosition, track -> MusicPublicBrowseMember in
             guard let source = track.sources.first(where: { $0.platform == collection.platform.rawValue }) else {
                 throw MusicServiceError.upstreamInvalid
@@ -144,7 +146,9 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             (result.collection.count ?? rows.count) >= rows.count, .upstreamInvalid)
         try musicRequire(rows.reduce(0, { $0 + $1.data.count }) <= MusicRemoteQueueSource.maximumBytes &&
             rows.allSatisfy { $0.platform == request.collection.platform.rawValue }, .limit)
-        _ = try rows.map(MusicModel.normalize) // Fully validate before giving the queue owner any rows.
+        try await retainSongMetadata(rows.map(MusicModel.normalize))
+        try check(own)
+        try musicRequire(revision == publicCollectionRevision, .staleResult)
         return result
     }
 
@@ -168,8 +172,9 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             }
             try check(own)
             try musicRequire(page.items.count <= 30 && page.items.allSatisfy { $0.platform == platform.rawValue }, .upstreamInvalid)
-            let items = try page.items.map { raw -> MusicPublicBrowseItem in
-                let track = try remember(MusicModel.normalize(raw))
+            let tracks = try await metadataPage(page).items
+            try check(own)
+            let items = tracks.map { track -> MusicPublicBrowseItem in
                 return .init(id: track.songId, title: track.title, subtitle: track.artist, artwork: track.artwork,
                              content: .track(track))
             }
@@ -206,7 +211,9 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             // Provider pages continue the same sections; the view merges by id.
             sectionPrefix = key + ":"
         } else { sectionPrefix = key + ":\(position.offset):" }
-        let sections = try publicSections(result, prefix: sectionPrefix)
+        let songs = try await publicSongMetadata(result)
+        try checkHomeSource(source, revision: sourceRevision, epoch: own)
+        let sections = try publicSections(result, prefix: sectionPrefix, songs: songs)
         let next = try result.next.map { remote in
             try musicRequire(remote != position.remote && !sections.isEmpty, .limit)
             return try position.encode(key: key, epoch: own, offset: position.offset + 1, remote: remote)
@@ -216,17 +223,17 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
     }
 
     func publicSections(_ result: MusicNativePublicBrowseDiscovery, prefix: String,
-                        binding: MusicNativeHomeBinding? = nil) throws -> [MusicPublicBrowseSection] {
+                        binding: MusicNativeHomeBinding? = nil, songs: [Data: MJ]) throws -> [MusicPublicBrowseSection] {
         try musicRequire(result.sections.count <= 60 && result.sections.reduce(0, { count, section in
             count + (section.tabs.isEmpty ? section.items.count : section.tabs.reduce(0) { $0 + $1.items.count })
         }) <= 600, .limit)
-        return try convertedPublicSections(result, prefix: prefix, binding: binding)
+        return try convertedPublicSections(result, prefix: prefix, binding: binding, songs: songs)
     }
 
     /// Already validated pages may accumulate beyond a single response's
     /// protocol limits. Conversion registers fresh handles, never authority.
     func convertedPublicSections(_ result: MusicNativePublicBrowseDiscovery, prefix: String,
-                                 binding: MusicNativeHomeBinding? = nil) throws -> [MusicPublicBrowseSection] {
+                                 binding: MusicNativeHomeBinding? = nil, songs: [Data: MJ]) throws -> [MusicPublicBrowseSection] {
         return try result.sections.map { section -> MusicPublicBrowseSection in
             let tabs = try section.tabs.map { tab in
                 let pending = tab.items.contains { item in
@@ -249,10 +256,10 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
                         })
                 }
                 return MusicPublicBrowseSectionTab(id: tab.id, title: tab.title,
-                                                   items: try publicItems(tab.items, layout: section.layout))
+                                                   items: try publicItems(tab.items, layout: section.layout, songs: songs))
             }
             let items: [MusicPublicBrowseItem]
-            if tabs.isEmpty { items = try publicItems(section.items, layout: section.layout) }
+            if tabs.isEmpty { items = try publicItems(section.items, layout: section.layout, songs: songs) }
             else {
                 guard let selected = tabs.first(where: { $0.id == section.selectedTab }) else {
                     throw MusicServiceError.upstreamInvalid
@@ -286,12 +293,15 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
         }
         if let binding { try await checkHomeBinding(binding, epoch: own) }
         try check(own)
-        return try publicItems(result.sections.first?.items ?? [], layout: layout)
+        let songs = try await publicSongMetadata(result)
+        if let binding { try await checkHomeBinding(binding, epoch: own) }
+        try check(own)
+        return try publicItems(result.sections.first?.items ?? [], layout: layout, songs: songs)
     }
 
     // Handle registration and the final admission check stay on this actor.
     private func publicItems(_ rows: [MusicNativePublicBrowseItem],
-                             layout: MusicPublicBrowseSection.Layout) throws -> [MusicPublicBrowseItem] {
+                             layout: MusicPublicBrowseSection.Layout, songs: [Data: MJ]) throws -> [MusicPublicBrowseItem] {
         try rows.map { item -> MusicPublicBrowseItem in
             let content: MusicPublicBrowseContent
             var title = item.title, subtitle = item.subtitle, artwork = item.artwork
@@ -302,7 +312,8 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             case .unavailable: content = .unavailable
             case .action(let action): content = .action(action)
             case .song(let value):
-                let track = try remember(MusicModel.normalize(value))
+                guard let song = songs[publicSongMetadataKey(value)] else { throw MusicServiceError.upstreamInvalid }
+                let track = try remember(song)
                 content = .track(track)
                 if title.isEmpty { title = track.title }
                 if subtitle.isEmpty {
@@ -312,7 +323,10 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
                 artwork = artwork ?? track.artwork
             case .songID: throw MusicServiceError.upstreamInvalid
             }
-            let preview = try item.previewSongs.prefix(3).map { try remember(MusicModel.normalize($0)) }
+            let preview = try item.previewSongs.prefix(3).map {
+                guard let song = songs[publicSongMetadataKey($0)] else { throw MusicServiceError.upstreamInvalid }
+                return try remember(song)
+            }
             return .init(id: item.id, title: title, subtitle: subtitle, artwork: artwork, content: content,
                          ranking: item.ranking, previewSongs: preview, recommendationReason: item.recommendationReason,
                          coverLabel: item.coverLabel)

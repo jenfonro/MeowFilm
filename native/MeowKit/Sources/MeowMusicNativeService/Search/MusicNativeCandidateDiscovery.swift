@@ -57,15 +57,30 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
                          seed: MusicNativeCandidateDiscoverySeed) async throws -> MusicNativeTrackPage {
         try candidateCheck(seed)
         try requirePlatform(platform)
+        let request = beginSourceDiscoveryObservation(platform: platform, query: query)
         let port = publicPlatforms
         // Discovery reads native rows without registering display handles.
-        let page = try await work(label: label) {
-            try await port.search(platform: platform, query: query, page: 1, limit: 30)
+        do {
+            let page = try await work(label: label) {
+                try await port.search(platform: platform, query: query, page: 1, limit: 30)
+            }
+            try candidateCheck(seed)
+            try musicRequire(page.total >= 0 &&
+                page.items.allSatisfy { $0.platform == platform }, .upstreamInvalid)
+            await recordSourceDiscovery(seed.song, platform: platform, page: page,
+                                        observation: finishSourceDiscoveryObservation(request))
+            try candidateCheck(seed)
+            return page
+        } catch {
+            if (try? candidateCheck(seed)) != nil {
+                let failure = MusicServiceError.sanitized(error)
+                if failure != .cancelled {
+                    await recordSourceDiscovery(seed.song, platform: platform, rows: [],
+                        observation: finishSourceDiscoveryObservation(request, failure: failure))
+                }
+            }
+            throw error
         }
-        try candidateCheck(seed)
-        try musicRequire(page.total >= 0 &&
-            page.items.allSatisfy { $0.platform == platform }, .upstreamInvalid)
-        return page
     }
 
     func candidateCommit(_ seed: MusicNativeCandidateDiscoverySeed, staged: MJ) throws -> MusicNativeCandidateDiscoverySeed {
@@ -195,12 +210,13 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
             // session is searched again only when its check is missing or 7+ days old.
             func recheck(_ platform: String) -> Bool {
                 contentFailed.contains(platform) && !otherFailed.contains(platform) &&
-                    (cache.entries[platform].map { cache.at - $0.checkedAt >= MusicSourceDiscoveryWindow.recheck } ?? true)
+                    (cache.checks[platform].map { cache.at - $0.checkedAt >= MusicSourceDiscoveryWindow.recheck } ?? true)
             }
             let platforms = MusicNativeCandidateDiscoveryMerge.searchable(staged)
                 ? MusicNativeSearchProtocol.platforms.filter {
                     owner.platformEnabled($0) && scope?.contains($0) != false &&
-                        (MusicNativeCandidateDiscoveryMerge.needsPlatform($0, song: staged, force: force, cache: cached[$0]) ||
+                        (MusicNativeCandidateDiscoveryMerge.needsPlatform($0, song: staged, force: force, cache: cached[$0]) &&
+                            (force || !cache.hasCurrentCheck($0, window: MusicSourceDiscoveryWindow.playback)) ||
                             recheck($0))
                 } : []
             let results = try await withThrowingTaskGroup(of: MusicNativeCandidateDiscoveryObservation.self) { group in
@@ -230,11 +246,6 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
             searchIssues = []; searched = false
             if !results.isEmpty {
                 let merged = try MusicNativeCandidateDiscoveryMerge.merge(staged, observations: results, excluded: cache.excluded)
-                for observation in results {
-                    guard let page = observation.page else { continue }
-                    await owner.recordSourceDiscovery(staged, platform: observation.platform, page: page)
-                    try check(); try await owner.candidateCheck(seed); try check()
-                }
                 staged = merged.song; searchIssues = merged.issues
                 searched = results.contains(where: { $0.page != nil })
             }

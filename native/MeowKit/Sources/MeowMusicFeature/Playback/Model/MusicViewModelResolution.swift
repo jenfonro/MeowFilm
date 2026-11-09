@@ -98,12 +98,16 @@ extension MusicViewModel {
               next.revision >= state.revision, snapshot.entries.map(\.id) == entries.map(\.id),
               next.total == snapshot.entries.count else { throw MusicServiceError.staleRevision }
         for (old, new) in zip(entries, snapshot.entries) {
+            let a = old.track, b = new.track
+            guard a.ref == b.ref, a.songId == b.songId, a.title == b.title, a.artist == b.artist,
+                  a.album == b.album, a.duration == b.duration else { throw MusicServiceError.targetChanged }
+            // Shared source facts can enrich repeated/non-current display rows
+            // without changing their frozen queue occurrence or context.
             if old.id != occurrenceID {
-                guard old == new else { throw MusicServiceError.targetChanged }
-            } else {
-                let a = old.track, b = new.track
-                guard a.ref == b.ref, a.songId == b.songId, a.title == b.title, a.artist == b.artist,
-                      a.album == b.album, a.duration == b.duration else { throw MusicServiceError.targetChanged }
+                guard a.artwork == b.artwork, old.sourceTitle == new.sourceTitle,
+                      old.remoteSessionID == new.remoteSessionID, old.displayIdentity == new.displayIdentity else {
+                    throw MusicServiceError.targetChanged
+                }
             }
         }
         playbackState.state = next; playbackState.queue = snapshot.entries; position = next.position
@@ -276,8 +280,8 @@ extension MusicViewModel {
         } catch { report(error, epoch: own) }
     }
     /// "Not this song" for a non-primary source of the current occurrence. When
-    /// that source is playing, the existing automatic selection replaces it and
-    /// keeps the live position and paused intent.
+    /// that source is playing, stop it and find a same-tier replacement while
+    /// keeping the live position and paused intent.
     func rejectInspectedSource(_ source: MusicResolvedSource, session: any MusicSourceInspectionSession) async {
         guard let current, let service else { return }
         let own = lifecycle, token = selectionID, before = state, entries = queue
@@ -285,6 +289,18 @@ extension MusicViewModel {
         let key = source.selection.sourceKey
         let operation = sourceSwitchID
         let playing = nativeAttempt != nil && candidate?.occurrenceId == current.id && lastSelection?.sourceKey == key
+        if playing, service is any MusicSourcePlaybackServing {
+            let quality = candidate?.delivery?.quality ?? lastSelection!.quality
+            await replaceExcludedSource(intent: .quality(quality),
+                resumeControl: phase == .paused ? nil : playbackControlRevision) {
+                let token = self.selectionID
+                try await session.reject(sourceKey: key, occurrenceID: current.id, expectedQueueRevision: before.revision)
+                try self.checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
+                try await self.refreshCandidateQueue(service, epoch: own, token: token, before: before,
+                                                     entries: entries, admission: admission)
+            }
+            return
+        }
         let replacement = playing ? SourceReplacementIntent(occurrenceID: current.id, position: position,
                                                             remainsPaused: phase == .paused) : nil
         error = nil
@@ -300,13 +316,6 @@ extension MusicViewModel {
             if playing { position = livePosition }
         } catch { report(error, epoch: own); return }
         guard playing else { return }
-        if service is any MusicSourcePlaybackServing {
-            // Recording exclusion is distinct from provider exclusion, but its
-            // replacement still belongs to the current song's shared session.
-            await replaceExcludedSource(intent: .automatic,
-                resumeControl: phase == .paused ? nil : playbackControlRevision)
-            return
-        }
         guard let provider = service as? any MusicCandidateDiscoveryServing else { return }
         await prepareAutomaticCandidate(provider, epoch: own, automatic: false, admission: admission,
                                         replacement: replacement)
@@ -555,11 +564,23 @@ extension MusicViewModel {
         remoteAudioRecoveryTask = task; recoveryDrains[drainID] = task
         return true
     }
-    @discardableResult func pausePlaybackRecovery() -> Bool {
+    @discardableResult func pausePlaybackRecovery(continuePendingSource: Bool = true) -> Bool {
         // A user's pause wins over an automatic recovery, before any actor
         // suspension. Do not interpret a failed native item as "start again"
         // while its replacement is still being resolved.
-        guard sourceRecoveryTask != nil || cachedAudioRecoveryTask != nil || remoteAudioRecoveryTask != nil else { return false }
+        if continuePendingSource, pendingSourceFailure != nil {
+            fmShouldPlay = false
+            let needsPause = sourceRecoveryWantsPlayback != false
+            sourceRecoveryWantsPlayback = false
+            playbackState.phase = .paused
+            // Keep B's one resolver/preparation and the failed donor scope.
+            // Native replacement inherits this latest pause rather than the
+            // donor's pre-failure play intent.
+            if needsPause, let nativeAttempt { player?.pause(nativeAttempt) }
+            return true
+        }
+        guard pendingSourceFailure != nil || sourceRecoveryTask != nil ||
+            cachedAudioRecoveryTask != nil || remoteAudioRecoveryTask != nil else { return false }
         let attempts = Set([candidate?.attemptId, resolvingAttempt].compactMap { $0 })
         fmShouldPlay = false
         invalidateSelection(stopMedia: true)

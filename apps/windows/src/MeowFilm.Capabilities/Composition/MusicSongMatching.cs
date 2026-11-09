@@ -28,10 +28,17 @@ public sealed partial class MusicNativeApplication
         songMatcher.Invalidate(platform);
     }
 
+    private async Task PrepareSongFactsAsync(CancellationToken token)
+    {
+        try { await songMatcher.InitializeAsync(token).ConfigureAwait(false); }
+        // Library/catalog acquisition remains available when optional derived data is incompatible.
+        // Matching itself still reports the current store's format error; there is no migration path.
+        catch (MusicPlaybackCacheDataException) { }
+    }
+
     /// <summary>
-    /// The one supplementary recording search of a playback selection: only requested
-    /// platforms the song has no accepted mapping for. The matcher's notFound window and
-    /// freshness rules apply; built-in and script providers share the merged result.
+    /// Supplements missing recordings, or rechecks an old mapping after content failure.
+    /// The matcher owns query scope, freshness and account-generation admission.
     /// </summary>
     private async Task<JsonElement> CompleteSongAsync(object? parameters, CancellationToken token)
     {
@@ -39,15 +46,18 @@ public sealed partial class MusicNativeApplication
         {
             var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
             LJ.Require(LJ.Bytes(input).Length <= 512 * 1024, "LIMIT");
-            LJ.Fields(input, "song platforms", "song platforms");
+            LJ.Fields(input, "song platforms contentFailed", "song platforms");
             var platforms = LJ.Array(input["platforms"]).Select(value => LJ.Text(value)).Distinct(StringComparer.Ordinal).ToArray();
             LJ.Require(platforms.Length is > 0 and <= 5 && platforms.All(NativeMusicSong.Platforms.Contains));
+            var contentFailed = input.ContainsKey("contentFailed")
+                ? LJ.Array(input["contentFailed"]).Select(value => LJ.Text(value)).ToHashSet(StringComparer.Ordinal) : [];
+            LJ.Require(contentFailed.All(NativeMusicSong.Platforms.Contains));
             var origin = NativeMusicSong.Normalize(input["song"]);
             var song = await songMatcher.KnownAsync(origin, token).ConfigureAwait(false);
             var known = LJ.Array(song["sources"]).OfType<JsonObject>().Select(source => LJ.S(source["source"]))
                 .ToHashSet(StringComparer.Ordinal);
             var failures = new JsonArray();
-            var targets = platforms.Where(platform => !known.Contains(platform)).ToArray();
+            var targets = platforms.Where(platform => !known.Contains(platform) || contentFailed.Contains(platform)).ToArray();
             var results = await Task.WhenAll(targets.Select(async platform =>
             {
                 // A catalog frame holds one platform's account lease. Parallel completion
@@ -58,7 +68,7 @@ public sealed partial class MusicNativeApplication
                 {
                     session = await sessions.AcquireAsync(platform, token).ConfigureAwait(false);
                     var match = await songMatcher.MatchAsync(origin, platform,
-                        MatchingContext(platform, session), token).ConfigureAwait(false);
+                        MatchingContext(platform, session), token, contentFailed: contentFailed.Contains(platform)).ConfigureAwait(false);
                     return (Platform: platform, Session: session, Match: match);
                 }
                 catch (MusicPlatformException e)

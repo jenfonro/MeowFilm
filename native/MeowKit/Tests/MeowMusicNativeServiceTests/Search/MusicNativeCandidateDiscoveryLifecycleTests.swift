@@ -43,7 +43,11 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
             XCTAssertEqual(discovered.entries[index].track.sources, queued.entries[index].track.sources)
             let song = try MusicModel.normalize(tracks[index])
             let entries = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
-            XCTAssertTrue(entries.isEmpty, "An unplayed recording acquired search evidence")
+            XCTAssertEqual(Set(entries.keys), ["tx"])
+            let acquired = try XCTUnwrap(entries["tx"])
+            XCTAssertEqual(acquired.sources.map(\.sourceKey), song["sources"].array.map { $0["sourceKey"].string })
+            XCTAssertEqual(acquired.checkedAt, 0, "Acquired playlist metadata is not an executed query")
+            XCTAssertTrue(acquired.observations.isEmpty, "An unplayed recording acquired search evidence")
         }
         let history = try await service.playedSongs()
         XCTAssertTrue(history.isEmpty)

@@ -53,7 +53,9 @@ FM 的 `mode/submode/ruleId/tabTagId` 来自最后提交成功的配置；首批
 
 ## 心动与普通队列推荐
 
-心动首批完整消费平台返回的有效条目，按 native recording 去重；播放器当前曲入口保留实际当前 occurrence，浏览曲种子恰与实际当前曲匹配时也复用该 occurrence，否则与喜欢入口一样以返回结果建立队列。首批不裁成三首，也不固定请求一百首。心动保留原队列 checkpoint，返回时恢复原 occurrence、原来源和选择；默认续播关闭，显式开启后使用桌面更多推荐读取后续批次。
+心动首批完整消费平台返回的有效条目，按 native recording 去重；播放器当前曲入口保留实际当前 occurrence，浏览曲种子恰与实际当前曲匹配时也复用该 occurrence，否则与喜欢入口一样以返回结果建立队列。首批不裁成三首，也不固定请求一百首。心动保留原队列 checkpoint；默认续播关闭，显式开启后使用桌面更多推荐读取后续批次。
+
+心动返回统一使用 `music.recommendations.return`：恢复 checkpoint 的原条目及来源，只将退出时的当前 occurrence 插入原选中项之后并继续选中它。例如原 A/B/C 从 B 进入心动，当前为推荐 E 时返回 A/B/E/C，其他推荐 D/F 不带回。该 occurrence 已在 checkpoint 中时只更新选择、不重复插入；空 checkpoint 只保留当前曲。同录音的不同 occurrence 各自保留，不按 native recording 合并。合并由唯一 library owner 的一次 restore CAS 完成，UI 不另行追加。相似推荐仍完全恢复 checkpoint 的原选择。
 
 普通 `queue` 候选与已入队 occurrence 分开：
 
@@ -106,6 +108,7 @@ Task PrepareRecommendationsAsync(CancellationToken ct = default);
 
 - 同时只允许一个媒体 consumer。
 - selection 已指向由唯一 library owner 完成提交的 occurrence；consumer 不再次执行 `queue.select`。
+- 心动返回保持同一当前 occurrence，不发送媒体 selection；既有队列刷新更新界面与反馈来源，保留音频实例、位置及播放／暂停状态。相似推荐返回不同 occurrence 时仍以 `RestoreOnly` 恢复为未播放状态。
 - 异步解析前后都调用 `selection.IsCurrent()`，并核对 entry、queue version、application generation 和 binding generation。
 - 只有实际播放器 Started／Ended／暂停／恢复事件更新推荐播放观察；队列选择或取得 URL 不等于播放成功。
 - 反馈只属于当前活会话中实际入队的 occurrence，不从持久 queue context 恢复算法会话。
@@ -120,6 +123,7 @@ Task PrepareRecommendationsAsync(CancellationToken ct = default);
 - 协调器将对应会话加入 `reconcileIds`，封闭新的推荐读取和写入。
 - 仅允许 get、cancel 和显式 reconcile。
 - reconcile 只读取当前持久文档判断该 nonce 是否生效，不重放 enter、append、select 或 restore。
+- 心动 restore 的成功及丢 ACK 后显式核对均不派发媒体 selection，也不改写播放／暂停意图；确认未应用时保留 checkpoint 和当前推荐曲，允许再次返回。返回流程在确认已应用后消费 checkpoint、退休会话并清空推荐 proof。
 - 全部未知项结算后才恢复推荐准入。
 
 未确认的 pending 只通过对应 owner 的 reconcile 结算。已提交但队列读回失败时保留协调状态，且不把成功提交后的回读失败改记为 `COMMIT_UNKNOWN`。owner 只保留最近一次推荐结果回执，由下一次推荐提交覆盖；replay 和 reconcile 仍按 nonce 读取该回执。

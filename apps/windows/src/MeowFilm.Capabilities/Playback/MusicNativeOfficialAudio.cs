@@ -76,8 +76,10 @@ public sealed partial class MusicNativeApplication
                 "music.official.authorize" or "music.official.confirm", "CAPABILITY_UNAVAILABLE");
             var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
             LJ.Require(LJ.Bytes(input).Length <= 512 * 1024, "LIMIT");
-            LJ.Fields(input, "platform song originSong sourceKey quality scope generation qualityPolicySignature refresh cacheOnly",
+            LJ.Fields(input, "platform song originSong sourceKey quality scope generation qualityPolicySignature refresh cacheOnly manualSource",
                 "platform song quality");
+            LJ.Require(input["manualSource"] is null || LJ.IsBool(input["manualSource"]), "INVALID_REQUEST");
+            bool manualSource = LJ.B(input["manualSource"]);
             LJ.Require(input["cacheOnly"] is null || LJ.IsBool(input["cacheOnly"]), "INVALID_REQUEST");
             LJ.Require(!LJ.B(input["cacheOnly"]) || !LJ.B(input["refresh"]), "INVALID_REQUEST");
             string platform = LJ.S(input["platform"]);
@@ -120,7 +122,7 @@ public sealed partial class MusicNativeApplication
                     .Where(q => MusicQualityPolicy.Enabled(q, policy.Policy))
                     .OrderBy(q => MusicQualityPolicy.Priority(q, policy.Policy))
                     .ThenBy(q => q == "320k" ? 0 : q == "192k" ? 1 : 2).ToArray()
-                : MusicQualityPolicy.Enabled(request, policy.Policy) ? [request] : [];
+                : manualSource || MusicQualityPolicy.Enabled(request, policy.Policy) ? [request] : [];
             LJ.Require(qualities.Length > 0, "QUALITY_DISABLED");
             string signature = LJ.Digest(LJ.Obj(("scope", session!.Scope), ("generation", session.Generation),
                 ("songId", songId), ("sourceKey", sourceKey), ("policy", policy.Signature), ("request", request)));

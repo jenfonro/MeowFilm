@@ -124,9 +124,11 @@ public sealed partial class MusicLibraryOwner
             "enter" => "nonce expectedVersion checkpoint seedEntryId songs context",
             "append" => "nonce expectedVersion songs context selectIndex",
             "select" => "nonce expectedVersion id",
-            _ => "nonce expectedVersion checkpoint"
+            _ => "nonce expectedVersion checkpoint retainCurrent"
         }, action is "enter" or "append" ? "nonce expectedVersion songs" :
             action == "select" ? "nonce expectedVersion id" : "nonce expectedVersion checkpoint");
+        if (action == "restore" && p.ContainsKey("retainCurrent"))
+            LJ.Require(LJ.IsBool(p["retainCurrent"]));
         string operation = RecommendationNonce(p), signature = RecommendationHash(method, p);
         if (RecommendationReplay(operation, signature, out var replay)) return (replay, false);
         LJ.Require(LJ.I(p["expectedVersion"]) == queueVersion, "REVISION_CONFLICT");
@@ -189,8 +191,21 @@ public sealed partial class MusicLibraryOwner
         {
             LJ.Require(recommendationCheckpoints.TryGetValue(checkpoint, out var saved), "CHECKPOINT_NOT_FOUND");
             var restored = (JsonObject)saved!.Queue.DeepClone();
+            var currentQueue = Queue(doc);
+            if (LJ.B(p["retainCurrent"]) && LJ.Array(currentQueue["entries"]).FirstOrDefault(
+                e => LJ.S(e?["id"]) == LJ.S(currentQueue["currentId"])) is { } retained)
+            {
+                var entries = LJ.Array(restored["entries"]);
+                string current = LJ.S(retained["id"]);
+                if (!entries.Any(e => LJ.S(e?["id"]) == current))
+                {
+                    int anchor = entries.Select(e => LJ.S(e?["id"])).ToList().IndexOf(LJ.S(restored["currentId"]));
+                    entries.Insert(anchor + 1, retained.DeepClone());
+                }
+                Select(restored, current, false, shuffleHistory);
+            }
             ValidateQueue(restored, true);
-            Archive(Queue(doc), doc);
+            Archive(currentQueue, doc);
             Set(doc, "queue", restored);
             shuffleHistory = saved.History.ToList(); failedEntries.Clear(); failedEntries.UnionWith(saved.Failed);
             queueVersion++;

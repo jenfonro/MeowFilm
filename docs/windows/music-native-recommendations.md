@@ -84,7 +84,8 @@ music.catalog.playlist.commit action=play
 - choose 在同一 lane 核对队列版本／current 后，将完整新曲批次 append，并以私有 `selectIndex` 选中候选；一次 envelope CAS 后才派发一个媒体 selection。自动尾部 append 不带 `selectIndex`，不抢当前播放。
 - 自动尾部追加优先消费已有候选批，沿用该批队列版本／epoch 和同一 CAS，不另发请求；未消费的最后一批候选不会因 `hasMore=false` 被提前标记 exhausted。消费后按该批 hasMore 决定是否结束；后续请求仍按原队列 occurrence 顺序保留重复 native ID。
 - continue 关闭后不再准入旧请求结果；已准入的 CAS 仍等实际结算。快速关闭／重开和初始预览转入尾部追加时，next／Ended 的等待跟随实际后继 flight，不先停止或漏过新批次。
-- 心动 native 参数为 `entry=favorites|current` 和 current 的 `songId`／可选 `seedEntryId`。只有显式播放器 `seedEntryId` 要求严格匹配实际当前 occurrence 和歌曲 ID；浏览歌曲无此参数时允许空队列或不同当前曲，实际匹配的当前 occurrence 可自动复用。平台响应的真实喜欢列表 context 用于队列 context 和反馈来源；完整首批入队，原 checkpoint 返回及默认关闭续播保持。
+- 心动 native 参数为 `entry=favorites|current` 和 current 的 `songId`／可选 `seedEntryId`。只有显式播放器 `seedEntryId` 要求严格匹配实际当前 occurrence 和歌曲 ID；浏览歌曲无此参数时允许空队列或不同当前曲，实际匹配的当前 occurrence 可自动复用。平台响应的真实喜欢列表 context 用于队列 context 和反馈来源；完整首批入队，默认关闭续播。
+- 心动各返回入口共用 `music.recommendations.return`，在 owner 的一次 restore CAS 中恢复原 checkpoint 并仅带回当前 occurrence，插入原选择之后；已存在不重复，空原队列保留当前，同录音不同 occurrence 不合并。返回保持 currentId，不发送 selection，现有 UI 队列刷新保留媒体实例、进度及播放／暂停状态，同时撤销已退休会话的反馈 proof。相似推荐仍恢复原队列与原选择。
 - FM snapshot 的 `mode/submode/ruleId/tabTagId` 是已提交配置；尚未提交、切换失败和旧响应不污染播放器显示。
 
 逐曲反馈通过 `MusicRecommendationFeedback` 的 `Provider/Algorithm/FeedbackSource` 与 session／batch／entry proof 传递。候选读取及原队列条目不凭推荐标签获得 proof；只有当前活会话实际入队的 occurrence 可读取。sourceMap 缺失为 `moreRcmd`，心动首批为 `aiMode`；反馈 consent 和账号校验仍由既有反馈职责拥有。请求配方、结束条件和资源边界见[原生持续推荐](music-recommendations.md)。

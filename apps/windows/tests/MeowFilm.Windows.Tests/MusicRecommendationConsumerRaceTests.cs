@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities;
+using MeowFilm.Capabilities.Feedback;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Recommendations;
 using MeowFilm.Platform.Storage;
@@ -28,6 +29,73 @@ public static partial class MusicUiTests
             RecommendationCommittedFmRace);
         yield return Case("recommendation consumer candidate replacement rejects old tokens before a native choose command",
             RecommendationCandidateRace);
+        yield return Case("recommendation consumer heartbeat return refreshes ABEC and retires proof without restarting playing media",
+            () => RecommendationHeartbeatReturn(paused: false));
+        yield return Case("recommendation consumer heartbeat return preserves paused media position without Stop Open or Resume",
+            () => RecommendationHeartbeatReturn(paused: true));
+    }
+
+    private static async Task RecommendationHeartbeatReturn(bool paused)
+    {
+        await using var f = await RecommendationRaceScene.Create();
+        f.App.UseHeartbeatCoordinator();
+        var original = await f.App.Replace("2", "1", "3");
+        string seed = original.GetProperty("entries")[1].GetProperty("id").GetString()!;
+        True((await f.App.ExecuteAsync("music.queue.select", new { id = seed })).GetProperty("ok").GetBoolean(), "select original B");
+        var started = await f.App.ExecuteAsync("music.recommendations.start",
+            new { kind = "heartbeat", platform = "wy", entry = "current", songId = "1", seedEntryId = seed });
+        Equal("ready", started.GetProperty("status").GetString());
+        var recommendations = await f.App.Queue();
+        string current = recommendations.GetProperty("entries")[2].GetProperty("id").GetString()!;
+        var observed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnQueue(JsonElement value)
+        {
+            if (value.TryGetProperty("currentId", out var entry) && entry.GetString() == current) observed.TrySetResult();
+        }
+        f.App.Changed += OnQueue;
+        try
+        {
+            True((await f.App.ExecuteAsync("music.queue.select", new { id = current })).GetProperty("ok").GetBoolean(), "select E");
+            await observed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally { f.App.Changed -= OnQueue; }
+        var playingQueue = await f.App.Queue();
+        True(await f.App.Select(playingQueue), "current E reaches the real module selection consumer");
+        f.Playback.Start();
+        await f.Playback.SeekAsync(43);
+        if (paused) await f.Playback.PauseAsync();
+        await Drain();
+        True(f.Module.CanReturnRecommendation && f.Module.HasActiveRecommendation, "heartbeat return is available after the committed snapshot");
+        var proof = f.App.FeedbackProbe.Selection?.Recommendation;
+        True(proof is { Value.Kind: "heartbeat" } && proof.IsCurrent(), "UI feedback carries live heartbeat occurrence proof");
+        int opens = f.Playback.Opens.Count, stops = f.Playback.Stopped.Count, resumes = f.Playback.Resumes;
+        int resolves = f.App.ResolveCalls, callbacks = f.App.CoordinatorSelections;
+        int commands = f.App.RecommendationCalls.Count, feedbackStarts = f.App.FeedbackProbe.Starts, feedbackFinishes = f.App.FeedbackProbe.Finishes;
+
+        await f.Module.ReturnRecommendationAsync();
+        await Drain();
+
+        var restored = await f.App.Queue();
+        True(restored.GetProperty("entries").EnumerateArray().Select(e => e.GetRawText()).SequenceEqual(
+            new[] { original.GetProperty("entries")[0], original.GetProperty("entries")[1],
+                playingQueue.GetProperty("current"), original.GetProperty("entries")[2] }.Select(e => e.GetRawText())), "ABC returns as ABEC");
+        Equal(current, restored.GetProperty("currentId").GetString());
+        Equal(current, f.Playback.Identity);
+        Equal(43d, f.Playback.PositionSeconds);
+        True(f.Playback.HasMedia && f.Playback.IsPlaying == !paused && f.Module.CanSeek, "same media and playback state survive return");
+        Equal(opens, f.Playback.Opens.Count);
+        Equal(stops, f.Playback.Stopped.Count);
+        Equal(resumes, f.Playback.Resumes);
+        Equal(resolves, f.App.ResolveCalls);
+        Equal(callbacks, f.App.CoordinatorSelections);
+        Equal(feedbackStarts, f.App.FeedbackProbe.Starts);
+        Equal(feedbackFinishes, f.App.FeedbackProbe.Finishes);
+        True(!f.Module.HasActiveRecommendation && !f.Module.CanReturnRecommendation, "returned snapshot retires UI controls");
+        Equal(playingQueue.GetProperty("current").GetProperty("song").GetProperty("title").GetString(), f.Module.CurrentTitle);
+        True(!proof!.IsCurrent() && f.App.GetFeedback(current) is null &&
+            f.App.FeedbackProbe.Selection is { EntryId: var entryId, Recommendation: null } && entryId == current,
+            "queue refresh drops the old UI feedback proof without finishing or reopening media");
+        Equal(1, f.App.RecommendationCalls.Skip(commands).Count(call => call.Method == "music.recommendations.return"));
     }
 
     private static async Task RecommendationCommittedFmRace()
@@ -249,6 +317,8 @@ public static partial class MusicUiTests
     {
         private const long Generation = 1;
         private readonly MusicLibraryOwner library = new(store);
+        private MusicRecommendationCoordinator? coordinator;
+        private MusicRecommendationQueuePort? queue;
         private readonly HashSet<Task> selections = [];
         private Func<MusicRecommendationSelection, CancellationToken, Task<bool>>? callback;
         private long selectionEpoch, revision;
@@ -257,9 +327,25 @@ public static partial class MusicUiTests
         internal readonly List<MusicRecommendationPlaybackState> Observations = [];
         internal Action<MusicRecommendationPlaybackState>? OnObservation;
         internal int ResolveCalls;
+        internal int CoordinatorSelections;
+        internal readonly RecommendationFeedbackProbe FeedbackProbe = new();
         internal readonly List<(string Method, JsonElement Parameters)> RecommendationCalls = [];
         internal JsonElement CurrentSnapshot => snapshot!.Value.Clone();
         public override event Action<JsonElement>? Changed;
+        public override IMusicPlaybackFeedback Feedback => FeedbackProbe;
+
+        internal void UseHeartbeatCoordinator()
+        {
+            var catalog = new RecommendationTest.Catalog();
+            catalog.Reply("heartbeat", "10", "11", "12");
+            queue = new(library);
+            coordinator = new(catalog, queue, (selection, token) =>
+            {
+                CoordinatorSelections++;
+                return callback!(selection, token);
+            }, readAsync: catalog.Read);
+            coordinator.Changed += value => Changed?.Invoke(value);
+        }
 
         public override IDisposable BindSelection(
             Func<MusicRecommendationSelection, CancellationToken, Task<bool>> selectAsync)
@@ -297,14 +383,14 @@ public static partial class MusicUiTests
             }
         }
         internal Task DrainSelections() => Task.WhenAll(selections.ToArray());
-        internal async Task<JsonElement> Replace(string id)
+        internal async Task<JsonElement> Replace(params string[] ids)
         {
             await Call("music.queue.replace", new
             {
-                songs = new[] { MusicSongFixture.Online("wy", id, "竞态歌曲" + id, "合成歌手", "", 180,
+                songs = ids.Select(id => MusicSongFixture.Online("wy", id, "竞态歌曲" + id, "合成歌手", "", 180,
                     native: JsonSerializer.SerializeToNode(new {
                         name = "竞态歌曲" + id, singer = "合成歌手", duration = 180
-                    })!.AsObject()) },
+                    })!.AsObject())).ToArray(),
                 index = 0
             });
             return await Queue();
@@ -356,14 +442,18 @@ public static partial class MusicUiTests
             ct.ThrowIfCancellationRequested();
             Observations.Add(state);
             OnObservation?.Invoke(state);
-            return Task.CompletedTask;
+            return coordinator?.OnPlaybackAsync(state, ct) ?? Task.CompletedTask;
         }
         public override Task<bool> TryAdvanceAsync(string entryId, bool naturalEnd, bool play,
             CancellationToken ct = default) =>
-            Task.FromResult(false);
-        public override MusicRecommendationFeedback? GetFeedback(string entryId) => null;
-        public override Task PrepareRecommendationsAsync(CancellationToken ct = default)
-        { selectionEpoch++; return DrainSelections(); }
+            coordinator?.TryAdvanceAsync(entryId, naturalEnd, play, ct) ?? Task.FromResult(false);
+        public override MusicRecommendationFeedback? GetFeedback(string entryId) => coordinator?.GetFeedback(entryId);
+        public override async Task PrepareRecommendationsAsync(CancellationToken ct = default)
+        {
+            selectionEpoch++;
+            if (coordinator is not null) await coordinator.PrepareCloseAsync(ct);
+            await DrainSelections();
+        }
         public override Task PrepareShutdownAsync(CancellationToken ct = default) => library.PrepareShutdownAsync(ct);
         public override Task CancelShutdownPreparationAsync(CancellationToken ct = default) =>
             library.CancelShutdownPreparationAsync(ct);
@@ -371,7 +461,9 @@ public static partial class MusicUiTests
         {
             if (closed) return;
             closed = true; selectionEpoch++;
-            await DrainSelections(); await library.DisposeAsync();
+            await DrainSelections();
+            if (coordinator is not null) await coordinator.DisposeAsync();
+            await library.DisposeAsync();
         }
         private async Task<JsonElement> ReadQualitySettings(CancellationToken token)
         {
@@ -398,13 +490,18 @@ public static partial class MusicUiTests
                     items = new[] { "wy", "tx", "kg" }.Select(platform =>
                         new { platform, state = "none", generation = 0, profile = (object?)null }).ToArray() });
             if (method.StartsWith("music.recommendations.", StringComparison.Ordinal))
+            {
                 RecommendationCalls.Add((method, JsonSerializer.SerializeToElement(parameters ?? new { })));
+                if (coordinator is not null) return await coordinator.ExecuteAsync(method, parameters, cancellationToken);
+            }
             if (method == "music.quality.settings.get") return await ReadQualitySettings(cancellationToken);
             if (method == "music.official.candidates")
             {
                 var request = JsonSerializer.SerializeToElement(parameters);
                 var input = JsonNode.Parse(request.GetRawText())!.AsObject();
-                LJ.Fields(input, "song quality qualityPolicySignature", "song quality qualityPolicySignature");
+                LJ.Fields(input, "song quality qualityPolicySignature manualSource", "song quality qualityPolicySignature");
+                LJ.Require(input["manualSource"] is null || LJ.IsBool(input["manualSource"]), "INVALID_REQUEST");
+                bool manualSource = LJ.B(input["manualSource"]);
                 _ = NativeMusicSong.Normalize(input["song"]);
                 string level = LJ.S(input["quality"]);
                 LJ.Require(level == "auto" || MusicQualityPolicy.OfficialTypes.Contains(level), "QUALITY_UNAVAILABLE");
@@ -413,8 +510,8 @@ public static partial class MusicUiTests
                 string signature = quality.GetProperty("signature").GetString()!;
                 LJ.Require(LJ.S(input["qualityPolicySignature"]) == signature, "QUALITY_POLICY_CHANGED");
                 var policy = JsonNode.Parse(quality.GetProperty("settings").GetRawText())!.AsObject();
-                LJ.Require(level == "auto" ? MusicQualityPolicy.HasEnabled(policy) :
-                    MusicQualityPolicy.Enabled(level, policy), "QUALITY_DISABLED");
+                LJ.Require(manualSource && level != "auto" || (level == "auto" ? MusicQualityPolicy.HasEnabled(policy) :
+                    MusicQualityPolicy.Enabled(level, policy)), "QUALITY_DISABLED");
                 return JsonSerializer.SerializeToElement(new { ok = true, song = request.GetProperty("song"),
                     candidates = Array.Empty<object>(), qualityPolicySignature = signature, authorizationRequired = false });
             }
@@ -424,10 +521,12 @@ public static partial class MusicUiTests
             {
                 var request = JsonSerializer.SerializeToElement(parameters);
                 var input = JsonNode.Parse(request.GetRawText())!.AsObject();
-                LJ.Fields(input, "song platforms", "song platforms");
+                LJ.Fields(input, "song platforms contentFailed", "song platforms");
                 _ = NativeMusicSong.Normalize(input["song"]);
                 var platforms = LJ.Array(input["platforms"]).Select(value => LJ.Text(value)).Distinct(StringComparer.Ordinal).ToArray();
                 LJ.Require(platforms.Length is > 0 and <= 5 && platforms.All(NativeMusicSong.Platforms.Contains));
+                if (input.ContainsKey("contentFailed"))
+                    LJ.Require(LJ.Array(input["contentFailed"]).Select(value => LJ.Text(value)).All(NativeMusicSong.Platforms.Contains));
                 return JsonSerializer.SerializeToElement(new { ok = true, song = request.GetProperty("song"),
                     failures = Array.Empty<object>() });
             }
@@ -486,8 +585,31 @@ public static partial class MusicUiTests
             if (method == "music.recommendations.choose" && snapshot is { } candidates) return candidates.Clone();
             // Unsupported incidental calls are real bounded errors, not an
             // invented success. Library/history remain native.
-            return await library.ExecuteAsync(method, parameters, cancellationToken);
+            return queue is not null ? await queue.ExecuteAsync(method, parameters, cancellationToken) :
+                await library.ExecuteAsync(method, parameters, cancellationToken);
         }
+    }
+
+    private sealed class RecommendationFeedbackProbe : IMusicPlaybackFeedback
+    {
+        internal MusicFeedbackSelection? Selection;
+        internal int Starts, Finishes;
+        public string? LastError => null;
+        public Task<MusicFeedbackSettings> ReadSettingsAsync(bool refresh = false, CancellationToken token = default)
+        {
+            token.ThrowIfCancellationRequested();
+            return Task.FromResult(new MusicFeedbackSettings(0, []));
+        }
+        public Task<MusicFeedbackSettings> SaveSettingsAsync(long revision, IReadOnlyList<string> enabled, CancellationToken token = default)
+        {
+            token.ThrowIfCancellationRequested();
+            return Task.FromResult(new MusicFeedbackSettings(revision + 1, enabled.ToArray()));
+        }
+        public void Select(MusicFeedbackSelection value) => Selection = value;
+        public void UpdateSelection(MusicFeedbackSelection value) => Selection = value;
+        public void Started(string entryId, double position, double duration, double rate = 1, int mode = 1) => Starts++;
+        public void Observe(string entryId, double position, double duration, bool isPlaying, double rate = 1, int mode = 1) { }
+        public void Finish(string reason = "ui") => Finishes++;
     }
 
     private sealed class RecommendationRacePlayback : IMusicPlayback
@@ -497,6 +619,7 @@ public static partial class MusicUiTests
         private RecommendationOpenHold? next;
         internal readonly List<string?> Stopped = [];
         internal List<(string Entry, Uri Uri)> Opens => inner.Opens;
+        internal int Resumes => inner.Resumes;
         public string? OwnerId => inner.OwnerId;
         public string? Identity => inner.Identity;
         public bool HasMedia => inner.HasMedia;

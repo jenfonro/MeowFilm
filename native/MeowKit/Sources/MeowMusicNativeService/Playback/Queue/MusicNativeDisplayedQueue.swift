@@ -128,6 +128,10 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
             guard let raw = resolved[position] else { throw MusicServiceError.notFound }
             return raw
         }
+        try musicRequire(try read().queue["revision"].int == expectedRevision, .staleRevision)
+        try await retainSongMetadata(songs)
+        if let binding { try await checkHomeBinding(binding, epoch: own) }
+        try check(own); try intent.check()
         let commit = {
             try intent.perform {
                 try self.similarQueueTransaction(["queue", "playback", "history"]) { document in
