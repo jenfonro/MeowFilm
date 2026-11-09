@@ -1,6 +1,5 @@
 // Native translation of music-core/src/lyric-timing.js; no DOM, scripting or external XML entities.
 using System.Globalization;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -11,10 +10,10 @@ public static class MusicLyricTiming
 {
     private sealed class Word(double time, double? duration, string text)
     { internal double Time = time; internal double? Duration = duration; internal string Text = text; }
-    private sealed class Line(double time, double? end, string text, List<Word> words, bool qrc)
+    private sealed class Line(double time, double? end, string text, List<Word> words)
     {
         internal double Time = time; internal double? End = end; internal string Text = text;
-        internal List<Word> Words = words; internal bool Qrc = qrc; internal string Timing = words.Count > 0 ? "word" : "estimated";
+        internal List<Word> Words = words;
     }
     private static Regex R(string pattern, RegexOptions options = RegexOptions.None) => new(pattern, options | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
     private static double Number(string s) => double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) && double.IsFinite(d) ? d : 0;
@@ -35,7 +34,7 @@ public static class MusicLyricTiming
         foreach (var line in original)
         {
             var row = LJ.Obj(("time", line.Time), ("end", line.End), ("text", line.Text), ("words", LJ.Arr(line.Words.Select(w =>
-                LJ.Obj(("time", w.Time), ("duration", w.Duration), ("text", w.Text), ("offset", w.Time - line.Time))))), ("timing", line.Timing));
+                LJ.Obj(("time", w.Time), ("duration", w.Duration), ("text", w.Text), ("offset", w.Time - line.Time))))));
             if (translations.TryGetValue((long)Math.Floor(line.Time * 1000 + .5), out var group))
             {
                 string translated = string.Join('\n', group.Where(t => t != line.Text)); if (translated.Length > 0) row["translation"] = translated;
@@ -78,7 +77,7 @@ public static class MusicLyricTiming
                         Math.Max(0, Number(m.Groups[qrc ? 3 : 2].Value) / 1000), word));
                 }
                 string text = words.Count > 0 ? string.Concat(words.Select(w => w.Text)) : body.Trim();
-                if (text.Length > 0) lines.Add(new(Math.Max(0, time + offset), Math.Max(0, end + offset), text, words, qrc));
+                if (text.Length > 0) lines.Add(new(time + offset, end + offset, text, words));
                 continue;
             }
             var head = R(@"^((?:\[\d{1,3}:\d{2}(?:\.\d{1,3})?\])+)(.*)$").Match(trimmed);
@@ -97,33 +96,25 @@ public static class MusicLyricTiming
                     {
                         var m = markers[i]; double stamp = Clock(m.Groups[m.Groups[1].Success ? 1 : 3].Value, m.Groups[m.Groups[1].Success ? 2 : 4].Value);
                         string word = content[(m.Index + m.Length)..(i + 1 < markers.Count ? markers[i + 1].Index : content.Length)];
-                        if (word.Length > 0) words.Add(new(Math.Max(0, stamp + (relative ? time : 0) + offset), null, word));
+                        if (word.Length > 0) words.Add(new(stamp + (relative ? time : 0) + offset, null, word));
                         else if (i == markers.Count - 1) markerEnd = stamp + (relative ? time : 0) + offset;
                     }
                     text = string.Concat(words.Select(w => w.Text));
                 }
-                if (text.Length > 0) lines.Add(new(Math.Max(0, time + offset), markerEnd, text, words, false));
+                if (text.Length > 0) lines.Add(new(time + offset, markerEnd, text, words));
             }
         }
         LJ.Require(lines.Count <= 10000, "LIMIT"); lines = lines.OrderBy(l => l.Time).ToList();
         for (int i = 0; i < lines.Count; i++)
         {
             var line = lines[i]; double? next = lines.Skip(i + 1).FirstOrDefault(l => l.Time > line.Time)?.Time;
-            if (!line.Qrc) line.End = Math.Max(line.Time + .05, line.End ?? next ?? (duration > line.Time ? duration : line.Time + 5));
-            if (line.Words.Count == 0)
-            {
-                var elements = StringInfo.GetTextElementEnumerator(line.Text); var graphemes = new List<string>();
-                while (elements.MoveNext()) graphemes.Add(elements.GetTextElement());
-                double Weight(string s) => s.Any(char.IsWhiteSpace) ? .25 : s.EnumerateRunes().All(r => Rune.GetUnicodeCategory(r) is
-                    UnicodeCategory.ConnectorPunctuation or UnicodeCategory.DashPunctuation or UnicodeCategory.OpenPunctuation or
-                    UnicodeCategory.ClosePunctuation or UnicodeCategory.InitialQuotePunctuation or UnicodeCategory.FinalQuotePunctuation or
-                    UnicodeCategory.OtherPunctuation or UnicodeCategory.MathSymbol or UnicodeCategory.CurrencySymbol or UnicodeCategory.ModifierSymbol or UnicodeCategory.OtherSymbol) ? .5 : 1;
-                double total = graphemes.Sum(Weight), t = line.Time;
-                foreach (string s in graphemes)
-                { double d = (line.End!.Value - line.Time) * Weight(s) / (total > 0 ? total : 1); line.Words.Add(new(t, d, s)); t += d; }
-            }
-            else for (int j = 0; j < line.Words.Count; j++)
-                line.Words[j].Duration ??= Math.Max(.05, (j + 1 < line.Words.Count ? line.Words[j + 1].Time : line.End!.Value) - line.Words[j].Time);
+            double time = Math.Max(0, line.Time);
+            double? end = line.End ?? next ?? (duration > time ? duration : (double?)null);
+            line.Time = time;
+            line.End = Math.Max(line.Time, end ?? time);
+            // Seek bounds are nonnegative; word intervals keep the source boundary after a negative offset.
+            for (int j = 0; j < line.Words.Count; j++)
+                line.Words[j].Duration ??= Math.Max(0, (j + 1 < line.Words.Count ? line.Words[j + 1].Time : end ?? line.Words[j].Time) - line.Words[j].Time);
         }
         return lines;
     }

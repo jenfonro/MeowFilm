@@ -178,16 +178,24 @@ public static class MusicLyricDisplayTests
             var arrived = Signal(); var release = Signal();
             f.Http.Block = async () => { arrived.TrySetResult(); await release.Task; };
             var read = f.Module.RefreshLyricsAsync();
-            await arrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
-            f.Module.CancelLyrics();
-            var retry = f.Module.RefreshLyricsAsync();
-            await Task.Delay(30);
-            Check(!read.IsCompleted && !retry.IsCompleted);
-            Equal(1, f.Http.Calls);
-            release.TrySetResult();
-            await Task.WhenAll(read, retry);
-            Equal(2, f.Http.Calls);
-            Equal(2, f.Module.Lyrics.Count); Equal(0, f.Runtime.Calls);
+            try
+            {
+                await arrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                f.Module.CancelLyrics();
+                await read.WaitAsync(TimeSpan.FromSeconds(3));
+                Equal(0, f.Module.Lyrics.Count);
+                // The current application contract cancels this subscription, not
+                // its shared physical read. A new same-recording subscriber joins it.
+                var retry = f.Module.RefreshLyricsAsync();
+                await Dispatcher.Yield(DispatcherPriority.Background);
+                Check(!retry.IsCompleted && !release.Task.IsCompleted);
+                Equal(1, f.Http.Calls);
+                release.TrySetResult();
+                await retry;
+                Equal(1, f.Http.Calls);
+                Equal(2, f.Module.Lyrics.Count); Equal(0, f.Runtime.Calls);
+            }
+            finally { release.TrySetResult(); await read; }
         }));
         yield return new("Native lyric display owns one request across player activation and duplicate restore", () => Sta(async () =>
         {
@@ -238,10 +246,13 @@ public static class MusicLyricDisplayTests
                         await f.Module.UpdateSourceAsync(f.Module.Sources.Single(row => !row.IsBuiltIn));
                         Check(f.Module.Sources.Single(row => !row.IsBuiltIn).ExecutionHash != previousHash);
                     }
+                    await read.WaitAsync(TimeSpan.FromSeconds(3));
                     var retry = f.Module.RestoreLyricsAsync();
-                    await Dispatcher.Yield(DispatcherPriority.Background);
-                    Check(!read.IsCompleted && !retry.IsCompleted);
-                    Equal(1, f.Http.Calls);
+                    await retry.WaitAsync(TimeSpan.FromSeconds(3));
+                    // Invalidating a source creates a new generation without
+                    // waiting for the old provider that ignores cancellation.
+                    Check(!release.Task.IsCompleted);
+                    Equal(2, f.Http.Calls);
                     release.TrySetResult();
                     await Task.WhenAll(read, retry);
                     Equal("CURRENT_SOURCE", f.Module.Lyrics[0].Text);
@@ -363,7 +374,7 @@ public static class MusicLyricDisplayTests
             Equal("tx", f.Module.MetadataPlatforms[0].Platform);
             Check(f.Module.MetadataPlatforms.All(row => !row.Enabled));
             await f.Module.RefreshLyricsAsync();
-            Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls); Equal("", f.Module.LyricStatus);
+            Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls); Equal("暂无歌词", f.Module.LyricStatus);
             Check(!f.Module.CanCancelLyrics && f.Module.CanEditMetadata);
         }));
         yield return new("Native metadata changes restore visible player lyrics once without manual refresh", () => Sta(async () =>
@@ -451,7 +462,7 @@ public static class MusicLyricDisplayTests
             await using var next = await Fixture.Create(root, seed: false);
             await next.Module.ActivateGlobalSurfaceAsync(
                 MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail, default);
-            Equal(0, next.Module.Lyrics.Count); Equal("", next.Module.LyricStatus);
+            Equal(0, next.Module.Lyrics.Count); Equal("暂无歌词", next.Module.LyricStatus);
             Equal(0, next.Http.Calls); Equal(0, next.Runtime.Calls);
             next.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
         }));
@@ -468,7 +479,7 @@ public static class MusicLyricDisplayTests
                 f.Module.MetadataPlatforms.Single(row => row.Platform == "wy"), false);
             Equal(writes, f.Access.LibraryWrites);
             await f.Module.RefreshLyricsAsync();
-            Equal("", f.Module.LyricStatus); Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls);
+            Equal("暂无歌词", f.Module.LyricStatus); Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls);
             Equal("", f.Module.Status);
         }));
     }
@@ -584,7 +595,8 @@ public static class MusicLyricDisplayTests
         var song = queue.GetProperty("current").GetProperty("song");
         return (song, song.GetProperty("sources")[0].GetProperty("sourceKey").GetString()!);
     }
-    private static void Check(bool value) { if (!value) throw new InvalidOperationException("Lyric display assertion failed"); }
+    private static void Check(bool value, [System.Runtime.CompilerServices.CallerArgumentExpression(nameof(value))] string? expression = null)
+    { if (!value) throw new InvalidOperationException("Lyric display assertion failed: " + expression); }
     private static void Equal<T>(T expected, T actual)
     { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}, got {actual}"); }
     private static JsonElement Ok(JsonElement result)

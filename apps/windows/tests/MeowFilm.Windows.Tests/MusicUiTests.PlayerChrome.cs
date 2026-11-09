@@ -420,7 +420,7 @@ public static partial class MusicUiTests
             retired.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
             Equal(2, f.Calls.Count("music.queue.mode"));
         });
-        yield return Case("player first visible frame has prepared artwork and no secondary footer disc", async () =>
+        yield return Case("player first opening presents its base while lyrics and artwork load independently", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var text = string.Join('\n', Enumerable.Range(0, 16).Select(i => $"[{i * 5 / 60:00}:{i * 5 % 60:00}]Prepared lyric {i}"));
@@ -432,11 +432,7 @@ public static partial class MusicUiTests
                 shell.PrepareForRender();
                 var root = (Border)shell.Content; shell.Content = null;
                 root.Resources.MergedDictionaries.Add(shell.Resources); root.DataContext = shell.DataContext;
-                var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-                var record = (MusicRecordView)detail.FindName("DetailRecord");
-                var cover = (ArtworkImage)record.FindName("Cover");
-                var loader = new HeldPlayerArtwork(); ArtworkScope.SetLoader(record, loader);
-                record.Address = "fixture://prepared-cover";
+                var pendingLyrics = f.Calls.HoldNext("music.lyrics.local.get");
                 using var source = new HwndSource(new HwndSourceParameters("player-prepared-frame-fixture")
                 {
                     WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
@@ -445,49 +441,61 @@ public static partial class MusicUiTests
                 source.RootVisual = root;
                 Render(root, 1110, 800); await Drain();
                 var playerSurface = (Grid)shell.FindName("PlayerDetailSurface");
-                var footer = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
-                var readyOnReveal = false;
-                playerSurface.IsVisibleChanged += (_, args) =>
-                {
-                    if (args.NewValue is true)
-                    {
-                        var lyrics = (ListBox)detail.FindName("LyricList");
-                        var scroll = Visuals(lyrics).OfType<ScrollViewer>().First();
-                        var row = lyrics.ItemContainerGenerator.ContainerFromIndex(8) as FrameworkElement;
-                        readyOnReveal = ((Image)cover.Children[0]).Source is not null &&
-                            ((GradientBrush)f.Module.PlayerBackground).GradientStops.All(stop => !stop.HasAnimatedProperties) &&
-                            f.Module.Lyrics.Count == 16 && row is not null &&
-                            Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y - scroll.ActualHeight * .35) < 2;
-                    }
-                };
                 await f.Module.ShowLyricsAsync();
+                await pendingLyrics.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Equal(Visibility.Visible, playerSurface.Visibility);
+                var detail = (MusicPlayerDetailView)((ContentControl)shell.FindName("PlayerDetailHost")).Content;
+                var footer = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
+                var record = (MusicRecordView)detail.FindName("DetailRecord");
+                var cover = (ArtworkImage)record.FindName("Cover");
+                Equal("加载中…", ((TextBlock)detail.FindName("LyricState")).Text);
+                True(!Visuals(detail).OfType<NoticeOutlet>().Any(), "normal lyric states stay in the lyric region");
+                var loader = new HeldPlayerArtwork(); ArtworkScope.SetLoader(record, loader);
+                record.Address = "fixture://prepared-cover";
                 await Until(() => loader.Calls.Count == 1);
-                Equal(Visibility.Hidden, playerSurface.Visibility);
-                True(((Image)cover.Children[0]).Source is null, "pending cover is not exposed by the entrance");
+                True(((Image)cover.Children[0]).Source is null, "missing cover leaves the base visible");
                 var lease = await new PlayerArtworkFixture().AcquireAsync("fixture://prepared-cover");
                 loader.Calls[0].Completion.SetResult(lease);
-                await Until(() => playerSurface.Visibility == Visibility.Visible);
+                await Until(() => ReferenceEquals(lease.Image, ((Image)cover.Children[0]).Source));
+                Equal("加载中…", f.Module.LyricStatus);
+                pendingLyrics.Release();
+                await Until(() => f.Module.Lyrics.Count == 16 && !f.Module.CanCancelLyrics);
                 Render(root, 1110, 800); await Drain();
-                True(readyOnReveal, "cover pixels and final background exist at the first visible frame");
-                True(ReferenceEquals(lease.Image, ((Image)cover.Children[0]).Source), "preparation's decoded image is used without refetching");
+                Equal("", ((TextBlock)detail.FindName("LyricState")).Text);
+                True(ReferenceEquals(lease.Image, ((Image)cover.Children[0]).Source), "independent artwork is not refetched after lyrics");
                 Equal(1, loader.Calls.Count);
                 Equal(0, Visuals(footer).OfType<MusicRecordView>().Count());
                 Equal(1, Visuals(f.Module.PlayerView).OfType<MusicRecordView>().Count());
                 var metadata = (StackPanel)footer.FindName("MetadataText");
                 var panel = (Grid)footer.FindName("MetadataPanel");
                 True(Math.Abs(metadata.TranslatePoint(new Point(), panel).X) < .5, "removed disc leaves no reserved column");
+                var lateLyrics = f.Calls.HoldNext("music.lyrics.local.get");
+                var reading = f.Module.RefreshLyricsAsync();
+                await lateLyrics.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                record.Address = "fixture://late-cover";
+                await Until(() => loader.Calls.Count == 2);
                 await f.Module.OpenPlayerDetailAsync();
                 await Until(() => playerSurface.Visibility == Visibility.Collapsed);
-                True(((PlayerArtworkLease)lease).Disposed, "closing releases the prepared image on actual unmount");
+                True(((PlayerArtworkLease)lease).Disposed, "closing releases the image on actual unmount");
+                True(loader.Calls[1].Token.IsCancellationRequested, "closing cancels pending artwork without awaiting it");
+                var lateImage = await new PlayerArtworkFixture().AcquireAsync("fixture://late-cover");
+                loader.Calls[1].Completion.SetResult(lateImage);
+                lateLyrics.Release(); await reading; await Drain();
+                Equal(Visibility.Collapsed, playerSurface.Visibility); Equal(0, f.Module.Lyrics.Count);
+                True(((PlayerArtworkLease)lateImage).Disposed, "late artwork never acquires a closed presentation");
+                record.Address = "";
+                await f.Module.ShowLyricsAsync();
+                await Until(() => playerSurface.Visibility == Visibility.Visible && f.Module.Lyrics.Count == 16);
+                await f.Module.OpenPlayerDetailAsync();
+                await Until(() => playerSurface.Visibility == Visibility.Collapsed);
                 source.RootVisual = null;
             }
             finally { shell.Close(); await shell.ShutdownCompletion; }
         });
-        yield return Case("player preparation rechecks the cover replaced while lyrics are pending", async () =>
+        yield return Case("player artwork replacement and cancellation stay independent of pending lyrics", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-            detail.Visibility = Visibility.Hidden;
             var record = (MusicRecordView)detail.FindName("DetailRecord");
             var cover = (ArtworkImage)record.FindName("Cover");
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -509,14 +517,18 @@ public static partial class MusicUiTests
             var preparing = f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
             await lyrics.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
             record.Address = "fixture://second";
-            lyrics.Release();
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
-            True(!preparing.IsCompleted, "lyrics completion cannot report readiness while the current cover is pending");
+            True(!preparing.IsCompleted, "current image starts while lyrics are pending");
+            lyrics.Release(); await f.Module.RestoreLyricsAsync();
+            True(((Image)cover.Children[0]).Source is null, "lyric completion does not wait for the current cover");
             var image = await new PlayerArtworkFixture().AcquireAsync("fixture://second");
-            completed.SetResult(image); await preparing;
+            completed.SetResult(image);
+            await preparing;
+            await Until(() => ReferenceEquals(image.Image, ((Image)cover.Children[0]).Source));
             True(ReferenceEquals(image.Image, ((Image)cover.Children[0]).Source), "prepared state uses the current cover");
             f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail); source.RootVisual = null;
-            True(((PlayerArtworkLease)image).Disposed, "retirement releases the current prepared cover");
+            await Drain();
+            True(((PlayerArtworkLease)image).Disposed, "retirement releases the current cover");
         });
         yield return Case("ordinary player footer reveals changes to its host backdrop", async () =>
         {
@@ -745,9 +757,9 @@ public static partial class MusicUiTests
                 void Hover(bool within) => bar.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0)
                     { RoutedEvent = within ? Mouse.MouseEnterEvent : Mouse.MouseLeaveEvent });
                 Hover(true); await Shade(true);
-                True(ReferenceEquals(root.InputHitTest(new Point(300, 40)), root) &&
+                True(ReferenceEquals(root.InputHitTest(new Point(300, 40)), bar) &&
                     ReferenceEquals(root.InputHitTest(new Point(300, 60)), bar),
-                    "decorative pixels never extend the actual seek hit area into page content");
+                    "activated shade and track share the seek hit area");
                 True(bar.Focus() && bar.IsKeyboardFocusWithin, "offscreen HWND supplies real focus without moving the system pointer");
                 Hover(false); await Shade(false);
                 Equal(Colors.White, SeekPixel(CaptureSeekFrame(root, 1), 100, 57));
@@ -1148,7 +1160,7 @@ public static partial class MusicUiTests
                 var row = lyricList.ItemContainerGenerator.ContainerFromIndex(8) as FrameworkElement;
                 if (row is null) throw new InvalidOperationException("active lyric row is not realized after automatic centering");
                 var rowCenter = row.TranslatePoint(new Point(0, row.ActualHeight / 2), lyricScroll).Y;
-                var readingBand = lyricScroll.ActualHeight * .35;
+                var readingBand = lyricScroll.ActualHeight * .24;
                 True(Math.Abs(rowCenter - readingBand) < 2,
                     $"active line reaches reference reading band: actual={rowCenter}, target={readingBand}, offset={centered}, " +
                     $"scrollable={lyricScroll.ScrollableHeight}, extent={lyricScroll.ExtentHeight}, viewport={lyricScroll.ViewportHeight}, row={row.ActualHeight}");
@@ -1168,7 +1180,7 @@ public static partial class MusicUiTests
                         recoveredRow = lyricList.ItemContainerGenerator.ContainerFromIndex(9) as FrameworkElement;
                         return recoveredRow is not null &&
                             Math.Abs(recoveredRow.TranslatePoint(new Point(0, recoveredRow.ActualHeight / 2), lyricScroll).Y -
-                                lyricScroll.ViewportHeight * .35) < 2;
+                                lyricScroll.ViewportHeight * .24) < 2;
                     });
                 }
                 catch (TimeoutException error)
@@ -1176,24 +1188,24 @@ public static partial class MusicUiTests
                     var actual = recoveredRow?.TranslatePoint(new Point(0, recoveredRow.ActualHeight / 2), lyricScroll).Y;
                     throw new TimeoutException($"Idle lyric recovery did not settle: font={detail.FontFamily.Source}, " +
                         $"index={f.Module.LyricDisplayIndex}, playing={f.Module.IsPlaying}, actual={actual}, " +
-                        $"target={lyricScroll.ViewportHeight * .35}, row={recoveredRow?.ActualHeight}, " +
+                        $"target={lyricScroll.ViewportHeight * .24}, row={recoveredRow?.ActualHeight}, " +
                         $"root={root.RenderSize}, detail={detail.RenderSize}, lyrics={lyricList.RenderSize}, " +
                         $"offset={lyricScroll.VerticalOffset}, extent={lyricScroll.ExtentHeight}, " +
                         $"viewport={lyricScroll.ViewportHeight}, scrollable={lyricScroll.ScrollableHeight}", error);
                 }
                 row = recoveredRow ?? throw new InvalidOperationException(
                     "active lyric row is not realized after manual-scroll recovery");
-                True(Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), lyricScroll).Y - lyricScroll.ActualHeight * .35) < 2,
+                True(Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), lyricScroll).Y - lyricScroll.ActualHeight * .24) < 2,
                     "idle timeout resumes lyric following without a new media tick");
-                f.Module.PreviewLyric(f.Module.Lyrics[2]); await Drain();
-                True(f.Module.HasLyricPreview, "preview remains available"); f.Module.CancelLyricPreview();
-                lyricList.ScrollIntoView(f.Module.Lyrics[2]); lyricList.UpdateLayout();
-                var previewRow = (FrameworkElement)lyricList.ItemContainerGenerator.ContainerFromIndex(2);
-                var playLine = Visuals(previewRow).OfType<Button>().Single(b =>
-                    System.Windows.Automation.AutomationProperties.GetName(b) == "播放此处" && ReferenceEquals(b.Tag, f.Module.Lyrics[2]));
+                var playLine = (Button)detail.FindName("ConfirmLyric");
+                lyricList.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120)
+                    { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+                await Task.Delay(250); await Drain();
+                True(f.Module.HasLyricPreview, "wheel chooses the line under the middle without clicking text");
+                var previewTime = f.Module.Lyrics[f.Module.LyricDisplayIndex].Time;
                 playLine.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
-                Equal(10d, f.Playback.PositionSeconds);
-                True(f.Playback.IsPlaying, "inline lyric control seeks and resumes real playback port");
+                Equal(previewTime, f.Playback.PositionSeconds);
+                True(f.Playback.IsPlaying, "middle-line control seeks and resumes real playback port");
                 Equal(opens, f.Playback.Opens.Count);
             }
             finally { shell.Close(); await shell.ShutdownCompletion; }
@@ -1226,7 +1238,7 @@ public static partial class MusicUiTests
                     var row = list.ItemContainerGenerator.ContainerFromIndex(index) as FrameworkElement;
                     return row is null ? double.PositiveInfinity : Math.Abs(
                         row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y -
-                        scroll.ViewportHeight * (f.Module.IsPlaying ? .24 : .35));
+                        scroll.ViewportHeight * .24);
                 }
                 await f.Playback.SeekAsync(80);
                 for (var i = 1; i <= 3; i++)
@@ -1253,15 +1265,12 @@ public static partial class MusicUiTests
                 var hold = System.Diagnostics.Stopwatch.StartNew();
                 list.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.PageDown)
                     { RoutedEvent = Keyboard.PreviewKeyDownEvent });
-                list.ScrollIntoView(f.Module.Lyrics[20]); detail.UpdateLayout(); await Drain();
-                var previewRow = (FrameworkElement)list.ItemContainerGenerator.ContainerFromIndex(20);
-                var preview = Visuals(previewRow).OfType<Button>()
-                    .Single(button => ReferenceEquals(button.Tag, f.Module.Lyrics[20]) && button.Content is StackPanel);
-                SimulateFocus(preview, UIElement.IsKeyboardFocusWithinProperty, true);
-                preview.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
+                await Task.Delay(250); await Drain();
+                var previewIndex = f.Module.LyricDisplayIndex;
+                True(f.Module.HasLyricPreview, "keyboard scrolling chooses a middle-line preview");
                 var held = scroll.VerticalOffset;
                 await f.Playback.SeekAsync(20); await Task.Delay(650); await Drain();
-                True(f.Module.HasLyricPreview && f.Module.LyricDisplayIndex == 20, "keyboard preview survives real ticks");
+                True(f.Module.HasLyricPreview && f.Module.LyricDisplayIndex == previewIndex, "keyboard preview survives real ticks");
                 True(Math.Abs(scroll.VerticalOffset - held) < 2, "preview and focus do not restart automatic centering");
                 await Task.Delay(2450); await Drain();
                 True(f.Module.HasLyricPreview, "the manual hold lasts four seconds");
@@ -1306,7 +1315,7 @@ public static partial class MusicUiTests
                     .Where(row => list.ItemContainerGenerator.IndexFromContainer(row) >= 0).ToArray();
                 True(rows.Length > 0 && rows.Length < Math.Min(count, 64),
                     $"realized lyric containers stay viewport bounded: {rows.Length}/{count}");
-                var anchor = f.Module.IsPlaying ? .24 : .35;
+                var anchor = .24;
                 foreach (var row in rows)
                 {
                     var first = ReferenceEquals(row.DataContext, f.Module.Lyrics[0]);
@@ -1324,8 +1333,6 @@ public static partial class MusicUiTests
             }
             async Task Visit(int index)
             {
-                list.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.PageDown)
-                    { RoutedEvent = Keyboard.PreviewKeyDownEvent });
                 list.ScrollIntoView(f.Module.Lyrics[index]); Layout(); await Drain(); Layout();
                 try
                 {
@@ -1356,7 +1363,7 @@ public static partial class MusicUiTests
                     {
                         Layout();
                         var row = list.ItemContainerGenerator.ContainerFromIndex(index) as FrameworkElement;
-                        var anchor = f.Module.IsPlaying ? .24 : .35;
+                        var anchor = .24;
                         return f.Module.LyricDisplayIndex == index && row is not null &&
                             Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y -
                                 scroll.ViewportHeight * anchor) < 2;
@@ -1365,7 +1372,7 @@ public static partial class MusicUiTests
                 catch (TimeoutException error)
                 {
                     var row = list.ItemContainerGenerator.ContainerFromIndex(index) as FrameworkElement;
-                    var anchor = f.Module.IsPlaying ? .24 : .35;
+                    var anchor = .24;
                     throw new TimeoutException($"Lyric edge follow did not settle: count={list.Items.Count}, " +
                         $"index={index}, active={f.Module.LyricDisplayIndex}, playing={f.Module.IsPlaying}, " +
                         $"actual={row?.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y}, " +
