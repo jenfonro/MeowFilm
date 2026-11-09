@@ -80,4 +80,4 @@
 
 ### 打包
 
-- [脚本载荷打包](windows/runtime-packaging.md)
+- [应用构建、安装与卸载](windows/runtime-packaging.md)

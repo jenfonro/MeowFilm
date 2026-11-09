@@ -1,6 +1,7 @@
 param(
     [ValidateSet('Debug','Release')][string]$Configuration = 'Release',
-    [switch]$FrameworkDependent
+    [switch]$FrameworkDependent,
+    [switch]$Installer
 )
 
 $ErrorActionPreference = 'Stop'
