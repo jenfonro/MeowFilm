@@ -25,6 +25,9 @@
     <RadioButton Content="外观" Tag="appearance" IsChecked="True" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>
     <RadioButton Content="首页数据源" Tag="sources" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>
     <RadioButton Content="缓存控制" Tag="cache" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>
+    <RadioButton x:Name="WindowArea" Content="窗口行为" Tag="window" Visibility="Collapsed"
+                 Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"
+                 AutomationProperties.Name="窗口行为"/>
    </StackPanel>
   </Border>
   <ScrollViewer x:Name="SettingsScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
@@ -46,6 +49,26 @@
     </StackPanel>
     <StackPanel x:Name="HomeSourceContributions" Visibility="Collapsed"/>
     <StackPanel x:Name="CacheContributions" Visibility="Collapsed"/>
+    <StackPanel x:Name="WindowBehaviorPage" Visibility="Collapsed">
+     <Border Style="{StaticResource MeowFilm.SettingsSection}">
+      <StackPanel>
+       <TextBlock Text="关闭主窗口时" Style="{StaticResource MeowFilm.SettingsSectionTitle}" Margin="0,0,0,8"/>
+       <ComboBox x:Name="CloseBehaviorSelection" Width="190" HorizontalAlignment="Left"
+                 Style="{StaticResource MeowFilm.SettingsComboBox}" SelectedValuePath="Tag"
+                 SelectedValue="{Binding Behavior,Mode=OneWay}" IsEnabled="{Binding CanEdit}"
+                 SelectionChanged="CloseBehavior_Changed" AutomationProperties.Name="关闭主窗口时">
+        <ComboBoxItem Content="每次询问" Tag="{x:Static local:WindowCloseBehavior.Ask}" AutomationProperties.Name="每次询问"/>
+        <ComboBoxItem Content="最小化到托盘" Tag="{x:Static local:WindowCloseBehavior.MinimizeToTray}" AutomationProperties.Name="最小化到托盘"/>
+        <ComboBoxItem Content="退出应用" Tag="{x:Static local:WindowCloseBehavior.Exit}" AutomationProperties.Name="退出应用"/>
+       </ComboBox>
+       <Button x:Name="ReloadClosePreferencesButton" Content="重新读取" HorizontalAlignment="Left"
+               Style="{StaticResource MeowFilm.QuietButton}" Click="CloseReload_Click" AutomationProperties.Name="重新读取窗口行为">
+        <Button.Visibility><Binding Path="Status" Converter="{x:Static local:GeneralSettingsView.StatusVisibility}"/></Button.Visibility>
+       </Button>
+       <local:NoticeOutlet x:Name="ClosePreferencesNotice" Message="{Binding Status}"/>
+      </StackPanel>
+     </Border>
+    </StackPanel>
    </Grid>
   </ScrollViewer>
  </Grid>

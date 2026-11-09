@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
 
@@ -9,12 +10,22 @@ namespace MeowFilm.Desktop;
 public partial class GeneralSettingsView : UserControl
 {
     private readonly IDesktopAppearance appearance;
+    private readonly IDesktopClosePreferences? closePreferences;
     public static IValueConverter StatusVisibility { get; } = new StatusConverter();
-    public GeneralSettingsView(IDesktopAppearance appearance, IEnumerable<IDesktopGeneralSettingsSource> sources)
+    public GeneralSettingsView(IDesktopAppearance appearance, IEnumerable<IDesktopGeneralSettingsSource> sources,
+        IDesktopClosePreferences? closePreferences = null)
     {
         this.appearance = appearance;
+        this.closePreferences = closePreferences;
         InitializeComponent();
         ThemeSelection.Presets = [new(AppearanceColors.DefaultColor, "浅蓝", AppearanceColors.DefaultColor)];
+        WindowBehaviorPage.DataContext = closePreferences;
+        if (closePreferences is null)
+        {
+            Areas.Children.Remove(WindowArea);
+            ((Panel)WindowBehaviorPage.Parent).Children.Remove(WindowBehaviorPage);
+        }
+        else WindowArea.Visibility = Visibility.Visible;
         DataContext = appearance;
         foreach (var source in sources)
         {
@@ -29,6 +40,7 @@ public partial class GeneralSettingsView : UserControl
         AppearancePage.Visibility = area == "appearance" ? Visibility.Visible : Visibility.Collapsed;
         HomeSourceContributions.Visibility = area == "sources" ? Visibility.Visible : Visibility.Collapsed;
         CacheContributions.Visibility = area == "cache" ? Visibility.Visible : Visibility.Collapsed;
+        WindowBehaviorPage.Visibility = area == "window" ? Visibility.Visible : Visibility.Collapsed;
         SettingsScroller.ScrollToTop();
     }
     private void Area_KeyDown(object sender, KeyEventArgs e)
@@ -40,12 +52,24 @@ public partial class GeneralSettingsView : UserControl
             Key.Left => (index + tabs.Length - 1) % tabs.Length, _ => (index + 1) % tabs.Length };
         tabs[next].IsChecked = true; tabs[next].Focus(); e.Handled = true;
     }
-    private async void View_Loaded(object sender, RoutedEventArgs e) => await appearance.LoadAsync();
+    private async void View_Loaded(object sender, RoutedEventArgs e) =>
+        await Task.WhenAll(appearance.LoadAsync(), closePreferences?.LoadAsync() ?? Task.CompletedTask);
     private async void Reload_Click(object sender, RoutedEventArgs e) => await appearance.LoadAsync();
     private async void Theme_Committed(object? sender, ColorSelectionEventArgs e)
     {
         await appearance.SaveAsync(e.Value);
         ThemeSelection.RestoreSelection();
+    }
+    private async void CloseReload_Click(object sender, RoutedEventArgs e)
+    {
+        if (closePreferences is not null) await closePreferences.LoadAsync();
+    }
+    private async void CloseBehavior_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (closePreferences is null || CloseBehaviorSelection.SelectedValue is not WindowCloseBehavior behavior ||
+            behavior == closePreferences.Behavior) return;
+        await closePreferences.SaveAsync(behavior);
+        CloseBehaviorSelection.GetBindingExpression(Selector.SelectedValueProperty)?.UpdateTarget();
     }
     private sealed class StatusConverter : IValueConverter
     {

@@ -21,11 +21,17 @@
 
 ## 关闭
 
-窗口进入关闭流程时先调用 `Suspend`：
+`Window.Closing` 是可取消的关闭意图，不终止系统媒体 attachment。关闭询问打开、取消关闭、隐藏到托盘及恢复窗口均保持同一个会话，继续发布元数据和接收命令。
+
+关闭期间的业务准入归现有 owner 管理：音乐的 `PrepareShutdownAsync` 同步封闭业务命令准入并排空已接纳工作，`CancelShutdownPreparationAsync` 完成恢复后重新准入；系统 Play／Next／Previous 仍走这些 owner 入口。Pause／Stop／Seek 操作 App 持有的唯一 `NativePlayback`，不访问模块已释放的业务资源。播放器自身的命令门与 disposing 围栏继续管理原生操作。
+
+真正释放由 App 生命周期调用 attachment 的 `DisposeAsync`：正常关闭先完成模块 preparation 和 disposal，强制清理则等待 owner 的 Abort 实际完成。两条路径都在释放 attachment 后，才通过 App 的资源回调释放 `NativePlayback`。准备失败后取消退出不会释放 attachment；不在系统媒体层重复建设 preparation 屏障。
+
+attachment 的重复 `DisposeAsync` 共享 session 的完成结果。会话释放首先调用不可恢复的 `Suspend`：
 
 1. 停止发布状态；
 2. 解绑播放器和 WinRT 事件；
 3. 取消会话命令；
 4. 禁用系统控制面。
 
-`DisposeAsync` 随后释放 backend，并等待已接纳命令最多 5 秒。超时明确为 `SYSTEM_MEDIA_DRAIN_FAILED`，不能把非合作命令当成已经终止。更新、命令和禁用错误只发布固定错误代码，不暴露操作系统或媒体来源原文。
+`DisposeAsync` 随后释放 backend 一次，并等待已接纳命令最多 5 秒。已经投递到 dispatcher 的旧事件与排队命令在会话终止后失效，不再调用播放 owner 或播放器。超时明确为 `SYSTEM_MEDIA_DRAIN_FAILED`，不能把非合作命令当成已经终止，App 也不得据此继续释放播放器。更新、命令和禁用错误只发布固定错误代码，不暴露操作系统或媒体来源原文。

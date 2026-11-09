@@ -37,11 +37,11 @@ public sealed partial class ShellWindow
         VerticalContentAlignment = VerticalAlignment.Stretch
     };
     private bool _generalSettingsOpen;
-    private void InitializeGeneralSettings(IDesktopAppearance? appearance)
+    private void InitializeGeneralSettings(IDesktopAppearance? appearance, IDesktopClosePreferences? closePreferences)
     {
         if (appearance is null) return;
         _generalSettingsHost.Content = new GeneralSettingsView(appearance,
-            _sessions.Select(session => session.Module).OfType<IDesktopGeneralSettingsSource>());
+            _sessions.Select(session => session.Module).OfType<IDesktopGeneralSettingsSource>(), closePreferences);
         ContentDeck.Children.Add(_generalSettingsHost);
         string? appliedColor = null;
         void Apply()
