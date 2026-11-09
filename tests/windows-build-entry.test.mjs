@@ -10,12 +10,13 @@ const bootstrap = "[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'bootstrap-m
 const build = `
 param(
     [ValidateSet('Debug','Release')][string]$Configuration = 'Release',
-    [switch]$FrameworkDependent
+    [switch]$FrameworkDependent,
+    [switch]$Installer
 )
 & (Join-Path $PSScriptRoot 'bootstrap.ps1')
 if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'bootstrap-marker'))) { throw 'Bootstrap was not called first.' }
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'build-marker'), 'called')
-[ordered]@{configuration=$Configuration; frameworkDependent=[bool]$FrameworkDependent} | ConvertTo-Json -Compress
+[ordered]@{configuration=$Configuration; frameworkDependent=[bool]$FrameworkDependent; installer=[bool]$Installer} | ConvertTo-Json -Compress
 `;
 
 function fixture(run, { args = [], prepare = bootstrap, compile = build } = {}) {
@@ -42,13 +43,18 @@ function fixture(run, { args = [], prepare = bootstrap, compile = build } = {}) 
 
 test('Windows build entry prepares dependencies then builds from its own directory, including spaces', () => fixture(result => {
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { configuration: 'Release', frameworkDependent: false });
+  assert.deepEqual(JSON.parse(result.stdout), { configuration: 'Release', frameworkDependent: false, installer: false });
 }));
 
 test('Windows build entry forwards the existing configuration and framework-dependent switches', () => fixture(result => {
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { configuration: 'Debug', frameworkDependent: true });
+  assert.deepEqual(JSON.parse(result.stdout), { configuration: 'Debug', frameworkDependent: true, installer: false });
 }, { args: ['-Configuration', 'Debug', '-FrameworkDependent'] }));
+
+test('Windows build entry forwards the explicit installer switch', () => fixture(result => {
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { configuration: 'Release', frameworkDependent: false, installer: true });
+}, { args: ['-Installer'] }));
 
 test('Windows build entry stops on dependency preparation errors without invoking compilation', () => fixture((result, scripts) => {
   assert.equal(result.status, 1);
@@ -67,6 +73,14 @@ test('Windows build entry preserves the exact inner compilation exit code', () =
   assert.equal(result.status, 23, result.stderr);
   assert.equal(existsSync(join(scripts, 'bootstrap-marker')), true);
 }, { compile: "& (Join-Path $PSScriptRoot 'bootstrap.ps1'); exit 23" }));
+
+for (const args of [['-Installer', '-Configuration', 'Debug'], ['-Installer', '-FrameworkDependent']]) {
+  test(`Windows installer rejects unsupported ${args.join(' ')} before dependency preparation`, () => fixture((result, scripts) => {
+    assert.equal(result.status, 1);
+    assert.match(result.stderr.replace(/\r?\n/g, ''), /installers require Release, self-contained win-x64/);
+    assert.equal(existsSync(join(scripts, 'bootstrap-marker')), false);
+  }, { args, compile: readFileSync(join(windowsRoot, 'scripts/windows/build.ps1'), 'utf8') }));
+}
 
 for (const failStage of ['', 'verify-dependency-lock', 'test-root', 'ensure-runtime-native']) {
   test(`Windows Node entry selects its platform and ${failStage ? `propagates ${failStage} failure` : 'completes the gate'}`, t => {

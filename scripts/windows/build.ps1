@@ -1,7 +1,11 @@
 param(
     [ValidateSet('Debug','Release')][string]$Configuration = 'Release',
-    [switch]$FrameworkDependent
+    [switch]$FrameworkDependent,
+    [switch]$Installer
 )
+if ($Installer -and ($Configuration -ne 'Release' -or $FrameworkDependent)) {
+    throw 'Windows installers require Release, self-contained win-x64. Remove -FrameworkDependent and use -Configuration Release.'
+}
 . (Join-Path $PSScriptRoot 'paths.ps1')
 New-WindowsDirectory $WindowsTmpRoot -Owner $WindowsRoot | Out-Null
 $LockPath = Assert-WindowsPath -Owner $WindowsTmpRoot -Path (Join-Path $WindowsTmpRoot 'build.lock')
@@ -13,6 +17,11 @@ try {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     . (Join-Path $PSScriptRoot 'environment.ps1')
     . (Join-Path $PSScriptRoot 'install.ps1')
+    if ($Installer) {
+        . (Join-Path $PSScriptRoot 'build-installer.ps1')
+        # Fail before publishing if Inno is unavailable. Ordinary builds never resolve it.
+        $InstallerCompiler = Resolve-WindowsInstallerCompiler
+    }
     $NodeRuntime = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'node-runtime.json') -Raw | ConvertFrom-Json
     $DataIdentity = 'aggregate' # Current wire/data identity, not a product selector.
     $Project = Join-Path $WindowsAppRoot 'app\MeowFilm.Windows.App.csproj'
@@ -94,7 +103,14 @@ try {
         redistributionPermissionVerified = $false
     }
     $Result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Output 'build-result.json') -Encoding utf8
+    if ($Installer) {
+        $InstallerCandidate = New-WindowsInstaller -Payload $Output -Compiler $InstallerCompiler
+        $FinalHash = & $WindowsNode (Join-Path $PSScriptRoot 'input-fingerprint.mjs')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if ($FinalHash -ne $InputHash) { throw 'Code inputs changed during installer compilation; the previous installer was retained.' }
+    }
     Install-WindowsBuild
+    if ($Installer) { Publish-WindowsInstaller -Candidate $InstallerCandidate }
     $Result | ConvertTo-Json -Depth 5
 }
 finally { Pop-Location; $BuildLock.Dispose() }
