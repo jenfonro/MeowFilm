@@ -149,6 +149,7 @@ export async function packageIOSRuntime({
       && manifest.trustedNative[0].package === '@meowfilm/script-host',
     'INVALID_NATIVE_RECEIPT', 'The iOS runtime requires the reviewed embedded framework');
     manifest.entry = `${IOS_OUTPUT}/entries/${product}.mjs`;
+    manifest.modules = ['music', 'cat', 'source', 'tmdb'];
     manifest.platform = 'ios';
     manifest.transport = TRANSPORT;
     manifest.target = target;
@@ -203,6 +204,7 @@ export async function packageIOSRuntime({
       ['../../../runtime/modules/music-script.mjs', '../../modules/music-script.mjs'],
       ['../../../runtime/modules/cat-script.mjs', '../../modules/cat-script.mjs'],
       ['../../../runtime/modules/source-runtime.mjs', '../../modules/source-runtime.mjs'],
+      ['../../../runtime/modules/metadata-data.mjs', '../../modules/metadata-data.mjs'],
       ['../bootstrap.mjs', '../bootstrap.mjs'],
     ]);
     for (const relative of ['bootstrap.mjs', 'entries/aggregate.mjs']) {

@@ -85,7 +85,8 @@ final class FilmSettingsPlatformTests: XCTestCase {
 
     func testModelStartsIndependentLocalOwnersAndCloseDoesNotCloseServices() async throws {
         let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
-        let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources)
+        let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources,
+            tmdb: FilmTMDBSettingsModel(service: FilmTMDBService(connection: { throw FilmSearchError.unavailable }), didSave: {}))
         model.start()
         await eventually { model.rules.draft != nil && model.snapshot != nil }
         let calls = await fixture.runtime.calls

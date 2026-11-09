@@ -6,7 +6,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class FilmSourcesTests
+public static partial class FilmSourcesTests
 {
     public static IEnumerable<TestCase> Cases()
     {
@@ -1431,6 +1431,9 @@ public static class FilmSourcesTests
 
     private sealed class Runtime : IRuntimeSession
     {
+        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Image requests are not part of this fixture.");
+
         internal readonly Dictionary<string, CatFixture> Nodes = new(StringComparer.Ordinal);
         internal readonly List<RpcCall> Calls = [];
         internal readonly List<Invocation> Invocations = [];

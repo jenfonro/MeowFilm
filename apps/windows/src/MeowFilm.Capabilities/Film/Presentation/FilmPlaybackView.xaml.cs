@@ -96,7 +96,7 @@ public partial class FilmPlaybackView : UserControl
         _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
         {
             if (!IsVisible || !ReferenceEquals(DataContext, page)) return;
-            int index = page.Episodes.ToList().IndexOf(page.SelectedEpisode);
+            int index = page.SelectedEpisode is { } selected ? page.Episodes.ToList().IndexOf(selected) : 0;
             HorizontalEpisodes.ScrollToHorizontalOffset(index * 276);
         }));
     }

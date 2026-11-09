@@ -7,10 +7,11 @@ import sys
 import runpy
 APPLICATION_DIRECTORIES = set(runpy.run_path(str(Path(__file__).with_name("generate-ios-project.py")))["APPLICATION_DIRECTORIES"])
 SHARED_TARGETS = {"MeowContracts", "MeowJSON", "MeowStorage", "MeowAccounts", "MeowPlayback", "MeowUI", "MeowRuntime"}
-# Exact local packages: the native engine and the one shared rule program.
+# Exact local packages: the native engine and client-side film rule programs.
 LOCAL_PRODUCTS = {
     "MeowJavaScript": ("javascript", "../JavaScript"),
     "FilmRuleProgram": ("film-rules", "../../packages/film-rules"),
+    "FilmSearchProgram": ("film-search", "../../packages/film-search"),
 }
 
 def application_membership(base, project_text):
@@ -157,11 +158,12 @@ def check(root):
                 failures.append("Linked source: " + str(path.relative_to(root)))
                 continue
             text = path.read_text(encoding="utf-8")
-            imported.update(re.findall(r"^(?:@testable )?import (Meow\w+|FilmRuleProgram)", text, re.M))
+            imported.update(re.findall(r"^(?:@testable )?import (Meow\w+|FilmRuleProgram|FilmSearchProgram)", text, re.M))
         if not imported <= dependencies:
             failures.append("Undeclared imports for {}: {}".format(target, sorted(imported - dependencies)))
         if target in SHARED_TARGETS:
-            if any(name.startswith(("MeowMusic", "MeowFilm")) for name in dependencies):
+            if any(name.startswith(("MeowMusic", "MeowFilm")) or name == "FilmSearchProgram"
+                   for name in dependencies):
                 failures.append("Shared target depends on business: " + target)
     def walk(name, path):
         if name in path:

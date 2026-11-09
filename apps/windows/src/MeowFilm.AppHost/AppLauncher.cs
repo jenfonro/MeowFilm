@@ -18,11 +18,12 @@ public static class AppLauncher
     public static void Run(AppDefinition definition,
         Func<IRuntimeClient, IDocumentStore, IReadOnlyList<IDesktopModule>> createModules,
         Func<ValueTask>? disposeResources = null,
-        Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null)
+        Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
+        Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null)
         => Run(definition, (runtime, store, modules) =>
         {
             foreach (var module in createModules(runtime, store)) modules.Add(module);
-        }, disposeResources, attachWindow);
+        }, disposeResources, attachWindow, createPages);
 
     /// <summary>
     /// Incremental registration owns each completed constructor even when a
@@ -31,7 +32,8 @@ public static class AppLauncher
     public static void Run(AppDefinition definition,
         Action<IRuntimeClient, IDocumentStore, ICollection<IDesktopModule>> createModules,
         Func<ValueTask>? disposeResources = null,
-        Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null)
+        Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
+        Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null)
     {
         var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         var launchWindow = new Window
@@ -159,10 +161,26 @@ public static class AppLauncher
                 // The shared runtime starts with the App; starting it executes no script.
                 runtime.Start();
                 var lifecycle = Lifecycle();
-                shell = new ShellWindow(modules, [],
+                shell = new ShellWindow(modules, createPages?.Invoke(modules) ?? [],
                     lifecycle.CloseAsync, lifecycle.ForceReleaseAsync, lifecycle.CancelShutdownPreparationAsync,
                     appearance) { Title = "meowfilm" };
-                artwork = new ArtworkService();
+                artwork = new ArtworkService(readTrusted: async (reference, maximumBytes, token) =>
+                {
+                    try { return await runtime.ReadImageAsync(reference, maximumBytes, token).ConfigureAwait(false); }
+                    catch (BridgeException error)
+                    {
+                        throw new ArtworkException(error.Code switch
+                        {
+                            "INVALID_REQUEST" => "ARTWORK_ADDRESS",
+                            "RESOURCE_LIMIT" => "ARTWORK_LIMIT",
+                            "INVALID_RESPONSE" or "UPSTREAM_FORMAT" => "ARTWORK_FORMAT",
+                            "CLOSED" => "ARTWORK_CLOSED",
+                            "TIMEOUT" => "ARTWORK_TIMEOUT",
+                            "PERMISSION_DENIED" => "ARTWORK_DENIED",
+                            _ => "ARTWORK_NETWORK"
+                        });
+                    }
+                });
                 ArtworkScope.SetLoader(shell, artwork);
                 windowAttachment = attachWindow?.Invoke(shell, modules);
                 cancellationToken.ThrowIfCancellationRequested();

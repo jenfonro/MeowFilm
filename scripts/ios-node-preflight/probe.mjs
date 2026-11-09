@@ -31,7 +31,7 @@ await check('ios-native-framework-payload', async () => {
   const manifest = JSON.parse(readFileSync(new URL('./runtime-manifest.json', import.meta.url), 'utf8'));
   assert.equal(manifest.assemblyProfile, 'common-native');
   assert.equal(manifest.transport, 'runtime.http.v1');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'tmdb']);
   assert.equal(manifest.trustedNative.length, 1);
   const native = manifest.trustedNative[0];
   assert.equal(native.path, 'Frameworks/MeowScriptHost.framework/MeowScriptHost');
@@ -159,6 +159,88 @@ await check('public-three-module-http-and-source-sdk', async () => {
     })), { list: [{ vod_id: '中文', vod_name: '中文' }] });
     assert.deepEqual(okay(await client.shutdown()), { closed: true, cleanupComplete: true });
   } finally { await runtime.close(); await client?.close(); }
+});
+
+await check('ios-four-module-http-and-tmdb', async () => {
+  const { createRuntimeClient } = await import('./app/entry.mjs');
+  const { createConnection, createServer } = await import('node:net');
+  const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86', requestKey = randomBytes(32).toString('hex');
+  const dataRoot = join(directory, 'four-modules');
+  const seen = [];
+  const upstream = http.createServer((request, response) => {
+    seen.push(request.url);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ id: 42, title: '预检', poster_path: '/preflight.jpg' }));
+  });
+  const bootstrap = createServer();
+  const okay = reply => { assert.equal(reply.ok, true, JSON.stringify(reply)); return reply.value; };
+  const originalArgv = process.argv;
+  let client, owner, nativeChannel;
+  try {
+    upstream.listen(0, '127.0.0.1');
+    await once(upstream, 'listening');
+    bootstrap.listen(0, '127.0.0.1');
+    await once(bootstrap, 'listening');
+    const connected = once(bootstrap, 'connection');
+    nativeChannel = createConnection(bootstrap.address().port, '127.0.0.1');
+    await once(nativeChannel, 'connect');
+    nativeChannel.pause();
+    [owner] = await connected;
+    const ready = new Promise((resolve, reject) => {
+      let bytes = Buffer.alloc(0);
+      owner.on('error', reject);
+      owner.once('close', () => reject(new Error('App bootstrap closed before ready')));
+      owner.setTimeout(10000, () => owner.destroy(new Error('App bootstrap did not become ready')));
+      owner.on('data', chunk => {
+        bytes = Buffer.concat([bytes, chunk]);
+        if (bytes.includes(10)) {
+          try {
+            assert.equal(bytes.indexOf(10), bytes.length - 1);
+            const value = JSON.parse(bytes.toString('utf8'));
+            assert.deepEqual(Object.keys(value), ['baseUrl']);
+            resolve(value.baseUrl);
+          } catch (error) { reject(error); }
+        }
+      });
+    });
+    ready.catch(() => {});
+    const manifest = JSON.parse(readFileSync(new URL('./runtime-manifest.json', import.meta.url), 'utf8'));
+    // Diagnostic-only handle access supplies a real connected owner descriptor
+    // to the unchanged packaged entry and its native dup; no binding is mocked.
+    assert.ok(Number.isInteger(nativeChannel._handle.fd) && nativeChannel._handle.fd >= 3);
+    process.argv = [originalArgv[0], originalArgv[1], '--meow-bootstrap-fd', String(nativeChannel._handle.fd)];
+    owner.write(`${JSON.stringify({ sessionId, requestKey, dataRoot })}\n`);
+    await import('./' + manifest.entry);
+    process.argv = originalArgv;
+    client = createRuntimeClient({ baseUrl: await ready, sessionId, requestKey });
+    owner.setTimeout(0);
+    const described = okay(await client.describe());
+    assert.deepEqual(described.modules.map(value => value.id), manifest.modules);
+    assert.deepEqual(described.modules.map(value => [value.id, value.version, value.contract]), [
+      ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
+      ['source', '0.2.0', 'source.runtime.v2'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
+    ]);
+    const settings = okay(await client.call('tmdb.data.settings.update', {
+      apiBase: `http://127.0.0.1:${upstream.address().port}/proxy`,
+    }));
+    assert.equal(settings.apiKeyConfigured, false);
+    assert.equal(settings.accessTokenConfigured, false);
+    assert.deepEqual(okay(await client.call('tmdb.data.request', {
+      path: '/3/movie/42', query: { language: 'zh-CN' }, imageSize: 'w500',
+    })), { id: 42, title: '预检', poster_path: '/v1/tmdb/images/w500/preflight.jpg' });
+    assert.deepEqual(seen, ['/proxy/3/movie/42?language=zh-CN']);
+    assert.deepEqual(okay(await client.shutdown()), { closed: true, cleanupComplete: true });
+    const closed = once(owner, 'close');
+    owner.end(); nativeChannel.destroy();
+    await closed;
+  } finally {
+    process.argv = originalArgv;
+    await client?.close();
+    owner?.destroy(); nativeChannel?.destroy();
+    await new Promise(resolve => bootstrap.close(resolve));
+    upstream.closeAllConnections();
+    await new Promise(resolve => upstream.close(resolve));
+  }
 });
 
 await check('native-thread-isolation-typed-tsfn-and-algorithms', async () => {

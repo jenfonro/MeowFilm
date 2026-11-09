@@ -12,4 +12,5 @@ public interface IDesktopPage
     bool ShowInSidebar => true;
     FrameworkElement View { get; }
     Task ActivateAsync(CancellationToken cancellationToken = default);
+    void Deactivate() { }
 }

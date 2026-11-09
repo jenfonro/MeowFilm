@@ -25,7 +25,7 @@ class NodePreflightTests(unittest.TestCase):
         self.manifest = {
             "schemaVersion": 1, "status": "complete", "assemblyProfile": "common-native",
             "platform": "ios", "transport": "runtime.http.v1",
-            "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source"],
+            "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "tmdb"],
             "target": {"sdk": "iphonesimulator", "arch": "x64", "minimumOS": "17.0"},
             "trustedNative": [{"platform": "ios", "arch": "x64", "abi": 1, "napi": 8,
                                "path": "Frameworks/MeowScriptHost.framework/MeowScriptHost",
@@ -41,6 +41,19 @@ class NodePreflightTests(unittest.TestCase):
 
     def test_accepts_matching_ios_payload_inventory(self):
         self.assertEqual(preflight.validate_runtime(self.payload), self.manifest)
+
+    def test_rejects_missing_duplicate_extra_unknown_or_reordered_modules(self):
+        for modules in [
+            ["music", "cat", "source"], ["music", "cat", "source", "douban"],
+            ["music", "cat", "source", "pan"], ["music", "cat", "source", "unknown"],
+            ["music", "cat", "source", "tmdb", "douban"], ["music", "cat", "source", "tmdb", "pan"],
+            ["music", "cat", "source", "tmdb", "tmdb"], ["tmdb", "music", "cat", "source"],
+        ]:
+            with self.subTest(modules=modules):
+                self.manifest["modules"] = modules
+                self.save()
+                with self.assertRaisesRegex(ValueError, "prepared common-native"):
+                    preflight.validate_runtime(self.payload)
 
     def test_rejects_wrong_profile_or_incomplete_packaging(self):
         for field, value in [("assemblyProfile", "windows-native"), ("status", "failed"), ("status", "platform-pending"),
@@ -137,7 +150,7 @@ class NodePreflightBuildTests(unittest.TestCase):
             (payload / "runtime-manifest.json").write_text(json.dumps({
                 "schemaVersion": 1, "status": "complete", "assemblyProfile": "common-native",
                 "platform": "ios", "transport": "runtime.http.v1",
-                "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source"],
+                "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "tmdb"],
                 "target": selected,
                 "trustedNative": [{"platform": "ios", "arch": selected["arch"], "abi": 1, "napi": 8,
                                   "path": "Frameworks/MeowScriptHost.framework/MeowScriptHost",

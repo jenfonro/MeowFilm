@@ -12,6 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createRuntimeClient } from '../apps/runtime/client.mjs';
 import { packageWindowsRuntime } from '../scripts/windows/package-runtime.mjs';
 import { assertOwnedPath, temporaryRoot } from '../scripts/windows/working-paths.mjs';
+import { verifyTMDBAssembly } from './tmdb-runtime-assembly-support.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const windows = { skip: process.platform !== 'win32' ? 'Requires real Windows named pipes' : false, timeout: 20000 };
@@ -55,7 +56,7 @@ async function pipeServer(t, dataRoot, { config } = {}) {
       replies.push(ready);
       const client = createRuntimeClient({ ...ready, sessionId, requestKey });
       clients.push(client);
-      accepted({ client, socket, ready });
+      accepted({ client, socket, ready, sessionId, requestKey });
     });
     const value = { sessionId, requestKey, dataRoot };
     socket.write(config ? config(value) : JSON.stringify(value) + '\n');
@@ -116,6 +117,7 @@ async function assertRealBusiness(client) {
     { id: 'music', version: '0.8.0', contract: 'music.script.v3' },
     { id: 'cat', version: '0.2.0', contract: 'cat.script.v2' },
     { id: 'source', version: '0.2.0', contract: 'source.runtime.v2' },
+    { id: 'tmdb', version: '0.1.0', contract: 'tmdb.data.v1' },
   ]);
   const operations = {
     music: ['sources.list', 'sources.detail', 'sources.add', 'sources.download', 'sources.edit',
@@ -124,9 +126,11 @@ async function assertRealBusiness(client) {
     cat: ['start', 'status', 'refresh', 'install', 'import', 'edit', 'update', 'restart',
       'enable', 'uninstall', 'invoke', 'management.describe', 'management.sync'],
     source: ['load', 'unload', 'invoke', 'status', 'close'],
+    tmdb: ['request', 'settings.get', 'settings.update'],
   };
   for (const module of description.modules) {
-    const prefix = module.id === 'source' ? 'source.runtime.' : `${module.id}.script.`;
+    const prefix = module.id === 'source' ? 'source.runtime.'
+      : module.id === 'tmdb' ? 'tmdb.data.' : `${module.id}.script.`;
     assert.deepEqual(module.methods, operations[module.id].map(name => prefix + name).sort());
   }
   assert.deepEqual(await client.call('music.script.sources.list'), {
@@ -137,6 +141,7 @@ async function assertRealBusiness(client) {
   });
   for (const method of ['music.library.list', 'film.playback.recognize', 'reader.content.chapter', 'eval'])
     await assert.rejects(client.call(method), { code: 'METHOD_NOT_FOUND' });
+  return description;
 }
 
 async function verifyScriptExecution(t, client, scriptDataRoot) {
@@ -301,11 +306,13 @@ async function verifyCatExecution(client) {
   assert.deepEqual(result, { ok: true, contract: 'cat.script.v2', value: { text } });
 }
 
-async function runProduct(t, entry, payload, dataRoot) {
+async function runProduct(t, entry, payload, dataRoot, manifest) {
   const server = await pipeServer(t, dataRoot);
   const child = spawnRuntime(t, entry, server.argv, payload);
-  const { client, socket } = await bounded(server.connection);
-  await assertRealBusiness(client);
+  const { client, socket, ready, sessionId, requestKey } = await bounded(server.connection);
+  const description = await assertRealBusiness(client);
+  if (manifest) assert.deepEqual(description.modules.map(module => module.id), manifest.modules);
+  const tmdbSettings = await verifyTMDBAssembly(t, { client, baseUrl: ready.baseUrl, sessionId, requestKey });
   await verifyScriptExecution(t, client, dataRoot);
   await verifySourceExecution(t, client);
   await verifyCatExecution(client);
@@ -320,6 +327,9 @@ async function runProduct(t, entry, payload, dataRoot) {
   const recovered = await pipeServer(t, dataRoot);
   const second = spawnRuntime(t, entry, recovered.argv, payload);
   const connected = await bounded(recovered.connection);
+  assert.deepEqual(await connected.client.call('tmdb.data.settings.get'), {
+    ok: true, contract: 'tmdb.data.v1', value: tmdbSettings,
+  });
   const music = await connected.client.call('music.script.sources.list');
   assert.equal(music.ok, true, JSON.stringify(music));
   assert.equal(music.value.items.length, 1);
@@ -349,18 +359,19 @@ async function runProduct(t, entry, payload, dataRoot) {
 }
 
 for (const packaged of [false, true]) {
-  test(`${packaged ? 'packaged' : 'source'} Windows entry serves three modules over HTTP and drains on close`, windows, async t => {
+  test(`${packaged ? 'packaged' : 'source'} Windows entry serves four modules over HTTP and drains on close`, windows, async t => {
     const area = temporary(t);
-    let entry = join(root, 'apps/windows/runtime/entries/aggregate.mjs'), payload;
+    let entry = join(root, 'apps/windows/runtime/entries/aggregate.mjs'), payload, manifest;
     if (packaged) {
       payload = join(area, 'payload');
-      const manifest = await packageWindowsRuntime({ root, product: 'aggregate', output: payload });
+      manifest = await packageWindowsRuntime({ root, product: 'aggregate', output: payload });
+      assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'tmdb']);
       assert.equal(manifest.transport, 'windows-http-v1');
       assert.equal(manifest.trustedNative[0].platform, 'win32');
       assert.equal(manifest.trustedNative[0].arch, process.arch);
       entry = join(payload, manifest.entry);
     }
-    await runProduct(t, entry, payload, join(area, 'data'));
+    await runProduct(t, entry, payload, join(area, 'data'), manifest);
   });
 }
 

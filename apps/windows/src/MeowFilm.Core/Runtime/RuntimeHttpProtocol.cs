@@ -16,6 +16,10 @@ public static partial class RuntimeHttpProtocol
     internal static readonly IReadOnlyDictionary<string, ModuleContract> Modules =
         new Dictionary<string, ModuleContract>(StringComparer.Ordinal)
     {
+        ["tmdb"] = new("0.1.0", "tmdb.data.v1", "tmdb.data.",
+            ["settings.get", "settings.update", "request"],
+            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR",
+                "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE" }),
         ["music"] = new("0.8.0", "music.script.v3", "music.script.",
             ["sources.list", "sources.detail", "sources.add", "sources.download",
                 "sources.edit", "sources.update", "sources.rollback", "sources.enable",
@@ -61,6 +65,11 @@ public static partial class RuntimeHttpProtocol
     private static partial Regex EndpointPattern();
     [GeneratedRegex(@"\A[0-9a-f]{64}\z", RegexOptions.CultureInvariant)]
     private static partial Regex KeyPattern();
+    [GeneratedRegex(@"\A/v1/tmdb/images/(?:original|[wh][1-9][0-9]*)/[A-Za-z0-9_-]+\.[A-Za-z0-9]+\z",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex ImagePattern();
+
+    public static bool ValidImageReference(string? reference) => reference is not null && ImagePattern().IsMatch(reference);
 
     public static bool ValidMethod(string? method) => method is not null && MethodPattern().IsMatch(method);
 

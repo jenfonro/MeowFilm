@@ -31,7 +31,7 @@ packages/pan-runtime/、apps/runtime/pan-entry.mjs
 
 受信调用方可显式启用 `pan@0.1.0/pan.runtime.v1` 的[网盘账号、分享与取址能力](pan-runtime.md)；默认三模块不变，平台 App 尚未接入。网盘属于 Node 内置业务，不是第四类脚本执行所有者。
 
-iOS 与 Windows 均已接入同一 HTTP 契约和三个模块。iOS 受信启动及内置原生 framework 见[iOS 运行底座](../ios/runtime-preflight.md)，Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)。通用运行器不保留旧 wire 或旧引擎。独立入口、平台 App 和设备运行须分别验证，不据此声明 Android 已接入。
+iOS 与 Windows 均已接入同一 HTTP 契约和三个脚本模块，并在同一会话中显式增加 [TMDB 元数据模块](metadata-data.md)供影视搜索使用；通用默认入口仍为三模块。iOS 受信启动及内置原生 framework 见[iOS 运行底座](../ios/runtime-preflight.md)，Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)。通用运行器不保留旧 wire 或旧引擎。独立入口、平台 App 和设备运行须分别验证，不据此声明 Android 已接入。
 
 ## 三类执行所有者
 

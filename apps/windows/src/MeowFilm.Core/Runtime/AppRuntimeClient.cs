@@ -5,7 +5,7 @@ namespace MeowFilm.Core.Runtime;
 /// <summary>The App's one script runtime connection. The App starts it once after composing
 /// its owners; starting the host executes no script. Explicit recovery replaces only a failed
 /// transport and never replays a business operation.</summary>
-public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeRecovery, IAsyncDisposable
+public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRuntimeRecovery, IAsyncDisposable
 {
     private sealed class Epoch
     {
@@ -85,8 +85,17 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeRecovery, IAsyncD
         return ExecuteAsync((session, token) => session.UploadSourceAsync(module, installationId,
             sourceRevision, source, basename, token), cancellationToken, waitForCompletion: true);
     }
-    private async Task<JsonElement> ExecuteAsync(Func<IRuntimeSession, CancellationToken, Task<JsonElement>> invoke,
-        CancellationToken cancellationToken, bool waitForCompletion = false)
+    public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!RuntimeHttpProtocol.ValidImageReference(reference) || maximumBytes <= 0)
+            throw new BridgeException("INVALID_REQUEST");
+        return ExecuteAsync((session, token) => session.ReadImageAsync(reference, maximumBytes, token),
+            cancellationToken, waitForCompletion: true, discard: bytes =>
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes));
+    }
+    private async Task<T> ExecuteAsync<T>(Func<IRuntimeSession, CancellationToken, Task<T>> invoke,
+        CancellationToken cancellationToken, bool waitForCompletion = false, Action<T>? discard = null)
     {
         Epoch epoch;
         lock (gate)
@@ -107,8 +116,12 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeRecovery, IAsyncD
             // Cancelling only the wait would let callers clear an in-use buffer.
             var result = waitForCompletion ? await operation.ConfigureAwait(false) :
                 await operation.WaitAsync(request.Token).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested(); CheckCurrent(epoch);
-            return result;
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested(); CheckCurrent(epoch);
+                return result;
+            }
+            catch { discard?.Invoke(result); throw; }
         }
         catch
         {

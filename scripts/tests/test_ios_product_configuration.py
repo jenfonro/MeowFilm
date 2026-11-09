@@ -77,7 +77,7 @@ class ProductConfigurationTests(unittest.TestCase):
         self.assertIn('path = "../../LICENSES/quickjs-native-MIT.txt";', project)
         self.assertIn('path = "../../LICENSES/Unicode-3.0.txt";', project)
         resources = next(line for line in project.splitlines() if "isa = PBXResourcesBuildPhase;" in line)
-        for license_name in ("quickjs-native-MIT.txt", "Unicode-3.0.txt"):
+        for license_name in ("quickjs-native-MIT.txt", "Unicode-3.0.txt", "NOTICE.md", "GPL-3.0-only.txt"):
             reference = next(line.split()[0] for line in project.splitlines()
                              if f'path = "../../LICENSES/{license_name}";' in line)
             build = next(line.split()[0] for line in project.splitlines()

@@ -403,6 +403,9 @@ public static class MusicNativeScriptTests
         ReadOnlyMemory<byte> Source, string? Basename);
     private sealed class Runtime : IRuntimeSession
     {
+        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Image requests are not part of this fixture.");
+
         internal readonly List<Request> Requests = [];
         internal readonly List<SourceUpload> Uploads = [];
         internal Func<string, JsonObject, object?>? Business;

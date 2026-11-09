@@ -222,6 +222,11 @@ public sealed class FilmFilterRow
 public sealed record FilmCardItem(string Id, string Title, string Poster, string Score)
 {
     public bool HasScore => Score.Length > 0;
+    public string TextBadge { get; init; } = "";
+    public string Subtitle { get; init; } = "";
+    public bool HasTextBadge => TextBadge.Length > 0;
+    public bool HasSubtitle => Subtitle.Length > 0;
+    public FilmSearchContext? SearchContext { get; init; }
 }
 
 internal enum FilmHomeSectionState

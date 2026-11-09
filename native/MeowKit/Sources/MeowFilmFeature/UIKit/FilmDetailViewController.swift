@@ -26,7 +26,8 @@ struct FilmHeroGeometry {
 public final class FilmDetailViewController: PageViewController, UIScrollViewDelegate {
     public var onPlay: ((URL) -> Void)?
     public var onSelectItem: ((FilmItem) -> Void)?
-    private let detail: FilmDetail
+    public private(set) var detail: FilmDetail
+    public private(set) var searchContext: FilmSearchContext?
     private let library: FilmLibrary
     private let images: ArtworkImages
     private let scroll = FilmTouchScrollView(), content = UIStackView()
@@ -38,6 +39,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private let poster: ArtworkView, logo: ArtworkView
     private let heroSpace = UIView()
     private let titleLabel = UILabel(), metadata = UILabel(), dateLabel = UILabel(), summary = UILabel()
+    private var dateContainer: UIView?
     private let play = UIButton(type: .system), favorite = UIButton(type: .custom)
     private let seasonButton = UIButton(type: .system)
     private let episodeRail = FilmDetailRail(), castRail = FilmDetailRail(), similarRail = FilmDetailRail()
@@ -64,6 +66,38 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         selectedSeasonID = detail.seasons.first?.id
         super.init(themeProvider: themeProvider)
         pageTitle = detail.title
+    }
+
+    public convenience init(searchContext: FilmSearchContext, library: FilmLibrary, images: ArtworkImages,
+                            themeProvider: any PageThemeProviding) {
+        self.init(detail: searchContext.detail, library: library, images: images, themeProvider: themeProvider)
+        self.searchContext = searchContext
+        observe(searchContext.session.$snapshot.eraseToAnyPublisher()) { [weak self] _ in
+            self?.receiveSearchUpdate()
+        }
+    }
+
+    private func receiveSearchUpdate() {
+        guard let searchContext else { return }
+        let previous = detail
+        detail = searchContext.detail
+        pageTitle = detail.title
+        guard isViewLoaded else { return }
+        titleLabel.text = detail.title
+        summary.text = detail.summary.isEmpty ? "暂无简介" : detail.summary
+        dateLabel.text = detail.releaseDate
+        dateLabel.isHidden = detail.releaseDate?.isEmpty != false
+        dateContainer?.isHidden = dateLabel.isHidden
+        renderMetadata()
+        if previous.backdropURL != detail.backdropURL || previous.item.posterURL != detail.item.posterURL {
+            heroCandidates = []
+            for url in [detail.backdropURL, detail.item.largePosterURL, detail.item.posterURL]
+                .compactMap({ $0 }) where !heroCandidates.contains(url) {
+                heroCandidates.append(url)
+            }
+            loadNextHeroCandidate()
+        }
+        applyTheme()
     }
 
     public override var preferredStatusBarStyle: UIStatusBarStyle {
@@ -148,16 +182,10 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             }
             logo.load(url)
         }
-        var facts: [String] = []
-        if let seasons = detail.seasonCount, seasons > 0 { facts.append("\(seasons) 季") }
-        if let episodes = detail.episodeCount, episodes > 0 { facts.append("\(episodes) 集") }
-        if facts.isEmpty, !detail.item.subtitle.isEmpty { facts.append(detail.item.subtitle) }
-        if !detail.item.score.isEmpty { facts.append("评分 \(detail.item.score)") }
-        metadata.text = facts.joined(separator: " · ")
+        renderMetadata()
         metadata.font = .systemFont(ofSize: 15, weight: .medium)
         metadata.numberOfLines = 2
         metadata.textAlignment = .center
-        metadata.isHidden = facts.isEmpty
         content.addArrangedSubview(inset(metadata, horizontal: 24))
         content.setCustomSpacing(10, after: content.arrangedSubviews.last!)
         dateLabel.text = detail.releaseDate
@@ -165,9 +193,20 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         dateLabel.textAlignment = .center
         dateLabel.isHidden = detail.releaseDate?.isEmpty != false
         let date = inset(dateLabel, horizontal: 24)
+        dateContainer = date
         date.isHidden = dateLabel.isHidden
         content.addArrangedSubview(date)
         content.setCustomSpacing(24, after: date)
+    }
+
+    private func renderMetadata() {
+        var facts: [String] = []
+        if let seasons = detail.seasonCount, seasons > 0 { facts.append("\(seasons) 季") }
+        if let episodes = detail.episodeCount, episodes > 0 { facts.append("\(episodes) 集") }
+        if facts.isEmpty, !detail.item.subtitle.isEmpty { facts.append(detail.item.subtitle) }
+        if !detail.item.score.isEmpty { facts.append("评分 \(detail.item.score)") }
+        metadata.text = facts.joined(separator: " · ")
+        metadata.isHidden = facts.isEmpty
     }
 
     private func configureActions() {

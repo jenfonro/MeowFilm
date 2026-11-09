@@ -40,6 +40,7 @@ public sealed partial class ShellWindow
                 throw new OperationCanceledException("SHELL_NAVIGATION_STALE");
             var session = ValidatePageNavigation(page, moduleId, route);
             session.IsSettingsOpen = false;
+            _returnPage = _currentPage;
             PreparePresentation(session);
             await RunRequestAsync(new(session, new(route)), cancellationToken, reportOutcome: true);
         }

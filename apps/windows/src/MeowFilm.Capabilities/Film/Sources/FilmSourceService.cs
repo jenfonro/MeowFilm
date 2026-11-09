@@ -6,7 +6,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class FilmSourceService : IAsyncDisposable
+public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
 {
     public const string DocumentNamespace = "film.video-sources.v1";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
@@ -42,6 +42,56 @@ public sealed class FilmSourceService : IAsyncDisposable
     public IReadOnlyList<FilmVideoSource> Videos => Volatile.Read(ref snapshot).Videos;
     public string? RuntimeError => Volatile.Read(ref runtimeError);
     public event EventHandler? Changed;
+
+    public Task<IReadOnlyList<FilmSearchSource>> ReadSearchSourcesAsync(CancellationToken token) =>
+        RunAsync(async ct =>
+        {
+            await InManagementAsync(() => SynchronizeAsync(null, ct), ct).ConfigureAwait(false);
+            await AwaitStartupAsync(ct).ConfigureAwait(false);
+            return CurrentSearchSources;
+        }, token);
+
+    public IReadOnlyList<FilmSearchSource> CurrentSearchSources
+    {
+        get
+        {
+            var current = Volatile.Read(ref snapshot);
+            return Array.AsReadOnly(current.Videos
+                .Where(site => site.Options.Enabled && site.Options.SearchEnabled &&
+                    site.Actions.Contains("search", StringComparer.Ordinal))
+                .Select(site => new FilmSearchSource(current.Cats.Single(cat =>
+                    cat.InstallationId == site.Key.InstallationId), site))
+                .Where(source => source.Cat.CanDetect).ToArray());
+        }
+    }
+
+    public bool IsSearchSourceCurrent(FilmSearchSource source)
+    {
+        var current = Volatile.Read(ref snapshot);
+        return current.Cats.Any(cat => cat.InstallationId == source.Cat.InstallationId &&
+            cat.CanDetect && cat.Generation == source.Cat.Generation) &&
+            current.Videos.Any(site => site.Key == source.Site.Key &&
+                site.Options.Enabled && site.Options.SearchEnabled &&
+                site.Actions.Contains("search", StringComparer.Ordinal));
+    }
+
+    public Task<JsonElement> SearchAsync(FilmSearchSource source, string query, int page, CancellationToken token) =>
+        RunAsync(async ct =>
+        {
+            if (!IsSearchSourceCurrent(source)) throw new OperationCanceledException(ct);
+            var result = await transport.InvokeAsync(source.Cat, source.Site, "search",
+                new { wd = query, page }, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            if (!IsSearchSourceCurrent(source)) throw new OperationCanceledException(ct);
+            if (result.ValueKind == JsonValueKind.String) result = CatScriptTransport.Parse(result.GetString()!);
+            CatScriptTransport.Require(result.ValueKind == JsonValueKind.Object &&
+                result.TryGetProperty("list", out var list) && list.ValueKind == JsonValueKind.Array &&
+                (!result.TryGetProperty("ok", out var ok) || ok.ValueKind != JsonValueKind.False) &&
+                (!result.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.False) &&
+                (!result.TryGetProperty("statusCode", out var status) || status.ValueKind != JsonValueKind.Number || status.GetDouble() < 400) &&
+                string.IsNullOrEmpty(CatScriptTransport.OptionalText(result, "error")));
+            return result.Clone();
+        }, token);
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
         RunAsync(token => InStateAsync(LoadAsync, token), cancellationToken);

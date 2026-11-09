@@ -1,13 +1,14 @@
 import Foundation
 
 public enum RuntimeModule: String, Sendable {
-    case music, cat, source
+    case music, cat, source, tmdb
 
     public var contract: String {
         switch self {
         case .music: return "music.script.v3"
         case .cat: return "cat.script.v2"
         case .source: return "source.runtime.v2"
+        case .tmdb: return "tmdb.data.v1"
         }
     }
 
@@ -16,12 +17,17 @@ public enum RuntimeModule: String, Sendable {
         case .music: return Self.musicCodes
         case .cat: return Self.catCodes
         case .source: return Self.sourceCodes
+        case .tmdb: return Self.metadataCodes
         }
     }
 
     static let publicCodes: Set<String> = [
         "INVALID_REQUEST", "METHOD_NOT_FOUND", "PERMISSION_DENIED",
         "CLOSED", "CANCELLED", "TIMEOUT", "INVALID_RESPONSE"
+    ]
+    private static let metadataCodes: Set<String> = [
+        "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR", "UPSTREAM_HTTP",
+        "UPSTREAM_FORMAT", "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE"
     ]
     private static let musicCodes: Set<String> = [
         "INVALID_REQUEST", "CLOSED", "CANCELLED", "LIMIT", "SCRIPT_INTEGRITY",

@@ -20,6 +20,7 @@ final class FilmPosterCell: UICollectionViewCell {
     static let reuseIdentifier = "FilmPosterCell"
     private var artwork: ArtworkView?
     private let titleLabel = UILabel()
+    private let badge = UILabel(), sourceLabel = UILabel()
     private lazy var feedback = PressFeedback(view: contentView)
 
     override var isHighlighted: Bool {
@@ -32,6 +33,19 @@ final class FilmPosterCell: UICollectionViewCell {
         titleLabel.numberOfLines = 2
         titleLabel.lineBreakMode = .byTruncatingTail
         contentView.addSubview(titleLabel)
+        badge.font = .systemFont(ofSize: 10, weight: .medium)
+        badge.textColor = .white
+        badge.backgroundColor = UIColor.black.withAlphaComponent(0.65)
+        badge.layer.cornerRadius = 3
+        badge.clipsToBounds = true
+        badge.textAlignment = .center
+        badge.lineBreakMode = .byTruncatingTail
+        badge.accessibilityIdentifier = "film.poster.badge"
+        sourceLabel.font = .systemFont(ofSize: 11)
+        sourceLabel.lineBreakMode = .byTruncatingTail
+        sourceLabel.accessibilityIdentifier = "film.poster.label"
+        contentView.addSubview(badge)
+        contentView.addSubview(sourceLabel)
         isAccessibilityElement = true
         accessibilityTraits = .button
     }
@@ -39,7 +53,8 @@ final class FilmPosterCell: UICollectionViewCell {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(item: FilmItem, images: ArtworkImages, theme: PageTheme) {
+    func configure(item: FilmItem, images: ArtworkImages, theme: PageTheme,
+                   textBadge: String = "", label: String = "") {
         if artwork == nil {
             let image = ArtworkView(size: 0, images: images)
             image.layer.cornerRadius = 7
@@ -50,7 +65,12 @@ final class FilmPosterCell: UICollectionViewCell {
         artwork?.load(item.posterURL)
         titleLabel.text = item.title
         titleLabel.textColor = UIColor(theme.ink)
-        accessibilityLabel = item.title
+        badge.text = textBadge
+        badge.isHidden = textBadge.isEmpty
+        sourceLabel.text = label
+        sourceLabel.isHidden = label.isEmpty
+        sourceLabel.textColor = UIColor(theme.muted)
+        accessibilityLabel = [item.title, textBadge, label].filter { !$0.isEmpty }.joined(separator: "，")
         accessibilityIdentifier = "film.poster.\(item.sourceID).\(item.id)"
         setNeedsLayout()
     }
@@ -60,6 +80,10 @@ final class FilmPosterCell: UICollectionViewCell {
         let height = contentView.bounds.width * 1.5
         artwork?.frame = CGRect(x: 0, y: 0, width: contentView.bounds.width, height: height)
         titleLabel.frame = CGRect(x: 0, y: height + 7, width: contentView.bounds.width, height: 32)
+        let badgeWidth = min(max(0, contentView.bounds.width - 8), ceil(badge.intrinsicContentSize.width) + 8)
+        badge.frame = CGRect(x: contentView.bounds.width - badgeWidth - 4, y: height - 23,
+                             width: badgeWidth, height: 19)
+        sourceLabel.frame = CGRect(x: 0, y: height + 41, width: contentView.bounds.width, height: 16)
     }
 
     override func prepareForReuse() {

@@ -317,7 +317,7 @@ public static class FilmPresentationTests
                 module.ActiveData.FilterRows[0].Options.Single(option => option.Label == "最新电影").IsSelected,
                 "restoration preserves data controls, filter, scroll and request count");
             Check(((IDesktopHeaderSource)view).Header is
-                { Title: "影片数据", SearchVisible: false, SearchEnabled: false },
+                { Title: "影片数据", SearchVisible: true, SearchEnabled: true, SearchTargetId: "film" },
                 "shell header contribution follows the data route");
 
             await module.NavigateAsync(FilmCapability.PlaybackRoute, default);
@@ -343,7 +343,7 @@ public static class FilmPresentationTests
                 TextOptions.GetTextRenderingMode(text) == TextRenderingMode.Auto),
                 "playback page text uses Display and Auto instead of page-wide grayscale");
             Check(((IDesktopHeaderSource)view).Header is
-                { Title: "播放页", SearchVisible: false, SearchEnabled: false },
+                { Title: "播放页", SearchVisible: true, SearchEnabled: true, SearchTargetId: "film" },
                 "shell header contribution follows the playback route");
         }
         finally

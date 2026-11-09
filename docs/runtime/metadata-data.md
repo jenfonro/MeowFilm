@@ -22,7 +22,7 @@ await runtime.start();
 // 宿主结束会话时：await runtime.close();
 ```
 
-也可与既有业务模块一并传给 `createAppRuntime`，每个模块只能出现一次。默认 `createRuntime`／`startRuntime` 仍装配 music、cat、source；没有擅自改变现有原生客户端严格验证的模块清单。模块源文件已纳入公共运行器打包闭包，原生客户端接线另行实施。
+也可与既有业务模块一并传给 `createAppRuntime`，每个模块只能出现一次。通用默认 `createRuntime`／`startRuntime` 仍装配 music、cat、source。iOS／Windows App entry 显式增加 tmdb，在同一会话中精确校验 music、cat、source、tmdb 四模块；没有装配 douban 或 pan。模块源文件已纳入公共运行器打包闭包，端侧搜索与设置接线分别见 [iOS 影视搜索](../ios/film-search.md)和 [Windows 影视搜索](../windows/film-search.md)。
 
 | 模块 | 版本 | contract | 逻辑方法前缀 |
 | --- | --- | --- | --- |
@@ -41,6 +41,8 @@ await runtime.start();
 - `settings.update {…patch}`：原子更新指定字段；省略字段不变，凭据空字符串表示清除。成功返回与 get 同形的脱敏设置。
 
 运行器独占 `<dataRoot>/tmdb/settings.json` 和 `<dataRoot>/douban/settings.json`，文档格式为 `{version:1,settings:{…}}`。首次访问恢复配置，之后使用内存快照；更新通过运行器完成，不支持绕过运行器并发外部编辑。首次未配置读取默认值，不写空文件。损坏文件明确失败，不当成缺失、不静默重置。
+
+恢复时先严格校验 UTF-8 字节，再解码并解析 JSON；保留 UTF-8 BOM 处理，不依赖内嵌 Node 的 ICU。非法字节返回 `CORRUPT_STORAGE`，不改写原文件。
 
 凭据由运行器保存和使用。客户端仅负责设置编辑和提交，不另建持久化事实来源，不在每次启动回灌。不向外部脚本实例授予此目录。
 
@@ -230,4 +232,4 @@ JSON 请求和图片流都可取消；会话关闭会取消上游，并等待已
 
 协议／会话错误仍使用 `runtime.http.v1` 的错误码。来源独立；一方失败不隐式调用另一方或合并数据。
 
-运行器测试使用合成 HTTP 上游与假凭据，覆盖结构、图片二进制、持久化恢复、代理切换和取消排空；不代表真实 TMDB 账号权限、豆瓣 Cookie／反爬条件已在线验收。本轮不修改 iOS／Windows 数据请求、图片加载器或缓存。后续客户端需移除自己保留的豆瓣域名改写，接入受信本地图片通道，而不是全局放宽普通外部图片 URL 的网络限制。
+运行器测试使用合成 HTTP 上游与假凭据，覆盖结构、图片二进制、持久化恢复、代理切换和取消排空；不代表真实 TMDB 账号权限、豆瓣 Cookie／反爬条件已在线验收。iOS／Windows 的 TMDB 搜索通过受信本地二进制图片通道消费稳定相对引用，不放宽普通外部图片 URL 的网络限制；客户端设置只编辑并提交运行器配置，不复制凭据持久化。豆瓣端侧接入不在影视搜索范围。

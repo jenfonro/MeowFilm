@@ -1,0 +1,57 @@
+<UserControl x:Class="MeowFilm.Capabilities.SearchResultsView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="clr-namespace:MeowFilm.Capabilities"
+ xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
+ FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
+ UseLayoutRounding="True" SnapsToDevicePixels="True">
+ <UserControl.Resources><ResourceDictionary>
+  <ResourceDictionary.MergedDictionaries>
+   <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
+  </ResourceDictionary.MergedDictionaries>
+  <Style x:Key="Search.Tab" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
+   <Setter Property="Margin" Value="0,0,24,0"/><Setter Property="Padding" Value="0,4,0,8"/>
+   <Setter Property="BorderThickness" Value="0,0,0,2"/>
+   <Style.Triggers><DataTrigger Binding="{Binding Selected}" Value="True">
+    <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+   </DataTrigger></Style.Triggers>
+  </Style>
+ </ResourceDictionary></UserControl.Resources>
+ <Grid Margin="40,20,24,20" MaxWidth="1490">
+  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+  <StackPanel Margin="0,0,0,24">
+   <TextBlock Text="{Binding Query}" FontSize="23" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+   <ItemsControl ItemsSource="{Binding Tabs}" Margin="0,14,0,0">
+    <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+    <ItemsControl.ItemTemplate><DataTemplate>
+     <Button Content="{Binding Label}" Tag="{Binding Id}" Style="{StaticResource Search.Tab}"
+             Click="Tab_Click" AutomationProperties.Name="{Binding Label,StringFormat={}{0}搜索结果}"/>
+    </DataTemplate></ItemsControl.ItemTemplate>
+   </ItemsControl>
+   <desktop:NoticeOutlet Message="{Binding Error}"/>
+  </StackPanel>
+  <ContentControl x:Name="MusicHost" Grid.Row="1" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+  <Grid x:Name="FilmBody" Grid.Row="1" Visibility="Collapsed">
+   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+   <DockPanel Margin="0,0,0,16">
+    <CheckBox Content="原始列表" IsChecked="{Binding RawListMode}" VerticalAlignment="Center"/>
+    <TextBlock Text="{Binding MetadataStatus}" Margin="20,0,0,0" Style="{StaticResource Capability.Muted}" VerticalAlignment="Center"/>
+   </DockPanel>
+   <ScrollViewer x:Name="FilmScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                 Style="{StaticResource MeowFilm.OverlayScrollViewer}">
+    <StackPanel>
+     <ItemsControl ItemsSource="{Binding Cards}" AutomationProperties.Name="影视搜索结果">
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate><DataTemplate><local:FilmCard Margin="0,0,24,24" Activated="Card_Activated"/></DataTemplate></ItemsControl.ItemTemplate>
+     </ItemsControl>
+     <TextBlock Text="{Binding Status}" Margin="0,16" HorizontalAlignment="Center" Style="{StaticResource Capability.Muted}"/>
+     <Button Content="加载更多" Click="More_Click" IsEnabled="{Binding CanLoadMore}" HorizontalAlignment="Center"
+             Visibility="{Binding HasMore,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+    </StackPanel>
+   </ScrollViewer>
+  </Grid>
+ </Grid>
+</UserControl>

@@ -9,6 +9,9 @@ public static class RuntimeRecoveryTests
     private static void Check(bool value) { if (!value) throw new InvalidOperationException("Runtime recovery assertion"); }
     private sealed class Session : IRuntimeSession
     {
+        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Image requests are not part of this fixture.");
+
         public bool IsConnected { get; set; } = true;
         public int Calls, Uploads, Disposals;
         public bool FailDisposal;
@@ -34,10 +37,12 @@ public static class RuntimeRecoveryTests
     {
         public int Prepares, Resumes;
         public Task? Hold;
+        public TaskCompletionSource<bool>? PrepareEntered;
         public bool Fail;
         public async Task PrepareRuntimeRecoveryAsync(CancellationToken cancellationToken)
         {
             Prepares++;
+            PrepareEntered?.TrySetResult(true);
             if (Hold is not null) await Hold.WaitAsync(cancellationToken);
             if (Fail) throw new Exception("synthetic-private");
         }
@@ -76,14 +81,20 @@ public static class RuntimeRecoveryTests
         yield return new("runtime-recovery: callback drain fences new calls and old successful replies", async () =>
         {
             var old = new Session(); var next = new Session(); int factories = 0;
-            var hold = Pending<bool>(); var response = Pending<JsonElement>(); var scope = new Scope { Hold = hold.Task };
+            var hold = Pending<bool>(); var response = Pending<JsonElement>(); var prepared = Pending<bool>();
+            var scope = new Scope { Hold = hold.Task, PrepareEntered = prepared };
             await using var runtime = new AppRuntimeClient(_ => Task.FromResult<IRuntimeSession>(++factories == 1 ? old : next));
             runtime.RegisterRecoveryScope(scope);
             runtime.Start();
             await runtime.CallAsync("music.script.sources.list"); old.Response = response.Task;
             var late = runtime.CallAsync("music.script.invoke"); old.IsConnected = false;
             var retry = runtime.RetryAsync();
+            Check(!retry.IsCompleted && factories == 1 && scope.Resumes == 0);
+            await BridgeTests.Expect("CLOSED", () => runtime.CallAsync("music.script.sources.list"));
+            // Recovery enters prepare only after the old session's actual disposal completes.
+            await prepared.Task.WaitAsync(TimeSpan.FromSeconds(10));
             Check(!retry.IsCompleted && factories == 1 && old.Disposals == 1);
+            Check(scope.Prepares == 1 && scope.Resumes == 0);
             await BridgeTests.Expect("CLOSED", () => runtime.CallAsync("music.script.sources.list"));
             hold.SetResult(true); await retry;
             response.SetResult(JsonSerializer.SerializeToElement(new { ok = true, contract = "music.script.v3", value = new { } }));

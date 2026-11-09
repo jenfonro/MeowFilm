@@ -210,6 +210,37 @@ public static class AppRuntimeClientTests
                 finally { Array.Clear(bytes); }
             }
         });
+        yield return new("app-runtime: cancelled image waits for physical bytes and clears rejected pixels", async () =>
+        {
+            var response = Pending<byte[]>();
+            var session = new Session { ImageResponse = response.Task };
+            await using var port = new AppRuntimeClient(_ => Task.FromResult<IRuntimeSession>(session));
+            port.Start();
+            using var caller = new CancellationTokenSource();
+            var image = port.ReadImageAsync("/v1/tmdb/images/w500/a.jpg", 4 * 1024 * 1024, caller.Token);
+            caller.Cancel();
+            BridgeTests.Equal(true, session.ImageCancellation.IsCancellationRequested);
+            BridgeTests.Equal(false, image.IsCompleted);
+            byte[] bytes = [1, 2, 3];
+            response.SetResult(bytes);
+            try { await image; throw new InvalidOperationException("Expected image cancellation"); }
+            catch (OperationCanceledException) { }
+            BridgeTests.Equal(true, bytes.All(value => value == 0));
+        });
+        yield return new("app-runtime: shutdown epoch fences a late image and clears its returned bytes", async () =>
+        {
+            var response = Pending<byte[]>();
+            var session = new Session { ImageResponse = response.Task };
+            var port = new AppRuntimeClient(_ => Task.FromResult<IRuntimeSession>(session));
+            port.Start();
+            var image = port.ReadImageAsync("/v1/tmdb/images/w500/a.jpg", 4 * 1024 * 1024);
+            await port.DisposeAsync();
+            BridgeTests.Equal(true, session.ImageCancellation.IsCancellationRequested);
+            BridgeTests.Equal(false, image.IsCompleted);
+            byte[] bytes = [1, 2, 3]; response.SetResult(bytes);
+            await BridgeTests.Expect("CLOSED", () => image);
+            BridgeTests.Equal(true, bytes.All(value => value == 0));
+        });
         yield return new("app-runtime: shutdown cancels and fences a late successful upload", async () =>
         {
             var response = Pending<JsonElement>();
@@ -228,6 +259,9 @@ public static class AppRuntimeClientTests
 
     private sealed class Session : IRuntimeSession
     {
+        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
+        { ImageCancellation = cancellationToken; return ImageResponse ?? Task.FromResult(new byte[] { 1 }); }
+
         public int Calls, Uploads, Disposals;
         public Task<JsonElement>? Response;
         public Task<JsonElement>? UploadResponse;
@@ -236,6 +270,8 @@ public static class AppRuntimeClientTests
         public ReadOnlyMemory<byte> Source;
         public CancellationToken UploadCancellation;
         public bool FailDisposal;
+        public Task<byte[]>? ImageResponse;
+        public CancellationToken ImageCancellation;
         public Task<JsonElement> CallAsync(string method, object? parameters = null,
             CancellationToken cancellationToken = default)
         {

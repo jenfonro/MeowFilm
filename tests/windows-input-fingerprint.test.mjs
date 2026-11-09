@@ -17,7 +17,7 @@ test('Windows input inventory covers shared packaging, locked configuration and 
     'scripts/script-host-native.json', 'apps/runtime/modules/music-script.mjs',
     'scripts/quickjs-native.json', 'native/JavaScript/CMakeLists.txt',
     'native/JavaScript/meowfilm_js.c', 'native/JavaScript/quickjs/quickjs.c',
-    'packages/film-rules/film-rules.js', 'LICENSES/quickjs-native-MIT.txt',
+    'packages/film-rules/film-rules.js', 'packages/film-search/film-search.js', 'LICENSES/quickjs-native-MIT.txt',
     'scripts/quickjs/build-native.mjs', 'scripts/quickjs/build-source-sdk.mjs',
     'scripts/windows/ensure-runtime-native.mjs', 'packages/script-host/native/task-context.patch',
     'packages/script-host/native/script_host_native.cc', 'packages/script-host/binding.gyp',

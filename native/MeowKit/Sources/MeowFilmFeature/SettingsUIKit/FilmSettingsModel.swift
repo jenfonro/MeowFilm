@@ -7,6 +7,7 @@ import Combine
 public final class FilmSettingsModel: ObservableObject {
     public let rules: FilmRulesDraft
     public let sources: FilmSourceService
+    public let tmdb: FilmTMDBSettingsModel
     @Published public private(set) var snapshot: FilmSourceSnapshot?
     @Published public private(set) var loadError: String?
     @Published public private(set) var rulesError: String?
@@ -15,8 +16,8 @@ public final class FilmSettingsModel: ObservableObject {
     private var loading: Task<Void, Never>?
     private var generation = UUID()
 
-    public init(rules: FilmRuleService, sources: FilmSourceService) {
-        self.rules = FilmRulesDraft(service: rules); self.sources = sources
+    public init(rules: FilmRuleService, sources: FilmSourceService, tmdb: FilmTMDBSettingsModel) {
+        self.rules = FilmRulesDraft(service: rules); self.sources = sources; self.tmdb = tmdb
     }
     public func start(loadError: String? = nil) {
         close()

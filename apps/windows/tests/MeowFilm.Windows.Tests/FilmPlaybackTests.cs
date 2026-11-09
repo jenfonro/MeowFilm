@@ -56,7 +56,7 @@ public static class FilmPlaybackTests
             Named<Grid>(scene.View, "PlaybackPage").IsVisible,
             "FilmView presents the bound playback page");
         Check(((IDesktopHeaderSource)scene.View).Header is
-            { Title: "播放页", SearchVisible: false, SearchEnabled: false },
+            { Title: "播放页", SearchVisible: true, SearchEnabled: true, SearchTargetId: "film" },
             "the shell receives the playback heading");
 
         await module.NavigateAsync(FilmCapability.HomeRoute, default);
@@ -73,7 +73,7 @@ public static class FilmPlaybackTests
                 "opening a card retains its identity title and poster");
             CheckPreview(page);
             Check(key == "movie"
-                ? page.Episodes.Count == 1 && page.SelectedEpisode.Label.Contains("正片", StringComparison.Ordinal)
+                ? page.Episodes.Count == 1 && page.SelectedEpisode!.Label.Contains("正片", StringComparison.Ordinal)
                 : page.Episodes.Count > 1 && page.Episodes.Select(episode => episode.Number).Distinct().Count() ==
                     page.Episodes.Count,
                 "movies offer the feature and series offer distinct episodes with descriptions");
@@ -368,7 +368,7 @@ public static class FilmPlaybackTests
         await Drain();
         var view = scene.Playback;
         var page = scene.Page;
-        var current = page.SelectedEpisode;
+        var current = page.SelectedEpisode ?? throw new InvalidOperationException("Preview episode is missing");
         await CheckLift(Tiles(view, "EpisodeCards")[1], Named<ItemsControl>(view, "EpisodeCards"), 144);
         await CheckLift(Tiles(view, "RelatedItems")[0], Named<ItemsControl>(view, "RelatedItems"), 234);
         Click(Named<Button>(view, "ListLayout"));
@@ -780,7 +780,7 @@ public static class FilmPlaybackTests
                 .All(value => !string.IsNullOrWhiteSpace(value))),
             "every preview episode supplies a title image duration and synopsis");
         Check(page.Recommendations.Count > 0 && page.Episodes.Count(episode => episode.IsSelected) == 1 &&
-            page.SelectedEpisode.IsSelected, "preview provides recommendations and exactly one current episode");
+            page.SelectedEpisode!.IsSelected, "preview provides recommendations and exactly one current episode");
     }
 
     private static void CheckEpisodeContent(ItemsControl host, FilmPlaybackPage page)

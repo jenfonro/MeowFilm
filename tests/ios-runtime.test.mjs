@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { installIOSFailureBoundary, parseIOSConfiguration, parseIOSLaunchArguments } from '../apps/ios/runtime/bootstrap.mjs';
 import { connect, contract, load, okay, root, simulatedIOS, spawnRuntime } from './ios-runtime-support.mjs';
+import { verifyTMDBAssembly } from './tmdb-runtime-assembly-support.mjs';
 
 const entry = join(root, 'apps/ios/runtime/entries/aggregate.mjs');
 
@@ -177,10 +178,15 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   assert.equal(described.protocol, 'runtime.http.v1');
   assert.deepEqual(described.modules.map(module => [module.id, module.version, module.contract]), [
     ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.2.0', 'source.runtime.v2'],
+    ['tmdb', '0.1.0', 'tmdb.data.v1'],
   ]);
   for (const method of ['music.script.sources.list', 'music.script.resolve', 'music.script.invoke'])
     assert.ok(described.modules[0].methods.includes(method), method);
   assert.ok(described.modules[2].methods.includes('source.runtime.invoke'));
+  assert.deepEqual(described.modules[3].methods, [
+    'tmdb.data.request', 'tmdb.data.settings.get', 'tmdb.data.settings.update',
+  ]);
+  await verifyTMDBAssembly(t, { client, baseUrl, ...runtime.configuration });
   const instance = okay(await load(client)).item;
   assert.equal(instance.state, 'ready');
   assert.equal(instance.name, 'iOS runtime fixture');
@@ -215,7 +221,7 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   okay(await client.call('source.runtime.status'), 'source.runtime.v2');
   okay(await client.call('cat.script.status'), 'cat.script.v2');
   okay(await client.shutdown(), 'runtime.http.v1');
-  assert.equal(okay(await client.describe(), 'runtime.http.v1').modules.length, 3);
+  assert.equal(okay(await client.describe(), 'runtime.http.v1').modules.length, 4);
   runtime.channel.end();
   await closed;
   await client.close();

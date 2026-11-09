@@ -36,7 +36,7 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(manifest["assemblyProfile"] as? String, "common-native")
         XCTAssertEqual(manifest["transport"] as? String, "runtime.http.v1")
-        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source"])
+        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "tmdb"])
         let files = try XCTUnwrap(manifest["files"] as? [[String: Any]])
         XCTAssertFalse(files.contains { ($0["path"] as? String)?.lowercased().hasSuffix(".wasm") == true })
         let frameworks = try XCTUnwrap(Bundle.main.privateFrameworksURL)

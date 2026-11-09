@@ -1,6 +1,35 @@
 #if os(iOS)
 import UIKit
 
+public struct SearchTargetOption: Equatable {
+    public let id: String
+    public let title: String
+    public let placeholder: String
+    public init(id: String, title: String, placeholder: String) {
+        self.id = id; self.title = title; self.placeholder = placeholder
+    }
+}
+
+/// Application composition supplies domain content; shared chrome and the
+/// hosting business do not import the additional domain.
+@MainActor
+public protocol SearchResultContent: AnyObject {
+    var controller: UIViewController { get }
+    func submit(_ query: String)
+    func applyTheme(_ theme: PageTheme)
+    func cancel()
+    func close()
+}
+
+@MainActor
+public struct SearchResultCategory {
+    public let target: SearchTargetOption
+    public let makeContent: () -> any SearchResultContent
+    public init(target: SearchTargetOption, makeContent: @escaping () -> any SearchResultContent) {
+        self.target = target; self.makeContent = makeContent
+    }
+}
+
 /// Search chrome contains no domain model. The caller supplies content and
 /// query submission; UINavigationController owns every ordinary return.
 @MainActor
@@ -13,6 +42,13 @@ open class SearchPageViewController: PageViewController {
         set { searchField.text = newValue; updateSubmission() }
     }
     public var onSubmit: ((String) -> Void)?
+    public var searchTargets: [SearchTargetOption] = [] {
+        didSet { updateSearchTargets() }
+    }
+    public var searchTargetID = "" {
+        didSet { updateSearchTargets() }
+    }
+    public var searchTargetButton: UIButton { input.target }
     private let initialFocus: Bool
     private var focusedInitially = false
 
@@ -51,6 +87,19 @@ open class SearchPageViewController: PageViewController {
         input.submit.tintColor = UIColor(theme.ink)
         input.submit.setTitleColor(UIColor(theme.ink), for: .normal)
         input.submit.setTitleColor(UIColor(theme.muted), for: .disabled)
+        input.target.setTitleColor(UIColor(theme.ink), for: .normal)
+    }
+
+    private func updateSearchTargets() {
+        input.target.isHidden = searchTargets.count < 2
+        guard let selected = searchTargets.first(where: { $0.id == searchTargetID }) ?? searchTargets.first else { return }
+        input.target.setTitle(selected.title + "⌄", for: .normal)
+        searchField.placeholder = selected.placeholder
+        input.target.menu = UIMenu(children: searchTargets.map { option in
+            UIAction(title: option.title, state: option.id == selected.id ? .on : .off) { [weak self] _ in
+                self?.searchTargetID = option.id
+            }
+        })
     }
 
     @objc private func submitQuery() {
@@ -69,6 +118,7 @@ open class SearchPageViewController: PageViewController {
 private final class SearchInputView: UIView {
     let field = UITextField()
     let submit = UIButton(type: .custom)
+    let target = UIButton(type: .system)
     let icon = UIImageView(image: PageIcon.image(.search, size: 18))
     let dividers = [UIView(), UIView()]
 
@@ -93,7 +143,12 @@ private final class SearchInputView: UIView {
         submit.setTitle("搜索", for: .normal)
         submit.titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
         submit.accessibilityIdentifier = "search.submit"
-        let stack = UIStackView(arrangedSubviews: [icon, dividers[0], field, dividers[1], submit])
+        target.isHidden = true
+        target.showsMenuAsPrimaryAction = true
+        target.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+        target.accessibilityIdentifier = "search.target"
+        target.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let stack = UIStackView(arrangedSubviews: [icon, dividers[0], target, field, dividers[1], submit])
         stack.axis = .horizontal
         stack.alignment = .center
         stack.spacing = 8

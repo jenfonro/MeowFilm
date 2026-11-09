@@ -12,6 +12,8 @@ public final class MusicSearchViewController: SearchPageViewController,
     private let appearance: MusicAppearancePreferencesStore
     private weak var router: (any MusicUIRouting)?
     private let history: SearchHistoryStore
+    private let additionalCategory: SearchResultCategory?
+    private let primaryTarget: SearchTargetOption
     private let table = UITableView(frame: .zero, style: .plain)
     private let historyCell = MusicSearchHistoryCell(style: .default, reuseIdentifier: "history")
     private let suggestionsCell = MusicSearchSuggestionsCell(style: .default, reuseIdentifier: "suggestions")
@@ -30,20 +32,27 @@ public final class MusicSearchViewController: SearchPageViewController,
     private var dataSource: UITableViewDiffableDataSource<Int, RowID>!
 
     public init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting,
-                history: SearchHistoryStore? = nil) {
+                history: SearchHistoryStore? = nil,
+                primaryTarget: SearchTargetOption = .init(id: "music", title: "音乐", placeholder: "搜索歌曲、歌手、歌单"),
+                additionalCategory: SearchResultCategory? = nil, initialTargetID: String? = nil) {
         self.model = model; self.appearance = appearance; self.router = router
         self.history = history ?? SearchHistoryStore()
+        self.additionalCategory = additionalCategory; self.primaryTarget = primaryTarget
         if let provider = model.searchDiscoveryProvider, let browser = model.publicBrowser {
             discoveryPage = MusicSearchDiscoveryModel(
                 provider: provider, browser: browser, hotPlayback: model.searchHotPlaybackProvider
             )
         } else { discoveryPage = nil }
         super.init(themeProvider: appearance, query: model.query, initialFocus: true)
+        if let additionalCategory {
+            searchTargets = [primaryTarget, additionalCategory.target]
+            searchTargetID = initialTargetID ?? primaryTarget.id
+        }
     }
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        searchField.placeholder = "搜索歌曲、歌手、歌单"
+        if searchTargets.isEmpty { searchField.placeholder = primaryTarget.placeholder }
         onSubmit = { [weak self] in self?.submit($0) }
         table.backgroundColor = .clear
         table.delegate = self
@@ -136,13 +145,16 @@ public final class MusicSearchViewController: SearchPageViewController,
     public func scrollViewDidChangeAdjustedContentInset(_ scrollView: UIScrollView) { measureMemberDemand() }
 
     private func submit(_ keyword: String) {
-        guard model.isAvailable, !model.isClosed else { return }
+        let additional = additionalCategory != nil && searchTargetID == additionalCategory?.target.id
+        guard additional || (model.isAvailable && !model.isClosed) else { return }
         model.query = keyword
         history.record(keyword)
         query = keyword
         searchField.resignFirstResponder()
         navigationController?.pushViewController(MusicSearchResultsViewController(
-            model: model, query: keyword, appearance: appearance, router: router, history: history
+            model: model, query: keyword, appearance: appearance, router: router, history: history,
+            primaryTarget: primaryTarget, additionalCategory: additionalCategory,
+            initialAdditional: additional
         ), animated: true)
     }
 
@@ -334,13 +346,14 @@ public final class MusicSearchViewController: SearchPageViewController,
 }
 
 @MainActor
-private final class MusicSearchResultsViewController: SearchPageViewController,
+public final class MusicSearchResultsViewController: SearchPageViewController,
     UIPageViewControllerDataSource, UIPageViewControllerDelegate, UITableViewDelegate
 {
     private enum Kind: CaseIterable, Hashable {
-        case all, songs, playlists
+        case all, songs, playlists, additional
+        static let music: [Kind] = [.all, .songs, .playlists]
         var title: String {
-            switch self { case .all: return "综合"; case .songs: return "单曲"; case .playlists: return "歌单" }
+            switch self { case .all: return "综合"; case .songs: return "单曲"; case .playlists: return "歌单"; case .additional: return "" }
         }
     }
     private let model: MusicViewModel
@@ -348,6 +361,9 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
     private weak var router: (any MusicUIRouting)?
     private let preferences: MusicSearchPreferencesStore
     private let history: SearchHistoryStore
+    private let additionalCategory: SearchResultCategory?
+    private let primaryTarget: SearchTargetOption
+    private var additionalContent: (any SearchResultContent)?
     private let results: MusicSearchResultsModel
     private let actions: MusicSearchActions
     private let categories = MusicSearchResultTabsView()
@@ -367,22 +383,36 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
     private var renderedRequest: UUID?
     private var shownFailures: [Int: String] = [:]
     private var submittedKeyword: String
-    private var kinds: [Kind] { results.preferences.searchPlaylists ? Kind.allCases : [.songs] }
+    private var kinds: [Kind] {
+        if additionalCategory != nil { return Kind.allCases }
+        return results.preferences.searchPlaylists ? Kind.music : [.songs]
+    }
+    private func controller(for kind: Kind) -> UIViewController? {
+        kind == .additional ? additionalContent?.controller : pages[kind]
+    }
 
-    init(model: MusicViewModel, query: String, appearance: MusicAppearancePreferencesStore,
-         router: (any MusicUIRouting)?, history: SearchHistoryStore) {
+    public init(model: MusicViewModel, query: String, appearance: MusicAppearancePreferencesStore,
+         router: (any MusicUIRouting)?, history: SearchHistoryStore,
+         primaryTarget: SearchTargetOption = .init(id: "music", title: "音乐", placeholder: "搜索歌曲、歌手、歌单"),
+         additionalCategory: SearchResultCategory? = nil, initialAdditional: Bool = false) {
         submittedKeyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
         self.model = model; self.appearance = appearance; self.router = router
         self.history = history
+        self.additionalCategory = additionalCategory; self.primaryTarget = primaryTarget
+        selected = initialAdditional ? .additional : .all
         preferences = MusicSearchPreferencesStore()
         actions = MusicSearchActions(model: model)
         results = MusicSearchResultsModel(owner: model)
         super.init(themeProvider: appearance, query: query)
+        if let additionalCategory {
+            searchTargets = [primaryTarget, additionalCategory.target]
+            searchTargetID = initialAdditional ? additionalCategory.target.id : primaryTarget.id
+        }
     }
 
-    override func viewDidLoad() {
+    public override func viewDidLoad() {
         super.viewDidLoad()
-        searchField.placeholder = "搜索歌曲、歌手、歌单"
+        if searchTargets.isEmpty { searchField.placeholder = primaryTarget.placeholder }
         onSubmit = { [weak self] _ in self?.submit() }
         categories.onSelect = { [weak self] index in
             guard let self, self.kinds.indices.contains(index) else { return }
@@ -412,7 +442,8 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
                 MainActor.assumeIsolated { self?.updatePagingProgress(scroll) }
             }
         }
-        for (index, kind) in Kind.allCases.enumerated() {
+        additionalContent = additionalCategory?.makeContent()
+        for (index, kind) in Kind.music.enumerated() {
             let page = MusicSearchTableController()
             page.table.tag = index
             page.table.accessibilityIdentifier = "music.search.results.page.\(index)"
@@ -451,38 +482,37 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         select(selected, animated: false)
     }
 
-    override func pageDidBecomeActive() {
+    public override func pageDidBecomeActive() {
         preferences.reload()
         _ = results.setAccess(available: model.isAvailable && !model.isClosed,
                               generation: model.searchAccessGeneration)
-        results.appear(); actions.setActive(true)
-        if results.query.isEmpty, model.isAvailable, !model.isClosed, !submittedKeyword.isEmpty {
-            results.submit(submittedKeyword, preferences: preferences.preferences)
-            results.holdPagination()
-        }
+        actions.setActive(true)
+        activateSelectedContent()
         render()
     }
 
-    override func pageDidBecomeInactive() {
+    public override func pageDidBecomeInactive() {
         results.disappear(); actions.suspend()
+        additionalContent?.close()
         updateLoadingSkeletons()
     }
-    override func pageDidBecomeHidden() {
+    public override func pageDidBecomeHidden() {
         results.holdPagination()
         finishPagingTransition(at: selected)
         resetPlaylistPressFeedback()
     }
-    override func pageDidBecomeVisible() {
+    public override func pageDidBecomeVisible() {
         updateLoadingSkeletons()
         showActionError(); showSearchFailure()
     }
-    override func pageDidFinishAppearing() {
+    public override func pageDidFinishAppearing() {
         showActionError(); showSearchFailure()
     }
 
-    override func applyTheme() {
+    public override func applyTheme() {
         super.applyTheme()
         categories.applyTheme(theme)
+        additionalContent?.applyTheme(theme)
         updateVisibleSongs()
         for page in pages.values {
             for path in page.table.indexPathsForVisibleRows ?? [] {
@@ -498,32 +528,36 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         }
     }
 
-    override func shouldBeginInteractiveBack(at point: CGPoint, in view: UIView) -> Bool {
+    public override func shouldBeginInteractiveBack(at point: CGPoint, in view: UIView) -> Bool {
         // UIPageViewController keeps the visible page at the middle offset.
         // Its selected kind, not that implementation offset, owns admission.
         kinds.firstIndex(of: selected) == 0 && !paging
     }
 
-    func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore page: UIViewController)
+    public func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore page: UIViewController)
         -> UIViewController? { neighbor(page, step: -1) }
-    func pageViewController(_ pageViewController: UIPageViewController, viewControllerAfter page: UIViewController)
+    public func pageViewController(_ pageViewController: UIPageViewController, viewControllerAfter page: UIViewController)
         -> UIViewController? { neighbor(page, step: 1) }
-    func pageViewController(_ pageViewController: UIPageViewController,
+    public func pageViewController(_ pageViewController: UIPageViewController,
                             willTransitionTo pendingViewControllers: [UIViewController]) {
         guard let page = pendingViewControllers.first,
-              let kind = kinds.first(where: { pages[$0] === page }) else { return }
+              let kind = kinds.first(where: { controller(for: $0) === page }) else { return }
         paging = true
         beginPagingTransition(to: kind)
     }
-    func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool,
+    public func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool,
                             previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
         if completed, let page = pager.viewControllers?.first,
-           let kind = kinds.first(where: { pages[$0] === page }) { selected = kind }
+           let kind = kinds.first(where: { controller(for: $0) === page }) {
+            selected = kind
+            synchronizeSearchTarget()
+        }
         finishPagingTransition(at: selected)
         paging = false
+        if let pending = pendingKind { pendingKind = nil; select(pending, animated: true); return }
         if !kinds.contains(selected) { select(.songs, animated: false) }
+        else { activateSelectedContent() }
         showSearchFailure()
-        if let pending = pendingKind { pendingKind = nil; select(pending, animated: true) }
     }
 
     private func beginPagingTransition(to kind: Kind) {
@@ -554,6 +588,26 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         categories.setPosition(CGFloat(index))
         updateLoadingSkeletons()
     }
+    private func synchronizeSearchTarget() {
+        if let additionalCategory {
+            searchTargetID = selected == .additional ? additionalCategory.target.id : primaryTarget.id
+        }
+    }
+    private func activateSelectedContent() {
+        guard isPageActive, !submittedKeyword.isEmpty else { return }
+        if selected == .additional {
+            results.holdPagination()
+            additionalContent?.submit(submittedKeyword)
+        } else if model.isAvailable, !model.isClosed {
+            if !results.query.utf8.elementsEqual(submittedKeyword.utf8) {
+                preferences.reload()
+                results.disappear()
+                results.submit(submittedKeyword, preferences: preferences.preferences)
+                results.appear()
+                results.holdPagination()
+            } else { results.appear() }
+        }
+    }
     private func updateLoadingSkeletons() {
         for (kind, page) in pages {
             for skeleton in page.skeletons.values {
@@ -561,7 +615,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             }
         }
     }
-    func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+    public func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
         if case .heading? = rowID(in: tableView, at: indexPath) { return 44 }
         if case .status(let section)? = rowID(in: tableView, at: indexPath) {
             if footerState(kind: Kind.allCases[tableView.tag], section: section)?.showsSkeleton == true {
@@ -576,7 +630,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         return columns == 1 ? 80 : (tableView.bounds.width - 32 - CGFloat(columns - 1) * 12) /
             CGFloat(columns) + 60
     }
-    func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
+    public func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
         self.tableView(tableView, heightForRowAt: indexPath)
     }
     private func makeCell(in tableView: UITableView, at indexPath: IndexPath,
@@ -612,11 +666,11 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             cell.contentView.addSubview(footer); footer.pinEdges(to: cell.contentView)
         }
     }
-    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+    public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         if let song = song(in: tableView, at: indexPath) { actions.playSingle(song, session: results) }
     }
-    func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath)
+    public func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath)
         -> UISwipeActionsConfiguration? {
         guard let song = song(in: tableView, at: indexPath) else { return nil }
         let request = results.requestID
@@ -629,7 +683,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         favorite.backgroundColor = UIColor(theme.accent)
         return UISwipeActionsConfiguration(actions: [favorite])
     }
-    func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath,
+    public func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath,
                    point: CGPoint) -> UIContextMenuConfiguration? {
         guard let song = song(in: tableView, at: indexPath) else { return nil }
         let request = results.requestID
@@ -638,7 +692,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             return self.songMenu(song, request: request)
         }
     }
-    func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+    public func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
         guard isPageVisible, !paging, Kind.allCases[tableView.tag] == selected, selected != .all else { return }
         if case .song? = rowID(in: tableView, at: indexPath), indexPath.row >= results.songs.count - 3 {
             results.more(.songs, automatic: true)
@@ -648,10 +702,10 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             results.more(.playlists, automatic: true)
         }
     }
-    func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+    public func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
         (cell as? MusicSearchPlaylistCell)?.resetPressFeedback()
     }
-    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+    public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         if let table = scrollView as? UITableView {
             for cell in table.visibleCells.compactMap({ $0 as? MusicSearchPlaylistCell }) { cell.resetPressFeedback() }
         }
@@ -669,21 +723,25 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
 
     private func submit() {
         let query = self.query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty, model.isAvailable, !model.isClosed else { return }
+        guard !query.isEmpty else { return }
+        let additional = additionalCategory != nil && searchTargetID == additionalCategory?.target.id
+        guard additional || (model.isAvailable && !model.isClosed) else { return }
+        if !submittedKeyword.utf8.elementsEqual(query.utf8) {
+            results.disappear()
+            additionalContent?.cancel()
+        }
         submittedKeyword = query
-        preferences.reload()
         history.record(query)
         model.query = query
         actions.suspend()
-        results.submit(query, preferences: preferences.preferences)
-        results.holdPagination()
         actions.setActive(true)
+        select(additional ? .additional : kinds.contains(.all) ? .all : .songs, animated: false)
     }
     private func reconcileAccess() {
         let available = model.isAvailable && !model.isClosed
         let keyword = submittedKeyword
         guard results.setAccess(available: available, generation: model.searchAccessGeneration) else { return }
-        if isPageActive, available, !keyword.isEmpty {
+        if isPageActive, available, selected != .additional, !keyword.isEmpty {
             preferences.reload()
             results.submit(keyword, preferences: preferences.preferences)
             results.holdPagination()
@@ -694,7 +752,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
     private func render() {
         guard isViewLoaded else { return }
         if !paging, !kinds.contains(selected) { select(.songs, animated: false) }
-        let titles = kinds.map(\.title)
+        let titles = kinds.map { $0 == .additional ? additionalCategory?.target.title ?? "" : $0.title }
         categories.setTitles(titles, theme: theme)
         categories.isHidden = titles.count <= 1
         categoriesHeight.constant = categories.isHidden ? 0 : 48
@@ -916,7 +974,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         if results.songFailures.isEmpty { shownFailures[0] = nil }
         if results.playlistFailures.isEmpty { shownFailures[1] = nil }
         let sections = requested.map { [$0] } ?? (selected == .songs ? [0] : selected == .playlists ? [1] : [0, 1])
-        guard canPresentPageAlert else { return }
+        guard canPresentPageAlert, selected != .additional else { return }
         for section in sections {
             let failures = section == 0 ? results.songFailures : results.playlistFailures
             guard !failures.isEmpty else { continue }
@@ -938,11 +996,13 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         }
     }
     private func select(_ kind: Kind, animated: Bool) {
-        guard let target = kinds.firstIndex(of: kind), let page = pages[kind] else { return }
+        guard let target = kinds.firstIndex(of: kind), let page = controller(for: kind) else { return }
         if paging { pendingKind = kind; return }
         let origin = selected
         let originIndex = kinds.firstIndex(of: origin) ?? 0
         if origin == kind, pager.viewControllers?.first === page {
+            synchronizeSearchTarget()
+            activateSelectedContent()
             finishPagingTransition(at: kind)
             showSearchFailure()
             return
@@ -951,8 +1011,10 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         guard animated else {
             results.holdPagination()
             selected = kind
+            synchronizeSearchTarget()
             pager.setViewControllers([page], direction: direction, animated: false)
             finishPagingTransition(at: kind)
+            activateSelectedContent()
             showSearchFailure()
             return
         }
@@ -962,21 +1024,24 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
                                  animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] finished in
             guard let self else { return }
             self.selected = finished ? kind : origin
+            if finished { self.synchronizeSearchTarget() }
             self.finishPagingTransition(at: self.selected)
             self.paging = false
-            if !self.kinds.contains(self.selected) { self.select(.songs, animated: false) }
-            self.showSearchFailure()
             if let pending = self.pendingKind {
                 self.pendingKind = nil
                 self.select(pending, animated: true)
+                return
             }
+            if !self.kinds.contains(self.selected) { self.select(.songs, animated: false) }
+            else { self.activateSelectedContent() }
+            self.showSearchFailure()
         }
         showSearchFailure()
     }
     private func neighbor(_ page: UIViewController, step: Int) -> UIViewController? {
-        guard let index = kinds.firstIndex(where: { pages[$0] === page }),
+        guard let index = kinds.firstIndex(where: { controller(for: $0) === page }),
               kinds.indices.contains(index + step) else { return nil }
-        return pages[kinds[index + step]]
+        return controller(for: kinds[index + step])
     }
 
     private func playlistCount(_ kind: Kind) -> Int {
@@ -1083,7 +1148,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         guard message != nil || label != nil else { return nil }
         return .init(message: message, label: label, action: action, showsSkeleton: showsSkeleton, request: results.requestID)
     }
-    func tableView(_ tableView: UITableView, heightForFooterInSection section: Int) -> CGFloat { .leastNormalMagnitude }
+    public func tableView(_ tableView: UITableView, heightForFooterInSection section: Int) -> CGFloat { .leastNormalMagnitude }
 }
 
 @MainActor

@@ -13,6 +13,20 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     private readonly MusicCapability module;
     private DataGrid ActiveSongsGrid => module.IsSearchPage ? SearchSongsGrid : SongsGrid;
     internal void ResetSearchPresentation() => CatalogView.ResetSearchPlaylistProjection();
+    internal void ProjectSearchResults(bool projected)
+    {
+        if (projected)
+        {
+            SearchHeading.Visibility = Visibility.Collapsed;
+            PageContent.Margin = new(0);
+        }
+        else
+        {
+            SearchHeading.SetBinding(VisibilityProperty, new System.Windows.Data.Binding(nameof(MusicCapability.IsSearchPage))
+            { Converter = new BooleanToVisibilityConverter() });
+            PageContent.ClearValue(MarginProperty);
+        }
+    }
     private readonly MeowFilm.Desktop.DesktopHeaderAction refreshAction;
     private readonly MeowFilm.Desktop.DesktopHeaderAction renamePlaylistAction, deletePlaylistAction;
     private async void UpdateVisibilityActivity()
@@ -133,7 +147,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         Actions: module.IsCollectionPage && module.CanDeleteCollection
             ? [renamePlaylistAction, deletePlaylistAction] :
             module.IsCollectionPage ? [] :
-            module.IsLocalLibraryPage ? [refreshAction] : []);
+            module.IsLocalLibraryPage ? [refreshAction] : []) { SearchTargetId = "music" };
     public event EventHandler? HeaderChanged;
     private async Task RenamePlaylistNameAsync(CancellationToken token)
     {

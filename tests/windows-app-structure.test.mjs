@@ -167,6 +167,32 @@ test('Windows resources cannot depend on the other platform', t => {
   assert.throws(() => verifyAppStructure(f.source), /missing\/unsafe XAML resource/);
 });
 
+test('embedded resources are inventoried and must resolve to authored shared inputs', t => {
+  const f = fixture(t);
+  f.write('packages/film-search/film-search.js', 'globalThis.meowfilmProcess = value => value;');
+  const project = 'apps/windows/src/MeowFilm.Capabilities/MeowFilm.Capabilities.csproj';
+  f.write(project, '<Project><EmbeddedResource Include="../../../../packages/film-search/film-search.js" LogicalName="MeowFilm.FilmSearch.js" /></Project>');
+  const result = verifyAppStructure(f.source);
+  assert.deepEqual(result.embeddedResources, [{
+    project, source: 'packages/film-search/film-search.js', logicalName: 'MeowFilm.FilmSearch.js',
+  }]);
+  assert.equal(result.resourceReferences, 2);
+  f.write(project, '<Project><EmbeddedResource Include="missing.js" LogicalName="MeowFilm.FilmSearch.js" /></Project>');
+  assert.throws(() => verifyAppStructure(f.source), /missing\/unsafe embedded resource/);
+});
+
+test('embedded resource identities cannot collide or import the other platform', t => {
+  const f = fixture(t);
+  f.write('packages/film-search/film-search.js', 'globalThis.meowfilmProcess = value => value;');
+  const project = 'apps/windows/src/MeowFilm.Capabilities/MeowFilm.Capabilities.csproj';
+  const resource = '<EmbeddedResource Include="../../../../packages/film-search/film-search.js" LogicalName="MeowFilm.FilmSearch.js" />';
+  f.write(project, `<Project>${resource}${resource}</Project>`);
+  assert.throws(() => verifyAppStructure(f.source), /duplicate embedded resource identity/);
+  f.write('apps/ios/fixture.js', 'export {};');
+  f.write(project, '<Project><EmbeddedResource Include="../../../ios/fixture.js" /></Project>');
+  assert.throws(() => verifyAppStructure(f.source), /missing\/unsafe embedded resource/);
+});
+
 test('shared tool links cannot hide dependency inputs', t => {
   const f = fixture(t);
   f.write('packages/shared/package-runtime.mjs', 'export {};');

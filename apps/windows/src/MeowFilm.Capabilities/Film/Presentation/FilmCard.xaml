@@ -4,10 +4,16 @@
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop"
- Width="176" Height="294" Background="Transparent"
+ Width="176" Background="Transparent"
  FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
  TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
  UseLayoutRounding="True" SnapsToDevicePixels="True">
+ <UserControl.Style><Style TargetType="UserControl">
+  <Setter Property="Height" Value="294"/>
+  <Style.Triggers><DataTrigger Binding="{Binding HasSubtitle}" Value="True">
+   <Setter Property="Height" Value="318"/>
+  </DataTrigger></Style.Triggers>
+ </Style></UserControl.Style>
  <UserControl.Resources>
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries>
@@ -53,6 +59,12 @@
     <local:FilmHoverShade x:Name="HoverShade"
                           Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton}"/>
     <local:FilmPlayMark Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton}"/>
+    <Border x:Name="TextBadge" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+            MaxWidth="160" Margin="8" Padding="7,3" CornerRadius="5" Background="#B0000000"
+            Visibility="{Binding HasTextBadge,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+     <TextBlock Text="{Binding TextBadge}" Foreground="White" FontSize="12"
+                TextTrimming="CharacterEllipsis"/>
+    </Border>
     <Border x:Name="ScoreBadge" Width="32" Height="32" CornerRadius="16" Margin="0,8,8,0"
             HorizontalAlignment="Right" VerticalAlignment="Top"
             Visibility="{Binding HasScore,Converter={StaticResource MeowFilm.BoolToVisibility}}"
@@ -77,6 +89,10 @@
               Foreground="{DynamicResource MeowFilm.Brush.Text}"
               FontSize="15" FontWeight="ExtraBold" TextAlignment="Center"
               TextTrimming="CharacterEllipsis"/>
+   <TextBlock x:Name="Subtitle" Text="{Binding Subtitle}" Margin="0,3,0,0" Height="21"
+              FontSize="12" TextAlignment="Center" TextTrimming="CharacterEllipsis"
+              Foreground="{DynamicResource MeowFilm.Brush.Muted}"
+              Visibility="{Binding HasSubtitle,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
   </StackPanel>
  </Button>
 </UserControl>

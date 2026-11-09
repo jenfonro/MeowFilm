@@ -13,9 +13,16 @@ public interface IRuntimeClient
 }
 
 /// <summary>An App-owned script connection; callers never own its lifetime.</summary>
-public interface IRuntimeSession : IRuntimeClient, IAsyncDisposable
+public interface IRuntimeSession : IRuntimeClient, IRuntimeImageClient, IAsyncDisposable
 {
     bool IsConnected => true;
 }
 
 public sealed record RuntimeModule(string Id, string Version);
+
+/// <summary>Authenticated image bytes from a validated runtime-relative reference.
+/// Completion includes physical response disposal, including cancellation.</summary>
+public interface IRuntimeImageClient
+{
+    Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default);
+}

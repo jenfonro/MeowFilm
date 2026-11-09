@@ -1,4 +1,5 @@
 import { PrivateDocuments } from '@meowfilm/script-host';
+import { isUtf8 } from 'node:buffer';
 
 export const metadataFailure = code => Object.assign(new Error(code), { code });
 export const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -53,7 +54,10 @@ export function createMetadataSettings(dataRoot, id) {
     try {
       const bytes = documents.read('settings.json');
       if (bytes === null) return { ...defaults[id] };
-      const document = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      // NodeMobile omits ICU, which fatal TextDecoder requires. Validate bytes
+      // independently, retaining strict UTF-8 and the decoder's BOM handling.
+      if (!isUtf8(bytes)) throw metadataFailure('CORRUPT_STORAGE');
+      const document = JSON.parse(new TextDecoder('utf-8').decode(bytes));
       if (!object(document) || document.version !== 1 ||
           Object.keys(document).length !== 2 || !Object.hasOwn(document, 'settings')) {
         throw metadataFailure('CORRUPT_STORAGE');

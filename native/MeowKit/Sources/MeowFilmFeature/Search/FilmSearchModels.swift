@@ -1,0 +1,74 @@
+import Foundation
+import MeowRuntime
+
+public enum FilmSearchChannelState: Equatable, Sendable {
+    case idle, loading, completed, unavailable, failed, cancelled
+}
+
+public enum FilmSearchError: Error, Sendable { case unavailable, closed, invalidResponse }
+
+/// The adapter returns the original TMDB structures. Image paths are resolved by
+/// that adapter against its runtime; the search rules never invent an image host.
+public protocol FilmSearchMetadataReading: Sendable {
+    func search(query: String) async throws -> RuntimeValue
+    func detail(type: String, id: Int) async throws -> RuntimeValue
+    func imageURL(path: String) -> URL?
+}
+
+public struct FilmSearchSite: Sendable {
+    public let cat: FilmCatSource
+    public let source: FilmVideoSource
+    public init(cat: FilmCatSource, source: FilmVideoSource) { self.cat = cat; self.source = source }
+    public var key: String {
+        // JSON tuple encoding is unambiguous even for separators in protocol IDs.
+        let data = try! RuntimeJSON.encode(.array([.string(cat.installationId),
+            .number(Double(cat.generation)), .string(source.key.siteKey)]))
+        return data.base64EncodedString()
+    }
+}
+
+/// Keeps the complete shared-program value, including every original member.
+/// Native presentation reads only the fields it needs; it does not regroup data.
+public struct FilmSearchCard: Equatable, Sendable {
+    public let value: RuntimeValue
+    public init(value: RuntimeValue) { self.value = value }
+    public var displayKey: String { text("displayKey") }
+    public var id: String { text("id") }
+    public var title: String { text("title") }
+    public var sourceKind: String { text("sourceKind") }
+    public var groupKey: String { text("groupKey") }
+    public var contentKey: String { text("contentKey") }
+    public var textBadge: String { text("textBadge") }
+    public var label: String { text("siteLabel") }
+    public var tmdbType: String { text("tmdbType") }
+    public var tmdbID: Int? { value.catField("tmdbId")?.catInteger }
+    public var members: [RuntimeValue] { value.catField("aggregateItems")?.catArray ?? [] }
+    func text(_ field: String) -> String { value.catField(field)?.catText ?? "" }
+    public func filmItem(imageURL: (String) -> URL?) -> FilmItem {
+        FilmItem(sourceID: sourceKind == "tmdb" ? "tmdb" : text("siteKey"),
+            id: sourceKind == "tmdb" ? id : text("siteDetail"), title: title,
+            posterURL: imageURL(text("poster")), subtitle: label)
+    }
+}
+
+public struct FilmSearchSnapshot: Equatable, Sendable {
+    public let sessionID: UUID
+    public let query: String
+    public var round = 0
+    public var siteState: FilmSearchChannelState = .idle
+    public var metadataState: FilmSearchChannelState = .idle
+    public var loading = false
+    public var hasMore = false
+    public var noSources = false
+    public var siteItems: [RuntimeValue] = []
+    public var tmdbItems: [RuntimeValue] = []
+    public var metadataSearch: RuntimeValue?
+    public var metadataQuery: String?
+    public var metadataDetails: [String: RuntimeValue] = [:]
+    public var cards: [FilmSearchCard] = []
+    public var rawCards: [FilmSearchCard] = []
+    public var failed: Bool {
+        !loading && cards.isEmpty && rawCards.isEmpty && siteState == .failed &&
+            [.completed, .failed, .unavailable].contains(metadataState)
+    }
+}

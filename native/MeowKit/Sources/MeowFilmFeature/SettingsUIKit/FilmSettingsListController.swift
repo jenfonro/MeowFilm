@@ -20,7 +20,7 @@ struct FilmSettingsSection {
     var rows: [FilmSettingsRow]
 }
 
-/// Native list chrome shared only by the three film settings pages.
+/// Native list chrome shared by film settings pages.
 @MainActor
 class FilmSettingsListController: PageViewController, UITableViewDataSource, UITableViewDelegate {
     var avoidsKeyboard: Bool { false }

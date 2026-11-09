@@ -644,7 +644,7 @@ public static class ArtworkTests
             "85///N8/",
         _ => throw new ArgumentOutOfRangeException(nameof(kind))
     });
-    private static byte[] Encode(string kind, int width, int height)
+    internal static byte[] Encode(string kind, int width, int height)
     {
         var source = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, new byte[width * height * 4], width * 4);
         BitmapEncoder encoder = kind switch { "jpeg" => new JpegBitmapEncoder(), "gif" => new GifBitmapEncoder(), _ => new PngBitmapEncoder() };

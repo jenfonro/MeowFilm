@@ -4,8 +4,9 @@ The application's own source code is licensed GPL-3.0-only (`GPL-3.0-only.txt`).
 Native C# and Swift adaptations of the projects below are combined GPL-3.0-only code;
 the adapted original portions keep their original licenses and attributions.
 
-No executable, server, account database, Node/Python/Go runtime or reference script
-from the adapted business projects is bundled or executed. Runtime/library dependencies
+No executable, server, account database or Node/Python/Go runtime
+from the adapted business projects is bundled or executed. The client-side film search
+program described below is a static adaptation, not the reference server runtime. Runtime/library dependencies
 are listed separately below. Public protocol keys, request-signing
 constants and device-profile parameters taken from these sources are client
 protocol parameters, not user credentials, and are not an endorsement of their
@@ -24,6 +25,19 @@ No server executable, database/cache implementation or challenge solver is
 included. That reference snapshot contains no separate license notice; this
 entry records provenance, not a claim that it grants a third-party license.
 The new runtime implementation remains application source under GPL-3.0-only.
+
+## meowfilm-server — project search behavior reference
+
+- Source: `jenfonro/meowfilm-server` `934a03e5aeda7edbcef0cfb037734fed93bfe881`.
+- Adapted portions: `Meowfilm/frontend/src/shared/searchRuntime.js`,
+  `tmdbRaw.js` and `normalize.js`, for the pure search normalization, grouping, ranking, card metadata
+  and TMDB detail projection in `packages/film-search/film-search.js`.
+- The adaptation adds complete source-page consumption and stable cross-page
+  appending. It runs in the clients' native JavaScript engine, without reference
+  server endpoints, credentials or playback implementations.
+- The referenced tree contains no separate license file. This entry records
+  provenance, not an additional upstream license or redistribution permission.
+  The application's own source remains covered by the project license above.
 
 ## iWebPlus / iWebPlayer — Apache-2.0
 
