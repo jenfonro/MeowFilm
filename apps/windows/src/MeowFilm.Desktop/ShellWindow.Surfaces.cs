@@ -53,7 +53,6 @@ public sealed partial class ShellWindow
         if (!CanPresentPlayerSurface(session)) return;
         var view = source.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail)
             ?? throw new InvalidOperationException("GLOBAL_SURFACE_UNAVAILABLE");
-        var continuing = ReferenceEquals(PlayerDetailHost.Content, view) && PlayerDetailSurface.Visibility == Visibility.Visible;
         if (!ReferenceEquals(PlayerDetailHost.Content, view))
         {
             PlayerDetailHost.Content = null;
@@ -67,10 +66,16 @@ public sealed partial class ShellWindow
         _playerDetailSession = session;
         _playerDetailOpen = true;
         var generation = ++_playerDetailGeneration;
-        if (!continuing) PlayerDetailSurface.Visibility = Visibility.Hidden;
+        PlayerDetailSurface.Visibility = Visibility.Visible;
         UpdatePlayerDetailChrome();
         ApplyPresentation();
         PlayerDetailSurface.UpdateLayout();
+        AnimatePlayerDetail(open: true, generation);
+        QueueUi(() =>
+        {
+            if (generation == _playerDetailGeneration && _playerDetailOpen)
+                PlayerDetailHost.MoveFocus(new(FocusNavigationDirection.First));
+        });
         try
         {
             await source.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, activation.Token);
@@ -82,18 +87,6 @@ public sealed partial class ShellWindow
             if (generation == _playerDetailGeneration && _playerDetailOpen)
                 SetStatus("播放器暂时无法加载完整内容", error: true);
         }
-        if (generation != _playerDetailGeneration || !_playerDetailOpen ||
-            !CanPresentPlayerSurface(session)) return;
-        PlayerDetailSurface.UpdateLayout();
-        PlayerDetailSurface.Visibility = Visibility.Visible;
-        UpdatePlayerDetailChrome();
-        ApplyPresentation();
-        AnimatePlayerDetail(open: true, generation);
-        QueueUi(() =>
-        {
-            if (generation == _playerDetailGeneration && _playerDetailOpen)
-                PlayerDetailHost.MoveFocus(new(FocusNavigationDirection.First));
-        });
     }
 
     private Task ClosePlayerDetailAsync()
@@ -183,7 +176,7 @@ public sealed partial class ShellWindow
         if (open && from < 1) from = height;
         var to = open ? 0 : height;
         PlayerDetailTransform.Y = from;
-        if (ReducedMotion || !IsVisible || PlayerDetailSurface.Visibility != Visibility.Visible)
+        if (ReducedMotion || !IsVisible || PlayerDetailSurface.Visibility != Visibility.Visible || Math.Abs(to - from) < .5)
         {
             Complete();
             return;

@@ -18,6 +18,8 @@ namespace MeowFilm.Capabilities;
 /// </summary>
 public sealed class SeekBar : Slider
 {
+    private const double RestingRailThickness = 2, ExpandedRailThickness = 8,
+        ExpandedHeadRadius = 7, HoverShadeHeight = 40;
     public static readonly DependencyProperty ChorusSecondsProperty = DependencyProperty.Register(
         nameof(ChorusSeconds), typeof(double), typeof(SeekBar),
         new FrameworkPropertyMetadata(double.NaN, FrameworkPropertyMetadataOptions.AffectsRender));
@@ -114,17 +116,21 @@ public sealed class SeekBar : Slider
         base.OnRender(dc);
         double width = ActualWidth, height = ActualHeight;
         if (width <= 0 || height <= 0) return;
-        dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, width, height));
+        // Reserve the full interaction envelope in the retained visual bounds,
+        // including the first hover frame before its expansion clock advances.
+        // HitTestCore admits this upper region only during pointer interaction.
+        dc.DrawRectangle(Brushes.Transparent, null, HitBounds(expanded: true));
         bool highContrast = DesktopTheme.GetIsHighContrast(this);
         Brush active = highContrast ? SystemColors.HighlightBrush : PlayedBrush;
         double expansion = Math.Clamp((double)GetValue(ExpansionProperty), 0, 1);
         double shadeOpacity = Math.Clamp((double)GetValue(HoverShadeOpacityProperty), 0, 1);
         Brush rail = highContrast ? SystemColors.WindowTextBrush : RailBrush;
-        double thickness = 2 + expansion * 6, y = RailAtTop ? 1 : height / 2;
+        double thickness = RestingRailThickness + expansion * (ExpandedRailThickness - RestingRailThickness),
+            y = RailCenter;
         if (RailAtTop && shadeOpacity > 0 && !highContrast)
         {
             dc.PushOpacity(shadeOpacity);
-            dc.DrawRectangle(hoverShade, null, new Rect(0, y - thickness / 2 - 40, width, 40));
+            dc.DrawRectangle(hoverShade, null, new Rect(0, y - thickness / 2 - HoverShadeHeight, width, HoverShadeHeight));
             dc.Pop();
         }
         double end = Fraction(DisplayValue) * width;
@@ -139,17 +145,29 @@ public sealed class SeekBar : Slider
         }
         if (expansion > 0 && IsEnabled)
         {
-            double radius = 7 * expansion, inset = radius + .5;
+            double radius = ExpandedHeadRadius * expansion, inset = radius + .5;
             dc.DrawEllipse(highContrast ? SystemColors.HighlightTextBrush : Brushes.White,
                 highContrast ? null : HeadOutline,
                 new(Math.Clamp(end, inset, Math.Max(inset, width - inset)), y), radius, radius);
         }
     }
 
-    // Decorative drawing above the footer must not keep MouseEnter active or
-    // intercept page clicks after the pointer leaves the actual seek surface.
+    private double RailCenter => RailAtTop ? RestingRailThickness / 2 : ActualHeight / 2;
+    private Rect HitBounds(bool expanded)
+    {
+        if (!expanded) return new Rect(RenderSize);
+        bool highContrast = DesktopTheme.GetIsHighContrast(this);
+        double radius = ExpandedHeadRadius + (highContrast ? 0 : HeadOutline.Thickness / 2);
+        double top = Math.Min(0, RailCenter - radius), bottom = Math.Max(ActualHeight, RailCenter + radius);
+        if (RailAtTop && !highContrast)
+            top = Math.Min(top, RailCenter - ExpandedRailThickness / 2 - HoverShadeHeight);
+        return new Rect(0, top, ActualWidth, bottom - top);
+    }
+
+    // Keep one stable envelope throughout hover/scrub, rather than shrinking it
+    // with animation frames. Keyboard focus alone never covers the upper page.
     protected override HitTestResult? HitTestCore(PointHitTestParameters hitTestParameters) =>
-        new Rect(RenderSize).Contains(hitTestParameters.HitPoint)
+        HitBounds(IsEnabled && IsLoaded && IsVisible && (pointerWithin || IsScrubbing)).Contains(hitTestParameters.HitPoint)
             ? new PointHitTestResult(this, hitTestParameters.HitPoint) : null;
 
     private static void PlayedBrushChanged(DependencyObject value, DependencyPropertyChangedEventArgs _) =>

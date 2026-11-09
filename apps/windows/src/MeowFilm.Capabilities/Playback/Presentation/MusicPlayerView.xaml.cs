@@ -23,7 +23,14 @@ public partial class MusicPlayerView : UserControl
     public MusicPlayerView(MusicCapability module, bool showArtwork = true)
     {
         InitializeComponent();
-        if (!showArtwork) { MetadataPanel.Children.Remove(ArtworkButton); ArtworkButton.Content = null; }
+        if (showArtwork)
+        {
+            var record = new MusicRecordView { Width = 60, Height = 60 };
+            record.SetBinding(MusicRecordView.AddressProperty, new Binding(nameof(MusicCapability.CurrentArtwork)));
+            record.SetBinding(MusicRecordView.PlayingProperty, new Binding(nameof(MusicCapability.IsPlaying)));
+            ArtworkButton.Content = record;
+        }
+        else MetadataPanel.Children.Remove(ArtworkButton);
         this.module = module; DataContext = module;
         QualityMenu.DataContext = module;
         ModeMenu.DataContext = module;

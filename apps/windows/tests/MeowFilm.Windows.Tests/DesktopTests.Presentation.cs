@@ -55,7 +55,7 @@ public static partial class DesktopTests
             page.Children.Remove(notice); await DrainAsync();
             Equal(0, stack.Children.Count, "unload retires source");
         });
-        yield return Case("player entrance waits for readiness and a cancelled preparation cannot reveal a newer page", async () =>
+        yield return Case("player entrance and close never wait for data and late activation cannot change a newer page", async () =>
         {
             var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var second = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -69,25 +69,26 @@ public static partial class DesktopTests
             var host = f.Element<ContentControl>("PlayerDetailHost");
             module.Request(DesktopGlobalSurface.PlayerDetail);
             await UntilAsync(() => module.PlayerActivations.Count == 1, "first preparation entered");
-            Equal(Visibility.Hidden, surface.Visibility, "unready page is mounted but never paints");
-            True(!transform.HasAnimatedProperties, "entrance clock has not started");
+            Equal(Visibility.Visible, surface.Visibility, "pending data does not hide the base");
+            if (SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast)
+                True(transform.HasAnimatedProperties, "entrance begins while data is pending");
             True(host.Content is not null && host.ActualHeight > 0, "preparation has its final layout");
             const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
             await (Task)typeof(ShellWindow).GetMethod("ClosePlayerDetailAsync", flags)!.Invoke(f.Shell, null)!;
-            Equal(Visibility.Collapsed, surface.Visibility, "pending presentation closes immediately");
+            await UntilAsync(() => surface.Visibility == Visibility.Collapsed, "pending presentation closes without data");
             True(host.Content is null && module.PlayerActivations[0].IsCancellationRequested,
                 "pending close cancels preparation and releases its tree");
             module.PlayerReady = second.Task;
             module.Request(DesktopGlobalSurface.PlayerDetail);
             await UntilAsync(() => module.PlayerActivations.Count == 2, "replacement preparation entered");
             first.SetResult(); await DrainAsync();
-            Equal(Visibility.Hidden, surface.Visibility, "late first readiness cannot expose the pending replacement");
-            second.SetResult();
+            Equal(Visibility.Visible, surface.Visibility, "replacement is already visible while its data is pending");
             await UntilAsync(() => surface.Visibility == Visibility.Visible, "ready replacement enters");
             Same(module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail), host.Content, "the ready retained view is presented");
-            var height = Math.Max(1, f.Element<Grid>("PresentationSurface").ActualHeight);
             if (SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast)
-                await UntilAsync(() => transform.Y > 1 && transform.Y < height - 1, "ready page starts its actual slide");
+                await UntilAsync(() => Math.Abs(transform.Y) < .5, "the entrance completes independently of data");
+            True(!second.Task.IsCompleted, "data is still pending after the entrance completes");
+            second.SetResult();
         });
         yield return Case("global surface animations reverse from their presented offsets and release content", async () =>
         {

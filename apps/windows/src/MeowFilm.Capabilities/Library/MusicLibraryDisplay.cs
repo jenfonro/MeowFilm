@@ -15,7 +15,7 @@ public sealed partial class MusicLibraryOwner
     private static void ValidateLyricDisplay(JsonObject display)
     {
         LJ.Fields(display, "schema songKey songId sourceKey lines", "schema songKey songId sourceKey lines");
-        LJ.Require(LJ.I(display["schema"]) == 1 && LJ.S(display["songKey"]).Length == 64, "CORRUPT_STORAGE");
+        LJ.Require(LJ.I(display["schema"]) == 2 && LJ.S(display["songKey"]).Length == 64, "CORRUPT_STORAGE");
         _ = LJ.Text(display["songId"], 8192);
         _ = LJ.Text(display["sourceKey"], 8192);
         ValidateDisplayLines(LJ.Array(display["lines"]));
@@ -43,15 +43,13 @@ public sealed partial class MusicLibraryOwner
         foreach (var item in lines)
         {
             var row = LJ.Object(item);
-            LJ.Fields(row, "time end text words timing translation romanization", "time text");
+            LJ.Fields(row, "time end text words translation romanization", "time text");
             double time = Seconds(row["time"]);
             LJ.Require(time >= previous, "INVALID_LYRIC_RESPONSE"); previous = time;
             if (row["end"] is not null) LJ.Require(Seconds(row["end"]) >= time, "INVALID_LYRIC_RESPONSE");
             Text(row["text"]);
             foreach (string key in new[] { "translation", "romanization" })
                 if (row[key] is not null) Text(row[key]);
-            if (row["timing"] is not null)
-                LJ.Require(LJ.S(row["timing"]) is "word" or "estimated", "INVALID_LYRIC_RESPONSE");
             if (row["words"] is not null)
                 foreach (var wordValue in LJ.Array(row["words"]))
                 {
@@ -102,7 +100,7 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(LJ.B(Settings(doc)["lyrics"]) && requested is not null &&
             MetadataSourceEnabled(doc, song, requested), "DISABLED");
         RequireCurrentLyricSong(doc, key);
-        var display = LJ.Obj(("schema", 1), ("songKey", key), ("songId", song["songId"]),
+        var display = LJ.Obj(("schema", 2), ("songKey", key), ("songId", song["songId"]),
             ("sourceKey", requested), ("lines", p["lines"]));
         ValidateLyricDisplay(display);
         if (Value(doc, LyricDisplayArea) is { } existing && JsonNode.DeepEquals(existing, display))
