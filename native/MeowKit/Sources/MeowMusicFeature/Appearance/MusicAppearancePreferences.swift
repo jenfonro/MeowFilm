@@ -72,13 +72,15 @@ public struct MusicAppearancePreferences: Codable, Equatable, Sendable {
 
     /// Feed the existing shared system-session owner; do not create another
     /// MPNowPlayingInfoCenter writer. Original utils.js:423-440 uses the lyric
-    /// as title and moves the song title to artist, never the translated line.
-    public func lockScreenMetadata(songTitle: String, lyric: String?, isFavorite: Bool) -> MusicLockScreenMetadata {
+    /// as title, never the translation. Keep the song and artist on the second line.
+    public func lockScreenMetadata(songTitle: String, songArtist: String, lyric: String?,
+                                   isFavorite: Bool) -> MusicLockScreenMetadata {
         let title = songTitle + (isFavorite ? " ♡︎" : "")
         if lockLyric, let lyric, !lyric.isEmpty {
-            return .init(title: lyric, artist: title, album: "我的曲库")
+            return .init(title: lyric, artist: songArtist.isEmpty ? title : title + " / " + songArtist,
+                         album: "我的曲库")
         }
-        return .init(title: title, artist: "meowfilm", album: "我的曲库")
+        return .init(title: title, artist: songArtist, album: "我的曲库")
     }
 }
 
@@ -306,11 +308,15 @@ import Combine
     func selectSystemArtwork(_ track: MusicRemoteTrack) {
         let identity = MusicAppearanceSongIdentity(track: track)
         let url = track.artwork?.absoluteString ?? ""
+        let targetChanged = systemArtworkTarget.map {
+            !$0.songKey.utf16.elementsEqual(identity.stableKey.utf16) || !$0.artworkID.utf16.elementsEqual(url.utf16)
+        } ?? false
         systemArtworkTarget = (identity.stableKey, url)
         selectSong(identity) // Idempotent: progress/lyrics never reset tickets.
         if displayArtworkID?.utf16.elementsEqual(url.utf16) != true {
             displayGeneration = UUID(); displayArtworkID = url; displayedArtwork = nil
         }
+        if targetChanged, systemArtworkEnabled { displayedArtworkRevision = UUID() }
         setSystemArtworkEnabled(true)
     }
 

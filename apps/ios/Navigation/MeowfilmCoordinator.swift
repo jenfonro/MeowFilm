@@ -199,7 +199,9 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         page.onSelectItem = { [weak self] in self?.showFilm($0) }
         page.onPlay = { [weak self, weak page] url in
             guard let self, let page, self.navigation.topViewController === page else { return }
-            self.assembly.playback.pause()
+            self.assembly.music?.stopForMediaHandoff()
+            // Also retire prepared native media with no current music attempt.
+            self.assembly.playback.stop()
             let player = AVPlayerViewController()
             player.player = AVPlayer(url: url)
             page.present(player, animated: true) { player.player?.play() }

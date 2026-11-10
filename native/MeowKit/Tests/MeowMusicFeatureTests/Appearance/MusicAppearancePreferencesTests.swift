@@ -206,15 +206,30 @@ import XCTest
 
     func testLockScreenLyricsPreserveSongAndFavoriteTitleAndRestoreImmediatelyWhenDisabled() {
         var preferences = MusicAppearancePreferences()
-        let lyric = preferences.lockScreenMetadata(songTitle: "Song", lyric: "Original line", isFavorite: true)
+        let lyric = preferences.lockScreenMetadata(songTitle: "Song", songArtist: "Artist",
+                                                   lyric: "Original line", isFavorite: true)
         XCTAssertEqual(lyric.title, "Original line")
-        XCTAssertEqual(lyric.artist, "Song ♡︎")
+        XCTAssertEqual(lyric.artist, "Song ♡︎ / Artist")
         XCTAssertEqual(lyric.album, "我的曲库")
         preferences.lockLyric = false
-        let plain = preferences.lockScreenMetadata(songTitle: "Song", lyric: "Original line", isFavorite: true)
+        let plain = preferences.lockScreenMetadata(songTitle: "Song", songArtist: "Artist",
+                                                   lyric: "Original line", isFavorite: true)
         XCTAssertEqual(plain.title, "Song ♡︎")
-        XCTAssertEqual(plain.artist, "meowfilm")
+        XCTAssertEqual(plain.artist, "Artist")
         preferences.lockLyric = true
-        XCTAssertEqual(preferences.lockScreenMetadata(songTitle: "Song", lyric: "", isFavorite: false).title, "Song")
+        let empty = preferences.lockScreenMetadata(songTitle: "Song", songArtist: "Artist", lyric: "", isFavorite: false)
+        XCTAssertEqual(empty.title, "Song")
+        XCTAssertEqual(empty.artist, "Artist")
+    }
+
+    func testLockScreenMetadataDoesNotAddASeparatorWhenArtistIsMissing() {
+        let preferences = MusicAppearancePreferences()
+        let lyric = preferences.lockScreenMetadata(songTitle: "Song", songArtist: "",
+                                                   lyric: "Original line", isFavorite: true)
+        XCTAssertEqual(lyric.title, "Original line")
+        XCTAssertEqual(lyric.artist, "Song ♡︎")
+        let plain = preferences.lockScreenMetadata(songTitle: "Song", songArtist: "", lyric: nil, isFavorite: false)
+        XCTAssertEqual(plain.title, "Song")
+        XCTAssertEqual(plain.artist, "")
     }
 }

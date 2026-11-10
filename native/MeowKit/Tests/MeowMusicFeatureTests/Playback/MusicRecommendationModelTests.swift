@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 import Combine
 import MeowContracts
-import MeowPlayback
+@testable import MeowPlayback
 @testable import MeowMusicFeature
 
 @MainActor
@@ -26,6 +26,108 @@ final class MusicRecommendationModelTests: XCTestCase {
         XCTAssertTrue(calls.starts.isEmpty); XCTAssertEqual(calls.enters, 0)
         XCTAssertTrue(player.resources.isEmpty)
         await model.close()
+    }
+
+    func testAcceptedFactsPersistOnlyWhileRetiredCandidateStillOwnsAccounting() async throws {
+        for retainsCandidate in [true, false] {
+            let service = RecommendationModelService(), player = RecommendationModelPlayer()
+            let model = MusicViewModel(service: service, player: player)
+            await model.load()
+            model.lastSelection = RecommendationModelService.selection
+            await model.prepareCurrent()
+            let candidate = try XCTUnwrap(model.candidate)
+            let playing = MusicPlaybackFact(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+                resourceId: candidate.resourceId, kind: .playing, position: 17, duration: 180)
+            let stopped = MusicPlaybackFact(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+                resourceId: candidate.resourceId, kind: .stopped, position: 19, duration: 180)
+            model.onPlayback(playing)
+            model.onPlayback(stopped)
+            // Handoff retires selection but keeps this fact owner. Clearing or
+            // replacing the candidate must still retire pending accounting.
+            if retainsCandidate { model.stopForMediaHandoff() }
+            else { model.invalidateSelection(stopMedia: true) }
+            model.onPlayback(playing) // New facts cannot enter the terminal owner.
+            await model.flushPlaybackFacts()
+            await model.flushNavigation()
+            let facts = await service.recordedFacts(), similar = await service.recordedSimilarFacts()
+            let calls = await service.calls()
+            XCTAssertEqual(facts.map(\.kind), retainsCandidate ? [.playing, .stopped] : [])
+            XCTAssertEqual(facts.map(\.attemptId), retainsCandidate ? [candidate.attemptId, candidate.attemptId] : [])
+            XCTAssertEqual(facts.map(\.position), retainsCandidate ? [17, 19] : [])
+            XCTAssertTrue(similar.isEmpty, "Retired facts only persist; they cannot reenter similar navigation")
+            XCTAssertEqual(calls.navigationPauses, 0, "Retired facts cannot cancel the handoff's newer navigation")
+            XCTAssertNil(model.nativeAttempt)
+            XCTAssertEqual(model.phase, .idle)
+            XCTAssertEqual(player.resources.count, 1)
+            XCTAssertEqual(player.resumes, 0)
+            XCTAssertNil(model.error)
+            await model.close()
+        }
+    }
+
+    func testRetiredEndedFactCompletionCannotAdvanceOrUpdateNewPlayback() async throws {
+        let service = RecommendationModelService(), player = RecommendationModelPlayer()
+        let model = MusicViewModel(service: service, player: player)
+        await model.load()
+        model.lastSelection = RecommendationModelService.selection
+        await model.prepareCurrent()
+        let old = try XCTUnwrap(model.candidate)
+        let entered = expectation(description: "Old ended fact awaiting persistence")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await service.blockRecord(gate)
+        model.onPlayback(.init(attemptId: old.attemptId, occurrenceId: old.occurrenceId,
+            resourceId: old.resourceId, kind: .ended, position: 180, duration: 180))
+        await fulfillment(of: [entered], timeout: 2)
+        defer { Task { await gate.release() } }
+        model.invalidateSelection(stopMedia: true)
+        await model.prepareCurrent()
+        let next = try XCTUnwrap(model.nativeAttempt)
+        XCTAssertNotEqual(model.candidate?.attemptId, old.attemptId)
+        let position = model.position, phase = model.phase
+        await gate.release()
+        await model.flushPlaybackFacts()
+        await model.flushNavigation()
+        let facts = await service.recordedFacts()
+        XCTAssertEqual(facts.map(\.kind), [.ended])
+        XCTAssertEqual(facts.map(\.attemptId), [old.attemptId])
+        XCTAssertEqual(model.nativeAttempt, next)
+        XCTAssertEqual(model.current?.id, old.occurrenceId)
+        XCTAssertEqual(model.position, position)
+        XCTAssertEqual(model.phase, phase)
+        XCTAssertEqual(player.resources.count, 2)
+        XCTAssertEqual(player.resumes, 0)
+        XCTAssertNil(model.error)
+        await model.close()
+    }
+
+    func testRetiredAcceptedFactsStillRequireCapturedAuthorizationAndLifecycle() async throws {
+        for revokeLifecycle in [false, true] {
+            let service = RecommendationModelService(), player = RecommendationModelPlayer()
+            let authorization = MusicQueueAuthorization()
+            await service.setPlaybackAuthorization(authorization)
+            let model = MusicViewModel(service: service, player: player)
+            await model.load()
+            model.lastSelection = RecommendationModelService.selection
+            await model.prepareCurrent()
+            let candidate = try XCTUnwrap(model.candidate)
+            let entered = expectation(description: "Exit fact awaiting pause acknowledgement")
+            let gate = MusicCollectionGate { entered.fulfill() }
+            await service.blockPause(gate)
+            model.onPlayback(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+                resourceId: candidate.resourceId, kind: .stopped, position: 17, duration: 180))
+            await fulfillment(of: [entered], timeout: 2)
+            defer { Task { await gate.release() } }
+            model.stopForMediaHandoff()
+            if revokeLifecycle { model.setAvailable(false) } else { authorization.revoke() }
+            await gate.release()
+            await model.flushPlaybackFacts()
+            let facts = await service.recordedFacts()
+            XCTAssertTrue(facts.isEmpty)
+            XCTAssertEqual(player.resources.count, 1)
+            XCTAssertEqual(player.resumes, 0)
+            XCTAssertNil(model.error, "A retired fact cannot publish its persistence error into a newer selection")
+            await model.close()
+        }
     }
 
     func testHomeDisplayedSearchBatchAndDiscoveryQueueExposeIndependentRecommendations() async throws {
@@ -479,6 +581,203 @@ final class MusicRecommendationModelTests: XCTestCase {
         await model.close()
     }
 
+    func testOutputUnavailableRevokesDelayedNextButExplicitPlayStillWorks() async throws {
+        try await delayedNextAfterPause(outputUnavailable: true)
+    }
+
+    func testOutputUnavailableDuringSourceWorkPersistsAcceptedFactsAndCancelsSimilarNavigation() async throws {
+        let service = RecommendationModelService(), player = RecommendationModelPlayer()
+        let model = MusicViewModel(service: service, player: player)
+        await model.load()
+        model.lastSelection = RecommendationModelService.selection
+        await model.prepareCurrent()
+        let candidate = try XCTUnwrap(model.candidate), native = try XCTUnwrap(model.nativeAttempt)
+        let queue = model.queue, sourceLifetime = MusicQueueAuthorization()
+        // The donor still owns facts while a replacement source receipt waits.
+        model.pendingSourceSelection = (UUID(), .quality("flac"), sourceLifetime)
+        model.onPlayback(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+            resourceId: candidate.resourceId, kind: .playing, position: 17, duration: 180))
+        model.onPlayback(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+            resourceId: candidate.resourceId, kind: .paused, position: 19, duration: 180))
+        // No await/flush: output loss retires the selection before either fact
+        // reaches the service, and an already-paused native emits no new pause.
+        model.onOutputUnavailable()
+        XCTAssertFalse(sourceLifetime.isActive)
+        XCTAssertNil(model.pendingSourceSelection)
+        XCTAssertEqual(model.nativeAttempt, native)
+        await model.flushPlaybackFacts()
+        await model.flushNavigation()
+        let facts = await service.recordedFacts(), similar = await service.recordedSimilarFacts()
+        let calls = await service.calls()
+        XCTAssertEqual(facts.map(\.kind), [.playing, .paused])
+        XCTAssertEqual(facts.map(\.attemptId), [candidate.attemptId, candidate.attemptId])
+        XCTAssertEqual(facts.map(\.position), [17, 19])
+        XCTAssertTrue(similar.isEmpty, "Accepted retired facts persist without restarting similar tail policy")
+        XCTAssertEqual(calls.navigationPauses, 1, "The accepted donor pause must still cancel pending similar navigation")
+        XCTAssertEqual(model.queue, queue)
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(player.resources.count, 1)
+        XCTAssertEqual(player.resumes, 0)
+        XCTAssertNil(model.error)
+        await model.close()
+    }
+
+    func testInterruptionPauseFactDoesNotCancelDelayedNextPlaybackIntent() async throws {
+        try await delayedNextAfterPause(outputUnavailable: false)
+    }
+
+    func testSystemToggleCancelsSuspendedResumeAndExplicitPlayStillWorks() async throws {
+        try await cancelSuspendedResume(usingSystemToggle: true)
+    }
+
+    func testAppToggleCancelsSuspendedResumeAndExplicitPlayStillWorks() async throws {
+        try await cancelSuspendedResume(usingSystemToggle: false)
+    }
+
+    private func cancelSuspendedResume(usingSystemToggle: Bool) async throws {
+        let service = RecommendationModelService(), player = RecommendationModelPlayer()
+        let model = MusicViewModel(service: service, player: player)
+        await model.load()
+        model.lastSelection = RecommendationModelService.selection
+        await model.prepareCurrent()
+        let candidate = try XCTUnwrap(model.candidate), native = try XCTUnwrap(model.nativeAttempt)
+        let attempt = PlayAttempt(id: native.id, owner: "music", resourceID: native.resourceID)
+        model.onPlayback(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+            resourceId: candidate.resourceId, kind: .playing, position: 17, duration: 180))
+        model.onPlayback(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+            resourceId: candidate.resourceId, kind: .paused, position: 17, duration: 180))
+        await model.flushPlaybackFacts()
+        let before = await service.exclusionReads()
+        let entered = expectation(description: "Resume source admission is held")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await service.blockExclusionRead(gate)
+        let appPlay: Task<Void, Never>?
+        if usingSystemToggle {
+            appPlay = nil
+            XCTAssertTrue(model.acceptPlayPause(.play, attempt: attempt))
+        } else {
+            appPlay = Task { await model.togglePlayback() }
+        }
+        await fulfillment(of: [entered], timeout: 2)
+        defer { Task { await gate.release() } }
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(player.resumes, 0)
+        XCTAssertTrue(model.acceptPlayPause(.play, attempt: attempt), "Repeated play keeps the same pending admission")
+        if usingSystemToggle {
+            XCTAssertTrue(model.acceptPlayPause(.toggle(wantsPlayback: false), attempt: attempt))
+        } else {
+            await model.togglePlayback()
+        }
+        XCTAssertEqual(player.pauses, 1, "Toggle cancels the pending play rather than scheduling a second resume")
+        await gate.release()
+        await appPlay?.value
+        await model.flushPlayPauseCommands()
+        await model.flushPlaybackFacts()
+        let after = await service.exclusionReads()
+        XCTAssertEqual(after, before + 1)
+        XCTAssertEqual(player.resumes, 0, "Late source admission cannot revive the cancelled intent")
+        XCTAssertEqual(player.resources.count, 1)
+        XCTAssertEqual(model.nativeAttempt, native)
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertNil(model.error)
+        XCTAssertTrue(model.acceptPlayPause(.play, attempt: attempt))
+        await model.flushPlayPauseCommands()
+        XCTAssertEqual(player.resumes, 1, "A new explicit play still admits and resumes the paused attempt")
+        XCTAssertEqual(player.resources.count, 1)
+        XCTAssertTrue(model.acceptPlayPause(.toggle(wantsPlayback: true), attempt: attempt))
+        XCTAssertEqual(player.pauses, 2, "Native intent still makes toggle pause even before a playing fact")
+        XCTAssertTrue(model.acceptPlayPause(.toggle(wantsPlayback: false), attempt: attempt))
+        await model.flushPlayPauseCommands()
+        XCTAssertEqual(player.resumes, 2, "With no pending play and no native intent, toggle means play")
+        await model.close()
+    }
+
+    func testToggleDoesNotMistakeOldAttemptResumeForNewAttemptIntent() async throws {
+        let service = RecommendationModelService(), player = RecommendationModelPlayer()
+        let model = MusicViewModel(service: service, player: player)
+        await model.load()
+        model.lastSelection = RecommendationModelService.selection
+        await model.prepareCurrent()
+        let oldNative = try XCTUnwrap(model.nativeAttempt)
+        let old = PlayAttempt(id: oldNative.id, owner: "music", resourceID: oldNative.resourceID)
+        let entered = expectation(description: "Old attempt resume is held")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await service.blockExclusionRead(gate)
+        XCTAssertTrue(model.acceptPlayPause(.play, attempt: old))
+        await fulfillment(of: [entered], timeout: 2)
+        defer { Task { await gate.release() } }
+        model.invalidateSelection(stopMedia: true)
+        await model.prepareCurrent()
+        let nextNative = try XCTUnwrap(model.nativeAttempt)
+        let next = PlayAttempt(id: nextNative.id, owner: "music", resourceID: nextNative.resourceID)
+        let candidate = try XCTUnwrap(model.candidate)
+        model.onPlayback(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+            resourceId: candidate.resourceId, kind: .paused, position: 0, duration: 180))
+        XCTAssertTrue(model.acceptPlayPause(.toggle(wantsPlayback: false), attempt: next))
+        XCTAssertEqual(player.pauses, 0, "The retired attempt's pending play is not the new owner's intent")
+        await gate.release()
+        await model.flushPlayPauseCommands()
+        await model.flushPlaybackFacts()
+        XCTAssertEqual(player.resumes, 1)
+        XCTAssertEqual(model.nativeAttempt, nextNative)
+        XCTAssertEqual(player.resources.count, 2)
+        XCTAssertNil(model.error)
+        await model.close()
+    }
+
+    private func delayedNextAfterPause(outputUnavailable: Bool) async throws {
+        let service = RecommendationModelService(), player = RecommendationModelPlayer()
+        let model = MusicViewModel(service: service, player: player)
+        await model.load()
+        model.lastSelection = RecommendationModelService.selection
+        await model.prepareCurrent()
+        let candidate = try XCTUnwrap(model.candidate), native = try XCTUnwrap(model.nativeAttempt)
+        let attempt = PlayAttempt(id: native.id, owner: "music", resourceID: native.resourceID)
+        model.onPlayback(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+            resourceId: candidate.resourceId, kind: .playing, position: 17, duration: 180))
+        await model.flushPlaybackFacts()
+        XCTAssertEqual(player.resources.count, 1)
+        let entered = expectation(description: "Ordinary next acknowledgement is held")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await service.blockAdvance(gate)
+        XCTAssertTrue(model.acceptNext(attempt))
+        await fulfillment(of: [entered], timeout: 2)
+        defer { Task { await gate.release() } }
+
+        // Output loss pauses native playback and delivers the environment
+        // fact before publishing its pause. An interruption only publishes the
+        // fact and must retain its recovery semantics.
+        if outputUnavailable {
+            player.pause(native) // The controller pauses before environment delivery.
+            model.onOutputUnavailable()
+            XCTAssertEqual(player.pauses, 1, "Output loss must synchronously revoke the current owner's intent")
+        } else {
+            XCTAssertEqual(player.pauses, 0)
+        }
+        model.onPlaybackEvent(.init(attempt: attempt, kind: .paused,
+            snapshot: .init(owner: "music", resourceID: native.resourceID, phase: .paused,
+                position: 17, duration: 180), error: nil))
+        XCTAssertEqual(model.phase, .paused)
+        await gate.release()
+        await model.flushNavigation()
+        await model.flushPlaybackFacts()
+        XCTAssertEqual(model.current?.id, "tail-next", "The committed queue is not rolled back")
+        XCTAssertNil(model.error)
+        XCTAssertEqual(player.resumes, 0)
+        if outputUnavailable {
+            XCTAssertEqual(player.resources.count, 1, "The old next result cannot start sound on the replacement output")
+            XCTAssertNil(model.nativeAttempt)
+            XCTAssertEqual(model.phase, .paused)
+            await model.togglePlayback() // A new explicit play from the paused queue.
+            XCTAssertEqual(player.resources.count, 2)
+            XCTAssertNotEqual(model.nativeAttempt?.id, native.id)
+            XCTAssertEqual(model.candidate?.occurrenceId, "tail-next")
+        } else {
+            XCTAssertEqual(player.resources.count, 2, "A generic paused fact is not permission to cancel an interruption's intent")
+        }
+        await model.close()
+    }
+
     func testFMChoicesExposeFourModesAndAllFortyThreeOfficialScenes() {
         XCTAssertEqual(MusicFMModeChoice.main.map(\.mode), [.default, .familiar, .explore, .puzzle])
         let expected = [
@@ -576,9 +875,11 @@ final class MusicRecommendationModelTests: XCTestCase {
 }
 
 private actor RecommendationModelService: MusicServing, MusicSimilarModeServing, MusicQueueRecommendationServing,
-    MusicDisplayedQueuePlaying, MusicSearchBatchPlaying, MusicHomeActionQueueServing, MusicRemoteQueueServing {
+    MusicDisplayedQueuePlaying, MusicSearchBatchPlaying, MusicHomeActionQueueServing, MusicRemoteQueueServing,
+    MusicSourceExclusionServing {
     struct Calls: Sendable {
         var previews = 0, queueWrites = 0, enters = 0, exits = 0, retries = 0, displayed = 0, searches = 0, resolutions = 0
+        var navigationPauses = 0
         var choices: [String] = [], queueSwitches: [Bool] = [], starts: [MusicSimilarModeStart] = []
     }
     static let selection = MusicPlaybackSelection(installationId: "official:synthetic", generation: 1,
@@ -603,7 +904,19 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
     private var fmGate: MusicCollectionGate?, fmFailure = false
     private var startFailure: MusicServiceError?
     private var pauseGate: MusicCollectionGate?
+    private var recordGate: MusicCollectionGate?
+    private var facts: [MusicPlaybackFact] = []
+    private var similarFacts: [MusicPlaybackFact] = []
+    private var playbackAuthorization: MusicQueueAuthorization?
+    private var exclusionReadGate: MusicCollectionGate?
+    private var exclusionReadCount = 0
     func calls() -> Calls { counts }
+    func recordedFacts() -> [MusicPlaybackFact] { facts }
+    func recordedSimilarFacts() -> [MusicPlaybackFact] { similarFacts }
+    func blockRecord(_ gate: MusicCollectionGate) { recordGate = gate }
+    func setPlaybackAuthorization(_ value: MusicQueueAuthorization) { playbackAuthorization = value }
+    func blockExclusionRead(_ gate: MusicCollectionGate) { exclusionReadGate = gate }
+    func exclusionReads() -> Int { exclusionReadCount }
     func startRequests() -> [MusicSimilarModeStart] { counts.starts }
     func exitCount() -> Int { counts.exits }
     func blockStart(_ gate: MusicCollectionGate, fail: Bool = false) {
@@ -706,8 +1019,12 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
     }
     func retrySimilarMode(snapshotID: UUID) throws -> MusicSimilarModeResult { throw MusicServiceError.unsupported }
     func cancelSimilarMode() { mode = nil }
-    func recordSimilarPlaybackFact(_ fact: MusicPlaybackFact) -> Bool { record(fact) }
+    func recordSimilarPlaybackFact(_ fact: MusicPlaybackFact) async -> Bool {
+        similarFacts.append(fact)
+        return await record(fact)
+    }
     func pauseSimilarNavigation() async {
+        counts.navigationPauses += 1
         let gate = pauseGate; pauseGate = nil
         if let gate { await gate.wait() }
     }
@@ -744,6 +1061,16 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
         return .init(options: [.init(installationId: Self.selection.installationId, generation: 1, siteId: "wy",
             sourceKey: Self.selection.sourceKey, qualities: ["128k"], title: "合成音源", version: "1", contentHash: "")], scriptState: .ready)
     }
+    func sourceExclusions() async -> [MusicSourceExclusion] {
+        exclusionReadCount += 1
+        let gate = exclusionReadGate; exclusionReadGate = nil
+        if let gate { await gate.wait() }
+        return []
+    }
+    func excludeSource(for reference: MusicReference, provider: String, platform: String) throws {
+        throw MusicServiceError.unsupported
+    }
+    func restoreSourceExclusion(id: String) throws { throw MusicServiceError.unsupported }
     func openHomeActionQueue(_ action: MusicHomeAction, title: String) async throws -> MusicRemoteQueueSource {
         let gate = fmGate, fail = fmFailure; fmGate = nil; fmFailure = false
         if let gate { await gate.wait() }
@@ -772,7 +1099,7 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
         counts.resolutions += 1
         return .init(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
             url: URL(string: "https://media.invalid/synthetic.mp3")!, title: "合成歌曲", requestedQuality: "128k",
-            resolvedSelection: selection)
+            resolvedSelection: selection, playbackAuthorization: playbackAuthorization)
     }
     func platforms() -> [MusicPlatform] { [] }
     func collections() -> [MusicCollection] { [] }
@@ -786,7 +1113,12 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
     func updateMetadataPreferences(_ change: MusicMetadataPreferencesChange) throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
     func metadataCandidates(occurrenceID: String) throws -> MusicMetadataCandidates { throw MusicServiceError.unsupported }
     func cancel(attemptId: String?) {}
-    func record(_ fact: MusicPlaybackFact) -> Bool { position = fact.position; return true }
+    func record(_ fact: MusicPlaybackFact) async -> Bool {
+        let gate = recordGate; recordGate = nil
+        if let gate { await gate.wait() }
+        facts.append(fact); position = fact.position
+        return true
+    }
     func lyrics(occurrenceId: String, sourceKey: String) -> MusicLyricsSnapshot { .init(occurrenceId: occurrenceId, state: .none, lines: []) }
     func playedSongs() -> [MusicPlayedSong] { [] }
     func playedPlaylists() -> [MusicPlayedPlaylist] { [] }

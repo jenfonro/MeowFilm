@@ -96,7 +96,7 @@ extension MusicViewModel {
         catch { source.revoke(); await source.close(); throw error }
     }
     public func playHomeAction(_ action: MusicHomeAction, title: String, forceReload: Bool = false) async throws {
-        let epoch = try enter(), account = searchAccessGeneration
+        let epoch = try enter(), account = searchAccessGeneration, selection = selectionID
         switch action {
         case .similar(let ids, let name):
             try await performSimilarMode { try await $0.startSimilarMode(.songRoaming(sourceIDs: ids, sourceName: name)) }
@@ -113,10 +113,10 @@ extension MusicViewModel {
         let source = try await openHomeActionQueue(action, title: title)
         defer { releaseRemoteQueueSource(source) }
         try check(epoch)
-        guard searchAccessGeneration == account else { throw MusicServiceError.cancelled }
+        guard searchAccessGeneration == account, selectionID == selection else { throw MusicServiceError.cancelled }
         let first = try await remoteQueuePage(source, cursor: nil)
         try check(epoch)
-        guard searchAccessGeneration == account else { throw MusicServiceError.cancelled }
+        guard searchAccessGeneration == account, selectionID == selection else { throw MusicServiceError.cancelled }
         guard let track = first.items.first else { throw MusicServiceError.notFound }
         try await prepareRemoteQueue(source, start: .init(index: 0, track: track))
         try check(epoch)

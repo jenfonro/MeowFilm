@@ -192,6 +192,8 @@ final class MeowfilmAssembly: ObservableObject {
         do {
             lease = try playback.bind(owner: "music", onPlayPause: { [weak model] attempt, command in
                 model?.acceptPlayPause(command, attempt: attempt) ?? false
+            }, onOutputUnavailable: { [weak model] in
+                model?.onOutputUnavailable()
             }) { [weak self, weak model] event in
                 model?.onPlayback(event)
                 self?.refreshCommands()

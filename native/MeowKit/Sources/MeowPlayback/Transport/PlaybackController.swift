@@ -58,6 +58,10 @@ public final class PlaybackController: ObservableObject {
     public var networkUsage: PlaybackNetworkUsage { networkBudget.usage }
     #if os(iOS)
     private var systemSession: PlaybackSystemSession?
+    private var systemNotifications = NotificationCenter.default
+    private var startScopedHLS: @MainActor (HLSLoopbackRoute, @escaping @Sendable (Result<URL, PlaybackNetworkError>) -> Void) -> Void = {
+        $0.start($1)
+    }
     #endif
 
     public init(volumePreferences: (any PlaybackVolumeStoring)? = nil) {
@@ -68,6 +72,21 @@ public final class PlaybackController: ObservableObject {
         self.player = player
         owners.onBindingsChanged = { [weak self] in self?.refreshOwnerCommands() }
     }
+
+    #if os(iOS)
+    /// Internal adapter inputs keep lifecycle tests on the real notification
+    /// bridge while controlling the asynchronous listener-readiness boundary.
+    convenience init(
+        systemNotifications: NotificationCenter,
+        startScopedHLS: @escaping @MainActor (HLSLoopbackRoute, @escaping @Sendable (Result<URL, PlaybackNetworkError>) -> Void) -> Void = {
+            $0.start($1)
+        }
+    ) {
+        self.init()
+        self.systemNotifications = systemNotifications
+        self.startScopedHLS = startScopedHLS
+    }
+    #endif
 
     /// Identity only, including failure until stop/replacement, not readiness.
     public func isCurrent(_ attempt: PlayAttempt) -> Bool { state.attempt == attempt }
@@ -105,10 +124,11 @@ public final class PlaybackController: ObservableObject {
         enabled: Bool = true,
         commands: PlaybackNavigationCommands = .init(),
         onPlayPause: (@MainActor (PlayAttempt, PlaybackPlayPauseCommand) -> Bool)? = nil,
+        onOutputUnavailable: (@MainActor () -> Void)? = nil,
         onEvent: @escaping @MainActor (PlaybackEvent) -> Void
     ) throws -> PlaybackOwnerLease {
         try owners.bind(owner: owner, enabled: enabled, commands: commands,
-                        onPlayPause: onPlayPause, onEvent: onEvent)
+                        onPlayPause: onPlayPause, onOutputUnavailable: onOutputUnavailable, onEvent: onEvent)
     }
 
     /// Convenience playback command using the current owner's default policy.
@@ -153,6 +173,11 @@ public final class PlaybackController: ObservableObject {
             publish()
             return attempt
         }
+        #if os(iOS)
+        // Audio interruptions span item preparation, including the asynchronous
+        // scoped-HLS listener startup. Do not wait for an asset to observe ended.
+        establishSystemSession(generation: token)
+        #endif
         if needsPlayerRecreation || player.status == .failed {
             let replacement = AVPlayer()
             replacement.automaticallyWaitsToMinimizeStalling = true
@@ -305,7 +330,7 @@ public final class PlaybackController: ObservableObject {
         }
         pendingHLS = route; localMediaFetch = true
         player.allowsExternalPlayback = false
-        route.start { [weak self, weak route] result in
+        let completion: @Sendable (Result<URL, PlaybackNetworkError>) -> Void = { [weak self, weak route] result in
             Task { @MainActor [weak self, weak route] in
                 guard let self, let route else { return }
                 guard self.state.accepts(token), self.pendingHLS === route else { route.invalidate(); return }
@@ -321,14 +346,16 @@ public final class PlaybackController: ObservableObject {
                 }
             }
         }
+        #if os(iOS)
+        startScopedHLS(route, completion)
+        #else
+        route.start(completion)
+        #endif
     }
 
     private func installNetworkAsset(_ binding: NativePlaybackAsset, generation token: UUID) {
         guard state.accepts(token) else { binding.invalidate(); return }
         networkAsset = binding
-        #if os(iOS)
-        establishSystemSession(generation: token)
-        #endif
         guard state.accepts(token), networkAsset === binding else { binding.invalidate(); return }
         let item = AVPlayerItem(asset: binding.asset)
         installItemObservers(item, generation: token)
@@ -820,26 +847,43 @@ public final class PlaybackController: ObservableObject {
     private func refreshOwnerCommands() {
         owners.updateContext(state.commandContext)
         #if os(iOS)
+        if owners.hasOutputSubscribers { _ = ensureSystemSession() }
+        systemSession?.updateOutputSubscription(owners.hasOutputSubscribers)
         systemSession?.updateNavigation(owners.navigationRoutes)
         systemSession?.updatePlayPause(owners.playPauseRoute)
         #endif
     }
 
     #if os(iOS)
+    private func ensureSystemSession() -> PlaybackSystemSession {
+        if let systemSession { return systemSession }
+        let session = PlaybackSystemSession(
+            onEvent: { [weak self] event, generation in self?.systemEvent(event, generation: generation) },
+            onCommand: { [weak self] command, generation, route in
+                self?.systemCommand(command, generation: generation, route: route) ?? false
+            },
+            onNavigation: { [weak self] route in
+                guard let self, self.state.accepts(route.attempt.id) else { return false }
+                return self.owners.perform(route)
+            },
+            onOutputUnavailable: { [weak self] in self?.outputUnavailable() },
+            notificationCenter: systemNotifications
+        )
+        systemSession = session
+        return session
+    }
+
     private func establishSystemSession(generation: UUID) {
-        if systemSession == nil {
-            systemSession = PlaybackSystemSession(
-                onEvent: { [weak self] event, generation in self?.systemEvent(event, generation: generation) },
-                onCommand: { [weak self] command, generation, route in
-                    self?.systemCommand(command, generation: generation, route: route) ?? false
-                },
-                onNavigation: { [weak self] route in
-                    guard let self, self.state.accepts(route.attempt.id) else { return false }
-                    return self.owners.perform(route)
-                }
-            )
-        }
-        systemSession?.beginSession(generation: generation)
+        ensureSystemSession().beginSession(generation: generation)
+    }
+
+    private func outputUnavailable() {
+        mutationDepth += 1
+        defer { finishMutation() }
+        // Environment delivery also covers an owner's pending source work
+        // while there is no native attempt. Never fabricate an attempt command.
+        pause()
+        owners.outputUnavailable()
     }
 
     private func activateAudio(generation: UUID) -> Bool {
@@ -865,8 +909,6 @@ public final class PlaybackController: ObservableObject {
         case .interruptionEnded(let shouldResume):
             state.interruptionEnded(shouldResume: shouldResume)
             drivePlayback()
-        case .outputUnavailable:
-            pause()
         case .mediaServicesReset:
             needsPlayerRecreation = true
             failedReplacementAutoplay = state.wantsPlayback
@@ -886,14 +928,19 @@ public final class PlaybackController: ObservableObject {
         switch command {
         case .play: playPause = .play
         case .pause: playPause = .pause
-        case .toggle: playPause = state.wantsPlayback ? .pause : .play
+        case .toggle: playPause = .toggle(wantsPlayback: state.wantsPlayback)
         case .stop: stop(); return true
         case .seek(let time):
             guard time.isFinite, time >= 0, state.canSeek else { return false }
             seek(to: time); return true
         }
         if let route = route ?? owners.playPauseRoute { return owners.perform(playPause, route: route) }
-        if playPause == .play { resume() } else { pause() }
+        switch playPause {
+        case .play: resume()
+        case .pause: pause()
+        case .toggle(let wantsPlayback):
+            if wantsPlayback { pause() } else { resume() }
+        }
         return true
     }
 
