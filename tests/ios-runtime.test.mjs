@@ -179,6 +179,7 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
     ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.2.0', 'source.runtime.v2'],
     ['pan', '0.1.0', 'pan.runtime.v1'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
     ['douban', '0.1.0', 'douban.data.v1'], ['film', '0.1.0', 'film.playback.v1'],
+    ['netease', '0.1.0', 'netease.token.v1'],
   ]);
   for (const method of ['music.script.sources.list', 'music.script.resolve', 'music.script.invoke'])
     assert.ok(described.modules[0].methods.includes(method), method);
@@ -186,6 +187,7 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   assert.deepEqual(described.modules.find(module => module.id === 'tmdb').methods, [
     'tmdb.data.request', 'tmdb.data.settings.get', 'tmdb.data.settings.update',
   ]);
+  assert.deepEqual(described.modules[7].methods, ['netease.token.get']);
   await verifyTMDBAssembly(t, { client, baseUrl });
   await verifyPanAndDoubanAssembly(client);
   for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
@@ -224,7 +226,7 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   okay(await client.call('source.runtime.status'), 'source.runtime.v2');
   okay(await client.call('cat.script.status'), 'cat.script.v2');
   okay(await client.shutdown(), 'runtime.http.v1');
-  assert.equal(okay(await client.describe(), 'runtime.http.v1').modules.length, 7);
+  assert.equal(okay(await client.describe(), 'runtime.http.v1').modules.length, 8);
   runtime.channel.end();
   await closed;
   await client.close();

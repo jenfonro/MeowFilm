@@ -828,7 +828,7 @@ public static partial class MusicUiTests
             Equal(2, f.Calls.Count("music.queue.playCollection"));
             Equal(1, f.Playback.Opens.Count); True(f.Module.CanPlay, "successful retry restores the current queue");
         });
-        yield return Case("playlist navigation rejects an oversized local total without request expansion", async () =>
+        yield return Case("playlist navigation rejects totals beyond the DTO resource boundary without request expansion", async () =>
         {
             await using var f = await Fixture.Create();
             var before = f.Module.Playlists.ToArray();
@@ -836,7 +836,7 @@ public static partial class MusicUiTests
             f.Calls.TransformNext("music.library.list", reply =>
             {
                 var changed = JsonNode.Parse(reply.GetRawText())!.AsObject();
-                changed["total"] = 10_001;
+                changed["total"] = 100_001;
                 return JsonSerializer.SerializeToElement(changed);
             });
             await f.Module.RefreshAsync();

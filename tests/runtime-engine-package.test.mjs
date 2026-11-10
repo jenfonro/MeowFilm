@@ -42,7 +42,8 @@ function sourceFixture() {
   };
   for (const path of new Set(['package.json', 'package-lock.json', policyPath, receiptPath,
     artifactPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
-  for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime', 'film-rules', 'film-playback']) {
+  for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
+    'film-rules', 'film-playback', 'netease-token']) {
     const location = `packages/${name}`;
     copy(`${location}/package.json`);
     copy(`${location}/${name === 'film-rules' ? 'film-rules.js' : 'src'}`);
@@ -119,7 +120,7 @@ test('common native payload preserves exact build, ABI, SDK, source and license 
   assert.equal(manifest.status, 'complete');
   assert.equal(manifest.assemblyProfile, 'common-native');
   assert.equal(manifest.entry, 'app/entry.mjs');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
   assert.equal(manifest.trustedNative.length, 1);
   const native = manifest.trustedNative[0];
   assert.equal(native.path, payloadPath(artifactPath));
@@ -174,7 +175,7 @@ function runIsolated(output, program) {
   } finally { rmSync(entry); }
 }
 
-test('packaged entry starts HTTP and serves all seven App modules without repository fallback', async t => {
+test('packaged entry starts HTTP and serves explicitly selected film modules without repository fallback', async t => {
   const f = fixture(t);
   await f.pack();
   const result = runIsolated(f.output, `

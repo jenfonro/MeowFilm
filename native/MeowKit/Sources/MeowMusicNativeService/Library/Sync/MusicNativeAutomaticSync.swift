@@ -43,11 +43,19 @@ private struct MusicNativeAutomaticSyncPort: MusicNativeLibrarySyncProviding {
         try await checkLibrarySync(session)
         return value
     }
-    func writeLibrarySync(_ session: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult {
+    func readLibrarySubscriptions(_ session: MusicLibrarySyncSession) async throws -> MusicLibrarySyncSnapshot {
         try await checkLibrarySync(session)
+        let value = try await base.readLibrarySubscriptions(session)
+        try await checkLibrarySync(session)
+        return value
+    }
+    func writeLibrarySync(_ session: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult {
+        do { try await checkLibrarySync(session) }
+        catch { return .notDispatched(MusicServiceError.sanitized(error)) }
         // Cancellation propagates into the existing account owner's per-write
         // authorization. An uncertain dispatched write keeps the engine fence.
         let result = try await base.writeLibrarySync(session, mutation: mutation)
+        if case .notDispatched = result { return result }
         try await checkLibrarySync(session)
         return result
     }
@@ -93,12 +101,21 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
     /// Called INSIDE the user's successful library transaction. It is durable
     /// intent, not a serialized HTTP command. Import/rollback never call this.
     func recordAutomaticLibraryMutation(_ d: inout MusicDocument, collectionID: String,
-                                       orderOnly: Bool = false) throws {
+                                       orderOnly: Bool = false, relationshipPlatform: MusicAccountPlatform? = nil) throws {
         var ledger = try MusicNativeSyncLedger.load(d.library)
         var preferences = ledger.automatic
         try musicRequire(preferences.intentRevision < 9_007_199_254_740_991, .limit)
-        preferences.orderOnly = orderOnly && preferences.intentRevision == preferences.settledIntentRevision
-            ? collectionID : nil
+        let settled = preferences.intentRevision == preferences.settledIntentRevision
+        if let relationshipPlatform {
+            if settled { preferences.relationshipPlatforms = [relationshipPlatform] }
+            else if !preferences.relationshipPlatforms.isEmpty, !preferences.relationshipPlatforms.contains(relationshipPlatform) {
+                preferences.relationshipPlatforms.append(relationshipPlatform)
+            }
+            preferences.orderOnly = nil
+        } else {
+            preferences.relationshipPlatforms = []
+            preferences.orderOnly = orderOnly && settled ? collectionID : nil
+        }
         preferences.intentRevision += 1
         ledger.automatic = preferences; d.library["sync"] = try ledger.json()
     }
@@ -143,6 +160,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
         try changeAutomaticPreferences(expected: preferences.revision, authorization: authorization) { value, ledger in
             value.revision = savedRevision; value.selections = selected
             value.bindings = value.bindings.filter { pair in selected.contains { $0.platform.rawValue == pair.key } }
+            value.relationshipPlatforms = value.relationshipPlatforms.filter { platform in selected.contains { $0.platform == platform && $0.playlists } }
             ledger.phase = .idle; ledger.issues = []
         }
         if selected.isEmpty { return try await librarySyncState() }
@@ -217,7 +235,12 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
         if bind { try await bindAutomaticLibraryAccounts(revision: preferences.revision, authorization: request.authorization) }
         let current = try MusicNativeSyncLedger.load(read().library).automatic
         try musicRequire(current.revision == preferences.revision, .revisionConflict)
-        let selected = try automaticSelections(current.selections)
+        var selected = try automaticSelections(current.selections)
+        let relationshipsOnly = request.reason == .localMutation && !current.relationshipPlatforms.isEmpty
+        if relationshipsOnly {
+            selected = selected.filter { current.relationshipPlatforms.contains($0.platform) && $0.playlists }
+                .map { .init(platform: $0.platform, playlists: true) }
+        }
         guard selected.allSatisfy({ current.bindings[$0.platform.rawValue] != nil }) else {
             try recordAutomaticSyncFailure(MusicServiceError.verificationRequired, expected: current.revision,
                                            authorization: request.authorization)
@@ -232,7 +255,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
         let task = Task {
             try permission.check()
             if let orderOnly { return try await self.performAutomaticOrderSync(nativeRequest, port: port, collectionID: orderOnly) }
-            return try await self.performLibrarySync(nativeRequest, port: port)
+            return try await self.performLibrarySync(nativeRequest, port: port, relationshipsOnly: relationshipsOnly)
         }
         let cancel: @Sendable () -> Void = { permission.revoke(); task.cancel() }
         automaticLibrarySyncRuntime.task = task; automaticLibrarySyncRuntime.authorization = permission
@@ -260,7 +283,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
             try changeAutomaticPreferences(expected: current.revision, authorization: request.authorization) { value, _ in
                 // A newer mutation is still pending and must keep its trigger.
                 value.settledIntentRevision = max(value.settledIntentRevision, current.intentRevision)
-                if value.intentRevision == current.intentRevision { value.orderOnly = nil }
+                if value.intentRevision == current.intentRevision { value.orderOnly = nil; value.relationshipPlatforms = [] }
             }
             return result
         } catch {
@@ -319,7 +342,6 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
                 let session = round.sessions[selection.platform.rawValue]!
                 for binding in local["bindings"].array where binding["platform"].string == selection.platform.rawValue {
                     guard let remote = round.snapshots[selection.platform.rawValue]?.collections.first(where: { $0.id == binding["id"].string }) else { continue }
-                    guard remote.writable else { round.issue("readOnly", platform: selection.platform, collection: collectionID); continue }
                     let map = binding["map"]
                     var desired = local["order"].strings.flatMap { id in remote.members.filter { map[$0.occurrenceID].string == id } }
                     let used = Set(desired.map(\.occurrenceID))

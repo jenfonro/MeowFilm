@@ -37,7 +37,7 @@ public sealed partial class RuntimeBundle
                 || manifest.GetProperty("platform").GetString() != "win32") Invalid();
             var modules = manifest.GetProperty("modules").EnumerateArray().Select(item => item.GetString()).ToArray();
             if (modules.Length != expectedModules.Count || modules.Distinct(StringComparer.Ordinal).Count() != modules.Length
-                || !modules.ToHashSet(StringComparer.Ordinal).SetEquals(expectedModules.Select(item => item.Id))) Invalid();
+                || !modules.SequenceEqual(expectedModules.Select(item => item.Id), StringComparer.Ordinal)) Invalid();
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var file in manifest.GetProperty("files").EnumerateArray())
             {

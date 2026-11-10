@@ -43,7 +43,18 @@ public sealed partial class MusicCapability
         ContentMenuItem(menu, "查看歌单", Current() && card.CanOpen, () => Run(() => OpenCatalogCardAsync(card)));
         ContentMenuItem(menu, "播放", Current() && card.CanPlay, () => Run(() => PlayCatalogCardAsync(card)));
         ContentMenuItem(menu, "下一首播放", Current() && CanEdit && card.CanPlay, () => Run(() => QueueCatalogCardAsync(card)));
-        ContentMenuItem(menu, "收藏", Current() && CanEdit && card.CanOpen, () => Run(() => FavoriteCatalogCardAsync(card)));
+        if (card.CanSavePlaylist)
+        {
+            var reference = NetworkPlaylistForCard(card);
+            ContentMenuItem(menu, reference is null ? "收藏" : "取消收藏", Current() && CanEdit,
+                () => Run(() =>
+                {
+                    var current = NetworkPlaylistForCard(card);
+                    if (!CanEdit || current?.Id != reference?.Id || current?.Revision != reference?.Revision)
+                        return Task.CompletedTask;
+                    return reference is null ? SaveNetworkPlaylistAsync(card) : RemoveNetworkPlaylistAsync(reference);
+                }));
+        }
     }
 
     internal void PopulateSongMenu(ContextMenu menu, SongRow? song, MusicCatalogCard? card, Func<bool> targetCurrent)
@@ -74,13 +85,16 @@ public sealed partial class MusicCapability
         var playlists = ContentMenuItem(menu, "添加到歌单", Current());
         foreach (var playlist in Playlists)
             ContentMenuItem(playlists, playlist.Name, Current(), () => Run(() => AddSongToPlaylistAsync(song, playlist.Id)));
-        menu.Items.Add(new Separator());
-        ContentMenuItem(menu, "移除", Current() && card is null && HasCollection, () => Run(() =>
+        if (card is null && HasCollection)
         {
-            if (card is not null || !HasCollection) return Task.CompletedTask;
-            SelectedSong = song;
-            return RemoveSongAsync();
-        }));
+            menu.Items.Add(new Separator());
+            ContentMenuItem(menu, "移除", Current(), () => Run(() =>
+            {
+                if (!HasCollection) return Task.CompletedTask;
+                SelectedSong = song;
+                return RemoveSongAsync();
+            }));
+        }
         if (card is null) return;
         menu.Items.Add(new Separator());
         ContentMenuItem(menu, "相似歌曲", Current() && card.CanSimilar, () => Run(() => SimilarCatalogCardAsync(card)));

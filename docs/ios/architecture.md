@@ -14,7 +14,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `apps/ios/Presentation` | 主页面外壳、页头、底部导航和播放器停靠区 |
 | `apps/ios/UITests` | UIKit 与音乐 UI 组件测试，复用已有 UIKit runner，不属于 App 源成员 |
 | `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的宿主测试：运行器集成实际链接、启动 Node；音乐本地启动测试使用合成存储与拒绝网络的 transport，冷启动清理测试使用临时数据与模拟 Keychain |
-| `apps/ios/runtime` | iOS socketpair 启动参数／失败边界与 music/cat/source/pan/tmdb/douban/film 七模块薄 entry，复用公共 JS 模块 |
+| `apps/ios/runtime` | iOS socketpair 启动参数／失败边界与 music/cat/source/pan/tmdb/douban/film/netease 八模块薄 entry，复用公共 JS 模块 |
 
 工程文件由 `scripts/generate-ios-project.py` 生成。App 只编译上述四个职责目录；UITests、RuntimeTests 使用独立测试 target。NodeMobile.xcframework 链接并嵌入签名，完整 JS 载荷作为 `Runtime` 资源随包签名；构建输入准备见[发布](release.md)。
 
@@ -50,7 +50,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 
 共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。
 
-影视智能播放、业务数据缓存、新增历史／人工匹配／屏蔽／偏好由 Node film owner 管理；原生模型仅投影快照并提交命令，收藏、规则与图片缓存保留原 owner。共用约束见[影视播放契约](../runtime/film-playback.md)，视频内核构建输入见[发布](release.md)。原生导航／搜索合并接线与平台验证仍须单独收口，不以七模块装配或内核版本代替实跑证据。
+影视智能播放、业务数据缓存、新增历史／人工匹配／屏蔽／偏好由 Node film owner 管理；原生模型仅投影快照并提交命令，收藏、规则与图片缓存保留原 owner。共用约束见[影视播放契约](../runtime/film-playback.md)，视频内核构建输入见[发布](release.md)。原生导航／搜索合并接线与平台验证仍须单独收口，不以八模块装配或内核版本代替实跑证据。
 
 全局搜索的音乐／影视关系由 `MeowfilmSearchComposition` 装配。`MeowUI` 仅提供目标选择和附加结果内容契约；音乐搜索分页容器按契约承载内容，不导入影视、不承载影视取数或整合策略。影视搜索、真实详情导航与关闭 ownership 见[影视搜索](film-search.md)。
 

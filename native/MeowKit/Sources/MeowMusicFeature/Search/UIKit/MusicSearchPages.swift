@@ -474,7 +474,10 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
             self?.showActionError()
         }
         observe(model.searchAccessChanges) { [weak self] in self?.reconcileAccess() }
-        observe(model.libraryChanges) { [weak self] in self?.actions.refreshFavorites() }
+        observe(model.libraryChanges) { [weak self] in
+            self?.actions.refreshFavorites()
+            self?.updateVisibleSongs()
+        }
         observe(model.playbackChanges) { [weak self] in self?.updateVisibleSongs() }
         observe(appearance.$preferences.map(\.playlistView).removeDuplicates().dropFirst().eraseToAnyPublisher()) {
             [weak self] _ in self?.render()
@@ -956,7 +959,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
                 self.showSources(song)
             },
         ]
-        let collections = model.collections.filter { $0.kind != "favorites" }.map { target in
+        let collections = model.collections.filter { $0.canEdit && $0.kind == "playlist" }.map { target in
             UIAction(title: target.title) { [weak self] _ in
                 guard let self, self.results.requestID == request else { return }
                 self.actions.perform(song: song, session: self.results) { [weak model = self.model] in

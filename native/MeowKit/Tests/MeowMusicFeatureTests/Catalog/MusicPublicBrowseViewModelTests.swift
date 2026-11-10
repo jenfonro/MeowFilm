@@ -13,7 +13,7 @@ private actor MusicPublicBrowseGate {
     func didStart() async { if !started { await withCheckedContinuation { startWaiters.append($0) } } }
     func release() { released = true; endWaiters.forEach { $0.resume() }; endWaiters.removeAll() }
 }
-private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading {
+private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading, MusicPublicBrowseRefreshing {
     static let collection = MusicPublicBrowseCollection(platform: .netease, nativeID: "41", title: "Synthetic playlist")
     static func track(_ id: String) -> MusicRemoteTrack {
         .init(ref: .init(kind: .handle, id: id), songId: "song:" + id, title: id,
@@ -27,6 +27,9 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     var emptyDetailFirst = false
     var detailCount = 1, detailPageSize = 30
     var openedQueues = 0
+    var queueRequests: [MusicPublicBrowseQueueRequest] = []
+    var detailTrackID = "1"
+    var refreshes: [MusicPublicBrowseCollection] = []
     var queries: [String] = []
     var cursors: [String?] = []
     var platforms: [MusicPublicBrowsePlatform] = []
@@ -37,6 +40,8 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     func keepPaging() { longPages = true }
     func omitFirstDetailPage() { emptyDetailFirst = true }
     func keepDetailPaging(count: Int, pageSize: Int = 30) { detailCount = count; detailPageSize = pageSize }
+    func replaceDetailTrack(_ id: String) { detailTrackID = id }
+    func refreshPublicCollection(_ collection: MusicPublicBrowseCollection) { refreshes.append(collection) }
     func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) async throws -> MusicPublicBrowseCollectionPage {
         queries.append(query); cursors.append(cursor); platforms.append(platform)
         if let gate { await gate.wait() }
@@ -51,6 +56,7 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     }
     func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) async throws -> MusicPublicBrowseDetail {
         cursors.append(cursor)
+        if let error { throw error }
         if emptyDetailFirst {
             let members: [MusicPublicBrowseMember] = cursor == nil ? [] :
                 [.init(nativeID: "31", sourcePosition: 30, track: Self.track("31"))]
@@ -65,7 +71,7 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
             }, total: detailCount, cursor: end < detailCount ? String(end) : nil,
                snapshot: String(repeating: "a", count: 64))
         }
-        return .init(collection: collection, members: [.init(nativeID: "1", sourcePosition: 0, track: Self.track("1"))],
+        return .init(collection: collection, members: [.init(nativeID: detailTrackID, sourcePosition: 0, track: Self.track(detailTrackID))],
                      total: 1, cursor: nil, snapshot: String(repeating: "a", count: 64))
     }
     func publicDiscovery(_ destination: MusicPublicBrowseDestination, cursor: String?) async throws -> MusicPublicBrowsePage {
@@ -78,7 +84,10 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     func publicQueueTracks(_ request: MusicPublicBrowseQueueRequest) -> [MusicNativeTrackData] { [] }
     func openPublicQueue(_ request: MusicPublicBrowseQueueRequest) -> MusicRemoteQueueSource {
         openedQueues += 1
-        return .init(context: .init(kind: .playlist, id: "wy:playlist:41", title: "Synthetic", platform: "wy"),
+        queueRequests.append(request)
+        return .init(context: .init(kind: request.collection.kind == .album ? .album : .playlist,
+              id: request.collection.id, title: "Synthetic", platform: request.collection.platform.rawValue,
+              collection: request.collection),
               loadPage: { _ in .init(items: []) })
     }
 }
@@ -159,6 +168,79 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         model.disappear()
         XCTAssertEqual(releasedSource, loadedSource); XCTAssertFalse(source.authorization.isActive)
         XCTAssertNil(model.remoteSource); XCTAssertTrue(model.sections.isEmpty)
+        await source.close()
+    }
+    func testPlaylistReopeningRefreshesRemoteMembersButNotOnEveryVisibleLoad() async throws {
+        let service = MusicPublicBrowseFeatureService(), page = model(service, request: .detail(MusicPublicBrowseFeatureService.collection))
+        await page.loadIfNeeded(); await page.loadIfNeeded()
+        XCTAssertEqual(page.tracks.map(\.title), ["1"])
+        let initial = await service.refreshes
+        XCTAssertEqual(initial.count, 1)
+        page.disappear(); await service.replaceDetailTrack("2")
+        page.appear(); await page.loadIfNeeded()
+        XCTAssertEqual(page.tracks.map(\.title), ["2"])
+        let refreshed = await service.refreshes, opens = await service.openedQueues
+        XCTAssertEqual(refreshed, [MusicPublicBrowseFeatureService.collection, MusicPublicBrowseFeatureService.collection])
+        XCTAssertEqual(opens, 0)
+        page.disappear()
+    }
+    func testNetworkSaveUsesDisplayedIdentityWithoutPreparingAPlaybackQueue() async throws {
+        let browser = MusicPublicBrowseFeatureService(), page = model(browser, request: .detail(MusicPublicBrowseFeatureService.collection))
+        let service = MusicCollectionService(rows: []), library = MusicViewModel(service: service, player: MusicCollectionPlayer())
+        await page.loadIfNeeded()
+        let collection = try XCTUnwrap(page.networkSaveCollection), intent = try XCTUnwrap(page.makeActionIntent())
+        await page.perform(intent: intent, operation: "收藏歌单", kind: .library) { try await library.saveNetworkPlaylist(collection) }
+        let saves = await service.statistics(), queues = await browser.openedQueues
+        XCTAssertEqual(saves.networkSaves, 1); XCTAssertEqual(saves.createCalls, 0)
+        XCTAssertEqual(saves.tracks, 0); XCTAssertEqual(saves.queueWrites, 0); XCTAssertEqual(queues, 0)
+        XCTAssertEqual(library.collections.first?.networkReference?.remoteID, collection.nativeID)
+        XCTAssertNil(page.remoteSource)
+        page.disappear(); await library.close()
+    }
+    func testFailedReopeningKeepsRemoteIdentityAndAlbumsCannotBecomeNetworkPlaylists() async throws {
+        let service = MusicPublicBrowseFeatureService(), requested = MusicPublicBrowseFeatureService.collection
+        let page = model(service, request: .detail(requested))
+        await page.loadIfNeeded(); page.disappear(); await service.fail(.upstreamFailed)
+        page.appear(); await page.loadIfNeeded()
+        XCTAssertEqual(page.error, .upstreamFailed); XCTAssertEqual(page.request, .detail(requested))
+        XCTAssertEqual(page.networkSaveCollection, requested)
+        let album = MusicPublicBrowseCollection(platform: .netease, nativeID: "41", kind: .album, title: "Album")
+        let albumPage = model(service, request: .detail(album))
+        XCTAssertFalse(albumPage.canSaveCollection); XCTAssertNil(albumPage.networkSaveCollection)
+        let listing = model(service)
+        XCTAssertFalse(listing.canSaveCollection)
+        page.disappear(); albumPage.disappear(); listing.disappear()
+    }
+    func testAlbumCannotBeSavedButKeepsFullPlaybackSourceAndSelectedOccurrence() async throws {
+        let service = MusicPublicBrowseFeatureService()
+        let album = MusicPublicBrowseCollection(platform: .netease, nativeID: "41", kind: .album, title: "Album")
+        await service.keepDetailPaging(count: 3, pageSize: 1)
+        var queueCursors: [String?] = []
+        let page = MusicPublicBrowseViewModel(service: service, request: .detail(album),
+            queuePage: { _, cursor in
+                queueCursors.append(cursor)
+                let index = cursor.flatMap(Int.init) ?? 0
+                return .init(items: [MusicPublicBrowseFeatureService.track(String(index + 1))],
+                             cursor: index < 2 ? String(index + 1) : nil)
+            })
+        page.setAccess(available: true, generation: UUID()); page.appear()
+        XCTAssertFalse(page.canPlayRemoteQueue)
+        await page.loadIfNeeded(); await page.next()
+        XCTAssertNil(page.error); XCTAssertFalse(page.canSaveCollection); XCTAssertNil(page.networkSaveCollection)
+        XCTAssertTrue(page.canPlayRemoteQueue); XCTAssertNil(page.remoteSource)
+        XCTAssertEqual(page.tracks.map(\.title), ["2"])
+        let initialOpens = await service.openedQueues
+        XCTAssertEqual(initialOpens, 0)
+        let (source, index) = try await page.playbackSource(for: XCTUnwrap(page.tracks.first))
+        XCTAssertEqual(index, 1, "第二页选曲必须保留在完整专辑中的位置")
+        XCTAssertEqual(source.context.kind, .album); XCTAssertEqual(source.context.collection, album)
+        XCTAssertEqual(queueCursors, [nil, "1"])
+        let requests = await service.queueRequests
+        XCTAssertEqual(requests.count, 1); XCTAssertEqual(requests.first?.collection, album)
+        XCTAssertEqual(requests.first?.snapshot, String(repeating: "a", count: 64))
+        XCTAssertTrue(page.canPlayRemoteQueue); XCTAssertFalse(page.canSaveCollection)
+        page.disappear()
+        XCTAssertFalse(page.canPlayRemoteQueue); XCTAssertFalse(source.authorization.isActive)
         await source.close()
     }
     func testEmptyVisiblePageRequiresExplicitContinuationAndKeepsExactRenewalCursor() async throws {

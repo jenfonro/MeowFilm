@@ -27,7 +27,7 @@ final class MusicQueueUIKitTests: XCTestCase {
         })
         let initialActions = try XCTUnwrap(source.menu).children.compactMap { $0 as? UIAction }
         XCTAssertTrue(initialActions.contains { $0.title == "当前歌曲心动" })
-        XCTAssertFalse(initialActions.contains { $0.title == "返回原队列" })
+        XCTAssertFalse(initialActions.contains { $0.title == "退出心动" || $0.title == "退出推荐" })
         let original = model.queue.map(\.id), displayed = content.fence
         content.startCurrentHeartbeat(expected: displayed)
         await wait("current heartbeat committed") { model.similarMode?.active == true && !model.isChangingSimilarMode }
@@ -36,8 +36,8 @@ final class MusicQueueUIKitTests: XCTestCase {
         let snapshot = try XCTUnwrap(model.similarMode)
         XCTAssertFalse(snapshot.continueEnabled)
         let activeActions = try XCTUnwrap(source.menu).children.compactMap { $0 as? UIAction }
-        XCTAssertTrue(activeActions.contains { $0.title == "返回原队列" })
-        XCTAssertFalse(activeActions.contains { $0.title == "自动续播" })
+        XCTAssertTrue(source.image(for: .normal) === MusicPlaybackModeIcon.image(.fm))
+        XCTAssertEqual(activeActions.map(\.title), ["退出心动"])
         content.returnFromRecommendations(snapshot: snapshot.id, expected: content.fence)
         await wait("explicit Return finished") { model.similarMode == nil && !model.isChangingSimilarMode }
         XCTAssertEqual(model.queue.map(\.id), original)

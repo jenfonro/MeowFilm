@@ -110,6 +110,7 @@ public sealed partial class MusicCapability
             nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(CanPlayContentDetail),
             nameof(CanLoadMoreCatalogPlaylist) }) Changed(name);
         PersonalCatalogBindings();
+        NetworkPlaylistBindings();
         SearchBindings();
     }
     private void RememberCatalogLocation()
@@ -207,6 +208,9 @@ public sealed partial class MusicCapability
             return PlayCatalogSectionAsync(card);
         }
         if (card.Kind == "song") return PlayCatalogSongAsync(card);
+        if (card.Kind == "playlist" && card.IsManagedPlaylist && card.Locator is null)
+            return OpenCatalogTargetAsync(Target("playlist", card.Platform, card.Title, new { id = card.ActionId })
+                with { ManagedPlaylist = true }, card.ActionId);
         if (card.Locator is not null || card.Kind is "daily" or "fm" or "similar" or "heartbeat" or "album" or "chart")
             return OpenPersonalCatalogCardAsync(card);
         RememberCatalogLocation();
@@ -218,7 +222,7 @@ public sealed partial class MusicCapability
     public Task FavoriteCatalogCardAsync(MusicCatalogCard card)
     {
         if (!CanEdit || !ContainsCatalogCard(card)) return Task.CompletedTask;
-        if (card.Kind == "playlist") return CatalogPlaylistActionAsync("save", 0, entry: card);
+        if (card.Kind == "playlist") return SaveNetworkPlaylistAsync(card);
         if (card.Song is null || !card.CanFavorite) return Task.CompletedTask;
         try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
         return FavoriteSongAsync(card.Song);
@@ -260,7 +264,8 @@ public sealed partial class MusicCapability
         InvalidateCatalogAction();
         var platform = route.Split('/') is { Length: 3 } parts ? parts[1] :
             IsCatalogSourceRoute(route) ? catalogSourcePlatform : SelectedCatalogPlatform.Key;
-        if (catalogLocations.TryGetValue(route + "/" + platform, out var saved) &&
+        bool playlist = route.StartsWith("catalog-playlist/", StringComparison.Ordinal);
+        if (!playlist && catalogLocations.TryGetValue(route + "/" + platform, out var saved) &&
             saved.Pages[saved.Page].Target?.Cacheable != false && RestoreCatalogPage(saved.Pages[saved.Page], platform))
         {
             token.ThrowIfCancellationRequested();
@@ -275,7 +280,7 @@ public sealed partial class MusicCapability
         if (route.StartsWith("catalog-channel/", StringComparison.Ordinal) && publishedChannelState is { } channel && !RestoreCatalogPage(channel, platform))
         { channelSections.Clear(); publishedChannelState = null; }
         catalogPageCode = catalogChannelCodes.GetValueOrDefault(route) ?? "";
-        await LoadCatalogAsync(route, "", 1, null, token);
+        await LoadCatalogAsync(route, "", 1, null, token, refresh: playlist);
     }
     public void CancelCatalog()
     {

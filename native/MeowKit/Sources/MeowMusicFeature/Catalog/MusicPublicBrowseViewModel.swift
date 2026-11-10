@@ -46,10 +46,15 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         guard let collection, let snapshot, loaded, contentIsCurrent, !isLoading else { return nil }
         return .init(collection: collection, snapshot: snapshot)
     }
+    public var canPlayRemoteQueue: Bool { remoteSource != nil || queueRequest != nil }
     public var tracks: [MusicRemoteTrack] {
         sections.flatMap(\.items).compactMap { if case .track(let value) = $0.content { return value }; return nil }
     }
-    public var canSaveCollection: Bool { remoteSource != nil || queueRequest != nil }
+    public var networkSaveCollection: MusicPublicBrowseCollection? {
+        guard case .detail(let requested) = request, requested.kind == .playlist else { return nil }
+        return collection ?? requested
+    }
+    public var canSaveCollection: Bool { networkSaveCollection != nil }
     public var errorContext: String {
         switch request {
         case .detail(let collection): return collection.platform.title + " · 歌单读取"
@@ -67,6 +72,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     private var generation = UUID(), pageEpoch = UUID(), actionEpoch = UUID()
     private var loadEpoch = UUID()
     private var homeNeedsRefresh = true
+    private var playlistNeedsRefresh = true
     private var displayedHomeSource: MusicHomeSourceSelection?
     private var isHome: Bool { request == .discovery(.home) }
     /// Optional private artwork follows the settled home, not retained cards
@@ -158,7 +164,10 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         invalidate(clear: true)
         return true
     }
-    public func appear() { visible = true; displayVisible = true }
+    public func appear() {
+        if !visible, case .detail(let collection) = request, collection.kind == .playlist { playlistNeedsRefresh = true }
+        visible = true; displayVisible = true
+    }
     /// Resource ownership and actual display demand are separate. A retained
     /// page may keep its owner active while a covered page must not refill
     /// display-only content.
@@ -428,15 +437,22 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         cursorOffsets = ["": 0]; trackOffset = 0
         trackPageOccurrences = [:]; detailSourcePositions = [:]
         pageNumber = 1; requiresExplicitNext = false; usesPageNavigation = false
-        if case .detail(let collection) = request,
-           let refreshing = service as? any MusicPublicBrowseRefreshing {
-            let own = pageEpoch
-            await refreshing.refreshPublicCollection(collection)
-            guard own == pageEpoch, available, visible, !Task.isCancelled else { return }
+        if case .detail(let collection) = request {
+            playlistNeedsRefresh = false
+            if let refreshing = service as? any MusicPublicBrowseRefreshing {
+                let own = pageEpoch
+                await refreshing.refreshPublicCollection(collection)
+                guard own == pageEpoch, available, visible, !Task.isCancelled else { return }
+            }
         }
         await load(cursor: nil, direction: 0, refresh: true)
     }
     public func loadIfNeeded() async {
+        if playlistNeedsRefresh, case .detail(let collection) = request, collection.kind == .playlist,
+           available, visible, !isLoading {
+            await refresh()
+            return
+        }
         if isHome, !isLoading, available, visible, displayVisible,
            let displayed = displayedHomeSource, let home = service as? any MusicHomeBrowsing {
             let access = generation, page = pageEpoch
@@ -465,7 +481,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         await load(cursor: nil, direction: 0)
     }
     /// Public detail reads do not load the complete queue. Only an explicit
-    /// play/save action opens it, and resolves the selected stable recording.
+    /// playback action opens it, and resolves the selected stable recording.
     public func playbackSource(for track: MusicRemoteTrack? = nil) async throws -> (MusicRemoteQueueSource, Int) {
         guard available, visible, loaded, contentIsCurrent, !isLoading else { throw MusicServiceError.staleResult }
         let own = pageEpoch, access = generation

@@ -37,11 +37,20 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         collection.delegate = self
         collection.alwaysBounceVertical = true
         collection.register(MusicLibraryCell.self, forCellWithReuseIdentifier: "collection")
+        collection.register(MusicLibrarySectionHeader.self, forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
+                            withReuseIdentifier: "section")
         dataSource = UICollectionViewDiffableDataSource(collectionView: collection) { [weak self] view, path, id in
             guard let self, let item = self.items[id] else { return nil }
             let cell = view.dequeueReusableCell(withReuseIdentifier: "collection", for: path) as! MusicLibraryCell
             cell.configure(item, grid: self.appearance.preferences.playlistView == .grid, theme: self.theme)
             return cell
+        }
+        dataSource.supplementaryViewProvider = { [weak self] view, kind, path in
+            guard let self, kind == UICollectionView.elementKindSectionHeader else { return nil }
+            let header = view.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: "section", for: path) as! MusicLibrarySectionHeader
+            let section = self.dataSource.snapshot().sectionIdentifiers[path.section]
+            header.configure(title: section == 0 ? "我的歌单" : "网络歌单", theme: self.theme)
+            return header
         }
         collection.refreshControl = UIRefreshControl()
         collection.refreshControl?.addAction(UIAction { [weak self] _ in
@@ -85,11 +94,32 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         if isViewLoaded {
             renderHeartbeat()
             updateVisibleCells()
+            for case let header as MusicLibrarySectionHeader in collection.visibleSupplementaryViews(ofKind: UICollectionView.elementKindSectionHeader) {
+                header.applyTheme(theme)
+            }
         }
     }
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         guard let id = dataSource.itemIdentifier(for: indexPath), let item = items[id] else { return }
-        router?.showLocalCollection(item)
+        if let remote = item.remoteCollection { router?.showPublicCollection(remote) }
+        else { router?.showLocalCollection(item) }
+    }
+    public func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemAt indexPath: IndexPath,
+                               point: CGPoint) -> UIContextMenuConfiguration? {
+        guard let id = dataSource.itemIdentifier(for: indexPath), let item = items[id], item.networkReference != nil else { return nil }
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+            UIMenu(children: [UIAction(title: "取消收藏", image: UIImage(systemName: "star.slash"), attributes: .destructive) {
+                [weak self] _ in
+                guard let self, self.isPageActive, self.items[id] == item else { return }
+                let alert = UIAlertController(title: "取消收藏歌单", message: nil, preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+                alert.addAction(UIAlertAction(title: "取消收藏", style: .destructive) { [weak self] _ in
+                    guard let self, self.items[id] == item else { return }
+                    self.runPageTask { await self.model.removeNetworkPlaylist(item) }
+                })
+                self.present(alert, animated: true)
+            }])
+        }
     }
     public func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
                                forItemAt indexPath: IndexPath) {
@@ -107,6 +137,10 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     public func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,
                                insetForSectionAt section: Int) -> UIEdgeInsets {
         UIEdgeInsets(top: PageLayoutMetrics.contentGap, left: 16, bottom: 12, right: 16)
+    }
+    public func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,
+                               referenceSizeForHeaderInSection section: Int) -> CGSize {
+        CGSize(width: collectionView.bounds.width, height: 30)
     }
     public func requestCreatePlaylist() {
         let alert = UIAlertController(title: "新建歌单", message: nil, preferredStyle: .alert)
@@ -165,12 +199,15 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         let previous = items
         items = Dictionary(uniqueKeysWithValues: values.map { (Data($0.id.utf8), $0) })
         var snapshot = NSDiffableDataSourceSnapshot<Int, Data>()
-        snapshot.appendSections([0])
         let ids = values.map { Data($0.id.utf8) }
-        snapshot.appendItems(ids)
+        for section in [0, 1] {
+            let group = values.filter { ($0.networkReference == nil ? 0 : 1) == section }.map { Data($0.id.utf8) }
+            if !group.isEmpty { snapshot.appendSections([section]); snapshot.appendItems(group, toSection: section) }
+        }
         let changed = ids.filter { previous[$0] != nil && previous[$0] != items[$0] }
         snapshot.reconfigureItems(changed)
-        if dataSource.snapshot().itemIdentifiers != ids || !changed.isEmpty {
+        if dataSource.snapshot().sectionIdentifiers != snapshot.sectionIdentifiers ||
+            dataSource.snapshot().itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
             dataSource.apply(snapshot, animatingDifferences: false)
         }
         renderState()
@@ -227,7 +264,8 @@ private final class MusicLibraryCell: UICollectionViewCell {
     func configure(_ item: MusicCollection, grid: Bool, theme: PageTheme) {
         self.grid = grid
         artwork.load(item.artwork)
-        title.text = item.title; count.text = "\(item.count)首"
+        title.text = item.title
+        count.text = item.networkReference.map { $0.platform.title } ?? "\(item.count)首"
         title.font = .systemFont(ofSize: grid ? 13 : 16, weight: .medium)
         count.font = .systemFont(ofSize: 11)
         title.textColor = UIColor(theme.ink); count.textColor = UIColor(theme.muted)
@@ -245,6 +283,26 @@ private final class MusicLibraryCell: UICollectionViewCell {
             title.frame = CGRect(x: 60, y: 10, width: max(0, bounds.width - 60), height: 28)
             count.frame = CGRect(x: 60, y: 40, width: max(0, bounds.width - 60), height: 16)
         }
+    }
+}
+
+@MainActor
+private final class MusicLibrarySectionHeader: UICollectionReusableView {
+    private let title = UILabel()
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        title.font = .systemFont(ofSize: 14, weight: .medium)
+        addSubview(title)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func configure(title: String, theme: PageTheme) {
+        self.title.text = title; applyTheme(theme)
+        accessibilityIdentifier = title == "网络歌单" ? "music.library.network" : "music.library.managed"
+    }
+    func applyTheme(_ theme: PageTheme) { title.textColor = UIColor(theme.muted) }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        title.frame = CGRect(x: 16, y: 4, width: max(0, bounds.width - 32), height: 22)
     }
 }
 #endif

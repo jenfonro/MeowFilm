@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -128,6 +129,45 @@ public static class RuntimeHttpEventsTests
             await response.AssertDisconnectedAsync();
             await AssertRPCStillWorks(client, server);
         });
+        yield return new("runtime-events: token cancellation preserves Film snapshots and owner close drains both exchanges", async () =>
+        {
+            await using var eventsServer = new Server();
+            await using var client = new RuntimeHttpClient(eventsServer.BaseUrl);
+            await using var events = client.EventsAsync("film", BusinessSession).GetAsyncEnumerator();
+            var next = events.MoveNextAsync().AsTask();
+            await using var stream = await eventsServer.AcceptAsync();
+            await stream.StartAsync(); await stream.SendAsync(Frame(0));
+            BridgeTests.Equal(true, await next.WaitAsync(TimeSpan.FromSeconds(5)));
+
+            using var cancellation = new CancellationTokenSource();
+            var token = client.CallAsync("netease.token.get", new { }, cancellation.Token);
+            await using (var exchange = await eventsServer.AcceptAsync())
+            {
+                BridgeTests.Equal("POST", exchange.Method);
+                BridgeTests.Equal("/v1/netease/get", exchange.Path);
+                BridgeTests.Equal("{}", Encoding.UTF8.GetString(exchange.Body));
+                BridgeTests.Equal(false, exchange.Headers.ContainsKey("Authorization"));
+                BridgeTests.Equal(false, exchange.Headers.ContainsKey("X-Meow-Session"));
+                cancellation.Cancel();
+                try { await token; throw new InvalidOperationException("Expected cancellation"); }
+                catch (OperationCanceledException) { }
+                await exchange.AssertDisconnectedAsync();
+            }
+            next = events.MoveNextAsync().AsTask();
+            await stream.SendAsync(Frame(1));
+            BridgeTests.Equal(true, await next.WaitAsync(TimeSpan.FromSeconds(5)));
+            BridgeTests.Equal(1L, events.Current.GetProperty("sequence").GetInt64());
+
+            token = client.CallAsync("netease.token.get", new { });
+            await using var pendingToken = await eventsServer.AcceptAsync();
+            BridgeTests.Equal("/v1/netease/get", pendingToken.Path);
+            await client.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            await BridgeTests.Expect("CLOSED", () => token);
+            await stream.AssertDisconnectedAsync();
+            await pendingToken.AssertDisconnectedAsync();
+            await BridgeTests.Expect("CLOSED", () => events.MoveNextAsync().AsTask());
+            BridgeTests.Equal(false, eventsServer.HasConnection);
+        });
 
         foreach (var (name, status, type, id, body) in new (string, int, string, string?, byte[])[]
         {
@@ -208,11 +248,13 @@ public static class RuntimeHttpEventsTests
         public ValueTask DisposeAsync() { listener.Stop(); return ValueTask.CompletedTask; }
     }
 
-    private sealed class Response(TcpClient socket, string method, string path, Dictionary<string, string> headers) : IAsyncDisposable
+    private sealed class Response(TcpClient socket, string method, string path, Dictionary<string, string> headers,
+        byte[] body) : IAsyncDisposable
     {
         public string Method => method;
         public string Path => path;
         public Dictionary<string, string> Headers => headers;
+        public byte[] Body => body;
 
         public static async Task<Response> ReadAsync(TcpClient socket, CancellationToken cancellationToken)
         {
@@ -233,7 +275,10 @@ public static class RuntimeHttpEventsTests
                 var split = line.IndexOf(':');
                 headers.Add(line[..split], line[(split + 1)..].Trim());
             }
-            return new Response(socket, first[0], first[1], headers);
+            var body = new byte[headers.TryGetValue("Content-Length", out var length)
+                ? int.Parse(length, CultureInfo.InvariantCulture) : 0];
+            await stream.ReadExactlyAsync(body, cancellationToken);
+            return new Response(socket, first[0], first[1], headers, body);
         }
         public async Task StartAsync(int status = 200, string type = "text/event-stream; charset=utf-8", string? id = null)
         {

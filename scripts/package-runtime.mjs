@@ -9,11 +9,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { iosTarget, iosArtifacts, checkIOSMachO, checkIOSSymbols, IOS_CAT_WEB_VALUES } from './quickjs/ios-target.mjs';
 
 const PRODUCTS = Object.freeze({
-  aggregate: ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film'],
+  aggregate: ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease'],
 });
 const MODULE_FILES = Object.freeze({
   music: 'modules/music-script.mjs', cat: 'modules/cat-script.mjs', source: 'modules/source-runtime.mjs',
-  pan: 'modules/pan-runtime.mjs', film: 'modules/film-playback.mjs',
+  pan: 'modules/pan-runtime.mjs', film: 'modules/film-playback.mjs', netease: 'modules/netease-token.mjs',
 });
 const MANIFEST = 'runtime-manifest.json';
 const SHARED_SOURCE = 'apps/runtime';
@@ -24,7 +24,7 @@ const SHARED_FILES = ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs
 const SHARED_IMPORTS = new Set([
   'node:buffer', 'node:crypto', 'node:http', 'node:https',
   '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
-  '@meowfilm/pan-runtime', '@meowfilm/film-playback',
+  '@meowfilm/pan-runtime', '@meowfilm/film-playback', '@meowfilm/netease-token',
 ]);
 const NATIVE_POLICY = 'scripts/script-host-native.json';
 const NATIVE_ARTIFACT = 'packages/script-host/build/Release/script_host_native.node';
@@ -578,7 +578,8 @@ function buildGraph(root, product, target) {
     check(isObject(value), 'INVALID_LOCK', `Invalid lock record: ${location}`);
     if (value.link) safeRelative(value.resolved);
   }
-  const selected = ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime', 'film-rules', 'film-playback'];
+  const selected = ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
+    'film-rules', 'film-playback', 'netease-token'];
   const workspacePaths = new Map(selected.map(name => [`packages/${name}`, `node_modules/@meowfilm/${name}`]));
   const nodes = new Map(), edges = [], omitted = [];
   const inputs = [{ path: 'package.json', sha256: rootJSON.hash }, { path: 'package-lock.json', sha256: lockJSON.hash }];
@@ -626,8 +627,8 @@ function buildGraph(root, product, target) {
     checkManifest(pkg, locked, location);
     check(!pkg.gypfile || (location === 'packages/script-host' && pkg.gypfile === true),
       'NATIVE_PAYLOAD', `${location}: native build metadata is not allowed`);
-    check(pkg.name !== 'jsdom',
-      'PRODUCT_CLOSURE', 'jsdom is outside the App script closure');
+    check(pkg.name !== 'jsdom' || pkg.version === '24.1.3',
+      'PRODUCT_CLOSURE', 'The token SDK requires the reviewed Node 18 compatible jsdom');
     if (pkg.name.startsWith('@meowfilm/')) {
       check(workspace && selected.includes(pkg.name.slice('@meowfilm/'.length)),
         'PRODUCT_CLOSURE', `${location}: workspace is not enabled`);
@@ -652,6 +653,9 @@ function buildGraph(root, product, target) {
       ['peer', dependencyMap(pkg, 'peerDependencies', location)],
     ]) {
       for (const name of Object.keys(entries).sort()) {
+        check(name !== 'jsdom' || (pkg.name === '@meowfilm/netease-token' &&
+          kind === 'dependency' && entries[name] === '24.1.3'),
+        'PRODUCT_CLOSURE', 'Only the token owner may depend on the reviewed jsdom');
         const optionalEdge = kind === 'optionalDependency' || (kind === 'peer' && pkg.peerDependenciesMeta?.[name]?.optional === true);
         let found;
         for (const candidate of candidates(location, name)) {

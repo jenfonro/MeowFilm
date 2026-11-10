@@ -202,9 +202,9 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
         return try MusicQQWire.object(value)
     }
 
-    private func heartbeatLikes(_ account: MusicNeteaseContext, own: UUID,
-                                authorize: @escaping @Sendable () async throws -> Void) async throws
-        -> (playlistID: String, ids: [String], validIDs: [String], songs: [String: [String: Any]]) {
+    private func heartbeatMembership(_ account: MusicNeteaseContext, own: UUID,
+                                     authorize: @escaping @Sendable () async throws -> Void) async throws
+        -> (playlistID: String, ids: [String], songs: [String: [String: Any]]) {
         var offset = 0, seen = Set<String>(), favorites: [String] = []
         while true {
             try await authorize(); try check(own)
@@ -241,7 +241,6 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
             detail["trackIds"] = tracks
         }
         let ids = try Self.orderedIDs(detail)
-        guard !ids.isEmpty else { throw MusicServiceError.notFound }
         let members = Set(ids)
         var songs: [String: [String: Any]] = [:], received = Set<String>()
         for row in try MusicNeteaseWire.rows(detail["tracks"] ?? []) {
@@ -249,6 +248,32 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
             guard members.contains(id), received.insert(id).inserted else { throw MusicServiceError.upstreamInvalid }
             if Self.hasDisplayFields(row) { songs[id] = row }
         }
+        return (pid, ids, songs)
+    }
+
+    func heartbeatHomeSeed(_ account: MusicNeteaseContext, own: UUID,
+                           authorize: @escaping @Sendable () async throws -> Void) async throws -> [String: Any]? {
+        let membership = try await heartbeatMembership(account, own: own, authorize: authorize)
+        for id in membership.ids {
+            if let song = membership.songs[id] { return song }
+        }
+        guard let id = membership.ids.first else { return nil }
+        try await authorize(); try check(own)
+        let rows = try await metadata([id], context: account)
+        try await authorize(); try check(own)
+        guard rows.count == 1, try MusicNeteaseWire.id(rows[0]["id"]) == id else {
+            throw MusicServiceError.upstreamInvalid
+        }
+        guard Self.hasDisplayFields(rows[0]) else { throw MusicServiceError.notFound }
+        return rows[0]
+    }
+
+    private func heartbeatLikes(_ account: MusicNeteaseContext, own: UUID,
+                                authorize: @escaping @Sendable () async throws -> Void) async throws
+        -> (playlistID: String, ids: [String], validIDs: [String], songs: [String: [String: Any]]) {
+        let membership = try await heartbeatMembership(account, own: own, authorize: authorize)
+        let ids = membership.ids
+        var songs = membership.songs
         let missing = ids.filter { songs[$0] == nil }
         for offset in stride(from: 0, to: missing.count, by: 100) {
             try await authorize(); try check(own)
@@ -265,7 +290,7 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
         }
         let valid = ids.filter { songs[$0] != nil }
         guard !valid.isEmpty else { throw MusicServiceError.notFound }
-        return (pid, ids, valid, songs)
+        return (membership.playlistID, ids, valid, songs)
     }
 
     private static func isOwnHeartbeatList(_ row: [String: Any], accountID: String) throws -> Bool {

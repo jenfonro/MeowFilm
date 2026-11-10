@@ -117,7 +117,7 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                 self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), {"status": "complete"})
                 self.assertEqual([p.name for p in target.parent.iterdir()], ["Runtime"])
 
-    def test_complete_seven_module_payload_is_published_at_the_existing_target_path(self):
+    def test_complete_eight_module_payload_is_published_at_the_existing_target_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             selected = prepare.target("iphonesimulator", "x86_64")
@@ -128,7 +128,7 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
             manifest = {
                 "status": "complete", "platform": "ios", "assemblyProfile": "common-native",
                 "target": selected, "transport": "runtime.http.v1",
-                "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film"],
+                "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"],
                 "trustedNative": [{}],
             }
 
@@ -139,18 +139,21 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                 staging = Path(command[command.index("--output") + 1])
                 staging.mkdir()
                 (staging / "runtime-manifest.json").write_text(json.dumps(manifest))
-                (staging / "sentinel").write_bytes(b"seven-module-payload")
+                (staging / "sentinel").write_bytes(b"eight-module-payload")
                 return SimpleNamespace(returncode=0)
 
             with patch.dict(prepare.payload.__globals__, ROOT=root), patch.object(prepare.subprocess, "run", run):
                 self.assertEqual(prepare.payload("node", selected), target)
             self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), manifest)
-            self.assertEqual((target / "sentinel").read_bytes(), b"seven-module-payload")
+            self.assertEqual((target / "sentinel").read_bytes(), b"eight-module-payload")
             self.assertEqual([path.name for path in target.parent.iterdir()], ["Runtime"])
 
-    def test_payload_requires_the_exact_seven_module_app_before_replacing_previous_payload(self):
-        expected_modules = ["music", "cat", "source", "pan", "tmdb", "douban", "film"]
+    def test_payload_requires_the_exact_eight_module_app_before_replacing_previous_payload(self):
+        expected_modules = ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"]
         for modules in [
+            ["music", "cat", "source", "tmdb"],
+            ["music", "cat", "source", "tmdb", "netease"],
+            ["music", "cat", "source", "pan", "tmdb", "douban", "film"],
             expected_modules, ["music", "cat", "source"], ["music", "cat", "source", "douban"],
             ["music", "cat", "source", "pan"], ["music", "cat", "source", "unknown"],
             expected_modules + ["douban"], expected_modules + ["pan"], expected_modules + ["tmdb"],
@@ -159,6 +162,7 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
             ["music", "cat", "source", "pan", "tmdb", "douban", "film", "unknown"],
             ["music", "cat", "source", "pan", "tmdb", "douban", "douban"],
             ["music", "cat", "source", "tmdb", "pan", "douban", "film"],
+            ["music", "cat", "source", "pan", "tmdb", "douban", "netease", "film"],
         ]:
             with self.subTest(modules=modules), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)

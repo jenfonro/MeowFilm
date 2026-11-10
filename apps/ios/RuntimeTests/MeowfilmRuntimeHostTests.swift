@@ -36,7 +36,7 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(manifest["assemblyProfile"] as? String, "common-native")
         XCTAssertEqual(manifest["transport"] as? String, "runtime.http.v1")
-        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "pan", "tmdb", "douban", "film"])
+        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"])
         let files = try XCTUnwrap(manifest["files"] as? [[String: Any]])
         XCTAssertFalse(files.contains { ($0["path"] as? String)?.lowercased().hasSuffix(".wasm") == true })
         let frameworks = try XCTUnwrap(Bundle.main.privateFrameworksURL)
@@ -62,11 +62,16 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let resources = try await hostResources()
         let service = resources.musicScripts
         let connection = try await resources.scriptSession.connection()
+        try await connection.validateAppModules()
         let description = try await connection.describe()
         guard case .object(let fields) = description, case .array(let modules)? = fields["modules"] else {
             return XCTFail("Missing runtime module description")
         }
         XCTAssertEqual(fields["protocol"], .string("runtime.http.v1"))
+        XCTAssertEqual(modules.compactMap { value -> String? in
+            guard case .object(let module) = value, case .string(let id)? = module["id"] else { return nil }
+            return id
+        }, ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"])
         XCTAssertTrue(modules.contains {
             guard case .object(let module) = $0 else { return false }
             return module["id"] == .string("music") && module["version"] == .string("0.8.0")

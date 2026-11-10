@@ -10,25 +10,47 @@ extension QQMusicAccountAdapter: MusicAccountSyncProvider {
         try await authorization.check()
         let auth = try auth(credential), first = try await directory(auth)
         var result: [MusicLibrarySyncCollection] = []
+        var subscriptions: [MusicLibrarySyncSubscription] = []
         for entry in first {
             let kind: MusicLibrarySyncKind = entry.id == "favorites" ? .favorites : .playlist
             if !kinds.contains(kind) { continue }
+            if !entry.owned {
+                subscriptions.append(.init(remoteID: entry.id, relationID: entry.id, name: entry.title))
+                continue
+            }
             try await authorization.check()
             let a = try await scan(entry, auth: auth), b = try await scan(entry, auth: auth)
             guard a == b else { throw MusicServiceError.revisionConflict }
             let members = try b.map { try MusicAccountSyncWire.member($0, platform: .qq) }
             result.append(try MusicAccountSyncWire.collection(id: entry.id, name: entry.title, kind: kind,
-                writable: entry.owned, canOrder: false, members: members))
+                writable: true, canOrder: false, members: members))
         }
         try await authorization.check()
         guard try await directory(auth) == first else { throw MusicServiceError.revisionConflict }
         try await authorization.check()
         let directory = try MusicAccountSyncWire.encoded(first.map { [$0.id, String($0.dirID), $0.owner, $0.title, String($0.owned)] })
-        return try MusicAccountSyncWire.snapshot(result, accountID: MusicQQWire.id(auth["musicid"]), kinds: kinds, directory: directory)
+        return try MusicAccountSyncWire.snapshot(result, subscriptions: subscriptions,
+            accountID: MusicQQWire.id(auth["musicid"]), kinds: kinds, directory: directory)
+    }
+
+    func syncReadSubscriptions(credential: AccountCredential,
+                               guard authorization: MusicAccountSyncAuthorization) async throws -> MusicLibrarySyncSnapshot {
+        try await authorization.check()
+        let auth = try auth(credential), first = try await directory(auth)
+        try await authorization.check()
+        guard try await directory(auth) == first else { throw MusicServiceError.revisionConflict }
+        try await authorization.check()
+        let subscriptions = first.filter { !$0.owned }.map {
+            MusicLibrarySyncSubscription(remoteID: $0.id, relationID: $0.id, name: $0.title)
+        }
+        let directory = try MusicAccountSyncWire.encoded(first.map { [$0.id, String($0.dirID), $0.owner, $0.title, String($0.owned)] })
+        return try MusicAccountSyncWire.snapshot([], subscriptions: subscriptions,
+            accountID: MusicQQWire.id(auth["musicid"]), kinds: [.playlist], directory: directory)
     }
 
     func syncWrite(_ mutation: MusicLibrarySyncMutation, credential: AccountCredential,
                    guard authorization: MusicAccountSyncAuthorization) async throws -> MusicLibrarySyncWriteResult {
+        if mutation.action.isSubscription { return try await syncSubscription(mutation, credential: credential, guard: authorization) }
         let auth: [String: Any]
         var entry: MusicQQCollection?
         var native: [[String: Any]] = []
@@ -79,9 +101,44 @@ extension QQMusicAccountAdapter: MusicAccountSyncProvider {
         case .order:
             // preflight rejects this before mutation; no remove/re-add fallback.
             return .notDispatched(.unsupported)
+        case .subscribe, .unsubscribe: return .notDispatched(.invalidRequest)
         }
         try MusicQQWire.codes(response)
         if let ret = response["retCode"], try MusicQQWire.integer(ret) != 0 { throw MusicServiceError.upstreamFailed }
+        try await authorization.check()
+        return .acknowledged(createdID: nil, createdName: nil)
+    }
+    private func syncSubscription(_ mutation: MusicLibrarySyncMutation, credential: AccountCredential,
+                                  guard authorization: MusicAccountSyncAuthorization) async throws -> MusicLibrarySyncWriteResult {
+        let auth: [String: Any], id: String, euin: String
+        do {
+            try await authorization.check()
+            auth = try self.auth(credential)
+            id = try MusicQQWire.id(mutation.collectionID)
+            euin = try MusicQQWire.string(auth["encrypt_uin"], maximum: 256)
+            let first = try await directory(auth)
+            try await authorization.check()
+            let second = try await directory(auth)
+            guard first == second else { throw MusicServiceError.revisionConflict }
+            let revision = MusicAccountSyncWire.hash(try MusicAccountSyncWire.encoded(first.map {
+                [$0.id, String($0.dirID), $0.owner, $0.title, String($0.owned)]
+            }))
+            let subscriptions = first.filter { !$0.owned }.map {
+                MusicLibrarySyncSubscription(remoteID: $0.id, relationID: $0.id, name: $0.title)
+            }
+            try MusicAccountSyncWire.subscriptionPreflight(mutation, subscriptions: subscriptions,
+                directoryRevision: revision, ownedIDs: first.filter(\.owned).map(\.id))
+            try await authorization.check()
+        } catch { return .notDispatched(MusicServiceError.sanitized(error)) }
+        // QQMusicApi 2698673 modules/user.py:335–371. Public disstid/pid,
+        // never an owned playlist's dirid; membership is confirmed by readback.
+        let response = try await syncRPC("music.musicasset.PlaylistFavWrite",
+            mutation.action == .subscribe ? "FavPlaylist" : "CancelFavPlaylist",
+            ["uin": euin, "v_playlistId": [Int(id)!]], auth: auth, authorization: authorization)
+        try MusicQQWire.codes(response)
+        let failed = try array(response["v_failedPlaylistId"] ?? [], maximum: 2000).map { try MusicQQWire.id($0) }
+        guard try MusicQQWire.integer(response["result"]) == 0,
+              !failed.contains(id) else { throw MusicServiceError.upstreamFailed }
         try await authorization.check()
         return .acknowledged(createdID: nil, createdName: nil)
     }

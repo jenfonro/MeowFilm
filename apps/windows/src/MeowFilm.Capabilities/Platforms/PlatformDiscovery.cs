@@ -141,8 +141,12 @@ internal static class PlatformDiscovery
         if (kind == "star" || S(r, "lunaItemType") == "heartRcmd")
         {
             var rawSong = PJ.First(A(ext, "songData"), A(ext, "song"), A(r, "songData"), A(r, "songInfo"));
-            if (rawSong is null) return Unsupported();
-            var song = NativeSong(rawSong, Cover(r));
+            if (rawSong is null)
+                return Finish("collection", PJ.Obj(("type", "heartbeat"), ("entry", "favorites")));
+            var seed = PJ.First(Pick(rawSong, "songInfo", "songData", "song"), rawSong);
+            if (!Regex.IsMatch(PJ.Scalar(Pick(seed, "id", "songId", "resourceId")), "^[1-9][0-9]{0,19}$"))
+                return Unsupported();
+            var song = NativeSong(rawSong!, Cover(r));
             result["entrySong"] = song;
             return Finish("collection", PJ.Obj(("type", "heartbeat"), ("entry", "favorites"),
                 ("songId", NativeMusicSong.NativeId(song))));

@@ -1110,25 +1110,20 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     }
 
     private func saveRemoteCollection() {
-        guard let page = remotePage, let intent = page.makeActionIntent() else { return }
+        guard let page = remotePage, let collection = page.networkSaveCollection,
+              let intent = page.makeActionIntent() else { return }
         let alert = UIAlertController(title: "收藏歌单", message: nil, preferredStyle: .alert)
-        alert.addTextField { [weak self, weak page] in
-            $0.text = page?.collection?.title ?? self?.requestedRemoteCollection?.title
-        }
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "保存", style: .default) {
-            [weak self, weak page, weak alert] _ in
-            let name = alert?.textFields?.first?.text?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard let self, let page, page === self.remotePage, !name.isEmpty else { return }
+        alert.addAction(UIAlertAction(title: "收藏", style: .default) {
+            [weak self, weak page] _ in
+            guard let self, let page, page === self.remotePage else { return }
             self.runPageTask {
                 await page.perform(
                     intent: intent,
                     operation: "收藏歌单",
                     kind: .library
                 ) {
-                    let (source, _) = try await page.playbackSource()
-                    try await self.model.saveRemoteCollection(source, name: name)
+                    try await self.model.saveNetworkPlaylist(collection)
                 }
             }
         })

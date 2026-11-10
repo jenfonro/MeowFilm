@@ -3,18 +3,20 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities.Sync;
 
-/// <summary>One coordinator per library owner. Borrows owners/transport; no Node, account writer or second library store.</summary>
+/// <summary>One coordinator per library owner. Borrows owners/transport/runtime; no account writer or second library store.</summary>
 public sealed class MusicLibrarySyncService : IAsyncDisposable
 {
-    public const string ContractVersion = "1.0.0";
+    public const string ContractVersion = "1.1.0";
     public static readonly TimeSpan Interval = TimeSpan.FromMinutes(5);
     private readonly MusicLibraryOwner library;
     private readonly IMusicPlatformSessionSource sessions;
     private readonly MusicPlatformHttp http;
     private readonly MusicPlatformClientContextOwner clients;
+    private readonly MusicNeteaseTokenProvider neteaseTokens;
     private readonly Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? cloud;
     private readonly TimeProvider time;
     private readonly object gate = new();
@@ -27,14 +29,17 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
     public event Action? StateChanged;
 
     internal MusicLibrarySyncService(MusicLibraryOwner library, IMusicPlatformSessionSource sessions, MusicPlatformHttp http,
-        MusicPlatformClientContextOwner clients)
-        : this(library, sessions, http, clients, null) { }
+        MusicPlatformClientContextOwner clients, IRuntimeClient tokenRuntime)
+        : this(library, sessions, http, clients, tokenRuntime, null) { }
     internal MusicLibrarySyncService(MusicLibraryOwner library, IMusicPlatformSessionSource sessions, MusicPlatformHttp http,
-        MusicPlatformClientContextOwner clients, Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? kugouCloudTransport, TimeProvider? timeProvider = null)
+        MusicPlatformClientContextOwner clients, IRuntimeClient tokenRuntime,
+        Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? kugouCloudTransport, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(library); ArgumentNullException.ThrowIfNull(sessions); ArgumentNullException.ThrowIfNull(http);
         this.library = library; this.sessions = sessions; this.http = http;
         this.clients = clients ?? throw new ArgumentNullException(nameof(clients)); cloud = kugouCloudTransport; time = timeProvider ?? TimeProvider.System;
+        neteaseTokens = new(tokenRuntime ?? throw new ArgumentNullException(nameof(tokenRuntime)));
+        library.SynchronizeNetworkPlaylists = RunNetworkPlaylists;
     }
     private static JsonElement Failed(string code) => LJ.Element(LJ.Obj(("ok", false), ("code", code)));
     private void Changed() { foreach (Action listener in StateChanged?.GetInvocationList() ?? []) try { listener(); } catch { /* UI observers cannot change the durable outcome. */ } }
@@ -86,7 +91,23 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
         lock (gate) { generation++; cts = roundCancellation; }
         try { cts?.Cancel(); } catch (ObjectDisposedException) { } catch (AggregateException) { }
     }
-    private Task<JsonElement> RunOnce(CancellationToken cancellationToken)
+    private async Task<JsonElement> RunNetworkPlaylists(string platform, CancellationToken cancellationToken)
+    {
+        try
+        {
+            LJ.Require(await controls.WaitAsync(0, cancellationToken).ConfigureAwait(false), "SYNC_BUSY");
+            Task<JsonElement> work;
+            try
+            {
+                Invalidate(); await DrainRound(cancellationToken).ConfigureAwait(false);
+                work = RunOnce(cancellationToken, platform);
+            }
+            finally { controls.Release(); }
+            return await work.ConfigureAwait(false);
+        }
+        catch (Exception error) { return Failed(MusicLibrarySyncEngine.Error(error)); }
+    }
+    private Task<JsonElement> RunOnce(CancellationToken cancellationToken, string? networkPlatform = null)
     {
         lock (gate)
         {
@@ -99,7 +120,8 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
                 try
                 {
                     void Check() { lock (gate) LJ.Require(!closed && !stopping && generation == epoch, "STALE_SESSION"); }
-                    return await new MusicLibrarySyncEngine(library, sessions, http, clients, cloud, Check, source.Token).RunAsync().ConfigureAwait(false);
+                    return await new MusicLibrarySyncEngine(library, sessions, http, clients, neteaseTokens, cloud, Check, source.Token)
+                        .RunAsync(networkPlatform).ConfigureAwait(false);
                 }
                 catch (Exception e) { return Failed(MusicLibrarySyncEngine.Error(e)); }
                 finally { lock (gate) if (ReferenceEquals(roundCancellation, source)) roundCancellation = null; source.Dispose(); Changed(); }
@@ -148,6 +170,9 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
                         var lease = await sessions.AcquireAsync(platform, cancellationToken);
                         LJ.Require(lease is not null && lease.Platform == platform && sessions.IsCurrent(lease), "AUTH_REQUIRED");
                         string account = LJ.S(data["accounts"]![platform]); LJ.Require(account.Length == 0 || account == lease.UserId, "ACCOUNT_REBIND_REQUIRED");
+                        LJ.Require(MusicLibraryOwner.NetworkPlaylists(data).OfType<JsonObject>().Where(r => LJ.S(r["platform"]) == platform)
+                            .All(r => (r["intent"] ?? r["subscription"]) is not JsonObject relation ||
+                                LJ.S(relation["accountId"]) == lease.UserId), "ACCOUNT_REBIND_REQUIRED");
                         settings["accountId"] = lease.UserId;
                     }
                     settings["favorites"] = LJ.B(p["favorites"]); settings["playlists"] = LJ.B(p["playlists"]);
@@ -158,6 +183,11 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
                     LJ.Require(state["pending"] is not JsonObject pending || LJ.S(pending["platform"]) != platform, "PENDING_WRITE");
                     settings["favorites"] = false; settings["playlists"] = false; settings["accountId"] = "";
                     LJ.Object(data["accounts"]).Remove(platform);
+                    foreach (var reference in MusicLibraryOwner.NetworkPlaylists(data).OfType<JsonObject>().Where(r => LJ.S(r["platform"]) == platform))
+                    {
+                        reference["subscription"] = null; reference["intent"] = null;
+                        reference["revision"] = LJ.I(reference["revision"]) + 1;
+                    }
                     foreach (var c in LJ.Array(data["collections"]).OfType<JsonObject>())
                     {
                         var removed = LJ.Array(c["bindings"]).OfType<JsonObject>().Where(b => LJ.S(b["platform"]) == platform).ToArray();
@@ -212,7 +242,8 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
     public async Task AbortAsync(CancellationToken cancellationToken = default)
     {
         await PrepareShutdownAsync(cancellationToken).ConfigureAwait(false);
-        lock (gate) { closed = true; schedulerCancellation?.Dispose(); schedulerCancellation = null; StateChanged = null; }
+        lock (gate) { closed = true; schedulerCancellation?.Dispose(); schedulerCancellation = null; StateChanged = null;
+            library.SynchronizeNetworkPlaylists = null; }
     }
     public async ValueTask DisposeAsync() => await AbortAsync().ConfigureAwait(false);
 }

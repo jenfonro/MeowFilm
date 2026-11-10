@@ -9,14 +9,14 @@ async function rejects(f, code) {
   assert.equal(readJSON(join(f.output, 'runtime-manifest.json')).status, 'failed');
 }
 
-test('iOS wrapper packages the seven-module App closure and separate pre-sign framework identity', async t => {
+test('iOS wrapper packages the eight-module App closure and separate pre-sign framework identity', async t => {
   const f = fixture(t), manifest = await f.pack();
   assert.equal(manifest.status, 'complete');
   assert.equal(manifest.entry, 'app/ios/entries/aggregate.mjs');
   assert.equal(manifest.platform, 'ios');
   assert.equal(manifest.transport, 'runtime.http.v1');
   assert.equal(manifest.assemblyProfile, 'common-native');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
   assert.deepEqual(manifest.target, target);
   assert.deepEqual(manifest.fileHashExcludes, ['runtime-manifest.json']);
   assert.equal(manifest.trustedNative.length, 1);
@@ -39,14 +39,14 @@ test('iOS wrapper packages the seven-module App closure and separate pre-sign fr
   assert.equal(manifest.files.some(file => /(?:^|\/)node_modules\/undici\//.test(file.path)), false);
   assert.equal(manifest.files.some(file => /\.(?:node|wasm|dylib|so|dll)$/i.test(file.path)), false);
   const entry = readFileSync(join(f.output, manifest.entry), 'utf8');
-  for (const name of ['music-script', 'cat-script', 'source-runtime', 'pan-runtime', 'metadata-data'])
+  for (const name of ['music-script', 'cat-script', 'source-runtime', 'pan-runtime', 'metadata-data', 'netease-token'])
     assert.ok(entry.includes(`../../modules/${name}.mjs`));
   const imports = manifest.relocations.find(file => file.path === manifest.entry).imports;
   assert.ok(imports.some(({ from, to }) => from === '../../../runtime/entry.mjs' && to === '../../entry.mjs'));
   assert.ok(manifest.dependencies.some(dependency => dependency.name === '@meowfilm/film-playback'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/film-rules/film-rules.js'));
   for (const license of ['quickjs-ng-LICENSE.txt', 'openssl-LICENSE.txt', 'zlib-LICENSE.txt', 'NOTICE.md',
-    'undici-LICENSE.txt'])
+    'undici-LICENSE.txt', 'api-enhanced-MIT.txt', 'npm-node-compat-ISC.txt'])
     assert.ok(manifest.files.some(file => file.path === `licenses/${license}`));
   assert.deepEqual(readFileSync(join(f.output, 'licenses/undici-LICENSE.txt')),
     readFileSync(join(f.root, f.receipt.catWebValues.license.path)));

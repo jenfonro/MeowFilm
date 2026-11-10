@@ -7,7 +7,11 @@ extension NativeMusicService: MusicLibrarySyncing {
         let wrapper = try read().library, ledger = try MusicNativeSyncLedger.load(wrapper)
         let pending = wrapper["library"]["collections"].array.reduce(0) { count, c in
             count + c["intents"].fields.filter { $0.1["pending"].bool }.count
-        }
+        } + wrapper["library"]["networkReferences"].array.filter { reference in
+            reference["pending"].bool && ledger.selections.contains {
+                $0.platform.rawValue == reference["platform"].string && $0.playlists
+            }
+        }.count
         let phase: MusicLibrarySyncState.Phase = librarySyncRun == nil && [.pulling, .pushing].contains(ledger.phase) ? .blocked : ledger.phase
         return .init(selections: ledger.selections, phase: phase, pending: pending + ledger.fences.count, issues: ledger.issues)
     }
@@ -56,16 +60,21 @@ extension NativeMusicService: MusicLibrarySyncing {
     func syncSnapshot(_ session: MusicLibrarySyncSession, selection: MusicLibrarySyncSelection,
                       round: MusicNativeSyncRound) async throws -> MusicLibrarySyncSnapshot {
         try await syncCurrent(round)
-        let snapshot = try await round.port.readLibrarySync(session, kinds: selection.kinds)
+        let snapshot: MusicLibrarySyncSnapshot
+        if round.relationshipsOnly { snapshot = try await round.port.readLibrarySubscriptions(session) }
+        else { snapshot = try await round.port.readLibrarySync(session, kinds: selection.kinds) }
         try await syncCurrent(round)
         try musicRequire(snapshot.accountID == session.accountID && !snapshot.revision.isEmpty &&
-            snapshot.collections.count <= 2000 &&
-            Set(snapshot.collections.map(\.id)).count == snapshot.collections.count, .invalidResponse)
+            snapshot.collections.count + snapshot.subscriptions.count <= 2000 &&
+            Set(snapshot.collections.map(\.id)).count == snapshot.collections.count &&
+            Set(snapshot.subscriptions.map(\.remoteID)).count == snapshot.subscriptions.count &&
+            (selection.playlists || snapshot.subscriptions.isEmpty), .invalidResponse)
+        try musicRequire(!round.relationshipsOnly || snapshot.collections.isEmpty, .invalidResponse)
         try musicRequire(!selection.favorites || snapshot.collections.filter { $0.kind == .favorites }.count == 1, .invalidResponse)
         var bytes = 0
         for c in snapshot.collections {
             _ = try musicText(c.id, maximum: 128); _ = try musicText(c.name, maximum: 600)
-            try musicRequire(selection.kinds.contains(c.kind) && !c.revision.isEmpty &&
+            try musicRequire(selection.kinds.contains(c.kind) && c.writable && !c.revision.isEmpty &&
                 Set(c.members.map(\.occurrenceID)).count == c.members.count, .invalidResponse)
             for member in c.members {
                 bytes += member.track.count
@@ -78,13 +87,26 @@ extension NativeMusicService: MusicLibrarySyncing {
                 }, .targetChanged)
             }
         }
+        for reference in snapshot.subscriptions {
+            try MusicNativeNetworkPlaylists.validateIdentity(platform: session.platform.rawValue, remoteID: reference.remoteID)
+            _ = try musicText(reference.name, maximum: 600)
+            try musicRequire(!reference.relationID.isEmpty && reference.relationID.utf8.count <= 256 &&
+                reference.creator.utf8.count <= 600 && reference.artwork.utf8.count <= 4096 &&
+                .string(reference.artwork) == MusicModel.publicURL(.string(reference.artwork)) &&
+                (reference.count == nil || reference.count! >= 0), .invalidResponse)
+            if session.platform == .kugou {
+                try musicRequire(reference.relationID.range(of: "^1:[1-9][0-9]*$", options: .regularExpression) != nil, .invalidResponse)
+            } else { try musicRequire(reference.relationID == reference.remoteID, .invalidResponse) }
+        }
         try musicRequire(bytes <= 4 * 1024 * 1024, .limit)
         return snapshot
     }
-    func performLibrarySync(_ request: MusicLibrarySyncRequest, port: any MusicNativeLibrarySyncProviding) async throws -> MusicLibrarySyncState {
+    func performLibrarySync(_ request: MusicLibrarySyncRequest, port: any MusicNativeLibrarySyncProviding,
+                            relationshipsOnly: Bool = false) async throws -> MusicLibrarySyncState {
         let initial = try read()
         var round = MusicNativeSyncRound(request: request, epoch: epoch, port: port,
             library: initial.library["library"], ledger: try MusicNativeSyncLedger.load(initial.library), revision: initial.library["revision"].int)
+        round.relationshipsOnly = relationshipsOnly
         round.ledger.selections = request.selections
         round.ledger.phase = .pulling; round.ledger.issues = []
         try syncCheckpoint(&round)
@@ -106,6 +128,10 @@ extension NativeMusicService: MusicLibrarySyncing {
                 guard let session = round.sessions[fence.platform.rawValue],
                       let snapshot = round.snapshots[fence.platform.rawValue] else { continue }
                 try musicRequire(fence.scope == session.scope && fence.accountID == session.accountID, .targetChanged)
+                if relationshipsOnly, !fence.mutation.action.isSubscription {
+                    round.issue("unconfirmed", platform: fence.platform, collection: fence.localID)
+                    continue
+                }
                 guard request.selections.first(where: { $0.platform == fence.platform })?.kinds
                     .contains(fence.mutation.before?.kind ?? .playlist) == true else {
                     round.issue("unconfirmed", platform: fence.platform, collection: fence.localID); continue
@@ -123,12 +149,16 @@ extension NativeMusicService: MusicLibrarySyncing {
                 for session in round.sessions.values { await port.endLibrarySync(session) }
                 return try await librarySyncState()
             }
-            try syncMerge(&round)
-            try await syncMapMissing(&round)
+            for selection in request.selections {
+                let platform = selection.platform.rawValue, session = round.sessions[platform]!
+                round.library["accounts"][platform] = .string(session.accountID); round.ledger.scopes[platform] = session.scope
+            }
+            if relationshipsOnly { try syncMergeSubscriptions(&round) }
+            else { try syncMerge(&round); try await syncMapMissing(&round) }
             round.ledger.phase = .pushing
             try await syncCurrent(round); try syncCheckpoint(&round)
-            try await syncPush(&round)
-            syncAcknowledge(&round)
+            if relationshipsOnly { try await syncPushSubscriptions(&round) }
+            else { try await syncPush(&round); syncAcknowledge(&round) }
             round.ledger.phase = round.ledger.issues.isEmpty && round.ledger.fences.isEmpty ? .synced : .partial
             try await syncCurrent(round); try syncCheckpoint(&round)
             for session in round.sessions.values { await port.endLibrarySync(session) }

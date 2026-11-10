@@ -281,7 +281,7 @@ public static partial class MusicUiTests
                 Equal("打开桌面歌词", AutomationProperties.GetName(button));
             }));
 
-        yield return Case("desktop lyrics footer keeps source FM quality and desktop controls inside both widths", () =>
+        yield return Case("desktop lyrics footer keeps infinity quality and desktop controls inside both widths", () =>
             WithDesktopLyrics((f, _) =>
             {
                 var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
@@ -290,35 +290,40 @@ public static partial class MusicUiTests
                 {
                     FrameworkElement surface = ReferenceEquals(player, detailFooter) ? detail : player;
                     // Render owns this viewport; the shown anchor Window must not re-layout the surface.
-                    var source = (Button)player.FindName("PlaybackSourceButton");
-                    // Exercise the widest visible source/FM/quality chrome without requiring an online account.
-                    ((StackPanel)source.Content).Children.OfType<TextBlock>().Last().Text = new string('宽', 24);
-                    ((Button)player.FindName("FmChannelButton")).Visibility = Visibility.Visible;
+                    var session = (Button)player.FindName("PlaybackSessionButton");
+                    var transport = (StackPanel)player.FindName("TransportPanel");
+                    Equal(0, transport.Children.IndexOf(session));
+                    Equal(1, transport.Children.IndexOf((Button)player.FindName("ModeButton")));
+                    // Exercise the widest right-hand chrome without requiring an online account.
                     ((Button)player.FindName("QualityButton")).Visibility = Visibility.Visible;
                     foreach (int width in new[] { 1110, 860 })
                     {
                         Render(surface, width, ReferenceEquals(player, detailFooter) ? 600 : 80);
                         True(Math.Abs(player.ActualWidth - width) < .5, "the actual footer spans the requested viewport");
+                        True(session.Visibility == Visibility.Visible && session.IsEnabled,
+                            "the common infinity entry remains available in the detached render fixture");
                         AssertPlayerBounds(player, width);
-                        var transport = (FrameworkElement)player.FindName("TransportPanel");
                         var transportRight = transport.TranslatePoint(new(transport.ActualWidth, 0), player).X;
                         var progress = (FrameworkElement)player.FindName("Progress");
                         var progressBottom = progress.TranslatePoint(new(0, progress.ActualHeight), player).Y;
-                        var names = new[] { "PlaybackSourceButton", "FmChannelButton", "QualityButton",
+                        var names = new[] { "QualityButton",
                             "PlaylistButton", "DesktopLyricsButton", "VolumeButton", "MoreButton" };
-                        var bounds = names.Select(name => (FrameworkElement)player.FindName(name))
+                        var options = names.Select(name => (FrameworkElement)player.FindName(name))
                             .Select(control => new Rect(control.TranslatePoint(new(), player), control.RenderSize)).ToArray();
+                        foreach (var rect in options)
+                            True(rect.Left >= transportRight - .5, "right controls do not overlap the centered transport");
+                        var bounds = new[] { new Rect(session.TranslatePoint(new(), player), session.RenderSize) }
+                            .Concat(options).ToArray();
                         foreach (var rect in bounds)
                         {
-                            True(rect.Width > 0 && rect.Height > 0, "all right controls have a measured hit area");
-                            True(rect.Left >= transportRight - .5, "right controls do not overlap the centered transport");
-                            True(rect.Top >= progressBottom - .5, "right controls remain below the seek hit area");
+                            True(rect.Width > 0 && rect.Height > 0, "all controls have a measured hit area");
+                            True(rect.Top >= progressBottom - .5, "controls remain below the seek hit area");
                         }
                         for (int i = 0; i < bounds.Length; i++)
                             for (int j = i + 1; j < bounds.Length; j++)
                                 True(bounds[i].Right <= bounds[j].Left + .5 || bounds[j].Right <= bounds[i].Left + .5 ||
                                     bounds[i].Bottom <= bounds[j].Top + .5 || bounds[j].Bottom <= bounds[i].Top + .5,
-                                    "source FM quality and desktop controls have distinct hit areas");
+                                    "infinity quality and desktop controls have distinct hit areas");
                         GeneralAppearanceTests.SavePreview(player,
                             "media-control-footer-max-" + (ReferenceEquals(player, detailFooter) ? "detail-" : "ordinary-") + width,
                             width, 80);

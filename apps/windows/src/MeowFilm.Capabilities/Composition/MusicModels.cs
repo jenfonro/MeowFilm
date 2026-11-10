@@ -4,15 +4,29 @@ using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
 
-public sealed record PlaylistRow(string Id, string Name, string Kind, long Revision, int Count)
+public sealed record PlaylistRow(string Id, string Name, string Kind, long Revision, int Count,
+    string Platform = "", string RemoteId = "", string Cover = "")
 {
     public string CountText => $"{Count} 首";
+    public string Route => Kind == "network" ? "catalog-playlist/" + Platform + "/" + Uri.EscapeDataString(RemoteId)
+        : Kind == "favorites" ? "favorites" : "playlist/" + Id;
     public static PlaylistRow Read(JsonElement value)
     {
         var kind = MusicDto.Text(value, "kind");
-        MusicDto.Require(kind is "favorites" or "playlist");
-        return new(MusicDto.Text(value, "id"), MusicDto.Text(value, "name"), kind,
-            MusicDto.Integer(value, "revision"), MusicDto.Count(value, "count"));
+        MusicDto.Require(kind is "favorites" or "playlist" or "network");
+        string id = MusicDto.Text(value, "id"), platform = "", remoteId = "", cover = "";
+        int count;
+        if (kind == "network")
+        {
+            platform = MusicDto.Text(value, "platform"); remoteId = MusicDto.Text(value, "remoteId");
+            MusicDto.Require(id == MusicLibraryOwner.NetworkPlaylistId(platform, remoteId) &&
+                value.GetProperty("editable").ValueKind == JsonValueKind.False);
+            cover = MusicCatalogDto.Text(value, "cover");
+            long number = MusicDto.Integer(value, "count"); MusicDto.Require(number <= int.MaxValue); count = (int)number;
+        }
+        else count = MusicDto.Count(value, "count");
+        return new(id, MusicDto.Text(value, "name"), kind,
+            MusicDto.Integer(value, "revision"), count, platform, remoteId, cover);
     }
 }
 

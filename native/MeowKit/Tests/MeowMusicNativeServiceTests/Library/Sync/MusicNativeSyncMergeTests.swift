@@ -485,16 +485,16 @@ import MeowMusicFeature
         let calls = await peer.calls(); XCTAssertEqual(calls.count, 1)
     }
 
-    func testRemotePlaylistRemovalRetiresOnlyObservedWritableBindingAndReadOnlyEditsStayPending() async throws {
+    func testRemotePlaylistRemovalRetiresOnlyManagedBindingWhileSubscriptionStaysReadOnly() async throws {
         let a = NativeSyncFixture.member("101"), b = NativeSyncFixture.member("102")
-        let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection(members: [a]),
-            NativeSyncFixture.collection("502", name: "Subscribed", members: [a], writable: false)])
+        let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection(members: [a])],
+            subscriptions: [.init(remoteID: "502", relationID: "502", name: "Subscribed")])
         let store = try NativeSyncFixture.store([b]), service = try await NativeMusicFixture.service(store, accounts: peer)
         _ = try await service.synchronizeLibrary(NativeSyncFixture.request())
         var lists = try await service.collections()
         let writable = try XCTUnwrap(lists.first { $0.title == "Remote" })
         _ = try await service.editPlaylist(writable, name: nil, refs: NativeSyncFixture.refs([a, b]), order: nil)
-        await peer.replace([NativeSyncFixture.collection("502", name: "Subscribed", members: [a], writable: false)])
+        await peer.replace([])
         let removed = try await service.synchronizeLibrary(NativeSyncFixture.request())
         XCTAssertEqual(removed.phase, .synced)
         let tombstone = try XCTUnwrap(NativeSyncFixture.document(store).library["library"]["collections"].array.first { $0["id"].string == writable.id })
@@ -502,12 +502,18 @@ import MeowMusicFeature
         XCTAssertFalse(tombstone["intents"].fields.contains { $0.1["pending"].bool })
         lists = try await service.collections()
         let readonly = try XCTUnwrap(lists.first { $0.title == "Subscribed" })
-        _ = try await service.editPlaylist(readonly, name: nil, refs: [], order: nil)
-        let blocked = try await service.synchronizeLibrary(NativeSyncFixture.request())
-        XCTAssertEqual(blocked.phase, .partial); XCTAssertTrue(blocked.issues.contains { $0.code == "readOnly" })
+        XCTAssertEqual(readonly.networkReference?.remoteID, "502"); XCTAssertFalse(readonly.canEdit)
+        do { _ = try await service.editPlaylist(readonly, name: nil, refs: [], order: nil); XCTFail("network members are read-only") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .unsupported) }
+        do { try await service.removePlaylist(readonly); XCTFail("must not delete the author's playlist") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .unsupported) }
+        let settled = try await service.synchronizeLibrary(NativeSyncFixture.request())
+        XCTAssertEqual(settled.phase, .synced)
         let calls = await peer.calls(); XCTAssertTrue(calls.isEmpty)
-        let saved = try XCTUnwrap(NativeSyncFixture.document(store).library["library"]["collections"].array.first { $0["id"].string == readonly.id })
-        XCTAssertTrue(saved["intents"].fields.first!.1["pending"].bool)
+        let managed = try NativeSyncFixture.document(store).library["library"]["collections"].array
+        XCTAssertFalse(managed.contains { $0["id"].string == readonly.id })
+        let subscriptions = await peer.subscriptionContents()
+        XCTAssertEqual(subscriptions.map(\.remoteID), ["502"])
     }
 
     func testPendingLocalRemovalWinsRemotePresenceAndQQOrderNeverDeletesAndReadds() async throws {
@@ -616,7 +622,7 @@ import MeowMusicFeature
     }
 }
 
-private actor MultiPlatformSyncPeer: MusicNativeAccountProviding, MusicNativeLibrarySyncProviding {
+actor MultiPlatformSyncPeer: MusicNativeAccountProviding, MusicNativeLibrarySyncProviding {
     let peers: [MusicAccountPlatform: NativeSyncPeer]
     init(_ peers: [MusicAccountPlatform: NativeSyncPeer]) { self.peers = peers }
     func beginLibrarySync(platform: MusicAccountPlatform) async throws -> MusicLibrarySyncSession {
@@ -635,6 +641,10 @@ private actor MultiPlatformSyncPeer: MusicNativeAccountProviding, MusicNativeLib
                          kinds: [MusicLibrarySyncKind]) async throws -> MusicLibrarySyncSnapshot {
         guard let peer = peers[session.platform] else { throw MusicServiceError.unsupported }
         return try await peer.readLibrarySync(session, kinds: kinds)
+    }
+    func readLibrarySubscriptions(_ session: MusicLibrarySyncSession) async throws -> MusicLibrarySyncSnapshot {
+        guard let peer = peers[session.platform] else { throw MusicServiceError.unsupported }
+        return try await peer.readLibrarySubscriptions(session)
     }
     func writeLibrarySync(_ session: MusicLibrarySyncSession,
                           mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult {

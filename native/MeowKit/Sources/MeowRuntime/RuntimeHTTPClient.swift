@@ -8,6 +8,7 @@ public enum RuntimeHTTPError: Error, Sendable, Equatable {
 /// App owner closes it. URLSession owns the actual HTTP tasks and their drain.
 public final class RuntimeHTTPClient: @unchecked Sendable {
     private static let protocolName = "runtime.http.v1"
+    private static let neteaseTokenTimeout: TimeInterval = 60
     private let baseURL: URL
     private let timeout: TimeInterval
     private let state = RuntimeHTTPState()
@@ -35,7 +36,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout
+        configuration.timeoutIntervalForResource = max(timeout, Self.neteaseTokenTimeout)
         eventConfiguration = configuration.copy() as! URLSessionConfiguration
         // Events have an idle timeout, but no whole-observation RPC deadline.
         eventConfiguration.timeoutIntervalForResource = 0
@@ -60,24 +61,29 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         guard case .object(let description) = try await describe(),
               description["protocol"] == .string(Self.protocolName),
               description["product"] == .string("aggregate"),
-              case .array(let modules)? = description["modules"], modules.count == 7 else {
+              case .array(let modules)? = description["modules"], modules.count == 8 else {
             throw RuntimeHTTPError.invalidResponse
         }
         let expected: [(RuntimeModule, String)] = [(.music, "0.8.0"), (.cat, "0.2.0"), (.source, "0.2.0"),
                                                    (.pan, "0.1.0"), (.tmdb, "0.1.0"), (.douban, "0.1.0"),
-                                                   (.film, "0.1.0")]
-        for (module, version) in expected {
-            let matches = modules.filter {
-                guard case .object(let fields) = $0 else { return false }
-                return fields["id"] == .string(module.rawValue) &&
-                    fields["version"] == .string(version) && fields["contract"] == .string(module.contract)
+                                                   (.film, "0.1.0"), (.netease, "0.1.0")]
+        for ((module, version), supplied) in zip(expected, modules) {
+            guard case .object(let fields) = supplied,
+                  fields["id"] == .string(module.rawValue),
+                  fields["version"] == .string(version),
+                  fields["contract"] == .string(module.contract) else {
+                throw RuntimeHTTPError.invalidResponse
             }
-            guard matches.count == 1 else { throw RuntimeHTTPError.invalidResponse }
             if module == .tmdb {
-                guard case .object(let fields) = matches[0], case .array(let methods)? = fields["methods"],
+                guard case .array(let methods)? = fields["methods"],
                       methods.count == 3, Set(methods.compactMap {
                           if case .string(let value) = $0 { return value }; return nil
                       }) == ["tmdb.data.request", "tmdb.data.settings.get", "tmdb.data.settings.update"] else {
+                    throw RuntimeHTTPError.invalidResponse
+                }
+            }
+            if module == .netease {
+                guard fields["methods"] == .array([.string("netease.token.get")]) else {
                     throw RuntimeHTTPError.invalidResponse
                 }
             }
@@ -131,11 +137,15 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         guard operation.range(of: #"^[a-z]+(?:\.[a-z]+)*$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
             throw RuntimeHTTPError.invalidRequest
         }
+        if module == .netease {
+            guard operation == "get", parameters == .object([:]) else { throw RuntimeHTTPError.invalidRequest }
+        }
         let body: Data
         do { body = try RuntimeJSON.encode(parameters) }
         catch { throw RuntimeHTTPError.invalidRequest }
         return try await request(method: "POST", path: "/v1/\(module.rawValue)/\(operation)",
-                                 body: body, module: module)
+                                 body: body, module: module,
+                                 timeout: module == .netease ? max(timeout, Self.neteaseTokenTimeout) : timeout)
     }
 
     /// Observes snapshots without owning the business session or the App runtime.
@@ -192,14 +202,14 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     private func request(method: String, path: String, body: Data? = nil, raw: Bool = false,
-                         module: RuntimeModule? = nil) async throws -> RuntimeValue {
+                         module: RuntimeModule? = nil, timeout: TimeInterval? = nil) async throws -> RuntimeValue {
         guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
         guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
             throw RuntimeHTTPError.invalidRequest
         }
         let requestID = UUID().uuidString.lowercased()
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout ?? self.timeout)
         request.httpMethod = method
         request.httpBody = body
         request.httpShouldHandleCookies = false

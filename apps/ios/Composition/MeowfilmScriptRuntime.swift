@@ -25,7 +25,7 @@ enum MeowfilmScriptRuntime {
     }
 }
 
-/// Only the App's four-module assembly may publish a usable connection.
+/// Only the App's eight-module assembly may publish a usable connection.
 /// A script startup failure still leaves native music/local film data usable.
 private struct MeowfilmRuntimeLauncher: RuntimeLaunching {
     let runtime: RuntimeEmbeddedLauncher

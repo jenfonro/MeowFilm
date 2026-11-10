@@ -17,9 +17,11 @@
     NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     NSThread *runtime = [[NSThread alloc] initWithBlock:^{
         @autoreleasepool {
-            NSArray<NSString *> *arguments = @[@"node",
+            NSMutableArray<NSString *> *arguments = [NSMutableArray arrayWithArray:@[@"node",
                 [root stringByAppendingPathComponent:@"probe.mjs"],
-                documents];
+                documents]];
+            NSArray<NSString *> *launch = NSProcessInfo.processInfo.arguments;
+            [arguments addObjectsFromArray:[launch subarrayWithRange:NSMakeRange(1, launch.count - 1)]];
             // node_start requires writable, contiguous argument storage.
             size_t length = 0;
             for (NSString *argument in arguments) length += strlen(argument.UTF8String) + 1;

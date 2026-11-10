@@ -118,6 +118,8 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
     let transport: any MusicAccountHTTPTransport
     let now: @Sendable () -> Date
     let clientContexts: NativeMusicClientService?
+    let tokenProvider: (any MusicNeteaseTokenProviding)?
+    private let weapiSecret: @Sendable () throws -> String
     var epoch = UUID()
     struct QR {
         let expires: Date
@@ -135,8 +137,12 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
     var dailyCache: DailyCache?
     var publicAudioContext: MusicNeteaseContext?
     init(transport: any MusicAccountHTTPTransport, now: @escaping @Sendable () -> Date,
-         clientContexts: NativeMusicClientService? = nil) {
+         clientContexts: NativeMusicClientService? = nil,
+         tokenProvider: (any MusicNeteaseTokenProviding)? = nil,
+         weapiSecret: @escaping @Sendable () throws -> String = { try MusicNeteaseCrypto.text(16) }) {
         self.transport = transport; self.now = now; self.clientContexts = clientContexts
+        self.tokenProvider = tokenProvider
+        self.weapiSecret = weapiSecret
     }
     func revoke() { epoch = UUID(); qr.removeAll(); sms.removeAll(); dailyCache = nil; publicAudioContext = nil }
     func cancelQR(_ id: UUID) { qr.removeValue(forKey: id) }
@@ -187,6 +193,10 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
         let readCookies = context.cookies
         let response = try await transport.send(.init(url: url, method: "POST", headers: headers, body: MusicQQWire.form(form)))
         try check(context, epoch: own)
+        return try accept(response, url: url, context: context, readCookies: readCookies, qr: qr, smsPath: smsPath)
+    }
+    func accept(_ response: MusicAccountHTTPResponse, url: URL, context: MusicNeteaseContext,
+                readCookies: [String: String], qr: Bool = false, smsPath: String? = nil) throws -> [String: Any] {
         let body = try MusicNeteaseWire.response(response, qr: qr, smsPath: smsPath)
         var devicePatch: [String: String] = [:], deviceRemovals = Set<String>()
         var nextCookies = context.cookies
@@ -251,6 +261,26 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
         context.keyState = state; return state
     }
     static let mobileUA = "NeteaseMusic/9.5.61.260802021928(9005061);Dalvik/2.1.0 (Linux; U; Android 12; HBN-AL00 Build/cd737a2.0)"
+    func requestCookies(_ context: MusicNeteaseContext) -> [String: String] {
+        var cookies = ["__remember_me": "true", "ntes_kaola_ad": "1", "WEVNSM": "1.0.0", "os": "pc",
+            "appver": "3.1.17.204416", "osver": "Microsoft-Windows-10-Professional-build-19045-64bit", "channel": "netease"]
+        cookies.merge(context.cookies) { _, value in value }; cookies.merge(context.device) { _, value in value }
+        return cookies
+    }
+    func eapiRequest(_ path: String, data: [String: Any], cookies: [String: String],
+                     antiCheatToken: String? = nil) throws -> MusicAccountHTTPRequest {
+        var header = cookies.filter { ["osver", "deviceId", "os", "appver", "channel", "MUSIC_U", "MUSIC_A", "NMTID"].contains($0.key) }
+        header.merge(["versioncode": "140", "mobilename": "", "buildver": String(Int(now().timeIntervalSince1970)),
+            "resolution": "1920x1080", "__csrf": cookies["__csrf"] ?? "",
+            "requestId": "\(Int(now().timeIntervalSince1970 * 1000))_0" + (try MusicNeteaseCrypto.text(3, alphabet: "0123456789"))]) { _, value in value }
+        if let antiCheatToken { header["X-antiCheatToken"] = antiCheatToken }
+        var body = data; body["e_r"] = false; body["header"] = header
+        return .init(url: URL(string: "https://interfacepc.music.163.com/eapi/" + path.dropFirst(5))!,
+            method: "POST", headers: ["User-Agent": "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)",
+                "Cookie": MusicNeteaseWire.cookieHeader(header),
+                "Content-Type": "application/x-www-form-urlencoded;charset=utf-8", "Cache-Control": "no-store"],
+            body: MusicQQWire.form(try MusicNeteaseCrypto.eapi(path, plain: MusicQQWire.json(body))))
+    }
     func request(_ path: String, data: [String: Any] = [:], crypto: String = "eapi",
                  context: MusicNeteaseContext, qr: Bool = false) async throws -> [String: Any] {
         let own = epoch; try check(context, epoch: own); try ensureDevice(context)
@@ -268,24 +298,19 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
             xeapiState = try await handshake(context)
             try check(context, epoch: own)
         } else { xeapiState = nil }
-        var cookies = ["__remember_me": "true", "ntes_kaola_ad": "1", "WEVNSM": "1.0.0", "os": "pc",
-            "appver": "3.1.17.204416", "osver": "Microsoft-Windows-10-Professional-build-19045-64bit", "channel": "netease"]
-        cookies.merge(context.cookies) { _, value in value }; cookies.merge(context.device) { _, value in value }
+        var cookies = requestCookies(context)
+        if crypto == "eapi" {
+            let request = try eapiRequest(path, data: data, cookies: cookies), readCookies = context.cookies
+            let response = try await transport.send(request)
+            try check(context, epoch: own)
+            return try accept(response, url: request.url, context: context, readCookies: readCookies, qr: qr)
+        }
         var body = data; body["e_r"] = false
         var headers: [String: String] = [:], form: [String: String], domain: String
         if crypto == "weapi" {
             domain = "music.163.com"; body["csrf_token"] = cookies["__csrf"] ?? ""
             headers = ["Referer": "https://music.163.com/", "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"]
-            form = try MusicNeteaseCrypto.weapi(MusicQQWire.json(body), secret: MusicNeteaseCrypto.text(16))
-        } else if crypto == "eapi" {
-            domain = "interfacepc.music.163.com"
-            var header = cookies.filter { ["osver", "deviceId", "os", "appver", "channel", "MUSIC_U", "MUSIC_A", "NMTID"].contains($0.key) }
-            header.merge(["versioncode": "140", "mobilename": "", "buildver": String(Int(now().timeIntervalSince1970)),
-                "resolution": "1920x1080", "__csrf": cookies["__csrf"] ?? "",
-                "requestId": "\(Int(now().timeIntervalSince1970 * 1000))_0" + (try MusicNeteaseCrypto.text(3, alphabet: "0123456789"))]) { _, value in value }
-            body["header"] = header; cookies = header
-            headers["User-Agent"] = "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)"
-            form = try MusicNeteaseCrypto.eapi(path, plain: MusicQQWire.json(body))
+            form = try MusicNeteaseCrypto.weapi(MusicQQWire.json(body), secret: weapiSecret())
         } else {
             domain = "interface3.music.163.com"
             guard let state = xeapiState else { throw MusicServiceError.invalidRequest }

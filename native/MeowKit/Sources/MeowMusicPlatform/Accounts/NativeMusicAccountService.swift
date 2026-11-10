@@ -163,6 +163,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     private var login: (id: UUID, platform: MusicAccountPlatform, expires: Date, method: MusicAccountLoginMethod)?
     private var checking = Set<UUID>(), lastCreate: [MusicAccountPlatform: Date] = [:]
     private var operations: [UUID: (platform: MusicAccountPlatform, cancel: @Sendable () -> Void)] = [:]
+    var pendingOperationCount: Int { operations.count }
     private var accessTransitions = 0
     private var pendingWrites = 0
     private var dailyStyleWrite: UUID?
@@ -318,7 +319,8 @@ public actor NativeMusicAccountService: MusicAccountsServing {
                 cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
                 clock: @escaping @Sendable () -> Date = { Date() },
                 clientContexts: NativeMusicClientService? = nil,
-                qqClient: NativeMusicQQPublicService? = nil) {
+                qqClient: NativeMusicQQPublicService? = nil,
+                neteaseTokenProvider: (any MusicNeteaseTokenProviding)? = nil) {
         self.accounts = accounts; self.scopes = scopes; self.now = clock
         self.cacheLifecycle = cacheLifecycle
         self.urlCache = MusicNativeAccountURLCache(store: urlCacheStore)
@@ -328,7 +330,8 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         let http = transport ?? owned!
         let clients = clientContexts ?? NativeMusicClientService(clock: clock)
         self.providers = [.qq: QQMusicAccountAdapter(transport: http, now: clock, clientDeviceProvider: qqClient),
-                          .netease: NeteaseMusicAccountAdapter(transport: http, now: clock, clientContexts: clients),
+                          .netease: NeteaseMusicAccountAdapter(transport: http, now: clock, clientContexts: clients,
+                                                              tokenProvider: neteaseTokenProvider),
                           .kugou: KugouMusicAccountAdapter(transport: http, now: clock, clientContexts: clients)]
     }
     // Internal provider injection for deterministic owner/lease contract tests.
@@ -398,6 +401,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         notifyAccountSession(platform)
     }
     private func run<T: Sendable>(_ platform: MusicAccountPlatform, queueAuthorization: MusicQueueAuthorization? = nil,
+                                  timeoutSeconds: UInt64 = 30,
                                   _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
         try check()
         let id = UUID(), own = epoch, gate = MusicAccountOperation<T>()
@@ -418,7 +422,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         }
         defer { queueAuthorization?.remove(id) }
         let timeout = Task {
-            do { try await Task.sleep(nanoseconds: 30_000_000_000) }
+            do { try await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000) }
             catch { return }
             gate.finish(.failure(MusicServiceError.timeout)); task.cancel()
         }
@@ -451,8 +455,9 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     }
     private func authenticated<T: Sendable>(_ platform: MusicAccountPlatform, token: AccountSessionToken, own: UUID, revision: Int,
                                             queueAuthorization: MusicQueueAuthorization? = nil,
+                                            timeoutSeconds: UInt64 = 30,
                                             _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
-        do { return try await run(platform, queueAuthorization: queueAuthorization, operation) }
+        do { return try await run(platform, queueAuthorization: queueAuthorization, timeoutSeconds: timeoutSeconds, operation) }
         catch {
             if safe(error).isAuthenticationFailure, epoch == own, revisions[platform, default: 0] == revision,
                tokens[platform] == token, validated.contains(platform) {
@@ -1582,16 +1587,42 @@ extension NativeMusicAccountService: MusicNativeLibrarySyncProviding {
         guard value.accountID == session.accountID else { throw MusicServiceError.targetChanged }
         return value
     }
-    public func writeLibrarySync(_ session: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult {
-        // No automatic refresh or login inside a dispatched write.
+    public func readLibrarySubscriptions(_ session: MusicLibrarySyncSession) async throws -> MusicLibrarySyncSnapshot {
         try await checkLibrarySync(session)
         guard let entry = librarySyncBindings[session.id],
               let provider = providers[session.platform] as? any MusicAccountSyncProvider else { throw MusicServiceError.staleResult }
         let value = try await authenticated(session.platform, token: entry.lease.token, own: entry.epoch, revision: entry.revision) {
-            try await provider.syncWrite(mutation, credential: entry.lease.credential, guard: entry.authorization)
+            try await provider.syncReadSubscriptions(credential: entry.lease.credential, guard: entry.authorization)
         }
         try await checkLibrarySync(session)
+        guard value.accountID == session.accountID, value.collections.isEmpty else { throw MusicServiceError.targetChanged }
         return value
+    }
+    public func writeLibrarySync(_ session: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult {
+        // No automatic refresh or login inside a dispatched write.
+        let dispatch = session.platform == .netease && mutation.action.isSubscription ? MusicAccountSyncDispatch() : nil
+        do {
+            try await checkLibrarySync(session)
+            guard let entry = librarySyncBindings[session.id],
+                  let provider = providers[session.platform] as? any MusicAccountSyncProvider else { throw MusicServiceError.staleResult }
+            let authorization = dispatch.map { MusicAccountSyncAuthorization(parent: entry.authorization, dispatch: $0) }
+                ?? entry.authorization
+            // Leave room for the fresh token's 45s Worker budget, its 60s HTTP
+            // request and the native directory preflight/write. Other calls keep 30s.
+            let timeout: UInt64 = dispatch == nil ? 30 : 120
+            let value = try await authenticated(session.platform, token: entry.lease.token, own: entry.epoch,
+                                                revision: entry.revision, timeoutSeconds: timeout) {
+                try await provider.syncWrite(mutation, credential: entry.lease.credential, guard: authorization)
+            }
+            if case .notDispatched = value { return value }
+            try await checkLibrarySync(session)
+            return value
+        } catch {
+            // run() can finish its logical wait before the adapter returns.
+            // Atomically stop that adapter before issuing a no-send proof.
+            if dispatch?.stopBeforeDispatch() == true { return .notDispatched(safe(error)) }
+            throw error
+        }
     }
     public func endLibrarySync(_ session: MusicLibrarySyncSession) {
         guard librarySyncBindings[session.id]?.session == session else { return }

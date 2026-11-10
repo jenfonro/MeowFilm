@@ -1,6 +1,6 @@
 # Windows 脚本启动与 HTTP 会话
 
-`apps/windows/runtime/` 只保留 `bootstrap.mjs` 和 `entries/aggregate.mjs`。薄 entry 使用公共 `apps/runtime/entry.mjs` 按序装配 music／cat／source／pan／tmdb／douban／film 七模块，并指定 source 平台为 Windows。前六个 provider 构造后经 `connectFilmPlayback` 接入 film 及变更撤权 hook；不复制脚本执行、协议或业务实现。通用 `createRuntime()` 默认三模块不变。
+`apps/windows/runtime/` 只保留 `bootstrap.mjs` 和 `entries/aggregate.mjs`。薄 entry 使用公共 `apps/runtime/entry.mjs` 按序装配 music／cat／source／pan／tmdb／douban／film／netease 八模块，并指定 source 平台为 Windows。前六个 provider 构造后经 `connectFilmPlayback` 接入 film 及变更撤权 hook，最后追加按需网易 token 模块；不复制脚本执行、协议或业务实现。通用 `createRuntime()` 默认三模块不变。
 
 ## 私密启动与存活句柄
 
@@ -14,7 +14,7 @@ App 通过已验证的管道发送一行 UTF-8 JSON `{sessionId,dataRoot}`，Nod
 
 `RuntimeHttpClient` 接受合法 HTTP(S) 根端点，包括域名、非回环和默认端口；App 默认使用启动握手返回的本机 URL。不走系统代理、不跟随重定向、不自动重放业务。每次请求携带独立 UUID `X-Meow-Request-Id`，核对响应 ID、内容类型、状态及严格信封；公开契约见 [Runtime bridge](../runtime/runtime-bridge.md)。
 
-- `GET /v1/describe` 核对 `runtime.http.v1`、`aggregate`、准确模块及完整方法清单，顺序为：`music@0.8.0` / `music.script.v3`、`cat@0.2.0` / `cat.script.v2`、`source@0.2.0` / `source.runtime.v2`、`pan@0.1.0` / `pan.runtime.v1`、`tmdb@0.1.0` / `tmdb.data.v1`、`douban@0.1.0` / `douban.data.v1`、`film@0.1.0` / `film.playback.v1`；缺项、多项、重复项或不符版本不接受。
+- `GET /v1/describe` 核对 `runtime.http.v1`、`aggregate`、准确模块及完整方法清单，顺序为：`music@0.8.0` / `music.script.v3`、`cat@0.2.0` / `cat.script.v2`、`source@0.2.0` / `source.runtime.v2`、`pan@0.1.0` / `pan.runtime.v1`、`tmdb@0.1.0` / `tmdb.data.v1`、`douban@0.1.0` / `douban.data.v1`、`film@0.1.0` / `film.playback.v1`、`netease@0.1.0` / `netease.token.v1`；缺项、多项、重复项或不符版本不接受。
 - 普通调用为 `POST /v1/{module}/{operation}`，参数直接是 JSON，成功信封为 `{ok:true,contract,value}`，失败为 `{ok:false,contract,code}`；结果不再是 JSON 字符串。
 - 源码经 `UploadSourceAsync` 完整 raw PUT，由 installationId 与明确 sourceRevision 绑定。异步上传借用调用方字节直到实际发送任务结束，包括取消；业务层不管理 begin/chunk/read/release。
 - `ReadImageAsync` 只接受受信运行器相对图片引用，经同一客户端携带请求 ID；成功读二进制、错误解包 `502` 模块信封，读取中受原生图片资源预算约束，取消等待物理响应释放。图片契约见[元数据运行器](../runtime/metadata-data.md)。

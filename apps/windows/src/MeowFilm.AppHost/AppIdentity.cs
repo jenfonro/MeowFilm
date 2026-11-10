@@ -20,7 +20,8 @@ public static class AppIdentity
             new RuntimeModule("pan", "0.1.0"),
             new RuntimeModule("tmdb", "0.1.0"),
             new RuntimeModule("douban", "0.1.0"),
-            new RuntimeModule("film", "0.1.0")
+            new RuntimeModule("film", "0.1.0"),
+            new RuntimeModule("netease", "0.1.0")
         });
     /// <summary>Trusted native content collections. Music sources are stored by the shared runtime module.</summary>
     public static IReadOnlyList<string> NativeCollections { get; } = Array.AsReadOnly(Array.Empty<string>());

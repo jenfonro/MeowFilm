@@ -16,6 +16,10 @@ public static partial class RuntimeHttpProtocol
     internal static readonly IReadOnlyDictionary<string, ModuleContract> Modules =
         new Dictionary<string, ModuleContract>(StringComparer.Ordinal)
     {
+        ["netease"] = new("0.1.0", "netease.token.v1", "netease.token.",
+            ["get"],
+            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "TIMEOUT", "NETWORK_ERROR",
+                "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "SDK_FAILURE", "SDK_CLEANUP" }),
         ["tmdb"] = new("0.1.0", "tmdb.data.v1", "tmdb.data.",
             ["settings.get", "settings.update", "request"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR",
@@ -128,14 +132,17 @@ public static partial class RuntimeHttpProtocol
                 || description.GetProperty("protocol").GetString() != Name
                 || description.GetProperty("product").GetString() != product
                 || expectedModules.Count != Modules.Count) throw new BridgeException("INVALID_RESPONSE");
-            var remaining = expectedModules.ToDictionary(module => module.Id, module => module.Version, StringComparer.Ordinal);
+            var declaredModules = description.GetProperty("modules");
+            if (declaredModules.GetArrayLength() != expectedModules.Count) throw new BridgeException("INVALID_RESPONSE");
             var methods = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var module in description.GetProperty("modules").EnumerateArray())
+            for (var index = 0; index < expectedModules.Count; index++)
             {
+                var module = declaredModules[index];
+                var expected = expectedModules[index];
                 var id = module.GetProperty("id").GetString()!;
-                if (module.EnumerateObject().Count() != 4 || !remaining.Remove(id, out var version)
-                    || !Modules.TryGetValue(id, out var contract) || version != contract.Version
-                    || module.GetProperty("version").GetString() != version
+                if (module.EnumerateObject().Count() != 4 || id != expected.Id
+                    || !Modules.TryGetValue(id, out var contract) || expected.Version != contract.Version
+                    || module.GetProperty("version").GetString() != expected.Version
                     || module.GetProperty("contract").GetString() != contract.Name)
                     throw new BridgeException("INVALID_RESPONSE");
                 var declared = new HashSet<string>(StringComparer.Ordinal);
@@ -147,7 +154,6 @@ public static partial class RuntimeHttpProtocol
                 if (!declared.SetEquals(contract.Operations.Select(operation => contract.Prefix + operation)))
                     throw new BridgeException("INVALID_RESPONSE");
             }
-            if (remaining.Count != 0) throw new BridgeException("INVALID_RESPONSE");
             return methods;
         }
         catch { throw new BridgeException("INVALID_RESPONSE"); }

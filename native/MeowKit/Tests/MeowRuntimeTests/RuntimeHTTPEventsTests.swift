@@ -183,6 +183,60 @@ final class RuntimeHTTPEventsTests: XCTestCase {
         XCTAssertTrue(client.isClosed)
     }
 
+    func testNeteaseCancellationKeepsFilmEventsAliveAndOwnerCloseDrainsBoth() async throws {
+        let client = try client()
+        let first = snapshot(1), second = snapshot(2)
+        let firstFrame = try frame(1, snapshot: first), secondFrame = try frame(2, snapshot: second)
+        let tokenEntered = expectation(description: "token request entered beside film observation")
+        let tokenStopped = expectation(description: "token cancellation reached its transport")
+        let eventsStopped = expectation(description: "owner drained film observation")
+        RuntimeEventsURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.timeoutInterval, 30)
+            transport.onStop { eventsStopped.fulfill() }
+            RuntimeEventsURLProtocol.fixture.set { request, token in
+                XCTAssertEqual(request.url?.path, "/v1/netease/get")
+                XCTAssertEqual(request.timeoutInterval, 60)
+                token.onStop {
+                    tokenStopped.fulfill()
+                    transport.send(secondFrame)
+                }
+                tokenEntered.fulfill()
+            }
+            transport.headers(); transport.send(firstFrame)
+        }
+        let events = try client.events(moduleID: "film", sessionID: businessSession)
+        var iterator = events.makeAsyncIterator()
+        let receivedFirst = try await iterator.next()
+        XCTAssertEqual(receivedFirst, first)
+        let token = Task { try await client.call(module: .netease, operation: "get") }
+        await fulfillment(of: [tokenEntered], timeout: 2)
+        token.cancel()
+        do { _ = try await token.value; XCTFail("cancelled token cannot succeed") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .cancelled) }
+        await fulfillment(of: [tokenStopped], timeout: 2)
+        let receivedSecond = try await iterator.next()
+        XCTAssertEqual(receivedSecond, second)
+        XCTAssertFalse(client.isClosed)
+
+        let ownerTokenEntered = expectation(description: "new token request entered")
+        let ownerTokenStopped = expectation(description: "owner drained token transport")
+        RuntimeEventsURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.url?.path, "/v1/netease/get")
+            transport.onStop { ownerTokenStopped.fulfill() }
+            ownerTokenEntered.fulfill()
+        }
+        let pendingToken = Task { try await client.call(module: .netease, operation: "get") }
+        await fulfillment(of: [ownerTokenEntered], timeout: 2)
+        await client.close()
+        do { _ = try await pendingToken.value; XCTFail("owner close retires token request") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
+        do { _ = try await iterator.next(); XCTFail("owner close retires film observation") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
+        await fulfillment(of: [ownerTokenStopped, eventsStopped], timeout: 2)
+        XCTAssertTrue(client.isClosed)
+    }
+
     func testMalformedFramesAndTruncatedUTF8FailWithoutEchoingWire() throws {
         let identity = businessSession.uuidString.lowercased()
         for body in [

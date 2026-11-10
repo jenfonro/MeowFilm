@@ -2,6 +2,10 @@ const metadataCodes = () => new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', '
   'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'WEB_INTERACTION_REQUIRED', 'STORAGE_ERROR', 'CORRUPT_STORAGE']);
 
 export const contracts = Object.freeze({
+  netease: { contract: 'netease.token.v1', version: '0.1.0', prefix: 'netease.token.',
+    operations: ['get'],
+    codes: new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'TIMEOUT', 'NETWORK_ERROR',
+      'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'SDK_FAILURE', 'SDK_CLEANUP']) },
   film: { contract: 'film.playback.v1', version: '0.1.0', prefix: 'film.',
     operations: ['session.open', 'session.command', 'session.snapshot', 'session.release',
       'session.attempt', 'session.media.release', 'settings.get', 'settings.set', 'library.get', 'library.remove', 'manual.update',

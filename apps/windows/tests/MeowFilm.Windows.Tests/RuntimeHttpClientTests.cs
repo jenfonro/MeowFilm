@@ -64,7 +64,8 @@ public static class RuntimeHttpClientTests
                 await exchange.ReplyAsync(Success(Description(), RuntimeHttpProtocol.Name));
             }
             var declared = RuntimeHttpProtocol.ValidateDescription((await describe).GetProperty("value"), "aggregate", Modules);
-            BridgeTests.Equal(66, declared.Count);
+            BridgeTests.Equal(67, declared.Count);
+            BridgeTests.Equal(true, declared.Contains("netease.token.get"));
             var close = client.ShutdownAsync();
             await using (var exchange = await server.AcceptAsync())
             {
@@ -82,6 +83,12 @@ public static class RuntimeHttpClientTests
             ("wrong contract", root => root["modules"]![1]!["contract"] = "wrong"),
             ("duplicate module", root => root["modules"]![1] = root["modules"]![0]!.DeepClone()),
             ("unknown module", root => root["modules"]![1]!["id"] = "unknown"),
+            ("reordered modules", root =>
+            {
+                var modules = root["modules"]!.AsArray();
+                var first = modules[0]!.DeepClone();
+                modules[0] = modules[1]!.DeepClone(); modules[1] = first;
+            }),
             ("missing method", root => root["modules"]![0]!["methods"]!.AsArray().RemoveAt(0)),
             ("duplicate method", root => root["modules"]![0]!["methods"]!.AsArray().Add("music.script.invoke")),
             ("unknown method", root => root["modules"]![0]!["methods"]!.AsArray().Add("music.script.unknown")),
@@ -91,6 +98,18 @@ public static class RuntimeHttpClientTests
             ("TMDB missing operation", root => root["modules"]![4]!["methods"]!.AsArray().RemoveAt(2)),
             ("missing film module", root => root["modules"]!.AsArray().RemoveAt(6)),
             ("missing pan module", root => root["modules"]!.AsArray().RemoveAt(3)),
+            ("missing Douban module", root => root["modules"]!.AsArray().RemoveAt(5)),
+            ("old seven-module description", root => root["modules"]!.AsArray().RemoveAt(7)),
+            ("old five-module description", root =>
+            {
+                var modules = root["modules"]!.AsArray();
+                modules.RemoveAt(6); modules.RemoveAt(5); modules.RemoveAt(3);
+            }),
+            ("old four-module description", root =>
+            {
+                var modules = root["modules"]!.AsArray();
+                modules.RemoveAt(7); modules.RemoveAt(6); modules.RemoveAt(5); modules.RemoveAt(3);
+            }),
             ("formal three-module assembly", root =>
             {
                 var modules = root["modules"]!.AsArray();
@@ -101,6 +120,10 @@ public static class RuntimeHttpClientTests
             ("duplicate film method", root => root["modules"]![6]!["methods"]!.AsArray().Add("film.library.get")),
             ("unknown film method", root => root["modules"]![6]!["methods"]!.AsArray().Add("film.session.unknown")),
             ("unknown metadata method", root => root["modules"]![4]!["methods"]!.AsArray().Add("tmdb.data.unknown")),
+            ("NetEase old version", root => root["modules"]![7]!["version"] = "0.0.1"),
+            ("NetEase wrong contract", root => root["modules"]![7]!["contract"] = "music.script.v3"),
+            ("NetEase missing operation", root => root["modules"]![7]!["methods"]!.AsArray().Clear()),
+            ("NetEase extra operation", root => root["modules"]![7]!["methods"]!.AsArray().Add("netease.token.close")),
             ("extra description field", root => root["extra"] = true),
         })
             yield return new("runtime-http: description rejects " + name, () =>
@@ -274,13 +297,51 @@ public static class RuntimeHttpClientTests
             await using var client = new RuntimeHttpClient(server.BaseUrl);
             var stalled = client.CallAsync("music.script.invoke");
             await using var waiting = await server.AcceptAsync();
+            var token = client.CallAsync("netease.token.get");
+            await using var tokenExchange = await server.AcceptAsync();
             var other = client.CallAsync("music.script.sources.list");
             await using (var exchange = await server.AcceptAsync())
                 await exchange.ReplyAsync(Success(new { items = Array.Empty<object>() }));
             BridgeTests.Equal(true, (await other).GetProperty("ok").GetBoolean());
             await BridgeTests.Expect("TIMEOUT", () => stalled).WaitAsync(TimeSpan.FromSeconds(35));
             await waiting.AssertDisconnectedAsync();
+            BridgeTests.Equal(false, token.IsCompleted);
+            await tokenExchange.ReplyAsync(Success(new { token = "SYNTHETIC_FRESH_TOKEN" }, "netease.token.v1"));
+            BridgeTests.Equal(true, (await token).GetProperty("ok").GetBoolean());
             BridgeTests.Equal(false, server.HasConnection);
+        });
+        yield return new("runtime-http: NetEase token route is exact and actively cancellable", async () =>
+        {
+            await using var server = new Server();
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
+            using var cancellation = new CancellationTokenSource();
+            var call = client.CallAsync("netease.token.get", new { }, cancellation.Token);
+            await using var exchange = await server.AcceptAsync();
+            CheckCorrelation(exchange, server);
+            BridgeTests.Equal("POST", exchange.Method);
+            BridgeTests.Equal("/v1/netease/get", exchange.Path);
+            BridgeTests.Equal("{}", Encoding.UTF8.GetString(exchange.Body));
+            cancellation.Cancel();
+            try { await call; throw new InvalidOperationException("Expected cancellation"); }
+            catch (OperationCanceledException) { }
+            await exchange.AssertDisconnectedAsync();
+            BridgeTests.Throws("METHOD_UNAVAILABLE", () => client.CallAsync("netease.token.close"));
+            BridgeTests.Throws("METHOD_UNAVAILABLE", () => client.CallAsync("music.script.netease.token.get"));
+            BridgeTests.Equal(false, server.HasConnection);
+        });
+        yield return new("runtime-http: NetEase returns only its declared sanitized error codes", async () =>
+        {
+            await using var server = new Server();
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
+            foreach (string code in new[] { "INVALID_REQUEST", "CLOSED", "CANCELLED", "TIMEOUT", "NETWORK_ERROR",
+                "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "SDK_FAILURE", "SDK_CLEANUP", "SYNTHETIC_PRIVATE_ERROR" })
+            {
+                var call = client.CallAsync("netease.token.get");
+                await using var exchange = await server.AcceptAsync();
+                await exchange.ReplyAsync(Failure(code, "netease.token.v1"));
+                if (code == "SYNTHETIC_PRIVATE_ERROR") await BridgeTests.Expect("INVALID_RESPONSE", () => call);
+                else BridgeTests.Equal(code, (await call).GetProperty("code").GetString());
+            }
         });
         yield return new("runtime-http: incomplete cleanup acknowledgement never becomes shutdown success", async () =>
         {
@@ -364,7 +425,8 @@ public static class RuntimeHttpClientTests
     }
 
     internal static RuntimeModule[] Modules => [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0"),
-        new("pan", "0.1.0"), new("tmdb", "0.1.0"), new("douban", "0.1.0"), new("film", "0.1.0")];
+        new("pan", "0.1.0"), new("tmdb", "0.1.0"), new("douban", "0.1.0"), new("film", "0.1.0"),
+        new("netease", "0.1.0")];
     internal static object Description() => new
     {
         protocol = "runtime.http.v1", product = "aggregate", modules = new[]
@@ -405,6 +467,10 @@ public static class RuntimeHttpClientTests
                 "film.session.attempt", "film.session.media.release", "film.settings.get", "film.settings.set",
                 "film.library.get", "film.library.remove", "film.manual.update",
                 "film.data.search", "film.data.detail", "film.data.metadata", "film.data.cache.entry", "film.data.invalidate"
+            } },
+            new { id = "netease", version = "0.1.0", contract = "netease.token.v1", methods = new[]
+            {
+                "netease.token.get"
             } }
         }
     };

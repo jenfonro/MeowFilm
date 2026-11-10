@@ -132,7 +132,11 @@ final class MusicNativeHomeActionTests: XCTestCase {
         for raw in [
             #"{"type":"star","resourceId":"987","action":"orpheus://playlist/42"}"#,
             #"{"lunaItemType":"heartRcmd","resourceId":"invalid","playlistId":"42","sid":"99"}"#
-        ] { XCTAssertEqual(try descriptor(json(raw)), .heartbeat) }
+        ] { XCTAssertEqual(try descriptor(json(raw)), .heartbeat, "an unseeded entrance must request an account seed") }
+        for raw in [
+            #"{"type":"star","songData":{"id":0},"resourceId":"987"}"#,
+            #"{"type":"star","songData":{"id":"invalid"},"resourceId":"987"}"#
+        ] { try unavailable(json(raw)) }
         let saved = Data(#"{"type":"heartbeat","playlistId":"42","resourceId":"not-a-playlist","pid":"99","sid":"100","url":"https://invalid.test"}"#.utf8)
         let decoded = try JSONDecoder().decode(MusicHomeAction.self, from: saved)
         XCTAssertEqual(decoded, .heartbeat)

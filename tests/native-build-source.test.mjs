@@ -7,6 +7,9 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import vm from 'node:vm';
+import { buildSourceSDK } from '../scripts/quickjs/build-source-sdk.mjs';
+import { sdkDependencyInputs } from '../scripts/quickjs/build-native.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const require = createRequire(import.meta.url);
@@ -141,4 +144,25 @@ test('native input hashing returns every sorted unique hash with 512 real files'
   const requested = [...paths, paths[0], paths[256], paths[0]];
   const expected = [...originals.keys()].sort().map(path => ({ path, sha256: hash(originals.get(path)) }));
   assert.deepEqual(await f.builder.hashInputs(requested), expected);
+});
+
+test('source SDK keeps its Node-free dependency closure when the token DOM dependencies are installed', async t => {
+  const temporary = join(repository, 'tmp/test-results/native-build-source');
+  mkdirSync(temporary, { recursive: true });
+  const directory = mkdtempSync(join(temporary, 'sdk-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  // Both are installed for Watchman; neither is a source SDK dependency.
+  assert.ok(require.resolve('jsdom'));
+  assert.ok(require.resolve('cssstyle'));
+  const before = new Set(await sdkDependencyInputs());
+  const sdk = await buildSourceSDK({ directory });
+  for (const input of sdk.inputs.filter(input => input.path.startsWith('node_modules/'))) {
+    assert.ok(before.has(input.path), `unrecorded SDK dependency: ${input.path}`);
+  }
+  assert.equal(sdk.inputs.some(input => /node_modules\/(?:cssstyle|jsdom)\//.test(input.path)), false);
+  // Load the real SDK without Node globals; this is a bundling regression,
+  // not a claim that this VM replaces the native QuickJS host acceptance.
+  const runtime = vm.runInNewContext(readFileSync(join(repository, sdk.path), 'utf8'), {}, { timeout: 1000 });
+  assert.equal(typeof runtime.start, 'function');
+  assert.deepEqual(Array.from(runtime.utility('encode', ['测试', 'gbk'])), [178, 226, 202, 212]);
 });

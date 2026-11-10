@@ -11,7 +11,7 @@ E49 搜索交接与元数据消费者已完成正式接线并有对应测试用�
 - `FilmSourceService` 实现 `IFilmSearchSources`，在读取当前 Cat 状态并等待已有 starting 结算后选取可搜索源；`CurrentSearchSources` 是无 I/O 的当前可用集合。内容请求经 `FilmSearchDataClient` 调用 `film.data.search`，携带准确 source、原查询和本源 `page`，并检查调用前后的安装／代次；不再由原生适配器直接调用 Cat 的搜索动作。
 - Capabilities 将共享文件嵌为 `MeowFilm.FilmSearch.js`，使用 `NativeJavaScriptJsonEngine` 执行投影、聚合和排序，不另写 C# 搜索算法；内容取数另走同一 App runtime。正则来自既有 `FilmRuleService` 已保存快照。MSBuild 继续构建并复制原生 `meowfilm_js.dll`。
 - `FilmMetadataService` 实现 `IFilmSearchMetadata`，内容经同一 `FilmSearchDataClient` 调用 `film.data.metadata`。搜索请求为 `/3/search/multi`、`{query:原查询,page:1,language:'zh-CN'}`、`imageSize:'w500'`；电影／剧集完整详情为 `/3/{movie|tv}/{id}`、`{language:'zh-CN',append_to_response:'credits,similar,images'}`、`imageSize:'original'`，与 Node 播放详情同键。保留完整原响应及附加字段，不以卡片显示摘要替代原数据；空凭据仍正常请求显式配置代理，失败不伪造空成功。
-- 正式 Windows entry、manifest 与原生 describe 精确装配 `music,cat,source,pan,tmdb,douban,film` 七模块；同进程先建六 provider，再以 `connectFilmPlayback` 接入影视及 provider 撤权 hook。通用 `createRuntime()` 默认三模块不变，精确身份／版本／操作校验不放宽，详见[运行器装配](app-runtime.md)与[打包](runtime-packaging.md)。装配豆瓣不表示搜索范围新增豆瓣。
+- 正式 Windows entry、manifest 与原生 describe 精确装配 `music,cat,source,pan,tmdb,douban,film,netease` 八模块；同进程先建六 provider，再以 `connectFilmPlayback` 接入影视及 provider 撤权 hook，最后追加网易 token。通用 `createRuntime()` 默认三模块不变，精确身份／版本／操作校验不放宽，详见[运行器装配](app-runtime.md)与[打包](runtime-packaging.md)。装配豆瓣不表示搜索范围新增豆瓣。
 - 内容缓存、完整度、新鲜度与同 key producer 合并由 [Node film 数据 owner](../runtime/film-playback.md) 唯一持有。原生只保留当前查询／页面展示快照，不保留跨查询的成功详情缓存或跨请求 flight。TMDB 设置仍调用 `tmdb.data.settings.get/update`，配置及凭据只由运行器持久化。
 - `IRuntimeImageClient` 经当前会话读取 `/v1/tmdb/images/...`，由 AppHost 注入 `ArtworkService` 中性字节口；相对引用就是缓存键，保持原生 4 MiB 编码图片与解码／像素预算。普通 `ArtworkHttp` 按实际 HTTP(S) 地址读取，不作域名、IP、端口或重定向来源访问准入，见[图像生命周期](artwork.md)。
 - 生产端点／凭据来自运行器配置；没有读取其他任务私密数据。真实公网联调仍需用户提供可用配置或授权来源，以下合成 HTTP 真实运行器用例不代表公网通过。
@@ -115,7 +115,7 @@ try {
 
 `FilmMetadataRuntimeTests.cs`／`FilmMetadataConsumerTests.cs` 正由对应 owner 整合，以下保留 group、依赖和必要覆盖，不固定精确 cases 或数量。当前未取得最终输入的执行结论。
 
-真实 runtime 组必须使用当前 Windows 七模块 entry 的 bundle（根下的 `aggregate`），经正常 bootstrap／ensure-runtime-native 与 `scripts/windows/prepare-test-bundles.mjs` 准备；需要 Node addon、原生 QuickJS 及测试工程上述原生构建闭包，不能以过时模块 bundle 或 DTO 替身替代。沿用 `MEOWFILM_TEST_NODE`、`MEOWFILM_TEST_DATA_ROOT`、`MEOWFILM_TEST_RUNTIME_ROOT`；既有 bundle 根为 `tmp/test-results/film-search/bundles`，应复用当前副本而不是另造轮次目录。冻结解除后，在前节同一环境和构建输出上：
+真实 runtime 组必须使用当前 Windows 八模块 entry 的 bundle（根下的 `aggregate`），经正常 bootstrap／ensure-runtime-native 与 `scripts/windows/prepare-test-bundles.mjs` 准备；需要 Node addon、原生 QuickJS 及测试工程上述原生构建闭包，不能以过时模块 bundle 或 DTO 替身替代。沿用 `MEOWFILM_TEST_NODE`、`MEOWFILM_TEST_DATA_ROOT`、`MEOWFILM_TEST_RUNTIME_ROOT`；既有 bundle 根为 `tmp/test-results/film-search/bundles`，应复用当前副本而不是另造轮次目录。冻结解除后，在前节同一环境和构建输出上：
 
 ```powershell
 # 在副本根目录准备真实 bundle；随后从 apps\windows 使用前节 $dll。
@@ -123,6 +123,28 @@ $env:MEOWFILM_TEST_RUNTIME_ROOT = Join-Path $root 'tmp\test-results\film-search\
 & $env:MEOWFILM_TEST_NODE (Join-Path $root 'scripts\windows\prepare-test-bundles.mjs') $env:MEOWFILM_TEST_RUNTIME_ROOT
 if ($LASTEXITCODE -ne 0) { throw 'Runtime bundle preparation failed' }
 ```
+
+### 历史阶段记录（不代表当前整合验证）
+
+首版交付的本地静态输出（不包含该阶段四项返修）：`git diff --check` 通过；工程结构检查列出 182 个相对导入、38 个资源引用及两个内嵌 JS 资源；6 个变更 XML 均可解析；当时 23 项新增 case 与文档清单一致，变更文档链接存在。新搜索链的 12／100 条截断、后续固定 `page:1` 与假预览引用检索为零；页码只在游标初始化为 1，排序仍交给共享资源。共享文件只读核对 SHA-256 为 `fc9c156af9845625cade5b6fcfc8ba52def5941ff87d2f053058287effdaa389`。原始输出在首版交付会话的静态检查工具回执 `1a1111`，不冒充本轮或 Windows 执行证据。
+
+没有删除用例。既有预期变更逐项为：播放页页头、数据页页头的 `SearchVisible/SearchEnabled` 从关闭改为开启，并新增 `SearchTargetId:film`；原预览的三处可空调用适配仍保留原断言，其中一处明确缺集即抛错。`FilmSourcesTests` 仅改为 partial 以复用真实传输替身。本轮按主会话明确待修纠正 `LateCarrier` 的错误理解：raw `Sources.Count` 从 2 改为 1，`CarrierItem.sourceKind` 从 `tmdb` 改为 `site`，新增 `Metadata == null`；保留原 sourceKind／installation／detail 身份断言，并补 generation／siteKey／displayKey／原 Item 保持的断言。没有其他预期修改或测试削弱。
+
+### 累计终审四项返修增量
+
+| 待修／验收 | 本轮文件（沿用上表目录） | 可观察结果／覆盖 |
+| --- | --- | --- |
+| 1／7 | `FilmSearchContracts.cs`；`FilmSearchTests.cs`；`SearchResultsConsumerTests.cs` | raw 永远单源无 TMDB 简介；迟到聚合跟随继续保留；真实播放空简介断言 |
+| 2／7、8 | `FilmSearchContracts.cs`、`FilmSearchSession.cs`、`SearchResultsPage.cs`、`FilmCapability.cs`、`FilmPlaybackPreview.cs`；`SearchResultsConsumerTests.cs` | 完整 item 变化替换卡片与新页；相同展示的新 generation 进入新 Context；旧普通／TMDB 详情不串代，实际历史可恢复，无额外元数据请求 |
+| 3／3、6 | `SearchResultsPage.cs`；`SearchResultsConsumerTests.cs` | 实际页面全源失败＋TMDB 成功空显示不可用；单源静默显式 more、成功空另有断言 |
+| 4／8 | `IDesktopModule.cs`、`ShellWindow.xaml.cs`、`FilmCapability.cs`、`FilmSearchSession.cs`；`SearchResultsConsumerTests.cs` | 中性导航位置集合；Q1/Q2 不可达页移除缓存和观察者；当前／history／origin 身份恢复 |
+| 必要说明 | `docs/windows/film-search.md`、`desktop-shell.md`、`film-playback.md`；Windows 进度文件 | 本端类型与接通事实、精确用例及预期纠正；不改共同契约 |
+
+该阶段完整增量静态终审的源码／真实交互链回执为 `46e2ae`、`9cf3fb`，文本核对回执为 `62a0ce`：12 个生产／测试／文档增量文件无行尾空白；15＋11＋2 个用例名称与文档逐项一致；3 篇文档本地链接存在；旧 session＋displayKey 缓存键、raw 扩大为 2 的预期、被 TMDB 状态掩盖的全源失败条件均检索为 0；Desktop 中性边界无影视标识；共享 JS hash 未变。不运行构建、测试、远端或 Git；有效原生证据仍由主会话冻结最终输入后统一取得。
+
+需供另一端关联核对的边界：已取消同词会话必须更新 lease 而非无条件返回；在途详情必须取消并物理排空，不能继承别的查询取消归属；普通组被迟到 TMDB 吸收后 Context 必须沿原成员跟随；新启用来源需使捕获的来源集合失效；已退役会话需移出服务跟踪。Windows 的 WPF 视图归还、草稿隔离及隐藏 HWND 渲染适配属于本端实现，没有跨写 iOS 或改共享规则。
+
+### 当前定向入口
 
 ```text
 --group FilmMetadataRuntimeTests RuntimeImageTests FilmMetadataConsumerTests
@@ -172,7 +194,16 @@ consumer 沿用无激活离屏 Shell 流程，无真实输入／活动桌面要�
 --case "film-presentation: more opens data while all cards open the playback page"
 ```
 
-其中 real Node 两项依赖同一七模块 bundle／addon，其余依赖判断见各组说明。`RuntimeHttpClientTests` 保留精确模块／版本／contract／operation 的拒绝校验；`AppRuntimeClientTests` 覆盖取消图片等待物理字节结束、epoch 关闭隔离迟到图片和清空返回字节，不以放宽握手或固定旧方法数量消除失败。
+其中 real Node 两项依赖同一当前八模块 bundle／addon，其余依赖判断见各组原说明。`AppRuntimeClientTests` 新增准确 case：
+
+```text
+app-runtime: cancelled image waits for physical bytes and clears rejected pixels
+app-runtime: shutdown epoch fences a late image and clears its returned bytes
+```
+
+`RuntimeHttpClientTests` 保留精确模块／版本／contract／operation 的拒绝校验；`AppRuntimeClientTests` 覆盖取消图片等待物理字节结束、epoch 关闭隔离迟到图片和清空返回字节，不以放宽握手或固定旧方法数量消除失败。
+
+TMDB 阶段曾将三模块更新为四模块，网易 token 阶段曾更新为五模块、36 个方法；这些是历史预期，当前按[App 运行器](app-runtime.md)精确校验八模块及完整方法。既有失败、取消、资源、来源、音乐和 UI 断言继续保留。
 
 纯传输／Artwork 无产品窗口或焦点要求；上列两项既有播放／呈现回归继续使用 `ShowActivated=false` 的屏幕外窗口。以上定向范围不是全量矩阵，不重跑无关音乐真实网络测试。App 需正常增量构建，包装／共享门禁由对应 owner 统一安排。本块没有执行构建、测试或远端操作；真实公网配置与账号权限仍未覆盖。
 
@@ -182,7 +213,7 @@ consumer 沿用无激活离屏 Shell 流程，无真实输入／活动桌面要�
 
 | 职责 | 文件 | 必要影响 |
 | --- | --- | --- |
-| 装配 | `apps/windows/runtime/entries/aggregate.mjs`；`apps/windows/src/MeowFilm.AppHost/AppIdentity.cs` | 正式七模块、精确 descriptor；公共默认三模块不变 |
+| 装配 | `apps/windows/runtime/entries/aggregate.mjs`；`apps/windows/src/MeowFilm.AppHost/AppIdentity.cs` | 正式八模块、精确 descriptor；公共默认三模块不变 |
 | 页面／导航 | `apps/windows/app/Program.cs`；`apps/windows/src/MeowFilm.AppHost/AppLauncher.cs`；`apps/windows/src/MeowFilm.Capabilities/Search/SearchResultsPage.cs`；同 Capabilities 的 `Film/FilmCapability.cs`；`apps/windows/src/MeowFilm.Desktop/` 导航文件 | 共用搜索页、原音乐 owner、真实播放接收、草稿／历史位置与可达页面保留 |
 | 原生搜索 | `apps/windows/src/MeowFilm.Capabilities/Film/Search/` 下 `FilmSearchContracts.cs`、`FilmSearchSession.cs`、`FilmSearchService.cs`、`FilmSearchDataClient.cs`、`FilmSearchPlayback.cs`、`FilmMetadataService.cs`；同能力 `Sources/FilmSourceService.cs` | 共享原生规则、分页／投影、统一 Node 取数、producer receipt、typed 交接与设置适配 |
 | 播放交接 | 同 Film 目录 `FilmPlaybackPage.cs`、`FilmPlaybackOpen.cs`、`FilmPlaybackSession.cs`、`FilmPlaybackModels.cs` | 准确来源范围、跨 owner hints、group／search.update、当前 target 重进；实际媒体边界见[播放页](film-playback.md) |

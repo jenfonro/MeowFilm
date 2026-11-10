@@ -36,7 +36,7 @@ def validate_runtime(directory, selected=None):
             or manifest.get("platform") != "ios" or manifest.get("transport") != "runtime.http.v1"
             or manifest.get("assemblyProfile") != "common-native"
             or manifest.get("entry") != "app/ios/entries/aggregate.mjs"
-            or manifest.get("modules") != ["music", "cat", "source", "pan", "tmdb", "douban", "film"]):
+            or manifest.get("modules") != ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"]):
         raise ValueError("Expected a prepared common-native iOS HTTP payload.")
     native = manifest.get("trustedNative", [])
     if (len(native) != 1 or native[0].get("platform") != "ios" or native[0].get("abi") != 1
@@ -80,13 +80,15 @@ def output(arguments):
     return run(arguments, stdout=subprocess.PIPE, text=True).stdout.strip()
 
 
-def build():
+def build(simulator_only=False):
     if sys.platform != "darwin":
         raise RuntimeError("This preflight requires macOS with Xcode and an iOS Simulator.")
     architectures = [
         ("simulator", "iphonesimulator", platform.machine(), "ios-arm64_x86_64-simulator"),
         ("device", "iphoneos", "arm64", "ios-arm64"),
     ]
+    if simulator_only:
+        architectures = architectures[:1]
     for _, sdk, arch, _ in architectures:
         run([sys.executable, "-I", "-B", ROOT / "scripts/prepare-ios-runtime.py",
              "--sdk", sdk, "--arch", arch], cwd=ROOT)
@@ -150,7 +152,7 @@ def build():
         print("BUILD_OK", name, flush=True)
 
 
-def probe(simulator):
+def probe(simulator, selected_case=None):
     (WORK / "result.json").unlink(missing_ok=True)
     run(["xcrun", "simctl", "install", simulator, WORK / "simulator/NodePreflight.app"])
     container = Path(output(["xcrun", "simctl", "get_app_container", simulator, BUNDLE, "data"]))
@@ -159,8 +161,11 @@ def probe(simulator):
     for name in ["node-report.json", "node-return.plist"]:
         (documents / name).unlink(missing_ok=True)
     log = WORK / "simulator.log"
+    command = ["xcrun", "simctl", "launch", "--console-pty", "--terminate-running-process", simulator, BUNDLE]
+    if selected_case:
+        command += ["--case", selected_case]
     process = subprocess.Popen(
-        ["xcrun", "simctl", "launch", "--console-pty", "--terminate-running-process", simulator, BUNDLE],
+        command,
         stdout=log.open("w"), stderr=subprocess.STDOUT,
     )
     try:
@@ -170,6 +175,8 @@ def probe(simulator):
             if report_path.exists() and (documents / "node-return.plist").exists():
                 report = json.loads(report_path.read_text())
                 if report.get("complete"):
+                    if selected_case and [case.get("name") for case in report.get("cases", [])] != [selected_case]:
+                        raise ValueError("Selected diagnostic case did not execute exactly once")
                     with (documents / "node-return.plist").open("rb") as stream:
                         report["nodeReturn"] = plistlib.load(stream)
                     (WORK / "result.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -193,10 +200,12 @@ def probe(simulator):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--simulator", required=True)
+    parser.add_argument("--simulator-only", action="store_true", help="Build only the executing simulator host.")
+    parser.add_argument("--case", help="Execute one exact diagnostic case, without unrelated probes.")
     options = parser.parse_args()
     try:
-        build()
-        sys.exit(probe(options.simulator))
+        build(simulator_only=options.simulator_only)
+        sys.exit(probe(options.simulator, options.case))
     except (OSError, ValueError, RuntimeError, TimeoutError, subprocess.CalledProcessError) as error:
         print(f"iOS Node preflight failed: {error}", file=sys.stderr)
         sys.exit(1)

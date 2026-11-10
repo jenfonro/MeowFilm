@@ -24,9 +24,12 @@ public static partial class MusicNativeSyncTests
             string p = platform;
             yield return new($"Music sync {p} pull and exact native identity", () => Pull(p));
             yield return new($"Music sync {p} local favorite write then verified ack", () => FavoriteWrite(p));
+            yield return new($"Music sync {p} first binding unions local and platform favorites", () => FirstBindingUnion(p));
+            yield return new($"Music sync {p} unbound remove cannot cancel future platform favorites", () => UnboundCancellation(p, false));
+            yield return new($"Music sync {p} unbound replacement cannot cancel future platform favorites", () => UnboundCancellation(p, true));
             yield return new($"Music sync {p} full playlist create bind members", () => Create(p));
             yield return new($"Music sync {p} unknown creation never duplicated after restart", () => UnknownCreate(p));
-            yield return new($"Music sync {p} read-only binding never writes", () => ReadOnly(p));
+            yield return new($"Music sync {p} subscription is metadata-only and rejects member editing", () => ReadOnly(p));
             yield return new($"Music sync {p} full paged members retained", () => Pages(p));
             yield return new($"Music sync {p} local source-free song does not block other favorites", () => LocalUnmapped(p));
         }
@@ -35,6 +38,9 @@ public static partial class MusicNativeSyncTests
         yield return new("Music sync stale confirmation cannot authorize changed remote", StaleConfirmation);
         yield return new("Music sync large local deletes require confirmation", LocalBulk);
         yield return new("Music sync bilateral local pending beats unacknowledged old remote", LocalPending);
+        yield return new("Music sync second platform first binding unions only real native identities", SecondPlatformFirstBinding);
+        yield return new("Music sync bound cancellation while disabled survives reopen and wins on re-enable", BoundDisabledCancellation);
+        foreach (var test in FirstBindingPrecedenceCases()) yield return test;
         yield return new("Music sync remote deletion propagates only after native delta", RemoteDelta);
         yield return new("Music sync WY pure order uses update and verifies order", OrderWy);
         yield return new("Music sync QQ order unsupported without clear and re-add", OrderTx);
@@ -65,6 +71,8 @@ public static partial class MusicNativeSyncTests
         yield return new("Music sync viewmodel immediate switches confirmation and visibility", ViewModel);
         yield return new("Music platform settings XAML initializes on native STA without module state", View);
         yield return new("Music sync cloud capability missing blocks only KG delete and order", KgCloudMissing);
+        foreach (var test in NetworkPlaylistCases()) yield return test;
+        foreach (var test in NeteaseTokenCases()) yield return test;
     }
     public static IEnumerable<TestCase> RecoveryCases()
     {
@@ -129,8 +137,9 @@ public static partial class MusicNativeSyncTests
         internal readonly Store Store = new(); internal readonly Sessions Sessions = new(); internal readonly Server Server;
         internal readonly MusicPlatformHttp Http; internal MusicLibraryOwner Owner; internal MusicLibrarySyncService Sync;
         internal readonly MusicClientContextFixture Clients;
-        internal Fixture(string platform = "tx", TimeProvider? clock = null)
-        { Server = new(platform); Http = MusicPlatformHttp.CreateWithHandler(Server); Clients = new(Http, clock: clock); if (platform == "tx") Clients.SeedQqAsync(TimeProvider.System).GetAwaiter().GetResult(); Owner = new(Store); Sync = new(Owner, Sessions, Http, Clients.Owner, null, clock); }
+        internal readonly TokenRuntime Tokens = new();
+        internal Fixture(string platform = "tx", TimeProvider? clock = null, Server? second = null)
+        { Server = new(platform); Http = MusicPlatformHttp.CreateWithHandler(second is null ? Server : new FirstBindingTransport(Server, second)); Clients = new(Http, clock: clock); if (platform == "tx" || second?.Platform == "tx") Clients.SeedQqAsync(TimeProvider.System).GetAwaiter().GetResult(); Owner = new(Store); Sync = new(Owner, Sessions, Http, Clients.Owner, Tokens, null, clock); }
         internal async Task Enable(bool favorites = true, bool playlists = false)
         {
             var before = Ok(await Sync.ExecuteAsync("music.librarySync.get"));
@@ -143,12 +152,13 @@ public static partial class MusicNativeSyncTests
             return Ok(await Owner.ExecuteAsync("music.library.addSongs", new { id = "favorites", ifRevision = c.GetProperty("revision").GetInt64(), songs = new[] { Song(Server.Platform, Native(Server.Platform, n), n) } }));
         }
         internal async Task Restart()
-        { await Sync.DisposeAsync(); await Owner.AbortAsync(); Owner = new(Store); Sync = new(Owner, Sessions, Http, Clients.Owner); }
+        { await Sync.DisposeAsync(); await Owner.AbortAsync(); Owner = new(Store); Sync = new(Owner, Sessions, Http, Clients.Owner, Tokens); }
         public async ValueTask DisposeAsync() { await Sync.DisposeAsync(); await Owner.AbortAsync(); await Clients.DisposeAsync(); Http.Dispose(); }
     }
     private sealed class Entry(string id, string name, bool favorite = false, bool writable = true)
     {
         internal string Id = id, Name = name; internal bool Favorite = favorite, Writable = writable;
+        internal string GlobalId = "", CreatorListId = "", Cover = "";
         internal List<int> Songs = []; internal List<int> Files = [];
         internal void Add(int n) { Songs.Add(n); Files.Add(Files.Count == 0 ? 5000 : Files.Max() + 1); }
     }
@@ -156,6 +166,9 @@ public static partial class MusicNativeSyncTests
     {
         internal string Platform = platform; internal List<Entry> Entries = [new(platform == "wy" ? "101" : platform == "tx" ? "favorites" : "0:101", platform == "kg" ? "我喜欢" : "Favorites", true)];
         internal Entry Favorite => Entries[0]; internal int Reads, Writes, Creates; internal bool FailReads, RepeatPage, DropWrites, ThrowAfterCreate, Ambiguous, Partial;
+        internal int MemberReads, SubscriptionMemberReads, SubscriptionWrites, MetadataReads, SearchReads;
+        internal bool ThrowAfterSubscription, FailSubscriptionReadback, SubscriptionRejected;
+        internal readonly Dictionary<string, Entry> SubscriptionTargets = [];
         internal string CreateName = "Local"; internal int FavoriteTarget = 1; internal bool FavoriteAdd = true;
         internal TaskCompletionSource? Entered, Release; internal Action? OnRead; internal Action<int>? ObserveRead;
         internal Action<JsonObject>? KgListInfo;
@@ -165,6 +178,7 @@ public static partial class MusicNativeSyncTests
         internal Action? AfterWrite;
         internal List<string> Operations = [];
         internal JsonObject? LastWrite;
+        internal string LastCookie = "";
         private static JsonObject Obj(params (string Key, object? Value)[] fields)
         { var o = new JsonObject(); foreach (var (k, v) in fields) o[k] = v is JsonNode n ? n.DeepClone() : JsonSerializer.SerializeToNode(v); return o; }
         private JsonObject Raw(int n)
@@ -179,16 +193,21 @@ public static partial class MusicNativeSyncTests
             token.ThrowIfCancellationRequested();
             string path = request.RequestUri!.AbsolutePath; JsonObject body = request.Content is null ? new() : await Decode(request);
             string operation = Platform == "tx" ? body["req_0"]!["method"]!.GetValue<string>() : path;
-            bool write = operation is "AddPlaylist" or "DelPlaylist" or "AddSonglist" or "DelSonglist" || path.Contains("/radio/like", StringComparison.Ordinal) ||
+            bool write = operation is "AddPlaylist" or "DelPlaylist" or "AddSonglist" or "DelSonglist" or "FavPlaylist" or "CancelFavPlaylist" || path.Contains("/radio/like", StringComparison.Ordinal) ||
                 path.Contains("/playlist/create", StringComparison.Ordinal) || path.Contains("/playlist/remove", StringComparison.Ordinal) || path.Contains("/playlist/manipulate/", StringComparison.Ordinal) ||
-                path is "/cloudlist.service/v5/add_list" or "/cloudlist.service/v6/add_song" or "/v4/delete_songs";
+                path is "/eapi/playlist/subscribe" or "/eapi/playlist/unsubscribe" or
+                    "/cloudlist.service/v5/add_list" or "/cloudlist.service/v6/add_song" or "/v4/delete_songs";
             if (!write)
             {
                 Reads++; ObserveRead?.Invoke(Reads); var action = OnRead; OnRead = null; action?.Invoke();
                 if (Entered is not null) { var entered = Entered; var release = Release!; Entered = null; entered.TrySetResult(); await release.Task.WaitAsync(token); }
                 if (FailReads) return new(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("{}") };
             }
-            else { Writes++; Operations.Add(operation); LastWrite = (JsonObject)body.DeepClone(); }
+            else
+            {
+                Writes++; Operations.Add(operation); LastWrite = (JsonObject)body.DeepClone();
+                LastCookie = request.Headers.TryGetValues("Cookie", out var cookies) ? string.Join("; ", cookies) : "";
+            }
             JsonObject data = Platform switch { "wy" => Wy(path, body), "tx" => Tx(operation, body["req_0"]!["param"]!.AsObject()), _ => Kg(path, body, request.RequestUri.Query) };
             if (write) { var after = AfterWrite; AfterWrite = null; after?.Invoke(); }
             return new(HttpStatusCode.OK) { Content = new StringContent(data.ToJsonString(), Encoding.UTF8, "application/json") };
@@ -211,10 +230,15 @@ public static partial class MusicNativeSyncTests
         }
         private JsonObject Wy(string path, JsonObject p)
         {
-            if (path.EndsWith("/user/playlist", StringComparison.Ordinal)) return Obj(("code", 200), ("more", false), ("playlist", Entries.Select(e => Obj(("id", e.Id), ("name", e.Name), ("creator", new { userId = e.Writable ? "42" : "77" }), ("specialType", e.Favorite ? 5 : 0))).ToArray()));
+            if (path == "/weapi/w/nuser/account/get") return Obj(("code", 200),
+                ("profile", new { userId = "42", nickname = "Synthetic account", avatarUrl = "" }));
+            if (path == "/weapi/music-vip-membership/client/vip/info") return Obj(("code", 500));
+            if (path.EndsWith("/user/playlist", StringComparison.Ordinal)) return Obj(("code", 200), ("more", false), ("playlist", Entries.Select(e => Obj(("id", e.Id), ("name", e.Name), ("creator", new { userId = e.Writable ? "42" : "77" }), ("specialType", e.Favorite ? 5 : 0),
+                ("trackCount", e.Songs.Count), ("coverImgUrl", e.Cover))).ToArray()));
             if (path.EndsWith("/playlist/detail", StringComparison.Ordinal))
             {
                 var e = Entries.Single(e => e.Id == p["id"]!.ToString());
+                MemberReads++; if (!e.Writable) SubscriptionMemberReads++;
                 var tracks = e.Songs.Where(n => !WyMissingTracks.Contains(n)).Select(Raw).ToArray();
                 if (WyConflictingDuplicate && tracks.Length > 1) tracks[^1]["name"] = "Synthetic conflict (live)";
                 return Obj(("code", 200), ("playlist", Obj(("id", e.Id), ("name", e.Name), ("creator", new { userId = e.Writable ? "42" : "77" }), ("specialType", e.Favorite ? 5 : 0),
@@ -229,6 +253,18 @@ public static partial class MusicNativeSyncTests
                 return Obj(("code", WyDetailCode), ("songs", details));
             }
             if (path.EndsWith("/radio/like", StringComparison.Ordinal)) { if (!DropWrites) Change(Favorite, [FavoriteTarget], FavoriteAdd); return Obj(("code", 200)); }
+            if (path is "/eapi/playlist/subscribe" or "/eapi/playlist/unsubscribe")
+            {
+                SubscriptionWrites++; string id = p["id"]!.ToString();
+                if (!DropWrites && !SubscriptionRejected)
+                {
+                    if (path == "/eapi/playlist/subscribe") Entries.Add(SubscriptionTargets[id]);
+                    else Entries.RemoveAll(entry => !entry.Writable && entry.Id == id);
+                }
+                if (FailSubscriptionReadback) FailReads = true;
+                if (ThrowAfterSubscription) { ThrowAfterSubscription = false; throw new HttpRequestException("SYNTHETIC_TIMEOUT"); }
+                return Obj(("code", SubscriptionRejected ? 500 : 200));
+            }
             if (path.EndsWith("/playlist/create", StringComparison.Ordinal)) { var e = New(); return Obj(("code", 200), ("id", e.Id)); }
             if (path.EndsWith("/playlist/manipulate/tracks", StringComparison.Ordinal))
             {
@@ -237,7 +273,7 @@ public static partial class MusicNativeSyncTests
                 return Obj(("code", 200));
             }
             if (path.EndsWith("/playlist/remove", StringComparison.Ordinal)) { if (!DropWrites) Entries.RemoveAll(e => !e.Favorite); return Obj(("code", 200)); }
-            if (path.Contains("cloudsearch", StringComparison.Ordinal)) return Obj(("code", 200), ("result", new { songs = Array.Empty<object>(), songCount = 0 }));
+            if (path.Contains("cloudsearch", StringComparison.Ordinal)) { SearchReads++; return Obj(("code", 200), ("result", new { songs = Array.Empty<object>(), songCount = 0 })); }
             throw new InvalidOperationException("UNEXPECTED_SYNTHETIC_WY_ROUTE");
         }
         private JsonObject Tx(string method, JsonObject p)
@@ -248,9 +284,23 @@ public static partial class MusicNativeSyncTests
             else if (method == "CgiGetDiss")
             {
                 var e = Number(p["dirid"]) == 201 ? Favorite : Entries.Single(e => e.Id == p["disstid"]!.ToString());
+                MemberReads++; if (!e.Writable) SubscriptionMemberReads++;
                 int offset = RepeatPage ? 0 : Number(p["song_begin"]), limit = Number(p["song_num"]); var songs = e.Songs.Skip(offset).Take(limit).Select(Raw).ToArray();
                 data = Obj(("total_song_num", e.Songs.Count), ("hasmore", Number(p["song_begin"]) + songs.Length < e.Songs.Count ? 1 : 0), ("songlist_size", songs.Length), ("songlist", songs),
                     ("dirinfo", new { id = e.Favorite ? "0" : e.Id, title = e.Name, dirid = e.Favorite ? "201" : e.Id, creator = new { musicid = e.Writable ? "42" : "77" } }));
+            }
+            else if (method is "FavPlaylist" or "CancelFavPlaylist")
+            {
+                SubscriptionWrites++;
+                string id = p["v_playlistId"]!.AsArray().Single()!.ToString();
+                if (!DropWrites && !SubscriptionRejected)
+                {
+                    if (method == "FavPlaylist") Entries.Add(SubscriptionTargets[id]);
+                    else Entries.RemoveAll(e => !e.Writable && e.Id == id);
+                }
+                if (FailSubscriptionReadback) FailReads = true;
+                if (ThrowAfterSubscription) { ThrowAfterSubscription = false; throw new HttpRequestException("SYNTHETIC_TIMEOUT"); }
+                data = Obj(("result", 0), ("v_failedPlaylistId", SubscriptionRejected ? new[] { id } : []));
             }
             else if (method == "AddPlaylist") { CreateName = p["dirName"]!.GetValue<string>(); var e = New(); data = Obj(("id", e.Id)); }
             else if (method == "DelPlaylist") { if (!DropWrites) Entries.RemoveAll(e => e.Id == p["dirId"]!.ToString()); data = Obj(("dirid", p["dirId"])); }
@@ -261,18 +311,19 @@ public static partial class MusicNativeSyncTests
                 if (method == "DelSonglist") Check(p["v_songInfo"]!.AsArray().All(s => Number(s!["songType"]) == 0), "QQ_DELETE_TYPE");
                 if (!DropWrites) Change(e, Partial ? ids.Take(1).ToArray() : ids, method == "AddSonglist"); data = Obj(("retCode", 0));
             }
-            else if (method == "DoSearchForQQMusicMobile") data = Obj(("meta", new { sum = 0, nextpage = -1 }), ("body", new { item_song = Array.Empty<object>() }));
+            else if (method == "DoSearchForQQMusicMobile") { SearchReads++; data = Obj(("meta", new { sum = 0, nextpage = -1 }), ("body", new { item_song = Array.Empty<object>() })); }
             else throw new InvalidOperationException("UNEXPECTED_SYNTHETIC_TX_ROUTE");
             return Obj(("code", 0), ("req_0", new { code = 0, data }));
         }
-        private object Card(Entry e) => new { tid = e.Id, id = e.Id, dirid = e.Id, uin = e.Writable ? "42" : "77", title = e.Name, invalid = false };
+        private object Card(Entry e) => new { tid = e.Id, id = e.Id, dirid = e.Id, uin = e.Writable ? "42" : "77", title = e.Name, invalid = false, songnum = e.Songs.Count, picurl = e.Cover };
         private JsonObject Kg(string path, JsonObject p, string query)
         {
             JsonObject data;
             if (path == "/v7/get_all_list")
             {
                 var rows = Entries.Select(e => new { listid = e.Id.Split(':')[1], type = e.Writable ? 0 : 1, source = 1, name = e.Name, count = e.Songs.Count,
-                    list_create_userid = e.Writable ? "42" : "77", is_def = e.Favorite ? 1 : 0, list_ver = 1, global_collection_id = "global" + e.Id.Split(':')[1] }).ToArray();
+                    list_create_userid = e.Writable ? "42" : "77", is_def = e.Favorite ? 1 : 0, list_ver = 1,
+                    global_collection_id = e.GlobalId.Length > 0 ? e.GlobalId : "global" + e.Id.Split(':')[1] }).ToArray();
                 data = Obj(("count", rows.Length), ("total_ver", 1), ("info", rows.Skip((Number(p["page"]) - 1) * 30).Take(30).ToArray()));
             }
             else if (path is "/v4/get_list_all_file_v3" or "/pubsongs/v2/get_other_list_file_nofilt")
@@ -280,16 +331,38 @@ public static partial class MusicNativeSyncTests
                 string id; int offset;
                 if (p["listid"] is not null) { id = "0:" + p["listid"]; offset = (Number(p["page"]) - 1) * 30; }
                 else { var q = Query(query); id = "1:" + q["global_collection_id"].Replace("global", "", StringComparison.Ordinal); offset = int.Parse(q["begin_idx"], System.Globalization.CultureInfo.InvariantCulture); }
-                var e = Entries.Single(e => e.Id == id); var rows = e.Songs.Select((n, i) => { var row = Raw(n); row["fileid"] = e.Files[i]; row["sort"] = i; return row; }).Skip(offset).Take(30).ToArray();
+                var e = Entries.Single(e => e.Id == id); MemberReads++; if (!e.Writable) SubscriptionMemberReads++;
+                var rows = e.Songs.Select((n, i) => { var row = Raw(n); row["fileid"] = e.Files[i]; row["sort"] = i; return row; }).Skip(offset).Take(30).ToArray();
                 var info = Obj(("count", e.Songs.Count), ("list_ver", 1)); KgListInfo?.Invoke(info);
                 data = Obj(("count", e.Songs.Count), ("list_info", info), ("info", rows));
+            }
+            else if (path == "/v3/get_list_info")
+            {
+                MetadataReads++;
+                string id = p["data"]!.AsArray().Single()!["global_collection_id"]!.ToString();
+                var target = SubscriptionTargets[id];
+                return Obj(("status", 1), ("error_code", 0), ("data", new[] { new {
+                    status = 1, global_collection_id = id, list_create_userid = 77, list_create_listid = int.Parse(target.CreatorListId),
+                    name = target.Name, count = target.Songs.Count, pic = target.Cover
+                } }));
+            }
+            else if (path == "/cloudlist.service/v5/add_list" && Number(p["type"]) == 1)
+            {
+                SubscriptionWrites++;
+                string id = p["list_create_gid"]!.ToString(); var target = SubscriptionTargets[id];
+                Check(p["list_create_userid"]!.ToString() == "77" && p["list_create_listid"]!.ToString() == target.CreatorListId,
+                    "SUBSCRIBE_CREATOR_LOCATOR");
+                if (!DropWrites) Entries.Add(target);
+                if (FailSubscriptionReadback) FailReads = true;
+                if (ThrowAfterSubscription) { ThrowAfterSubscription = false; throw new HttpRequestException("SYNTHETIC_TIMEOUT"); }
+                data = Obj(("listid", target.Id.Split(':')[1]));
             }
             else if (path == "/cloudlist.service/v5/add_list") { CreateName = p["name"]!.GetValue<string>(); var e = New(); data = Obj(("listid", e.Id.Split(':')[1])); }
             else if (path == "/cloudlist.service/v6/add_song")
             { var e = Entries.Single(e => e.Id == "0:" + p["listid"]); var ids = p["data"]!.AsArray().Select(r => Convert.ToInt32(r!["hash"]!.ToString(), 16)).ToArray(); if (!DropWrites) Change(e, ids, true); data = new(); }
             else if (path == "/v4/delete_songs")
             { var e = Entries.Single(e => e.Id == "0:" + p["listid"]); var files = p["data"]!.AsArray().Select(r => Number(r!["fileid"])).ToHashSet(); if (!DropWrites) for (int i = e.Files.Count - 1; i >= 0; i--) if (files.Contains(e.Files[i])) { e.Files.RemoveAt(i); e.Songs.RemoveAt(i); } data = new(); }
-            else if (path == "/v2/search/song") data = Obj(("total", 0), ("lists", Array.Empty<object>()));
+            else if (path == "/v2/search/song") { SearchReads++; data = Obj(("total", 0), ("lists", Array.Empty<object>())); }
             else throw new InvalidOperationException("UNEXPECTED_SYNTHETIC_KG_ROUTE");
             return Obj(("status", 1), ("error_code", 0), ("data", data));
         }
@@ -327,6 +400,91 @@ public static partial class MusicNativeSyncTests
         await using var f = new Fixture(platform); await f.AddFavorite(1); await f.Enable(); Ok(await f.Run()); Check(f.Server.Favorite.Songs.SequenceEqual(new[] { 1 })); Check(f.Server.Writes == 1);
         var snapshot = await f.Owner.ReadLibrarySyncAsync(); var intents = snapshot.Library.GetProperty("collections")[0].GetProperty("intents");
         Check(intents.EnumerateObject().All(i => !i.Value.GetProperty("pending").GetBoolean() && i.Value.GetProperty("acknowledged").GetArrayLength() == 1));
+        Ok(await f.Run()); Check(f.Server.Writes == 1);
+    }
+    private static async Task FirstBindingUnion(string platform)
+    {
+        await using var f = new Fixture(platform);
+        await f.AddFavorite(1);
+        string localId = S(Ok(await f.Owner.ExecuteAsync("music.library.detail", new { id = "favorites" })).GetProperty("songs")[0], "songId");
+        f.Server.Favorite.Add(2);
+        await f.Enable(); Ok(await f.Run());
+        var songs = Ok(await f.Owner.ExecuteAsync("music.library.detail", new { id = "favorites" })).GetProperty("songs");
+        Check(songs.GetArrayLength() == 2 && songs.EnumerateArray().Any(song => S(song, "songId") == localId),
+            "FIRST_BINDING_MUST_RETAIN_LOCAL_FAVORITE");
+        Check(f.Server.Favorite.Songs.Order().SequenceEqual(new[] { 1, 2 }),
+            "FIRST_BINDING_MUST_UNION_PLATFORM_FAVORITES");
+    }
+    private static async Task UnboundCancellation(string platform, bool replace)
+    {
+        await using var f = new Fixture(platform);
+        await f.AddFavorite(1);
+        var before = Ok(await f.Owner.ExecuteAsync("music.library.detail", new { id = "favorites" }));
+        long revision = before.GetProperty("collection").GetProperty("revision").GetInt64();
+        if (replace) Ok(await f.Owner.ExecuteAsync("music.library.edit", new { id = "favorites", ifRevision = revision, songs = Array.Empty<object>() }));
+        else Ok(await f.Owner.ExecuteAsync("music.library.removeSong", new
+        {
+            id = "favorites", ifRevision = revision, songId = S(before.GetProperty("songs")[0], "songId")
+        }));
+        await f.Restart();
+        Check(Ok(await f.Owner.ExecuteAsync("music.library.detail", new { id = "favorites" })).GetProperty("songs").GetArrayLength() == 0);
+        f.Server.Favorite.Add(1); f.Server.Favorite.Add(2);
+        await f.Enable(); Ok(await f.Run());
+        Check(Ok(await f.Owner.ExecuteAsync("music.library.detail", new { id = "favorites" })).GetProperty("songs").GetArrayLength() == 2);
+        Check(f.Server.Favorite.Songs.SequenceEqual(new[] { 1, 2 }) && f.Server.Writes == 0,
+            "UNBOUND_CANCELLATION_MUST_NOT_REACH_FIRST_ACCOUNT");
+    }
+    private static async Task SecondPlatformFirstBinding()
+    {
+        await using var f = new Fixture();
+        await f.AddFavorite(1);
+        var favorite = Ok(await f.Owner.ExecuteAsync("music.library.detail", new { id = "favorites" })).GetProperty("collection");
+        Ok(await f.Owner.ExecuteAsync("music.library.addSongs", new
+        {
+            id = "favorites", ifRevision = favorite.GetProperty("revision").GetInt64(), songs = new[] { Song("wy", Native("wy", 1)) }
+        }));
+        var firstPlatform = f.Server.Favorite;
+        firstPlatform.Add(2);
+        await f.Enable(); Ok(await f.Run());
+        Check(firstPlatform.Songs.Order().SequenceEqual(new[] { 1, 2 }));
+        await f.Enable(false);
+        f.Server.Platform = "wy";
+        f.Server.Entries = [new("101", "Favorites", true)];
+        f.Server.Favorite.Add(3);
+        await f.Enable(); Ok(await f.Run());
+        var detail = Ok(await f.Owner.ExecuteAsync("music.library.detail", new { id = "favorites" }));
+        Check(detail.GetProperty("songs").GetArrayLength() == 3, "SECOND_PLATFORM_MUST_RETAIN_LOCAL_UNION");
+        Check(f.Server.Favorite.Songs.Order().SequenceEqual(new[] { 1, 3 }) &&
+            firstPlatform.Songs.Order().SequenceEqual(new[] { 1, 2 }),
+            "SECOND_PLATFORM_MUST_ONLY_WRITE_CONFIRMED_NATIVE_IDENTITIES");
+        var txOnly = detail.GetProperty("songs").EnumerateArray().Single(song => S(song, "title") == "Track 2");
+        Check(txOnly.GetProperty("sources").EnumerateArray().All(source => S(source, "source") == "tx"),
+            "UNMAPPED_SONG_MUST_NOT_GAIN_A_FABRICATED_PLATFORM");
+        var snapshot = await f.Owner.ReadLibrarySyncAsync();
+        Check(snapshot.Library.GetProperty("collections")[0].GetProperty("bindings").GetArrayLength() == 2 &&
+            S(snapshot.Library.GetProperty("accounts"), "tx") == "42" && S(snapshot.Library.GetProperty("accounts"), "wy") == "42");
+    }
+    private static async Task BoundDisabledCancellation()
+    {
+        await using var f = new Fixture();
+        f.Server.Favorite.Add(1); f.Server.Favorite.Add(2);
+        await f.Enable(); Ok(await f.Run());
+        await f.Enable(false);
+        var detail = Ok(await f.Owner.ExecuteAsync("music.library.detail", new { id = "favorites" }));
+        Ok(await f.Owner.ExecuteAsync("music.library.removeSong", new
+        {
+            id = "favorites", ifRevision = detail.GetProperty("collection").GetProperty("revision").GetInt64(),
+            songId = S(detail.GetProperty("songs")[0], "songId")
+        }));
+        await f.Restart();
+        int reads = f.Server.Reads;
+        Ok(await f.Run());
+        Check(f.Server.Reads == reads && f.Server.Writes == 0 &&
+            f.Server.Favorite.Songs.SequenceEqual(new[] { 1, 2 }));
+        await f.Enable(); Ok(await f.Run());
+        Check(f.Server.Favorite.Songs.SequenceEqual(new[] { 2 }) &&
+            f.Server.Operations.SequenceEqual(new[] { "DelSonglist" }), "BOUND_DISABLED_CANCELLATION_MUST_STILL_WIN");
+        Check(Ok(await f.Owner.ExecuteAsync("music.library.detail", new { id = "favorites" })).GetProperty("songs").GetArrayLength() == 1);
         Ok(await f.Run()); Check(f.Server.Writes == 1);
     }
     private static async Task Create(string platform)
@@ -370,8 +528,14 @@ public static partial class MusicNativeSyncTests
         await using var f = new Fixture(platform); var remote = new Entry(platform == "kg" ? "1:301" : "301", "Subscription", writable: false); remote.Add(1); f.Server.Entries.Add(remote);
         await f.Enable(false, true); Ok(await f.Run());
         var list = Ok(await f.Owner.ExecuteAsync("music.library.list")).GetProperty("items"); var target = list.EnumerateArray().Single(c => c.GetProperty("name").GetString() == "Subscription");
-        Ok(await f.Owner.ExecuteAsync("music.library.edit", new { id = target.GetProperty("id").GetString(), ifRevision = target.GetProperty("revision").GetInt64(), songs = Array.Empty<object>() }));
-        Ok(await f.Run()); Check(f.Server.Writes == 0 && remote.Songs.Count == 1);
+        Check(S(target, "kind") == "network" && !target.GetProperty("editable").GetBoolean());
+        Code(await f.Owner.ExecuteAsync("music.library.edit", new { id = target.GetProperty("id").GetString(), ifRevision = target.GetProperty("revision").GetInt64(), songs = Array.Empty<object>() }), "READ_ONLY");
+        Code(await f.Owner.ExecuteAsync("music.library.detail", new { id = target.GetProperty("id").GetString() }), "READ_ONLY");
+        Ok(await f.Run()); Check(f.Server.Writes == 0 && remote.Songs.Count == 1 && f.Server.SubscriptionMemberReads == 0);
+        var snapshot = await f.Owner.ReadLibrarySyncAsync();
+        Check(snapshot.Library.GetProperty("networkPlaylists").GetArrayLength() == 1 &&
+            snapshot.Library.GetProperty("songs").EnumerateObject().Count() == 0 &&
+            snapshot.Library.GetProperty("collections").GetArrayLength() == 1);
     }
     private static async Task Pages(string platform)
     {
@@ -635,6 +799,7 @@ public static partial class MusicNativeSyncTests
     });
     private static IEnumerable<SyncCorruption> SyncCorruptions()
     {
+        yield return new("with the old sync schema", (_, sync, _) => sync["schema"] = 1);
         yield return new("with a missing root field", (_, sync, _) => sync.Remove("status"));
         yield return new("with an extra legacy field", (_, sync, _) => sync["legacy"] = true);
         yield return new("with an incomplete platform row", (_, sync, _) =>
@@ -747,7 +912,7 @@ public static partial class MusicNativeSyncTests
         f.Store.Writes = 0;
         f.Server.Reads = f.Server.Writes = f.Server.Creates = 0;
         f.Owner = new(f.Store);
-        f.Sync = new(f.Owner, f.Sessions, f.Http, f.Clients.Owner);
+        f.Sync = new(f.Owner, f.Sessions, f.Http, f.Clients.Owner, f.Tokens);
         Code(await f.Owner.ExecuteAsync("music.library.list"), "CORRUPT_SYNC");
         Code(await f.Sync.ExecuteAsync("music.librarySync.get"), "CORRUPT_SYNC");
         Code(await f.Sync.ExecuteAsync("music.librarySync.run"), "CORRUPT_SYNC");
@@ -767,12 +932,13 @@ public static partial class MusicNativeSyncTests
         var sessions = new Sessions(); var server = new Server("tx"); using var http = MusicPlatformHttp.CreateWithHandler(server);
         await using var store = new LocalDocumentStore(path, [MusicLibraryOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: [MusicPlatformClientContextOwner.DocumentNamespace]);
         await using var clients = new MusicClientContextFixture(http, store);
-        var owner = new MusicLibraryOwner(store); await using (var sync = new MusicLibrarySyncService(owner, sessions, http, clients.Owner))
+        var owner = new MusicLibraryOwner(store); var tokens = new TokenRuntime();
+        await using (var sync = new MusicLibrarySyncService(owner, sessions, http, clients.Owner, tokens))
         {
             Ok(await sync.ExecuteAsync("music.librarySync.set", new { platform = "tx", favorites = false, playlists = true, ifRevision = 0, confirm = true }));
             Ok(await owner.CreatePlaylistAsync("Local", [])); server.DropWrites = true; Code(await sync.ExecuteAsync("music.librarySync.run"), "CREATE_UNCONFIRMED");
         }
-        await owner.AbortAsync(); owner = new(store); await using var next = new MusicLibrarySyncService(owner, sessions, http, clients.Owner);
+        await owner.AbortAsync(); owner = new(store); await using var next = new MusicLibrarySyncService(owner, sessions, http, clients.Owner, tokens);
         Code(await next.ExecuteAsync("music.librarySync.run"), "CREATE_UNCONFIRMED"); Check(server.Creates == 1);
         var snapshot = await owner.ReadLibrarySyncAsync(); Check(!snapshot.State.GetRawText().Contains("synthetic-only", StringComparison.Ordinal));
         await next.AbortAsync(); await owner.AbortAsync();
