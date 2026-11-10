@@ -538,7 +538,7 @@ public static class MusicPlaybackCacheTests
         }
         internal MusicAudioFileCache NewCache(Func<string, double, CancellationToken, Task<double>>? validate = null) =>
             new(Root, Store, validate ?? ((_, expected, _) => Task.FromResult(expected)), Clock,
-                NativeHttpMediaOptions.ForLoopbackTests([Origin]));
+                new NativeHttpMediaOptions());
         internal string? RequiredHeader;
         internal JsonElement ScriptInfo(string provider, string quality)
         {

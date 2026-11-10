@@ -13,7 +13,7 @@ public partial class GeneralSettingsView : UserControl
     private readonly IDesktopClosePreferences? closePreferences;
     public static IValueConverter StatusVisibility { get; } = new StatusConverter();
     public GeneralSettingsView(IDesktopAppearance appearance, IEnumerable<IDesktopGeneralSettingsSource> sources,
-        IDesktopClosePreferences? closePreferences = null)
+        IDesktopClosePreferences? closePreferences = null, IDesktopMediaControlSettings? mediaControls = null)
     {
         this.appearance = appearance;
         this.closePreferences = closePreferences;
@@ -27,6 +27,12 @@ public partial class GeneralSettingsView : UserControl
         }
         else WindowArea.Visibility = Visibility.Visible;
         DataContext = appearance;
+        if (mediaControls is not null)
+        {
+            ShortcutsPage.Content = new MediaControlSettingsView(mediaControls);
+            ShortcutsArea.Visibility = Visibility.Visible;
+        }
+        else Areas.Children.Remove(ShortcutsArea);
         foreach (var source in sources)
         {
             AppearanceContributions.Children.Add(source.AppearanceSettingsView);
@@ -41,12 +47,13 @@ public partial class GeneralSettingsView : UserControl
         HomeSourceContributions.Visibility = area == "sources" ? Visibility.Visible : Visibility.Collapsed;
         CacheContributions.Visibility = area == "cache" ? Visibility.Visible : Visibility.Collapsed;
         WindowBehaviorPage.Visibility = area == "window" ? Visibility.Visible : Visibility.Collapsed;
+        ShortcutsPage.Visibility = area == "shortcuts" ? Visibility.Visible : Visibility.Collapsed;
         SettingsScroller.ScrollToTop();
     }
     private void Area_KeyDown(object sender, KeyEventArgs e)
     {
         if (sender is not RadioButton current || e.Key is not (Key.Home or Key.End or Key.Left or Key.Right)) return;
-        var tabs = Areas.Children.OfType<RadioButton>().ToArray();
+        var tabs = Areas.Children.OfType<RadioButton>().Where(tab => tab.Visibility == Visibility.Visible).ToArray();
         int index = Array.IndexOf(tabs, current);
         int next = e.Key switch { Key.Home => 0, Key.End => tabs.Length - 1,
             Key.Left => (index + tabs.Length - 1) % tabs.Length, _ => (index + 1) % tabs.Length };

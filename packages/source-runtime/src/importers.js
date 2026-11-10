@@ -9,7 +9,7 @@ function remoteHtmlList(value) {
   return entries.length > 0 && entries.every(entry => {
     try {
       const url = new URL(entry);
-      return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
+      return ['http:', 'https:'].includes(url.protocol);
     } catch {
       return false;
     }

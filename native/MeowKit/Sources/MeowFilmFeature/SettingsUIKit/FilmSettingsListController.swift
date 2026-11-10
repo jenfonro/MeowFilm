@@ -27,6 +27,7 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
     let table = UITableView(frame: .zero, style: .insetGrouped)
     var sections: [FilmSettingsSection] = []
     private var pendingFailure: (String, (() -> Void)?)?
+    private var pendingNotice: (String, String?)?
     private var alertChoices: [String: () -> Void] = [:]
     private weak var actionAlert: UIAlertController?
 
@@ -106,13 +107,23 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
     func failure(_ error: Error, retry: (() -> Void)? = nil) {
         guard !(error is CancellationError) else { return }
         pendingFailure = (error.localizedDescription, retry)
-        presentPendingFailure()
+        presentPendingFeedback()
     }
-    override func pageDidFinishAppearing() { presentPendingFailure() }
-    private func presentPendingFailure() {
-        guard let (message, retry) = pendingFailure, canPresentPageAlert else { return }
-        pendingFailure = nil
-        presentActionAlert("错误", message: message, choices: retry.map { [("重试", UIAlertAction.Style.default, $0)] } ?? [])
+    override func pageDidFinishAppearing() { presentPendingFeedback() }
+    private func presentPendingFeedback() {
+        guard canPresentPageAlert else { return }
+        if let (message, retry) = pendingFailure {
+            pendingFailure = nil
+            presentActionAlert("错误", message: message, choices: retry.map { [("重试", UIAlertAction.Style.default, $0)] } ?? [])
+        } else if let (title, message) = pendingNotice {
+            pendingNotice = nil
+            let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "确定", style: .default) { [weak self, weak alert] _ in
+                guard let self, let alert else { return }
+                dismissPageModal(alert)
+            })
+            present(alert, animated: true)
+        }
     }
     func confirm(_ title: String, message: String? = nil, action: @escaping () -> Void) {
         presentActionAlert(title, message: message, choices: [("确认", .destructive, action)])
@@ -137,13 +148,11 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
     func selectAlertChoice(_ title: String) {
         guard let alert = actionAlert, let action = alertChoices[title] else { return }
         alertChoices.removeAll(); actionAlert = nil
-        alert.dismiss(animated: true, completion: action)
+        dismissPageModal(alert, completion: action)
     }
     func notice(_ title: String, message: String? = nil) {
-        guard canPresentPageAlert else { return }
-        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "确定", style: .default))
-        present(alert, animated: true)
+        pendingNotice = (title, message)
+        presentPendingFeedback()
     }
 }
 

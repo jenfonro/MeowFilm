@@ -7,7 +7,7 @@
 - 页面：推荐、频道、我的、搜索与结果、公开及本地歌单、设置、账号、完整播放器、歌词、队列和历史。
 - 账号平台：网易云音乐、QQ 音乐、酷狗音乐（登录、资料、同步与账号播放）。
 - 公开歌单搜索／详情、搜索与歌词平台：网易云音乐、QQ 音乐、酷狗音乐、酷我音乐、咪咕音乐；首页与频道来源为网易云或酷狗，由设置「数据源」选择。酷我、咪咕不提供账号登录、资料、同步或账号播放；启用声明对应平台能力的 LX 脚本后可提供播放候选。
-- 本地能力：普通文件曲库与脚本数据、加密凭据与设备会话、播放队列和历史、系统媒体会话。
+- 本地能力：普通文件曲库与脚本数据、加密凭据与设备会话、播放队列和历史、[系统媒体会话、锁屏歌词与耳机控制](system-media.md)。
 - 当前支持本地／网络导入第三方 LX 脚本音源；不提供猫源管理入口、音箱控制或局域网供流、用户音乐下载及离线库。
 
 ## 设置与平台账号
@@ -32,7 +32,7 @@
   管理地址、类型、平台声明和检测由公共模块持有；iOS 管理与选源见[音源管理与选源](music-sources.md)。
 - 自动与手动调用继续核对 installation、generation、site 和录音；HTTP 音频升级 HTTPS，不新增 ATS 豁免，实测音质不由请求推断。
 - 原生歌词优先；仅 `wy`、`kw`、`mg` 的原生结果为空时，依安装顺序尝试同平台、已启用并声明 `lyric` 的脚本。`tx`／`kg` 保持原生歌词；原生错误不视为空结果。LX `search`／`musicSearch` 无统一结果契约，本端不接入原生搜索。
-- App 内嵌 Node Mobile 18.20.4、`MeowScriptHost.framework` 与公共运行器，实际 App entry 显式装配 music@0.8.0／music.script.v3、cat@0.2.0／cat.script.v2、source@0.2.0／source.runtime.v2、tmdb@0.1.0／tmdb.data.v1、netease@0.1.0／netease.token.v1 五模块；通用默认仍为前三模块，不装配 douban／pan。App 的 `RuntimeSession` 唯一持有运行器，音乐、猫源、网易 token 与 [TMDB 搜索／设置／图片](film-search.md)借用同一个 `RuntimeHTTPClient`，每个进程只启动一次 Node。LX／source 共享原生绑定并逐实例使用独立 QuickJS Runtime／线程，Cat 使用独立 Node Worker，不嵌套 WASM。冷启动恢复猫源及音乐目录，音乐首次 invoke／resolve／check 才惰性加载；普通来源读取不调用 enable，也不重建 failed 实例。候选与调用保留内容身份及真实执行代次检查，不把 idle 伪装成 ready。
+- App 内嵌 Node Mobile 18.20.4、`MeowScriptHost.framework` 与公共运行器，实际 App entry 按序显式装配 music@0.8.0／music.script.v3、cat@0.2.0／cat.script.v2、source@0.2.0／source.runtime.v2、pan@0.1.0／pan.runtime.v1、tmdb@0.1.0／tmdb.data.v1、douban@0.1.0／douban.data.v1、film@0.1.0／film.playback.v1、netease@0.1.0／netease.token.v1 八模块；通用默认仍为前三模块。App 的 `RuntimeSession` 唯一持有运行器，音乐、猫源、影视、网易 token 与 [TMDB 搜索／设置／图片](film-search.md)借用同一个 `RuntimeHTTPClient`，每个进程只启动一次 Node。LX／source 共享原生绑定并逐实例使用独立 QuickJS Runtime／线程，Cat 使用独立 Node Worker，不嵌套 WASM。冷启动恢复猫源及音乐目录，音乐首次 invoke／resolve／check 才惰性加载；普通来源读取不调用 enable，也不重建 failed 实例。候选与调用保留内容身份及真实执行代次检查，不把 idle 伪装成 ready。
 - 启动失败不阻断原生官方业务；关闭／不可恢复退出后本次运行内脚本不可用，不自动重启。音乐关闭取消并排空自身调用，通过 `music.script.close` 的真实终态确认收口，不关闭共享 HTTP 客户端。App 最后关闭运行器 listener、工作线程及启动通道，并等待 `node_start` 返回；HTTP 成功回执本身不代表 Node 已退出。风险及独立诊断工具见[运行底座预检](runtime-preflight.md)。
 
 ## 曲库与网络歌单

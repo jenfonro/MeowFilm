@@ -1,6 +1,5 @@
 import Foundation
 import Darwin
-import Security
 
 public enum RuntimeLaunchError: Error, Sendable, Equatable {
     case payloadUnavailable, alreadyStarted, descriptorUnavailable
@@ -20,7 +19,7 @@ public struct RuntimePayload: Sendable, Equatable {
               let manifest = try? JSONDecoder().decode(Manifest.self, from: data),
               manifest.schemaVersion == 1, manifest.status == "complete", manifest.product == "aggregate",
               manifest.platform == "ios", manifest.transport == "runtime.http.v1",
-              manifest.assemblyProfile == "common-native", manifest.modules == ["music", "cat", "source", "tmdb", "netease"],
+              manifest.assemblyProfile == "common-native", manifest.modules == RuntimeModule.allCases.map(\.rawValue),
               Self.safe(manifest.entry) else {
             throw RuntimeLaunchError.payloadUnavailable
         }
@@ -71,15 +70,8 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
         _ = setsockopt(descriptors[0], SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
         _ = setsockopt(descriptors[1], SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
         let sessionID = UUID().uuidString.lowercased()
-        var keyBytes = [UInt8](repeating: 0, count: 32)
-        let randomStatus = keyBytes.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, $0.count, $0.baseAddress!) }
-        guard randomStatus == errSecSuccess else {
-            _ = Darwin.close(descriptors[0]); _ = Darwin.close(descriptors[1])
-            throw RuntimeLaunchError.descriptorUnavailable
-        }
-        let requestKey = keyBytes.map { String(format: "%02x", $0) }.joined()
         let configuration = try RuntimeJSON.encode(.object([
-            "sessionId": .string(sessionID), "requestKey": .string(requestKey),
+            "sessionId": .string(sessionID),
             "dataRoot": .string(dataDirectory.path)
         ]))
         let channel = RuntimeBootstrapChannel(descriptor: descriptors[0]) { [weak self] in self?.bootstrapEnded() }
@@ -89,7 +81,7 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
             throw RuntimeHTTPError.closed
         }
         // Swift owns the original until Start returns; Node only owns its dup.
-        // No credentials or data paths enter argv.
+        // No data paths enter argv.
         let bootstrapDescriptor = descriptors[1]
         let arguments = ["node", payload.entry.path, "--meow-bootstrap-fd", String(bootstrapDescriptor)]
         let start = start
@@ -104,7 +96,7 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
         thread.start()
         do {
             let baseURL = try await channel.endpoint(configuration: configuration)
-            let client = try RuntimeHTTPClient(baseURL: baseURL, sessionID: sessionID, requestKey: requestKey)
+            let client = try RuntimeHTTPClient(baseURL: baseURL)
             guard publish(client) else { await client.close(); throw RuntimeHTTPError.closed }
             return client
         } catch {

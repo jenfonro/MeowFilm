@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { installIOSFailureBoundary, parseIOSConfiguration, parseIOSLaunchArguments } from '../apps/ios/runtime/bootstrap.mjs';
 import { connect, contract, load, okay, root, simulatedIOS, spawnRuntime } from './ios-runtime-support.mjs';
-import { verifyTMDBAssembly } from './tmdb-runtime-assembly-support.mjs';
+import { verifyPanAndDoubanAssembly, verifyTMDBAssembly } from './tmdb-runtime-assembly-support.mjs';
 
 const entry = join(root, 'apps/ios/runtime/entries/aggregate.mjs');
 
@@ -141,11 +141,11 @@ test('iOS argv contains only the private bootstrap descriptor', () => {
   }
 });
 
-test('trusted configuration accepts only session, key and App data root', () => {
-  const value = { sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex'), dataRoot: '/data/猫' };
+test('private configuration carries only lifecycle session and App data root', () => {
+  const value = { sessionId: randomUUID(), dataRoot: '/data/猫' };
   assert.deepEqual(parseIOSConfiguration(Buffer.from(JSON.stringify(value))), value);
   for (const bad of [null, [], {}, { ...value, extra: true }, { ...value, sessionId: 'invalid' },
-    { ...value, requestKey: 'invalid' }, { ...value, dataRoot: 'relative/data' },
+    { ...value, dataRoot: 'relative/data' },
     { ...value, dataRoot: '/data\nother' }]) {
     assert.throws(() => parseIOSConfiguration(Buffer.from(JSON.stringify(bad))), { code: 'INVALID_REQUEST' });
   }
@@ -171,24 +171,27 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   t.after(() => client.close());
   assert.deepEqual(runtime.args.slice(-2), ['--meow-bootstrap-fd', '3']);
   assert.equal(runtime.args.includes(runtime.configuration.sessionId), false);
-  assert.equal(runtime.args.includes(runtime.configuration.requestKey), false);
   assert.equal(runtime.args.includes(runtime.configuration.dataRoot), false);
   const described = okay(await client.describe(), 'runtime.http.v1');
   assert.equal(described.product, 'aggregate');
   assert.equal(described.protocol, 'runtime.http.v1');
   assert.deepEqual(described.modules.map(module => [module.id, module.version, module.contract]), [
     ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.2.0', 'source.runtime.v2'],
-    ['tmdb', '0.1.0', 'tmdb.data.v1'],
+    ['pan', '0.1.0', 'pan.runtime.v1'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
+    ['douban', '0.1.0', 'douban.data.v1'], ['film', '0.1.0', 'film.playback.v1'],
     ['netease', '0.1.0', 'netease.token.v1'],
   ]);
   for (const method of ['music.script.sources.list', 'music.script.resolve', 'music.script.invoke'])
     assert.ok(described.modules[0].methods.includes(method), method);
   assert.ok(described.modules[2].methods.includes('source.runtime.invoke'));
-  assert.deepEqual(described.modules[3].methods, [
+  assert.deepEqual(described.modules.find(module => module.id === 'tmdb').methods, [
     'tmdb.data.request', 'tmdb.data.settings.get', 'tmdb.data.settings.update',
   ]);
-  assert.deepEqual(described.modules[4].methods, ['netease.token.get']);
-  await verifyTMDBAssembly(t, { client, baseUrl, ...runtime.configuration });
+  assert.deepEqual(described.modules[7].methods, ['netease.token.get']);
+  await verifyTMDBAssembly(t, { client, baseUrl });
+  await verifyPanAndDoubanAssembly(client);
+  for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
+    'film.settings.get', 'film.library.get']) assert.equal((await client.call(method)).ok, true, method);
   const instance = okay(await load(client)).item;
   assert.equal(instance.state, 'ready');
   assert.equal(instance.name, 'iOS runtime fixture');
@@ -223,7 +226,7 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   okay(await client.call('source.runtime.status'), 'source.runtime.v2');
   okay(await client.call('cat.script.status'), 'cat.script.v2');
   okay(await client.shutdown(), 'runtime.http.v1');
-  assert.equal(okay(await client.describe(), 'runtime.http.v1').modules.length, 4);
+  assert.equal(okay(await client.describe(), 'runtime.http.v1').modules.length, 8);
   runtime.channel.end();
   await closed;
   await client.close();

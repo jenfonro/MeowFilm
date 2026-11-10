@@ -34,7 +34,7 @@ await check('ios-native-framework-payload', async () => {
   const manifest = JSON.parse(readFileSync(new URL('./runtime-manifest.json', import.meta.url), 'utf8'));
   assert.equal(manifest.assemblyProfile, 'common-native');
   assert.equal(manifest.transport, 'runtime.http.v1');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'tmdb', 'netease']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
   assert.equal(manifest.trustedNative.length, 1);
   const native = manifest.trustedNative[0];
   assert.equal(native.path, 'Frameworks/MeowScriptHost.framework/MeowScriptHost');
@@ -136,16 +136,47 @@ await check('worker-and-runaway-termination', async () => {
   } finally { await worker.terminate(); }
 });
 
+await check('public-explicit-film-modules-http-and-local-settings', async () => {
+  const { createRuntime, createRuntimeClient } = await import('./app/entry.mjs');
+  const { contracts } = await import('./app/contracts.mjs');
+  const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
+  const runtime = createRuntime({ sessionId, dataRoot: join(directory, 'app-modules'),
+    source: { platform: 'ios' }, pan: {}, tmdb: {}, douban: {}, film: {} });
+  const okay = reply => { assert.equal(reply.ok, true, JSON.stringify(reply)); return reply.value; };
+  let client;
+  try {
+    await runtime.start();
+    client = createRuntimeClient({ baseUrl: runtime.baseUrl });
+    const described = okay(await client.describe());
+    assert.equal(described.protocol, 'runtime.http.v1');
+    assert.deepEqual(described.modules.map(value => value.id), ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film']);
+    for (const module of described.modules) {
+      const spec = contracts[module.id];
+      assert.equal(module.version, spec.version);
+      assert.equal(module.contract, spec.contract);
+      assert.deepEqual(module.methods, spec.operations.map(operation => spec.prefix + operation).sort());
+    }
+    for (const method of ['music.script.sources.list', 'pan.settings.get', 'tmdb.data.settings.get',
+      'douban.data.settings.get', 'film.settings.get', 'film.library.get']) okay(await client.call(method));
+    const release = await client.call('film.session.media.release', {});
+    assert.equal(release.ok, false);
+    assert.equal(release.contract, 'film.playback.v1');
+    assert.equal(release.code, 'INVALID_REQUEST');
+    assert.deepEqual(okay(await client.shutdown()), { closed: true, cleanupComplete: true });
+    return { modules: described.modules.map(value => value.id) };
+  } finally { await runtime.close(); await client?.close(); }
+});
+
 await check('public-three-module-http-and-source-sdk', async () => {
   const { createRuntime, createRuntimeClient } = await import('./app/entry.mjs');
-  const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86', requestKey = randomBytes(32).toString('hex');
-  const runtime = createRuntime({ sessionId, requestKey, dataRoot: join(directory, 'three-modules'),
+  const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
+  const runtime = createRuntime({ sessionId, dataRoot: join(directory, 'three-modules'),
     source: { platform: 'ios' } });
   const okay = reply => { assert.equal(reply.ok, true, JSON.stringify(reply)); return reply.value; };
   let client;
   try {
     await runtime.start();
-    client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
+    client = createRuntimeClient({ baseUrl: runtime.baseUrl });
     const described = okay(await client.describe());
     assert.equal(described.protocol, 'runtime.http.v1');
     assert.deepEqual(described.modules.map(value => value.contract),
@@ -164,11 +195,11 @@ await check('public-three-module-http-and-source-sdk', async () => {
   } finally { await runtime.close(); await client?.close(); }
 });
 
-await check('ios-five-module-http-and-tmdb', async () => {
+await check('ios-eight-module-http-and-tmdb', async () => {
   const { createRuntimeClient } = await import('./app/entry.mjs');
   const { createConnection, createServer } = await import('node:net');
-  const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86', requestKey = randomBytes(32).toString('hex');
-  const dataRoot = join(directory, 'five-modules');
+  const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
+  const dataRoot = join(directory, 'eight-modules');
   const seen = [];
   const upstream = http.createServer((request, response) => {
     seen.push(request.url);
@@ -212,17 +243,18 @@ await check('ios-five-module-http-and-tmdb', async () => {
     // to the unchanged packaged entry and its native dup; no binding is mocked.
     assert.ok(Number.isInteger(nativeChannel._handle.fd) && nativeChannel._handle.fd >= 3);
     process.argv = [originalArgv[0], originalArgv[1], '--meow-bootstrap-fd', String(nativeChannel._handle.fd)];
-    owner.write(`${JSON.stringify({ sessionId, requestKey, dataRoot })}\n`);
+    owner.write(`${JSON.stringify({ sessionId, dataRoot })}\n`);
     await import('./' + manifest.entry);
     process.argv = originalArgv;
-    client = createRuntimeClient({ baseUrl: await ready, sessionId, requestKey });
+    client = createRuntimeClient({ baseUrl: await ready });
     owner.setTimeout(0);
     const described = okay(await client.describe());
     assert.deepEqual(described.modules.map(value => value.id), manifest.modules);
     assert.deepEqual(described.modules.map(value => [value.id, value.version, value.contract]), [
       ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
-      ['source', '0.2.0', 'source.runtime.v2'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
-      ['netease', '0.1.0', 'netease.token.v1'],
+      ['source', '0.2.0', 'source.runtime.v2'], ['pan', '0.1.0', 'pan.runtime.v1'],
+      ['tmdb', '0.1.0', 'tmdb.data.v1'], ['douban', '0.1.0', 'douban.data.v1'],
+      ['film', '0.1.0', 'film.playback.v1'], ['netease', '0.1.0', 'netease.token.v1'],
     ]);
     const settings = okay(await client.call('tmdb.data.settings.update', {
       apiBase: `http://127.0.0.1:${upstream.address().port}/proxy`,

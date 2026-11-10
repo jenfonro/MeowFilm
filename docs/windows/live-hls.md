@@ -8,7 +8,7 @@ live HLS 由 `AdaptiveLiveSession` 和 `NativePlayback` 当前会话共同拥有
 - 支持滑动窗口和 append-only `EVENT`；正常出现 `ENDLIST` 后按有限媒体完成。
 - 媒体使用当前受支持的 MPEG-TS 或固定初始化 fragmented MP4 profile。
 - 重叠序号的媒体、时长、discontinuity、初始化段和实际 payload 身份必须保持一致。
-- 刷新后的媒体 endpoint 不能变成新的 master，也不能扩张到未经初次图授权的新 authority。
+- 刷新后的媒体 endpoint 不能变成新的 master；实际 HTTP(S) 引用与重定向不按 Origin 或 URL 许可图限制。
 - live window 最多 8 个 playlist、每窗最多 1024 个 segment；资源图和实际缓冲字节继续服从自适应媒体资源边界，不附加 HTTP 请求数或总并发额度。
 
 不支持动态 DASH、DVR／录制、任意 live seek、LL-HLS part、delta update、blocking reload、运行时 master 演化、任意初始化段切换、DRM 或 `SAMPLE-AES`。开放中的 live window 不能被发布为完整离线归档。
@@ -17,7 +17,7 @@ live HLS 由 `AdaptiveLiveSession` 和 `NativePlayback` 当前会话共同拥有
 
 - 原生读取驱动清单刷新；没有常驻刷新 timer，也不会因页面可见性反复创建请求。
 - 每个 playlist 只有一个刷新 gate。未到 target 时按当前窗口等待；同一窗口不会并发刷新。
-- 每次刷新从最后已验证的清单地址开始，并重新校验重定向、凭据范围、地址和清单结构。
+- 每次刷新从最后解析的清单地址开始，保留输入请求头，校验实际重定向、URI 和清单结构。
 - 表示序号、discontinuity、playlist 类型或重叠 payload 回退／改变时明确失败。
 - 最后一个已验证窗口只可在受限的瞬时网络／服务错误下保留最多两次调度重试；格式、权限和表示错误不重试。
 - 重复未前进窗口有界计数，超过预算后报告过期，不形成无限轮询。
@@ -38,6 +38,6 @@ live HLS 由 `AdaptiveLiveSession` 和 `NativePlayback` 当前会话共同拥有
 
 ## 生命周期
 
-- stop、替换、资源撤权、调用方取消和关闭会取消刷新与恢复，等待 playlist gate、上游读取、本地 capability 服务和原生会话退出。
+- stop、替换、资源撤权、调用方取消和关闭会取消刷新与恢复，等待 playlist gate、上游读取、本地表示服务和原生会话退出。
 - live 状态只属于当前 generation，不持久化窗口、序号、能力或 recovery ticket。
-- 失败后不直连原始 URL 绕过资源授权。
+- 失败后不脱离原 owner／revoked 生命周期另开输入或伪装恢复成功。

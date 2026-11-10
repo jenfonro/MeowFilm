@@ -81,24 +81,29 @@ final class DoubanFilmSourceTests: XCTestCase {
         XCTAssertEqual(items[2].posterURL?.absoluteString, "https://img.doubanio.cmliussss.net/cover.jpg")
         XCTAssertNil(items[2].largePosterURL)
         XCTAssertEqual(items[2].score, "9")
-        XCTAssertNil(items[3].posterURL)
+        XCTAssertEqual(items[3].posterURL?.absoluteString, "https://user@artwork.invalid/private.jpg")
         XCTAssertNil(items[3].largePosterURL)
         XCTAssertEqual(items[3].score, "")
     }
 
-    func testPosterNormalizationKeepsWindowsProxyAndURLContract() {
+    func testPosterNormalizationPreservesEndpointsAndKeepsTheDoubanCDNMapping() {
         for host in ["img.doubanio.com", "img.douban.com", "img12.doubanio.com",
                      "img9.douban.com", "img.doubanio.cmliussss.com", "img.doubanio.cmliussss.net"] {
             XCTAssertEqual(FilmPosterAddress.normalize("http://" + host + "/poster.jpg")?.absoluteString,
                            "https://img.doubanio.cmliussss.net/poster.jpg")
         }
         XCTAssertEqual(FilmPosterAddress.normalize("http://artwork.invalid:80/poster.jpg")?.absoluteString,
-                       "https://artwork.invalid/poster.jpg")
+                       "http://artwork.invalid:80/poster.jpg")
         XCTAssertEqual(FilmPosterAddress.normalize("https://imgx.doubanio.com/poster.jpg")?.host,
                        "imgx.doubanio.com")
-        for address in ["file:///poster.jpg", "https://user:secret@artwork.invalid/a.jpg",
+        for address in ["http://127.0.0.1:19191/poster.jpg", "http://localhost:19191/poster.jpg",
+                        "http://[::1]:19191/poster.jpg", "http://192.168.1.2:19191/poster.jpg",
+                        "https://user:synthetic@artwork.invalid/a.jpg",
                         "https://artwork.invalid:8443/a.jpg", "https://artwork.invalid/a.jpg#fragment",
-                        "https://artwork.invalid/a\n.jpg", String(repeating: "x", count: 8_193)] {
+                        "https://artwork.invalid/a.jpg?token=" + String(repeating: "x", count: 8_193)] {
+            XCTAssertEqual(FilmPosterAddress.normalize(address)?.absoluteString, address)
+        }
+        for address in ["file:///poster.jpg", "/relative.jpg", "https://artwork.invalid/a\n.jpg"] {
             XCTAssertNil(FilmPosterAddress.normalize(address))
         }
     }

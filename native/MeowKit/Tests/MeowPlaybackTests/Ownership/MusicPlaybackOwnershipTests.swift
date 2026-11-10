@@ -138,7 +138,8 @@ private actor CrossDomainNavigationService: MusicServing {
                        phase: PlaybackPhase, position: Double) -> PlaybackEvent {
         .init(attempt: attempt, kind: kind,
               snapshot: .init(owner: attempt.owner, resourceID: attempt.resourceID,
-                              phase: phase, position: position, duration: 180), error: nil)
+                              phase: phase, position: position, duration: 180),
+              wantsPlayback: kind != .ended && kind != .failed, error: nil)
     }
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
         let old = current, oldPhase = phase, oldPosition = position

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer, get } from 'node:http';
 
 // Controlled local upstream only; shared by the actual platform entry tests.
-export async function verifyTMDBAssembly(t, { client, baseUrl, sessionId, requestKey }) {
+export async function verifyTMDBAssembly(t, { client, baseUrl }) {
   const observed = [];
   const png = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=',
@@ -46,8 +46,14 @@ export async function verifyTMDBAssembly(t, { client, baseUrl, sessionId, reques
   }));
   assert.deepEqual(settings, {
     apiBase: origin + '/metadata', imageBase: origin + '/posters/t/p',
-    apiKeyConfigured: false, accessTokenConfigured: false,
+    apiKeyConfigured: false, accessTokenConfigured: false, revision: settings.revision,
   });
+  assert.equal(typeof settings.revision, 'string');
+  assert.notEqual(settings.revision, '');
+  assert.notEqual(settings.revision, initial.revision);
+  assert.deepEqual(okay(await client.call('tmdb.data.settings.update', {
+    apiBase: settings.apiBase, imageBase: settings.imageBase,
+  })), settings);
   const search = okay(await client.call('tmdb.data.request', {
     path: '/3/search/multi', query: { query: '示例', page: 1, language: 'zh-CN' }, imageSize: 'w500',
   }));
@@ -65,7 +71,7 @@ export async function verifyTMDBAssembly(t, { client, baseUrl, sessionId, reques
   const requestId = randomUUID();
   const image = await new Promise((resolve, reject) => {
     get(baseUrl + imagePath, { agent: false, headers: {
-      authorization: `Bearer ${requestKey}`, 'x-meow-session': sessionId, 'x-meow-request-id': requestId,
+      'x-meow-request-id': requestId,
     } }, response => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
@@ -92,8 +98,19 @@ export async function verifyTMDBAssembly(t, { client, baseUrl, sessionId, reques
     assert.equal(item.headers['x-meow-session'], undefined);
     assert.equal(item.headers['x-meow-request-id'], undefined);
   }
-  for (const method of ['douban.data.settings.get', 'pan.providers'])
-    assert.deepEqual(await client.call(method),
-      { ok: false, contract: 'runtime.http.v1', code: 'METHOD_NOT_FOUND' });
   return settings;
+}
+
+export async function verifyPanAndDoubanAssembly(client) {
+  const douban = await client.call('douban.data.settings.get');
+  assert.equal(douban.ok, true);
+  assert.equal(douban.contract, 'douban.data.v1');
+  assert.equal(typeof douban.value.revision, 'string');
+  assert.notEqual(douban.value.revision, '');
+  assert.equal(douban.value.cookieConfigured, false);
+  const pan = await client.call('pan.providers');
+  assert.equal(pan.ok, true);
+  assert.equal(pan.contract, 'pan.runtime.v1');
+  assert.deepEqual(pan.value.providers.map(row => row.provider).sort(),
+    ['baidu', 'quark', 'quark_tv', 'tianyi', 'uc', 'uc_tv', 'yidong']);
 }

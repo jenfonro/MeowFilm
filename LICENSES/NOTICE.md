@@ -613,3 +613,81 @@ been established, and rights must be confirmed before distributing these assets.
   by `https://m.kugou.com/`:
   `https://m.kugou.com/v3/static/images/img/icon_kugou2.png`.
   No resizing, recolouring or redrawing was applied.
+
+## Video playback kernel — FFmpeg, KSPlayer and libxml2
+
+FFmpeg 8.1.2 is built from the pinned upstream revision
+`38b88335f99e76ed89ff3c93f877fdefce736c13`:
+<https://github.com/FFmpeg/FFmpeg/tree/38b88335f99e76ed89ff3c93f877fdefce736c13>.
+The source archive SHA-256 is
+`2ae7e42343cfffb811d15cfe98b6d005f082595fcdf034d30a4ff90cfed9f9c6`.
+The upstream licensing overview is reproduced in `FFmpeg-LICENSE.md`; the
+LGPL texts are `LGPL-2.1-only.txt` and `LGPL-3.0-only.txt`. These filenames
+identify the texts, not a removal of upstream's “or later” grant.
+
+- iOS uses avformat, avcodec, avutil, swresample and swscale, built with
+  `--disable-gpl --disable-nonfree --enable-version3` (LGPLv3 or later).
+  The exact recipe and source adaptations are in `scripts/ios-video-kernel.json`
+  and `native/VideoKernel/patches/ffmpeg-native-output.patch`.
+- Windows builds a private avformat/avcodec/avutil demux library with decoders,
+  encoders, network protocols and GPL/nonfree components disabled. The source
+  adaptations and build recipe are in `apps/windows/native/VideoKernel/`.
+  Existing libVLC remains the decoder/rendering owner; the private adapter does
+  not convert video to another format.
+- This software is based in part on the work of the Independent JPEG Group.
+  The upstream IJG notices and the unchanged-source statement are reproduced
+  in `FFmpeg-IJG-NOTICE.txt` for the iOS decoding build.
+
+The iOS sample-buffer renderer, resampling and bounded queue implementation
+references and adapts KSPlayer by kintan/kingslay and its contributors, fixed at
+`d0d063ab1f045735129b6617591ad2148d88d5db`:
+<https://github.com/kingslay/KSPlayer/tree/d0d063ab1f045735129b6617591ad2148d88d5db>.
+This revision's `LICENSE` is GPLv3, **not MIT** (upstream text SHA-256
+`8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903`).
+The repository's existing `GPL-3.0-only.txt` supplies the same license terms;
+no duplicate GPLv3 body is kept. The adaptation uses current FFmpeg public APIs
+and Apple sample buffers, without KSPlayer's UI or FFmpegKit private shim.
+
+Windows also builds libxml2 2.14.6 from
+<https://download.gnome.org/sources/libxml2/2.14/libxml2-2.14.6.tar.xz>,
+SHA-256 `7ce458a0affeb83f0b55f1f4f9e0e55735dbfc1a9de124ee86fb4a66b597203a`.
+Copyright (C) 1998–2012 Daniel Veillard and the libxml2 contributors; upstream
+MIT-style text is reproduced in `libxml2-MIT.txt`. Its `dict.c` also credits
+Copyright (C) 2003–2012 Daniel Veillard; `list.c` credits Copyright (C) 2000 Gary
+Pennington and Daniel Veillard. Their distinct permission/disclaimer is appended
+to `libxml2-MIT.txt` without dropping those notices.
+iOS links the Apple SDK's system libxml2 rather than shipping a second copy.
+
+The Windows native build links the GCC 13.2.0 support library `libgcc`
+statically. Its source is GCC tag `releases/gcc-13.2.0`:
+<https://github.com/gcc-mirror/gcc/tree/releases/gcc-13.2.0/libgcc>.
+Copyright (C) Free Software Foundation, Inc. The applicable grant is
+GPL-3.0-or-later WITH GCC-exception-3.1. The GPLv3 terms are supplied by the
+existing `GPL-3.0-only.txt`; that filename does not narrow libgcc's “or later”
+grant. `GCC-Runtime-Library-Exception-3.1.txt` reproduces upstream
+`COPYING.RUNTIME` verbatim (SHA-256
+`9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74`).
+The exception applies to eligible compilation processes as defined in that
+text; it does not change FFmpeg's or VLC's separate license obligations.
+
+The Windows toolchain also contributes the MinGW-w64 runtime and statically
+linked winpthreads. Installed headers identify MinGW-w64 11.0.1; upstream tag
+`v11.0.1` supplies the source notices:
+<https://github.com/mingw-w64/mingw-w64/tree/v11.0.1>.
+`MinGW-w64-runtime-NOTICE.txt` preserves the upstream runtime notice verbatim.
+`winpthreads-LICENSE.txt` contains its MIT grant, the derived Lockless Inc.
+BSD-style notice, and the additional 2011–2016 notice from `src/misc.c`.
+The native build receipt records the actual static archive identities; the
+upstream attribution alone does not establish absence of toolchain patches.
+These Windows support libraries are not included in the iOS kernel.
+
+## VLC 3.0.24 SDK — Windows
+
+The private demux plugin uses the official VideoLAN VLC 3.0.24 Windows x64 SDK:
+<https://download.videolan.org/pub/videolan/vlc/3.0.24/win64/vlc-3.0.24-win64.7z>,
+SHA-256 `1ed59c09152e78aff84663fa76efab26057716576db74332858810e5ef54ae1f`.
+Copyright VideoLAN and VLC authors. VLC is GPLv2 or later, while libVLC's
+public library interface is LGPLv2.1 or later. The corresponding license texts
+are `GPL-2.0-only.txt` and `LGPL-2.1-only.txt`; existing bundled upstream notices
+remain in the libVLC distribution. The plugin's SDK ABI and exact libvlccore
+identity are checked by the locked native build.

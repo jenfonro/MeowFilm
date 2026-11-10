@@ -1,6 +1,7 @@
 using System.Text.Json;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Scripting;
+using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Scripting;
 
 namespace MeowFilm.Windows.Tests;
@@ -13,7 +14,7 @@ public static class FilmSearchTests
         yield return Case("missing page counts repeated identities and silent explicit same-page retry", PageBoundaries);
         yield return Case("first-round late ranking and later-round aggregate upgrades freeze both orders", RoundOrder);
         yield return Case("TMDB raw fallback boundaries preserve original payload and effective query", MetadataFallback);
-        yield return Case("TMDB details cache by type and ID and more never repeats metadata", MetadataCache);
+        yield return Case("TMDB details delegate freshness per query and more retains its displayed metadata", MetadataOwner);
         yield return Case("new-query cancellation fences noncooperative old results", QueryCancellation);
         yield return Case("retired physical work releases owner tracking while playback retains its snapshot", RetiredSnapshot);
         yield return Case("all source failures remain retryable and distinct from successful empty results", AllSourceFailures);
@@ -21,9 +22,9 @@ public static class FilmSearchTests
         yield return Case("prepare resume retains completed pages and metadata with a fresh lease", PrepareResume);
         yield return Case("prepare resume recovers only interrupted source pages and missing metadata details", PrepareResumeInFlight);
         yield return Case("hanging detail receives cancellation and physically drains before engine close", DetailShutdown);
-        yield return Case("cross-query detail flights cannot inherit another query cancellation or cache late data", DetailOwnership);
+        yield return Case("cross-query details cannot inherit another waiter cancellation or publish late data", DetailOwnership);
         yield return Case("in-flight playback follows original members into a late TMDB carrier", LateCarrier);
-        yield return Case("real Cat transport selects enabled searchable sources and sends original query and page", FilmSourcesTests.SearchWire);
+        yield return Case("Node data search selects enabled sources and sends original query and page", FilmSourcesTests.SearchWire);
     }
     private static TestCase Case(string name, Func<Task> action) =>
         new("film-search: " + name, () => MusicQualityConsumerTests.Sta(action));
@@ -133,7 +134,7 @@ public static class FilmSearchTests
         }
     }
 
-    private static async Task MetadataCache()
+    private static async Task MetadataOwner()
     {
         var metadata = new SearchMetadata { ReadSearch = (word, _) => Task.FromResult(SearchFixture.Tmdb(word == "电影" ? "movie" : "tv", 7, word, "搜索简介")) };
         var sources = new SearchSources(SearchFixture.Source("a")) { Read = (_, _, page, _) => Task.FromResult(SearchFixture.Page(2, (page.ToString(), "站源", ""))) };
@@ -144,9 +145,10 @@ public static class FilmSearchTests
         await f.Service.LoadMoreAsync();
         SearchFixture.Check(metadata.Searches.Count == 1 && metadata.Details.Count == 1, "more never repeats TMDB search/detail");
         await SearchFixture.Settle(f.Service.Start("别名"));
-        SearchFixture.Check(metadata.Details.Count == 1, "same type and ID reuse successful detail across queries");
+        SearchFixture.Check(metadata.Details.Count == 2, "a new query delegates detail freshness to the data owner rather than an App-lifetime success cache");
         await SearchFixture.Settle(f.Service.Start("电影"));
-        SearchFixture.Check(metadata.Details.SequenceEqual(new[] { ("tv", 7L), ("movie", 7L) }), "equal numeric IDs do not cross movie/tv cache identity");
+        SearchFixture.Check(metadata.Details.SequenceEqual(new[] { ("tv", 7L), ("tv", 7L), ("movie", 7L) }),
+            "each new query delegates its exact type and ID; more alone retains its current display snapshot");
     }
 
     private static async Task QueryCancellation()
@@ -324,12 +326,14 @@ public static class FilmSearchTests
             await oldCancelled.Task.WaitAsync(TimeSpan.FromSeconds(10));
             var current = f.Service.Start("新查询"); await SearchFixture.Settle(current);
             SearchFixture.Check(metadata.Details.Count == 2 && new FilmSearchContext(current, current.Items.Single()).Metadata!.Value
-                .GetProperty("overview").GetString() == "current", "new query owns an independent flight after the last old reader cancelled");
+                .GetProperty("overview").GetString() == "current", "new query has its own waiter after the previous query cancelled");
             oldRelease.TrySetResult(SearchFixture.Json(new { name = "目标", overview = "late-old" }));
             await SearchFixture.Settle(old);
-            var cached = f.Service.Start("第三查询"); await SearchFixture.Settle(cached);
-            SearchFixture.Check(metadata.Details.Count == 2 && new FilmSearchContext(cached, cached.Items.Single()).Metadata!.Value
-                .GetProperty("overview").GetString() == "current", "cancelled old flight cannot overwrite the successful new type/ID cache");
+            var third = f.Service.Start("第三查询"); await SearchFixture.Settle(third);
+            SearchFixture.Check(metadata.Details.Count == 3 && new FilmSearchContext(third, third.Items.Single()).Metadata!.Value
+                .GetProperty("overview").GetString() == "current" &&
+                !old.Details.ContainsKey(JsonSerializer.Serialize(new object[] { "tv", 7L })),
+                "each query reconsults the data owner; a cancelled late receipt cannot seed even its retired display snapshot");
         }
         finally { oldRelease.TrySetResult(SearchFixture.Json(new { })); }
     }
@@ -417,6 +421,8 @@ internal sealed class SearchEngine : IJavaScriptJsonEngine
 }
 internal sealed class SearchSources(params FilmSearchSource[] sources) : IFilmSearchSources
 {
+    internal RuntimeConnection? DataOwner;
+    internal Func<FilmSearchSource, string, int, JsonElement, JsonElement?>? CacheEntry;
     private event EventHandler? changed;
     public event EventHandler? Changed { add => changed += value; remove => changed -= value; }
     internal int Subscribers => changed?.GetInvocationList().Length ?? 0;
@@ -427,19 +433,27 @@ internal sealed class SearchSources(params FilmSearchSource[] sources) : IFilmSe
     public IReadOnlyList<FilmSearchSource> CurrentSearchSources => Sources.ToArray();
     public Task<IReadOnlyList<FilmSearchSource>> ReadSearchSourcesAsync(CancellationToken token)
     { token.ThrowIfCancellationRequested(); return Task.FromResult<IReadOnlyList<FilmSearchSource>>(Sources.ToArray()); }
-    public Task<JsonElement> SearchAsync(FilmSearchSource source, string query, int page, CancellationToken token)
-    { Calls.Add((source, query, page)); return Read(source, query, page, token); }
+    public async Task<FilmSearchData> SearchAsync(FilmSearchSource source, string query, int page, CancellationToken token)
+    {
+        Calls.Add((source, query, page));
+        var raw = await Read(source, query, page, token);
+        return new(SearchFixture.Json(new { items = raw.GetProperty("list"), page, raw }), DataOwner,
+            CacheEntry?.Invoke(source, query, page, raw));
+    }
     public bool IsSearchSourceCurrent(FilmSearchSource source) => Sources.Any(current => current.Key == source.Key && current.Cat.Generation == source.Cat.Generation);
     internal void Publish() => changed?.Invoke(this, EventArgs.Empty);
 }
 internal sealed class SearchMetadata : IFilmSearchMetadata
 {
+    internal RuntimeConnection? DataOwner;
     internal List<string> Searches { get; } = [];
     internal List<(string Type, long Id)> Details { get; } = [];
     internal Func<string, CancellationToken, Task<JsonElement>> ReadSearch = (_, _) => Task.FromResult(SearchFixture.Tmdb("tv", 7, "目标", "搜索简介"));
     internal Func<string, long, CancellationToken, Task<JsonElement>> ReadDetail = (type, _, _) => Task.FromResult(SearchFixture.Json(new
     { name = "目标", title = "目标", overview = "详情" + type, first_air_date = "2023-01-01", release_date = "2023-01-01", seasons = Array.Empty<object>() }));
-    public Task<JsonElement> SearchAsync(string query, CancellationToken token) { Searches.Add(query); return ReadSearch(query, token); }
-    public Task<JsonElement> DetailAsync(string type, long id, CancellationToken token) { Details.Add((type, id)); return ReadDetail(type, id, token); }
+    public async Task<FilmSearchData> SearchAsync(string query, CancellationToken token)
+    { Searches.Add(query); return new(await ReadSearch(query, token), DataOwner); }
+    public async Task<FilmSearchData> DetailAsync(string type, long id, CancellationToken token)
+    { Details.Add((type, id)); return new(await ReadDetail(type, id, token), DataOwner); }
     public string ResolveImage(string path) => path.Length == 0 ? "" : "https://fixture.invalid" + path;
 }

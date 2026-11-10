@@ -2,19 +2,19 @@
 
 `@meowfilm/pan-runtime@0.1.0` 是通用运行器的内置 Node 能力，不运行外部脚本，不创建 Worker 或额外进程。它拥有网盘凭据、分享枚举、必要单文件转存、登录及取播放地址；不拥有影视搜索、播放选路、媒体代理、账号页面或客户端缓存。
 
-本模块仅提供运行器能力。iOS／Windows App 未启用网盘能力；不能把这里的接口可用描述为平台 App 已接入。
+本模块仅提供 provider 能力。iOS／Windows 正式 App entry 已在八模块中装配 pan，film 复用同一个 owner；这不等于账号 UI、真实登录／转存或平台播放已验证，具体业务与边界见[影视播放契约](film-playback.md)。
 
 ## 受信装配
 
 ```js
 import { createPanRuntime } from './apps/runtime/pan-entry.mjs';
-const runtime = createPanRuntime({ sessionId, requestKey, dataRoot });
+const runtime = createPanRuntime({ sessionId, dataRoot });
 await runtime.start();
 // 结束时必须等待所有请求与上游连接排空。
 await runtime.close();
 ```
 
-`sessionId/requestKey` 使用 [runtime.http.v1](runtime-bridge.md) 的受信配置，不接受脚本、URL 或 CLI 提供。`dataRoot` 是绝对目录。同进程总装配 `createRuntime({sessionId,requestKey,dataRoot,pan:{}})` 可显式加入 pan；省略 `pan` 时默认三模块不变。pan-only 入口不加载原生脚本引擎。
+`sessionId` 是 [runtime.http.v1](runtime-bridge.md) 的生命周期代次；普通 HTTP 调用无需 session 或启动密钥。`dataRoot` 是绝对目录。同进程总装配 `createRuntime({sessionId,dataRoot,pan:{}})` 可显式加入 pan；省略 `pan` 时默认三模块不变。pan-only 入口不加载原生脚本引擎。
 
 新模块没有源码上传接口。`describe` 中为 `pan@0.1.0/pan.runtime.v1`；所有业务请求是 `POST /v1/pan/{operation}`，完整 JSON body，不增加摘要、加密、分片或大小分类。Node 调用端用 `client.call('pan.' + operation, params)`。成功与错误信封复用现有 HTTP 契约。
 
@@ -72,11 +72,11 @@ await runtime.close();
 
 TV 只接受明确账号内的 `kind:"stored"` 引用，不 list、不转存、不尝试普通盘回退。可显式传入对应普通盘 `prepare` 返回的完整引用，service 同时校验普通账号 revision；也可传入 `{kind:"stored",provider:"quark_tv",accountRevision:当前TV账号revision,fileId:"准确账号内fid"}`。没有普通 Cookie 与 TV 账号的自动绑定或播放优先级策略。
 
-每次 `play` 只取调用方指定的一种模式，不同时请求 streaming/download，不因失败切换 provider。返回 URL 和必要 headers，调用方负责媒体请求；headers 可能含上游要求的 Cookie／Authorization，不用于其他域名，不写日志。运行器不建立服务器媒体 relay。
+每次 `play` 只取调用方指定的一种模式，不同时请求 streaming/download，不因失败切换 provider。返回 URL 和必要 headers，调用方负责媒体请求；headers 可能含上游要求的 Cookie／Authorization，不用于其他域名，不写日志。pan provider 自身不建立媒体 relay；film 的独立受控媒体入口不属于此 provider 的取址接口。
 
 ### 参考接入与模式含义
 
-网盘通信能力以 meowfilm-server 的独立适配函数为依据，而不是将其播放编排整体移植。普通盘与 TV 的选择、优先级以及失败后是否再次尝试由客户端负责。
+网盘通信能力以 meowfilm-server 的独立适配函数为依据，而不是将其播放编排整体移植。普通盘与 TV 的选择、优先级以及失败后是否再次尝试由调用方负责；正式 App 中由 Node film 智能会话编排，不由 pan provider 自行选择。
 
 - **普通夸克／UC**：两种 `mode` 都调用一次同盘的 `file/download`。按参考 `quarkDirectDownloadWithCookie`／`ucDirectDownload`，在所选文件的同一响应中优先取 `streaming → play_url` 或 `download → download_url`，随后按 `download_url → play_url → url` 读取可用地址。这里的模式是字段偏好，**不保证两种地址不同，也不声明普通盘具有 TV 转码接口**；只有 `download_url` 时仍能提供原文件直链。不会为此请求 TV 或另一种上游取址接口。
 - **夸克 TV／UC TV**：明确调用 `/file?method=streaming` 或 `/file?method=download`，分别读取 `video_info` 中首个非空 URL 或 `download_url`。所选结果缺失时报错，不使用另一模式的结果，不补发普通盘请求。
@@ -104,7 +104,7 @@ await client.call('pan.login.poll', { sessionId }, { timeout: 45000 });
 
 ## 上游传输、并发与安全边界
 
-原生 `http/https` keep-alive 与 Buffer 聚合供完整响应接口使用；仅执行上游协议明确需要的 JSON/JSONP、解压、Cookie、签名与 AES/RSA。JSONP 不 eval，大整数精确保留。重定向不把凭据自动送往任意域名；协议认证链只允许对应已知端点。错误只使用封闭码，不回传请求 URL、底层异常、上游正文或账号资料。
+原生 `http/https` keep-alive 与 Buffer 聚合供完整响应接口使用；仅执行上游协议明确需要的 JSON/JSONP、解压、Cookie、签名与 AES/RSA。JSONP 不 eval，大整数精确保留。HTTP 重定向不设域名／Origin／降级访问门禁，显式请求头与 307/308 的 body 保留；301/302 POST 和 303 依协议转 GET 并去掉正文头。百度二维码、天翼登录和播放取址可跟随来源提供的 HTTP(S) 地址；登录 Cookie jar 仍按 Domain/Path/Secure/expiry 选取，不混入其它账号或目标的 Cookie。分享 URL 的 provider 识别属于分享协议解析，不是网站访问限制。错误只使用封闭码，不回传请求 URL、底层异常、上游正文或账号资料。
 
 百度／天翼解析播放重定向时仅需要响应头：保持上游要求的 GET／Range，收到头后停止并排空响应，不下载媒体正文。它不是按响应大小分类，也不改变其他完整响应接口。
 

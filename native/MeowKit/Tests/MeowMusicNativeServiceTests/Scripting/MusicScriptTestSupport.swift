@@ -16,11 +16,11 @@ struct MusicScriptTestDocuments {
 private final class MusicScriptHTTPRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var runtimes: [String: MusicScriptTestRuntime] = [:]
-    func set(_ runtime: MusicScriptTestRuntime?, session: String) {
-        lock.lock(); defer { lock.unlock() }; runtimes[session] = runtime
+    func set(_ runtime: MusicScriptTestRuntime?, host: String) {
+        lock.lock(); defer { lock.unlock() }; runtimes[host] = runtime
     }
-    func runtime(_ session: String) -> MusicScriptTestRuntime? {
-        lock.lock(); defer { lock.unlock() }; return runtimes[session]
+    func runtime(_ host: String) -> MusicScriptTestRuntime? {
+        lock.lock(); defer { lock.unlock() }; return runtimes[host]
     }
 }
 
@@ -34,7 +34,7 @@ private final class MusicScriptURLProtocol: URLProtocol, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         loading = Task {
             do {
-                let id = request.value(forHTTPHeaderField: "X-Meow-Session") ?? ""
+                let id = request.url?.host ?? ""
                 guard let runtime = Self.registry.runtime(id) else { throw RuntimeHTTPError.closed }
                 let response = try await runtime.respond(request)
                 try Task.checkCancellation()
@@ -89,7 +89,7 @@ actor MusicScriptTestRuntime: RuntimeLaunching {
     var gates: [String: NativeMusicGate] = [:]
     var cancellationObservers: [String: @Sendable () -> Void] = [:]
     var id = "1c33c457-d51f-4f51-a3b7-b0c222e89a01"
-    let sessionID = UUID().uuidString.lowercased()
+    let endpointHost = UUID().uuidString.lowercased() + ".invalid"
     func fail(_ code: String?) { failure = code }
     func setHandshakeValid(_ valid: Bool) { handshakeValid = valid }
     func setCleanupComplete(_ complete: Bool) { cleanupComplete = complete }
@@ -111,17 +111,17 @@ actor MusicScriptTestRuntime: RuntimeLaunching {
     func metrics() -> (connects: Int, calls: [String]) { (connects, calls) }
     func connect() throws -> RuntimeHTTPClient {
         connects += 1
-        MusicScriptURLProtocol.registry.set(self, session: sessionID)
+        MusicScriptURLProtocol.registry.set(self, host: endpointHost)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MusicScriptURLProtocol.self]
-        let client = try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43210")!,
-            sessionID: sessionID, requestKey: String(repeating: "a", count: 64), configuration: configuration)
+        let client = try RuntimeHTTPClient(baseURL: URL(string: "http://\(endpointHost):43210")!,
+            configuration: configuration)
         native = client
         return client
     }
     func close() async {
         await native?.close()
-        MusicScriptURLProtocol.registry.set(nil, session: sessionID)
+        MusicScriptURLProtocol.registry.set(nil, host: endpointHost)
     }
     func waitForExit() {}
     private func success(_ value: RuntimeValue = .object([:]), contract: String = "music.script.v3") -> RuntimeValue {

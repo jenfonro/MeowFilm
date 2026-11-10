@@ -30,13 +30,15 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
       return result;
     } });
     const { createRuntime, createRuntimeClient, createAppRuntime, createMusicScriptModule,
-      createCatScriptModule, createSourceRuntimeModule, createTMDBDataModule } = await import('./app/entry.mjs');
-    const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86', requestKey = 'a'.repeat(64);
-    const runtime = createRuntime({ sessionId, requestKey, dataRoot: join(payload, 'data'), source: { platform: 'ios' } });
+      createCatScriptModule, createSourceRuntimeModule, createPanRuntimeModule,
+      createTMDBDataModule, createDoubanDataModule, connectFilmPlayback,
+      createNeteaseTokenModule } = await import('./app/entry.mjs');
+    const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
+    const runtime = createRuntime({ sessionId, dataRoot: join(payload, 'data'), source: { platform: 'ios' } });
     let client;
     try {
       await runtime.start();
-      client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
+      client = createRuntimeClient({ baseUrl: runtime.baseUrl });
       const described = await client.describe();
       assert.equal(described.ok, true);
       assert.deepEqual(described.value.modules.map(value => [value.id, value.version]),
@@ -46,24 +48,36 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
       assert.equal((await client.shutdown()).ok, true);
     } finally { await runtime.close(); await client?.close(); }
     const dataRoot = join(payload, 'app-data');
-    const app = createAppRuntime({ sessionId, requestKey, modules: [
+    const modules = [
       createMusicScriptModule({ dataRoot }), createCatScriptModule({ dataRoot: join(dataRoot, 'cat') }),
-      createSourceRuntimeModule({ platform: 'ios' }), createTMDBDataModule({ dataRoot }),
-    ] });
+      createSourceRuntimeModule({ platform: 'ios' }), createPanRuntimeModule({ dataRoot }),
+      createTMDBDataModule({ dataRoot }), createDoubanDataModule({ dataRoot }),
+    ];
+    connectFilmPlayback(modules, { dataRoot });
+    modules.push(createNeteaseTokenModule());
+    const app = createAppRuntime({ sessionId, modules });
     try {
       await app.start();
-      client = createRuntimeClient({ baseUrl: app.baseUrl, sessionId, requestKey });
+      client = createRuntimeClient({ baseUrl: app.baseUrl });
       const described = await client.describe();
       assert.equal(described.ok, true);
       const manifest = JSON.parse(readFileSync('runtime-manifest.json', 'utf8'));
       assert.deepEqual(described.value.modules.map(value => value.id), manifest.modules);
       assert.deepEqual(described.value.modules.map(value => [value.id, value.version, value.contract]), [
         ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
-        ['source', '0.2.0', 'source.runtime.v2'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
+        ['source', '0.2.0', 'source.runtime.v2'], ['pan', '0.1.0', 'pan.runtime.v1'],
+        ['tmdb', '0.1.0', 'tmdb.data.v1'], ['douban', '0.1.0', 'douban.data.v1'],
+        ['film', '0.1.0', 'film.playback.v1'], ['netease', '0.1.0', 'netease.token.v1'],
       ]);
-      assert.deepEqual(described.value.modules[3].methods, [
+      assert.deepEqual(described.value.modules[4].methods, [
         'tmdb.data.request', 'tmdb.data.settings.get', 'tmdb.data.settings.update',
       ]);
+      assert.deepEqual(described.value.modules[7].methods, ['netease.token.get']);
+      for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
+        'film.settings.get', 'film.library.get']) {
+        const reply = await client.call(method);
+        assert.equal(reply.ok, true, JSON.stringify(reply));
+      }
       const settings = await client.call('tmdb.data.settings.get');
       assert.equal(settings.ok, true);
       assert.equal(settings.contract, 'tmdb.data.v1');

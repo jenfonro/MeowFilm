@@ -7,6 +7,9 @@
     <ApplicationIcon>../../src/MeowFilm.Desktop/Assets/Meowfilm.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../app/AppSystemMediaAttachment.cs" Link="App/AppSystemMediaAttachment.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../../src/MeowFilm.Core/MeowFilm.Core.csproj" />
     <ProjectReference Include="../../src/MeowFilm.Platform/MeowFilm.Platform.csproj" />
     <ProjectReference Include="../../src/MeowFilm.Capabilities/MeowFilm.Capabilities.csproj" />

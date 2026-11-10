@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -10,32 +9,24 @@ using Reply = MeowFilm.Windows.Tests.AdaptiveMediaTests.Reply;
 namespace MeowFilm.Windows.Tests;
 
 // Synthetic loopback media and real libVLC dummy. Unlike earlier transport fixtures this
-// exercises the production resource entry, never ForLoopbackTests or an offline read lease.
+// exercises the production resource entry and physical receipt release.
 public static class MediaResourceTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        foreach (var address in new[] { "http://localhost:4123/a", "http://[::1]:4123/a",
-            "https://127.0.0.1:4123/a", "http://127.0.0.1:0/a", "https://example.org/a",
-            "file:///C:/private-media.wav" })
-            yield return Case("reject nonregistered address " + address, async () =>
-            {
-                await using var player = New();
-                var lease = new Lease(new(address));
-                await Error(() => Open(player, lease), PlaybackError.InvalidResourceLease);
-                Released(lease);
-                Check(!player.HasMedia && player.NativeVersion is null, "no decoder");
-            });
-        yield return Case("ordinary HTTP does not inherit resource exception", async () =>
+        yield return Case("non-HTTP resource rejects actual unsupported input", async () =>
+        {
+            await using var player = New(); var lease = new Lease(new("file:///C:/private-media.wav"));
+            await Error(() => Open(player, lease), PlaybackError.UnsupportedUri);
+            Released(lease); Check(!player.HasMedia && player.NativeVersion is null, "no decoder");
+        });
+        yield return Case("ordinary HTTP reads loopback without a resource exception", async () =>
         {
             await using var origin = WaveOrigin();
-            await Error(async () =>
-            {
-                using var input = await HttpMediaInput.OpenAsync(origin.Uri("/wave"), origin.Headers);
-            }, PlaybackError.HttpAddressBlocked);
-            Check(origin.Requests.IsEmpty, "ordinary policy still refuses loopback");
+            using var input = await HttpMediaInput.OpenAsync(origin.Uri("/wave"), origin.Headers);
+            Check(input.Length > 0 && origin.Requests.Count == 1, "actual default HTTP access");
         });
-        foreach (var mode in new[] { "revoked", "unrevocable", "denied", "throwing-policy", "throwing-getter", "invalid-header" })
+        foreach (var mode in new[] { "revoked", "unrevocable", "throwing-getter", "invalid-header" })
             yield return Case("preflight " + mode + " releases without network", async () =>
             {
                 await using var origin = WaveOrigin();
@@ -46,8 +37,6 @@ public static class MediaResourceTests
                 {
                     case "revoked": lease.Revoke(); expected = PlaybackError.ResourceRevoked; break;
                     case "unrevocable": lease.Unrevocable = true; break;
-                    case "denied": lease.Permit = _ => false; expected = PlaybackError.HttpAddressBlocked; break;
-                    case "throwing-policy": lease.Permit = _ => throw new IOException("secret-policy-canary"); break;
                     case "throwing-getter": lease.ThrowAddress = true; break;
                     case "invalid-header": lease.HeaderValues["Host"] = "private"; expected = PlaybackError.UnsupportedHeaders; break;
                 }
@@ -123,25 +112,23 @@ public static class MediaResourceTests
             lease.Revoke(); await Cancelled(() => opening);
             Released(lease); Check(origin.Requests.All(r => r.Authorized), "immutable accepted headers");
         });
-        yield return Case("capability cannot authorize unrelated loopback port", async () =>
+        yield return Case("receipt follows a redirect to another local port", async () =>
         {
-            await using var other = WaveOrigin();
-            await using var origin = new Origin();
+            await using var other = WaveOrigin(); await using var origin = new Origin();
             origin.Route = _ => Reply.Redirect(other.Uri("/wave").AbsoluteUri);
-            await using var player = New();
-            var lease = LeaseFor(origin, "/root"); lease.Permit = _ => true;
-            await Error(() => Open(player, lease), PlaybackError.HttpAddressBlocked);
-            Released(lease); Check(other.Requests.IsEmpty, "fixed native endpoint protects against faulty adapter");
+            await using var player = New(); var lease = LeaseFor(origin, "/root");
+            await Start(player, lease);
+            Check(other.Requests.Any(r => r.Authorized), "cross-port request retains the explicit input headers");
+            await player.StopAsync(); Released(lease);
         });
-        yield return Case("same origin redirect still needs resource authorization", async () =>
+        yield return Case("same origin redirect needs no URL authorization", async () =>
         {
-            await using var origin = new Origin();
-            origin.Route = _ => Reply.Redirect("/private");
-            await using var player = New();
-            var lease = LeaseFor(origin, "/root"); lease.Permit = uri => uri.AbsolutePath == "/root";
-            await Error(() => Open(player, lease), PlaybackError.HttpAddressBlocked);
-            Released(lease);
-            Check(origin.Requests.Count == 1 && origin.Requests.Single().Path == "/root", "no unauthorized redirected request");
+            await using var origin = WaveOrigin(); var route = origin.Route;
+            origin.Route = path => path == "/root" ? Reply.Redirect("/private") : route(path);
+            await using var player = New(); var lease = LeaseFor(origin, "/root");
+            await Start(player, lease);
+            Check(origin.Requests.Any(r => r.Path == "/private"), "actual redirected input");
+            await player.StopAsync(); Released(lease);
         });
         foreach (string format in new[] { "hls-master", "hls-mp4", "dash-list" })
             yield return Case("actual " + format + " child resources share one scoped capability", async () =>
@@ -154,21 +141,18 @@ public static class MediaResourceTests
                 await Until(() => origin.Requests.Any(r => r.Path.EndsWith(".ts", StringComparison.Ordinal) ||
                     r.Path.EndsWith(".m4s", StringComparison.Ordinal)), "adaptive fragments");
                 Check(origin.Requests.All(r => r.Authorized), "all resource requests have scoped credential");
-                Check(lease.Checked.Select(u => u.AbsolutePath).Distinct().Count() >= 3, "root and child admission");
+                Check(origin.Requests.Select(r => r.Path).Distinct().Count() >= 3, "actual root and child IO");
                 lease.Revoke();
                 await Until(() => lease.ReleaseComplete && !player.HasMedia, "adaptive listener and source retired");
                 Released(lease);
             });
-        yield return Case("adaptive child authorization refusal never reaches source", async () =>
+        yield return Case("adaptive children use the input without URL authorization", async () =>
         {
-            await using var origin = new Origin();
-            origin.Route = path => AdaptiveMediaTests.MediaRoute(path, "hls-master", 30);
-            await using var player = New();
-            var lease = LeaseFor(origin, "/root.m3u8");
-            lease.Permit = uri => uri.AbsolutePath == "/root.m3u8";
-            await Error(() => Open(player, lease), PlaybackError.HttpAddressBlocked);
-            Released(lease);
-            Check(origin.Requests.All(r => r.Path == "/root.m3u8"), "child not fetched before scope authorization");
+            await using var origin = new Origin(); origin.Route = path => AdaptiveMediaTests.MediaRoute(path, "hls-master", 30);
+            await using var player = New(); var lease = LeaseFor(origin, "/root.m3u8");
+            await Start(player, lease);
+            Check(origin.Requests.Any(r => r.Path != "/root.m3u8"), "actual child requests");
+            await player.StopAsync(); Released(lease);
         });
         yield return Case("closed dispatcher releases lease without evaluating it", async () =>
         {
@@ -176,7 +160,7 @@ public static class MediaResourceTests
             await AdaptiveMediaTests.Sta(async () => { closed = New(); await closed.DisposeAsync(); });
             var lease = new Lease(new("http://127.0.0.1:4123/wave")) { ThrowAddress = true };
             await Error(() => Open(closed!, lease), PlaybackError.DispatcherUnavailable);
-            Released(lease); Check(lease.Checked.IsEmpty, "no dispatch or resource lookup");
+            Released(lease); Check(lease.AddressReads == 0, "no dispatch or resource lookup");
         });
         yield return Case("cleanup failure is sanitized and blocks player reuse", async () =>
         {
@@ -204,7 +188,7 @@ public static class MediaResourceTests
         await Until(() => player.IsPlaying && player.DurationSeconds > 0, "native start");
     }
     private static Lease LeaseFor(Origin origin, string path) =>
-        new(origin.Uri(path), origin.Headers) { Permit = uri => uri.GetLeftPart(UriPartial.Authority) == origin.Base.GetLeftPart(UriPartial.Authority) };
+        new(origin.Uri(path), origin.Headers);
     private static Origin WaveOrigin()
     {
         var origin = new Origin();
@@ -256,17 +240,15 @@ public static class MediaResourceTests
     {
         private readonly CancellationTokenSource revoked = new();
         internal Dictionary<string, string> HeaderValues { get; } = headers ?? [];
-        internal Func<Uri, bool> Permit = _ => true;
-        internal readonly ConcurrentQueue<Uri> Checked = new();
+        internal int AddressReads;
         internal bool Unrevocable, ThrowAddress, ThrowRelease;
         internal int DisposeCalls;
         internal volatile bool ReleaseComplete;
         internal Task? ReleaseGate;
         internal readonly TaskCompletionSource ReleaseEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public Uri Address => ThrowAddress ? throw new IOException("secret-address-canary") : address;
+        public Uri Address { get { Interlocked.Increment(ref AddressReads); return ThrowAddress ? throw new IOException("secret-address-canary") : address; } }
         public IReadOnlyDictionary<string, string> Headers => HeaderValues;
         public CancellationToken Revoked => Unrevocable ? CancellationToken.None : revoked.Token;
-        public bool Authorizes(Uri value) { Checked.Enqueue(value); return Permit(value); }
         internal void Revoke() => revoked.Cancel();
         public async ValueTask DisposeAsync()
         {

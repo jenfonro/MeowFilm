@@ -1,0 +1,704 @@
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Threading;
+using MeowFilm.Capabilities;
+using MeowFilm.Core.Runtime;
+using MeowFilm.Desktop;
+using MeowFilm.Media;
+using static MeowFilm.Windows.Tests.FilmPlaybackFixture;
+
+namespace MeowFilm.Windows.Tests;
+
+public static class FilmPlaybackControlsTests
+{
+    private static TestCase Test(string name, Func<Task> run) =>
+        new("film-playback-controls: " + name, () => MusicQualityConsumerTests.Sta(run));
+    public static IEnumerable<TestCase> Cases()
+    {
+        yield return Test("play pause seek rate aspect and volume drive the actual accepted occurrence", async () =>
+        {
+            await using var scene = await Scene.Create();
+            await scene.Play();
+            Click(scene.Element<Button>("PlayButton")); await Until(() => scene.Rig.Native.Paused);
+            var seek = scene.Element<Slider>("SeekSlider"); seek.Value = 89;
+            seek.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(seek)!, 0, Key.Right)
+            { RoutedEvent = Keyboard.PreviewKeyUpEvent });
+            await Until(() => scene.Rig.Native.Position == 89);
+            scene.Element<ComboBox>("RateBox").SelectedIndex = 3;
+            scene.Element<ComboBox>("AspectBox").SelectedIndex = 2;
+            var volume = Visuals(scene.View).OfType<Slider>().Single(slider => AutomationProperties.GetName(slider) == "音量");
+            volume.Value = 37;
+            await Until(() => scene.Rig.Native.Rate == 1.5 && scene.Rig.Native.Aspect == "4:3" && scene.Rig.Native.Volume == 37);
+            Check(scene.Rig.Session.Rate == 1.5 && scene.Rig.Session.Aspect == "4:3" &&
+                scene.Rig.Native.Commits == 1 && scene.Rig.Page.ProgressLabel.StartsWith("1:29", StringComparison.Ordinal),
+                "controls alter real owner state without opening another input or changing an episode selection");
+            Click(scene.Element<Button>("PlayButton")); await Until(() => !scene.Rig.Native.Paused);
+        });
+        yield return Test("full screen and picture in picture reparent the same host and only an explicit live owner retains it", async () =>
+        {
+            await using var scene = await Scene.Create();
+            await scene.Play();
+            var frame = scene.Element<Grid>("PlayerFrame"); var host = scene.Element<ContentControl>("VideoHost");
+            var view = scene.Rig.Native.View;
+            Click(scene.Button("全屏"));
+            var full = scene.Window.OwnedWindows.Cast<Window>().Single();
+            Check(ReferenceEquals(host.Content, view) && frame.IsDescendantOf(full) && scene.Rig.Native.Commits == 1,
+                "full screen moves the existing native surface rather than opening a new player");
+            full.Close();
+            await Until(() => frame.IsDescendantOf(scene.View));
+            Click(scene.Button("画中画"));
+            var pip = scene.Window.OwnedWindows.Cast<Window>().Single();
+            Check(ReferenceEquals(host.Content, view) && frame.IsDescendantOf(pip) && scene.Rig.Session.CanRetainMedia,
+                "the visible PiP window owns the same accepted output");
+            await scene.Rig.Session.LeaveAsync(retainedOwner: true);
+            scene.View.Visibility = Visibility.Collapsed;
+            Check(pip.IsVisible && scene.Rig.Session.HasOutput && scene.Rig.Session.HasSession,
+                "leaving the ordinary page does not kill an explicitly retained PiP output");
+            pip.Close();
+            await Until(() => !scene.Rig.Session.HasSession);
+            Check(scene.Rig.Native.Stops == 1 && ReferenceEquals(frame.Parent, scene.Element<Grid>("HeroGrid")),
+                "closing the last explicit owner returns the same layout and waits for actual stop");
+        });
+        yield return Test("four actions use exact business commands and menu opening performs no request", async () =>
+        {
+            await using var scene = await Scene.Create();
+            await scene.Play();
+            int before = scene.Rig.Runtime.Calls.Count;
+            var pan = scene.Element<Button>("PanButton"); Click(pan);
+            Check(scene.Rig.Runtime.Calls.Count == before, "opening the pan menu does not request sources or start matching");
+            ((MenuItem)pan.ContextMenu.Items[2]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            pan.ContextMenu.IsOpen = false;
+            await Until(() => scene.Called("pan"));
+            var selected = scene.Rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "pan");
+            Check(FilmJson.Text(selected.Parameters, "provider") == "quark", "pan selection is a standard provider, never a label guess");
+            var quality = scene.Element<Button>("QualityButton"); before = scene.Rig.Runtime.Calls.Count; Click(quality);
+            Check(scene.Rig.Runtime.Calls.Count == before, "quality menu opening is local presentation");
+            ((MenuItem)quality.ContextMenu.Items[0]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            quality.ContextMenu.IsOpen = false;
+            await Until(() => scene.Called("quality"));
+            selected = scene.Rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "quality");
+            Check(FilmJson.Text(selected.Parameters, "quality") == "4k_hdr", "quality has an exact hard-constraint action");
+            Click(scene.Element<Button>("SwitchButton")); await Until(() => scene.Called("switch"));
+            Check(scene.Element<Button>("BlockButton").IsEnabled && scene.Rig.Native.Identity == "controls",
+                "permanent block is available for a real current target while browse/switch acknowledgement does not destroy its donor");
+            var answer = AnswerBlockDialog(scene, confirm: true);
+            Click(scene.Element<Button>("BlockButton"));
+            await answer;
+            await Until(() => scene.Called("block"));
+            selected = scene.Rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "block");
+            Check(FilmJson.Text(selected.Parameters, "attemptId") == "controls",
+                "the real confirmation sends the exact occurrence it described");
+        });
+        yield return Test("wrong-source confirmation cancels without a command and failed persistence keeps its output", async () =>
+        {
+            await using var scene = await Scene.Create();
+            await scene.Play();
+            int before = scene.Rig.Runtime.Calls.Count;
+            var cancel = AnswerBlockDialog(scene, confirm: false);
+            Click(scene.Element<Button>("BlockButton"));
+            await cancel;
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(scene.Rig.Runtime.Calls.Count == before && scene.Rig.Native.SettledIdentity == "controls" &&
+                scene.Rig.Native.Stops == 0, "Cancel closes the native dialog without writing, matching or stopping media");
+
+            scene.Rig.Runtime.Intercept = (method, input, _) => Task.FromResult(
+                method == "film.session.command" && FilmJson.Text(input, "action") == "block"
+                    ? FilmRuntimeProbe.Failure("STORAGE_ERROR") : scene.Rig.Runtime.Handle(method, input));
+            var confirm = AnswerBlockDialog(scene, confirm: true);
+            Click(scene.Element<Button>("BlockButton"));
+            await confirm;
+            await Until(() => scene.Notices.Count == 1);
+            var command = scene.Rig.Runtime.Calls.Single(call => FilmJson.Text(call.Parameters, "action") == "block");
+            Check(FilmJson.Text(command.Parameters, "attemptId") == "controls" && scene.Notices.Single() == "本地存储失败" &&
+                scene.Rig.Native.SettledIdentity == "controls" && scene.Rig.Native.Stops == 0 &&
+                !scene.Rig.Runtime.Calls.Any(call => FilmJson.Text(call.Parameters, "action") == "switch"),
+                "a failed durable receipt is observable and never authorizes replacement of the still-usable output");
+        });
+        yield return Test("confirming an old wrong-source dialog cannot silently retarget a newer playing occurrence", async () =>
+        {
+            await using var scene = await Scene.Create();
+            await scene.Play();
+            scene.Rig.Runtime.Intercept = (method, input, _) =>
+            {
+                if (method == "film.session.command" && FilmJson.Text(input, "action") == "block")
+                {
+                    Check(FilmJson.Text(input, "attemptId") == "controls",
+                        "the view must send the original captured occurrence, never the later current");
+                    return Task.FromResult(FilmRuntimeProbe.Failure("STALE_SESSION"));
+                }
+                return Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+            };
+            var confirm = AnswerBlockDialog(scene, confirm: true, async () =>
+            {
+                scene.Rig.Runtime.Attempt("replacement", Candidate("replacement", episode: 2));
+                await Until(() => scene.Rig.Native.SettledIdentity == "replacement" &&
+                    scene.Rig.Page.CurrentAttemptId == "replacement");
+            });
+            Click(scene.Element<Button>("BlockButton"));
+            await confirm;
+            await Until(() => scene.Notices.Count == 1);
+            Check(scene.Rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "block") == 1 &&
+                scene.Notices.Single() == "会话已失效，请重连" &&
+                scene.Rig.Native.SettledIdentity == "replacement" && scene.Rig.Session.HasOutput,
+                "a stale confirmation surfaces the rejection and leaves the newer occurrence playing");
+        });
+        foreach (var rejected in new[]
+        {
+            (Action: "preview", Field: "previewEpisodes", Label: "点映", Code: "STORAGE_ERROR", Message: "本地存储失败"),
+            (Action: "shortvideo", Field: "shortVideo", Label: "短视频", Code: "CLOSED", Message: "服务已关闭，请重连"),
+            (Action: "shortvideo", Field: "shortVideo", Label: "短视频", Code: "STALE_SESSION", Message: "会话已失效，请重连")
+        })
+        {
+            yield return Test($"rejected {rejected.Action} {rejected.Code} restores the actual checkbox without another snapshot and retries true", async () =>
+            {
+                foreach (bool accepted in new[] { false, true })
+                {
+                    await using var scene = await Scene.Create();
+                    if (accepted) scene.Rig.Runtime.Change(root => root[rejected.Field] = true);
+                    bool PageValue() => rejected.Action == "preview" ? scene.Rig.Page.PreviewEpisodes : scene.Rig.Page.ShortVideo;
+                    var box = Visuals(scene.View).OfType<CheckBox>().Single(value => Equals(value.Content, rejected.Label));
+                    await Until(() => PageValue() == accepted && box.IsChecked == accepted);
+                    long sequence = scene.Rig.Runtime.Value.GetProperty("sequence").GetInt64();
+                    int before = scene.Rig.Runtime.Calls.Count;
+                    var toggledValues = new List<bool?>();
+                    scene.Rig.Runtime.Intercept = (method, input, _) =>
+                    {
+                        if (method != "film.session.command" || FilmJson.Text(input, "action") != rejected.Action)
+                            return Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+                        toggledValues.Add(box.IsChecked);
+                        return Task.FromResult(FilmRuntimeProbe.Failure(rejected.Code));
+                    };
+                    for (int click = 1; click <= 2; click++)
+                    {
+                        ToggleByKeyboard(box);
+                        await Until(() => scene.Rig.Runtime.Calls.Count == before + click && scene.Notices.Count == 1);
+                        var commands = scene.Rig.Runtime.Calls.Where(call =>
+                            call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == rejected.Action).ToArray();
+                        Console.WriteLine($"WFR01 action={rejected.Action} error={rejected.Code} accepted={accepted} click={click} " +
+                            $"enabled={FilmJson.Bool(commands[^1].Parameters, "enabled")} page={PageValue()} checkbox={box.IsChecked} " +
+                            $"sequence={sequence}->{scene.Rig.Runtime.Value.GetProperty("sequence").GetInt64()}");
+                        Check(commands.Length == click && commands.All(call => FilmJson.Bool(call.Parameters, "enabled") == !accepted) &&
+                            toggledValues.Count == click && toggledValues.All(value => value == !accepted),
+                            "real WPF Space input toggles before Click and the next click retries the same rejected intent");
+                        Check(PageValue() == accepted && box.IsChecked == accepted && scene.Notices[^1] == rejected.Message &&
+                            scene.Rig.Runtime.Value.GetProperty("sequence").GetInt64() == sequence &&
+                            scene.Rig.Runtime.Calls.Count == before + click && scene.Rig.Native.Commits == 0,
+                            "without a new snapshot or a refresh RPC the actual checkbox returns to the accepted value and preserves its error");
+                    }
+                }
+            });
+        }
+        yield return Test("open raw directory follows exact current A pending B started B while keeping its path and selection without browse requests", async () =>
+        {
+            await using var scene = await Scene.Create();
+            JsonElement File(string id, string path)
+            {
+                var row = JsonNode.Parse(Candidate(id).GetRawText())!;
+                row["name"] = "同名文件"; row["path"] = path;
+                return JsonSerializer.SerializeToElement(row);
+            }
+            var a = File("directory-a", "/库/第二季/a.mp4");
+            var b = File("directory-b", "/库/第二季/b.mp4");
+            scene.Rig.Runtime.Change(root =>
+            {
+                root["sources"] = JsonNode.Parse(FilmJson.Encode(new[] { new { id = "directory-source", title = "目录来源" } }).GetRawText());
+                root["browsing"] = JsonNode.Parse(FilmJson.Encode(new
+                {
+                    sourceId = "directory-source", lineId = 0, loading = false, error = (string?)null,
+                    lines = new[] { new { id = 0, label = "原线路" } },
+                    episodes = new[]
+                    {
+                        new { candidateId = "directory-a", name = "同名文件", path = "/库/第二季/a.mp4" },
+                        new { candidateId = "directory-b", name = "同名文件", path = "/库/第二季/b.mp4" }
+                    },
+                    originalEpisodes = new[]
+                    {
+                        new { candidateId = "directory-a", name = "同名文件", path = "/库/第二季/a.mp4" },
+                        new { candidateId = "directory-b", name = "同名文件", path = "/库/第二季/b.mp4" },
+                        new { candidateId = "directory-other", name = "同名文件", path = "/库/其他季/a.mp4" }
+                    }
+                }).GetRawText());
+            });
+            scene.Rig.Runtime.Attempt("directory-output-a", a);
+            await Until(() => scene.Rig.Page.CurrentCandidateId == "directory-a" && scene.Rig.Native.SettledIdentity == "directory-output-a");
+            int before = scene.Rig.Runtime.Calls.Count;
+            Click(scene.Element<Button>("RawDirectory"));
+            var dialog = scene.Window.OwnedWindows.OfType<FilmDirectoryDialog>().Single();
+            await Until(() => dialog.IsLoaded);
+            var list = Visuals(dialog).OfType<ListBox>().Single();
+            var play = Visuals(dialog).OfType<Button>().Single(button => Equals(button.Content, "播放所选文件"));
+            var back = Visuals(dialog).OfType<Button>().Single(button => Equals(button.Content, "返回上级"));
+            void Enter(string name)
+            {
+                list.SelectedItem = list.Items.Cast<FilmDirectoryRow>().Single(row => row.IsDirectory && row.Name == name);
+                list.RaiseEvent(new KeyEventArgs(new KeyboardProbe(), PresentationSource.FromVisual(list)!, 0, Key.Enter)
+                { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+            }
+            void Current(string expected, string phase)
+            {
+                list.UpdateLayout();
+                var rows = list.Items.Cast<FilmDirectoryRow>().ToArray();
+                var current = rows.Single(row => row.IsCurrent);
+                Check(dialog.IsVisible && current.CandidateId == expected && current.Label == "当前 · 同名文件" &&
+                    rows.Select(row => row.Path).SequenceEqual(new[] { "/库/第二季/a.mp4", "/库/第二季/b.mp4" }) &&
+                    Visuals(dialog).OfType<TextBlock>().Any(text => text.Text == "/库/第二季") &&
+                    Visuals(list).OfType<TextBlock>().Count(text => text.Text == "当前 · 同名文件") == 1,
+                    "only the exact acknowledged file is marked in the live directory and neither path nor same-name identity changes");
+                Console.WriteLine($"WFR02 phase={phase} page={scene.Rig.Page.CurrentCandidateId} current={current.CandidateId} " +
+                    $"path=/库/第二季 selected={(list.SelectedItem as FilmDirectoryRow)?.CandidateId}");
+            }
+            Enter("库"); Enter("第二季");
+            Current("directory-a", "current-A");
+            Check(scene.Rig.Runtime.Calls.Count == before, "opening and traversing the original directory performs no request");
+            var prepare = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            scene.Rig.Native.Preparing = token => prepare.Task.WaitAsync(token);
+            scene.Rig.Runtime.Intercept = (method, input, _) =>
+            {
+                if (method == "film.session.command" && FilmJson.Text(input, "action") == "select.candidate")
+                {
+                    Check(FilmJson.Text(input, "candidateId") == "directory-b", "the directory plays the exact selected file");
+                    scene.Rig.Runtime.Attempt("directory-output-b", b);
+                }
+                return Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+            };
+            try
+            {
+                list.SelectedItem = list.Items.Cast<FilmDirectoryRow>().Single(row => row.CandidateId == "directory-b");
+                Click(play);
+                await Until(() => scene.Rig.Native.Intents.Any(intent => intent.Identity == "directory-output-b"));
+                Current("directory-a", "pending-B");
+                Check((list.SelectedItem as FilmDirectoryRow)?.CandidateId == "directory-b" && play.IsEnabled,
+                    "a pending replacement keeps the user's selected exact file");
+                prepare.SetResult();
+                await Until(() => scene.Rig.Page.CurrentCandidateId == "directory-b" && scene.Rig.Native.SettledIdentity == "directory-output-b");
+                Current("directory-b", "started-B");
+                Check((list.SelectedItem as FilmDirectoryRow)?.CandidateId == "directory-b" && play.IsEnabled,
+                    "current-marker refresh preserves selection instead of returning to the directory root");
+                before = scene.Rig.Runtime.Calls.Count;
+                scene.Rig.Page.NotifyMedia(); scene.Rig.Page.NotifyMedia();
+                Click(back); Enter("其他季");
+                Check(list.Items.Cast<FilmDirectoryRow>().All(row => !row.IsCurrent),
+                    "a same-name file in another exact path is never mistaken for current");
+                Click(back); Enter("第二季");
+                Current("directory-b", "return-to-path");
+                Check(scene.Rig.Runtime.Calls.Count == before &&
+                    scene.Rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "select.candidate") == 1 &&
+                    !scene.Rig.Runtime.Calls.Any(call => FilmJson.Text(call.Parameters, "action") is "browse" or "search.more" ||
+                        call.Method is "film.session.snapshot" || call.Method.StartsWith("film.data.", StringComparison.Ordinal)),
+                    "marker refresh and later traversal add no snapshot content or browse requests; only one explicit file selection was sent");
+                scene.Rig.Runtime.Change(root => root["browsing"]!["lineId"] = "0");
+                await Until(() => !dialog.IsVisible);
+            }
+            finally { prepare.TrySetResult(); }
+        });
+        yield return Test("movie buttons mark exact same-label current through pending failed replacement and started while retaining width and quality order", async () =>
+        {
+            await using var scene = await Scene.Create();
+            JsonElement Movie(string id, string quality = "1080p")
+            {
+                var row = JsonNode.Parse(Candidate(id, episode: null, quality: quality).GetRawText())!;
+                row["name"] = "同名电影文件"; row["path"] = "/电影/" + id + ".mp4";
+                return JsonSerializer.SerializeToElement(row);
+            }
+            var a = Movie("movie-a"); var b = Movie("movie-b");
+            var rows = FilmJson.Encode(new[] { a, b, Movie("movie-unknown", ""), Movie("movie-hdr", "4k_hdr") });
+            void Choices() => scene.Rig.Runtime.Change(root => root["candidates"] = JsonNode.Parse(rows.GetRawText()));
+            scene.Rig.Runtime.Target = scene.Rig.Runtime.Target with
+            { Id = "tmdb:movie:100", Kind = "movie", Season = null, Episode = null, GlobalEpisode = null };
+            scene.Rig.Runtime.Attempt("movie-output-a", a);
+            Choices();
+            await Until(() => scene.Rig.Page.CurrentCandidateId == "movie-a" && scene.Rig.Page.Candidates.Count == 4 &&
+                scene.Rig.Native.SettledIdentity == "movie-output-a");
+            var choices = scene.Element<ItemsControl>("MovieCandidates");
+            Button ButtonFor(string id) => Visuals(choices).OfType<Button>().Single(button => button.Tag is FilmCandidateItem value && value.Id == id);
+            void Current(string expected, string phase)
+            {
+                scene.View.UpdateLayout();
+                var buttons = Visuals(choices).OfType<Button>().ToArray();
+                Check(buttons.Select(button => ((FilmCandidateItem)button.Tag).Id)
+                    .SequenceEqual(new[] { "movie-hdr", "movie-a", "movie-b", "movie-unknown" }) &&
+                    buttons.All(button => Math.Abs(button.ActualWidth - 176) < .5),
+                    "all accepted-state updates retain global quality order and the 176-pixel button width");
+                Check(scene.Rig.Page.Candidates.Single(value => value.Id == "movie-a").DisplayLabel == "1080P · 契约来源" &&
+                    scene.Rig.Page.Candidates.Single(value => value.Id == "movie-b").DisplayLabel == "1080P · 契约来源 (2)" &&
+                    scene.Rig.Page.Candidates.Single(value => value.IsSelected).Id == expected,
+                    "same-label numbering stays stable while only the exact current candidate gets the selected projection");
+                foreach (var button in buttons)
+                {
+                    var item = (FilmCandidateItem)button.Tag;
+                    Check((AutomationProperties.GetItemStatus(button) == "当前") == (item.Id == expected) &&
+                        Visuals(button).OfType<TextBlock>().Any(text => text.Text == "当前" && text.IsVisible) == (item.Id == expected) &&
+                        Visuals(button).OfType<TextBlock>().Single(text => text.Text == item.DisplayLabel).TextTrimming == TextTrimming.CharacterEllipsis,
+                        "the live button's visible current badge and accessible status agree on exact identity without expanding its label");
+                }
+                Console.WriteLine($"WFR03 phase={phase} page={scene.Rig.Page.CurrentCandidateId} " +
+                    $"visual={((FilmCandidateItem)buttons.Single(button => Visuals(button).OfType<TextBlock>().Any(text => text.Text == "当前" && text.IsVisible)).Tag).Id} " +
+                    $"accessible={((FilmCandidateItem)buttons.Single(button => AutomationProperties.GetItemStatus(button) == "当前").Tag).Id}");
+            }
+            Current("movie-a", "current-A");
+            var prepare = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            bool fail = true; int attempt = 0;
+            scene.Rig.Native.Preparing = async token =>
+            {
+                await prepare.Task.WaitAsync(token);
+                if (fail) throw new FilmPlaybackException("MEDIA_UNAVAILABLE");
+            };
+            scene.Rig.Runtime.Intercept = (method, input, _) =>
+            {
+                if (method == "film.session.command" && FilmJson.Text(input, "action") == "select.candidate")
+                {
+                    Check(FilmJson.Text(input, "candidateId") == "movie-b", "same display names never retarget the selected candidate");
+                    scene.Rig.Runtime.Attempt("movie-output-b-" + ++attempt, b);
+                    Choices();
+                }
+                return Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+            };
+            try
+            {
+                Click(ButtonFor("movie-b"));
+                await Until(() => scene.Rig.Native.Intents.Any(intent => intent.Identity == "movie-output-b-1"));
+                Current("movie-a", "pending-B");
+                prepare.SetResult();
+                await Until(() => scene.Rig.Runtime.Calls.Any(call => FilmJson.Text(call.Parameters, "action") == "media.failed" &&
+                    FilmJson.Text(call.Parameters, "attemptId") == "movie-output-b-1") &&
+                    FilmJson.Member(scene.Rig.Runtime.Value, "attempt").ValueKind == JsonValueKind.Null);
+                Current("movie-a", "failed-B");
+                fail = false; prepare = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                Click(ButtonFor("movie-b"));
+                await Until(() => scene.Rig.Native.Intents.Any(intent => intent.Identity == "movie-output-b-2"));
+                Current("movie-a", "retry-pending-B");
+                prepare.SetResult();
+                await Until(() => scene.Rig.Page.CurrentCandidateId == "movie-b" && scene.Rig.Native.SettledIdentity == "movie-output-b-2");
+                foreach (double width in new[] { 1150d, 780d })
+                {
+                    scene.Window.Width = width;
+                    await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                    Current("movie-b", "started-B-" + width);
+                }
+                Check(scene.Rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "select.candidate") == 2 &&
+                    !scene.Rig.Runtime.Calls.Any(call => FilmJson.Text(call.Parameters, "action") is "browse" or "search.more" ||
+                        call.Method.StartsWith("film.data.", StringComparison.Ordinal)),
+                    "rendering and current-state changes do not request additional candidates or merge two same-name selections");
+            }
+            finally { prepare.TrySetResult(); }
+        });
+        yield return Test("long movie choices keep fixed widths and raw-directory visibility follows the selected real list", async () =>
+        {
+            await using var scene = await Scene.Create();
+            string longName = string.Concat(Enumerable.Repeat("这是一个很长但不能撑开选集块的站点名称", 12));
+            var candidate = JsonNode.Parse(Candidate("movie-long", episode: null).GetRawText())!.AsObject();
+            candidate["source"]!["name"] = longName;
+            scene.Rig.Runtime.Change(root =>
+            {
+                root["target"]!["kind"] = "movie";
+                root["target"]!.AsObject().Remove("season");
+                root["target"]!.AsObject().Remove("episode");
+                root["target"]!.AsObject().Remove("globalEpisode");
+                root["candidates"] = new JsonArray(candidate);
+                root["episodes"] = new JsonArray();
+            });
+            await Until(() => scene.Rig.Page.ShowMovieCandidates && scene.Rig.Page.Candidates.Count == 1);
+            foreach (double width in new[] { 1150d, 780d })
+            {
+                scene.Window.Width = width;
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                scene.View.UpdateLayout();
+                var choices = scene.Element<ItemsControl>("MovieCandidates");
+                var button = Visuals(choices).OfType<Button>().Single();
+                var label = Visuals(button).OfType<TextBlock>().Single(value => value.Text.Contains(longName, StringComparison.Ordinal));
+                Check(Math.Abs(button.ActualWidth - 176) < .5 && choices.ActualWidth <= scene.View.ActualWidth &&
+                    label.TextWrapping == TextWrapping.NoWrap && label.TextTrimming == TextTrimming.CharacterEllipsis,
+                    "wide and narrow movie rows constrain the real long label instead of expanding the content region");
+            }
+            Check(!scene.Element<Button>("RawDirectory").IsVisible, "pure metadata has no original site directory");
+            void Browse(bool content, string? error = null) => scene.Rig.Runtime.Change(root =>
+            {
+                root["sources"] = JsonNode.Parse(FilmJson.Encode(new[] { new { id = "site-result", title = "真实站点" } }).GetRawText());
+                root["browsing"] = JsonNode.Parse(FilmJson.Encode(new
+                {
+                    sourceId = "site-result", lineId = 0, loading = false, error,
+                    lines = new[] { new { id = 0, label = "未知原线路" } }, episodes = Array.Empty<object>(),
+                    originalEpisodes = content ? new[] { new { id = 0, name = "准确原始文件", path = "/目录/文件.mp4" } } : []
+                }).GetRawText());
+            });
+            Browse(content: false);
+            await Until(() => scene.Rig.Page.SourceId == "site-result");
+            Check(!scene.Element<Button>("RawDirectory").IsVisible, "a site with no original content does not get a fake directory entry");
+            Browse(content: true);
+            await Until(() => scene.Element<Button>("RawDirectory").IsVisible);
+            Browse(content: true, error: "UPSTREAM_HTTP");
+            await Until(() => scene.Rig.Page.ListError.Length > 0);
+            Check(!scene.Element<Button>("RawDirectory").IsVisible && scene.Rig.Page.Candidates.Count == 0 &&
+                scene.Element<ComboBox>("SourcePicker").IsEnabled,
+                "a failed selected list hides stale content while source selection remains usable");
+            Browse(content: true);
+            await Until(() => scene.Element<Button>("RawDirectory").IsVisible && scene.Rig.Page.ListError.Length == 0);
+        });
+        yield return Test("short-video wheel gestures drive next and previous while ordinary mode remains inert", async () =>
+        {
+            await using var scene = await Scene.Create();
+            var gesture = scene.Element<Border>("ShortVideoGesture");
+            int before = scene.Rig.Runtime.Calls.Count;
+            gesture.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, 120) { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+            Check(scene.Rig.Runtime.Calls.Count == before, "ordinary mode never changes the target from a short-video gesture");
+            scene.Rig.Runtime.Change(root => root["shortVideo"] = true);
+            await Until(() => scene.Rig.Page.ShortVideo && gesture.IsVisible);
+            gesture.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 1, 120) { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+            await Until(() => scene.Called("next"));
+            await Task.Delay(260); // Above the UI's 250 ms wheel-gesture coalescing window, not completion proof.
+            gesture.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 2, -120) { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+            await Until(() => scene.Called("previous"));
+            Check(scene.Rig.Native.Commits == 0, "target navigation alone does not claim actual native output or buffered media");
+        });
+        yield return Test("rate and aspect failures retain rollback while their notices use typed classification or safe action fallback", async () =>
+        {
+            await using var scene = await Scene.Create();
+            await scene.Play();
+            var rate = scene.Element<ComboBox>("RateBox");
+            var aspect = scene.Element<ComboBox>("AspectBox");
+            int originalRate = rate.SelectedIndex, originalAspect = aspect.SelectedIndex;
+            var rateChoice = (ComboBoxItem)rate.Items[3];
+            var aspectChoice = (ComboBoxItem)aspect.Items[2];
+            object rateTag = rateChoice.Tag, aspectTag = aspectChoice.Tag;
+            try
+            {
+                rateChoice.Tag = "fixture-invalid-rate";
+                rate.SelectedIndex = 3;
+                await Until(() => scene.Notices.Count == 1);
+                Check(rate.SelectedIndex == originalRate && scene.Rig.Native.Rate == 1 &&
+                    scene.Rig.Native.SettledIdentity == "controls" && scene.Notices.Single() == "倍速设置失败",
+                    "an unknown parse failure rolls back the visible choice and uses only the rate-specific safe fallback");
+                aspectChoice.Tag = "fixture-invalid-aspect";
+                aspect.SelectedIndex = 2;
+                await Until(() => scene.Notices.Count == 2);
+                Check(aspect.SelectedIndex == originalAspect && scene.Rig.Native.Aspect is null &&
+                    scene.Rig.Native.SettledIdentity == "controls" && scene.Notices[^1] == "请求无效",
+                    "a rejected aspect command retains the actual owner and rollback while preserving its typed failure");
+            }
+            finally { rateChoice.Tag = rateTag; aspectChoice.Tag = aspectTag; }
+        });
+        yield return Test("failed controls publish classified safe notices instead of collapsing formal error codes", async () =>
+        {
+            await using var scene = await Scene.Create();
+            (string Code, string Message)[] failures =
+            [
+                ("TIMEOUT", "请求超时，请重试"),
+                ("CLOSED", "服务已关闭，请重连"),
+                ("DISCONNECTED", "连接已断开，请重连"),
+                ("INVALID_RESPONSE", "响应无效，请重试"),
+                ("UPSTREAM_FORMAT", "上游数据格式错误"),
+                ("NO_MATCH", "未找到匹配片源"),
+                ("PERMISSION_DENIED", "没有访问权限"),
+                ("AUTH_REQUIRED", "请先登录账号"),
+                ("AUTH_FAILED", "账号认证失败，请重新登录"),
+                ("LOGIN_EXPIRED", "账号登录已失效，请重新登录"),
+                ("MEDIA_UPSTREAM_TIMEOUT", "请求超时，请重试"),
+                ("MEDIA_EMPTY_RESPONSE", "媒体响应为空"),
+                (PlaybackError.HttpUnauthorized, "媒体认证失败")
+            ];
+            foreach (var failure in failures)
+            {
+                scene.Rig.Runtime.Intercept = (method, input, _) =>
+                {
+                    if (method != "film.session.command" || FilmJson.Text(input, "action") != "switch")
+                        return Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+                    return Task.FromResult(failure.Code == "INVALID_RESPONSE"
+                        ? JsonSerializer.SerializeToElement(new { ok = true, contract = "film.playback.v1", value = (object?)null })
+                        : FilmRuntimeProbe.Failure(failure.Code));
+                };
+                int before = scene.Notices.Count;
+                Click(scene.Element<Button>("SwitchButton"));
+                await Until(() => scene.Notices.Count == before + 1);
+                Check(scene.Notices[^1] == failure.Message, "the real action publishes the formal failure category: " + failure.Code);
+            }
+            scene.Rig.Runtime.Intercept = (method, input, _) => Task.FromResult(
+                method == "film.session.command" && FilmJson.Text(input, "action") == "switch"
+                    ? FilmRuntimeProbe.Failure("TIMEOUT: https://upstream.invalid/?token=fixture-secret Cookie=fixture-cookie")
+                    : scene.Rig.Runtime.Handle(method, input));
+            int count = scene.Notices.Count;
+            Click(scene.Element<Button>("SwitchButton"));
+            await Until(() => scene.Notices.Count == count + 1);
+            Check(scene.Notices[^1] == "操作失败，请重试", "unknown codes reveal neither raw code nor upstream address or credentials");
+            scene.Rig.Runtime.Intercept = (method, input, _) =>
+                method == "film.session.command" && FilmJson.Text(input, "action") == "switch"
+                    ? Task.FromException<JsonElement>(new BridgeException("PERMISSION_DENIED"))
+                    : Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+            count = scene.Notices.Count;
+            Click(scene.Element<Button>("SwitchButton"));
+            await Until(() => scene.Notices.Count == count + 1);
+            Check(scene.Notices[^1] == "没有访问权限", "public bridge exceptions retain their typed code without reading Exception.Message");
+        });
+        yield return Test("unknown exceptions keep the action fallback while success cancellation and retired pages add no failure notice", async () =>
+        {
+            await using var scene = await Scene.Create();
+            scene.Rig.Runtime.Intercept = (method, input, _) =>
+                method == "film.session.command" && FilmJson.Text(input, "action") == "switch"
+                    ? Task.FromException<JsonElement>(new InvalidOperationException("TIMEOUT"))
+                    : Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+            Click(scene.Element<Button>("SwitchButton"));
+            await Until(() => scene.Notices.Count == 1);
+            Check(scene.Notices.Single() == "操作失败，请重试", "a plain exception message is never treated as a protocol code");
+            scene.Rig.Runtime.Change(root => root["sources"] = System.Text.Json.Nodes.JsonNode.Parse(
+                FilmJson.Encode(new[] { new { id = "source-failure", title = "可选来源" } }).GetRawText()));
+            await Until(() => scene.Rig.Page.Sources.Any(source => source.Id == "source-failure"));
+            scene.Rig.Runtime.Intercept = (method, input, _) =>
+                method == "film.session.command" && FilmJson.Text(input, "action") == "browse"
+                    ? Task.FromException<JsonElement>(new InvalidOperationException("https://upstream.invalid/?token=fixture-secret"))
+                    : Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+            scene.Element<ComboBox>("SourcePicker").SelectedItem = scene.Rig.Page.Sources.Single(source => source.Id == "source-failure");
+            await Until(() => scene.Notices.Count == 2);
+            Check(scene.Notices[^1] == "来源加载失败", "an unknown source failure retains its own safe operation fallback");
+            scene.Rig.Runtime.Intercept = (method, input, _) =>
+                method == "film.session.command" && FilmJson.Text(input, "action") == "switch"
+                    ? Task.FromException<JsonElement>(new OperationCanceledException())
+                    : Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+            Click(scene.Element<Button>("SwitchButton"));
+            await scene.Rig.Page.CommandAsync("search.more");
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(scene.Notices.Count == 2, "an explicitly cancelled control adds no failure notice");
+            scene.Rig.Runtime.Intercept = null;
+            Click(scene.Element<Button>("SwitchButton"));
+            await scene.Rig.Page.CommandAsync("search.more");
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(scene.Notices.Count == 2, "successful control acknowledgement adds no failure notice");
+
+            var pending = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+            bool entered = false;
+            scene.Rig.Runtime.Intercept = (method, input, _) =>
+            {
+                if (method != "film.session.command" || FilmJson.Text(input, "action") != "switch")
+                    return Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+                entered = true; return pending.Task;
+            };
+            try
+            {
+                Click(scene.Element<Button>("SwitchButton"));
+                await Until(() => entered);
+                scene.View.DataContext = new FilmPlaybackPage(scene.Rig.Page.Item, scene.Rig.Page.Request, null, null);
+                pending.SetResult(FilmRuntimeProbe.Failure("AUTH_FAILED"));
+                await scene.Rig.Page.CommandAsync("search.more");
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(scene.Notices.Count == 2, "a retired page's late classified error cannot notify its replacement");
+            }
+            finally { pending.TrySetResult(FilmRuntimeProbe.Failure("CANCELLED")); }
+        });
+    }
+    private sealed class Scene : IAsyncDisposable
+    {
+        internal readonly FilmPlaybackRig Rig = new();
+        internal readonly FilmPlaybackView View = new();
+        internal readonly Window Window;
+        internal readonly List<string> Notices = [];
+        private Scene()
+        {
+            Window = new() { Content = View, Width = 1150, Height = 850, Left = -10000, Top = -10000,
+                ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
+            Window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
+            { if (args.Message.Length > 0) Notices.Add(args.Message); }));
+        }
+        internal static async Task<Scene> Create()
+        {
+            var scene = new Scene();
+            try
+            {
+                await scene.Rig.OpenAsync(); scene.View.DataContext = scene.Rig.Page; scene.Window.Show();
+                await Until(() => scene.View.IsLoaded && scene.View.ActualWidth > 0);
+                return scene;
+            }
+            catch { await scene.DisposeAsync(); throw; }
+        }
+        internal async Task Play()
+        {
+            Rig.Runtime.Attempt("controls", Candidate("controls"));
+            await Until(() => Rig.Native.SettledIdentity == "controls" && Called("media.started") && Rig.Session.HasOutput);
+            View.UpdateLayout();
+        }
+        internal bool Called(string action) => Rig.Runtime.Calls.Any(call =>
+            call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == action);
+        internal T Element<T>(string name) where T : FrameworkElement => (T)View.FindName(name);
+        internal Button Button(string label) => Visuals(View).OfType<Button>().Single(button => Equals(button.Content, label));
+        public async ValueTask DisposeAsync()
+        {
+            foreach (Window owned in Window.OwnedWindows.Cast<Window>().ToArray()) owned.Close();
+            View.DataContext = null; Window.Content = null; Window.Close(); await Rig.DisposeAsync();
+        }
+    }
+    private static void Click(ButtonBase button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+    private static void ToggleByKeyboard(CheckBox box)
+    {
+        box.BringIntoView();
+        var keyboard = new KeyboardProbe();
+        var source = PresentationSource.FromVisual(box)!;
+        box.RaiseEvent(new KeyEventArgs(keyboard, source, 0, Key.Space) { RoutedEvent = Keyboard.KeyDownEvent });
+        box.RaiseEvent(new KeyEventArgs(keyboard, source, 1, Key.Space) { RoutedEvent = Keyboard.KeyUpEvent });
+    }
+    private sealed class KeyboardProbe() : KeyboardDevice(InputManager.Current)
+    {
+        protected override KeyStates GetKeyStatesFromSystem(Key key) => KeyStates.None;
+    }
+    // Drive only the native dialog owned by this hidden fixture window. No
+    // SendInput, foreground activation, or other process/window is targeted.
+    private static async Task AnswerBlockDialog(Scene scene, bool confirm, Func<Task>? beforeReply = null)
+    {
+        uint thread = GetCurrentThreadId();
+        nint owner = new WindowInteropHelper(scene.Window).Handle, dialog = 0;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            while (dialog == 0)
+            {
+                EnumThreadWindows(thread, (window, _) =>
+                {
+                    if (GetWindow(window, 4) != owner) return true; // GW_OWNER
+                    var name = new StringBuilder(64);
+                    GetClassName(window, name, name.Capacity);
+                    if (name.ToString() != "#32770") return true;
+                    dialog = window;
+                    return false;
+                }, 0);
+                if (dialog == 0) await Task.Delay(10, deadline.Token);
+            }
+            var title = new StringBuilder(64);
+            GetWindowText(dialog, title, title.Capacity);
+            Check(title.ToString() == "片源错误" && GetDlgItem(dialog, 1) != 0 && GetDlgItem(dialog, 2) != 0,
+                "the product opened the actual expected OK/Cancel confirmation");
+            if (beforeReply is not null) await beforeReply();
+            int choice = confirm ? 1 : 2;
+            Check(PostMessage(dialog, 0x0111, choice, GetDlgItem(dialog, choice)),
+                "the exact owned native confirmation accepted its button command");
+            dialog = 0;
+        }
+        finally
+        {
+            if (dialog != 0) PostMessage(dialog, 0x0111, 2, GetDlgItem(dialog, 2));
+        }
+    }
+    private delegate bool EnumerateWindow(nint window, nint parameter);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] private static extern bool EnumThreadWindows(uint thread, EnumerateWindow callback, nint parameter);
+    [DllImport("user32.dll")] private static extern nint GetWindow(nint window, uint command);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(nint window, StringBuilder text, int count);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(nint window, StringBuilder text, int count);
+    [DllImport("user32.dll")] private static extern nint GetDlgItem(nint dialog, int id);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool PostMessage(nint window, uint message, nint wParam, nint lParam);
+    private static async Task Until(Func<bool> condition)
+    {
+        await FilmPlaybackFixture.Until(condition);
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+    }
+    private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
+    {
+        yield return root;
+        for (int index = 0; index < VisualTreeHelper.GetChildrenCount(root); index++)
+            foreach (var child in Visuals(VisualTreeHelper.GetChild(root, index))) yield return child;
+    }
+}

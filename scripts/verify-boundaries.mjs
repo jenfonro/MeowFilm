@@ -92,7 +92,7 @@ export function verifyBoundaries(root = windowsRoot) {
   const sharedImports = new Set([
     'node:buffer', 'node:crypto', 'node:http', 'node:https',
     '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
-    '@meowfilm/pan-runtime', '@meowfilm/netease-token',
+    '@meowfilm/pan-runtime', '@meowfilm/film-playback', '@meowfilm/netease-token',
   ]);
   if (existsSync(shared)) {
     if (lstatSync(shared).isSymbolicLink()) errors.push('apps/runtime: linked source');

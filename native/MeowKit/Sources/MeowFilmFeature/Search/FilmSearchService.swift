@@ -2,41 +2,39 @@
 import Foundation
 import MeowRuntime
 
-/// App owner for query snapshots, native engine and metadata detail reuse.
+/// App owner for query snapshots and the native projection engine.
 /// Cat installations and saved rules remain owned by the existing services.
 @MainActor
 public final class FilmSearchService {
     public typealias Sites = @Sendable () async throws -> [FilmSearchSite]
     public typealias Rules = @Sendable () async throws -> [String]
     let processor: FilmSearchProcessor
-    let transport: CatScriptTransport
+    let data: FilmSearchData
     let sites: Sites
     let rules: Rules
     let metadata: (any FilmSearchMetadataReading)?
-    private(set) var metadataCache: FilmSearchMetadataCache?
     private(set) var metadataRevision = UUID()
-    private var retiredCaches: [UUID: Task<Void, Never>] = [:]
     private(set) var sourceOwner: FilmSourceService?
     private var current: FilmSearchSession?
     // Only physically pending retirements are owned here. Settled historical
     // snapshots live solely in the actual search/detail navigation consumers.
     private var retirements: [UUID: (FilmSearchSession, Task<Void, Never>)] = [:]
-    private var sourceKeys: Set<String>?
+    private var sourceScope: [String: Int64]?
     private var closed = false
     private var closing: Task<Void, Never>?
     private var sourceObservation: Task<Void, Never>?
 
-    public init(processor: FilmSearchProcessor, transport: CatScriptTransport,
+    public init(processor: FilmSearchProcessor, data: FilmSearchData,
                 sites: @escaping Sites, rules: @escaping Rules,
                 metadata: (any FilmSearchMetadataReading)? = nil) {
-        self.processor = processor; self.transport = transport
+        self.processor = processor; self.data = data
         self.sites = sites; self.rules = rules; self.metadata = metadata
-        metadataCache = metadata.map { FilmSearchMetadataCache(reader: $0) }
     }
 
     public convenience init(sources: FilmSourceService, rules: FilmRuleService,
+                            data: FilmSearchData,
                             metadata: (any FilmSearchMetadataReading)? = nil) throws {
-        self.init(processor: try FilmSearchProcessor(), transport: sources.transport, sites: {
+        self.init(processor: try FilmSearchProcessor(), data: data, sites: {
             try await sources.refresh()
             let snapshot = await sources.snapshot
             return Self.searchableSites(snapshot)
@@ -65,10 +63,14 @@ public final class FilmSearchService {
         }.sorted { $0.source.order < $1.source.order }
     }
 
+    nonisolated static func authorizationScope(_ sites: [FilmSearchSite]) -> [String: Int64] {
+        Dictionary(uniqueKeysWithValues: sites.map { ($0.key, $0.cat.generation) })
+    }
+
     private func sourcesChanged(_ snapshot: FilmSourceSnapshot) {
-        let keys = Set(Self.searchableSites(snapshot).map(\.key))
-        sourceKeys = keys
-        if let session = current, session.hasDifferentSources(keys) {
+        let scope = Self.authorizationScope(Self.searchableSites(snapshot))
+        sourceScope = scope
+        if let session = current, session.hasDifferentSources(scope) {
             session.invalidateSources()
             retire(session)
             current = nil
@@ -81,7 +83,7 @@ public final class FilmSearchService {
         let session = [retained, current].compactMap { $0 }.first { candidate in
             candidate.belongs(to: self) && !candidate.invalidated &&
             candidate.snapshot.query.utf8.elementsEqual(query.utf8) &&
-            (sourceKeys.map { !candidate.hasDifferentSources($0) } ?? true)
+            (sourceScope.map { !candidate.hasDifferentSources($0) } ?? true)
         } ?? FilmSearchSession(query: query, service: self)
         if current !== session {
             if let previous = current { previous.cancel(); retire(previous) }
@@ -94,7 +96,7 @@ public final class FilmSearchService {
     func ownsWork(for session: FilmSearchSession) -> Bool { !closed && current === session }
 
     /// Called only after the runtime accepted a settings write. Old navigation
-    /// keeps its data but cannot regain request/cache ownership.
+    /// keeps its display data but cannot regain publication ownership.
     public func metadataSettingsChanged() {
         guard !closed else { return }
         metadataRevision = UUID()
@@ -102,15 +104,6 @@ public final class FilmSearchService {
         for session in accepted { session.invalidateSources() }
         if let current { retire(current) }
         current = nil
-        let old = metadataCache
-        metadataCache = metadata.map { FilmSearchMetadataCache(reader: $0) }
-        if let old {
-            let id = UUID()
-            retiredCaches[id] = Task { [weak self] in
-                await old.close()
-                self?.retiredCaches[id] = nil
-            }
-        }
     }
 
     func release(_ session: FilmSearchSession) {
@@ -137,16 +130,11 @@ public final class FilmSearchService {
         let retired = Array(retirements.values)
         let accepted = (current.map { [$0] } ?? []) + retired.map(\.0)
         for session in accepted { session.invalidateSources() }
-        let processor = processor, cache = metadataCache, retiredCaches = Array(retiredCaches.values)
+        let processor = processor
         let task = Task {
-            // Revoke the unstructured shared detail tasks before awaiting any
-            // session group that may itself be waiting on one of those tasks.
-            let closedCache = Task { await cache?.close() }
             await sourceObservation?.value
             for session in accepted { await session.drain() }
             for (_, drain) in retired { await drain.value }
-            await closedCache.value
-            for cache in retiredCaches { await cache.value }
             await processor.close()
         }
         closing = task
@@ -159,12 +147,9 @@ public final class FilmSearchService {
         sourceObservation?.cancel()
         let accepted = (current.map { [$0] } ?? []) + retirements.values.map(\.0)
         for session in accepted { session.invalidateSources() }
-        let processor = processor, cache = metadataCache, retiredCaches = Array(retiredCaches.values)
+        let processor = processor
         Task {
-            let closedCache = Task { await cache?.close() }
             for session in accepted { await session.drain() }
-            await closedCache.value
-            for cache in retiredCaches { await cache.value }
             await processor.close()
         }
     }

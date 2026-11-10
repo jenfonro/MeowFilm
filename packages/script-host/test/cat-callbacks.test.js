@@ -2156,8 +2156,7 @@ test('Cat socket and request close waits survive guest removal and retire all na
         destroy(error, done) { resumeX = () => { resumeX = null; done(error); }; },
       });
       const owned = () => kind === 'socket'
-        ? node.networkResources.has(y) && node.resourceCleanup.has(y) &&
-          services.trustedSockets.has(y) && services.trustedSocketCleanup.has(y)
+        ? node.networkResources.has(y) && node.resourceCleanup.has(y)
         : session.nativeRequests.has(y) && services.requestCleanup.has(y);
       let rawX = 0, rawY = 0, guestY = 0, settled = false, removal;
       const observations = [], closed = [];
@@ -2212,8 +2211,6 @@ test('Cat socket and request close waits survive guest removal and retire all na
         assert.equal(Object.hasOwn(y, 'emit'), false);
         assert.equal(services.connections.size, 0);
         assert.equal(services.connectionCleanup.size, 0);
-        assert.equal(services.trustedSockets.size, 0);
-        assert.equal(services.trustedSocketCleanup.size, 0);
         assert.equal(services.requestCleanup.size, 0);
         assert.equal(session.nativeRequests.size, 0);
         assert.equal(node.networkResources.size, 0);

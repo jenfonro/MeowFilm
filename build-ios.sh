@@ -27,6 +27,7 @@ cleanup() {
 trap cleanup EXIT
 mkdir "$staging"
 
+python3 -I -B scripts/prepare-ios-video-kernel.py --target ios-arm64
 python3 -I -B scripts/prepare-ios-runtime.py --sdk iphoneos --arch arm64
 
 settings=(

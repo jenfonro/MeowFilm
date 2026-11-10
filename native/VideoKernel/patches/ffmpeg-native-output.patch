@@ -1,0 +1,372 @@
+--- a/libavcodec/videotoolbox.c
++++ b/libavcodec/videotoolbox.c
+@@ -65,7 +65,18 @@
+ typedef struct VTHWFrame {
+     CVPixelBufferRef pixbuf;
+     AVBufferRef *hw_frames_ctx;
++    int hardware_decode;
+ } VTHWFrame;
++
++/* Meowfilm: the frame retains the measurement from its owning VT session,
++ * including when frame threading hides that session from the caller. */
++int av_meow_videotoolbox_frame_hardware_decode(const AVFrame *frame);
++
++int av_meow_videotoolbox_frame_hardware_decode(const AVFrame *frame)
++{
++    const VTHWFrame *ref = (const VTHWFrame *)frame->buf[0]->data;
++    return ref->hardware_decode;
++}
+ 
+ static void videotoolbox_buffer_release(void *opaque, uint8_t *data)
+ {
+@@ -502,6 +513,24 @@
+     return avctx->hwaccel_context;
+ }
+ 
++/* Query on the decoding context while it still owns the actual session. */
++static int videotoolbox_hardware_decode(AVCodecContext *avctx)
++{
++    AVVideotoolboxContext *context = videotoolbox_get_context(avctx);
++    CFTypeRef value = NULL;
++    int result = -1;
++    if (!context || !context->session)
++        return -1;
++    if (VTSessionCopyProperty(context->session,
++                              kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
++                              kCFAllocatorDefault, &value) == noErr && value) {
++        if (CFGetTypeID(value) == CFBooleanGetTypeID())
++            result = CFBooleanGetValue(value);
++        CFRelease(value);
++    }
++    return result;
++}
++
+ static void videotoolbox_stop(AVCodecContext *avctx)
+ {
+     AVVideotoolboxContext *videotoolbox = videotoolbox_get_context(avctx);
+@@ -559,6 +588,7 @@
+ 
+     ref = (VTHWFrame *)frame->buf[0]->data;
+ 
++    ref->hardware_decode = videotoolbox_hardware_decode(avctx);
+     if (ref->pixbuf)
+         CVPixelBufferRelease(ref->pixbuf);
+     ref->pixbuf = vtctx->frame;
+@@ -843,9 +873,7 @@
+                                                                    &kCFTypeDictionaryValueCallBacks);
+ 
+     CFDictionarySetValue(config_info,
+-                         codec_type == kCMVideoCodecType_HEVC ?
+-                            kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder :
+-                            kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder,
++                         kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder,
+                          kCFBooleanTrue);
+ 
+     avc_info = CFDictionaryCreateMutable(kCFAllocatorDefault,
+--- a/libavformat/dashdec.c
++++ b/libavformat/dashdec.c
+@@ -109,7 +109,6 @@
+     int64_t cur_seg_offset;
+     int64_t cur_seg_size;
+     struct fragment *cur_seg;
+-    int n_open_failures;            /* consecutive open_input failures since last good read */
+ 
+     /* Currently active Media Initialization Section */
+     struct fragment *init_section;
+@@ -1276,7 +1275,9 @@
+     } else {
+         LIBXML_TEST_VERSION
+ 
+-        doc = xmlReadMemory(buf.str, buf.len, c->base_url, NULL, 0);
++        /* Meowfilm: libxml diagnostics bypass av_log and include URLs/XML. */
++        doc = xmlReadMemory(buf.str, buf.len, c->base_url, NULL,
++                            XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
+         root_element = xmlDocGetRootElement(doc);
+         node = root_element;
+ 
+@@ -1714,6 +1715,10 @@
+         buf_size = FFMIN(buf_size, pls->cur_seg_size - pls->cur_seg_offset);
+ 
+     ret = avio_read(pls->input, buf, buf_size);
++    /* Meowfilm: avio_read may return partial bytes and also set error.
++     * Preserve the actual terminal IO failure before a parser sees them. */
++    if (pls->input->error < 0 && pls->input->error != AVERROR_EOF)
++        return pls->input->error;
+     if (ret > 0)
+         pls->cur_seg_offset += ret;
+ 
+@@ -1814,7 +1819,6 @@
+     struct representation *v = opaque;
+     DASHContext *c = v->parent->priv_data;
+ 
+-restart:
+     if (!v->input) {
+         free_fragment(&v->cur_seg);
+         v->cur_seg = get_current_fragment(v);
+@@ -1834,18 +1838,9 @@
+                 ret = AVERROR_EXIT;
+                 goto end;
+             }
+-            av_log(v->parent, AV_LOG_WARNING, "Failed to open fragment of playlist\n");
+-            if (++v->n_open_failures > c->max_reload) {
+-                av_log(v->parent, AV_LOG_ERROR,
+-                       "Reached max consecutive fragment open failures (%d), giving up\n",
+-                       c->max_reload);
+-                ret = AVERROR_EOF;
+-                goto end;
+-            }
+-            v->cur_seq_no++;
+-            goto restart;
+-        }
+-        v->n_open_failures = 0;
++            /* Meowfilm: do not skip a failed fragment or turn it into EOF. */
++            goto end;
++        }
+     }
+ 
+     if (v->init_sec_buf_read_offset < v->init_sec_data_len) {
+@@ -1866,7 +1861,7 @@
+         goto end;
+     }
+     ret = read_from_url(v, v->cur_seg, buf, buf_size);
+-    if (ret > 0)
++    if (ret > 0 || (ret < 0 && ret != AVERROR_EOF))
+         goto end;
+ 
+     if (c->is_live || v->cur_seq_no < v->last_seq_no) {
+@@ -1876,6 +1871,12 @@
+     }
+ 
+ end:
++    /* Meowfilm: outer stream-info probing can consume a read error and
++     * return success. Keep terminal media IO on the parent AVIO owner,
++     * beyond the lifetime of this fragment's demuxer. */
++    if (ret < 0 && ret != AVERROR_EOF && ret != AVERROR(EAGAIN) &&
++        ret != AVERROR_EXIT)
++        v->parent->pb->error = ret;
+     return ret;
+ }
+ 
+@@ -1939,6 +1940,8 @@
+     pls->ctx->max_analyze_duration = s->max_analyze_duration > 0 ? s->max_analyze_duration : 4 * AV_TIME_BASE;
+     pls->ctx->interrupt_callback = s->interrupt_callback;
+     ret = av_probe_input_buffer(&pls->pb.pub, &in_fmt, "", NULL, 0, 0);
++    if (pls->pb.pub.error < 0 && pls->pb.pub.error != AVERROR_EOF)
++        ret = pls->pb.pub.error;
+     if (ret < 0) {
+         av_log(s, AV_LOG_ERROR, "Error when loading first fragment of playlist\n");
+         avformat_free_context(pls->ctx);
+@@ -1957,6 +1960,8 @@
+     // provide additional information from mpd if available
+     ret = avformat_open_input(&pls->ctx, "", in_fmt, &in_fmt_opts); //pls->init_section->url
+     av_dict_free(&in_fmt_opts);
++    if (pls->pb.pub.error < 0 && pls->pb.pub.error != AVERROR_EOF)
++        ret = pls->pb.pub.error;
+     if (ret < 0)
+         goto fail;
+     if (pls->n_fragments) {
+@@ -1967,6 +1972,8 @@
+         }
+ #endif
+         ret = avformat_find_stream_info(pls->ctx, NULL);
++        if (pls->pb.pub.error < 0 && pls->pb.pub.error != AVERROR_EOF)
++            ret = pls->pb.pub.error;
+         if (ret < 0)
+             goto fail;
+     }
+@@ -2216,6 +2223,9 @@
+     struct representation *cur = NULL;
+     struct representation *rep = NULL;
+ 
++    if (s->pb->error < 0 && s->pb->error != AVERROR_EOF)
++        return s->pb->error;
++
+     recheck_discard_flags(s, c->videos, c->n_videos);
+     recheck_discard_flags(s, c->audios, c->n_audios);
+     recheck_discard_flags(s, c->subtitles, c->n_subtitles);
+@@ -2254,12 +2264,20 @@
+     }
+     while (!ff_check_interrupt(c->interrupt_callback) && !ret) {
+         ret = av_read_frame(cur->ctx, pkt);
++        /* A partial packet must not hide the actual representation IO error. */
++        if (cur->pb.pub.error < 0 && cur->pb.pub.error != AVERROR_EOF) {
++            av_packet_unref(pkt);
++            return cur->pb.pub.error;
++        }
+         if (ret >= 0) {
+             /* If we got a packet, return it */
+             cur->cur_timestamp = av_rescale(pkt->pts, (int64_t)cur->ctx->streams[0]->time_base.num * 90000, cur->ctx->streams[0]->time_base.den);
+             pkt->stream_index = cur->stream_index;
+             return 0;
+         }
++        /* Only clean segment EOF may advance to the next fragment. */
++        if (ret != AVERROR_EOF)
++            return ret;
+         if (cur->is_restart_needed) {
+             cur->cur_seg_offset = 0;
+             cur->init_sec_buf_read_offset = 0;
+@@ -2268,7 +2286,9 @@
+             ret = reopen_demux_for_component(s, cur);
+         }
+     }
+-    return AVERROR_EOF;
++    if (ff_check_interrupt(c->interrupt_callback))
++        return AVERROR_EXIT;
++    return ret < 0 ? ret : AVERROR_EOF;
+ }
+ 
+ static int dash_close(AVFormatContext *s)
+@@ -2356,6 +2376,9 @@
+                                            AV_ROUND_DOWN : AV_ROUND_UP);
+     if ((flags & AVSEEK_FLAG_BYTE) || c->is_live)
+         return AVERROR(ENOSYS);
++
++    /* An explicit new seek starts a new media IO operation. */
++    s->pb->error = 0;
+ 
+     /* Seek in discarded streams with dry_run=1 to avoid reopening them */
+     for (i = 0; i < c->n_videos; i++) {
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -1150,6 +1150,10 @@
+         buf_size = FFMIN(buf_size, seg->size - pls->cur_seg_offset);
+ 
+     ret = avio_read(pls->input, buf, buf_size);
++    /* Meowfilm: avio_read may return partial bytes and also set error.
++     * Preserve the actual terminal IO failure before a parser sees them. */
++    if (pls->input->error < 0 && pls->input->error != AVERROR_EOF)
++        return pls->input->error;
+     if (ret > 0)
+         pls->cur_seg_offset += ret;
+ 
+@@ -1693,11 +1697,9 @@
+                    v->cur_seq_no,
+                    v->index);
+             if (segment_retries >= c->seg_max_retry) {
+-                av_log(v->parent, AV_LOG_WARNING, "Segment %"PRId64" of playlist %d failed too many times, skipping\n",
+-                       v->cur_seq_no,
+-                       v->index);
+-                v->cur_seq_no++;
+-                segment_retries = 0;
++                /* Meowfilm: retries belong to this segment. A terminal
++                 * failure is not a gap or the end of a successful VOD. */
++                return ret;
+             } else {
+                 segment_retries++;
+             }
+@@ -1747,9 +1749,13 @@
+              * to convey timestamps using them in the beginning of each segment. */
+             intercept_id3(v, buf, buf_size, &ret);
+         }
++        if (v->input->error < 0 && v->input->error != AVERROR_EOF)
++            return v->input->error;
+ 
+         return ret;
+     }
++    if (ret < 0 && ret != AVERROR_EOF)
++        return ret;
+     if (c->http_persistent &&
+         seg->key_type == KEY_NONE && av_strstart(seg->url, "http", NULL)) {
+         v->input_read_done = 1;
+@@ -2307,8 +2313,9 @@
+             pls->input_next_requested = 0;
+             pls->cur_seg_offset = 0;
+             pls->cur_init_section = NULL;
+-            /* Reset EOF flag */
++            /* Reset EOF and errors before restarting the probed input. */
+             pls->pb.pub.eof_reached = 0;
++            pls->pb.pub.error = 0;
+             /* Clear any buffered data */
+             pls->pb.pub.buf_end = pls->pb.pub.buf_ptr = pls->pb.pub.buffer;
+             /* Reset the position */
+@@ -2334,6 +2341,8 @@
+             pls->ctx->interrupt_callback = s->interrupt_callback;
+             url = av_strdup(pls->segments[0]->url);
+             ret = av_probe_input_buffer(&pls->pb.pub, &in_fmt, url, NULL, 0, 0);
++            if (pls->pb.pub.error < 0 && pls->pb.pub.error != AVERROR_EOF)
++                ret = pls->pb.pub.error;
+ 
+             for (int n = 0; n < pls->n_segments; n++)
+                 if (ret >= 0)
+@@ -2380,6 +2389,8 @@
+ 
+         ret = avformat_open_input(&pls->ctx, pls->segments[0]->url, in_fmt, &options);
+         av_dict_free(&options);
++        if (pls->pb.pub.error < 0 && pls->pb.pub.error != AVERROR_EOF)
++            ret = pls->pb.pub.error;
+         if (ret < 0)
+             return ret;
+ 
+@@ -2407,6 +2418,8 @@
+             else
+                 ret = avformat_find_stream_info(pls->ctx, NULL);
+ 
++            if (pls->pb.pub.error < 0 && pls->pb.pub.error != AVERROR_EOF)
++                ret = pls->pb.pub.error;
+             if (ret < 0)
+                 return ret;
+         }
+@@ -2547,8 +2560,13 @@
+                     ret = read_subtitle_packet(pls, pls->pkt);
+                 else
+                     ret = av_read_frame(pls->ctx, pls->pkt);
++                /* A child may yield a partial packet or EOF after IO failed. */
++                if (pls->pb.pub.error < 0 && pls->pb.pub.error != AVERROR_EOF) {
++                    av_packet_unref(pls->pkt);
++                    return pls->pb.pub.error;
++                }
+                 if (ret < 0) {
+-                    if (!avio_feof(&pls->pb.pub) && ret != AVERROR_EOF)
++                    if (ret != AVERROR_EOF)
+                         return ret;
+                     break;
+                 } else {
+@@ -2737,6 +2755,7 @@
+         pls->input_next_requested = 0;
+         av_packet_unref(pls->pkt);
+         pb->eof_reached = 0;
++        pb->error = 0;
+         /* Clear any buffered data */
+         pb->buf_end = pb->buf_ptr = pb->buffer;
+         /* Reset the pos, to let the mpegts/mov demuxer know we've seeked. */
+--- a/libavformat/isom.h
++++ b/libavformat/isom.h
+@@ -276,6 +276,8 @@
+     int has_sidx;  // If there is an sidx entry for this stream.
+     struct {
+         struct AVAESCTR* aes_ctr;
++        uint8_t meow_key[16];
++        int meow_key_valid;
+         struct AVAES *aes_ctx;
+         unsigned int per_sample_iv_size;  // Either 0, 8, or 16.
+         AVEncryptionInfo *default_encrypted_sample;
+--- a/libavformat/mov.c
++++ b/libavformat/mov.c
+@@ -8450,6 +8450,18 @@
+ 
+ static int cenc_decrypt(MOVContext *c, MOVStreamContext *sc, AVEncryptionInfo *sample, uint8_t *input, int size)
+ {
++    uint8_t key[16];
++    int ret = get_key_from_kid(key, sizeof(key), c, sample);
++    if (ret < 0)
++        return ret;
++    if (!sc->cenc.meow_key_valid || memcmp(key, sc->cenc.meow_key, sizeof(key))) {
++        av_aes_ctr_free(sc->cenc.aes_ctr);
++        sc->cenc.aes_ctr = NULL;
++        av_freep(&sc->cenc.aes_ctx);
++        memcpy(sc->cenc.meow_key, key, sizeof(key));
++        sc->cenc.meow_key_valid = 1;
++    }
++    memset(key, 0, sizeof(key));
+     if (sample->scheme == MKBETAG('c','e','n','c') && !sample->crypt_byte_block && !sample->skip_byte_block) {
+         return cenc_scheme_decrypt(c, sc, sample, input, size);
+     } else if (sample->scheme == MKBETAG('c','b','c','1') && !sample->crypt_byte_block && !sample->skip_byte_block) {
+@@ -10117,6 +10129,8 @@
+     mov_free_encryption_index(&sc->cenc.encryption_index);
+     av_encryption_info_free(sc->cenc.default_encrypted_sample);
+     av_aes_ctr_free(sc->cenc.aes_ctr);
++    av_freep(&sc->cenc.aes_ctx);
++    memset(sc->cenc.meow_key, 0, sizeof(sc->cenc.meow_key));
+ 
+     av_freep(&sc->stereo3d);
+     av_freep(&sc->spherical);

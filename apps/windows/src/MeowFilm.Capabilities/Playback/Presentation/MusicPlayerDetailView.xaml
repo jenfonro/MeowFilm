@@ -4,7 +4,9 @@
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
- TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto">
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
+ PreviewKeyDown="Detail_PreviewKeyDown" PreviewKeyUp="Detail_PreviewKeyUp"
+ LostKeyboardFocus="Detail_LostKeyboardFocus">
  <UserControl.Style>
   <Style TargetType="UserControl">
    <!-- The page's only backdrop; detail content and footer stay transparent over it. -->
@@ -190,7 +192,15 @@
            <local:MusicLyricWordView Word="{Binding}" FontSize="20" Foreground="#8B898C" Highlight="#F4F3F6"/>
           </DataTemplate></ItemsControl.ItemTemplate>
          </ItemsControl>
-         <TextBlock Text="{Binding Translation}" Style="{StaticResource Player.OptionalText}" TextWrapping="Wrap"/>
+         <TextBlock x:Name="LyricTranslation" Text="{Binding Translation}" TextWrapping="Wrap">
+          <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Player.OptionalText}">
+           <Style.Triggers>
+            <DataTrigger Binding="{Binding DataContext.ShowLyricTranslation,RelativeSource={RelativeSource AncestorType=local:MusicPlayerDetailView}}" Value="False">
+             <Setter Property="Visibility" Value="Collapsed"/>
+            </DataTrigger>
+           </Style.Triggers>
+          </Style></TextBlock.Style>
+         </TextBlock>
          <TextBlock Text="{Binding Romanization}" Style="{StaticResource Player.OptionalText}" TextWrapping="Wrap"/>
         </StackPanel>
       </Border>

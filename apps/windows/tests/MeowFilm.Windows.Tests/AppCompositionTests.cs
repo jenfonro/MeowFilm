@@ -53,7 +53,10 @@ public static class AppCompositionTests
             ("music", "0.8.0"),
             ("cat", "0.2.0"),
             ("source", "0.2.0"),
+            ("pan", "0.1.0"),
             ("tmdb", "0.1.0"),
+            ("douban", "0.1.0"),
+            ("film", "0.1.0"),
             ("netease", "0.1.0")
         }));
         Check(AppIdentity.NativeCollections.Count == 0, "music sources are stored by the shared runtime module");

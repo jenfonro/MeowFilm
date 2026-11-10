@@ -113,9 +113,10 @@ public static class AppLauncher
         async Task<StartupOutcome> StartCoreAsync(CancellationToken cancellationToken)
         {
             LocalDocumentStore? store = null;
-            AppRuntimeClient? runtime = null;
+            AppRuntimeConnectionHost? runtime = null;
             ArtworkService? artwork = null;
             AppAppearance? appearance = null;
+            AppMediaControlSettings? mediaControls = null;
             AppClosePreferences? closePreferences = null;
             var modules = new List<IDesktopModule>();
             IAsyncDisposable? windowAttachment = null;
@@ -134,7 +135,7 @@ public static class AppLauncher
                     new(() => disposeResources?.Invoke() ?? ValueTask.CompletedTask),
                     new(() => runtime?.DisposeAsync() ?? ValueTask.CompletedTask, InterruptsPendingOperations: true),
                     new(() => store?.DisposeAsync() ?? ValueTask.CompletedTask)
-                ], sharedParticipants: new IDesktopShutdownParticipant?[] { appearance, closePreferences }
+                ], sharedParticipants: new IDesktopShutdownParticipant?[] { mediaControls, appearance, closePreferences }
                     .OfType<IDesktopShutdownParticipant>());
             }
             try
@@ -143,7 +144,7 @@ public static class AppLauncher
                 Directory.CreateDirectory(paths.Documents);
                 store = new LocalDocumentStore(paths.Documents, definition.NativeNamespaces,
                     definition.NativeCollections, definition.ProtectedNamespaces);
-                runtime = new AppRuntimeClient(async token =>
+                runtime = new AppRuntimeConnectionHost(async token =>
                 {
                     // Native pages and business owners never wait for this start:
                     // a failed runtime only makes script sources unavailable.
@@ -152,7 +153,7 @@ public static class AppLauncher
                         definition.RuntimeModules), token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
                     return await NodeRuntime.StartAsync(Path.Combine(root, "node.exe"), bundle,
-                        definition.RuntimeModules, paths.ScriptRuntime, token).ConfigureAwait(false);
+                        definition.RuntimeModules, paths.ScriptRuntime, token, ownerRevoked: token).ConfigureAwait(false);
                 });
                 cancellationToken.ThrowIfCancellationRequested();
                 createModules(runtime, store, modules);
@@ -160,6 +161,8 @@ public static class AppLauncher
                 closePreferences = new AppClosePreferences(store);
                 await appearance.LoadAsync();
                 await closePreferences.LoadAsync();
+                mediaControls = new AppMediaControlSettings(store);
+                await mediaControls.LoadAsync();
                 ValidateModuleComposition(modules);
                 await PrepareModulesAsync(modules, cancellationToken);
                 // The shared runtime starts with the App; starting it executes no script.
@@ -167,7 +170,7 @@ public static class AppLauncher
                 var lifecycle = Lifecycle();
                 shell = new ShellWindow(modules, createPages?.Invoke(modules) ?? [],
                     lifecycle.CloseAsync, lifecycle.ForceReleaseAsync, lifecycle.CancelShutdownPreparationAsync,
-                    appearance, closePreferences) { Title = "meowfilm" };
+                    appearance, closePreferences, mediaControls: mediaControls) { Title = "meowfilm" };
                 artwork = new ArtworkService(readTrusted: async (reference, maximumBytes, token) =>
                 {
                     try { return await runtime.ReadImageAsync(reference, maximumBytes, token).ConfigureAwait(false); }

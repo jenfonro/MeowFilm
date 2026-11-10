@@ -26,7 +26,7 @@ class NodePreflightTests(unittest.TestCase):
         self.manifest = {
             "schemaVersion": 1, "status": "complete", "assemblyProfile": "common-native",
             "platform": "ios", "transport": "runtime.http.v1",
-            "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "tmdb", "netease"],
+            "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"],
             "target": {"sdk": "iphonesimulator", "arch": "x64", "minimumOS": "17.0"},
             "trustedNative": [{"platform": "ios", "arch": "x64", "abi": 1, "napi": 8,
                                "path": "Frameworks/MeowScriptHost.framework/MeowScriptHost",
@@ -67,6 +67,23 @@ class NodePreflightTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     preflight.validate_runtime(self.payload)
                 self.manifest[field] = original
+
+    def test_rejects_inexact_app_module_assemblies(self):
+        for modules in [
+            ["music", "cat", "source"],
+            ["music", "cat", "source", "tmdb", "netease"],
+            ["music", "cat", "source", "pan", "tmdb", "douban", "film"],
+            ["music", "cat", "source", "pan", "tmdb", "douban"],
+            ["music", "cat", "source", "pan", "tmdb", "douban", "film", "unknown"],
+            ["music", "cat", "source", "pan", "tmdb", "douban", "douban"],
+            ["music", "cat", "source", "tmdb", "pan", "douban", "film"],
+            ["music", "cat", "source", "pan", "tmdb", "douban", "netease", "film"],
+        ]:
+            with self.subTest(modules=modules):
+                self.manifest["modules"] = modules
+                self.save()
+                with self.assertRaises(ValueError):
+                    preflight.validate_runtime(self.payload)
 
     def test_rejects_missing_unreviewed_or_mismatched_native_framework(self):
         original = self.manifest["trustedNative"][0]
@@ -152,7 +169,7 @@ class NodePreflightBuildTests(unittest.TestCase):
             (payload / "runtime-manifest.json").write_text(json.dumps({
                 "schemaVersion": 1, "status": "complete", "assemblyProfile": "common-native",
                 "platform": "ios", "transport": "runtime.http.v1",
-                "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "tmdb", "netease"],
+                "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"],
                 "target": selected,
                 "trustedNative": [{"platform": "ios", "arch": selected["arch"], "abi": 1, "napi": 8,
                                   "path": "Frameworks/MeowScriptHost.framework/MeowScriptHost",

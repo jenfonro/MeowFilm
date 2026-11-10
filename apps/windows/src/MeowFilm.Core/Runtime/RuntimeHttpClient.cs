@@ -5,22 +5,19 @@ using System.Text.Json;
 
 namespace MeowFilm.Core.Runtime;
 
-/// <summary>Authenticated loopback HTTP exchanges. The process owner holds session lifetime.</summary>
-public sealed class RuntimeHttpClient : IRuntimeClient, IRuntimeImageClient, IAsyncDisposable
+/// <summary>HTTP exchanges with request correlation. The process owner holds session lifetime.</summary>
+public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageClient, IAsyncDisposable
 {
     private readonly HttpClient client;
     private readonly Uri endpoint;
-    private readonly string sessionId, requestKey;
     private readonly CancellationTokenSource lifetime = new();
     private readonly object gate = new();
     private readonly HashSet<TaskCompletionSource> pending = [];
     private Task? disposal;
 
-    public RuntimeHttpClient(string baseUrl, string sessionId, string requestKey)
+    public RuntimeHttpClient(string baseUrl)
     {
         endpoint = RuntimeHttpProtocol.ValidateEndpoint(baseUrl);
-        RuntimeHttpProtocol.ValidateSession(sessionId, requestKey);
-        this.sessionId = sessionId; this.requestKey = requestKey;
         client = new(new SocketsHttpHandler
         {
             UseProxy = false, AllowAutoRedirect = false, UseCookies = false,
@@ -76,7 +73,8 @@ public sealed class RuntimeHttpClient : IRuntimeClient, IRuntimeImageClient, IAs
     public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!RuntimeHttpProtocol.ValidImageReference(reference) || maximumBytes <= 0)
+        var provider = RuntimeHttpProtocol.ImageProvider(reference);
+        if (provider is null || maximumBytes <= 0)
             throw new BridgeException("INVALID_REQUEST");
         return ExchangeAsync(HttpMethod.Get, reference, default, false, async (response, token) =>
         {
@@ -88,7 +86,7 @@ public sealed class RuntimeHttpClient : IRuntimeClient, IRuntimeImageClient, IAs
                     if ((int)response.StatusCode is not (400 or 401 or 403 or 404 or 413 or 415 or 502) ||
                         response.Content.Headers.ContentType?.ToString() != "application/json")
                         throw new BridgeException("INVALID_RESPONSE");
-                    var spec = RuntimeHttpProtocol.Modules["tmdb"];
+                    var spec = RuntimeHttpProtocol.Modules[provider];
                     var failure = RuntimeHttpProtocol.ValidateEnvelope(bytes, spec.Name, spec.Codes);
                     if (failure.GetProperty("ok").GetBoolean()) throw new BridgeException("INVALID_RESPONSE");
                     throw new BridgeException(failure.GetProperty("code").GetString()!);
@@ -187,8 +185,6 @@ public sealed class RuntimeHttpClient : IRuntimeClient, IRuntimeImageClient, IAs
                 Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact
             };
             var requestId = Guid.NewGuid().ToString("D");
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", requestKey);
-            request.Headers.Add("X-Meow-Session", sessionId);
             request.Headers.Add("X-Meow-Request-Id", requestId);
             if (method != HttpMethod.Get)
             {

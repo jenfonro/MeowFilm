@@ -81,7 +81,7 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
           let value, error;
           try {
             if (linked.signal.aborted) throw new ScriptHostError('CANCELLED');
-            value = await body(captured, linked.signal);
+            value = await body(captured, linked.signal, context);
             if (linked.signal.aborted) throw new ScriptHostError('CANCELLED');
           } catch (failure) { error = failure; }
           try { linked.release(); } catch (failure) { error ??= failure; }
@@ -171,13 +171,13 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
     finally { sources.remove(input.installationId); }
   });
   method('invoke', ['installationId', 'generation', 'siteId', 'operation', 'payload'],
-    ['installationId', 'siteId', 'operation'], (input, signal) => {
+    ['installationId', 'siteId', 'operation'], (input, signal, context) => {
       identifier(input.installationId); identifier(input.operation);
       requireValue(typeof input.siteId === 'string' && input.siteId.length > 0 &&
         input.siteId.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(input.siteId));
       if (input.generation !== undefined) integer(input.generation);
       requireValue(input.payload === undefined || object(input.payload));
-      return get().invoke({ ...input, payload: input.payload ?? {} }, { signal });
+      return get().invoke({ ...input, payload: input.payload ?? {} }, { signal, ...(context.mediaPurpose === undefined ? {} : { mediaPurpose: context.mediaPurpose }) });
     });
   method('management.describe', ['installationId', 'generation'], ['installationId'], (input, signal) => {
     identifier(input.installationId);
@@ -210,5 +210,6 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
       if (error) throw error;
     })();
   }
-  return { id: 'cat', version: contracts.cat.version, contract: catScriptContract, methods, upload, close };
+  return { id: 'cat', version: contracts.cat.version, contract: catScriptContract,
+    methods, upload, close };
 }

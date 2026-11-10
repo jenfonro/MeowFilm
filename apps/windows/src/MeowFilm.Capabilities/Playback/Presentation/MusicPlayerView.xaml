@@ -179,6 +179,19 @@
       <Border Width="72" CornerRadius="3" BorderThickness="1" BorderBrush="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}" Padding="6,2"><TextBlock TextAlignment="Center" Text="{Binding CurrentQualityLabel}" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="10"/></Border>
      </Button>
      <Button x:Name="PlaylistButton" Content="&#xE710;" Click="PlaylistMenu_Click" IsEnabled="{Binding CanPlay}" AutomationProperties.Name="收藏到歌单"/>
+     <Button x:Name="DesktopLyricsButton" Click="DesktopLyrics_Click" IsEnabled="{Binding CanToggleDesktopLyrics}"
+             ToolTip="{Binding DesktopLyricsLabel}" AutomationProperties.Name="{Binding DesktopLyricsLabel}">
+      <Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+       <Style.Triggers>
+        <DataTrigger Binding="{Binding IsDesktopLyricsOpen}" Value="True"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Accent}"/></DataTrigger>
+        <MultiDataTrigger><MultiDataTrigger.Conditions>
+         <Condition Binding="{Binding IsDesktopLyricsOpen}" Value="True"/>
+         <Condition Binding="{Binding (desktop:DesktopTheme.IsHighContrast),RelativeSource={RelativeSource Self}}" Value="True"/>
+        </MultiDataTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiDataTrigger>
+       </Style.Triggers>
+      </Style></Button.Style>
+      <TextBlock Text="桌" FontSize="15" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
+     </Button>
      <Button x:Name="VolumeButton" Content="&#xE767;" Click="Volume_Click" AutomationProperties.Name="音量"/>
      <Button x:Name="MoreButton" Content="&#xE712;" Click="More_Click" AutomationProperties.Name="更多"/>
     </StackPanel>

@@ -1,27 +1,5 @@
-const routes = [
-  /^\/3\/configuration(?:\/(?:countries|languages|primary_translations|timezones))?$/,
-  /^\/3\/genre\/(?:movie|tv)\/list$/,
-  /^\/3\/search\/(?:movie|tv|multi|person)$/,
-  /^\/3\/discover\/(?:movie|tv)$/,
-  /^\/3\/trending\/(?:all|movie|tv|person)\/(?:day|week)$/,
-  /^\/3\/movie\/(?:latest|now_playing|popular|top_rated|upcoming)$/,
-  /^\/3\/movie\/[1-9]\d*(?:\/(?:alternative_titles|credits|external_ids|images|keywords|lists|recommendations|release_dates|similar|translations|videos|watch\/providers))?$/,
-  /^\/3\/tv\/(?:latest|airing_today|on_the_air|popular|top_rated)$/,
-  /^\/3\/tv\/[1-9]\d*(?:\/(?:aggregate_credits|alternative_titles|content_ratings|credits|episode_groups|external_ids|images|keywords|recommendations|screened_theatrically|similar|translations|videos|watch\/providers))?$/,
-  /^\/3\/tv\/[1-9]\d*\/season\/(?:0|[1-9]\d*)(?:\/(?:aggregate_credits|credits|external_ids|images|translations|videos|watch\/providers))?$/,
-  /^\/3\/tv\/[1-9]\d*\/season\/(?:0|[1-9]\d*)\/episode\/(?:0|[1-9]\d*)(?:\/(?:credits|external_ids|images|translations|videos))?$/,
-  /^\/3\/tv\/episode_group\/[A-Za-z0-9_-]+$/,
-  /^\/3\/person\/(?:latest|popular)$/,
-  /^\/3\/person\/[1-9]\d*(?:\/(?:combined_credits|external_ids|images|movie_credits|tagged_images|translations|tv_credits))?$/,
-  /^\/3\/collection\/[1-9]\d*(?:\/(?:images|translations))?$/,
-  /^\/3\/credit\/[A-Za-z0-9_-]+$/,
-  /^\/3\/watch\/providers\/(?:regions|movie|tv)$/,
-];
 const imageFields = new Set([
   'poster_path', 'backdrop_path', 'profile_path', 'logo_path', 'still_path', 'file_path',
-]);
-const credentialFields = new Set([
-  'apikey', 'accesstoken', 'requesttoken', 'sessionid', 'guestsessionid', 'authorization', 'cookie',
 ]);
 const control = /[\u0000-\u001f\u007f\u2028\u2029]/;
 const sizePattern = /^(?:original|[wh][1-9]\d*)$/;
@@ -39,10 +17,6 @@ function requireValue(condition, code = 'INVALID_REQUEST') {
   if (!condition) throw new Failure(code);
 }
 
-function allowedPath(path) {
-  return typeof path === 'string' && !control.test(path) && routes.some(route => route.test(path));
-}
-
 function imageSize(size) {
   requireValue(typeof size === 'string' && !control.test(size) && sizePattern.test(size));
   return size;
@@ -52,22 +26,17 @@ function baseURL(value) {
   requireValue(typeof value === 'string' && !/[\u0000-\u0020\u007f\\?#]/.test(value));
   let url;
   try { url = new URL(value); } catch { throw new Failure('INVALID_REQUEST'); }
-  requireValue(['http:', 'https:'].includes(url.protocol) && !url.username && !url.password);
+  requireValue(['http:', 'https:'].includes(url.protocol));
   return url.href.replace(/\/+$/, '');
 }
 
-function queryParams(query, path) {
+function queryParams(query) {
   requireValue(record(query));
   const params = new URLSearchParams();
   for (const [name, value] of Object.entries(query)) {
-    requireValue(/^[A-Za-z][A-Za-z0-9_.]*$/.test(name) && !control.test(name) &&
-      !credentialFields.has(name.replaceAll('_', '').toLowerCase()));
+    requireValue(name.length > 0 && !control.test(name));
     requireValue(typeof value === 'string' || typeof value === 'boolean' ||
       typeof value === 'number' && Number.isFinite(value));
-    if (name.toLowerCase() === 'append_to_response') {
-      requireValue(typeof value === 'string' && value.split(',').every(part =>
-        part.length > 0 && allowedPath(`${path}/${part}`)));
-    }
     params.set(name, String(value));
   }
   return params;
@@ -127,12 +96,14 @@ function responseData(response, path, size) {
 export async function requestTMDB(input, { settings, request, signal }) {
   requireValue(record(input) && Object.hasOwn(input, 'path') &&
     Object.keys(input).every(key => ['path', 'query', 'imageSize'].includes(key)));
-  requireValue(allowedPath(input.path) && object(settings) && typeof request === 'function' &&
+  requireValue(typeof input.path === 'string' && input.path.startsWith('/') && !input.path.startsWith('//') &&
+    !/[\u0000-\u0020\u007f\\?#\u2028\u2029]/.test(input.path) &&
+    object(settings) && typeof request === 'function' &&
     (signal === undefined || signal instanceof AbortSignal));
   const path = input.path;
   const size = imageSize(input.imageSize === undefined ? 'original' : input.imageSize);
   const url = new URL(`${baseURL(settings.apiBase)}${path}`);
-  url.search = queryParams(input.query === undefined ? {} : input.query, path).toString();
+  url.search = queryParams(input.query === undefined ? {} : input.query).toString();
   const { apiKey, accessToken } = settings;
   requireValue(typeof apiKey === 'string' && !control.test(apiKey) &&
     typeof accessToken === 'string' && !control.test(accessToken));
@@ -143,7 +114,7 @@ export async function requestTMDB(input, { settings, request, signal }) {
   requireValue(!signal?.aborted, 'CANCELLED');
   let response;
   try {
-    response = await request(url.href, { method: 'GET', headers, signal, followRedirect: false });
+    response = await request(url.href, { method: 'GET', headers, signal, followRedirect: true });
   } catch (error) {
     if (signal?.aborted || error?.name === 'AbortError' ||
         ['CANCELLED', 'ABORT_ERR'].includes(error?.code)) throw new Failure('CANCELLED');

@@ -36,7 +36,7 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(manifest["assemblyProfile"] as? String, "common-native")
         XCTAssertEqual(manifest["transport"] as? String, "runtime.http.v1")
-        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "tmdb", "netease"])
+        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"])
         let files = try XCTUnwrap(manifest["files"] as? [[String: Any]])
         XCTAssertFalse(files.contains { ($0["path"] as? String)?.lowercased().hasSuffix(".wasm") == true })
         let frameworks = try XCTUnwrap(Bundle.main.privateFrameworksURL)
@@ -51,6 +51,12 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         XCTAssertTrue(try String(contentsOf: unicodeLicense, encoding: .utf8).contains("1991-2026 Unicode, Inc."))
     }
 
+    func testAppBundleAllowsArbitraryHTTPWithoutScopedATSOverrides() throws {
+        let transport = try XCTUnwrap(
+            Bundle.main.object(forInfoDictionaryKey: "NSAppTransportSecurity") as? [String: Bool])
+        XCTAssertEqual(transport, ["NSAllowsArbitraryLoads": true])
+    }
+
     @MainActor
     func testEmbeddedNodeServesAnLXScriptThroughTheNativeOwner() async throws {
         let resources = try await hostResources()
@@ -62,6 +68,10 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
             return XCTFail("Missing runtime module description")
         }
         XCTAssertEqual(fields["protocol"], .string("runtime.http.v1"))
+        XCTAssertEqual(modules.compactMap { value -> String? in
+            guard case .object(let module) = value, case .string(let id)? = module["id"] else { return nil }
+            return id
+        }, ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"])
         XCTAssertTrue(modules.contains {
             guard case .object(let module) = $0 else { return false }
             return module["id"] == .string("music") && module["version"] == .string("0.8.0")

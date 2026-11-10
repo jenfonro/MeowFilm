@@ -51,6 +51,16 @@ Desktop 只拥有原生 WPF 壳、导航/历史、设置展示、窗口及界面
 - `FloatingSurface`、`ItemHover`、`ItemSelected`、`InputSurface` 从同一 `ThemeColor` 派生浅色菜单／弹层、悬停、当前及搜索底色。AppHost 当前仅装配一个 Shell 和一个 appearance owner；同一 UI dispatcher 的重复 Theme 字典与脱离视觉树的 Popup 引用同一组颜色 Brush。Brush 的 Color 绑定到派生值，防止 WPF 模板／资源封存冻结后不能更新；未复制主题设置或遍历控件树。这不是同一 dispatcher 多个独立主题 owner 的契约。高对比由控件样式切到系统色。
 - `SettingsScrollChrome.xaml` 仅用于设置页和其中列表，常显且不创建空闲计时器；普通页保留 `OverlayScrollChrome` 的原自动隐藏机制。
 
+## 媒体快捷键设置
+
+- AppHost 先加载 `AppMediaControlSettings`，再通过 `ShellWindow` 构造器末尾的 `mediaControls` 参数注入；上游 `appearance`、`closePreferences` 及内部测试端口 `trayIconFactory` 保留原位置。壳只读 `MediaControls` 暴露同一 `IDesktopMediaControlSettings`，将其交给通用设置的“快捷键”区域和窗口附件；“窗口行为”继续使用同一关闭偏好 owner。Desktop 设置不依赖音乐能力，不创建播放器或全局键注册。
+- 原生文档独立为 `app.media-controls.v1`，严格字段为 `{schema:1, globalEnabled:true, systemMediaEnabled:true, bindings:[{action:"TogglePlayback",local:{key:"P",modifiers:2},global:{key:"P",modifiers:3}},…]}`。`action`／`key` 使用枚举名称，`modifiers` 使用 WPF `ModifierKeys` 位值；`null` 表示清除。八个动作各有一项，翻译的 `global` 必须为 `null`。不迁移或改写外观、音乐文档，不向脚本开放此命名空间。
+- 默认两开关开启，彼此独立。应用内键依次为 `Ctrl+P`、`Ctrl+Left`、`Ctrl+Right`、`Ctrl+Up`、`Ctrl+Down`、`Ctrl+L`、`Ctrl+D`、`Ctrl+T`，对应播放／暂停、上一首、下一首、音量加、音量减、喜欢歌曲、打开／关闭桌面歌词、源译文显隐；前七项的全局键在应用内键上增加 `Alt`，翻译全局列不提供编辑。
+- 缺失文档只采用默认值，不写盘。读取失败、损坏或未知版本撤销输入及编辑准入，保留原文档并通过 `NoticeOutlet` 通知，允许显式重新读取。保存按上次读取指纹 CAS；失败后权威重读，已接受写入的丢失回执可以恢复为成功，未接受的草稿不发布、不重放。偏好快照不可变；保存成功后才通知输入及系统媒体消费者。
+- 通用页沿用原有 32px 左右边距和设置滚动条。“功能说明／应用内快捷键／全局快捷键”展示八行；按钮可通过键盘及自动化访问，录制期间消费候选键的按下、长按及释放，并在 WPF 输入预处理阶段隔断 Shell 固定导航。纯修饰键不提交；Esc 取消、Tab 离开、Delete／Backspace 清除。候选可即时保存并结束视觉编辑，但同一 `IsRecording` 保持至所消费的候选／控制键全部释放，期间不恢复全局注册；候选保存中保留输入按钮的焦点资格，避免控件禁用导致提前失焦。失焦、隐藏、卸载、窗口停用或显式取消输入会话均可立即释放该状态，保存中同样可清理。内部不同动作跨局部／全局重复、`Ctrl+F`、`Alt+Left`、裸 Esc／Space 均拒绝保存，同一动作共享局部／全局组合允许。冲突就地显示并通过通知反馈，键位始终恢复权威值。
+- `IsRecording` 和 `GlobalErrors` 仅为运行时状态，不持久化。设置 UI 不探测、不推测占用；运行时附件以 `SetGlobalErrors` 发布真实注册结果，行内保留“热键被占用”或其他具体错误。重新检测只通过 `RequestRegistrationRefresh` 事件请求附件，设置未恢复、全局关闭或正在录制时不发出请求。
+- 媒体设置位于 `AppShutdown.sharedParticipants` 首位，其后依次为外观和关闭偏好。真正退出准备先同步令 `IsAvailable=false`，撤销编辑、输入及录制准入，封住全部系统媒体请求（包括 Pause／Stop）和自定义快捷键，再等待已接受保存实际结算；外观或关闭偏好保存未结算不能延后封口。取消准备按逆序恢复，媒体最后按权威开关重新开放；永久 Abort／Dispose 或已关闭的会话不再恢复。关闭询问及隐藏到托盘不进入真正退出准备，继续遵守各自开关。启动失败同样由生命周期所有者排空设置后才释放存储。
+
 `DialogPlacement.Centered` 为业务表单Popup提供窗口内容区居中、移动/缩放重定位和所属控件退场清理；其PlacementTarget仍用于上下文/焦点，不再决定表单位置。锚点菜单、调色盘不启用此机制。`ColorSelection`、设置下拉框和栏目间距资源由Desktop共用，业务设置页只负责提供选项和提交至各自owner。
 
 ## 系统托盘与关闭选择
@@ -58,7 +68,8 @@ Desktop 只拥有原生 WPF 壳、导航/历史、设置展示、窗口及界面
 - Windows App 注入唯一 `IDesktopClosePreferences`。主窗口的标题栏关闭、播放器页关闭和 Alt+F4 使用同一关闭入口；默认询问「最小化到托盘」或「退出」，可勾选「记住我的选择」。取消或 Esc 不保存、不退出；未勾选只执行本次操作。普通最小化按钮仍最小化到任务栏。
 - 通用设置的「窗口行为」提供「每次询问」「最小化到托盘」「退出应用」。设置和关闭提示都提交到同一 owner；设置立即保存，关闭提示记住选择时必须收到保存成功后才执行动作。保存失败保留可操作界面及统一错误通知，不把草稿当成已保存偏好。
 - `AppClosePreferences` 独占 Windows 原生文档 `app.window.v1`，字段为 `{schema:1, closeBehavior:"ask"|"minimizeToTray"|"exit"}`。缺失采用 `ask` 且不写盘；损坏或未知格式不覆盖。保存使用读取指纹 CAS，失败后权威重读；设置页可重新读取。该 namespace 不开放给脚本桥，已接受的写入随 App 两阶段关闭实际排空，取消关闭恢复编辑准入。
-- Shell 拥有托盘实例，在 HWND 可用后注册。Windows App 编译期嵌入 `Desktop/Assets/Meowfilm.ico`（SVG 来源沿用现有绿色 `m` 品牌），托盘复制窗口的原生图标并独立释放，不依赖 `dotnet.exe` 宿主图标。最小化到托盘仅隐藏主窗口，保留播放、系统媒体会话、运行器和窗口状态；恢复时还原此前正常／最大化状态。隐藏前必须确认图标可用，注册失败保持窗口可见并提示。
+- Shell 拥有托盘实例，在 HWND 可用后注册。Windows App 编译期嵌入 `Desktop/Assets/Meowfilm.ico`（SVG 来源沿用现有绿色 `m` 品牌），托盘复制窗口的原生图标并独立释放，不依赖 `dotnet.exe` 宿主图标。最小化到托盘仅隐藏主窗口，保留播放、系统媒体会话、自定义全局快捷键、运行器和窗口状态；媒体开关仍独立生效，恢复时还原此前正常／最大化状态。隐藏前必须确认图标可用，注册失败保持窗口可见并提示。
+- `ShellWindow.IsHiddenToTray` 只读发布这一次托盘隐藏事实，先于子视图可见性变化置位，恢复显示前复位。Film 仅据此保留已有实际输出、attempt 和媒体通道；准备中无输出不保活，恢复不重新开播。普通页面离开仍按原停止／显式 PiP／外播规则，真正退出仍排空。
 - 托盘主激活恢复主窗口；菜单提供「显示主窗口」「退出」，复用应用浮层、菜单和高对比度样式。菜单使用托盘实例持有的独立锚点 HWND，仅在菜单打开时显示，不要求先显示主窗口。Explorer 重建任务栏后重新注册，恢复失败让主窗口重新可达；真正关闭时移除通知图标并释放句柄、订阅及菜单。
 - 托盘显式退出绕过询问和已记住的最小化偏好，先恢复窗口再执行原有关闭链路。重复请求不重复弹窗或清理；清理失败／超时仍由原有等待、取消与强制清理界面处理。系统注销／关机保留 Windows 会话结束语义，不因关闭偏好弹出选择或拒绝系统退出。
 - 未注入关闭偏好的独立 Shell 消费者继续直接使用其注入的 shutdown 回调，不生成无 owner 的窗口行为设置。实际 App 始终注入偏好。

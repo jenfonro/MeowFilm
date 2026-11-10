@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "libraries": [
+    "avformat",
+    "avcodec",
+    "avutil",
+    "swresample",
+    "swscale"
+  ],
+  "sources": {
+    "ffmpeg": {
+      "version": "8.1.2",
+      "revision": "38b88335f99e76ed89ff3c93f877fdefce736c13",
+      "url": "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/38b88335f99e76ed89ff3c93f877fdefce736c13",
+      "sha256": "2ae7e42343cfffb811d15cfe98b6d005f082595fcdf034d30a4ff90cfed9f9c6",
+      "licenses": {
+        "COPYING.LGPLv2.1": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30",
+        "COPYING.LGPLv3": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+        "LICENSE.md": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
+      },
+      "inventorySHA256": "f192dd8ca7bc2358cbe681f6e92c588ce28fd800f34d5c2c7370e7d5ebaf3c10"
+    },
+    "ksplayer": {
+      "revision": "d0d063ab1f045735129b6617591ad2148d88d5db",
+      "url": "https://codeload.github.com/kingslay/KSPlayer/tar.gz/d0d063ab1f045735129b6617591ad2148d88d5db",
+      "sha256": "db3ab9c6947f20cfb5a1b1e5a812fe74ad4a5e0cf331971e9ea135124c6c85f7",
+      "licenses": {
+        "LICENSE": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+      },
+      "inventorySHA256": "9034debfed30ce27ac5020c23753c9caec5f5553f51b8b44adf3cea3775cbf2e"
+    }
+  },
+  "patch": {
+    "path": "native/VideoKernel/patches/ffmpeg-native-output.patch",
+    "sha256": "b9c93b45787a3b93d74bfbd1bccbe391cdf29053cfe968beded496d0292c9b0a",
+    "files": {
+      "libavcodec/videotoolbox.c": {
+        "upstream": "85abc859e1b1e44fa5995d32a108bba4385e03bedcf892cfbb1d30f28bdc5f56",
+        "patched": "95a887ea85e285474e7ced473595c491e3d16814ce8cbd1dff95ea8fb6b3113e"
+      },
+      "libavformat/mov.c": {
+        "upstream": "7ed52b0e5932026058a55483e72880eb592cdef048b0cec15e9ea7e922ad0347",
+        "patched": "34b932c40c2a9283fef11cd74df99db56ab8b8669d64714f24afd90d9ac0c489"
+      },
+      "libavformat/isom.h": {
+        "upstream": "424f1ea8b388da2d1af6ad19b2065ff22b8f80214ff6d19b44b452b3aeb891dc",
+        "patched": "046382fc9e7049c5219c0332b5ea4c7771f89fab1b3f4e1eb588e5269d3926ea"
+      },
+      "libavformat/hls.c": {
+        "upstream": "401fa5d806cc59888261e6fd08ee5772a4cda153192c1f339c99da5be388cd2c",
+        "patched": "d228e5de151910f1bb06bad1a457a94e1ba1642415535ebe18fb8d6b95e31496"
+      },
+      "libavformat/dashdec.c": {
+        "upstream": "50f4368e09137d961ba7965ac4e664b48bc3358efcfc1a44df19cb897832ea86",
+        "patched": "f82f9abd967207fc99dbf74e37e178747ae1f57aef43adc96fbaf07328f5e687"
+      }
+    }
+  },
+  "targets": {
+    "macos-x86_64": {
+      "sdk": "macosx",
+      "arch": "x86_64",
+      "triple": "x86_64-apple-macos14.0",
+      "minimum": "14.0"
+    },
+    "ios-arm64": {
+      "sdk": "iphoneos",
+      "arch": "arm64",
+      "triple": "arm64-apple-ios17.0",
+      "minimum": "17.0"
+    },
+    "ios-simulator-x86_64": {
+      "sdk": "iphonesimulator",
+      "arch": "x86_64",
+      "triple": "x86_64-apple-ios17.0-simulator",
+      "minimum": "17.0"
+    },
+    "ios-simulator-arm64": {
+      "sdk": "iphonesimulator",
+      "arch": "arm64",
+      "triple": "arm64-apple-ios17.0-simulator",
+      "minimum": "17.0"
+    },
+    "macos-arm64": {
+      "sdk": "macosx",
+      "arch": "arm64",
+      "triple": "arm64-apple-macos14.0",
+      "minimum": "14.0"
+    }
+  },
+  "configure": [
+    "--disable-autodetect",
+    "--disable-programs",
+    "--disable-doc",
+    "--disable-debug",
+    "--disable-shared",
+    "--enable-static",
+    "--enable-pic",
+    "--disable-encoders",
+    "--disable-muxers",
+    "--disable-avdevice",
+    "--disable-avfilter",
+    "--disable-gpl",
+    "--disable-nonfree",
+    "--enable-version3",
+    "--enable-libxml2",
+    "--enable-securetransport",
+    "--enable-videotoolbox",
+    "--enable-audiotoolbox",
+    "--enable-zlib",
+    "--enable-bzlib",
+    "--enable-iconv"
+  ],
+  "requiredComponents": [
+    "DASH_DEMUXER",
+    "HLS_DEMUXER",
+    "MOV_DEMUXER",
+    "MATROSKA_DEMUXER",
+    "MPEGTS_DEMUXER",
+    "HEVC_DECODER",
+    "H264_DECODER",
+    "AAC_DECODER",
+    "HEVC_VIDEOTOOLBOX_HWACCEL",
+    "H264_VIDEOTOOLBOX_HWACCEL",
+    "TLS_PROTOCOL",
+    "HTTP_PROTOCOL"
+  ]
+}

@@ -15,9 +15,11 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
         InitializeComponent();
         DataContext = module;
         module.PropertyChanged += OnModulePropertyChanged;
+        module.OperationFailed += (_, message) => Notices.Message = message;
         IsVisibleChanged += (_, _) =>
         {
-            if (!IsVisible) module.SuspendPresentation();
+            if (!IsVisible) module.SuspendPresentation(
+                hiddenToTray: Window.GetWindow(this) is ShellWindow { IsHiddenToTray: true });
         };
     }
 
@@ -43,7 +45,7 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
     private async void Shelf_ItemActivated(object? sender, FilmCardActivatedEventArgs e)
     {
         if (sender is FilmShelf)
-            await module.OpenPlaybackAsync(e.Item);
+            await OpenPlaybackAsync(() => module.OpenPlaybackAsync(e.Item));
     }
 
     private async void Shelf_RetryRequested(object? sender, EventArgs e)
@@ -67,11 +69,18 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
     private async void DataCard_Activated(object? sender, FilmCardActivatedEventArgs e)
     {
         if (sender is FilmCard)
-            await module.OpenPlaybackAsync(e.Item);
+            await OpenPlaybackAsync(() => module.OpenPlaybackAsync(e.Item));
     }
 
     private async void Playback_RecommendationRequested(object? sender, FilmCardActivatedEventArgs e) =>
-        await module.OpenRecommendationAsync(e.Item);
+        await OpenPlaybackAsync(() => module.OpenRecommendationAsync(e.Item));
+
+    private async Task OpenPlaybackAsync(Func<Task> action)
+    {
+        try { await action(); }
+        catch (OperationCanceledException) { }
+        catch (Exception error) { Notices.Message = module.OperationErrorText(error); }
+    }
 
     private async void Filter_Click(object sender, RoutedEventArgs e)
     {

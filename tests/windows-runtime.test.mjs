@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { createServer as createHTTPServer } from 'node:http';
-import { randomBytes, randomUUID, createHash } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
@@ -12,7 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createRuntimeClient } from '../apps/runtime/client.mjs';
 import { packageWindowsRuntime } from '../scripts/windows/package-runtime.mjs';
 import { assertOwnedPath, temporaryRoot } from '../scripts/windows/working-paths.mjs';
-import { verifyTMDBAssembly } from './tmdb-runtime-assembly-support.mjs';
+import { verifyPanAndDoubanAssembly, verifyTMDBAssembly } from './tmdb-runtime-assembly-support.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const windows = { skip: process.platform !== 'win32' ? 'Requires real Windows named pipes' : false, timeout: 20000 };
@@ -34,7 +34,7 @@ function bounded(promise, milliseconds = 5000) {
 
 // Node protocol fixture only. CurrentUserOnly ACL/PID checks belong to the native launcher tests.
 async function pipeServer(t, dataRoot, { config } = {}) {
-  const pipeName = `meowfilm-${randomUUID()}`, sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex');
+  const pipeName = `meowfilm-${randomUUID()}`, sessionId = randomUUID();
   const sockets = new Set(), clients = [], replies = [];
   let accepted;
   const connection = new Promise(resolve => { accepted = resolve; });
@@ -54,11 +54,11 @@ async function pipeServer(t, dataRoot, { config } = {}) {
       assert.equal(ready.protocol, 'runtime.http.v1');
       assert.match(ready.baseUrl, /^http:\/\/127\.0\.0\.1:[1-9][0-9]*$/);
       replies.push(ready);
-      const client = createRuntimeClient({ ...ready, sessionId, requestKey });
+      const client = createRuntimeClient({ baseUrl: ready.baseUrl });
       clients.push(client);
-      accepted({ client, socket, ready, sessionId, requestKey });
+      accepted({ client, socket, ready, sessionId });
     });
-    const value = { sessionId, requestKey, dataRoot };
+    const value = { sessionId, dataRoot };
     socket.write(config ? config(value) : JSON.stringify(value) + '\n');
   });
   t.after(async () => {
@@ -117,7 +117,10 @@ async function assertRealBusiness(client) {
     { id: 'music', version: '0.8.0', contract: 'music.script.v3' },
     { id: 'cat', version: '0.2.0', contract: 'cat.script.v2' },
     { id: 'source', version: '0.2.0', contract: 'source.runtime.v2' },
+    { id: 'pan', version: '0.1.0', contract: 'pan.runtime.v1' },
     { id: 'tmdb', version: '0.1.0', contract: 'tmdb.data.v1' },
+    { id: 'douban', version: '0.1.0', contract: 'douban.data.v1' },
+    { id: 'film', version: '0.1.0', contract: 'film.playback.v1' },
     { id: 'netease', version: '0.1.0', contract: 'netease.token.v1' },
   ]);
   const operations = {
@@ -127,22 +130,33 @@ async function assertRealBusiness(client) {
     cat: ['start', 'status', 'refresh', 'install', 'import', 'edit', 'update', 'restart',
       'enable', 'uninstall', 'invoke', 'management.describe', 'management.sync'],
     source: ['load', 'unload', 'invoke', 'status', 'close'],
-    tmdb: ['request', 'settings.get', 'settings.update'],
+    pan: ['providers', 'settings.get', 'settings.set', 'settings.clear', 'login.start',
+      'login.poll', 'login.cancel', 'list', 'prepare', 'play', 'refresh'],
+    tmdb: ['settings.get', 'settings.update', 'request'],
+    douban: ['settings.get', 'settings.update', 'request', 'search'],
     netease: ['get'],
+    film: ['session.open', 'session.command', 'session.snapshot', 'session.release', 'session.attempt',
+      'session.media.release', 'settings.get', 'settings.set', 'library.get', 'library.remove', 'manual.update',
+      'data.search', 'data.detail', 'data.metadata', 'data.cache.entry', 'data.invalidate'],
   };
   for (const module of description.modules) {
-    const prefix = module.id === 'source' ? 'source.runtime.'
-      : module.id === 'tmdb' ? 'tmdb.data.' : module.id === 'netease' ? 'netease.token.' : `${module.id}.script.`;
+    const prefix = { music: 'music.script.', cat: 'cat.script.', source: 'source.runtime.',
+      pan: 'pan.', tmdb: 'tmdb.data.', douban: 'douban.data.', film: 'film.', netease: 'netease.token.' }[module.id];
     assert.deepEqual(module.methods, operations[module.id].map(name => prefix + name).sort());
   }
+  for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
+    'film.settings.get', 'film.library.get']) assert.equal((await client.call(method)).ok, true, method);
   assert.deepEqual(await client.call('music.script.sources.list'), {
     ok: true, contract: 'music.script.v3', value: { revision: 0, items: [] },
   });
   assert.deepEqual(await client.call('source.runtime.status'), {
     ok: true, contract: 'source.runtime.v2', value: { instances: [] },
   });
-  for (const method of ['music.library.list', 'film.playback.recognize', 'reader.content.chapter', 'eval'])
+  for (const method of ['music.library.list', 'reader.content.chapter', 'eval'])
     await assert.rejects(client.call(method), { code: 'METHOD_NOT_FOUND' });
+  assert.deepEqual(await client.call('film.playback.recognize'), {
+    ok: false, contract: 'runtime.http.v1', code: 'METHOD_NOT_FOUND',
+  });
   return description;
 }
 
@@ -311,10 +325,11 @@ async function verifyCatExecution(client) {
 async function runProduct(t, entry, payload, dataRoot, manifest) {
   const server = await pipeServer(t, dataRoot);
   const child = spawnRuntime(t, entry, server.argv, payload);
-  const { client, socket, ready, sessionId, requestKey } = await bounded(server.connection);
+  const { client, socket, ready } = await bounded(server.connection);
   const description = await assertRealBusiness(client);
   if (manifest) assert.deepEqual(description.modules.map(module => module.id), manifest.modules);
-  const tmdbSettings = await verifyTMDBAssembly(t, { client, baseUrl: ready.baseUrl, sessionId, requestKey });
+  const tmdbSettings = await verifyTMDBAssembly(t, { client, baseUrl: ready.baseUrl });
+  await verifyPanAndDoubanAssembly(client);
   await verifyScriptExecution(t, client, dataRoot);
   await verifySourceExecution(t, client);
   await verifyCatExecution(client);
@@ -329,8 +344,16 @@ async function runProduct(t, entry, payload, dataRoot, manifest) {
   const recovered = await pipeServer(t, dataRoot);
   const second = spawnRuntime(t, entry, recovered.argv, payload);
   const connected = await bounded(recovered.connection);
-  assert.deepEqual(await connected.client.call('tmdb.data.settings.get'), {
-    ok: true, contract: 'tmdb.data.v1', value: tmdbSettings,
+  const restoredSettings = await connected.client.call('tmdb.data.settings.get');
+  assert.equal(typeof restoredSettings.value?.revision, 'string');
+  const { revision, ...restoredConfiguration } = restoredSettings.value;
+  const { revision: previousRevision, ...previousConfiguration } = tmdbSettings;
+  assert.equal(typeof previousRevision, 'string');
+  assert.notEqual(previousRevision, '');
+  assert.notEqual(revision, '');
+  assert.notEqual(revision, previousRevision);
+  assert.deepEqual({ ...restoredSettings, value: restoredConfiguration }, {
+    ok: true, contract: 'tmdb.data.v1', value: previousConfiguration,
   });
   const music = await connected.client.call('music.script.sources.list');
   assert.equal(music.ok, true, JSON.stringify(music));
@@ -364,13 +387,13 @@ for (const packaged of [false, true]) {
   // Disk inventory/copy of the native and jsdom payload has a separate fixture
   // budget; it must not consume the unchanged real-runtime protocol deadline.
   const options = { ...windows, timeout: packaged ? 120000 : windows.timeout };
-  test(`${packaged ? 'packaged' : 'source'} Windows entry serves five modules over HTTP and drains on close`, options, async t => {
+  test(`${packaged ? 'packaged' : 'source'} Windows entry serves eight App modules over HTTP and drains on close`, options, async t => {
     const area = temporary(t);
     let entry = join(root, 'apps/windows/runtime/entries/aggregate.mjs'), payload, manifest;
     if (packaged) {
       payload = join(area, 'payload');
       manifest = await packageWindowsRuntime({ root, product: 'aggregate', output: payload });
-      assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'tmdb', 'netease']);
+      assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
       assert.equal(manifest.transport, 'windows-http-v1');
       assert.equal(manifest.trustedNative[0].platform, 'win32');
       assert.equal(manifest.trustedNative[0].arch, process.arch);

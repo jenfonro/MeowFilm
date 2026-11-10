@@ -30,7 +30,7 @@ Task ReopenAsync(continuation, uri, headers, token)
 
 ## 3. 原子重开
 
-- `ReopenAsync` 只接受 HTTP(S) URI 和显式请求头集合；新输入继续经过当前 URI、重定向、地址、Range 和表示一致性检查。
+- `ReopenAsync` 只接受 HTTP(S) URI 和显式请求头集合；新输入继续经过实际 URI、重定向、Range 和表示一致性解析；不作 Origin／回环／URL 图准入。
 - 重开不得改变 owner 或媒体 identity。generation 必须与被捕获的当前输入一致，迟到 capability 以 `Superseded` 失败。
 - 旧原生实例释放后才创建新实例。新实例以暂停状态准备，先恢复位置，再读取准备结束时最新的暂停意图决定是否继续播放。
 - 准备、seek、调用方取消和授权撤销共用同一取消边界。重开失败不把错误输入标记为当前成功来源。

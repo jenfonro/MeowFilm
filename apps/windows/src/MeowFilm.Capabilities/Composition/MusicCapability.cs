@@ -574,6 +574,44 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             .FirstOrDefault(item => ReferenceEquals(item.Song, song));
         return card is null ? Task.CompletedTask : OpenCatalogCardAsync(card);
     }
+    public async Task ExecuteMediaShortcutAsync(MediaShortcutAction action)
+    {
+        if (stopping || disposed) return;
+        try
+        {
+            switch (action)
+            {
+                case MediaShortcutAction.TogglePlayback:
+                    if (CanTogglePlayback) await TogglePlaybackAsync();
+                    else await Notify("当前无法播放或暂停");
+                    break;
+                case MediaShortcutAction.Previous:
+                case MediaShortcutAction.Next:
+                    if (CanPlay) await StepAsync(action == MediaShortcutAction.Next);
+                    else await Notify("当前无法切换歌曲");
+                    break;
+                case MediaShortcutAction.VolumeUp:
+                case MediaShortcutAction.VolumeDown:
+                    Volume += action == MediaShortcutAction.VolumeUp ? 5 : -5;
+                    await SaveVolumeAsync();
+                    break;
+                case MediaShortcutAction.ToggleFavorite:
+                    if (HasCurrent && CanEdit) await ToggleCurrentFavoriteAsync();
+                    else await Notify("当前无法收藏歌曲");
+                    break;
+                case MediaShortcutAction.ToggleDesktopLyrics:
+                    await ToggleDesktopLyricsAsync();
+                    break;
+                case MediaShortcutAction.ToggleTranslation:
+                    ToggleLyricTranslation();
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(action));
+            }
+        }
+        catch (OperationCanceledException) { if (!stopping) await Notify("操作已取消"); }
+        catch (Exception error) { if (!stopping) await Notify(ErrorText(error)); }
+    }
     public Task TogglePlaybackAsync()
     {
         InvalidateCatalogAction();
@@ -774,7 +812,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         {
             await OpenOnlineCurrent(selected, epoch, cancellationToken, admission);
             await RestorePlaybackRateAsync(selected, epoch, cancellationToken);
-            if (IsLyrics && !stopping && epoch == playbackEpoch) _ = RestoreLyricsAsync();
+            if (NeedsLyrics && epoch == playbackEpoch) _ = RestoreLyricsAsync();
             return;
         }
         using var request = BeginOnline(cancellationToken);
@@ -787,7 +825,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             openedEntry = selected.EntryId; recorded = false;
             await playback.OpenAsync(Id, selected.EntryId, media.Uri!, selected.Title, media.Headers, request.Token);
             await RestorePlaybackRateAsync(selected, epoch, request.Token);
-            if (IsLyrics && !stopping && epoch == playbackEpoch) _ = RestoreLyricsAsync();
+            if (NeedsLyrics && epoch == playbackEpoch) _ = RestoreLyricsAsync();
         }
         finally { EndOnline(request); }
     }
@@ -811,6 +849,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             if (args.PropertyName != nameof(IMusicPlayback.Volume)) SyncChorus();
             if (args.PropertyName == nameof(IMusicPlayback.DurationSeconds)) CheckMediaDuration();
             playbackPresentation.Refresh();
+            DesktopLyricBindings();
             Changed(nameof(CanHeartbeatCurrent));
             Changed(nameof(CanRecommendCurrent));
         }
@@ -900,6 +939,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         if (preparation is not null) return preparation;
         FinishFeedback("interrupt");
         stopping = true; // Seal admission synchronously, before yielding to any callback.
+        PrepareDesktopLyricsShutdown();
         RetireQueueSurfaceRequest();
         Presentation.DeactivateDetail();
         SealRecommendations();
@@ -1011,6 +1051,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         RefreshBindings();
         if (Presentation.IsPageActive && IsDiscovery) await ActivateDiscoveryViewAsync();
         await vipPage.CancelShutdownPreparationAsync();
+        await ResumeDesktopLyricsAsync();
     }
     public Task AbortAsync()
     {
@@ -1024,6 +1065,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         await Task.Yield();
         Exception? failure = null;
         stopping = true;
+        ReleaseDesktopLyrics();
         try { lifetime.Cancel(); } catch (Exception error) { failure = error; }
         try { await prepare; } catch { /* Explicit unsaved exit, not a successful save. */ }
         if (resumption is { } recovering) { try { await recovering; } catch { } }
@@ -1046,6 +1088,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         finally
         {
             disposed = true;
+            ReleaseDesktopLyrics();
             UnsubscribeSearch();
             UnsubscribeDiscovery();
             ReleaseRecommendations();

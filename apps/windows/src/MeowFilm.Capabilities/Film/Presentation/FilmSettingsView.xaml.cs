@@ -14,6 +14,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private readonly FilmRuleService rules;
     private readonly FilmSourceService sources;
     private readonly FilmMetadataService? metadata;
+    private readonly FilmPlaybackSettingsView? playbackSettings;
     private string section = "rules";
     private bool initialized, observingSources;
     private long activation;
@@ -21,11 +22,22 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private FrameworkElement? popupAnchor;
 
     public FilmSettingsView(FilmRuleService rules, FilmSourceService sources, FilmMetadataService? metadata = null)
+        : this(rules, sources, null, null, () => null, metadata) { }
+
+    internal FilmSettingsView(FilmRuleService rules, FilmSourceService sources,
+        FilmPlaybackSettings? business, FilmLibrary? favorites, Func<FilmPlaybackTarget?> target,
+        FilmMetadataService? metadata = null)
     {
         this.rules = rules ?? throw new ArgumentNullException(nameof(rules));
         this.sources = sources ?? throw new ArgumentNullException(nameof(sources));
         this.metadata = metadata;
         InitializeComponent();
+        if (business is not null)
+        {
+            playbackSettings = new(business, favorites, target);
+            BusinessPage.Children.Add(playbackSettings);
+            BusinessNavigation.Visibility = Visibility.Visible;
+        }
         DataContext = this;
         foreach (var editor in RuleEditors)
         {
@@ -67,8 +79,12 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         ruleOperation?.Cancel();
         sourceOperation?.Cancel();
         metadataOperation?.Cancel();
+        playbackSettings?.Deactivate();
         ClosePopup(restoreFocus: false);
     }
+    internal Task PreparePlaybackSettingsShutdownAsync() =>
+        playbackSettings?.PrepareShutdownAsync() ?? Task.CompletedTask;
+    internal void ResumePlaybackSettings() => playbackSettings?.Resume();
 
     private async Task ActivateCurrentAsync()
     {
@@ -80,6 +96,10 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         else if (section == "tmdb")
         {
             if (!MetadataLoaded && !MetadataBusy && !MetadataFailed) await LoadMetadataAsync();
+        }
+        else if (section is not ("cats" or "videos"))
+        {
+            if (playbackSettings is not null) await playbackSettings.ShowAsync(section);
         }
         else if (!SourcesBusy && !SourcesFailed)
         {
@@ -98,6 +118,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         CatsPage.Visibility = key == "cats" ? Visibility.Visible : Visibility.Collapsed;
         VideosPage.Visibility = key == "videos" ? Visibility.Visible : Visibility.Collapsed;
         MetadataPage.Visibility = key == "tmdb" ? Visibility.Visible : Visibility.Collapsed;
+        BusinessPage.Visibility = key is "rules" or "cats" or "videos" or "tmdb" ? Visibility.Collapsed : Visibility.Visible;
         anchor.Focus(); anchor.BringIntoView();
         await ActivateCurrentAsync();
     }
@@ -105,7 +126,9 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private void Section_KeyDown(object sender, KeyEventArgs e)
     {
         if (sender is not RadioButton current || e.Key is not (Key.Home or Key.End or Key.Left or Key.Right)) return;
-        var anchors = SettingsNavigation.Children.OfType<RadioButton>().Where(anchor => anchor.IsVisible).ToArray();
+        var anchors = SettingsNavigation.Children.OfType<RadioButton>()
+            .Concat(BusinessNavigation.Children.OfType<RadioButton>())
+            .Where(anchor => anchor.IsVisible).ToArray();
         int index = Array.IndexOf(anchors, current);
         int next = e.Key switch { Key.Home => 0, Key.End => anchors.Length - 1,
             Key.Left => (index + anchors.Length - 1) % anchors.Length, _ => (index + 1) % anchors.Length };

@@ -46,6 +46,16 @@ def main():
     result = Path(args.result).resolve()
     if result.exists():
         raise ValueError("Result bundle already exists: " + str(result))
+    log = result.with_suffix(".log")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    preparation = run([
+        sys.executable, "-I", "-B", "scripts/prepare-ios-video-kernel.py",
+        "--target", "ios-simulator-" + platform.machine(),
+    ])
+    if preparation.returncode:
+        log.write_text(preparation.stdout, encoding="utf-8")
+        print("Video kernel preparation failed; see " + str(log), file=sys.stderr)
+        return preparation.returncode
     command = [
         "xcodebuild",
         "-project", "apps/ios/Meowfilm.xcodeproj",
@@ -65,9 +75,7 @@ def main():
     command.extend(["ARCHS=" + platform.machine(), "ONLY_ACTIVE_ARCH=YES"])
     command.append("test")
     process = run(command)
-    log = result.with_suffix(".log")
-    log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_text(process.stdout, encoding="utf-8")
+    log.write_text(preparation.stdout + "\n" + process.stdout, encoding="utf-8")
     events = re.findall(
         r"Test Case '-\[[A-Za-z0-9_]+\.{} (test[A-Za-z0-9_]+)\]' "
         r"(started|passed|failed|skipped)".format(CLASS),

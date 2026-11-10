@@ -564,11 +564,11 @@ extension MusicViewModel {
         remoteAudioRecoveryTask = task; recoveryDrains[drainID] = task
         return true
     }
-    @discardableResult func pausePlaybackRecovery(continuePendingSource: Bool = true) -> Bool {
+    @discardableResult func pausePlaybackRecovery() -> Bool {
         // A user's pause wins over an automatic recovery, before any actor
         // suspension. Do not interpret a failed native item as "start again"
         // while its replacement is still being resolved.
-        if continuePendingSource, pendingSourceFailure != nil {
+        if pendingSourceFailure != nil {
             fmShouldPlay = false
             let needsPause = sourceRecoveryWantsPlayback != false
             sourceRecoveryWantsPlayback = false
@@ -579,7 +579,7 @@ extension MusicViewModel {
             if needsPause, let nativeAttempt { player?.pause(nativeAttempt) }
             return true
         }
-        guard pendingSourceFailure != nil || sourceRecoveryTask != nil ||
+        guard sourceRecoveryTask != nil ||
             cachedAudioRecoveryTask != nil || remoteAudioRecoveryTask != nil else { return false }
         let attempts = Set([candidate?.attemptId, resolvingAttempt].compactMap { $0 })
         fmShouldPlay = false

@@ -47,7 +47,6 @@ private final class NeteaseTokenRuntimeHTTP: URLProtocol, @unchecked Sendable {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [NeteaseTokenRuntimeHTTP.self]
         return try .init(baseURL: URL(string: "http://127.0.0.1:43210")!,
-            sessionID: "11111111-1111-4111-8111-111111111111", requestKey: String(repeating: "a", count: 64),
             configuration: configuration)
     }
     private func success(_ value: RuntimeValue) -> RuntimeValue {

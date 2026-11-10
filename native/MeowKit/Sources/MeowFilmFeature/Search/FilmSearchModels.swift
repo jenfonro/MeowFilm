@@ -13,6 +13,17 @@ public protocol FilmSearchMetadataReading: Sendable {
     func search(query: String) async throws -> RuntimeValue
     func detail(type: String, id: Int) async throws -> RuntimeValue
     func imageURL(path: String) -> URL?
+    func searchRead(query: String) async throws -> FilmSearchRead
+    func detailRead(type: String, id: Int) async throws -> FilmSearchRead
+}
+
+extension FilmSearchMetadataReading {
+    public func searchRead(query: String) async throws -> FilmSearchRead {
+        .init(value: try await search(query: query))
+    }
+    public func detailRead(type: String, id: Int) async throws -> FilmSearchRead {
+        .init(value: try await detail(type: type, id: id))
+    }
 }
 
 public struct FilmSearchSite: Sendable {
@@ -22,7 +33,7 @@ public struct FilmSearchSite: Sendable {
     public var key: String {
         // JSON tuple encoding is unambiguous even for separators in protocol IDs.
         let data = try! RuntimeJSON.encode(.array([.string(cat.installationId),
-            .number(Double(cat.generation)), .string(source.key.siteKey)]))
+            .string(source.key.siteKey)]))
         return data.base64EncodedString()
     }
 }
@@ -42,11 +53,15 @@ public struct FilmSearchCard: Equatable, Sendable {
     public var label: String { text("siteLabel") }
     public var tmdbType: String { text("tmdbType") }
     public var tmdbID: Int? { value.catField("tmdbId")?.catInteger }
+    public var detailID: FilmPlaybackIdentifier? {
+        value.catField("detailId").flatMap { try? FilmPlaybackIdentifier($0) }
+    }
     public var members: [RuntimeValue] { value.catField("aggregateItems")?.catArray ?? [] }
     func text(_ field: String) -> String { value.catField(field)?.catText ?? "" }
     public func filmItem(imageURL: (String) -> URL?) -> FilmItem {
         FilmItem(sourceID: sourceKind == "tmdb" ? "tmdb" : text("siteKey"),
-            id: sourceKind == "tmdb" ? id : text("siteDetail"), title: title,
+            id: sourceKind == "tmdb" ? tmdbID.map(String.init) ?? id : id, title: title,
+            kind: sourceKind == "tmdb" ? FilmItemKind(rawValue: tmdbType) : nil,
             posterURL: imageURL(text("poster")), subtitle: label)
     }
 }
@@ -55,6 +70,7 @@ public struct FilmSearchSnapshot: Equatable, Sendable {
     public let sessionID: UUID
     public let query: String
     public var round = 0
+    public var revision = 0
     public var siteState: FilmSearchChannelState = .idle
     public var metadataState: FilmSearchChannelState = .idle
     public var loading = false

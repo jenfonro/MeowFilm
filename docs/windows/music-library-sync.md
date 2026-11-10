@@ -141,4 +141,4 @@ music.librarySync.resetAccount
 
 App 启动、账号操作、脚本列表及普通自管同步不调用 token provider。runtime 的 token HTTP 交换单独使用 60 秒预算，覆盖公共 Node 的 45 秒执行预算，仍响应主动取消；其余交换沿用原 30 秒预算。SDK 获取错误不使原生曲库、账号及播放整体不可用。
 
-新增行为测试位于 `MusicNativeSyncTests.NeteaseToken.cs`、`MusicNativeSyncTests.NetworkPlaylists.cs`、`MusicNativeCatalogTests.NetworkPlaylists.cs` 与 `MusicCatalogTests.NetworkPlaylists.cs`，进入现有 LibrarySync／Catalog runner；`RuntimeHttpClientTests` 覆盖五模块、唯一路由、错误枚举和预算／取消。token 接入的测试及增量 App 构建由主会话集中执行；真实官方订阅写入未验证。
+新增行为测试位于 `MusicNativeSyncTests.NeteaseToken.cs`、`MusicNativeSyncTests.NetworkPlaylists.cs`、`MusicNativeCatalogTests.NetworkPlaylists.cs` 与 `MusicCatalogTests.NetworkPlaylists.cs`，进入现有 LibrarySync／Catalog runner；`RuntimeHttpClientTests` 覆盖八模块、唯一路由、错误枚举和预算／取消。token 接入的测试及增量 App 构建由主会话集中执行；真实官方订阅写入未验证。

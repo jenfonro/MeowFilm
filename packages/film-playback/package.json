@@ -1,0 +1,18 @@
+{
+  "name": "@meowfilm/film-playback",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "engines": {
+    "node": "^18.20.4 || ^22.0.0 || ^24.0.0"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": ["src"],
+  "dependencies": {
+    "@meowfilm/film-rules": "0.1.0",
+    "@meowfilm/script-host": "0.3.0"
+  }
+}

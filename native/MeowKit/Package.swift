@@ -20,6 +20,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../JavaScript"),
+        .package(path: "../VideoKernel"),
         .package(path: "../../packages/film-rules"),
         .package(path: "../../packages/film-search")
     ],
@@ -28,7 +29,8 @@ let package = Package(
         .target(name: "MeowJSON", dependencies: []),
         .target(name: "MeowStorage", dependencies: ["MeowContracts"]),
         .target(name: "MeowAccounts", dependencies: ["MeowContracts"]),
-        .target(name: "MeowPlayback", dependencies: ["MeowContracts"]),
+        .target(name: "MeowPlayback", dependencies: ["MeowContracts",
+            .product(name: "MeowVideoKernel", package: "videokernel")]),
         .target(name: "MeowUI", dependencies: []),
         .target(name: "MeowRuntime", dependencies: []),
         .target(name: "MeowMusicFeature", dependencies: ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowUI"]),
@@ -44,7 +46,8 @@ let package = Package(
         .testTarget(name: "MeowMusicFeatureTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback", "MeowStorage", "MeowUI"]),
         .testTarget(name: "MeowMusicNativeServiceTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicNativeService", "MeowMusicPlatform", "MeowPlayback", "MeowRuntime", "MeowStorage"]),
         .testTarget(name: "MeowMusicPlatformTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowRuntime", "MeowStorage"]),
-        .testTarget(name: "MeowPlaybackTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback"]),
+        .testTarget(name: "MeowPlaybackTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback"],
+                    resources: [.copy("Video/Fixtures")]),
         .testTarget(name: "MeowRuntimeTests", dependencies: ["MeowJSON", "MeowRuntime"]),
         .testTarget(name: "MeowUITests", dependencies: ["MeowUI"]),
         .testTarget(name: "MeowFilmFeatureTests", dependencies: ["MeowFilmFeature", "MeowStorage", "MeowJSON", "MeowRuntime",

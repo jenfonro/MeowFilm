@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Files;
@@ -25,7 +26,7 @@ public static class RuntimeTests
         return path;
     }
     private const string Identity = "aggregate";
-    private static RuntimeModule[] Modules => [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0"), new("tmdb", "0.1.0"), new("netease", "0.1.0")];
+    private static RuntimeModule[] Modules => RuntimeHttpClientTests.Modules;
     private static string[] Namespaces => ["music.library.v1", "music.accounts.v1"];
     private static string ScriptData() => Path.Combine(NewData(), "script-runtime");
 
@@ -62,6 +63,28 @@ public static class RuntimeTests
                     await BridgeTests.Expect("METHOD_UNAVAILABLE", () => runtime.CallAsync(method, new { }));
             }
             AssertExited(pid);
+        });
+        yield return new("native-runtime: eight-module App keeps provider Film and token routes independent without starting the SDK", async () =>
+        {
+            var modules = Modules;
+            var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
+            await using var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, ScriptData());
+            var token = await runtime.CallAsync("netease.token.get", new { unexpected = true });
+            BridgeTests.Equal(false, token.GetProperty("ok").GetBoolean());
+            BridgeTests.Equal("netease.token.v1", token.GetProperty("contract").GetString());
+            BridgeTests.Equal("INVALID_REQUEST", token.GetProperty("code").GetString());
+            foreach (var (method, contract) in new[]
+            {
+                ("pan.providers", "pan.runtime.v1"), ("tmdb.data.settings.get", "tmdb.data.v1"),
+                ("douban.data.settings.get", "douban.data.v1"), ("film.settings.get", "film.playback.v1"),
+                ("music.script.sources.list", "music.script.v3")
+            })
+            {
+                var reply = await runtime.CallAsync(method, new { });
+                BridgeTests.Equal(true, reply.GetProperty("ok").GetBoolean());
+                BridgeTests.Equal(contract, reply.GetProperty("contract").GetString());
+            }
+            BridgeTests.Equal(true, runtime.IsConnected);
         });
         yield return new("native-runtime: native music queue survives script process restart through DPAPI", async () =>
         {
@@ -290,6 +313,27 @@ public static class RuntimeTests
             BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(extra.Root, Identity, Modules));
             return Task.CompletedTask;
         });
+        foreach (var assembly in new[] { "old five-module", "old seven-module", "reordered eight-module" })
+            yield return new("native-runtime: verified App bundle rejects " + assembly + " manifest", () =>
+            {
+                var fixture = CreateFixture("normal");
+                var path = Path.Combine(fixture.Root, "runtime-manifest.json");
+                var manifest = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+                var modules = manifest["modules"]!.AsArray();
+                if (assembly == "old five-module")
+                {
+                    modules.RemoveAt(6); modules.RemoveAt(5); modules.RemoveAt(3);
+                }
+                else if (assembly == "old seven-module") modules.RemoveAt(7);
+                else
+                {
+                    var first = modules[0]!.DeepClone();
+                    modules[0] = modules[1]!.DeepClone(); modules[1] = first;
+                }
+                File.WriteAllText(path, manifest.ToJsonString());
+                BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(fixture.Root, Identity, Modules));
+                return Task.CompletedTask;
+            });
         yield return new("native-runtime: wrong identity, module, version and remote data roots fail closed", async () =>
         {
             var description = BridgeCodec.Value(new { protocol = "runtime.http.v1", product = Identity,
@@ -377,10 +421,9 @@ public static class RuntimeTests
               if (!text.endsWith('\n')) return;
               initialized = true;
               try { config = JSON.parse(text); } catch { process.exitCode = 4; finish(); return; }
-              if (Object.keys(config).sort().join(',') !== 'dataRoot,requestKey,sessionId' ||
-                  config.sessionId !== argv[3] || !/^[0-9a-f]{64}$/.test(config.requestKey) ||
+              if (Object.keys(config).sort().join(',') !== 'dataRoot,sessionId' ||
+                  config.sessionId !== argv[3] ||
                   typeof config.dataRoot !== 'string' ||
-                  [...process.argv, ...Object.values(process.env)].some(value => value.includes(config.requestKey)) ||
                   process.env.MEOWFILM_SCRIPT_DATA_ROOT !== undefined) {
                 process.exitCode = 5; finish(); return;
               }
@@ -389,8 +432,9 @@ public static class RuntimeTests
               if (mode === 'large-ready') { stream.write(' '.repeat(65537) + '\n'); return; }
               server = http.createServer(async (request, response) => {
                 request.resume();
-                if (request.headers.authorization !== 'Bearer ' + config.requestKey ||
-                    request.headers['x-meow-session'] !== config.sessionId) { response.destroy(); return; }
+                if (request.headers.authorization !== undefined || request.headers['x-meow-session'] !== undefined) {
+                  response.destroy(); return;
+                }
                 let value;
                 if (request.url === '/v1/describe' && request.method === 'GET') value = description;
                 else if (request.url === '/v1/music/invoke' && request.method === 'POST') {
@@ -413,7 +457,7 @@ public static class RuntimeTests
               });
               server.listen(0, '127.0.0.1', () => {
                 const ready = {protocol:mode === 'wrong-protocol' ? 'wrong' : 'runtime.http.v1',
-                  baseUrl:mode === 'wrong-endpoint' ? 'http://localhost:123' : `http://127.0.0.1:${server.address().port}`};
+                  baseUrl:mode === 'wrong-endpoint' ? 'file:///invalid-runtime' : `http://127.0.0.1:${server.address().port}`};
                 if (mode === 'extra-ready-field') ready.extra = true;
                 stream.write(JSON.stringify(ready) + '\n' + (mode === 'extra-ready-bytes' ? 'x' : ''));
               });

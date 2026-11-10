@@ -47,6 +47,7 @@ esac
 case "$*" in
  *repository-paths.py*) echo "$GATE_TMP" ;;
  *check-source-scope.py*) echo scope >> "$GATE_EVENTS" ;;
+ *prepare-ios-video-kernel.py*) echo "video $*" >> "$GATE_EVENTS"; [ "$GATE_FAIL" != video ] ;;
  *prepare-ios-runtime.py*) echo runtime >> "$GATE_EVENTS"; [ "$GATE_FAIL" != runtime ] ;;
  *check-simulator-signing.py*) echo signing >> "$GATE_EVENTS"; [ "$GATE_FAIL" != signing ] ;;
  *unittest*) echo tools >> "$GATE_EVENTS"; [ "$GATE_FAIL" != tools ] ;;
@@ -93,6 +94,10 @@ echo "$kind" >> "$GATE_EVENTS"; [ "$GATE_FAIL" != "$kind" ]
     def recorded(self):
         return self.events.read_text().splitlines() if self.events.exists() else []
 
+    def video(self, simulator=False):
+        return ("video -I -B scripts/prepare-ios-video-kernel.py --target macos-x86_64" +
+                (" --target ios-simulator-x86_64" if simulator else ""))
+
     def test_scope_is_required_before_invoking_any_tool(self):
         for arguments in [(), ("test",), ("test", "--filter", ""), ("unknown",)]:
             with self.subTest(arguments=arguments):
@@ -102,7 +107,8 @@ echo "$kind" >> "$GATE_EVENTS"; [ "$GATE_FAIL" != "$kind" ]
     def test_filtered_tests_build_only_the_package_and_do_not_require_git_or_prior_receipts(self):
         result = self.run_gate("test", "--filter", "MeowUITests.SomeCase")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.recorded(), ["javascript", "swift test --package-path native/MeowKit -j 2 --filter MeowUITests.SomeCase"])
+        self.assertEqual(self.recorded(), ["javascript", self.video(),
+            "swift test --package-path native/MeowKit -j 2 --filter MeowUITests.SomeCase"])
         self.assertEqual(self.run_gate("test", "--filter", "MeowUITests.SomeCase").returncode, 0)
 
     def test_native_source_verification_failure_never_compiles_or_runs_tests(self):
@@ -110,21 +116,32 @@ echo "$kind" >> "$GATE_EVENTS"; [ "$GATE_FAIL" != "$kind" ]
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.recorded(), ["javascript"])
 
+    def test_video_kernel_preparation_failure_never_builds_against_stale_libraries(self):
+        result = self.run_gate("test", "--filter", "SomeCase", GATE_FAIL="video")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.recorded(), ["javascript", self.video()])
+        self.events.unlink()
+        result = self.run_gate("compile", GATE_FAIL="video")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.recorded(), ["scope", self.video(simulator=True)])
+
     def test_explicit_all_compiles_then_runs_both_test_layers(self):
         result = self.run_gate("all")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.recorded()[:7], ["scope", "package", "runtime", "app", "components", "signing", "tools"])
+        self.assertEqual(self.recorded()[:8], ["scope", self.video(simulator=True),
+            "package", "runtime", "app", "components", "signing", "tools"])
         self.assertIn("--skip-build", self.recorded()[-1])
 
     def test_failed_compile_collects_independent_compile_errors_without_running_tests(self):
         result = self.run_gate("all", GATE_FAIL="package")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(self.recorded(), ["scope", "package", "runtime", "app", "components", "signing"])
+        self.assertEqual(self.recorded(), ["scope", self.video(simulator=True),
+            "package", "runtime", "app", "components", "signing"])
 
     def test_failed_runtime_preparation_never_builds_with_stale_app_inputs(self):
         result = self.run_gate("compile", GATE_FAIL="runtime")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(self.recorded(), ["scope", "package", "runtime"])
+        self.assertEqual(self.recorded(), ["scope", self.video(simulator=True), "package", "runtime"])
 
     def test_tool_failure_does_not_hide_swift_test_results(self):
         result = self.run_gate("all", GATE_FAIL="tools")

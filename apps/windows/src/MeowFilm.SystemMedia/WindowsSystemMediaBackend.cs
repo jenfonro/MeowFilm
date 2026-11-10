@@ -100,6 +100,7 @@ public sealed class WindowsSystemMediaBackend : ISystemMediaBackend
         controls.IsEnabled = false;
         controls.PlaybackStatus = MediaPlaybackStatus.Closed;
         controls.DisplayUpdater.ClearAll();
+        displayedOwner = displayedIdentity = displayedTitle = null;
         controls.DisplayUpdater.Update();
     }
 

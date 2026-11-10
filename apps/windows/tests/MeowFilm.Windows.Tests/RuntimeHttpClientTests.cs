@@ -10,8 +10,6 @@ namespace MeowFilm.Windows.Tests;
 
 public static class RuntimeHttpClientTests
 {
-    private const string Session = "b72dd937-0020-47de-9f03-6c9c5c64b7ef";
-    private static readonly string Key = new('a', 64); // Synthetic fixture identity, never a real credential.
     private static byte[] Success(object? value, string contract = "music.script.v3") =>
         JsonSerializer.SerializeToUtf8Bytes(new { ok = true, contract, value });
     private static byte[] Failure(string code, string contract = "music.script.v3") =>
@@ -19,15 +17,15 @@ public static class RuntimeHttpClientTests
 
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("runtime-http: exact auth headers, complete large Unicode JSON and raw source", async () =>
+        yield return new("runtime-http: request correlation without credentials, complete large Unicode JSON and raw source", async () =>
         {
             await using var server = new Server();
-            await using var client = new RuntimeHttpClient(server.BaseUrl, Session, Key);
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
             var text = new string('中', 400_000) + "🎵";
             var outgoing = client.CallAsync("music.script.invoke", new Dictionary<string, object?> { ["歌曲"] = text });
             await using (var exchange = await server.AcceptAsync())
             {
-                CheckAuthentication(exchange, server);
+                CheckCorrelation(exchange, server);
                 BridgeTests.Equal("POST", exchange.Method);
                 BridgeTests.Equal("/v1/music/invoke", exchange.Path);
                 BridgeTests.Equal("application/json", exchange.Headers["Content-Type"]);
@@ -42,7 +40,7 @@ public static class RuntimeHttpClientTests
             var upload = client.UploadSourceAsync("source", "candidate", 123, source, "来源.js");
             await using (var exchange = await server.AcceptAsync())
             {
-                CheckAuthentication(exchange, server);
+                CheckCorrelation(exchange, server);
                 BridgeTests.Equal("PUT", exchange.Method);
                 BridgeTests.Equal("/v1/source/sources/candidate/123?basename=" + Uri.EscapeDataString("来源.js"), exchange.Path);
                 BridgeTests.Equal("application/octet-stream", exchange.Headers["Content-Type"]);
@@ -55,7 +53,7 @@ public static class RuntimeHttpClientTests
         yield return new("runtime-http: GET describe and explicit shutdown have exact routes and cleanup acknowledgement", async () =>
         {
             await using var server = new Server();
-            await using var client = new RuntimeHttpClient(server.BaseUrl, Session, Key);
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
             var describe = client.DescribeAsync();
             await using (var exchange = await server.AcceptAsync())
             {
@@ -66,7 +64,7 @@ public static class RuntimeHttpClientTests
                 await exchange.ReplyAsync(Success(Description(), RuntimeHttpProtocol.Name));
             }
             var declared = RuntimeHttpProtocol.ValidateDescription((await describe).GetProperty("value"), "aggregate", Modules);
-            BridgeTests.Equal(36, declared.Count);
+            BridgeTests.Equal(67, declared.Count);
             BridgeTests.Equal(true, declared.Contains("netease.token.get"));
             var close = client.ShutdownAsync();
             await using (var exchange = await server.AcceptAsync())
@@ -85,18 +83,48 @@ public static class RuntimeHttpClientTests
             ("wrong contract", root => root["modules"]![1]!["contract"] = "wrong"),
             ("duplicate module", root => root["modules"]![1] = root["modules"]![0]!.DeepClone()),
             ("unknown module", root => root["modules"]![1]!["id"] = "unknown"),
+            ("reordered modules", root =>
+            {
+                var modules = root["modules"]!.AsArray();
+                var first = modules[0]!.DeepClone();
+                modules[0] = modules[1]!.DeepClone(); modules[1] = first;
+            }),
             ("missing method", root => root["modules"]![0]!["methods"]!.AsArray().RemoveAt(0)),
             ("duplicate method", root => root["modules"]![0]!["methods"]!.AsArray().Add("music.script.invoke")),
             ("unknown method", root => root["modules"]![0]!["methods"]!.AsArray().Add("music.script.unknown")),
-            ("missing TMDB module", root => root["modules"]!.AsArray().RemoveAt(3)),
-            ("TMDB old version", root => root["modules"]![3]!["version"] = "0.0.1"),
-            ("TMDB wrong contract", root => root["modules"]![3]!["contract"] = "douban.data.v1"),
-            ("TMDB missing operation", root => root["modules"]![3]!["methods"]!.AsArray().RemoveAt(2)),
-            ("old four-module description", root => root["modules"]!.AsArray().RemoveAt(4)),
-            ("NetEase old version", root => root["modules"]![4]!["version"] = "0.0.1"),
-            ("NetEase wrong contract", root => root["modules"]![4]!["contract"] = "music.script.v3"),
-            ("NetEase missing operation", root => root["modules"]![4]!["methods"]!.AsArray().Clear()),
-            ("NetEase extra operation", root => root["modules"]![4]!["methods"]!.AsArray().Add("netease.token.close")),
+            ("missing TMDB module", root => root["modules"]!.AsArray().RemoveAt(4)),
+            ("TMDB old version", root => root["modules"]![4]!["version"] = "0.0.1"),
+            ("TMDB wrong contract", root => root["modules"]![4]!["contract"] = "douban.data.v1"),
+            ("TMDB missing operation", root => root["modules"]![4]!["methods"]!.AsArray().RemoveAt(2)),
+            ("missing film module", root => root["modules"]!.AsArray().RemoveAt(6)),
+            ("missing pan module", root => root["modules"]!.AsArray().RemoveAt(3)),
+            ("missing Douban module", root => root["modules"]!.AsArray().RemoveAt(5)),
+            ("old seven-module description", root => root["modules"]!.AsArray().RemoveAt(7)),
+            ("old five-module description", root =>
+            {
+                var modules = root["modules"]!.AsArray();
+                modules.RemoveAt(6); modules.RemoveAt(5); modules.RemoveAt(3);
+            }),
+            ("old four-module description", root =>
+            {
+                var modules = root["modules"]!.AsArray();
+                modules.RemoveAt(7); modules.RemoveAt(6); modules.RemoveAt(5); modules.RemoveAt(3);
+            }),
+            ("formal three-module assembly", root =>
+            {
+                var modules = root["modules"]!.AsArray();
+                while (modules.Count > 3) modules.RemoveAt(modules.Count - 1);
+            }),
+            ("new module version", root => root["modules"]![6]!["version"] = "0.2.0"),
+            ("missing film media release", root => root["modules"]![6]!["methods"]!.AsArray().RemoveAt(5)),
+            ("duplicate film method", root => root["modules"]![6]!["methods"]!.AsArray().Add("film.library.get")),
+            ("unknown film method", root => root["modules"]![6]!["methods"]!.AsArray().Add("film.session.unknown")),
+            ("unknown metadata method", root => root["modules"]![4]!["methods"]!.AsArray().Add("tmdb.data.unknown")),
+            ("NetEase old version", root => root["modules"]![7]!["version"] = "0.0.1"),
+            ("NetEase wrong contract", root => root["modules"]![7]!["contract"] = "music.script.v3"),
+            ("NetEase missing operation", root => root["modules"]![7]!["methods"]!.AsArray().Clear()),
+            ("NetEase extra operation", root => root["modules"]![7]!["methods"]!.AsArray().Add("netease.token.close")),
+            ("extra description field", root => root["extra"] = true),
         })
             yield return new("runtime-http: description rejects " + name, () =>
             {
@@ -131,7 +159,7 @@ public static class RuntimeHttpClientTests
             yield return new("runtime-http: rejects " + name + " with a safe error", async () =>
             {
                 await using var server = new Server();
-                await using var client = new RuntimeHttpClient(server.BaseUrl, Session, Key);
+                await using var client = new RuntimeHttpClient(server.BaseUrl);
                 var outgoing = client.CallAsync("music.script.invoke");
                 await using var exchange = await server.AcceptAsync();
                 await exchange.ReplyAsync(bytes, status, id, contentType);
@@ -140,7 +168,7 @@ public static class RuntimeHttpClientTests
         yield return new("runtime-http: valid public and module failures remain complete safe envelopes", async () =>
         {
             await using var server = new Server();
-            await using var client = new RuntimeHttpClient(server.BaseUrl, Session, Key);
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
             foreach (var (code, contract, status) in new[]
             {
                 ("PERMISSION_DENIED", RuntimeHttpProtocol.Name, 401),
@@ -156,10 +184,48 @@ public static class RuntimeHttpClientTests
                 BridgeTests.Equal(code, reply.GetProperty("code").GetString());
             }
         });
+        yield return new("runtime-http: App provider and film methods use exact contracts and closed error codes", async () =>
+        {
+            await using var server = new Server();
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
+            foreach (var (method, path, contract, code, foreignCode) in new[]
+            {
+                ("pan.providers", "/v1/pan/providers", "pan.runtime.v1", "LOGIN_EXPIRED", "NO_MATCH"),
+                ("tmdb.data.settings.get", "/v1/tmdb/settings.get", "tmdb.data.v1", "NETWORK_ERROR", "PAN_FAILURE"),
+                ("douban.data.settings.get", "/v1/douban/settings.get", "douban.data.v1", "WEB_INTERACTION_REQUIRED", "AUTH_REQUIRED"),
+                ("film.library.get", "/v1/film/library.get", "film.playback.v1", "STORAGE_CHANGED", "SOURCE_CLEANUP"),
+                ("film.library.remove", "/v1/film/library.remove", "film.playback.v1", "LIBRARY_UPDATE_FAILED", "SOURCE_CLEANUP"),
+                ("film.session.media.release", "/v1/film/session.media.release", "film.playback.v1", "MEDIA_CLOSE_FAILED", "SOURCE_CLEANUP")
+            })
+            {
+                var input = new { id = "fixture-lease" };
+                var outgoing = client.CallAsync(method, input);
+                await using (var exchange = await server.AcceptAsync())
+                {
+                    CheckCorrelation(exchange, server);
+                    BridgeTests.Equal("POST", exchange.Method);
+                    BridgeTests.Equal(path, exchange.Path);
+                    BridgeTests.Equal("fixture-lease", BridgeCodec.DecodeJSONValue(exchange.Body).GetProperty("id").GetString());
+                    await exchange.ReplyAsync(Success(new { accepted = true }, contract));
+                }
+                var reply = await outgoing;
+                BridgeTests.Equal(contract, reply.GetProperty("contract").GetString());
+                BridgeTests.Equal(true, reply.GetProperty("value").GetProperty("accepted").GetBoolean());
+                outgoing = client.CallAsync(method);
+                await using (var exchange = await server.AcceptAsync()) await exchange.ReplyAsync(Failure(code, contract));
+                reply = await outgoing;
+                BridgeTests.Equal(false, reply.GetProperty("ok").GetBoolean());
+                BridgeTests.Equal(code, reply.GetProperty("code").GetString());
+                outgoing = client.CallAsync(method);
+                await using (var exchange = await server.AcceptAsync()) await exchange.ReplyAsync(Failure(foreignCode, contract));
+                await BridgeTests.Expect("INVALID_RESPONSE", () => outgoing);
+            }
+            await BridgeTests.Expect("METHOD_UNAVAILABLE", () => client.CallAsync("film.session.media.release.extra"));
+        });
         yield return new("runtime-http: business value depth is independent of the response envelope", async () =>
         {
             await using var server = new Server();
-            await using var client = new RuntimeHttpClient(server.BaseUrl, Session, Key);
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
             foreach (var depth in new[] { 64, 65 })
             {
                 var json = new string('[', depth) + "null" + new string(']', depth);
@@ -178,7 +244,7 @@ public static class RuntimeHttpClientTests
         yield return new("runtime-http: caller cancellation aborts only its exchange and disposal drains pending sockets", async () =>
         {
             await using var server = new Server();
-            var client = new RuntimeHttpClient(server.BaseUrl, Session, Key);
+            var client = new RuntimeHttpClient(server.BaseUrl);
             try
             {
                 using var cancelled = new CancellationTokenSource();
@@ -203,11 +269,11 @@ public static class RuntimeHttpClientTests
             }
             finally { await client.DisposeAsync(); }
         });
-        yield return new("runtime-http: redirect is rejected without sending credentials to the destination", async () =>
+        yield return new("runtime-http: redirect is rejected without connecting to the destination", async () =>
         {
             await using var server = new Server();
             await using var destination = new Server();
-            await using var client = new RuntimeHttpClient(server.BaseUrl, Session, Key);
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
             var call = client.CallAsync("music.script.invoke");
             await using var exchange = await server.AcceptAsync();
             await exchange.ReplyAsync(Failure("CLOSED", RuntimeHttpProtocol.Name), 307,
@@ -218,7 +284,7 @@ public static class RuntimeHttpClientTests
         yield return new("runtime-http: truncated response closes only one exchange without business replay", async () =>
         {
             await using var server = new Server();
-            await using var client = new RuntimeHttpClient(server.BaseUrl, Session, Key);
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
             var call = client.CallAsync("music.script.sources.add");
             await using (var exchange = await server.AcceptAsync())
                 await exchange.ReplyAsync("{"u8.ToArray(), declaredBytes: 20);
@@ -228,7 +294,7 @@ public static class RuntimeHttpClientTests
         yield return new("runtime-http: default request deadline cancels only its exchange without replay", async () =>
         {
             await using var server = new Server();
-            await using var client = new RuntimeHttpClient(server.BaseUrl, Session, Key);
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
             var stalled = client.CallAsync("music.script.invoke");
             await using var waiting = await server.AcceptAsync();
             var token = client.CallAsync("netease.token.get");
@@ -247,11 +313,11 @@ public static class RuntimeHttpClientTests
         yield return new("runtime-http: NetEase token route is exact and actively cancellable", async () =>
         {
             await using var server = new Server();
-            await using var client = new RuntimeHttpClient(server.BaseUrl, Session, Key);
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
             using var cancellation = new CancellationTokenSource();
             var call = client.CallAsync("netease.token.get", new { }, cancellation.Token);
             await using var exchange = await server.AcceptAsync();
-            CheckAuthentication(exchange, server);
+            CheckCorrelation(exchange, server);
             BridgeTests.Equal("POST", exchange.Method);
             BridgeTests.Equal("/v1/netease/get", exchange.Path);
             BridgeTests.Equal("{}", Encoding.UTF8.GetString(exchange.Body));
@@ -266,7 +332,7 @@ public static class RuntimeHttpClientTests
         yield return new("runtime-http: NetEase returns only its declared sanitized error codes", async () =>
         {
             await using var server = new Server();
-            await using var client = new RuntimeHttpClient(server.BaseUrl, Session, Key);
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
             foreach (string code in new[] { "INVALID_REQUEST", "CLOSED", "CANCELLED", "TIMEOUT", "NETWORK_ERROR",
                 "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "SDK_FAILURE", "SDK_CLEANUP", "SYNTHETIC_PRIVATE_ERROR" })
             {
@@ -280,7 +346,7 @@ public static class RuntimeHttpClientTests
         yield return new("runtime-http: incomplete cleanup acknowledgement never becomes shutdown success", async () =>
         {
             await using var server = new Server();
-            await using var client = new RuntimeHttpClient(server.BaseUrl, Session, Key);
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
             foreach (var value in new object[] { new { closed = true }, new { closed = true, cleanupComplete = false } })
             {
                 var close = client.ShutdownAsync();
@@ -289,16 +355,65 @@ public static class RuntimeHttpClientTests
                 await BridgeTests.Expect("INVALID_RESPONSE", () => close);
             }
         });
-        yield return new("runtime-http: unsafe endpoints and malformed identities are rejected before connecting", () =>
+        yield return new("runtime-http: malformed endpoint components are rejected before connecting", () =>
+        {
+            foreach (var endpoint in new[] { "ftp://example.invalid",
+                "http://127.0.0.1:123/x", "http://127.0.0.1:123?x=1",
+                "http://127.0.0.1:123#x", "http://127.0.0.1:65536" })
+                BridgeTests.Throws("INVALID_REQUEST", () => new RuntimeHttpClient(endpoint));
+            return Task.CompletedTask;
+        });
+        yield return new("runtime-http: HTTP and HTTPS accept DNS private IPv6 and default-port endpoints without credentials", async () =>
         {
             foreach (var endpoint in new[] { "http://localhost:123", "https://127.0.0.1:123",
-                "http://127.0.0.1:123@elsewhere:456", "http://127.0.0.1:123/x", "http://127.0.0.1:123?x=1",
-                "http://127.0.0.1:123#x", "http://127.0.0.1", "http://127.0.0.1:65536" })
-                BridgeTests.Throws("INVALID_REQUEST", () => new RuntimeHttpClient(endpoint, Session, Key));
-            foreach (var session in new[] { "wrong", " " + Session, Session + " ", "\t" + Session + "\r\n" })
-                BridgeTests.Throws("INVALID_REQUEST", () => new RuntimeHttpClient("http://127.0.0.1:123", session, Key));
-            BridgeTests.Throws("INVALID_REQUEST", () => new RuntimeHttpClient("http://127.0.0.1:123", Session, "wrong"));
-            return Task.CompletedTask;
+                "http://external.example.invalid:43210", "https://external.example.invalid",
+                "http://10.0.0.2:43210", "http://169.254.1.2:43210", "http://[2001:db8::1]:43210", "http://127.0.0.1" })
+            {
+                await using var client = new RuntimeHttpClient(endpoint);
+                BridgeTests.Equal(new Uri(endpoint).Host, RuntimeHttpProtocol.ValidateEndpoint(endpoint).Host);
+            }
+            await using var server = new Server();
+            var baseUrl = new UriBuilder(server.BaseUrl) { Host = "localhost" }.Uri.AbsoluteUri;
+            await using var connected = new RuntimeHttpClient(baseUrl);
+            var description = connected.DescribeAsync();
+            await using var exchange = await server.AcceptAsync();
+            BridgeTests.Equal("GET", exchange.Method);
+            BridgeTests.Equal(false, exchange.Headers.ContainsKey("Authorization"));
+            BridgeTests.Equal(false, exchange.Headers.ContainsKey("X-Meow-Session"));
+            BridgeTests.Equal(true, exchange.Headers["Host"].StartsWith("localhost:", StringComparison.Ordinal));
+            await exchange.ReplyAsync(Success(Description(), RuntimeHttpProtocol.Name));
+            BridgeTests.Equal(true, (await description).GetProperty("ok").GetBoolean());
+        });
+        yield return new("runtime-http: standard URI userinfo preserves the actual destination without extra authentication configuration", async () =>
+        {
+            foreach (var (address, host, port, userInfo) in new[]
+            {
+                ("http://fixture-user@external.example.invalid:43210", "external.example.invalid", 43210, "fixture-user"),
+                ("http://fixture-user:fixture-password@external.example.invalid:43210",
+                    "external.example.invalid", 43210, "fixture-user:fixture-password"),
+                ("https://:fixture-password@external.example.invalid", "external.example.invalid", 443, ":fixture-password"),
+                ("https://fixture%40user:fixture%3Apassword@external.example.invalid",
+                    "external.example.invalid", 443, "fixture%40user:fixture%3Apassword"),
+                ("http://127.0.0.1:123@elsewhere:456", "elsewhere", 456, "127.0.0.1:123")
+            })
+            {
+                var endpoint = RuntimeHttpProtocol.ValidateEndpoint(address);
+                BridgeTests.Equal(host, endpoint.Host);
+                BridgeTests.Equal(port, endpoint.Port);
+                BridgeTests.Equal(userInfo, endpoint.UserInfo);
+                await using var client = new RuntimeHttpClient(address);
+            }
+            await using var server = new Server();
+            var baseUrl = new UriBuilder(server.BaseUrl) { UserName = "fixture-user", Password = "fixture-password" }.Uri.AbsoluteUri;
+            await using var connected = new RuntimeHttpClient(baseUrl);
+            var description = connected.DescribeAsync();
+            await using var exchange = await server.AcceptAsync();
+            BridgeTests.Equal("GET", exchange.Method);
+            BridgeTests.Equal("/v1/describe", exchange.Path);
+            BridgeTests.Equal(new Uri(server.BaseUrl).Authority, exchange.Headers["Host"]);
+            BridgeTests.Equal(false, exchange.Headers.ContainsKey("X-Meow-Session"));
+            await exchange.ReplyAsync(Success(Description(), RuntimeHttpProtocol.Name));
+            BridgeTests.Equal(true, (await description).GetProperty("ok").GetBoolean());
         });
         yield return new("runtime-http: shared source revisions are globally positive unique safe integers", async () =>
         {
@@ -309,7 +424,9 @@ public static class RuntimeHttpClientTests
         });
     }
 
-    private static RuntimeModule[] Modules => [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0"), new("tmdb", "0.1.0"), new("netease", "0.1.0")];
+    internal static RuntimeModule[] Modules => [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0"),
+        new("pan", "0.1.0"), new("tmdb", "0.1.0"), new("douban", "0.1.0"), new("film", "0.1.0"),
+        new("netease", "0.1.0")];
     internal static object Description() => new
     {
         protocol = "runtime.http.v1", product = "aggregate", modules = new[]
@@ -331,9 +448,25 @@ public static class RuntimeHttpClientTests
             {
                 "source.runtime.load", "source.runtime.unload", "source.runtime.invoke", "source.runtime.status", "source.runtime.close"
             } },
+            new { id = "pan", version = "0.1.0", contract = "pan.runtime.v1", methods = new[]
+            {
+                "pan.providers", "pan.settings.get", "pan.settings.set", "pan.settings.clear", "pan.login.start",
+                "pan.login.poll", "pan.login.cancel", "pan.list", "pan.prepare", "pan.play", "pan.refresh"
+            } },
             new { id = "tmdb", version = "0.1.0", contract = "tmdb.data.v1", methods = new[]
             {
                 "tmdb.data.settings.get", "tmdb.data.settings.update", "tmdb.data.request"
+            } },
+            new { id = "douban", version = "0.1.0", contract = "douban.data.v1", methods = new[]
+            {
+                "douban.data.settings.get", "douban.data.settings.update", "douban.data.request", "douban.data.search"
+            } },
+            new { id = "film", version = "0.1.0", contract = "film.playback.v1", methods = new[]
+            {
+                "film.session.open", "film.session.command", "film.session.snapshot", "film.session.release",
+                "film.session.attempt", "film.session.media.release", "film.settings.get", "film.settings.set",
+                "film.library.get", "film.library.remove", "film.manual.update",
+                "film.data.search", "film.data.detail", "film.data.metadata", "film.data.cache.entry", "film.data.invalidate"
             } },
             new { id = "netease", version = "0.1.0", contract = "netease.token.v1", methods = new[]
             {
@@ -342,13 +475,12 @@ public static class RuntimeHttpClientTests
         }
     };
 
-    private static void CheckAuthentication(Exchange exchange, Server server)
+    private static void CheckCorrelation(Exchange exchange, Server server)
     {
-        BridgeTests.Equal("Bearer " + Key, exchange.Headers["Authorization"]);
-        BridgeTests.Equal(Session, exchange.Headers["X-Meow-Session"]);
+        BridgeTests.Equal(false, exchange.Headers.ContainsKey("Authorization"));
+        BridgeTests.Equal(false, exchange.Headers.ContainsKey("X-Meow-Session"));
         BridgeTests.Equal(true, Guid.TryParseExact(exchange.Headers["X-Meow-Request-Id"], "D", out _));
         BridgeTests.Equal(new Uri(server.BaseUrl).Authority, exchange.Headers["Host"]);
-        BridgeTests.Equal(false, exchange.Path.Contains(Key, StringComparison.Ordinal));
     }
 
     internal sealed class Server : IAsyncDisposable

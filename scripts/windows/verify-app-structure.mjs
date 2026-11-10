@@ -9,7 +9,7 @@ const runtimeTrees = new Map([
   ['apps/runtime', {
     files: ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
       'modules/music-script.mjs', 'modules/cat-script.mjs', 'modules/source-runtime.mjs', 'modules/pan-runtime.mjs',
-      'modules/netease-token.mjs',
+      'modules/film-playback.mjs', 'modules/netease-token.mjs',
       'modules/metadata-data.mjs', 'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
       'modules/metadata/tmdb.mjs', 'modules/metadata/douban.mjs'],
     directories: ['modules', 'modules/metadata'],
@@ -19,7 +19,7 @@ const runtimeTrees = new Map([
 const sharedImports = new Set([
   'node:buffer', 'node:crypto', 'node:http', 'node:https',
   '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
-  '@meowfilm/pan-runtime', '@meowfilm/netease-token',
+  '@meowfilm/pan-runtime', '@meowfilm/film-playback', '@meowfilm/netease-token',
 ]);
 const windowsImports = new Set(['node:net', 'node:path', '@meowfilm/runtime-bridge']);
 function fail(message) { throw new Error('Windows App structure: ' + message); }

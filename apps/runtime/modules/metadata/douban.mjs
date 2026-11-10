@@ -1,7 +1,6 @@
 import { isUtf8 } from 'node:buffer';
 
 const imageRoute = '/v1/douban/images/';
-const apiPrefix = '/rexxar/api/v2/';
 const browserUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36';
 const control = /[\u0000-\u0020\u007f\\]/;
 const imageFields = new Set(['pic', 'pics', 'cover', 'cover_url', 'avatar', 'avatars', 'avatar_url',
@@ -10,13 +9,6 @@ const imageFields = new Set(['pic', 'pics', 'cover', 'cover_url', 'avatar', 'ava
 const imageVariants = new Set(['normal', 'large', 'small', 'medium', 'original', 'raw', 'url', 'src',
   's', 'm', 'l', 'sizes']);
 const redirects = new Set([301, 302, 303, 307, 308]);
-const readScopes = [
-  /^subject\/recent_hot\/(?:movie|tv)$/,
-  /^(?:movie|tv)\/(?:categories|showing|recommend)$/,
-  /^(?:movie|tv)\/[0-9]+(?:\/(?:celebrities|credits|photos|recommendations|recommend|trailers|videos|episodes))?$/,
-  /^celebrity\/[0-9]+(?:\/(?:works|photos))?$/,
-  /^subject_collection\/[A-Za-z0-9_]+(?:\/items)?$/,
-];
 
 class Failure extends Error {
   constructor(code) { super(code); this.code = code; }
@@ -32,8 +24,7 @@ function httpURL(value, code) {
     !control.test(value) && !value.includes('#'), code);
   let parsed;
   try { parsed = new URL(value); } catch { throw new Failure(code); }
-  requireValue(/^https?:$/.test(parsed.protocol) && parsed.hostname && !parsed.username &&
-    !parsed.password && !parsed.hash, code);
+  requireValue(/^https?:$/.test(parsed.protocol) && parsed.hostname && !parsed.hash, code);
   return parsed;
 }
 function resourcePath(value, code) {
@@ -43,18 +34,9 @@ function resourcePath(value, code) {
       /^[A-Za-z0-9._~-]+$/.test(part) && !control.test(part)), code);
   return value;
 }
-function prefixPath(path, code) {
-  for (const part of path.split('/')) {
-    let decoded;
-    try { decoded = decodeURIComponent(part); } catch { throw new Failure(code); }
-    requireValue(decoded !== '.' && decoded !== '..' && !/[\u0000-\u001f\u007f/%\\?#]/.test(decoded), code);
-  }
-}
 function baseURL(value) {
   const parsed = httpURL(value, 'INVALID_REQUEST');
   requireValue(!parsed.search && !/[?#]/.test(value));
-  const path = value.slice(value.indexOf('://') + 3).replace(/^[^/]+/, '').replace(/\/+$/, '');
-  prefixPath(path, 'INVALID_REQUEST');
   return parsed.href.replace(/\/+$/, '');
 }
 function proxyTemplate(value) {
@@ -91,7 +73,9 @@ function imageSettings(settings) {
   return { base, origin: parsed.origin, prefix: parsed.pathname.replace(/\/$/, ''),
     proxy: proxyTemplate(settings.imageProxy) };
 }
-function allowedImageHost(host) {
+// These aliases identify the same source image path. Other HTTP(S) image URLs
+// remain usable as URLs instead of being forced through the configured base.
+function sourceImageHost(host) {
   return /^img[0-9]*\.(?:doubanio|douban)\.com$/.test(host) ||
     host === 'img.doubanio.cmliussss.net' || host === 'img.doubanio.cmliussss.com';
 }
@@ -104,7 +88,9 @@ function imageReference(value, hint, config) {
   const unwrapped = unwrapProxy(value, config.proxy, 'UPSTREAM_FORMAT');
   const raw = unwrapped.startsWith('//') ? 'https:' + unwrapped : unwrapped;
   if (raw.startsWith('/') && !raw.startsWith('//')) {
-    return hint ? imageRoute + resourcePath(raw, 'UPSTREAM_FORMAT').slice(1) : value;
+    if (!hint) return value;
+    try { return imageRoute + resourcePath(raw, 'UPSTREAM_FORMAT').slice(1); }
+    catch { return applyProxy(httpURL(config.base + raw, 'UPSTREAM_FORMAT').href, config.proxy); }
   }
   let parsed;
   try { parsed = new URL(raw); } catch {
@@ -113,21 +99,17 @@ function imageReference(value, hint, config) {
   }
   const { origin, prefix } = config;
   const configured = parsed.origin === origin && (prefix === '' || parsed.pathname.startsWith(prefix + '/'));
-  const known = allowedImageHost(parsed.hostname);
+  const sourceImage = sourceImageHost(parsed.hostname);
   if (!hint && /^(?:movie|m)\.douban\.com$/.test(parsed.hostname) &&
     /^\/(?:subject|movie|tv|celebrity)\/[0-9]+\/?$/.test(parsed.pathname)) return value;
-  if (!configured && !known) {
-    requireValue(!hint, 'UPSTREAM_FORMAT');
-    return value;
+  if (!hint && !configured && !sourceImage) return value;
+  requireValue(['http:', 'https:'].includes(parsed.protocol) && !control.test(raw), 'UPSTREAM_FORMAT');
+  if (!configured && !sourceImage || parsed.search || parsed.hash || parsed.username || parsed.password) {
+    return applyProxy(parsed.href, config.proxy);
   }
-  httpURL(raw, 'UPSTREAM_FORMAT');
-  requireValue(!parsed.search && !/[?#]/.test(raw), 'UPSTREAM_FORMAT');
-  // Inspect the unnormalized path too: URL() otherwise erases ../ segments.
-  const originalPath = raw.slice(raw.indexOf('://') + 3).replace(/^[^/]+/, '');
-  if (configured) prefixPath(originalPath, 'UPSTREAM_FORMAT');
-  else resourcePath(originalPath, 'UPSTREAM_FORMAT');
   const path = configured ? parsed.pathname.slice(prefix.length) : parsed.pathname;
-  return imageRoute + resourcePath(path, 'UPSTREAM_FORMAT').slice(1);
+  try { return imageRoute + resourcePath(path, 'UPSTREAM_FORMAT').slice(1); }
+  catch { return applyProxy(parsed.href, config.proxy); }
 }
 
 /** A pure projection: source image fields keep their positions; ordinary links keep their values. */
@@ -226,10 +208,6 @@ function operationCookies(initial, configured) {
     },
   };
 }
-function interactionURL(url) {
-  return url.hostname === 'sec.douban.com' || url.hostname === 'accounts.douban.com' ||
-    /\/(?:accounts\/login|login|captcha|challenge|verify)(?:\/|$)/i.test(url.pathname);
-}
 function interactionScript(script) {
   // Skip quoted business values and comments without evaluating the page script.
   const tokens = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|(\b(?:window|top|self)\.location(?:\.href)?\s*=\s*["']https:\/\/(?:sec|accounts)\.douban\.com\/)/gi;
@@ -257,7 +235,6 @@ async function fetchMetadata(initial, config, request, signal, search) {
   for (let step = 0; step <= 5; step++) {
     cancelled(signal);
     const logical = httpURL(current, 'UPSTREAM_FORMAT');
-    requireValue(!interactionURL(logical), 'WEB_INTERACTION_REQUIRED');
     const headers = search ? {
       'user-agent': browserUA, accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
       'accept-language': 'zh-CN,zh;q=0.9', 'cache-control': 'no-cache', pragma: 'no-cache',
@@ -319,8 +296,8 @@ function businessError(payload) {
 
 export async function requestDouban(input, { settings, request, signal }) {
   fields(input, ['path', 'query'], ['path']);
-  requireValue(typeof input.path === 'string' && input.path.startsWith(apiPrefix) && !control.test(input.path) &&
-    readScopes.some(pattern => pattern.test(input.path.slice(apiPrefix.length))));
+  requireValue(typeof input.path === 'string' && input.path.startsWith('/') && !input.path.startsWith('//') &&
+    !control.test(input.path) && !/[?#]/.test(input.path));
   const query = queryString(input.query), config = apiSettings(settings, false);
   const body = await fetchMetadata(config.base + input.path + query, config, request, signal, false);
   let payload;
@@ -386,7 +363,8 @@ function searchPayload(payload, query) {
       if (text === '可播放') canPlay = true;
     }
     if (!kind && optionalText(item.url).includes('/subject/')) kind = 'movie';
-    const title = item.title.replace(/\p{Cf}/gu, '').trim();
+    // Unicode 15.0 Cf, also supported by NodeMobile's V8 without ICU.
+    const title = item.title.replace(/[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\u{110bd}\u{110cd}\u{13430}-\u{1343f}\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0001}\u{e0020}-\u{e007f}]/gu, '').trim();
     const rating = item.rating ?? {};
     const target = {
       rating: { count: numeric(rating.count, true), max: 10, star_count: numeric(rating.star_count), value: numeric(rating.value) },

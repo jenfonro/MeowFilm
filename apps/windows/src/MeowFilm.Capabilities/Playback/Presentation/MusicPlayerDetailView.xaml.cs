@@ -2,6 +2,7 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
@@ -22,6 +23,7 @@ public partial class MusicPlayerDetailView : UserControl
     private bool? needlePlaying;
     private Thickness lyricEdgeSpace;
     private string lyricPresentationKey;
+    private bool playbackSpacePressed;
     private CancellationTokenSource? artworkRequest;
     private IDisposable? artworkPresentation;
 
@@ -84,6 +86,7 @@ public partial class MusicPlayerDetailView : UserControl
             if (IsVisible) { QueueCenterLyric(); SyncNeedle(); }
             else
             {
+                playbackSpacePressed = false;
                 centeredLyric = centeringLyric = -1;
                 StopLyricMotion();
                 NeedleRotation.BeginAnimation(RotateTransform.AngleProperty, null);
@@ -95,6 +98,7 @@ public partial class MusicPlayerDetailView : UserControl
         };
         Unloaded += (_, _) =>
         {
+            playbackSpacePressed = false;
             StopLyricMotion();
             NeedleRotation.BeginAnimation(RotateTransform.AngleProperty, null);
             needlePlaying = null;
@@ -103,6 +107,42 @@ public partial class MusicPlayerDetailView : UserControl
         };
         PropertyChangedEventManager.AddHandler(module, OnModuleChanged, "");
         CollectionChangedEventManager.AddHandler(module.Lyrics, OnLyricRowsChanged);
+    }
+
+    private async void Detail_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Space || !IsVisible || !module.IsLyrics || !IsPlaybackKeySource(e.OriginalSource)) return;
+        if (playbackSpacePressed) { e.Handled = true; return; }
+        if (e.KeyboardDevice.Modifiers != ModifierKeys.None ||
+            e.KeyboardDevice.IsKeyDown(Key.LWin) || e.KeyboardDevice.IsKeyDown(Key.RWin) ||
+            !module.CanTogglePlayback) return;
+        playbackSpacePressed = true;
+        // Consume before ButtonBase can arm its Space KeyUp click.
+        e.Handled = true;
+        if (!e.IsRepeat) await module.TogglePlaybackAsync();
+    }
+
+    private void Detail_PreviewKeyUp(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Space || !playbackSpacePressed) return;
+        playbackSpacePressed = false;
+        if (IsVisible && module.IsLyrics && IsPlaybackKeySource(e.OriginalSource)) e.Handled = true;
+    }
+
+    private void Detail_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if (!IsKeyboardFocusWithin) playbackSpacePressed = false;
+    }
+
+    private bool IsPlaybackKeySource(object originalSource)
+    {
+        for (var node = originalSource as DependencyObject; node is not null;
+            node = node is FrameworkContentElement content ? content.Parent : VisualTreeHelper.GetParent(node))
+        {
+            if (node is TextBoxBase or PasswordBox or ComboBox { IsEditable: true } or MenuBase or Popup) return false;
+            if (ReferenceEquals(node, this)) return true;
+        }
+        return false;
     }
 
     internal Task ActivateAsync(CancellationToken cancellationToken)
@@ -137,6 +177,7 @@ public partial class MusicPlayerDetailView : UserControl
 
     internal void Deactivate()
     {
+        playbackSpacePressed = false;
         artworkRequest?.Cancel();
         if (!IsVisible) { artworkPresentation?.Dispose(); artworkPresentation = null; }
         module.CancelLyricPreview();

@@ -1,8 +1,8 @@
 # AGENTS.md
 
 meowfilm 的 iPhone 与 Windows 原生客户端：
-- iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供业务、平台、账号、播放、缓存和持久化能力。公共 Node 脚本宿主随 App 启动恢复启用猫源；客户端影视规则静态链接原生 QuickJS，不依赖 Node。
-- Windows：WPF / .NET 原生桌面应用；公共 Node 脚本宿主随 App 启动，影视恢复已启用的猫源，音乐脚本仅在启用、调用或显式检测时执行。原生业务不依赖脚本服务可用；客户端影视规则内嵌原生 QuickJS，不依赖 Node。
+- iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供原生业务、平台、账号、播放和持久化能力。公共 Node 运行器随 App 启动恢复启用猫源，并持有影视智能播放、业务数据缓存与本地播放资料；客户端影视规则静态链接原生 QuickJS。
+- Windows：WPF / .NET 原生桌面应用；公共 Node 运行器随 App 启动，影视使用同一智能播放与数据契约，音乐脚本仅在启用、调用或显式检测时执行。既有原生音乐、本地收藏和规则管理不因新增影视业务而依赖运行器；客户端影视规则内嵌原生 QuickJS。
 
 ## 命令
 
@@ -11,6 +11,7 @@ meowfilm 的 iPhone 与 Windows 原生客户端：
 ```sh
 python3 -I -B scripts/generate-ios-project.py         # 生成 apps/ios/Meowfilm.xcodeproj
 python3 -I -B scripts/prepare-ios-runtime.py          # Node 24 + npm ci：准备内嵌运行器构建输入
+python3 -I -B scripts/prepare-ios-video-kernel.py --target ios-arm64 # 锁定源码准备视频内核；测试入口选择对应 Mac/模拟器目标
 python3 -I -B scripts/check-source-scope.py           # 源码、依赖与工程成员检查
 python3 -I -B -m unittest discover -s scripts/tests -p "test_<area>.py" -v
 bash scripts/test-native.sh test --filter <pattern> # macOS：受影响的 Swift 测试
@@ -55,6 +56,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `MeowContracts`、`MeowJSON`、`MeowStorage`、`MeowAccounts`、`MeowPlayback`、`MeowUI`、`MeowRuntime` — 共享能力
   - `MeowMusicFeature`、`MeowMusicPlatform`、`MeowMusicNativeService` — 音乐界面、平台和原生业务
   - `MeowFilmFeature` — 影视数据源、首页、详情、收藏、规则设置与来源管理
+- `native/VideoKernel/` — Apple 平台视频解码与 sample-buffer 输出；锁定 FFmpeg 源码及本地适配，不拥有业务或系统媒体会话
 - `apps/windows/app/` — Windows 应用入口与装配
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约
@@ -65,12 +67,13 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/windows/tests/` — Windows 原生测试
-- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`entry.mjs` 默认管理三个模块，契约为 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.2.0；另导出可组合的 tmdb.data.v1／douban.data.v1，只读数据和图片契约见 `docs/runtime/metadata-data.md`。iOS 与 Windows 的 App entry 在同一 runtime.http.v1 会话中显式增加 tmdb@0.1.0 与 netease@0.1.0／netease.token.v1，精确校验五模块；保留各自平台受信启动，不保留旧运行器协议回退，不装配豆瓣或网盘。
+- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`createRuntime` 默认管理 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.2.0 三个模块。iOS 与 Windows aggregate 按序显式装配 music、cat、source、pan、tmdb、douban、film、netease 八模块，保留各自平台受信启动，不保留旧运行器协议回退；数据、媒体、会话与网易 token 契约见 `docs/runtime/metadata-data.md`、`docs/runtime/film-playback.md`、`docs/runtime/netease-token.md`。
 - `apps/windows/runtime/` — 仅 Windows 私密启动／存活管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
 - `packages/script-host/` — 统一实例生命周期；LX 与 portable 来源使用共享原生绑定、逐实例线程／QuickJS Runtime，CatNode 使用逐实例 Node Worker 与原生 Node 能力。
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层
 - `packages/runtime-bridge/` — runtime.http.v1 完整 HTTP 请求／响应、取消与连接生命周期
-- `packages/pan-runtime/` — 可显式装配的内置网盘账号、分享与取址能力；同进程异步 I/O，不创建脚本执行环境，通用默认入口与平台 App 均不默认装配网盘
+- `packages/pan-runtime/` — 内置网盘账号、分享与取址能力；同进程异步 I/O，不创建脚本执行环境，通用默认入口不装配，平台 App 显式装配
+- `packages/film-playback/` — 影视智能会话、唯一业务数据缓存、本地历史/人工匹配/屏蔽/偏好，以及受控二进制媒体流；不复制原生收藏或图片缓存
 - `packages/netease-token/` — 网易订阅实时 token 的按需 SDK Worker；账号和订阅写入仍由原生管理，契约与信任边界见 `docs/runtime/netease-token.md`
 - `packages/film-search/` — 双端客户端共享的影视搜索整合规则资源，由各自原生 QuickJS 执行；不在通用运行器聚合搜索
 - `scripts/` — iOS 工程生成、结构检查、测试、构建打包与发布，`scripts/tests/` 为脚本测试；Node 共用工具

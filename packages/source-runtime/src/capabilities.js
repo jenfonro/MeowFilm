@@ -24,7 +24,7 @@ const names = new Set([
 ]);
 const base64Alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const forbiddenHeaders = new Set([
-  'host', 'content-length', 'transfer-encoding', 'upgrade', 'trailer',
+  'content-length', 'transfer-encoding', 'upgrade', 'trailer',
   'proxy-authorization', 'proxy-connection', 'te',
 ]);
 
@@ -49,7 +49,7 @@ function httpUrl(value, code = 'INVALID_ARGUMENT') {
   sourceRequire(typeof value === 'string' && value.length <= 16384, code);
   try {
     const url = new URL(value);
-    sourceRequire(['http:', 'https:'].includes(url.protocol) && !url.username && !url.password, code);
+    sourceRequire(['http:', 'https:'].includes(url.protocol), code);
     return url.href;
   } catch (error) {
     if (error?.code) throw error;

@@ -557,18 +557,31 @@ test('Baidu mediainfo resolves a returned dlink even with a warning errno, and e
   }
 });
 
-test('Baidu media redirect cycles, downgrade and terminal failure are explicit', async () => {
-  for (const behavior of ['cycle', 'downgrade', 'denied']) {
+test('Baidu media redirect cycles and terminal failures remain explicit', async () => {
+  for (const behavior of ['cycle', 'denied']) {
     const f = fixture(url => {
       if (url.pathname === '/api/mediainfo') return response({ info: { dlink: 'https://media.invalid/start' } });
       if (behavior === 'cycle') return response('', 302, { location: '/start' });
-      if (behavior === 'downgrade') return response('', 302, { location: 'http://media.invalid/file' });
       return response('', 403);
     });
     await assert.rejects(baidu.play({ file: storedFile, mode: 'streaming' }, f.ctx), {
       code: behavior === 'cycle' ? 'UPSTREAM_FORMAT' : 'UPSTREAM_HTTP',
     });
   }
+});
+
+test('Baidu media redirects accept HTTP and explicit URL userinfo', async () => {
+  const target = 'http://media-user:media-password@media.invalid/file';
+  const f = fixture(url => {
+    if (url.pathname === '/api/mediainfo') return response({ info: { dlink: 'https://media.invalid/start' } });
+    if (url.pathname === '/start') return response('', 302, { location: target });
+    assert.equal(url.href, target);
+    return response('', 206);
+  });
+  assert.equal((await baidu.play({ file: storedFile, mode: 'streaming' }, f.ctx)).url, target);
+  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls[2].responseMode, 'headers');
+  assert.equal(header(f.calls[2], 'Range'), 'bytes=0-0');
 });
 
 function qrFixture(poll) {
@@ -686,13 +699,68 @@ test('Baidu QR missing image Content-Type uses reference image sniffing and supp
   }
 });
 
+test('Baidu QR image follows cross-origin HTTP and relative redirects with scoped session cookies', async () => {
+  const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=', 'base64');
+  const f = fixture(url => {
+    if (url.href === 'https://pan.baidu.com/') return response('', 200, { 'set-cookie': [
+      'BAIDUID=synthetic-shared; Domain=.baidu.com; Path=/; Secure',
+      'PANONLY=synthetic-pan; Path=/; Secure',
+    ] });
+    if (url.origin === 'https://passport.baidu.com' && url.pathname === '/v2/api/getqrcode') {
+      return response({ errno: 0, sign: 'synthetic-sign', imgurl: 'https://passport.baidu.com/qr-image' }, 200, {
+        'set-cookie': [
+          'QRSESSION=synthetic-passport; Path=/; Secure',
+          'APIONLY=synthetic-api; Path=/v2/; Secure',
+        ],
+      });
+    }
+    if (url.href === 'https://passport.baidu.com/qr-image') {
+      return response('', 302, { location: 'http://image.invalid/qr/start' });
+    }
+    if (url.href === 'http://image.invalid/qr/start') return response('', 302, {
+      location: 'image.png?challenge=synthetic',
+      'set-cookie': [
+        'IMAGE=synthetic-image; Path=/',
+        'IMAGEPATH=synthetic-path; Path=/qr',
+        'OTHERPATH=synthetic-other; Path=/other',
+        'IMAGESECURE=synthetic-secure; Path=/; Secure',
+      ],
+    });
+    if (url.href === 'http://image.invalid/qr/image.png?challenge=synthetic') {
+      return response('', 302, { location: 'https://image.invalid/qr/image.png?challenge=synthetic' });
+    }
+    assert.equal(url.href, 'https://image.invalid/qr/image.png?challenge=synthetic');
+    return { status: 200, headers: { 'content-type': 'image/png' }, body: image };
+  }, {});
+  const login = await baidu.loginStart({}, f.ctx);
+  assert.deepEqual(login.challenge, { type: 'image', url: `data:image/png;base64,${image.toString('base64')}` });
+  const query = new URLSearchParams({
+    lp: 'pc', tt: String(f.ctx.now()), gid: login.session.gid, callback: login.session.callback,
+  });
+  assert.deepEqual(f.calls.map(request => [request.url, header(request, 'Cookie')]), [
+    ['https://pan.baidu.com/', ''],
+    [`https://passport.baidu.com/v2/api/getqrcode?${query}`, 'BAIDUID=synthetic-shared'],
+    ['https://passport.baidu.com/qr-image', 'BAIDUID=synthetic-shared; QRSESSION=synthetic-passport'],
+    ['http://image.invalid/qr/start', ''],
+    ['http://image.invalid/qr/image.png?challenge=synthetic', 'IMAGEPATH=synthetic-path; IMAGE=synthetic-image'],
+    ['https://image.invalid/qr/image.png?challenge=synthetic', 'IMAGEPATH=synthetic-path; IMAGE=synthetic-image; IMAGESECURE=synthetic-secure'],
+  ]);
+  for (const request of f.calls) {
+    assert.equal(header(request, 'User-Agent'), qrUA);
+    assert.equal(header(request, 'Referer'), 'https://pan.baidu.com/');
+    assert.equal(request.signal, f.controller.signal);
+    assert.equal(request.timeout, 30000);
+  }
+  assert.equal(f.patches.length, 0);
+  assert.equal(login.session.credentials, undefined);
+});
+
 test('Baidu QR image HTTP failures and malformed images fail before exposing a challenge or saving credentials', async () => {
   for (const [image, code] of [
     [{ status: 403, headers: {}, body: Buffer.alloc(0) }, 'UPSTREAM_HTTP'],
     [{ status: 200, headers: { 'content-type': 'text/html' }, body: Buffer.from('<html>challenge</html>') }, 'UPSTREAM_FORMAT'],
     [{ status: 200, headers: { 'content-type': 'image/png' }, body: Buffer.alloc(0) }, 'UPSTREAM_FORMAT'],
     [{ status: 200, headers: {}, body: Buffer.from('invalid image') }, 'UPSTREAM_FORMAT'],
-    [{ status: 302, headers: { location: 'https://attacker.invalid/qr-image' }, body: Buffer.alloc(0) }, 'UPSTREAM_FORMAT'],
   ]) {
     const f = fixture(url => {
       if (url.pathname === '/') return response('');
@@ -862,10 +930,28 @@ test('Baidu QR expiry/cancel stops polling and clears credentials', async () => 
   }
 });
 
-test('Baidu QR rejects an off-provider login redirect before forwarding authentication', async () => {
-  const f = fixture(() => response('', 302, { location: 'https://attacker.invalid/' }), {});
-  await assert.rejects(baidu.loginStart({}, f.ctx), { code: 'UPSTREAM_FORMAT' });
-  assert.equal(f.calls.length, 1);
+test('Baidu QR follows off-provider login and image addresses while keeping Cookie jar scope', async () => {
+  const f = fixture((url, request) => {
+    if (url.origin === 'https://pan.baidu.com') return response('', 302, {
+      location: 'http://external.invalid/landing',
+      'set-cookie': ['BDUSS=source; Domain=.baidu.com; Path=/; Secure'],
+    });
+    if (url.pathname === '/landing') {
+      assert.equal(header(request, 'Cookie'), '');
+      return response('');
+    }
+    if (url.pathname === '/v2/api/getqrcode') {
+      assert.equal(header(request, 'Cookie'), 'BDUSS=source');
+      return response({ errno: 0, sign: 'synthetic-sign', imgurl: 'http://image.invalid/qr' });
+    }
+    assert.equal(url.href, 'http://image.invalid/qr');
+    assert.equal(header(request, 'Cookie'), '');
+    return { status: 200, headers: { 'content-type': 'image/png' }, body: qrPNG };
+  }, {});
+  const login = await baidu.loginStart({}, f.ctx);
+  assert.deepEqual(login.challenge, qrChallenge);
+  assert.equal(f.calls.length, 4);
+  assert.deepEqual(f.patches, []);
 });
 
 test('Baidu QR unique redirect chain is bounded by the challenge deadline and remaining request timeout', async () => {

@@ -28,6 +28,7 @@
     <RadioButton x:Name="WindowArea" Content="窗口行为" Tag="window" Visibility="Collapsed"
                  Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"
                  AutomationProperties.Name="窗口行为"/>
+    <RadioButton x:Name="ShortcutsArea" Content="快捷键" Tag="shortcuts" Visibility="Collapsed" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>
    </StackPanel>
   </Border>
   <ScrollViewer x:Name="SettingsScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
@@ -69,6 +70,7 @@
       </StackPanel>
      </Border>
     </StackPanel>
+    <ContentControl x:Name="ShortcutsPage" Visibility="Collapsed" HorizontalContentAlignment="Stretch"/>
    </Grid>
   </ScrollViewer>
  </Grid>

@@ -53,7 +53,7 @@ function verifyManifest(output, manifest) {
   assert.equal(manifest.platform, 'win32');
   assert.equal(manifest.entry, 'app/windows/entries/aggregate.mjs');
   assert.equal(manifest.assemblyProfile, 'common-native');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'tmdb', 'netease']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
   const paths = manifest.files.map(file => file.path);
   assert.deepEqual(paths, [...paths].sort());
   assert.equal(new Set(paths.map(path => path.normalize('NFC').toLowerCase())).size, paths.length);
@@ -66,7 +66,8 @@ function verifyManifest(output, manifest) {
   }
   assert.deepEqual(paths.filter(path => path.startsWith('app/')), [
     'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/entry.mjs',
-    'app/modules/cat-script.mjs', ...metadataFiles.map(file => `app/${file}`), 'app/modules/music-script.mjs',
+    'app/modules/cat-script.mjs', 'app/modules/film-playback.mjs',
+    ...metadataFiles.map(file => `app/${file}`), 'app/modules/music-script.mjs',
     'app/modules/netease-token.mjs', 'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs',
     'app/pan-entry.mjs',
     'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
@@ -82,11 +83,13 @@ function packagingFixture({
   const lock = { name: manifest.name, version: manifest.version, lockfileVersion: 3, packages: { '': { ...manifest } } };
   const inert = 'throw new Error("Synthetic fixture must not execute");\n';
   write(source, 'package.json', manifest);
-  for (const name of ['runtime-bridge', 'script-host', 'source-runtime', 'pan-runtime', 'netease-token', 'inactive-core']) {
+  for (const name of ['runtime-bridge', 'script-host', 'source-runtime', 'pan-runtime',
+    'film-rules', 'film-playback', 'netease-token', 'inactive-core']) {
     const location = `packages/${name}`, installed = `node_modules/@meowfilm/${name}`;
     const pkg = {
       name: `@meowfilm/${name}`, version: '1.0.0', type: 'module', license: 'MIT', exports: './src/index.js',
       ...(name === 'script-host' ? { dependencies: { '@meowfilm/source-runtime': '1.0.0' } } : {}),
+      ...(name === 'film-playback' ? { dependencies: { '@meowfilm/film-rules': '1.0.0' } } : {}),
     };
     write(source, `${location}/package.json`, pkg);
     if (!(missingShared && name === 'script-host')) write(source, `${location}/src/index.js`, inert);
@@ -98,7 +101,7 @@ function packagingFixture({
   }
   write(source, 'package-lock.json', lock);
   for (const file of ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs',
-    'modules/pan-runtime.mjs', 'modules/netease-token.mjs', 'modules/source-candidates.mjs'])
+    'modules/pan-runtime.mjs', 'modules/film-playback.mjs', 'modules/netease-token.mjs', 'modules/source-candidates.mjs'])
     write(source, `apps/runtime/${file}`, inert);
   if (!missingCommonModule) {
     write(source, 'apps/runtime/modules/music-script.mjs', inert);
@@ -168,7 +171,7 @@ test('Windows packaging preserves common files byte-for-byte and is reproducible
   const second = await packageWindowsRuntime({ root: f.root, product: 'aggregate', output: join(f.area, 'second') });
   assert.deepEqual(first, second);
   const shared = await packageRuntime({ root: f.root, product: 'aggregate', output: join(f.area, 'common'), profile: 'common-native' });
-  assert.deepEqual(shared.modules, ['music', 'cat', 'source']);
+  assert.deepEqual(shared.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
   assert.deepEqual(first.files.filter(file => !file.path.startsWith('app/windows/')), shared.files);
   assert.deepEqual(first.dependencies, shared.dependencies);
   assert.deepEqual(first.omittedOptionalDependencies, shared.omittedOptionalDependencies);
@@ -208,7 +211,7 @@ test('Windows packaging accepts optional metadata and pan closures and neutral H
 });
 
 for (const [name, mutate, code] of [
-  ...[...metadataFiles, 'modules/pan-runtime.mjs', 'pan-entry.mjs'].map(file => [`missing shared ${file}`, f =>
+  ...[...metadataFiles, 'modules/pan-runtime.mjs', 'modules/film-playback.mjs', 'modules/netease-token.mjs', 'pan-entry.mjs'].map(file => [`missing shared ${file}`, f =>
     rmSync(join(f.root, 'apps/runtime', file)), 'MISSING_SOURCE']),
   ...['unlisted', 'modules/unlisted', 'modules/metadata/unlisted'].map(path =>
     [`unlisted shared directory ${path}`, f =>
@@ -228,7 +231,7 @@ for (const [name, mutate, code] of [
     const manifest = readJSON(join(f.output, 'runtime-manifest.json'));
     assert.equal(manifest.status, 'failed');
     assert.equal(manifest.error.code, code);
-    assert.deepEqual(manifest.modules, ['music', 'cat', 'source']);
+    assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
     for (const file of manifest.files) {
       const bytes = readFileSync(join(f.output, file.path));
       assert.equal(bytes.length, file.bytes);
@@ -283,9 +286,10 @@ function nativeFixture(t) {
     // Use actual build evidence. No fabricated addon, SDK, upstream hash or receipt can satisfy this fixture.
     for (const path of new Set(['package.json', 'package-lock.json', 'scripts/script-host-native.json',
       artifactPath, receiptPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
-    for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime', 'netease-token']) {
+    for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
+      'film-rules', 'film-playback', 'netease-token']) {
       copy(`packages/${name}/package.json`);
-      copy(`packages/${name}/src`);
+      copy(`packages/${name}/${name === 'film-rules' ? 'film-rules.js' : 'src'}`);
       const installed = join(source, 'node_modules/@meowfilm', name);
       mkdirSync(dirname(installed), { recursive: true });
       symlinkSync(join(source, 'packages', name), installed, process.platform === 'win32' ? 'junction' : 'dir');

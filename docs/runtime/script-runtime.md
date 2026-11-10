@@ -6,9 +6,11 @@
 apps/runtime/entry.mjs
   受信 session config 的 createRuntime/startRuntime 独立入口
 apps/runtime/bootstrap.mjs、client.mjs、contracts.mjs
-  标准本地 HTTP 装配、Node 调用端、三模块版本和安全错误
+  标准本地 HTTP 装配、Node 调用端、模块版本和安全错误
 apps/runtime/modules/{music-script,cat-script,source-runtime}.mjs
   LX、CatNode、Reader/CatVod 的明确业务 owner
+apps/runtime/modules/{pan-runtime,metadata-data,film-playback}.mjs
+  内置网盘、TMDB/豆瓣数据与影视智能会话的薄装配
 apps/runtime/modules/source-candidates.mjs
   完整源码候选归属、同 installation 管理顺序
 packages/script-host/
@@ -16,12 +18,16 @@ packages/script-host/
 packages/source-runtime/
   Node-independent Reader 规则、CatVod Spider adapter 与 capability ABI 2
 packages/runtime-bridge/
-  标准 Node HTTP、严格 JSON、反向调用和交换生命周期
+  标准 Node HTTP、严格 JSON、取消和交换生命周期
 packages/pan-runtime/、apps/runtime/pan-entry.mjs
   显式装配的内置网盘能力，不加载脚本引擎或额外 Worker
+packages/film-playback/
+  影视会话、唯一业务数据缓存、新增本地播放资料及受控媒体流
+packages/netease-token/、apps/runtime/modules/netease-token.mjs
+  原生订阅按需借用的独立 token 模块、官方 SDK Worker 与锁定 jsdom
 ```
 
-通用运行器不依赖平台目录。官方账号、目录、曲库、歌词、播放等原生业务由调用方管理；脚本安装、源码、来源地址和私有数据由运行器持久管理。客户端可保存来源列表、检测结果等供原生界面直接读取的快照，不形成第二套安装管理或脚本存储。独立入口描述 `aggregate`，模块为：
+通用运行器不依赖平台目录。音乐官方账号、目录、曲库、歌词、播放等原生业务由调用方管理；脚本安装、源码、来源地址和私有数据由运行器持久管理。客户端可保存来源列表、检测结果等供原生界面直接读取的快照，不形成第二套安装管理或脚本存储。通用 `createRuntime()` 默认入口描述 `aggregate`，装配以下三个模块：
 
 | 模块 | 响应契约 | 输入职责 |
 | --- | --- | --- |
@@ -29,9 +35,9 @@ packages/pan-runtime/、apps/runtime/pan-entry.mjs
 | `cat@0.2.0` | `cat.script.v2` | CatNode、HTTP 服务、direct Spider、私有卷和管理同步 |
 | `source@0.2.0` | `source.runtime.v2` | Legado、异次元、轻悦时光、独立 CatVod Spider |
 
-受信调用方可显式启用 `pan@0.1.0/pan.runtime.v1` 的[网盘账号、分享与取址能力](pan-runtime.md)；默认三模块不变，平台 App 尚未接入。网盘属于 Node 内置业务，不是第四类脚本执行所有者。
+受信调用方可显式启用 `pan@0.1.0/pan.runtime.v1` 的[网盘账号、分享与取址能力](pan-runtime.md)、`tmdb@0.1.0/tmdb.data.v1` 与 `douban@0.1.0/douban.data.v1` 的[元数据能力](metadata-data.md)，以及 `film@0.1.0/film.playback.v1` 的[影视播放业务](film-playback.md)。这些是 Node 内置业务，不是新的脚本执行所有者；通用默认三模块不变。
 
-iOS 与 Windows 均已接入同一 HTTP 契约和三个脚本模块，并在同一会话中显式增加 [TMDB 元数据模块](metadata-data.md)供影视搜索使用和[网易实时 token 模块](netease-token.md)供原生订阅使用；通用默认入口仍为三模块。iOS 受信启动及内置原生 framework 见[iOS 运行底座](../ios/runtime-preflight.md)，Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)。通用运行器不保留旧 wire 或旧引擎。独立入口、平台 App 和设备运行须分别验证，不据此声明 Android 已接入。
+iOS 与 Windows 的正式 App entry 在同一 HTTP 会话中按 `music,cat,source,pan,tmdb,douban,film,netease` 顺序装配八模块。`connectFilmPlayback` 复用前六个 provider owner 并连接变更撤权，不另建来源或账号实例；[网易实时 token 模块](netease-token.md)最后追加，原生订阅按需取用，不改变默认三模块。film 持有智能播放会话、业务缓存及新增本地播放资料；原生收藏、客户端规则与图片缓存仍由原 owner 管理。iOS 受信启动及内置原生 framework 见[iOS 运行底座](../ios/runtime-preflight.md)，Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)。通用运行器不保留旧 wire 或旧引擎。模块装配不等于原生导航／搜索交接、实际媒体输出或设备验证已完成；搜索交接规则只见[共同契约](../common/film/search.md)，不据此声明 Android 已接入。
 
 ## 三类执行所有者
 
@@ -39,7 +45,7 @@ Node 主控负责客户端 HTTP、安装与代次、调度、共享异步 I/O �
 
 LX 每个启用实例有一个原生线程、一个原生 QuickJS Runtime 和一个 Context。source 每个启用实例有一个原生线程、一个 Runtime、两个 Context：可信规则/SDK core 与用户脚本 realm；两个 Context 共用同实例 Runtime，不给每个书源再套 V8 Worker。CatNode 每个实例使用独立 Node Worker/V8 直接执行，移除内部 QuickJS。独立实例保留状态，不通过闲置卸载、重建或固定活跃数配额降低成本。
 
-脚本正常运行中的变量由引擎自然持有，不做内存快照持久化。Cat 同一私有卷只允许一个 Worker：更新前先退出旧 Worker，失败恢复的是旧源码而不是旧内存状态；其他实例不因此重建。明确管理重启与闲置回收是不同操作。尚未接入的网盘宿主缓存不在当前实现内。
+脚本正常运行中的变量由引擎自然持有，不做内存快照持久化。Cat 同一私有卷只允许一个 Worker：更新前先退出旧 Worker，失败恢复的是旧源码而不是旧内存状态；其他实例不因此重建。明确管理重启与闲置回收是不同操作。影视业务缓存由 film 统一持有，不是脚本内存快照或 pan provider 的第二份缓存。
 
 慢实例的同步 JavaScript、显式算法或网络等待不通过全局执行队列阻塞其他实例或控制 HTTP；同安装管理修改有序，各协议原有动作调度语义保留。实际 CPU/内存竞争仍存在，原生进程崩溃不承诺仅影响单实例。
 
@@ -49,7 +55,7 @@ Node-independent 只描述 `@meowfilm/source-runtime` 的纯规则与 ABI 包；
 
 引擎采用 QuickJS-NG 原生 Node-API 绑定，来源、ABI、架构及精确输入以 `scripts/script-host-native.json` 为准；不加载旧 WASM/asmjs，不在失败时切换后端。原生 Runtime 的建立、Context、求值、pending jobs、值引用和释放均由所属线程拥有，主线程不调用跨线程 JSValue。宿主回调传递明确身份、结构和 typed bytes，必要的所有权边界复制保留，不声称零拷贝。
 
-LX/source 用户脚本不能直接获得 Node 对象、任意宿主 callable、文件、进程或模块加载器。原生绑定线程与 Cat Worker 是执行及生命周期隔离，不是对恶意代码或引擎漏洞的安全保证；既有私有卷、grant、scope 和网络访问身份仍必须保留。
+LX/source 用户脚本不能直接获得 Node 对象、任意宿主 callable、文件、进程或模块加载器。原生绑定线程与 Cat Worker 是执行及生命周期隔离，不是对恶意代码或引擎漏洞的安全保证；既有私有卷、grant、scope 和网络资源归属仍必须保留。
 
 Promise reaction、原生 await、异步迭代和清理回调保留登记任务身份。旧 A 延续由 B 唤醒时仍属于 A，不能借 B 的能力。私有任务入口在 SDK 初始化捕获后、用户代码执行前移除；不包装公开 Promise.then、不增添微任务或改变标准排队顺序。LX 特权存储始终使用显式请求 context，不由 ambient task identity 授权。
 
@@ -87,11 +93,17 @@ lx.on(lx.EVENT_NAMES.request, async (payload, context) => {
 
 ## 网络与 Cat 持久资源
 
-LX 网络适配器形状保持 `network({url,options,signal,scope,validateURL})`。validateURL 检查 HTTP(S)、URL userinfo 和重定向语法，不是域名/私网白名单；跨 origin 不转发 Authorization/Cookie。`followRedirect:false` 禁止自动跳转，true 仍服从既有次数边界；`retry` 兼容字段不触发宿主自动重试或重放 POST。脚本显式 crypto/zlib、既有字符集/JSON/HTTP 解压语义保留，没有附加正文加工层。
+LX 网络适配器形状保持 `network({url,options,signal,scope,validateURL})`。validateURL 检查 HTTP(S) 和重定向语法，接受调用输入的 URL userinfo，不按域名、origin 或私网限制访问；显式 Authorization／Cookie／Host／Origin 跨 origin 重定向仍保留。`followRedirect:false` 禁止自动跳转，true 仍服从既有次数边界；`retry` 兼容字段不触发宿主自动重试或重放 POST。脚本显式 crypto/zlib、既有字符集/JSON/HTTP 解压语义保留，没有附加正文加工层。
+
+该完整响应适配器按 `Content-Encoding` 流式解码 gzip／deflate／br（含叠加编码），
+只收集最终解码字节，不另行缓存完整压缩响应。它仍返回完整 Buffer，不是媒体流接口；
+不截断合法 JSON 或套用图片大小限制。取消及失败等待 request／response／socket、
+decoder 与收集器实际关闭；HEAD／无正文状态不对缺失正文解压。实际解码后移除失效的
+编码／长度头，未知编码与损坏压缩体分别返回 `UNSUPPORTED_OPTION`、`NETWORK_ERROR`。
 
 管理入口的网络源码通过专用 `createSourceDownload` 下载，沿用各模块的 URL、状态、重定向和期限规则；传输与解压后的源码均受 16 MiB 输入边界约束，取消等待连接与解压流真实关闭。普通 guest 网络适配器不恢复响应字节配额，也不套用源码大小限制。
 
-Cat 的 HTTP(S)、DNS、net/TLS 不按公网、私网或链路本地地址过滤；已登记 listener 别名映射本实例实际回环端点并携带访问身份，未登记回环目标直接访问且不附加凭据。socketPath/fd 与私有卷规则继续属于文件/IPC 边界。完整服务、管理 Cookie、provider 拦截和目录规则见 [CatNode 契约](cat-script-runtime.md)。
+Cat 的 HTTP(S)、DNS、net/TLS 不按公网、私网或链路本地地址过滤；已登记 listener 别名映射本实例实际端点，HTTP 自调用的内部 scope 只用于取消与归属，不是访问凭据，未登记回环目标直接访问。listener 和 aggregate 全接口监听，无 access token、管理 Cookie 或 Host／Origin 来源门禁；调用输入的显式头不按 origin 删除。socketPath/fd 与私有卷规则继续属于文件/IPC 边界。完整服务、页面、provider 拦截和目录规则见 [CatNode 契约](cat-script-runtime.md)。
 
 Cat 真实 Buffer/流/密钥对象按 Node 语义工作，资源按请求或实例生命周期跟踪。停用、更新、端口变化及进程重启保留私有卷；卸载或设置移除在真实停止后删除该卷与无引用源码，删除失败明确记录，不扫描未知目录或残卷。
 

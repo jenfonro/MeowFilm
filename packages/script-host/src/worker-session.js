@@ -486,7 +486,6 @@ export class WorkerSession {
     if (!Array.isArray(value?.endpoints)) return;
     this.catSnapshot = clone({
       endpoint: value.endpoint,
-      access: value.access,
       endpoints: value.endpoints,
       aggregatePort: value.aggregatePort,
     });
@@ -547,8 +546,7 @@ export class WorkerSession {
     requireValue(this.live && !signal.aborted, 'STALE_SESSION');
     let url;
     try { url = new URL(value); } catch { throw fault('INVALID_ARGUMENT'); }
-    requireValue((url.protocol === 'https:' || url.protocol === 'http:') &&
-      url.username === '' && url.password === '');
+    requireValue(url.protocol === 'https:' || url.protocol === 'http:');
     return url.href;
   }
 

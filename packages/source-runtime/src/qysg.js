@@ -35,8 +35,7 @@ function remoteHtmlCandidates(value, maximum) {
     let url;
     try { url = new URL(entry); }
     catch { throw sourceFault('SCRIPT_PROTOCOL_ERROR'); }
-    sourceRequire(['http:', 'https:'].includes(url.protocol) &&
-      !url.username && !url.password, 'SCRIPT_PROTOCOL_ERROR');
+    sourceRequire(['http:', 'https:'].includes(url.protocol), 'SCRIPT_PROTOCOL_ERROR');
     return url.href;
   });
 }

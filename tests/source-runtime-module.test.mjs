@@ -27,6 +27,26 @@ const catSource = `
   };
 `;
 
+test('CatVod reporting is a discovered formal action with exact playback payload, not an arbitrary callback URL', async t => {
+  const { rpc } = setup(t);
+  const instance = await load(rpc, { protocol: 'cat', source: `
+    export default {
+      async playerContent(flag, id) { return { url: 'https://media.invalid/video', watchReport: true }; },
+      async report(payload) { return { ok: true, received: payload }; }
+    };
+  ` });
+  assert.ok(instance.capabilities.source.actions.includes('report'));
+  const payload = { flag: '原始线路', id: 0, sessionId: 'attempt', event: 'progress',
+    positionSeconds: 12.5, durationSeconds: 300 };
+  const reported = okay(await rpc('invoke', { installationId: instance.installationId,
+    revision: instance.revision, generation: instance.generation, action: 'report', payload }));
+  assert.deepEqual(reported, { ok: true, received: payload });
+  const absent = await load(rpc, { installationId: 'without-report', protocol: 'cat', source: catSource });
+  assert.equal(absent.capabilities.source.actions.includes('report'), false);
+  denied(await rpc('invoke', { installationId: absent.installationId, revision: absent.revision,
+    generation: absent.generation, action: 'report', payload }), 'UNSUPPORTED_ACTION');
+});
+
 function setup(t, { owner: suppliedOwner, hostFactory } = {}) {
   const network = async input => ({
     statusCode: 200,

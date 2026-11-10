@@ -9,12 +9,12 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | 目录 | 职责 |
 | --- | --- |
 | `apps/ios/Application` | `UIApplication`／scene 生命周期、唯一窗口、固定产品身份 |
-| `apps/ios/Composition` | 资源、原生音乐服务、播放控制、账号访问与后台同步的装配和关闭 |
+| `apps/ios/Composition` | 资源、原生音乐服务、共享播放控制、影视运行器适配、账号访问与后台同步的装配和关闭 |
 | `apps/ios/Navigation` | 根容器、普通页面导航、播放器及其他非导航呈现的路由 |
 | `apps/ios/Presentation` | 主页面外壳、页头、底部导航和播放器停靠区 |
 | `apps/ios/UITests` | UIKit 与音乐 UI 组件测试，复用已有 UIKit runner，不属于 App 源成员 |
 | `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的宿主测试：运行器集成实际链接、启动 Node；音乐本地启动测试使用合成存储与拒绝网络的 transport，冷启动清理测试使用临时数据与模拟 Keychain |
-| `apps/ios/runtime` | iOS socketpair 启动参数／失败边界与 music/Cat 薄 entry，复用公共 JS 模块 |
+| `apps/ios/runtime` | iOS socketpair 启动参数／失败边界与 music/cat/source/pan/tmdb/douban/film/netease 八模块薄 entry，复用公共 JS 模块 |
 
 工程文件由 `scripts/generate-ios-project.py` 生成。App 只编译上述四个职责目录；UITests、RuntimeTests 使用独立测试 target。NodeMobile.xcframework 链接并嵌入签名，完整 JS 载荷作为 `Runtime` 资源随包签名；构建输入准备见[发布](release.md)。
 
@@ -36,18 +36,21 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `MeowJSON` | Codable DTO 值、外部字典 JSON 解析与数字原文转发 | 无 |
 | `MeowStorage` | 普通及加密文档存储 | Contracts |
 | `MeowAccounts` | 凭据与账号状态基础设施 | Contracts |
-| `MeowPlayback` | 系统播放、媒体会话、播放所有权 | Contracts |
+| `MeowPlayback` | 系统播放、媒体会话、播放所有权与视频内核适配 | Contracts、MeowVideoKernel |
 | `MeowUI` | 中性主题、窗口渐变、页面生命周期、自绘页头、导航栈与转场、搜索页与呈现机制 | 无 |
-| `MeowRuntime` | 协议 1 帧与专用 JSON 校验、双向 fd RPC／取消／关闭与单次内嵌启动机制 | JSON |
+| `MeowRuntime` | runtime.http.v1 客户端、严格 JSON、事件观察／取消／关闭与单次内嵌启动机制；fd 仅交接受信启动及生命期 | 无 |
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Contracts、JSON、Accounts、Storage |
 | `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、JSON、Feature、Runtime、Storage |
 | `MeowFilmFeature` | 影视页面、搜索会话、规则及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | UI、JSON、Storage、Runtime、MeowJavaScript、FilmRuleProgram、FilmSearchProgram |
 | `native/JavaScript` | 锁源 QuickJS 原生 C ABI 与后台 Swift JSON 引擎 | 无业务依赖 |
+| `native/VideoKernel` | 锁定 FFmpeg 8.1.2、私有 C／Swift 适配与系统 sample-buffer 输出 | Apple 系统媒体框架，无业务依赖 |
 | `packages/film-rules` | 同一份规则 JS 的 SwiftPM 资源包 | 无原生业务依赖 |
 | `packages/film-search` | 影视搜索整合 JS 的 SwiftPM 静态资源包 | 无原生业务依赖 |
 
 共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。
+
+影视智能播放、业务数据缓存、新增历史／人工匹配／屏蔽／偏好由 Node film owner 管理；原生模型仅投影快照并提交命令，收藏、规则与图片缓存保留原 owner。共用约束见[影视播放契约](../runtime/film-playback.md)，视频内核构建输入见[发布](release.md)。原生导航／搜索合并接线与平台验证仍须单独收口，不以八模块装配或内核版本代替实跑证据。
 
 全局搜索的音乐／影视关系由 `MeowfilmSearchComposition` 装配。`MeowUI` 仅提供目标选择和附加结果内容契约；音乐搜索分页容器按契约承载内容，不导入影视、不承载影视取数或整合策略。影视搜索、真实详情导航与关闭 ownership 见[影视搜索](film-search.md)。
 
@@ -96,7 +99,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 - 页面跳转由路由显式调用，不通过业务状态标志触发。
 - 上层呈现通过视图层级阻挡下层触摸。
 - 资源活跃、页面可见及浮层呈现时机分别管理；待处理的错误在页面稳定出现或导航／呈现转场完成后处理，不因此重新加载业务。
-- `PageViewController.showError` 保留单“确定”及确认回调；需要显式恢复的页面使用 `showRetryableError`，在同一错误浮层内提供“重试”，等待浮层退出后调用业务动作，已失效页面不再重试。
+- `PageViewController.showError` 保留单“确定”及确认回调；需要显式恢复的页面使用 `showRetryableError`，在同一错误浮层内提供“重试”。页面记录实际接受呈现的浮层身份；`dismissPageModal` 以实际退出回执结算该次转场后调用业务动作，UIKit 已自动退出才触发的 action 仍可消费一次，已失效页面不再重试；影视设置的成功反馈在暂不可呈现时保留，待页面出现或原浮层退出后显示，不重新提交保存。
 
 ## 页面加载与刷新
 
@@ -166,7 +169,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `meowfilm.music.audio-cache.v1` | 实际播放后的完整音频缓存 |
 | `music.playback-display.v1`、`music.home.snapshot.v1` | 播放展示和首页快照缓存 |
 | `music.ui.appearance.v1`、`music.ui.songColors.v1`、`music.ui.lastChannel` | 音乐外观偏好、歌曲取色缓存和频道恢复 |
-| `playback.volume`、播放所有者 `music` | 共享播放音量与当前播放业务所有者 |
+| `playback.volume`、播放所有者 `music`／`film` | 共享播放音量与当前播放业务所有者 |
 | `meowfilm.film.library.v1` | 影视收藏的来源 ID 与影片 ID |
 
 歌曲／录音、来源、队列 occurrence、播放 attempt、账号访问代次和文件版本是相互独立的身份，不能用标题、短期 URL 或队列位置替代。

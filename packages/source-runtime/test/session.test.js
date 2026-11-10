@@ -287,6 +287,29 @@ test('QYSG protocol detection accepts case-insensitive script markup', () => {
   ).protocol, 'cat');
 });
 
+test('QYSG remote definitions preserve HTTP URL credentials through import and the capability ABI', async t => {
+  const url = 'https://reader:synthetic-only@rules.invalid/definition.html?version=1';
+  const source = { bookSourceName: 'Remote QYSG', bookSourceUrl: 'https://books.invalid/', html: url };
+  assert.equal(detectSourceProtocol(source), 'qysg');
+  assert.equal(normalizeSourceDefinition(source).source.html, url);
+  const calls = [];
+  let loaded;
+  const session = new SourceSession({
+    installationId: 'qysg-url-credentials', source, protocol: 'qysg',
+    capabilities: capabilitiesFor({
+      '/definition.html': '<script>function search(){ return []; }</script>',
+    }, calls),
+    createSandbox: sandboxFactory({
+      load(_options, _kind, code) { loaded = code; },
+    }),
+  });
+  t.after(() => session.close());
+  await session.start();
+  assert.match(loaded, /function search\(\)/);
+  assert.equal(calls.filter(call => call.name === 'http.request').length, 1);
+  assert.equal(calls.find(call => call.name === 'http.request').input.url, url);
+});
+
 test('pagination limits fail explicitly instead of returning a truncated table of contents', async t => {
   const source = {
     ...legadoSource,

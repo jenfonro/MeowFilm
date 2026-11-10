@@ -6,10 +6,39 @@ import MeowStorage
 
 @MainActor
 extension MusicViewModel {
+    private var hasPendingPlayCommand: Bool {
+        guard let pending = playPauseCommandTask else { return false }
+        return pending.id == playbackControlRevision && pending.attempt == nativeAttempt && !pending.task.isCancelled
+    }
+
+    /// Physical output loss cancels pending playback even before a native
+    /// attempt exists. A retained handoff candidate alone is not active work.
+    public func onOutputUnavailable() {
+        guard isAvailable, !isClosed else { return }
+        let sourceWork = pendingSourceSelection != nil || isResolving || resolutionTask != nil ||
+            candidateDiscoveryTask != nil || cachedAudioLookup != nil || sourceRecoveryTask != nil ||
+            cachedAudioRecoveryTask != nil || remoteAudioRecoveryTask != nil
+        guard nativeAttempt != nil && terminalAttempt == nil || hasPendingPlayCommand || sourceWork ||
+            navigationPlaybackIntent?.isActive == true || recommendationPlaybackIntent?.isActive == true ||
+            fmAdvanceIntent?.isActive == true || isPreparingRemoteQueue ||
+            isChangingSimilarMode || isChangingQueueRecommendations else { return }
+        cancelPlayPauseCommands()
+        recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
+        remoteQueueIntent?.revoke()
+        fmShouldPlay = false
+        if sourceWork {
+            // Retire source continuations, not accepted fact ownership. The
+            // controller has already paused any live native output.
+            invalidateSelection(stopMedia: false)
+        }
+        playbackState.phase = .paused
+    }
+
     public func togglePlayback() async {
+        let pendingPlay = hasPendingPlayCommand
         cancelPlayPauseCommands()
         guard isAvailable, !isClosed else { return }
-        if isChangingSimilarMode || isChangingQueueRecommendations || navigationPlaybackIntent != nil {
+        if pendingPlay || isChangingSimilarMode || isChangingQueueRecommendations || navigationPlaybackIntent != nil {
             recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
             if !pausePlaybackRecovery() {
                 if pendingSourceSelection != nil, nativeAttempt == nil {
@@ -38,23 +67,31 @@ extension MusicViewModel {
             if !fmShouldPlay, let nativeAttempt { player?.pause(nativeAttempt) }
             return
         }
-        if let nativeAttempt, candidate != nil, terminalAttempt == nil {
-            guard candidate?.fileAuthorization?.isActive != false, candidate?.playbackAuthorization?.isActive != false else {
+        if let nativeAttempt, let candidate, terminalAttempt == nil {
+            guard candidate.fileAuthorization?.isActive != false, candidate.playbackAuthorization?.isActive != false else {
                 invalidateSelection(stopMedia: true); error = MusicServiceError.staleAccess.localizedDescription; return
             }
             if phase == .playing || phase == .buffering { player?.pause(nativeAttempt) }
-            else { await resumePlayback(nativeAttempt, epoch: own, token: token, control: control) }
+            else {
+                let task = schedulePlayCommand(nativeAttempt, occurrenceID: candidate.occurrenceId, replay: false)
+                await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+            }
         } else { await prepareCurrent() }
     }
 
-    /// The system already resolved play/pause intent against its native state.
-    /// Do not toggle again after waiting for business admission.
-    public func acceptPlayPause(_ command: PlaybackPlayPauseCommand, attempt: PlayAttempt) -> Bool {
+    /// Resolve toggle before waiting: native playback may still be paused while
+    /// the current owner is admitting an earlier explicit play.
+    public func acceptPlayPause(_ request: PlaybackPlayPauseCommand, attempt: PlayAttempt) -> Bool {
         guard isAvailable, !isClosed, attempt.owner == "music", let current, let candidate,
               candidate.occurrenceId == current.id, candidate.resourceId == attempt.resourceID,
               let nativeAttempt, nativeAttempt.id == attempt.id,
               nativeAttempt.resourceID == attempt.resourceID else { return false }
-        if command == .play, phase == .playing || phase == .buffering { return true }
+        let command: PlaybackPlayPauseCommand
+        switch request {
+        case .toggle(let wantsPlayback): command = wantsPlayback || hasPendingPlayCommand ? .pause : .play
+        case .play, .pause: command = request
+        }
+        if command == .play, phase == .playing || phase == .buffering || hasPendingPlayCommand { return true }
         cancelPlayPauseCommands()
         if command == .pause {
             fmShouldPlay = false
@@ -62,7 +99,12 @@ extension MusicViewModel {
             if !pausePlaybackRecovery() { player?.pause(nativeAttempt) }
             return true
         }
-        let replay = terminalAttempt != nil
+        _ = schedulePlayCommand(nativeAttempt, occurrenceID: current.id, replay: terminalAttempt != nil)
+        return true
+    }
+
+    private func schedulePlayCommand(_ nativeAttempt: MusicPlayerAttempt, occurrenceID: String,
+                                     replay: Bool) -> Task<Void, Never> {
         let own = lifecycle, token = selectionID, control = playbackControlRevision
         let previous = playPauseCommandTask?.task
         let task = Task { [weak self] in
@@ -71,7 +113,7 @@ extension MusicViewModel {
             defer { if self.playPauseCommandTask?.id == control { self.playPauseCommandTask = nil } }
             if replay {
                 do {
-                    try self.checkSelection(own, token: token, occurrenceID: current.id, admission: nil)
+                    try self.checkSelection(own, token: token, occurrenceID: occurrenceID, admission: nil)
                     guard self.nativeAttempt == nativeAttempt, self.terminalAttempt != nil,
                           self.playbackControlRevision == control else { return }
                     await self.prepareCurrent()
@@ -83,7 +125,7 @@ extension MusicViewModel {
             }
         }
         playPauseCommandTask = (control, nativeAttempt, task)
-        return true
+        return task
     }
 
     func cancelPlayPauseCommands() {
@@ -161,10 +203,22 @@ extension MusicViewModel {
                 retirePlaybackNavigation()
                 cancelRemoteQueuePreparation(); cancelFMNavigation()
                 nativeAttempt = nil; pendingNativeResourceID = nil
+                // A terminal donor can still have automatic recovery pending.
+                // Retire that work without clearing accepted fact ownership or
+                // changing the identity captured by the successful handoff.
+                pendingSourceSelection?.lifetime.revoke(); pendingSourceSelection = nil
+                pendingSourceFailure = nil
+                sourceSwitchID = UUID()
+                sourceSwitchTask?.cancel(); sourceSwitchTask = nil
+                sourceMediaTask?.cancel(); sourceMediaTask = nil
+                sourceRecoveryID = UUID()
+                sourceRecoveryTask?.cancel(); sourceRecoveryTask = nil; sourceRecoveryWantsPlayback = nil
+                cachedAudioRecoveryTask?.cancel(); cachedAudioRecoveryTask = nil
+                remoteAudioRecoveryTask?.cancel(); remoteAudioRecoveryTask = nil
+                playbackState.isResolving = false
+                playbackState.phase = .idle
             }
-            if [.paused, .stopped, .replaced].contains(event.kind) {
-                pausePlaybackRecovery(continuePendingSource: event.kind == .paused)
-            }
+            if event.kind == .paused { pausePlaybackRecovery() }
             return
         }
         switch event.kind {
@@ -215,8 +269,12 @@ extension MusicViewModel {
               candidate.playbackAuthorization?.isActive != false else {
             retireRevokedAudio(); return
         }
-        if [.paused, .stopped].contains(fact.kind),
-           playPauseCommandTask?.attempt.resourceID == fact.resourceId { cancelPlayPauseCommands() }
+        if playPauseCommandTask?.attempt.resourceID == fact.resourceId {
+            if fact.kind == .paused { cancelPlayPauseCommands() }
+            // Exit revokes the addressed task, not a new user control request.
+            // Native identity/terminal admission already rejects its resume.
+            else if fact.kind == .stopped { playPauseCommandTask?.task.cancel() }
+        }
         if ![.failed, .stopped].contains(fact.kind),
            !MusicMediaDuration.matches(expected: current?.track.duration ?? 0, actual: fact.duration),
            recoverSourceAudio(fact, invalidDuration: true) { return }
@@ -244,12 +302,26 @@ extension MusicViewModel {
             guard let self else { return }
             do {
                 try self.check(epoch)
-                guard token == self.selectionID, self.candidate?.attemptId == fact.attemptId else { return }
+                // The captured candidate already admitted this fact. Retiring
+                // its UI selection must not discard accepted playback accounting;
+                // the service still checks the fact's own attempt at commit.
+                guard self.candidate?.attemptId == candidate.attemptId else { return }
                 try candidate.fileAuthorization?.check()
                 try candidate.playbackAuthorization?.check()
+                if let similar = service as? any MusicSimilarModeServing,
+                   [.paused, .stopped].contains(fact.kind),
+                   self.navigationID == navigation {
+                    // Retiring a source selection does not retire this donor's
+                    // pause. Only a newer navigation may supersede its cancel.
+                    await similar.pauseSimilarNavigation()
+                    try self.check(epoch)
+                    guard self.candidate?.attemptId == candidate.attemptId else { return }
+                    try candidate.fileAuthorization?.check()
+                    try candidate.playbackAuthorization?.check()
+                }
                 let accepted: Bool
-                if let similar = service as? any MusicSimilarModeServing {
-                    if fact.kind == .paused || fact.kind == .stopped { await similar.pauseSimilarNavigation() }
+                if let similar = service as? any MusicSimilarModeServing,
+                   token == self.selectionID, self.candidate?.attemptId == fact.attemptId {
                     accepted = try await similar.recordSimilarPlaybackFact(fact)
                 } else { accepted = try await service.record(fact) }
                 try self.check(epoch)
@@ -267,9 +339,9 @@ extension MusicViewModel {
                     playbackState.state = updated
                 }
             } catch {
-                if self.lifecycle == epoch, self.selectionID == token, self.terminalAttempt == fact.attemptId {
-                    self.terminalAttempt = nil
-                }
+                guard self.lifecycle == epoch, self.selectionID == token,
+                      self.candidate?.attemptId == fact.attemptId else { return }
+                if self.terminalAttempt == fact.attemptId { self.terminalAttempt = nil }
                 self.report(error, epoch: epoch)
             }
         }
