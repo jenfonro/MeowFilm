@@ -173,7 +173,7 @@ export class LXAdapterOwner {
     scope.assertOpen();
     let url;
     try { url = new URL(input); } catch { throw fault('INVALID_ARGUMENT'); }
-    requireValue(['https:', 'http:'].includes(url.protocol) && !url.username && !url.password);
+    requireValue(['https:', 'http:'].includes(url.protocol));
     return url.href;
   }
 

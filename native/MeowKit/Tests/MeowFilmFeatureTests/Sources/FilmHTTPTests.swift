@@ -39,8 +39,10 @@ final class FilmHTTPTests: XCTestCase {
 
     func testStatusTimeoutAndNetworkErrorsRemainDistinct() async throws {
         let cases: [(Int, URLError?, FilmHomeError)] = [
+            (401, nil, .upstream(statusCode: 401)),
+            (403, nil, .upstream(statusCode: 403)),
             (503, nil, .upstream(statusCode: 503)),
-            (302, nil, .redirectDenied),
+            (302, nil, .upstream(statusCode: 302)),
             (200, URLError(.timedOut), .timeout),
             (200, URLError(.notConnectedToInternet), .network)
         ]
@@ -55,6 +57,41 @@ final class FilmHTTPTests: XCTestCase {
                 XCTAssertEqual(error as? FilmHomeError, expected)
             }
             XCTAssertEqual(stub.requests.count, 1)
+        }
+    }
+
+    func testArtworkReadsPreserveHTTPProtocolAndNonDefaultEndpointPorts() async throws {
+        for address in ["http://127.0.0.1:19191/poster.jpg", "http://localhost:19191/poster.jpg",
+                        "http://[::1]:19191/poster.jpg", "http://192.168.1.2:19191/poster.jpg",
+                        "https://artwork.invalid:8443/poster.jpg"] {
+            let url = try XCTUnwrap(URL(string: address))
+            let stub = FilmHTTPStub(url: url)
+            defer { stub.close() }
+            let http = FilmHTTP(configuration: FilmHTTPStub.configuration())
+            let bytes = try await http.readArtwork(url)
+            XCTAssertEqual(bytes, Data([1, 2, 3]))
+            XCTAssertEqual(stub.requests.map(\.url), [url])
+        }
+    }
+
+    func testArtworkAndHomeFollowCrossOriginRedirectsToLocalNodeEndpoints() async throws {
+        for artwork in [false, true] {
+            let destination = FilmHTTPStub(url: try XCTUnwrap(URL(string:
+                "http://127.0.0.1:19191/" + UUID().uuidString)))
+            let first = FilmHTTPStub(status: 302, redirectTo: destination.url)
+            defer { first.close(); destination.close() }
+            let http = FilmHTTP(configuration: FilmHTTPStub.configuration())
+            let bytes: Data
+            if artwork { bytes = try await http.readArtwork(first.url) }
+            else { bytes = try await http.readHome(first.url) }
+            XCTAssertEqual(bytes, Data([1, 2, 3]))
+            XCTAssertEqual(first.requests.count, 1)
+            XCTAssertEqual(destination.requests.map(\.url), [destination.url])
+            let request = try XCTUnwrap(destination.requests.first)
+            XCTAssertFalse(request.httpShouldHandleCookies)
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Origin"), artwork ? nil : "https://m.douban.com")
         }
     }
 

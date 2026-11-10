@@ -89,6 +89,13 @@ export function duplicateBootstrapDescriptor(descriptor) {
   return loaded.duplicateBootstrapDescriptor(descriptor);
 }
 
+/** Synchronous Unicode utility without a script owner or guest context. */
+export function normalizeNFKCNative(value) {
+  const loaded = loadBinding();
+  if (typeof loaded.normalizeNFKC !== 'function') throw fault('NATIVE_ABI_MISMATCH');
+  return loaded.normalizeNFKC(value);
+}
+
 /**
  * NativeEngine.create() returns immediately so initialization can be stopped.
  * Await .ready before publishing a session; call() also waits for initialization.

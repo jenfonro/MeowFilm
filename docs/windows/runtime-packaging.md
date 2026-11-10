@@ -1,4 +1,4 @@
-# Windows App 脚本载荷打包
+# Windows App 构建与安装包
 
 Windows 包装使用当前 `common-native` 通用运行器；仅 `--product aggregate` 是有效 wire 身份。业务通信为 `runtime.http.v1`，平台 manifest 的 transport 为 `windows-http-v1`。启动及生命周期见[平台接入](app-runtime.md)，公共引擎及契约见[共用核心](../runtime/script-runtime.md)。
 
@@ -13,11 +13,29 @@ Windows 包装使用当前 `common-native` 通用运行器；仅 `--product aggr
 
 目标机只需完整 `build/windows/`，launcher 使用包内 `runtime/node.exe`，不查询 PATH 或借系统 Node。默认输出自带 .NET；`-FrameworkDependent` 版本另需匹配的 .NET Desktop Runtime。不能只复制 exe，也不需要目标机安装编译工具。
 
+## Windows 安装与卸载
+
+```powershell
+.\build-windows.ps1 -Installer
+```
+
+该入口生成同一份完整应用及 `build/windows-installer/meowfilm-setup.exe`，安装包只支持 Release、自包含、win-x64；不接受 `-Configuration Debug` 或 `-FrameworkDependent`。构建机另外需要 [Inno Setup 6](https://jrsoftware.org/isinfo.php)：可将 `ISCC.exe` 放在 PATH，或安装到 Program Files／当前用户 `LocalAppData\Programs` 下的标准 `Inno Setup 6` 目录。普通应用构建不依赖 Inno Setup。安装器使用 Inno Setup 的原生安装／卸载引擎，保留其版权信息。
+
+安装包包含应用、.NET Desktop Runtime、Node、脚本运行器、原生库及许可；目标电脑无需安装构建工具。默认无需管理员权限，安装到 `%LOCALAPPDATA%\Programs\meowfilm`，创建开始菜单入口，可选择创建桌面快捷方式，并登记到 Windows“已安装的应用”。重复安装沿用产品身份及原安装位置，按原安装清单删除过时文件；遇到不属于原安装的同名目标文件时停止，需选择其他安装目录。升级前须关闭 meowfilm，不强制终止运行中的应用。
+
+用户数据固定存放于 `%LOCALAPPDATA%\meowfilm\aggregate`，与安装目录分离。交互卸载询问是否保留账号、设置、来源及缓存：默认保留，明确选择删除后才清理当前用户的数据；取消则不开始卸载。静默卸载保留数据。卸载只移除所属安装文件、快捷方式和系统登记，删除数据失败会报告；不会递归清理用户选择的整个安装目录或其他用户目录。
+
+安装包先生成于 `tmp/windows-installer`，验证完成后替换固定输出；打包或编译失败保留上一份有效安装包。应用 EXE 的产品／文件版本是安装器版本来源；生成安装包不等于已完成签名、安装验收或发行发布。
+
+## 产品图标
+
+`apps/windows/app/Assets/AppIcon.ico` 是 Windows 编译输入，包含 16、24、32、48、64、128、256 像素七个尺寸；EXE、WPF 默认窗口图标及安装器共用该产品图标，快捷方式和卸载入口引用安装的 EXE。ICO 像素由既有正式产品图 `apps/ios/Assets.xcassets/AppIcon.appiconset/Icon-1024.png` 分别以 LANCZOS 缩放生成，未重绘或修改 iOS 资源。普通构建直接使用已提交 ICO，无需 Python、浏览器或图像工具。
+
 ## 输入闭包与信任边界
 
-Windows 平台模块为 `music@0.8.0`、`cat@0.2.0`、`source@0.2.0`、`tmdb@0.1.0`，契约分别为 `music.script.v3`、`cat.script.v2`、`source.runtime.v2`、`tmdb.data.v1`；平台 manifest 与实际 entry、原生 describe 严格一致。通用默认 `createRuntime` 仍为原三模块。完整 HTTP 源码/JSON 不使用平台业务分片。
+Windows 平台模块按序为 `music@0.8.0`、`cat@0.2.0`、`source@0.2.0`、`pan@0.1.0`、`tmdb@0.1.0`、`douban@0.1.0`、`film@0.1.0`，契约分别为 `music.script.v3`、`cat.script.v2`、`source.runtime.v2`、`pan.runtime.v1`、`tmdb.data.v1`、`douban.data.v1`、`film.playback.v1`；平台 manifest 与实际 entry、原生 describe 严格一致。通用默认 `createRuntime` 仍为原三模块。完整 HTTP 源码/JSON 不使用平台业务分片。
 
-载荷包含公共 `app/` 入口及模块、`app/windows/` 两个包装文件，以及 `@meowfilm/{runtime-bridge,script-host,source-runtime}` 和根锁解析的运行依赖。`script-host/build/Release/` 的原生 addon、SDK、构建回执只按公共策略精确路径及哈希放行，不加载 WASM/asm.js 或任意附加 native binary。
+载荷包含公共 `app/` 入口及七模块、`app/windows/` 两个包装文件，以及 `@meowfilm/{runtime-bridge,script-host,source-runtime,pan-runtime,film-playback,film-rules}` 和根锁解析的运行依赖。`script-host/build/Release/` 的原生 addon、SDK、构建回执只按公共策略精确路径及哈希放行，不加载 WASM/asm.js 或任意附加 native binary。
 
 `scripts/script-host-native.json` 固定 QuickJS-NG、OpenSSL、zlib、Node headers、补丁、构建工具和输入；回执记录真实平台/架构、源码树、文件哈希和构建命令。Node-API ABI、来源、许可、SDK 和所有输入必须匹配；打包不重建、不安装、不修锁。中央许可及包内实际许可均按库存复制，见[许可说明](../licenses.md)。
 
@@ -28,6 +46,8 @@ Windows 平台模块为 `music@0.8.0`、`cat@0.2.0`、`source@0.2.0`、`tmdb@0.1
 - 新输出独占创建，完成前核对完整 byte/hash inventory 与输入未变；失败保留 failed 清单。manifest 不自哈希。
 
 客户端影视规则仍独立使用 `native/JavaScript` 和 `scripts/quickjs-native.json`，正常 .NET 增量构建生成 `meowfilm_js.dll`；它不是 Node addon，也不混入运行器闭包。固定规则程序嵌入 Capabilities，规则数据由客户端持有。
+
+视频内核同样不属于 Node 载荷。`MeowFilm.Media.csproj` 通过 `scripts/windows/build-video-kernel.ps1` 增量构建并复制私有 `libmeowfilm_ffmpeg_plugin.dll` 和 receipt；输入由 `apps/windows/native/VideoKernel/video-kernel.lock.json` 锁定 FFmpeg 8.1.2、VLC 3.0.24 SDK、libxml2、ABI／架构及配置。现有 libVLC 仍唯一解码／渲染，插件只解复用，具体见[原生媒体实现](media-playback.md)。原生 DLL 构建证据不代表合并后 Media C#、整 App、真实帧或最终分发闭包已验证；不得手动替换 DLL 或放宽运行器 native scope。
 
 ## 验证入口
 

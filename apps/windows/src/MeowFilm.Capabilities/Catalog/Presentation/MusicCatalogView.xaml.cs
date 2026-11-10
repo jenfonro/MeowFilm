@@ -443,8 +443,6 @@ public partial class MusicCatalogView : UserControl
     { if (Owner is { } owner && sender is Button { Tag: MusicCatalogCard card }) await owner.SimilarCatalogCardAsync(card); }
     private async void Album_Click(object sender, RoutedEventArgs e)
     { if (Owner is { } owner && sender is Button { Tag: MusicCatalogCard card }) await owner.AlbumCatalogCardAsync(card); }
-    private async void Heartbeat_Click(object sender, RoutedEventArgs e)
-    { if (Owner is { } owner && sender is Button { Tag: MusicCatalogCard card }) await owner.HeartbeatCatalogCardAsync(card); }
 }
 
 public sealed class MusicChannelSelectionConverter : IMultiValueConverter

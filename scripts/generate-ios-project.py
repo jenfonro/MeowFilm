@@ -16,6 +16,7 @@ NATIVE_JAVASCRIPT_LICENSE = "../../LICENSES/quickjs-native-MIT.txt"
 NATIVE_UNICODE_LICENSE = "../../LICENSES/Unicode-3.0.txt"
 PROJECT_NOTICES = "../../LICENSES/NOTICE.md"
 PROJECT_LICENSE = "../../LICENSES/GPL-3.0-only.txt"
+VIDEO_LICENSES = ("LGPL-2.1-only.txt", "LGPL-3.0-only.txt", "FFmpeg-LICENSE.md", "FFmpeg-IJG-NOTICE.txt")
 
 
 def source_paths(root, directories):
@@ -84,6 +85,7 @@ def generate():
         "unicodeLicense", "unicodeLicenseBuild",
         "projectNotices", "projectNoticesBuild", "projectLicense", "projectLicenseBuild",
         "runtimeTests", "runtimeTestGroup", "runtimeTestTarget", "runtimeTestSources",
+        "runtimeTestMovie", "runtimeTestMovieBuild", "runtimeTestResources",
         "runtimeTestConfigs", "runtimeTestDebug", "runtimeTestRelease", "runtimeTestDependency", "runtimeTestProxy",
     ]})
     libraries = ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowAccounts", "MeowUI", "MeowRuntime",
@@ -127,9 +129,16 @@ def generate():
     obj("projectLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = GPL-3.0-only.txt; path = {quoted(PROJECT_LICENSE)}; sourceTree = "<group>";')
     obj("projectLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['projectLicense']};")
     obj("nodeLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['nodeLicense']};")
+    video_license_references, video_license_builds = [], []
+    for filename in VIDEO_LICENSES:
+        reference, build = identifier(f"{product}:license:{filename}"), identifier(f"{product}:license-build:{filename}")
+        video_license_references.append(reference)
+        video_license_builds.append(build)
+        objects.append(f'\t\t{reference} = {{ isa = PBXFileReference; lastKnownFileType = text; name = {quoted(filename)}; path = {quoted("../../LICENSES/" + filename)}; sourceTree = "<group>"; }};')
+        objects.append(f"\t\t{build} = {{ isa = PBXBuildFile; fileRef = {reference}; }};")
     obj("app", f'isa = PBXFileReference; explicitFileType = wrapper.application; path = {name}.app; sourceTree = BUILT_PRODUCTS_DIR;')
     obj("productsGroup", f'isa = PBXGroup; children = ({ids["app"]}, {ids["uiTests"]}, {ids["runtimeTests"]},); name = Products; sourceTree = "<group>";')
-    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + [ids["assets"], ids["nodeFramework"], ids["scriptHostFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["javascriptLicense"], ids["unicodeLicense"], ids["projectNotices"], ids["projectLicense"], ids["uiTestGroup"], ids["runtimeTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
+    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + video_license_references + [ids["assets"], ids["nodeFramework"], ids["scriptHostFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["javascriptLicense"], ids["unicodeLicense"], ids["projectNotices"], ids["projectLicense"], ids["uiTestGroup"], ids["runtimeTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
     obj("sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = {seq(app_builds)}; runOnlyForDeploymentPostprocessing = 0;')
     package_ids, framework_ids = [], []
     for library in libraries:
@@ -140,19 +149,12 @@ def generate():
         objects.append(f"\t\t{dependency_id} = {{ isa = XCSwiftPackageProductDependency; package = {ids['package']}; productName = {library}; }};")
         objects.append(f"\t\t{build_id} = {{ isa = PBXBuildFile; productRef = {dependency_id}; }};")
     obj("frameworks", f"isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = {seq(framework_ids + [ids['nodeFrameworkLink']])}; runOnlyForDeploymentPostprocessing = 0;")
-    obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({ids["assetsBuild"]}, {ids["runtimePayloadBuild"]}, {ids["nodeLicenseBuild"]}, {ids["javascriptLicenseBuild"]}, {ids["unicodeLicenseBuild"]}, {ids["projectNoticesBuild"]}, {ids["projectLicenseBuild"]},); runOnlyForDeploymentPostprocessing = 0;')
+    obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = {seq([ids["assetsBuild"], ids["runtimePayloadBuild"], ids["nodeLicenseBuild"], ids["javascriptLicenseBuild"], ids["unicodeLicenseBuild"], ids["projectNoticesBuild"], ids["projectLicenseBuild"]] + video_license_builds)}; runOnlyForDeploymentPostprocessing = 0;')
     obj("package", 'isa = XCLocalSwiftPackageReference; relativePath = ../../native/MeowKit;')
     common_project = "CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0;"
     conditions = "FEATURE_MUSIC"
-    # Fixed-reference Kugou CSCC still requires this exact HTTP origin.
-    # Consent, path/method allowlisting and actual listening gates remain native
-    # responsibilities, not reasons to permit arbitrary insecure requests.
     app_info = plistlib.loads(plistlib.dumps(base_info))
-    transport = app_info.setdefault("NSAppTransportSecurity", {})
-    transport.setdefault("NSExceptionDomains", {})["d.kugou.com"] = {
-        "NSExceptionAllowsInsecureHTTPLoads": True,
-        "NSIncludesSubdomains": False,
-    }
+    app_info["NSAppTransportSecurity"] = {"NSAllowsArbitraryLoads": True}
     app_info["UIApplicationSceneManifest"] = {
         "UIApplicationSupportsMultipleScenes": False,
         "UISceneConfigurations": {
@@ -228,7 +230,10 @@ def generate():
     obj("uiTestTarget", f'isa = PBXNativeTarget; buildConfigurationList = {ids["uiTestConfigs"]}; buildPhases = ({ids["uiTestSources"]}, {ids["uiTestFrameworks"]},); buildRules = (); dependencies = ({ids["uiTestDependency"]},); name = {test_name}; productName = {test_name}; productReference = {ids["uiTests"]}; productType = "com.apple.product-type.bundle.ui-testing"; packageProductDependencies = {seq(ui_packages)};')
     # Hosted in the real App process: no package products are linked again, so
     # the App's single copy of each module (and of Node Mobile) is exercised.
-    obj("runtimeTestGroup", f'isa = PBXGroup; children = {seq(runtime_test_references)}; name = RuntimeTests; sourceTree = "<group>";')
+    obj("runtimeTestMovie", 'isa = PBXFileReference; lastKnownFileType = video.mp4; name = ordinary.mp4; path = "../../native/VideoKernel/Tests/VideoKernelTests/Fixtures/ordinary.mp4"; sourceTree = "<group>";')
+    obj("runtimeTestMovieBuild", f"isa = PBXBuildFile; fileRef = {ids['runtimeTestMovie']};")
+    obj("runtimeTestResources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({ids["runtimeTestMovieBuild"]},); runOnlyForDeploymentPostprocessing = 0;')
+    obj("runtimeTestGroup", f'isa = PBXGroup; children = {seq(runtime_test_references + [ids["runtimeTestMovie"]])}; name = RuntimeTests; sourceTree = "<group>";')
     obj("runtimeTests", f'isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = {runtime_test_name}.xctest; sourceTree = BUILT_PRODUCTS_DIR;')
     obj("runtimeTestSources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = {seq(runtime_test_builds)}; runOnlyForDeploymentPostprocessing = 0;')
     obj("runtimeTestProxy", f'isa = PBXContainerItemProxy; containerPortal = {ids["project"]}; proxyType = 1; remoteGlobalIDString = {ids["target"]}; remoteInfo = {name};')
@@ -249,7 +254,7 @@ def generate():
         active = ("DEBUG " if config == "Debug" else "") + conditions
         obj("runtimeTest" + config, f'isa = XCBuildConfiguration; name = {config}; buildSettings = {{ {runtime_test_settings} SWIFT_OPTIMIZATION_LEVEL = "{optimization}"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = {quoted(active)}; }};')
     obj("runtimeTestConfigs", f'isa = XCConfigurationList; buildConfigurations = ({ids["runtimeTestDebug"]}, {ids["runtimeTestRelease"]},); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
-    obj("runtimeTestTarget", f'isa = PBXNativeTarget; buildConfigurationList = {ids["runtimeTestConfigs"]}; buildPhases = ({ids["runtimeTestSources"]},); buildRules = (); dependencies = ({ids["runtimeTestDependency"]},); name = {runtime_test_name}; productName = {runtime_test_name}; productReference = {ids["runtimeTests"]}; productType = "com.apple.product-type.bundle.unit-test";')
+    obj("runtimeTestTarget", f'isa = PBXNativeTarget; buildConfigurationList = {ids["runtimeTestConfigs"]}; buildPhases = ({ids["runtimeTestSources"]}, {ids["runtimeTestResources"]},); buildRules = (); dependencies = ({ids["runtimeTestDependency"]},); name = {runtime_test_name}; productName = {runtime_test_name}; productReference = {ids["runtimeTests"]}; productType = "com.apple.product-type.bundle.unit-test";')
     test_targets = f' {ids["uiTestTarget"]}, {ids["runtimeTestTarget"]},'
     test_attributes = (
         f' TargetAttributes = {{ '

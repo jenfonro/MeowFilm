@@ -198,18 +198,17 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
         await gate.release()
         let history = try await service.playedSongs(); XCTAssertTrue(history.isEmpty)
     }
-    func testOrderBoundaryDoesNotRewriteQueueOrResetPosition() async throws {
+    func testListBoundaryWrapsAndResetsPosition() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, scripts: NativeMusicScriptFixture())
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
-        _ = try await service.updateSettings(.init(ifRevision: 0, mode: .order))
+        _ = try await service.updateSettings(.init(ifRevision: 0, mode: .loop))
         let id = try XCTUnwrap(state.currentId), options = (try await service.sourceAvailability(for: page.items[0].ref)).options
         let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: id,
                                                  selection: options[0].selection(quality: "128k"))
         _ = try await service.record(.init(attemptId: candidate.attemptId, occurrenceId: id, resourceId: candidate.resourceId, kind: .playing, position: 11))
-        let before = store.snapshot().0
         let result = try await service.advance(.previous, reason: .manual, expectedRevision: state.revision)
-        XCTAssertNil(result.selectedId); XCTAssertEqual(result.state.position, 11)
-        XCTAssertEqual(result.state.revision, state.revision); XCTAssertEqual(store.snapshot().0, before)
+        XCTAssertNotNil(result.selectedId); XCTAssertEqual(result.state.position, 0)
+        XCTAssertEqual(result.state.revision, state.revision + 1)
     }
 }

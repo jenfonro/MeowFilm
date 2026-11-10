@@ -304,14 +304,14 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
         f.player.onStop = { [weak model = f.model] stopped in
             model?.onPlaybackEvent(.init(attempt: .init(id: stopped.id, owner: "music", resourceID: stopped.resourceID),
                 kind: .stopped, snapshot: .init(owner: "music", resourceID: stopped.resourceID,
-                    phase: .idle, position: exitPosition, duration: 180), error: nil))
+                    phase: .idle, position: exitPosition, duration: 180), wantsPlayback: false, error: nil))
         }
 
         // Do not drain or yield between the first native playing event and the
         // synchronous native exit. Both must persist after selection retirement.
         f.model.onPlaybackEvent(.init(attempt: original, kind: .played,
             snapshot: .init(owner: "music", resourceID: original.resourceID, phase: .playing,
-                position: 37, duration: 180), error: nil))
+                position: 37, duration: 180), wantsPlayback: true, error: nil))
         f.model.stopForMediaHandoff()
         f.model.onOutputUnavailable() // A retained idle fact owner is not new playback work.
         XCTAssertEqual(f.player.stopped, [native])
@@ -351,7 +351,7 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
         XCTAssertFalse(f.player.resumed.contains(native), "Explicit replay must not raw-resume the retired native attempt")
         f.model.onPlaybackEvent(.init(attempt: resumed, kind: .played,
             snapshot: .init(owner: "music", resourceID: resumed.resourceID, phase: .playing,
-                position: exitPosition, duration: 180), error: nil))
+                position: exitPosition, duration: 180), wantsPlayback: true, error: nil))
         await f.model.flushPlaybackFacts()
         let resumedState = try await f.native.state(), resumedQueue = try await f.native.queue()
         let resumedKinds = await f.service.recordedKinds()
@@ -529,13 +529,17 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
     func testSystemPlayReopensEndedCurrentSongInsteadOfResumingTerminalAttempt() async throws {
         let f = try await fixture(paused: false), original = try attempt(f.model)
         let oldNative = try XCTUnwrap(f.player.attempts.first)
-        // Use the real queue's sequential tail, not a fake rejected ended fact,
-        // to prevent automatic navigation from replacing the terminal owner.
+        // All global loops now wrap. Retire automatic navigation as a newer
+        // source-return intent would, but keep the real accepted ended fact.
         await f.model.removeOccurrence("entry-2")
-        await f.model.updateSettings(.init(ifRevision: f.model.state.settingsRevision, mode: .order))
+        await f.model.updateSettings(.init(ifRevision: f.model.state.settingsRevision, mode: .loop))
         XCTAssertEqual(f.model.queue.map(\.id), ["entry-1"])
-        XCTAssertFalse(f.model.canNext)
-        try await fact(f, .ended, position: 180)
+        XCTAssertTrue(f.model.canNext)
+        let candidate = try XCTUnwrap(f.model.candidate)
+        f.model.onPlayback(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+            resourceId: candidate.resourceId, kind: .ended, position: 180, duration: 180))
+        f.model.retirePlaybackNavigation()
+        await f.model.flushPlaybackFacts()
         await f.model.flushNavigation()
         XCTAssertEqual(f.model.phase, .ended)
         XCTAssertEqual(f.model.activeNativeAttemptID, original.id)

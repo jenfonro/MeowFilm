@@ -227,6 +227,7 @@ public sealed record FilmCardItem(string Id, string Title, string Poster, string
     public bool HasTextBadge => TextBadge.Length > 0;
     public bool HasSubtitle => Subtitle.Length > 0;
     public FilmSearchContext? SearchContext { get; init; }
+    public FilmPlaybackRequest? PlaybackContext { get; init; }
 }
 
 internal enum FilmHomeSectionState

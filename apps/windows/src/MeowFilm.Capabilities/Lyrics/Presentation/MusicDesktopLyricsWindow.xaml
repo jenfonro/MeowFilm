@@ -1,0 +1,46 @@
+<Window x:Class="MeowFilm.Capabilities.MusicDesktopLyricsWindow" x:ClassModifier="internal"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Title="meowfilm 桌面歌词" Width="720" Height="112"
+ WindowStyle="None" ResizeMode="NoResize" WindowStartupLocation="Manual"
+ Topmost="True" ShowActivated="False" ShowInTaskbar="False" Focusable="False"
+ FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
+ Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+ Foreground="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"
+ UseLayoutRounding="True" SnapsToDevicePixels="True"
+ AutomationProperties.Name="桌面歌词">
+ <Window.Resources>
+  <ResourceDictionary>
+   <ResourceDictionary.MergedDictionaries>
+    <ResourceDictionary Source="/MeowFilm.Desktop;component/Theme.xaml"/>
+   </ResourceDictionary.MergedDictionaries>
+  </ResourceDictionary>
+ </Window.Resources>
+ <Border BorderBrush="{DynamicResource {x:Static SystemColors.WindowFrameBrushKey}}"
+         BorderThickness="1" Padding="22,16,10,16" MouseLeftButtonDown="Lyrics_MouseLeftButtonDown">
+  <Grid>
+   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="32"/></Grid.ColumnDefinitions>
+   <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+    <TextBlock x:Name="CurrentLine" Text="{Binding DesktopLyricText}" FontSize="24"
+               FontWeight="SemiBold" TextAlignment="Center" TextTrimming="CharacterEllipsis"
+               ToolTip="{Binding DesktopLyricText}"/>
+    <TextBlock x:Name="CurrentTranslation" Text="{Binding DesktopLyricTranslation}" FontSize="15"
+               TextAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,7,0,0"
+               ToolTip="{Binding DesktopLyricTranslation}">
+     <TextBlock.Style><Style TargetType="TextBlock">
+      <Style.Triggers>
+       <Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger>
+      </Style.Triggers>
+     </Style></TextBlock.Style>
+    </TextBlock>
+   </StackPanel>
+   <Button x:Name="CloseButton" Grid.Column="1" Width="30" Height="30" VerticalAlignment="Top"
+           Focusable="False" IsTabStop="False" Click="Close_Click"
+           Style="{StaticResource MeowFilm.QuietButton}" Padding="0"
+           AutomationProperties.Name="关闭桌面歌词" ToolTip="关闭桌面歌词">
+    <TextBlock Text="×" FontSize="20" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
+   </Button>
+  </Grid>
+ </Border>
+</Window>

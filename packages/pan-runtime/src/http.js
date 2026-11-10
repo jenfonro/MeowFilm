@@ -11,7 +11,7 @@ const decompressors = { gzip: createGunzip, deflate: createInflate, br: createBr
 function address(value, code = 'INVALID_REQUEST') {
   try {
     const url = new URL(value);
-    requireValue(['http:', 'https:'].includes(url.protocol) && !url.username && !url.password, code);
+    requireValue(['http:', 'https:'].includes(url.protocol), code);
     url.hash = '';
     return url;
   } catch { throw new PanError(code); }
@@ -219,16 +219,8 @@ export function createTransport({ timeout = 30000 } = {}) {
           let next;
           try { next = address(new URL(result.headers.location, url), 'UPSTREAM_FORMAT'); }
           catch { throw new PanError('UPSTREAM_FORMAT'); }
-          requireValue(!(url.protocol === 'https:' && next.protocol === 'http:'), 'UPSTREAM_HTTP');
           const discardBody = result.status === 303 && method !== 'HEAD' ||
             [301, 302].includes(result.status) && method === 'POST';
-          if (next.origin !== url.origin) {
-            requireValue(body === undefined || discardBody, 'UPSTREAM_HTTP');
-            // Only non-secret representation headers survive a change of origin.
-            const publicHeaders = new Set(['accept', 'accept-encoding', 'accept-language',
-              'user-agent', 'content-type', 'content-length']);
-            headers = Object.fromEntries(Object.entries(headers).filter(([name]) => publicHeaders.has(name)));
-          }
           if (discardBody) {
             method = 'GET';
             body = undefined;

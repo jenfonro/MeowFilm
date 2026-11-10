@@ -1,6 +1,6 @@
 # 音乐能力
 
-共同规则见[歌曲资料与智能播放](../common/music/smart-playback.md)、[页面数据请求](../common/pages/data-requests.md)和[平台客户端上下文](../common/music/platform-client-context.md)；本端按[逐端自查](../common/music/self-check.md)的报告格式验证，本文件保留 iOS 能力及实现差异。
+共同规则见[歌曲资料与智能播放](../common/music/smart-playback.md)、[播放来源、循环与续播](../common/music/playback-sessions.md)、[页面数据请求](../common/pages/data-requests.md)和[平台客户端上下文](../common/music/platform-client-context.md)；本端按[逐端自查](../common/music/self-check.md)的报告格式验证，本文件保留 iOS 能力及实现差异。
 
 ## 范围
 
@@ -32,12 +32,12 @@
   管理地址、类型、平台声明和检测由公共模块持有；iOS 管理与选源见[音源管理与选源](music-sources.md)。
 - 自动与手动调用继续核对 installation、generation、site 和录音；HTTP 音频升级 HTTPS，不新增 ATS 豁免，实测音质不由请求推断。
 - 原生歌词优先；仅 `wy`、`kw`、`mg` 的原生结果为空时，依安装顺序尝试同平台、已启用并声明 `lyric` 的脚本。`tx`／`kg` 保持原生歌词；原生错误不视为空结果。LX `search`／`musicSearch` 无统一结果契约，本端不接入原生搜索。
-- App 内嵌 Node Mobile 18.20.4、`MeowScriptHost.framework` 与公共运行器，实际 App entry 显式装配 music@0.8.0／music.script.v3、cat@0.2.0／cat.script.v2、source@0.2.0／source.runtime.v2、tmdb@0.1.0／tmdb.data.v1 四模块；通用默认仍为前三模块，不装配 douban／pan。App 的 `RuntimeSession` 唯一持有运行器，音乐、猫源与 [TMDB 搜索／设置／图片](film-search.md)借用同一个 `RuntimeHTTPClient`，每个进程只启动一次 Node。LX／source 共享原生绑定并逐实例使用独立 QuickJS Runtime／线程，Cat 使用独立 Node Worker，不嵌套 WASM。冷启动恢复猫源及音乐目录，音乐首次 invoke／resolve／check 才惰性加载；普通来源读取不调用 enable，也不重建 failed 实例。候选与调用保留内容身份及真实执行代次检查，不把 idle 伪装成 ready。
+- App 内嵌 Node Mobile 18.20.4、`MeowScriptHost.framework` 与公共运行器，实际 App entry 按序显式装配 music@0.8.0／music.script.v3、cat@0.2.0／cat.script.v2、source@0.2.0／source.runtime.v2、pan@0.1.0／pan.runtime.v1、tmdb@0.1.0／tmdb.data.v1、douban@0.1.0／douban.data.v1、film@0.1.0／film.playback.v1 七模块；通用默认仍为前三模块。App 的 `RuntimeSession` 唯一持有运行器，音乐、猫源与 [TMDB 搜索／设置／图片](film-search.md)借用同一个 `RuntimeHTTPClient`，每个进程只启动一次 Node。LX／source 共享原生绑定并逐实例使用独立 QuickJS Runtime／线程，Cat 使用独立 Node Worker，不嵌套 WASM。冷启动恢复猫源及音乐目录，音乐首次 invoke／resolve／check 才惰性加载；普通来源读取不调用 enable，也不重建 failed 实例。候选与调用保留内容身份及真实执行代次检查，不把 idle 伪装成 ready。
 - 启动失败不阻断原生官方业务；关闭／不可恢复退出后本次运行内脚本不可用，不自动重启。音乐关闭取消并排空自身调用，通过 `music.script.close` 的真实终态确认收口，不关闭共享 HTTP 客户端。App 最后关闭运行器 listener、工作线程及启动通道，并等待 `node_start` 返回；HTTP 成功回执本身不代表 Node 已退出。风险及独立诊断工具见[运行底座预检](runtime-preflight.md)。
 
 ## 播放与音质
 
-- 网易云漫游、心动和独立普通队列推荐的入口、请求、续播、返回与来源资格见[推荐接入](music-recommendations.md)。
+- 全局单曲／列表／随机循环与来源、自动续播独立；网易云私人 FM、相似艺人／歌曲、心动、搜索单曲候选及歌单主动推荐的入口、请求、续播、返回与资格见[推荐接入](music-recommendations.md)。
 - 完整播放器的星光唱片按 iWebPlus 原始矢量绘制：玻璃与珍珠反光、10 条细环、340 个固定颗粒与 24 个独立星芒；九色材质作用于盘面底色和反射，真实封面不变色。封面直径为盘面的 54.8%，高光与星芒从径向渐变的 39%–40% 处渐显，径向长度按中心到角落计算。
 - 无封面时，盘芯采用浅主题色三段渐变、方向反光、分区细唱槽与小尺寸中心压纹/轴点，不使用大块纯色标签或全盘等距靶环。外盘保留主题玻璃底材与珠光，浅色内缘向页面主题色提亮、以亮珠光分隔，不叠封面内环投影。随九色主题切换，加载真实封面后不再叠加盘芯，透明图片直接合成，底材裁在封面外、外投影仅限盘外。盘面纹理、盘芯或封面、星芒位置共同旋转，星芒各自明暗与缩放；外层反光、底色和投影保持固定，唱臂仅执行落针／抬针。切主题或更新封面不重置转动相位，暂停与不可见时同时停住转子和星芒，恢复后续接。
 - 唱臂使用原始 80×320 坐标中的矩形支座、珠光杆体和旋转 32° 的针头；整体绕 `(58,24)` 从暂停 0° 转至播放 10°，保持相对唱片的固定位置。纹理按尺寸重绘，32 秒一圈的转子与星芒沿用 Core Animation 的暂停／恢复，不逐帧生成颗粒；短屏和完整歌词页继续沿用既有布局与可见性规则。
@@ -96,7 +96,7 @@
 - 曲库使用当前紧凑歌曲及当前曲库结构。歌曲必须是包含上述当前字段的对象（`cover_url` 可选）；缺少必要字段明确失败，不补 ID、名称或来源，`sources=[]` 表示合法本地歌曲。平台原始响应通过专用转换入口进入当前模型。持久文档任一区域出现秘密字段名即按损坏拒绝。
 - `cleanSong` 仅提取当前歌曲字段；完整合法歌曲附加的无关字段不参与转换、不持久化，也不影响歌曲 ID、来源及录音元信息。字段类型、来源一致性、秘密和瞬态字段规则，以及来源数量、时长和长度边界仍按当前契约校验。
 - collection 与 `sources` 来源行使用封闭字段集合，未知字段会被拒绝。同步 ledger 的 `automatic` 为必填；整份 ledger 不存在时创建当前状态且默认不自动远端写入。绑定 `map` 固定为 native／occurrence ID 到 song ID，并校验歌曲引用。
-- 相似模式会话的当前 schema 为 2，平台与 source ID 使用当前字段，队列身份与授权按当前契约校验；已有心动／SIMILAR 恢复保留队列与开关，不恢复推荐反馈 proof，独立普通推荐会话不持久化。无效持久文档明确失败并保留原文件；可淘汰缓存按各自的未命中规则处理，不清扫用户数据。
+- 特殊来源会话的当前 schema 为 2，平台与 source ID 使用当前字段，队列身份与授权按当前契约校验；心动、相似及主动推荐恢复保留队列与适用的续播状态，不恢复推荐反馈 proof，搜索自动推荐候选不持久化。私人 FM 选择按本机网易账号保存，不恢复旧循环值。无效持久文档明确失败并保留原文件；可淘汰缓存按各自的未命中规则处理，不清扫用户数据。
 - `MusicServing` 要求当前来源可用性与播放元数据契约；来源列表由 `sourceAvailability` 提供。播放 owner 消费带身份的 event／fact。
 
 ## 平台客户端上下文

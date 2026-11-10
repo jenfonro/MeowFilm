@@ -110,34 +110,6 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
         let alert = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
         let occurrence = content.model.current?.id, access = content.model.accountAccessGeneration
         let displayed = content.fence, account = content.model.searchAccessGeneration
-        let command = content.model.recommendationCommandID
-        let heartbeat = UIAlertAction(title: "当前歌曲心动", style: .default) { [weak self] _ in
-            guard let self, self.isPageVisible, self.content.model.recommendationCommandID == command else { return }
-            self.content.startCurrentHeartbeat(expected: displayed)
-        }
-        heartbeat.isEnabled = content.model.canEnterSimilarMode && !content.model.isChangingSimilarMode &&
-            !content.model.isChangingQueueRecommendations
-        alert.addAction(heartbeat)
-        if content.model.similarMode?.active == true || content.model.isChangingSimilarMode {
-            let snapshot = content.model.similarMode?.id
-            alert.addAction(UIAlertAction(title: "返回原队列", style: .default) { [weak self] _ in
-                guard let self, self.isPageVisible, self.content.model.recommendationCommandID == command else { return }
-                self.content.returnFromRecommendations(snapshot: snapshot, expected: displayed)
-            })
-        }
-        if let snapshot = content.model.similarMode, snapshot.active {
-            alert.addAction(UIAlertAction(title: snapshot.continueEnabled ? "关闭推荐续播" : "开启推荐续播", style: .default) {
-                [weak self] _ in
-                guard let self, self.isPageVisible, self.content.model.recommendationCommandID == command else { return }
-                self.content.setSimilarContinue(!snapshot.continueEnabled, snapshot: snapshot.id, expected: displayed)
-            })
-        } else if let snapshot = content.model.queueRecommendations {
-            alert.addAction(UIAlertAction(title: snapshot.continueEnabled ? "关闭推荐续播" : "开启推荐续播", style: .default) {
-                [weak self] _ in
-                guard let self, self.isPageVisible, self.content.model.recommendationCommandID == command else { return }
-                self.content.setQueueRecommendationContinue(!snapshot.continueEnabled, snapshot: snapshot.id, expected: displayed)
-            })
-        }
         alert.addAction(UIAlertAction(title: "播放倍速", style: .default) { [weak self, weak alert] _ in
             guard let self, let alert else { return }
             self.dismissMenu(alert) { self.showRates() }

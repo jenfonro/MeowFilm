@@ -4,12 +4,6 @@ import Foundation
 import MeowMusicFeature
 
 extension NativeMusicService {
-    var recommendationPendingTail: String? {
-        if let session = similarMode.active, session.continueEnabled, session.pending != nil { return session.pendingTail }
-        if let item = similarMode.queue, item.continueEnabled, item.pending != nil { return item.pendingTail }
-        return nil
-    }
-
     func nextID(_ d: MusicDocument, direction: MusicDirection, reason: MusicAdvanceReason = .manual, preview: Bool = false) -> String? {
         let q = d.queue, rows = q["entries"].array, current = q["currentId"].string, mode = d.playback["mode"].int
         let failed = Set(q["failed"].strings)
@@ -18,8 +12,6 @@ extension NativeMusicService {
         if rows.isEmpty || valid.isEmpty { return nil }
         if direction == .previous && mode == 2 { return q["history"].strings.reversed().first { $0 != current && validSet.contains($0) } }
         if direction == .next, let priority = q["priority"].strings.first(where: validSet.contains) { return priority }
-        if direction == .next, mode == 1, recommendationPendingTail == current,
-           rows.last?["id"].string == current { return nil }
         if direction == .next && mode == 3 && reason == .ended && valid.contains(current) { return current }
         if mode == 2 {
             let options = valid.filter { $0 != current }
@@ -32,7 +24,6 @@ extension NativeMusicService {
         let start = rows.firstIndex { $0["id"].string == current } ?? (step == 1 ? -1 : rows.count)
         for offset in 1...rows.count {
             var i = start + offset * step
-            if mode == 0 && !(0..<rows.count).contains(i) { return nil }
             i = (i % rows.count + rows.count) % rows.count
             let id = rows[i]["id"].string
             if validSet.contains(id) { return id }
@@ -41,10 +32,10 @@ extension NativeMusicService {
     }
     func stateDTO(_ d: MusicDocument) -> MusicPlaybackState {
         let policy = MusicModel.policy(d.playback), id = d.queue["currentId"].string
+        let source = d.queue["source"]
+        let sourceTitle = source["title"].string.isEmpty ? source["sourceTitle"].string : source["title"].string
         let next = nextID(d, direction: .next, preview: true)
         let previous = nextID(d, direction: .previous, preview: true)
-        let waitingForRecommendations = recommendationPendingTail == id &&
-            d.queue["entries"].array.last?["id"].string == id && [0, 1].contains(d.playback["mode"].int)
         // Availability may inspect a deterministic candidate, but a visual
         // preview must never pretend it is shuffle's eventual random result.
         let priority = Set(d.queue["priority"].strings)
@@ -56,11 +47,11 @@ extension NativeMusicService {
             lyricsEnabled: d.playback["lyricsEnabled"].bool, showTranslation: d.playback["showTranslation"].bool,
             officialSources: MusicModel.officialSources(d.playback), currentId: id.isEmpty ? nil : id, total: d.queue["entries"].array.count,
             position: d.playback["position"]["seconds"].number,
-            canNext: next != nil || waitingForRecommendations, canPrevious: previous != nil,
+            canNext: next != nil, canPrevious: previous != nil,
             nextPreviewID: randomNext ? nil : next, previousPreviewID: previous,
-            fmNextPreviewID: fmNext(d, direction: .next), fmPreviousPreviewID: fmNext(d, direction: .previous),
             sourceCollectionID: d.queue["source"]["id"].string.isEmpty ? nil : d.queue["source"]["id"].string,
-            requestQuality: d.playback["requestQuality"].isString ? d.playback["requestQuality"].string : "flac")
+            requestQuality: d.playback["requestQuality"].isString ? d.playback["requestQuality"].string : "flac",
+            queueSourceTitle: sourceTitle.isEmpty ? nil : sourceTitle)
     }
     public func state() async throws -> MusicPlaybackState { stateDTO(try read()) }
     public func queue() async throws -> MusicQueueSnapshot {
@@ -136,7 +127,8 @@ extension NativeMusicService {
         case .replace, .collection: similarChange = .replace
         case .clear: similarChange = .clear
         case .select: similarChange = .select
-        case .append, .remove, .reorder: similarChange = .edit
+        case .append(_, let next): similarChange = next ? .insertNext : .append
+        case .remove, .reorder: similarChange = .edit
         }
         let result = try similarQueueTransaction(["queue", "playback", "history"]) { d -> MusicPlaybackState in
             try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
@@ -153,12 +145,12 @@ extension NativeMusicService {
                 try musicRequire(!refs.isEmpty && refs.indices.contains(index))
                 let songs = try refs.map(resolved)
                 let rows = try makeEntries(songs, queue: &d.queue, context: .obj([
-                    ("sourceTitle", .string("搜索")), ("sourceType", .string("search"))
+                    ("sourceTitle", .string("歌曲")), ("sourceType", .string("song"))
                 ]))
                 changesCurrent = true
                 archive(old, into: &d); d.queue["entries"] = .array(rows); d.queue["currentId"] = rows[index]["id"]
                 for key in ["history", "priority", "failed"] { d.queue[key] = .array([]) }
-                d.queue["source"] = .null
+                d.queue["source"] = .obj([("sourceType", .string("song")), ("sourceTitle", .string("歌曲"))])
             case .collection(let id, let revision, let index):
                 changesCurrent = true
                 let c = try collection(id, d)
@@ -241,6 +233,7 @@ extension NativeMusicService {
                     d.queue["history"] = .strings(history)
                 }
                 select(id, queue: &d.queue, remember: !(direction == .previous && d.playback["mode"].int == 2))
+                similarWillChangeQueue(.select, queue: &d.queue)
             }
             d.resetPosition(); d.queue["revision"] = .n(expectedRevision + 1)
             return .init(state: stateDTO(d), selectedId: id)
@@ -279,6 +272,7 @@ extension NativeMusicService {
             if let value = change.showTranslation { d.playback["showTranslation"] = .bool(value) }
             d.playback["revision"] = .n(change.ifRevision + 1); return stateDTO(d)
         }
+        if change.mode != nil { try? similarBoundary(); try? queueRecommendationBoundary(); try? fmBoundary() }
         if change.lyricsEnabled == false { lyricEpoch = UUID(); cancelWork("lyrics") }
         return result
     }

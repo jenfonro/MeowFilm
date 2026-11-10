@@ -1,9 +1,11 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -22,6 +24,8 @@ public static class FilmPresentationTests
             () => MusicQualityConsumerTests.Sta(HomePresentation));
         yield return new("film-presentation: more opens data while all cards open the playback page",
             () => MusicQualityConsumerTests.Sta(DataNavigation));
+        yield return new("film-presentation: classified list error stays in the third row and real source selection recovers it",
+            () => MusicQualityConsumerTests.Sta(PlaybackListFailure));
     }
 
     private static async Task SkeletonPresentation()
@@ -209,7 +213,9 @@ public static class FilmPresentationTests
     private static async Task DataNavigation()
     {
         var source = new ImmediateFilmSource();
-        await using var module = new FilmCapability(source);
+        await using var runtime = new FilmRuntimeProbe();
+        await using var module = new FilmCapability(source, new FilmPlaybackSession(runtime.CaptureConnectionAsync, new FilmNativeProbe()),
+            new FilmLibrary(new FilmMemoryStore()));
         await module.NavigateAsync(FilmCapability.HomeRoute, default);
         var routes = new List<string>();
         module.NavigationRequested += (_, args) => routes.Add(args.Route);
@@ -234,7 +240,7 @@ public static class FilmPresentationTests
             Check(routes.SequenceEqual([FilmCapability.DataRoute, FilmCapability.PlaybackRoute]),
                 "more and cards request their distinct internal destinations");
             Check(module.ActiveData.Key == "movie" &&
-                ReferenceEquals(module.Playback?.Item, homeItem),
+                module.Playback?.Item.Id == homeItem.Id && module.Playback.Request.Target.Id == homeItem.PlaybackContext!.Target.Id,
                 "both entry points retain their data and playback contexts");
 
             await module.NavigateAsync(FilmCapability.DataRoute, default);
@@ -291,7 +297,7 @@ public static class FilmPresentationTests
             ((Button)dataCard.FindName("HitButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Drain();
             Check(routes.Count == routeCount + 1 && routes[^1] == FilmCapability.PlaybackRoute &&
-                ReferenceEquals(module.Playback?.Item, dataItem),
+                module.Playback?.Item.Id == dataItem.Id && module.Playback.Request.Target.Id == dataItem.PlaybackContext!.Target.Id,
                 "data cards use the same internal playback destination and retain the selected id");
 
             pageAction.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
@@ -351,6 +357,79 @@ public static class FilmPresentationTests
             window.Content = null;
             window.Close();
         }
+    }
+
+    private static async Task PlaybackListFailure()
+    {
+        await using var rig = new FilmPlaybackRig();
+        await rig.OpenAsync();
+        rig.Runtime.Change(root =>
+        {
+            root["sources"] = JsonNode.Parse(FilmJson.Encode(new[]
+            {
+                new { id = "failed-source", title = "失败来源" }, new { id = "valid-source", title = "有效来源" }
+            }).GetRawText());
+            root["browsing"] = JsonNode.Parse(FilmJson.Encode(new
+            {
+                sourceId = "failed-source", season = 1, loading = false, error = (string?)null, lines = Array.Empty<object>(),
+                episodes = new[] { new { id = "old", candidateId = "old", name = "旧集数", season = 1, episode = 1 } },
+                originalEpisodes = new[] { new { id = "old", candidateId = "old", name = "旧集数", path = "/old.mp4" } }
+            }).GetRawText());
+            root["candidates"] = JsonNode.Parse(FilmJson.Encode(new[] { FilmPlaybackFixture.Candidate("old") }).GetRawText());
+        });
+        await Until(() => rig.Page.SourceId == "failed-source" && rig.Page.Episodes.Count == 1,
+            "the initial source and its episode reach the playback page");
+        var view = new FilmPlaybackView { DataContext = rig.Page };
+        var window = WindowFor(view, 1150, 850);
+        try
+        {
+            window.Show(); window.UpdateLayout(); await Drain();
+            var source = (ComboBox)view.FindName("SourcePicker");
+            var status = Visuals(view).OfType<TextBlock>().Single(text =>
+                BindingOperations.GetBindingExpression(text, TextBlock.TextProperty)?.ParentBinding.Path?.Path == "ListStatus");
+            var listRegion = (Grid)status.Parent;
+            var controlRows = (StackPanel)((DockPanel)source.Parent).Parent;
+            var body = (Panel)listRegion.Parent;
+            rig.Runtime.Change(root => root["browsing"]!["error"] = "UPSTREAM_FORMAT");
+            await Until(() => rig.Page.ListStatus == "上游数据格式错误",
+                "the upstream format failure reaches the classified list status");
+            window.UpdateLayout(); await Drain();
+            Check(listRegion.IsVisible && status.Text == "上游数据格式错误" &&
+                status.HorizontalAlignment == HorizontalAlignment.Center && status.VerticalAlignment == VerticalAlignment.Center &&
+                status.TextAlignment == TextAlignment.Center &&
+                ReferenceEquals(controlRows.Parent, body) && controlRows.Children.Count == 2 &&
+                body.Children.IndexOf(listRegion) == body.Children.IndexOf(controlRows) + 1 &&
+                rig.Page.Episodes.Count == 0 && rig.Page.Candidates.Count == 0 && !rig.Page.CanBrowseRaw,
+                "the classified error is centered after the source and season rows, not beside them or over the whole page");
+            Check(source.IsEnabled && source.Items.Count == 3 && rig.Page.Sources.Any(choice => choice.Id == "valid-source"),
+                "the failed third row leaves exact source choices enabled");
+            int before = rig.Runtime.Calls.Count(call => call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == "browse");
+            rig.Runtime.Intercept = (method, input, _) =>
+            {
+                if (method != "film.session.command" || FilmJson.Text(input, "action") != "browse" ||
+                    FilmJson.Text(input, "sourceId") != "valid-source")
+                    return Task.FromResult(rig.Runtime.Handle(method, input));
+                rig.Runtime.Change(root =>
+                {
+                    root["browsing"]!["sourceId"] = "valid-source"; root["browsing"]!["error"] = null;
+                    root["browsing"]!["episodes"] = JsonNode.Parse(FilmJson.Encode(new[]
+                    { new { id = "recovered", candidateId = "recovered", name = "恢复集数", season = 1, episode = 1 } }).GetRawText());
+                    root["browsing"]!["originalEpisodes"] = JsonNode.Parse(FilmJson.Encode(new[]
+                    { new { id = "recovered", candidateId = "recovered", name = "恢复集数", path = "/recovered.mp4" } }).GetRawText());
+                    root["candidates"] = JsonNode.Parse(FilmJson.Encode(new[] { FilmPlaybackFixture.Candidate("recovered") }).GetRawText());
+                });
+                return Task.FromResult(FilmRuntimeProbe.Ok(rig.Runtime.Value));
+            };
+            source.SelectedItem = rig.Page.Sources.Single(choice => choice.Id == "valid-source");
+            await Until(() => rig.Page.SourceId == "valid-source" && rig.Page.Episodes.Count == 1 && !listRegion.IsVisible,
+                "the explicitly selected source restores its episode and hides the list status");
+            Check(rig.Page.ListError == "" && !rig.Page.ShowListStatus && rig.Page.Candidates.Single().Id == "recovered" &&
+                rig.Page.CanBrowseRaw && source.IsEnabled &&
+                rig.Runtime.Calls.Count(call => call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == "browse") == before + 1 &&
+                FilmJson.Text(rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "browse").Parameters, "sourceId") == "valid-source",
+                "only explicit source selection requests its exact identity and restores real episodes and raw-directory access");
+        }
+        finally { view.DataContext = null; window.Content = null; window.Close(); }
     }
 
     private static Window WindowFor(FrameworkElement content, double width, double height)
@@ -433,11 +512,9 @@ public static class FilmPresentationTests
             cancellationToken.ThrowIfCancellationRequested();
             Calls.Add(new(section, start, limit));
             IReadOnlyList<FilmCardItem> items = Enumerable.Range(start + 1, limit)
-                .Select(index => new FilmCardItem(
-                    $"{section.Key}:{index}",
-                    $"{section.Title} {index}",
-                    "",
-                    index == 1 ? "8.6" : ""))
+                .Select(index => FilmPlaybackFixture.Card(section.Kind == "movie" ? "movie" : "tv", 100 + index,
+                    $"{section.Title} {index}", "") with
+                    { Id = $"{section.Key}:{index}", Score = index == 1 ? "8.6" : "" })
                 .ToArray();
             return Task.FromResult(items);
         }

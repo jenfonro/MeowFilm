@@ -224,21 +224,21 @@ public final class MusicPlayerContentModel {
         }
     }
 
+    func setFMContinue(_ enabled: Bool, session: UUID, expected: MusicReferencePlayerFence) {
+        runModeCommand(expected: expected) { await $0.setFMContinue(enabled, sessionID: session) }
+    }
+
+    func startSongRecommendations(expected: MusicReferencePlayerFence) {
+        runModeCommand(expected: expected) { model in
+            guard let occurrence = expected.occurrence else { return }
+            await model.startSongRecommendations(occurrenceID: occurrence, expectedRevision: expected.queueRevision)
+        }
+    }
+
     func startCurrentHeartbeat(expected: MusicReferencePlayerFence) {
         runModeCommand(expected: expected) { model in
             guard let occurrence = expected.occurrence else { return }
             await model.startCurrentHeartbeat(occurrenceID: occurrence, expectedRevision: expected.queueRevision)
-        }
-    }
-
-    func toggleHeartbeat(snapshot: UUID?, expected: MusicReferencePlayerFence) {
-        runModeCommand(expected: expected) { model in
-            guard !model.isFMActive, model.similarMode?.id == snapshot else { return }
-            if model.similarMode?.active == true, model.similarMode?.provider == .heartbeat {
-                await model.exitSimilarMode()
-            } else if let occurrence = expected.occurrence {
-                await model.startCurrentHeartbeat(occurrenceID: occurrence, expectedRevision: expected.queueRevision)
-            }
         }
     }
 

@@ -1,8 +1,9 @@
 import http from 'node:http';
 import https from 'node:https';
 import { randomBytes } from 'node:crypto';
-import { gunzip, inflate, brotliDecompress } from 'node:zlib';
-import { promisify } from 'node:util';
+import { Writable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
 import { fault, requireValue, safeError } from './errors.js';
 
 const knownOptions = new Set([
@@ -10,11 +11,11 @@ const knownOptions = new Set([
 ]);
 // LX request does not consume retry; accept it without replaying user requests.
 const forbiddenHeaders = new Set([
-  'host', 'content-length', 'transfer-encoding', 'upgrade', 'trailer',
+  'content-length', 'transfer-encoding', 'upgrade', 'trailer',
   'proxy-authorization', 'proxy-connection', 'te',
 ]);
 const redirects = new Set([301, 302, 303, 307, 308]);
-const decompressors = { gzip: promisify(gunzip), deflate: promisify(inflate), br: promisify(brotliDecompress) };
+const decompressors = { gzip: createGunzip, deflate: createInflate, br: createBrotliDecompress };
 
 function buffer(value) {
   if (typeof value === 'string') return Buffer.from(value);
@@ -101,30 +102,53 @@ async function requestOnce(url, { method, headers, body }, signal, follow) {
     return resource;
   };
   try {
-    return await new Promise((resolve, reject) => {
+    const response = await new Promise((resolve, reject) => {
       const transport = url.protocol === 'https:' ? https : http;
-      const request = own(transport.request(url, { method, headers, signal, agent: false }, response => {
-        own(response);
-        response.on('error', reject);
-        response.once('aborted', () => reject(signal.aborted
-          ? signal.reason ?? fault('CANCELLED') : fault('NETWORK_ERROR')));
-        if (follow && redirects.has(response.statusCode) && response.headers.location) {
-          // Finally closes this hop without collecting a redirect body.
-          resolve({ statusCode: response.statusCode, headers: response.headers, body: Buffer.alloc(0) });
-          return;
-        }
-        const chunks = [];
-        response.on('data', chunk => chunks.push(chunk));
-        response.once('end', () => resolve({
-          statusCode: response.statusCode, statusMessage: response.statusMessage,
-          headers: response.headers, body: Buffer.concat(chunks),
-        }));
+      const request = own(transport.request(url, { method, headers, signal, agent: false }, incoming => {
+        own(incoming);
+        // Cover the interval between headers and installation of the pipeline.
+        incoming.on('error', () => {});
+        resolve(incoming);
       }));
       request.once('socket', socket => own(socket));
       request.on('error', error => reject(signal.aborted
         ? signal.reason ?? fault('CANCELLED') : error));
       request.end(body);
     });
+    if (signal.aborted) throw signal.reason ?? fault('CANCELLED');
+    if (follow && redirects.has(response.statusCode) && response.headers.location) {
+      // Finally closes this hop without collecting a redirect body.
+      return { statusCode: response.statusCode, headers: response.headers, body: Buffer.alloc(0) };
+    }
+    const responseHeaders = { ...response.headers };
+    const encodings = method === 'HEAD' || [204, 205, 304].includes(response.statusCode) ? [] :
+      String(response.headers['content-encoding'] ?? 'identity')
+        .split(',').map(value => value.trim().toLowerCase()).reverse();
+    const streams = [response];
+    for (const encoding of encodings) {
+      if (encoding === 'identity') continue;
+      requireValue(Object.hasOwn(decompressors, encoding), 'UNSUPPORTED_OPTION');
+      streams.push(own(decompressors[encoding]()));
+    }
+    if (streams.length > 1) {
+      delete responseHeaders['content-encoding'];
+      delete responseHeaders['content-length'];
+    }
+    const chunks = [];
+    let length = 0;
+    streams.push(own(new Writable({
+      write(chunk, _encoding, callback) {
+        length += chunk.length;
+        chunks.push(chunk);
+        callback();
+      },
+    })));
+    // The complete-response API retains decoded bytes only; compressed input
+    // and each decoder stay streaming and cancellable, including after EOF.
+    await pipeline(streams, { signal });
+    if (signal.aborted) throw signal.reason ?? fault('CANCELLED');
+    return { statusCode: response.statusCode, statusMessage: response.statusMessage,
+      headers: responseHeaders, body: chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, length) };
   } finally {
     for (const resource of resources) resource.destroy();
     await Promise.all(closing);
@@ -133,7 +157,7 @@ async function requestOnce(url, { method, headers, body }, signal, follow) {
 
 /**
  * Optional, explicitly injected adapter for metadata HTTP, not a media relay.
- * Validate HTTP(S) on every redirect and never forward credentials cross-origin.
+ * Validate HTTP(S) on every redirect and preserve explicit caller headers.
  */
 export function createNodeNetwork({
   maxRedirects = 5, ...unsupported
@@ -155,11 +179,6 @@ export function createNodeNetwork({
         if (follow > 0 && redirects.has(response.statusCode) && response.headers.location) {
           requireValue(hop < follow, 'RESOURCE_LIMIT');
           const next = new URL(validateURL(new URL(response.headers.location, url).href));
-          if (next.origin !== url.origin) {
-            request = { ...request, headers: { ...request.headers } };
-            delete request.headers.authorization;
-            delete request.headers.cookie;
-          }
           if ((response.statusCode === 303 && request.method !== 'HEAD') ||
               ([301, 302].includes(response.statusCode) && request.method === 'POST')) {
             request = { method: 'GET', headers: { ...request.headers }, body: undefined };
@@ -168,17 +187,6 @@ export function createNodeNetwork({
           }
           url = next;
           continue;
-        }
-        const encoding = String(response.headers['content-encoding'] ?? 'identity').toLowerCase();
-        const decompressor = Object.hasOwn(decompressors, encoding) ? decompressors[encoding] : undefined;
-        if (encoding !== 'identity') {
-          requireValue(decompressor, 'UNSUPPORTED_OPTION');
-          try { response.body = await decompressor(response.body); }
-          catch (error) {
-            throw fault('NETWORK_ERROR');
-          }
-          delete response.headers['content-encoding'];
-          delete response.headers['content-length'];
         }
         if (signal.aborted) throw signal.reason ?? fault('CANCELLED');
         return { ...response, url: url.href };

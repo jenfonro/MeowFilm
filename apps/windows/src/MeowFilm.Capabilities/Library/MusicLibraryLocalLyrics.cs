@@ -6,12 +6,12 @@ public sealed partial class MusicLibraryOwner
 {
     private const string LocalLyricsArea = "native-local-lyrics";
     private JsonObject LocalLyrics(JsonObject doc) => Value(doc, LocalLyricsArea) as JsonObject ??
-        LJ.Obj(("schema", 1), ("items", new JsonArray()));
+        LJ.Obj(("schema", 2), ("items", new JsonArray()));
 
     private static void ValidateLocalLyrics(JsonObject state)
     {
         LJ.Fields(state, "schema items", "schema items");
-        LJ.Require(LJ.I(state["schema"]) == 1);
+        LJ.Require(LJ.I(state["schema"]) == 2);
         var rows = LJ.Array(state["items"]);
         LJ.Require(rows.Count <= 64 && LJ.Bytes(state).Length <= 2 * 1024 * 1024, "LIMIT");
         var identities = new HashSet<string>(StringComparer.Ordinal);

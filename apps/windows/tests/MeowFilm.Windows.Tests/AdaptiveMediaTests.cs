@@ -15,18 +15,97 @@ using MeowFilm.Media;
 namespace MeowFilm.Windows.Tests;
 
 // Only generated MPEG audio/TS and PCM/fMP4, literal loopback fixtures and real libVLC dummy.
-// No file media, Node, subprocess encoder, public origin, credentials or external account.
+// No file media, Node, subprocess encoder, public origin, real credentials or external account.
 public static class AdaptiveMediaTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (string format in new[] { "hls-ts", "dash-list" })
+            foreach (bool explicitHeader in new[] { false, true })
+                yield return Case($"userinfo root redirect and child decoding {format}; explicit Authorization={explicitHeader}", async () =>
+                {
+                    string basic = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("fixture user:p@ss:word"));
+                    await using var fixture = new Origin { Credential = explicitHeader ? "Fixture explicit-only-value" : basic };
+                    string root = format == "hls-ts" ? "/root.m3u8" : "/root.mpd";
+                    string entry = format == "hls-ts" ? "/entry.m3u8" : "/entry.mpd";
+                    fixture.Route = path => path == entry ? Reply.Redirect(root) : MediaRoute(path, format, 40);
+                    var address = new Uri($"http://fixture%20user:p%40ss%3Aword@127.0.0.1:{fixture.Base.Port}{entry}");
+                    await using var player = New();
+                    if (explicitHeader) await player.OpenAsync("music", format, address, "", fixture.Headers);
+                    else await player.OpenAsync("music", format, address, "");
+                    await Decoded(player);
+                    Check(fixture.Requests.Any(request => request.Path == entry) &&
+                        fixture.Requests.Any(request => request.Path == root) &&
+                        fixture.Requests.Any(request => request.Path.EndsWith(format == "hls-ts" ? ".ts" : ".m4s", StringComparison.Ordinal)) &&
+                        fixture.Requests.All(request => request.Authorized && !request.LocalCapability),
+                        "actual root, redirect and child requests use URL userinfo unless explicit Authorization takes precedence");
+                    var session = Session(player)!; int port = Port(player);
+                    await player.StopAsync(); await Released(session, port);
+                });
+        foreach (string reference in new[] { "hls-master", "hls-segment", "hls-map", "dash-template" })
+            yield return Case("long manifest URL reference reads and decodes " + reference, async () =>
+            {
+                await using var fixture = new Origin();
+                string suffix = "?fixture=" + new string('x', 17000);
+                string format = reference == "dash-template" ? "dash-number" :
+                    reference == "hls-map" ? "hls-mp4" : "hls-ts";
+                string root = reference == "dash-template" ? "/root.mpd" : "/root.m3u8";
+                string longPath = (reference == "hls-master" ? "/child.m3u8" :
+                    reference == "hls-map" ? "/init.mp4" :
+                    reference == "dash-template" ? "/mp40.m4s" : "/ts0.ts") + suffix;
+                fixture.Route = path =>
+                {
+                    if (path == root)
+                    {
+                        string manifest = reference switch
+                        {
+                            "hls-master" => "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=128000\n" + longPath + "\n",
+                            "hls-segment" => Hls("ts", 40).Replace("ts0.ts", longPath,
+                                StringComparison.Ordinal),
+                            "hls-map" => Hls("mp4", 40).Replace("URI=\"init.mp4\"", "URI=\"" + longPath + "\"",
+                                StringComparison.Ordinal),
+                            _ => Dash("number", 40).Replace("media=\"mp4$Number$.m4s\"",
+                                "media=\"mp4$Number$.m4s" + suffix + "\"", StringComparison.Ordinal)
+                        };
+                        return new Reply(Text(manifest), reference == "dash-template" ?
+                            "application/dash+xml" : "application/vnd.apple.mpegurl");
+                    }
+                    int query = path.IndexOf('?');
+                    return MediaRoute(query < 0 ? path : path[..query], format, 40);
+                };
+                await using var player = New();
+                await Open(player, fixture, format); await Decoded(player);
+                Check(fixture.Requests.Any(request => request.Path == longPath) &&
+                    fixture.Requests.All(request => request.Authorized),
+                    "the manifest's exact long reference reaches HTTP and produces actual decoded media");
+                var session = Session(player)!; int port = Port(player);
+                await player.StopAsync(); await Released(session, port);
+            });
+        yield return Case("long child redirect URL reads and decodes without an address-length gate", async () =>
+        {
+            await using var fixture = new Origin();
+            string longPath = "/long-child.m3u8?fixture=" + new string('x', 17000);
+            fixture.Route = path => path switch
+            {
+                "/root.m3u8" => new Reply(Text("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=128000\nchild.m3u8\n")),
+                "/child.m3u8" => Reply.Redirect(longPath),
+                _ => MediaRoute(path == longPath ? "/child.m3u8" : path, "hls-ts", 40)
+            };
+            await using var player = New();
+            await Open(player, fixture, "hls-ts"); await Decoded(player);
+            Check(fixture.Requests.Any(request => request.Path == longPath) &&
+                fixture.Requests.Any(request => request.Path.EndsWith(".ts", StringComparison.Ordinal)) &&
+                fixture.Requests.All(request => request.Authorized), "actual long redirect and following segment reads succeeded");
+            var session = Session(player)!; int port = Port(player);
+            await player.StopAsync(); await Released(session, port);
+        });
         yield return Case("native runtime bound root rejects another path before loading", async () =>
         {
             await using var fixture = new Origin();
             fixture.Route = path => MediaRoute(path, "hls-mp4", 40);
             var modules = typeof(NativePlayback).Assembly.GetType("MeowFilm.Media.NativeRuntimeModules")!;
             var rootField = modules.GetField("_runtimeRoot", BindingFlags.Static | BindingFlags.NonPublic)!;
-            await using (var first = New(fixture))
+            await using (var first = New())
             {
                 await Open(first, fixture, "hls-mp4"); await Decoded(first);
                 string root = (string)rootField.GetValue(null)!;
@@ -36,8 +115,7 @@ public static class AdaptiveMediaTests
                 string other = Path.Combine(AppContext.BaseDirectory, "not-the-bound-native-runtime");
                 Check(!string.Equals(Path.GetFullPath(other), root, StringComparison.OrdinalIgnoreCase), "distinct runtime request");
                 await using var rejected = new NativePlayback(Dispatcher.CurrentDispatcher, other,
-                    NativeAudioOutput.Dummy, NativeHttpMediaOptions.ForLoopbackTests([fixture.Base],
-                        TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3)));
+                    NativeAudioOutput.Dummy, new NativeHttpMediaOptions(TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3)));
                 try
                 {
                     await Open(rejected, fixture, "hls-mp4");
@@ -64,8 +142,7 @@ public static class AdaptiveMediaTests
             foreach (string? path in new[] { Path.Combine(bound, ".") + Path.DirectorySeparatorChar, null })
             {
                 await using var player = new NativePlayback(Dispatcher.CurrentDispatcher, path,
-                    NativeAudioOutput.Dummy, NativeHttpMediaOptions.ForLoopbackTests([fixture.Base],
-                        TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3)));
+                    NativeAudioOutput.Dummy, new NativeHttpMediaOptions(TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3)));
                 await Open(player, fixture, "hls-mp4"); await Decoded(player);
                 object active = Session(player)!; int port = Port(player);
                 var engine = (LibVLC)Field(player, "_engine")!;
@@ -79,7 +156,7 @@ public static class AdaptiveMediaTests
         {
             await using var fixture = new Origin();
             fixture.Route = path => MediaRoute(path, "hls-ts", 40);
-            await using (var player = New(fixture))
+            await using (var player = New())
             {
                 await Open(player, fixture, "hls-ts");
                 await Decoded(player);
@@ -106,7 +183,7 @@ public static class AdaptiveMediaTests
             {
                 await using var fixture = new Origin();
                 fixture.Route = path => MediaRoute(path, format, 40);
-                await using var player = New(fixture);
+                await using var player = New();
                 await Open(player, fixture, format);
                 await Decoded(player);
                 Check(player.NativeVersion!.StartsWith("3.0.24", StringComparison.Ordinal), "fixed native version");
@@ -127,7 +204,7 @@ public static class AdaptiveMediaTests
         {
             await using var fixture = new Origin();
             fixture.Route = path => MediaRoute(path, "hls-mp4", 3);
-            await using var player = New(fixture);
+            await using var player = New();
             object? session = null; int port = 0, ended = 0;
             player.Ended += (_, _) =>
             {
@@ -145,7 +222,7 @@ public static class AdaptiveMediaTests
             await using var fixture = new Origin();
             fixture.RequireAuthorization = false;
             fixture.Route = path => path == "/wave" ? new Reply(Wave()) : MediaRoute(path, "hls-ts", 40);
-            await using var player = New(fixture);
+            await using var player = New();
             await player.OpenAsync("music", "hls", fixture.Uri("root.m3u8"), "");
             await Decoded(player);
             Check(Adaptive(player) is not null, "headerless known manifest controlled");
@@ -159,7 +236,7 @@ public static class AdaptiveMediaTests
             await using var fixture = new Origin();
             fixture.Route = path => path == "/opaque" ? new Reply(Text(Hls("ts", 40)), "application/octet-stream") :
                 MediaRoute(path, "hls-ts", 40);
-            await using var player = New(fixture);
+            await using var player = New();
             await player.OpenAsync("music", "opaque", fixture.Uri("opaque"), "", fixture.Headers);
             await Decoded(player);
             Check(Adaptive(player) is not null, "body classification instead of suffix only");
@@ -170,7 +247,7 @@ public static class AdaptiveMediaTests
                 await using var fixture = new Origin();
                 fixture.Route = path => path.StartsWith("/ts", StringComparison.Ordinal) ?
                     new Reply(Ts(0)) { BlockBody = true } : MediaRoute(path, "hls-ts", 40);
-                var player = New(fixture);
+                var player = New();
                 using var cancel = new CancellationTokenSource();
                 try
                 {
@@ -200,7 +277,7 @@ public static class AdaptiveMediaTests
                 fixture.Route = path => child && path == "/root.m3u8"
                     ? new Reply(Text("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=128000\nchild.m3u8\n"))
                     : new Reply(Text(Hls("ts", 40))) { BlockBody = true };
-                await using var player = New(fixture);
+                await using var player = New();
                 using var cancel = new CancellationTokenSource();
                 var pending = Open(player, fixture, "hls-ts", cancel.Token);
                 await Until(() => fixture.Blocked > 0, "preflight blocked");
@@ -209,30 +286,30 @@ public static class AdaptiveMediaTests
                 catch (OperationCanceledException) { }
                 Check(!player.HasMedia && Session(player) is null, "preflight owns no decoder");
             });
-        yield return Case("cross origin segments strip every supplied header", async () =>
+        yield return Case("cross origin segments preserve the input header snapshot", async () =>
         {
             await using var other = new Origin { RequireAuthorization = false };
             other.Route = path => MediaRoute(path, "hls-ts", 40);
             await using var first = new Origin();
             first.Route = _ => new Reply(Text(Hls("ts", 40, other.Base.AbsoluteUri)));
-            await using var player = New(first, other);
+            await using var player = New();
             await Open(player, first, "hls-ts"); await Decoded(player);
-            Check(first.Requests.All(r => r.Authorized) && other.Requests.All(r => !r.AnyCallerHeader),
-                "cross origin strips authorization cookie referrer and custom fields");
+            Check(first.Requests.All(r => r.Authorized) && other.Requests.All(r => r.AnyCallerHeader && r.Authorized),
+                "cross origin preserves authorization cookie referrer and custom fields");
         });
-        yield return Case("redirect away and back never restores credentials for descendants", async () =>
+        yield return Case("redirect away and back preserves input headers for descendants", async () =>
         {
             await using var first = new Origin { RequireAuthorization = false };
             await using var other = new Origin { RequireAuthorization = false };
             first.Route = path => path == "/root.m3u8" ? Reply.Redirect(other.Uri("hop").AbsoluteUri) :
                 path == "/returned.m3u8" ? new Reply(Text(Hls("ts", 40))) : MediaRoute(path, "hls-ts", 40);
             other.Route = _ => Reply.Redirect(first.Uri("returned.m3u8").AbsoluteUri);
-            await using var player = New(first, other);
+            await using var player = New();
             await Open(player, first, "hls-ts"); await Decoded(player);
-            Check(first.Requests.First().Authorized && first.Requests.Skip(1).All(r => !r.AnyCallerHeader) &&
-                other.Requests.All(r => !r.AnyCallerHeader), "permanent redirect-chain stripping");
+            Check(first.Requests.First().Authorized && first.Requests.Skip(1).All(r => r.AnyCallerHeader && r.Authorized) &&
+                other.Requests.All(r => r.AnyCallerHeader && r.Authorized), "input headers cross the complete redirect chain");
         });
-        yield return Case("child redirect cannot restore root credentials", async () =>
+        yield return Case("child redirect preserves root input headers", async () =>
         {
             await using var first = new Origin { RequireAuthorization = false };
             await using var other = new Origin { RequireAuthorization = false };
@@ -244,31 +321,28 @@ public static class AdaptiveMediaTests
                 _ => MediaRoute(path, "hls-ts", 40)
             };
             other.Route = _ => Reply.Redirect(first.Uri("returned.m3u8").AbsoluteUri);
-            await using var player = New(first, other);
+            await using var player = New();
             await Open(player, first, "hls-ts"); await Decoded(player);
             Check(first.Requests.Where(r => r.Path is "/root.m3u8" or "/child.m3u8").All(r => r.Authorized) &&
-                first.Requests.Where(r => r.Path != "/root.m3u8" && r.Path != "/child.m3u8").All(r => !r.AnyCallerHeader),
+                first.Requests.Where(r => r.Path != "/root.m3u8" && r.Path != "/child.m3u8").All(r => r.AnyCallerHeader && r.Authorized),
                 "scope carried across recursive manifests");
         });
-        yield return Case("capability rejects missing auth unknown path and revoked session", async () =>
+        yield return Case("local representations accept ordinary requests and close with the owner", async () =>
         {
             await using var fixture = new Origin();
             fixture.Route = path => MediaRoute(path, "hls-ts", 40);
-            await using var player = New(fixture);
+            await using var player = New();
             await Open(player, fixture, "hls-ts"); await Decoded(player);
             object adaptive = Adaptive(player)!;
             var root = (Uri)Property(adaptive, "Root")!;
-            var cap = (string)Property(adaptive, "Capability")!;
             using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
-            using var denied = await client.GetAsync(root);
-            Check(denied.StatusCode == HttpStatusCode.Forbidden, "missing capability denied");
-            client.DefaultRequestHeaders.UserAgent.ParseAdd(cap);
+            client.DefaultRequestHeaders.Add("Origin", "https://fixture.invalid");
+            client.DefaultRequestHeaders.Host = "localhost";
             using var allowed = await client.GetAsync(root);
-            Check(allowed.StatusCode == HttpStatusCode.OK, "session header accepted");
+            Check(allowed.StatusCode == HttpStatusCode.OK, "local representation serves parsed requests without origin or secret-header admission");
             string rewritten = await allowed.Content.ReadAsStringAsync();
             Check(!rewritten.Contains(fixture.Base.AbsoluteUri, StringComparison.Ordinal) &&
-                !rewritten.Contains(fixture.Credential, StringComparison.Ordinal) &&
-                !root.AbsoluteUri.Contains(cap, StringComparison.Ordinal), "no upstream/capability in local URL/body");
+                !rewritten.Contains(fixture.Credential, StringComparison.Ordinal), "no upstream credentials in local URL/body");
             using var unknown = await client.GetAsync(new Uri(root, "/r/" + new string('0', 32)));
             Check(unknown.StatusCode == HttpStatusCode.NotFound, "no arbitrary proxy target");
             int port = Port(player); var session = Session(player)!;
@@ -284,7 +358,7 @@ public static class AdaptiveMediaTests
             fixture.Route = path => path == "/root.m3u8"
                 ? new Reply(Text($"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.008,\n#EXT-X-BYTERANGE:{first.Length}@0\nall.ts\n#EXTINF:1.008,\n#EXT-X-BYTERANGE:{second.Length}@{first.Length}\nall.ts\n#EXT-X-ENDLIST\n"))
                 : new Reply(all, "video/mp2t");
-            await using var player = New(fixture);
+            await using var player = New();
             await Open(player, fixture, "hls-ts");
             await Until(() => fixture.Requests.Count(r => r.Path == "/all.ts") >= 2, "both byte-range segments");
             Check(fixture.Requests.Where(r => r.Path == "/all.ts").All(r => r.Range) &&
@@ -295,11 +369,10 @@ public static class AdaptiveMediaTests
         {
             await using var fixture = new Origin();
             fixture.Route = path => MediaRoute(path, "hls-ts", 40);
-            await using var player = New(fixture);
+            await using var player = New();
             await Open(player, fixture, "hls-ts"); await Decoded(player);
             var adaptive = Adaptive(player)!;
             using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false });
-            client.DefaultRequestHeaders.UserAgent.ParseAdd((string)Property(adaptive, "Capability")!);
             string manifest = await client.GetStringAsync((Uri)Property(adaptive, "Root")!);
             string segment = manifest.Split('\n').First(l => l.StartsWith("http://", StringComparison.Ordinal));
             using var request = new HttpRequestMessage(HttpMethod.Get, segment);
@@ -319,7 +392,7 @@ public static class AdaptiveMediaTests
                 ? new Reply(Text($"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.008,\n#EXT-X-BYTERANGE:{segment.Length}@0\nall.ts\n#EXTINF:1.008,\n#EXT-X-BYTERANGE:{segment.Length}@{segment.Length}\nall.ts\n#EXT-X-ENDLIST\n"))
                 : new Reply(segment.Concat(Ts(1)).ToArray(), "video/mp2t")
                 { Tag = Interlocked.Increment(ref requests) == 1 ? "\"fixture-v1\"" : "\"fixture-v2\"" };
-            await using var player = New(fixture);
+            await using var player = New();
             await Open(player, fixture, "hls-ts");
             await Until(() => player.LastErrorCode is not null, "changed representation terminal");
             Check(player.LastErrorCode == PlaybackError.HttpRepresentationChanged && !player.HasMedia,
@@ -331,7 +404,7 @@ public static class AdaptiveMediaTests
             fixture.Route = path => path.StartsWith("/ts", StringComparison.Ordinal)
                 ? new Reply(Ts(0)) { BlockBody = true } : MediaRoute(path, "hls-ts", 40);
             await using var player = new NativePlayback(Dispatcher.CurrentDispatcher, null, NativeAudioOutput.Dummy,
-                NativeHttpMediaOptions.ForLoopbackTests([fixture.Base], TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(250)));
+                new NativeHttpMediaOptions(TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(250)));
             await Open(player, fixture, "hls-ts");
             var session = Session(player)!; int port = Port(player);
             await Until(() => player.LastErrorCode is not null, "read deadline");
@@ -344,7 +417,7 @@ public static class AdaptiveMediaTests
                 await using var fixture = new Origin();
                 fixture.Route = path => path.StartsWith("/ts", StringComparison.Ordinal) ?
                     new Reply([]) { Status = status } : MediaRoute(path, "hls-ts", 40);
-                await using var player = New(fixture);
+                await using var player = New();
                 int ended = 0; player.Ended += (_, _) => ended++;
                 await Open(player, fixture, "hls-ts");
                 var session = Session(player)!; int port = Port(player);
@@ -357,7 +430,20 @@ public static class AdaptiveMediaTests
                 Check(player.LastErrorCode == code && ended == 0, "fixed failure not natural end");
                 await Released(session, port);
             });
-        foreach (string bad in new[] { "file", "loopback", "xml-entity", "drm", "aes-version", "live", "dynamic",
+        foreach (string format in new[] { "hls-ts", "dash-list" })
+            yield return Case("cross-port child input has no origin admission " + format, async () =>
+            {
+                await using var origin = new Origin(); await using var child = new Origin();
+                child.Route = path => MediaRoute(path, format, 30);
+                string text = format == "hls-ts" ? Hls("ts", 30, child.Base.AbsoluteUri) :
+                    Dash("list", 30).Replace("<Period", "<BaseURL>" + child.Base.AbsoluteUri + "</BaseURL><Period", StringComparison.Ordinal);
+                origin.Route = _ => new Reply(Text(text));
+                await using var player = New();
+                await Open(player, origin, format); await Decoded(player);
+                Check(child.Requests.Count > 0 && child.Requests.All(r => r.Authorized), "actual child IO carries the explicit input header snapshot");
+                await player.StopAsync();
+            });
+        foreach (string bad in new[] { "file", "xml-entity", "drm", "aes-version", "live", "dynamic",
             "unknown-hls", "duplicate-attribute", "mime-poison", "oversize", "cycle", "template-external" })
             yield return Case("reject before decoder " + bad, async () =>
             {
@@ -365,7 +451,6 @@ public static class AdaptiveMediaTests
                 string manifest = bad switch
                 {
                     "file" => Hls("ts", 1).Replace("ts0.ts", "file:///C:/private.ts", StringComparison.Ordinal),
-                    "loopback" => Hls("ts", 1).Replace("ts0.ts", "http://127.0.0.1:1/private.ts", StringComparison.Ordinal),
                     "xml-entity" => "<!DOCTYPE MPD [<!ENTITY x SYSTEM 'file:///C:/private'>]><MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\">&x;</MPD>",
                     "drm" => Dash("list", 4).Replace("<Representation", "<ContentProtection schemeIdUri=\"urn:uuid:00000000-0000-0000-0000-000000000000\"/><Representation", StringComparison.Ordinal),
                     "aes-version" => Hls("ts", 4).Replace("#EXT-X-TARGETDURATION:2", "#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\",KEYFORMATVERSIONS=\"2\"\n#EXT-X-TARGETDURATION:2", StringComparison.Ordinal),
@@ -379,7 +464,7 @@ public static class AdaptiveMediaTests
                     _ => Dash("number", 4).Replace("mp4$Number$.m4s", "file:///C:/mp4$Number$.m4s", StringComparison.Ordinal)
                 };
                 fixture.Route = _ => bad == "mime-poison" ? new Reply(Wave(), "application/dash+xml") : new Reply(Text(manifest));
-                await using var player = New(fixture);
+                await using var player = New();
                 try
                 {
                     await Open(player, fixture, bad is "drm" or "dynamic" or "template-external" or "xml-entity" ? "dash-list" : "hls-ts");
@@ -419,7 +504,7 @@ public static class AdaptiveMediaTests
                     }
                     return normal;
                 };
-                await using var player = New(fixture);
+                await using var player = New();
                 object? active = null; int port = 0, failed = 0, ended = 0;
                 player.PropertyChanged += (_, e) =>
                 {
@@ -447,7 +532,7 @@ public static class AdaptiveMediaTests
         {
             await using var fixture = new Origin();
             fixture.Route = path => MediaRoute(path, "hls-mp4", 40);
-            await using var player = New(fixture);
+            await using var player = New();
             int failed = 0, ended = 0;
             player.Failed += (_, _) => failed++;
             player.Ended += (_, _) => ended++;
@@ -468,7 +553,7 @@ public static class AdaptiveMediaTests
         {
             await using var fixture = new Origin();
             fixture.Route = path => MediaRoute(path, "hls-mp4", 40);
-            await using var player = New(fixture);
+            await using var player = New();
             await Open(player, fixture, "hls-mp4"); await Decoded(player);
             object old = Session(player)!, retired = Adaptive(player)!; int oldPort = Port(player);
             await Open(player, fixture, "hls-mp4"); await Decoded(player);
@@ -504,9 +589,8 @@ public static class AdaptiveMediaTests
     private static void ReportRequestFailure(object adaptive, Exception error, CancellationToken request) =>
         adaptive.GetType().GetMethod("ReportRequestFailure", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(adaptive, [error, true, request]);
-    private static NativePlayback New(params Origin[] origins) => new(Dispatcher.CurrentDispatcher, null,
-        NativeAudioOutput.Dummy, NativeHttpMediaOptions.ForLoopbackTests(origins.Select(o => o.Base),
-            TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3)));
+    private static NativePlayback New() => new(Dispatcher.CurrentDispatcher, null,
+        NativeAudioOutput.Dummy, new NativeHttpMediaOptions(TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3)));
     private static Task Open(NativePlayback player, Origin origin, string format, CancellationToken token = default) =>
         player.OpenAsync("music", format, origin.Uri(format.StartsWith("dash", StringComparison.Ordinal) ? "root.mpd" : "root.m3u8"),
             "合成媒体", origin.Headers, token);
@@ -535,7 +619,7 @@ public static class AdaptiveMediaTests
         Check(((ConcurrentDictionary<int, TcpClient>)Field(adaptive, "_clients")!).IsEmpty, "no service connections");
         var graph = Field(adaptive, "_manifest")!;
         var resources = (System.Collections.IDictionary)Field(graph, "_resources")!;
-        Check(resources.Count == 0 && (string)Property(adaptive, "Capability")! == "", "retired graph/capability cleared");
+        Check(resources.Count == 0, "retired representation graph cleared");
     }
     internal static TestCase Case(string name, Func<Task> body) => new("adaptive-media: " + name, () => Sta(body));
     private static void Check(bool condition, string message)
@@ -726,7 +810,7 @@ public static class AdaptiveMediaTests
         private readonly CancellationTokenSource _stop = new();
         private readonly List<Task> _handlers = [];
         private readonly Task _accept;
-        internal string Credential { get; } = "Fixture " + Guid.NewGuid().ToString("N");
+        internal string Credential { get; set; } = "Fixture " + Guid.NewGuid().ToString("N");
         internal Dictionary<string, string> Headers => new()
         {
             ["Authorization"] = Credential, ["Cookie"] = "synthetic=" + Credential[8..],

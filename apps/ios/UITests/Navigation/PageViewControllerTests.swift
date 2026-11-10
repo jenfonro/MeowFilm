@@ -633,6 +633,7 @@ final class PageViewControllerTests: XCTestCase {
             XCTAssertNil(presentedAlert?.viewIfLoaded?.window)
             XCTAssertFalse(presentedAlert?.isBeingDismissed ?? false)
             XCTAssertTrue(page.isPageActive)
+            XCTAssertTrue(page.canPresentPageAlert, "The actual dismissal receipt also settles alert admission")
             retried.fulfill()
         })
         await waitForErrorAlertState("retryable error presented") {
@@ -696,6 +697,108 @@ final class PageViewControllerTests: XCTestCase {
         }
         await drainErrorAlertRunLoop()
         XCTAssertEqual(retries, 0)
+    }
+
+    func testModalDismissalReceiptSettlesOnlyItsOwnTransitionBeforeFollowUp() async throws {
+        try await performRunnerAction { $0.activate() }
+        for replaced in [false, true] {
+            let page = PageAlertTestPage(themeProvider: PageLifecycleTestTheme())
+            try mountDismissalPage(page)
+            await waitForErrorAlertState("dismissal page ready") { page.canPresentPageAlert }
+            let modal = PageDismissalTestModal()
+            page.covering = modal
+            let unrelated = PageDismissalTestModal()
+            page.dismissPageModal(unrelated) { XCTFail("An unrelated modal has no dismissal receipt for this page") }
+            XCTAssertFalse(unrelated.dismissalStarted)
+            var completions = 0
+            page.dismissPageModal(modal) {
+                completions += 1
+                XCTAssertNil(page.presentedViewController)
+                XCTAssertEqual(page.canPresentPageAlert, !replaced)
+            }
+            XCTAssertTrue(modal.dismissalStarted)
+            XCTAssertEqual(completions, 0)
+            page.coordinator = modal.coordinator
+            let replacement = PageLifecycleTestCoordinator()
+            if replaced {
+                page.coordinator = replacement
+                page.viewWillTransition(to: page.view.bounds.size, with: replacement)
+            }
+            page.covering = nil
+            XCTAssertFalse(page.canPresentPageAlert, "Removing the modal alone is not a transition receipt")
+            modal.completeDismissal()
+            XCTAssertEqual(completions, 1)
+            XCTAssertEqual(page.canPresentPageAlert, !replaced)
+            if replaced {
+                replacement.complete(cancelled: false)
+                XCTAssertTrue(page.canPresentPageAlert, "The new transition still needs its own completion")
+            }
+        }
+    }
+
+    func testModalDismissalReceiptDoesNotExecuteFollowUpAfterInvalidation() async throws {
+        try await performRunnerAction { $0.activate() }
+        let page = PageAlertTestPage(themeProvider: PageLifecycleTestTheme())
+        try mountDismissalPage(page)
+        await waitForErrorAlertState("dismissal page ready before invalidation") { page.canPresentPageAlert }
+        let modal = PageDismissalTestModal()
+        page.covering = modal
+        var completions = 0
+        page.dismissPageModal(modal) { completions += 1 }
+        XCTAssertTrue(modal.dismissalStarted)
+        page.coordinator = modal.coordinator
+        page.covering = nil
+        PageViewController.invalidatePages(in: page)
+        modal.completeDismissal()
+        XCTAssertEqual(completions, 0)
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertFalse(page.canPresentPageAlert)
+    }
+
+    func testAutomaticallyDismissedModalRunsFollowUpOnlyForItsRecordedPageOnce() async throws {
+        try await performRunnerAction { $0.activate() }
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        try mountDismissalPage(page)
+        await waitForErrorAlertState("page ready before automatic dismissal") { page.canPresentPageAlert }
+        let alert = UIAlertController(title: "自动退出", message: nil, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "确定", style: .default))
+        page.present(alert, animated: true)
+        await waitForErrorAlertState("automatic dismissal alert presented") {
+            alert.viewIfLoaded?.window != nil && !alert.isBeingPresented
+        }
+        try await performRunnerAction { $0.alerts["自动退出"].buttons["确定"].tap() }
+        await waitForErrorAlertState("automatic dismissal has removed presentation links") {
+            page.presentedViewController == nil && alert.presentingViewController == nil &&
+                alert.viewIfLoaded?.window == nil && !alert.isBeingDismissed
+        }
+        let otherPage = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        otherPage.dismissPageModal(alert) { XCTFail("Another page cannot consume the former modal") }
+        var completions = 0
+        page.dismissPageModal(alert) {
+            completions += 1
+            XCTAssertTrue(page.canPresentPageAlert)
+        }
+        XCTAssertEqual(completions, 1)
+        page.dismissPageModal(alert) { completions += 1 }
+        XCTAssertEqual(completions, 1, "The recorded automatic dismissal can only be consumed once")
+    }
+
+    private func mountDismissalPage(_ page: PageViewController) throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first {
+            $0.activationState == .foregroundActive
+        })
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        addTeardownBlock {
+            await MainActor.run {
+                PageViewController.invalidatePages(in: page)
+                window.isHidden = true; window.rootViewController = nil
+                previous?.makeKey()
+            }
+        }
+        window.rootViewController = page; window.makeKeyAndVisible(); window.layoutIfNeeded()
+        page.view.layoutIfNeeded()
     }
 
     private func waitForErrorAlertState(_ description: String,
@@ -843,6 +946,24 @@ private final class PageAlertTestPage: PageViewController {
                           completion: (() -> Void)? = nil) {
         alerts.append(viewControllerToPresent)
         completion?()
+    }
+}
+
+@MainActor
+private final class PageDismissalTestModal: UIViewController {
+    let coordinator = PageLifecycleTestCoordinator()
+    private(set) var dismissalStarted = false
+    private var completion: (() -> Void)?
+    override var transitionCoordinator: UIViewControllerTransitionCoordinator? { dismissalStarted ? coordinator : nil }
+    override func dismiss(animated flag: Bool, completion: (() -> Void)? = nil) {
+        dismissalStarted = true
+        self.completion = completion
+    }
+    func completeDismissal() {
+        coordinator.complete(cancelled: false)
+        let callback = completion
+        completion = nil
+        callback?()
     }
 }
 

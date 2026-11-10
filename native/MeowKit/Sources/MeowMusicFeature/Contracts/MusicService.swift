@@ -169,12 +169,12 @@ public struct MusicPlatform: Codable, Equatable, Sendable, Identifiable {
 }
 
 public enum MusicPlaybackMode: Int, Codable, CaseIterable, Sendable {
-    case order = 0, loop = 1, shuffle = 2, single = 3
+    case loop = 1, shuffle = 2, single = 3
     public var title: String {
-        switch self { case .order: return "顺序播放"; case .loop: return "列表循环"; case .shuffle: return "随机播放"; case .single: return "单曲循环" }
+        switch self { case .loop: return "列表循环"; case .shuffle: return "随机播放"; case .single: return "单曲循环" }
     }
     public var symbol: String {
-        switch self { case .order: return "arrow.right"; case .loop: return "repeat"; case .shuffle: return "shuffle"; case .single: return "repeat.1" }
+        switch self { case .loop: return "repeat"; case .shuffle: return "shuffle"; case .single: return "repeat.1" }
     }
 }
 
@@ -201,9 +201,8 @@ public struct MusicPlaybackState: Codable, Equatable, Sendable {
     /// These DTO fields are derived from the queue; they are not persisted.
     public let nextPreviewID: String?
     public let previousPreviewID: String?
-    public let fmNextPreviewID: String?
-    public let fmPreviousPreviewID: String?
     public let sourceCollectionID: String?
+    public let queueSourceTitle: String?
     public init(revision: Int = 0, settingsRevision: Int = 0, mode: MusicPlaybackMode = .loop,
                 qualityEnabled: [String] = ["standard"], qualityOrder: [String] = ["standard"],
                 spatialEnabled: [String] = [], spatialOrder: [String] = [],
@@ -211,8 +210,8 @@ public struct MusicPlaybackState: Codable, Equatable, Sendable {
                 officialSources: [MusicAccountPlatform] = MusicAccountPlatform.allCases, currentId: String? = nil,
                 total: Int = 0, position: Double = 0, canNext: Bool = false, canPrevious: Bool = false,
                 nextPreviewID: String? = nil, previousPreviewID: String? = nil,
-                fmNextPreviewID: String? = nil, fmPreviousPreviewID: String? = nil,
-                sourceCollectionID: String? = nil, requestQuality: String = "flac") {
+                sourceCollectionID: String? = nil, requestQuality: String = "flac",
+                queueSourceTitle: String? = nil) {
         self.revision = revision; self.settingsRevision = settingsRevision; self.mode = mode
         self.requestQuality = requestQuality
         self.qualityEnabled = qualityEnabled; self.qualityOrder = qualityOrder
@@ -222,8 +221,8 @@ public struct MusicPlaybackState: Codable, Equatable, Sendable {
         self.currentId = currentId; self.total = total; self.position = position
         self.canNext = canNext; self.canPrevious = canPrevious
         self.nextPreviewID = nextPreviewID; self.previousPreviewID = previousPreviewID
-        self.fmNextPreviewID = fmNextPreviewID; self.fmPreviousPreviewID = fmPreviousPreviewID
         self.sourceCollectionID = sourceCollectionID
+        self.queueSourceTitle = queueSourceTitle
     }
 }
 

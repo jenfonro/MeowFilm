@@ -244,7 +244,7 @@ export function createNodeSourceCapabilities({
   const redirects = new Set([301, 302, 303, 307, 308]);
   const validateURL = value => {
     const url = new URL(value);
-    requireValue(['http:', 'https:'].includes(url.protocol) && !url.username && !url.password);
+    requireValue(['http:', 'https:'].includes(url.protocol));
     return url.href;
   };
 
@@ -297,11 +297,6 @@ export function createNodeSourceCapabilities({
         }
         requireValue(hop < input.redirects, 'RESOURCE_LIMIT');
         const next = validateURL(new URL(location, responseUrl).href);
-        if (new URL(next).origin !== new URL(responseUrl).origin) {
-          headers = { ...headers };
-          delete headers.authorization;
-          delete headers.cookie;
-        }
         if ((response.statusCode === 303 && method !== 'HEAD') ||
             ([301, 302].includes(response.statusCode) && method === 'POST')) {
           method = 'GET';

@@ -141,7 +141,7 @@ enum MusicNativePublicBrowseParser {
             return .init("fm", homeAction: .fm(mode: .default, submode: "", entry: nil))
         }
         if path == "nm/play/similarFM" {
-            guard field("sourceType") == "song", !field("sourceId").isEmpty,
+            guard ["song", "artist"].contains(field("sourceType")), !field("sourceId").isEmpty,
                   query.filter({ $0.name == "sourceName" }).count <= 1 else { return nil }
             let ids: MJ
             do { ids = try object(.string(field("sourceId"))) }
@@ -150,7 +150,9 @@ enum MusicNativePublicBrowseParser {
             // collections, whose normalizer deliberately filters invalid IDs.
             guard ids.isArray, (1...MusicHomeAction.maximumSimilarSeeds).contains(ids.array.count),
                   ids.array.allSatisfy({ MusicNativeHomePresentation.positiveID($0, digits: 16, safe: true) != nil }) else { return nil }
-            let descriptor = MusicHomeAction.similar(sourceIDs: ids.array.map(\.id), sourceName: field("sourceName"))
+            let descriptor: MusicHomeAction = field("sourceType") == "artist" ?
+                .similarArtist(sourceIDs: ids.array.map(\.id), sourceName: field("sourceName")) :
+                .similar(sourceIDs: ids.array.map(\.id), sourceName: field("sourceName"))
             do { try descriptor.validate() }
             catch MusicServiceError.invalidRequest { return nil }
             return .init("similar", MusicNativeHomePresentation.actionID(descriptor), homeAction: descriptor)
@@ -180,8 +182,8 @@ enum MusicNativePublicBrowseParser {
             channelKinds.first(where: { $0.value == kind })?.key ?? link.id
         return .init(id: id, title: title, kind: kind, pageCode: link.page, platform: .netease)
     }
-    private static func requiresAccount(_ link: Action) -> Bool {
-        if let action = link.homeAction { return action.requiresAccount }
+    private static func hiddenWhenLoggedOut(_ link: Action) -> Bool {
+        if let action = link.homeAction { return action.requiresAccount && !action.isSimilar && !action.isHeartbeat }
         guard let channel = channel(link, title: "") else { return false }
         return [.vip, .artistActivity].contains(channel.kind)
     }
@@ -190,14 +192,13 @@ enum MusicNativePublicBrowseParser {
         guard row.isObject else { return nil }
         let kind = text(row["resourceType"], row["targetType"], row["type"], row["creativeType"]).lowercased()
         if ["video", "podcast", "voice", "djradio", "djprogram", "mv"].contains(where: kind.contains) { return nil }
-        if !loggedIn, ["dailysongs", "star", "similarsong", "similarartist"].contains(kind) ||
-            row["lunaItemType"].string == "heartRcmd" { return nil }
+        if !loggedIn, kind == "dailysongs" { return nil }
         let play = MusicNativeHomePresentation.hasValue(row["playBtnData"]) ? try object(row["playBtnData"]) : .null
         let primary = MusicNativeHomePresentation.primaryAction(row)
         var link = try action(primary)
         if link == nil { link = try action(play["detailUrl"]) }
         if kind == "dragon_ball", link == nil { link = try action(row["uiElement"]["mainTitle"]["action"]) }
-        if !loggedIn, let link, requiresAccount(link) { return nil }
+        if !loggedIn, let link, hiddenWhenLoggedOut(link) { return nil }
         let rawSong = row["resourceExtInfo"]["songData"] != .null ? row["resourceExtInfo"]["songData"] :
             row["resourceExtInfo"]["song"] != .null ? row["resourceExtInfo"]["song"] :
             row["songInfo"] != .null ? row["songInfo"] : row["songData"]
@@ -216,10 +217,13 @@ enum MusicNativePublicBrowseParser {
         if ["similarsong", "similarartist"].contains(kind) || link?.kind == "similar" {
             // No song-preview/ID/FM or alternate-URL seed fallback.
             let declared = try action(primary == .null ? play["detailUrl"] : primary)
-            if kind != "similarartist", let descriptor = declared?.homeAction,
-               case .similar = descriptor {
+            if let descriptor = declared?.homeAction, descriptor.isSimilar {
                 content = .action(descriptor); stable = MusicNativeHomePresentation.actionID(descriptor); entrance = true
             } else { content = .unavailable; stable = index }
+        } else if kind == "star" || row["lunaItemType"].string == "heartRcmd" {
+            let action: MusicHomeAction = MusicNativeHomePresentation.positiveID(rawSong["id"], digits: 16, safe: true)
+                .map { .heartbeatSong(songID: $0) } ?? .heartbeat
+            entrance = true; content = .action(action); stable = MusicNativeHomePresentation.actionID(action)
         } else if kind == "song" || link?.kind == "song" || rawSong.isObject {
             let songID = try MusicPlatformProtocol.numericID(.string(rawSong.isObject ?
                 textID(rawSong["id"], rawSong["songId"], rawSong["resourceId"]) : id))
@@ -232,9 +236,6 @@ enum MusicNativePublicBrowseParser {
             entrance = true
             let descriptor = MusicHomeAction.daily(branch: link?.kind == "daily-style" ? .style : .default)
             content = .action(descriptor); stable = MusicNativeHomePresentation.actionID(descriptor)
-        } else if kind == "star" || row["lunaItemType"].string == "heartRcmd" {
-            // A star resource is not a verified playlist/seed for this account.
-            entrance = true; content = .action(.heartbeat); stable = MusicNativeHomePresentation.actionID(.heartbeat)
         } else if kind == "fm" || link?.kind == "fm" {
             if let descriptor = try MusicNativeHomePresentation.fmAction(row, channel: channel, name: name) {
                 entrance = true; content = .action(descriptor); stable = MusicNativeHomePresentation.actionID(descriptor)
@@ -317,7 +318,7 @@ enum MusicNativePublicBrowseParser {
                 let declared = [contentRoot["action"], contentRoot["header"]["action"], contentRoot["block"]["action"],
                     block["uiElement"]["button"]["action"]].first(where: MusicNativeHomePresentation.hasValue) ?? .null
                 let link = try action(declared)
-                if !loggedIn, let link, requiresAccount(link) { continue }
+                if !loggedIn, let link, hiddenWhenLoggedOut(link) { continue }
                 let headingChannel = link.flatMap { channel($0, title: heading) }
                 let sectionPrefix: String
                 if isHome {

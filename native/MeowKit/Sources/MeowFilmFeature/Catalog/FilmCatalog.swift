@@ -10,13 +10,29 @@ public struct FilmSourceDescriptor: Hashable, Sendable {
     }
 }
 
+public enum FilmItemKind: String, Hashable, Codable, Sendable {
+    case movie, tv
+}
+
 public struct FilmItemIdentity: Hashable, Codable, Sendable {
     public let sourceID: String
     public let itemID: String
+    public let kind: FilmItemKind?
 
-    public init(sourceID: String, itemID: String) {
+    public init(sourceID: String, itemID: String, kind: FilmItemKind? = nil) {
         self.sourceID = sourceID
         self.itemID = itemID
+        // TMDB has separate movie/tv ID namespaces; Douban subject IDs are global.
+        self.kind = sourceID == "tmdb" ? kind : nil
+    }
+
+    private enum CodingKeys: String, CodingKey { case sourceID, itemID, kind }
+
+    public init(from decoder: any Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(sourceID: try fields.decode(String.self, forKey: .sourceID),
+                  itemID: try fields.decode(String.self, forKey: .itemID),
+                  kind: try fields.decodeIfPresent(FilmItemKind.self, forKey: .kind))
     }
 }
 
@@ -24,6 +40,7 @@ public struct FilmItem: Equatable, Codable, Sendable {
     public let sourceID: String
     public let id: String
     public let title: String
+    public let kind: FilmItemKind?
     public let posterURL: URL?
     /// Higher-resolution poster for full-width detail artwork; cards keep `posterURL`.
     public let largePosterURL: URL?
@@ -31,14 +48,15 @@ public struct FilmItem: Equatable, Codable, Sendable {
     public let subtitle: String
 
     public var identity: FilmItemIdentity {
-        FilmItemIdentity(sourceID: sourceID, itemID: id)
+        FilmItemIdentity(sourceID: sourceID, itemID: id, kind: kind)
     }
 
-    public init(sourceID: String, id: String, title: String, posterURL: URL? = nil,
+    public init(sourceID: String, id: String, title: String, kind: FilmItemKind? = nil, posterURL: URL? = nil,
                 largePosterURL: URL? = nil, score: String = "", subtitle: String = "") {
         self.sourceID = sourceID
         self.id = id
         self.title = title
+        self.kind = kind
         self.posterURL = posterURL
         self.largePosterURL = largePosterURL
         self.score = score

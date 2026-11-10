@@ -54,17 +54,17 @@ final class MusicQueueCurrentPage: UIViewController, UITableViewDataSource, UITa
     }
 
     func configure(snapshot: MusicSimilarModeSnapshot?, recommendations: MusicQueueRecommendationSnapshot?,
-                   changing: Bool, returning: Bool, count: Int, modeTitle: String, theme: PageTheme) {
+                   changing: Bool, returning: Bool, count: Int, modeTitle: String, theme: PageTheme, fm: MusicFMPlaybackSnapshot? = nil) {
         loadViewIfNeeded()
         self.theme = theme
         let active = snapshot?.active == true
-        controls.isHidden = !active && recommendations == nil && !returning
+        controls.isHidden = !active && recommendations == nil && fm == nil && !returning
         mode.isHidden = returning && !active
-        continuePlaying.isHidden = returning && !active
+        continuePlaying.isHidden = active ? snapshot?.supportsContinuation != true : recommendations == nil && fm == nil
         retry.isHidden = !(active ? snapshot?.canRetry == true : recommendations?.canRetry == true)
-        returnToQueue.isHidden = !active && !returning
+        returnToQueue.isHidden = snapshot?.canRestoreQueue != true
         mode.setTitle(modeTitle, for: .normal)
-        let enabled = active ? snapshot?.continueEnabled == true : recommendations?.continueEnabled == true
+        let enabled = fm?.continueEnabled ?? (active ? snapshot?.continueEnabled == true : recommendations?.continueEnabled == true)
         continuePlaying.setTitle(enabled ? "续播已开启" : "续播已关闭", for: .normal)
         continuePlaying.accessibilityValue = enabled ? "开启" : "关闭"
         for button in [mode, continuePlaying, retry, returnToQueue] {
@@ -86,12 +86,9 @@ final class MusicQueueCurrentPage: UIViewController, UITableViewDataSource, UITa
         }
         self.recommendations.isHidden = candidates.isEmpty
         self.recommendations.isUserInteractionEnabled = !changing
-        recommendationStatus.isHidden = recommendations == nil
+        recommendationStatus.isHidden = candidates.isEmpty
         recommendationStatus.textColor = UIColor(theme.muted)
-        if recommendations?.status == .loading { recommendationStatus.text = "正在加载推荐" }
-        else if candidates.isEmpty, recommendations?.exhausted == true { recommendationStatus.text = "推荐已结束" }
-        else if recommendations?.status == .empty { recommendationStatus.text = "暂无推荐" }
-        else { recommendationStatus.text = "更多推荐" }
+        recommendationStatus.text = "更多推荐"
         empty.text = count == 0 ? "没有正在播放歌曲" : nil
         empty.textColor = UIColor(theme.muted)
         collection.backgroundView = empty.text == nil ? nil : empty

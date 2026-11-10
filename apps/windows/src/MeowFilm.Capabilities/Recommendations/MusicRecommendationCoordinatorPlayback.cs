@@ -14,144 +14,69 @@ public sealed partial class MusicRecommendationCoordinator
         {
             if (session is not { } s || !CurrentLocked(s) || s.Returning) return Task.CompletedTask;
             if (!state.IsLocal) { RetireLocked(s, "remote"); return s.Cleanup; }
-            // Old media events cannot change the intent of a newly selected occurrence.
-            if (s.Queue?.CurrentId != state.EntryId) return Task.CompletedTask;
             s.Playback = state;
-            if (s.Play != state.IsPlaying) { s.Play = state.IsPlaying; s.MediaIntent++; PublishLocked(); }
+            if (s.Queue?.CurrentId == state.EntryId && s.Play != state.IsPlaying)
+            { s.Play = state.IsPlaying; s.MediaIntent++; PublishLocked(); }
             return MaybeBeginLocked(s) ?? Task.CompletedTask;
         }
     }
-    private Task? MaybeBeginLocked(Session s, bool naturalEnd = false, CancellationToken caller = default)
+    private Task? MaybeBeginLocked(Session s, CancellationToken caller = default)
     {
+        if (s.Queue is { } actual && s.Playback is { HasStarted: true, MediaReady: true } observed &&
+            observed.EntryId == actual.CurrentId)
+        {
+            string playback = observed.EntryId + ":" + observed.PlaybackEvent;
+            if (s.LastPlayback != playback)
+            {
+                s.LastPlayback = playback;
+                s.RandomFetch = actual.Mode == 2 && fetchOnRandomPlayback();
+            }
+        }
         if (!CurrentLocked(s) || s.Loading || s.Returning || s.Pending is not null || !s.Continue ||
-            s.InitialPending && s.Config.Kind != "queue" || s.Exhausted ||
-            s.Failures >= 2 || s.RetryAt > clock.GetUtcNow() || s.Queue is not { } q ||
-            s.Playback is not { HasStarted: true, MediaReady: true, IsLocal: true } state ||
-            !state.IsPlaying && !naturalEnd ||
-            state.EntryId != q.CurrentId || q.Tail.Length == 0 || q.CurrentId != q.Tail) return null;
-        if (s.Config.Kind != "fm" && !s.Attempted.Add(q.Tail)) return null;
-        if (s.Candidates is { } batch) return BeginCandidatesLocked(s, batch, null, caller);
+            s.InitialPending || s.Exhausted || s.Config.Kind == "heartbeat" || s.Queue is not { } q ||
+            s.Playback is not { IsPlaying: true, HasStarted: true, MediaReady: true, IsLocal: true } state ||
+            state.EntryId != q.CurrentId) return null;
+        // Preview candidates remain visible until an actual selection/advance admits them.
+        if (s.Config.Kind == "queue" && !s.RecommendationStarted) return null;
+        string attempt;
+        if (q.Mode == 2)
+        {
+            if (!s.RandomFetch) return null;
+            attempt = "play:" + s.LastPlayback;
+        }
+        else
+        {
+            if (q.CurrentId != q.Tail) return null;
+            attempt = "tail:" + s.Batch + ":" + s.Offset + ":" + q.Tail;
+        }
+        if (s.Candidates is { } batch) return BeginCandidatesLocked(s, batch, null, caller, automatic: true);
+        if (!s.Attempted.Add(attempt)) return null;
         return BeginBatchLocked(s, false, true, caller);
     }
     public async Task<bool> TryAdvanceAsync(string entryId, bool naturalEnd, bool play,
         CancellationToken cancellationToken = default)
     {
-        Task<bool> next;
+        Task? commit = null;
+        Session? target;
+        long epoch = queue.Epoch;
+        // This read is local. Never wait for an in-flight provider request to select the next song.
+        var snapshot = await queue.InLaneAsync(ReadAsync, cancellationToken).ConfigureAwait(false);
         lock (gate)
         {
-            if (session is not { } s || !CurrentLocked(s) || s.Returning || s.Pending is not null ||
-                s.Queue?.CurrentId != entryId && !(s.Config.Kind == "fm" && s.Batch == 0 && s.Loading) ||
-                s.Config.Kind != "fm" && !s.Continue) return false;
+            target = session;
+            if (target is not { } s || !CurrentLocked(s) || s.Returning || s.Pending is not null ||
+                snapshot.CurrentId != entryId || queue.Epoch != epoch) return false;
+            s.Queue = snapshot;
             if (s.Play != play) { s.Play = play; s.MediaIntent++; }
-            if (s.Advance is Task<bool> running && !running.IsCompleted && s.AdvanceNavigation == s.Navigation) next = running;
-            else
-            {
-                int navigation = ++s.Navigation; long epoch = queue.Epoch;
-                var previous = s.Advance; s.AdvanceNavigation = navigation;
-                next = LaunchLocked(async () =>
-                {
-                    await previous.ConfigureAwait(false);
-                    return await AdvanceAsync(s, entryId, naturalEnd, navigation, epoch, cancellationToken).ConfigureAwait(false);
-                });
-                s.Advance = next;
-            }
+            if (s.Config.Kind == "queue" && s.Candidates is { } batch && !s.Loading &&
+                !snapshot.HasPriority && snapshot.CurrentId == snapshot.Tail &&
+                (!naturalEnd || s.Continue && snapshot.Mode != 3))
+                commit = BeginCandidatesLocked(s, batch, null, cancellationToken, automatic: naturalEnd);
         }
-        return await next.ConfigureAwait(false);
+        if (commit is not null) await commit.ConfigureAwait(false);
+        // The sole queue owner applies the global loop/shuffle strategy, including explicit play-next priority.
+        return queue.Epoch != epoch || target is not null && !ReferenceEquals(session, target);
     }
-    private async Task<bool> AdvanceAsync(Session s, string entryId, bool naturalEnd, int navigation,
-        long epoch, CancellationToken token)
-    {
-        try
-        {
-            var before = await queue.InLaneAsync(ReadAsync, token).ConfigureAwait(false);
-            Task? flight;
-            lock (gate)
-            {
-                if (!NavigationCurrentLocked(s, navigation, epoch) || before.CurrentId != entryId) return true;
-                s.Queue = before;
-                if (s.Config.Kind != "fm" && before.CurrentId != before.Tail) return false;
-                if (s.InitialPending && (s.Config.Kind != "queue" || s.Loading))
-                { s.Waiting = true; PublishLocked(); flight = s.Flight; }
-                else if (before.CurrentId == before.Tail)
-                {
-                    s.Waiting = true; PublishLocked();
-                    bool loading = s.Loading;
-                    flight = loading ? s.Flight :
-                        s.Config.Kind == "queue" ? MaybeBeginLocked(s, naturalEnd, token) :
-                        s.Exhausted ||
-                        naturalEnd && (s.RetryAt > clock.GetUtcNow() || s.Failures >= 2 ||
-                            s.Config.Kind != "fm" && s.Attempted.Contains(before.Tail)) ? null :
-                        BeginBatchLocked(s, false, naturalEnd, token);
-                    if (!loading && flight is not null && s.Config.Kind is not ("fm" or "queue")) s.Attempted.Add(before.Tail);
-                }
-                else flight = null;
-            }
-            while (flight is not null)
-            {
-                await flight.ConfigureAwait(false);
-                lock (gate)
-                {
-                    if (!NavigationCurrentLocked(s, navigation, epoch)) return true;
-                    // A preview or a cancelled prior flight can hand the same
-                    // playing tail to its actual automatic append in finally.
-                    if (s.Config.Kind != "queue") flight = null;
-                    else if (s.Loading) flight = !ReferenceEquals(s.Flight, flight) ? s.Flight : null;
-                    else flight = MaybeBeginLocked(s, naturalEnd, token);
-                }
-            }
-            MusicRecommendationSelection? selection = null;
-            await queue.InLaneAsync(async (owner, ct) =>
-            {
-                var current = await ReadAsync(owner, ct).ConfigureAwait(false);
-                lock (gate)
-                    if (!NavigationCurrentLocked(s, navigation, epoch) || current.CurrentId != entryId || s.Pending is not null)
-                        return false;
-                string next = current.Index >= 0 && current.Index + 1 < current.Entries.Length ? current.Entries[current.Index + 1].Id : "";
-                if (next.Length > 0)
-                {
-                    var operation = new PendingOperation(Guid.NewGuid().ToString("D"), "select", [], null, "", false, naturalEnd, epoch);
-                    var result = await owner.ExecuteAsync("music.queue.recommendation.select",
-                        new { nonce = operation.Nonce, expectedVersion = current.Version, id = next }, ct).ConfigureAwait(false);
-                    if (!result.GetProperty("ok").GetBoolean())
-                    {
-                        string code = Text(result, "code");
-                        if (code is "COMMIT_UNKNOWN" or "STORAGE_CONFLICT") MarkUnknown(s, operation, code);
-                        throw new RecommendationException(code);
-                    }
-                    current = await ReadAsync(owner, CancellationToken.None).ConfigureAwait(false);
-                }
-                lock (gate)
-                {
-                    if (!NavigationCurrentLocked(s, navigation, epoch)) return false;
-                    s.Queue = current; s.Waiting = false;
-                    selection = next.Length > 0
-                        ? SelectionLocked(s, next, s.Play, naturalEnd, false)
-                        : SelectionLocked(s, entryId, false, naturalEnd, false, MusicRecommendationPlaybackAction.Stop);
-                    PublishLocked();
-                }
-                return true;
-            }, token).ConfigureAwait(false);
-            if (selection is not null) await SelectAsync(s, selection, token).ConfigureAwait(false);
-        }
-        catch (Exception error)
-        {
-            lock (gate)
-            {
-                if (NavigationCurrentLocked(s, navigation, epoch))
-                {
-                    s.Waiting = false; s.Error = ErrorCode(error); s.Status = s.Pending is null ? "error" : "commit-unknown";
-                    PublishLocked();
-                }
-            }
-        }
-        return true;
-    }
-    private bool NavigationCurrentLocked(Session s, int navigation, long epoch) =>
-        CurrentLocked(s) && !s.Returning && s.Navigation == navigation && queue.Epoch == epoch;
-    private static bool PlayingTailLocked(Session s) =>
-        s.Queue is { } q && q.CurrentId.Length > 0 && q.CurrentId == q.Tail &&
-        s.Playback is { IsPlaying: true, HasStarted: true, MediaReady: true, IsLocal: true } state &&
-        state.EntryId == q.CurrentId;
     private MusicRecommendationSelection SelectionLocked(Session s, string entryId, bool play, bool automatic,
         bool restoreOnly, MusicRecommendationPlaybackAction action = MusicRecommendationPlaybackAction.Select, bool inactive = false)
     {
@@ -180,8 +105,36 @@ public sealed partial class MusicRecommendationCoordinator
     }
     public MusicRecommendationFeedback? GetFeedback(string entryId)
     {
-        lock (gate) return session is { } s && CurrentLocked(s) && s.QueueEpoch == queue.Epoch &&
-            s.Queue?.Entries.Any(e => e.Id == entryId) == true ? s.Feedback.GetValueOrDefault(entryId) : null;
+        lock (gate)
+        {
+            if (session is not { } active || !CurrentLocked(active)) return null;
+            var s = active.InitialPending ? active.PreviousSession : active;
+            return s is not null && s.QueueEpoch == queue.Epoch &&
+                s.Queue?.Entries.Any(e => e.Id == entryId) == true ? s.Feedback.GetValueOrDefault(entryId) : null;
+        }
+    }
+    private JsonElement? QueueSelectionSource(string entryId)
+    {
+        lock (gate)
+        {
+            if (session is not { } active || !CurrentLocked(active) || active.Returning) return null;
+            var s = active.InitialPending ? active.PreviousSession : active;
+            if (s is null || s.QueueEpoch != queue.Epoch || s.Config.Kind != "queue" ||
+                !s.Feedback.ContainsKey(entryId)) return null;
+            return Context(s, s.Heartbeat).GetProperty("queueSource");
+        }
+    }
+    private void QueueSelected(string entryId)
+    {
+        lock (gate)
+        {
+            if (session is not { } active || !CurrentLocked(active) || active.Returning) return;
+            var s = active.InitialPending ? active.PreviousSession : active;
+            if (s is null || s.QueueEpoch != queue.Epoch || s.Config.Kind != "queue" ||
+                !s.Feedback.ContainsKey(entryId) || s.RecommendationStarted) return;
+            s.RecommendationStarted = true;
+            PublishLocked();
+        }
     }
     private async Task ReturnAsync(Session s, Task previous, CancellationToken token)
     {
@@ -197,7 +150,7 @@ public sealed partial class MusicRecommendationCoordinator
                 var operation = new PendingOperation(Guid.NewGuid().ToString("D"), "restore", [], null, "", false, false, epoch);
                 var result = await owner.ExecuteAsync("music.queue.recommendation.restore",
                     new { nonce = operation.Nonce, expectedVersion = before.Version, checkpoint = s.Checkpoint,
-                        retainCurrent = s.Config.Kind == "heartbeat" }, ct).ConfigureAwait(false);
+                        retainCurrent = true }, ct).ConfigureAwait(false);
                 if (!result.GetProperty("ok").GetBoolean())
                 {
                     string code = Text(result, "code");
@@ -210,7 +163,7 @@ public sealed partial class MusicRecommendationCoordinator
                     s.Checkpoint = "";
                     if (ReferenceEquals(session, s) && s.Navigation == navigation && queue.Epoch == epoch)
                     {
-                        s.Active = false; s.Returning = false; s.Continue = false; s.Waiting = false; s.Status = "returned";
+                        s.Active = false; s.Returning = false; s.Continue = false; s.Status = "returned";
                         s.Feedback.Clear(); s.Queue = restored;
                         if (before.CurrentId != restored.CurrentId)
                             selection = SelectionLocked(s, restored.CurrentId, false, false, true,

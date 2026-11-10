@@ -6,7 +6,6 @@ public enum FilmHomeError: Error, Equatable, Sendable, LocalizedError {
     case invalidResponse
     case responseTooLarge
     case upstream(statusCode: Int)
-    case redirectDenied
 
     public var errorDescription: String? {
         switch self {
@@ -15,7 +14,6 @@ public enum FilmHomeError: Error, Equatable, Sendable, LocalizedError {
         case .invalidResponse: return "影视数据格式无效"
         case .responseTooLarge: return "影视数据超出大小限制"
         case .upstream: return "影视数据源暂时不可用"
-        case .redirectDenied: return "影视数据源返回了重定向"
         }
     }
 

@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT3S" minBufferTime="PT1S" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">
+<Period duration="PT3S">
+<AdaptationSet contentType="video" mimeType="video/mp4"><ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"/><Representation id="0" codecs="avc1.64000a" bandwidth="60000" width="96" height="64"><BaseURL>cenc-dash-video.mp4</BaseURL></Representation></AdaptationSet>
+<AdaptationSet contentType="audio" mimeType="audio/mp4"><ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"/><Representation id="1" codecs="mp4a.40.2" bandwidth="48000" audioSamplingRate="48000"><BaseURL>cenc-dash-audio.mp4</BaseURL></Representation></AdaptationSet>
+</Period></MPD>

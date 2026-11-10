@@ -2463,6 +2463,18 @@ extension NativeMusicAccountService: MusicNativeHomeProviding {
 }
 
 extension NativeMusicAccountService: MusicNativeFMProviding {
+    public func nativeFMPreferenceScope(_ value: MusicNativeHomeBinding) async throws -> String {
+        try await checkNativeHomeBinding(value)
+        let binding = try requireNativeHomeBinding(value)
+        guard binding.token != nil else { return "wy-fm:guest" }
+        let lease = try await nativeHomeCredential(value)
+        defer { lease.revoke() }
+        guard let provider = providers[.netease] else { throw MusicServiceError.unsupported }
+        let uid = try await provider.nativeID(lease.credential)
+        try await checkNativeHomeBinding(value)
+        return "wy-fm:" + Data(SHA256.hash(data: Data(uid.utf8))).map { String(format: "%02x", $0) }.joined()
+    }
+
     public func nativeFM(_ action: MusicHomeAction, preview: Bool,
                          binding value: MusicNativeHomeBinding) async throws -> MusicNativeFMResponse {
         do {
@@ -2760,8 +2772,13 @@ extension NativeMusicAccountService: MusicNativeSimilarModeProviding {
                         throw MusicServiceError.targetChanged
                     }
                     try MusicNeteaseSimilarModeRequest.validate(.heartbeat(lastID: nil, fromHome: false, context: context))
-                case .songRoaming, .queueRecommendations:
+                case .songRoaming, .artistRoaming:
                     guard result.heartbeatContext == nil else { throw MusicServiceError.invalidResponse }
+                case .songRecommendations(_, let requestedOffset):
+                    guard result.heartbeatContext == nil, let next = result.offset, next >= 0,
+                          let more = result.hasMore, !more || next > requestedOffset else {
+                        throw MusicServiceError.invalidResponse
+                    }
                 }
                 return result
             }

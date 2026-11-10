@@ -71,8 +71,14 @@ public static partial class MusicUiTests
             Equal(Path.GetFileName(f.Dialogs.ScriptPath), f.Runtime.Uploads.Single().Basename);
             var requests = f.Calls.Log.Where(call => call.Method == "music.online.resolve").ToArray();
             Equal(source.InstallationId, requests.Single().Parameters.GetProperty("installationId").GetString());
+            var identity = f.Playback.Identity;
+            int opens = f.Playback.Opens.Count;
             await f.Module.SetSourceEnabledAsync(ScriptRow(f), false); await Until(() => f.Module.CanEdit);
-            True(!f.Playback.HasMedia, "source disable stops owned media");
+            True(!ScriptRow(f).Enabled, "source disable prevents new parsing");
+            True(f.Playback.HasMedia && f.Playback.IsPlaying && f.Playback.Identity == identity,
+                "source disable preserves already accepted historical media");
+            Equal(opens, f.Playback.Opens.Count);
+            Equal(requests.Length, f.Calls.Count("music.online.resolve"));
         });
         yield return Case("late online resolver cannot open after its playback retires; no synthetic history", async () =>
         {
@@ -232,7 +238,7 @@ public static partial class MusicUiTests
             var nativePath = Path.Combine(AppContext.BaseDirectory, "libvlc",
                 "win-" + System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant());
             await using var native = new NativePlayback(dispatcher: null, nativeLibraryPath: nativePath, audioOutput: NativeAudioOutput.Dummy,
-                httpOptions: NativeHttpMediaOptions.ForLoopbackTests([new Uri(new Uri(server.Url), "/")]));
+                httpOptions: new NativeHttpMediaOptions());
             await using var f = await Fixture.Create(native: native);
             await SetupOnline(f, JsonSerializer.Serialize(server.Url));
             var module = f.Module;
@@ -387,7 +393,7 @@ internal sealed class NativeMusicScriptTestRuntime : IRuntimeClient, IAsyncDispo
             ?? throw new InvalidOperationException("Packaged runtime root required.");
         string node = Environment.GetEnvironmentVariable("MEOWFILM_TEST_NODE")
             ?? throw new InvalidOperationException("Verified Node required.");
-        RuntimeModule[] modules = [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0"), new("tmdb", "0.1.0")];
+        RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
         Directory.CreateDirectory(dataRoot);
         return await NodeRuntime.StartAsync(node,
             RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules),

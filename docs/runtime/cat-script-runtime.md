@@ -50,7 +50,7 @@ contract: cat.script.v2
 | `restart` | `installationId` | 一个 instance |
 | `enable` | `installationId,enabled` | 一个 instance |
 | `uninstall` | `installationId` | `{applied,failures:[{installationId,code}]}` |
-| `start/status` | 空对象 | `{settingsPath,aggregate:{origin,access},instances:[...]}` |
+| `start/status` | 空对象 | `{settingsPath,aggregate:{origin},instances:[...]}` |
 
 `config` 为 JSON object，`sourceRevision` 选择同 installation 的完整上传；网络下载使用 `import`。`sourceType` 只允许 `local`、`network`；本地 `sourceUrl` 为 `null`，网络为 HTTP(S) URL 字符串。旧的 `install` 调用可以继续省略新增元数据。新安装缺省名称为 installationId、类型为 local、URL 为 null、config 为 `{}`、version 为 `0.0.0`。
 
@@ -182,14 +182,14 @@ TLS 证书链可保留循环引用，缓存的真实 KeyObject 可跨请求使�
 网络访问不区分公网、私网、链路本地、回环或 `.local`／`.lan`／`.internal` 等名称，也不维护域名授权或 origin 白名单。DNS 答案不过滤；有平台网络适配器时 DNS 不可用，以适配器归属为准。
 
 - `socketPath`、fd 仍拒绝；guest 自定义 `lookup`／`createConnection` 仍拒绝。这些是文件／IPC 与连接控制边界，不是地址限制。
-- 实例已登记的 listener 端口和别名仍映射到该实例的实际回环端点，并附加实例访问头和请求作用域；HTTP、HTTPS、net、TLS 自调用必须与 listener 协议一致，协议错配报错。
-- 未登记的回环端口直接连接真实 `127.0.0.1:port`，不附加实例访问头或作用域 token。该规则同时用于 `http.request`、`outboundURL` 与 net/tls `connection`。
+- 实例已登记的 listener 端口和别名仍映射到该实例的实际端点；HTTP 自调用仅附加内部 request scope，用于取消与资源归属，进入脚本前移除。普通外部请求不需要 scope，过期内部请求不能升级为实例 root。HTTP、HTTPS、net、TLS 自调用必须与 listener 协议一致，协议错配报错。
+- 未登记的回环端口按真实目标直接连接，不附加内部 scope 或访问凭据。该规则同时用于 `http.request`、`outboundURL` 与 net/tls `connection`。调用输入的 Host／Origin／Authorization／Cookie 保留，URL userinfo 按 HTTP Basic 语义处理，不从其它实例取得凭据。
 
-脚本自己的服务只监听 `127.0.0.1`。首个真正调用 `listen` 的 HTTP 或 HTTPS listener 成为主服务；运行器预留 HTTP listener，并为未使用预留 listener 的主服务及其他 listener 分配实际端口。脚本请求的固定端口仅登记为该实例内别名，因此多个 installation 可同时请求同一端口。主服务配置省略端口时，按协议将默认 80 或 443 映射到该服务。脚本自调用、`server.address()` 和 Cat 输出中的已登记本地 URL 使用实际端点。HTTP、HTTPS、net 和 TLS 自调用必须与 listener 类型一致，未启动或协议错配的本地端点不做降级映射。
+脚本的 HTTP(S) 服务全接口监听；对外调用不按 Host、Origin、回环来源或启动密钥检查准入。首个真正调用 `listen` 的 HTTP 或 HTTPS listener 成为主服务；运行器预留 HTTP listener，并为未使用预留 listener 的主服务及其他 listener 分配实际端口。脚本请求的固定端口仅登记为该实例内别名，因此多个 installation 可同时请求同一端口。主服务配置省略端口时，按协议将默认 80 或 443 映射到该服务。脚本自调用、`server.address()` 和 Cat 输出中的已登记本地 URL 使用实际端点。HTTP、HTTPS、net 和 TLS 自调用必须与 listener 类型一致，未启动或协议错配的本地端点不做降级映射。
 
 运行器读取 Cat 配置时会在该 installation 已登记的 HTTP(S) listener 上依次尝试 `/full-config` 与 `/config`，并以实际返回有效站点配置的 origin 解析相对 site API、选择主要管理端点，不把一个辅助 listener 的 401 当成其他 listener 不可用。
 
-对于明确提供 `internalAuthSecret` 的 Fastify 本机服务，在请求已经通过运行器外层访问检查后，通过脚本自己的 `x-internal-auth` 约定调用；该值留在当前 guest，不作为运行器凭据发布，也不发送到其他实例或上游。未提供该内部调用约定的脚本、交互式页面账号及上游账号仍遵循各自鉴权。
+对于明确提供 `internalAuthSecret` 的 Fastify 本机服务，通过脚本自己的 `x-internal-auth` 约定调用；该值留在当前 guest，不作为运行器凭据发布，也不发送到其他实例或上游。它不是运行器网络准入机制；未提供该内部调用约定的脚本、交互式页面账号及上游账号仍遵循各自鉴权。
 
 `net.createServer` 只兼容脚本启动时的端口可用性探测：它在 installation 私有的虚拟端口空间中提供 `listen`、事件、`address`、`close` 和 ref/unref 语义，不创建可接收入站数据的宿主 TCP listener。探测关闭后，同一虚拟端口可由受控 HTTP(S) listener 接管；运行器不因此开放任意 raw TCP 服务能力。
 
@@ -199,14 +199,14 @@ TLS 证书链可保留循环引用，缓存的真实 KeyObject 可跨请求使�
 
 运行器状态返回：
 
-- 聚合 Cat origin 与受信客户端访问 token；
+- 聚合 Cat origin，不发布或要求访问 token；
 - 每个 instance 始终包含 `installationId,generation,state,version,sourceHash,error,sites`，并增加 `name,sourceType,sourceUrl,enabled,importedAt,updatedAt,updateState,updateError`。state 为 `disabled`／`starting`／`ready`／`failed`；enabled 是独立的持久启用意图，不从 state 或更新结果反推。
 - sites 保留 `key/name/api/actions/methods` 及已有 discovery；未就绪或停用时返回最后成功保存的描述，首次尚无成功发现时为空。候选未提交时不发布其 sourceHash/sites；运行中的端口、generation 不作为持久安装或站点主键。
 - 仅 ready instance 另有当前实际 endpoints 和可用的 managementUrl。
 
-聚合入口只处理 `/cat/<installation>/<site>/<operation>` 和 `/proxy/...`。Cat 业务请求必须携带运行器 access header；脚本代理 URL 使用不可猜测路由身份并只允许 GET/HEAD。代理保留状态、Range、必要响应头、取消和流式背压；本实例的 Location、HLS URI 与 MPD BaseURL 才会继续映射。`/website`、`/admin`、配置及运行器内部路径不得借代理暴露。
+聚合入口只处理 `/cat/<installation>/<site>/<operation>` 和 `/proxy/...`，不要求 access header 或 URL 授权图许可。代理路由标识只还原真实 listener、installation 和 generation；普通 path／query、管理样式路径与正常 HTTP(S) 子资源不设访问名单。媒体方法为 GET／HEAD，OPTIONS 返回开放的 preflight，其他方法为 405。aggregate 收到 `Access-Control-Request-Private-Network: true` 时返回 `Access-Control-Allow-Private-Network: true`；该请求头缺失或为 `false` 时不发送此同意头，preflight 仍开放。代理保留状态、Range、必要响应头、取消和流式背压；Location、HLS URI 与 DASH 引用按真实上游基址解析，本地 listener 继续准确映射，外部清单子资源沿原媒体请求转发。
 
-脚本管理页面不挂到聚合前缀。客户端先访问 instance 的 `managementUrl`，运行器设置该 installation 独有的随机 HttpOnly/SameSite cookie；HTTPS listener 还设置 Secure。浏览器会向同一主机的其他端口发送该 cookie，因此端口不是隔离边界：每个 installation 只认可自己的随机值，Cookie 请求还必须具有精确同源 `Origin`，或在无 `Origin` 时明确携带 `Sec-Fetch-Site: none/same-origin`；进入 guest 前会剥离全部内部 `__meow_*` cookie。随后页面按原路径加载 HTML、JS、CSS 和 AJAX，运行器不解析或重写页面正文。
+脚本管理页面的 `managementUrl` 直接指向实际 listener 的 `/website`，没有 cookie bootstrap、管理 Cookie 或 Origin／Sec-Fetch-Site 检查；listener 与 aggregate 均提供开放 CORS。页面按原路径加载 HTML、JS、CSS 和 AJAX，运行器不解析或重写页面正文，也不剥离源自己的 Cookie／Set-Cookie。来源自行实现的账号认证不因此变成运行器访问门禁。
 
 ## Cat 输出与 provider 拦截
 
@@ -227,6 +227,8 @@ TLS 证书链可保留循环引用，缓存的真实 KeyObject 可跨请求使�
 ```
 
 不会返回 `{cat:{...}, own:{...}}` 两份数据，也不会覆盖脚本自有 `_meow`。增强包括已认领本地代理路由、真实宽高/分辨率/fps/文件名和可选 M3U8 variant；HTTP 失败、断连和增强自身超时仅在原实例仍有效时保留原始结果。M3U8 增强继承同一次调用的取消信号；取消停止在途下载并以 `CANCELLED` 结束调用，不回退为成功的原始结果。
+
+影视取址调用通过内部模块 context 传入 `mediaPurpose:'receipt'`，CatRuntime 在交付来源结果时跳过可选 M3U8 清单读取；用途不进入脚本 payload，也不是公开 RPC 参数。普通 Cat 消费保留既有增强。清单真正被媒体消费者读取后，Cat 代理与影视媒体入口均在解码前校验原始 UTF-8 字节，移除首 BOM 并保留内部 BOM、合法 U+FFFD 与非 ASCII 文本；非法输入不会被替换字符掩盖。Cat 清单错误继续为 `INVALID_RESPONSE`，影视受控清单入口将该错误映射为 `MEDIA_MANIFEST_INVALID`。
 
 调用开始时即绑定原 session/generation，即使调用方未显式提供 generation，增强也只交给该 session，不转交后续代次。主调用的成功与失败回执、增强成功结果和普通失败回退在返回前均核对原 session 仍为当前有效实例；停用、更新、重启、卸载、实例失败或关闭使其失效后，调用以生命周期错误结束，不发布退役代次的原始或增强结果，不把退役失败当作仍有效实例的普通阶段错误，不探测或重放调用。原调用信号取消仍为 `CANCELLED`；未关闭运行器中已退役的 session 返回 `STALE_SESSION`。仍存活实例的普通 HTTP 失败等保留原错误语义，不按错误码一概判为失效。增强所有权标记仅作内部控制，返回值不携带该 Symbol。
 

@@ -57,35 +57,65 @@ public static partial class RuntimeHttpProtocol
                 "SERVICE_CLOSED", "ROLLBACK_UNAVAILABLE", "UNSUPPORTED_RULE", "UNSUPPORTED_SCRIPT_ASYNC",
                 "HTTP_ERROR", "INVALID_RESPONSE", "UNSUPPORTED_OPTION", "UNSUPPORTED_CRYPTO",
                 "WEB_INTERACTION_REQUIRED", "VIRTUAL_ROUTE_NOT_FOUND", "UNMAPPED_LOCAL_URL" }),
+        ["pan"] = new("0.1.0", "pan.runtime.v1", "pan.",
+            ["providers", "settings.get", "settings.set", "settings.clear", "login.start",
+                "login.poll", "login.cancel", "list", "prepare", "play", "refresh"],
+            new(StringComparer.Ordinal) { "INVALID_REQUEST", "UNSUPPORTED_OPERATION", "NOT_CONFIGURED",
+                "AUTH_REQUIRED", "AUTH_FAILED", "CHALLENGE_REQUIRED", "NOT_FOUND", "UPSTREAM_HTTP",
+                "UPSTREAM_FORMAT", "UPSTREAM_ERROR", "NETWORK_ERROR", "TIMEOUT", "CANCELLED", "CLOSED",
+                "STALE_ACCOUNT", "STORAGE_ERROR", "CORRUPT_STORAGE", "LOGIN_EXPIRED", "PAN_FAILURE" }),
+        ["douban"] = new("0.1.0", "douban.data.v1", "douban.data.",
+            ["settings.get", "settings.update", "request", "search"],
+            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR",
+                "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE" }),
+        ["film"] = new("0.1.0", "film.playback.v1", "film.",
+            ["session.open", "session.command", "session.snapshot", "session.release",
+                "session.attempt", "session.media.release", "settings.get", "settings.set",
+                "library.get", "library.remove", "manual.update", "data.search", "data.detail",
+                "data.metadata", "data.cache.entry", "data.invalidate"],
+            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "NOT_FOUND", "NO_MATCH",
+                "SOURCE_NOT_FOUND", "SOURCE_DISABLED", "STALE_SOURCE", "STALE_SESSION", "STALE_ACCOUNT", "STALE_METADATA",
+                "NOT_CONFIGURED", "AUTH_REQUIRED", "AUTH_FAILED", "CHALLENGE_REQUIRED",
+                "UNSUPPORTED_OPERATION", "CAPABILITY_UNAVAILABLE", "MEDIA_UNAVAILABLE",
+                "NETWORK_ERROR", "TIMEOUT", "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "UPSTREAM_ERROR",
+                "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE", "COMMIT_UNKNOWN",
+                "NO_EPISODE_MAPPING", "INVALID_PREFERENCES", "INVALID_RULES", "INVALID_DETAIL",
+                "INVALID_RESULT", "CACHE_LOAD_FAILED", "STORAGE_CHANGED", "LIBRARY_UPDATE_FAILED",
+                "PAN_FAILURE", "SOURCE_FAILURE", "CAT_FAILURE", "SCRIPT_FAILURE", "SCRIPT_PROTOCOL_ERROR", "LOGIN_EXPIRED",
+                "MEDIA_BUSY", "MEDIA_CANCELLED", "MEDIA_CLOSED", "MEDIA_CLOSE_FAILED", "MEDIA_DRM_UNSUPPORTED",
+                "MEDIA_EMPTY_RESPONSE", "MEDIA_INVALID_DESCRIPTOR", "MEDIA_INVALID_REQUEST",
+                "MEDIA_LISTEN_FAILED", "MEDIA_MANIFEST_INVALID", "MEDIA_MANIFEST_LIMIT", "MEDIA_MANIFEST_UNSUPPORTED",
+                "MEDIA_METHOD_NOT_ALLOWED", "MEDIA_NOT_FOUND", "MEDIA_PREFETCH_DISABLED", "MEDIA_PREFETCH_HTTP_ERROR",
+                "MEDIA_PREFETCH_LIMIT", "MEDIA_PREFETCH_TIMEOUT", "MEDIA_PREFETCH_UNSUPPORTED", "MEDIA_RANGE_UNSUPPORTED",
+                "MEDIA_REDIRECT_ERROR", "MEDIA_RESOURCE_CHANGED", "MEDIA_RESOURCE_LIMIT", "MEDIA_UPSTREAM_ERROR",
+                "MEDIA_UPSTREAM_TIMEOUT" }),
     };
 
     [GeneratedRegex(@"\A[a-zA-Z][a-zA-Z0-9_.-]{0,127}\z", RegexOptions.CultureInvariant)]
     private static partial Regex MethodPattern();
-    [GeneratedRegex(@"\Ahttp://127\.0\.0\.1:([1-9][0-9]{0,4})/?\z", RegexOptions.CultureInvariant)]
-    private static partial Regex EndpointPattern();
-    [GeneratedRegex(@"\A[0-9a-f]{64}\z", RegexOptions.CultureInvariant)]
-    private static partial Regex KeyPattern();
     [GeneratedRegex(@"\A/v1/tmdb/images/(?:original|[wh][1-9][0-9]*)/[A-Za-z0-9_-]+\.[A-Za-z0-9]+\z",
         RegexOptions.CultureInvariant)]
     private static partial Regex ImagePattern();
+    [GeneratedRegex(@"\A/v1/douban/images/(?!\.{1,2}(?:/|\z))[A-Za-z0-9._~-]+(?:/(?!\.{1,2}(?:/|\z))[A-Za-z0-9._~-]+)*\z",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex DoubanImagePattern();
 
-    public static bool ValidImageReference(string? reference) => reference is not null && ImagePattern().IsMatch(reference);
+    public static bool ValidImageReference(string? reference) => ImageProvider(reference) is not null;
+
+    internal static string? ImageProvider(string? reference) => reference is null ? null :
+        ImagePattern().IsMatch(reference) ? "tmdb" : DoubanImagePattern().IsMatch(reference) ? "douban" : null;
 
     public static bool ValidMethod(string? method) => method is not null && MethodPattern().IsMatch(method);
 
     public static Uri ValidateEndpoint(string baseUrl)
     {
-        if (baseUrl is null || !EndpointPattern().IsMatch(baseUrl)
-            || !Uri.TryCreate(baseUrl, UriKind.Absolute, out var endpoint) || endpoint.Port is < 1 or > 65535)
+        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var endpoint)
+            || (endpoint.Scheme != Uri.UriSchemeHttp && endpoint.Scheme != Uri.UriSchemeHttps)
+            || string.IsNullOrEmpty(endpoint.Host) || endpoint.Port is < 1 or > 65535
+            || endpoint.AbsolutePath != "/"
+            || endpoint.Query.Length != 0 || endpoint.Fragment.Length != 0)
             throw new BridgeException("INVALID_REQUEST");
         return endpoint;
-    }
-
-    internal static void ValidateSession(string sessionId, string requestKey)
-    {
-        if (sessionId is null || sessionId.Length != 36 || !Guid.TryParseExact(sessionId, "D", out _)
-            || requestKey is null || !KeyPattern().IsMatch(requestKey))
-            throw new BridgeException("INVALID_REQUEST");
     }
 
     public static HashSet<string> ValidateDescription(JsonElement description, string product,

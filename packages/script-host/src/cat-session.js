@@ -4,13 +4,13 @@ import { randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createNodeRealm } from './node-realm.js';
 import { NodeCapabilities } from './node-capabilities.js';
-import { ScriptServices, scriptAccessHeader } from './script-services.js';
+import { ScriptServices } from './script-services.js';
 import { PanInterceptor } from './pan-interceptor.js';
 import { ResourceScope } from './scope.js';
 import { clone, deferred, fault, requireValue, safeError } from './errors.js';
 import { normalizeCatOutput, decodePanResource, addExtension, mergeExtension,
   ownedExtension, parseM3U8Metadata } from './cat-output.js';
-import { allowedProxyPath, fixedOriginURL } from './cat-proxy.js';
+import { fixedOriginURL } from './cat-proxy.js';
 import { isLoopbackHost } from './network-boundary.js';
 import { describeScriptError } from './script-diagnostic.js';
 
@@ -113,21 +113,18 @@ export class CatSession {
         let target;
         try { target = new URL(site.api, configOrigin); }
         catch { throw fault('SCRIPT_PROTOCOL_ERROR'); }
-        requireValue(['http:', 'https:'].includes(target.protocol) && !target.username && !target.password &&
+        requireValue(['http:', 'https:'].includes(target.protocol) &&
           !target.search && !target.hash, 'SCRIPT_PROTOCOL_ERROR');
         if (isLoopbackHost(target.hostname)) {
           const secure = target.protocol === 'https:';
           const requestedPort = Number(target.port || (secure ? 443 : 80));
-          let listener = this.services.listener(requestedPort);
+          const listener = this.services.listener(requestedPort);
           if (!listener && this.services.main?.meowStarted && this.services.main.listening &&
             this.services.main.meowSecure === secure) {
             this.services.aliases.set(requestedPort, this.services.main);
-            listener = this.services.main;
           }
-          requireValue(listener?.listening && listener.meowSecure === secure, 'SCRIPT_PROTOCOL_ERROR');
         }
-        const actual = this.services.mapLocal(target.href);
-        requireValue(actual, 'SCRIPT_PROTOCOL_ERROR');
+        const actual = this.services.outboundURL(target.href);
         this.sites.set(site.key, { ...site, api: actual.href.replace(/\/$/, '') });
         this.capabilities[site.key] = { actions: [], methods: {}, discovery: 'opaque-http',
           api: actual.pathname, name: site.name ?? site.key };
@@ -338,7 +335,6 @@ export class CatSession {
 
   async read(path, payload, scope, method = 'POST', origin = this.services.endpoint().origin) {
     scope.assertOpen();
-    const endpoint = this.services.endpoint();
     const target = new URL(path, origin);
     const query = method === 'GET' || method === 'HEAD';
     if (query) {
@@ -462,7 +458,7 @@ export class CatSession {
         request = (target.protocol === 'https:' ? https : http).request(target, {
           ...(target.protocol === 'https:' ? { rejectUnauthorized: false } : {}),
           agent: false, method,
-          headers: { [scriptAccessHeader]: endpoint.access, 'x-meow-request-scope': token.id,
+          headers: { 'x-meow-request-scope': token.id,
             ...(raw ? { 'content-type': 'application/json', 'content-length': raw.length } : {}) },
         }, responded);
         requestGuard = guardClientRequestErrors(request);
@@ -511,7 +507,7 @@ export class CatSession {
       value = await this.contextScope.run(scope, () => scope.race(new Promise((resolve, reject) => {
         const safeHeaders = Object.fromEntries(Object.entries(headers ?? {}).filter(([key, value]) =>
           typeof key === 'string' && !/[\r\n\u0000]/.test(key) &&
-          !/^(?:host|content-length|transfer-encoding|connection)$/i.test(key) &&
+          !/^(?:content-length|transfer-encoding|connection)$/i.test(key) &&
           (typeof value === 'string' || Array.isArray(value) && value.every(item => typeof item === 'string'))));
         safeHeaders['accept-encoding'] = 'identity';
         const target = new URL(url);
@@ -656,10 +652,11 @@ export class CatSession {
     // mismatch semantics identical to direct CatSession use.
     const local = this.services.mapLocal(value);
     if (!local) return value;
-    requireValue(allowedProxyPath(local.pathname), 'PERMISSION_DENIED');
     const entry = this.proxyForOrigin(local.origin, true);
-    return `http://127.0.0.1:${this.aggregatePort || Number(new URL(
-      this.services.endpoint().origin).port)}/proxy/${this.installationId}/${this.generation}/${entry.id}${local.pathname}${local.search}${local.hash}`;
+    const mapped = new URL(`http://127.0.0.1:${this.aggregatePort || Number(new URL(
+      this.services.endpoint().origin).port)}/proxy/${this.installationId}/${this.generation}/${entry.id}${local.pathname}${local.search}${local.hash}`);
+    mapped.username = local.username; mapped.password = local.password;
+    return mapped.href;
   }
   takeNewProxies() {
     const entries = [...this.pendingProxies]
@@ -675,7 +672,7 @@ export class CatSession {
   endpointSnapshot() {
     const main = this.services.main;
     return { endpoint: this.live && main?.meowStarted && main.listening ? this.endpoint() : null,
-      access: this.services.access, endpoints: this.proxyEndpoints(),
+      endpoints: this.proxyEndpoints(),
       aggregatePort: this.aggregatePort };
   }
 

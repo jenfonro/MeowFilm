@@ -14,6 +14,29 @@ final class MusicMediaHandoffTests: XCTestCase {
         return model
     }
 
+    func testCapturedHandoffDoesNotCancelANewerExplicitControlOrSelection() async throws {
+        for command in ["toggle", "next", "selection"] {
+            let service = MusicCandidateViewModelService(), player = MediaHandoffPlayer()
+            let model = await model(service: service, player: player)
+            await model.prepareCurrent()
+            let first = try XCTUnwrap(player.current)
+            let completion = model.mediaHandoffCompletion()
+            if command == "toggle" { await model.togglePlayback() }
+            else if command == "next" { XCTAssertTrue(model.requestNext()) }
+            else { await model.selectOccurrence("entry-2") }
+            let current = player.current
+            completion()
+            XCTAssertEqual(player.current, current, "The old handoff cannot stop newer explicit music")
+            if command == "next" {
+                await model.flushNavigation()
+                XCTAssertNotEqual(player.current?.id, first.id)
+            } else {
+                XCTAssertEqual(model.activeNativeAttemptID, current?.id)
+            }
+            await model.close()
+        }
+    }
+
     func testHandoffStopsAddressedMusicPreservesAcceptedFactsQueueAndExplicitResume() async throws {
         let service = MusicCandidateViewModelService(), player = MediaHandoffPlayer()
         let model = await model(service: service, player: player)
@@ -64,6 +87,39 @@ final class MusicMediaHandoffTests: XCTestCase {
 
         await model.togglePlayback()
         XCTAssertEqual(player.resources.count, 1)
+        XCTAssertEqual(player.current?.id, model.activeNativeAttemptID)
+        await model.close()
+    }
+
+    func testTerminalDonorExitRetiresItsPendingRecoveryWithoutLosingTheSuccessfulHandoff() async throws {
+        let service = MediaHandoffService(), player = MediaHandoffPlayer()
+        let model = await model(service: service, player: player)
+        await model.choose(.init(installationId: "official:synthetic", generation: 1,
+            siteId: "tx", sourceKey: "source-a", quality: "128k"))
+        XCTAssertNotNil(player.current)
+        player.emit(.played, position: 42)
+        await model.flushPlaybackFacts()
+        let began = expectation(description: "non-cooperative official URL recovery")
+        let gate = MusicCandidateViewModelGate { began.fulfill() }
+        await service.holdRecovery(gate)
+        player.emit(.failed, position: 42)
+        await fulfillment(of: [began], timeout: 2)
+        XCTAssertTrue(model.isResolving)
+
+        let completion = model.mediaHandoffCompletion()
+        let film = player.takeFilm(replacingMusic: true)
+        completion()
+        XCTAssertEqual(player.current, film)
+        XCTAssertNil(model.activeNativeAttemptID)
+        XCTAssertFalse(model.isResolving)
+        XCTAssertEqual(model.phase, .idle)
+        await gate.release(); await model.flushPlaybackFacts()
+        XCTAssertEqual(player.current, film, "Late recovery cannot replace the new owner")
+        XCTAssertEqual(player.resources.count, 1)
+        XCTAssertNil(model.error)
+
+        await model.togglePlayback()
+        XCTAssertEqual(player.resources.count, 2)
         XCTAssertEqual(player.current?.id, model.activeNativeAttemptID)
         await model.close()
     }
@@ -163,6 +219,39 @@ final class MusicMediaHandoffTests: XCTestCase {
         try await checkHomeAction(page: true)
     }
 
+    func testHandoffRejectsLateRememberedFMWithoutOpeningItsQueueAndKeepsTheNextExplicitEntrance() async throws {
+        let service = MediaHandoffService(), player = MediaHandoffPlayer()
+        let model = await model(service: service, player: player)
+        let began = expectation(description: "remembered FM preference")
+        let gate = MusicCandidateViewModelGate { began.fulfill() }
+        await service.holdRememberedFM(gate)
+        let old = Task { () -> MusicServiceError? in
+            do {
+                try await model.playHomeAction(.fm(mode: .default, submode: "", entry: nil), title: "FM")
+                return nil
+            } catch { return MusicServiceError.sanitized(error) }
+        }
+        await fulfillment(of: [began], timeout: 2)
+        let state = model.state, queue = model.queue
+        model.stopForMediaHandoff()
+        let film = player.takeFilm()
+        await gate.release()
+        let failure = await old.value, oldActions = await service.openedHomeActions()
+        let oldCommits = await service.remoteCommitCount()
+        XCTAssertEqual(failure, .cancelled)
+        XCTAssertTrue(oldActions.isEmpty); XCTAssertEqual(oldCommits, 0)
+        XCTAssertEqual(player.current, film); XCTAssertTrue(player.resources.isEmpty)
+        XCTAssertEqual(model.state, state); XCTAssertEqual(model.queue, queue)
+        XCTAssertNil(model.error); XCTAssertFalse(model.isPreparingRemoteQueue)
+
+        try await model.playHomeAction(.fm(mode: .default, submode: "", entry: nil), title: "FM")
+        let newActions = await service.openedHomeActions(), newCommits = await service.remoteCommitCount()
+        XCTAssertEqual(newActions, [.fm(mode: .explore, submode: "", entry: nil)])
+        XCTAssertEqual(newCommits, 1); XCTAssertEqual(player.resources.count, 1)
+        XCTAssertEqual(player.current?.id, model.activeNativeAttemptID)
+        await model.close()
+    }
+
     private func checkHomeAction(page: Bool) async throws {
         let service = MediaHandoffService(), player = MediaHandoffPlayer()
         let model = await model(service: service, player: player)
@@ -219,6 +308,7 @@ private final class MediaHandoffPlayer: MusicPlaybackHandoffDriving {
         deliver?(.init(attempt: current, kind: kind,
             snapshot: .init(owner: "music", resourceID: current.resourceID,
                 phase: kind == .played ? .playing : .preparing, position: position, duration: 180),
+            wantsPlayback: kind != .paused,
             error: nil))
     }
     func stop(_ attempt: MusicPlayerAttempt) {
@@ -227,11 +317,17 @@ private final class MediaHandoffPlayer: MusicPlaybackHandoffDriving {
         current = nil
         deliver?(.init(attempt: old, kind: .stopped,
             snapshot: .init(owner: "music", resourceID: old.resourceID,
-                phase: .idle, position: position, duration: 180), error: nil))
+                phase: .idle, position: position, duration: 180), wantsPlayback: false, error: nil))
     }
-    func takeFilm() -> PlayAttempt {
+    func takeFilm(replacingMusic: Bool = false) -> PlayAttempt {
+        let old = current
         let film = PlayAttempt(id: UUID(), owner: "film", resourceID: "film:synthetic")
         current = film
+        if replacingMusic, let old, old.owner == "music" {
+            deliver?(.init(attempt: old, kind: .replaced,
+                snapshot: .init(owner: "music", resourceID: old.resourceID,
+                    phase: .idle, position: position, duration: 180), wantsPlayback: false, error: nil))
+        }
         return film
     }
     func pause(_ attempt: MusicPlayerAttempt) {}
@@ -254,7 +350,7 @@ private final class MediaHandoffPlayer: MusicPlaybackHandoffDriving {
 /// Reuses the existing synthetic queue/resolution service. Only the source,
 /// history and home ports under test add non-cooperative suspension points.
 private actor MediaHandoffService: MusicServing, MusicSourcePlaybackServing, MusicHistoryManaging,
-    MusicHomeActionQueueServing, MusicRemoteQueueServing {
+    MusicHomeActionQueueServing, MusicRemoteQueueServing, MusicFMPlaybackServing, MusicPlaybackRecoveryServing {
     private let base = MusicCandidateViewModelService()
     private var matchGate: MusicCandidateViewModelGate?
     private var acknowledgementGate: MusicCandidateViewModelGate?
@@ -262,7 +358,10 @@ private actor MediaHandoffService: MusicServing, MusicSourcePlaybackServing, Mus
     private var queueGate: MusicCandidateViewModelGate?
     private var openGate: MusicCandidateViewModelGate?
     private var pageGate: MusicCandidateViewModelGate?
+    private var rememberedGate: MusicCandidateViewModelGate?
+    private var recoveryGate: MusicCandidateViewModelGate?
     private var discarded: [String] = []
+    private var homeActions: [MusicHomeAction] = []
     private var remoteCommits = 0
 
     static var history: MusicHistoryDetail {
@@ -278,6 +377,28 @@ private actor MediaHandoffService: MusicServing, MusicSourcePlaybackServing, Mus
     }
     func holdHome(_ gate: MusicCandidateViewModelGate, page: Bool) {
         if page { pageGate = gate } else { openGate = gate }
+    }
+    func holdRememberedFM(_ gate: MusicCandidateViewModelGate) { rememberedGate = gate }
+    func holdRecovery(_ gate: MusicCandidateViewModelGate) { recoveryGate = gate }
+    func openedHomeActions() -> [MusicHomeAction] { homeActions }
+    func rememberedFM() async -> MusicHomeAction {
+        let gate = rememberedGate; rememberedGate = nil
+        if let gate { await gate.wait() }
+        return .fm(mode: .explore, submode: "", entry: nil)
+    }
+    func fmPlaybackSnapshot() -> MusicFMPlaybackSnapshot? { nil }
+    func setFMContinue(_ enabled: Bool, sessionID: UUID) throws { throw MusicServiceError.unsupported }
+    func recoverPlayback(previousAttemptID: String, attemptID: String,
+                         rejectedURL: URL, position: Double) async throws -> MusicPlaybackRecovery {
+        let gate = recoveryGate; recoveryGate = nil
+        if let gate { await gate.wait() }
+        let selection = MusicPlaybackSelection(installationId: "official:synthetic", generation: 1,
+            siteId: "tx", sourceKey: "source-a", quality: "128k")
+        let state = await base.state()
+        guard let occurrenceID = state.currentId else { throw MusicServiceError.notFound }
+        let candidate = try await base.resolve(attemptId: attemptID,
+            occurrenceId: occurrenceID, selection: selection)
+        return .init(candidate: candidate, selection: selection)
     }
     func discardedSources() -> [String] { discarded }
     func remoteCommitCount() -> Int { remoteCommits }
@@ -326,6 +447,7 @@ private actor MediaHandoffService: MusicServing, MusicSourcePlaybackServing, Mus
     func inspectSources(for reference: MusicReference) throws -> any MusicSourceInspectionSession { throw MusicServiceError.unsupported }
 
     func openHomeActionQueue(_ action: MusicHomeAction, title: String) async -> MusicRemoteQueueSource {
+        homeActions.append(action)
         let gate = openGate; openGate = nil
         if let gate { await gate.wait() }
         return .init(context: .init(kind: .recommendation, id: "handoff-home", title: title, platform: "tx"),

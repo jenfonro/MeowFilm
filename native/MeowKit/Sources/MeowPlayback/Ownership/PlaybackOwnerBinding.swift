@@ -26,6 +26,9 @@ public struct PlaybackEvent {
     public let attempt: PlayAttempt
     public let kind: Kind
     public let snapshot: PlaybackSnapshot
+    /// User intent at this event's identity/time, not inferred from transport
+    /// phase (buffering, seek and interruption can pause actual output).
+    public let wantsPlayback: Bool
     /// Only the controller's sanitized NativePlaybackError / ContractError.
     public let error: Error?
 

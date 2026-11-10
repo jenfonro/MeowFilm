@@ -1,6 +1,7 @@
 #if os(iOS)
 import XCTest
 import UIKit
+import Combine
 import MeowUI
 import MeowRuntime
 @testable import MeowFilmFeature
@@ -58,9 +59,9 @@ final class FilmSearchUIKitTests: XCTestCase {
 
     func testSearchContentUsesExistingPostersKeepsBothModesAndDeliversLiveContext() async throws {
         let reads = FilmSearchUIKitReads()
-        let service = FilmSearchService(processor: try FilmSearchProcessor(), transport: .init(request: { _, parameters in
-            try await reads.read(parameters)
-        }, upload: { _, _, _ in throw FilmSearchError.unavailable }), sites: {
+        let service = FilmSearchService(processor: try FilmSearchProcessor(), data: .init(read: { _, _, page in
+            .init(value: try await reads.read(page: page))
+        }), sites: {
             [FilmSearchSite(cat: .init(installationId: "cat", name: "猫源", sourceType: "local", generation: 4),
                 source: .init(key: .init(installationId: "cat", siteKey: "site"), name: "来源", api: "fixture", actions: ["search"], methods: [:]))]
         }, rules: { ["高清"] })
@@ -108,6 +109,59 @@ final class FilmSearchUIKitTests: XCTestCase {
         await service.close()
     }
 
+    func testRawTypedZeroCardsKeepSeparateNavigationAndRealFavoritesAcrossReload() async throws {
+        let name = "film-search-favorites-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let site = FilmSearchSite(cat: .init(installationId: "fixture", name: "fixture", sourceType: "local", generation: 4),
+            source: .init(key: .init(installationId: "fixture", siteKey: "site"), name: "同一来源",
+                          api: "fixture", actions: ["search"], methods: [:]))
+        let service = FilmSearchService(processor: try FilmSearchProcessor(), data: .init(read: { _, _, _ in
+            .init(value: .object(["list": .array([.number(0), .string("0")].map { id in
+                .object(["vod_id": id, "vod_name": .string("同一标题"), "vod_remarks": .string("原备注")])
+            }), "pagecount": .number(1)]))
+        }), sites: { [site] }, rules: { [] })
+        addTeardownBlock { await service.close() }
+        let images = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { _ in throw FilmSearchError.unavailable }
+        let content = FilmSearchResultsContent(service: service, images: images, theme: PageTheme())
+        content.loadViewIfNeeded(); content.submit("原查询")
+        let session = try XCTUnwrap(content.session)
+        await session.drain()
+        let modes = try XCTUnwrap(find("film.search.mode", in: content.view) as? UISegmentedControl)
+        modes.selectedSegmentIndex = 1; modes.sendActions(for: .valueChanged)
+        let grid = try XCTUnwrap(find("film.search.grid", in: content.view) as? UICollectionView)
+        await waitFor { grid.numberOfItems(inSection: 0) == 2 }
+        let library = FilmLibrary(defaults: defaults)
+        var contexts: [FilmSearchContext] = []
+        content.onSelect = { contexts.append($0) }
+        for index in 0..<2 { content.collectionView(grid, didSelectItemAt: IndexPath(item: index, section: 0)) }
+        XCTAssertEqual(contexts.count, 2)
+        let zero = try XCTUnwrap(contexts.first { $0.selectedCard.detailID == .number(0) })
+        let stringZero = try XCTUnwrap(contexts.first { $0.selectedCard.detailID == .string("0") })
+        XCTAssertEqual(zero.selectedCard.text("siteDetail"), stringZero.selectedCard.text("siteDetail"))
+        XCTAssertNotEqual(zero.detail.item.identity, stringZero.detail.item.identity)
+        XCTAssertEqual(zero.detail.item.id, zero.selectedCard.id)
+        XCTAssertEqual(stringZero.detail.item.id, stringZero.selectedCard.id)
+        XCTAssertEqual(try zero.playbackTarget().value["source"]?.filmObject?["detailId"], .number(0))
+        XCTAssertEqual(try stringZero.playbackTarget().value["source"]?.filmObject?["detailId"], .string("0"))
+        let pages = [zero, stringZero].map {
+            FilmDetailViewController(searchContext: $0, library: library, images: images, themeProvider: SearchUIKitTheme())
+        }
+        for page in pages { page.loadViewIfNeeded() }
+        let numericFavorite = try XCTUnwrap(find("film.detail.favorite", in: pages[0].view) as? UIButton)
+        let stringFavorite = try XCTUnwrap(find("film.detail.favorite", in: pages[1].view) as? UIButton)
+        numericFavorite.sendActions(for: .touchUpInside)
+        XCTAssertTrue(library.contains(zero.detail.item)); XCTAssertFalse(library.contains(stringZero.detail.item))
+        stringFavorite.sendActions(for: .touchUpInside)
+        XCTAssertEqual(library.favorites.count, 2)
+        let restored = FilmLibrary(defaults: defaults)
+        XCTAssertTrue(restored.contains(zero.detail.item)); XCTAssertTrue(restored.contains(stringZero.detail.item))
+        numericFavorite.sendActions(for: .touchUpInside)
+        XCTAssertFalse(library.contains(zero.detail.item)); XCTAssertTrue(library.contains(stringZero.detail.item))
+        XCTAssertEqual(FilmLibrary(defaults: defaults).favorites, [stringZero.detail.item.identity])
+        content.close()
+    }
+
     private func find(_ id: String, in view: UIView) -> UIView? {
         if view.accessibilityIdentifier == id { return view }
         for child in view.subviews { if let found = find(id, in: child) { return found } }
@@ -120,21 +174,21 @@ final class FilmSearchUIKitTests: XCTestCase {
     }
 }
 
+@MainActor
+private final class SearchUIKitTheme: PageThemeProviding {
+    let pageColorway = PageColorway.allCases[0]
+    let animatesPageColorway = false
+    var pageThemeChanges: AnyPublisher<Void, Never> { Empty(completeImmediately: false).eraseToAnyPublisher() }
+}
+
 private actor FilmSearchUIKitReads {
     var pages: [Int] = []
     private var failFirst = true
-    func read(_ parameters: RuntimeValue) throws -> RuntimeValue {
-        let payload = field(parameters, "payload")
-        let page: Int
-        if case .number(let number) = field(payload, "page") { page = Int(number) } else { page = 0 }
+    func read(page: Int) throws -> RuntimeValue {
         pages.append(page)
         if failFirst { failFirst = false; throw FilmSearchError.unavailable }
         return .object(["pagecount": .number(2), "list": .array([
             .object(["vod_id": .string(page == 1 ? "\u{e9}" : "e\u{301}"), "vod_name": .string(page == 1 ? "真实标题" : "真实标题高清"), "vod_remarks": .string("更新至12集")])])])
-    }
-    private func field(_ value: RuntimeValue, _ key: String) -> RuntimeValue {
-        if case .object(let fields) = value { return fields[key] ?? .null }
-        return .null
     }
 }
 #endif

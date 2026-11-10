@@ -1,31 +1,17 @@
 # 原生媒体资源租约
 
-`resource-media-v1` / `INativeMediaResourceLease` / `NativePlayback.OpenResourceAsync` 是 Media 的受限原生输入契约，与普通 URL、不可变离线 read lease 共用媒体生命周期。
+`INativeMediaResourceLease`／`NativePlayback.OpenResourceAsync` 将一个媒体输入的真实所有权与释放回执交给 Media，与普通 HTTP(S) 和不可变 read lease 共用原生生命周期。它不是 URL 访问许可，也不要求来源是回环、指定 Origin 或某个资源 URL 图。
 
-不持久化地址、随机 capability 或运行会话。无能力的调用方不能换普通 URL 绕过拒绝。共享边界保留其地址、预算、授权、撤权和实际释放规则。
+## 输入与回执
 
-## 生产约束
-
-- 只接受已由原生协议适配校验的 lease；root 固定 literal `127.0.0.1`、
-  HTTP 和实际登记端口，拒绝别名、其他本地地址、用户信息和 fragment。
-- `Authorizes(Uri)` 由可信的原生领域适配实现，必须逐次核对资源与安装／版本／
-  会话／站点的绑定。共享层不解释业务源或站点字段。
-- Header 在首次准入前快照，普通头校验保持；每个 root、重定向、manifest、
-  分段／密钥和实际连接仍经过权限与地址政策。即便适配器错误地返回 true，
-  也不能授权其他 loopback 端口、私有地址或 DNS 重绑定。
-- 公共子资源同时需要 lease 许可及原有 public IP／DNS 政策。跨 origin 继承
-  原生已有的凭据去除规则，不发送原 root 的 Cookie、Authorization 或 capability。
-- 生产 resource session 使用资源租约的授权策略。
-  普通数据 API 不经 Node。这不是全量媒体代理或当前 App 的普通业务入口。
-- 可变清单使用 resource lease；媒体格式、加密、预算和容器校验复用自适应媒体层。
+- HTTP(S) 地址及请求头由调用方提供，Media 校验实际 URI／HTTP／媒体格式，不分类公网、私网、域名、DNS 结果或端口来决定能否访问。
+- 默认 HTTP、重定向、HLS／DASH 子清单、初始化、分段和密钥没有域名名单、Origin 或授权 URL 图准入。显式输入头快照随该输入请求传递；不保存／重放响应 Cookie，不把地址、头或密钥写入日志。
+- 公共 lease 不再有 `Authorizes(Uri)`。`Revoked` 只表达来源／账号／运行器 owner 的失效，不承担地址许可。
+- `RuntimeMediaAuthority(runtimeRevoked, releaseResource)` 管理同一运行器代次的准确 resource ID 和唯一释放 task。ID 是现行 media.release RPC 的 24 字节 base64url（32 字符）；它不与媒体 URL 路径／Origin 比较。地址可与 release ID 无路径对应关系。
+- 不持久化短效媒体地址、请求头或运行会话。媒体格式、Range、表示一致性、资源预算与取消仍按对应输入处理。
 
 ## 生命周期
 
-调用 `OpenResourceAsync` 即转移独占所有权，包括参数错误、取消、dispatcher
-不可用。新请求预检失败不打断旧播放。已接受会话直到原生 Stop、回调、传输和
-监听完成才回收 lease；替换等待真实 release，不只看取消信号。
+调用 open／prepare 即转移独占所有权，包括参数错误、取消和 dispatcher 不可用；失败不先毁可用 donor。外层已接管操作在校验前登记，close 先取消再等待真实 worker、局部资源、拒绝请求和准确 release 回执结束，随后释放 donor／surface／engine，不持 command gate 反向等待。
 
-`Revoked` 必须可取消，且在实例停用、更新成功、卸载、运行时失联、保护或权限
-失效时主动触发；暂停／缓存不延缓撤权。caller cancellation 同样绑定完整会话。
-未知保存／未知桥回执由协议适配先阻断旧资源。Dispose 恰调用一次；回收失败
-归一为不含地址／凭据的稳定错误并阻断播放器继续使用，不把失败当回收成功。
+来源／账号／运行器撤权仍主动取消，暂停不会延缓；每份 receipt 和 child 恰好实际释放一次。重复 dispose／close 共享原回执，失败固定为不带 inner、地址或私有路径的 `MEDIA_RELEASE_FAILED`，继续尽力排空其余资源，不能假成功。UI 订阅或智能搜索早停不拥有实际媒体生命周期。

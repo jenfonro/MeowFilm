@@ -12,7 +12,7 @@ internal sealed class AdaptiveKey(AdaptiveResource resource)
     private readonly SemaphoreSlim gate = new(1, 1);
     private byte[]? bytes;
     private int references = 1;
-    internal string Identity => (resource.OriginalCredentials ? "1:" : "0:") + resource.OriginalUri.AbsoluteUri;
+    internal string Identity => resource.OriginalUri.AbsoluteUri;
     internal AdaptiveKey Retain() { Interlocked.Increment(ref references); return this; }
     internal void SetIndependent() => resource.Independent = true;
     internal async Task<byte[]> GetAsync(AdaptiveHttpTransport transport, CancellationToken token)

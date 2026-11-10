@@ -24,12 +24,16 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
     private readonly NativeHttpMediaOptions _httpOptions;
     private readonly SemaphoreSlim _commands = new(1, 1);
     private LibVLC? _engine;
+    private readonly object _engineGate = new();
     private Session? _session;
     private CancellationTokenSource? _opening;
     private long _generation;
     private bool _disposing;
     private bool _releaseFaulted;
     private Task? _disposeTask;
+    private readonly object _ownedMediaGate = new();
+    private readonly HashSet<Task> _ownedMediaRequests = [];
+    private bool _ownedMediaClosing, _ownedMediaReleaseFailed;
     private bool _volumePending;
     private int _volume = 100;
     private string? _ownerId, _identity, _lastErrorCode, _nativeVersion;
@@ -42,7 +46,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         NativeAudioOutput audioOutput = NativeAudioOutput.SystemDefault)
         : this(dispatcher, nativeLibraryPath, audioOutput, new NativeHttpMediaOptions()) { }
 
-    /// <summary>Trusted host transport policy; explicit loopback-test configuration is never source supplied.</summary>
+    /// <summary>HTTP resource deadlines shared by ordinary and owned media inputs.</summary>
     public NativePlayback(Dispatcher? dispatcher, string? nativeLibraryPath,
         NativeAudioOutput audioOutput, NativeHttpMediaOptions httpOptions)
     {
@@ -128,12 +132,14 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         if (_releaseFaulted) throw Error(PlaybackError.ReleaseFailed);
         Validate(ownerId, identity, uri, title, headers);
         // Take a bounded immutable request snapshot before any await/replacement.
-        var requestOptions = resource is null ? _httpOptions : NativeHttpMediaOptions.ForResource(resource, _httpOptions);
-        // An explicit empty header map still requests controlled HTTP input.
+        var requestOptions = _httpOptions;
+        // An explicit empty header map or URL userinfo requests managed HTTP input.
         // Official CDN URLs carry no account headers, but need the same bounded
         // redirect/Range validation and typed failure reporting as signed inputs.
-        var requestHeaders = resource is not null || headers is not null && uri.Scheme is ("http" or "https") || AdaptiveManifest.HasManifestPath(uri)
-            ? HttpMediaInput.ValidateRequest(uri, headers ?? new Dictionary<string, string>(), requestOptions, true) : null;
+        var requestHeaders = resource is not null ||
+            uri.Scheme is ("http" or "https") && (headers is not null || uri.UserInfo.Length != 0) ||
+            AdaptiveManifest.HasManifestPath(uri)
+            ? HttpMediaInput.ValidateRequest(uri, headers ?? new Dictionary<string, string>(), true) : null;
         token.ThrowIfCancellationRequested(); // Rejected requests never interrupt current playback.
         long generation;
         if (continuation is null)
@@ -184,10 +190,9 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
                         throw Error(HttpMediaInput.Classify(error));
                     }
                     var resolved = unownedInput.EffectiveUri;
-                    bool credentials = unownedInput.HeadersAllowed;
                     unownedInput.Dispose(); unownedInput = null;
-                    unownedAdaptive = await AdaptiveMediaSession.OpenAsync(manifest, resolved, credentials,
-                        uri, requestHeaders, requestOptions, opening.Token);
+                    unownedAdaptive = await AdaptiveMediaSession.OpenAsync(manifest, resolved,
+                        requestHeaders, requestOptions, opening.Token);
                 }
             }
             CheckRequest(generation, opening.Token);
@@ -289,33 +294,40 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
 
     private void EnsureEngine()
     {
-        if (_engine is not null) return;
-        // This is library bootstrap, not a decoder, global playback service or Node proxy.
-        NativeRuntimeModules.EnsureLoaded(_nativeLibraryPath);
-        var options = new List<string>
+        lock (_engineGate)
         {
-            "--quiet", "--ignore-config", "--no-interact", "--keystore=none",
-            "--no-video-title-show", "--no-osd",
-            "--no-sub-autodetect-file", "--no-metadata-network-access"
-        };
-        if (_audioOutput == NativeAudioOutput.Dummy) options.Add("--aout=dummy");
-        _engine = new LibVLC(false, options.ToArray());
-        // Replaces the native default logger. No URI, native message or credentials leave this boundary.
-        _engine.Log += DiscardNativeLog;
+            ThrowIfDisposed();
+            if (_engine is not null) return;
+            // This is library bootstrap, not a decoder, global playback service or Node proxy.
+            NativeRuntimeModules.EnsureLoaded(_nativeLibraryPath);
+            var options = new List<string>
+            {
+                "--quiet", "--ignore-config", "--no-interact", "--keystore=none",
+                "--no-video-title-show", "--no-osd",
+                "--no-sub-autodetect-file", "--no-metadata-network-access"
+            };
+            FFmpegNativeLibrary.EnsureLoaded();
+            if (_audioOutput == NativeAudioOutput.Dummy) options.Add("--aout=dummy");
+            _engine = new LibVLC(false, options.ToArray());
+            // Replaces the native default logger. No URI, native message or credentials leave this boundary.
+            _engine.Log += DiscardNativeLog;
+        }
     }
 
     private static void DiscardNativeLog(object? sender, LogEventArgs args) { }
 
     private Session CreateSession(long generation, Uri? uri, HttpMediaInput? input,
         ReadLeaseMediaInput? readInput = null, AdaptiveMediaSession? adaptive = null,
-        MediaResourceSession? resource = null)
+        MediaResourceSession? resource = null, FFmpegMediaInput? ffmpeg = null)
     {
         // Fixed demux whitelist prevents adaptive/playlist auto detection on callback content.
         // URI and headers are never passed as VLC options or an MRL on this path.
         MediaInput? callbackInput = readInput ?? (MediaInput?)input;
-        var media = adaptive is not null
+        var media = ffmpeg is not null
+            ? new VlcMedia(_engine!, ffmpeg.Mrl, FromType.FromLocation)
+            : adaptive is not null
             ? new VlcMedia(_engine!, adaptive.Root.AbsoluteUri, FromType.FromLocation,
-                ":demux=adaptive,none", ":http-user-agent=" + adaptive.Capability,
+                ":demux=adaptive,none",
                 ":adaptive-maxbuffer=5", ":adaptive-minbuffer=1", ":adaptive-logic=lowest")
             : callbackInput is not null
             ? new VlcMedia(_engine!, callbackInput, $":demux={readInput?.DemuxName ?? input!.DemuxName},none",
@@ -332,7 +344,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
                 EnableMouseInput = false,
                 Volume = _volume
             };
-            return new Session(generation, player, media, input, readInput, adaptive, resource);
+            return new Session(generation, player, media, input, readInput, adaptive, resource, ffmpeg);
         }
         catch
         {
@@ -404,7 +416,6 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
     private async Task StopCoreAsync()
     {
         ThrowIfDisposed();
-        if (_releaseFaulted) throw Error(PlaybackError.ReleaseFailed);
         var generation = BeginReplacement();
         await _commands.WaitAsync();
         try
@@ -471,16 +482,20 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
 
     private async Task RetireAsync(bool preserveHandoff = false)
     {
-        if (!preserveHandoff) await DiscardHandoffCoreAsync();
+        bool failed = _releaseFaulted;
+        try { if (!preserveHandoff) await DiscardHandoffCoreAsync(); }
+        catch { failed = true; }
         var session = _session;
-        if (session is null) return;
-        bool failed;
-        try { failed = await ReleaseNativeAsync(session, detachView: true); }
-        finally
+        if (session is not null)
         {
-            _session = null;
-            Set(ref _isPlaying, false, nameof(IsPlaying));
-            Set(ref _hasMedia, false, nameof(HasMedia));
+            try { failed |= await ReleaseNativeAsync(session, detachView: true); }
+            catch { failed = true; }
+            finally
+            {
+                _session = null;
+                Set(ref _isPlaying, false, nameof(IsPlaying));
+                Set(ref _hasMedia, false, nameof(HasMedia));
+            }
         }
         if (failed)
         {
@@ -491,9 +506,11 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
 
     /// <summary>Stops and frees one session's native resources. A session that is no longer
     /// displayed (replaced by a handoff, or never published) leaves the view alone.</summary>
-    private async Task<bool> ReleaseNativeAsync(Session session, bool detachView)
+    private Task<bool> ReleaseNativeAsync(Session session, bool detachView) =>
+        session.ReleaseTask ??= ReleaseNativeCoreAsync(session, detachView);
+
+    private async Task<bool> ReleaseNativeCoreAsync(Session session, bool detachView)
     {
-        if (session.Released) return false;
         session.Released = true;
         session.ContinuationReady?.TrySetCanceled(new CancellationToken(true));
         session.Invalidate();
@@ -501,6 +518,8 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         session.Cancellation.Dispose(); // Cancellation callback only enqueues work; never waits for this dispatcher.
         if (detachView) _view.BeginRetirement();
         bool failed = false;
+        try { if (session.RuntimeOutput is { } output) await output.DisposeAsync(); }
+        catch { failed = true; }
         // Stop joins native threads. Never call it on a libVLC callback or block the WPF message pump.
         try { await Task.Run(session.Player.Stop); }
         catch { failed = true; }
@@ -532,6 +551,8 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         catch { failed = true; }
         try { if (session.Adaptive is not null) await session.Adaptive.DisposeAsync(); }
         catch { failed = true; }
+        try { if (session.FFmpeg is not null) await session.FFmpeg.DisposeAsync(); }
+        catch { failed = true; }
         try { if (session.Resource is not null) await session.Resource.DisposeAsync(); }
         catch { failed = true; }
         finally { session.ProgressTimer = null; }
@@ -540,18 +561,22 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
 
     private async Task DisposeCoreAsync()
     {
+        var ownedMediaDrain = DrainOwnedMediaRequestsAsync();
         _disposing = true;
         BeginReplacement();
+        // Rejected attachment/open requests may need the command gate to finish.
+        // Cancel first, then join their outer receipt before acquiring that gate.
+        bool failed = await ownedMediaDrain;
         await _commands.WaitAsync();
-        bool failed = _releaseFaulted;
+        failed |= _releaseFaulted;
         try
         {
             try { await RetireAsync(); }
             catch { failed = true; }
             try { _view.CloseSurface(); }
             catch { failed = true; }
-            var engine = _engine;
-            _engine = null;
+            LibVLC? engine;
+            lock (_engineGate) { engine = _engine; _engine = null; }
             if (engine is not null)
             {
                 try { await Task.Run(engine.Dispose); }
@@ -705,10 +730,6 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         if (uri is null || !uri.IsAbsoluteUri ||
             (uri.Scheme != Uri.UriSchemeFile && uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
             throw Error(PlaybackError.UnsupportedUri);
-        if (!string.IsNullOrEmpty(uri.UserInfo)) throw Error(PlaybackError.UriCredentials);
-        // A file request must not turn into implicit SMB credentials/network filesystem access.
-        if (uri.IsFile && (uri.IsUnc || (!string.IsNullOrEmpty(uri.Host) && !uri.IsLoopback)))
-            throw Error(PlaybackError.UnsupportedUri);
         if (uri.IsFile && (!string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment)))
             throw Error(PlaybackError.UnsupportedUri);
         if (uri.IsFile && headers is { Count: > 0 }) throw Error(PlaybackError.UnsupportedHeaders);
@@ -733,6 +754,44 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         Set(ref _positionSeconds, 0, nameof(PositionSeconds));
         Set(ref _durationSeconds, 0, nameof(DurationSeconds));
         Set(ref _lastErrorCode, null, nameof(LastErrorCode));
+    }
+
+    private async Task TrackOwnedMediaRequestAsync(Func<Task> operation)
+    {
+        TaskCompletionSource? receipt;
+        lock (_ownedMediaGate)
+        {
+            receipt = _ownedMediaClosing ? null : new(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (receipt is not null) _ownedMediaRequests.Add(receipt.Task);
+        }
+        try { await operation().ConfigureAwait(false); }
+        catch (PlaybackException error) when (error.Code == PlaybackError.ReleaseFailed)
+        {
+            lock (_ownedMediaGate)
+                if (receipt is not null) _ownedMediaReleaseFailed = true;
+            throw;
+        }
+        finally
+        {
+            if (receipt is not null)
+                lock (_ownedMediaGate)
+                {
+                    _ownedMediaRequests.Remove(receipt.Task);
+                    receipt.TrySetResult();
+                }
+        }
+    }
+
+    private async Task<bool> DrainOwnedMediaRequestsAsync()
+    {
+        Task[] pending;
+        lock (_ownedMediaGate)
+        {
+            _ownedMediaClosing = true;
+            pending = _ownedMediaRequests.ToArray();
+        }
+        await Task.WhenAll(pending);
+        lock (_ownedMediaGate) return _ownedMediaReleaseFailed;
     }
 
     private Task DispatchAsync(Func<Task> operation)
@@ -783,7 +842,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
 
     private sealed class Session(long generation, MediaPlayer player, VlcMedia media, HttpMediaInput? input,
         ReadLeaseMediaInput? readInput = null, AdaptiveMediaSession? adaptive = null,
-        MediaResourceSession? resource = null)
+        MediaResourceSession? resource = null, FFmpegMediaInput? ffmpeg = null)
     {
         internal readonly long Generation = generation;
         internal readonly MediaPlayer Player = player;
@@ -792,7 +851,10 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         internal readonly ReadLeaseMediaInput? ReadInput = readInput;
         internal readonly AdaptiveMediaSession? Adaptive = adaptive;
         internal readonly MediaResourceSession? Resource = resource;
-        internal string? LastInputError => ReadInput?.LastErrorCode ?? Input?.LastErrorCode ?? Adaptive?.LastErrorCode;
+        internal readonly FFmpegMediaInput? FFmpeg = ffmpeg;
+        internal RuntimeOutput? RuntimeOutput;
+        internal string? LastInputError => FFmpeg?.LastErrorCode ?? ReadInput?.LastErrorCode ??
+            Input?.LastErrorCode ?? Adaptive?.LastErrorCode;
         internal CancellationTokenRegistration Cancellation;
         internal int Cancelled;
         private int _valid = 1;
@@ -800,13 +862,16 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         internal void Invalidate()
         {
             Interlocked.Exchange(ref _valid, 0);
+            ContinuationReady?.TrySetCanceled(new CancellationToken(true));
             // Never wait on the IO lock here. A native command/Stop may already be joining Read.
             Input?.Cancel();
             ReadInput?.Cancel();
             Adaptive?.Cancel();
+            FFmpeg?.Cancel();
             Resource?.Cancel();
         }
-        internal bool HasStarted, Terminal, Released;
+        internal bool HasStarted, Terminal, Released, RuntimeOutputReady;
+        internal Task<bool>? ReleaseTask;
         internal TaskCompletionSource? ContinuationReady;
         internal bool ContinuationInitializing;
         internal double ContinuationPosition;
@@ -821,6 +886,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         private Action<string>? _inputFailed;
         private Action<string>? _readFailed;
         private Action<string>? _adaptiveFailed;
+        private Action<string>? _ffmpegFailed;
 
         internal void Attach(NativePlayback owner)
         {
@@ -852,6 +918,11 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
                 _adaptiveFailed = code => owner.Post(() => owner.Observe(owner.FinishSessionAsync(this, code)));
                 Adaptive.Failed += _adaptiveFailed;
             }
+            if (FFmpeg is not null)
+            {
+                _ffmpegFailed = code => owner.Post(() => owner.Observe(owner.FinishSessionAsync(this, code)));
+                FFmpeg.Failed += _ffmpegFailed;
+            }
         }
 
         internal void Detach()
@@ -866,6 +937,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
             if (Input is not null) Input.Failed -= _inputFailed;
             if (ReadInput is not null) ReadInput.Failed -= _readFailed;
             if (Adaptive is not null) Adaptive.Failed -= _adaptiveFailed;
+            if (FFmpeg is not null) FFmpeg.Failed -= _ffmpegFailed;
         }
     }
 }

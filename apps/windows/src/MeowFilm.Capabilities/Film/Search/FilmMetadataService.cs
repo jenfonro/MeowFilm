@@ -20,14 +20,41 @@ public sealed class FilmMetadataService(IRuntimeClient runtime) : IFilmSearchMet
     public event EventHandler? Saved;
 
     public Task<JsonElement> SearchAsync(string query, CancellationToken token) =>
-        RequestAsync("/3/search/multi", new { query, page = 1, language = "zh-CN" }, token);
+        ContentAsync("/3/search/multi", new { query, page = 1, language = "zh-CN" }, "w500", token);
     public Task<JsonElement> DetailAsync(string type, long id, CancellationToken token)
     {
         if (type is not ("movie" or "tv") || id <= 0) throw new BridgeException("INVALID_REQUEST");
-        return RequestAsync("/3/" + type + "/" + id.ToString(CultureInfo.InvariantCulture), new { language = "zh-CN" }, token);
+        return ContentAsync("/3/" + type + "/" + id.ToString(CultureInfo.InvariantCulture),
+            new { language = "zh-CN", append_to_response = "credits,similar,images" }, "original", token);
     }
-    private Task<JsonElement> RequestAsync(string path, object query, CancellationToken token) =>
-        RunAsync("tmdb.data.request", new { path, query, imageSize = "w500" }, value => value, token);
+    async Task<FilmSearchData> IFilmSearchMetadata.SearchAsync(string query, CancellationToken token) =>
+        await ReadContentAsync("/3/search/multi", new { query, page = 1, language = "zh-CN" }, "w500", token);
+    Task<FilmSearchData> IFilmSearchMetadata.DetailAsync(string type, long id, CancellationToken token)
+    {
+        if (type is not ("movie" or "tv") || id <= 0) throw new BridgeException("INVALID_REQUEST");
+        return ReadContentAsync("/3/" + type + "/" + id.ToString(CultureInfo.InvariantCulture),
+            new { language = "zh-CN", append_to_response = "credits,similar,images" }, "original", token);
+    }
+    private async Task<JsonElement> ContentAsync(string path, object query, string imageSize, CancellationToken token) =>
+        (await ReadContentAsync(path, query, imageSize, token)).Value;
+    private Task<FilmSearchData> ReadContentAsync(string path, object query, string imageSize, CancellationToken token)
+    {
+        dispatcher.VerifyAccess();
+        ObjectDisposedException.ThrowIf(closed, this);
+        if (stopping) throw new BridgeException("CLOSED");
+        token.ThrowIfCancellationRequested();
+        var work = ReadAsync();
+        pending.Add(work);
+        _ = ReleaseAsync(work);
+        return work;
+        async Task<FilmSearchData> ReadAsync()
+        {
+            using var request = CancellationTokenSource.CreateLinkedTokenSource(token, reads.Token);
+            return await FilmSearchDataClient.ReadAsync(runtime, "metadata",
+                new { provider = "tmdb", path, query, imageSize },
+                new { kind = "metadata", provider = "tmdb", path, query, imageSize }, request.Token);
+        }
+    }
     public string ResolveImage(string path) => path;
 
     public Task<FilmMetadataSettings> GetSettingsAsync(CancellationToken token = default)

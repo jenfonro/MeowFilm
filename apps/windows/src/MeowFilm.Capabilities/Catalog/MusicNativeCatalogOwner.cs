@@ -32,7 +32,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
     internal Func<CancellationToken, Task>? PrepareSongFacts { get; set; }
     internal Func<MusicSearchRequest, CancellationToken, Task<JsonElement>>? SearchSongs { get; set; }
     private sealed record Stage(string Platform, string Id, string Name, string Snapshot,
-        JsonElement[] Songs, string[] Members, long Bytes, DateTimeOffset Expires, long Epoch);
+        JsonElement[] Songs, string[] Members, long Bytes, DateTimeOffset Expires, long Epoch, string HeartbeatAccount);
     private static string NativeId(JsonElement song)
     {
         var id = SongJson.NativeId(song);
@@ -142,24 +142,23 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                         OptionalText(input, "submode", allowEmpty: true) ?? "", Flag(input, "preview"),
                         OptionalText(input, "ruleId"), OptionalText(input, "tabTagId")), signal).ConfigureAwait(false); break;
                 case "music.catalog.similar":
-                    Fields(input, ["platform", "sourceIds"]);
+                    Fields(input, ["platform", "sourceIds", "sourceType"], ["platform", "sourceIds", "sourceType"]);
                     var sourceIds = Strings(input, "sourceIds");
                     Check(sourceIds.Length <= 20, "INVALID_REQUEST");
-                    result = await catalog.SimilarAsync(new(Platform(input), sourceIds), signal).ConfigureAwait(false); break;
+                    result = await catalog.SimilarAsync(new(Platform(input), sourceIds, Text(input, "sourceType")), signal).ConfigureAwait(false); break;
                 case "music.catalog.heartbeat":
-                    Fields(input, ["platform", "entry", "songId"], ["platform", "entry"]);
+                    Fields(input, ["platform", "entry", "songId", "playlistId"], ["platform", "entry"]);
                     var entry = Text(input, "entry") switch
                     {
                         "favorites" => MusicHeartbeatEntry.Favorites, "current" => MusicHeartbeatEntry.CurrentSong,
                         _ => throw new CatalogFailure("INVALID_REQUEST")
                     };
                     var heartbeatSongId = OptionalText(input, "songId");
-                    Check(entry == MusicHeartbeatEntry.CurrentSong ? heartbeatSongId is not null : heartbeatSongId is null, "INVALID_REQUEST");
-                    result = await catalog.HeartbeatAsync(new(Platform(input), entry, heartbeatSongId), signal).ConfigureAwait(false); break;
+                    Check(entry != MusicHeartbeatEntry.CurrentSong || heartbeatSongId is not null && OptionalText(input, "playlistId") is not null, "INVALID_REQUEST");
+                    result = await catalog.HeartbeatAsync(new(Platform(input), entry, heartbeatSongId, OptionalText(input, "playlistId")), signal).ConfigureAwait(false); break;
                 case "music.catalog.queueRecommendations":
-                    Fields(input, ["platform", "songIds", "currentPlaySongId"]);
-                    result = await catalog.QueueRecommendationsAsync(new(Platform(input), Strings(input, "songIds"),
-                        Text(input, "currentPlaySongId")), signal).ConfigureAwait(false); break;
+                    Fields(input, ["platform", "seedSongId", "offset"], ["platform", "seedSongId"]);
+                    result = await catalog.QueueRecommendationsAsync(new(Platform(input), Text(input, "seedSongId"), Number(input, "offset", 0)), signal).ConfigureAwait(false); break;
                 case "music.catalog.album":
                     Fields(input, ["platform", "id", "refresh"], ["platform", "id"]);
                     result = await catalog.AlbumAsync(new(Platform(input), Text(input, "id"),
@@ -242,6 +241,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
             var seen = new HashSet<string>(StringComparer.Ordinal);
             string? snapshot = null, name = null, strength = null; int? total = null;
             bool? memberIds = null;
+            string heartbeatAccount = "";
             for (int page = 1; ; page = checked(page + 1))
             {
                 Guard(signal, captured);
@@ -252,7 +252,8 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 SongsObserved?.Invoke(result.GetProperty("items").EnumerateArray()
                     .Select(song => NativeMusicSong.Normalize(JsonNode.Parse(song.GetRawText()))));
                 snapshot ??= Text(result, "snapshot"); name ??= Text(result, "name"); total ??= Number(result, "total");
-                if (page == 1) { strength = OptionalText(result, "snapshotStrength"); memberIds = result.TryGetProperty("memberIds", out _); }
+                if (page == 1) { strength = OptionalText(result, "snapshotStrength"); memberIds = result.TryGetProperty("memberIds", out _);
+                    heartbeatAccount = OptionalText(result, "heartbeatAccountId") ?? ""; }
                 Check(Text(result, "name") == name, "SNAPSHOT_CHANGED");
                 Check(OptionalText(result, "snapshotStrength") == strength, "SNAPSHOT_CHANGED");
                 int memberIndex = 0;
@@ -308,7 +309,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 // Account for array delimiters, including a valid empty playlist.
                 Check(reservedBytes + 2 <= MaximumStageBytes * 2, "LIMIT"); reservedBytes += 2;
                 stages.Add(token, new(platform, id, name!, snapshot!, songs.ToArray(), members.ToArray(), size,
-                    clock.GetUtcNow().AddMinutes(1), captured));
+                    clock.GetUtcNow().AddMinutes(1), captured, heartbeatAccount));
                 reservationTransferred = true;
             }
             return JsonSerializer.SerializeToElement(new { token, platform, id, name, count = total, snapshot });
@@ -372,12 +373,18 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 result = await library.CreatePlaylistAsync(name ?? item.Name, item.Songs, signal).ConfigureAwait(false);
             else
             {
-                var context = JsonSerializer.SerializeToElement(new { sourceTitle = item.Name,
+                var context = JsonSerializer.SerializeToNode(new { sourceTitle = item.Name,
                     sourcePlatform = item.Platform, sourceType = "playlist", sourceId = item.Id,
-                    queueSource = new { id = item.Id, title = item.Name, kind = "playlist", platform = item.Platform } });
+                    queueSource = new { id = item.Id, title = item.Name, kind = "playlist", platform = item.Platform } })!.AsObject();
+                if (item.HeartbeatAccount.Length > 0)
+                {
+                    context["heartbeatPlaylistId"] = item.Id;
+                    context["heartbeatAccountId"] = item.HeartbeatAccount;
+                }
+                var sourceContext = JsonSerializer.SerializeToElement(context);
                 result = action == "next"
-                    ? await library.AppendQueueAsync(item.Songs, context, version, signal).ConfigureAwait(false)
-                    : await library.ReplaceQueueAsync(item.Songs, index, context, version, signal).ConfigureAwait(false);
+                    ? await library.AppendQueueAsync(item.Songs, sourceContext, version, signal).ConfigureAwait(false)
+                    : await library.ReplaceQueueAsync(item.Songs, index, sourceContext, version, signal).ConfigureAwait(false);
             }
             Check(result.ValueKind == JsonValueKind.Object && result.TryGetProperty("ok", out _), "INVALID_RESPONSE");
             if (result.GetProperty("ok").ValueKind != JsonValueKind.True)

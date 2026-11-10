@@ -68,6 +68,8 @@ public static partial class MusicUiTests
     public static IEnumerable<TestCase> Cases()
     {
         foreach (var test in PlayerChromeCases()) yield return test;
+        foreach (var test in SeekHitAreaCases()) yield return test;
+        foreach (var test in LyricInteractionCases()) yield return test;
         yield return Case("test document stores authorize exact native namespaces and complete script sources", async () =>
         {
             const string hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -873,7 +875,7 @@ public static partial class MusicUiTests
             await Cancelled(loading);
             Equal(0, f.Playback.Subscribers);
             True(!preparation.IsCompleted, "admitted writes still draining");
-            await f.Module.ChangeModeAsync(0); await f.Module.RefreshAsync();
+            await f.Module.ChangeModeAsync(1); await f.Module.RefreshAsync();
             await f.Module.InitializeAsync(default); await f.Module.NavigateAsync("favorites", default); await f.Module.SearchAsync("ignored", default);
             await f.Module.OpenPlaylistAsync("favorites"); await f.Module.OpenPlayQueueAsync();
             f.Playback.End(); f.Playback.Start(); f.Playback.Fail();
@@ -911,7 +913,7 @@ public static partial class MusicUiTests
                 Equal(0, f.Playback.Subscribers); Equal(0, f.Calls.DisposeCalls);
                 True(!f.Module.CanEdit, "failure does not reopen business admission");
                 var count = f.Calls.Log.Count;
-                await f.Module.ChangeModeAsync(0);
+                await f.Module.ChangeModeAsync(1);
                 await f.Module.InitializeAsync(default); await f.Module.NavigateAsync("favorites", default); await f.Module.SearchAsync("ignored", default);
                 await f.Module.OpenPlayQueueAsync(); f.Playback.Start(); f.Playback.End();
                 Equal(count, f.Calls.Log.Count);
@@ -1238,7 +1240,7 @@ public static partial class MusicUiTests
         public double PositionSeconds => Seek;
         public double DurationSeconds => 180;
         public int Volume { get; set; } = 80;
-        public double Seek; public int Pauses, Resumes, Stops;
+        public double Seek; public int SeekCalls, Pauses, Resumes, Stops;
         public List<(string Entry, Uri Uri)> Opens { get; } = [];
         public event PropertyChangedEventHandler? PropertyChanged;
         public event EventHandler? Started, Ended, Failed;
@@ -1253,7 +1255,7 @@ public static partial class MusicUiTests
         public Task PauseAsync() { Pauses++; IsPlaying = false; Changed(); return Task.CompletedTask; }
         public Task ResumeAsync() { Resumes++; IsPlaying = true; Changed(); return Task.CompletedTask; }
         public Task StopAsync() { Stops++; HasMedia = false; IsPlaying = false; Changed(); return Task.CompletedTask; }
-        public Task SeekAsync(double seconds) { Seek = seconds; Changed(); return Task.CompletedTask; }
+        public Task SeekAsync(double seconds) { SeekCalls++; Seek = seconds; Changed(); return Task.CompletedTask; }
         public void Tick(double seconds)
         { Seek = seconds; PropertyChanged?.Invoke(this, new(nameof(PositionSeconds))); }
     }

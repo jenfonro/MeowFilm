@@ -38,10 +38,12 @@ public static class RuntimeRecoveryTests
         public int Prepares, Resumes;
         public Task? Hold;
         public TaskCompletionSource<bool>? PrepareEntered;
+        public Action<CancellationToken>? OnPrepare;
         public bool Fail;
         public async Task PrepareRuntimeRecoveryAsync(CancellationToken cancellationToken)
         {
             Prepares++;
+            OnPrepare?.Invoke(cancellationToken);
             PrepareEntered?.TrySetResult(true);
             if (Hold is not null) await Hold.WaitAsync(cancellationToken);
             if (Fail) throw new Exception("synthetic-private");
@@ -153,6 +155,50 @@ public static class RuntimeRecoveryTests
             var late = new Session(); handshake.SetResult(late);
             await BridgeTests.Expect("CLOSED", () => retry); await close;
             Check(late.Disposals == 1 && late.Calls == 0 && scope.Resumes == 0);
+        });
+        yield return new("runtime-recovery: pending lifetime callbacks cannot delay borrowed epoch revocation or finish shutdown early", async () =>
+        {
+            int factories = 0;
+            var session = new Session();
+            CancellationTokenSource? borrowed = null;
+            var callbackEntered = Pending<bool>();
+            using var releaseCallback = new ManualResetEventSlim();
+            CancellationTokenRegistration registration = default;
+            var scope = new Scope
+            {
+                OnPrepare = token => registration = token.Register(() =>
+                {
+                    callbackEntered.TrySetResult(true);
+                    releaseCallback.Wait();
+                })
+            };
+            var runtime = new AppRuntimeClient(token =>
+            {
+                if (++factories == 1) return Task.FromException<IRuntimeSession>(new Exception("synthetic-private"));
+                borrowed = CancellationTokenSource.CreateLinkedTokenSource(token);
+                return Task.FromResult<IRuntimeSession>(session);
+            });
+            try
+            {
+                runtime.RegisterRecoveryScope(scope);
+                runtime.Start();
+                await BridgeTests.Expect("INTERNAL", () => runtime.CallAsync("music.script.sources.list"));
+                await runtime.RetryAsync();
+                var close = runtime.DisposeAsync().AsTask();
+                Check(borrowed!.IsCancellationRequested);
+                await callbackEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                Check(!close.IsCompleted);
+                releaseCallback.Set();
+                await close;
+                Check(factories == 2 && session.Disposals == 1 && scope.Resumes == 1);
+            }
+            finally
+            {
+                releaseCallback.Set();
+                await runtime.DisposeAsync();
+                registration.Dispose();
+                borrowed?.Dispose();
+            }
         });
         yield return new("runtime-recovery: explicit retry cancels and fences old uploads without replay", async () =>
         {

@@ -15,14 +15,24 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
     case fm(mode: FMMode, submode: String, entry: FMEntry?)
     /// Exactly one selector: a positive safe rule ID, or a numeric/official tab.
     case ruleFM(ruleID: String, tabTagID: String, sourceName: String)
-    /// Ordered song seeds, including repetitions; never artist/playlist seeds.
+    /// Verified song or artist seeds retain their actual provider identity.
     case similar(sourceIDs: [String], sourceName: String)
+    case similarArtist(sourceIDs: [String], sourceName: String)
     case daily(branch: DailyBranch)
     /// Deliberately carries no resource/playlist/song ID. The account owner
     /// resolves the current user's real liked playlist and seed at execution.
     case heartbeat
+    case heartbeatSong(songID: String)
     /// A finite ordered collection, not a playlist ID or an endless FM stream.
     case songCollection(ids: [String])
+
+    public var isSimilar: Bool {
+        switch self { case .similar, .similarArtist: return true; default: return false }
+    }
+
+    public var isHeartbeat: Bool {
+        switch self { case .heartbeat, .heartbeatSong: return true; default: return false }
+    }
 
     public static let maximumSimilarSeeds = 20
 
@@ -30,7 +40,7 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
     /// provider path; personal recommendations require the account owner.
     public var requiresAccount: Bool {
         switch self {
-        case .daily, .heartbeat, .similar: return true
+        case .daily, .heartbeat, .heartbeatSong, .similar, .similarArtist: return true
         case .fm, .ruleFM, .songCollection: return false
         }
     }
@@ -50,7 +60,7 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
                 : Self.safeID(ruleID) && tabTagID.isEmpty
             guard validSelector else { throw MusicServiceError.invalidRequest }
             try Self.validateName(sourceName)
-        case .similar(let sourceIDs, let sourceName):
+        case .similar(let sourceIDs, let sourceName), .similarArtist(let sourceIDs, let sourceName):
             guard sourceIDs.count <= Self.maximumSimilarSeeds else { throw MusicServiceError.limit }
             guard !sourceIDs.isEmpty, sourceIDs.allSatisfy(Self.safeID) else { throw MusicServiceError.invalidRequest }
             try Self.validateName(sourceName)
@@ -58,6 +68,8 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
             guard !ids.isEmpty, ids.allSatisfy({ Self.positiveID($0, digits: 18) }) else {
                 throw MusicServiceError.invalidRequest
             }
+        case .heartbeatSong(let id):
+            guard Self.safeID(id) else { throw MusicServiceError.invalidRequest }
         case .daily, .heartbeat: break
         }
     }
@@ -81,7 +93,7 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
     // shape without persisting arbitrary parameters or native URLs/DSL.
     private enum CodingKeys: String, CodingKey {
         case type, provider, mode, submode, entry, ruleId, tabTagId, sourceName
-        case sourceType, sourceIds, branch, ids
+        case sourceType, sourceIds, branch, ids, songId
     }
     public init(from decoder: Decoder) throws {
         let data = try decoder.container(keyedBy: CodingKeys.self)
@@ -101,15 +113,18 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
                            entry: try data.decodeIfPresent(FMEntry.self, forKey: .entry))
             }
         case "similar":
-            guard try data.decode(String.self, forKey: .sourceType) == "song" else {
-                throw DecodingError.dataCorruptedError(forKey: .sourceType, in: data, debugDescription: "Expected song seeds")
+            let type = try data.decode(String.self, forKey: .sourceType)
+            let ids = try Self.decodeIDs(data, key: .sourceIds, maximum: Self.maximumSimilarSeeds)
+            let name = try data.decodeIfPresent(String.self, forKey: .sourceName) ?? ""
+            switch type {
+            case "song": self = .similar(sourceIDs: ids, sourceName: name)
+            case "artist": self = .similarArtist(sourceIDs: ids, sourceName: name)
+            default: throw MusicServiceError.invalidRequest
             }
-            self = .similar(sourceIDs: try Self.decodeIDs(data, key: .sourceIds, maximum: Self.maximumSimilarSeeds),
-                            sourceName: try data.decodeIfPresent(String.self, forKey: .sourceName) ?? "")
         case "daily": self = .daily(branch: try data.decode(DailyBranch.self, forKey: .branch))
         case "heartbeat":
-            // Old snapshots may have playlistId/resourceId. Never retain them.
-            self = .heartbeat
+            if let id = try data.decodeIfPresent(String.self, forKey: .songId) { self = .heartbeatSong(songID: id) }
+            else { self = .heartbeat }
         case "song-collection":
             self = .songCollection(ids: try Self.decodeIDs(data, key: .ids, maximum: nil))
         default:
@@ -147,6 +162,14 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
             try data.encode("song", forKey: .sourceType)
             try data.encode(sourceIDs, forKey: .sourceIds)
             if !sourceName.isEmpty { try data.encode(sourceName, forKey: .sourceName) }
+        case .similarArtist(let sourceIDs, let sourceName):
+            try data.encode("similar", forKey: .type)
+            try data.encode("artist", forKey: .sourceType)
+            try data.encode(sourceIDs, forKey: .sourceIds)
+            if !sourceName.isEmpty { try data.encode(sourceName, forKey: .sourceName) }
+        case .heartbeatSong(let id):
+            try data.encode("heartbeat", forKey: .type)
+            try data.encode(id, forKey: .songId)
         case .daily(let branch):
             try data.encode("daily", forKey: .type)
             try data.encode(branch, forKey: .branch)

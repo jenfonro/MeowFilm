@@ -173,6 +173,23 @@ class SourceScopeTests(unittest.TestCase):
         self.write("native/MeowKit/Sources/MeowUI/Fixture.swift", "import FilmSearchProgram\n")
         self.assertIn("Shared target depends on business: MeowUI", scope.check(self.root))
 
+    def test_video_kernel_requires_its_exact_local_package_and_explicit_dependency(self):
+        path = self.root / "native/MeowKit/Package.swift"
+        text = path.read_text().replace('.target(name: "MeowUI", dependencies: [])',
+            '.target(name: "MeowUI", dependencies: [.product(name: "MeowVideoKernel", package: "videokernel")])')
+        path.write_text('.package(path: "../VideoKernel")\n' + text)
+        self.write("native/MeowKit/Sources/MeowUI/Fixture.swift", "import MeowVideoKernel\n")
+        self.assertEqual(scope.check(self.root), [])
+        path.write_text('.package(path: "../Foreign")\n' + text)
+        self.assertTrue(any("Unapproved" in error for error in scope.check(self.root)))
+        path.write_text('.package(path: "../VideoKernel")\n' + text.replace(
+            'name: "MeowVideoKernel", package: "videokernel"',
+            'name: "MeowVideoKernel", package: "foreign"'))
+        self.assertTrue(any("Unapproved local product" in error for error in scope.check(self.root)))
+        path.write_text('.package(path: "../VideoKernel")\n' + text)
+        self.write("native/MeowKit/Sources/MeowJSON/Fixture.swift", "import MeowVideoKernel\n")
+        self.assertTrue(any("Undeclared imports for MeowJSON" in error for error in scope.check(self.root)))
+
 
 
 if __name__ == "__main__":

@@ -4,7 +4,11 @@
     <WindowsSdkPackageVersion>10.0.19041.57</WindowsSdkPackageVersion>
     <OutputType>Exe</OutputType>
     <UseWPF>true</UseWPF>
+    <ApplicationIcon>../../src/MeowFilm.Desktop/Assets/Meowfilm.ico</ApplicationIcon>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../app/AppSystemMediaAttachment.cs" Link="App/AppSystemMediaAttachment.cs" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/MeowFilm.Core/MeowFilm.Core.csproj" />
     <ProjectReference Include="../../src/MeowFilm.Platform/MeowFilm.Platform.csproj" />

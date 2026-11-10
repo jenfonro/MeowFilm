@@ -4,7 +4,6 @@ using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
-using System.Security.Cryptography;
 using System.Text;
 
 namespace MeowFilm.Media;
@@ -26,7 +25,6 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
     private string? _error;
     private int _nextClient;
     internal Uri Root { get; private set; } = null!;
-    internal string Capability { get; private set; }
     internal int Port { get; }
     internal string? LastErrorCode => Volatile.Read(ref _error);
     internal event Action<string>? Failed;
@@ -34,16 +32,15 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
     internal CancellationToken Lifetime => _lifetime.Token;
     internal void LiveRecoveryFailed() => Fail(new PlaybackException(PlaybackError.HttpExpired));
 
-    private AdaptiveMediaSession(Uri origin, Dictionary<string, string> headers, NativeHttpMediaOptions options,
+    private AdaptiveMediaSession(Dictionary<string, string> headers, NativeHttpMediaOptions options,
         CancellationToken token, OfflineAdaptiveArchive? offline = null)
     {
         _options = options;
         _lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
-        Capability = "MeowAdaptive/" + Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         _listener = new TcpListener(IPAddress.Loopback, 0);
         _listener.Start();
         Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
-        _transport = offline is null ? new(options, headers, origin, _lifetime.Token) : new(offline, _lifetime.Token);
+        _transport = offline is null ? new(options, headers, _lifetime.Token) : new(offline, _lifetime.Token);
         _manifest = new(_transport, new Uri($"http://127.0.0.1:{Port}/"), allowLive: offline is null);
         _abort = _lifetime.Token.Register(() =>
         {
@@ -55,26 +52,26 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
     {
         var archive = new OfflineAdaptiveArchive(content, length);
         await archive.LoadAsync(token).ConfigureAwait(false);
-        var session = new AdaptiveMediaSession(NativeAdaptiveArchive.ArchiveOrigin, [], new(), token, archive);
+        var session = new AdaptiveMediaSession([], new(), token, archive);
         try
         {
             // Recompile even our own index. Arbitrary caller-provided archives cannot bypass the
             // manifest profile/URI checks; the transport has no upstream network implementation.
-            session.Root = await session._manifest.BuildAsync(archive.RootBytes, archive.Root, false, token).ConfigureAwait(false);
+            session.Root = await session._manifest.BuildAsync(archive.RootBytes, archive.Root, token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             session._accept = session.AcceptAsync(); return session;
         }
         catch { await session.DisposeAsync().ConfigureAwait(false); throw; }
     }
-    internal static async Task<AdaptiveMediaSession> OpenAsync(byte[] root, Uri resolved, bool credentials,
-        Uri origin, Dictionary<string, string> headers, NativeHttpMediaOptions options, CancellationToken token)
+    internal static async Task<AdaptiveMediaSession> OpenAsync(byte[] root, Uri resolved,
+        Dictionary<string, string> headers, NativeHttpMediaOptions options, CancellationToken token)
     {
-        var session = new AdaptiveMediaSession(origin, headers, options, token);
+        var session = new AdaptiveMediaSession(headers, options, token);
         try
         {
             using var graphDeadline = CancellationTokenSource.CreateLinkedTokenSource(token, session._lifetime.Token);
             graphDeadline.CancelAfter(options.RequestTimeout);
-            session.Root = await session._manifest.BuildAsync(root, resolved, credentials, graphDeadline.Token).ConfigureAwait(false);
+            session.Root = await session._manifest.BuildAsync(root, resolved, graphDeadline.Token).ConfigureAwait(false);
             session._live = AdaptiveLiveSession.Create(session._manifest, session._transport,
                 new Uri($"http://127.0.0.1:{session.Port}/"), options.RequestTimeout, session._lifetime.Token);
             session._lifetime.Token.ThrowIfCancellationRequested();
@@ -123,7 +120,7 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
     }
     private async Task HandleAsync(int id, TcpClient client)
     {
-        bool authenticated = false;
+        bool parsed = false;
         AdaptiveResource? resource = null;
         byte[]? liveInitialization = null;
         using var requestLifetime = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
@@ -136,9 +133,9 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
             var request = await RequestAsync(stream).ConfigureAwait(false);
             if (request is null)
             {
-                await StatusAsync(stream, 403, 0).ConfigureAwait(false); return;
+                await StatusAsync(stream, 400, 0).ConfigureAwait(false); return;
             }
-            authenticated = true;
+            parsed = true;
             disconnect = WatchDisconnectAsync(stream, requestLifetime);
             resource = _live is not null
                 ? await _live.AcquireAsync(request.Value.Path, requestLifetime.Token).ConfigureAwait(false)
@@ -235,7 +232,7 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
         }
         catch (Exception error)
         {
-            ReportRequestFailure(error, authenticated, requestLifetime.Token);
+            ReportRequestFailure(error, parsed, requestLifetime.Token);
         }
         finally
         {
@@ -247,17 +244,16 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
             _clients.TryRemove(id, out _);
         }
     }
-    private void ReportRequestFailure(Exception error, bool authenticated, CancellationToken request)
+    private void ReportRequestFailure(Exception error, bool parsed, CancellationToken request)
     {
         // A native seek/disconnect retires only that IO. But a confirmed payload rejection
         // cannot become successful EOF merely because the socket closes at the same time.
         // Session cancellation/old generations remain suppressed by Fail's lifetime check.
-        if (!authenticated || error is LocalClientClosedException) return;
+        if (!parsed || error is LocalClientClosedException) return;
         if (request.IsCancellationRequested && error is not PlaybackException
             { Code: PlaybackError.HttpFormatUnsupported or PlaybackError.AdaptiveInvalid or
                 PlaybackError.AdaptiveUnsupported or PlaybackError.AdaptiveDrmUnsupported or
                 PlaybackError.AdaptiveEncryptionUnsupported or PlaybackError.AdaptiveBudget or
-                PlaybackError.HttpAddressBlocked or PlaybackError.HttpRedirectBlocked or
                 PlaybackError.HttpRepresentationChanged }) return;
         Fail(error);
     }
@@ -297,11 +293,7 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
             int colon = line.IndexOf(':');
             if (colon <= 0 || !headers.TryAdd(line[..colon], line[(colon + 1)..].Trim())) return null;
         }
-        if (headers.GetValueOrDefault("Host") != $"127.0.0.1:{Port}" ||
-            headers.ContainsKey("Origin") || headers.ContainsKey("Transfer-Encoding") ||
-            headers.ContainsKey("Content-Length") ||
-            !CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(headers.GetValueOrDefault("User-Agent", "")),
-                Encoding.ASCII.GetBytes(Capability))) return null;
+        if (headers.ContainsKey("Transfer-Encoding") || headers.ContainsKey("Content-Length")) return null;
         return (first[1], headers.GetValueOrDefault("Range"));
     }
     private static (long Start, long? End) ParseRange(string? range)
@@ -418,7 +410,6 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
         _live?.Clear();
         _manifest.Clear();
         lock (_handlers) _handlers.Clear();
-        Capability = "";
         _abort.Dispose(); _lifetime.Dispose();
     }
 }

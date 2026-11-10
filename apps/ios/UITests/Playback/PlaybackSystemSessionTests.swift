@@ -142,7 +142,8 @@ final class PlaybackSystemSessionTests: XCTestCase {
         let notifications = NotificationCenter(), targets = SystemRemoteTargetRecorder()
         let before = MPNowPlayingInfoCenter.default().nowPlayingInfo as NSDictionary?
         var outputs = 0
-        let session = PlaybackSystemSession(onEvent: { _, _ in XCTFail("No attempt-scoped notification was posted") },
+        let session = PlaybackSystemSession(audioActions: .live,
+            onEvent: { _, _ in XCTFail("No attempt-scoped notification was posted") },
             onCommand: { _, _, _ in true }, onNavigation: { _ in true },
             onOutputUnavailable: { outputs += 1 }, notificationCenter: notifications,
             registerCommandTarget: targets.register)
@@ -271,7 +272,7 @@ final class PlaybackSystemSessionTests: XCTestCase {
 
     func testStandardCommandTargetsFollowCapabilitiesAndAreRemovedOnReplacementAndEnd() async throws {
         let targets = SystemRemoteTargetRecorder()
-        let session = PlaybackSystemSession(onEvent: { _, _ in },
+        let session = PlaybackSystemSession(audioActions: .live, onEvent: { _, _ in },
             onCommand: { _, _, _ in true }, onNavigation: { _ in true },
             notificationCenter: NotificationCenter(), registerCommandTarget: targets.register)
         defer { session.endSession() }
@@ -409,7 +410,7 @@ private actor SystemOutputMusicService: MusicServing, MusicSourcePlaybackServing
     func holdResolution(_ gate: SystemOutputWait) { resolution = gate }
     func holdActivation(_ gate: SystemOutputWait) { activation = gate }
     func state() -> MusicPlaybackState {
-        .init(revision: revision, mode: .order, currentId: entries[index].id, total: entries.count,
+        .init(revision: revision, mode: .loop, currentId: entries[index].id, total: entries.count,
             position: position, canNext: index == 0, canPrevious: index == 1)
     }
     func queue() -> MusicQueueSnapshot { .init(revision: revision, currentId: entries[index].id, entries: entries) }

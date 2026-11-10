@@ -42,7 +42,7 @@ public static class LiveHlsTests
         yield return Case("AES byte exact window Range and zero retired keys", BytesAndKeys);
         yield return Case("128 advancing windows bounded catalog validators and keys", Bounded);
         yield return Case("admitted retired payload retains key until read drains", Retained);
-        yield return Case("cross origin reload redirect strips headers permanently", Redirect);
+        yield return Case("cross origin reload redirect preserves input headers", Redirect);
         yield return Case("transient reload two retries then success", RetrySuccess);
         yield return Case("transient reload third failure terminal", () => Terminal("server"));
         yield return Case("nine unchanged reloads terminal no infinite poll", () => Terminal("stale"));
@@ -51,7 +51,7 @@ public static class LiveHlsTests
         yield return Case("invalid live update wins simultaneous local disconnect", FailureFence);
         yield return Case("archive refuses live before any segment or key IO", DownloadBoundary);
         foreach (string bad in new[] { "rollback", "uri", "range", "duration", "discontinuity", "target",
-            "key", "file", "private", "master", "sample-aes", "ll-hls", "short-window", "vod-live" })
+            "key", "file", "master", "sample-aes", "ll-hls", "short-window", "vod-live" })
             yield return Case("invalid update or profile " + bad, () => Invalid(bad));
     }
     private static TestCase Case(string name, Func<Task> run) => new("live-hls: " + name, () => A.Sta(run));
@@ -71,9 +71,9 @@ public static class LiveHlsTests
         BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(item, args);
     private static void Set(object item, string field, object value) => item.GetType().GetField(field,
         BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.SetValue(item, value);
-    private static NativeHttpMediaOptions Options(params A.Origin[] origins) =>
-        NativeHttpMediaOptions.ForLoopbackTests(origins.Select(o => o.Base), TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
-    private static NativePlayback Player(A.Origin origin) => new(Dispatcher.CurrentDispatcher, null, NativeAudioOutput.Dummy, Options(origin));
+    private static NativeHttpMediaOptions Options() =>
+        new NativeHttpMediaOptions(TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
+    private static NativePlayback Player() => new(Dispatcher.CurrentDispatcher, null, NativeAudioOutput.Dummy, Options());
     private static Task Open(NativePlayback player, A.Origin origin, CancellationToken token = default) =>
         player.OpenAsync("film", "live-synthetic", origin.Uri("root.m3u8"), "合成直播", origin.Headers, token);
     private static ulong Audio(object session) => (ulong)((LibVLCSharp.Shared.Media)A.Field(session, "Media")!).Statistics.DecodedAudio;
@@ -122,7 +122,6 @@ public static class LiveHlsTests
                 "target" => text.Replace("#EXT-X-TARGETDURATION:1", "#EXT-X-TARGETDURATION:2"),
                 "key" => text.Replace("key0", "changed-key"),
                 "file" => text.Replace("s1\n", "file:///C:/never-authorized\n"),
-                "private" => text.Replace("s1\n", "http://192.168.1.2/never-authorized\n"),
                 "master" => "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=128000\nunexpected-child.m3u8\n",
                 "sample-aes" => text.Replace("AES-128", "SAMPLE-AES"),
                 "ll-hls" => text + "#EXT-X-PART:DURATION=0.2,URI=\"part\"\n",
@@ -165,7 +164,7 @@ public static class LiveHlsTests
     private static async Task Native(string profile)
     {
         await using var origin = new A.Origin(); var feed = new Feed(profile) { Rolling = true }; origin.Route = feed.Route;
-        await using var player = Player(origin);
+        await using var player = Player();
         await Open(player, origin); await A.Decoded(player);
         object session = A.Session(player)!; int port = A.Port(player); ulong initial = Audio(session);
         try
@@ -184,7 +183,7 @@ public static class LiveHlsTests
     private static async Task Gap(bool encrypted)
     {
         await using var origin = new A.Origin(); var feed = new Feed(encrypted ? "aes" : "ts") { Rolling = true }; origin.Route = feed.Route;
-        await using var player = Player(origin); await Open(player, origin); await A.Decoded(player);
+        await using var player = Player(); await Open(player, origin); await A.Decoded(player);
         var session = A.Session(player)!; int port = A.Port(player); ulong before = Audio(session);
         feed.ExpireNext = true;
         await Until(() => feed.Expired >= 0, "upstream expired an actual native segment");
@@ -220,7 +219,7 @@ public static class LiveHlsTests
     private static async Task Ended()
     {
         await using var origin = new A.Origin(); var feed = new Feed(); origin.Route = feed.Route;
-        await using var player = Player(origin); int ended = 0; player.Ended += (_, _) => ended++;
+        await using var player = Player(); int ended = 0; player.Ended += (_, _) => ended++;
         await Open(player, origin); await A.Decoded(player); var session = A.Session(player)!; int port = A.Port(player);
         feed.End = true;
         await Until(() => ended == 1 && !player.HasMedia, "natural final ENDLIST", 18000);
@@ -229,11 +228,10 @@ public static class LiveHlsTests
     private sealed class Lease(A.Origin origin) : INativeMediaResourceLease
     {
         internal readonly CancellationTokenSource Stop = new();
-        internal int Disposals, Checks;
+        internal int Disposals;
         public Uri Address => origin.Uri("root.m3u8");
         public IReadOnlyDictionary<string, string> Headers => origin.Headers;
         public CancellationToken Revoked => Stop.Token;
-        public bool Authorizes(Uri uri) { Interlocked.Increment(ref Checks); return uri.GetLeftPart(UriPartial.Authority) == origin.Base.GetLeftPart(UriPartial.Authority); }
         public ValueTask DisposeAsync() { Interlocked.Increment(ref Disposals); Stop.Cancel(); return ValueTask.CompletedTask; }
     }
     private static async Task Revoked()
@@ -246,14 +244,14 @@ public static class LiveHlsTests
         await player.PauseAsync(); lease.Stop.Cancel();
         await Until(() => !player.HasMedia && lease.Disposals == 1, "revoke paused lease");
         await A.Released(session, port); await player.StopAsync();
-        Check(lease.Disposals == 1 && lease.Checks > 4, "real once ownership and repeated authorization");
+        Check(lease.Disposals == 1 && lease.Stop.IsCancellationRequested, "real once ownership and revocable lifetime");
         lease.Stop.Dispose();
     }
     private static async Task Blocked(string kind)
     {
         await using var origin = new A.Origin(); var feed = new Feed("aes") { Rolling = true }; origin.Route = feed.Route;
         using var cancel = new CancellationTokenSource();
-        await using var player = Player(origin); await Open(player, origin, cancel.Token); await A.Decoded(player);
+        await using var player = Player(); await Open(player, origin, cancel.Token); await A.Decoded(player);
         object session = A.Session(player)!; int port = A.Port(player); feed.Block = kind;
         await Until(() => origin.Blocked > 0, "blocked " + kind);
         if (kind == "key") cancel.Cancel();
@@ -267,7 +265,7 @@ public static class LiveHlsTests
     {
         await using var origin = new A.Origin(); var feed = new Feed("aes") { Rolling = true }; origin.Route = feed.Route;
         await using var player = command == "revoke"
-            ? new NativePlayback(Dispatcher.CurrentDispatcher, null, NativeAudioOutput.Dummy) : Player(origin);
+            ? new NativePlayback(Dispatcher.CurrentDispatcher, null, NativeAudioOutput.Dummy) : Player();
         Lease? lease = command == "revoke" ? new(origin) : null;
         if (lease is not null) await player.OpenResourceAsync("film", "live-synthetic", lease, "合成直播");
         else await Open(player, origin);
@@ -325,7 +323,7 @@ public static class LiveHlsTests
     private static async Task QueuedResume()
     {
         await using var origin = new A.Origin(); var feed = new Feed { Rolling = true }; origin.Route = feed.Route;
-        await using var player = Player(origin); await Open(player, origin); await A.Decoded(player);
+        await using var player = Player(); await Open(player, origin); await A.Decoded(player);
         object session = A.Session(player)!; int port = A.Port(player);
         var native = (LibVLCSharp.Shared.MediaPlayer)A.Field(session, "Player")!;
         await player.PauseAsync(); await Until(() => !player.IsPlaying, "initial live pause");
@@ -354,7 +352,7 @@ public static class LiveHlsTests
     private static async Task RecoveryFramePause()
     {
         await using var origin = new A.Origin(); var feed = new Feed { Rolling = true }; origin.Route = feed.Route;
-        await using var player = Player(origin); await Open(player, origin); await A.Decoded(player);
+        await using var player = Player(); await Open(player, origin); await A.Decoded(player);
         object session = A.Session(player)!; int port = A.Port(player);
         var native = (LibVLCSharp.Shared.MediaPlayer)A.Field(session, "Player")!;
         IntPtr pointer = native.NativeReference;
@@ -394,7 +392,7 @@ public static class LiveHlsTests
     private static async Task RecoveryBudget()
     {
         await using var origin = new A.Origin(); var feed = new Feed { Rolling = true }; origin.Route = feed.Route;
-        await using var player = Player(origin); int ended = 0; player.Ended += (_, _) => ended++;
+        await using var player = Player(); int ended = 0; player.Ended += (_, _) => ended++;
         await Open(player, origin); await A.Decoded(player);
         object session = A.Session(player)!; int port = A.Port(player);
         object state = Invoke(player, "LiveState", session)!;
@@ -407,7 +405,7 @@ public static class LiveHlsTests
     private static async Task UnexpectedEof()
     {
         await using var origin = new A.Origin(); var feed = new Feed(); origin.Route = feed.Route;
-        await using var player = Player(origin); int ended = 0; player.Ended += (_, _) => ended++;
+        await using var player = Player(); int ended = 0; player.Ended += (_, _) => ended++;
         await Open(player, origin); await A.Decoded(player);
         object session = A.Session(player)!; int port = A.Port(player);
         await Task.Run(((LibVLCSharp.Shared.MediaPlayer)A.Field(session, "Player")!).Stop);
@@ -418,7 +416,7 @@ public static class LiveHlsTests
     private static async Task VodControl()
     {
         await using var origin = new A.Origin(); var feed = new Feed { End = true, Count = 4 }; origin.Route = feed.Route;
-        await using var player = Player(origin); int ended = 0; player.Ended += (_, _) => ended++;
+        await using var player = Player(); int ended = 0; player.Ended += (_, _) => ended++;
         await Open(player, origin); await A.Decoded(player);
         object session = A.Session(player)!; int port = A.Port(player);
         Check(A.Field(A.Adaptive(player)!, "_live") is null, "VOD has no live coordinator");
@@ -455,15 +453,14 @@ public static class LiveHlsTests
         internal Uri Root => (Uri)Prop(Session, "Root")!;
         internal readonly HttpClient Client = new(new SocketsHttpHandler { UseProxy = false, UseCookies = false, AllowAutoRedirect = false })
         { Timeout = TimeSpan.FromSeconds(6) };
-        internal static async Task<Manual> Open(A.Origin origin, Feed feed, CancellationToken token = default, params A.Origin[] others)
+        internal static async Task<Manual> Open(A.Origin origin, Feed feed, CancellationToken token = default)
         {
             var method = typeof(NativePlayback).Assembly.GetType("MeowFilm.Media.AdaptiveMediaSession")!
                 .GetMethod("OpenAsync", BindingFlags.NonPublic | BindingFlags.Static)!;
-            var task = (Task)method.Invoke(null, [Text(feed.Manifest(feed.Start)), origin.Uri("root.m3u8"), true,
-                origin.Base, origin.Headers, Options([origin, .. others]), token])!;
+            var task = (Task)method.Invoke(null, [Text(feed.Manifest(feed.Start)), origin.Uri("root.m3u8"),
+                origin.Headers, Options(), token])!;
             await task;
             var result = new Manual { Session = Prop(task, "Result")! };
-            result.Client.DefaultRequestHeaders.UserAgent.ParseAdd((string)Prop(result.Session, "Capability")!);
             return result;
         }
         // Only scheduling-independent tests use this. Spacing/native tests use real monotonic time.
@@ -562,14 +559,14 @@ public static class LiveHlsTests
         await using var origin = new A.Origin(); await using var other = new A.Origin { RequireAuthorization = false };
         var feed = new Feed("aes"); origin.Route = feed.Route; other.Route = path =>
             path == "/root.m3u8" ? new(Text(feed.Manifest(8))) : feed.Route(path);
-        await using var m = await Manual.Open(origin, feed, default, other);
+        await using var m = await Manual.Open(origin, feed);
         feed.RedirectTo = other.Uri("root.m3u8").AbsoluteUri;
         string text = await m.Manifest();
         await m.Client.GetByteArrayAsync(Manual.Segments(text)[0]);
-        Check(other.Requests.All(r => !r.AnyCallerHeader && !r.LocalCapability), "all headers stripped on redirect and children");
+        Check(other.Requests.All(r => r.AnyCallerHeader && r.Authorized && !r.LocalCapability), "explicit input headers accompany redirects and children");
         int previous = origin.Requests.Count;
         await m.Manifest();
-        Check(origin.Requests.Count == previous, "reload pins stripped effective origin");
+        Check(origin.Requests.Count == previous, "reload pins the effective representation");
     }
     private static async Task RetrySuccess()
     {
@@ -620,8 +617,8 @@ public static class LiveHlsTests
         await using var origin = new A.Origin(); var feed = new Feed("aes"); origin.Route = feed.Route;
         try
         {
-            await using var archive = await NativeAdaptiveArchive.CreateAsync(Text(feed.Manifest(0)), origin.Uri("root.m3u8"), true,
-                origin.Base, origin.Headers, Options(origin), 1024 * 1024, _ => { });
+            await using var archive = await NativeAdaptiveArchive.CreateAsync(Text(feed.Manifest(0)), origin.Uri("root.m3u8"),
+                origin.Headers, Options(), 1024 * 1024);
             throw new InvalidOperationException("live incorrectly published as finite archive");
         }
         catch (PlaybackException error) { Check(error.Code == PlaybackError.AdaptiveUnsupported, "explicit live archive boundary"); }
@@ -633,7 +630,7 @@ public static class LiveHlsTests
         if (scenario is "short-window" or "vod-live")
         {
             feed.Invalid = scenario; if (scenario == "short-window") feed.Count = 2;
-            await using var player = Player(origin);
+            await using var player = Player();
             try { await Open(player, origin); throw new InvalidOperationException("profile accepted"); }
             catch (PlaybackException error)
             { Check(error.Code == (scenario == "short-window" ? PlaybackError.AdaptiveInvalid : PlaybackError.AdaptiveUnsupported), "explicit profile state"); }
@@ -646,7 +643,6 @@ public static class LiveHlsTests
         {
             "rollback" or "target" or "master" => PlaybackError.AdaptiveInvalid,
             "file" => PlaybackError.UnsupportedUri,
-            "private" => PlaybackError.HttpAddressBlocked,
             "sample-aes" => PlaybackError.AdaptiveDrmUnsupported,
             "ll-hls" => PlaybackError.AdaptiveUnsupported,
             _ => PlaybackError.HttpRepresentationChanged

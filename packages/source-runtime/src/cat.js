@@ -9,6 +9,7 @@ const actions = Object.freeze([
   'search',
   'detail',
   'play',
+  'report',
   'proxy',
   'action',
   'destroy',

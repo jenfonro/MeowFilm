@@ -115,7 +115,8 @@ import MeowContracts
         readback.cancel(); try await readback.value
         XCTAssertEqual(owner.state.settingsRevision, 1)
         owner.playbackState.state = .init(revision: 5, currentId: "retained-entry", total: 1,
-            position: 12, canNext: true, nextPreviewID: "retained-next", sourceCollectionID: "retained-collection")
+            position: 12, canNext: true, nextPreviewID: "retained-next", sourceCollectionID: "retained-collection",
+            queueSourceTitle: "原始歌单")
         owner.clock.position = 15
         try await owner.reconcilePlaybackFeedbackSettings(accessGeneration: generation)
         XCTAssertEqual(owner.state.settingsRevision, 1)
@@ -124,6 +125,7 @@ import MeowContracts
         XCTAssertEqual(owner.state.position, 12)
         XCTAssertEqual(owner.state.nextPreviewID, "retained-next")
         XCTAssertEqual(owner.state.sourceCollectionID, "retained-collection")
+        XCTAssertEqual(owner.state.queueSourceTitle, "原始歌单")
         XCTAssertEqual(owner.clock.position, 15)
         let newer = MusicPlaybackState(revision: 5, settingsRevision: 5)
         owner.playbackState.state = newer

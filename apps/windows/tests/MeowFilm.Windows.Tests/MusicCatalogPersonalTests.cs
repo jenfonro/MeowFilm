@@ -35,7 +35,7 @@ public static partial class MusicCatalogPersonalTests
         foreach (var homeCase in HomeCases()) yield return homeCase;
         yield return Case("song cards replace only their own complete column and start at the clicked song", SectionQueue);
         yield return Case("song cards with a playlist source prepare all members and retain starting identity", SectionPlaylistQueue);
-        yield return Case("playlist play starts a read-only queue preview after successful playback", PlaylistQueuePreview);
+        yield return Case("playlist playback has no implicit search recommendation and can explicitly enter", PlaylistQueuePreview);
         yield return Case("playlist next preserves live FM and never starts playback or queue preview", PlaylistNextDuringFm);
         yield return Case("card loading belongs to the initiating card and retired receipt cannot clear its successor", CardLoading);
         yield return Case("native chart opens real album details and keeps album playback separate", ChartNavigation);
@@ -63,14 +63,24 @@ public static partial class MusicCatalogPersonalTests
         yield return Case("heartbeat and queue recommendations retain explicit context", RecommendationContext);
         yield return Case("home heartbeat and cloud favorites start native favorites without browser playlist context", HeartbeatFavoritesEntries);
         yield return Case("player heartbeat captures the real occurrence and rejects a retired presentation", HeartbeatCurrentEntry);
-        yield return Case("ordinary home queue previews choose a whole candidate batch and reject old cards", QueueCandidateActions);
-        yield return Case("search single playback starts one queue preview and preserves original search context", SearchQueuePreview);
+        yield return Case("official heartbeat entry stays reachable without login but never inherits another account", HeartbeatAccountQualification);
+        yield return Case("source operations update controls silently while real failures use the shared notice", SourceNotices);
+        yield return Case("search queue candidates append one batch and reject old cards", QueueCandidateActions);
+        foreach (string tab in new[] { "overview", "songs" })
+            yield return Case("search single playback starts one queue preview and preserves original search context: " + tab,
+                () => SearchQueuePreview(tab));
         foreach (string retirement in new[] { "stopped", "owner-replaced", "account-intent" })
             foreach (bool failed in new[] { false, true })
                 yield return Case("queue preview rejects a retired " + retirement + (failed ? " error" : " success"),
                     () => QueuePreviewRetirement(retirement, failed));
         yield return Case("queue preview admission failure reaches the WPF notice before a session exists", QueuePreviewFailureNotice);
-        yield return Case("paused ordinary playback still admits a read-only queue preview", PausedQueuePreview);
+        yield return Case("search paused after Started still admits read-only candidates", PausedQueuePreview);
+        foreach (string outcome in new[] { "started", "paused-before-start", "failed", "stopped", "owner-replaced", "source-replaced", "account-intent" })
+        {
+            string action = outcome;
+            yield return Case("search preview waits for its real first Started: " + outcome, () => SearchStartedGate(action));
+        }
+        yield return Case("search preview accepts synchronous Started before Open completion once", SearchSynchronousStarted);
         yield return Case("queue preview publication cannot replace a reentrant explicit FM intent", QueuePreviewReentrantIntent);
         yield return Case("FM footer consumes committed modes and all public scenes while failure keeps the previous mode", PlaybackFmChoices);
         foreach (bool restore in new[] { false, true })
@@ -155,21 +165,22 @@ public static partial class MusicCatalogPersonalTests
     }
     private static async Task PlaylistQueuePreview()
     {
-        await using var f = await Fixture.Create();
-        f.Platform.Total = 5;
-        await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
-        await f.Module.PlayCatalogPlaylistAsync();
-        await Until(() => f.Module.HasQueueRecommendations && !f.Module.RecommendationLoading);
-        var queue = await f.Queue();
-        Equal(5L, N(queue, "total")); Equal(1, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
-        Equal("play", S(f.App.Last("music.catalog.playlist.commit"), "action"));
-        Equal(1, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
-        Equal("queue", S(f.App.Last("music.recommendations.start"), "kind"));
+        await using var f = await Fixture.Create(); f.Platform.Total = 5;
+        await f.Module.NavigateAsync("catalog-playlist/wy/500", default); await f.Module.PlayCatalogPlaylistAsync();
+        var before = await f.Queue();
+        Equal(5L, N(before, "total")); Equal(1, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
+        Check(!f.Module.HasQueueRecommendations && f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count() == 0);
+        await f.Module.NavigateAsync("catalog-search", default);
+        Check(!f.Module.HasQueueRecommendations, "browsing search never changes an existing source");
+        await f.Module.RecommendCurrentAsync(f.Module.PlaybackPresentationKey);
+        Check(f.Module.HasQueueRecommendations && f.Module.CanReturnRecommendation && f.Module.RecommendationContinue);
         var request = f.Platform.Last<MusicQueueRecommendationsRequest>();
-        Check(request.SongIds.SequenceEqual(Enumerable.Range(0, 5).Select(i => Id("wy", i))));
-        Equal(Id("wy", 0), request.CurrentPlaySongId);
-        Equal(3, f.Module.RecommendationCandidates.Count);
+        Equal(Id("wy", 0), request.SeedSongId); Equal(0, request.Offset);
+        Equal(S(before, "currentId"), S(await f.Queue(), "currentId")); Equal(1, f.Output.Opens);
+        await f.Module.ReturnRecommendationAsync();
+        Equal(before.GetProperty("entries").GetRawText(), (await f.Queue()).GetProperty("entries").GetRawText());
     }
+
     private static async Task PlaylistNextDuringFm()
     {
         await using var f = await Fixture.Create();
@@ -976,30 +987,27 @@ public static partial class MusicCatalogPersonalTests
     private static async Task RecommendationContext()
     {
         await using var f = await Fixture.Create();
-        await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
-        var song = FirstSong(f); await f.Module.HeartbeatCatalogCardAsync(song);
-        var heart = f.Platform.Last<MusicHeartbeatRequest>();
-        Equal(MusicHeartbeatEntry.CurrentSong, heart.Entry); Equal(song.ActionId, heart.SongId);
-        var input = f.App.Last("music.recommendations.start");
-        Equal("current", S(input, "entry"));
-        Check(!input.TryGetProperty("playlistId", out _) && !input.TryGetProperty("startMusicId", out _) &&
-            !input.TryGetProperty("seedEntryId", out _), "a browser song has no current occurrence and never supplies the favorites context");
-        Equal(1, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
-        var heartbeatQueue = await f.Queue();
-        Equal(3L, N(heartbeatQueue, "total"));
-        Equal(MusicSongFixture.NativeId(Song("wy", 100)), MusicSongFixture.NativeId(
-            heartbeatQueue.GetProperty("current").GetProperty("song")));
+        await f.Module.NavigateAsync("catalog-playlist/wy/500", default); await f.Module.PlayCatalogPlaylistAsync();
+        var original = await f.Queue();
+        Check(!f.Module.CanHeartbeatCurrent && f.Module.CanRecommendCurrent, "ordinary remote playlist only supports single-song recommendation");
+        int calls = f.Platform.Requests.OfType<MusicHeartbeatRequest>().Count();
+        await f.Module.HeartbeatCurrentAsync(f.Module.PlaybackPresentationKey);
+        Equal(calls, f.Platform.Requests.OfType<MusicHeartbeatRequest>().Count());
         await f.Module.CatalogQueueRecommendationsAsync();
-        var queue = f.Platform.Last<MusicQueueRecommendationsRequest>();
-        Equal(3, queue.SongIds.Count); Check(queue.SongIds.Contains(queue.CurrentPlaySongId));
-        Equal(1, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
-        Equal("queue", S(f.App.Last("music.recommendations.start"), "kind"));
+        var request = f.Platform.Last<MusicQueueRecommendationsRequest>();
+        Equal(MusicSongFixture.NativeId(original.GetProperty("current").GetProperty("song")), request.SeedSongId);
+        Equal(0, request.Offset);
+        var input = f.App.Last("music.recommendations.start");
+        Equal("queue", S(input, "kind")); Check(input.GetProperty("restore").GetBoolean());
+        Equal(2, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
+        Equal(S(original, "currentId"), S(await f.Queue(), "currentId"));
     }
+
     private static async Task HeartbeatFavoritesEntries()
     {
         await using var f = await Fixture.Create();
         f.Platform.HomeEntries = [new { id = "heart", name = "心动模式", available = true, presentation = "static",
-            action = new { type = "heartbeat", entry = "favorites" } }];
+            action = new { type = "heartbeat", entry = "favorites", songId = "101" } }];
         await f.Module.NavigateAsync("catalog-home", default);
         var home = f.Module.CatalogSections.Single().Items.Single();
         Check(home.CanPlay && home.CanOpen && home.ActionId.Length > 0, "home heartbeat survives action validation");
@@ -1007,8 +1015,9 @@ public static partial class MusicCatalogPersonalTests
         Equal(MusicHeartbeatEntry.Favorites, f.Platform.Last<MusicHeartbeatRequest>().Entry);
         var input = f.App.Last("music.recommendations.start");
         Equal("heartbeat", S(input, "kind")); Equal("favorites", S(input, "entry"));
-        Check(!input.GetProperty("continue").GetBoolean() && !input.TryGetProperty("songId", out _) &&
-            !input.TryGetProperty("seedEntryId", out _), "favorites start delegates random seed selection to the platform");
+        Check(!input.TryGetProperty("continue", out _) && S(input, "songId") == "101" &&
+            !input.TryGetProperty("seedEntryId", out _), "home heartbeat uses the displayed seed, not a random replacement");
+        Equal("101", MusicSongFixture.NativeId((await f.Queue()).GetProperty("current").GetProperty("song")));
         var recommendation = await f.Queue();
         int opens = f.Output.Opens, resumes = f.Output.Resumes;
         await f.Module.ReturnRecommendationAsync();
@@ -1031,100 +1040,187 @@ public static partial class MusicCatalogPersonalTests
     private static async Task HeartbeatCurrentEntry()
     {
         await using var f = await Fixture.Create();
-        f.App.TransformNext("music.catalog.home", _ => Edit(E(SongSections()), n => n["ok"] = true));
-        await f.Module.NavigateAsync("catalog-home", default);
-        var played = f.Module.CatalogSections[0].Items[4];
-        await f.Module.OpenCatalogCardAsync(played);
-        await Until(() => f.Module.HasQueueRecommendations && !f.Module.RecommendationLoading);
-        f.Module.SelectedSong = f.Module.Songs.First();
-        Check(f.Module.CanHeartbeatCurrent, "actual opened WY occurrence is eligible");
+        f.Platform.PlaylistChange = request => Edit(Page(request, 3), value => value["heartbeatAccountId"] = "42");
+        await f.Module.NavigateAsync("catalog-playlist/wy/555", default); await f.Module.PlayCatalogPlaylistAsync();
+        Check(f.Module.CanHeartbeatCurrent, "current occurrence carries verified official playlist/account context");
         var before = await f.Queue(); string key = f.Module.PlaybackPresentationKey;
         var footer = (MusicPlayerView)f.Module.PlayerView;
         using var surface = new HwndSource(new HwndSourceParameters("recommendation-current-heartbeat-fixture") {
-            WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
-            PositionX = -32000, PositionY = -32000, Width = 1000, Height = 100 });
-        surface.RootVisual = footer; Layout(footer, 1000, 100); await Drain();
+            WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+            PositionX = -32000, PositionY = -32000, Width = 1110, Height = 100 });
+        surface.RootVisual = footer; Layout(footer, 1110, 100); await Drain();
         var mode = (Button)footer.FindName("ModeButton");
         var menu = (ContextMenu)footer.FindName("ModeMenu");
+        var sourceButton = (Button)footer.FindName("PlaybackSourceButton");
+        var source = (ContextMenu)footer.FindName("PlaybackSourceMenu");
         f.App.FailNext("music.recommendations.start", "NETWORK_ERROR");
-        await f.Module.TogglePlaybackHeartbeatAsync(f.Module.PlaybackModeActionKey); await Drain();
-        Check(!f.Module.HasPlaybackHeartbeat && f.Module.PlaybackModeIcon == "repeat", "failed entry keeps the committed icon");
+        await f.Module.HeartbeatCurrentAsync(key); await Drain();
+        Check(!f.Module.HasPlaybackHeartbeat && f.Module.PlaybackModeIcon == "repeat");
         Equal(before.GetProperty("entries").GetRawText(), (await f.Queue()).GetProperty("entries").GetRawText());
-        mode.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
-        SaveRecommendationFrame(menu, "ordinary-mode-menu.png");
-        var heartbeat = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, "heartbeat"));
-        Check(heartbeat.IsEnabled && !heartbeat.IsChecked);
+        sourceButton.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        var heartbeat = source.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "从当前歌曲进入心动"));
+        Check(heartbeat.IsEnabled);
         var hold = f.App.HoldNext("music.recommendations.start", before: true);
         ((IInvokeProvider)new MenuItemAutomationPeer(heartbeat).GetPattern(PatternInterface.Invoke)).Invoke();
         await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        try { Check(!f.Module.HasPlaybackHeartbeat && f.Module.PlaybackModeIcon == "repeat", "pending entry keeps the committed icon"); }
+        try { Check(!f.Module.HasPlaybackHeartbeat && f.Module.PlaybackModeIcon == "repeat"); }
         finally { hold.Release(); }
         await Until(() => f.Module.HasPlaybackHeartbeat && !f.Module.RecommendationLoading);
-        Equal("heartbeat", f.Module.PlaybackModeIcon); Equal("心动模式", AutomationProperties.GetName(mode));
+        Equal("repeat", f.Module.PlaybackModeIcon); Equal("列表循环", AutomationProperties.GetName(mode));
         var input = f.App.Last("music.recommendations.start");
-        Equal("heartbeat", S(input, "kind")); Equal("current", S(input, "entry"));
-        Equal(played.ActionId, S(input, "songId")); Equal(S(before, "currentId"), S(input, "seedEntryId"));
-        Equal(S(before, "currentId"), S(await f.Queue(), "currentId"));
-        Check(!f.Module.RecommendationContinue, "heartbeat defaults continuation off");
+        Equal("heartbeat", S(input, "kind")); Equal("current", S(input, "entry")); Equal("555", S(input, "playlistId"));
+        Equal(S(before, "currentId"), S(input, "seedEntryId")); Equal(S(before, "currentId"), S(await f.Queue(), "currentId"));
+        Check(!f.Module.CanChangeRecommendationContinue && !f.Module.RecommendationContinue, "heartbeat has no unverified continuation");
         mode.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
-        Check(menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, "heartbeat")).IsChecked);
-        SaveRecommendationFrame(menu, "heartbeat-mode-menu.png");
+        Equal(3, menu.Items.Count); SaveRecommendationFrame(menu, "heartbeat-global-loop-menu.png");
         MeowFilm.Desktop.DesktopTheme.SetIsHighContrast(menu, true); await Drain();
+        var selected = menu.Items.OfType<MenuItem>().Single(item => item.IsChecked);
+        Equal(1, (int)selected.Tag!);
+        Equal(SystemColors.HighlightTextBrush.Color, ((SolidColorBrush)selected.Foreground).Color);
+        Equal(SystemColors.HighlightBrush.Color, ((SolidColorBrush)selected.Background).Color);
         foreach (var item in menu.Items.OfType<MenuItem>())
+        {
+            var content = (StackPanel)item.Header;
             Equal(((SolidColorBrush)item.Foreground).Color,
-                ((SolidColorBrush)((StackPanel)item.Header).Children.OfType<TextBlock>().Single().Foreground).Color);
-        SaveRecommendationFrame(menu, "heartbeat-mode-menu-high-contrast.png");
+                ((SolidColorBrush)content.Children.OfType<TextBlock>().Single().Foreground).Color);
+            Equal(((SolidColorBrush)item.Foreground).Color,
+                ((SolidColorBrush)content.Children.OfType<MusicPlaybackIcon>().Single().Foreground).Color);
+        }
+        SaveRecommendationFrame(menu, "heartbeat-global-loop-menu-high-contrast.png");
         MeowFilm.Desktop.DesktopTheme.SetIsHighContrast(menu, false); await Drain();
         menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 3)).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-        await Until(() => f.Module.Mode == 3 && !f.Module.Busy);
-        Check(f.Module.HasPlaybackHeartbeat, "changing the ordinary mode does not exit heartbeat");
+        await Until(() => f.Module.Mode == 3 && !f.Module.Busy); Check(f.Module.HasPlaybackHeartbeat);
         await f.Module.StepAsync(true);
         int starts = f.App.Log.Count(call => call.Method == "music.recommendations.start");
-        await f.Module.HeartbeatCurrentAsync(key);
-        Equal(starts, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
-        var recommendation = await f.Queue();
-        string playing = S(recommendation, "currentId");
+        await f.Module.HeartbeatCurrentAsync(key); Equal(starts, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
+        var recommendation = await f.Queue(); string playing = S(recommendation, "currentId");
         int opens = f.Output.Opens, resumes = f.Output.Resumes;
-        mode.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
-        var returning = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, "heartbeat"));
+        sourceButton.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        Check(source.Items.OfType<MenuItem>().Select(item => item.Header)
+            .SequenceEqual(new object[] { "心动模式", "从当前歌曲进入推荐", "返回原队列" }));
+        var returning = source.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "返回原队列"));
         ((IInvokeProvider)new MenuItemAutomationPeer(returning).GetPattern(PatternInterface.Invoke)).Invoke();
         await Until(() => !f.Module.HasPlaybackHeartbeat && !f.Module.HasActiveRecommendation);
-        var returned = await f.Queue();
-        var original = before.GetProperty("entries").EnumerateArray().ToList();
-        int anchor = original.FindIndex(item => S(item, "id") == S(before, "currentId"));
-        original.Insert(anchor + 1, recommendation.GetProperty("current"));
+        var returned = await f.Queue(); var original = before.GetProperty("entries").EnumerateArray().ToList();
+        original.Insert(1, recommendation.GetProperty("current"));
         Equal(string.Join(',', original.Select(item => S(item, "id"))),
             string.Join(',', returned.GetProperty("entries").EnumerateArray().Select(item => S(item, "id"))));
         Equal(playing, S(returned, "currentId")); Equal(playing, f.Output.Identity!);
-        Equal(opens, f.Output.Opens); Equal(resumes, f.Output.Resumes);
-        Check(f.Output.HasMedia, "return retains the already opened media");
+        Equal(opens, f.Output.Opens); Equal(resumes, f.Output.Resumes); Check(f.Output.HasMedia);
         Equal("single", f.Module.PlaybackModeIcon); Equal("单曲循环", AutomationProperties.GetName(mode));
         surface.RootVisual = null;
+    }
+
+    private static async Task HeartbeatAccountQualification()
+    {
+        await using var f = await Fixture.Create();
+        f.Platform.PlaylistChange = request => Edit(Page(request, 3), value => value["heartbeatAccountId"] = "42");
+        await f.Module.NavigateAsync("catalog-playlist/wy/555", default); await f.Module.PlayCatalogPlaylistAsync();
+        var before = await f.Queue();
+        var view = f.Module.View; var notices = new List<string>();
+        view.AddHandler(MeowFilm.Desktop.NoticeOutlet.NoticeEvent,
+            new EventHandler<MeowFilm.Desktop.DesktopNoticeEventArgs>((_, args) => notices.Add(args.Message)));
+        using var surface = new HwndSource(new HwndSourceParameters("heartbeat-account-entry-fixture") {
+            WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+            PositionX = -32000, PositionY = -32000, Width = 860, Height = 120 });
+        surface.RootVisual = view; Layout(view, 860, 120); await Drain();
+        f.App.Authenticated = false; f.App.AccountGeneration++;
+        await f.Module.ReadAccountsAsync();
+        Check(f.Module.CanHeartbeatCurrent, "only missing login must not hide a qualified official entry");
+        await f.Module.HeartbeatCurrentAsync(f.Module.PlaybackPresentationKey); await Drain();
+        Check(notices.Count > 0 && !f.Platform.Requests.OfType<MusicHeartbeatRequest>().Any());
+        Equal(before.GetProperty("entries").GetRawText(), (await f.Queue()).GetProperty("entries").GetRawText());
+        Equal(1, f.Output.Opens);
+        f.App.Authenticated = true; f.App.AccountUserId = "43"; f.App.AccountGeneration++;
+        await f.Module.ReadAccountsAsync();
+        Check(!f.Module.CanHeartbeatCurrent, "another known account does not inherit the official context");
+        await f.Module.HeartbeatCurrentAsync(f.Module.PlaybackPresentationKey);
+        Check(!f.Platform.Requests.OfType<MusicHeartbeatRequest>().Any());
+        f.App.AccountUserId = "42"; f.App.AccountGeneration++;
+        await f.Module.ReadAccountsAsync(); Check(f.Module.CanHeartbeatCurrent);
+        surface.RootVisual = null;
+    }
+    private static async Task SourceNotices()
+    {
+        await using var f = await Fixture.Create();
+        f.Platform.PlaylistChange = request => Edit(Page(request, 3), value => value["heartbeatAccountId"] = "42");
+        await f.Module.NavigateAsync("catalog-playlist/wy/555", default); await f.Module.PlayCatalogPlaylistAsync();
+        var view = f.Module.View; var notices = new List<string>();
+        view.AddHandler(MeowFilm.Desktop.NoticeOutlet.NoticeEvent,
+            new EventHandler<MeowFilm.Desktop.DesktopNoticeEventArgs>((_, args) => notices.Add(args.Message)));
+        using var surface = new HwndSource(new HwndSourceParameters("source-notice-fixture") {
+            WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+            PositionX = -32000, PositionY = -32000, Width = 860, Height = 120 });
+        surface.RootVisual = view; Layout(view, 860, 120); await Drain(); notices.Clear();
+        await f.Module.HeartbeatCurrentAsync(f.Module.PlaybackPresentationKey); await Drain();
+        Check(f.Module.HasPlaybackHeartbeat && f.Module.CanReturnRecommendation);
+        await f.Module.ChangeModeAsync(2);
+        await f.Module.ReturnRecommendationAsync(); await Drain();
+        await f.Module.RecommendCurrentAsync(f.Module.PlaybackPresentationKey); await Drain();
+        Check(f.Module.HasQueueRecommendations && f.Module.CanReturnRecommendation);
+        await f.Module.ChangeRecommendationContinueAsync(false);
+        await f.Module.ReturnRecommendationAsync(); await Drain();
+        Equal(0, notices.Count);
+        await f.Module.NavigateAsync("catalog-fm", default); notices.Clear();
+        await f.Module.PlayCatalogPlaylistAsync(); await Drain();
+        await f.Module.ChangePlaybackFmAsync("scene", "ELECTRONIC", f.Module.PlaybackFmActionKey); await Drain();
+        await f.Module.ChangeRecommendationContinueAsync(false); await f.Module.CancelRecommendationAsync(); await Drain();
+        Equal(0, notices.Count);
+        await f.Module.NavigateAsync("catalog-daily", default); notices.Clear();
+        await f.Module.SimilarCatalogCardAsync(FirstSong(f)); await Drain();
+        Check(f.Module.RecommendationTitle == "相似歌曲" && f.Module.HasActiveRecommendation);
+        await f.Module.CancelRecommendationAsync(); await Drain(); Equal(0, notices.Count);
+        f.App.FailNext("music.recommendations.start", "NETWORK_ERROR");
+        await f.Module.SimilarCatalogCardAsync(FirstSong(f)); await Drain();
+        Check(notices.Count == 1 && notices[0] == f.Module.Status);
+        surface.RootVisual = null;
+    }
+
+    private static async Task PrepareSearch(Fixture f)
+    {
+        await f.Module.NavigateAsync("catalog-search", default); await f.Module.SearchAsync("合成歌曲", default);
+        await Until(() => f.Module.Songs.Count > 0 && !f.Module.SearchSongsLoading);
+        f.Module.SelectedSong = f.Module.Songs.Last();
+    }
+    private static async Task PlaySearch(Fixture f)
+    {
+        await f.Module.PlaySelectionAsync();
+        f.Output.Start();
     }
     private static async Task QueueCandidateActions()
     {
         await using var f = await Fixture.Create();
-        f.App.TransformNext("music.catalog.home", _ => Edit(E(SongSections()), n => n["ok"] = true));
-        await f.Module.NavigateAsync("catalog-home", default);
-        var card = f.Module.CatalogSections[0].Items[4];
-        await f.Module.OpenCatalogCardAsync(card);
+        await PrepareSearch(f);
+        int writes = f.Store.LibraryWrites;
+        await PlaySearch(f);
         await Until(() => f.Module.HasQueueRecommendations && !f.Module.RecommendationLoading);
         var before = await f.Queue();
-        Equal(8L, N(before, "total")); Equal(1, f.Store.LibraryWrites);
-        Check(f.Module.HasQueueRecommendations && !f.Module.RecommendationContinue);
+        Equal(1L, N(before, "total")); Equal(writes + 2, f.Store.LibraryWrites);
+        Equal(1, f.App.Log.Count(call => call.Method == "music.history.recordPlayed"));
+        Check(f.Module.HasQueueRecommendations && f.Module.RecommendationContinue);
         Equal(3, f.Module.RecommendationCandidates.Count);
         Equal(1, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
-        Equal("first", S(before.GetProperty("source"), "id"));
+        Equal("search", S(before.GetProperty("source"), "kind"));
+        var footer = (MusicPlayerView)f.Module.PlayerView;
+        using var surface = new HwndSource(new HwndSourceParameters("search-source-controls-fixture") {
+            WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+            PositionX = -32000, PositionY = -32000, Width = 1110, Height = 100 });
+        surface.RootVisual = footer; Layout(footer, 1110, 100); await Drain();
+        ((Button)footer.FindName("PlaybackSourceButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        var sourceMenu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
+        Check(sourceMenu.Items.OfType<MenuItem>().Select(item => item.Header)
+            .SequenceEqual(new object[] { "搜索结果", "自动续播", "重试取歌" }));
+        sourceMenu.IsOpen = false; surface.RootVisual = null;
         var candidate = f.Module.RecommendationCandidates[1];
         var stale = f.Module.RecommendationCandidates[0];
         await f.Module.ChooseRecommendationAsync(candidate);
         var chosen = await f.Queue();
-        Equal(11L, N(chosen, "total")); Equal(2, f.Store.LibraryWrites); Equal(2, f.Output.Opens);
+        Equal(4L, N(chosen, "total")); Equal(writes + 3, f.Store.LibraryWrites); Equal(2, f.Output.Opens);
         Equal(candidate.Song.Id, S(chosen.GetProperty("current").GetProperty("song"), "songId"));
-        Check(chosen.GetProperty("entries").EnumerateArray().Take(8).Select(row => row.GetRawText())
+        Check(chosen.GetProperty("entries").EnumerateArray().Take(1).Select(row => row.GetRawText())
             .SequenceEqual(before.GetProperty("entries").EnumerateArray().Select(row => row.GetRawText())),
             "preview and append preserve original occurrence context");
-        Equal(before.GetProperty("source").GetRawText(), chosen.GetProperty("source").GetRawText());
+        Equal("queue", S(chosen.GetProperty("source"), "kind"));
         int chooses = f.App.Log.Count(call => call.Method == "music.recommendations.choose");
         await f.Module.ChooseRecommendationAsync(stale);
         Equal(chooses, f.App.Log.Count(call => call.Method == "music.recommendations.choose"));
@@ -1138,35 +1234,57 @@ public static partial class MusicCatalogPersonalTests
         Equal(starts, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
         Check(!f.Module.HasQueueRecommendations, "FM stays its own session");
     }
-    private static async Task SearchQueuePreview()
+    private static async Task SearchQueuePreview(string tab)
     {
         await using var f = await Fixture.Create();
+        f.Platform.SearchCount = 2;
         await f.Module.NavigateAsync("catalog-search", default);
         await f.Module.SearchAsync("合成歌曲", default);
         await Until(() => f.Module.Songs.Count > 0 && !f.Module.SearchSongsLoading);
+        if (tab == "songs") await f.Module.OpenSearchTabAsync(tab);
+        Equal(tab, f.Module.SearchTab);
         int writes = f.Store.LibraryWrites;
-        f.Module.SelectedSong = f.Module.Songs[0];
-        await f.Module.PlaySelectionAsync();
+        f.Module.SelectedSong = f.Module.Songs.Last();
+        string clicked = RecommendationJson.NativeId(f.Module.SelectedSong.Raw);
+        Check(clicked != RecommendationJson.NativeId(f.Module.Songs[0].Raw), "fixture must distinguish clicked seed from the first search result");
+        int reads = f.App.Log.Count(call => call.Method == "music.recommendations.get");
+        await f.Module.PlaySelectionAsync(); await Drain();
+        Equal(1, f.Output.Opens);
+        var beforeStarted = await f.Queue();
+        Equal(1L, N(beforeStarted, "total"));
+        Equal(clicked, MusicSongFixture.NativeId(beforeStarted.GetProperty("current").GetProperty("song")));
+        Equal(reads, f.App.Log.Count(call => call.Method == "music.recommendations.get"));
+        Equal(0, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
+        Equal(0, f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count());
+        Check(!f.Module.HasQueueRecommendations, "accepted Open is not a real playback start");
+        f.Output.Start();
         await Until(() => f.Module.HasQueueRecommendations && !f.Module.RecommendationLoading);
         Equal(1, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
         Equal("queue", S(f.App.Last("music.recommendations.start"), "kind"));
         var queue = await f.Queue();
-        Equal(1L, N(queue, "total")); Equal(writes + 1, f.Store.LibraryWrites);
+        Equal(1L, N(queue, "total")); Equal(writes + 2, f.Store.LibraryWrites);
+        Equal(1, queue.GetProperty("entries").GetArrayLength()); Equal(1, f.Output.Opens);
+        Equal(clicked, MusicSongFixture.NativeId(queue.GetProperty("current").GetProperty("song")));
         Equal("search", S(queue.GetProperty("current").GetProperty("context"), "sourceType"));
         Equal("合成歌曲", S(queue.GetProperty("current").GetProperty("context"), "searchKeyword"));
+        var source = queue.GetProperty("source");
+        Equal("search", S(source, "id")); Equal("搜索结果", S(source, "title")); Equal("search", S(source, "kind"));
+        Check(!source.TryGetProperty("platform", out _), "cross-platform search source never invents a platform");
+        Equal(1, f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count());
+        Equal(clicked, f.Platform.Last<MusicQueueRecommendationsRequest>().SeedSongId);
+        Check(!f.Module.CanReturnRecommendation, "search preview never captures the replaced queue");
     }
     private static async Task QueuePreviewRetirement(string retirement, bool failed)
     {
         await using var f = await Fixture.Create();
         await f.Module.ReadAccountsAsync();
-        f.App.TransformNext("music.catalog.home", _ => Edit(E(SongSections()), n => n["ok"] = true));
-        await f.Module.NavigateAsync("catalog-home", default);
+        await PrepareSearch(f);
         var held = f.App.HoldNext("music.recommendations.get");
         if (failed) f.App.TransformNext("music.recommendations.get", _ => E(new { ok = false, code = "NETWORK_ERROR" }));
-        await f.Module.OpenCatalogCardAsync(f.Module.CatalogSections[0].Items[0]);
+        await PlaySearch(f);
         await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var before = await f.Queue();
-        string status = f.Module.RecommendationStatus;
+        string status = f.Module.Status;
         if (retirement == "stopped") await f.Output.StopAsync();
         else if (retirement == "owner-replaced")
             await f.Output.OpenAsync("film", "film-entry", new Uri("https://media.invalid/film"), "合成影片", default);
@@ -1180,14 +1298,14 @@ public static partial class MusicCatalogPersonalTests
         await held.Delivered.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
         Equal(0, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
         Equal(0, f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count());
-        Equal(status, f.Module.RecommendationStatus);
+        Equal(status, f.Module.Status);
         Equal(before.GetRawText(), (await f.Queue()).GetRawText());
         Check(!f.Module.HasQueueRecommendations, "retired preview cannot create a session or publish its error");
     }
     private static async Task QueuePreviewFailureNotice()
     {
         await using var f = await Fixture.Create();
-        var view = new MusicRecommendationView { DataContext = f.Module };
+        var view = f.Module.View;
         var notices = new List<string>();
         view.AddHandler(MeowFilm.Desktop.NoticeOutlet.NoticeEvent,
             new EventHandler<MeowFilm.Desktop.DesktopNoticeEventArgs>((_, args) => notices.Add(args.Message)));
@@ -1195,28 +1313,29 @@ public static partial class MusicCatalogPersonalTests
             WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
             PositionX = -32000, PositionY = -32000, Width = 860, Height = 120 });
         surface.RootVisual = view; Layout(view, 860, 120); await Drain();
-        f.App.TransformNext("music.catalog.home", _ => Edit(E(SongSections()), n => n["ok"] = true));
-        await f.Module.NavigateAsync("catalog-home", default);
+        await PrepareSearch(f);
+        int writes = f.Store.LibraryWrites;
         f.App.FailNext("music.recommendations.get", "NETWORK_ERROR");
-        await f.Module.OpenCatalogCardAsync(f.Module.CatalogSections[0].Items[0]);
-        await Until(() => f.Module.RecommendationStatus.Length > 0 && notices.Contains(f.Module.RecommendationStatus));
-        Check(!f.Module.HasRecommendationSession && !f.Module.HasRecommendationControls,
+        await PlaySearch(f);
+        await Until(() => f.Module.Status.Length > 0 && notices.Contains(f.Module.Status));
+        Check(!f.Module.HasRecommendationSession && !f.Module.HasQueueRecommendations,
             "an admission read failure notifies without inventing a recommendation session");
         Equal(0, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
-        Equal(8L, N(await f.Queue(), "total")); Equal(1, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
+        Equal(1L, N(await f.Queue(), "total")); Equal(writes + 2, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
+        Equal(1, f.App.Log.Count(call => call.Method == "music.history.recordPlayed"));
         await f.Module.CatalogQueueRecommendationsAsync();
-        Check(f.Module.HasQueueRecommendations && f.Module.RecommendationStatus.Length == 0,
-            "the explicit recommendation entry can retry after admission failure");
-        Equal(8L, N(await f.Queue(), "total")); Equal(1, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
+        Check(f.Module.HasQueueRecommendations && f.Module.CanReturnRecommendation,
+            "explicit recommendation can enter after admission failure and has its own checkpoint");
+        Equal(4L, N(await f.Queue(), "total")); Equal(writes + 3, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
         surface.RootVisual = null;
     }
     private static async Task PausedQueuePreview()
     {
         await using var f = await Fixture.Create();
-        f.App.TransformNext("music.catalog.home", _ => Edit(E(SongSections()), n => n["ok"] = true));
-        await f.Module.NavigateAsync("catalog-home", default);
+        await PrepareSearch(f);
+        int writes = f.Store.LibraryWrites;
         var held = f.App.HoldNext("music.recommendations.get");
-        await f.Module.OpenCatalogCardAsync(f.Module.CatalogSections[0].Items[0]);
+        await PlaySearch(f);
         await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await f.Output.PauseAsync();
         Check(f.Output.HasMedia && !f.Output.IsPlaying);
@@ -1226,17 +1345,89 @@ public static partial class MusicCatalogPersonalTests
         Equal(1, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
         Equal(3, f.Module.RecommendationCandidates.Count);
         Equal(before.GetRawText(), (await f.Queue()).GetRawText());
-        Equal(1, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
+        Equal(writes + 2, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
+        Equal(1, f.App.Log.Count(call => call.Method == "music.history.recordPlayed"));
         Equal(0, f.Output.Resumes);
         Check(!f.Output.IsPlaying, "read-only preview does not resume paused playback");
+    }
+    private static async Task SearchStartedGate(string outcome)
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.ReadAccountsAsync();
+        await PrepareSearch(f);
+        string seed = RecommendationJson.NativeId(f.Module.SelectedSong!.Raw);
+        int reads = f.App.Log.Count(call => call.Method == "music.recommendations.get");
+        await f.Module.PlaySelectionAsync();
+        await Drain();
+        Equal(1, f.Output.Opens); Equal(1L, N(await f.Queue(), "total"));
+        Equal(reads, f.App.Log.Count(call => call.Method == "music.recommendations.get"));
+        Equal(0, f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count());
+        Check(!f.Module.HasQueueRecommendations, "accepted Open is not a real playback start");
+        if (outcome == "paused-before-start")
+        {
+            await f.Output.PauseAsync(); await f.Output.SeekAsync(12);
+            await f.Module.ChangeModeAsync(2);
+            await f.Module.NavigateAsync("catalog-home", default); await Drain();
+            Equal(reads, f.App.Log.Count(call => call.Method == "music.recommendations.get"));
+            Equal(0, f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count());
+            await f.Output.ResumeAsync();
+        }
+        else
+        {
+            if (outcome == "failed") f.Output.Fail();
+            else if (outcome == "stopped") await f.Output.StopAsync();
+            else if (outcome == "owner-replaced")
+                await f.Output.OpenAsync("film", "film-entry", new Uri("https://media.invalid/film"), "合成影片", default);
+            else if (outcome == "source-replaced")
+            {
+                await f.Module.NavigateAsync("catalog-daily", default);
+                await f.Module.PlayCatalogPlaylistAsync();
+            }
+            else if (outcome == "account-intent")
+            {
+                f.App.FailNext("music.accounts.logout", "NETWORK_ERROR");
+                await f.Module.LogoutAccountAsync(f.Module.Accounts.Single(row => row.Platform == "wy"), confirmed: true);
+            }
+            else await f.Module.NavigateAsync("catalog-home", default);
+            f.Output.Start();
+        }
+        if (outcome is "started" or "paused-before-start")
+        {
+            await Until(() => f.Module.HasQueueRecommendations && !f.Module.RecommendationLoading);
+            Equal(1, f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count());
+            Equal(seed, f.Platform.Last<MusicQueueRecommendationsRequest>().SeedSongId);
+            await f.Output.PauseAsync(); await f.Output.SeekAsync(24); await f.Output.ResumeAsync();
+            await f.Output.OpenAsync(f.Output.OwnerId!, f.Output.Identity!, new Uri("https://media.invalid/other-source"),
+                "合成换源", default);
+            f.Output.Start(); await Drain();
+            Equal(1, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
+            Equal(1L, N(await f.Queue(), "total"));
+        }
+        else
+        {
+            await Drain();
+            Equal(0, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
+            Equal(0, f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count());
+            Check(!f.Module.HasQueueRecommendations, "retired pre-start intent must not revive");
+        }
+    }
+    private static async Task SearchSynchronousStarted()
+    {
+        await using var f = await Fixture.Create();
+        await PrepareSearch(f); f.Output.StartOnOpen = true;
+        await f.Module.PlaySelectionAsync();
+        await Until(() => f.Module.HasQueueRecommendations && !f.Module.RecommendationLoading);
+        f.Output.Start(); await Drain();
+        Equal(1, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
+        Equal(1, f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count());
+        Equal(1L, N(await f.Queue(), "total")); Equal(1, f.Output.Opens);
     }
     private static async Task QueuePreviewReentrantIntent()
     {
         await using var f = await Fixture.Create();
-        f.App.TransformNext("music.catalog.home", _ => Edit(E(SongSections()), n => n["ok"] = true));
-        await f.Module.NavigateAsync("catalog-home", default);
+        await PrepareSearch(f);
         var held = f.App.HoldNext("music.recommendations.get");
-        await f.Module.OpenCatalogCardAsync(f.Module.CatalogSections[0].Items[0]);
+        await PlaySearch(f);
         await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await f.Module.NavigateAsync("catalog-fm", default);
         Task? started = null;
@@ -1279,16 +1470,16 @@ public static partial class MusicCatalogPersonalTests
         }
         await f.Module.ChangePlaybackFmAsync("scene", "HOT_SONG", f.Module.PlaybackFmActionKey);
         Equal("scene", f.Module.PlaybackFmMode); Equal("HOT_SONG", f.Module.PlaybackFmScene);
-        Equal("热歌", f.Module.PlaybackModeText);
+        Equal("热歌", f.Module.PlaybackFmTitle); Equal(f.Module.ModeText, f.Module.PlaybackModeText);
         f.Module.CatalogFmMode = "familiar";
-        Equal("热歌", f.Module.PlaybackModeText);
+        Equal("热歌", f.Module.PlaybackFmTitle); Equal(f.Module.ModeText, f.Module.PlaybackModeText);
         var held = f.Platform.HoldNextFm();
         string oldKey = f.Module.PlaybackFmActionKey;
         var failed = f.Module.ChangePlaybackFmAsync("explore", "", oldKey);
         await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
-        Equal("热歌", f.Module.PlaybackModeText);
+        Equal("热歌", f.Module.PlaybackFmTitle); Equal(f.Module.ModeText, f.Module.PlaybackModeText);
         held.Fail("NETWORK_ERROR"); await failed; await Drain();
-        Equal("热歌", f.Module.PlaybackModeText);
+        Equal("热歌", f.Module.PlaybackFmTitle); Equal(f.Module.ModeText, f.Module.PlaybackModeText);
         int requests = f.Platform.Requests.Count;
         await f.Module.ChangePlaybackFmAsync("default", "", oldKey);
         Equal(requests, f.Platform.Requests.Count);
@@ -1301,15 +1492,11 @@ public static partial class MusicCatalogPersonalTests
         JsonElement checkpoint = default;
         if (restore)
         {
-            f.App.TransformNext("music.catalog.home", _ => Edit(E(SongSections()), n => n["ok"] = true));
-            await f.Module.NavigateAsync("catalog-home", default);
-            await f.Module.OpenCatalogCardAsync(f.Module.CatalogSections[0].Items[4]);
-            await Until(() => f.Module.HasQueueRecommendations && !f.Module.RecommendationLoading);
+            f.Platform.PlaylistChange = request => Edit(Page(request, 3), value => value["heartbeatAccountId"] = "42");
+            await f.Module.NavigateAsync("catalog-playlist/wy/555", default); await f.Module.PlayCatalogPlaylistAsync();
             checkpoint = await f.Queue();
-            await f.Module.HeartbeatCurrentAsync(f.Module.PlaybackPresentationKey);
-            await Drain();
-            Equal("心动模式", f.Module.RecommendationTitle);
-            Check(f.Module.CanReturnRecommendation, "heartbeat owns the original ordinary queue checkpoint");
+            await f.Module.HeartbeatCurrentAsync(f.Module.PlaybackPresentationKey); await Drain();
+            Equal("心动模式", f.Module.RecommendationTitle); Check(f.Module.CanReturnRecommendation);
         }
         else
         {
@@ -1356,7 +1543,7 @@ public static partial class MusicCatalogPersonalTests
             int writes = f.Store.LibraryWrites, opens = f.Output.Opens, resumes = f.Output.Resumes;
             string? owner = f.Output.OwnerId, identity = f.Output.Identity;
             bool hasMedia = f.Output.HasMedia;
-            string status = f.Module.Status, notice = f.Module.RecommendationStatus;
+            string status = f.Module.Status;
             Equal(accountReads + 1, f.App.Log.Count(call => call.Method == "music.accounts.list"));
             Equal(starts, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
             Equal(fmRequests, f.Platform.Requests.OfType<MusicFmRequest>().Count());
@@ -1372,7 +1559,7 @@ public static partial class MusicCatalogPersonalTests
             Equal(settled.GetRawText(), (await f.Queue()).GetRawText());
             Equal(opens, f.Output.Opens); Equal(resumes, f.Output.Resumes);
             Equal(owner, f.Output.OwnerId); Equal(identity, f.Output.Identity); Equal(hasMedia, f.Output.HasMedia);
-            Equal(status, f.Module.Status); Equal(notice, f.Module.RecommendationStatus);
+            Equal(status, f.Module.Status);
             Check(!f.Module.HasActiveRecommendation, "late success or failure cannot revive the retired intent");
         }
         finally
@@ -1391,17 +1578,27 @@ public static partial class MusicCatalogPersonalTests
         surface.RootVisual = footer; Layout(footer, 1110, 100); await Drain();
         var mode = (Button)footer.FindName("ModeButton");
         var menu = (ContextMenu)footer.FindName("ModeMenu");
+        var channel = (Button)footer.FindName("FmChannelButton");
         var popup = (Popup)footer.FindName("FmPopup");
         mode.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
         Equal(1, f.Module.Mode); Check(menu.IsOpen && !popup.IsOpen, "ordinary playback opens choices without a write");
         var ordinary = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2));
         Equal(f.Module.ModeText, AutomationProperties.GetName(mode));
         await f.Module.NavigateAsync("catalog-fm", default); await f.Module.PlayCatalogPlaylistAsync(); await Drain();
-        Check(!menu.IsOpen, "entering FM closes the ordinary menu");
+        Check(!menu.IsOpen, "playback identity change closes the old global menu");
         ordinary.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
         Equal(1, f.Module.Mode);
-        Equal("fm", f.Module.PlaybackModeIcon);
         mode.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        Check(menu.IsOpen && !popup.IsOpen, "FM opens the independent global loop menu");
+        mode.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        Check(!menu.IsOpen, "global menu closes independently of FM entry");
+        Equal("repeat", f.Module.PlaybackModeIcon);
+        ((Button)footer.FindName("PlaybackSourceButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        var sourceMenu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
+        Check(sourceMenu.Items.OfType<MenuItem>().Select(item => item.Header)
+            .SequenceEqual(new object[] { "私人 FM", "自动续播", "从当前歌曲进入推荐", "重试取歌" }));
+        sourceMenu.IsOpen = false;
+        channel.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
         Check(popup.IsOpen, "live WY FM opens mode selection");
         var modes = (StackPanel)footer.FindName("FmModeChoices");
         var scenes = (UniformGrid)footer.FindName("FmSceneChoices");
@@ -1416,7 +1613,7 @@ public static partial class MusicCatalogPersonalTests
         hot.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
         await Until(() => f.Module.PlaybackFmScene == "HOT_SONG" && !f.Module.RecommendationLoading);
         Check(!popup.IsOpen);
-        mode.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        channel.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
         Check(popup.IsOpen);
         SaveRecommendationFrame((FrameworkElement)popup.Child, "fm-popup-hot-song.png");
         MeowFilm.Desktop.DesktopTheme.SetIsHighContrast(popup.Child, true); await Drain();
@@ -1440,7 +1637,7 @@ public static partial class MusicCatalogPersonalTests
         menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2)).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
         await Until(() => f.Module.Mode == 2 && !f.Module.Busy);
         var gallery = new StackPanel { Orientation = Orientation.Horizontal, Background = Brushes.White };
-        foreach (var (icon, label) in new[] { ("order", "顺序播放"), ("repeat", "列表循环"), ("single", "单曲循环"),
+        foreach (var (icon, label) in new[] { ("repeat", "列表循环"), ("single", "单曲循环"),
             ("shuffle", "随机播放"), ("heartbeat", "心动模式"), ("fm", "私人漫游") })
         {
             var cell = new StackPanel { Width = 90, Margin = new(0, 12, 0, 12) };
@@ -1455,9 +1652,8 @@ public static partial class MusicCatalogPersonalTests
     private static async Task QueueCandidateSurface()
     {
         await using var f = await Fixture.Create();
-        f.App.TransformNext("music.catalog.home", _ => Edit(E(SongSections()), n => n["ok"] = true));
-        await f.Module.NavigateAsync("catalog-home", default);
-        await f.Module.OpenCatalogCardAsync(f.Module.CatalogSections[0].Items[0]);
+        await PrepareSearch(f);
+        await PlaySearch(f);
         await Until(() => f.Module.HasQueueRecommendations && !f.Module.RecommendationLoading);
         await f.Module.ActivateGlobalSurfaceAsync(MeowFilm.Desktop.DesktopGlobalSurface.PlayQueue, default);
         var view = (MusicQueueView)f.Module.GetGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayQueue);
@@ -1468,19 +1664,19 @@ public static partial class MusicCatalogPersonalTests
         surface.RootVisual = host; Layout(host, 386, 720); await Drain();
         var queueList = (ListBox)view.FindName("QueueList");
         var candidates = (ListBox)view.FindName("RecommendationList");
-        Equal(8, queueList.Items.Count); Equal(3, candidates.Items.Count);
+        Equal(1, queueList.Items.Count); Equal(3, candidates.Items.Count);
         var toggle = Visuals<CheckBox>(view).Single(box => Equals(box.Content, "续播"));
-        Check(toggle.IsEnabled && toggle.IsChecked == false);
+        Check(toggle.IsEnabled && toggle.IsChecked == true);
         SaveRecommendationFrame(host, "queue-candidates-default-width.png");
         var before = await f.Queue();
-        toggle.IsChecked = true; toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-        await Until(() => f.Module.RecommendationContinue);
+        toggle.IsChecked = false; toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        await Until(() => !f.Module.RecommendationContinue);
         Equal(before.GetRawText(), (await f.Queue()).GetRawText());
         var candidate = f.Module.RecommendationCandidates[1];
         var choice = Visuals<Button>(candidates).Single(button => ReferenceEquals(button.Tag, candidate));
         choice.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
         await Until(() => f.Module.CurrentTitle == candidate.Title && !f.Module.RecommendationLoading);
-        Equal(11L, N(await f.Queue(), "total"));
+        Equal(4L, N(await f.Queue(), "total"));
         surface.RootVisual = null;
         f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayQueue);
     }
@@ -1755,6 +1951,7 @@ public static partial class MusicCatalogPersonalTests
         public ConcurrentQueue<object> Requests { get; } = new();
         public int Total = 65;
         public int DailyCount = 3;
+        public int SearchCount = 1;
         public bool EmptyDirectoryFirst, Expired;
         public string LocatorVersion = "7";
         public object[]? HomeActions;
@@ -1826,11 +2023,13 @@ public static partial class MusicCatalogPersonalTests
         }
         public Task<JsonElement> SimilarAsync(MusicSimilarRequest r, CancellationToken t = default) => Result(r, Batch("similar", "相似歌曲"), t);
         public Task<JsonElement> HeartbeatAsync(MusicHeartbeatRequest r, CancellationToken t = default) =>
-            Result(r, Edit(Batch("heartbeat", "心动推荐", 100), row => row["context"] = JsonSerializer.SerializeToNode(new {
-                playlistId = "555", startMusicId = FirstId("wy"), songId = r.SongId ?? FirstId("wy"),
-                fromHome = r.Entry == MusicHeartbeatEntry.Favorites, count = 65 })), t);
+            Result(r, Edit(Batch("heartbeat", "心动推荐", 100), row => { row["context"] = JsonSerializer.SerializeToNode(new {
+                playlistId = "555", startMusicId = r.SongId ?? "101", songId = r.SongId ?? "101",
+                fromHome = r.Entry == MusicHeartbeatEntry.Favorites, count = 65 });
+                row["entrySong"] = JsonNode.Parse(Song("wy", int.Parse(r.SongId ?? "101") - 1).GetRawText()); }), t);
         public Task<JsonElement> QueueRecommendationsAsync(MusicQueueRecommendationsRequest r, CancellationToken t = default) =>
-            Result(r, Batch("queue-recommendations", "队列推荐", 200 + Interlocked.Increment(ref queueBatch) * 3), t);
+            Result(r, Edit(Batch("queue-recommendations", "队列推荐", 200 + Interlocked.Increment(ref queueBatch) * 3),
+                row => { row["offset"] = r.Offset + 15; row["hasMore"] = true; }), t);
         public Task<JsonElement> ChartAsync(MusicChartRequest r, CancellationToken t = default) =>
             Result(r, E(new { platform = r.Platform, name = "畅销榜", more = false, count = 1, total = 1,
                 sections = new[] { new { id = "chart", title = "畅销榜", type = "albums", layout = "ranking",
@@ -1860,8 +2059,8 @@ public static partial class MusicCatalogPersonalTests
         }
         public Task<JsonElement> SearchAsync(MusicSearchRequest r, CancellationToken t = default) =>
             Result(r, E(new { platform = r.Platform,
-                items = r.Kind == MusicSearchKind.Songs ? new[] { Song(r.Platform, 0) } : Array.Empty<JsonElement>(),
-                page = r.Page, limit = r.Limit, total = r.Kind == MusicSearchKind.Songs ? 1 : 0, more = false }), t);
+                items = r.Kind == MusicSearchKind.Songs ? Enumerable.Range(0, SearchCount).Select(i => Song(r.Platform, i)).ToArray() : Array.Empty<JsonElement>(),
+                page = r.Page, limit = r.Limit, total = r.Kind == MusicSearchKind.Songs ? SearchCount : 0, more = false }), t);
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken t = default) =>
             Result(r, E(new { platform = r.Platform, song = Song(r.Platform, 0) }), t);
         public JsonElement Describe() => E(new { execution = "native",
@@ -1896,6 +2095,7 @@ public static partial class MusicCatalogPersonalTests
         private bool recommendationPrepared;
         public ConcurrentQueue<Invocation> Log { get; } = new();
         public bool Authenticated = true;
+        public string AccountUserId = "42";
         public long AccountGeneration = 1;
         private readonly HashSet<string> revokedAccounts = [];
         public int InitializationCalls, AccountDetailReads;
@@ -2054,7 +2254,7 @@ public static partial class MusicCatalogPersonalTests
                     platform, state = revokedAccounts.Contains(platform) ? "revoked" : Authenticated ? "verified" : "none",
                     generation = AccountGeneration,
                     profile = Authenticated && !revokedAccounts.Contains(platform)
-                        ? new { platform, userId = "42", displayName = "Fixture " + platform } : null }) });
+                        ? new { platform, userId = AccountUserId, displayName = "Fixture " + platform } : null }) });
             else if (method.StartsWith("music.recommendations.", StringComparison.Ordinal))
                 result = await recommendations.ExecuteAsync(method, p, cancellationToken);
             else if (method is "music.search.start" or "music.search.get" or "music.search.next" or "music.search.cancel")
@@ -2071,7 +2271,7 @@ public static partial class MusicCatalogPersonalTests
                 if (method == "music.catalog.playlist.commit" &&
                     p.TryGetProperty("action", out var action) && action.GetString() is "play" or "next")
                     result = await recommendationQueue.ExecuteExternalAsync(
-                        action.GetString() == "play" ? MusicRecommendationQueueChange.Replace : MusicRecommendationQueueChange.Append,
+                        action.GetString() == "play" ? MusicRecommendationQueueChange.Replace : MusicRecommendationQueueChange.PlayNext,
                         token => Catalog.ExecuteAsync(method, p, token), cancellationToken);
                 else if (method == "music.catalog.playlist.commit")
                     result = await recommendationQueue.InLaneAsync(
@@ -2083,7 +2283,9 @@ public static partial class MusicCatalogPersonalTests
             else if (method == "music.official.candidates")
             {
                 var input = JsonNode.Parse(p.GetRawText())!.AsObject();
-                LJ.Fields(input, "song quality qualityPolicySignature", "song quality qualityPolicySignature");
+                LJ.Fields(input, "song quality qualityPolicySignature manualSource", "song quality qualityPolicySignature");
+                LJ.Require(input["manualSource"] is null || LJ.IsBool(input["manualSource"]));
+                bool manualSource = LJ.B(input["manualSource"]);
                 _ = NativeMusicSong.Normalize(input["song"]);
                 string request = LJ.S(input["quality"]);
                 LJ.Require(request == "auto" || MusicQualityPolicy.OfficialTypes.Contains(request), "QUALITY_UNAVAILABLE");
@@ -2093,8 +2295,8 @@ public static partial class MusicCatalogPersonalTests
                 {
                     LJ.Require(LJ.S(input["qualityPolicySignature"]) == S(quality, "signature"), "QUALITY_POLICY_CHANGED");
                     var policy = JsonNode.Parse(quality.GetProperty("settings").GetRawText())!.AsObject();
-                    LJ.Require(request == "auto" ? MusicQualityPolicy.HasEnabled(policy) :
-                        MusicQualityPolicy.Enabled(request, policy), "QUALITY_DISABLED");
+                    LJ.Require(manualSource && request != "auto" || (request == "auto" ? MusicQualityPolicy.HasEnabled(policy) :
+                        MusicQualityPolicy.Enabled(request, policy)), "QUALITY_DISABLED");
                     result = E(new { ok = true, song = p.GetProperty("song"), candidates = Array.Empty<object>(),
                         qualityPolicySignature = S(quality, "signature"), authorizationRequired = false });
                 }
@@ -2104,10 +2306,13 @@ public static partial class MusicCatalogPersonalTests
             else if (method == "music.songs.complete")
             {
                 var input = JsonNode.Parse(p.GetRawText())!.AsObject();
-                LJ.Fields(input, "song platforms", "song platforms");
+                LJ.Fields(input, "song platforms contentFailed", "song platforms");
                 _ = NativeMusicSong.Normalize(input["song"]);
                 var platforms = LJ.Array(input["platforms"]).Select(value => LJ.Text(value)).Distinct(StringComparer.Ordinal).ToArray();
                 LJ.Require(platforms.Length is > 0 and <= 5 && platforms.All(NativeMusicSong.Platforms.Contains));
+                var contentFailed = input.ContainsKey("contentFailed")
+                    ? LJ.Array(input["contentFailed"]).Select(value => LJ.Text(value)).ToHashSet(StringComparer.Ordinal) : [];
+                LJ.Require(contentFailed.All(NativeMusicSong.Platforms.Contains));
                 result = E(new { ok = true, song = p.GetProperty("song"), failures = Array.Empty<object>() });
             }
             else if (method == "music.sources.list")
@@ -2189,23 +2394,44 @@ public static partial class MusicCatalogPersonalTests
     private sealed class Output : IMusicPlayback
     {
         public int Opens, Resumes;
+        public bool StartOnOpen;
         public string? OwnerId { get; private set; }
         public string? Identity { get; private set; }
         public bool HasMedia { get; private set; }
-        public bool IsPlaying => false;
-        public double PositionSeconds => 0;
+        public bool IsPlaying { get; private set; }
+        public double PositionSeconds { get; private set; }
         public double DurationSeconds => 180;
         public int Volume { get; set; }
-        public event PropertyChangedEventHandler? PropertyChanged { add { } remove { } }
-        public event EventHandler? Started { add { } remove { } }
+        public event PropertyChangedEventHandler? PropertyChanged;
+        public event EventHandler? Started;
         public event EventHandler? Ended { add { } remove { } }
-        public event EventHandler? Failed { add { } remove { } }
+        public event EventHandler? Failed;
         public Task OpenAsync(string owner, string identity, Uri uri, string title, CancellationToken token)
-        { token.ThrowIfCancellationRequested(); OwnerId = owner; Identity = identity; HasMedia = true; Opens++; return Task.CompletedTask; }
-        public Task PauseAsync() => Task.CompletedTask;
-        public Task ResumeAsync() { Resumes++; return Task.CompletedTask; }
-        public Task StopAsync() { HasMedia = false; return Task.CompletedTask; }
-        public Task SeekAsync(double seconds) => Task.CompletedTask;
+        {
+            token.ThrowIfCancellationRequested(); OwnerId = owner; Identity = identity; HasMedia = true;
+            IsPlaying = false; PositionSeconds = 0; Opens++;
+            PropertyChanged?.Invoke(this, new(nameof(OwnerId)));
+            PropertyChanged?.Invoke(this, new(nameof(HasMedia)));
+            if (StartOnOpen) Start();
+            return Task.CompletedTask;
+        }
+        public void Start()
+        {
+            if (!HasMedia) return;
+            IsPlaying = true; Started?.Invoke(this, EventArgs.Empty);
+            PropertyChanged?.Invoke(this, new(nameof(IsPlaying)));
+        }
+        public void Fail() => Failed?.Invoke(this, EventArgs.Empty);
+        public Task PauseAsync()
+        { IsPlaying = false; PropertyChanged?.Invoke(this, new(nameof(IsPlaying))); return Task.CompletedTask; }
+        public Task ResumeAsync() { Resumes++; Start(); return Task.CompletedTask; }
+        public Task StopAsync()
+        {
+            HasMedia = IsPlaying = false;
+            PropertyChanged?.Invoke(this, new(nameof(HasMedia))); return Task.CompletedTask;
+        }
+        public Task SeekAsync(double seconds)
+        { PositionSeconds = seconds; PropertyChanged?.Invoke(this, new(nameof(PositionSeconds))); return Task.CompletedTask; }
     }
     private sealed class Fixture : IAsyncDisposable
     {

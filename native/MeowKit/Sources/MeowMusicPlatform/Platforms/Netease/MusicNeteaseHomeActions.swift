@@ -17,7 +17,7 @@ enum MusicNeteaseHomeActionRoute {
         switch request.url.host {
         case "interfacepc.music.163.com":
             return ["/eapi/v1/radio/get", "/eapi/tag/tab/fm/recommends", "/eapi/tag/tab/fm/cover",
-                    "/eapi/playmode/intelligence/list", "/eapi/homepage/more/rcmd/song"].contains(request.url.path)
+                    "/eapi/playmode/intelligence/list", "/eapi/homepage/scene/more/rcmd/song"].contains(request.url.path)
         case "interface3.music.163.com":
             return ["/xeapi/homepage/category/daily/song/list", "/xeapi/homepage/daily/song/config/get",
                     "/xeapi/homepage/daily/song/tag/save"].contains(request.url.path)
@@ -39,16 +39,20 @@ enum MusicNeteaseHomeActionRequest {
         case .fm(let mode, let submode, _):
             guard (mode == .scene) == !submode.isEmpty,
                   submode.isEmpty || scenes.contains(submode) else { throw MusicServiceError.invalidRequest }
-            return ("/api/v1/radio/get", ["mode": mode.rawValue, "subMode": submode, "limit": 3], "eapi")
+            return ("/api/v1/radio/get", ["mode": mode.rawValue, "subMode": submode, "limit": "3",
+                "unplaySongIds": "[]", "openAidj": "false", "aidjReqTimes": "0"], "eapi")
         case .ruleFM(let rule, let tab, _):
             return ("/api/tag/tab/fm/recommends",
                     ["ruleType": 1, "ruleId": rule, "tabTagId": tab, "firstSongId": "", "firstSongAlg": "", "limit": 5], "eapi")
         case .similar(let ids, _):
             return ("/api/v1/radio/get", ["limit": "3", "mode": "SIMILAR", "sourceType": "song",
                 "sourceIds": "[" + ids.joined(separator: ",") + "]", "unplaySonIds": "[]"], "weapi")
+        case .similarArtist(let ids, _):
+            return ("/api/v1/radio/get", ["limit": "3", "mode": "SIMILAR", "sourceType": "artist",
+                "sourceIds": "[" + ids.joined(separator: ",") + "]", "unplaySonIds": "[]"], "weapi")
         case .daily(.style):
             return ("/api/homepage/category/daily/song/list", [:], "xeapi")
-        case .daily(.default), .heartbeat, .songCollection: return nil
+        case .daily(.default), .heartbeat, .heartbeatSong, .songCollection: return nil
         }
     }
 }
@@ -71,8 +75,10 @@ extension NeteaseMusicAccountAdapter: MusicAccountHomeActionProvider {
             var seen = Set<String>()
             let ids = declared.filter { seen.insert($0).inserted }
             raw = try await homeActionMetadata(ids, context: context, own: own, authorize: authorize)
-        } else if case .heartbeat = action {
-            let batch = try await similarMode(.heartbeat(lastID: nil, fromHome: true, context: nil),
+        } else if action.isHeartbeat {
+            let selected: String?
+            if case .heartbeatSong(let id) = action { selected = id } else { selected = nil }
+            let batch = try await similarMode(.heartbeat(lastID: selected, fromHome: true, context: nil),
                                               credential: credential, authorize: authorize)
             return .init(rows: try batch.items.map { try JSONDecoder().decode(JSONValue.self, from: $0.data) }, nextPage: nil)
         } else if let (path, data, crypto) = specification {

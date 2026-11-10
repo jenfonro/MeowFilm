@@ -579,6 +579,65 @@ test('startup timers lose capability access when readiness closes the startup sc
   assert.equal(networkCalls, 0);
 });
 
+test('Node HTTP follows normal origins while Cookie domain, path, Secure and profile semantics remain isolated', async () => {
+  const calls = [];
+  const owner = createNodeSourceCapabilities({ network: async input => {
+    calls.push({ url: input.url, headers: { ...input.options.headers } });
+    if (input.url === 'https://first.invalid/start') return { statusCode: 302, url: input.url,
+      headers: { location: 'http://second.invalid/allowed/final?opaque=a%2Fb' }, body: Buffer.alloc(0) };
+    return { statusCode: 200, url: input.url, headers: {}, body: Buffer.from([0, 127, 255]) };
+  } });
+  const client = createCapabilityClient({
+    invoke: (name, input, context) => owner.invoke(name, input, context),
+  });
+  const profile = 'source:network:1:cookies';
+  await client.call('cookie.set', {
+    version: hostApiVersion, profile, url: 'https://first.invalid/',
+    values: ['first=private; Path=/'],
+  });
+  await client.call('cookie.set', {
+    version: hostApiVersion, profile, url: 'https://second.invalid/allowed/',
+    values: ['second=current; Path=/allowed', 'secure=private; Secure; Path=/',
+      'path=private; Path=/elsewhere', 'foreign=private; Domain=first.invalid; Path=/'],
+  });
+  await client.call('cookie.set', {
+    version: hostApiVersion, profile: 'source:network:2:cookies', url: 'https://second.invalid/',
+    values: ['otherProfile=private; Path=/'],
+  });
+  const result = await client.call('http.request', {
+    version: hostApiVersion, url: 'https://first.invalid/start',
+    headers: { Host: 'source.virtual.invalid', Origin: 'https://caller.invalid',
+      authorization: 'call-input', cookie: 'explicit=call-input' },
+    cookieProfile: profile,
+  });
+  assert.equal(result.status, 200);
+  assert.equal(result.url, 'http://second.invalid/allowed/final?opaque=a%2Fb');
+  assert.deepEqual(Buffer.from(result.body), Buffer.from([0, 127, 255]));
+  assert.deepEqual(calls, [
+    { url: 'https://first.invalid/start', headers: {
+      host: 'source.virtual.invalid', origin: 'https://caller.invalid',
+      authorization: 'call-input', cookie: 'explicit=call-input',
+    } },
+    { url: 'http://second.invalid/allowed/final?opaque=a%2Fb',
+      headers: { host: 'source.virtual.invalid', origin: 'https://caller.invalid',
+        authorization: 'call-input', cookie: 'explicit=call-input' } },
+  ]);
+  calls.length = 0;
+  await client.call('http.request', {
+    version: hostApiVersion, url: 'https://first.invalid/start',
+    headers: { Origin: 'https://caller.invalid' }, cookieProfile: profile,
+  });
+  assert.deepEqual(calls, [
+    { url: 'https://first.invalid/start', headers: { origin: 'https://caller.invalid', cookie: 'first=private' } },
+    { url: 'http://second.invalid/allowed/final?opaque=a%2Fb',
+      headers: { origin: 'https://caller.invalid', cookie: 'second=current' } },
+  ], 'jar cookies are selected afresh per actual target, unlike explicit input headers');
+  assert.equal(await client.call('cookie.get', {
+    version: hostApiVersion, profile, url: 'https://second.invalid/elsewhere',
+  }), 'path=private; secure=private');
+  await owner.releaseProfiles('source:network:');
+});
+
 test('Node cookie and profile storage remain scoped and reject obvious public-suffix domains', async () => {
   const owner = createNodeSourceCapabilities();
   const client = createCapabilityClient({

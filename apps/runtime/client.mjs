@@ -1,15 +1,15 @@
 import { BridgeError, HTTP_PROTOCOL, createHttpClient } from '@meowfilm/runtime-bridge';
 import { contracts } from './contracts.mjs';
 
-export function createRuntimeClient({ baseUrl, sessionId, requestKey, timeout } = {}) {
-  const client = createHttpClient({ baseUrl, sessionId, key: requestKey, timeout });
+export function createRuntimeClient({ baseUrl, timeout } = {}) {
+  const client = createHttpClient({ baseUrl, timeout });
   return Object.freeze({
     call(method, params = {}, options = {}) {
       const selected = Object.entries(contracts).find(([, value]) => typeof method === 'string' && method.startsWith(value.prefix));
       if (!selected) return Promise.reject(new BridgeError('METHOD_NOT_FOUND'));
       const [id, { prefix, contract, codes }] = selected;
       const operation = method.slice(prefix.length);
-      if (!/^[a-z]+(?:\.[a-z]+)?$(?![\s\S])/.test(operation)) return Promise.reject(new BridgeError('METHOD_NOT_FOUND'));
+      if (!/^[a-z]+(?:\.[a-z]+)*$(?![\s\S])/.test(operation)) return Promise.reject(new BridgeError('METHOD_NOT_FOUND'));
       return client.request({ ...options, path: `/v1/${id}/${operation}`, body: params, contract, codes });
     },
     upload(module, installationId, sourceRevision, bytes, { basename, ...options } = {}) {

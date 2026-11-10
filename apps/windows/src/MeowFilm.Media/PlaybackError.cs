@@ -5,7 +5,6 @@ public static class PlaybackError
 {
     public const string InvalidRequest = "MEDIA_INVALID_REQUEST";
     public const string UnsupportedUri = "MEDIA_UNSUPPORTED_URI";
-    public const string UriCredentials = "MEDIA_URI_CREDENTIALS";
     public const string UnsupportedHeaders = "MEDIA_UNSUPPORTED_HEADERS";
     public const string InvalidHeaders = "MEDIA_INVALID_HEADERS";
     public const string UnsupportedAdaptive = "MEDIA_UNSUPPORTED_ADAPTIVE_HEADERS";
@@ -14,8 +13,6 @@ public static class PlaybackError
     public const string AdaptiveDrmUnsupported = "MEDIA_ADAPTIVE_DRM_UNSUPPORTED";
     public const string AdaptiveEncryptionUnsupported = "MEDIA_ADAPTIVE_ENCRYPTION_UNSUPPORTED";
     public const string AdaptiveBudget = "MEDIA_ADAPTIVE_BUDGET";
-    public const string HttpAddressBlocked = "MEDIA_HTTP_ADDRESS_BLOCKED";
-    public const string HttpRedirectBlocked = "MEDIA_HTTP_REDIRECT_BLOCKED";
     public const string HttpRedirectFailed = "MEDIA_HTTP_REDIRECT_FAILED";
     public const string HttpInvalidRange = "MEDIA_HTTP_INVALID_RANGE";
     public const string HttpRangeRejected = "MEDIA_HTTP_RANGE_REJECTED";

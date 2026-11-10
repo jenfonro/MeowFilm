@@ -83,7 +83,7 @@ native-local-lyrics
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "items": [
     {
       "songKey": "<64 位摘要>",
@@ -97,7 +97,7 @@ native-local-lyrics
 
 - 最多 64 首、区域最多 2 MiB、单项最多 256 KiB。
 - `songKey` 唯一并绑定当前歌曲显示身份；`contentHash` 绑定导入文本。
-- 保存的是解析后的纯时间轴，不保存凭据、媒体 URL、请求头或文件能力。
+- 保存的是解析后的纯时间轴，不保存凭据、媒体 URL、请求头或文件能力；逐字仅保存真实时间，当前格式不含 timing 标签。不兼容旧 schema，不迁移或删除原文件。
 - `music.lyrics.local.get` 只读取精确歌曲；`save` 原子替换该歌曲内容；`remove` 只删除该精确关联。
 - 全局歌词关闭时不显示本地或在线歌词，但不会删除本地内容。
 

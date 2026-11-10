@@ -203,10 +203,22 @@ extension MusicViewModel {
                 retirePlaybackNavigation()
                 cancelRemoteQueuePreparation(); cancelFMNavigation()
                 nativeAttempt = nil; pendingNativeResourceID = nil
+                // A terminal donor can still have automatic recovery pending.
+                // Retire that work without clearing accepted fact ownership or
+                // changing the identity captured by the successful handoff.
+                pendingSourceSelection?.lifetime.revoke(); pendingSourceSelection = nil
+                pendingSourceFailure = nil
+                sourceSwitchID = UUID()
+                sourceSwitchTask?.cancel(); sourceSwitchTask = nil
+                sourceMediaTask?.cancel(); sourceMediaTask = nil
+                sourceRecoveryID = UUID()
+                sourceRecoveryTask?.cancel(); sourceRecoveryTask = nil; sourceRecoveryWantsPlayback = nil
+                cachedAudioRecoveryTask?.cancel(); cachedAudioRecoveryTask = nil
+                remoteAudioRecoveryTask?.cancel(); remoteAudioRecoveryTask = nil
+                playbackState.isResolving = false
+                playbackState.phase = .idle
             }
-            if [.paused, .stopped, .replaced].contains(event.kind) {
-                pausePlaybackRecovery(continuePendingSource: event.kind == .paused)
-            }
+            if event.kind == .paused { pausePlaybackRecovery() }
             return
         }
         switch event.kind {
@@ -257,8 +269,12 @@ extension MusicViewModel {
               candidate.playbackAuthorization?.isActive != false else {
             retireRevokedAudio(); return
         }
-        if [.paused, .stopped].contains(fact.kind),
-           playPauseCommandTask?.attempt.resourceID == fact.resourceId { cancelPlayPauseCommands() }
+        if playPauseCommandTask?.attempt.resourceID == fact.resourceId {
+            if fact.kind == .paused { cancelPlayPauseCommands() }
+            // Exit revokes the addressed task, not a new user control request.
+            // Native identity/terminal admission already rejects its resume.
+            else if fact.kind == .stopped { playPauseCommandTask?.task.cancel() }
+        }
         if ![.failed, .stopped].contains(fact.kind),
            !MusicMediaDuration.matches(expected: current?.track.duration ?? 0, actual: fact.duration),
            recoverSourceAudio(fact, invalidDuration: true) { return }

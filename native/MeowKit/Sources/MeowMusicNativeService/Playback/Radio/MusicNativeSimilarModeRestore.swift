@@ -56,7 +56,8 @@ extension NativeMusicService {
                 seedEntryID: saved["seedEntryId"].isString ? saved["seedEntryId"].string : nil,
                 returnQueue: saved["returnQueue"], fromHome: saved["fromHome"].bool, provider: provider,
                 sourceIDs: sourceIDs, context: context, scope: scope, lease: lease)
-            session.continueEnabled = saved["continue"].bool
+            session.continueEnabled = provider != .heartbeat && saved["continue"].bool
+            session.offset = saved["offset"].int; session.exhausted = saved["exhausted"].bool
             session.batches = saved["batches"].array; session.attempted = Set(saved["attempted"].strings)
             session.status = [.error, .empty].contains(MusicSimilarModeSnapshot.Status(rawValue: saved["status"].string) ?? .ready) ?
                 MusicSimilarModeSnapshot.Status(rawValue: saved["status"].string)! : .ready

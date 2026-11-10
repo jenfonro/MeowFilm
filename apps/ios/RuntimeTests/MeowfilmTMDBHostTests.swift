@@ -72,8 +72,11 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         XCTAssertEqual(context.detail.summary, "已得剧集详情")
         XCTAssertEqual(session.context(for: movie).detail.summary, "已得电影详情")
         XCTAssertEqual(context.metadataDetail?.catField("extra"), .object(["kept": .bool(true)]))
+        XCTAssertEqual(context.metadataDetail?.catField("poster_path"), .string("/v1/tmdb/images/original/tv.png"))
+        XCTAssertEqual(context.snapshot.metadataSearch?.catField("results")?.catArray?.first?.catField("poster_path"),
+            .string("/v1/tmdb/images/w500/tv.png"), "The original search response retains its distinct list-sized image identity")
         let poster = try XCTUnwrap(context.detail.item.posterURL)
-        XCTAssertEqual(poster.absoluteString, "/v1/tmdb/images/w500/tv.png")
+        XCTAssertEqual(poster.absoluteString, "/v1/tmdb/images/original/tv.png")
         XCTAssertNil(poster.scheme); XCTAssertNil(poster.baseURL)
         let cell = FilmPosterCell(frame: CGRect(x: 0, y: 0, width: 110, height: 224))
         cell.configure(item: context.detail.item, images: assembly.filmImages, theme: PageTheme(), label: tv.label)
@@ -89,9 +92,11 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         XCTAssertEqual(searchRequest.query, ["query": query, "page": "1", "language": "zh-CN"])
         XCTAssertEqual(Set(apiReads.map(\.path)), ["/api/3/search/multi", "/api/3/tv/7", "/api/3/movie/42"])
         XCTAssertTrue(apiReads.allSatisfy { $0.headers["authorization"] == "Bearer synthetic-token" })
-        XCTAssertTrue(apiReads.filter { !$0.path.hasSuffix("/multi") }.allSatisfy { $0.query == ["language": "zh-CN"] })
+        XCTAssertTrue(apiReads.filter { !$0.path.hasSuffix("/multi") }.allSatisfy {
+            $0.query == ["language": "zh-CN", "append_to_response": "credits,similar,images"]
+        })
         assertNoRuntimeAuthentication(upstream.requests)
-        let imageReads = upstream.requests.filter { $0.path == "/images/w500/tv.png" }
+        let imageReads = upstream.requests.filter { $0.path == "/images/original/tv.png" }
         XCTAssertEqual(imageReads.count, 1)
         XCTAssertNil(imageReads.first?.headers["authorization"])
         XCTAssertEqual(imageReads.first?.query, [:])
@@ -225,6 +230,62 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         XCTAssertEqual(detail.detail.summary, "搜索已得简介", "The existing detail is not rebound to the new session")
         XCTAssertNil(old.snapshot.metadataDetails["tv:7"])
         XCTAssertEqual(upstream.requests.filter { $0.path == "/new/3/tv/7" }.count, 1)
+    }
+
+    func testCancelledDetailWaiterLeavesActualProducerToPopulateTheSharedCache() async throws {
+        let resources = try await hostResources(), assembly = try assembly()
+        let original = try await resources.filmMetadata.settings()
+        try requireEmptyCredentials(original)
+        let entered = expectation(description: "The actual Node producer reached the metadata upstream")
+        let upstream = try TMDBTestUpstream { request in
+            XCTAssertEqual(request.path, "/api/3/tv/7")
+            XCTAssertEqual(request.query, ["language": "zh-CN", "append_to_response": "credits,similar,images"])
+            entered.fulfill()
+            return .hold(onDisconnect: {})
+        }
+        try await upstream.start()
+        let search = try XCTUnwrap(assembly.filmSearch)
+        addTeardownBlock {
+            upstream.stop()
+            _ = try await resources.filmMetadata.updateSettings([
+                "apiBase": .string(original.apiBase), "imageBase": .string(original.imageBase),
+                "apiKey": .string(""), "accessToken": .string("")
+            ])
+            await MainActor.run { search.metadataSettingsChanged() }
+        }
+        _ = try await resources.filmMetadata.updateSettings([
+            "apiBase": .string(upstream.base + "/api"), "imageBase": .string(upstream.base + "/images")
+        ])
+        search.metadataSettingsChanged()
+        let connection = try await resources.scriptSession.connection()
+        let read = Task { try await resources.filmMetadata.detailRead(type: "tv", id: 7) }
+        addTeardownBlock { read.cancel(); upstream.stop(); _ = await read.result }
+        await fulfillment(of: [entered], timeout: 10)
+        read.cancel()
+        do { _ = try await read.value; XCTFail("A cancelled observer cannot publish metadata") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .cancelled) }
+
+        XCTAssertEqual(upstream.replyToHeldJSON(tmdbHostTV), 1,
+            "Cancelling the borrower must leave the admitted upstream producer alive")
+        let next = try await resources.filmMetadata.detailRead(type: "tv", id: 7)
+        XCTAssertTrue(next.producer === connection)
+        XCTAssertEqual(next.value.catField("overview"), .string("已得剧集详情"))
+        XCTAssertEqual(next.value.catField("poster_path"), .string("/v1/tmdb/images/original/tv.png"))
+        let seed = try XCTUnwrap(next.cacheEntry)
+        XCTAssertEqual(seed.catField("kind"), .string("metadata"))
+        XCTAssertEqual(seed.catField("completeness"), .string("complete"))
+        XCTAssertEqual(seed.catField("imageSize"), .string("original"))
+        XCTAssertEqual(seed.catField("query"), .object([
+            "language": .string("zh-CN"), "append_to_response": .string("credits,similar,images")
+        ]))
+        XCTAssertEqual(seed.catField("value"), next.value)
+        XCTAssertNotNil(seed.catField("fetchedAt"))
+        XCTAssertNotNil(seed.catField("settings")?.catField("revision"))
+        let cached = try await resources.filmMetadata.detailRead(type: "tv", id: 7)
+        XCTAssertEqual(cached.value, next.value)
+        XCTAssertEqual(cached.cacheEntry, seed, "Reusing the owner cache must not reset its timestamps or revision")
+        XCTAssertEqual(upstream.requests.count, 1, "The completed producer serves both later reads without a new upstream request")
+        assertNoRuntimeAuthentication(upstream.requests)
     }
 
     func testActualArtworkRejectsModuleFailureTruncationAndCancellationWithoutCachingThenRetries() async throws {
@@ -488,10 +549,12 @@ private let tmdbHostSearch: RuntimeValue = .object([
 ])
 private let tmdbHostTV: RuntimeValue = .object([
     "id": .number(7), "name": .string("受控剧集"), "poster_path": .string("/tv.png"),
-    "overview": .string("已得剧集详情"), "number_of_episodes": .number(24), "extra": .object(["kept": .bool(true)])
+    "overview": .string("已得剧集详情"), "number_of_episodes": .number(24),
+    "genres": .array([]), "seasons": .array([]), "extra": .object(["kept": .bool(true)])
 ])
 private let tmdbHostMovie: RuntimeValue = .object([
-    "id": .number(42), "title": .string("受控电影"), "poster_path": .string("/movie.png"), "overview": .string("已得电影详情")
+    "id": .number(42), "title": .string("受控电影"), "poster_path": .string("/movie.png"),
+    "overview": .string("已得电影详情"), "genres": .array([]), "runtime": .number(90)
 ])
 
 private final class TMDBHostImageSequence: @unchecked Sendable {
@@ -521,7 +584,7 @@ private final class TMDBHostImageSequence: @unchecked Sendable {
 
 /// A real, local HTTP upstream. It receives no runtime credentials and never
 /// reads application files. Held responses are released by stop on any failure.
-private final class TMDBTestUpstream: @unchecked Sendable {
+final class TMDBTestUpstream: @unchecked Sendable {
     struct Request: Sendable {
         let method: String, path: String
         let query: [String: String], headers: [String: String]
@@ -538,6 +601,7 @@ private final class TMDBTestUpstream: @unchecked Sendable {
     private let listener: NWListener
     private let handler: @Sendable (Request) -> Response
     private var connections: [ObjectIdentifier: NWConnection] = [:]
+    private var held: [ObjectIdentifier: NWConnection] = [:]
     private var recorded: [Request] = []
     var base: String { "http://127.0.0.1:\(listener.port!.rawValue)" }
     var requests: [Request] { queue.sync { recorded } }
@@ -565,6 +629,18 @@ private final class TMDBTestUpstream: @unchecked Sendable {
             listener.cancel()
             for connection in connections.values { connection.cancel() }
             connections.removeAll()
+            held.removeAll()
+        }
+    }
+    func replyToHeldJSON(_ value: RuntimeValue, status: Int = 200) -> Int {
+        queue.sync {
+            let waiting = Array(held.values)
+            held.removeAll()
+            let data = try! RuntimeJSON.encode(value)
+            for connection in waiting {
+                send(connection, data: data, type: "application/json", status: status, length: data.count)
+            }
+            return waiting.count
         }
     }
     private func accept(_ connection: NWConnection) {
@@ -606,6 +682,7 @@ private final class TMDBTestUpstream: @unchecked Sendable {
     private func respond(_ connection: NWConnection, _ response: Response) {
         switch response {
         case .hold(let onDisconnect):
+            held[ObjectIdentifier(connection)] = connection
             waitForDisconnect(connection, callback: onDisconnect)
         case .bytes(let data, let type, let status):
             send(connection, data: data, type: type, status: status, length: data.count)
@@ -628,6 +705,7 @@ private final class TMDBTestUpstream: @unchecked Sendable {
     }
     private func remove(_ connection: NWConnection) {
         connections[ObjectIdentifier(connection)] = nil
+        held[ObjectIdentifier(connection)] = nil
         connection.cancel()
     }
 }

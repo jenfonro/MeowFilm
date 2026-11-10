@@ -11,6 +11,7 @@ public actor MusicRemoteQueueSource {
     private let validateBinding: @Sendable () async throws -> Void
     private let release: @Sendable () async -> Void
     public nonisolated let dailyStyle: MusicDailyStyleEditing?
+    public nonisolated let fmAction: MusicHomeAction?
     private var pages: [String: MusicNativeTrackPage] = [:]
     private var loading = false
     private var savingStyle = false
@@ -24,10 +25,11 @@ public actor MusicRemoteQueueSource {
                 loadPage: @escaping @Sendable (String?) async throws -> MusicNativeTrackPage,
                 validate: @escaping @Sendable () async throws -> Void = {},
                 close: @escaping @Sendable () async -> Void = {},
-                dailyStyle: MusicDailyStyleEditing? = nil) {
+                dailyStyle: MusicDailyStyleEditing? = nil, fmAction: MusicHomeAction? = nil) {
         self.context = context; self.authorization = authorization
         load = loadPage; validateBinding = validate; release = close
         self.dailyStyle = dailyStyle
+        self.fmAction = fmAction
         // No constructor, capability cast or restoration starts a request.
     }
     public func validate() async throws {
@@ -131,7 +133,6 @@ public actor MusicRemoteQueueSource {
             bytes += try checked(value); rows += value.items; cursor = value.cursor
             guard bytes <= Self.maximumBytes else { throw MusicServiceError.limit }
         } while cursor != nil
-        guard !rows.isEmpty else { throw MusicServiceError.upstreamInvalid }
         return rows
     }
     public nonisolated func revoke() { authorization.revoke() }

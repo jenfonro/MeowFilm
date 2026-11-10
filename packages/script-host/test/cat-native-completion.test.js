@@ -386,7 +386,6 @@ for (const ending of ['normal', 'sync', 'async']) {
       // With no outstanding sockets, the real listener/PassThrough close
       // notifications drain before a native worker completion can be delivered.
       assert.equal(a.services.connections.size, 0);
-      assert.equal(a.services.trustedSockets.size, 0);
       assert.equal(a.nativeRequests.size, 0);
       const resources = retainResources(a);
       const origin = new ResourceScope(a.root.signal);
@@ -524,7 +523,6 @@ for (const [name, failure] of falsyNativeFailures) for (const ending of ['sync',
     const bGeneration = b.generation, bRealm = b.realm;
     assert.deepEqual(await invoke(b), { count: 1 });
     assert.equal(a.services.connections.size, 0);
-    assert.equal(a.services.trustedSockets.size, 0);
     assert.equal(a.nativeRequests.size, 0);
     const resources = retainResources(a);
     const origin = new ResourceScope(a.root.signal);

@@ -27,35 +27,33 @@ import MeowJSON
         for invalid in ["0", "01", "-1", "1e3", "9007199254740992", "١", " 101"] {
             XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(.songRoaming(sourceIDs: [invalid])))
             XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(
-                .queueRecommendations(songIDs: ["101", invalid], currentPlaySongID: "101")))
+                .songRecommendations(seedID: invalid, offset: 0)))
         }
         XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(.songRoaming(sourceIDs: [])))
         XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(.songRoaming(sourceIDs: Array(repeating: "101", count: 21))))
         XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(
-            .queueRecommendations(songIDs: ["101"], currentPlaySongID: "102")))
-        XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(
-            .queueRecommendations(songIDs: [], currentPlaySongID: "101")))
+            .songRecommendations(seedID: "102", offset: -1)))
         XCTAssertNoThrow(try MusicNeteaseSimilarModeRequest.validate(
-            .queueRecommendations(songIDs: Array(repeating: "101", count: 2001), currentPlaySongID: "101")))
+            .songRecommendations(seedID: "101", offset: 0)))
     }
 
     func testHeartbeatReadsActualFavoriteSeedAndUsesExplicitContinuationContext() async throws {
         let f = try MusicNeteaseNativeFixture(); try await f.enable()
         let path = "/eapi/playmode/intelligence/list"
         await f.http.replies(path, [try MusicNeteaseFixture.response([
-            "code": 200, "data": [["songInfo": MusicNeteaseFixture.song(103), "alg": "synthetic-alg"]]
+            "code": 200, "data": [["songInfo": MusicNeteaseFixture.song(102), "alg": "synthetic-alg"]]
         ])])
         let lease = try await f.service.beginAccountQueue(platform: .netease)
         let batch = try await f.service.similarModeBatch(lease, request: .heartbeat(lastID: "102", fromHome: false, context: nil))
         let context = try XCTUnwrap(batch.heartbeatContext)
-        XCTAssertEqual(context, .init(playlistID: "501", seedID: "101"))
+        XCTAssertEqual(context, .init(playlistID: "501", seedID: "102"))
         let first = try MusicQQWire.decode(XCTUnwrap(batch.items.first?.data))
         let attribution = try MusicQQWire.object(first["_recommendation"])
         XCTAssertEqual(attribution["source"] as? String, "heartbeat")
         XCTAssertEqual(attribution["feedbackSource"] as? String, "aiMode")
         XCTAssertEqual(attribution["sourceId"] as? String, "501")
         XCTAssertEqual(attribution["alg"] as? String, "synthetic-alg")
-        _ = try await f.service.similarModeBatch(lease, request: .heartbeat(lastID: nil, fromHome: true, context: context))
+        _ = try await f.service.similarModeBatch(lease, request: .heartbeat(lastID: "102", fromHome: true, context: context))
         let records = await f.http.recorded(), requests = records.filter { $0.request.url.path == path }
         XCTAssertEqual(requests.count, 2)
         let one = try MusicQQWire.decode(XCTUnwrap(requests.first?.payload))
@@ -71,18 +69,17 @@ import MeowJSON
 
     func testQueueRecommendationsReadFreshBatchesPreserveAllIDsAndAttribution() async throws {
         let f = try MusicNeteaseNativeFixture(); try await f.enable()
-        let path = "/eapi/homepage/more/rcmd/song"
+        let path = "/eapi/homepage/scene/more/rcmd/song"
         await f.http.replies(path, try [101, 102].map { id in
             try MusicNeteaseFixture.response(["code": 200, "data": [
-                "songList": [MusicNeteaseFixture.song(id)], "algMap": [String(id): "synthetic-\(id)"]
+                "songList": [MusicNeteaseFixture.song(id)], "algMap": [String(id): "synthetic-\(id)"], "hasMore": true, "offset": (id - 100) * 15
             ]])
         })
         let lease = try await f.service.beginAccountQueue(platform: .netease)
         let before = f.store.peek(f.identity)
-        let ids = (1...2001).map(String.init)
-        let request = MusicNativeSimilarModeRequest.queueRecommendations(songIDs: ids, currentPlaySongID: "500")
+        let request = MusicNativeSimilarModeRequest.songRecommendations(seedID: "500", offset: 0)
         let first = try await f.service.similarModeBatch(lease, request: request)
-        let second = try await f.service.similarModeBatch(lease, request: request)
+        let second = try await f.service.similarModeBatch(lease, request: .songRecommendations(seedID: "500", offset: XCTUnwrap(first.offset)))
         XCTAssertNotEqual(first.items.first?.data, second.items.first?.data)
         XCTAssertNil(first.heartbeatContext); XCTAssertTrue(first.items.allSatisfy { $0.platform == "wy" })
         let song = try MusicQQWire.decode(XCTUnwrap(second.items.first?.data))
@@ -94,7 +91,7 @@ import MeowJSON
         let records = await f.http.recorded(), pages = records.filter { $0.request.url.path == path }
         XCTAssertEqual(pages.count, 2)
         let payload = try MusicQQWire.decode(XCTUnwrap(pages.last?.payload))
-        XCTAssertEqual(payload["songIds"] as? String, "[" + ids.joined(separator: ",") + "]")
+        XCTAssertEqual(payload["songIds"] as? String, "[500]")
         XCTAssertEqual(payload["currentPlaySongId"] as? String, "500")
         XCTAssertEqual(payload["source"] as? String, "curlist_more_rcmd")
         XCTAssertEqual(records.filter { $0.request.url.path == "/weapi/w/nuser/account/get" }.count, 1)
@@ -210,7 +207,7 @@ import MeowJSON
             let call = MusicAccountQueueOwnerCall("lease cancellation drained \(direct)") {
                 defer { probe.callerFinished() }
                 return try await owner.similarModeBatch(lease,
-                    request: .queueRecommendations(songIDs: ["101"], currentPlaySongID: "101"))
+                    request: .songRecommendations(seedID: "101", offset: 0))
             }
             defer { call.cancel(); Task { await gate.release(); _ = await owner.close() } }
             await fulfillment(of: [gate.entered], timeout: 3)
@@ -249,7 +246,7 @@ import MeowJSON
             if sameLease { call.cancel() } else { await owner.endAccountQueue(first) }
             await fulfillment(of: [probe.cancelled], timeout: 3)
             let other = try await owner.similarModeBatch(second,
-                request: .queueRecommendations(songIDs: ["102"], currentPlaySongID: "102"))
+                request: .songRecommendations(seedID: "102", offset: 0))
             XCTAssertEqual(other.items.count, 1)
             let after = try await owner.similarModeScope(second)
             XCTAssertEqual(after, scope); XCTAssertTrue(second.authorization.isActive)
@@ -284,7 +281,7 @@ import MeowJSON
             let lease = try await owner.beginAccountQueue(platform: .netease)
             do {
                 _ = try await owner.similarModeBatch(lease,
-                    request: .queueRecommendations(songIDs: ["101"], currentPlaySongID: "101"))
+                    request: .songRecommendations(seedID: "101", offset: 0))
                 XCTFail("Byte resource boundary removed")
             } catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
             _ = await owner.close()
@@ -326,6 +323,9 @@ private actor MusicSimilarModeGateProvider: MusicAccountProvider, MusicAccountSi
         }
         if let batch { return batch }
         let row = try NeteaseMusicAccountAdapter.song(MusicNeteaseFixture.song(), id: "101")
+        if case .songRecommendations(_, let offset) = request {
+            return .init(items: [.init(platform: "wy", data: try JSONEncoder().encode(row))], hasMore: true, offset: offset + 15)
+        }
         return .init(items: [.init(platform: "wy", data: try JSONEncoder().encode(row))])
     }
     func nativeID(_ credential: AccountCredential) async throws -> String { try await account.nativeID(credential) }

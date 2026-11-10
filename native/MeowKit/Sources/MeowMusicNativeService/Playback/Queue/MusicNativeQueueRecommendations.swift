@@ -3,53 +3,40 @@ import MeowMusicFeature
 
 extension NativeMusicService: MusicQueueRecommendationServing {
     public func queueRecommendationSnapshot() async throws -> MusicQueueRecommendationSnapshot? {
-        try check()
-        guard let item = try prepareQueueRecommendations() else { return nil }
+        guard let item = try await prepareQueueRecommendations() else { return nil }
+        item.currentEntryID = try read().queue["currentId"].string
         return queueRecommendationDTO(item)
     }
 
     public func previewQueueRecommendations() async throws -> MusicQueueRecommendationSnapshot? {
-        guard let item = try prepareQueueRecommendations() else { return nil }
-        let token = item.id
-        if item.pending == nil, item.songs.isEmpty, !item.exhausted, item.status != .error {
-            try beginQueueRecommendationBatch(item, append: false)
-        }
+        guard let item = try await prepareQueueRecommendations() else { return nil }
+        try queueRecommendationBoundary()
         let pending = item.pending
-        await withTaskCancellationHandler { await pending?.value } onCancel: { pending?.cancel() }
+        await pending?.value
         try check()
-        try musicRequire(similarMode.queue === item && item.id == token, .targetChanged)
+        try musicRequire(similarMode.queue === item, .targetChanged)
         return queueRecommendationDTO(item)
     }
 
     public func playQueueRecommendation(snapshotID: UUID, candidateID: String) async throws -> MusicSimilarModeResult {
         try check()
         guard let item = similarMode.queue, item.id == snapshotID,
-              let index = item.songs.indices.first(where: { "\(item.id.uuidString):\($0)" == candidateID }) else {
+              let index = item.songs.indices.first(where: { "\(item.candidateID.uuidString):\($0)" == candidateID }) else {
             throw MusicServiceError.targetChanged
         }
         let state = try appendQueueRecommendations(item, selectedIndex: index)
         invalidatePlayback()
-        similarMode.navigation = UUID(); similarMode.playing = nil
+        similarMode.playing = nil; similarMode.playbackEvent = nil; similarMode.eventOccurrence = nil
         emitSimilar()
         return .init(state: state, action: .playCurrent)
     }
 
     public func setQueueRecommendationContinue(_ enabled: Bool, snapshotID: UUID) async throws {
         try check()
-        guard let item = similarMode.queue, item.id == snapshotID else { throw MusicServiceError.targetChanged }
-        if let lease = item.lease { try lease.authorization.check() }
-        try musicRequire(queueRecommendationsAreCurrent(item, try read()), .targetChanged)
-        if item.continueEnabled == enabled { return }
+        guard let item = similarMode.queue, item.id == snapshotID,
+              queueRecommendationsAreCurrent(item, try read()) else { throw MusicServiceError.targetChanged }
+        try item.lease?.authorization.check()
         item.continueEnabled = enabled
-        if !enabled {
-            if let tail = item.pendingTail { item.attempted.remove(tail) }
-            item.pendingTail = nil
-            if item.pending != nil {
-                item.pending?.cancel(); item.id = UUID()
-                item.status = .ready; item.error = nil
-            }
-            similarMode.navigation = UUID()
-        }
         emitSimilar()
         if enabled { try queueRecommendationBoundary() }
     }
@@ -59,51 +46,38 @@ extension NativeMusicService: MusicQueueRecommendationServing {
         guard let item = similarMode.queue, item.id == snapshotID, queueRecommendationDTO(item).canRetry else {
             throw MusicServiceError.invalidRequest
         }
-        let d = try read()
-        let append = item.continueEnabled && item.attempted.contains(item.currentEntryID) &&
-            d.queue["entries"].array.last?["id"].string == item.currentEntryID
-        item.exhausted = false; item.error = nil; item.id = UUID()
-        item.attempted.remove(item.currentEntryID)
-        try beginQueueRecommendationBatch(item, append: append)
+        item.exhausted = false; item.error = nil
+        try beginQueueRecommendationBatch(item, append: item.active && item.continueEnabled)
         let pending = item.pending
-        await withTaskCancellationHandler { await pending?.value } onCancel: { pending?.cancel() }
+        await pending?.value
         try check()
         try musicRequire(similarMode.queue === item, .targetChanged)
         return .init(state: stateDTO(try read()), action: .keepCurrent)
     }
 
-    public func cancelQueueRecommendationPreview() async {
-        guard let item = similarMode.queue, item.pendingTail == nil else { return }
-        item.pending?.cancel()
-        item.id = UUID(); item.songs = []; item.recommendations = [:]
-        item.status = .ready; item.error = nil
-        if !item.continueEnabled && item.liveRecommendations.isEmpty { discardQueueRecommendations() }
-        emitSimilar()
-    }
+    // The queue sheet only observes a playback-owned candidate session.
+    public func cancelQueueRecommendationPreview() async {}
 }
 
 extension NativeMusicService {
-    func ordinaryRecommendationRequest(_ d: MusicDocument) -> MusicNativeSimilarModeRequest? {
-        guard platformEnabled("wy"), accounts is any MusicNativeSimilarModeProviding,
-              similarMode.active == nil, d.queue["similar"] == .null,
-              !d.queue["entries"].array.contains(where: { $0["context"]["sourceType"].string == "fm" }) else { return nil }
-        return MusicNativeSimilarData.queueRequest(d.queue)
-    }
-
-    func prepareQueueRecommendations() throws -> MusicNativeQueueRecommendations? {
+    func prepareQueueRecommendations() async throws -> MusicNativeQueueRecommendations? {
         let d = try read()
-        guard ordinaryRecommendationRequest(d) != nil else {
-            discardQueueRecommendations(); return nil
-        }
         if let item = similarMode.queue {
-            if item.lease?.authorization.isActive == false {
-                discardQueueRecommendations(); return nil
-            }
-            if !queueRecommendationsAreCurrent(item, d) { refreshQueueRecommendations(item, document: d) }
+            guard item.lease?.authorization.isActive != false else { discardQueueRecommendations(); return nil }
             return item
         }
-        let item = MusicNativeQueueRecommendations(revision: d.queue["revision"].int,
-                                                   currentEntryID: d.queue["currentId"].string)
+        guard platformEnabled("wy"), accounts is any MusicNativeSimilarModeProviding,
+              similarMode.active == nil, fmPlayback == nil, d.queue["similar"] == .null,
+              d.queue["source"]["sourceType"].string == "search-song",
+              let row = d.queue["entries"].array.first(where: { $0["id"] == d.queue["source"]["seedEntryId"] }) else { return nil }
+        let navigation = similarMode.navigation
+        let seed = try await sharedSongMetadata(row["song"])
+        let current = try read()
+        if let existing = similarMode.queue { return existing }
+        guard navigation == similarMode.navigation, current.queue["source"] == d.queue["source"],
+              MusicNativeSimilarData.nativeID(seed) != nil else { return nil }
+        let item = MusicNativeQueueRecommendations(revision: current.queue["revision"].int,
+            currentEntryID: current.queue["currentId"].string, seed: seed)
         similarMode.queue = item
         return item
     }
@@ -112,44 +86,29 @@ extension NativeMusicService {
         .init(id: item.id, status: item.status, currentEntryID: item.currentEntryID,
             continueEnabled: item.continueEnabled,
             candidates: item.songs.enumerated().map {
-                .init(id: "\(item.id.uuidString):\($0.offset)", song: MusicNativeSimilarData.display($0.element))
+                .init(id: "\(item.candidateID.uuidString):\($0.offset)", song: MusicNativeSimilarData.display($0.element))
             }, exhausted: item.exhausted, error: item.error,
-            canRetry: item.pending == nil && (item.status == .error || item.exhausted && item.songs.isEmpty))
+            canRetry: item.pending == nil && (item.status == .error || item.exhausted && item.songs.isEmpty),
+            active: item.active, errorID: item.errorID)
     }
 
     func queueRecommendationsAreCurrent(_ item: MusicNativeQueueRecommendations, _ d: MusicDocument) -> Bool {
-        similarMode.queue === item && d.queue["revision"].int == item.revision &&
-            d.queue["currentId"].string == item.currentEntryID && ordinaryRecommendationRequest(d) != nil
-    }
-
-    func refreshQueueRecommendations(_ item: MusicNativeQueueRecommendations, document d: MusicDocument,
-                                     edited: Bool = true) {
-        item.pending?.cancel()
-        if let tail = item.pendingTail { item.attempted.remove(tail) }
-        item.pendingTail = nil
-        item.id = UUID(); item.revision = d.queue["revision"].int
-        item.currentEntryID = d.queue["currentId"].string
-        item.songs = []; item.recommendations = [:]
-        if edited { item.exhausted = false; item.attempted.removeAll() }
-        item.status = item.exhausted ? .empty : .ready; item.error = nil
-        let entries = Set(d.queue["entries"].array.map { $0["id"].string })
-        item.liveRecommendations = item.liveRecommendations.filter { entries.contains($0.key) }
+        similarMode.queue === item && item.lease?.authorization.isActive != false &&
+            similarMode.active == nil && fmPlayback == nil && !d.queue["entries"].array.isEmpty
     }
 
     func beginQueueRecommendationBatch(_ item: MusicNativeQueueRecommendations, append: Bool) throws {
         guard item.pending == nil else { return }
-        let d = try read()
-        try musicRequire(queueRecommendationsAreCurrent(item, d), .targetChanged)
-        guard let request = ordinaryRecommendationRequest(d) else { throw MusicServiceError.sourceUnavailable }
-        if append {
-            try musicRequire(d.queue["entries"].array.last?["id"].string == item.currentEntryID, .targetChanged)
-            item.attempted.insert(item.currentEntryID)
-        }
+        try musicRequire(queueRecommendationsAreCurrent(item, try read()), .targetChanged)
+        guard let seed = MusicNativeSimilarData.nativeID(item.seed) else { throw MusicServiceError.sourceUnavailable }
         let requestID = UUID(), token = item.id
-        item.pendingID = requestID; item.pendingTail = append ? item.currentEntryID : nil
+        item.pendingID = requestID; item.pendingTail = append ? String(item.offset) : nil
         item.pendingToken = token
-        item.status = .loading; item.error = nil; item.songs = []; item.recommendations = [:]
-        item.pending = Task { await loadQueueRecommendations(item, requestID: requestID, token: token, request: request) }
+        item.status = .loading; item.error = nil; item.errorID = nil
+        item.pending = Task {
+            await loadQueueRecommendations(item, requestID: requestID, token: token,
+                request: .songRecommendations(seedID: seed, offset: item.offset))
+        }
         emitSimilar()
     }
 
@@ -163,7 +122,6 @@ extension NativeMusicService {
                 if item.status == .loading { item.status = .ready }
                 if similarMode.queue === item {
                     emitSimilar()
-                    try? queueRecommendationBoundary()
                 }
             }
         }
@@ -199,19 +157,20 @@ extension NativeMusicService {
             try await owner.checkAccountQueue(lease)
             try check(own); try lease.authorization.check()
             guard similarMode.queue === item, item.id == token, item.pendingID == requestID else { return }
-            let d = try read()
-            guard queueRecommendationsAreCurrent(item, d) else { return }
+            guard queueRecommendationsAreCurrent(item, try read()) else { return }
             let songs = try MusicNativeSimilarData.songs(response)
             let recommendations = try MusicNativeSimilarData.recommendations(response.items)
             try await retainSongMetadata(songs)
             try check(own); try lease.authorization.check()
             guard similarMode.queue === item, item.id == token, item.pendingID == requestID,
                   queueRecommendationsAreCurrent(item, try read()) else { return }
-            let unique = MusicNativeSimilarData.unique(songs, excluding: d.queue["entries"].array.map { $0["song"] })
+            let unique = MusicNativeSimilarData.unique(songs, excluding: try read().queue["entries"].array.map { $0["song"] })
+            guard let offset = response.offset, response.hasMore != nil else { throw MusicServiceError.invalidResponse }
+            item.offset = offset; item.candidateID = UUID()
             item.songs = unique; item.recommendations = recommendations
             item.exhausted = response.hasMore == false || item.songs.isEmpty
             item.status = item.songs.isEmpty ? .empty : .ready
-            if item.pendingTail != nil, item.continueEnabled, !item.songs.isEmpty {
+            if item.active, item.pendingTail != nil, item.continueEnabled, !item.songs.isEmpty {
                 _ = try appendQueueRecommendations(item)
             }
         } catch {
@@ -223,32 +182,30 @@ extension NativeMusicService {
             item.songs = []; item.recommendations = [:]
             item.status = failure == .cancelled ? .ready : .error
             item.error = failure == .cancelled ? nil : failure
+            item.errorID = failure == .cancelled ? nil : requestID
         }
     }
 
-    /// A cached preview can be admitted at the same real tail boundary. A
-    /// pending preview becomes the one tail request, rather than racing it.
     func queueRecommendationBoundary() throws {
-        guard let item = similarMode.queue, item.continueEnabled,
-              !item.attempted.contains(item.currentEntryID), let playing = similarMode.playing,
-              playing.occurrence == item.currentEntryID, attempt?.id == playing.attempt,
-              attempt?.ready == true, attempt?.started == true, attempt?.ended == false else { return }
+        guard let item = similarMode.queue, item.continueEnabled, item.pending == nil,
+              !item.exhausted || !item.songs.isEmpty else { return }
         let d = try read()
-        guard let tail = d.queue["entries"].array.last, d.queue["currentId"] == tail["id"],
-              queueRecommendationsAreCurrent(item, d) else { return }
-        if item.pending != nil {
-            guard item.pendingToken == item.id else { return }
-            item.pendingTail = item.currentEntryID
-            item.attempted.insert(item.currentEntryID)
+        if !item.active {
+            guard item.songs.isEmpty, !item.attempted.contains("initial"), hasCurrentPlayback(d),
+                  d.queue["currentId"] == d.queue["source"]["seedEntryId"] else { return }
+            item.attempted.insert("initial")
+            try beginQueueRecommendationBatch(item, append: false)
             return
         }
-        if !item.songs.isEmpty, item.status == .ready {
-            item.attempted.insert(item.currentEntryID)
-            _ = try appendQueueRecommendations(item)
-            emitSimilar()
-        } else if !item.exhausted && item.status != .error {
-            try beginQueueRecommendationBatch(item, append: true)
+        let event = d.playback["mode"].int == MusicPlaybackMode.shuffle.rawValue ? similarMode.playbackEvent ?? "" :
+            d.queue["currentId"].string + ":" + String(item.offset)
+        guard continuationIsDue(d) else { return }
+        if item.active, !item.songs.isEmpty {
+            _ = try appendQueueRecommendations(item); emitSimilar(); return
         }
+        guard item.songs.isEmpty, !item.attempted.contains(event) else { return }
+        item.attempted.insert(event)
+        try beginQueueRecommendationBatch(item, append: item.active)
     }
 
     func appendQueueRecommendations(_ item: MusicNativeQueueRecommendations,
@@ -276,6 +233,8 @@ extension NativeMusicService {
                 if let selectedIndex {
                     select(rows[selectedIndex]["id"].string, queue: &draft.queue)
                     draft.resetPosition()
+                    draft.queue["source"]["sourceType"] = .string("queue-recommendations")
+                    draft.queue["source"]["sourceTitle"] = .string("推荐")
                 }
                 draft.queue["revision"] = .n(draft.queue["revision"].int + 1)
                 return stateDTO(draft)
@@ -283,8 +242,9 @@ extension NativeMusicService {
         }
         item.liveRecommendations.merge(live) { _, new in new }
         item.revision = state.revision; item.currentEntryID = state.currentId ?? ""
-        item.songs = []; item.recommendations = [:]; item.id = UUID()
-        item.status = .ready; item.error = nil
+        if selectedIndex != nil { item.active = true }
+        item.songs = []; item.recommendations = [:]; item.candidateID = UUID()
+        item.status = .ready; item.error = nil; item.errorID = nil
         return state
     }
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
@@ -16,7 +16,7 @@ import { createSourceRuntimeModule } from '../apps/runtime/modules/source-runtim
 import { deferred, turn, until, rawRequest } from '../packages/runtime-bridge/test/http-fixture.js';
 import { lxScript } from '../packages/script-host/test/fixtures.js';
 
-const config = () => ({ sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex') });
+const config = () => ({ sessionId: randomUUID() });
 function temporaryData() {
   const directory = fileURLToPath(new URL('../tmp/test-results/runtime-assembly/', import.meta.url));
   mkdirSync(directory, { recursive: true });
@@ -33,7 +33,7 @@ async function connect(t, modules) {
   const identity = config();
   const runtime = createAppRuntime({ ...identity, modules });
   await runtime.start();
-  const client = createRuntimeClient({ ...identity, baseUrl: runtime.baseUrl });
+  const client = createRuntimeClient({ baseUrl: runtime.baseUrl });
   t.after(async () => { await client.close(); await runtime.close().catch(() => {}); });
   return { runtime, client, identity };
 }
@@ -70,7 +70,7 @@ test('HTTP close accepts only an empty object and rejects every other shape befo
   const { runtime, client, identity } = await connect(t, [fixture('music', () => { closes++; })]);
   for (const value of [true, 1, [], null, { x: 1 }]) {
     const reply = await rawRequest(runtime.baseUrl,
-      { sessionId: identity.sessionId, key: identity.requestKey },
+      { sessionId: identity.sessionId },
       { path: '/v1/close', body: JSON.stringify(value) }).response;
     assert.equal(reply.status, 400);
     assert.deepEqual(reply.value, { ok: false, contract: 'runtime.http.v1', code: 'INVALID_REQUEST' });
@@ -89,6 +89,45 @@ test('failed module cleanup is explicit without leaking provider diagnostics', a
   const { runtime, client } = await connect(t, [fixture('music', () => { throw new Error('PRIVATE'); })]);
   assert.deepEqual(await client.shutdown(), { ok: false, contract: 'runtime.http.v1', code: 'INVALID_RESPONSE' });
   await assert.rejects(runtime.close(), { code: 'INVALID_RESPONSE', message: 'INVALID_RESPONSE' });
+});
+
+test('external HTTP close needs no startup identity and acknowledges only after real request and module drain', async t => {
+  const entered = deferred(), releaseHandler = deferred(), moduleClosing = deferred(), releaseModule = deferred();
+  t.after(() => { releaseHandler.resolve(); releaseModule.resolve(); });
+  let signal, closes = 0, acknowledged = false;
+  const module = fixture('music', async () => {
+    closes++; moduleClosing.resolve(); await releaseModule.promise;
+  });
+  module.methods['music.script.sources.list'] = async (_input, context) => {
+    signal = context.signal; entered.resolve(); await releaseHandler.promise;
+    return { ok: true, contract: 'music.script.v3', value: 'late' };
+  };
+  const { runtime, client } = await connect(t, [module]);
+  const call = client.call('music.script.sources.list', {}).catch(error => error.code);
+  await entered.promise;
+  const close = rawRequest(runtime.baseUrl, {}, { path: '/v1/close', body: '{}',
+    headers: { host: 'external.example.invalid', origin: 'https://browser.example.invalid',
+      'x-meow-request-id': undefined } }).response.then(reply => { acknowledged = true; return reply; });
+  await moduleClosing.promise;
+  await turn();
+  assert.equal(signal.aborted, true);
+  assert.equal(acknowledged, false);
+  assert.equal(runtime.state.active, 2);
+  releaseModule.resolve();
+  await turn();
+  assert.equal(acknowledged, false, 'module cleanup alone does not prove the running handler drained');
+  releaseHandler.resolve();
+  const reply = await close;
+  assert.equal(await call, 'CLOSED');
+  assert.equal(reply.status, 200);
+  assert.equal(reply.headers['access-control-allow-origin'], '*');
+  assert.match(reply.headers['x-meow-request-id'], /^[0-9a-f-]{36}$/);
+  assert.deepEqual(reply.value, {
+    ok: true, contract: 'runtime.http.v1', value: { closed: true, cleanupComplete: true },
+  });
+  await until(() => runtime.state.active === 0);
+  await runtime.close();
+  assert.equal(closes, 1);
 });
 
 test('overlapping HTTP shutdown requests share disposal without waiting on each other', async t => {
@@ -164,7 +203,7 @@ test('invalid assembly cannot open a listener or override methods; failed factor
   await turn(); assert.equal(closes, 4);
 });
 
-test('synchronous assembly receives no capabilities and handlers receive the authenticated HTTP context', async t => {
+test('synchronous assembly receives no capabilities and handlers receive the HTTP lifecycle context', async t => {
   const identity = config(); let assemblies = 0, received;
   const runtime = createAppRuntime({ ...identity, assemble(...args) {
     assemblies++;
@@ -181,7 +220,7 @@ test('synchronous assembly receives no capabilities and handlers receive the aut
   } });
   assert.equal(assemblies, 1);
   await runtime.start();
-  const client = createRuntimeClient({ ...identity, baseUrl: runtime.baseUrl });
+  const client = createRuntimeClient({ baseUrl: runtime.baseUrl });
   t.after(async () => { await client.close(); await runtime.close(); });
   const input = { text: '原样😀', é: 1, 'e\u0301': 2 };
   assert.deepEqual(await client.call('music.script.sources.list', input), {
@@ -413,7 +452,7 @@ test('assembly factories cannot mix modules or async results and bad identity ca
     { assemble: async () => [fixture()] }]) {
     assert.throws(() => createAppRuntime({ ...config(), ...input }), { code: 'INVALID_REQUEST' });
   }
-  assert.throws(() => createAppRuntime({ ...config(), requestKey: 'invalid', assemble: () => assert.fail('allocated') }),
+  assert.throws(() => createAppRuntime({ ...config(), sessionId: 'invalid', assemble: () => assert.fail('allocated') }),
     { code: 'INVALID_REQUEST' });
 });
 
@@ -436,7 +475,7 @@ test('independent public create/start runtime exposes all three frozen versions 
         assert.equal(input.dataRoot, dataRoot);
         return { async status() { return {}; }, async close() {} };
       } } });
-    const client = createRuntimeClient({ ...identity, baseUrl: runtime.baseUrl });
+    const client = createRuntimeClient({ baseUrl: runtime.baseUrl });
     t.after(async () => { await client.close(); await runtime.close(); rmSync(dataRoot, { recursive: true }); });
     const description = (await client.describe()).value;
     assert.equal(description.protocol, 'runtime.http.v1'); assert.equal(description.product, 'aggregate');

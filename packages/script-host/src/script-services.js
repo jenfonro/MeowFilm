@@ -2,43 +2,31 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import { EventEmitter } from 'node:events';
 import { Writable, Readable } from 'node:stream';
-import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { deferred, fault, requireValue } from './errors.js';
 import { isLoopbackHost } from './network-boundary.js';
 import { ResourceScope } from './scope.js';
 import { tlsOptionNames, projectHttpRequestOptions } from './native-roles.js';
 import { afterCloseDispatch, closeResource } from './resource-close.js';
 
-export const scriptAccessHeader = 'x-meow-script-access';
 const ownerScope = Symbol('script-request-scope');
 const scopeCleanup = Symbol('script-service-scope-cleanup');
 const agentOwner = Symbol('script-agent-owner');
 const resourceOwner = Symbol('script-resource-owner');
 const ignoreError = () => {};
-const equal = (left, right) => {
-  if (typeof left !== 'string' || typeof right !== 'string') return false;
-  const a = Buffer.from(left), b = Buffer.from(right);
-  return a.length === b.length && timingSafeEqual(a, b);
-};
 const requestHost = host => String(host).includes(':') && !String(host).startsWith('[') ? `[${host}]` : host;
 const connectHost = host => typeof host === 'string' && host.startsWith('[') && host.endsWith(']')
   ? host.slice(1, -1) : host;
-function localHeaders(input, port, access, scope) {
+function localHeaders(input, scope) {
   const entries = [];
   if (Array.isArray(input)) {
     for (let index = 0; index + 1 < input.length; index += 2) entries.push([input[index], input[index + 1]]);
   } else entries.push(...Object.entries(input ?? {}));
-  const denied = new Set(['host', scriptAccessHeader, 'x-meow-request-scope']);
-  const headers = Object.fromEntries(entries.filter(([key]) => !denied.has(String(key).toLowerCase())));
-  headers[scriptAccessHeader] = access;
+  const headers = Object.fromEntries(entries.filter(([key]) => String(key).toLowerCase() !== 'x-meow-request-scope'));
   headers['x-meow-request-scope'] = scope;
-  headers.host = `127.0.0.1:${port}`;
   return headers;
 }
 
-const listenHost = value => value === undefined || value === null || value === '' ||
-  ['0.0.0.0', '::', '0:0:0:0:0:0:0:0'].includes(String(value).toLowerCase()) ||
-  isLoopbackHost(String(value));
 const socketError = code => Object.assign(new Error(code), { code });
 
 class PortProbeServer extends EventEmitter {
@@ -60,7 +48,7 @@ class PortProbeServer extends EventEmitter {
       port: args[0], host: typeof args[1] === 'string' ? args[1] : undefined,
     };
     requireValue(options.path === undefined && options.fd === undefined &&
-      options.handle === undefined && listenHost(options.host), 'PERMISSION_DENIED');
+      options.handle === undefined, 'PERMISSION_DENIED');
     const requested = Number(options.port);
     requireValue(Number.isInteger(requested) && requested >= 0 && requested <= 65535,
       'INVALID_ARGUMENT');
@@ -136,17 +124,13 @@ export class ScriptServices {
     this.probePorts = new Map();
     this.nextProbePort = 49152;
     this.scopes = new Map();
-    this.trustedSockets = new Set();
     this.connections = new Set();
-    this.access = randomBytes(32).toString('hex');
-    this.cookie = '__meow_' + createHash('sha256').update(session.installationId).digest('hex').slice(0, 16);
     this.primary = null;
     this.main = null;
     this.claimed = false;
     this.started = deferred();
     this.agents = new Set();
     this.requestCleanup = new Map();
-    this.trustedSocketCleanup = new Map();
     this.connectionCleanup = new Map();
     this.serverCleanup = new Map();
     this.cleanupState = { error: null };
@@ -173,7 +157,7 @@ export class ScriptServices {
       this.primary.once('error', failed);
       this.primary.once('close', cancelled);
       try {
-        http.Server.prototype.listen.call(this.primary, 0, '127.0.0.1', () => {
+        http.Server.prototype.listen.call(this.primary, 0, () => {
           finish(resolve);
         });
       } catch { failed(); }
@@ -229,8 +213,7 @@ export class ScriptServices {
           !creationScope.signal?.aborted, 'SERVICE_CLOSED');
         if (args[0] && typeof args[0] === 'object')
           requireValue(args[0].path === undefined && args[0].fd === undefined &&
-            args[0].handle === undefined && listenHost(args[0].host), 'PERMISSION_DENIED');
-        else requireValue(typeof args[1] !== 'string' || listenHost(args[1]), 'PERMISSION_DENIED');
+            args[0].handle === undefined, 'PERMISSION_DENIED');
         let port = typeof args[0] === 'object' ? args[0]?.port : args[0];
         requireValue(Number.isInteger(Number(port)) && Number(port) >= 0 &&
           Number(port) <= 65535, 'PERMISSION_DENIED');
@@ -255,7 +238,7 @@ export class ScriptServices {
         this.meowStarted = true;
         try {
           if (callback) this.once('listening', callback);
-          return Parent.prototype.listen.call(this, 0, '127.0.0.1', () => {
+          return Parent.prototype.listen.call(this, 0, () => {
             if (this === owner.main) owner.started.resolve();
             owner.session?.endpointsChanged?.();
           });
@@ -566,9 +549,10 @@ export class ScriptServices {
       let options;
       if (typeof args[0] === 'string' || args[0] instanceof URL) {
         const url = new URL(args[0]);
-        requireValue(!url.username && !url.password, 'PERMISSION_DENIED');
         options = { protocol: url.protocol, hostname: url.hostname, port: url.port,
-          path: url.pathname + url.search, ...(typeof args[1] === 'object' ? args[1] : {}) };
+          path: url.pathname + url.search,
+          ...(url.username || url.password ? { auth: `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}` } : {}),
+          ...(typeof args[1] === 'object' ? args[1] : {}) };
       } else options = projectHttpRequestOptions(args[0],
         value => value === false || this.agents.has(value)) ?? {};
       // As in Node, an explicit Agent (including agent:false's one-shot Agent)
@@ -614,7 +598,7 @@ export class ScriptServices {
       let scopeToken;
       try {
         scopeToken = local ? this.withScope(outbound) : null;
-        if (local) options.headers = localHeaders(options.headers, options.port, this.access, scopeToken.id);
+        if (local) options.headers = localHeaders(options.headers, scopeToken.id);
         const clean = { ...(secure ? this.tlsOptions(options, { client: true, local }) : {}),
           protocol: options.protocol,
           hostname: options.hostname, port: options.port, path: options.path, method: options.method,
@@ -825,8 +809,7 @@ export class ScriptServices {
   outboundURL(input) {
     requireValue(!this.stopping, 'SERVICE_CLOSED');
     const target = new URL(input);
-    requireValue(['http:', 'https:'].includes(target.protocol) && !target.username && !target.password,
-      'PERMISSION_DENIED');
+    requireValue(['http:', 'https:'].includes(target.protocol), 'INVALID_ARGUMENT');
     if (isLoopbackHost(target.hostname)) {
       const mapped = this.mapLocal(target.href);
       if (mapped) return mapped;
@@ -836,8 +819,7 @@ export class ScriptServices {
 
   externalURL(input) {
     const target = new URL(input);
-    requireValue(['http:', 'https:'].includes(target.protocol) && !target.username && !target.password,
-      'PERMISSION_DENIED');
+    requireValue(['http:', 'https:'].includes(target.protocol), 'INVALID_ARGUMENT');
     return target.href;
   }
 
@@ -858,34 +840,6 @@ export class ScriptServices {
     if (!listener) return { ...options, host: connectHost(host) };
     requireValue(listener.meowSecure === secure, 'UNMAPPED_LOCAL_URL');
     return { ...options, host: '127.0.0.1', port: listener.address().port, meowLocal: true };
-  }
-  trustSocket(socket) {
-    const sockets = this.trustedSockets;
-    const cleanups = this.trustedSocketCleanup;
-    const failures = this.cleanupState;
-    sockets.add(socket);
-    const state = { active: true, detachClosed: null };
-    const release = () => {
-      if (!state.active) return;
-      state.active = false;
-      try { state.detachClosed?.(); } catch (error) { failures.error ??= error; }
-      state.detachClosed = null;
-      sockets.delete(socket);
-      cleanups.delete(socket);
-      try { delete socket[resourceOwner]; } catch (error) { failures.error ??= error; }
-    };
-    cleanups.set(socket, release);
-    try {
-      state.detachClosed = afterCloseDispatch(socket, release);
-      Object.defineProperty(socket, resourceOwner, {
-        configurable: true, value: this,
-      });
-      if (socket.closed) release();
-    } catch (error) {
-      try { if (!socket.destroyed) socket.destroy(); } catch {}
-      try { release(); } catch {}
-      throw error;
-    }
   }
   requestScope(request) { return request?.[ownerScope]; }
   createRequestScope(parent, request, response, transferScope = parent) {
@@ -1019,68 +973,52 @@ export class ScriptServices {
     }
   }
 
-  accept(request, response, server, secure) {
+  accept(request, response) {
     const session = this.session;
     if (!session || this.stopping) {
       response.writeHead(410, { 'content-length': '0' });
       response.end();
       return false;
     }
-    const address = server.address();
-    const origin = `${secure ? 'https' : 'http'}://127.0.0.1:${address.port}`;
-    const deny = status => { response.writeHead(status, { 'content-length': '0' }); response.end(); return false; };
-    if (request.headers.host !== `127.0.0.1:${address.port}`) return deny(403);
-    const url = new URL(request.url, origin);
-    if (url.pathname === '/__meow/open') {
-      if (!session.activated || !equal(url.searchParams.get('access'), this.access)) return deny(403);
-      const target = url.searchParams.get('target') || '/website';
-      if (!target.startsWith('/') || target.startsWith('//') || /[\r\n\\]/.test(target)) return deny(400);
-      response.writeHead(302, { location: target, 'cache-control': 'no-store',
-        'referrer-policy': 'no-referrer',
-        'set-cookie': `${this.cookie}=${this.access}; HttpOnly; SameSite=Strict; Path=/${secure ? '; Secure' : ''}` });
-      response.end(); return false;
+    // CORS is transport metadata, not an origin or caller admission rule.
+    if (response.setHeader) {
+      response.setHeader('Access-Control-Allow-Origin', request.headers.origin ?? '*');
+      response.setHeader('Access-Control-Allow-Credentials', 'true');
+      response.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
+      response.setHeader('Access-Control-Allow-Headers', request.headers['access-control-request-headers'] ?? '*');
+      response.setHeader('Access-Control-Expose-Headers', '*');
+      response.setHeader('Vary', 'Origin');
+      if (request.method === 'OPTIONS') {
+        response.writeHead(204); response.end(); return false;
+      }
     }
-    const cookie = String(request.headers.cookie ?? '').split(';').map(value => value.trim())
-      .find(value => value.startsWith(this.cookie + '='))?.slice(this.cookie.length + 1);
-    const socketTrusted = [...this.trustedSockets].some(socket => !socket.destroyed &&
-      socket.localPort === request.socket.remotePort && socket.remotePort === address.port);
-    const token = request.headers[scriptAccessHeader];
-    const requestOrigin = request.headers.origin;
-    const fetchSite = request.headers['sec-fetch-site'];
-    const cookieAuthorized = equal(cookie, this.access) &&
-      (requestOrigin === origin || requestOrigin === undefined &&
-        (fetchSite === 'none' || fetchSite === 'same-origin'));
-    const authorized = equal(token, this.access) || socketTrusted ||
-      cookieAuthorized;
-    if (!authorized || requestOrigin !== undefined && requestOrigin !== origin) return deny(403);
     const scopeToken = request.headers['x-meow-request-scope'];
     let parent = session.root;
     if (scopeToken !== undefined) {
-      if (typeof scopeToken !== 'string') return deny(403);
       parent = this.scopes.get(scopeToken);
-      if (!parent || parent.signal.aborted) return deny(410);
+      if (!parent || parent.signal.aborted) {
+        response.writeHead(410, { 'content-length': '0' }); response.end(); return false;
+      }
     }
     this.createRequestScope(parent, request, response, parent);
-    delete request.headers[scriptAccessHeader];
     delete request.headers['x-meow-request-scope'];
-    request.headers.cookie = String(request.headers.cookie ?? '').split(';')
-      .filter(value => !value.trim().startsWith('__meow_')).join(';');
-    request.rawHeaders = Object.entries(request.headers).flatMap(([key, value]) => [key, String(value)]);
+    const raw = request.rawHeaders;
+    if (raw) for (let index = raw.length - 2; index >= 0; index -= 2)
+      if (raw[index].toLowerCase() === 'x-meow-request-scope') raw.splice(index, 2);
     return true;
   }
 
   endpoint() {
     requireValue(this.session?.live && this.main?.meowStarted && this.main.listening, 'SERVICE_CLOSED');
     const origin = `${this.main.meowSecure ? 'https' : 'http'}://127.0.0.1:${this.main.address().port}`;
-    return { origin, access: this.access,
-      managementUrl: `${origin}/__meow/open?access=${this.access}&target=%2Fwebsite` };
+    return { origin, managementUrl: `${origin}/website` };
   }
 
   endpoints() {
     return [...this.listeners].filter(server => server.meowStarted && server.listening).map(server => {
       const origin = `${server.meowSecure ? 'https' : 'http'}://127.0.0.1:${server.address().port}`;
       return { origin, requestedPorts: [...this.aliases].filter(([, target]) => target === server).map(([port]) => port),
-        managementUrl: `${origin}/__meow/open?access=${this.access}&target=%2Fwebsite` };
+        managementUrl: `${origin}/website` };
     });
   }
 
@@ -1101,7 +1039,7 @@ export class ScriptServices {
     // Stop active I/O and refuse new admission, but let a cooperative script
     // close its own listeners before final owner cleanup.
     for (const target of new Set([...(this.session?.nativeRequests ?? []),
-      ...this.connections, ...this.trustedSockets, ...this.agents])) {
+      ...this.connections, ...this.agents])) {
       try { if (!target.destroyed) target.destroy(); }
       catch (error) { this.cleanupState.error ??= error; }
     }
@@ -1124,7 +1062,6 @@ export class ScriptServices {
     const session = this.session;
     const requests = [...(session?.nativeRequests ?? [])];
     const connections = [...this.connections];
-    const trustedSockets = [...this.trustedSockets];
     const probes = [...this.probes];
     const listeners = [...this.listeners];
     const waits = [];
@@ -1160,11 +1097,6 @@ export class ScriptServices {
         closed: value => value.closed && !this.connectionCleanup.has(value),
       });
     }
-    for (const socket of trustedSockets) add(socket, () => {
-      if (!socket.destroyed) socket.destroy();
-    }, () => this.trustedSocketCleanup.get(socket)?.(), {
-      closed: value => value.closed && !this.trustedSocketCleanup.has(value),
-    });
     for (const server of probes) add(server, () => server.close(ignoreError),
       () => this.releaseProbe(server));
     for (const server of listeners) {
@@ -1185,7 +1117,7 @@ export class ScriptServices {
       if (result.error && result.error.code === 'TIMEOUT') failure ??= fault('TIMEOUT');
       else if (result.error) failed(result.error);
     }
-    for (const target of new Set([...requests, ...connections, ...trustedSockets])) {
+    for (const target of new Set([...requests, ...connections])) {
       if (target[ownerScope]) {
         try { target[ownerScope].close?.(fault('SERVICE_CLOSED')); }
         catch (error) { failed(error); }
@@ -1196,8 +1128,7 @@ export class ScriptServices {
     }
     session?.nativeRequests?.clear();
     this.listeners.clear(); this.probes.clear(); this.connections.clear();
-    this.trustedSockets.clear();
-    this.requestCleanup.clear(); this.trustedSocketCleanup.clear();
+    this.requestCleanup.clear();
     this.connectionCleanup.clear(); this.serverCleanup.clear();
     this.scopes.clear(); this.aliases.clear(); this.probePorts.clear();
     this.main = null; this.primary = null;
@@ -1214,7 +1145,10 @@ class AdapterRequest extends Writable {
   constructor(session, url, options, scope) {
     super();
     this.session = session; this.url = url; this.options = options; this.scope = scope;
-    this.chunks = []; this.headers = { ...options.headers };
+    this.chunks = []; this.headers = Object.fromEntries(Object.entries(options.headers ?? {})
+      .map(([key, value]) => [key.toLowerCase(), value]));
+    if (options.auth !== undefined && this.headers.authorization === undefined)
+      this.headers.authorization = 'Basic ' + Buffer.from(options.auth).toString('base64');
     this.method = options.method ?? 'GET'; this.path = url.pathname + url.search;
     this.controller = new AbortController();
     this.scopeAbort = () => this.controller.abort(scope.reason);

@@ -5,6 +5,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Capabilities.Lyrics;
 using MeowFilm.Platform.Files;
 using MeowFilm.Platform.Storage;
 
@@ -17,6 +18,7 @@ public static partial class MusicNativeLibraryTests
         foreach (var test in FullAppendCases()) yield return test;
         foreach (var test in RecordingConsumerCases()) yield return test;
         foreach (var test in OnlineSettingsCases()) yield return test;
+        foreach (var test in LyricPersistenceCases()) yield return test;
         yield return new("Native music library contract version and storage identity", Contract);
         yield return new("Native music library initial reads never manufacture a document", Initial);
         yield return new("Native music collection member edits exact ordering revisions and tombstones", Collections);
@@ -28,7 +30,7 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music current song contract rejects unowned fields credentials and resource URLs", RejectTransientSong);
         yield return new("Native music catalog full collection handoff uses expected queue version", FullCollection);
         yield return new("Native music duplicate queue occurrences and next priority", Occurrences);
-        yield return new("Native music queue sequential mode boundaries", () => Modes(0));
+        yield return new("Native music queue rejects modes outside the three global loop choices", InvalidMode);
         yield return new("Native music queue loop mode boundaries", () => Modes(1));
         yield return new("Native music queue single repeats ended only", () => Modes(3));
         yield return new("Native music queue shuffle previous uses runtime history", Shuffle);
@@ -49,9 +51,14 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music online settings revision and exact fields", Settings);
         yield return new("Native music retired script areas stay unread, unchanged and never block other owners", RetiredAreas);
         yield return new("Native music non-current envelopes fail every owner entry without writes", NonCurrentDocuments);
-        yield return new("Native music LRC graphemes weighting and duplicate timestamps", LyricsLrc);
+        yield return new("Native music plain LRC keeps full text empty words and duplicate timestamps", LyricsLrc);
         yield return new("Native music YRC QRC exact intervals and negative offset", LyricsWords);
+        yield return new("Native music KRC conversion preserves word timestamps and zero durations", LyricsKrc);
         yield return new("Native music word LRC absolute relative tags and trailing markers", LyricsMarkers);
+        yield return new("Native music word LRC preserves sub-50ms and zero intervals", LyricsShortMarkers);
+        yield return new("Native music word LRC negative offsets retain elapsed word progress", LyricsNegativeMarkers);
+        yield return new("Native music word LRC trailing words use next line and song boundaries", LyricsTrailingWords);
+        yield return new("Native music word LRC without end boundary keeps timestamps and zero trailing duration", LyricsUnboundedTrailingWords);
         yield return new("Native music QRC XML entity decode never interprets markup", LyricsXml);
         yield return new("Native music translation exact timestamps only no nearest matching", LyricsTranslation);
         yield return new("Native music lyrics local JSON adapter and bounded bad inputs", LyricsAdapter);
@@ -297,6 +304,13 @@ public static partial class MusicNativeLibraryTests
         await Ok(o, "music.queue.mode", new { mode = 3 });
         Check((await Ok(o, "music.queue.next", new { reason = "ended" })).GetProperty("targetId").GetString() == next);
     }
+    private static async Task InvalidMode()
+    {
+        await using var f = new Fixture(); var o = f.Owner();
+        foreach (int mode in new[] { -1, 0, 4 })
+            await Error(o, "music.queue.mode", new { mode }, "INVALID_REQUEST");
+        Check((await Ok(o, "music.queue.get")).GetProperty("mode").GetInt32() == 1);
+    }
     private static async Task Modes(int mode)
     {
         await using var f = new Fixture(); var o = f.Owner();
@@ -304,10 +318,10 @@ public static partial class MusicNativeLibraryTests
         var q = await Ok(o, "music.queue.get"); string a = q.GetProperty("entries")[0].GetProperty("id").GetString()!, b = q.GetProperty("currentId").GetString()!;
         await Ok(o, "music.queue.mode", new { mode });
         var result = await Ok(o, "music.queue.next", new { reason = "ended" });
-        Check(result.GetProperty("targetId").GetString() == (mode == 0 ? null : mode == 1 ? a : b));
+        Check(result.GetProperty("targetId").GetString() == (mode == 1 ? a : b));
         if (mode == 3) Check((await Ok(o, "music.queue.next")).GetProperty("targetId").GetString() == a);
         await Ok(o, "music.queue.select", new { id = a });
-        Check((await Ok(o, "music.queue.previous")).GetProperty("targetId").GetString() == (mode == 0 ? null : b));
+        Check((await Ok(o, "music.queue.previous")).GetProperty("targetId").GetString() == b);
     }
     private static async Task Shuffle()
     {
@@ -358,11 +372,11 @@ public static partial class MusicNativeLibraryTests
     private static async Task Restart()
     {
         await using var f = new Fixture(); var o = f.Owner();
-        await Ok(o, "music.queue.replace", new { songs = new[] { Song("a"), Song("b") }, index = 1 }); await Ok(o, "music.queue.mode", new { mode = 0 });
+        await Ok(o, "music.queue.replace", new { songs = new[] { Song("a"), Song("b") }, index = 1 }); await Ok(o, "music.queue.mode", new { mode = 2 });
         string id = (await Ok(o, "music.queue.get")).GetProperty("currentId").GetString()!;
         await Ok(o, "music.history.recordPlayed", new { entryId = id, at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
         await o.DisposeAsync(); Check(!f.Store.Disposed); var restored = f.Owner();
-        var q = await Ok(restored, "music.queue.get"); Check(q.GetProperty("mode").GetInt32() == 0 && q.GetProperty("currentId").GetString() == id);
+        var q = await Ok(restored, "music.queue.get"); Check(q.GetProperty("mode").GetInt32() == 2 && q.GetProperty("currentId").GetString() == id);
         Check(!f.Store.State("queue").ContainsKey("history") && !Encoding.UTF8.GetString(f.Store.Bytes!).Contains("currentTime"));
     }
     private static async Task PlainFiles()
@@ -666,10 +680,14 @@ public static partial class MusicNativeLibraryTests
     private static Task LyricsLrc()
     {
         var lines = MusicLyricTiming.Parse("[00:00]你好👨‍👩‍👧‍👦\n[00:06]再见", "", 10);
-        Check(lines[0].GetProperty("words").GetArrayLength() == 3 && lines[1].GetProperty("end").GetDouble() == 10);
-        var weighted = MusicLyricTiming.Parse("[00:01]A !\n[00:01]B\n[00:08]End");
-        Check(weighted[0].GetProperty("words").EnumerateArray().Select(w => w.GetProperty("duration").GetDouble()).SequenceEqual(new[] { 4d, 1, 2 }));
-        Check(MusicLyricTiming.ActiveIndex(weighted, 1) == 1 && MusicLyricTiming.ActiveIndex(weighted, .9) == -1);
+        Check(lines[0].GetProperty("text").GetString() == "你好👨‍👩‍👧‍👦" && lines[1].GetProperty("text").GetString() == "再见");
+        Check(lines[0].GetProperty("end").GetDouble() == 6 && lines[1].GetProperty("end").GetDouble() == 10);
+        var duplicates = MusicLyricTiming.Parse("[00:01]A !\n[00:01]B\n[00:08]End");
+        Check(duplicates[0].GetProperty("text").GetString() == "A !" && duplicates[1].GetProperty("text").GetString() == "B");
+        Check(duplicates[0].GetProperty("end").GetDouble() == 8 && duplicates[1].GetProperty("end").GetDouble() == 8);
+        foreach (var row in lines.EnumerateArray().Concat(duplicates.EnumerateArray()))
+            Check(row.GetProperty("words").GetArrayLength() == 0 && !row.TryGetProperty("timing", out _));
+        Check(MusicLyricTiming.ActiveIndex(duplicates, 1) == 1 && MusicLyricTiming.ActiveIndex(duplicates, .9) == -1);
         return Task.CompletedTask;
     }
     private static Task LyricsWords()
@@ -677,18 +695,123 @@ public static partial class MusicNativeLibraryTests
         foreach (string text in new[] { "[offset:-2000]\n[1000,2000](1000,1000,0)A(2000,1000,0)B", "[offset:-2000]\n[1000,2000]A(1000,1000)B(2000,1000)" })
         {
             var line = MusicLyricTiming.Parse(text)[0]; Check(line.GetProperty("time").GetDouble() == 0 && line.GetProperty("end").GetDouble() == 1);
-            Check(line.GetProperty("words")[0].GetProperty("time").GetDouble() == -1);
+            var words = line.GetProperty("words");
+            Check(words.GetArrayLength() == 2 && line.GetProperty("text").GetString() == "AB" && !line.TryGetProperty("timing", out _));
+            Check(words[0].GetProperty("time").GetDouble() == -1 && words[1].GetProperty("time").GetDouble() == 0);
+            Check(words[0].GetProperty("offset").GetDouble() == -1 && words[1].GetProperty("offset").GetDouble() == 0);
+            Check(words.EnumerateArray().All(word => word.GetProperty("duration").GetDouble() == 1));
         }
-        var shortLines = MusicLyricTiming.Parse("[1000,0]Zero(1000,0)\n[1000,20]Tiny(1000,20)");
-        Check(shortLines[0].GetProperty("end").GetDouble() == 1 && shortLines[1].GetProperty("end").GetDouble() == 1.02);
-        Check(MusicLyricTiming.Progress(1, 0, 1) == 1); return Task.CompletedTask;
+        foreach (string text in new[] { "[1000,0]Zero(1000,0)\n[1000,20]Tiny(1000,20)", "[1000,0](1000,0,0)Zero\n[1000,20](1000,20,0)Tiny" })
+        {
+            var shortLines = MusicLyricTiming.Parse(text);
+            Check(shortLines[0].GetProperty("end").GetDouble() == 1 && shortLines[1].GetProperty("end").GetDouble() == 1.02);
+            Check(shortLines[0].GetProperty("words")[0].GetProperty("duration").GetDouble() == 0 &&
+                shortLines[1].GetProperty("words")[0].GetProperty("duration").GetDouble() == .02);
+        }
+        Check(MusicLyricTiming.Progress(1, 0, .99) == 0 && MusicLyricTiming.Progress(1, 0, 1) == 1);
+        return Task.CompletedTask;
     }
     private static Task LyricsMarkers()
     {
         var lines = MusicLyricTiming.Parse("[00:10][00:20][[00:00.000]]X[[00:01.000]]Y[[00:02.000]]");
         Check(lines[0].GetProperty("end").GetDouble() == 12 && lines[1].GetProperty("end").GetDouble() == 22);
+        for (int i = 0; i < 2; i++)
+        {
+            var words = lines[i].GetProperty("words");
+            Check(words[0].GetProperty("time").GetDouble() == (i + 1) * 10 && words[1].GetProperty("time").GetDouble() == (i + 1) * 10 + 1);
+            Check(words.EnumerateArray().All(word => word.GetProperty("duration").GetDouble() == 1));
+            Check(!lines[i].TryGetProperty("timing", out _));
+        }
         var absolute = MusicLyricTiming.Parse("[00:10]Lead [[00:10.000]]A[[00:10.000]]B<00:11.000>")[0];
-        Check(absolute.GetProperty("text").GetString() == "Lead AB" && absolute.GetProperty("words")[0].GetProperty("duration").GetDouble() == .05);
+        Check(absolute.GetProperty("text").GetString() == "Lead AB" && absolute.GetProperty("end").GetDouble() == 11);
+        Check(absolute.GetProperty("words").EnumerateArray().Select(word => word.GetProperty("duration").GetDouble()).SequenceEqual(new[] { 0d, 0, 1 }));
+        return Task.CompletedTask;
+    }
+    private static Task LyricsShortMarkers()
+    {
+        var lines = MusicLyricTiming.Parse("[00:01]<00:01.000>A<00:01.020>B<00:01.020>C<00:01.040>\n[00:02]<00:02.000>Z<00:02.000>");
+        var words = lines[0].GetProperty("words");
+        Check(lines[0].GetProperty("end").GetDouble() == 1.04 && words.GetArrayLength() == 3);
+        Check(words[0].GetProperty("time").GetDouble() == 1 && words[1].GetProperty("time").GetDouble() == 1.02 &&
+            words[2].GetProperty("time").GetDouble() == 1.02);
+        Check(Math.Abs(words[0].GetProperty("duration").GetDouble() - .02) < 1e-12 &&
+            words[1].GetProperty("duration").GetDouble() == 0 &&
+            Math.Abs(words[2].GetProperty("duration").GetDouble() - .02) < 1e-12);
+        Check(lines[1].GetProperty("end").GetDouble() == 2 && lines[1].GetProperty("words")[0].GetProperty("duration").GetDouble() == 0);
+        return Task.CompletedTask;
+    }
+    private static Task LyricsNegativeMarkers()
+    {
+        foreach (string text in new[] {
+            "[offset:-1500]\n[00:01]<00:01.000>A<00:02.000>B<00:03.000>",
+            "[offset:-10500]\n[00:10][[00:00.000]]A[[00:01.000]]B[[00:02.000]]",
+            "[offset:-1500]\n[00:01]A<00:02.000>B<00:03.000>"
+        })
+        {
+            var line = MusicLyricTiming.Parse(text)[0]; var words = line.GetProperty("words");
+            Check(line.GetProperty("time").GetDouble() == 0 && line.GetProperty("end").GetDouble() == 1.5);
+            Check(words[0].GetProperty("time").GetDouble() == -.5 && words[0].GetProperty("offset").GetDouble() == -.5 &&
+                words[0].GetProperty("duration").GetDouble() == 1);
+            Check(words[1].GetProperty("time").GetDouble() == .5 && words[1].GetProperty("duration").GetDouble() == 1);
+            Check(MusicLyricTiming.Progress(words[0].GetProperty("time").GetDouble(), words[0].GetProperty("duration").GetDouble(), 0) == .5);
+        }
+        var expired = MusicLyricTiming.Parse("[offset:-1500]\n[00:01]<00:01.000>A<00:01.020>")[0];
+        Check(expired.GetProperty("time").GetDouble() == 0 && expired.GetProperty("end").GetDouble() == 0 &&
+            expired.GetProperty("words")[0].GetProperty("time").GetDouble() == -.5);
+        Check(Math.Abs(expired.GetProperty("words")[0].GetProperty("duration").GetDouble() - .02) < 1e-12);
+        return Task.CompletedTask;
+    }
+    private static Task LyricsKrc()
+    {
+        var converted = KrcLyrics.Convert("[offset:-1500]\n[1000,20]<0,0,0>A<0,20,0>B\n[2000,0]<0,0,0>Z", default) ??
+            throw new InvalidOperationException("Expected KRC words");
+        var lines = MusicLyricTiming.Parse(converted.Text);
+        var words = lines[0].GetProperty("words");
+        Check(lines[0].GetProperty("text").GetString() == "AB" && lines[0].GetProperty("time").GetDouble() == 0 &&
+            lines[0].GetProperty("end").GetDouble() == 0);
+        Check(words[0].GetProperty("time").GetDouble() == -.5 && words[0].GetProperty("duration").GetDouble() == 0 &&
+            words[1].GetProperty("time").GetDouble() == -.5 && words[1].GetProperty("duration").GetDouble() == .02);
+        Check(lines[1].GetProperty("time").GetDouble() == .5 && lines[1].GetProperty("end").GetDouble() == .5 &&
+            lines[1].GetProperty("words")[0].GetProperty("duration").GetDouble() == 0);
+        return Task.CompletedTask;
+    }
+    private static Task LyricsTrailingWords()
+    {
+        var lines = MusicLyricTiming.Parse("[00:01]<00:01.000>A<00:01.020>B\n[00:02]整句\n[00:03]<00:03.000>C", duration: 4);
+        Check(lines[0].GetProperty("end").GetDouble() == 2 &&
+            Math.Abs(lines[0].GetProperty("words")[1].GetProperty("duration").GetDouble() - .98) < 1e-12);
+        Check(lines[1].GetProperty("text").GetString() == "整句" && lines[1].GetProperty("words").GetArrayLength() == 0 &&
+            lines[1].GetProperty("end").GetDouble() == 3);
+        Check(lines[2].GetProperty("end").GetDouble() == 4 && lines[2].GetProperty("words")[0].GetProperty("duration").GetDouble() == 1);
+        var shifted = MusicLyricTiming.Parse("[offset:-2500]\n[00:01]<00:01.000>A\n[00:02]整句\n[00:03]<00:03.000>C", duration: 4);
+        Check(shifted[0].GetProperty("time").GetDouble() == 0 && shifted[0].GetProperty("end").GetDouble() == 0 &&
+            shifted[0].GetProperty("words")[0].GetProperty("time").GetDouble() == -1.5 &&
+            shifted[0].GetProperty("words")[0].GetProperty("duration").GetDouble() == 1);
+        Check(shifted[1].GetProperty("time").GetDouble() == 0 && shifted[1].GetProperty("end").GetDouble() == .5 &&
+            shifted[1].GetProperty("words").GetArrayLength() == 0);
+        return Task.CompletedTask;
+    }
+    private static Task LyricsUnboundedTrailingWords()
+    {
+        foreach (var (text, time, first, last) in new[] {
+            ("[00:01]<00:01.000>A<00:02.000>B", 1d, 1d, 2d),
+            ("[00:10][[00:00.000]]A[[00:01.000]]B", 10d, 10d, 11d),
+            ("[offset:-2500]\n[00:01]<00:01.000>A<00:02.000>B", 0d, -1.5, -.5)
+        })
+        {
+            var line = MusicLyricTiming.Parse(text)[0]; var words = line.GetProperty("words");
+            Check(line.GetProperty("time").GetDouble() == time && line.GetProperty("end").GetDouble() == time &&
+                line.GetProperty("text").GetString() == "AB" && words.GetArrayLength() == 2);
+            Check(words[0].GetProperty("time").GetDouble() == first && words[0].GetProperty("duration").GetDouble() == 1);
+            Check(words[1].GetProperty("time").GetDouble() == last && words[1].GetProperty("duration").GetDouble() == 0);
+            Check(MusicLyricTiming.Progress(last, words[1].GetProperty("duration").GetDouble(), last - .01) == 0 &&
+                MusicLyricTiming.Progress(last, words[1].GetProperty("duration").GetDouble(), last) == 1);
+        }
+        var single = MusicLyricTiming.Parse("[offset:-1500]\n[00:01]<00:01.000>A")[0];
+        Check(single.GetProperty("end").GetDouble() == 0 && single.GetProperty("words")[0].GetProperty("time").GetDouble() == -.5 &&
+            single.GetProperty("words")[0].GetProperty("duration").GetDouble() == 0);
+        var plain = MusicLyricTiming.Parse("[00:03]整句")[0];
+        Check(plain.GetProperty("end").GetDouble() == 3 && plain.GetProperty("words").GetArrayLength() == 0);
         return Task.CompletedTask;
     }
     private static Task LyricsXml()
@@ -709,7 +832,8 @@ public static partial class MusicNativeLibraryTests
     {
         await using var f = new Fixture(); var o = f.Owner();
         var lines = await o.ExecuteAsync("music.lyrics.parse", new { text = "[00:01]Synthetic", translation = "", duration = 4 });
-        Check(lines.ValueKind == JsonValueKind.Array && f.Store.Writes == 0);
+        Check(lines.ValueKind == JsonValueKind.Array && lines[0].GetProperty("words").GetArrayLength() == 0 &&
+            !lines[0].TryGetProperty("timing", out _) && f.Store.Writes == 0);
         await Error(o, "music.lyrics.parse", new { text = new string('x', 65537), translation = "", duration = 0 }, "INVALID_LYRIC_RESPONSE");
     }
 }

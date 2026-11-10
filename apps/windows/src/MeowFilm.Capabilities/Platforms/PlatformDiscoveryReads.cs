@@ -36,7 +36,7 @@ public sealed partial class MusicPlatformCatalog
             {
                 var supported = type is "song" or "playlist" or "channel" or "chart" or "album" or "daily" or "fm" or "similar" or "heartbeat";
                 var needsAccount = type is "daily" or "fm" or "similar" or "heartbeat";
-                var display = !needsAccount || c.Session is not null;
+                var display = type is "fm" or "similar" or "heartbeat" || !needsAccount || c.Session is not null;
                 o["requiresAccount"] = needsAccount;
                 o["display"] = display;
                 o["available"] = supported && display;

@@ -1054,7 +1054,6 @@ export class NodeCapabilities {
       const socket = native === tls ? tls.connect(clean, ...args) : net.connect(clean, ...args);
       this.ownNetwork(socket);
       if (callback) socket.once(native === tls ? 'secureConnect' : 'connect', callback);
-      if (mapped.meowLocal) this.services.trustSocket(socket);
       return socket;
     };
     const createServer = (...args) => {

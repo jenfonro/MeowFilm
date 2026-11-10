@@ -1,14 +1,17 @@
 import Foundation
 
-public enum RuntimeModule: String, Sendable {
-    case music, cat, source, tmdb
+public enum RuntimeModule: String, CaseIterable, Sendable {
+    case music, cat, source, pan, tmdb, douban, film
 
     public var contract: String {
         switch self {
         case .music: return "music.script.v3"
         case .cat: return "cat.script.v2"
         case .source: return "source.runtime.v2"
+        case .pan: return "pan.runtime.v1"
         case .tmdb: return "tmdb.data.v1"
+        case .douban: return "douban.data.v1"
+        case .film: return "film.playback.v1"
         }
     }
 
@@ -17,7 +20,9 @@ public enum RuntimeModule: String, Sendable {
         case .music: return Self.musicCodes
         case .cat: return Self.catCodes
         case .source: return Self.sourceCodes
-        case .tmdb: return Self.metadataCodes
+        case .pan: return Self.panCodes
+        case .tmdb, .douban: return Self.metadataCodes
+        case .film: return Self.filmCodes
         }
     }
 
@@ -56,5 +61,29 @@ public enum RuntimeModule: String, Sendable {
         "SERVICE_CLOSED", "ROLLBACK_UNAVAILABLE", "UNSUPPORTED_RULE", "UNSUPPORTED_SCRIPT_ASYNC",
         "HTTP_ERROR", "INVALID_RESPONSE", "UNSUPPORTED_OPTION", "UNSUPPORTED_CRYPTO",
         "WEB_INTERACTION_REQUIRED", "VIRTUAL_ROUTE_NOT_FOUND", "UNMAPPED_LOCAL_URL"
+    ]
+    private static let panCodes: Set<String> = [
+        "INVALID_REQUEST", "UNSUPPORTED_OPERATION", "NOT_CONFIGURED",
+        "AUTH_REQUIRED", "AUTH_FAILED", "CHALLENGE_REQUIRED", "NOT_FOUND", "UPSTREAM_HTTP",
+        "UPSTREAM_FORMAT", "UPSTREAM_ERROR", "NETWORK_ERROR", "TIMEOUT", "CANCELLED", "CLOSED",
+        "STALE_ACCOUNT", "STORAGE_ERROR", "CORRUPT_STORAGE", "LOGIN_EXPIRED", "PAN_FAILURE"
+    ]
+    private static let filmCodes: Set<String> = [
+        "INVALID_REQUEST", "CLOSED", "CANCELLED", "NOT_FOUND", "NO_MATCH",
+        "SOURCE_NOT_FOUND", "SOURCE_DISABLED", "STALE_SOURCE", "STALE_SESSION", "STALE_ACCOUNT", "STALE_METADATA",
+        "NOT_CONFIGURED", "AUTH_REQUIRED", "AUTH_FAILED", "CHALLENGE_REQUIRED",
+        "UNSUPPORTED_OPERATION", "CAPABILITY_UNAVAILABLE", "MEDIA_UNAVAILABLE",
+        "NETWORK_ERROR", "TIMEOUT", "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "UPSTREAM_ERROR",
+        "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE", "COMMIT_UNKNOWN",
+        "NO_EPISODE_MAPPING", "INVALID_PREFERENCES", "INVALID_RULES", "INVALID_DETAIL",
+        "INVALID_RESULT", "CACHE_LOAD_FAILED", "STORAGE_CHANGED", "LIBRARY_UPDATE_FAILED",
+        "PAN_FAILURE", "SOURCE_FAILURE", "CAT_FAILURE", "SCRIPT_FAILURE", "SCRIPT_PROTOCOL_ERROR", "LOGIN_EXPIRED",
+        "MEDIA_BUSY", "MEDIA_CANCELLED", "MEDIA_CLOSED", "MEDIA_CLOSE_FAILED", "MEDIA_DRM_UNSUPPORTED",
+        "MEDIA_EMPTY_RESPONSE", "MEDIA_INVALID_DESCRIPTOR", "MEDIA_INVALID_REQUEST",
+        "MEDIA_LISTEN_FAILED", "MEDIA_MANIFEST_INVALID", "MEDIA_MANIFEST_LIMIT", "MEDIA_MANIFEST_UNSUPPORTED",
+        "MEDIA_METHOD_NOT_ALLOWED", "MEDIA_NOT_FOUND", "MEDIA_PREFETCH_DISABLED", "MEDIA_PREFETCH_HTTP_ERROR",
+        "MEDIA_PREFETCH_LIMIT", "MEDIA_PREFETCH_TIMEOUT", "MEDIA_PREFETCH_UNSUPPORTED", "MEDIA_RANGE_UNSUPPORTED",
+        "MEDIA_REDIRECT_ERROR", "MEDIA_RESOURCE_CHANGED", "MEDIA_RESOURCE_LIMIT", "MEDIA_UPSTREAM_ERROR",
+        "MEDIA_UPSTREAM_TIMEOUT"
     ]
 }

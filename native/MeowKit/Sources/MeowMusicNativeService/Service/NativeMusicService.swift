@@ -63,7 +63,7 @@ struct MusicDocument {
             try MusicNativeSimilarData.validateSession(queue["similar"], serial: queue["serial"].int)
         }
         try musicRequire(playback["schema"] == .n(1) && playback["revision"].isInteger &&
-            playback["mode"].isInteger && (0...3).contains(playback["mode"].int) &&
+            playback["mode"].isInteger && MusicPlaybackMode(rawValue: playback["mode"].int) != nil &&
             playback["lyricsEnabled"].isBool && playback["showTranslation"].isBool &&
             playback["position"]["seconds"].isNumber && playback["position"]["seconds"].number.isFinite && playback["position"]["seconds"].number >= 0, .corruptDocument)
         for (key, allowed) in [("qualityEnabled", MusicModel.qualityOrder), ("qualityOrder", MusicModel.qualityOrder),
@@ -73,6 +73,16 @@ struct MusicDocument {
         }
         if playback.contains("requestQuality") {
             try musicRequire(MusicSourceQualityPolicy.qualities.contains(playback["requestQuality"].string), .corruptDocument)
+        }
+        if playback.contains("fmSelections") {
+            try musicRequire(playback["fmSelections"].isObject, .corruptDocument)
+            for (scope, value) in playback["fmSelections"].fields {
+                try musicRequire(!scope.isEmpty && scope.utf8.count <= 512, .corruptDocument)
+                do {
+                    let action = try JSONDecoder().decode(MusicHomeAction.self, from: value.bytes)
+                    try musicRequire(action.isPersonalFM, .corruptDocument)
+                } catch { throw MusicServiceError.corruptDocument }
+            }
         }
         if playback.contains("sourceExclusions") {
             try musicRequire(playback["sourceExclusions"].isArray, .corruptDocument)
@@ -212,6 +222,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     let playbackFeedback = MusicNativeFeedbackController()
     var playbackFeedbackAdmission: MusicNativeFeedbackAdmission?
     var similarMode = MusicNativeSimilarRuntime()
+    var fmPlayback: MusicNativeFMSession?
     var fmPreviews: [MusicHomeAction: MusicNativeFMPreviewEntry] = [:]
     var fmPreviewOrder: [MusicHomeAction] = []
     var fmQueues: [UUID: (MusicHomeAction, MusicQueueAuthorization)] = [:]
@@ -273,6 +284,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
             Task { await entry.reader.close() }
         }
         publicQueueSources.removeAll()
+        clearFMPlayback()
         clearFMPreviews()
         for (id, value) in fmQueues { access.remove(id); value.1.revoke() }
         fmQueues.removeAll()

@@ -31,28 +31,35 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
     } });
     const { createRuntime, createRuntimeClient, createAppRuntime, createMusicScriptModule,
       createCatScriptModule, createSourceRuntimeModule, createTMDBDataModule } = await import('./app/entry.mjs');
-    const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86', requestKey = 'a'.repeat(64);
-    const runtime = createRuntime({ sessionId, requestKey, dataRoot: join(payload, 'data'), source: { platform: 'ios' } });
+    const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
+    const runtime = createRuntime({ sessionId, dataRoot: join(payload, 'data'), source: { platform: 'ios' },
+      pan: {}, tmdb: {}, douban: {}, film: {} });
     let client;
     try {
       await runtime.start();
-      client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
+      client = createRuntimeClient({ baseUrl: runtime.baseUrl });
       const described = await client.describe();
       assert.equal(described.ok, true);
       assert.deepEqual(described.value.modules.map(value => [value.id, value.version]),
-        [['music', '0.8.0'], ['cat', '0.2.0'], ['source', '0.2.0']]);
+        [['music', '0.8.0'], ['cat', '0.2.0'], ['source', '0.2.0'], ['pan', '0.1.0'],
+          ['tmdb', '0.1.0'], ['douban', '0.1.0'], ['film', '0.1.0']]);
       const listed = await client.call('music.script.sources.list');
       assert.equal(listed.ok, true);
+      for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
+        'film.settings.get', 'film.library.get']) {
+        const reply = await client.call(method);
+        assert.equal(reply.ok, true, JSON.stringify(reply));
+      }
       assert.equal((await client.shutdown()).ok, true);
     } finally { await runtime.close(); await client?.close(); }
     const dataRoot = join(payload, 'app-data');
-    const app = createAppRuntime({ sessionId, requestKey, modules: [
+    const app = createAppRuntime({ sessionId, modules: [
       createMusicScriptModule({ dataRoot }), createCatScriptModule({ dataRoot: join(dataRoot, 'cat') }),
       createSourceRuntimeModule({ platform: 'ios' }), createTMDBDataModule({ dataRoot }),
     ] });
     try {
       await app.start();
-      client = createRuntimeClient({ baseUrl: app.baseUrl, sessionId, requestKey });
+      client = createRuntimeClient({ baseUrl: app.baseUrl });
       const described = await client.describe();
       assert.equal(described.ok, true);
       const manifest = JSON.parse(readFileSync('runtime-manifest.json', 'utf8'));

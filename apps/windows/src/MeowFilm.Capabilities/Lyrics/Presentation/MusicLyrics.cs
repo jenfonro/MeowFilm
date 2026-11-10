@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Text.Json;
 using MeowFilm.Platform.Files;
 
@@ -7,6 +8,19 @@ namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicCapability
 {
+    private sealed class LyricRows : ObservableCollection<MusicLyricRow>
+    {
+        internal void Publish(IReadOnlyList<MusicLyricRow> rows)
+        {
+            CheckReentrancy();
+            Items.Clear();
+            foreach (var row in rows) Items.Add(row);
+            OnPropertyChanged(new PropertyChangedEventArgs(nameof(Count)));
+            OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
+            OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+        }
+    }
+    private readonly LyricRows lyricRows = [];
     private sealed record LyricRequestIdentity(string EntryId, string Song, string PlaybackSong,
         string SourceKey, long SourcesRevision, bool Enabled);
 
@@ -34,8 +48,6 @@ public sealed partial class MusicCapability
     public int LyricDisplayIndex => lyricPreview is null ? ActiveLyricIndex : Lyrics.IndexOf(lyricPreview);
     public IReadOnlyList<MusicLyricWord> CurrentLyricWords => ActiveLyricIndex is var index && index >= 0 && index < Lyrics.Count
         ? Lyrics[index].Words ?? [] : [];
-    public string LyricTimingLabel => ActiveLyricIndex is var index && index >= 0 && index < Lyrics.Count &&
-        Lyrics[index].Timing == "estimated" ? "估算逐字" : "";
     private void OnLyricRowsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
         if (e.Action == NotifyCollectionChangedAction.Reset || e.NewStartingIndex == 0 || e.OldStartingIndex == 0)
@@ -60,7 +72,8 @@ public sealed partial class MusicCapability
         if (!ReferenceEquals(publishedLyric, row))
         {
             publishedLyric = row;
-            Changed(nameof(CurrentLyricWords)); Changed(nameof(LyricTimingLabel));
+            Changed(nameof(CurrentLyricWords));
+            DesktopLyricBindings();
         }
         int display = lyricPreview is null ? index : Lyrics.IndexOf(lyricPreview);
         if (publishedLyricDisplayIndex != display)
@@ -76,10 +89,14 @@ public sealed partial class MusicCapability
     }
     public void PreviewLyric(MusicLyricRow row)
     {
-        if (stopping || !Lyrics.Contains(row)) return;
+        if (stopping || ReferenceEquals(lyricPreview, row) || !Lyrics.Contains(row)) return;
         lyricPreview = row; PreviewBindings();
     }
-    public void CancelLyricPreview() { lyricPreview = null; PreviewBindings(); }
+    public void CancelLyricPreview()
+    {
+        if (lyricPreview is null) return;
+        lyricPreview = null; PreviewBindings();
+    }
     private void PreviewBindings()
     {
         Changed(nameof(HasLyricPreview)); Changed(nameof(LyricPreviewText));
@@ -99,7 +116,7 @@ public sealed partial class MusicCapability
         {
             if (value is null || !LyricSources.Contains(value) || value == selectedLyricSource) return;
             RetireLyrics(); selectedLyricSource = value; Changed();
-            _ = RestoreLyricsAsync();
+            if (NeedsLyrics) _ = RestoreLyricsAsync();
         }
     }
     private void UpdateLyricSources()
@@ -142,7 +159,7 @@ public sealed partial class MusicCapability
         Interlocked.Increment(ref selectionSourcesRevision);
         lyricSourcesRevision = checked(lyricSourcesRevision + 1);
         RetireLyrics();
-        if (IsLyrics && !stopping) _ = RestoreLyricsAsync();
+        if (NeedsLyrics) _ = RestoreLyricsAsync();
     }
     public void CancelLyrics()
     {
@@ -167,6 +184,7 @@ public sealed partial class MusicCapability
             RetireLyrics(); epoch = lyricEpoch;
             using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             lyricCancellation = request; Changed(nameof(CanCancelLyrics));
+            DesktopLyricBindings();
             try
             {
                 var snapshot = await SelectedLyricSnapshot.ReadAsync(path, request.Token);
@@ -201,7 +219,7 @@ public sealed partial class MusicCapability
                 !dialogs.Confirm("移除“" + selected.Title + "”的本地歌词？", "移除本地歌词")) return;
             RetireLyrics();
             await Call("music.lyrics.local.remove", new { song = selected.Raw });
-            if (selected == current && !stopping) await RestoreLyricsAsync();
+            if (selected == current && NeedsLyrics) await RestoreLyricsAsync();
         });
     }
     private Task LoadLyricsAsync(bool restore)
@@ -212,6 +230,7 @@ public sealed partial class MusicCapability
         if (selected is null)
         {
             RetireLyrics();
+            lyricStatus = "暂无歌词"; OnlineBindings();
             return Task.CompletedTask;
         }
         var rawSong = selected.Raw.Clone();
@@ -230,6 +249,7 @@ public sealed partial class MusicCapability
         RetireLyrics();
         var epoch = lyricEpoch;
         lyricLoadingIdentity = identity;
+        lyricStatus = "加载中…"; OnlineBindings();
         var task = Read();
         lyricLoadTail = task;
         loadDrains.Add(task);
@@ -243,6 +263,7 @@ public sealed partial class MusicCapability
             if (!CurrentRequest()) return;
             using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             lyricCancellation = request; Changed(nameof(CanCancelLyrics));
+            DesktopLyricBindings();
             try
             {
                 var parameters = new Dictionary<string, object> { ["song"] = playbackSong };
@@ -272,13 +293,14 @@ public sealed partial class MusicCapability
                     return new MusicLyricRow(line.GetProperty("time").GetDouble(), MusicDto.Text(line, "text"),
                         line.TryGetProperty("translation", out var translated) ? translated.GetString() ?? "" : "",
                         line.TryGetProperty("romanization", out var romanized) ? romanized.GetString() ?? "" : "",
-                        words, line.TryGetProperty("timing", out var timing) ? timing.GetString() ?? "" : "");
+                        words);
                 }).ToArray();
                 if (!CurrentRequest()) return;
-                foreach (var row in rows) Lyrics.Add(row);
-                lyricStatus = MusicDto.Text(reply, "state") switch {
-                    "none" => "暂无歌词", _ => ""
-                };
+                // Publish one complete snapshot, not thousands of synchronous row
+                // and edge-binding updates during the player's entrance.
+                lyricRows.Publish(rows);
+                lyricStatus = rows.Length == 0 ? "暂无歌词" : "";
+                OnlineBindings();
                 if (!restored && Lyrics.Count > 0 && MusicDto.Text(reply, "state") != "local")
                 {
                     try
@@ -293,14 +315,14 @@ public sealed partial class MusicCapability
                     }
                 }
             }
-            catch (OperationCanceledException) { if (CurrentRequest()) lyricStatus = ""; }
+            catch (OperationCanceledException) { if (CurrentRequest()) lyricStatus = "已取消"; }
             catch (MusicOperationException error)
             {
                 if (CurrentRequest())
                     lyricStatus = error.Code switch {
                         "CAPABILITY_UNAVAILABLE" => "当前音源不提供歌词",
                         "LYRIC_IDENTITY_MISMATCH" => "歌词录音不匹配",
-                        "CANCELLED" => "", _ => ErrorText(error)
+                        "CANCELLED" => "已取消", _ => ErrorText(error)
                     };
             }
             catch (Exception error) { if (CurrentRequest()) lyricStatus = ErrorText(error); }

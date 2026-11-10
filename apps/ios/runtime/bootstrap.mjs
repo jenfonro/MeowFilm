@@ -18,11 +18,11 @@ export function parseIOSLaunchArguments(argv) {
 export function parseIOSConfiguration(bytes) {
   const value = decodeJSONValue(bytes);
   if (value === null || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).length !== 3 || !Object.hasOwn(value, 'sessionId') ||
-      !Object.hasOwn(value, 'requestKey') || !Object.hasOwn(value, 'dataRoot') ||
+      Object.keys(value).length !== 2 || !Object.hasOwn(value, 'sessionId') ||
+      !Object.hasOwn(value, 'dataRoot') ||
       typeof value.dataRoot !== 'string' || !isAbsolute(value.dataRoot) ||
       /[\u0000-\u001f\u007f]/.test(value.dataRoot)) throw new BridgeError('INVALID_REQUEST');
-  validateSession({ sessionId: value.sessionId, key: value.requestKey });
+  validateSession({ sessionId: value.sessionId });
   return Object.freeze(value);
 }
 
@@ -67,7 +67,7 @@ export async function startIOSAppRuntime({ product, assemble, argv = process.arg
     const configuration = await readConfiguration(channel);
     if (ended) throw new BridgeError('CLOSED');
     runtime = createAppRuntime({ product,
-      sessionId: configuration.sessionId, requestKey: configuration.requestKey,
+      sessionId: configuration.sessionId,
       assemble: () => assemble({ dataRoot: configuration.dataRoot }),
     });
     await runtime.start();

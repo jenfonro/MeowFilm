@@ -136,7 +136,7 @@ public sealed partial class MusicCapability
             {
                 metadataBusy = false;
                 Changed(nameof(CanEditMetadata));
-                if (playerDetailOpen && current is not null && !stopping)
+                if (NeedsLyrics && current is not null)
                     await RestoreLyricsAsync();
             }
         });

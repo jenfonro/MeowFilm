@@ -75,24 +75,18 @@ public static partial class MusicUiTests
             Equal(4, f.Playback.Opens.Count);
             Equal(before + 1, f.Http.Batches);
         });
-        yield return Case("recommendation similar retains current occurrence then returns original queue paused without replay", async () =>
+        yield return Case("recommendation similar replaces the FM queue and never exposes an invented return", async () =>
         {
             await using var f = await RecommendationScene.Create(); await f.EnableScript(); await f.Start("fm");
-            f.Playback.Start(); await f.Module.CancelRecommendationAsync();
-            var before = await f.Queue();
-            string seed = MusicSongFixture.NativeId(before.GetProperty("current").GetProperty("song"));
-            string original = before.GetProperty("currentId").GetString()!;
+            string original = (await f.Queue()).GetProperty("currentId").GetString()!;
             int opens = f.Playback.Opens.Count;
-            await f.Call("music.recommendations.start", new { kind = "similar", platform = "wy", sourceIds = new[] { seed } });
-            await RecommendationUntil(() => f.Module.RecommendationTitle == "相似推荐" && !f.Module.RecommendationLoading);
-            Equal(original, (await f.Queue()).GetProperty("currentId").GetString());
-            Equal(opens, f.Playback.Opens.Count);
-            await f.Module.StepAsync(true); Equal(opens + 1, f.Playback.Opens.Count);
-            await f.Module.ReturnRecommendationAsync();
-            Equal(original, (await f.Queue()).GetProperty("currentId").GetString());
-            Equal(before.GetProperty("entries").GetRawText(), (await f.Queue()).GetProperty("entries").GetRawText());
+            await f.Call("music.recommendations.start", new { kind = "similar", platform = "wy", sourceIds = new[] { "77" }, sourceType = "song" });
+            await RecommendationUntil(() => f.Module.RecommendationTitle == "相似歌曲" && !f.Module.RecommendationLoading);
+            True((await f.Queue()).GetProperty("currentId").GetString() != original, "new source replaces occurrences");
             Equal(opens + 1, f.Playback.Opens.Count);
-            True(!f.Playback.IsPlaying && !f.Module.HasActiveRecommendation, "restoration is not a fresh listen");
+            True(f.Module.RecommendationContinue && !f.Module.CanReturnRecommendation && !f.Module.HasPlaybackFm, "similar owns continuation but no FM channel or checkpoint");
+            await f.Module.ReturnRecommendationAsync();
+            Equal(opens + 1, f.Playback.Opens.Count);
         });
         yield return Case("recommendation cancel control physically drains pending native HTTP and never admits its late queue", async () =>
         {
@@ -184,25 +178,22 @@ public static partial class MusicUiTests
             Equal("77", MusicSongFixture.NativeId(queue.GetProperty("current").GetProperty("song")));
             Equal(0, f.Playback.Opens.Count);
         });
-        yield return Case("recommendation real WPF session controls toggle continuation and return without explanatory content", async () =>
+        yield return Case("recommendation real WPF source menu separates continuation from loop and FM channels", async () =>
         {
-            await using var f = await RecommendationScene.Create(); await f.EnableScript();
-            await f.Start("similar");
-            await RecommendationUntil(() => f.Module.HasActiveRecommendation && !f.Module.RecommendationLoading);
-            var view = (System.Windows.FrameworkElement)f.Module.View;
-            var host = new Border { Background = (System.Windows.Media.Brush)view.FindResource("MeowFilm.Brush.Window"), Child = view };
-            Render(host, 1000, 720);
-            var controls = Visuals(host).OfType<MusicRecommendationView>().Single();
-            var toggle = Visuals(controls).OfType<CheckBox>().Single();
-            True(toggle.IsEnabled && toggle.IsChecked != true, "default continuation off");
-            toggle.IsChecked = true;
-            toggle.RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
-            await RecommendationUntil(() => f.Module.RecommendationContinue);
-            var back = Visuals(controls).OfType<Button>().Single(b => Equals(b.Content, "返回原队列"));
-            True(back.IsEnabled, "actual return action");
-            back.RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
-            await RecommendationUntil(() => !f.Module.HasActiveRecommendation);
-            Equal(0, (await f.Queue()).GetProperty("total").GetInt32());
+            await using var f = await RecommendationScene.Create(); await f.EnableScript(); await f.Start("similar");
+            var footer = (MusicPlayerView)f.Module.PlayerView;
+            using var surface = RecommendationPlayerSurface(footer);
+            await Drain();
+            var sourceButton = (Button)footer.FindName("PlaybackSourceButton");
+            sourceButton.RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
+            var menu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
+            var toggle = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "自动续播"));
+            True(toggle.IsEnabled && toggle.IsChecked, "new similar session enables continuation");
+            True(!menu.Items.OfType<MenuItem>().Any(item => Equals(item.Header, "返回原队列")), "similar has no return checkpoint");
+            toggle.RaiseEvent(new(MenuItem.ClickEvent)); await RecommendationUntil(() => !f.Module.RecommendationContinue);
+            Equal("repeat", f.Module.PlaybackModeIcon);
+            True(((Button)footer.FindName("FmChannelButton")).Visibility != System.Windows.Visibility.Visible, "only private FM exposes channels");
+            menu.IsOpen = false; surface.RootVisual = null;
         });
         yield return Case("recommendation feedback carries live native provenance but never resurrects it from durable queue", async () =>
         {
@@ -242,16 +233,17 @@ public static partial class MusicUiTests
                 True(closeError is not null, "an unknown queue write cannot pass close preparation");
                 await f.Module.CancelShutdownPreparationAsync();
                 await RecommendationUntil(() => f.Module.CanReconcileRecommendation);
-                Equal("保存结果待核对", f.Module.RecommendationStatus);
+                True(f.Module.CanReconcileRecommendation, "unknown receipt remains explicit");
                 Equal(batches, f.Http.Batches); Equal(writes, f.Store.LibraryWrites);
                 Equal(0, f.Playback.Opens.Count);
-                var view = (System.Windows.FrameworkElement)f.Module.View;
-                var host = new Border { Background = (System.Windows.Media.Brush)view.FindResource("MeowFilm.Brush.Window"), Child = view };
-                Render(host, 1000, 720);
-                var controls = Visuals(host).OfType<MusicRecommendationView>().Single();
-                var reconcile = Visuals(controls).OfType<Button>().Single(b => Equals(b.Content, "核对保存结果"));
-                True(reconcile.IsEnabled, "reconciliation is reachable after cancelling failed close");
-                reconcile.RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+                var footer = (MusicPlayerView)f.Module.PlayerView;
+                using var surface = RecommendationPlayerSurface(footer);
+                await Drain();
+                ((Button)footer.FindName("PlaybackSourceButton")).RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
+                var menu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
+                var reconcile = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "核对保存结果"));
+                True(reconcile.IsEnabled, "source menu keeps reconciliation reachable after failed close");
+                reconcile.RaiseEvent(new(MenuItem.ClickEvent));
                 await RecommendationUntil(() => !f.Module.CanReconcileRecommendation);
                 Equal(persisted ? 3 : 0, (await f.Queue()).GetProperty("total").GetInt32());
                 Equal(batches, f.Http.Batches); Equal(writes, f.Store.LibraryWrites);
@@ -261,6 +253,14 @@ public static partial class MusicUiTests
             });
     }
 
+    private static System.Windows.Interop.HwndSource RecommendationPlayerSurface(MusicPlayerView footer)
+    {
+        var surface = new System.Windows.Interop.HwndSource(new System.Windows.Interop.HwndSourceParameters("recommendation-player-fixture") {
+            WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+            PositionX = -32000, PositionY = -32000, Width = 1110, Height = 100 });
+        surface.RootVisual = footer; Render(footer, 1110, 100);
+        return surface;
+    }
     private static async Task RecommendationUntil(Func<bool> done)
     {
         for (int n = 0; n < 500; n++)
@@ -311,7 +311,7 @@ public static partial class MusicUiTests
         internal async Task Start(string kind)
         {
             var input = kind == "fm" ? JsonSerializer.SerializeToElement(new { kind, platform = "wy" }) :
-                JsonSerializer.SerializeToElement(new { kind, platform = "wy", sourceIds = new[] { "77" } });
+                JsonSerializer.SerializeToElement(new { kind, platform = "wy", sourceIds = new[] { "77" }, sourceType = "song" });
             var response = await Call("music.recommendations.start", input);
             Equal("", response.GetProperty("error").GetString());
             await RecommendationUntil(() => Module.HasActiveRecommendation && !Module.RecommendationLoading);

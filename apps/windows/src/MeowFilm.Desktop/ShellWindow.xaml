@@ -303,6 +303,8 @@
                                 Focusable="False" IsTabStop="False" />
             </Border>
         </Grid>
+        <local:CloseWindowDialog x:Name="CloseDialog" Panel.ZIndex="90" Visibility="Collapsed"
+                                 shell:WindowChrome.IsHitTestVisibleInChrome="True"/>
         <StackPanel x:Name="NotificationOverlay" Panel.ZIndex="100" HorizontalAlignment="Center" VerticalAlignment="Top" MaxWidth="560" Margin="24,76,24,12">
                 <Border x:Name="StatusPanel" Margin="0,0,0,8">
                     <Border.Style>

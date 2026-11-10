@@ -6,12 +6,11 @@ import UIKit
 @MainActor
 enum MusicPlaybackModeIcon {
     enum Kind: CaseIterable {
-        case order, loop, single, shuffle, heartbeat, fm
+        case loop, single, shuffle, heartbeat, fm
     }
 
     static func image(_ kind: Kind) -> UIImage {
         switch kind {
-        case .order: images.order
         case .loop: images.loop
         case .single: images.single
         case .shuffle: images.shuffle
@@ -21,7 +20,6 @@ enum MusicPlaybackModeIcon {
     }
 
     private static let images = (
-        order: render(.order),
         loop: render(.loop),
         single: render(.single),
         shuffle: render(.shuffle),
@@ -41,26 +39,9 @@ enum MusicPlaybackModeIcon {
         }.withRenderingMode(.alwaysTemplate)
     }
 
-    // Coordinates and stroke styles match MusicPlaybackIcon.cs's six 24-unit icons.
+    // Coordinates and stroke styles match MusicPlaybackIcon.cs's 24-unit icons.
     private static func draw(_ kind: Kind, in context: CGContext) {
         switch kind {
-        case .order:
-            context.move(to: .init(x: 2, y: 6))
-            context.addLine(to: .init(x: 20, y: 6))
-            context.move(to: .init(x: 2, y: 18))
-            context.addLine(to: .init(x: 20, y: 18))
-            context.strokePath()
-
-            context.move(to: .init(x: 18, y: 3))
-            context.addLine(to: .init(x: 22, y: 6))
-            context.addLine(to: .init(x: 18, y: 9))
-            context.closePath()
-            context.move(to: .init(x: 18, y: 15))
-            context.addLine(to: .init(x: 22, y: 18))
-            context.addLine(to: .init(x: 18, y: 21))
-            context.closePath()
-            context.fillPath()
-
         case .loop, .single:
             context.move(to: .init(x: 22, y: 13))
             context.addCurve(to: .init(x: 12, y: 21),

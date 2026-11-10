@@ -147,6 +147,64 @@ final class PlaybackStateMachineTests: XCTestCase {
         XCTAssertEqual(state.snapshot.phase, .playing)
     }
 
+    func testEventIntentDistinguishesBufferingAndSeekFromUserPause() throws {
+        var (state, generation) = try readyState()
+        state.transport(generation: generation, state: .playing)
+        state.stalled(generation: generation)
+        state.progress(generation: generation, position: 2)
+        let buffering = try XCTUnwrap(state.takeEvents().last { $0.kind == .progress })
+        XCTAssertEqual(buffering.snapshot.phase, .buffering)
+        XCTAssertTrue(buffering.wantsPlayback)
+
+        XCTAssertTrue(state.requestSeek(to: 12))
+        let seek = try XCTUnwrap(state.takeSeekIfPossible())
+        state.completeSeek(seek, finished: true, actualPosition: 12)
+        let completion = try XCTUnwrap(state.takeEvents().last { $0.kind == .progress })
+        XCTAssertEqual(completion.snapshot.phase, .buffering)
+        XCTAssertTrue(completion.wantsPlayback)
+
+        state.pause()
+        let paused = try XCTUnwrap(state.takeEvents().last { $0.kind == .paused })
+        XCTAssertFalse(state.wantsPlayback)
+        XCTAssertFalse(paused.wantsPlayback)
+        XCTAssertTrue(buffering.wantsPlayback, "An immutable old sample must not borrow a newer pause")
+        XCTAssertTrue(completion.wantsPlayback)
+    }
+
+    func testBufferingAndRecoveryRemainObservableAtUnchangedPosition() throws {
+        var (state, generation) = try readyState()
+        state.transport(generation: generation, state: .playing)
+        state.progress(generation: generation, position: 2)
+        _ = state.takeEvents()
+        state.stalled(generation: generation)
+        let buffered = state.takeEvents()
+        XCTAssertEqual(buffered.count, 1)
+        let buffering = try XCTUnwrap(buffered.first)
+        XCTAssertEqual(buffering.kind, .progress)
+        XCTAssertEqual(buffering.snapshot.phase, .buffering)
+        XCTAssertEqual(buffering.snapshot.position, 2)
+        XCTAssertTrue(buffering.wantsPlayback)
+        state.stalled(generation: generation)
+        state.progress(generation: generation, position: 2)
+        XCTAssertTrue(state.takeEvents().isEmpty, "Repeated observations are not new phase edges")
+        state.transport(generation: generation, state: .playing)
+        let recovery = state.takeEvents()
+        XCTAssertEqual(recovery.count, 1)
+        let recovered = try XCTUnwrap(recovery.first)
+        XCTAssertEqual(recovered.kind, .played)
+        XCTAssertEqual(recovered.snapshot.phase, .playing)
+        XCTAssertEqual(recovered.snapshot.position, 2)
+        XCTAssertTrue(recovered.wantsPlayback)
+
+        state.transport(generation: generation, state: .waiting)
+        let waits = state.takeEvents()
+        XCTAssertEqual(waits.count, 1)
+        let waiting = try XCTUnwrap(waits.first)
+        XCTAssertEqual(waiting.kind, .progress)
+        XCTAssertEqual(waiting.snapshot.phase, .buffering)
+        XCTAssertTrue(waiting.wantsPlayback)
+    }
+
     func testResumeWaitsForReadinessThenSuccessfulSeek() throws {
         var state = PlaybackStateMachine()
         let generation = state.begin(resource: try resource(start: 32), owner: "music")

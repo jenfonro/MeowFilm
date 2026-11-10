@@ -26,7 +26,7 @@ import { fault } from '../src/errors.js';
 import { NodeCapabilities } from '../src/node-capabilities.js';
 import { PrivateVolume } from '../src/private-volume.js';
 import { ResourceScope } from '../src/scope.js';
-import { ScriptServices, scriptAccessHeader } from '../src/script-services.js';
+import { ScriptServices } from '../src/script-services.js';
 import { projectHttpRequestOptions, projectFields } from '../src/native-roles.js';
 import { parse, tokenizer, parseExpressionAt } from 'acorn';
 import { createLocalStartupLookup, startupWrapperTarget } from '../src/cat-source-routes.js';
@@ -113,8 +113,8 @@ const requestOutcome = value => new Promise(resolve => {
 const selfHeaders = () => new Promise((resolve, reject) => {
   const request = http.get('http://127.0.0.1:' + requestedPort + '/headers', {
     headers: {
-      HOST: 'attacker.invalid',
-      'X-Meow-Script-Access': 'attacker',
+      HOST: 'source.virtual.invalid',
+      'X-Source-Header': 'synthetic-only',
       'X-Meow-Request-Scope': 'attacker',
     },
   }, response => {
@@ -182,8 +182,8 @@ async function route(request, response) {
   }
   if (url.pathname === '/headers') {
     json(response, {
-      hostCorrect: request.headers.host === '127.0.0.1:' + server.address().port,
-      access: request.headers['x-meow-script-access'] || null,
+      hostCorrect: request.headers.host === 'source.virtual.invalid',
+      explicit: request.headers['x-source-header'] || null,
       scope: request.headers['x-meow-request-scope'] || null,
     });
     return;
@@ -1187,9 +1187,7 @@ async function streamUpstream(t) {
 }
 
 function scriptRequest(endpoint, path) {
-  return request(endpoint.origin + path, {
-    headers: { 'x-meow-script-access': endpoint.access },
-  });
+  return request(endpoint.origin + path);
 }
 
 async function waitFor(predicate, message, timeoutMs = 5000) {
@@ -1530,7 +1528,6 @@ test('Cat start publishes aggregate readiness and starts instances independently
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-meow-runtime-access': started.aggregate.access,
       },
       body: '{}',
     });
@@ -2288,7 +2285,7 @@ test('Cat compressed fetch handles an aborted upstream response without a host e
     }
   });
 
-test('Cat native fetch replays 307 and 308 bodies without dropping bytes or leaking cross-origin credentials',
+test('Cat native fetch replays 307 and 308 bodies and preserves explicit cross-origin headers',
   { timeout: 30000 }, async t => {
     const received = [];
     const final = await serverFor(t, async (request, response) => {
@@ -2296,7 +2293,8 @@ test('Cat native fetch replays 307 and 308 bodies without dropping bytes or leak
       for await (const part of request) parts.push(part);
       const bytes = Buffer.concat(parts);
       received.push({ method: request.method, length: bytes.length, hash: sha256(bytes),
-        authorization: request.headers.authorization, cookie: request.headers.cookie });
+        authorization: request.headers.authorization, cookie: request.headers.cookie,
+        host: request.headers.host, origin: request.headers.origin });
       response.setHeader('content-type', 'application/json');
       response.end(JSON.stringify({ ok: true }));
     });
@@ -2310,7 +2308,8 @@ test('Cat native fetch replays 307 and 308 bodies without dropping bytes or leak
         const bytes = Buffer.alloc(1024 * 1024, 0x8d), result = [];
         for (const status of [307, 308]) {
           const reply = await fetch(${JSON.stringify(redirect.socketOrigin)} + '/' + status, {
-            method: 'POST', headers: { authorization: 'synthetic-only', cookie: 'synthetic-only' },
+            method: 'POST', headers: { authorization: 'synthetic-only', cookie: 'synthetic-only',
+              host: 'source.virtual.invalid', origin: 'https://source.invalid' },
             body: bytes,
           });
           result.push({ redirected: reply.redirected, url: reply.url, value: await reply.json() });
@@ -2320,7 +2319,8 @@ test('Cat native fetch replays 307 and 308 bodies without dropping bytes or leak
     assert.deepEqual(await session.invoke({ siteId: 'default', operation: 'home', payload: {} }),
       [307, 308].map(() => ({ redirected: true, url: final.socketOrigin + '/receive', value: { ok: true } })));
     assert.deepEqual(received, [307, 308].map(() => ({ method: 'POST', length: 1024 * 1024,
-      hash: sha256(Buffer.alloc(1024 * 1024, 0x8d)), authorization: undefined, cookie: undefined })));
+      hash: sha256(Buffer.alloc(1024 * 1024, 0x8d)), authorization: 'synthetic-only', cookie: 'synthetic-only',
+      host: 'source.virtual.invalid', origin: 'https://source.invalid' })));
     await session.stop();
     assert.equal(session.node.webResources.size, 0);
   });
@@ -2621,12 +2621,12 @@ test('Cat guest close listener removal cannot retain an owned mapped TCP socket'
         });
       });
     ` });
+  const baseline = session.node.resourceCleanup.size;
   for (let index = 0; index < 3; index++) {
     assert.deepEqual(await session.invoke({ siteId: 'default', operation: 'home', payload: {} }),
       { closed: true });
-    await waitFor(() => session.services.trustedSockets.size === 0 &&
-      session.services.trustedSocketCleanup.size === 0 &&
-      session.node.networkResources.size === 0, 'mapped TCP socket retained an internal owner');
+    await waitFor(() => session.node.networkResources.size === 0 &&
+      session.node.resourceCleanup.size === baseline, 'mapped TCP socket retained an internal owner');
     assert.equal(session.failure, undefined);
   }
 });
@@ -2878,45 +2878,6 @@ test('Cat proxy header cleanup treats Connection declarations case-insensitively
     'x-trace': 'secret',
     'Content-Type': 'application/octet-stream',
   }), { 'Content-Type': 'application/octet-stream' });
-});
-
-test('Cat HTTPS management bootstrap cookie is Secure', () => {
-  const session = { installationId: 'cookie-fixture', activated: true, root: {} };
-  const services = new ScriptServices(session);
-  let status, headers, ended = false;
-  const accepted = services.accept({
-    headers: { host: '127.0.0.1:4443' },
-    url: `/__meow/open?access=${services.access}&target=%2Fwebsite`,
-    socket: {},
-  }, {
-    writeHead(value, input) { status = value; headers = input; },
-    end() { ended = true; },
-  }, { address: () => ({ port: 4443 }) }, true);
-  assert.equal(accepted, false);
-  assert.equal(status, 302);
-  assert.equal(ended, true);
-  assert.match(headers['set-cookie'], /; Secure$/);
-  for (const agent of services.agents) agent.destroy();
-});
-
-test('Cat access comparison rejects equal-character Unicode tokens without throwing', () => {
-  const session = { installationId: 'access-fixture', activated: true, root: {} };
-  const services = new ScriptServices(session);
-  let status;
-  const accepted = services.accept({
-    headers: {
-      host: '127.0.0.1:4555',
-      'x-meow-script-access': 'é'.repeat(services.access.length),
-    },
-    url: '/',
-    socket: {},
-  }, {
-    writeHead(value) { status = value; },
-    end() {},
-  }, { address: () => ({ port: 4555 }) }, false);
-  assert.equal(accepted, false);
-  assert.equal(status, 403);
-  for (const agent of services.agents) agent.destroy();
 });
 
 test('Cat service cleanup continues after request and agent cleanup failures', async () => {
@@ -3188,8 +3149,7 @@ test('Cat upgraded transports run guest close handlers before retiring request l
     });
     await new Promise((resolve, reject) => {
       const client = http.get(endpoint.origin, {
-        agent: false, headers: { [scriptAccessHeader]: endpoint.access,
-          connection: 'Upgrade', upgrade: 'test' },
+        agent: false, headers: { connection: 'Upgrade', upgrade: 'test' },
       });
       client.once('error', reject);
       client.once('upgrade', (_response, socket) => { socket.destroy(); resolve(); });
@@ -3287,7 +3247,6 @@ test('Cat rejects an expired internal request scope instead of promoting it to t
   const accepted = services.accept({
     headers: {
       host: '127.0.0.1:4666',
-      [scriptAccessHeader]: services.access,
       'x-meow-request-scope': token.id,
     },
     url: '/',
@@ -3360,7 +3319,7 @@ test('Cat can select an HTTPS listener as the script primary endpoint', async t 
   await services.started.promise;
   const endpoint = services.endpoint();
   assert.match(endpoint.origin, /^https:\/\/127\.0\.0\.1:\d+$/);
-  assert.match(endpoint.managementUrl, /^https:\/\/127\.0\.0\.1:\d+\/__meow\/open\?/);
+  assert.equal(endpoint.managementUrl, endpoint.origin + '/website');
   assert.deepEqual(services.endpoints()[0].requestedPorts, [9443]);
 });
 
@@ -3548,7 +3507,7 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
       hostEnvironment: null,
       guestGlobals: { lx: 'undefined', meow: 'undefined', bridge: 'undefined' },
       fsCompatibility: { exists: true, nativeRealpath: '/state.json', nativeAlias: true },
-      selfHeaders: { hostCorrect: true, access: null, scope: null },
+      selfHeaders: { hostCorrect: true, explicit: 'synthetic-only', scope: null },
       configValue: null,
       cookie: null,
       multipart: { contentType: true, text: true, file: true },
@@ -3597,25 +3556,15 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-meow-runtime-access': status.aggregate.access,
       },
       body: JSON.stringify({ wd: 'aggregate' }),
     });
     assert.equal(aggregate.status, 200);
     assert.equal(JSON.parse(aggregate.text).list[0].vod_name, 'aggregate');
 
-    const opened = await request(a.managementUrl);
-    assert.equal(opened.status, 302);
-    const cookie = opened.headers['set-cookie'][0].split(';')[0];
-    const pageUrl = new URL(opened.headers.location, a.managementUrl);
-    const missingFetchContext = await request(pageUrl, {
-      headers: { cookie },
-    });
-    assert.equal(missingFetchContext.status, 403);
-    const page = await request(pageUrl, {
-      headers: { cookie, 'sec-fetch-site': 'same-origin' },
-    });
+    const page = await request(a.managementUrl);
     assert.equal(page.status, 200);
+    assert.equal(page.headers['set-cookie'], undefined);
     assert.match(page.text, /site-a/);
 
     const play = await runtime.invoke({
@@ -3646,8 +3595,9 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
     const cookieProxy = await request(segment, {
       headers: { cookie: 'media_auth=client; __meow_private=blocked' },
     });
-    assert.equal(cookieProxy.headers['x-upstream-cookie'], 'media_auth=client');
-    assert.deepEqual(cookieProxy.headers['set-cookie'], ['media_session=kept; Path=/']);
+    assert.equal(cookieProxy.headers['x-upstream-cookie'], 'media_auth=client; __meow_private=blocked');
+    assert.deepEqual(cookieProxy.headers['set-cookie'],
+      ['media_session=kept; Path=/', '__meow_private=blocked; HttpOnly; Path=/']);
     const unscoped = await request(segment, {
       headers: { 'x-meow-request-scope': 'attacker-controlled' },
     });
@@ -3692,52 +3642,185 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
     assert.equal((await reopened.status()).instances.length, 2);
   });
 
-test('Cat aggregate proxy cannot escape its registered origin through a scheme-relative path',
+test('Cat aggregate preflight reflects private-network requests without route dispatch', async t => {
+  const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+  t.after(() => runtime.close());
+  const state = await runtime.start();
+  const headers = { Host: 'caller.virtual.invalid', Origin: 'https://caller.invalid',
+    'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'authorization,x-source-header' };
+  for (const path of ['/cat/missing/site/home', '/proxy/missing/1/missing/media.bin']) {
+    for (const privateNetwork of [undefined, 'false', 'true']) {
+      const preflight = await request(state.aggregate.origin + path, {
+        method: 'OPTIONS', headers: { ...headers,
+          ...(privateNetwork === undefined ? {} : { 'Access-Control-Request-Private-Network': privateNetwork }) },
+      });
+      assert.equal(preflight.status, 204, path);
+      assert.equal(preflight.bytes.length, 0);
+      assert.equal(preflight.headers['access-control-allow-origin'], headers.Origin);
+      assert.equal(preflight.headers['access-control-allow-credentials'], 'true');
+      assert.equal(preflight.headers['access-control-allow-headers'], headers['Access-Control-Request-Headers']);
+      assert.match(preflight.headers['access-control-allow-methods'], /\bGET\b/);
+      assert.equal(preflight.headers['access-control-allow-private-network'],
+        privateNetwork === 'true' ? 'true' : undefined);
+    }
+  }
+  assert.deepEqual((await runtime.status()).instances, [], 'preflight does not require an installed source or media');
+});
+
+test('Cat listeners and aggregate accept external callers while preserving paths, explicit headers and resource ownership',
   { timeout: 30000 }, async t => {
     let captured = 0;
-    const attacker = http.createServer((_request, response) => {
+    const other = http.createServer((_request, response) => {
       captured++;
-      response.end('escaped');
+      response.end('other-origin');
     });
     await new Promise((resolve, reject) => {
-      attacker.once('error', reject);
-      attacker.listen(0, '127.0.0.1', resolve);
+      other.once('error', reject);
+      other.listen(0, '127.0.0.1', resolve);
     });
     t.after(() => new Promise(resolve => {
-      attacker.closeAllConnections();
-      attacker.close(resolve);
+      other.closeAllConnections();
+      other.close(resolve);
     }));
-    const runtime = await installed(t, rootFor(t));
-    const play = await runtime.invoke({
-      installationId: 'fixture-a', siteId: 'site-a', operation: 'play', payload: { id: 'hls' },
+    const address = Object.values(networkInterfaces()).flat()
+      .find(item => item.family === 'IPv4' && !item.internal)?.address;
+    assert.ok(address, 'this regression requires a real non-loopback IPv4 interface');
+    const adapterCalls = [];
+    const runtime = createCatRuntime({ dataRoot: rootFor(t), network: async input => {
+      adapterCalls.push({ url: input.url, headers: input.options.headers });
+      return { statusCode: 200, headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url: input.url, headers: input.options.headers }) };
+    } });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'open', version: '1', enabled: true, config: {}, source: String.raw`
+        const http = require('http');
+        let server, mediaReads = 0, managementReads = 0;
+        const get = (url, headers) => new Promise((resolve, reject) => {
+          http.get(url, { headers }, response => {
+            const chunks = [];
+            response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+            response.once('end', () => {
+              try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+              catch (error) { reject(error); }
+            });
+            response.once('error', reject);
+          }).once('error', reject);
+        });
+        module.exports.start = () => new Promise(resolve => {
+          server = http.createServer(async (request, response) => {
+            const json = value => {
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify(value));
+            };
+            if (request.url === '/full-config' || request.url === '/config') {
+              managementReads++;
+              json({ video: { sites: [{ key: 'open', name: 'Open',
+                api: 'http://127.0.0.1:9988/api/open', actions: ['home', 'play', 'probe', 'counts'] }] } });
+            } else if (request.url === '/website') {
+              response.end('<title>Open</title>');
+            } else if (request.url === '/api/open/home') {
+              json({ opened: true });
+            } else if (request.url === '/api/open/counts') {
+              json({ mediaReads, managementReads });
+            } else if (request.url === '/api/open/play') {
+              json({ parse: 0, url: 'http://127.0.0.1:9988/media.bin?raw=a%2Fb%252F' });
+            } else if (request.url === '/api/open/probe') {
+              const headers = { Host: 'source.virtual.invalid', Origin: 'https://source.invalid',
+                Cookie: 'source=explicit' };
+              json({
+                self: await get('http://reader:synthetic-only@127.0.0.1:9988/echo?raw=a%2Fb', headers),
+                external: await get('http://reader:synthetic-only@outside.invalid/echo?raw=a%2Fb', headers),
+                override: await get('http://reader:synthetic-only@outside.invalid/override',
+                  { ...headers, Authorization: 'source-explicit' }),
+              });
+            } else if (request.url === '/media.bin?raw=a%2Fb%252F') {
+              mediaReads++;
+              response.setHeader('content-type', 'application/octet-stream');
+              response.end(Buffer.from([0, 1, 127, 128, 255]));
+            } else {
+              json({ path: request.url, headers: request.headers,
+                rawHeaders: request.rawHeaders });
+            }
+          });
+          server.listen(9988, '127.0.0.1', resolve);
+        });
+        module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+      `,
     });
-    const escaped = new URL(play.url);
-    const prefix = escaped.pathname.split('/').slice(0, 5).join('/');
-    escaped.pathname = `${prefix}//127.0.0.1:${attacker.address().port}/capture`;
-    const denied = await request(escaped);
-    assert.equal(denied.status, 403);
-    assert.equal(captured, 0);
-  });
-
-test('Cat aggregate proxy rejects repeatedly encoded and normalized management paths',
-  { timeout: 30000 }, async t => {
-    const runtime = await installed(t, rootFor(t));
-    const play = await runtime.invoke({
-      installationId: 'fixture-a', siteId: 'site-a', operation: 'play', payload: { id: 'hls' },
-    });
-    const route = new URL(play.url);
-    const prefix = route.pathname.split('/').slice(0, 5).join('/');
-    for (const path of [
-      '/%2577ebsite',
-      '/%2561dmin',
-      '/%255f%255fmeow/open',
-      '/%252e%252e/full-config',
-      '/%255cwebsite',
-      '/%252f%252fexample.invalid/website',
-    ]) {
-      const denied = await request(`${route.origin}${prefix}${path}`);
-      assert.equal(denied.status, 403, path);
+    const state = await runtime.status(), instance = state.instances[0];
+    const external = value => {
+      const url = new URL(value);
+      url.hostname = address;
+      return url;
+    };
+    const headers = { Host: 'caller.virtual.invalid', Origin: 'https://caller.invalid' };
+    const page = await request(external(instance.managementUrl), { headers });
+    assert.equal(page.status, 200);
+    assert.equal(page.text, '<title>Open</title>');
+    assert.equal(page.headers['set-cookie'], undefined);
+    assert.equal(page.headers['access-control-allow-origin'], headers.Origin);
+    const home = await request(external(state.aggregate.origin + '/cat/open/open/home'), { headers });
+    assert.equal(home.status, 200);
+    assert.deepEqual(JSON.parse(home.text), { opened: true });
+    for (const origin of [instance.endpoints[0].origin, state.aggregate.origin]) {
+      const preflight = await request(external(origin + '/website'), {
+        method: 'OPTIONS', headers: { ...headers, 'Access-Control-Request-Headers': 'x-source-header' },
+      });
+      assert.equal(preflight.status, 204);
+      assert.equal(preflight.headers['access-control-allow-origin'], headers.Origin);
+      assert.equal(preflight.headers['access-control-allow-headers'], 'x-source-header');
     }
+    const invoke = operation => runtime.invoke({
+      installationId: 'open', siteId: 'open', operation, payload: {},
+    });
+    const before = await invoke('counts');
+    const play = await runtime.invoke({
+      installationId: 'open', siteId: 'open', operation: 'play', payload: {},
+    });
+    assert.deepEqual(await invoke('counts'), before, 'address preparation does not read media or management');
+    const media = await request(external(play.url), { headers });
+    assert.equal(media.status, 200);
+    assert.deepEqual(media.bytes, Buffer.from([0, 1, 127, 128, 255]));
+    const route = new URL(play.url), prefix = route.pathname.split('/').slice(0, 5).join('/');
+    const paths = [
+      `//127.0.0.1:${other.address().port}/capture`,
+      '/website', '/admin', '/__meow/open',
+      '/%2577ebsite', '/%2561dmin', '/%255f%255fmeow/open',
+      '/%252e%252e/full-config', '/%255cwebsite', '/%252f%252fexample.invalid/website',
+    ];
+    for (const path of paths) {
+      const reply = await request(external(`${route.origin}${prefix}${path}?raw=a%2Fb%252F`), { headers });
+      assert.equal(reply.status, 200, path);
+      const echoed = JSON.parse(reply.text);
+      assert.equal(echoed.path, path + '?raw=a%2Fb%252F');
+      assert.equal(echoed.headers.host, headers.Host);
+      assert.equal(echoed.headers.origin, headers.Origin);
+      assert.equal(echoed.headers.authorization, undefined);
+    }
+    assert.equal(captured, 0);
+    const probe = await invoke('probe');
+    const basic = 'Basic ' + Buffer.from('reader:synthetic-only').toString('base64');
+    assert.equal(probe.self.path, '/echo?raw=a%2Fb');
+    for (const value of [probe.self, probe.external]) {
+      assert.equal(value.headers.authorization, basic);
+      assert.equal(value.headers.host, 'source.virtual.invalid');
+      assert.equal(value.headers.origin, 'https://source.invalid');
+      assert.equal(value.headers.cookie, 'source=explicit');
+      assert.equal(value.headers['x-meow-request-scope'], undefined);
+    }
+    assert.equal(probe.self.rawHeaders.includes('Host'), true);
+    assert.equal(probe.self.rawHeaders.some(value => value.toLowerCase() === 'x-meow-request-scope'), false);
+    assert.equal(probe.override.headers.authorization, 'source-explicit');
+    assert.deepEqual(adapterCalls.map(call => call.url),
+      ['http://outside.invalid/echo?raw=a%2Fb', 'http://outside.invalid/override']);
+    const session = runtime.getSession('open');
+    await runtime.setEnabled('open', false);
+    const stale = await request(external(play.url));
+    assert.equal(stale.status, 502);
+    assert.deepEqual(JSON.parse(stale.text), { error: { code: 'STALE_SESSION' } });
+    assert.equal(session.live, false);
+    await assert.rejects(request(external(instance.managementUrl)), { code: 'ECONNREFUSED' });
   });
 
 test('Cat provider interception is settings-controlled, emits one Cat root and falls back to script networking',
@@ -3906,7 +3989,6 @@ test('Cat keeps request transport state bounded while session resources are expl
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        [scriptAccessHeader]: endpoint.access,
       },
       body: '{}',
     })).status, 200);
@@ -3931,7 +4013,6 @@ test('Cat keeps request transport state bounded while session resources are expl
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          [scriptAccessHeader]: endpoint.access,
         },
         body: '{}',
       });
@@ -4832,8 +4913,7 @@ test('Cat guest proxy releases upstream work when the client disconnects and sta
     const endpoint = session.endpoint();
     const client = http.get(endpoint.origin + '/bridge/slowProxy?size=' + size, {
       agent: false,
-      headers: { host: new URL(endpoint.origin).host,
-        'x-meow-script-access': endpoint.access },
+      headers: { host: new URL(endpoint.origin).host },
     });
     const closed = new Promise((resolve, reject) => {
       let dataSeen = false;
@@ -5003,9 +5083,7 @@ test('Cat listener returns a complete 17 MiB response and stays usable',
     });
     const size = 17 * 1024 * 1024;
     const expected = upstream.blob(size);
-    const value = await request(runtime.getSession('bridge').endpoint().origin + '/bridge/proxy?size=' + size, {
-      headers: { [scriptAccessHeader]: runtime.getSession('bridge').endpoint().access },
-    });
+    const value = await request(runtime.getSession('bridge').endpoint().origin + '/bridge/proxy?size=' + size);
     assert.equal(value.status, 200);
     assert.equal(value.bytes.length, size);
     assert.equal(sha256(value.bytes), sha256(expected));
@@ -5035,7 +5113,6 @@ test('Cat aggregate entry accepts complete 12 and 17 MiB request bodies',
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-meow-runtime-access': status.aggregate.access,
       },
       body: JSON.stringify({ data }),
     });
@@ -5059,7 +5136,6 @@ test('Cat aggregate entry accepts complete 12 and 17 MiB request bodies',
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-meow-runtime-access': boundedStatus.aggregate.access,
       },
       body: JSON.stringify({ data: 'z'.repeat(17 * 1024 * 1024) }),
     }).catch(error => ({ status: null, error: error.code }));
@@ -5071,7 +5147,6 @@ test('Cat aggregate entry accepts complete 12 and 17 MiB request bodies',
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-meow-runtime-access': boundedStatus.aggregate.access,
       },
       body: JSON.stringify({ data: 'ok' }),
     });
@@ -5090,7 +5165,6 @@ test('Cat aggregate invocation is admitted under the 60 second request deadline'
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-meow-runtime-access': aggregate.access,
       },
       body: JSON.stringify({ wd: 'wait' }),
     });
@@ -5576,8 +5650,10 @@ test('Cat keeps callback failures on finished inbound requests away from live re
 
 test('Cat M3U8 enrichment creates the root extension when no earlier enhancement exists',
   { timeout: 30000 }, async t => {
+    let reads = 0;
     const runtime = await installed(t, rootFor(t), {
       network: async input => {
+        reads++;
         assert.equal(input.url, 'https://media.example.invalid/master.m3u8');
         return {
           statusCode: 200,
@@ -5586,6 +5662,13 @@ test('Cat M3U8 enrichment creates the root extension when no earlier enhancement
         };
       },
     });
+    const receipt = await runtime.invoke({
+      installationId: 'fixture-a', siteId: 'site-a', operation: 'externalPlay', payload: {},
+    }, { mediaPurpose: 'receipt' });
+    assert.equal(receipt.url, 'https://media.example.invalid/master.m3u8');
+    assert.equal(receipt._meow, undefined);
+    assert.deepEqual(Object.getOwnPropertySymbols(receipt), []);
+    assert.equal(reads, 0, 'receipt resolution cannot probe a manifest');
     const result = await runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'externalPlay', payload: {},
     });
@@ -5594,6 +5677,7 @@ test('Cat M3U8 enrichment creates the root extension when no earlier enhancement
     assert.deepEqual(Object.getOwnPropertySymbols(result), []);
     assert.equal(result._meow.media[0].variants[0].url,
       'https://media.example.invalid/child.m3u8');
+    assert.equal(reads, 1, 'ordinary Cat consumption keeps its optional manifest enhancement');
   });
 
 test('Cat accepts a function module entry and gives independent random listeners physical ports',
@@ -6185,10 +6269,7 @@ test('Cat discovers config on another owned listener without bypassing the first
     const instance = (await runtime.status()).instances[0];
     const authEndpoint = instance.endpoints.find(endpoint => endpoint.requestedPorts.includes(32111));
     assert(authEndpoint);
-    assert.equal((await request(authEndpoint.origin + '/full-config')).status, 403);
-    assert.equal((await request(authEndpoint.origin + '/full-config', {
-      headers: { [scriptAccessHeader]: runtime.getSession('multi-listener').endpoint().access },
-    })).status, 401);
+    assert.equal((await request(authEndpoint.origin + '/full-config')).status, 401);
     assert.deepEqual(await runtime.invoke({
       installationId: 'multi-listener', siteId: 'multi-listener', operation: 'home', payload: {},
     }), { class: [{ type_id: 'ready', type_name: 'Ready' }] });
@@ -6384,7 +6465,7 @@ test('Cat observes real framework routes, waits for its listener and selects eac
     await assert.rejects(invoke('accounts'), { code: 'CAPABILITY_UNAVAILABLE' });
     const beforeFailure = diagnostics.length;
     await assert.rejects(invoke('failure'), { code: 'UPSTREAM_HTTP_ERROR' });
-    // The trusted listener scope already owns the hook, before HTTP 500 is read.
+    // The listener request scope already owns the hook, before HTTP 500 is read.
     const failureDiagnostics = diagnostics.slice(beforeFailure);
     const diagnostic = failureDiagnostics.find(event => event.kind === 'TypeError' && event.reason === 'input');
     const httpError = failureDiagnostics.find(event =>
@@ -6403,7 +6484,9 @@ test('Cat observes real framework routes, waits for its listener and selects eac
     assert.equal(JSON.stringify(diagnostics).includes('SYNTHETIC-PRIVATE-VALUE'), false);
     const catEndpoint = instance.endpoints.find(endpoint => endpoint.requestedPorts.includes(9988));
     assert.equal(new URL(instance.managementUrl).origin, catEndpoint.origin);
-    assert.equal((await request(catEndpoint.origin + '/api/one/home')).status, 403);
+    const home = await request(catEndpoint.origin + '/api/one/home', { method: 'POST', body: '{}' });
+    assert.equal(home.status, 200);
+    assert.deepEqual(JSON.parse(home.text), { method: 'POST', query: {}, body: {} });
   });
 
 test('Cat discovers constant template, dispatch-map and anchored regex actions without probing endpoints',
@@ -7960,12 +8043,89 @@ test('Cat scripts reach unregistered private, loopback and local-name hosts',
     assert.ok(lookup === '127.0.0.1' || lookup === '::1', lookup);
   });
 
-test('Cat rejects credentialed, routed and unmapped HTTPS site APIs', { timeout: 30000 }, async t => {
+test('Cat installs credentialed site APIs and sends URL userinfo as Basic authentication',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'credentialed-api', config: {}, version: '1', enabled: true, source: String.raw`
+        const http = require('http');
+        let server;
+        module.exports.start = () => {
+          server = http.createServer((request, response) => {
+            response.setHeader('content-type', 'application/json');
+            if (request.url === '/full-config' || request.url === '/config') {
+              response.end(JSON.stringify({ video: { sites: [{
+                key: 'credentialed', name: 'Credentialed',
+                api: 'http://reader:synthetic-only@127.0.0.1/api/credentialed', actions: ['home'],
+              }] } }));
+              return;
+            }
+            if (request.url === '/api/credentialed/home') {
+              response.end(JSON.stringify({ path: request.url, method: request.method,
+                authorization: request.headers.authorization }));
+              return;
+            }
+            response.statusCode = 404;
+            response.end();
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1');
+        };
+        module.exports.stop = () => { server?.closeAllConnections(); server?.close(); };
+      `,
+    });
+    assert.equal((await runtime.status()).instances[0].state, 'ready');
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'credentialed-api', siteId: 'credentialed', operation: 'home', payload: {},
+    }), {
+      path: '/api/credentialed/home', method: 'POST',
+      authorization: 'Basic ' + Buffer.from('reader:synthetic-only').toString('base64'),
+    });
+  });
+
+test('Cat preserves unregistered HTTPS site APIs without aliasing the HTTP listener',
+  { timeout: 30000 }, async t => {
+    const api = 'https://127.0.0.1/api/unmapped';
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'unmapped-https', source: `
+        const http = require('http');
+        let server;
+        module.exports.start = () => {
+          server = http.createServer((request, response) => {
+            response.setHeader('content-type', 'application/json');
+            if (request.url === '/full-config' || request.url === '/config') {
+              response.end(JSON.stringify({ video: { sites: [{
+                key: 'unmapped', name: 'Unmapped', api: ${JSON.stringify(api)}, actions: ['home'],
+              }] } }));
+              return;
+            }
+            response.statusCode = 404;
+            response.end();
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1');
+        };
+        module.exports.stop = () => { server?.closeAllConnections(); server?.close(); };
+      `,
+    });
+    assert.equal(session.sites.get('unmapped').api, api);
+    assert.equal(session.services.listener(443), null);
+    assert.equal(session.services.aliases.has(443), false);
+    assert.match(session.endpoint().origin, /^http:\/\/127\.0\.0\.1:\d+$/);
+    const calls = [];
+    t.mock.method(session, 'read', async (url, payload, _scope, method) => {
+      calls.push({ url, payload, method });
+      return { reached: true };
+    });
+    assert.deepEqual(await session.invoke({
+      siteId: 'unmapped', operation: 'home', payload: { page: 2 },
+    }), { reached: true });
+    assert.deepEqual(calls, [{ url: api + '/home', payload: { page: 2 }, method: 'POST' }]);
+  });
+
+test('Cat rejects query and fragment site APIs that cannot append an operation', { timeout: 30000 }, async t => {
   const invalid = [
-    'http://user@127.0.0.1/api/invalid',
     'http://127.0.0.1/api/invalid?route=1',
     'http://127.0.0.1/api/invalid#route',
-    'https://127.0.0.1/api/invalid',
   ];
   for (const [index, api] of invalid.entries()) {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });

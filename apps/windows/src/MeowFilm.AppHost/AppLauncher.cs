@@ -113,9 +113,11 @@ public static class AppLauncher
         async Task<StartupOutcome> StartCoreAsync(CancellationToken cancellationToken)
         {
             LocalDocumentStore? store = null;
-            AppRuntimeClient? runtime = null;
+            AppRuntimeConnectionHost? runtime = null;
             ArtworkService? artwork = null;
             AppAppearance? appearance = null;
+            AppMediaControlSettings? mediaControls = null;
+            AppClosePreferences? closePreferences = null;
             var modules = new List<IDesktopModule>();
             IAsyncDisposable? windowAttachment = null;
             ShellWindow? shell = null;
@@ -133,7 +135,8 @@ public static class AppLauncher
                     new(() => disposeResources?.Invoke() ?? ValueTask.CompletedTask),
                     new(() => runtime?.DisposeAsync() ?? ValueTask.CompletedTask, InterruptsPendingOperations: true),
                     new(() => store?.DisposeAsync() ?? ValueTask.CompletedTask)
-                ], sharedParticipants: appearance is null ? [] : [appearance]);
+                ], sharedParticipants: new IDesktopShutdownParticipant?[] { mediaControls, appearance, closePreferences }
+                    .OfType<IDesktopShutdownParticipant>());
             }
             try
             {
@@ -141,7 +144,7 @@ public static class AppLauncher
                 Directory.CreateDirectory(paths.Documents);
                 store = new LocalDocumentStore(paths.Documents, definition.NativeNamespaces,
                     definition.NativeCollections, definition.ProtectedNamespaces);
-                runtime = new AppRuntimeClient(async token =>
+                runtime = new AppRuntimeConnectionHost(async token =>
                 {
                     // Native pages and business owners never wait for this start:
                     // a failed runtime only makes script sources unavailable.
@@ -150,12 +153,16 @@ public static class AppLauncher
                         definition.RuntimeModules), token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
                     return await NodeRuntime.StartAsync(Path.Combine(root, "node.exe"), bundle,
-                        definition.RuntimeModules, paths.ScriptRuntime, token).ConfigureAwait(false);
+                        definition.RuntimeModules, paths.ScriptRuntime, token, ownerRevoked: token).ConfigureAwait(false);
                 });
                 cancellationToken.ThrowIfCancellationRequested();
                 createModules(runtime, store, modules);
                 appearance = new AppAppearance(store);
+                closePreferences = new AppClosePreferences(store);
                 await appearance.LoadAsync();
+                await closePreferences.LoadAsync();
+                mediaControls = new AppMediaControlSettings(store);
+                await mediaControls.LoadAsync();
                 ValidateModuleComposition(modules);
                 await PrepareModulesAsync(modules, cancellationToken);
                 // The shared runtime starts with the App; starting it executes no script.
@@ -163,7 +170,7 @@ public static class AppLauncher
                 var lifecycle = Lifecycle();
                 shell = new ShellWindow(modules, createPages?.Invoke(modules) ?? [],
                     lifecycle.CloseAsync, lifecycle.ForceReleaseAsync, lifecycle.CancelShutdownPreparationAsync,
-                    appearance) { Title = "meowfilm" };
+                    appearance, closePreferences, mediaControls: mediaControls) { Title = "meowfilm" };
                 artwork = new ArtworkService(readTrusted: async (reference, maximumBytes, token) =>
                 {
                     try { return await runtime.ReadImageAsync(reference, maximumBytes, token).ConfigureAwait(false); }
@@ -185,10 +192,13 @@ public static class AppLauncher
                 windowAttachment = attachWindow?.Invoke(shell, modules);
                 cancellationToken.ThrowIfCancellationRequested();
                 application.MainWindow = shell;
+                SessionEndingCancelEventHandler sessionEnding = (_, _) => shell.PrepareForSessionEnding();
+                application.SessionEnding += sessionEnding;
                 shell.Closed += (_, _) =>
                 {
-                    // Normal/forced shell closure already awaited actual cleanup.
-                    // Never shut down the dispatcher on a failed drain receipt.
+                    application.SessionEnding -= sessionEnding;
+                    // User-requested closure awaited cleanup; session ending keeps the OS path.
+                    // Never initiate dispatcher shutdown on a failed drain receipt.
                     if (switched && lifecycle.IsReleased) application.Shutdown();
                 };
                 shell.Show();

@@ -15,6 +15,12 @@ public sealed class MusicRecommendationQueuePort
     private long epoch;
     internal event Action<MusicRecommendationQueueChange>? Changing;
     internal event Action<MusicRecommendationQueueChange>? Changed;
+    internal event Action<string>? Selected;
+    internal Func<string, JsonElement?>? SelectionSource
+    {
+        get => library.QueueSelectionSource;
+        set => library.QueueSelectionSource = value;
+    }
     internal long Epoch => Interlocked.Read(ref epoch);
     public MusicRecommendationQueuePort(MusicLibraryOwner library)
     { ArgumentNullException.ThrowIfNull(library); this.library = library; }
@@ -36,15 +42,30 @@ public sealed class MusicRecommendationQueuePort
     {
         ArgumentNullException.ThrowIfNull(operation);
         cancellationToken.ThrowIfCancellationRequested();
-        Interlocked.Increment(ref epoch);
+        if (change is MusicRecommendationQueueChange.Replace or MusicRecommendationQueueChange.Clear or
+            MusicRecommendationQueueChange.Restore or MusicRecommendationQueueChange.Reset)
+            Interlocked.Increment(ref epoch);
         Changing?.Invoke(change); // fence before admission, never while holding the lane
-        try { return await InLaneAsync((_, token) => operation(token), cancellationToken).ConfigureAwait(false); }
+        try
+        {
+            return await InLaneAsync(async (_, token) =>
+            {
+                var result = await operation(token).ConfigureAwait(false);
+                // Publish actual selection only after its successful CAS, before
+                // releasing the lane or admitting a following ordinary append.
+                if ((change is MusicRecommendationQueueChange.Selection or MusicRecommendationQueueChange.Remove) &&
+                    Bool(result, "ok"))
+                    Selected?.Invoke(result.GetProperty("currentId").ValueKind == JsonValueKind.Null ? "" : Text(result, "currentId"));
+                return result;
+            }, cancellationToken).ConfigureAwait(false);
+        }
         finally { Changed?.Invoke(change); }
     }
     private static MusicRecommendationQueueChange? Classify(string method, object? parameters) => method switch
     {
         "music.queue.select" or "music.queue.next" or "music.queue.previous" or "music.queue.step" => MusicRecommendationQueueChange.Selection,
-        "music.queue.append" => MusicRecommendationQueueChange.Append,
+        "music.queue.append" => parameters is not null && Json(parameters).TryGetProperty("next", out var next) &&
+            next.ValueKind == JsonValueKind.True ? MusicRecommendationQueueChange.PlayNext : MusicRecommendationQueueChange.Append,
         "music.queue.remove" => MusicRecommendationQueueChange.Remove,
         "music.queue.reorder" => MusicRecommendationQueueChange.Reorder,
         "music.queue.replace" or "music.queue.playCollection" => MusicRecommendationQueueChange.Replace,
@@ -62,7 +83,7 @@ public sealed class MusicRecommendationQueuePort
     internal static async Task<QueueSnapshot> ReadAsync(MusicLibraryOwner owner, CancellationToken token)
     {
         var entries = new List<QueueEntry>();
-        long? version = null; int total = 0, mode = 0; string current = "";
+        long? version = null; int total = 0, mode = 1; string current = ""; bool priority = false;
         for (int offset = 0; offset == 0 || offset < total; offset += 100)
         {
             var value = Okay(await owner.ExecuteAsync("music.queue.get", new { offset, limit = 100 }, token).ConfigureAwait(false));
@@ -72,16 +93,17 @@ public sealed class MusicRecommendationQueuePort
             int actualTotal = checked((int)Number(value, "total"));
             Require(version is null || version == actualVersion && current == actualCurrent && total == actualTotal, "STALE_QUEUE");
             version = actualVersion; current = actualCurrent; total = actualTotal; mode = checked((int)Number(value, "mode"));
+            priority = Bool(value, "hasPriority");
             var rows = value.GetProperty("entries");
             Require(rows.ValueKind == JsonValueKind.Array && rows.GetArrayLength() == Math.Min(100, total - offset), "INVALID_RESPONSE");
             foreach (var row in rows.EnumerateArray())
                 entries.Add(new(Text(row, "id"), row.GetProperty("song").Clone(), row.GetProperty("context").Clone()));
         }
         Require(entries.Select(e => e.Id).Distinct(StringComparer.Ordinal).Count() == entries.Count, "INVALID_RESPONSE");
-        return new(version!.Value, current, mode, entries.ToArray());
+        return new(version!.Value, current, mode, entries.ToArray(), priority);
     }
     internal sealed record QueueEntry(string Id, JsonElement Song, JsonElement Context);
-    internal sealed record QueueSnapshot(long Version, string CurrentId, int Mode, QueueEntry[] Entries)
+    internal sealed record QueueSnapshot(long Version, string CurrentId, int Mode, QueueEntry[] Entries, bool HasPriority)
     {
         internal int Index => Array.FindIndex(Entries, e => e.Id == CurrentId);
         internal string Tail => Entries.LastOrDefault()?.Id ?? "";

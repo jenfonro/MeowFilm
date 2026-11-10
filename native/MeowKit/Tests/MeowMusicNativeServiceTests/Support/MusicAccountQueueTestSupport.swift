@@ -37,7 +37,8 @@ enum MusicAccountQueueFixture {
     static func source(_ pages: MusicAccountQueuePages, kind: MusicRemoteQueueContext.Kind = .playlist,
                        authorization: MusicQueueAuthorization = .init()) -> MusicRemoteQueueSource {
         .init(context: .init(kind: kind, id: "9001", title: "Synthetic remote list", platform: "tx"),
-              authorization: authorization, loadPage: { try await pages.read($0) })
+              authorization: authorization, loadPage: { try await pages.read($0) },
+              fmAction: kind == .fm ? .fm(mode: .default, submode: "", entry: nil) : nil)
     }
     static func seed(_ service: NativeMusicService) async throws -> MusicQueueSnapshot {
         let page = try await service.search(platform: "tx", query: "Old", page: 1, limit: 30)

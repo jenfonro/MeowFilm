@@ -1,4 +1,5 @@
 using System.Text.Json;
+using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
 
@@ -9,6 +10,7 @@ public sealed class FilmSearchSession
     public string Query { get; }
     public string MetadataQuery { get; internal set; } = "";
     public JsonElement? MetadataSearchPayload { get; internal set; }
+    public long Revision { get; private set; }
     public FilmSearchChannelState SitesState { get; internal set; }
     public FilmSearchChannelState MetadataState { get; internal set; }
     public bool Loading { get; internal set; }
@@ -22,6 +24,17 @@ public sealed class FilmSearchSession
     internal List<JsonElement> SiteItems { get; } = [];
     internal List<JsonElement> TmdbItems { get; } = [];
     internal Dictionary<string, JsonElement> Details { get; } = new(StringComparer.Ordinal);
+    internal Dictionary<string, FilmSearchData> MetadataData { get; } = new(StringComparer.Ordinal);
+    internal RuntimeConnection? DataOwner
+    {
+        get
+        {
+            var responses = Cursors.SelectMany(cursor => cursor.Pages.Values).ToArray();
+            if (responses.Length == 0) responses = MetadataData.Values.ToArray();
+            var owner = responses.FirstOrDefault()?.Owner;
+            return owner is not null && responses.All(value => FilmPlaybackOpen.SameOwner(value.Owner, owner)) ? owner : null;
+        }
+    }
     internal HashSet<string> Identities { get; } = new(StringComparer.Ordinal);
     internal string[] AggregateOrder { get; set; } = [];
     internal string[] RawOrder { get; set; } = [];
@@ -33,7 +46,7 @@ public sealed class FilmSearchSession
     internal bool SourcesLoaded { get; set; }
     internal bool MetadataSearchCompleted { get; set; }
     internal bool ReadingSources { get; set; }
-    internal void Publish() => Changed?.Invoke(this, EventArgs.Empty);
+    internal void Publish() { Revision++; Changed?.Invoke(this, EventArgs.Empty); }
     internal JsonElement CurrentItem(JsonElement selected)
     {
         if (FilmSearchJson.Text(selected, "sourceKind") == "tmdb")
@@ -78,6 +91,8 @@ public sealed class FilmSearchSession
     {
         internal FilmSearchSource Source { get; } = source;
         internal int Page { get; set; } = 1;
+        internal int ConfirmedPage => Pages.Count == 0 ? 0 : Pages.Keys.Max();
+        internal SortedDictionary<int, FilmSearchData> Pages { get; } = [];
         internal bool Ended { get; set; }
         internal bool NeedsRecovery { get; set; } = true;
     }

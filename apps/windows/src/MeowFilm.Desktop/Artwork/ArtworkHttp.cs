@@ -1,7 +1,8 @@
 using System.IO;
 using System.Net;
 using System.Net.Http;
-using System.Net.Sockets;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace MeowFilm.Desktop.Artwork;
@@ -14,58 +15,19 @@ internal sealed class ArtworkHttp : IDisposable
 
     internal static Uri Parse(string address)
     {
-        if (address.Length is 0 or > 8192 || address.Any(c => char.IsControl(c)) ||
+        if (address.Length == 0 || address.Any(c => char.IsControl(c)) ||
             !Uri.TryCreate(address, UriKind.Absolute, out var uri) ||
-            uri.Scheme is not ("http" or "https") || uri.UserInfo.Length != 0 || uri.Fragment.Length != 0 ||
-            uri.Port is not (80 or 443) ||
-            uri.HostNameType is not (UriHostNameType.Dns or UriHostNameType.IPv4 or UriHostNameType.IPv6) ||
-            uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
-            uri.Host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase) ||
-            uri.Host.Equals("local", StringComparison.OrdinalIgnoreCase) ||
-            uri.Host.EndsWith(".local", StringComparison.OrdinalIgnoreCase) ||
-            IPAddress.TryParse(uri.DnsSafeHost.Trim('[', ']'), out var ip) && !PublicAddress(ip))
+            uri.Scheme is not ("http" or "https") || uri.Fragment.Length != 0 ||
+            uri.HostNameType is not (UriHostNameType.Dns or UriHostNameType.IPv4 or UriHostNameType.IPv6))
             throw new ArtworkException("ARTWORK_ADDRESS");
         return uri;
-    }
-    private static bool PublicAddress(IPAddress address)
-    {
-        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
-        var b = address.GetAddressBytes();
-        if (address.AddressFamily == AddressFamily.InterNetwork)
-            return b[0] is not (0 or 10 or 127) && b[0] < 224 &&
-                !(b[0] == 100 && b[1] is >= 64 and <= 127) &&
-                !(b[0] == 169 && b[1] == 254) && !(b[0] == 172 && b[1] is >= 16 and <= 31) &&
-                !(b[0] == 192 && (b[1] is 0 or 168 || b[1] == 88 && b[2] == 99)) &&
-                !(b[0] == 198 && (b[1] is 18 or 19 || b[1] == 51 && b[2] == 100)) &&
-                !(b[0] == 203 && b[1] == 0 && b[2] == 113);
-        return b.Length == 16 && (b[0] & 0xe0) == 0x20 &&
-            !(b[0] == 0x20 && b[1] == 1 && b[2] < 2) &&
-            !(b[0] == 0x20 && b[1] == 1 && b[2] == 0x0d && b[3] == 0xb8) &&
-            !(b[0] == 0x20 && b[1] == 2);
     }
     private static SocketsHttpHandler CreateHandler() => new()
     {
         UseCookies = false, UseProxy = false, AllowAutoRedirect = false,
         AutomaticDecompression = DecompressionMethods.None,
         ConnectTimeout = TimeSpan.FromSeconds(10), MaxResponseHeadersLength = 32,
-        PooledConnectionLifetime = TimeSpan.FromMinutes(2),
-        ConnectCallback = async (context, token) =>
-        {
-            var addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, token).ConfigureAwait(false);
-            if (addresses.Length == 0 || addresses.Any(ip => !PublicAddress(ip))) throw new ArtworkException("ARTWORK_ADDRESS");
-            foreach (var address in addresses.Take(8))
-            {
-                var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-                try
-                {
-                    await socket.ConnectAsync(new IPEndPoint(address, context.DnsEndPoint.Port), token).ConfigureAwait(false);
-                    return new NetworkStream(socket, ownsSocket: true);
-                }
-                catch (OperationCanceledException) { socket.Dispose(); throw; }
-                catch { socket.Dispose(); }
-            }
-            throw new ArtworkException("ARTWORK_NETWORK");
-        }
+        PooledConnectionLifetime = TimeSpan.FromMinutes(2)
     };
 
     internal async Task<byte[]> ReadAsync(Uri uri, CancellationToken token)
@@ -84,6 +46,15 @@ internal sealed class ArtworkHttp : IDisposable
             token.ThrowIfCancellationRequested(); _ = Parse(uri.AbsoluteUri);
             if (!visited.Add(uri.AbsoluteUri)) throw new ArtworkException("ARTWORK_REDIRECT");
             using var message = new HttpRequestMessage(HttpMethod.Get, uri);
+            if (uri.UserInfo.Length != 0)
+            {
+                string userInfo = uri.UserInfo;
+                int separator = userInfo.IndexOf(':');
+                string username = Uri.UnescapeDataString(separator < 0 ? userInfo : userInfo[..separator]);
+                string password = separator < 0 ? "" : Uri.UnescapeDataString(userInfo[(separator + 1)..]);
+                message.Headers.Authorization = new AuthenticationHeaderValue("Basic",
+                    Convert.ToBase64String(Encoding.UTF8.GetBytes(username + ":" + password)));
+            }
             message.Headers.Accept.ParseAdd("image/png,image/jpeg,image/gif,image/webp");
             using var response = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
             int status = (int)response.StatusCode;
@@ -92,7 +63,6 @@ internal sealed class ArtworkHttp : IDisposable
                 if (hop == 5 || response.Headers.Location is not { } location) throw new ArtworkException("ARTWORK_REDIRECT");
                 Uri next = location.IsAbsoluteUri ? location : new Uri(uri, location);
                 _ = Parse(next.AbsoluteUri);
-                if (uri.Scheme == "https" && next.Scheme != "https") throw new ArtworkException("ARTWORK_REDIRECT");
                 uri = next; continue;
             }
             if (!response.IsSuccessStatusCode) throw new ArtworkException(status is 401 or 403 ? "ARTWORK_DENIED" : "ARTWORK_NETWORK");
