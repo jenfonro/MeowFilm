@@ -202,6 +202,10 @@ private actor AutomaticFailurePeer: MusicNativeAccountProviding, MusicNativeLibr
         guard !offline else { throw MusicServiceError.upstreamFailed }
         return try await base.readLibrarySync(session, kinds: kinds)
     }
+    func readLibrarySubscriptions(_ session: MusicLibrarySyncSession) async throws -> MusicLibrarySyncSnapshot {
+        guard !offline else { throw MusicServiceError.upstreamFailed }
+        return try await base.readLibrarySubscriptions(session)
+    }
     func writeLibrarySync(_ session: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult {
         try await base.writeLibrarySync(session, mutation: mutation)
     }

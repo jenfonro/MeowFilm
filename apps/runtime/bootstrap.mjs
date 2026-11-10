@@ -7,7 +7,8 @@ const publicCodes = new Set(['INVALID_REQUEST', 'METHOD_NOT_FOUND', 'PERMISSION_
   'CLOSED', 'CANCELLED', 'TIMEOUT', 'INVALID_RESPONSE']);
 const success = value => ({ ok: true, contract: HTTP_PROTOCOL, value });
 const failureCode = id => ({ music: 'SCRIPT_FAILURE', source: 'SOURCE_FAILURE',
-  cat: 'SCRIPT_EXCEPTION', pan: 'PAN_FAILURE', tmdb: 'UPSTREAM_FORMAT', douban: 'UPSTREAM_FORMAT' })[id];
+  cat: 'SCRIPT_EXCEPTION', pan: 'PAN_FAILURE', tmdb: 'UPSTREAM_FORMAT', douban: 'UPSTREAM_FORMAT',
+  netease: 'SDK_FAILURE' })[id];
 
 /** Trusted session configuration; no platform bootstrap or persistent identity. */
 export function createAppRuntime({ sessionId, requestKey,

@@ -48,7 +48,8 @@ public sealed class RuntimeHttpClient : IRuntimeClient, IRuntimeImageClient, IAs
         RuntimeHttpProtocol.ModuleContract contract, CancellationToken token)
     {
         var bytes = BridgeCodec.EncodeJSONValue(parameters);
-        try { return await RequestAsync(HttpMethod.Post, path, bytes, false, contract.Name, contract.Codes, token).ConfigureAwait(false); }
+        try { return await RequestAsync(HttpMethod.Post, path, bytes, false, contract.Name, contract.Codes, token,
+            timeout: contract.Name == "netease.token.v1" ? TimeSpan.FromSeconds(60) : null).ConfigureAwait(false); }
         finally { Clear(bytes); }
     }
 
@@ -147,7 +148,7 @@ public sealed class RuntimeHttpClient : IRuntimeClient, IRuntimeImageClient, IAs
     }
 
     private Task<JsonElement> RequestAsync(HttpMethod method, string path, ReadOnlyMemory<byte> body,
-        bool raw, string contract, IReadOnlySet<string> codes, CancellationToken cancellationToken)
+        bool raw, string contract, IReadOnlySet<string> codes, CancellationToken cancellationToken, TimeSpan? timeout = null)
         => ExchangeAsync(method, path, body, raw, async (response, token) =>
         {
             if (response.Content.Headers.ContentType?.ToString() != "application/json"
@@ -162,11 +163,11 @@ public sealed class RuntimeHttpClient : IRuntimeClient, IRuntimeImageClient, IAs
                 return result;
             }
             finally { Clear(bytes); }
-        }, cancellationToken);
+        }, cancellationToken, timeout: timeout);
 
     private async Task<T> ExchangeAsync<T>(HttpMethod method, string path, ReadOnlyMemory<byte> body,
         bool raw, Func<HttpResponseMessage, CancellationToken, Task<T>> read, CancellationToken cancellationToken,
-        Action<T>? discard = null)
+        Action<T>? discard = null, TimeSpan? timeout = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var owner = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -180,7 +181,7 @@ public sealed class RuntimeHttpClient : IRuntimeClient, IRuntimeImageClient, IAs
         using (deadline)
         try
         {
-            deadline.CancelAfter(TimeSpan.FromSeconds(30));
+            deadline.CancelAfter(timeout ?? TimeSpan.FromSeconds(30));
             using var request = new HttpRequestMessage(method, new Uri(endpoint, path))
             {
                 Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact

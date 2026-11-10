@@ -51,9 +51,12 @@ internal static class PlatformProtocols
         }, null, client, weapi: true);
     // Raw-cookie overloads are native account-validation seams, NOT public catalog/UI inputs.
     internal static HttpRequestMessage WyWithCookie(string path, JsonObject parameters, string? cookieHeader,
-        MusicWyClientContext client, bool weapi = false)
+        MusicWyClientContext client, bool weapi = false, string? antiCheatToken = null)
     {
         PJ.Require(path.StartsWith("/api/", StringComparison.Ordinal));
+        if (antiCheatToken is not null)
+            PJ.Require(!weapi && (path is "/api/playlist/subscribe" or "/api/playlist/unsubscribe") &&
+                MusicNeteaseTokenProvider.ValidToken(antiCheatToken), "INVALID_REQUEST");
         var cookies = MusicWyRequestContext.Cookies(client, cookieHeader);
         var data = (JsonObject)parameters.DeepClone();
         var csrf = PJ.Cookie(cookies, "__csrf");
@@ -89,6 +92,7 @@ internal static class PlatformProtocols
                     RandomNumberGenerator.GetInt32(1000).ToString("000", CultureInfo.InvariantCulture)));
             foreach (var name in new[] { "MUSIC_U", "MUSIC_A", "NMTID", "deviceId", "_ntes_nuid", "_ntes_nnid", "WNMCID" })
                 if (cookies.TryGetValue(name, out var value)) header[name] = value;
+            if (antiCheatToken is not null) header["X-antiCheatToken"] = antiCheatToken;
             data["header"] = header.DeepClone();
             var payload = PJ.Encode(data);
             var digest = Md5($"nobody{path}use{payload}md5forencrypt");

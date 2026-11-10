@@ -16,7 +16,8 @@ actor MusicAccountAccessGate {
          audioCache: (any MusicAudioFileCaching)?,
          displayCache: (any MusicPlaybackDisplayCaching)?,
          clientContexts: NativeMusicClientService,
-         qqClient: NativeMusicQQPublicService) throws {
+         qqClient: NativeMusicQQPublicService,
+         neteaseTokenProvider: any MusicNeteaseTokenProviding) throws {
         let store = try KeychainCredentialStore(
             service: bundleIdentifier + ".music.accounts.v1",
             accessibility: .afterFirstUnlockThisDeviceOnly
@@ -44,7 +45,7 @@ actor MusicAccountAccessGate {
                 case .accessChanged, .closed:
                     await audioCache?.cancelPending()
                 }
-            }, clientContexts: clientContexts, qqClient: qqClient)
+            }, clientContexts: clientContexts, qqClient: qqClient, neteaseTokenProvider: neteaseTokenProvider)
     }
 
     /// Product assembly admits the account service once per process.

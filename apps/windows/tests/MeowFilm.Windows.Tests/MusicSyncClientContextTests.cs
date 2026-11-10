@@ -94,6 +94,9 @@ public static class MusicSyncClientContextTests
         internal Task<JsonObject> ReadProbeAsync() => Wy("/api/toplist", new(), weapi: false);
         internal override Task<SyncDirectory> ReadAsync(string[] kinds) => throw Unused();
         internal override Task<SyncRemote?> ReadCollectionAsync(string id) => throw Unused();
+        internal override Task<IReadOnlyList<SyncSubscription>> ReadSubscriptionsAsync() => throw Unused();
+        internal override Task SubscribeAsync(SyncSubscription target) => throw Unused();
+        internal override Task UnsubscribeAsync(SyncSubscription subscription) => throw Unused();
         internal override Task CreateAsync(string name) => throw Unused();
         internal override Task DeleteAsync(SyncRemote remote) => throw Unused();
         internal override Task ChangeAsync(SyncRemote remote, bool add, IReadOnlyList<string> ids, IReadOnlyDictionary<string, JsonObject> songs) => throw Unused();

@@ -1,7 +1,7 @@
 import Foundation
 
 public enum RuntimeModule: String, Sendable {
-    case music, cat, source, tmdb
+    case music, cat, source, tmdb, netease
 
     public var contract: String {
         switch self {
@@ -9,6 +9,7 @@ public enum RuntimeModule: String, Sendable {
         case .cat: return "cat.script.v2"
         case .source: return "source.runtime.v2"
         case .tmdb: return "tmdb.data.v1"
+        case .netease: return "netease.token.v1"
         }
     }
 
@@ -18,12 +19,17 @@ public enum RuntimeModule: String, Sendable {
         case .cat: return Self.catCodes
         case .source: return Self.sourceCodes
         case .tmdb: return Self.metadataCodes
+        case .netease: return Self.neteaseCodes
         }
     }
 
     static let publicCodes: Set<String> = [
         "INVALID_REQUEST", "METHOD_NOT_FOUND", "PERMISSION_DENIED",
         "CLOSED", "CANCELLED", "TIMEOUT", "INVALID_RESPONSE"
+    ]
+    private static let neteaseCodes: Set<String> = [
+        "INVALID_REQUEST", "CLOSED", "CANCELLED", "TIMEOUT", "NETWORK_ERROR",
+        "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "SDK_FAILURE", "SDK_CLEANUP"
     ]
     private static let metadataCodes: Set<String> = [
         "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR", "UPSTREAM_HTTP",

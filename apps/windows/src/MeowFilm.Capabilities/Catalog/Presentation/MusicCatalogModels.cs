@@ -27,7 +27,7 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     int? DayOfMonth = null, string Decoration = "",
     bool RequiresAccount = false, bool Display = true, string Placement = "",
     bool DirectPlay = true, JsonElement? PlaybackSource = null, string RankText = "", string SalesText = "",
-    bool IsCloudFavorites = false) : INotifyPropertyChanged
+    bool IsCloudFavorites = false, bool IsManagedPlaylist = false, int? Count = null) : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
     private IReadOnlyList<MusicRankPreview>? initializedPreview;
@@ -57,6 +57,7 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     public bool CanRequestPreview => Display && IsPreviewEntry && CanOpen && Kind is "playlist" or "daily" or "album";
     public bool CanPlay => DirectPlay && CanOpen && (Song is not null || Kind is "song" or "playlist" or "daily" or "fm" or "similar" or "heartbeat" or "album");
     public bool CanOpen => Available && (Song is not null || MusicCatalogDto.SupportsAction(Platform, Kind));
+    public bool CanSavePlaylist => CanOpen && Kind == "playlist" && !IsManagedPlaylist && Locator is null;
     public bool CanFavorite => Available && Song is not null;
     public bool CanSimilar => CanFavorite && Recommendations.RecommendationJson.NativeId(Song!.Raw).Length > 0;
     public bool CanHeartbeatFavorites => CanOpen && Platform == "wy" && IsCloudFavorites;
@@ -305,7 +306,9 @@ public static class MusicCatalogDto
             Presentation: presentation, DayOfMonth: CalendarDay(item),
             Decoration: Text(item, "decoration"), RequiresAccount: requiresAccount, Display: display, Placement: placement,
             DirectPlay: Boolean(item, "canPlay", true), RankText: Text(item, "rankText"), SalesText: Text(item, "salesText"),
-            IsCloudFavorites: cloudFavorites);
+            IsCloudFavorites: cloudFavorites, IsManagedPlaylist: Text(item, "relationship") == "owned",
+            Count: item.TryGetProperty("count", out var count) && count.ValueKind != JsonValueKind.Null
+                ? checked((int)MusicDto.Integer(item, "count")) : null);
     }
     private static bool Boolean(JsonElement item, string name, bool fallback)
     {

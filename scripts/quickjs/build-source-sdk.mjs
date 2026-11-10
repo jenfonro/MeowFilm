@@ -57,6 +57,14 @@ export async function buildSourceSDK({ directory = outputDirectory } = {}) {
         plugin.onResolve({ filter: /^linkedom$/ }, () => ({
           path: resolve(dirname(require.resolve('linkedom/package.json')), 'worker.js'),
         }));
+        // Linkedom's optional require must remain absent in the Node-free SDK.
+        // Installing jsdom for another module must not change this DOM implementation.
+        plugin.onResolve({ filter: /^cssstyle$/ }, input => {
+          if (input.importer !== resolve(dirname(require.resolve('linkedom/package.json')), 'worker.js')) {
+            throw new Error('Unexpected cssstyle import in source SDK');
+          }
+          return { path: input.path, external: true };
+        });
         plugin.onLoad({ filter: /.*/, namespace: 'source-sdk' }, () => ({
           contents: 'module.exports = {};',
           loader: 'js',

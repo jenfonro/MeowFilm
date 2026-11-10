@@ -59,6 +59,7 @@ struct MeowfilmResources: Sendable {
             try await scriptSession.connection()
         }
         musicScripts = NativeMusicScriptService(connection: connection)
+        let neteaseToken = RuntimeMusicNeteaseTokenProvider(connection: connection)
         filmMetadata = FilmTMDBService(connection: connection)
         filmRules = try FilmRuleService(store: Self.documentFactory(
             base: libraryRoot, namespace: FilmRuleService.documentNamespace)())
@@ -75,7 +76,7 @@ struct MeowfilmResources: Sendable {
             bundleIdentifier: MeowfilmIdentity.bundleIdentifier,
             urlCacheStore: try? Self.documentFactory(base: cacheRoot, namespace: "music.account-url-cache.v1")(),
             audioCache: musicAudioCache, displayCache: musicDisplayCache,
-            clientContexts: musicClients, qqClient: musicPublicQQ
+            clientContexts: musicClients, qqClient: musicPublicQQ, neteaseTokenProvider: neteaseToken
         )
         musicAccounts = musicAccountGate?.service
     }

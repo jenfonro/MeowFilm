@@ -12,7 +12,8 @@ constants and device-profile parameters taken from these sources are client
 protocol parameters, not user credentials, and are not an endorsement of their
 cryptographic design. No device-registration bypass, anti-bot simulation,
 media-unlocking or challenge bypass is copied. The opt-in pan runtime's credential
-refresh protocols and their specific trust boundary are described below.
+refresh protocols and the on-demand official Watchman SDK's execution trust
+boundary are described below.
 
 ## MeowFilm server — protocol reference
 
@@ -137,6 +138,13 @@ Adapted portions:
   `module/song_url_v1.js`; chorus metadata uses `module/song_chorus.js`.
 - Lyrics: `module/lyric_new.js`.
 - Feedback reuses the WY request encryption above.
+- Subscription/token integration additionally follows the inspected `v4.41.1`
+  reference's `module/playlist_subscribe.js`, `module/register_checktoken_v2.js`
+  and `util/request.js`. This is a separate reference from the earlier protocol
+  pin above. `packages/netease-token` adapts the Watchman initialization and token
+  request sequence; its Worker lifecycle, cancellation and runtime contract are
+  application code. The adapted portions retain the Binaryify MIT attribution
+  and `api-enhanced-MIT.txt`; that license does not cover the remote official SDK.
 
 ## L-1124/QQMusicApi — GPL-3.0-or-later
 
@@ -471,6 +479,55 @@ copied into the application's protocol adapters.
 They and their executable/development dependencies are not in the runtime payload.
 The neutral SDK bundle keeps upstream legal comments and the payload retains
 the original dependency license files.
+
+## NetEase token provider and official Watchman SDK
+
+`@meowfilm/netease-token` 0.1.0 is application source under GPL-3.0-only, with
+the api-enhanced MIT protocol attribution above. It uses `jsdom` 24.1.3 to load
+the official `https://acstatic-dun.126.net/tool.min.js` entry and the Watchman
+resources it loads, on demand for token acquisition. Account cookies, account
+lifecycle and subscription writes remain native-client responsibilities.
+
+The remote SDK is trusted executable upstream code, not a bundled npm dependency
+or vendored SDK copy. Its execution and network behavior are an explicitly
+accepted trust boundary; a Worker and jsdom do not make it a security sandbox.
+The SDK and its service remain subject to their rights holders' terms. Neither
+the api-enhanced MIT license, jsdom's MIT license nor the application's GPL
+grants a license to redistribute that SDK. No SDK redistribution permission is
+asserted by this notice.
+
+### jsdom production dependencies
+
+The root `package-lock.json` records the exact versions, registry URLs and
+integrities. Its installed token-provider closure contains 63 npm package
+instances, including nested `rrweb-cssom` 0.8.0 and `entities` 6.0.1 rather than
+substituting the versions used by other workspaces. Declared licenses are:
+
+- MIT: `jsdom` 24.1.3 (Copyright (c) 2010 Elijah Insua) and 55 other package
+  instances in this closure. Their original notices identify their respective
+  copyright holders.
+- MIT-0: `@csstools/color-helpers` 5.1.0, Copyright CSSTools Contributors.
+- ISC: `lru-cache` 10.4.3 and `saxes` 6.0.0.
+- BSD-2-Clause: `entities` 6.0.1 under `parse5` and `webidl-conversions` 7.0.0.
+- BSD-3-Clause: `tough-cookie` 4.1.4, Copyright (c) 2015, Salesforce.com, Inc.
+- Apache-2.0: `xml-name-validator` 5.0.0.
+
+The common runtime packager preserves the installed package manifests and
+original license files byte-for-byte, including `LICENSE.txt`, `LICENSE.md`,
+`LICENSE-MIT.txt`, `LICENCE.md`, `License` and `license.md`. Those files contain
+the complete license texts for 62 of the 63 package instances and remain in
+both platform runtime payloads; no duplicate collection of those texts is added.
+
+The `saxes` 6.0.0 npm package omits its license file. Its upstream
+[`v6.0.0/LICENSE`](https://github.com/lddubeau/saxes/blob/v6.0.0/LICENSE), retrieved
+on 2026-11-10, grants ISC terms with Copyright (c) Contributors and retains sax's
+Copyright (c) Isaac Z. Schlueter and Contributors. The existing
+`npm-node-compat-ISC.txt` preserves both attributions with the shared ISC terms.
+Distributions must retain it together with this notice and `api-enhanced-MIT.txt`.
+
+The optional `canvas`, `bufferutil` and `utf-8-validate` peers are not installed
+or part of this closure. No native addon, canvas or WebAssembly dependency is
+authorized by these license declarations.
 
 ## QR Code generator — MIT
 

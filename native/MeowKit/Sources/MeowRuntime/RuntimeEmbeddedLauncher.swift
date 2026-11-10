@@ -20,7 +20,7 @@ public struct RuntimePayload: Sendable, Equatable {
               let manifest = try? JSONDecoder().decode(Manifest.self, from: data),
               manifest.schemaVersion == 1, manifest.status == "complete", manifest.product == "aggregate",
               manifest.platform == "ios", manifest.transport == "runtime.http.v1",
-              manifest.assemblyProfile == "common-native", manifest.modules == ["music", "cat", "source", "tmdb"],
+              manifest.assemblyProfile == "common-native", manifest.modules == ["music", "cat", "source", "tmdb", "netease"],
               Self.safe(manifest.entry) else {
             throw RuntimeLaunchError.payloadUnavailable
         }

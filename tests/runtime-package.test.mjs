@@ -90,6 +90,7 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   add('packages/source-runtime', '@meowfilm/source-runtime', '0.1.0',
     { files: ['src'] }, true);
   add('packages/pan-runtime', '@meowfilm/pan-runtime', '0.1.0', { files: ['src'] }, true);
+  add('packages/netease-token', '@meowfilm/netease-token', '0.1.0', { files: ['src'] }, true);
   add('packages/unused-core', '@meowfilm/unused-core', '0.2.0',
     { dependencies: { 'music-lib': '~1.0.0' } }, true);
   add('packages/inactive-core', '@meowfilm/inactive-core', '0.1.0',
@@ -119,6 +120,7 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   file('apps/runtime/modules/cat-script.mjs', sourceCode);
   file('apps/runtime/modules/source-runtime.mjs', sourceCode);
   file('apps/runtime/modules/pan-runtime.mjs', sourceCode);
+  file('apps/runtime/modules/netease-token.mjs', sourceCode);
   for (const path of ['entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
     'modules/metadata-data.mjs', 'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
     'modules/metadata/tmdb.mjs', 'modules/metadata/douban.mjs']) {
@@ -184,11 +186,11 @@ test('common runtime packaging stages only the script dependency closure with ex
       'app/modules/cat-script.mjs', 'app/modules/metadata-data.mjs', 'app/modules/metadata/douban.mjs',
       'app/modules/metadata/network.mjs', 'app/modules/metadata/settings.mjs', 'app/modules/metadata/tmdb.mjs',
       'app/modules/music-script.mjs',
-      'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs',
+      'app/modules/netease-token.mjs', 'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs',
       'app/pan-entry.mjs']);
   assert.deepEqual(manifest.dependencies.map(p => p.path).sort(), [
     'node_modules/@meowfilm/runtime-bridge', 'node_modules/@meowfilm/script-host',
-    'node_modules/@meowfilm/source-runtime', 'node_modules/@meowfilm/pan-runtime',
+    'node_modules/@meowfilm/source-runtime', 'node_modules/@meowfilm/pan-runtime', 'node_modules/@meowfilm/netease-token',
     'node_modules/shared', 'node_modules/host-lib', 'node_modules/peer-lib',
     'node_modules/fixture-lib', 'node_modules/fixture-lib/node_modules/shared', 'node_modules/@fixture/token',
     'node_modules/music-lib', 'node_modules/@meowfilm/script-host/node_modules/fixture-dom',
@@ -595,6 +597,21 @@ test('jsdom cannot silently enter the App script payload', async () => {
   f.add('node_modules/jsdom', 'jsdom', '26.1.0');
   f.update('packages/script-host', { dependencies: { jsdom: '26.1.0' } });
   await fails(f, 'PRODUCT_CLOSURE', 'aggregate');
+});
+
+test('only the token owner may package the exact Node 18 compatible jsdom', async () => {
+  const accepted = fixture();
+  accepted.add('node_modules/jsdom', 'jsdom', '24.1.3');
+  accepted.update('packages/netease-token', { dependencies: { jsdom: '24.1.3' } });
+  const manifest = await accepted.pack();
+  assert.ok(manifest.dependencies.some(value => value.name === 'jsdom' && value.version === '24.1.3'));
+  assert.ok(manifest.files.some(value => value.path === 'node_modules/jsdom/LICENSE'));
+  for (const [owner, version] of [['script-host', '24.1.3'], ['netease-token', '26.1.0']]) {
+    const denied = fixture();
+    denied.add('node_modules/jsdom', 'jsdom', version);
+    denied.update(`packages/${owner}`, { dependencies: { jsdom: version } });
+    await fails(denied, 'PRODUCT_CLOSURE', 'aggregate');
+  }
 });
 
 test('unselected package contents never enter the App payload', async () => {

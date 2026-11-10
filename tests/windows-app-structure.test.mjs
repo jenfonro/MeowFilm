@@ -31,6 +31,7 @@ function fixture(t) {
   write('apps/runtime/modules/cat-script.mjs', 'export {};');
   write('apps/runtime/modules/source-runtime.mjs', 'export {};');
   write('apps/runtime/modules/pan-runtime.mjs', 'export {};');
+  write('apps/runtime/modules/netease-token.mjs', 'export {};');
   for (const file of metadataFiles) write(`apps/runtime/${file}`, 'export {};');
   write('apps/windows/runtime/bootstrap.mjs', "import { Socket } from 'node:net';");
   write('apps/windows/runtime/entries/aggregate.mjs',
@@ -66,7 +67,7 @@ test('shared metadata sources and neutral HTTP imports fit the exact runtime inv
   assert.deepEqual(result.sourceFiles.filter(path => path.startsWith('apps/runtime/')), [
     'apps/runtime/bootstrap.mjs', 'apps/runtime/client.mjs', 'apps/runtime/contracts.mjs', 'apps/runtime/entry.mjs',
     'apps/runtime/modules/cat-script.mjs', ...metadataFiles.map(file => `apps/runtime/${file}`),
-    'apps/runtime/modules/music-script.mjs', 'apps/runtime/modules/pan-runtime.mjs',
+    'apps/runtime/modules/music-script.mjs', 'apps/runtime/modules/netease-token.mjs', 'apps/runtime/modules/pan-runtime.mjs',
     'apps/runtime/modules/source-candidates.mjs', 'apps/runtime/modules/source-runtime.mjs',
     'apps/runtime/pan-entry.mjs',
   ]);

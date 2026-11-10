@@ -19,10 +19,11 @@ public static partial class MusicNativeCatalogTests
             yield return new("Native catalog explicit typed catalog route " + route, () => PersonalRoute(route));
         yield return new("Native catalog artist cancellation remains owned until the typed read settles", ArtistCancellation);
         yield return new("Native catalog rejects implicit platform unknown routes and malformed fields", InvalidRequests);
-        yield return new("Native catalog complete multi-page save has a single durable handoff", CompleteSave);
+        foreach (var test in NetworkPlaylistCases()) yield return test;
+        yield return new("Native catalog reference save does not request or persist playlist members", ReferenceSave);
         yield return new("Native catalog complete multi-page queue selection and source context", CompleteQueue);
         yield return new("Native catalog full playlist resolves preview selection by identity and refuses missing songs", CompleteQueueByIdentity);
-        yield return new("Native catalog empty playlist saves but cannot replace queue", Empty);
+        yield return new("Native catalog empty reference saves but cannot replace queue", Empty);
         yield return new("Native catalog duplicate member rejects while equal recording IDs remain legal", Duplicates);
         yield return new("Native catalog failed final page leaves existing queue and library unchanged", TailFailure);
         foreach (string defect in new[] { "identity", "page", "length", "total", "snapshot", "name", "strength", "more", "continuation" })
@@ -383,32 +384,33 @@ public static partial class MusicNativeCatalogTests
         Error(await f.Run("personal.aggregate", new { platform = "wy" }), "METHOD_UNAVAILABLE");
         Check(f.Platform.Calls.Length == 0 && f.Store.Writes == 0);
     }
-    private static async Task CompleteSave()
+    private static async Task ReferenceSave()
     {
         await using var f = new Fixture();
-        var stage = await f.Prepare(); Check(N(stage, "count") == 235 && f.Store.Writes == 0);
-        Check(f.Platform.Calls.Select(c => ((MusicPlaylistRequest)c.Request!).Page).SequenceEqual([1, 2, 3]));
-        Check(((MusicPlaylistRequest)f.Platform.Calls[0].Request!).Snapshot is null);
-        Check(f.Platform.Calls.Skip(1).All(c => ((MusicPlaylistRequest)c.Request!).Snapshot == S(stage, "snapshot")));
-        var saved = Ok(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "save", name = "Saved complete" }));
+        var saved = Ok(await f.Run("playlist.save", new { platform = "wy", id = "42", name = "Saved reference", count = 235 }));
         Check(f.Store.Writes == 1 && N(saved.GetProperty("collection"), "count") == 235);
-        var songs = new List<JsonElement>();
-        for (int offset = 0; offset < 235; offset += 100)
-        {
-            var detail = Ok(await f.Library.ExecuteAsync("music.library.detail",
-                new { id = S(saved.GetProperty("collection"), "id"), offset, limit = 100 }));
-            Check(N(detail, "total") == 235);
-            songs.AddRange(detail.GetProperty("songs").EnumerateArray().Select(song => song.Clone()));
-        }
-        Check(songs.Count == 235 && MusicSongFixture.NativeId(songs[234]) == NativeId("wy", 234));
-        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "save" }), "CATALOG_TOKEN_EXPIRED");
+        Check(f.Platform.Calls.Length == 0 && S(saved.GetProperty("collection"), "kind") == "network");
+        Check(saved.GetProperty("localSaved").GetBoolean() && S(saved.GetProperty("sync"), "state") == "local-only");
+        var duplicate = Ok(await f.Run("playlist.save", new { platform = "wy", id = "42", name = "Saved reference", count = 235 }));
+        Check(S(duplicate.GetProperty("collection"), "id") == S(saved.GetProperty("collection"), "id") && f.Store.Writes == 1);
+        var snapshot = await f.Library.ReadLibrarySyncAsync();
+        Check(snapshot.Library.GetProperty("songs").EnumerateObject().Count() == 0 &&
+            snapshot.Library.GetProperty("collections").GetArrayLength() == 1 &&
+            snapshot.Library.GetProperty("networkPlaylists").GetArrayLength() == 1);
+        Error(await f.Library.ExecuteAsync("music.library.detail", new { id = S(saved.GetProperty("collection"), "id") }), "READ_ONLY");
         await using var reader = new MusicLibraryOwner(f.Store);
         Check(N(Ok(await reader.ExecuteAsync("music.library.list")), "total") == 2);
+        Check(S(Ok(await reader.ExecuteAsync("music.library.network.get", new { platform = "wy", id = "42" }))
+            .GetProperty("collection"), "remoteId") == "42");
     }
     private static async Task CompleteQueue()
     {
         await using var f = new Fixture();
         var before = await f.Queue(); var stage = await f.Prepare();
+        Check(N(stage, "count") == 235 && f.Store.Writes == 0);
+        Check(f.Platform.Calls.Select(c => ((MusicPlaylistRequest)c.Request!).Page).SequenceEqual([1, 2, 3]));
+        Check(((MusicPlaylistRequest)f.Platform.Calls[0].Request!).Snapshot is null);
+        Check(f.Platform.Calls.Skip(1).All(c => ((MusicPlaylistRequest)c.Request!).Snapshot == S(stage, "snapshot")));
         var reply = Ok(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", index = 101,
             expectedVersion = N(before, "version"), expectedSongId = S(Song("wy", 101), "songId") }));
         var queue = await f.Queue();
@@ -418,6 +420,9 @@ public static partial class MusicNativeCatalogTests
         var context = queue.GetProperty("current").GetProperty("context");
         Check(!context.TryGetProperty("heartbeatPlaylistId", out _) &&
             !context.TryGetProperty("heartbeatAccountId", out _), "ordinary playlists carry no official heartbeat qualification");
+        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", index = 101,
+            expectedVersion = N(queue, "version") }), "CATALOG_TOKEN_EXPIRED");
+        Check(f.Store.Writes == 1 && (await f.Queue()).GetRawText() == queue.GetRawText());
     }
     private static async Task CompleteQueueByIdentity()
     {
@@ -437,7 +442,7 @@ public static partial class MusicNativeCatalogTests
         await using var f = new Fixture(); f.Platform.Total = 0;
         var stage = await f.Prepare(); Check(N(stage, "count") == 0);
         Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }), "INVALID_REQUEST");
-        var saved = Ok(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "save" }));
+        var saved = Ok(await f.Run("playlist.save", new { platform = "wy", id = "42", name = "Empty reference", count = 0 }));
         Check(N(saved.GetProperty("collection"), "count") == 0 && f.Store.Writes == 1);
     }
     private static async Task Duplicates()
@@ -502,7 +507,7 @@ public static partial class MusicNativeCatalogTests
         if (defect == "none")
         {
             Ok(reply);
-            Ok(await f.Run("playlist.commit", new { token = S(reply, "token"), action = "save" }));
+            Ok(await f.Run("playlist.commit", new { token = S(reply, "token"), action = "play", expectedVersion = 0 }));
             Check(f.Store.Writes == 1);
         }
         else { Error(reply, defect == "failure" ? "INVALID_RESPONSE" : "SNAPSHOT_CHANGED"); Check(f.Store.Writes == 0); }
@@ -582,8 +587,8 @@ public static partial class MusicNativeCatalogTests
         Check(Ok(await f.Run("playlist.discard", new { token = S(a, "token") })).GetProperty("discarded").GetBoolean());
         Check(!Ok(await f.Run("playlist.discard", new { token = S(a, "token") })).GetProperty("discarded").GetBoolean());
         var c = await f.Prepare(); f.Clock.Advance(TimeSpan.FromMinutes(1));
-        Error(await f.Run("playlist.commit", new { token = S(b, "token"), action = "save" }), "CATALOG_TOKEN_EXPIRED");
-        Error(await f.Run("playlist.commit", new { token = S(c, "token"), action = "save" }), "CATALOG_TOKEN_EXPIRED");
+        Error(await f.Run("playlist.commit", new { token = S(b, "token"), action = "play", expectedVersion = 0 }), "CATALOG_TOKEN_EXPIRED");
+        Error(await f.Run("playlist.commit", new { token = S(c, "token"), action = "play", expectedVersion = 0 }), "CATALOG_TOKEN_EXPIRED");
         await f.Prepare(); await f.Prepare();
     }
     private static async Task PreparingSlots()
@@ -614,10 +619,10 @@ public static partial class MusicNativeCatalogTests
         await using var f = new Fixture(); f.Platform.Total = 1;
         var a = await f.Prepare(); var b = await f.Prepare();
         f.Store.Block();
-        var writing = f.Run("playlist.commit", new { token = S(a, "token"), action = "save" });
+        var writing = f.Run("playlist.commit", new { token = S(a, "token"), action = "play", expectedVersion = 0 });
         await f.Store.Entered!.Task;
         using var cancel = new CancellationTokenSource();
-        var queued = f.Run("playlist.commit", new { token = S(b, "token"), action = "save" }, cancel.Token);
+        var queued = f.Run("playlist.commit", new { token = S(b, "token"), action = "play", expectedVersion = 0 }, cancel.Token);
         await f.Prepare();
         cancel.Cancel(); Error(await queued, "CANCELLED");
         await f.Prepare();
@@ -664,7 +669,7 @@ public static partial class MusicNativeCatalogTests
         f.Platform.Handler = async c => { entered.TrySetResult(); await release.Task; return Page((MusicPlaylistRequest)c.Request!, 1); };
         var late = f.Run("playlist.prepare", new { platform = "wy", id = "43" });
         await entered.Task; f.Owner.Invalidate("wy"); release.TrySetResult(); Error(await late, "STALE_SESSION");
-        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "save" }), "CATALOG_TOKEN_EXPIRED");
+        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }), "CATALOG_TOKEN_EXPIRED");
         Check(f.Platform.Invalidations.SequenceEqual(["wy"]) && f.Store.Writes == 0);
         f.Platform.Handler = null; await f.Prepare(); await f.Prepare();
     }
@@ -674,7 +679,7 @@ public static partial class MusicNativeCatalogTests
         var stage = await f.Prepare(); f.Store.Block();
         var other = f.Library.CreatePlaylistAsync("Other user action", [Song("wy", 99)]);
         await f.Store.Entered!.Task;
-        var queued = f.Run("playlist.commit", new { token = S(stage, "token"), action = "save" });
+        var queued = f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 });
         f.Owner.Invalidate("wy"); Error(await queued, "STALE_SESSION");
         f.Store.Release!.TrySetResult(); Ok(await other); Check(f.Store.Writes == 1);
     }
@@ -682,7 +687,7 @@ public static partial class MusicNativeCatalogTests
     {
         await using var f = new Fixture(); f.Platform.Total = 1; var stage = await f.Prepare(); f.Store.Block();
         using var cancel = new CancellationTokenSource();
-        var writing = f.Run("playlist.commit", new { token = S(stage, "token"), action = "save" }, cancel.Token);
+        var writing = f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }, cancel.Token);
         await f.Store.Entered!.Task; cancel.Cancel(); f.Store.Release!.TrySetResult();
         Ok(await writing); Check(f.Store.WriteWasUncancellable && f.Store.Writes == 1);
     }
@@ -690,15 +695,16 @@ public static partial class MusicNativeCatalogTests
     {
         await using var f = new Fixture(); f.Platform.Total = 1;
         var stage = await f.Prepare(); f.Store.Failure = after ? 2 : 1;
-        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "save" }), "COMMIT_UNKNOWN");
-        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "save" }), "CATALOG_TOKEN_EXPIRED");
+        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }), "COMMIT_UNKNOWN");
+        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }), "CATALOG_TOKEN_EXPIRED");
         var next = await f.Prepare();
-        Error(await f.Run("playlist.commit", new { token = S(next, "token"), action = "save" }), "PENDING_WRITE");
+        Error(await f.Run("playlist.commit", new { token = S(next, "token"), action = "play", expectedVersion = 0 }), "PENDING_WRITE");
         Check(f.Store.Writes == 1 && (f.Store.Bytes is not null) == after);
         await f.Library.ReconcileAsync();
-        Check(N(Ok(await f.Library.ExecuteAsync("music.library.list")), "total") == (after ? 2 : 1));
+        Check(N(Ok(await f.Library.ExecuteAsync("music.library.list")), "total") == 1 &&
+            N(await f.Queue(), "total") == (after ? 1 : 0));
         var explicitRetry = await f.Prepare();
-        Ok(await f.Run("playlist.commit", new { token = S(explicitRetry, "token"), action = "save" }));
+        Ok(await f.Run("playlist.commit", new { token = S(explicitRetry, "token"), action = "play", expectedVersion = N(await f.Queue(), "version") }));
         Check(f.Store.Writes == 2);
     }
     private static async Task StorageConflict()
@@ -707,7 +713,7 @@ public static partial class MusicNativeCatalogTests
         Ok(await f.Library.ExecuteAsync("music.library.list")); // Capture missing fingerprint.
         f.Store.Bytes = Encoding.UTF8.GetBytes("{\"version\":1,\"entries\":[]}");
         var external = f.Store.Bytes.ToArray(); var stage = await f.Prepare();
-        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "save" }), "STORAGE_CONFLICT");
+        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }), "STORAGE_CONFLICT");
         Check(f.Store.Bytes.SequenceEqual(external) && f.Store.Writes == 0);
     }
     private static async Task CloseRead()
@@ -723,7 +729,7 @@ public static partial class MusicNativeCatalogTests
     private static async Task CloseCommit()
     {
         await using var f = new Fixture(); f.Platform.Total = 1; var stage = await f.Prepare(); f.Store.Block();
-        var writing = f.Run("playlist.commit", new { token = S(stage, "token"), action = "save" });
+        var writing = f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 });
         await f.Store.Entered!.Task;
         var closing = f.Owner.DisposeAsync().AsTask(); await Until(() => f.Clock.HasTimer(TimeSpan.FromSeconds(30)));
         Check(!closing.IsCompleted); f.Store.Release!.TrySetResult(); Ok(await writing); await closing;

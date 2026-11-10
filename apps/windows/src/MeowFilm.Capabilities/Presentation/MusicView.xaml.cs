@@ -149,6 +149,11 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
             module.IsCollectionPage ? [] :
             module.IsLocalLibraryPage ? [refreshAction] : []) { SearchTargetId = "music" };
     public event EventHandler? HeaderChanged;
+    private async void NetworkPlaylist_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        await module.ToggleNetworkPlaylistAsync();
+    }
     private async Task RenamePlaylistNameAsync(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();

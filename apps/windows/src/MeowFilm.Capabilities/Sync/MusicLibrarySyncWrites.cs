@@ -12,7 +12,6 @@ internal sealed partial class MusicLibrarySyncEngine
         SyncRemote? created = null;
         if (bindings.Length == 0 && !LJ.B(c["deleted"]))
         {
-            if (SubscribedOnly(c)) return;
             LJ.Require(S(c["kind"]) != "favorites", "FAVORITES_UNCONFIRMED");
             var fresh = await adapter.ReadAsync(Kinds(platform)); Validate(fresh, adapter);
             adapter.CheckWriteCapability("create");
@@ -25,7 +24,6 @@ internal sealed partial class MusicLibrarySyncEngine
         foreach (string key in bindings.Select(BindingKey).ToArray())
         {
             c = Collection(cid); var b = Binding(cid, key);
-            if (!LJ.B(b["writable"])) continue;
             var current = created is not null && created.Id == S(b["id"])
                 ? created
                 : initial.Collections.FirstOrDefault(remote => remote.Id == S(b["id"]));
@@ -111,6 +109,11 @@ internal sealed partial class MusicLibrarySyncEngine
         var w = LJ.Object(state["pending"]); string platform = S(w["platform"]), cid = S(w["collectionId"]), operation = S(w["operation"]);
         LJ.Require(adapters.TryGetValue(platform, out var adapter) && adapter.AccountId == S(w["accountId"]), "PENDING_ACCOUNT_CHANGED");
         await Guard();
+        if (operation is "subscribe" or "unsubscribe")
+        {
+            await RecoverSubscriptionPending(adapter);
+            return null;
+        }
         if (operation == "create")
         {
             var data = await adapter.ReadAsync(Kinds(platform)); Validate(data, adapter);

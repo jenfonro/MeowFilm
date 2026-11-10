@@ -64,8 +64,8 @@ extension NativeMusicService {
         _ = try musicText(request.collection.title, maximum: 600)
         try musicRequire(request.snapshot.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil)
         let own = epoch, revision = publicCollectionRevision, until = now().addingTimeInterval(600), id = UUID()
-        // This entry is reached only by explicit play/save, not by displaying
-        // a detail page. Resolve one complete snapshot before issuing authority
+        // This entry is reached only by explicit playback/filter actions, not by
+        // displaying a detail page. Resolve one complete snapshot before issuing authority
         // so its visibility loss is available to every action consumer.
         let snapshot = try await publicQueueSnapshot(request)
         try checkPublicQueue(epoch: own, until: until)
@@ -92,7 +92,8 @@ extension NativeMusicService {
         publicQueueSources[id] = (request.collection.id, authorization, reader, bytes, until)
         return MusicRemoteQueueSource(context: .init(kind: request.collection.kind == .album ? .album : .playlist,
             id: request.collection.id, title: snapshot.collection.title, platform: request.collection.platform.rawValue,
-            unavailableCount: (snapshot.collection.count ?? snapshot.tracks.count) - snapshot.tracks.count),
+            unavailableCount: (snapshot.collection.count ?? snapshot.tracks.count) - snapshot.tracks.count,
+            collection: snapshot.collection),
             authorization: authorization, loadPage: { try await reader.page($0) },
             validate: { [weak self] in
                 guard let self else { throw MusicServiceError.closed }

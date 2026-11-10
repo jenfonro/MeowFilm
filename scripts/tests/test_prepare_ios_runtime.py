@@ -116,9 +116,10 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                 self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), {"status": "complete"})
                 self.assertEqual([p.name for p in target.parent.iterdir()], ["Runtime"])
 
-    def test_payload_requires_the_exact_four_module_app_before_replacing_previous_payload(self):
-        expected_modules = ["music", "cat", "source", "tmdb"]
+    def test_payload_requires_the_exact_five_module_app_before_replacing_previous_payload(self):
+        expected_modules = ["music", "cat", "source", "tmdb", "netease"]
         for modules in [
+            ["music", "cat", "source", "tmdb"],
             expected_modules, ["music", "cat", "source"], ["music", "cat", "source", "douban"],
             ["music", "cat", "source", "pan"], ["music", "cat", "source", "unknown"],
             expected_modules + ["douban"], expected_modules + ["pan"], expected_modules + ["tmdb"],

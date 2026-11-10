@@ -8,7 +8,7 @@
 - `MusicCapability.SearchOnlineAsync` 是在线综合入口；独立曲库搜索原入口保留。`SearchResultsPage` 拥有四分类、模式与滚动投影，影视状态仍由 `FilmSearchService`／`FilmSearchSession` 持有。
 - `FilmSourceService` 实现 `IFilmSearchSources`，在读取当前 Cat 状态并等待已有 starting 结算后选取可搜索源；`CurrentSearchSources` 是无 I/O 的当前可用集合。实际请求通过既有 `CatScriptTransport` 发出 `search`，携带原 `wd` 和本源 `page`，并检查调用前后的安装／代次。
 - Capabilities 将共享文件嵌为 `MeowFilm.FilmSearch.js`，使用 `NativeJavaScriptJsonEngine` 执行；不经 Node、HTTP runner 或另一份 C# 搜索算法。正则来自既有 `FilmRuleService` 已保存快照。MSBuild 继续构建并复制原生 `meowfilm_js.dll`。
-- `FilmMetadataService` 实现 `IFilmSearchMetadata`，实际 App 注入同一 runtime 的 `tmdb.data.request`；首次综合搜索与电影／剧集详情使用 `zh-CN`、`w500`。平台 entry／manifest／原生 describe 严格装配 music／cat／source／tmdb 四模块。原始 JSON 保留，空凭据仍正常请求显式配置代理；失败不伪造空成功。
+- `FilmMetadataService` 实现 `IFilmSearchMetadata`，实际 App 注入同一 runtime 的 `tmdb.data.request`；首次综合搜索与电影／剧集详情使用 `zh-CN`、`w500`。当前平台 entry／manifest／原生 describe 严格装配 music／cat／source／tmdb／netease 五模块。原始 JSON 保留，空凭据仍正常请求显式配置代理；失败不伪造空成功。
 - `IRuntimeImageClient` 经当前会话读取 `/v1/tmdb/images/...`，由 AppHost 注入 `ArtworkService` 中性可信字节口；相对引用就是缓存键，保持原生 4 MiB 编码图片与解码／像素预算，普通公网 `ArtworkHttp` 限制不变。
 - 生产端点／凭据来自运行器配置；没有读取其他任务私密数据。真实公网联调仍需用户提供可用配置或授权来源，以下合成 HTTP 真实运行器用例不代表公网通过。
 
@@ -169,7 +169,7 @@ try {
 
 ## TMDB 真实接通增量测试
 
-以下为已编写、**本块尚未执行**的准确入口。`FilmMetadataRuntimeTests` 必须使用当前 Windows 四模块 entry 的真实 bundle（目录下的 `aggregate`），由主会话正常 bootstrap／ensure-runtime-native 后准备；需要 Node addon 与原生 QuickJS DLL，不能以旧三模块 bundle 或 DTO 替身替代。沿用 `MEOWFILM_TEST_NODE`、`MEOWFILM_TEST_DATA_ROOT`、`MEOWFILM_TEST_RUNTIME_ROOT`；固定 bundle 根由主会话使用 `tmp/test-results/film-search/bundles`。
+以下为已编写、**本块尚未执行**的准确入口。`FilmMetadataRuntimeTests` 必须使用当前 Windows 五模块 entry 的真实 bundle（目录下的 `aggregate`），由主会话正常 bootstrap／ensure-runtime-native 后准备；需要 Node addon 与原生 QuickJS DLL，不能以旧三／四模块 bundle 或 DTO 替身替代。沿用 `MEOWFILM_TEST_NODE`、`MEOWFILM_TEST_DATA_ROOT`、`MEOWFILM_TEST_RUNTIME_ROOT`；固定 bundle 根由主会话使用 `tmp/test-results/film-search/bundles`。
 
 ```text
 --group FilmMetadataRuntimeTests RuntimeImageTests FilmMetadataConsumerTests
@@ -242,14 +242,14 @@ TMDB admitted settings save drains before close and never restores a revoked sea
 --case "film-presentation: more opens data while all cards open the playback page"
 ```
 
-其中 real Node 两项依赖同一四模块 bundle／addon，其余依赖判断见各组原说明。`AppRuntimeClientTests` 新增准确 case：
+其中 real Node 两项依赖同一当前五模块 bundle／addon，其余依赖判断见各组原说明。`AppRuntimeClientTests` 新增准确 case：
 
 ```text
 app-runtime: cancelled image waits for physical bytes and clears rejected pixels
 app-runtime: shutdown epoch fences a late image and clears its returned bytes
 ```
 
-`RuntimeHttpClientTests` 新增 `runtime-http: description rejects ` 前缀下的 `missing TMDB module`、`TMDB old version`、`TMDB wrong contract`、`TMDB missing operation`，成功 describe 方法数从 32 更新为 35。App 身份与所有实际 runtime 测试夹具由三模块更新为四模块，这是验收 11 的必要预期调整；既有失败、取消、资源、来源、音乐和 UI 断言不删除、不放宽。
+TMDB 阶段的 `RuntimeHttpClientTests` 新增 `runtime-http: description rejects ` 前缀下的 `missing TMDB module`、`TMDB old version`、`TMDB wrong contract`、`TMDB missing operation`，成功 describe 方法数从 32 更新为 35。App 身份与所有实际 runtime 测试夹具当时由三模块更新为四模块，这是验收 11 的必要预期调整；以下文件／验收映射仍记录该阶段。当前网易 token 接入后精确五模块、36 个方法，见[App 运行器](app-runtime.md)；既有失败、取消、资源、来源、音乐和 UI 断言不删除、不放宽。
 
 纯传输／Artwork 无产品窗口或焦点要求；上列两项既有播放／呈现回归继续使用 `ShowActivated=false` 的屏幕外窗口。以上定向范围不是全量矩阵，不重跑无关音乐真实网络测试。App 需正常增量构建，包装／共享门禁由对应 owner 统一安排。本块没有执行构建、测试或远端操作；真实公网配置与账号权限仍未覆盖。
 

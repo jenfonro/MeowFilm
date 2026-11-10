@@ -338,7 +338,7 @@ public static class FilmMetadataRuntimeTests
         internal static async Task<RuntimeHost> OpenAsync(string root)
         {
             string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
-                ?? throw new InvalidOperationException("A real four-module Windows runtime bundle is required.");
+                ?? throw new InvalidOperationException("A real five-module Windows runtime bundle is required.");
             var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId, AppIdentity.ScriptModules);
             var host = new RuntimeHost(root, bundle);
             try { await host.Metadata.GetSettingsAsync(); return host; }

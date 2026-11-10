@@ -81,6 +81,37 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         await service.close()
     }
 
+    func testLocalFusedFavoritesNeedNeteaseIdentityAndStillUseOfficialMembershipValidation() async throws {
+        for hasIdentity in [false, true] {
+            var document = try MusicDocument(fixtureDocument(count: 1), runID: "fixture")
+            var rows = document.queue["entries"].array
+            let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
+                "tx", id: "LocalMID", title: "Song 100", artist: "Synthetic"))
+            rows[0]["song"] = song; rows[0]["key"] = song["songId"]
+            rows[0]["context"] = .obj([("collectionId", .string("favorites")), ("sourceTitle", .string("我的收藏"))])
+            document.queue["entries"] = .array(rows)
+            document.queue["source"] = .obj([("id", .string("favorites")), ("title", .string("我的收藏"))])
+            let owner = SimilarModeAccountFixture([["301"]])
+            await owner.failNext(.sourceUnavailable)
+            let service = try await NativeMusicFixture.service(
+                NativeMusicMemoryDocument(try document.encode(changed: ["queue", "playback"])), accounts: owner)
+            if hasIdentity {
+                try await service.retainSongMetadata([MusicModel.normalize(SimilarModeAccountFixture.track("100"))])
+            }
+            let eligible = try await service.canEnterSimilarMode()
+            XCTAssertEqual(eligible, hasIdentity)
+            let before = try await service.queue()
+            do { _ = try await service.enterSimilarMode(); XCTFail("membership rejection must not replace the queue") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .sourceUnavailable) }
+            let requests = await owner.requests
+            XCTAssertEqual(requests, hasIdentity ? [.heartbeat(lastID: "100", fromHome: false, context: nil)] : [])
+            let after = try await service.queue()
+            XCTAssertEqual(after.entries.map(\.id), before.entries.map(\.id))
+            XCTAssertEqual(after.currentId, before.currentId)
+            await service.close()
+        }
+    }
+
     func testSimilarRestoreAndTailAppendKeepLargeQueueReturnQueueBatchesAndAttempts() async throws {
         var document = try MusicDocument(fixtureDocument(count: 2001), runID: "fixture")
         let original = document.queue["entries"].array

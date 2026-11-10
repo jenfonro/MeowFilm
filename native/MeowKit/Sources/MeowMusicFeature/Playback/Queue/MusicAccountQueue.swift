@@ -114,12 +114,16 @@ public struct MusicRemoteQueueContext: Sendable, Equatable {
     public let title: String
     public let platform: String
     public let unavailableCount: Int
+    /// Explicit public identity; account handles and formatted source IDs are not
+    /// inferred to be public playlist IDs.
+    public let collection: MusicPublicBrowseCollection?
     public var availabilityNotice: String? {
         unavailableCount > 0 ? "\(unavailableCount) 首歌曲当前不可见或不可用" : nil
     }
-    public init(kind: Kind, id: String, title: String, platform: String, unavailableCount: Int = 0) {
+    public init(kind: Kind, id: String, title: String, platform: String, unavailableCount: Int = 0,
+                collection: MusicPublicBrowseCollection? = nil) {
         self.kind = kind; self.id = id; self.title = title; self.platform = platform
-        self.unavailableCount = max(0, unavailableCount)
+        self.unavailableCount = max(0, unavailableCount); self.collection = collection
     }
 }
 

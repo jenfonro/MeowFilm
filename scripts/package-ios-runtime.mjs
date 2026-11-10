@@ -149,7 +149,7 @@ export async function packageIOSRuntime({
       && manifest.trustedNative[0].package === '@meowfilm/script-host',
     'INVALID_NATIVE_RECEIPT', 'The iOS runtime requires the reviewed embedded framework');
     manifest.entry = `${IOS_OUTPUT}/entries/${product}.mjs`;
-    manifest.modules = ['music', 'cat', 'source', 'tmdb'];
+    manifest.modules = ['music', 'cat', 'source', 'tmdb', 'netease'];
     manifest.platform = 'ios';
     manifest.transport = TRANSPORT;
     manifest.target = target;
@@ -205,6 +205,7 @@ export async function packageIOSRuntime({
       ['../../../runtime/modules/cat-script.mjs', '../../modules/cat-script.mjs'],
       ['../../../runtime/modules/source-runtime.mjs', '../../modules/source-runtime.mjs'],
       ['../../../runtime/modules/metadata-data.mjs', '../../modules/metadata-data.mjs'],
+      ['../../../runtime/modules/netease-token.mjs', '../../modules/netease-token.mjs'],
       ['../bootstrap.mjs', '../bootstrap.mjs'],
     ]);
     for (const relative of ['bootstrap.mjs', 'entries/aggregate.mjs']) {
@@ -223,9 +224,11 @@ export async function packageIOSRuntime({
       appendFile(path, bytes);
       manifest.relocations.push({ source, path, imports: [...imports].map(([from, to]) => ({ from, to })) });
     }
-    const notice = readStable(root, 'LICENSES/NOTICE.md');
-    sourceInputs.push({ path: 'LICENSES/NOTICE.md', sha256: digest(notice) });
-    appendFile('licenses/NOTICE.md', notice);
+    for (const name of ['NOTICE.md', 'api-enhanced-MIT.txt', 'npm-node-compat-ISC.txt']) {
+      const source = `LICENSES/${name}`, bytes = readStable(root, source);
+      sourceInputs.push({ path: source, sha256: digest(bytes) });
+      appendFile(`licenses/${name}`, bytes);
+    }
     manifest.inputs.push(...sourceInputs);
     for (const input of manifest.inputs) {
       check(digest(readStable(root, input.path)) === input.sha256,

@@ -12,11 +12,13 @@ enum MusicAccountSyncRoute {
         case order = "/v1/modify_song_sort"
         case hashMapping = "/v2/album_audio/audio"
         case metadata = "/kmr/v2/audio"
+        case subscriptionInfo = "/v3/get_list_info"
         var router: String? {
             switch self {
             case .create, .add: return nil
             case .hashMapping: return "kmr.service.kugou.com"
             case .metadata: return "openapi.kugou.com"
+            case .subscriptionInfo: return "pubsongs.kugou.com"
             default: return "cloudlist.service.kugou.com"
             }
         }
@@ -32,7 +34,8 @@ enum MusicAccountSyncRoute {
         case "music.163.com":
             return routers.isEmpty && ["/weapi/playlist/create", "/weapi/playlist/remove", "/weapi/radio/like"].contains(request.url.path)
         case "interfacepc.music.163.com":
-            return routers.isEmpty && ["/eapi/batch", "/eapi/playlist/manipulate/tracks"].contains(request.url.path)
+            return routers.isEmpty && ["/eapi/batch", "/eapi/playlist/manipulate/tracks",
+                "/eapi/playlist/subscribe", "/eapi/playlist/unsubscribe"].contains(request.url.path)
         case "gateway.kugou.com":
             guard let route = Kugou(rawValue: request.url.path) else { return false }
             if let router = route.router { return routers.count == 1 && routers.first?.value == router }
@@ -59,7 +62,9 @@ extension KugouMusicAccountAdapter {
             query["p"] = try MusicKugouCrypto.rsaPKCS1(MusicKugouWire.json(["aes": seed, "uid": auth.uid, "token": auth.token]))
             query["key"] = MusicKugouCrypto.paramsKey(seconds)
             if route == .delete { body = Data(body.base64EncodedString().utf8); query["last_area"] = "gztx"; query["last_time"] = String(seconds) }
-        } else if route == .create || route == .add { query["last_area"] = "gztx"; query["last_time"] = String(seconds) }
+        } else if route == .create && (payload["type"] as? Int) == 0 || route == .add {
+            query["last_area"] = "gztx"; query["last_time"] = String(seconds)
+        }
         if !route.cloud && route != .hashMapping { query["signature"] = MusicKugouCrypto.signature(query, body: body) }
         var headers = ["User-Agent": "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi",
             "dfid": dfid, "mid": context.device.mid, "clienttime": String(seconds), "kg-rc": "1", "kg-thash": "5d816a0",

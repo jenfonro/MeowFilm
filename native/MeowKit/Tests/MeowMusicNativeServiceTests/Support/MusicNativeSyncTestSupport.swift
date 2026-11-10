@@ -45,32 +45,39 @@ enum NativeSyncFixture {
 }
 
 actor NativeSyncPeer: MusicNativeAccountProviding, MusicNativeLibrarySyncProviding {
-    enum Fault { case none, lostCreateResponse, failedReadback, acknowledgedWithoutChange, appliedThenThrow, oscillatingRename }
+    enum Fault { case none, lostCreateResponse, failedReadback, acknowledgedWithoutChange, appliedThenThrow, oscillatingRename, notDispatched }
     let platform: MusicAccountPlatform
     private var rows: [MusicLibrarySyncCollection]
+    private var subscriptions: [MusicLibrarySyncSubscription]
     private var revision = 1, next = 600
     private var session: MusicLibrarySyncSession?
     private var uid = "42", scope = "synthetic-install:local-account"
     private var mutations: [MusicLibrarySyncMutation] = []
-    private var reads = 0, begins = 0
+    private var reads = 0, begins = 0, relationshipReads = 0
     private var fault: Fault = .none
     private var readFailure = false
     private var readGate: NativeMusicGate?
+    private var writeGate: NativeMusicGate?
     private var failDocument: NativeMusicMemoryDocument?
-    init(platform: MusicAccountPlatform = .netease, rows: [MusicLibrarySyncCollection] = []) {
-        self.platform = platform; self.rows = rows
+    init(platform: MusicAccountPlatform = .netease, rows: [MusicLibrarySyncCollection] = [],
+         subscriptions: [MusicLibrarySyncSubscription] = []) {
+        self.platform = platform; self.rows = rows; self.subscriptions = subscriptions
     }
-    func configure(fault: Fault = .none, gate: NativeMusicGate? = nil, failDocument: NativeMusicMemoryDocument? = nil) {
-        self.fault = fault; readGate = gate; self.failDocument = failDocument
+    func configure(fault: Fault = .none, gate: NativeMusicGate? = nil, writeGate: NativeMusicGate? = nil,
+                   failDocument: NativeMusicMemoryDocument? = nil) {
+        self.fault = fault; readGate = gate; self.writeGate = writeGate; self.failDocument = failDocument
     }
     func switchAccount(uid: String = "99", scope: String = "synthetic-install:other-account") {
         self.uid = uid; self.scope = scope; session = nil
     }
     func replace(_ rows: [MusicLibrarySyncCollection]) { self.rows = rows; revision += 1 }
+    func replaceSubscriptions(_ subscriptions: [MusicLibrarySyncSubscription]) { self.subscriptions = subscriptions; revision += 1 }
     func calls() -> [MusicLibrarySyncMutation] { mutations }
     func clearCalls() { mutations = [] }
     func counts() -> (Int, Int) { (begins, reads) }
+    func relationshipReadCount() -> Int { relationshipReads }
     func contents() -> [MusicLibrarySyncCollection] { rows }
+    func subscriptionContents() -> [MusicLibrarySyncSubscription] { subscriptions }
     func beginLibrarySync(platform: MusicAccountPlatform) throws -> MusicLibrarySyncSession {
         guard platform == self.platform, session == nil else { throw MusicServiceError.busy }
         let value = MusicLibrarySyncSession(id: UUID(), platform: platform, accountID: uid, scope: scope)
@@ -82,14 +89,34 @@ actor NativeSyncPeer: MusicNativeAccountProviding, MusicNativeLibrarySyncProvidi
     func readLibrarySync(_ value: MusicLibrarySyncSession, kinds: [MusicLibrarySyncKind]) async throws -> MusicLibrarySyncSnapshot {
         try checkLibrarySync(value); reads += 1
         if readFailure { readFailure = false; throw MusicServiceError.upstreamFailed }
-        let snapshot = MusicLibrarySyncSnapshot(accountID: uid, collections: rows.filter { kinds.contains($0.kind) }, revision: String(revision))
+        let snapshot = MusicLibrarySyncSnapshot(accountID: uid, collections: rows.filter { kinds.contains($0.kind) },
+            subscriptions: kinds.contains(.playlist) ? subscriptions : [], revision: String(revision))
         if let readGate { await readGate.wait() } // Deliberately non-cooperative.
         failDocument?.fail(.storageConflict)
         return snapshot
     }
-    func writeLibrarySync(_ value: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) throws -> MusicLibrarySyncWriteResult {
+    func readLibrarySubscriptions(_ value: MusicLibrarySyncSession) async throws -> MusicLibrarySyncSnapshot {
+        try checkLibrarySync(value); relationshipReads += 1
+        if readFailure { readFailure = false; throw MusicServiceError.upstreamFailed }
+        let snapshot = MusicLibrarySyncSnapshot(accountID: uid, collections: [],
+            subscriptions: subscriptions, revision: String(revision))
+        if let readGate { await readGate.wait() }
+        failDocument?.fail(.storageConflict)
+        return snapshot
+    }
+    func writeLibrarySync(_ value: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult {
         try checkLibrarySync(value)
-        if mutation.action == .create {
+        if fault == .notDispatched { return .notDispatched(.upstreamFailed) }
+        if mutation.action.isSubscription {
+            guard mutation.directoryRevision == String(revision), let id = mutation.collectionID,
+                  mutation.before == nil, mutation.members.isEmpty, !rows.contains(where: { $0.id == id }) else {
+                return .notDispatched(.revisionConflict)
+            }
+            let current = subscriptions.first { $0.remoteID == id }
+            guard mutation.action == .subscribe
+                ? current == nil && mutation.beforeSubscription == nil
+                : current != nil && current == mutation.beforeSubscription else { return .notDispatched(.revisionConflict) }
+        } else if mutation.action == .create {
             guard mutation.directoryRevision == String(revision) else { return .notDispatched(.revisionConflict) }
         } else {
             guard rows.first(where: { $0.id == mutation.collectionID })?.revision == mutation.before?.revision else {
@@ -99,7 +126,13 @@ actor NativeSyncPeer: MusicNativeAccountProviding, MusicNativeLibrarySyncProvidi
         mutations.append(mutation); revision += 1
         if fault == .acknowledgedWithoutChange { return .acknowledged(createdID: nil, createdName: nil) }
         var created: String?
-        if mutation.action == .create {
+        if mutation.action.isSubscription {
+            if mutation.action == .subscribe {
+                next += 1
+                subscriptions.append(.init(remoteID: mutation.collectionID!,
+                    relationID: platform == .kugou ? "1:\(next)" : mutation.collectionID!, name: mutation.name!))
+            } else { subscriptions.removeAll { $0.remoteID == mutation.collectionID } }
+        } else if mutation.action == .create {
             next += 1; created = String(next)
             rows.append(NativeSyncFixture.collection(created!, name: mutation.name!, revision: String(revision)))
         } else {
@@ -127,6 +160,7 @@ actor NativeSyncPeer: MusicNativeAccountProviding, MusicNativeLibrarySyncProvidi
             }
         }
         if fault == .failedReadback { readFailure = true; fault = .none }
+        if let writeGate { await writeGate.wait() } // May finish after account/switch revocation.
         if fault == .lostCreateResponse || fault == .appliedThenThrow { throw MusicServiceError.timeout }
         return .acknowledged(createdID: created, createdName: mutation.name)
     }

@@ -92,6 +92,9 @@ enum MusicNeteaseHomeRequest {
             return ("/api/tag/tab/playlists", ["ids": ids.joined(separator: ",")], "eapi")
         case .vipSongs:
             return ("/api/vipnewcenter/app/viptab/recommend/song/list", [:], "eapi")
+        case .heartbeatSeed:
+            // The account adapter resolves this compound read before a single-route recipe is requested.
+            throw MusicServiceError.invalidRequest
         }
     }
 
@@ -103,9 +106,15 @@ extension NeteaseMusicAccountAdapter: MusicNeteaseHomeProvider {
                      authorize: @escaping @Sendable () async throws -> Void) async throws -> Data {
         let own = epoch
         try check(own)
-        let (path, data, crypto) = try MusicNeteaseHomeRequest.specification(input, now: now())
         let context = try context(credential)
         try await authorize(); try check(context, epoch: own)
+        if case .heartbeatSeed = input {
+            let song = try await heartbeatHomeSeed(context, own: own, authorize: authorize)
+            try check(context, epoch: own); try await authorize(); try check(context, epoch: own)
+            return try MusicNeteaseHomePayload.encode(["song": song as Any? ?? NSNull()],
+                secrets: Array(context.cookies.values) + Array(context.device.values))
+        }
+        let (path, data, crypto) = try MusicNeteaseHomeRequest.specification(input, now: now())
         let membershipExpiry: Date?
         if case .vipSongs = input {
             // b900c259 discoveryRequest marks this read vip:true. A missing

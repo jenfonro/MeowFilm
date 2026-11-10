@@ -63,7 +63,8 @@ extension NativeMusicService: MusicSimilarModeServing {
     func heartbeatSource(_ d: MusicDocument) -> Bool {
         guard let row = d.queue["entries"].array.first(where: { $0["id"] == d.queue["currentId"] }) else { return false }
         let source = row["context"]
-        return source["platform"].string == "wy" && source["sourceId"].string == "favorites"
+        return source["collectionId"].string == "favorites" ||
+            (source["platform"].string == "wy" && source["sourceId"].string == "favorites")
     }
     func similarCanEnter(_ d: MusicDocument) -> Bool {
         heartbeatSource(d) && platformEnabled("wy") && accounts is any MusicNativeSimilarModeProviding &&

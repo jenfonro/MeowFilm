@@ -16,6 +16,10 @@ public static partial class RuntimeHttpProtocol
     internal static readonly IReadOnlyDictionary<string, ModuleContract> Modules =
         new Dictionary<string, ModuleContract>(StringComparer.Ordinal)
     {
+        ["netease"] = new("0.1.0", "netease.token.v1", "netease.token.",
+            ["get"],
+            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "TIMEOUT", "NETWORK_ERROR",
+                "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "SDK_FAILURE", "SDK_CLEANUP" }),
         ["tmdb"] = new("0.1.0", "tmdb.data.v1", "tmdb.data.",
             ["settings.get", "settings.update", "request"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR",

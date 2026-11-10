@@ -18,6 +18,9 @@ public partial class MusicPlayerView : UserControl
     private PlayerSurfaceInput? surfaceInput;
     private string fmActionKey = "";
     private long fmPopupGeneration;
+    private string playbackSessionActionKey = "";
+    private long playbackSessionMenuGeneration;
+    private bool returnPlaybackSessionFocus;
     private string modeActionKey = "";
     private long modeMenuGeneration;
     public MusicPlayerView(MusicCapability module, bool showArtwork = true)
@@ -34,7 +37,7 @@ public partial class MusicPlayerView : UserControl
         this.module = module; DataContext = module;
         QualityMenu.DataContext = module;
         ModeMenu.DataContext = module;
-        PlaybackSourceMenu.DataContext = module;
+        PlaybackSessionMenu.DataContext = module;
         Progress.ScrubStarted += (_, _) => BeginProgress();
         Progress.ScrubCancelled += (_, _) => RestoreProgress();
         Progress.ScrubCommitted += async (_, _) =>
@@ -56,8 +59,7 @@ public partial class MusicPlayerView : UserControl
         }
         QualityMenu.Opened += (_, _) => surfaceInput?.Observe(QualityMenu);
         ModeMenu.Opened += (_, _) => surfaceInput?.Observe(ModeMenu);
-        PlaybackSourceMenu.Opened += (_, _) => surfaceInput?.Observe(PlaybackSourceMenu);
-        PlaybackSourceMenu.Closed += (_, _) => { surfaceInput?.LayerClosed(); surfaceInput?.Forget(PlaybackSourceMenu); };
+        PlaybackSessionMenu.Opened += (_, _) => surfaceInput?.Observe(PlaybackSessionMenu);
         IsVisibleChanged += (_, _) => { if (!IsVisible) Deactivate(); };
         Unloaded += (_, _) =>
         {
@@ -65,26 +67,28 @@ public partial class MusicPlayerView : UserControl
             Deactivate();
             surfaceInput?.Dispose(); surfaceInput = null;
         };
-        SizeChanged += (_, _) => MetadataText.MaxWidth = Math.Min(200, Math.Max(30, ActualWidth / 2 - 260));
+        SizeChanged += (_, _) => MetadataText.MaxWidth = Math.Min(200, Math.Max(30, ActualWidth / 2 - 284));
     }
     internal void Deactivate()
     {
+        returnPlaybackSessionFocus = false;
         surfaceInput?.Cancel();
         qualityRequest++;
         QualityMenu.IsOpen = false;
         ModeMenu.IsOpen = false;
-        PlaybackSourceMenu.IsOpen = false;
+        PlaybackSessionMenu.IsOpen = false;
+        playbackSessionActionKey = ""; playbackSessionMenuGeneration++;
         modeActionKey = ""; modeMenuGeneration++;
         SourcePopup.IsOpen = false;
         PlaylistPopup.IsOpen = false;
         VolumePopup.IsOpen = false;
         RatePopup.IsOpen = false;
         FmPopup.IsOpen = false;
-        fmActionKey = "";
+        fmActionKey = ""; fmPopupGeneration++;
         if (MoreButton.ContextMenu is { } menu) menu.IsOpen = false;
         Progress.CancelScrub(); RestoreProgress();
     }
-    private bool LayersOpen() => QualityMenu.IsOpen || ModeMenu.IsOpen || PlaybackSourceMenu.IsOpen || SourcePopup.IsOpen || PlaylistPopup.IsOpen ||
+    private bool LayersOpen() => QualityMenu.IsOpen || ModeMenu.IsOpen || PlaybackSessionMenu.IsOpen || SourcePopup.IsOpen || PlaylistPopup.IsOpen ||
         VolumePopup.IsOpen || RatePopup.IsOpen || FmPopup.IsOpen || MoreButton.ContextMenu?.IsOpen == true;
     private static bool IsBlank(object sender, MouseButtonEventArgs e)
     {
@@ -243,54 +247,87 @@ public partial class MusicPlayerView : UserControl
         ModeMenu.PlacementTarget = ModeButton;
         ModeMenu.IsOpen = true;
     }
-    private void PlaybackSource_Click(object sender, RoutedEventArgs e)
+    private void PlaybackSession_Click(object sender, RoutedEventArgs e) => OpenPlaybackSessionMenu();
+    private void PlaybackSession_ContextMenuOpening(object sender, ContextMenuEventArgs e)
     {
-        if (PlaybackSourceMenu.IsOpen) { PlaybackSourceMenu.IsOpen = false; return; }
-        PlaybackSourceMenu.Items.Clear();
-        string actionKey = module.PlaybackSourceActionKey;
-        void Add(string label, bool enabled, Func<Task> action, bool? selected = null)
+        e.Handled = true;
+        if (!PlaybackSessionMenu.IsOpen && !FmPopup.IsOpen) OpenPlaybackSessionMenu();
+    }
+    private void OpenPlaybackSessionMenu()
+    {
+        if (!IsLoaded || !IsVisible) return;
+        if (PlaybackSessionMenu.IsOpen) { PlaybackSessionMenu.IsOpen = false; return; }
+        FmPopup.IsOpen = false;
+        returnPlaybackSessionFocus = true;
+        PlaybackSessionMenu.Items.Clear();
+        string actionKey = playbackSessionActionKey = module.PlaybackSourceActionKey;
+        long generation = ++playbackSessionMenuGeneration;
+        string presentationKey = module.PlaybackPresentationKey;
+        void Add(string label, bool enabled, Func<Task> action)
         {
-            var item = new MenuItem { Header = label, IsEnabled = enabled,
-                IsCheckable = selected is not null, IsChecked = selected == true, StaysOpenOnClick = true };
-            item.Click += async (_, _) =>
+            var item = new MenuItem { Header = label, IsEnabled = enabled, StaysOpenOnClick = true };
+            AutomationProperties.SetName(item, label);
+            item.Click += async (_, e) =>
             {
-                if (!PlaybackSourceMenu.IsOpen || actionKey != module.PlaybackSourceActionKey || !IsLoaded || !IsVisible) return;
-                PlaybackSourceMenu.IsOpen = false;
+                e.Handled = true;
+                if (!PlaybackSessionMenu.IsOpen || !item.IsEnabled || !IsLoaded || !IsVisible ||
+                    generation != playbackSessionMenuGeneration || actionKey != module.PlaybackSourceActionKey) return;
+                PlaybackSessionMenu.IsOpen = false;
                 await action();
             };
-            PlaybackSourceMenu.Items.Add(item);
+            PlaybackSessionMenu.Items.Add(item);
         }
-        PlaybackSourceMenu.Items.Add(new MenuItem { Header = module.PlaybackQueueSourceText, IsEnabled = false });
+        PlaybackSessionMenu.Items.Add(new MenuItem { Header = module.PlaybackQueueSourceText, IsEnabled = false });
         if (module.RecommendationLoading)
-            PlaybackSourceMenu.Items.Add(new MenuItem { Header = "正在加载", IsEnabled = false });
-        if (module.CanChangeRecommendationContinue)
-            Add("自动续播", true, () => module.ChangeRecommendationContinueAsync(!module.RecommendationContinue), module.RecommendationContinue);
-        if (module.HasCurrentRecommendationIdentity && !module.HasQueueRecommendations)
-            Add("从当前歌曲进入推荐", module.CanRecommendCurrent, () => module.RecommendCurrentAsync(module.PlaybackPresentationKey));
-        if (module.CanHeartbeatCurrent && !module.HasPlaybackHeartbeat)
-            Add("从当前歌曲进入心动", true, () => module.HeartbeatCurrentAsync(module.PlaybackPresentationKey));
+            PlaybackSessionMenu.Items.Add(new MenuItem { Header = "正在加载", IsEnabled = false });
+        if (module.HasCurrentRecommendationIdentity && !module.HasActiveRecommendation)
+            Add("推荐模式", module.CanRecommendCurrent, () => module.RecommendCurrentAsync(presentationKey));
         if (module.CanReturnRecommendation)
-            Add("返回原队列", true, module.ReturnRecommendationAsync);
+            Add(module.HasPlaybackHeartbeat ? "退出心动" : "退出推荐", true, module.ReturnRecommendationAsync);
+        if (module.CanChangeRecommendationContinue)
+        {
+            bool enabled = !module.RecommendationContinue;
+            Add(enabled ? "开启续播" : "关闭续播", true, () => module.ChangeRecommendationContinueAsync(enabled));
+        }
+        if (module.HasPlaybackFm)
+            Add("频道切换", CanOpenFmChoices, () => { OpenFmChoices(); return Task.CompletedTask; });
+        if (module.CanHeartbeatCurrent && !module.HasPlaybackHeartbeat)
+            Add("从当前歌曲进入心动", true, () => module.HeartbeatCurrentAsync(presentationKey));
         if (module.CanRetryRecommendation)
             Add("重试取歌", true, module.RetryRecommendationAsync);
         if (module.CanReconcileRecommendation)
             Add("核对保存结果", true, module.ReconcileRecommendationAsync);
-        MusicCapability.ApplyContentMenuStyles(this, PlaybackSourceMenu);
-        PlaybackSourceMenu.PlacementTarget = PlaybackSourceButton;
-        PlaybackSourceMenu.IsOpen = true;
+        MusicCapability.ApplyContentMenuStyles(this, PlaybackSessionMenu);
+        PlaybackSessionMenu.PlacementTarget = PlaybackSessionButton;
+        PlaybackSessionMenu.IsOpen = true;
     }
-    private void FmChannel_Click(object sender, RoutedEventArgs e)
+    private void PlaybackSessionMenu_Closed(object? sender, RoutedEventArgs e)
     {
-        if (!module.HasPlaybackFm || module.CanReconcileRecommendation) return;
-        if (FmPopup.IsOpen) { FmPopup.IsOpen = false; return; }
+        surfaceInput?.LayerClosed(); surfaceInput?.Forget(PlaybackSessionMenu);
+        playbackSessionActionKey = ""; playbackSessionMenuGeneration++;
+        if (!FmPopup.IsOpen) RestorePlaybackSessionFocus();
+    }
+    private bool CanOpenFmChoices => module.HasPlaybackFm && module.CanChangePlaybackMode && !module.CanReconcileRecommendation;
+    private void OpenFmChoices()
+    {
+        if (!IsLoaded || !IsVisible || !CanOpenFmChoices) return;
+        returnPlaybackSessionFocus = true;
         fmActionKey = module.PlaybackFmActionKey;
         fmPopupGeneration++;
         FmModeChoices.Children.Clear(); FmSceneChoices.Children.Clear();
         foreach (var choice in module.PlaybackFmModes) FmModeChoices.Children.Add(FmChoice(choice, scene: false));
         foreach (var choice in module.CatalogFmScenes) FmSceneChoices.Children.Add(FmChoice(choice, scene: true));
         FmPopup.IsOpen = true;
+    }
+    private void FmPopup_Opened(object? sender, EventArgs e)
+    {
+        if (!IsLoaded || !IsVisible) return;
         var choices = FmModeChoices.Children.OfType<Button>().Concat(FmSceneChoices.Children.OfType<Button>());
-        (choices.FirstOrDefault(button => AutomationProperties.GetItemStatus(button) == "已选中") ?? choices.First()).Focus();
+        var selected = choices.FirstOrDefault(button => AutomationProperties.GetItemStatus(button) == "已选中");
+        if ((selected ?? choices.FirstOrDefault()) is not { } initial) return;
+        FocusManager.SetFocusedElement(FmPanel, initial);
+        if (Window.GetWindow(this) is null or { IsActive: true }) initial.Focus();
+        initial.BringIntoView();
     }
     private MenuItem ModeChoice(string name, string iconKey, int mode, bool selected)
     {
@@ -355,18 +392,27 @@ public partial class MusicPlayerView : UserControl
         button.Click += async (_, e) =>
         {
             e.Handled = true;
-            if (!FmPopup.IsOpen || generation != fmPopupGeneration || actionKey != fmActionKey) return;
+            if (!FmPopup.IsOpen || !button.IsEnabled || !IsLoaded || !IsVisible || !CanOpenFmChoices ||
+                generation != fmPopupGeneration || actionKey != module.PlaybackFmActionKey) return;
             FmPopup.IsOpen = false;
-            if (IsLoaded && IsVisible)
-                await module.ChangePlaybackFmAsync(scene ? "scene" : choice.Key, scene ? choice.Key : "", actionKey);
+            await module.ChangePlaybackFmAsync(scene ? "scene" : choice.Key, scene ? choice.Key : "", actionKey);
         };
         return button;
     }
     private void FmPopup_Closed(object? sender, EventArgs e)
     {
         fmActionKey = ""; fmPopupGeneration++;
-        if (IsLoaded && IsVisible) FmChannelButton.Focus();
+        FocusManager.SetFocusedElement(FmPanel, null);
+        FmModeChoices.Children.Clear(); FmSceneChoices.Children.Clear();
+        RestorePlaybackSessionFocus();
     }
+    private void RestorePlaybackSessionFocus()
+    {
+        if (!returnPlaybackSessionFocus || !IsLoaded || !IsVisible || Window.GetWindow(this) is { IsVisible: false }) return;
+        FocusManager.SetFocusedElement(FocusManager.GetFocusScope(PlaybackSessionButton), PlaybackSessionButton);
+        if (Window.GetWindow(this) is null or { IsActive: true }) PlaybackSessionButton.Focus();
+    }
+    private void CloseFm_Click(object sender, RoutedEventArgs e) => FmPopup.IsOpen = false;
     private void FmPopup_KeyDown(object sender, KeyEventArgs e)
     { if (e.Key == Key.Escape) { FmPopup.IsOpen = false; e.Handled = true; } }
     private async void Queue_Click(object sender, RoutedEventArgs e) => await module.OpenPlayQueueAsync();
@@ -381,14 +427,14 @@ public partial class MusicPlayerView : UserControl
     private async void RateReset_Click(object sender, RoutedEventArgs e) => await module.ChangePlaybackRateAsync(1);
     private void OnPlaybackChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (PlaybackSourceMenu.IsOpen && (e.PropertyName == nameof(MusicCapability.PlaybackSourceActionKey) ||
+        if (PlaybackSessionMenu.IsOpen && (playbackSessionActionKey != module.PlaybackSourceActionKey ||
             !module.CanPlay && !module.HasActiveRecommendation && !module.CanReconcileRecommendation))
-            PlaybackSourceMenu.IsOpen = false;
+            PlaybackSessionMenu.IsOpen = false;
         if (SourcePopup.IsOpen && !module.HasSourceChoices) SourcePopup.IsOpen = false;
         if (!module.HasQualityButton) QualityMenu.IsOpen = false;
         if (ModeMenu.IsOpen && (modeActionKey != module.PlaybackModeActionKey || !module.CanChangePlaybackMode))
             ModeMenu.IsOpen = false;
-        if (FmPopup.IsOpen && fmActionKey != module.PlaybackFmActionKey) FmPopup.IsOpen = false;
+        if (FmPopup.IsOpen && (fmActionKey != module.PlaybackFmActionKey || !CanOpenFmChoices)) FmPopup.IsOpen = false;
         if (scrubKey is not null && (scrubKey != module.PlaybackPresentationKey || !module.CanSeek))
         { Progress.CancelScrub(); RestoreProgress(); }
     }

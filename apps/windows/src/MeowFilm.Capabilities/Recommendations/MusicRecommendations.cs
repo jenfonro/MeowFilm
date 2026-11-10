@@ -50,9 +50,10 @@ public sealed partial class MusicCapability
     public string PlaybackFmRuleId => HasPlaybackFm ? RecText(recommendationSnapshot!.Value, "ruleId") : "";
     public string PlaybackFmTabTagId => HasPlaybackFm ? RecText(recommendationSnapshot!.Value, "tabTagId") : "";
     public string PlaybackFmActionKey => HasPlaybackFm
-        ? RecText(recommendationSnapshot!.Value, "id") + ":" + recommendationCommandEpoch + ":" + accountEpoch +
+        ? RecText(recommendationSnapshot!.Value, "id") + ":" + PlaybackSourceActionKey +
             ":" + PlaybackFmMode + ":" + PlaybackFmScene + ":" + PlaybackFmRuleId + ":" + PlaybackFmTabTagId
         : "";
+    public string PlaybackSessionIcon => !stopping && HasActiveRecommendation ? "fm" : "fm-off";
     public string PlaybackModeText => ModeText;
     public string PlaybackModeIcon => Mode switch { 1 => "repeat", 2 => "shuffle", _ => "single" };
     public string PlaybackModeActionKey => accountEpoch + ":" + PlaybackPresentationKey;
@@ -69,18 +70,28 @@ public sealed partial class MusicCapability
         RecText(context, "heartbeatAccountId").Length > 0 &&
         Accounts.Any(account => account.Platform == "wy" &&
             (account.UserId.Length == 0 || account.UserId == RecText(context, "heartbeatAccountId")));
+    private bool CurrentFromLocalFavorites => currentFeedbackContext is { } context &&
+        RecText(context, "playlistId") == "favorites";
     public bool HasCurrentRecommendationIdentity => CurrentWyId.Length > 0;
     public bool CanRecommendCurrent => CanPlay && OwnsCurrent && playback.HasMedia && HasCurrentRecommendationIdentity &&
         !CanReconcileRecommendation && !RecommendationLoading;
     public bool CanHeartbeatCurrent => CanPlay && OwnsCurrent && playback.HasMedia &&
-        HasCurrentRecommendationIdentity && HasHeartbeatContext && !CanReconcileRecommendation && !RecommendationLoading;
+        HasCurrentRecommendationIdentity && (HasHeartbeatContext || CurrentFromLocalFavorites) &&
+        !CanReconcileRecommendation && !RecommendationLoading;
     public string PlaybackQueueSourceText => HasActiveRecommendation &&
         (RecText(recommendationSnapshot!.Value, "kind") != "queue" || RecBool(recommendationSnapshot.Value, "started"))
             ? RecommendationTitle : queueSource is { } source ? RecText(source, "kind") switch
             { "search" => "搜索结果", "favorites" => "本地收藏", "playlist" when RecText(source, "platform").Length > 0 => "网络歌单",
               "playlist" => "本地歌单", _ => RecText(source, "title") } : "普通列表";
-    public string PlaybackSourceActionKey => recommendationCommandEpoch + ":" + accountEpoch + ":" +
-        Accounts.Single(account => account.Platform == "wy").UserId + ":" + queueEpoch + ":" + PlaybackPresentationKey;
+    public string PlaybackSourceActionKey
+    {
+        get
+        {
+            var account = Accounts.Single(value => value.Platform == "wy");
+            return recommendationCommandEpoch + ":" + recommendationRevision + ":" + catalogActionGeneration + ":" +
+                accountEpoch + ":" + account.UserId + ":" + account.Generation + ":" + queueEpoch + ":" + PlaybackPresentationKey;
+        }
+    }
     public bool RecommendationContinue => recommendationSnapshot is { } value && RecBool(value, "continue");
     public bool CanChangeRecommendationContinue => !stopping && HasActiveRecommendation && !RecommendationLoading &&
         RecText(recommendationSnapshot!.Value, "kind") != "heartbeat" && !CanReconcileRecommendation;
@@ -109,7 +120,7 @@ public sealed partial class MusicCapability
             nameof(CanChooseRecommendation), nameof(RecommendationCandidates), nameof(HasPlaybackFm),
             nameof(PlaybackFmMode), nameof(PlaybackFmScene), nameof(PlaybackFmRuleId), nameof(PlaybackFmTabTagId),
             nameof(PlaybackFmActionKey), nameof(PlaybackModeText), nameof(PlaybackModeIcon), nameof(CanChangePlaybackMode),
-            nameof(HasPlaybackHeartbeat), nameof(PlaybackModeActionKey), nameof(PlaybackFmTitle),
+            nameof(HasPlaybackHeartbeat), nameof(PlaybackSessionIcon), nameof(PlaybackModeActionKey), nameof(PlaybackFmTitle),
             nameof(CanHeartbeatCurrent), nameof(CanRecommendCurrent), nameof(HasCurrentRecommendationIdentity),
             nameof(PlaybackQueueSourceText), nameof(PlaybackSourceActionKey), nameof(HasActiveRecommendation),
             nameof(RecommendationTitle), nameof(RecommendationLoading), nameof(RecommendationContinue),
@@ -256,8 +267,11 @@ public sealed partial class MusicCapability
     public Task HeartbeatCurrentAsync(string presentationKey)
     {
         if (!CanHeartbeatCurrent || presentationKey != PlaybackPresentationKey) return Task.CompletedTask;
-        return StartRecommendation(Target("heartbeat", "wy", "心动模式",
-            new { entry = "current", songId = CurrentWyId, playlistId = HeartbeatPlaylistId, seedEntryId = current!.EntryId }));
+        return StartRecommendation(HasHeartbeatContext
+            ? Target("heartbeat", "wy", "心动模式",
+                new { entry = "current", songId = CurrentWyId, playlistId = HeartbeatPlaylistId, seedEntryId = current!.EntryId })
+            : Target("heartbeat", "wy", "心动模式",
+                new { entry = "current", songId = CurrentWyId, seedEntryId = current!.EntryId }));
     }
     public Task RecommendCurrentAsync(string presentationKey)
     {
@@ -340,7 +354,8 @@ public sealed partial class MusicCapability
             if (!Current()) return;
             if (Accounts.Single(a => a.Platform == target.Platform).State is not ("saved" or "verified"))
                 throw new MusicOperationException("AUTH_REQUIRED");
-            if (target.Operation == "heartbeat" && RecText(target.Parameters, "entry") == "current" && !HasHeartbeatContext)
+            if (target.Operation == "heartbeat" && RecText(target.Parameters, "entry") == "current" &&
+                !HasHeartbeatContext && !CurrentFromLocalFavorites)
                 throw new MusicOperationException("UNSUPPORTED");
         }
         catch (OperationCanceledException) { return; }

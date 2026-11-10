@@ -1,0 +1,23 @@
+{
+  "name": "@meowfilm/netease-token",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "engines": {
+    "node": "^18.20.4 || ^22.0.0 || ^24.0.0"
+  },
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "jsdom": "24.1.3"
+  }
+}

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities.Platforms;
 
@@ -56,7 +57,7 @@ public sealed partial class MusicPlatformCatalog
         page["platform"] = c.Platform;
         return page;
     }
-    private static Task<JsonObject> Content(Call c, JsonElement? continuation, string kind, string target)
+    private static async Task<JsonObject> Content(Call c, JsonElement? continuation, string kind, string target)
     {
         var prev = Continuation(continuation, c, target, "cursor", "blockCodeOrderList", "loadedPositionCodes");
         var cursor = PJ.Scalar(prev["cursor"]); if (cursor.Length == 0) cursor = "0";
@@ -65,28 +66,49 @@ public sealed partial class MusicPlatformCatalog
             ("isFirstScreen", cursor == "0"), ("pageStyleType", "noCutBlock"), ("refresh", false));
         foreach (var key in new[] { "blockCodeOrderList", "loadedPositionCodes" })
             if (PJ.S(prev, key).Length > 0) input[key] = PJ.InputAll(PJ.S(prev, key));
-        return c.Wy("/api/link/page/rcmd/resource/show", input, data =>
+        var page = await c.Wy("/api/link/page/rcmd/resource/show", input, data =>
         {
             Shape(data);
-            var page = PlatformDiscovery.Page(data, target, cursor);
-            if (page["continuation"] is JsonObject next)
+            var result = PlatformDiscovery.Page(data, target, cursor);
+            if (result["continuation"] is JsonObject next)
             {
                 JsonArray ParseCodes(string text)
                 {
                     if (text.Length == 0) return new();
                     try
                     {
-                        var result = JsonNode.Parse(text) as JsonArray;
-                        PJ.Require(result is not null && result.All(v => PJ.Text(v).Length > 0));
-                        return result!;
+                        var codes = JsonNode.Parse(text) as JsonArray;
+                        PJ.Require(codes is not null && codes.All(v => PJ.Text(v).Length > 0));
+                        return codes!;
                     }
                     catch (JsonException) { throw new MusicPlatformException("INVALID_REQUEST"); }
                 }
                 var all = ParseCodes(PJ.S(prev, "loadedPositionCodes")).Concat(ParseCodes(PJ.S(next, "loadedPositionCodes"))).Select(PJ.Text).Distinct(StringComparer.Ordinal).ToArray();
                 next["loadedPositionCodes"] = PJ.Encode(PJ.Node(all));
             }
-            return BindDiscovery(page, c, target, prev);
+            return result;
         });
+        var missingSeeds = PJ.Array(page["entries"])
+            .Concat(PJ.Array(page["sections"]).SelectMany(section => PJ.Array(PJ.At(section, "items"))))
+            .OfType<JsonObject>().Where(item => PJ.S(item, "action", "type") == "heartbeat" &&
+                PJ.S(item, "action", "songId").Length == 0).ToArray();
+        if (c.Session is not null && missingSeeds.Length > 0)
+        {
+            var seed = await HeartbeatHomeSeed(c);
+            foreach (var item in missingSeeds)
+            {
+                if (seed is null)
+                {
+                    item["action"] = PJ.Obj(("type", "unsupported"), ("code", "NOT_FOUND"));
+                    continue;
+                }
+                item["action"]!["songId"] = NativeMusicSong.NativeId(seed);
+                item["entrySong"] = seed.DeepClone();
+                item["subtitle"] = string.Join(" · ", new[] { PJ.S(seed, "title"), PJ.S(seed, "artist") }.Where(text => text.Length > 0));
+                item["cover"] = PJ.S(seed, "cover_url");
+            }
+        }
+        return BindDiscovery(page, c, target, prev);
     }
     private static void Shape(JsonObject data)
     {

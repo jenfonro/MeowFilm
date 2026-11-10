@@ -8,6 +8,7 @@ public enum RuntimeHTTPError: Error, Sendable, Equatable {
 /// App owner closes it. URLSession owns the actual HTTP tasks and their drain.
 public final class RuntimeHTTPClient: @unchecked Sendable {
     private static let protocolName = "runtime.http.v1"
+    private static let neteaseTokenTimeout: TimeInterval = 60
     private let baseURL: URL
     private let sessionID: String
     private let requestKey: String
@@ -43,7 +44,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout
+        configuration.timeoutIntervalForResource = max(timeout, Self.neteaseTokenTimeout)
         session = URLSession(configuration: configuration, delegate: RuntimeHTTPDelegate(state: state),
                              delegateQueue: nil)
     }
@@ -59,11 +60,11 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         guard case .object(let description) = try await describe(),
               description["protocol"] == .string(Self.protocolName),
               description["product"] == .string("aggregate"),
-              case .array(let modules)? = description["modules"], modules.count == 4 else {
+              case .array(let modules)? = description["modules"], modules.count == 5 else {
             throw RuntimeHTTPError.invalidResponse
         }
         let expected: [(RuntimeModule, String)] = [(.music, "0.8.0"), (.cat, "0.2.0"),
-                                                   (.source, "0.2.0"), (.tmdb, "0.1.0")]
+                                                   (.source, "0.2.0"), (.tmdb, "0.1.0"), (.netease, "0.1.0")]
         for (module, version) in expected {
             let matches = modules.filter {
                 guard case .object(let fields) = $0 else { return false }
@@ -76,6 +77,12 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
                       methods.count == 3, Set(methods.compactMap {
                           if case .string(let value) = $0 { return value }; return nil
                       }) == ["tmdb.data.request", "tmdb.data.settings.get", "tmdb.data.settings.update"] else {
+                    throw RuntimeHTTPError.invalidResponse
+                }
+            }
+            if module == .netease {
+                guard case .object(let fields) = matches[0],
+                      fields["methods"] == .array([.string("netease.token.get")]) else {
                     throw RuntimeHTTPError.invalidResponse
                 }
             }
@@ -124,11 +131,15 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         guard operation.range(of: #"^[a-z]+(?:\.[a-z]+)?$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
             throw RuntimeHTTPError.invalidRequest
         }
+        if module == .netease {
+            guard operation == "get", parameters == .object([:]) else { throw RuntimeHTTPError.invalidRequest }
+        }
         let body: Data
         do { body = try RuntimeJSON.encode(parameters) }
         catch { throw RuntimeHTTPError.invalidRequest }
         return try await request(method: "POST", path: "/v1/\(module.rawValue)/\(operation)",
-                                 body: body, module: module)
+                                 body: body, module: module,
+                                 timeout: module == .netease ? max(timeout, Self.neteaseTokenTimeout) : timeout)
     }
 
     public func upload(module: RuntimeModule, installationID: String, sourceRevision: Int,
@@ -163,14 +174,14 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     private func request(method: String, path: String, body: Data? = nil, raw: Bool = false,
-                         module: RuntimeModule? = nil) async throws -> RuntimeValue {
+                         module: RuntimeModule? = nil, timeout: TimeInterval? = nil) async throws -> RuntimeValue {
         guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
         guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
             throw RuntimeHTTPError.invalidRequest
         }
         let requestID = UUID().uuidString.lowercased()
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout ?? self.timeout)
         request.httpMethod = method
         request.httpBody = body
         request.httpShouldHandleCookies = false

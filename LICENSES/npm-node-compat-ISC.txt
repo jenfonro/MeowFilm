@@ -2,6 +2,16 @@ The ISC License
 
 Copyright (c) Isaac Z. Schlueter
 
+Additional component: saxes 6.0.0
+Source: https://github.com/lddubeau/saxes/blob/v6.0.0/LICENSE
+Copyright (c) Contributors
+
+The upstream license also retains the following attribution for sax, from
+which saxes was forked:
+Copyright (c) Isaac Z. Schlueter and Contributors
+
+All of the above use the same ISC terms below.
+
 Permission to use, copy, modify, and/or distribute this software for any
 purpose with or without fee is hereby granted, provided that the above
 copyright notice and this permission notice appear in all copies.

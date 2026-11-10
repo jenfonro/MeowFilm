@@ -38,6 +38,7 @@ public static partial class MusicCatalogTests
     public static IEnumerable<TestCase> Cases()
     {
         foreach (var test in NextRecoveryCases()) yield return test;
+        foreach (var test in NetworkReferenceCases()) yield return test;
         yield return Case("playlist card next stages the complete list and never starts playback", async () =>
         {
             await using var f = await Fixture.Create();
@@ -81,23 +82,23 @@ public static partial class MusicCatalogTests
                 .Concat(new[] { "2", "3" })), "entire playlist is one ordered segment after the unchanged current occurrence");
             Equal(0, f.Playback.Opens.Count);
         });
-        yield return Case("playlist card favorite copies all songs into a new local playlist each time", async () =>
+        yield return Case("playlist card favorite saves one remote reference without loading members", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
             var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.Kind == "playlist");
-            await f.Configure(new { nextDetail = 0 });
+            int playlistReads = f.Client.Count("music.catalog.playlist");
             await f.Module.FavoriteCatalogCardAsync(card);
-            await f.Configure(new { nextDetail = 0 });
             await f.Module.FavoriteCatalogCardAsync(card);
-            var copies = f.Module.Playlists.Where(p => p.Kind == "playlist").ToArray();
-            Equal(2, copies.Length); True(copies[0].Id != copies[1].Id, "repeat favorite creates a distinct copy");
-            True(copies.All(p => p.Count == 205), "both copies contain the full playlist");
-            foreach (var copy in copies)
-            {
-                var tail = await f.Rpc("music.library.detail", new { id = copy.Id, offset = 200, limit = 100 });
-                Equal(5, tail.GetProperty("songs").GetArrayLength());
-            }
+            Equal(0, f.Module.Playlists.Count(p => p.Kind == "playlist"));
+            var reference = f.Module.NetworkPlaylists.Single();
+            Equal(card.Platform, reference.Platform); Equal(card.ActionId, reference.RemoteId);
+            Equal(card.Title, reference.Name);
+            Equal(playlistReads, f.Client.Count("music.catalog.playlist"));
+            Equal(0, f.Client.Count("music.catalog.playlist.prepare"));
+            Equal(0, f.Client.Count("music.catalog.playlist.commit"));
+            var detail = await f.Client.ExecuteAsync("music.library.detail", new { id = reference.Id });
+            Equal("READ_ONLY", detail.GetProperty("code").GetString());
             Equal(0, f.Playback.Opens.Count);
         });
         yield return Case("playlist card next retires preparation on navigation pause and queue conflict", async () =>
@@ -149,13 +150,20 @@ public static partial class MusicCatalogTests
                 stale.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
                 Equal(calls, f.Client.Log.Count);
                 OpenContentMenu(host);
-                int commits = f.Client.Count("music.catalog.playlist.commit");
-                await f.Configure(new { nextDetail = 0 });
+                int saves = f.Client.Count("music.catalog.playlist.save");
                 ((MenuItem)host.ContextMenu.Items[3]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-                await Until(() => f.Client.Count("music.catalog.playlist.commit") > commits && !second.IsPreparing);
-                var prepare = f.Client.Log.Last(c => c.Method == "music.catalog.playlist.prepare").Parameters;
-                Equal(second.ActionId, prepare.GetProperty("id").GetString());
-                OpenContentMenu(host); stale = (MenuItem)host.ContextMenu.Items[2];
+                await Until(() => f.Client.Count("music.catalog.playlist.save") > saves && !second.IsPreparing &&
+                    f.Module.NetworkPlaylists.Any(p => p.Platform == second.Platform && p.RemoteId == second.ActionId));
+                var saved = f.Client.Last("music.catalog.playlist.save");
+                Equal(second.ActionId, saved.GetProperty("id").GetString());
+                OpenContentMenu(host);
+                Equal("取消收藏", ((MenuItem)host.ContextMenu.Items[3]).Header);
+                int removes = f.Client.Count("music.library.network.remove");
+                ((MenuItem)host.ContextMenu.Items[3]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                await Until(() => f.Client.Count("music.library.network.remove") == removes + 1 && !f.Module.Busy &&
+                    !f.Module.NetworkPlaylists.Any(p => p.Platform == second.Platform && p.RemoteId == second.ActionId));
+                OpenContentMenu(host);
+                stale = (MenuItem)host.ContextMenu.Items[2];
                 await f.Module.NavigateAsync("favorites", default);
                 calls = f.Client.Log.Count;
                 stale.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
@@ -192,20 +200,38 @@ public static partial class MusicCatalogTests
             OpenContentMenu(row);
             Equal(calls, f.Client.Log.Count);
             True(row.ContextMenu.Items.OfType<MenuItem>().Select(i => i.Header).SequenceEqual(new object[]
-                { "播放", "下一首播放", "收藏", "添加到歌单", "移除", "相似歌曲", "专辑", "心动推荐" }),
+                { "播放", "下一首播放", "收藏", "添加到歌单", "相似歌曲", "专辑" }),
                 "catalog rows share all search actions and preserve their discovery extensions");
-            True(!row.ContextMenu.Items.OfType<MenuItem>().Single(i => i.Header as string == "移除").IsEnabled,
-                "catalog content cannot be removed as a local collection member");
+            True(!row.ContextMenu.Items.OfType<MenuItem>().Any(i => i.Header as string == "心动推荐"),
+                "an ordinary home song row is not an eligible heartbeat context");
+            var similar = row.ContextMenu.Items.OfType<MenuItem>().Single(i => i.Header as string == "相似歌曲");
+            True(similar.IsEnabled, "an identified home song keeps its valid recommendation action");
+            True(!row.ContextMenu.Items.OfType<MenuItem>().Any(i => i.Header as string == "移除"),
+                "catalog content does not expose collection member removal");
+            row.DataContext = cards[0]; await Drain();
+            calls = f.Client.Log.Count;
+            similar.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
+            Equal(calls, f.Client.Log.Count);
+            Equal(0, f.Playback.Opens.Count);
+            row.DataContext = card; await Drain(); OpenContentMenu(row);
             ((MenuItem)row.ContextMenu.Items[2]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
             await Until(() => !f.Module.Busy && f.Client.Count("music.library.addSongs") == 1, "song.favorite");
             var favorite = await f.Rpc("music.library.detail", new { id = "favorites" });
             Equal(card.Song!.Id, SongRow.Read(favorite.GetProperty("songs")[0]).Id);
             OpenContentMenu(row);
             ((MenuItem)row.ContextMenu.Items[0]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-            await Until(() => f.Playback.Opens.Count == 1, "song.play");
+            await Until(() => f.Playback.Opens.Count == 1 && !f.Module.Busy && !card.IsPreparing, "song.play");
             var replace = f.Client.Log.Last(c => c.Method == "music.queue.replace").Parameters;
             Equal(cards.Length, replace.GetProperty("songs").GetArrayLength());
             Equal(1, replace.GetProperty("index").GetInt32());
+            OpenContentMenu(row);
+            similar = row.ContextMenu.Items.OfType<MenuItem>().Single(i => i.Header as string == "相似歌曲");
+            True(similar.IsEnabled, "the valid recommendation remains available before leaving its source");
+            await f.Module.NavigateAsync("favorites", default);
+            calls = f.Client.Log.Count;
+            similar.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
+            Equal(calls, f.Client.Log.Count);
+            Equal(1, f.Playback.Opens.Count);
         });
         yield return Case("channel ordinary playlist cards expose four actions without adding tab menus", async () =>
         {
@@ -2412,7 +2438,7 @@ public static partial class MusicCatalogTests
         });
         foreach (var platform in new[] { "tx", "kg" })
         {
-            yield return Case("actual " + platform + " provider song DTO and full cloud save", async () =>
+            yield return Case("actual " + platform + " provider song DTO and metadata reference save", async () =>
             {
                 await using var f = await Fixture.Create();
                 Equal("wy", f.Module.CatalogSourcePlatform);
@@ -2428,8 +2454,13 @@ public static partial class MusicCatalogTests
                 await f.Module.NavigateAsync("catalog-playlist/" + platform + "/" + id, default);
                 Equal(platform, f.Module.SelectedCatalogPlatform.Key);
                 Equal("wy", f.Module.CatalogSourcePlatform);
+                int reads = f.Client.Count("music.catalog.playlist");
                 await f.Module.SaveCatalogPlaylistAsync();
-                Equal(205, f.Module.Playlists.Single(p => p.Kind == "playlist").Count);
+                var reference = f.Module.NetworkPlaylists.Single();
+                Equal(platform, reference.Platform); Equal(id, reference.RemoteId); Equal(205, reference.Count);
+                Equal(0, f.Module.Playlists.Count(p => p.Kind == "playlist"));
+                Equal(reads, f.Client.Count("music.catalog.playlist"));
+                Equal(0, f.Client.Count("music.catalog.playlist.prepare"));
                 await f.Module.NavigateAsync("catalog-home", default);
                 Equal("wy", f.Module.CatalogSourcePlatform);
                 Equal("wy", f.Module.SelectedCatalogPlatform.Key);
@@ -2445,28 +2476,32 @@ public static partial class MusicCatalogTests
             Equal(calls, f.Client.Count("music.catalog.home")); Equal("第 2 页", f.Module.CatalogPageText);
             True(before.SequenceEqual(f.Module.CatalogSections), "same successful state restored");
         });
-        yield return Case("native save complete 205 song playlist through Native application and DPAPI", async () =>
+        yield return Case("native metadata reference save through Native application and DPAPI", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
-            await f.Configure(new { nextDetail = 0 });
+            int reads = f.Client.Count("music.catalog.playlist");
             await f.Module.SaveCatalogPlaylistAsync();
-            var list = f.Module.Playlists.Single(p => p.Kind == "playlist");
+            var list = f.Module.NetworkPlaylists.Single();
             Equal(205, list.Count);
-            var tail = await f.Rpc("music.library.detail", new { id = list.Id, offset = 200, limit = 100 });
-            Equal(5, tail.GetProperty("songs").GetArrayLength());
+            Equal("wy", list.Platform); Equal("500", list.RemoteId);
+            Equal(0, f.Module.Playlists.Count(p => p.Kind == "playlist"));
+            Equal(reads, f.Client.Count("music.catalog.playlist"));
+            Equal(0, f.Client.Count("music.catalog.playlist.prepare"));
+            Equal(0, f.Client.Count("music.catalog.playlist.commit"));
             True(f.Client.Log.Where(c => c.Method.StartsWith("music.catalog.playlist.", StringComparison.Ordinal))
-                .All(c => c.Parameters.GetRawText().Length < 1024), "token control only, not oversized song JSON");
-            Equal("已保存到本地歌单", f.Module.Status);
+                .All(c => c.Parameters.GetRawText().Length < 1024), "metadata control only, not oversized song JSON");
+            Equal("已收藏歌单", f.Module.Status);
         });
-        yield return Case("empty cloud list saves locally and play-all remains disabled", async () =>
+        yield return Case("empty remote list saves a reference and play-all remains disabled", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Configure(new { total = 0 });
             await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
             True(f.Module.CanCatalogAction && !f.Module.CanPlayCatalogPlaylist, "empty save is allowed, absent playback is not");
             await f.Module.SaveCatalogPlaylistAsync();
-            Equal(0, f.Module.Playlists.Single(p => p.Kind == "playlist").Count);
+            Equal(0, f.Module.NetworkPlaylists.Single().Count);
+            Equal(0, f.Module.Playlists.Count(p => p.Kind == "playlist"));
         });
         yield return Case("native full playlist selected song 204 replaces complete queue and resolves chosen recording", async () =>
         {
@@ -2497,19 +2532,21 @@ public static partial class MusicCatalogTests
             Equal(0, f.Playback.Opens.Count);
             Equal(0, (await f.Rpc("music.queue.get", new { })).GetProperty("total").GetInt32());
         });
-        yield return Case("cancel full-list save before commit creates no partial collection", async () =>
+        yield return Case("cancel full-list play before commit creates no partial queue or collection", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
             await f.Configure(new { nextDetail = 0 });
             var hold = f.Client.Hold("music.catalog.playlist.prepare");
-            var loading = f.Module.SaveCatalogPlaylistAsync(); await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var loading = f.Module.PlayCatalogPlaylistAsync(); await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
             f.Module.CancelCatalog(); await Task.Delay(35); await Drain();
             True(!loading.IsCompleted, "cancelled prepare abandoned its successful token receipt");
             hold.Release(); await loading;
             Equal(0, f.Client.Count("music.catalog.playlist.commit"));
             Equal(1, f.Client.Count("music.catalog.playlist.discard"));
             Equal(1, (await f.Rpc("music.library.list", new { })).GetProperty("total").GetInt32());
+            Equal(0, (await f.Rpc("music.queue.get", new { })).GetProperty("total").GetInt32());
+            Equal(0, f.Playback.Opens.Count);
         });
         yield return Case("manual pause intent cancels old playlist load even with no current media", async () =>
         {
@@ -3072,6 +3109,7 @@ public static partial class MusicCatalogTests
             True(uri.Host is "music.163.com" or "interfacepc.music.163.com", "no unregistered upstream");
             if (path.Contains("/playlist/detail", StringComparison.Ordinal))
             {
+                if (Number("playlistFailure") != 0) return Json(new { }, Number("playlistFailure"));
                 var p = await Eapi(request);
                 return Json(new { code = 200, playlist = new { id = p["id"]!.ToString(), name = "完整云歌单",
                     coverImgUrl = "https://img.invalid/playlist.jpg", trackCount = total,

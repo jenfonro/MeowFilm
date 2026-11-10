@@ -323,25 +323,21 @@ public sealed partial class MusicCapability
     }
     private async Task<(PlaylistRow[] Rows, long Revision)> FetchPlaylists(CancellationToken token)
     {
-        const int maximumPages = 100;
-        const int maximumPlaylists = 10_000;
         var rows = new List<PlaylistRow>();
         var ids = new HashSet<string>(StringComparer.Ordinal);
         long revision = -1;
         int? expectedCount = null;
-        for (var pageNumber = 0; ; pageNumber++)
+        while (true)
         {
-            MusicDto.Require(pageNumber < maximumPages);
             var reply = await Call("music.library.list", new { offset = rows.Count, limit = 100 }, token);
             var nextRevision = MusicDto.Integer(reply, "revision");
             if (revision >= 0 && revision != nextRevision) throw new MusicOperationException("REVISION_CONFLICT");
             revision = nextRevision;
             var count = MusicDto.Count(reply, "total");
-            MusicDto.Require(count <= maximumPlaylists && (expectedCount is null || expectedCount == count));
+            MusicDto.Require(expectedCount is null || expectedCount == count);
             expectedCount = count;
             var page = MusicDto.Page(reply, "items", rows.Count).Select(PlaylistRow.Read).ToArray();
-            MusicDto.Require(rows.Count + page.Length <= maximumPlaylists &&
-                page.All(row => ids.Add(row.Id)));
+            MusicDto.Require(page.All(row => ids.Add(row.Id)));
             rows.AddRange(page);
             if (rows.Count >= count) break;
         }
@@ -358,8 +354,10 @@ public sealed partial class MusicCapability
     {
         if (revision < libraryRevision) return;
         libraryRevision = revision;
-        Playlists.Clear(); foreach (var row in rows) Playlists.Add(row);
+        Playlists.Clear(); foreach (var row in rows.Where(row => row.Kind != "network")) Playlists.Add(row);
+        NetworkPlaylists.Clear(); foreach (var row in rows.Where(row => row.Kind == "network")) NetworkPlaylists.Add(row);
         RebuildNavigation(); Changed(nameof(CountText));
+        NetworkPlaylistBindings();
         _ = RefreshCurrentFavoriteAsync();
     }
     private void RebuildNavigation()
@@ -370,6 +368,7 @@ public sealed partial class MusicCapability
             new("favorites", "我的收藏", "\uEB51", "我的", GroupAction: Presentation.CreatePlaylistAction),
             ..Playlists.Where(item => item.Kind == "playlist").Select(item =>
                 new NavigationItem("playlist/" + item.Id, item.Name, "\uE8D6", "我的")),
+            ..NetworkPlaylists.Select(item => new NavigationItem(item.Route, item.Name, "\uE8D6", "网络歌单")),
             // Declared routes remain reachable from content/settings and public-page handoff.
             new("catalog-discovery", "搜索发现", "\uE721", ShowInSidebar: false),
             new("catalog-personal", "平台歌单", "\uE8D6", ShowInSidebar: false),

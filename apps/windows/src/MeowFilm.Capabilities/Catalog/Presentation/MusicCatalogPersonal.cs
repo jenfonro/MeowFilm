@@ -7,7 +7,8 @@ namespace MeowFilm.Capabilities;
 public sealed partial class MusicCapability
 {
     // These are in-process route arguments, never credentials or a generic RPC/URL.
-    private sealed record CatalogTarget(string Operation, string Platform, string Title, JsonElement Parameters)
+    private sealed record CatalogTarget(string Operation, string Platform, string Title, JsonElement Parameters,
+        bool ManagedPlaylist = false)
     {
         public bool Private => Operation is "personalPlaylists" or "daily" or "fm" or "similar" or
             "heartbeat" || Parameters.TryGetProperty("personal", out _);
@@ -196,7 +197,8 @@ public sealed partial class MusicCapability
     {
         var action = card.Action ?? JsonSerializer.SerializeToElement(new { type = card.Kind });
         if (card.Kind == "playlist" && card.Locator is { } locator)
-            return OpenCatalogTargetAsync(Target("playlist", card.Platform, card.Title, new { id = card.ActionId, personal = locator }), card.ActionId);
+            return OpenCatalogTargetAsync(Target("playlist", card.Platform, card.Title,
+                new { id = card.ActionId, personal = locator }) with { ManagedPlaylist = card.IsManagedPlaylist }, card.ActionId);
         if (card.Kind == "chart")
             return OpenCatalogTargetAsync(Target("chart", card.Platform, card.Title,
                 new { kind = card.ActionId, period = "daily" }), card.ActionId);

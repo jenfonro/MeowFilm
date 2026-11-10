@@ -31,7 +31,7 @@ music.recommendations.start / get / choose / continue / retry / return / cancel 
 | --- | --- |
 | `fm` | `mode=default|familiar|explore|puzzle|scene`、`submode`，或 `ruleId/tabTagId`；同一 FM lineage 的频道切换使用 append + selectIndex |
 | `similar` | `sourceType=artist|song`、`sourceIds`（协议最多 20 个 ID）；始终独立 enter，不捕获 checkpoint |
-| `heartbeat` | `entry=favorites|current`，首页保留 `songId`；current 必须带真实 `songId/playlistId`，播放器另带 `seedEntryId`；捕获 checkpoint，不提供 continue |
+| `heartbeat` | `entry=favorites|current`，首页保留 `songId`；current 必须带真实网易 `songId`，播放器另带 `seedEntryId`。本地融合收藏不传本地歌单 ID，由平台读取当前账号真实喜欢歌单并核实成员；已有 `playlistId` 时仍校验其与实际喜欢歌单一致。捕获 checkpoint，不提供 continue |
 | `queue` | 必须带当前 occurrence 的 `seedEntryId`；`restore=false` 为只读候选，`restore=true` 为主动 enter 并捕获 checkpoint；只要求种子可解析成网易 ID，不要求整队网易身份 |
 
 当前只接 `platform=wy`、本地播放；其他平台返回 `UNSUPPORTED`，`local=false` 返回 `REMOTE_NOT_SUPPORTED`。已有共享资料中的网易 ID 由 `MusicFeedbackIdentity.Resolve` 解析，不为菜单补搜。
@@ -49,6 +49,14 @@ sourceType heartbeatPlaylistId mode submode ruleId tabTagId
 `Session.Config` 是来源配置，队列 `playback-settings.mode` 是唯一全局循环值（1 列表／2 随机／3 单曲），checkpoint 不包含该设置。待进入来源暂存 `PreviousSession`；取得可用批次并经唯一队列 owner 提交后才转移来源所有权，失败保留原来源与媒体。
 
 `MusicQueueRecommendationsRequest(Platform, SeedSongId, Offset)` 的 seed 在会话中固定，分页仅前移服务端 offset；[平台配方](music-native-platforms.md#网易云漫游与推荐)不携带当前整队或搜索上下文。
+
+## 播放器呈现
+
+- 底部与全屏播放器复用 `MusicPlayerView`：横向 ∞ 入口常显，位于独立的全局循环按钮之前。普通来源显示带斜线的 ∞；活跃推荐、私人 FM、相似歌曲／艺人或心动会话显示无斜线 ∞。斜线表示会话归属，不表示续播开关。
+- ∞ 的原生扁平菜单保留当前来源及加载状态。普通来源的合资格当前歌曲可进入“推荐模式”；推荐、FM、相似或心动会话中不再提供重复推荐入口，心动入口仍按歌曲来源资格显示。只有实际可恢复原队列时才显示“退出推荐”或“退出心动”。可续播来源使用“开启续播／关闭续播”动作；心动不提供续播。搜索候选、FM 与相似来源没有 checkpoint，不显示退出恢复操作。
+- “重试取歌”与未知提交的“核对保存结果”继续使用现有资格。每次菜单打开有独立代次；动作同时核对推荐命令／快照、当前播放及队列、Catalog action 和网易账号代次，关闭、重开或状态失效后的旧 `MenuItem` 不能提交。
+- 只有活跃私人 FM 的菜单提供同级“频道切换”，不保留独立频道按钮。现有模式与场景选择通过 `DialogPlacement.Centered` 相对当前应用窗口内容居中，随窗口移动／尺寸变化重新定位。关闭按钮、Escape、外部点击、隐藏、卸载及窗口关闭结束面板；正常关闭将焦点归还 ∞，卸载或关闭窗口时不重新聚焦失效控件。选择按钮和焦点随面板关闭释放，旧按钮不能操作新面板或账号。
+- FM 面板使用首页相同的 `Capability.OverlayScrollViewer`。播放器既有 `SettingsTheme.xaml` 已通过 `CapabilityTheme.xaml → Presentation/Controls/OverlayScrollChrome.xaml → MeowFilm.Desktop/OverlayScrollChrome.xaml` 引入实际模板与滚动交互，不复制滚动条样式。主题、系统字体、原生 ∞／场景矢量及 iWebPlus 许可沿用原实现。
 
 ## 候选与续取实现
 

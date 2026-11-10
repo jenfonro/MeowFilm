@@ -531,6 +531,7 @@ extension MusicNativePlatforms {
         if case .artistActivity = request { result = try MusicNativePublicBrowseParser.artistActivity(root) }
         else { result = try MusicNativePublicBrowseParser.blocks(root, previous: remote,
             isHome: destination == .home, loggedIn: binding.loggedIn) }
+        result = try await hydrateHomeHeartbeat(result, account: account, binding: binding)
         if case .home(nil) = request, binding.loggedIn,
            !result.sections.contains(where: { $0.layout == .artistUpdates || $0.channel?.kind == .artistActivity }) {
             try await account.checkNativeHomeBinding(binding)
@@ -545,6 +546,45 @@ extension MusicNativePlatforms {
             }
         })
         try await account.checkNativeHomeBinding(binding)
+        return result
+    }
+
+    func hydrateHomeHeartbeat(_ input: MusicNativePublicBrowseDiscovery,
+                              account: any MusicNativeHomeProviding,
+                              binding: MusicNativeHomeBinding) async throws -> MusicNativePublicBrowseDiscovery {
+        func needsSeed(_ item: MusicNativePublicBrowseItem) -> Bool {
+            if case .action(.heartbeat) = item.content { return true }
+            return false
+        }
+        guard binding.loggedIn, input.sections.contains(where: {
+            $0.items.contains(where: needsSeed) || $0.tabs.contains(where: { $0.items.contains(where: needsSeed) })
+        }) else { return input }
+        let raw = try MJ.parse(await account.nativeHomePayload(.heartbeatSeed, binding: binding),
+                               maximum: 2 * 1024 * 1024)["song"]
+        let id = raw == .null ? nil : try MusicPlatformProtocol.numericID(raw["id"])
+        let track = raw == .null ? MJ.null : try MJ.parse(Self.browseWYSong(raw).data)
+        try await account.checkNativeHomeBinding(binding)
+        func hydrate(_ items: [MusicNativePublicBrowseItem]) -> [MusicNativePublicBrowseItem] {
+            items.map { item in
+                guard needsSeed(item) else { return item }
+                var result = item
+                guard let id else {
+                    result.content = .unavailable
+                    return result
+                }
+                result.content = .action(.heartbeatSong(songID: id))
+                result.subtitle = [track["name"].string, track["singer"].string].filter { !$0.isEmpty }.joined(separator: " · ")
+                result.artwork = MusicNativePublicBrowseSupport.artwork(track["img"])
+                return result
+            }
+        }
+        var result = input
+        for index in result.sections.indices {
+            result.sections[index].items = hydrate(result.sections[index].items)
+            for tab in result.sections[index].tabs.indices {
+                result.sections[index].tabs[tab].items = hydrate(result.sections[index].tabs[tab].items)
+            }
+        }
         return result
     }
 }

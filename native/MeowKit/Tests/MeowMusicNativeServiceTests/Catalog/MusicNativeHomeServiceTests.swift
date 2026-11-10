@@ -23,11 +23,17 @@ private actor HomeAccountFixture: MusicNativeAccountProviding, MusicNativeHomeDi
     var activityGate: NativeMusicGate?
     var activityFailure: MusicServiceError?
     var dailyPage: MusicNativeTrackPage?
+    var heartbeatSeedID: String? = "101"
+    var heartbeatGate: NativeMusicGate?
+    var heartbeatFailure: MusicServiceError?
     init(loggedIn: Bool = true) { binding = .init(scope: loggedIn ? "synthetic-account-a" : "guest", revision: UUID(), loggedIn: loggedIn) }
     func suspend(_ gate: NativeMusicGate) { self.gate = gate }
     func setHome(_ value: Data) { homePayload = value }
     func setActivity(_ value: Data) { activityPayload = value }
     func setDaily(_ value: MusicNativeTrackPage) { dailyPage = value }
+    func setHeartbeat(_ id: String?) { heartbeatSeedID = id }
+    func suspendHeartbeat(_ gate: NativeMusicGate) { heartbeatGate = gate }
+    func failHeartbeat(_ error: MusicServiceError) { heartbeatFailure = error }
     func suspendActivity(_ gate: NativeMusicGate) { activityGate = gate }
     func failActivity(_ value: MusicServiceError) { activityFailure = value }
     func changeAccount() {
@@ -71,6 +77,12 @@ private actor HomeAccountFixture: MusicNativeAccountProviding, MusicNativeHomeDi
             return Data(#"{"code":200,"data":{"title":"艺人新作","newWorks":[{"info":{"blockType":"mv","songLists":[{"id":8}]}},{"publishTime":1234,"info":{"blockType":"album","albumId":"42","albumSongCount":8,"blockTitle":{"resourceName":"新专辑","artistName":"艺人","resourcePicUrl":"https://p1.music.126.net/album.jpg","imgUrl":"https://p1.music.126.net/avatar.jpg"},"songLists":[{"id":41}]}}]}}"#.utf8)
         case .songMetadata(let ids):
             return MJ.obj([("code", .n(200)), ("songs", .array(ids.map(MusicNativePublicBrowseFixture.song)))]).bytes
+        case .heartbeatSeed:
+            let id = heartbeatSeedID
+            if let heartbeatGate { await heartbeatGate.wait() }
+            if let heartbeatFailure { throw heartbeatFailure }
+            // Noncooperative provider: publication still needs the service's binding check.
+            return MJ.obj([("song", id.map(MusicNativePublicBrowseFixture.song) ?? .null)]).bytes
         case .playlistMetadata, .vipSongs: throw MusicServiceError.invalidRequest
         }
     }
@@ -91,6 +103,96 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let value = NativeMusicService(document: document, accounts: account, qq: NativeMusicQQFixture(),
             enabledPlatforms: [.netease, .qq, .kugou], homeSnapshot: store, transport: http, clock: { NativeMusicFixture.date })
         try await value.setAccess(available: true, generation: 1); return value
+    }
+    private func heartbeatHome(songID: String? = nil) -> Data {
+        var card = MJ.obj([("resourceType", .string("star")), ("resourceId", .string("987")),
+                           ("title", .string("心动"))])
+        if let songID { card["songData"] = MusicNativePublicBrowseFixture.song(songID) }
+        let section = MJ.obj([
+            ("positionCode", .string("ENTRY")),
+            ("dslData", .obj([("items", .array([card]))]))
+        ])
+        return MJ.obj([("code", .n(200)), ("data", .obj([("blocks", .array([section]))]))]).bytes
+    }
+    private func heartbeatAction(_ page: MusicPublicBrowsePage) throws -> MusicHomeAction {
+        let item = try XCTUnwrap(page.sections.flatMap(\.items).first)
+        guard case .action(let action) = item.content else {
+            XCTFail("a heartbeat card must have a typed action")
+            throw MusicServiceError.invalidResponse
+        }
+        return action
+    }
+    func testUnseededHomeReadsAccountSeedOnceAndRetainsItUntilRefreshWithoutLibrarySync() async throws {
+        let account = HomeAccountFixture()
+        await account.setHome(heartbeatHome())
+        let store = HomeSnapshotFixture(), value = try await service(account, store: store)
+        let first = try await value.homePage(cursor: nil, refresh: true)
+        XCTAssertEqual(try heartbeatAction(first), .heartbeatSong(songID: "101"))
+        XCTAssertFalse(try XCTUnwrap(first.sections.first?.items.first).subtitle.isEmpty)
+        await account.setHeartbeat("102")
+        let reused = try await value.homePage(cursor: nil, refresh: false)
+        XCTAssertEqual(try heartbeatAction(reused), .heartbeatSong(songID: "101"))
+        let restored = try await value.restoredHome()
+        XCTAssertEqual(try heartbeatAction(XCTUnwrap(restored)), .heartbeatSong(songID: "101"))
+        let beforeRefresh = await account.calls
+        XCTAssertEqual(beforeRefresh.filter { $0 == .heartbeatSeed }.count, 1)
+        let refreshed = try await value.homePage(cursor: nil, refresh: true)
+        XCTAssertEqual(try heartbeatAction(refreshed), .heartbeatSong(songID: "102"))
+        let calls = await account.calls
+        XCTAssertEqual(calls.filter { $0 == .heartbeatSeed }.count, 2)
+        XCTAssertFalse(calls.contains { if case .songMetadata = $0 { return true }; return false })
+        await value.close()
+    }
+    func testDisplayedHomeSeedNeverReadsAnotherSeedAndFailureKeepsSavedHomeAndQueue() async throws {
+        let account = HomeAccountFixture(), store = HomeSnapshotFixture()
+        await account.setHome(heartbeatHome(songID: "102"))
+        let value = try await service(account, store: store)
+        let shown = try await value.homePage(cursor: nil, refresh: true)
+        XCTAssertEqual(try heartbeatAction(shown), .heartbeatSong(songID: "102"))
+        let calls = await account.calls
+        XCTAssertFalse(calls.contains(.heartbeatSeed))
+        let saved = store.read(), queue = try await value.queue()
+        await account.setHome(heartbeatHome())
+        await account.failHeartbeat(.upstreamInvalid)
+        do { _ = try await value.homePage(cursor: nil, refresh: true); XCTFail("failed seed was published") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
+        XCTAssertEqual(store.read(), saved)
+        let unchanged = try await value.queue()
+        XCTAssertEqual(unchanged.entries.map(\.id), queue.entries.map(\.id))
+        XCTAssertEqual(unchanged.currentId, queue.currentId)
+        await value.close()
+    }
+    func testChangedAccountCannotPublishLateHomeSeed() async throws {
+        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), gate = NativeMusicGate()
+        await account.setHome(heartbeatHome())
+        await account.suspendHeartbeat(gate)
+        let value = try await service(account, store: store)
+        let read = Task { try await value.homePage(cursor: nil, refresh: true) }
+        await gate.started()
+        await account.changeAccount()
+        await gate.release()
+        do { _ = try await read.value; XCTFail("retired account seed published") }
+        catch { XCTAssertTrue([.staleAccess, .staleResult].contains(error as? MusicServiceError)) }
+        XCTAssertNil(store.read())
+        await value.close()
+    }
+    func testEmptyPlatformFavoritesLeaveHomeUsableWithoutAnUnseededHeartbeatAction() async throws {
+        let account = HomeAccountFixture()
+        await account.setHome(heartbeatHome())
+        await account.setHeartbeat(nil)
+        let value = try await service(account)
+        let page = try await value.homePage(cursor: nil, refresh: true)
+        let card = try XCTUnwrap(page.sections.first?.items.first)
+        guard case .unavailable = card.content else {
+            XCTFail("an empty liked library cannot supply a heartbeat seed")
+            await value.close()
+            return
+        }
+        XCTAssertTrue(page.sections.contains { $0.layout == .artistUpdates })
+        let calls = await account.calls
+        XCTAssertEqual(calls.filter { $0 == .heartbeatSeed }.count, 1)
+        XCTAssertFalse(calls.contains { if case .songMetadata = $0 { return true }; return false })
+        await value.close()
     }
     func testDisplayedHomeQueueRecoversOwnedRowsAndPreservesSectionHistory() async throws {
         let account = HomeAccountFixture(), document = NativeMusicMemoryDocument()

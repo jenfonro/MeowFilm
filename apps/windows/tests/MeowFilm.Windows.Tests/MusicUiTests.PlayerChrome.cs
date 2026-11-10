@@ -173,7 +173,8 @@ public static partial class MusicUiTests
                         before.bubbleUp + 1, before.viewDown + 1, before.viewUp + 1),
                         (previewDown, bubbleDown, previewUp, bubbleUp, viewDown, viewUp));
                 }
-                foreach (string name in new[] { "VolumePopup", "PlaylistPopup", "RatePopup", "SourcePopup", "QualityMenu", "MoreMenu" })
+                foreach (string name in new[] { "VolumePopup", "PlaylistPopup", "RatePopup", "SourcePopup", "QualityMenu", "MoreMenu",
+                    "PlaybackSessionMenu", "FmPopup" })
                 {
                     phase = name + "/open"; routeTrace.Clear();
                     System.Windows.Controls.Primitives.Popup? popup = null;
@@ -187,6 +188,11 @@ public static partial class MusicUiTests
                     {
                         var more = (Button)player.FindName("MoreButton");
                         more.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); menu = more.ContextMenu;
+                    }
+                    else if (name == "PlaybackSessionMenu")
+                    {
+                        ((Button)player.FindName("PlaybackSessionButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                        menu = (ContextMenu)player.FindName(name);
                     }
                     else
                     {
@@ -409,12 +415,12 @@ public static partial class MusicUiTests
             await Until(() => f.Module.Mode == 3 && !f.Module.Busy);
             await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             True(!f.Module.HasPlaybackFm && !f.Module.CanHeartbeatCurrent, "local recording is never sent to WY heartbeat");
-            var sourceButton = (Button)footer.FindName("PlaybackSourceButton");
+            var sourceButton = (Button)footer.FindName("PlaybackSessionButton");
             sourceButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
-            var sourceMenu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
+            var sourceMenu = (ContextMenu)footer.FindName("PlaybackSessionMenu");
             True(sourceMenu.IsOpen && sourceMenu.Items.OfType<MenuItem>().All(item =>
-                !Equals(item.Header, "从当前歌曲进入心动") && !Equals(item.Header, "从当前歌曲进入推荐")),
-                "the separate source menu hides unsupported local-recording entries");
+                !Equals(item.Header, "从当前歌曲进入心动") && !Equals(item.Header, "推荐模式")),
+                "the infinity menu hides unsupported local-recording entries");
             sourceMenu.IsOpen = false;
             mode.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
             var retired = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 1));

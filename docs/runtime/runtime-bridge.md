@@ -27,7 +27,7 @@ X-Meow-Request-Id: <UUID>
 | `POST /v1/{module}/{operation}` | `application/json`，body 即业务参数 | 业务值；`sources.list`、`management.describe` 等是字面 operation 段 |
 | `POST /v1/close` | `{}` | 停止全部模块、取消其他交换并等待实际排空，成功值为 `{closed:true,cleanupComplete:true}` |
 
-成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。通用默认三模块为 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.2.0/source.runtime.v2`。iOS／Windows App 显式增加 `tmdb@0.1.0/tmdb.data.v1`，其只读请求、持久设置和二进制图片路由见[元数据契约](metadata-data.md)。
+成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。通用默认三模块为 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.2.0/source.runtime.v2`。iOS／Windows App 显式增加 `tmdb@0.1.0/tmdb.data.v1` 和 `netease@0.1.0/netease.token.v1`，精确握手五模块；分别见[元数据契约](metadata-data.md)与[网易订阅 token](netease-token.md)。
 
 受信 Node 装配还可显式加入 [pan.runtime.v1](pan-runtime.md)，使用 `POST /v1/pan/{operation}`；pan 不支持源码上传。`pan-entry.mjs` 提供同进程 pan-only 入口，或 `createRuntime({...,pan:{}})` 共用 aggregate HTTP 会话。通用默认 aggregate 与 iOS／Windows App 均不默认装配 pan；平台握手精确匹配各自显式装配的模块。
 

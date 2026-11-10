@@ -6,7 +6,7 @@ import MeowMusicFeature
 @testable import MeowMusicPlatform
 
 // Synthetic HTTP peer, no platform connection, user credential or reference
-// execution. Decrypts actual EAPI/XEAPI bytes rather than mocking the provider.
+// execution. Decrypts actual EAPI/XEAPI bytes and opt-in WEAPI payloads rather than mocking the provider.
 enum MusicNeteaseFixture {
     static let uid = "42"
     static func credential(_ uid: String = "42") throws -> AccountCredential {
@@ -124,11 +124,14 @@ actor MusicNeteaseTestHTTP: MusicAccountHTTPTransport {
     struct Record: Sendable { let request: MusicAccountHTTPRequest; let payload: Data? }
     let clock: MusicAccountTestClock
     let peer = try! Curve25519.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 7, count: 32))
+    private let weapiSecret: String?
     private var records: [Record] = []
     private var overrides: [String: [MusicAccountHTTPResponse]] = [:]
     private var block: (String, MusicAccountTestGate)?
     private var numericHandshakeTimestamp = true
-    init(clock: MusicAccountTestClock) { self.clock = clock }
+    init(clock: MusicAccountTestClock, weapiSecret: String? = nil) {
+        self.clock = clock; self.weapiSecret = weapiSecret
+    }
     func useNumericHandshakeTimestamp(_ value: Bool) { numericHandshakeTimestamp = value }
     func replies(_ path: String, _ responses: [MusicAccountHTTPResponse]) { overrides[path] = responses }
     func hold(_ path: String, _ gate: MusicAccountTestGate) { block = (path, gate) }
@@ -148,7 +151,15 @@ actor MusicNeteaseTestHTTP: MusicAccountHTTPTransport {
         } else if path.hasPrefix("/xeapi/") {
             payload = try MusicNeteaseFixture.xeapi(form, peer: peer)
         } else if path.hasPrefix("/weapi/") {
-            guard form["encSecKey"]?.count == 256, form["params"]?.isEmpty == false else { throw MusicServiceError.invalidRequest }
+            guard form["encSecKey"]?.count == 256, let params = form["params"], !params.isEmpty else { throw MusicServiceError.invalidRequest }
+            if let weapiSecret {
+                let iv = Data("0102030405060708".utf8)
+                let middle = try MusicNeteaseFixture.aes(MusicNeteaseFixture.base64(params), key: Data(weapiSecret.utf8), iv: iv)
+                let plain = try MusicNeteaseFixture.aes(
+                    MusicNeteaseFixture.base64(String(decoding: middle, as: UTF8.self)),
+                    key: Data("0CoJUm6Qyw8W8jud".utf8), iv: iv)
+                payload = try MusicQQWire.decode(plain)
+            }
         } else { payload = form }
         records.append(.init(request: request, payload: try MusicQQWire.json(payload)))
         if let block, block.0 == path { await block.1.wait() }

@@ -4,6 +4,7 @@ import { createMusicScriptModule } from '../../../runtime/modules/music-script.m
 import { createCatScriptModule } from '../../../runtime/modules/cat-script.mjs';
 import { createSourceRuntimeModule } from '../../../runtime/modules/source-runtime.mjs';
 import { createTMDBDataModule } from '../../../runtime/modules/metadata-data.mjs';
+import { createNeteaseTokenModule } from '../../../runtime/modules/netease-token.mjs';
 
 try {
   await startIOSAppRuntime({
@@ -14,6 +15,7 @@ try {
         modules.push(createCatScriptModule({ dataRoot: join(dataRoot, 'cat') }));
         modules.push(createSourceRuntimeModule({ platform: 'ios' }));
         modules.push(createTMDBDataModule({ dataRoot }));
+        modules.push(createNeteaseTokenModule());
         return modules;
       } catch (error) {
         for (const module of modules) void Promise.resolve(module.close()).catch(() => {});

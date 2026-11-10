@@ -1,6 +1,6 @@
 # Windows 脚本启动与 HTTP 会话
 
-`apps/windows/runtime/` 只保留 `bootstrap.mjs` 和 `entries/aggregate.mjs`。薄 entry 使用公共 `apps/runtime/entry.mjs` 显式装配 music／cat／source／tmdb 四模块，并指定 source 平台为 Windows；不复制脚本执行、协议或业务实现。
+`apps/windows/runtime/` 只保留 `bootstrap.mjs` 和 `entries/aggregate.mjs`。薄 entry 使用公共 `apps/runtime/entry.mjs` 显式装配 music／cat／source／tmdb／netease 五模块，并指定 source 平台为 Windows；不复制脚本执行、协议或业务实现。
 
 ## 私密启动与存活句柄
 
@@ -14,7 +14,7 @@ App 生成每次启动独立的 32 字节随机 request key。通过已验证的
 
 `RuntimeHttpClient` 使用 `127.0.0.1` HTTP，不走系统代理、不跟随重定向、不自动重放业务。每次请求携带 Bearer key、`X-Meow-Session` 和独立 UUID `X-Meow-Request-Id`，核对响应 ID、内容类型、状态及严格信封；公开契约见 [Runtime bridge](../runtime/runtime-bridge.md)。
 
-- `GET /v1/describe` 核对 `runtime.http.v1`、`aggregate`、准确模块及方法清单：`music@0.8.0` / `music.script.v3`、`cat@0.2.0` / `cat.script.v2`、`source@0.2.0` / `source.runtime.v2`、`tmdb@0.1.0` / `tmdb.data.v1`。
+- `GET /v1/describe` 核对 `runtime.http.v1`、`aggregate`、准确模块及方法清单：`music@0.8.0` / `music.script.v3`、`cat@0.2.0` / `cat.script.v2`、`source@0.2.0` / `source.runtime.v2`、`tmdb@0.1.0` / `tmdb.data.v1`、`netease@0.1.0` / `netease.token.v1`；不接受旧四模块描述。
 - 普通调用为 `POST /v1/{module}/{operation}`，参数直接是 JSON，成功信封为 `{ok:true,contract,value}`，失败为 `{ok:false,contract,code}`；结果不再是 JSON 字符串。
 - 源码经 `UploadSourceAsync` 完整 raw PUT，由 installationId 与明确 sourceRevision 绑定。异步上传借用调用方字节直到实际发送任务结束，包括取消；业务层不管理 begin/chunk/read/release。
 - `ReadImageAsync` 只接受受信运行器相对图片引用，经同一会话携带认证；成功读二进制、错误解包 `502` 模块信封，读取中受原生图片资源预算约束，取消等待物理响应释放。图片契约见[元数据运行器](../runtime/metadata-data.md)。

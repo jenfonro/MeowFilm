@@ -32,7 +32,7 @@ struct MusicDocument {
         do {
             for value in [library, queue, playback, history, catalogSource] { try MusicModel.rejectSecrets(value) }
         } catch { throw MusicServiceError.corruptDocument }
-        try musicRequire(library["schema"] == .n(1) && library["scope"].string == "device" && library["revision"].isInteger, .corruptDocument)
+        try musicRequire(library["schema"] == .n(2) && library["scope"].string == "device" && library["revision"].isInteger, .corruptDocument)
         try MusicLibraryValidation.validate(library["library"], owner: "device")
         _ = try MusicNativeSyncLedger.load(library)
         try musicRequire(queue["schema"] == .n(1) && queue["revision"].isInteger && queue["serial"].isInteger &&

@@ -7,7 +7,8 @@
     "packages/runtime-bridge",
     "packages/script-host",
     "packages/source-runtime",
-    "packages/pan-runtime"
+    "packages/pan-runtime",
+    "packages/netease-token"
   ],
   "engines": {
     "node": "^24.0.0"

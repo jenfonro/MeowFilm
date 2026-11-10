@@ -9,46 +9,19 @@ extension NativeMusicService: MusicRemoteCollectionServing {
         try check(); try intent.check(); try source.authorization.check()
         try requirePlatform(source.context.platform)
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        _ = try musicText(name, maximum: 600); try musicRequire(name.utf16.count <= 200)
+        _ = try musicText(name, maximum: 600)
         _ = try remoteContext(source)
+        guard source.context.kind == .playlist, let collection = source.context.collection, collection.kind == .playlist,
+              collection.platform.rawValue == source.context.platform else { throw MusicServiceError.unsupported }
         let own = epoch
-        let raw = try await work { try await source.collectionTracks(intent: intent) }
-        try check(own); try intent.check()
-        try musicRequire(raw.allSatisfy { $0.platform == source.context.platform }, .invalidResponse)
-        let songs = try raw.map(MusicModel.normalize)
         try await work { try await source.validate() }
         try check(own); try intent.check(); try source.authorization.check()
-        try await retainSongMetadata(songs)
-        try check(own)
         // All suspended work is over. Account/source and UI intent revocation
         // serialize with the one existing protected-document transaction.
-        let result = try source.authorization.perform {
-            try intent.perform {
-                try transaction(["library"]) { d in
-                    var library = d.library["library"]
-                    try musicRequire(library["collections"].array.count < 2000 &&
-                        library["nextId"].int < 9_007_199_254_740_991, .limit)
-                    let ids = try upsert(songs, library: &library)
-                    var collection = MusicModel.freshCollection("playlist:\(library["nextId"].int)", name)
-                    library["nextId"] = .n(library["nextId"].int + 1)
-                    collection["order"] = .strings(ids)
-                    collection["manualOrder"] = .bool(true)
-                    collection["locallyCreated"] = .bool(true)
-                    collection["revision"] = .n(1)
-                    collection["intents"] = .obj(ids.map {
-                        ($0, .obj([("present", .bool(true)), ("pending", .bool(true)), ("origin", .string("local"))]))
-                    })
-                    // Save locally first. Only previously enabled, exact-account
-                    // automatic preferences may consume this durable intent.
-                    d.library["library"] = library
-                    saveCollection(collection, &d)
-                    try recordAutomaticLibraryMutation(&d, collectionID: collection["id"].string)
-                    return collectionDTO(collection)
-                }
-            }
+        return try source.authorization.perform {
+            try saveNetworkPlaylist(.init(platform: collection.platform, nativeID: collection.nativeID,
+                title: name, creator: collection.creator, artwork: collection.artwork, count: collection.count), intent: intent)
         }
-        publishAutomaticLibrarySync(.localMutation)
-        return result
     }
 
     public func filteredRemoteQueue(source: MusicRemoteQueueSource, query: String,
@@ -89,7 +62,7 @@ extension NativeMusicService: MusicRemoteCollectionServing {
                 let parent = source.context
                 // A filtered FM preview is a finite queue, not an FM generator.
                 let context = MusicRemoteQueueContext(kind: parent.kind == .fm ? .recommendation : parent.kind,
-                    id: parent.id, title: parent.title, platform: parent.platform)
+                    id: parent.id, title: parent.title, platform: parent.platform, collection: parent.collection)
                 return MusicRemoteQueueSource(context: context, authorization: reader.authorization,
                     loadPage: { try reader.page($0) },
                     validate: { [weak self] in

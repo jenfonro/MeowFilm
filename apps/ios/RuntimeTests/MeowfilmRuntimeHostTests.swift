@@ -36,7 +36,7 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(manifest["assemblyProfile"] as? String, "common-native")
         XCTAssertEqual(manifest["transport"] as? String, "runtime.http.v1")
-        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "tmdb"])
+        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "tmdb", "netease"])
         let files = try XCTUnwrap(manifest["files"] as? [[String: Any]])
         XCTAssertFalse(files.contains { ($0["path"] as? String)?.lowercased().hasSuffix(".wasm") == true })
         let frameworks = try XCTUnwrap(Bundle.main.privateFrameworksURL)
@@ -56,6 +56,7 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let resources = try await hostResources()
         let service = resources.musicScripts
         let connection = try await resources.scriptSession.connection()
+        try await connection.validateAppModules()
         let description = try await connection.describe()
         guard case .object(let fields) = description, case .array(let modules)? = fields["modules"] else {
             return XCTFail("Missing runtime module description")

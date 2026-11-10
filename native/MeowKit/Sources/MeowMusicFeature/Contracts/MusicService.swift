@@ -233,10 +233,18 @@ public struct MusicCollection: Codable, Equatable, Sendable, Identifiable {
     public let count: Int
     public let revision: Int
     public let artwork: URL?
+    public let networkReference: MusicNetworkPlaylistReference?
+    public var canEdit: Bool { networkReference == nil && ["playlist", "favorites"].contains(kind) }
+    public var remoteCollection: MusicPublicBrowseCollection? {
+        networkReference.map {
+            .init(platform: $0.platform, nativeID: $0.remoteID, title: title,
+                  creator: $0.creator, artwork: artwork, count: count)
+        }
+    }
     public init(id: String, title: String, kind: String = "playlist", count: Int = 0, revision: Int = 0,
-                artwork: URL? = nil) {
+                artwork: URL? = nil, networkReference: MusicNetworkPlaylistReference? = nil) {
         self.id = id; self.title = title; self.kind = kind; self.count = count; self.revision = revision
-        self.artwork = artwork
+        self.artwork = artwork; self.networkReference = networkReference
     }
 }
 

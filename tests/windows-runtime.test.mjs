@@ -118,6 +118,7 @@ async function assertRealBusiness(client) {
     { id: 'cat', version: '0.2.0', contract: 'cat.script.v2' },
     { id: 'source', version: '0.2.0', contract: 'source.runtime.v2' },
     { id: 'tmdb', version: '0.1.0', contract: 'tmdb.data.v1' },
+    { id: 'netease', version: '0.1.0', contract: 'netease.token.v1' },
   ]);
   const operations = {
     music: ['sources.list', 'sources.detail', 'sources.add', 'sources.download', 'sources.edit',
@@ -127,10 +128,11 @@ async function assertRealBusiness(client) {
       'enable', 'uninstall', 'invoke', 'management.describe', 'management.sync'],
     source: ['load', 'unload', 'invoke', 'status', 'close'],
     tmdb: ['request', 'settings.get', 'settings.update'],
+    netease: ['get'],
   };
   for (const module of description.modules) {
     const prefix = module.id === 'source' ? 'source.runtime.'
-      : module.id === 'tmdb' ? 'tmdb.data.' : `${module.id}.script.`;
+      : module.id === 'tmdb' ? 'tmdb.data.' : module.id === 'netease' ? 'netease.token.' : `${module.id}.script.`;
     assert.deepEqual(module.methods, operations[module.id].map(name => prefix + name).sort());
   }
   assert.deepEqual(await client.call('music.script.sources.list'), {
@@ -359,19 +361,22 @@ async function runProduct(t, entry, payload, dataRoot, manifest) {
 }
 
 for (const packaged of [false, true]) {
-  test(`${packaged ? 'packaged' : 'source'} Windows entry serves four modules over HTTP and drains on close`, windows, async t => {
+  // Disk inventory/copy of the native and jsdom payload has a separate fixture
+  // budget; it must not consume the unchanged real-runtime protocol deadline.
+  const options = { ...windows, timeout: packaged ? 120000 : windows.timeout };
+  test(`${packaged ? 'packaged' : 'source'} Windows entry serves five modules over HTTP and drains on close`, options, async t => {
     const area = temporary(t);
     let entry = join(root, 'apps/windows/runtime/entries/aggregate.mjs'), payload, manifest;
     if (packaged) {
       payload = join(area, 'payload');
       manifest = await packageWindowsRuntime({ root, product: 'aggregate', output: payload });
-      assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'tmdb']);
+      assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'tmdb', 'netease']);
       assert.equal(manifest.transport, 'windows-http-v1');
       assert.equal(manifest.trustedNative[0].platform, 'win32');
       assert.equal(manifest.trustedNative[0].arch, process.arch);
       entry = join(payload, manifest.entry);
     }
-    await runProduct(t, entry, payload, join(area, 'data'), manifest);
+    await bounded(runProduct(t, entry, payload, join(area, 'data'), manifest), windows.timeout);
   });
 }
 

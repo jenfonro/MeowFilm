@@ -22,7 +22,7 @@ await runtime.start();
 // 宿主结束会话时：await runtime.close();
 ```
 
-也可与既有业务模块一并传给 `createAppRuntime`，每个模块只能出现一次。通用默认 `createRuntime`／`startRuntime` 仍装配 music、cat、source。iOS／Windows App entry 显式增加 tmdb，在同一会话中精确校验 music、cat、source、tmdb 四模块；没有装配 douban 或 pan。模块源文件已纳入公共运行器打包闭包，端侧搜索与设置接线分别见 [iOS 影视搜索](../ios/film-search.md)和 [Windows 影视搜索](../windows/film-search.md)。
+也可与既有业务模块一并传给 `createAppRuntime`，每个模块只能出现一次。通用默认 `createRuntime`／`startRuntime` 仍装配 music、cat、source。iOS／Windows App entry 显式增加 tmdb 和 [netease token](netease-token.md)，在同一会话中精确校验五模块；没有装配 douban 或 pan。模块源文件已纳入公共运行器打包闭包，端侧搜索与设置接线分别见 [iOS 影视搜索](../ios/film-search.md)和 [Windows 影视搜索](../windows/film-search.md)。
 
 | 模块 | 版本 | contract | 逻辑方法前缀 |
 | --- | --- | --- | --- |

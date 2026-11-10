@@ -9,6 +9,8 @@ import { isUtf8 } from 'node:buffer';
 import { deflateSync } from 'node:zlib';
 
 const directory = process.argv[2];
+const selected = process.argv[3] === '--case' && process.argv.length === 5 ? process.argv[4] : undefined;
+assert.ok(process.argv.length === 3 || selected, 'Use --case <exact name>');
 const report = {
   node: process.version, platform: process.platform, arch: process.arch,
   v8: process.versions.v8, execArgv: process.execArgv,
@@ -16,6 +18,7 @@ const report = {
   webAssembly: typeof globalThis.WebAssembly, cases: [],
 };
 async function check(name, run) {
+  if (selected && selected !== name) return;
   const started = performance.now();
   try { report.cases.push({ name, passed: true, detail: await run() ?? null, ms: performance.now() - started }); }
   catch (error) {
@@ -31,7 +34,7 @@ await check('ios-native-framework-payload', async () => {
   const manifest = JSON.parse(readFileSync(new URL('./runtime-manifest.json', import.meta.url), 'utf8'));
   assert.equal(manifest.assemblyProfile, 'common-native');
   assert.equal(manifest.transport, 'runtime.http.v1');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'tmdb']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'tmdb', 'netease']);
   assert.equal(manifest.trustedNative.length, 1);
   const native = manifest.trustedNative[0];
   assert.equal(native.path, 'Frameworks/MeowScriptHost.framework/MeowScriptHost');
@@ -161,11 +164,11 @@ await check('public-three-module-http-and-source-sdk', async () => {
   } finally { await runtime.close(); await client?.close(); }
 });
 
-await check('ios-four-module-http-and-tmdb', async () => {
+await check('ios-five-module-http-and-tmdb', async () => {
   const { createRuntimeClient } = await import('./app/entry.mjs');
   const { createConnection, createServer } = await import('node:net');
   const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86', requestKey = randomBytes(32).toString('hex');
-  const dataRoot = join(directory, 'four-modules');
+  const dataRoot = join(directory, 'five-modules');
   const seen = [];
   const upstream = http.createServer((request, response) => {
     seen.push(request.url);
@@ -219,6 +222,7 @@ await check('ios-four-module-http-and-tmdb', async () => {
     assert.deepEqual(described.modules.map(value => [value.id, value.version, value.contract]), [
       ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
       ['source', '0.2.0', 'source.runtime.v2'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
+      ['netease', '0.1.0', 'netease.token.v1'],
     ]);
     const settings = okay(await client.call('tmdb.data.settings.update', {
       apiBase: `http://127.0.0.1:${upstream.address().port}/proxy`,
@@ -496,8 +500,53 @@ await check('public-cat-install-invoke-close', async () => {
   } finally { await runtime.close(); }
 });
 
+await check('netease-token-sdk-worker', async () => {
+  const { createNeteaseTokenProvider } = await import('./node_modules/@meowfilm/netease-token/src/index.js');
+  const sdkURL = new URL('./node_modules/@meowfilm/netease-token/src/watchman.js', import.meta.url).href;
+  let downloads = 0, provider;
+  const upstream = http.createServer((_request, response) => {
+    downloads++;
+    response.writeHead(200, { 'content-type': 'application/javascript' });
+    response.end(`window.initWatchman = ({productNumber,onload}) => {
+        if (productNumber !== 'YD00000558929251') throw new Error('identity');
+        let next = 0, ready = false;
+        onload({getInstance: () => ({I(done) { ready = true; done(); }}),
+          getToken(id, done) {
+            if (!ready || id !== 'bd5d2f973ef74cd2a61325a412ae54d9') throw new Error('identity');
+            ready = false; done('preflight-' + (++next));
+          }});
+      };`);
+  });
+  try {
+    upstream.listen(0, '127.0.0.1');
+    await once(upstream, 'listening');
+    provider = createNeteaseTokenProvider({ workerFactory: () => new Worker(`
+      const { parentPort } = require('node:worker_threads');
+      // Only redirect this diagnostic worker's fixed official download to a synthetic loopback SDK.
+      require('node:https').get = (url, options, receive) => {
+        require('node:assert/strict').equal(url, 'https://acstatic-dun.126.net/tool.min.js');
+        return require('node:http').get('http://127.0.0.1:${upstream.address().port}/tool.js', options, receive);
+      };
+      const ready = import(${JSON.stringify(sdkURL)}).then(({createWatchman}) => createWatchman());
+      parentPort.on('message', async ({id}) => {
+        try { parentPort.postMessage({id, token: await (await ready).get()}); }
+        catch { parentPort.postMessage({id, code:'SDK_FAILURE'}); }
+      });
+    `, { eval: true, stdout: true, stderr: true }) });
+    assert.equal(await provider.get(), 'preflight-1');
+    assert.equal(await provider.get(), 'preflight-2');
+    assert.equal(downloads, 1);
+    return { jsdom: '24.1.3', worker: true, calls: 2, downloads, network: 'loopback-only', account: false };
+  } finally {
+    await provider?.close();
+    upstream.closeAllConnections();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
 report.complete = true;
-report.passed = report.cases.every(value => value.passed);
+report.passed = report.cases.length > 0 && report.cases.every(value => value.passed) &&
+  (!selected || report.cases.length === 1 && report.cases[0].name === selected);
 writeFileSync(join(directory, 'node-report.json'), JSON.stringify(report, null, 2));
 console.log('IOS_NODE_PREFLIGHT', JSON.stringify(report));
 process.exitCode = report.passed ? 0 : 1;

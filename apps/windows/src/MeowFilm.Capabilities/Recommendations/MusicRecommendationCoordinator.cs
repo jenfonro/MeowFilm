@@ -214,7 +214,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
             string entry = Text(p, "entry"), song = Text(p, "songId");
             Require(entry is "favorites" or "current");
             Require(entry == "favorites" && song.Length == 0 || ValidId(song));
-            Require(entry != "current" || ValidId(Text(p, "playlistId")));
+            Require(!p.TryGetProperty("playlistId", out _) || ValidId(Text(p, "playlistId")));
             heartbeat = new(platform, entry == "favorites" ? MusicHeartbeatEntry.Favorites : MusicHeartbeatEntry.CurrentSong,
                 song.Length > 0 ? song : null, p.TryGetProperty("playlistId", out _) ? Text(p, "playlistId") : null);
         }

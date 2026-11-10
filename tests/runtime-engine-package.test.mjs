@@ -42,7 +42,7 @@ function sourceFixture() {
   };
   for (const path of new Set(['package.json', 'package-lock.json', policyPath, receiptPath,
     artifactPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
-  for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime']) {
+  for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime', 'netease-token']) {
     const location = `packages/${name}`;
     copy(`${location}/package.json`);
     copy(`${location}/src`);

@@ -18,7 +18,9 @@ import MeowMusicFeature
         }
         let wy = ["https://music.163.com/weapi/playlist/create", "https://music.163.com/weapi/playlist/remove",
                   "https://music.163.com/weapi/radio/like", "https://interfacepc.music.163.com/eapi/batch",
-                  "https://interfacepc.music.163.com/eapi/playlist/manipulate/tracks"]
+                  "https://interfacepc.music.163.com/eapi/playlist/manipulate/tracks",
+                  "https://interfacepc.music.163.com/eapi/playlist/subscribe",
+                  "https://interfacepc.music.163.com/eapi/playlist/unsubscribe"]
         for raw in wy {
             let url = URL(string: raw)!
             XCTAssertTrue(MusicAccountSyncRoute.permits(.init(url: url, method: "POST")))

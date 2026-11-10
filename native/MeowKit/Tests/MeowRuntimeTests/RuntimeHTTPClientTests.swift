@@ -403,18 +403,29 @@ final class RuntimeHTTPClientTests: XCTestCase {
         }
     }
 
-    func testAppDescribeRequiresExactFourModuleVersionsContractsAndTMDBMethods() async throws {
+    func testAppDescribeRequiresExactFiveModuleVersionsContractsAndMethods() async throws {
         let client = try client()
         let modules: [RuntimeValue] = [
             .object(["id": .string("music"), "version": .string("0.8.0"), "contract": .string("music.script.v3")]),
             .object(["id": .string("cat"), "version": .string("0.2.0"), "contract": .string("cat.script.v2")]),
             .object(["id": .string("source"), "version": .string("0.2.0"), "contract": .string("source.runtime.v2")]),
             .object(["id": .string("tmdb"), "version": .string("0.1.0"), "contract": .string("tmdb.data.v1"),
-                "methods": .array(["request", "settings.get", "settings.update"].map { .string("tmdb.data." + $0) })])
+                "methods": .array(["request", "settings.get", "settings.update"].map { .string("tmdb.data." + $0) })]),
+            .object(["id": .string("netease"), "version": .string("0.1.0"), "contract": .string("netease.token.v1"),
+                "methods": .array([.string("netease.token.get")])])
         ]
-        let invalidTMDB: RuntimeValue = .object(["id": .string("tmdb"), "version": .string("0.2.0"), "contract": .string("tmdb.data.v1")])
-        for (index, supplied) in [modules, Array(modules.prefix(3)), modules + [modules[3]],
-                                  Array(modules.prefix(3)) + [invalidTMDB], Array(modules.prefix(3)) + [modules[0]]].enumerated() {
+        var invalid = [Array(modules.prefix(3)), Array(modules.prefix(4)), modules + [modules[4]]]
+        for (index, field, value) in [
+            (3, "version", RuntimeValue.string("0.2.0")), (3, "methods", .array([])),
+            (4, "version", .string("0.2.0")), (4, "contract", .string("music.script.v3")),
+            (4, "methods", .array([])), (4, "methods", .array([.string("netease.token.get"), .string("netease.token.get")])),
+            (4, "methods", .array([.string("netease.token.other")])), (4, "id", .string("music"))
+        ] {
+            var supplied = modules
+            guard case .object(var fields) = supplied[index] else { return XCTFail("module fixture") }
+            fields[field] = value; supplied[index] = .object(fields); invalid.append(supplied)
+        }
+        for (index, supplied) in ([modules] + invalid).enumerated() {
             RuntimeTestURLProtocol.fixture.set { _, transport in
                 transport.respond(.object(["ok": .bool(true), "contract": .string("runtime.http.v1"), "value": .object([
                     "protocol": .string("runtime.http.v1"), "product": .string("aggregate"), "modules": .array(supplied)
@@ -424,6 +435,73 @@ final class RuntimeHTTPClientTests: XCTestCase {
             catch { XCTAssertNotEqual(index, 0); XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
         }
         await client.close()
+    }
+
+    func testNeteaseTokenRoutingHasEmptyInputAndSixtySecondBudgetWithOrdinaryRequestBudgetPreserved() async throws {
+        let client = try client()
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.url?.path, "/v1/netease/get")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.timeoutInterval, 60)
+            XCTAssertEqual(transport.body(), Data("{}".utf8))
+            XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+            transport.respond(.object(["ok": .bool(true), "contract": .string("netease.token.v1"),
+                                       "value": .object(["token": .string("synthetic-token")])]))
+        }
+        let value = try await client.call(module: .netease, operation: "get")
+        XCTAssertEqual(value, .object(["token": .string("synthetic-token")]))
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.timeoutInterval, 30)
+            transport.respond(.object(["ok": .bool(true), "contract": .string("music.script.v3"), "value": .null]))
+        }
+        _ = try await client.call(module: .music, operation: "invoke")
+        RuntimeTestURLProtocol.fixture.set { _, _ in XCTFail("invalid token calls must not reach HTTP") }
+        for (operation, parameters) in [("token.get", RuntimeValue.object([:])),
+                                        ("get", .object(["cookie": .string("synthetic")])),
+                                        ("get", .null)] {
+            do { _ = try await client.call(module: .netease, operation: operation, parameters: parameters); XCTFail("invalid input") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidRequest) }
+        }
+        await client.close()
+    }
+
+    func testNeteaseTokenEnvelopeAcceptsOnlyItsContractAndClosedErrorVocabulary() async throws {
+        let client = try client()
+        for code in ["INVALID_REQUEST", "CLOSED", "CANCELLED", "TIMEOUT", "NETWORK_ERROR",
+                     "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "SDK_FAILURE", "SDK_CLEANUP"] {
+            RuntimeTestURLProtocol.fixture.set { _, transport in
+                transport.respond(.object(["ok": .bool(false), "contract": .string("netease.token.v1"), "code": .string(code)]))
+            }
+            do { _ = try await client.call(module: .netease, operation: "get"); XCTFail("remote failure") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote(code)) }
+        }
+        for response in [
+            reply(.object(["token": .string("synthetic")])),
+            .object(["ok": .bool(false), "contract": .string("netease.token.v1"), "code": .string("SCRIPT_FAILURE")]),
+            .object(["ok": .bool(false), "contract": .string("netease.token.v1"), "code": .string("SDK_FAILURE"), "message": .string("unsafe")])
+        ] {
+            RuntimeTestURLProtocol.fixture.set { _, transport in transport.respond(response) }
+            do { _ = try await client.call(module: .netease, operation: "get"); XCTFail("invalid envelope") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
+        }
+        await client.close()
+    }
+
+    func testNeteaseTokenCancellationAndOwnerCloseStopTheActualHTTPTask() async throws {
+        for ownerClose in [false, true] {
+            let client = try client()
+            let entered = expectation(description: "token request entered"), stopped = expectation(description: "token request stopped")
+            RuntimeTestURLProtocol.fixture.set { _, transport in
+                transport.onStop { stopped.fulfill() }; entered.fulfill()
+            }
+            let pending = Task { try await client.call(module: .netease, operation: "get") }
+            await fulfillment(of: [entered], timeout: 2)
+            if ownerClose { await client.close() } else { pending.cancel() }
+            do { _ = try await pending.value; XCTFail("pending token cannot succeed") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, ownerClose ? .closed : .cancelled) }
+            await fulfillment(of: [stopped], timeout: 2)
+            await client.close()
+        }
     }
 
     func testRejectsUntrustedEndpointsAndCredentials() throws {

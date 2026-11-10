@@ -82,6 +82,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     public string Version => "0.4.0";
     public ObservableCollection<NavigationItem> Navigation { get; } = [];
     public ObservableCollection<PlaylistRow> Playlists { get; } = [];
+    public ObservableCollection<PlaylistRow> NetworkPlaylists { get; } = [];
     private readonly ObservableCollection<SongRow> searchSongs = [], catalogSongs = [];
     public ObservableCollection<SongRow> Songs => IsSearchPage ? searchSongs : catalogSongs;
     public ObservableCollection<SongRow> SearchSongsSource => searchSongs;
@@ -310,6 +311,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         MusicOperationException { Code: "CAPABILITY_UNAVAILABLE" } => "当前音源不支持此操作或音质",
         MusicOperationException { Code: "PERMISSION_DENIED" } => "音源权限未授权",
         MusicOperationException { Code: "AUTH_REQUIRED" } => "当前内容需要平台登录",
+        MusicOperationException { Code: "SDK_FAILURE" or "SDK_CLEANUP" } => "网易云订阅验证失败",
         MusicOperationException { Code: "AUTH_CHANGED" or "AUTH_EXPIRED" } => "平台登录状态已失效",
         MusicOperationException { Code: "VIP_REQUIRED" } => "当前官方音源需要有效会员",
         MusicOperationException { Code: "TRIAL_ONLY" or "PLAYBACK_RESTRICTED" } => "当前歌曲暂无完整播放权限",
@@ -354,7 +356,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         requested(this, new(destination)); // Shell owns route history and back.
         return Task.CompletedTask;
     }
-    public Task OpenPlaylistAsync(string id) => RequestNavigationAsync(id == "favorites" ? "favorites" : "playlist/" + id);
+    public Task OpenPlaylistAsync(string id) => RequestNavigationAsync(NetworkPlaylists.FirstOrDefault(p => p.Id == id)?.Route
+        ?? (id == "favorites" ? "favorites" : "playlist/" + id));
     public Task RefreshAsync()
     {
         if (IsDiscovery) return RefreshDiscoveryAsync();

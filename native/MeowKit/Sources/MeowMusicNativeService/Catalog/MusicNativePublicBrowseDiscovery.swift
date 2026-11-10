@@ -221,9 +221,15 @@ enum MusicNativePublicBrowseParser {
                 content = .action(descriptor); stable = MusicNativeHomePresentation.actionID(descriptor); entrance = true
             } else { content = .unavailable; stable = index }
         } else if kind == "star" || row["lunaItemType"].string == "heartRcmd" {
-            let action: MusicHomeAction = MusicNativeHomePresentation.positiveID(rawSong["id"], digits: 16, safe: true)
-                .map { .heartbeatSong(songID: $0) } ?? .heartbeat
-            entrance = true; content = .action(action); stable = MusicNativeHomePresentation.actionID(action)
+            entrance = true
+            if let songID = MusicNativeHomePresentation.positiveID(rawSong["id"], digits: 16, safe: true) {
+                let action = MusicHomeAction.heartbeatSong(songID: songID)
+                content = .action(action); stable = MusicNativeHomePresentation.actionID(action)
+            } else if rawSong == .null {
+                content = .action(.heartbeat); stable = MusicNativeHomePresentation.actionID(.heartbeat)
+            } else {
+                content = .unavailable; stable = index
+            }
         } else if kind == "song" || link?.kind == "song" || rawSong.isObject {
             let songID = try MusicPlatformProtocol.numericID(.string(rawSong.isObject ?
                 textID(rawSong["id"], rawSong["songId"], rawSong["resourceId"]) : id))

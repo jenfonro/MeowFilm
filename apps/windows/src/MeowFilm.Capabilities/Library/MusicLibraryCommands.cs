@@ -13,6 +13,8 @@ public sealed partial class MusicLibraryOwner
     {
         if (method.StartsWith("music.queue.recommendation.", StringComparison.Ordinal))
             return await RecommendationCommandAsync(method, parameters, document, cancellationToken).ConfigureAwait(false);
+        if (method.StartsWith("music.library.network.", StringComparison.Ordinal))
+            return NetworkPlaylistCommand(method, parameters, document);
         if (method.StartsWith("music.library.", StringComparison.Ordinal))
             return CollectionCommand(method, parameters, document, full);
         if (method.StartsWith("music.queue.", StringComparison.Ordinal))

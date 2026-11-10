@@ -112,7 +112,7 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
         case .artistActivity: return Data(#"{"code":200,"data":{"newWorks":[]}}"#.utf8)
         case .songMetadata(let ids):
             return MJ.obj([("code", .n(200)), ("songs", .array(ids.map(MusicNativePublicBrowseFixture.song)))]).bytes
-        case .playlistMetadata, .vipSongs: throw MusicServiceError.invalidRequest
+        case .playlistMetadata, .vipSongs, .heartbeatSeed: throw MusicServiceError.invalidRequest
         }
     }
     func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage { throw MusicServiceError.unsupported }

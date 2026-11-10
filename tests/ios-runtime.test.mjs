@@ -179,6 +179,7 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   assert.deepEqual(described.modules.map(module => [module.id, module.version, module.contract]), [
     ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.2.0', 'source.runtime.v2'],
     ['tmdb', '0.1.0', 'tmdb.data.v1'],
+    ['netease', '0.1.0', 'netease.token.v1'],
   ]);
   for (const method of ['music.script.sources.list', 'music.script.resolve', 'music.script.invoke'])
     assert.ok(described.modules[0].methods.includes(method), method);
@@ -186,6 +187,7 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   assert.deepEqual(described.modules[3].methods, [
     'tmdb.data.request', 'tmdb.data.settings.get', 'tmdb.data.settings.update',
   ]);
+  assert.deepEqual(described.modules[4].methods, ['netease.token.get']);
   await verifyTMDBAssembly(t, { client, baseUrl, ...runtime.configuration });
   const instance = okay(await load(client)).item;
   assert.equal(instance.state, 'ready');
