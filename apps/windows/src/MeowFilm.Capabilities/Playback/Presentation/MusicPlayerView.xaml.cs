@@ -105,6 +105,8 @@ public partial class MusicPlayerView : UserControl
     }
     private async void Lyrics_Click(object sender, RoutedEventArgs e) => await module.OpenPlayerDetailAsync();
     private async void Favorite_Click(object sender, RoutedEventArgs e) => await module.ToggleCurrentFavoriteAsync();
+    private async void DesktopLyrics_Click(object sender, RoutedEventArgs e) =>
+        await module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
     private void PlaylistMenu_Click(object sender, RoutedEventArgs e) => PlaylistPopup.IsOpen = !PlaylistPopup.IsOpen;
     private async void AddCurrent_Click(object sender, RoutedEventArgs e)
     {

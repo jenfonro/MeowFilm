@@ -18,7 +18,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class MusicLyricDisplayTests
+public static partial class MusicLyricDisplayTests
 {
     public static IEnumerable<TestCase> Cases()
     {
@@ -174,8 +174,12 @@ public static class MusicLyricDisplayTests
         }));
         yield return new("Native lyric display switches and closes cancel late metadata before publication", () => Sta(async () =>
         {
-            await using var f = await Fixture.Create();
+            LyricLookupApplication? application = null;
+            await using var f = await Fixture.Create(decorate: inner => application = new(inner));
+            var lookups = application!;
             var arrived = Signal(); var release = Signal();
+            var published = new List<string>();
+            f.Module.Lyrics.CollectionChanged += (_, _) => published.AddRange(f.Module.Lyrics.Select(row => row.Text));
             f.Http.Block = async () => { arrived.TrySetResult(); await release.Task; };
             var read = f.Module.RefreshLyricsAsync();
             try
@@ -183,17 +187,20 @@ public static class MusicLyricDisplayTests
                 await arrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
                 f.Module.CancelLyrics();
                 await read.WaitAsync(TimeSpan.FromSeconds(3));
-                Equal(0, f.Module.Lyrics.Count);
+                Equal(0, f.Module.Lyrics.Count); Equal(0, published.Count);
+                Check(!f.Module.CanCancelLyrics);
                 // The current application contract cancels this subscription, not
                 // its shared physical read. A new same-recording subscriber joins it.
                 var retry = f.Module.RefreshLyricsAsync();
-                await Dispatcher.Yield(DispatcherPriority.Background);
+                await lookups.SecondLookupEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
                 Check(!retry.IsCompleted && !release.Task.IsCompleted);
                 Equal(1, f.Http.Calls);
                 release.TrySetResult();
                 await retry;
                 Equal(1, f.Http.Calls);
                 Equal(2, f.Module.Lyrics.Count); Equal(0, f.Runtime.Calls);
+                Equal("SYNTHETIC_LYRIC", f.Module.Lyrics[0].Text);
+                Equal("second", f.Module.Lyrics[1].Text);
             }
             finally { release.TrySetResult(); await read; }
         }));
@@ -247,15 +254,18 @@ public static class MusicLyricDisplayTests
                         Check(f.Module.Sources.Single(row => !row.IsBuiltIn).ExecutionHash != previousHash);
                     }
                     await read.WaitAsync(TimeSpan.FromSeconds(3));
+                    Equal(0, f.Module.Lyrics.Count);
+                    Check(!published.Contains("OLD_SOURCE"));
                     var retry = f.Module.RestoreLyricsAsync();
-                    await retry.WaitAsync(TimeSpan.FromSeconds(3));
+                    await retry.WaitAsync(TimeSpan.FromSeconds(5));
                     // Invalidating a source creates a new generation without
                     // waiting for the old provider that ignores cancellation.
                     Check(!release.Task.IsCompleted);
                     Equal(2, f.Http.Calls);
                     release.TrySetResult();
-                    await Task.WhenAll(read, retry);
+                    Equal(2, f.Module.Lyrics.Count);
                     Equal("CURRENT_SOURCE", f.Module.Lyrics[0].Text);
+                    Equal("second", f.Module.Lyrics[1].Text);
                     Check(!published.Contains("OLD_SOURCE"));
                     Equal(2, f.Http.Calls); Equal(0, f.Runtime.Invocations); Equal(0, f.Playback.Opens);
                     var queue = Ok(await f.Application.ExecuteAsync("music.queue.get"));
@@ -633,6 +643,24 @@ public static class MusicLyricDisplayTests
         await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
         if (error is not null) ExceptionDispatchInfo.Capture(error).Throw();
     }
+    private sealed class LyricLookupApplication(IMusicApplication inner) : MusicApplicationForwarder(inner)
+    {
+        private readonly TaskCompletionSource releaseLookups = Signal();
+        private int lookups;
+        internal bool HoldLookups;
+        internal readonly TaskCompletionSource SecondLookupEntered = Signal();
+        internal void ReleaseLookups() => releaseLookups.TrySetResult();
+        public override async Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (method != "music.lyrics.lookup")
+                return await Inner.ExecuteAsync(method, parameters, cancellationToken);
+            if (HoldLookups) await releaseLookups.Task.WaitAsync(cancellationToken);
+            var read = Inner.ExecuteAsync(method, parameters, cancellationToken);
+            if (Interlocked.Increment(ref lookups) == 2) SecondLookupEntered.TrySetResult();
+            return await read;
+        }
+    }
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly LocalDocumentStore Store;
@@ -649,7 +677,7 @@ public static class MusicLyricDisplayTests
         internal Exception? SyncNoticeFailure;
         private readonly TaskCompletionSource releaseSyncNotice = Signal();
         private int syncNoticeHeld;
-        private Fixture(string root, bool holdSync)
+        private Fixture(string root, bool holdSync, Func<IMusicApplication, IMusicApplication>? decorate = null)
         {
             Runtime = new(root);
             ScriptPath = Path.Combine(root, "lyric-source.js");
@@ -657,7 +685,7 @@ public static class MusicLyricDisplayTests
             Access = new(Store);
             Application = new(Access, Runtime, Http);
             if (holdSync) Application.LibrarySyncChanged += HoldSyncNotice;
-            Module = new(Application, Access, Playback, Dialogs);
+            Module = new(decorate?.Invoke(Application) ?? Application, Access, Playback, Dialogs);
             if (holdSync) Application.LibrarySyncChanged += () => SyncNoticeDelivered.TrySetResult();
         }
         private void HoldSyncNotice()
@@ -669,9 +697,9 @@ public static class MusicLyricDisplayTests
         }
         internal void ReleaseSyncNotice() => releaseSyncNotice.TrySetResult();
         internal static async Task<Fixture> Create(string? root = null, bool seed = true, string cover = "", bool holdSync = false,
-            bool allowScripts = false)
+            bool allowScripts = false, Func<IMusicApplication, IMusicApplication>? decorate = null)
         {
-            var value = new Fixture(root ?? NewRoot(), holdSync);
+            var value = new Fixture(root ?? NewRoot(), holdSync, decorate);
             value.Runtime.AllowScripts = allowScripts;
             try
             {

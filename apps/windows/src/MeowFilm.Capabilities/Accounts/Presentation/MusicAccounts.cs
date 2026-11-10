@@ -311,6 +311,7 @@ public sealed partial class MusicCapability
             }
             AccountBindings();
             if (changedAccount) BeginHomeAccountRecovery(forceRead: true);
+            if (changedAccount && epoch == accountEpoch && NeedsLyrics) _ = RestoreLyricsAsync();
         }
     }
     public Task CancelAccountAsync()
@@ -332,6 +333,7 @@ public sealed partial class MusicCapability
 
         async Task Settle()
         {
+            bool settled = false;
             await Task.Yield(); // Publish the settlement task before cancellation callbacks can re-enter.
             try
             {
@@ -348,6 +350,7 @@ public sealed partial class MusicCapability
                 if (result.ErrorCode is { } code) throw new MusicOperationException(code);
                 accountStatus = accountSaveUncertain ? "取消结果待核对，请读取账号状态" :
                     sending ? "短信发送结果未确认" : "已取消";
+                settled = true;
             }
             catch
             {
@@ -361,6 +364,7 @@ public sealed partial class MusicCapability
             {
                 completion.TrySetResult();
                 AccountBindings();
+                if (settled && epoch == accountEpoch && NeedsLyrics) _ = RestoreLyricsAsync();
             }
         }
     }

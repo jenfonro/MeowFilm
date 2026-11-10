@@ -1,6 +1,8 @@
 using MeowFilm.AppHost;
+using MeowFilm.App;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Film.Rules;
+using MeowFilm.Desktop;
 using MeowFilm.Media;
 using MeowFilm.Platform.Scripting;
 using MeowFilm.SystemMedia;
@@ -22,6 +24,7 @@ internal static class Program
         FilmSourceService? pendingSources = null;
         FilmMetadataService? pendingMetadata = null;
         SearchResultsPage? searchPage = null;
+        AppMediaWindowAttachment? pendingMediaAttachment = null;
         AppLauncher.Run(new(AppIdentity.RuntimeId, AppIdentity.ScriptModules,
             AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces),
             (runtime, storage, capabilities) =>
@@ -42,6 +45,7 @@ internal static class Program
             },
             async () =>
             {
+                if (pendingMediaAttachment is not null) await pendingMediaAttachment.DisposeAsync();
                 try
                 {
                     searchPage?.Dispose();
@@ -68,9 +72,17 @@ internal static class Program
                 // Platform callbacks are composed before this attachment. Host
                 // restoration is App-owned and independent of the selected page.
                 _ = capabilities.OfType<FilmCapability>().Single().StartSourcesAsync();
-                return new SystemMediaWindowAttachment(window, playback!,
+                var settings = shell.MediaControls ?? throw new InvalidOperationException("MEDIA_CONTROLS_MISSING");
+                var attachment = pendingMediaAttachment = new AppMediaWindowAttachment(window, settings);
+                music.AttachDesktopLyricsOwner(window);
+                var systemMedia = new SystemMediaWindowAttachment(window, playback!,
                     [new("music", _ => music.StepAsync(true), _ => music.StepAsync(false),
-                        Play: _ => music.ResumePlaybackAsync())]);
+                        Play: _ => music.ResumePlaybackAsync())],
+                    enabled: settings.IsAvailable && settings.Preferences.SystemMediaEnabled);
+                attachment.OwnSystemMedia(systemMedia, systemMedia.SetEnabled);
+                attachment.OwnShortcuts(new MediaShortcutWindowAttachment(window, settings, music.ExecuteMediaShortcutAsync));
+                pendingMediaAttachment = null;
+                return attachment;
             },
             capabilities => [searchPage = new SearchResultsPage(capabilities.OfType<MusicCapability>().Single(),
                 capabilities.OfType<FilmCapability>().Single())]);

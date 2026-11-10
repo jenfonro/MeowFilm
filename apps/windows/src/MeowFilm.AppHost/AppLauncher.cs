@@ -116,6 +116,7 @@ public static class AppLauncher
             AppRuntimeClient? runtime = null;
             ArtworkService? artwork = null;
             AppAppearance? appearance = null;
+            AppMediaControlSettings? mediaControls = null;
             AppClosePreferences? closePreferences = null;
             var modules = new List<IDesktopModule>();
             IAsyncDisposable? windowAttachment = null;
@@ -134,7 +135,7 @@ public static class AppLauncher
                     new(() => disposeResources?.Invoke() ?? ValueTask.CompletedTask),
                     new(() => runtime?.DisposeAsync() ?? ValueTask.CompletedTask, InterruptsPendingOperations: true),
                     new(() => store?.DisposeAsync() ?? ValueTask.CompletedTask)
-                ], sharedParticipants: new IDesktopShutdownParticipant?[] { appearance, closePreferences }
+                ], sharedParticipants: new IDesktopShutdownParticipant?[] { mediaControls, appearance, closePreferences }
                     .OfType<IDesktopShutdownParticipant>());
             }
             try
@@ -160,6 +161,8 @@ public static class AppLauncher
                 closePreferences = new AppClosePreferences(store);
                 await appearance.LoadAsync();
                 await closePreferences.LoadAsync();
+                mediaControls = new AppMediaControlSettings(store);
+                await mediaControls.LoadAsync();
                 ValidateModuleComposition(modules);
                 await PrepareModulesAsync(modules, cancellationToken);
                 // The shared runtime starts with the App; starting it executes no script.
@@ -167,7 +170,7 @@ public static class AppLauncher
                 var lifecycle = Lifecycle();
                 shell = new ShellWindow(modules, createPages?.Invoke(modules) ?? [],
                     lifecycle.CloseAsync, lifecycle.ForceReleaseAsync, lifecycle.CancelShutdownPreparationAsync,
-                    appearance, closePreferences) { Title = "meowfilm" };
+                    appearance, closePreferences, mediaControls: mediaControls) { Title = "meowfilm" };
                 artwork = new ArtworkService(readTrusted: async (reference, maximumBytes, token) =>
                 {
                     try { return await runtime.ReadImageAsync(reference, maximumBytes, token).ConfigureAwait(false); }

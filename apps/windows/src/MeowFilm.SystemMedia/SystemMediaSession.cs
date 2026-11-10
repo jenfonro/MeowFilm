@@ -18,29 +18,35 @@ public sealed class SystemMediaSession : IAsyncDisposable
     private readonly CancellationTokenSource lifetime = new();
     private readonly SemaphoreSlim commands = new(1, 1);
     private readonly HashSet<Task> running = [];
+    private bool enabled;
     private bool stopped;
     private bool disposed;
     private long generation;
     private string? owner, identity;
-    private Target published = new(0, null, null);
+    private Target published = new(0, null, null, false);
     private Task? disposing;
     private int pending;
     private long interruption;
     public string? LastErrorCode { get; private set; }
 
     public SystemMediaSession(ISystemPlayback playback, ISystemMediaBackend backend,
-        IEnumerable<SystemPlaybackOwner> owners, Dispatcher? dispatcher = null)
+        IEnumerable<SystemPlaybackOwner> owners, Dispatcher? dispatcher = null, bool enabled = true)
     {
         this.dispatcher = dispatcher ?? Dispatcher.CurrentDispatcher;
         this.dispatcher.VerifyAccess();
         this.playback = playback ?? throw new ArgumentNullException(nameof(playback));
         this.backend = backend ?? throw new ArgumentNullException(nameof(backend));
+        this.enabled = enabled;
         this.owners = owners.ToDictionary(item => item.Id, StringComparer.Ordinal);
         if (this.owners.Count == 0 || this.owners.Keys.Any(string.IsNullOrWhiteSpace))
             throw new ArgumentException("SYSTEM_MEDIA_OWNERS");
         playback.PropertyChanged += Changed;
         backend.Requested += Requested;
-        try { Publish(); }
+        try
+        {
+            if (enabled) Publish();
+            else backend.Disable();
+        }
         catch
         {
             playback.PropertyChanged -= Changed;
@@ -51,8 +57,24 @@ public sealed class SystemMediaSession : IAsyncDisposable
     }
 
     public SystemMediaSession(NativePlayback playback, ISystemMediaBackend backend,
-        IEnumerable<SystemPlaybackOwner> owners, Dispatcher? dispatcher = null)
-        : this(new NativeSource(playback), backend, owners, dispatcher) { }
+        IEnumerable<SystemPlaybackOwner> owners, Dispatcher? dispatcher = null, bool enabled = true)
+        : this(new NativeSource(playback), backend, owners, dispatcher, enabled) { }
+
+    /// <summary>Call on the owning dispatcher; this does not stop playback or resume a suspended session.</summary>
+    public void SetEnabled(bool enabled)
+    {
+        dispatcher.VerifyAccess();
+        if (disposed || stopped || this.enabled == enabled) return;
+        this.enabled = enabled;
+        if (enabled) PublishSafely();
+        else
+        {
+            generation++;
+            Volatile.Write(ref published, new(generation, owner, identity, false));
+            try { backend.Disable(); }
+            catch { LastErrorCode = "SYSTEM_MEDIA_DISABLE_FAILED"; }
+        }
+    }
 
     private void Changed(object? sender, PropertyChangedEventArgs args)
     {
@@ -67,7 +89,7 @@ public sealed class SystemMediaSession : IAsyncDisposable
 
     private void PublishSafely()
     {
-        if (disposed || stopped) return;
+        if (disposed || stopped || !enabled) return;
         try { Publish(); }
         catch { LastErrorCode = "SYSTEM_MEDIA_UPDATE_FAILED"; }
     }
@@ -81,12 +103,12 @@ public sealed class SystemMediaSession : IAsyncDisposable
             identity = state.Identity;
             generation++;
         }
-        Volatile.Write(ref published, new(generation, owner, identity));
-        bool enabled = state.HasMedia && state.OwnerId is not null && owners.ContainsKey(state.OwnerId);
-        var registered = enabled ? owners[state.OwnerId!] : null;
+        Volatile.Write(ref published, new(generation, owner, identity, enabled));
+        bool available = state.HasMedia && state.OwnerId is not null && owners.ContainsKey(state.OwnerId);
+        var registered = available ? owners[state.OwnerId!] : null;
         backend.Update(state with
         {
-            HasMedia = enabled, IsPlaying = enabled && state.IsPlaying,
+            HasMedia = available, IsPlaying = available && state.IsPlaying,
             CanNext = registered?.Next is not null, CanPrevious = registered?.Previous is not null,
             Kind = registered?.Kind ?? SystemPlaybackKind.Audio
         });
@@ -97,6 +119,7 @@ public sealed class SystemMediaSession : IAsyncDisposable
         // WinRT events can arrive on a pool thread. Do not touch WPF or the player
         // there, and bound the number of posted/queued requests before allocation.
         var target = Volatile.Read(ref published);
+        if (!target.Enabled) return;
         if (Interlocked.Increment(ref pending) > 16)
         {
             Interlocked.Decrement(ref pending);
@@ -159,7 +182,7 @@ public sealed class SystemMediaSession : IAsyncDisposable
                 entered = true;
             }
             var state = playback.State;
-            if (stopped || disposed || generation != issued || serial != interruption || !state.HasMedia ||
+            if (stopped || disposed || !enabled || generation != issued || serial != interruption || !state.HasMedia ||
                 state.OwnerId != expectedOwner || state.Identity != expectedIdentity ||
                 expectedOwner is null || !owners.TryGetValue(expectedOwner, out var registered)) return;
             switch (request.Command)
@@ -185,13 +208,14 @@ public sealed class SystemMediaSession : IAsyncDisposable
         finally { if (entered) commands.Release(); }
     }
 
-    /// <summary>Irreversibly retires commands; called by DisposeAsync, not cancellable window Closing.</summary>
+    /// <summary>Permanently suspend on Closed or Dispose; use SetEnabled(false) for reversible shutdown preparation.</summary>
     public void Suspend()
     {
         dispatcher.VerifyAccess();
         if (stopped) return;
         stopped = true;
         generation++;
+        Volatile.Write(ref published, new(generation, owner, identity, false));
         playback.PropertyChanged -= Changed;
         backend.Requested -= Requested;
         _ = ObserveCancellation(lifetime.CancelAsync());
@@ -246,5 +270,5 @@ public sealed class SystemMediaSession : IAsyncDisposable
         public Task StopAsync() => native.StopAsync();
         public Task SeekAsync(double seconds) => native.SeekAsync(seconds);
     }
-    private sealed record Target(long Generation, string? Owner, string? Identity);
+    private sealed record Target(long Generation, string? Owner, string? Identity, bool Enabled);
 }

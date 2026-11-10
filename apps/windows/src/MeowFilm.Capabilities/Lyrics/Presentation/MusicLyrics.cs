@@ -73,6 +73,7 @@ public sealed partial class MusicCapability
         {
             publishedLyric = row;
             Changed(nameof(CurrentLyricWords));
+            DesktopLyricBindings();
         }
         int display = lyricPreview is null ? index : Lyrics.IndexOf(lyricPreview);
         if (publishedLyricDisplayIndex != display)
@@ -115,7 +116,7 @@ public sealed partial class MusicCapability
         {
             if (value is null || !LyricSources.Contains(value) || value == selectedLyricSource) return;
             RetireLyrics(); selectedLyricSource = value; Changed();
-            _ = RestoreLyricsAsync();
+            if (NeedsLyrics) _ = RestoreLyricsAsync();
         }
     }
     private void UpdateLyricSources()
@@ -158,7 +159,7 @@ public sealed partial class MusicCapability
         Interlocked.Increment(ref selectionSourcesRevision);
         lyricSourcesRevision = checked(lyricSourcesRevision + 1);
         RetireLyrics();
-        if (IsLyrics && !stopping) _ = RestoreLyricsAsync();
+        if (NeedsLyrics) _ = RestoreLyricsAsync();
     }
     public void CancelLyrics()
     {
@@ -183,6 +184,7 @@ public sealed partial class MusicCapability
             RetireLyrics(); epoch = lyricEpoch;
             using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             lyricCancellation = request; Changed(nameof(CanCancelLyrics));
+            DesktopLyricBindings();
             try
             {
                 var snapshot = await SelectedLyricSnapshot.ReadAsync(path, request.Token);
@@ -217,7 +219,7 @@ public sealed partial class MusicCapability
                 !dialogs.Confirm("移除“" + selected.Title + "”的本地歌词？", "移除本地歌词")) return;
             RetireLyrics();
             await Call("music.lyrics.local.remove", new { song = selected.Raw });
-            if (selected == current && !stopping) await RestoreLyricsAsync();
+            if (selected == current && NeedsLyrics) await RestoreLyricsAsync();
         });
     }
     private Task LoadLyricsAsync(bool restore)
@@ -261,6 +263,7 @@ public sealed partial class MusicCapability
             if (!CurrentRequest()) return;
             using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             lyricCancellation = request; Changed(nameof(CanCancelLyrics));
+            DesktopLyricBindings();
             try
             {
                 var parameters = new Dictionary<string, object> { ["song"] = playbackSong };

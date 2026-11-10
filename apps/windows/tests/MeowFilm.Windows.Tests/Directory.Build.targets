@@ -1,0 +1,5 @@
+<Project>
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\app\AppMediaWindowAttachment.cs" Link="AppMediaWindowAttachment.cs" />
+  </ItemGroup>
+</Project>
