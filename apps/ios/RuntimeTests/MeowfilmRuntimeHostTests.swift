@@ -36,7 +36,7 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(manifest["assemblyProfile"] as? String, "common-native")
         XCTAssertEqual(manifest["transport"] as? String, "runtime.http.v1")
-        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "tmdb"])
+        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "pan", "tmdb", "douban", "film"])
         let files = try XCTUnwrap(manifest["files"] as? [[String: Any]])
         XCTAssertFalse(files.contains { ($0["path"] as? String)?.lowercased().hasSuffix(".wasm") == true })
         let frameworks = try XCTUnwrap(Bundle.main.privateFrameworksURL)
@@ -49,6 +49,12 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         XCTAssertTrue(try String(contentsOf: nativeLicense, encoding: .utf8).contains("Fabrice Bellard"))
         let unicodeLicense = try XCTUnwrap(Bundle.main.url(forResource: "Unicode-3.0", withExtension: "txt"))
         XCTAssertTrue(try String(contentsOf: unicodeLicense, encoding: .utf8).contains("1991-2026 Unicode, Inc."))
+    }
+
+    func testAppBundleAllowsArbitraryHTTPWithoutScopedATSOverrides() throws {
+        let transport = try XCTUnwrap(
+            Bundle.main.object(forInfoDictionaryKey: "NSAppTransportSecurity") as? [String: Bool])
+        XCTAssertEqual(transport, ["NSAllowsArbitraryLoads": true])
     }
 
     @MainActor

@@ -6,6 +6,7 @@ final class FilmHTTPStub: @unchecked Sendable {
     private let status: Int
     private let length: Int?
     private let failure: URLError?
+    private let redirectTo: URL?
     private let held: Bool
     private let started: (@Sendable () -> Void)?
     private let stopped: (@Sendable () -> Void)?
@@ -22,13 +23,14 @@ final class FilmHTTPStub: @unchecked Sendable {
 
     init(url: URL = URL(string: "https://artwork.invalid/" + UUID().uuidString + ".jpg")!,
          status: Int = 200, bodyChunks: [Data] = [Data([1, 2, 3])], length: Int? = nil,
-         failure: URLError? = nil, held: Bool = false,
+         failure: URLError? = nil, held: Bool = false, redirectTo: URL? = nil,
          started: (@Sendable () -> Void)? = nil, stopped: (@Sendable () -> Void)? = nil) {
         self.url = url
         self.status = status
         self.bodyChunks = bodyChunks
         self.length = length
         self.failure = failure
+        self.redirectTo = redirectTo
         self.held = held
         self.started = started
         self.stopped = stopped
@@ -67,9 +69,15 @@ final class FilmHTTPStub: @unchecked Sendable {
         var headers = ["Content-Type": "application/octet-stream", "X-Content-Type-Options": "nosniff",
                        "Set-Cookie": "synthetic-response=isolated; Path=/; Secure"]
         if let length { headers["Content-Length"] = String(length) }
-        if (300..<400).contains(status) { headers["Location"] = "https://redirect.invalid/" }
+        if let redirectTo { headers["Location"] = redirectTo.absoluteString }
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
                                        headerFields: headers)!
+        if let redirectTo {
+            instance.client?.urlProtocol(instance, wasRedirectedTo: URLRequest(url: redirectTo),
+                                         redirectResponse: response)
+            started?()
+            return
+        }
         instance.client?.urlProtocol(instance, didReceive: response, cacheStoragePolicy: .notAllowed)
         for chunk in bodyChunks where !chunk.isEmpty {
             instance.client?.urlProtocol(instance, didLoad: chunk)

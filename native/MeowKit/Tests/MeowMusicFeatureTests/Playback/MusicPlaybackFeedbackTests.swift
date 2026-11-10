@@ -76,9 +76,10 @@ private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
     }
     private func event(_ kind: PlaybackEvent.Kind, id: UUID, owner: String = "music",
                        resource: String = "music:observed", position: Double = 0,
-                       phase: PlaybackPhase = .playing) -> PlaybackEvent {
+                       phase: PlaybackPhase = .playing, wantsPlayback: Bool = true) -> PlaybackEvent {
         .init(attempt: .init(id: id, owner: owner, resourceID: resource), kind: kind,
-              snapshot: .init(owner: owner, resourceID: resource, phase: phase, position: position, duration: 180), error: nil)
+              snapshot: .init(owner: owner, resourceID: resource, phase: phase, position: position, duration: 180),
+              wantsPlayback: wantsPlayback, error: nil)
     }
     func testOnlyAcceptedMusicEventsProduceOrderedObservations() async {
         let sink = FeedbackFeatureSink(), consumer = MusicPlaybackFeedbackConsumer(service: sink, clock: { 10 })
@@ -93,8 +94,8 @@ private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
         consumer.consume(event(.played, id: id), candidate: item, automatic: true)
         consumer.discontinuity()
         consumer.consume(event(.progress, id: id, position: 80), candidate: item)
-        consumer.consume(event(.paused, id: id, position: 81, phase: .paused), candidate: item)
-        consumer.consume(event(.ended, id: id, position: 180, phase: .ended), candidate: item)
+        consumer.consume(event(.paused, id: id, position: 81, phase: .paused, wantsPlayback: false), candidate: item)
+        consumer.consume(event(.ended, id: id, position: 180, phase: .ended, wantsPlayback: false), candidate: item)
         await consumer.flush()
         let rows = await sink.recorded()
         XCTAssertEqual(rows.map(\.sequence), [1, 2, 3, 4, 5])

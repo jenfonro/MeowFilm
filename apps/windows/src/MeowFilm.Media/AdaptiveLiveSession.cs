@@ -73,8 +73,8 @@ internal sealed class AdaptiveLiveSession
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime);
             deadline.CancelAfter(timeout);
             // Mutable playlist reload has no If-Match/If-Range. Every attempt revalidates all
-            // redirect hops, starting at the last resolved URL and stripped credential scope.
-            var request = new AdaptiveResource(playlist.Current.Uri, playlist.Current.Credentials,
+            // redirect hops, starting at the last resolved URL with the input's headers.
+            var request = new AdaptiveResource(playlist.Current.Uri,
                 AdaptiveResourceKind.Manifest) { Independent = true };
             var candidate = new AdaptiveManifest(transport, local, allowLive: true, singleMedia: true);
             byte[]? bytes = null;
@@ -82,7 +82,7 @@ internal sealed class AdaptiveLiveSession
             {
                 lock (catalog) candidate.SeedLiveKeys(previous.Paths.Select(p => graph.Resources[p]));
                 bytes = await transport.ManifestAsync(request, deadline.Token).ConfigureAwait(false);
-                Uri root = await candidate.BuildAsync(bytes, request.Uri, request.Credentials, deadline.Token, hlsChild: true).ConfigureAwait(false);
+                Uri root = await candidate.BuildAsync(bytes, request.Uri, deadline.Token, hlsChild: true).ConfigureAwait(false);
                 var next = candidate.Resources[root.AbsolutePath];
                 var window = next.Window ?? throw new PlaybackException(PlaybackError.AdaptiveInvalid);
                 // A media endpoint cannot transform into a master and discover new authority.

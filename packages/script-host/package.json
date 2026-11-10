@@ -8,7 +8,10 @@
     "node": "^18.20.4 || ^22.0.0 || ^24.0.0"
   },
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./cat-output": "./src/cat-output.js",
+    "./media-manifest": "./src/media-manifest.js",
+    "./unicode": "./src/unicode.js"
   },
   "main": "./src/index.js",
   "files": [

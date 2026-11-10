@@ -53,7 +53,7 @@ function joinPath(parent, name) {
 function address(value, base, code = 'UPSTREAM_FORMAT') {
   try {
     const url = new URL(value, base);
-    requireValue(['https:', 'http:'].includes(url.protocol) && !url.username && !url.password, code);
+    requireValue(['https:', 'http:'].includes(url.protocol), code);
     return url;
   } catch {
     throw new PanError(code);
@@ -218,9 +218,7 @@ async function resolveMedia(ctx, value) {
     });
     if (response.status >= 300 && response.status < 400) {
       requireValue(typeof response.headers.location === 'string', 'UPSTREAM_FORMAT');
-      const next = address(response.headers.location, url);
-      requireValue(url.protocol !== 'https:' || next.protocol === 'https:', 'UPSTREAM_HTTP');
-      url = next;
+      url = address(response.headers.location, url);
       continue;
     }
     requireValue(response.status >= 200 && response.status < 300, 'UPSTREAM_HTTP');
@@ -235,7 +233,6 @@ async function qrRequest(ctx, session, value, timeout = 30000) {
     active(ctx);
     const remaining = session.expiresAt - ctx.now();
     requireValue(remaining > 0, 'LOGIN_EXPIRED');
-    requireValue(url.protocol === 'https:' && [pan, passport].includes(url.origin), 'UPSTREAM_FORMAT');
     requireValue(!seen.has(url.href), 'UPSTREAM_FORMAT');
     seen.add(url.href);
     let response;
@@ -402,7 +399,6 @@ export const baidu = {
       const image = text(value.imgurl).trim();
       requireValue(image, 'UPSTREAM_FORMAT');
       const imageURL = address(image.startsWith('//') || image.startsWith('http') ? image : `https://${image}`, passport);
-      requireValue(imageURL.protocol === 'https:' && [pan, passport].includes(imageURL.origin), 'UPSTREAM_FORMAT');
       const challenge = qrImage(await qrRequest(ctx, session, imageURL));
       return { session, challenge, expiresAt: session.expiresAt };
     } catch (error) {

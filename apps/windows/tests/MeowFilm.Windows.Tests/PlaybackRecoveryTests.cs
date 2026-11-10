@@ -2096,8 +2096,7 @@ public static partial class PlaybackRecoveryTests
         origin.Route = _ => new Reply(bytes, "audio/wav"); return origin;
     }
     private static NativePlayback Player(Origin origin) => new(Dispatcher.CurrentDispatcher, null,
-        NativeAudioOutput.Dummy, NativeHttpMediaOptions.ForLoopbackTests([origin.Base],
-            TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3)));
+        NativeAudioOutput.Dummy, new NativeHttpMediaOptions(TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3)));
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static JsonElement Element(object value) => JsonSerializer.SerializeToElement(value, Json);
     private static void SameMusicTarget(List<JsonElement> resolutions)
@@ -2636,7 +2635,7 @@ public static partial class PlaybackRecoveryTests
                     "meowfilm-preload-test-" + Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(CacheRoot);
                 Cache = new(CacheRoot, Store, Validate,
-                    httpOptions: NativeHttpMediaOptions.ForLoopbackTests([Origin.Base]));
+                    httpOptions: new NativeHttpMediaOptions());
                 Module = new(App, Store, Output, Cache, new Dialogs());
             }
             else Module = new(App, Store, Output, new Dialogs());

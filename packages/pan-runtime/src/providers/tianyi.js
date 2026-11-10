@@ -21,7 +21,7 @@ function record(value) {
 function url(value, base, code = 'UPSTREAM_FORMAT') {
   try {
     const result = new URL(value, base);
-    requireValue(['https:', 'http:'].includes(result.protocol) && !result.username && !result.password, code);
+    requireValue(['https:', 'http:'].includes(result.protocol), code);
     return result;
   } catch {
     throw new PanError(code);
@@ -135,11 +135,10 @@ async function loginRequest(ctx, jar, value, options = {}) {
   let target = url(value);
   let method = options.method ?? 'GET';
   let body = options.form ? new URLSearchParams(options.form).toString() : undefined;
-  let headers = { ...options.headers };
+  const headers = { ...options.headers };
   const seen = new Set();
   for (;;) {
     active(ctx);
-    requireValue(target.protocol === 'https:' && [cloud, authOrigin].includes(target.origin), 'UPSTREAM_FORMAT');
     requireValue(!seen.has(target.href), 'UPSTREAM_FORMAT');
     seen.add(target.href);
     const response = await ctx.http.request({
@@ -158,10 +157,6 @@ async function loginRequest(ctx, jar, value, options = {}) {
       if (response.status === 303 || ([301, 302].includes(response.status) && method === 'POST')) {
         method = 'GET';
         body = undefined;
-      }
-      if (next.origin !== target.origin) {
-        requireValue(body === undefined, 'UPSTREAM_HTTP');
-        headers = {};
       }
       target = next;
       continue;
@@ -219,9 +214,7 @@ async function mediaURL(ctx, value) {
     active(ctx);
     if (response.status >= 300 && response.status < 400) {
       requireValue(typeof response.headers.location === 'string', 'UPSTREAM_FORMAT');
-      const next = url(response.headers.location, current);
-      requireValue(current.protocol !== 'https:' || next.protocol === 'https:', 'UPSTREAM_HTTP');
-      current = next;
+      current = url(response.headers.location, current);
       continue;
     }
     requireValue(response.status >= 200 && response.status < 300, 'UPSTREAM_HTTP');

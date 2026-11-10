@@ -3,6 +3,7 @@ import XCTest
 import UIKit
 import Combine
 import MeowUI
+import MeowRuntime
 @testable import MeowFilmFeature
 
 @MainActor
@@ -679,61 +680,79 @@ final class FilmUIKitTests: XCTestCase {
         try assertText("熟悉的声音再次响起。", in: page.view)
     }
 
-    func testDetailPlaybackUsesOnlyURLsSuppliedForTheSelectedSeasonOrFilm() async throws {
+    func testDetailSelectionUsesPublishedEpisodeCoordinatesAndExactMovieCandidateIdentity() async throws {
         let detail = suppliedDetail()
+        let server = FilmUIKitPlaybackServer(), media = FilmUIKitPlaybackMedia()
+        let model = playbackModel(server, media)
+        await model.open()?.value
+        await server.awaitObservation()
         let page = FilmDetailViewController(detail: detail, library: try isolatedLibrary(),
-                                            images: artworkImages(), themeProvider: FilmUIKitTheme())
-        var played: [URL] = []
-        page.onPlay = { played.append($0) }
+                                            images: artworkImages(), themeProvider: FilmUIKitTheme(), model: model)
+        var presentations = 0
+        page.onPresentPlayback = { presentations += 1 }
         let window = mount(page)
         defer { release(page, window: window) }
         await waitFor("playable detail visible") { page.isPageVisible }
-        let firstURL = try XCTUnwrap(detail.seasons[0].episodes[1].playbackURL)
-        let secondURL = try XCTUnwrap(detail.seasons[1].episodes[2].playbackURL)
         let play = try button("film.detail.play", in: page.view)
         XCTAssertTrue(play.isEnabled)
-        XCTAssertTrue(played.isEmpty, "Mounting a detail must not start playback")
-        let unavailable = try button("film.episode.first-unavailable", in: page.view)
-        XCTAssertFalse(unavailable.isEnabled)
-        unavailable.sendActions(for: .touchUpInside)
-        XCTAssertTrue(played.isEmpty)
+        XCTAssertTrue(media.inputs.isEmpty, "Mounting a detail must not create a media consumer")
+        XCTAssertEqual(presentations, 0)
         play.sendActions(for: .touchUpInside)
-        XCTAssertEqual(played, [firstURL])
-        let episode = try button("film.episode.first-playable", in: page.view)
+        await model.waitForPendingWork()
+        let episode = try button("film.episode.season-1-episode-2", in: page.view)
         XCTAssertTrue(episode.isEnabled)
         episode.sendActions(for: .touchUpInside)
-        XCTAssertEqual(played, [firstURL, firstURL])
+        await model.waitForPendingWork()
+        var commands = await server.calls().filter { $0.operation == "session.command" }
+        XCTAssertEqual(commands.map(\.action), ["play", "select.episode"])
+        XCTAssertEqual(commands.last?.input.filmObject?["episode"],
+                       .object(["season": .number(1), "episode": .number(2)]))
 
+        await server.reply(to: "browse.season", with: FilmUIKitPlaybackFixture.snapshot(
+            browsing: FilmUIKitPlaybackFixture.browsing(season: 2),
+            episodes: FilmUIKitPlaybackFixture.episodes(season: 2, numbers: [4, 7])))
         invoke(try menuAction("第二季", in: button("film.detail.season", in: page.view)))
-        let secondUnavailable = try button("film.episode.second-two", in: page.view)
-        XCTAssertFalse(secondUnavailable.isEnabled)
-        secondUnavailable.sendActions(for: .touchUpInside)
-        XCTAssertEqual(played, [firstURL, firstURL])
+        await model.waitForPendingWork()
+        await deliverMainRunLoop()
+        XCTAssertNil(identified("film.episode.season-1-episode-2", in: page.view))
         play.sendActions(for: .touchUpInside)
-        XCTAssertEqual(played, [firstURL, firstURL, secondURL])
-        try button("film.episode.second-playable", in: page.view).sendActions(for: .touchUpInside)
-        XCTAssertEqual(played, [firstURL, firstURL, secondURL, secondURL])
+        await model.waitForPendingWork()
+        try button("film.episode.season-2-episode-7", in: page.view).sendActions(for: .touchUpInside)
+        await model.waitForPendingWork()
+        commands = await server.calls().filter { $0.operation == "session.command" }
+        XCTAssertEqual(commands.suffix(3).map(\.action), ["browse.season", "select.episode", "select.episode"])
+        XCTAssertEqual(commands[3].input.filmObject?["episode"],
+                       .object(["season": .number(2), "episode": .number(4)]),
+                       "Primary play selects Node's actual first episode, never an invented S2E1")
+        XCTAssertEqual(commands[4].input.filmObject?["episode"],
+                       .object(["season": .number(2), "episode": .number(7)]))
+        XCTAssertEqual(presentations, 4)
+        XCTAssertTrue(media.inputs.isEmpty)
 
-        let filmURL = URL(string: "https://media.example.invalid/film.m3u8")!
-        let film = FilmDetail(item: .init(sourceID: "fixture", id: "film", title: "电影"), playbackURL: filmURL)
+        let filmServer = FilmUIKitPlaybackServer(FilmUIKitPlaybackFixture.snapshot(kind: .movie,
+            candidates: [FilmUIKitPlaybackFixture.candidate("opaque-movie")]))
+        let filmModel = playbackModel(filmServer, FilmUIKitPlaybackMedia())
+        await filmModel.open()?.value
+        let film = FilmDetail(item: .init(sourceID: "fixture", id: "film", title: "电影"))
         let filmPage = FilmDetailViewController(detail: film, library: try isolatedLibrary(),
-                                                images: artworkImages(), themeProvider: FilmUIKitTheme())
-        filmPage.onPlay = { played.append($0) }
+                                                images: artworkImages(), themeProvider: FilmUIKitTheme(), model: filmModel)
         let filmWindow = mount(filmPage)
         defer { release(filmPage, window: filmWindow) }
         await waitFor("film detail visible") { filmPage.isPageVisible }
-        let filmPlay = try button("film.detail.play", in: filmPage.view)
-        XCTAssertTrue(filmPlay.isEnabled)
-        filmPlay.sendActions(for: .touchUpInside)
-        XCTAssertEqual(played, [firstURL, firstURL, secondURL, secondURL, filmURL])
+        try button("film.candidate.opaque-movie", in: filmPage.view).sendActions(for: .touchUpInside)
+        await filmModel.waitForPendingWork()
+        let filmCommands = await filmServer.calls().filter { $0.operation == "session.command" }
+        XCTAssertEqual(filmCommands.map(\.action), ["select.candidate"])
+        XCTAssertEqual(filmCommands.last?.input.filmObject?["candidateId"], .string("opaque-movie"))
+        XCTAssertNil(filmCommands.last?.input.filmObject?["episode"])
     }
 
     func testUnavailableDetailKeepsHonestEmptySectionsAndCannotPlay() async throws {
         let detail = FilmDetail(item: .init(sourceID: "fixture", id: "empty", title: "待补充影片"))
         let page = FilmDetailViewController(detail: detail, library: try isolatedLibrary(),
                                             images: artworkImages(), themeProvider: FilmUIKitTheme())
-        var played: [URL] = []
-        page.onPlay = { played.append($0) }
+        var presentations = 0
+        page.onPresentPlayback = { presentations += 1 }
         let window = mount(page)
         defer { release(page, window: window) }
         await waitFor("empty detail visible") { page.isPageVisible }
@@ -759,21 +778,19 @@ final class FilmUIKitTests: XCTestCase {
         XCTAssertEqual(play.configuration?.title, "暂无片源")
         XCTAssertEqual(play.accessibilityLabel, "播放，暂无可用片源")
         play.sendActions(for: .touchUpInside)
-        XCTAssertTrue(played.isEmpty, "Even a dispatched action cannot fabricate a playback URL")
+        XCTAssertEqual(presentations, 0, "A dispatched action cannot fabricate a playable session")
     }
 
-    func testSelectingASeasonWithoutAPlaybackURLDisablesPrimaryPlay() async throws {
-        let supplied = suppliedDetail()
-        let detail = FilmDetail(item: supplied.item, seasons: [
-            supplied.seasons[0],
-            .init(id: "unavailable", title: "未上线季", episodes: [
-                .init(id: "unreleased", title: "待上线", number: 1),
-            ]),
-        ])
-        let page = FilmDetailViewController(detail: detail, library: try isolatedLibrary(),
-                                            images: artworkImages(), themeProvider: FilmUIKitTheme())
-        var played: [URL] = []
-        page.onPlay = { played.append($0) }
+    func testSelectingASeasonWithoutPublishedEpisodesDisablesPrimaryPlayAndCanRecover() async throws {
+        let server = FilmUIKitPlaybackServer(), media = FilmUIKitPlaybackMedia()
+        let model = playbackModel(server, media)
+        await model.open()?.value
+        await server.reply(to: "browse.season", with: FilmUIKitPlaybackFixture.snapshot(
+            browsing: FilmUIKitPlaybackFixture.browsing(season: 2), episodes: []))
+        let page = FilmDetailViewController(detail: suppliedDetail(), library: try isolatedLibrary(),
+                                            images: artworkImages(), themeProvider: FilmUIKitTheme(), model: model)
+        var presentations = 0
+        page.onPresentPlayback = { presentations += 1 }
         let window = mount(page)
         defer { release(page, window: window) }
         await waitFor("season availability detail visible") { page.isPageVisible }
@@ -781,18 +798,28 @@ final class FilmUIKitTests: XCTestCase {
         let season = try button("film.detail.season", in: page.view)
         XCTAssertTrue(play.isEnabled)
 
-        invoke(try menuAction("未上线季", in: season))
-        XCTAssertFalse(play.isEnabled, "A selected season without a film or episode URL cannot offer playback")
-        let unavailable = try button("film.episode.unreleased", in: page.view)
-        XCTAssertFalse(unavailable.isEnabled)
+        invoke(try menuAction("第二季", in: season))
+        await model.waitForPendingWork()
+        await deliverMainRunLoop()
+        XCTAssertFalse(play.isEnabled, "A selected season without actual episodes cannot invent a target")
+        XCTAssertTrue(episodeButtons(in: page).isEmpty)
         play.sendActions(for: .touchUpInside)
-        unavailable.sendActions(for: .touchUpInside)
-        XCTAssertTrue(played.isEmpty)
+        await model.waitForPendingWork()
+        XCTAssertEqual(presentations, 0)
+        var commands = await server.calls().filter { $0.operation == "session.command" }
+        XCTAssertEqual(commands.map(\.action), ["browse.season"])
 
+        await server.reply(to: "browse.season", with: FilmUIKitPlaybackFixture.snapshot())
         invoke(try menuAction("第一季", in: season))
+        await model.waitForPendingWork()
+        await deliverMainRunLoop()
         XCTAssertTrue(play.isEnabled)
         play.sendActions(for: .touchUpInside)
-        XCTAssertEqual(played, [try XCTUnwrap(supplied.seasons[0].episodes[1].playbackURL)])
+        await model.waitForPendingWork()
+        commands = await server.calls().filter { $0.operation == "session.command" }
+        XCTAssertEqual(commands.map(\.action), ["browse.season", "browse.season", "play"])
+        XCTAssertEqual(presentations, 1)
+        XCTAssertTrue(media.inputs.isEmpty)
     }
 
     func testFavoriteButtonsStayInSyncAcrossDetailInstances() async throws {
@@ -1088,6 +1115,14 @@ final class FilmUIKitTests: XCTestCase {
                 .init(sourceID: "other", id: "stars", title: "群星之间"),
             ]
         )
+    }
+
+    private func playbackModel(_ server: FilmUIKitPlaybackServer, _ media: FilmUIKitPlaybackMedia) -> FilmPlaybackModel {
+        let model = FilmPlaybackModel(transport: server.transport, media: media, openExternalURL: { _ in
+            XCTFail("Unexpected external-player launch"); return false
+        }, request: { FilmUIKitPlaybackFixture.request() })
+        addTeardownBlock { await model.close() }
+        return model
     }
 
     private func artworkImages(_ data: [URL: Data] = [:]) -> ArtworkImages {

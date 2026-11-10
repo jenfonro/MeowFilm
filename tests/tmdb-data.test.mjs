@@ -48,6 +48,7 @@ test('TMDB preserves API prefixes, query scalars and the direct business respons
     ['https://api-proxy.invalid/tmdb', 'https://api-proxy.invalid/tmdb/3/search/multi'],
     ['https://api-proxy.invalid/prefix/tmdb///', 'https://api-proxy.invalid/prefix/tmdb/3/search/multi'],
     ['http://127.0.0.1:3456/tmdb', 'http://127.0.0.1:3456/tmdb/3/search/multi'],
+    ['http://fixture-user:fixture-password@192.168.1.25/tmdb', 'http://192.168.1.25/tmdb/3/search/multi'],
   ]) {
     const { context, calls } = fixture(value, { ...defaults, apiBase });
     assert.deepEqual(await requestTMDB({
@@ -61,7 +62,9 @@ test('TMDB preserves API prefixes, query scalars and the direct business respons
     });
     assert.equal(calls[0].method, 'GET');
     assert.equal(calls[0].body, undefined);
-    assert.equal(calls[0].followRedirect, false);
+    assert.equal(calls[0].followRedirect, true);
+    assert.equal(url.username, new URL(apiBase).username);
+    assert.equal(url.password, new URL(apiBase).password);
     assert.deepEqual(calls[0].headers, { Accept: 'application/json' });
     assert.equal(calls.length, 1);
   }
@@ -84,23 +87,25 @@ test('TMDB uses a bearer token in preference to an API key and never sends both'
   }
 });
 
-test('TMDB query parameters cannot supply credentials, headers or nested values', async () => {
+test('TMDB query fields remain scalar URL data, not HTTP headers or a field permission list', async () => {
   const { context, calls } = fixture();
   for (const name of [
     'api_key', 'API_KEY', 'apiKey', 'access_token', 'AccessToken', 'request_token',
-    'session_id', 'guest_session_id', 'Authorization', 'cookie', 'api_key[]', 'api.key\n',
+    'session_id', 'guest_session_id', 'Authorization', 'cookie', 'api_key[]',
   ]) {
-    await assert.rejects(requestTMDB({ path: '/3/movie/42', query: { [name]: 'fixture-injection' } }, context),
-      failure('INVALID_REQUEST'));
+    await requestTMDB({ path: '/3/movie/42', query: { [name]: 'fixture-value' } }, context);
+    assert.equal(new URL(calls.at(-1).url).searchParams.get(name), 'fixture-value');
+    assert.deepEqual(calls.at(-1).headers, { Accept: 'application/json' });
   }
+  const count = calls.length;
   for (const query of [null, [], new URLSearchParams(), { language: {} }, { page: [] },
-    { page: null }, { page: undefined }, { page: Infinity }, { page: NaN }]) {
+    { page: null }, { page: undefined }, { page: Infinity }, { page: NaN }, { 'api.key\n': 'value' }]) {
     await assert.rejects(requestTMDB({ path: '/3/movie/42', query }, context), failure('INVALID_REQUEST'));
   }
-  assert.equal(calls.length, 0);
+  assert.equal(calls.length, count);
 });
 
-test('TMDB discover parameters and whitelisted append responses preserve their source syntax', async () => {
+test('TMDB discover and append parameters preserve source syntax without a resource permission list', async () => {
   const { context, calls } = fixture();
   await requestTMDB({ path: '/3/discover/movie',
     query: { 'vote_average.gte': 7.5, with_genres: '18,35', sort_by: 'popularity.desc', include_video: true },
@@ -118,12 +123,16 @@ test('TMDB discover parameters and whitelisted append responses preserve their s
     'credits,images,external_ids,watch/providers');
   assert.equal(new URL(calls[2].url).searchParams.get('append_to_response'),
     'aggregate_credits,season/0,season/1/episode/2');
-  for (const append of ['account_states', 'credits,account_states', '../account', 'images?session_id=x',
-    '/3/account', 'images,', 'images/../account_states', '%61ccount_states']) {
-    await assert.rejects(requestTMDB({ path: '/3/movie/42', query: { append_to_response: append } }, context),
-      failure('INVALID_REQUEST'));
+  const additional = ['account_states', 'credits,account_states', '../account', 'images?session_id=x',
+    '/3/account', 'images,', 'images/../account_states', '%61ccount_states'];
+  for (const append of additional) {
+    await requestTMDB({ path: '/3/movie/42', query: { append_to_response: append } }, context);
+    const url = new URL(calls.at(-1).url);
+    assert.equal(url.pathname, '/3/movie/42');
+    assert.equal(url.searchParams.get('append_to_response'), append);
+    assert.equal(url.searchParams.get('session_id'), null);
   }
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 3 + additional.length);
 });
 
 test('TMDB exposes the explicit configuration, catalog and related metadata routes', async () => {
@@ -166,20 +175,22 @@ test('TMDB exposes the explicit configuration, catalog and related metadata rout
   assert.equal(calls.length, paths.length);
 });
 
-test('TMDB rejects movie and TV reviews, including appended reviews, before networking', async () => {
+test('TMDB reads movie and TV reviews and appended reviews through the same GET interface', async () => {
   const { context, calls } = fixture();
   for (const type of ['movie', 'tv']) {
     const path = `/3/${type}/42`;
-    await assert.rejects(requestTMDB({ path: `${path}/reviews` }, context), failure('INVALID_REQUEST'));
+    await requestTMDB({ path: `${path}/reviews` }, context);
+    assert.equal(new URL(calls.at(-1).url).pathname, `${path}/reviews`);
     for (const append of ['reviews', 'credits,reviews', 'reviews,images']) {
-      await assert.rejects(requestTMDB({ path, query: { append_to_response: append } }, context),
-        failure('INVALID_REQUEST'));
+      await requestTMDB({ path, query: { append_to_response: append } }, context);
+      assert.equal(new URL(calls.at(-1).url).searchParams.get('append_to_response'), append);
     }
   }
-  assert.equal(calls.length, 0);
+  assert.equal(calls.length, 8);
+  assert.ok(calls.every(call => call.method === 'GET'));
 });
 
-test('TMDB rejects account, authentication, writes, unknown routes and encoded paths before networking', async () => {
+test('TMDB GET paths do not require a registered resource or normalized source ID', async () => {
   const { context, calls } = fixture();
   for (const path of [
     '/3/account', '/3/account/42', '/3/account/42/favorite/movies', '/3/authentication/token/new',
@@ -187,11 +198,21 @@ test('TMDB rejects account, authentication, writes, unknown routes and encoded p
     '/3/movie/42/rating', '/3/tv/42/rating', '/3/tv/42/season/1/account_states',
     '/3/tv/42/season/1/episode/2/rating', '/3/movie/42/unknown', '/3/list/42', '/4/list/42',
     '/3/search/company', '/3/configuration/unknown', '/3/trending/movie/month', '/3/movie/0',
-    '/3/movie/01', '/3/tv/-1', '/3/tv/42/season/-1', '/3/person/42/changes',
+    '/3/movie/01', '/3/tv/-1', '/3/tv/42/season/-1', '/3/person/42/changes', '/3/movie/42/',
+    '/3/movie/42/../43', '/3/movie/%34%32', '/3/movie/42%2fimages', '/3//movie/42', '/3/movie/42;images',
+  ]) {
+    assert.deepEqual(await requestTMDB({ path }, context), { id: 42 });
+    assert.equal(calls.at(-1).url, new URL(path, defaults.apiBase).href);
+    assert.equal(calls.at(-1).method, 'GET');
+  }
+});
+
+test('TMDB rejects malformed path/query data and fields outside the GET request contract', async () => {
+  const { context, calls } = fixture();
+  for (const path of [
     'https://untrusted.invalid/3/movie/42', '//untrusted.invalid/3/movie/42',
-    '/3/movie/42?api_key=fixture-injection', '/3/movie/42#fragment', '/3/movie/42/',
-    '/3/movie/42/../43', '/3/movie/%34%32', '/3/movie/42%2fimages', '/3/movie/42\\images',
-    '/3//movie/42', '/3/movie/42\n', '/3/movie/42\u0000', '/3/movie/42;images',
+    '/3/movie/42?api_key=fixture-injection', '/3/movie/42#fragment', '/3/movie/42\\images',
+    '/3/movie/42\n', '/3/movie/42\u0000',
     '/3/movie/42\u2028', '/3/movie/42\u2029',
   ]) {
     await assert.rejects(requestTMDB({ path }, context), failure('INVALID_REQUEST'), path);
@@ -333,8 +354,8 @@ test('TMDB image target rejects URLs, credentials, encoded paths, query injectio
   }
 });
 
-test('TMDB rejects invalid configured bases and header-injected credentials without exposing them', async () => {
-  for (const base of ['not-a-url', 'file:///tmp/fixture', 'https://fixture-user:fixture-password@proxy.invalid',
+test('TMDB rejects malformed configured bases and header-injected credentials without exposing them', async () => {
+  for (const base of ['not-a-url', 'file:///tmp/fixture',
     'https://proxy.invalid/tmdb?api_key=fixture-injection', 'https://proxy.invalid/tmdb?',
     'https://proxy.invalid/tmdb#fragment', 'https://proxy.invalid\\tmdb', 'https://proxy.invalid/\n']) {
     const { context, calls } = fixture({}, { ...defaults, apiBase: base });
@@ -351,7 +372,7 @@ test('TMDB rejects invalid configured bases and header-injected credentials with
   }
 });
 
-test('TMDB HTTP failures and redirects yield fixed errors without following or leaking upstream details', async () => {
+test('TMDB final unsuccessful HTTP responses yield fixed errors without upstream details', async () => {
   for (const status of [301, 302, 303, 304, 307, 308, 400, 401, 403, 404, 429, 500, 503]) {
     const { context, calls } = fixture({
       success: false, status_message: 'fixture-secret https://fixture-user:fixture-password@proxy.invalid',
@@ -361,7 +382,7 @@ test('TMDB HTTP failures and redirects yield fixed errors without following or l
     });
     await assert.rejects(requestTMDB({ path: '/3/movie/42' }, context), failure('UPSTREAM_HTTP'));
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].followRedirect, false);
+    assert.equal(calls[0].followRedirect, true);
   }
   const { context } = fixture({ success: false, status_code: 7, status_message: 'fixture-secret' });
   await assert.rejects(requestTMDB({ path: '/3/movie/42' }, context), failure('UPSTREAM_HTTP'));

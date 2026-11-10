@@ -1,4 +1,4 @@
-import { createHash, randomUUID, randomBytes } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile, readdir, stat, mkdir, mkdtemp, writeFile, rename, realpath, rm } from 'node:fs/promises';
 import { registerHooks } from 'node:module';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
@@ -87,12 +87,12 @@ if (options.kind === 'source') {
     import(pathToFileURL(join(runtimeDirectory, 'client.mjs')).href),
   ]);
   async function openHttp(module) {
-    const sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex');
+    const sessionId = randomUUID();
     let runtime, client;
     try {
-      runtime = createAppRuntime({ sessionId, requestKey, assemble: () => [module] });
+      runtime = createAppRuntime({ sessionId, assemble: () => [module] });
       await runtime.start();
-      client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
+      client = createRuntimeClient({ baseUrl: runtime.baseUrl });
       return { client, async close() {
         const results = await Promise.allSettled([client.close(), runtime.close()]);
         if (results.some(result => result.status === 'rejected')) throw Object.assign(new Error(), { code: 'SCRIPT_CLEANUP' });

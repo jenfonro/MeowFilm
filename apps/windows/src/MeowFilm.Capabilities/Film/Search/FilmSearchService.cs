@@ -16,9 +16,6 @@ public sealed class FilmSearchService : IAsyncDisposable
     private readonly IFilmSearchMetadata? metadata;
     private readonly Dispatcher dispatcher = Dispatcher.CurrentDispatcher;
     private readonly List<FilmSearchSession> sessions = [];
-    private readonly Dictionary<string, JsonElement> detailCache = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, DetailFlight> detailFlights = new(StringComparer.Ordinal);
-    private readonly HashSet<Task> detailDrains = [];
     private bool stopping, closed;
     private Task? preparation, disposal;
     public FilmSearchSession? Current { get; private set; }
@@ -111,9 +108,6 @@ public sealed class FilmSearchService : IAsyncDisposable
         var session = Current;
         Current = null;
         if (session is not null) { Cancel(session); _ = RetireAsync(session); }
-        detailCache.Clear();
-        foreach (var flight in detailFlights.Values.ToArray()) flight.Cancellation.Cancel();
-        detailFlights.Clear();
         Changed?.Invoke(this, EventArgs.Empty);
     }
 
@@ -207,9 +201,11 @@ public sealed class FilmSearchService : IAsyncDisposable
             try
             {
                 var source = cursor.Source;
-                var payload = await sources.SearchAsync(source, session.Query, cursor.Page, token);
+                var response = await sources.SearchAsync(source, session.Query, cursor.Page, token);
                 token.ThrowIfCancellationRequested();
                 if (!sources.IsSearchSourceCurrent(source)) { Cancel(session); token.ThrowIfCancellationRequested(); }
+                var payload = FilmJson.Member(response.Value, "raw");
+                if (payload.ValueKind != JsonValueKind.Object) throw new FilmPlaybackException("INVALID_RESPONSE");
                 result = await engine.InvokeAsync(new
                 {
                     operation = "site", query = session.Query, aggregateRules = session.Rules,
@@ -219,6 +215,7 @@ public sealed class FilmSearchService : IAsyncDisposable
                 }, token);
                 token.ThrowIfCancellationRequested();
                 if (!sources.IsSearchSourceCurrent(source)) { Cancel(session); token.ThrowIfCancellationRequested(); }
+                cursor.Pages[cursor.Page] = response;
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested || !sources.IsSearchSourceCurrent(cursor.Source))
             { Cancel(session); throw; }
@@ -251,7 +248,8 @@ public sealed class FilmSearchService : IAsyncDisposable
                     var original = await metadata.SearchAsync(session.Query, token);
                     token.ThrowIfCancellationRequested();
                     session.MetadataQuery = session.Query;
-                    session.MetadataSearchPayload = original.Clone();
+                    session.MetadataSearchPayload = original.Value.Clone();
+                    session.MetadataData["search:" + session.Query] = original;
                 }
                 var payload = session.MetadataSearchPayload!.Value;
                 string effectiveQuery = session.Query;
@@ -263,7 +261,8 @@ public sealed class FilmSearchService : IAsyncDisposable
                     {
                         var next = await metadata.SearchAsync(query, token);
                         token.ThrowIfCancellationRequested();
-                        if (next.GetProperty("results").GetArrayLength() > 0) { payload = next; effectiveQuery = query; }
+                        session.MetadataData["search:" + query] = next;
+                        if (next.Value.GetProperty("results").GetArrayLength() > 0) { payload = next.Value; effectiveQuery = query; }
                     }
                 }
                 session.MetadataQuery = effectiveQuery;
@@ -292,7 +291,15 @@ public sealed class FilmSearchService : IAsyncDisposable
             JsonElement payload, enhanced;
             try
             {
-                payload = session.Details.TryGetValue(key, out var retained) ? retained : await GetDetailAsync(item, token);
+                if (session.Details.TryGetValue(key, out var retained)) payload = retained;
+                else
+                {
+                    var response = await metadata.DetailAsync(FilmSearchJson.Text(item, "tmdbType"),
+                        FilmSearchJson.Number(item, "tmdbId"), token);
+                    token.ThrowIfCancellationRequested();
+                    payload = response.Value;
+                    session.MetadataData["detail:" + key] = response;
+                }
                 token.ThrowIfCancellationRequested();
                 session.Details[key] = payload;
                 enhanced = await engine.InvokeAsync(new { operation = "detail", item, payload }, token);
@@ -304,63 +311,6 @@ public sealed class FilmSearchService : IAsyncDisposable
             session.TmdbItems[index] = enhanced;
             await DisplayAsync(session);
         }
-    }
-
-    private sealed class DetailFlight
-    {
-        internal CancellationTokenSource Cancellation { get; } = new();
-        internal Task<JsonElement> Work { get; set; } = null!;
-        internal List<CancellationToken> Readers { get; } = [];
-    }
-    private async Task<JsonElement> GetDetailAsync(JsonElement item, CancellationToken token)
-    {
-        token.ThrowIfCancellationRequested();
-        string key = FilmSearchJson.MetadataIdentity(item);
-        if (detailCache.TryGetValue(key, out var cached)) return cached;
-        detailFlights.TryGetValue(key, out var flight);
-        if (flight is not null && flight.Readers.All(reader => reader.IsCancellationRequested)) flight.Cancellation.Cancel();
-        if (flight is null || flight.Cancellation.IsCancellationRequested)
-        {
-            flight = new();
-            detailFlights[key] = flight;
-            flight.Work = FetchAsync(flight);
-            var drain = ObserveAsync(flight.Work);
-            detailDrains.Add(drain);
-            _ = RemoveDrainAsync(drain);
-        }
-        flight.Readers.Add(token);
-        try { return await flight.Work.WaitAsync(token); }
-        finally
-        {
-            flight.Readers.Remove(token);
-            if (!flight.Work.IsCompleted && flight.Readers.All(reader => reader.IsCancellationRequested)) flight.Cancellation.Cancel();
-        }
-
-        async Task<JsonElement> FetchAsync(DetailFlight owner)
-        {
-            await Task.Yield();
-            try
-            {
-                var value = (await metadata!.DetailAsync(FilmSearchJson.Text(item, "tmdbType"),
-                    FilmSearchJson.Number(item, "tmdbId"), owner.Cancellation.Token)).Clone();
-                owner.Cancellation.Token.ThrowIfCancellationRequested();
-                return detailCache[key] = value;
-            }
-            finally
-            {
-                if (detailFlights.TryGetValue(key, out var current) && ReferenceEquals(current, owner)) detailFlights.Remove(key);
-                owner.Cancellation.Dispose();
-            }
-        }
-    }
-    private static async Task ObserveAsync(Task work)
-    {
-        try { await work; } catch { /* The requesting item owns the visible outcome. */ }
-    }
-    private async Task RemoveDrainAsync(Task drain)
-    {
-        await drain;
-        detailDrains.Remove(drain);
     }
 
     private async Task DisplayAsync(FilmSearchSession session)
@@ -426,13 +376,11 @@ public sealed class FilmSearchService : IAsyncDisposable
         if (preparation is not null) return preparation;
         stopping = true;
         foreach (var session in sessions) Cancel(session);
-        foreach (var flight in detailFlights.Values.ToArray()) flight.Cancellation.Cancel();
         return preparation = DrainAsync();
     }
     private async Task DrainAsync()
     {
         await Task.WhenAll(sessions.Select(session => session.Work));
-        await Task.WhenAll(detailDrains.ToArray());
     }
     public void Resume()
     {
@@ -458,6 +406,5 @@ public sealed class FilmSearchService : IAsyncDisposable
         await drained;
         await engine.DisposeAsync();
         foreach (var session in sessions.ToArray()) ReleaseSession(session);
-        detailCache.Clear(); detailFlights.Clear();
     }
 }

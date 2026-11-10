@@ -209,20 +209,23 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
     }
     private Task RetireAsync(Epoch epoch)
     {
+        TaskCompletionSource completion;
         lock (gate)
         {
             if (epoch.Retirement is not null) return epoch.Retirement;
-            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
             epoch.Retirement = completion.Task; Observe(completion.Task);
-            _ = RetireCoreAsync(epoch, completion); return completion.Task;
         }
+        // Cancellation invokes borrowed-token callbacks, which may reenter this owner.
+        _ = RetireCoreAsync(epoch, completion); return completion.Task;
     }
     private static async Task RetireCoreAsync(Epoch epoch, TaskCompletionSource completion)
     {
         bool failed = false;
         try
         {
-            try { await epoch.Cancellation.CancelAsync().ConfigureAwait(false); } catch { failed = true; }
+            // Propagate revocation through linked capabilities before the first await.
+            try { epoch.Cancellation.Cancel(); } catch { failed = true; }
             IRuntimeSession? session = null;
             try { session = await epoch.Start.Task.ConfigureAwait(false); }
             catch { /* A failed factory owns its partial initialization cleanup. */ }
@@ -250,9 +253,12 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
         bool failed = false;
         try
         {
-            try { await lifetime.CancelAsync().ConfigureAwait(false); } catch { failed = true; }
+            Task? cancellation = null;
+            try { cancellation = lifetime.CancelAsync(); } catch { failed = true; }
             Epoch? epoch; lock (gate) epoch = current;
             Task? retiring = epoch is null ? null : RetireAsync(epoch);
+            // Pending recovery callbacks must not postpone the current epoch's revocation.
+            if (cancellation is not null) { try { await cancellation.ConfigureAwait(false); } catch { failed = true; } }
             if (recovering is not null) { try { await recovering.ConfigureAwait(false); } catch { } }
             if (retiring is not null) { try { await retiring.ConfigureAwait(false); } catch { failed = true; } }
             lock (gate) scopes.Clear();

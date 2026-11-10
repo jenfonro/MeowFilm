@@ -22,18 +22,32 @@ public struct FilmTMDBService: FilmSearchMetadataReading {
     private let connection: @Sendable () async throws -> RuntimeHTTPClient
     public init(connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) { self.connection = connection }
     public func search(query: String) async throws -> RuntimeValue {
-        try await request(path: "/3/search/multi", query: ["query": .string(query), "page": .number(1)])
+        try await searchRead(query: query).value
     }
     public func detail(type: String, id: Int) async throws -> RuntimeValue {
-        guard ["movie", "tv"].contains(type), id > 0 else { throw FilmSearchError.invalidResponse }
-        return try await request(path: "/3/\(type)/\(id)", query: [:])
+        try await detailRead(type: type, id: id).value
     }
-    private func request(path: String, query: [String: RuntimeValue]) async throws -> RuntimeValue {
+    public func searchRead(query: String) async throws -> FilmSearchRead {
+        try await request(path: "/3/search/multi", query: ["query": .string(query), "page": .number(1)], imageSize: "w500")
+    }
+    public func detailRead(type: String, id: Int) async throws -> FilmSearchRead {
+        guard ["movie", "tv"].contains(type), id > 0 else { throw FilmSearchError.invalidResponse }
+        return try await request(path: "/3/\(type)/\(id)",
+            query: ["append_to_response": .string("credits,similar,images")], imageSize: "original")
+    }
+    private func request(path: String, query: [String: RuntimeValue], imageSize: String) async throws -> FilmSearchRead {
         var query = query; query["language"] = .string("zh-CN")
         let client = try await connection()
-        return try await client.call(module: .tmdb, operation: "request", parameters: .object([
-            "path": .string(path), "query": .object(RuntimeObject(query)), "imageSize": .string("w500")
-        ]))
+        var input: RuntimeObject = [
+            "provider": .string("tmdb"), "path": .string(path),
+            "query": .object(RuntimeObject(query)), "imageSize": .string(imageSize),
+        ]
+        let value = try await client.call(module: .film, operation: "data.metadata", parameters: .object(input))
+        input["kind"] = .string("metadata")
+        let entry = try await client.call(module: .film, operation: "data.cache.entry", parameters: .object(input))
+        try Task.checkCancellation()
+        guard !client.isClosed else { throw RuntimeHTTPError.closed }
+        return .init(value: value, producer: client, cacheEntry: entry == .null ? nil : entry)
     }
     public func settings() async throws -> FilmTMDBSettings {
         let client = try await connection()
@@ -45,9 +59,9 @@ public struct FilmTMDBService: FilmSearchMetadataReading {
         let value = try await client.call(module: .tmdb, operation: "settings.update", parameters: .object(patch))
         return try FilmTMDBSettings(value)
     }
-    public func imageURL(path: String) -> URL? { RuntimeHTTPClient.tmdbImageURL(path) }
+    public func imageURL(path: String) -> URL? { RuntimeHTTPClient.metadataImageURL(path) }
     public func readImage(_ reference: URL) async throws -> Data {
         let client = try await connection()
-        return try await client.readTMDBImage(reference)
+        return try await client.readMetadataImage(reference)
     }
 }

@@ -12,6 +12,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly IDocumentStore store;
     private readonly CatScriptTransport transport;
+    private readonly IRuntimeClient searchRuntime;
     private readonly IRuntimeRecovery? recovery;
     private readonly SemaphoreSlim stateGate = new(1, 1), managementGate = new(1, 1);
     private readonly CancellationTokenSource lifetime = new();
@@ -34,6 +35,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         ArgumentNullException.ThrowIfNull(runtime);
         ArgumentNullException.ThrowIfNull(store);
         transport = new(runtime);
+        searchRuntime = runtime;
         recovery = runtime as IRuntimeRecovery;
         this.store = store;
     }
@@ -75,22 +77,19 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
                 site.Actions.Contains("search", StringComparer.Ordinal));
     }
 
-    public Task<JsonElement> SearchAsync(FilmSearchSource source, string query, int page, CancellationToken token) =>
+    public Task<FilmSearchData> SearchAsync(FilmSearchSource source, string query, int page, CancellationToken token) =>
         RunAsync(async ct =>
         {
             if (!IsSearchSourceCurrent(source)) throw new OperationCanceledException(ct);
-            var result = await transport.InvokeAsync(source.Cat, source.Site, "search",
-                new { wd = query, page }, ct).ConfigureAwait(false);
+            var result = await FilmSearchDataClient.ReadAsync(searchRuntime, "search",
+                new { source = source.Wire, query, page },
+                new { kind = "search", source = source.Wire, query, page }, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             if (!IsSearchSourceCurrent(source)) throw new OperationCanceledException(ct);
-            if (result.ValueKind == JsonValueKind.String) result = CatScriptTransport.Parse(result.GetString()!);
-            CatScriptTransport.Require(result.ValueKind == JsonValueKind.Object &&
-                result.TryGetProperty("list", out var list) && list.ValueKind == JsonValueKind.Array &&
-                (!result.TryGetProperty("ok", out var ok) || ok.ValueKind != JsonValueKind.False) &&
-                (!result.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.False) &&
-                (!result.TryGetProperty("statusCode", out var status) || status.ValueKind != JsonValueKind.Number || status.GetDouble() < 400) &&
-                string.IsNullOrEmpty(CatScriptTransport.OptionalText(result, "error")));
-            return result.Clone();
+            if (FilmJson.Member(result.Value, "raw").ValueKind != JsonValueKind.Object ||
+                FilmJson.Member(result.Value, "items").ValueKind != JsonValueKind.Array)
+                throw new FilmPlaybackException("INVALID_RESPONSE");
+            return result;
         }, token);
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>

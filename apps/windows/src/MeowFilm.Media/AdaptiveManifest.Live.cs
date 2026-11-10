@@ -47,7 +47,7 @@ internal sealed partial class AdaptiveManifest
         }
     }
     private static string RepresentationIdentity(AdaptiveResource resource) =>
-        (resource.OriginalCredentials ? "1:" : "0:") + resource.OriginalUri.AbsoluteUri;
+        resource.OriginalUri.AbsoluteUri;
 
     internal void SeedLiveKeys(IEnumerable<AdaptiveResource> resources)
     {
@@ -97,7 +97,7 @@ internal sealed partial class AdaptiveManifest
         foreach (var (path, resource) in candidate._resources) _resources.Add(path, resource.Retain());
     }
     internal static bool SamePayload(AdaptiveResource a, AdaptiveResource b) =>
-        a.OriginalUri == b.OriginalUri && a.OriginalCredentials == b.OriginalCredentials &&
+        a.OriginalUri == b.OriginalUri &&
         a.Kind == b.Kind && a.Offset == b.Offset && a.Count == b.Count &&
         (a.Encryption is null && b.Encryption is null ||
          a.Encryption is { } ae && b.Encryption is { } be && ae.Key.Identity == be.Key.Identity &&

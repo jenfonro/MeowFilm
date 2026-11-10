@@ -7,6 +7,7 @@ import MeowUI
 public final class FilmHomeViewController: PageViewController, UICollectionViewDelegate {
     public var onSelectCategory: ((FilmCategoryModel) -> Void)?
     public var onSelectItem: ((FilmItem) -> Void)?
+    public var onSelectPlaybackItem: ((FilmItem, FilmCategory?) -> Void)?
     private let model: FilmHomeModel
     private let images: ArtworkImages
     private let activity = UIActivityIndicatorView(style: .medium)
@@ -198,7 +199,9 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: false)
         guard let row = dataSource.itemIdentifier(for: indexPath), let item = items[row] else { return }
-        onSelectItem?(item)
+        if let onSelectPlaybackItem {
+            onSelectPlaybackItem(item, model.categoryModel(sectionID: row.section)?.category)
+        } else { onSelectItem?(item) }
     }
 
     public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,

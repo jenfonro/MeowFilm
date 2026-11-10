@@ -5,12 +5,16 @@ namespace MeowFilm.Media;
 public sealed partial class NativePlayback
 {
     /// <summary>
-    /// Consumes one explicit native capability, never a source-supplied loopback exception.
+    /// Consumes one owned media receipt and its revocable lifetime, not a URL permission.
     /// Owns lease immediately, including dispatcher/preflight failure. The capability remains
     /// attached through native retirement; a successful return means accepted Play(), not output.
     /// </summary>
-    public async Task OpenResourceAsync(string ownerId, string identity, INativeMediaResourceLease lease,
-        string title, CancellationToken token = default)
+    public Task OpenResourceAsync(string ownerId, string identity, INativeMediaResourceLease lease,
+        string title, CancellationToken token = default) =>
+        TrackOwnedMediaRequestAsync(() => OpenResourceOwnedAsync(ownerId, identity, lease, title, token));
+
+    private async Task OpenResourceOwnedAsync(string ownerId, string identity, INativeMediaResourceLease lease,
+        string title, CancellationToken token)
     {
         if (lease is null) throw Error(PlaybackError.InvalidResourceLease);
         var resource = new MediaResourceSession(lease);
@@ -67,37 +71,26 @@ internal sealed class MediaResourceSession(INativeMediaResourceLease lease) : IA
         try
         {
             Address = lease.Address;
-            if (Address is null || !Address.IsAbsoluteUri || Address.Scheme != "http" || Address.IdnHost != "127.0.0.1" ||
-                Address.Port is <= 0 or > 65535)
-                throw new PlaybackException(PlaybackError.InvalidResourceLease);
             NativeHttpMediaOptions.ValidateSyntax(Address);
             revoked = lease.Revoked;
             if (!revoked.CanBeCanceled) throw new PlaybackException(PlaybackError.InvalidResourceLease);
             caller = token;
             lifetime = CancellationTokenSource.CreateLinkedTokenSource(token, revoked);
             Token = lifetime.Token;
-            Authorize(Address);
+            CheckCurrent();
             // Snapshot before any await; a later caller mutation cannot change the request.
-            Headers = HttpMediaInput.ValidateRequest(Address, lease.Headers,
-                NativeHttpMediaOptions.ForResource(this), allowAdaptive: true);
+            Headers = HttpMediaInput.ValidateRequest(Address, lease.Headers, allowAdaptive: true);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (PlaybackException) { throw; }
         catch { throw new PlaybackException(PlaybackError.InvalidResourceLease); }
     }
 
-    internal void Authorize(Uri address)
+    internal void CheckCurrent()
     {
         caller.ThrowIfCancellationRequested();
         if (revoked.IsCancellationRequested || Volatile.Read(ref cancelled) != 0)
             throw new PlaybackException(PlaybackError.ResourceRevoked);
-        bool authorized;
-        try { authorized = lease.Authorizes(address); }
-        catch { throw new PlaybackException(PlaybackError.InvalidResourceLease); }
-        caller.ThrowIfCancellationRequested();
-        if (revoked.IsCancellationRequested || Volatile.Read(ref cancelled) != 0)
-            throw new PlaybackException(PlaybackError.ResourceRevoked);
-        if (!authorized) throw new PlaybackException(PlaybackError.HttpAddressBlocked);
     }
 
     internal void Cancel()

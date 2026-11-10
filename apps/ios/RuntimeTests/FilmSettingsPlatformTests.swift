@@ -85,8 +85,16 @@ final class FilmSettingsPlatformTests: XCTestCase {
 
     func testModelStartsIndependentLocalOwnersAndCloseDoesNotCloseServices() async throws {
         let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(connection: {
+            XCTFail("Starting local settings must not request TMDB"); throw FilmSearchError.unavailable
+        }), didSave: {})
+        let playback = FilmPlaybackSettingsModel(transport: .init(request: { _, _ in
+            XCTFail("Starting local settings must not request playback"); throw FilmPlaybackError(code: "CLOSED")
+        }, observation: { _, _, _ in XCTFail("Settings must not observe a playback session") }))
         let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources,
-            tmdb: FilmTMDBSettingsModel(service: FilmTMDBService(connection: { throw FilmSearchError.unavailable }), didSave: {}))
+                                      tmdb: tmdb, playback: playback)
+        XCTAssertTrue(model.tmdb === tmdb)
+        XCTAssertTrue(model.playback === playback)
         model.start()
         await eventually { model.rules.draft != nil && model.snapshot != nil }
         let calls = await fixture.runtime.calls
@@ -96,8 +104,74 @@ final class FilmSettingsPlatformTests: XCTestCase {
         await eventually { model.snapshot != nil }
         XCTAssertEqual(model.rules.rules(.episodeClean).first?.pattern, "长期草稿")
         model.close()
+        XCTAssertTrue(model.tmdb === tmdb)
+        XCTAssertTrue(model.playback === playback)
+        XCTAssertNil(tmdb.saved)
+        XCTAssertNil(playback.preferences)
         _ = try await fixture.rules.savedSnapshot()
         try await fixture.sources.initialize()
+        await fixture.rules.close(); await fixture.sources.close()
+    }
+
+    func testSettingsMenuKeepsTMDBIndependentWhenPlaybackIsUnavailable() async throws {
+        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(connection: { throw FilmSearchError.unavailable }), didSave: {})
+        let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources, tmdb: tmdb)
+        XCTAssertNil(model.playback)
+        let page = FilmSettingsViewController(model: model, themeProvider: FilmSettingsTheme())
+        let navigation = UINavigationController(rootViewController: page)
+        defer { PageViewController.invalidatePages(in: navigation) }
+        page.loadViewIfNeeded()
+        let menu = try XCTUnwrap(page.children.compactMap { $0 as? FilmSettingsListController }.first)
+        menu.loadViewIfNeeded()
+        let rows = try XCTUnwrap(menu.sections.first).rows
+        XCTAssertEqual(rows.map(\.id), [
+            "film.settings.rules", "film.settings.cats", "film.settings.videos", "film.settings.tmdb",
+            "film.settings.site-clean", "film.settings.preferences", "film.settings.auto-prepare",
+            "film.settings.history", "film.settings.manual", "film.settings.blocks",
+        ])
+        XCTAssertTrue(rows.prefix(4).allSatisfy(\.enabled))
+        XCTAssertTrue(rows.dropFirst(4).allSatisfy { !$0.enabled })
+        for index in 4..<rows.count {
+            menu.tableView(menu.table, didSelectRowAt: IndexPath(row: index, section: 0))
+            XCTAssertTrue(navigation.topViewController === page)
+        }
+        try selectRow(menu, "film.settings.tmdb")
+        XCTAssertTrue(navigation.topViewController is FilmTMDBSettingsViewController)
+        XCTAssertEqual((navigation.topViewController as? PageViewController)?.pageTitle, "TMDB")
+        await fixture.rules.close(); await fixture.sources.close()
+    }
+
+    func testSettingsMenuRoutesAllPlaybackAreasAlongsideTMDB() async throws {
+        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(connection: { throw FilmSearchError.unavailable }), didSave: {})
+        let playback = FilmPlaybackSettingsModel(transport: .init(
+            request: { _, _ in throw FilmPlaybackError(code: "CLOSED") },
+            observation: { _, _, _ in XCTFail("Settings must not observe a playback session") }))
+        let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources, tmdb: tmdb, playback: playback)
+        let page = FilmSettingsViewController(model: model, themeProvider: FilmSettingsTheme())
+        let navigation = UINavigationController(rootViewController: page)
+        defer { PageViewController.invalidatePages(in: navigation) }
+        page.loadViewIfNeeded()
+        let menu = try XCTUnwrap(page.children.compactMap { $0 as? FilmSettingsListController }.first)
+        menu.loadViewIfNeeded()
+        XCTAssertEqual(menu.sections.flatMap(\.rows).count, 10)
+        XCTAssertTrue(menu.sections.flatMap(\.rows).allSatisfy(\.enabled))
+        for (id, title) in [
+            ("tmdb", "TMDB"), ("site-clean", "站点净化"), ("preferences", "播放偏好"),
+            ("auto-prepare", "自动准备"), ("history", "播放历史"), ("manual", "人工匹配"), ("blocks", "片源屏蔽"),
+        ] {
+            navigation.setViewControllers([page], animated: false)
+            try selectRow(menu, "film.settings.\(id)")
+            let destination = try XCTUnwrap(navigation.topViewController as? PageViewController)
+            XCTAssertFalse(destination === page)
+            XCTAssertEqual(destination.pageTitle, title)
+            switch id {
+            case "tmdb": XCTAssertTrue(destination is FilmTMDBSettingsViewController)
+            case "site-clean", "preferences", "auto-prepare": XCTAssertTrue(destination is FilmPlaybackPreferencesController)
+            default: XCTAssertTrue(destination is FilmPlaybackLibraryController)
+            }
+        }
         await fixture.rules.close(); await fixture.sources.close()
     }
 

@@ -19,7 +19,8 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         let transport = CatScriptTransport(connectionProvider: { try await resources.scriptSession.connection() })
         let sources = FilmSourceService(transport: transport, storeFactory: { sourceStore })
         let rules = try FilmRuleService(store: ruleStore)
-        let service = try FilmSearchService(sources: sources, rules: rules)
+        let service = try FilmSearchService(sources: sources, rules: rules,
+            data: FilmSearchData { try await resources.scriptSession.connection() })
         let id = "ios-film-search-" + UUID().uuidString.lowercased()
         do {
             let installed = try await sources.importLocal(name: "Search transport fixture", source: filmSearchCatScript, installationId: id)
@@ -81,24 +82,26 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         withExtendedLifetime(coordinator) {}
     }
 
-    func testActualSearchTapRetainsLiveGroupTMDBAndLaterPageWithoutAnotherSearch() async throws {
+    func testActualSearchTapUsesTheDataOwnerAndLiveGroupRawDirectoriesWithoutAnotherSearch() async throws {
+        let resources = try await hostResources()
         let app = try XCTUnwrap(UIApplication.shared.delegate as? MeowfilmAppDelegate)
-        try await waitFor { app.launch.phase == .ready }
         let assembly = try XCTUnwrap(app.readyAssembly())
-        await assembly.waitForStartup()
-        let reads = FilmSearchHostReads()
-        let metadata = FilmSearchHostMetadata()
-        let service = FilmSearchService(processor: try FilmSearchProcessor(), transport: .init(request: { _, params in
-            await reads.read(params)
-        }, upload: { _, _, _ in throw FilmSearchError.unavailable }), sites: {
-            ["first", "second"].enumerated().map { index, installation in
-                FilmSearchSite(cat: .init(installationId: installation, name: installation, sourceType: "local", generation: Int64(index + 3)),
-                    source: .init(key: .init(installationId: installation, siteKey: "same"), name: installation, api: "fixture", actions: ["search"], methods: [:], order: index))
-            }
-        }, rules: { ["高清"] }, metadata: metadata)
+        let client = try await resources.scriptSession.connection()
+        let id = "ios-film-search-live-" + UUID().uuidString.lowercased()
+        let installed = try await resources.filmSourceSettings.importLocal(name: "Live search fixture",
+            source: filmSearchPlaybackCatScript, installationId: id)
+        let catalog = await resources.filmSourceSettings.snapshot
+        let sites = catalog.videos.filter { $0.key.installationId == id }.map { FilmSearchSite(cat: installed, source: $0) }
+        XCTAssertEqual(Set(sites.map { $0.source.key.siteKey }), ["first", "second"])
+        // Only the installed fixture is admitted; unrelated user sources and
+        // public metadata must not be searched by this controlled host case.
+        let service = FilmSearchService(processor: try FilmSearchProcessor(),
+            data: FilmSearchData(connection: { client }), sites: { sites }, rules: { [] })
         addTeardownBlock {
-            await reads.release(); await metadata.release()
+            _ = try? await self.sourceState(client, installed, release: true)
             await service.close()
+            try await assembly.leaveFilm(allowSystemOwner: false)
+            try await resources.filmSourceSettings.deleteCat(id)
         }
         let (window, previous) = try hostWindow()
         let coordinator = MeowfilmCoordinator(window: window, assembly: assembly, resetUserData: {})
@@ -118,7 +121,9 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         try await navigate(root.navigation, to: { $0 === results }) {
             root.navigation.pushViewController(results, animated: false)
         }
-        try await waitFor { self.descendants(results).contains { ($0 as? FilmSearchResultsContent)?.session?.snapshot.cards.count == 1 } }
+        try await waitFor { self.descendants(results).contains {
+            ($0 as? FilmSearchResultsContent)?.session?.snapshot.rawCards.count == 2
+        } }
         let content = try XCTUnwrap(descendants(results).compactMap { $0 as? FilmSearchResultsContent }.first)
         let session = try XCTUnwrap(content.session)
         let grid = try XCTUnwrap(find("film.search.grid", in: content.view) as? UICollectionView)
@@ -128,50 +133,100 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         }
         var detail = root.navigation.topViewController as? FilmDetailViewController
         weak var releasedDetail = detail
-        XCTAssertEqual(detail?.searchContext?.selectedCard.sourceKind, "site")
+        let group = try XCTUnwrap(detail?.filmPlaybackModel)
+        try await waitFor { group.snapshot?.stage == "idle" && !group.opening }
+        XCTAssertNil(group.actionError); XCTAssertNil(group.observationError)
+        XCTAssertTrue(assembly.filmPlayback === group)
+        XCTAssertEqual(group.snapshot?.target.kind, .group)
+        XCTAssertEqual(group.snapshot?.target.value["members"]?.filmArray?.count, 2)
         XCTAssertEqual(detail?.searchContext?.snapshot.query, "真实原查询")
-        XCTAssertEqual(detail?.searchContext?.sources.count, 1)
-        XCTAssertTrue(detail?.searchContext?.snapshot.loading == true, "A tap does not claim the in-flight session is complete")
-        XCTAssertTrue(detail?.detail.summary.isEmpty == true)
-        XCTAssertNil(detail?.detail.playbackURL)
-        await reads.release(); await metadata.release()
-        await session.drain()
-        try await waitFor { detail?.detail.summary == "已得真实结构简介" }
-        XCTAssertTrue(detail?.searchContext?.session === session)
-        XCTAssertEqual(detail?.searchContext?.card.displayKey, "tmdb:tv:7")
-        XCTAssertEqual(detail?.searchContext?.selectedCard.sourceKind, "site")
         XCTAssertEqual(detail?.searchContext?.sources.count, 2)
-        XCTAssertEqual(Set(detail?.searchContext?.sources.compactMap { $0.catField("installationId")?.catText } ?? []), ["first", "second"])
-        XCTAssertEqual(Set(detail?.searchContext?.sources.compactMap { $0.catField("generation")?.catInteger } ?? []), [3, 4])
-        XCTAssertTrue(detail?.searchContext?.sources.allSatisfy { $0.catField("siteDetail") == .string("same-id") } == true)
-        XCTAssertEqual(detail?.searchContext?.metadataDetail?.catField("number_of_episodes"), .number(24))
-        XCTAssertEqual(detail?.detail.episodeCount, 24)
-        XCTAssertNil(detail?.detail.playbackURL)
-        try await navigate(root.navigation, to: { $0 === results }) {
-            root.navigation.popViewController(animated: false)
-        }
+        XCTAssertTrue(session.snapshot.loading, "Opening the page must not await a gated source")
+        XCTAssertNil(group.snapshot?.attempt); XCTAssertNil(group.snapshot?.current)
+        let groupID = group.sessionID
+        _ = try await sourceState(client, installed, release: true)
+        await session.drain(); await group.waitForPendingWork()
+        try await waitFor { group.snapshot?.sources.count == 3 }
+        XCTAssertEqual(group.sessionID, groupID, "Late search context updates the same real Node session")
+        XCTAssertEqual(detail?.searchContext?.sources.count, 3)
+        XCTAssertEqual(group.snapshot?.target.kind, .group)
+        XCTAssertNil(group.snapshot?.attempt); XCTAssertNil(group.snapshot?.current)
+        var state = try await sourceState(client, installed)
+        XCTAssertEqual(state["searches"]?.filmArray?.count, 2)
+        XCTAssertEqual(state["details"], .array([])); XCTAssertEqual(state["plays"], .array([]))
+        XCTAssertTrue(state["searches"]?.filmArray?.allSatisfy { $0.filmObject?["query"] == .string("真实原查询") } == true)
+        try await navigate(root.navigation, to: { $0 === results }) { root.navigation.popViewController(animated: false) }
+        await group.close()
         detail = nil
         try await waitFor { releasedDetail == nil }
         XCTAssertTrue(content.session === session)
         XCTAssertEqual(results.searchTargetID, "film")
         session.loadMore(); await session.drain()
-        try await waitFor { session.snapshot.cards.first?.members.count == 3 }
+        try await waitFor { session.snapshot.cards.first?.members.count == 4 }
+        XCTAssertEqual(session.snapshot.round, 2); XCTAssertFalse(session.snapshot.hasMore)
         try await navigate(root.navigation, to: { $0 is FilmDetailViewController }) {
             content.collectionView(grid, didSelectItemAt: IndexPath(item: 0, section: 0))
         }
-        let second = try XCTUnwrap(root.navigation.topViewController as? FilmDetailViewController)
-        XCTAssertTrue(second.searchContext?.session === session)
-        XCTAssertEqual(second.searchContext?.sources.count, 3, "All acquired later-page sources reach the actual detail page")
-        XCTAssertEqual(second.searchContext?.snapshot.query, "真实原查询")
-        XCTAssertEqual(second.searchContext?.snapshot.round, 2)
-        let calls = await reads.calls, queries = await metadata.queries, detailCalls = await metadata.details
-        XCTAssertEqual(calls.map { "\($0.0):\($0.1)" }.sorted(), ["first:1", "first:2", "second:1"])
-        XCTAssertTrue(calls.allSatisfy { $0.2 == "真实原查询" })
-        XCTAssertEqual(queries, ["真实原查询"])
-        XCTAssertEqual(detailCalls, ["tv:7"])
+        let later = try XCTUnwrap(root.navigation.topViewController as? FilmDetailViewController)
+        let laterModel = try XCTUnwrap(later.filmPlaybackModel)
+        try await waitFor { laterModel.snapshot?.stage == "idle" && !laterModel.opening }
+        XCTAssertNil(laterModel.actionError)
+        XCTAssertTrue(later.searchContext?.session === session)
+        XCTAssertEqual(later.searchContext?.sources.count, 4)
+        XCTAssertEqual(laterModel.snapshot?.sources.count, 4)
+        try await navigate(root.navigation, to: { $0 === results }) { root.navigation.popViewController(animated: false) }
+        await laterModel.close()
+        let modes = try XCTUnwrap(find("film.search.mode", in: content.view) as? UISegmentedControl)
+        modes.selectedSegmentIndex = 1; modes.sendActions(for: .valueChanged)
+        try await waitFor { grid.numberOfItems(inSection: 0) == 4 }
+        let rawIndex = try XCTUnwrap(session.snapshot.rawCards.firstIndex {
+            $0.detailID == .number(0) && $0.text("siteKey") == sites.first { $0.source.key.siteKey == "first" }?.key
+        })
+        try await navigate(root.navigation, to: { $0 is FilmDetailViewController }) {
+            content.collectionView(grid, didSelectItemAt: IndexPath(item: rawIndex, section: 0))
+        }
+        let raw = try XCTUnwrap(root.navigation.topViewController as? FilmDetailViewController)
+        let rawModel = try XCTUnwrap(raw.filmPlaybackModel)
+        try await waitFor { rawModel.snapshot?.stage == "idle" && !rawModel.opening }
+        XCTAssertNil(rawModel.actionError)
+        XCTAssertEqual(rawModel.snapshot?.target.kind, .source)
+        XCTAssertEqual(rawModel.snapshot?.target.value["source"]?.filmObject?["detailId"], .number(0))
+        XCTAssertEqual(rawModel.snapshot?.sources.count, 1, "Raw navigation cannot admit the same-title other IDs")
+        let result = try XCTUnwrap(rawModel.snapshot?.sources.first)
+        rawModel.browse(sourceID: result.id)
+        try await waitFor {
+            rawModel.snapshot?.browsing.sourceID == result.id && rawModel.snapshot?.browsing.loading == false &&
+                rawModel.snapshot?.browsing.error == nil && rawModel.snapshot?.browsing.files.count == 2 &&
+                rawModel.snapshot?.browsing.files.allSatisfy { $0.candidateID != nil } == true
+        }
+        XCTAssertEqual(rawModel.snapshot?.browsing.lines.map(\.label), ["原始线路"])
+        XCTAssertEqual(rawModel.snapshot?.browsing.originalFiles.map(\.name), ["真实文件一", "真实文件二"])
+        let shared = try await client.call(module: .film, operation: "data.detail", parameters: .object([
+            "source": .object(try XCTUnwrap(sites.first { $0.source.key.siteKey == "first" }).playbackSource.value),
+            "detailId": .number(0),
+        ]))
+        XCTAssertEqual(shared.filmObject?["lines"]?.filmArray?.count, 1, "The actual data owner serves the already-read detail")
+        state = try await sourceState(client, installed)
+        XCTAssertEqual(state["searches"]?.filmArray?.count, 3, "Navigation, cache export and live update do not re-search")
+        XCTAssertEqual(state["details"], .array([.object(["site": .string("first"), "id": .number(0)])]))
+        XCTAssertEqual(state["plays"], .array([]), "Directory browsing is not address resolution or playback")
+        XCTAssertNil(rawModel.snapshot?.attempt); XCTAssertNil(rawModel.snapshot?.current)
+        XCTAssertTrue(raw.searchContext?.session === session)
+        XCTAssertEqual(raw.searchContext?.snapshot.query, "真实原查询")
+        await rawModel.close()
         PageViewController.invalidatePages(in: root)
         await service.close()
-        XCTAssertFalse(session.snapshot.loading)
+        withExtendedLifetime(coordinator) {}
+    }
+
+    private func sourceState(_ client: RuntimeHTTPClient, _ source: FilmCatSource,
+                             release: Bool = false) async throws -> RuntimeObject {
+        let value = try await client.call(module: .cat, operation: "invoke", parameters: .object([
+            "installationId": .string(source.installationId), "generation": .number(Double(source.generation)),
+            "siteId": .string("first"), "operation": .string("home"),
+            "payload": .object(["release": .bool(release)]),
+        ]))
+        return try value.filmRequiredObject()
     }
 
     private func descendants(_ controller: UIViewController) -> [UIViewController] {
@@ -275,41 +330,6 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
 
 }
 
-private actor FilmSearchHostReads {
-    var calls: [(String, Int, String)] = []
-    private var continuation: CheckedContinuation<Void, Never>?
-    private var released = false
-    func release() { released = true; continuation?.resume(); continuation = nil }
-    func read(_ params: RuntimeValue) async -> RuntimeValue {
-        let installation = params.catField("installationId")?.catText ?? ""
-        let payload = params.catField("payload") ?? .null
-        let page = payload.catField("page")?.catInteger ?? 0
-        calls.append((installation, page, payload.catField("wd")?.catText ?? ""))
-        if installation == "second", !released { await withCheckedContinuation { continuation = $0 } }
-        return .object(["pagecount": .number(installation == "first" ? 2 : 1), "list": .array([
-            .object(["vod_id": .string(page == 1 ? "same-id" : "later-id"), "vod_name": .string("斗破苍穹高清"),
-                     "vod_remarks": .string("更新至12集")])])])
-    }
-}
-
-private actor FilmSearchHostMetadata: FilmSearchMetadataReading {
-    var queries: [String] = [], details: [String] = []
-    private var continuation: CheckedContinuation<Void, Never>?
-    private var released = false
-    func release() { released = true; continuation?.resume(); continuation = nil }
-    func search(query: String) async -> RuntimeValue {
-        queries.append(query)
-        if !released { await withCheckedContinuation { continuation = $0 } }
-        return .object(["results": .array([.object(["id": .number(7), "media_type": .string("tv"), "name": .string("斗破苍穹")])])])
-    }
-    func detail(type: String, id: Int) -> RuntimeValue {
-        details.append("\(type):\(id)")
-        return .object(["id": .number(7), "name": .string("斗破苍穹"), "overview": .string("已得真实结构简介"),
-                        "number_of_seasons": .number(2), "number_of_episodes": .number(24), "first_air_date": .string("2026-01-01")])
-    }
-    nonisolated func imageURL(path: String) -> URL? { nil }
-}
-
 private let filmSearchCatScript = #"""
 const http = require('http');
 let server, nextPage = 1;
@@ -337,6 +357,61 @@ module.exports.start = () => new Promise(resolve => {
     response.statusCode = 400; response.end(JSON.stringify({error:'Search wire contract'}));
   });
   server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+});
+module.exports.stop = () => { server?.closeAllConnections(); server?.close(); };
+"""#
+
+
+private let filmSearchPlaybackCatScript = #"""
+const http = require('http');
+let server, released = false;
+const searches = [], details = [], plays = [], pending = new Set();
+const json = (response, value) => {
+  response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(value));
+};
+const state = () => ({ searches, details, plays });
+module.exports.start = () => new Promise(resolve => {
+  server = http.createServer(async (request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1');
+    if (url.pathname === '/config' || url.pathname === '/full-config') {
+      json(response, { video: { sites: ['first', 'second'].map(key => ({ key, name: key, api: '/film/' + key,
+        actions: ['home', 'search', 'detail', 'play'] })) } }); return;
+    }
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    const input = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : Object.fromEntries(url.searchParams);
+    const [, , site, action] = url.pathname.split('/');
+    if (action === 'home') {
+      if (input.release) { released = true; for (const finish of [...pending]) finish(); }
+      json(response, state()); return;
+    }
+    if (action === 'search') {
+      searches.push({ site, page: Number(input.page), query: input.wd });
+      if (input.wd !== '真实原查询' || ![1, 2].includes(Number(input.page))) {
+        response.writeHead(400); json(response, { error: 'HOST_SEARCH_PROTOCOL' }); return;
+      }
+      const ids = site === 'first' ? Number(input.page) === 1 ? [0, '0'] : ['later'] : ['other'];
+      const finish = () => {
+        pending.delete(finish); clearTimeout(timer);
+        json(response, { pagecount: site === 'first' ? 2 : 1,
+          list: ids.map(vod_id => ({ vod_id, vod_name: '真实标题', vod_remarks: '完整原备注', unknown: { raw: true } })) });
+      };
+      let timer;
+      if (site === 'second' && !released) {
+        pending.add(finish);
+        response.once('close', () => { pending.delete(finish); clearTimeout(timer); });
+        timer = setTimeout(() => { pending.delete(finish); response.writeHead(504); json(response, { error: 'HOST_GATE_TIMEOUT' }); }, 10000);
+      } else finish();
+      return;
+    }
+    if (action === 'detail') {
+      details.push({ site, id: input.id });
+      json(response, { list: [{ vod_id: input.id, vod_name: '真实标题', vod_play_from: '原始线路',
+        vod_play_url: '真实文件一$file-one#真实文件二$file-two' }] }); return;
+    }
+    if (action === 'play') { plays.push(input); response.writeHead(400); json(response, { error: 'UNEXPECTED_PLAY' }); return; }
+    response.writeHead(404); response.end();
+  });
+  server.listen(9987, '127.0.0.1', resolve);
 });
 module.exports.stop = () => { server?.closeAllConnections(); server?.close(); };
 """#

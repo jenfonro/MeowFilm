@@ -72,16 +72,17 @@ public static class FilmHomeTests
             origins.SequenceEqual(["https://m.douban.com"]), "fixed origin");
 
         Check(items.Count == 3, "blank titles are filtered");
-        Check(items[0] == new FilmCardItem(
-            "100",
-            "第一部",
-            "https://img.doubanio.cmliussss.net/view/photo/s_ratio_poster/public/p100.jpg",
-            "8.6"), "normal poster and numeric score");
+        Check(items[0].Id == "100" && items[0].Title == "第一部" &&
+            items[0].Poster == "https://img.doubanio.cmliussss.net/view/photo/s_ratio_poster/public/p100.jpg" &&
+            items[0].Score == "8.6" && items[0].PlaybackContext?.Target is
+                { Id: "douban:movie:100", Kind: "movie", MetadataProvider: "douban", MetadataId: "100" },
+            "normal poster, numeric score and independent Douban identity");
         Check(items[1].Poster.EndsWith("/large.jpg", StringComparison.Ordinal) &&
             items[1].Score.Length == 0, "large fallback and zero score");
         Check(items[2].Id.StartsWith("movie:27:", StringComparison.Ordinal) &&
             items[2].Poster.EndsWith("/cover.jpg", StringComparison.Ordinal) &&
-            items[2].Score == "9", "ranged fallback identity cover and string score");
+            items[2].Score == "9" && items[2].PlaybackContext is null,
+            "a ranged display fallback is not fabricated into a playable metadata identity");
 
         foreach (var definition in FilmSectionDefinition.Home)
         {
@@ -123,7 +124,9 @@ public static class FilmHomeTests
     private static async Task IndependentSections()
     {
         var source = new ControlledFilmSource();
-        await using var module = new FilmCapability(source);
+        await using var runtime = new FilmRuntimeProbe();
+        await using var module = new FilmCapability(source, new FilmPlaybackSession(runtime.CaptureConnectionAsync, new FilmNativeProbe()),
+            new FilmLibrary(new FilmMemoryStore()));
         await module.InitializeAsync(default);
         Check(source.Calls.Count == 0 && module.Sections.All(section => section.ShowSkeleton),
             "constructing and initializing film does not read business data");
@@ -154,8 +157,8 @@ public static class FilmHomeTests
         string homeLocation = module.CaptureNavigationLocation();
         Check(homeLocation == FilmCapability.HomeRoute, "capture retains the current film route");
         await module.RestoreNavigationAsync(FilmCapability.PlaybackRoute, default);
-        Check(module.CaptureNavigationLocation().StartsWith(FilmCapability.PlaybackRoute + ":", StringComparison.Ordinal),
-            "capture follows the restored playback destination and film identity");
+        Check(module.CaptureNavigationLocation() == FilmCapability.PlaybackRoute && !module.HasPlayback && runtime.Calls.Count == 0,
+            "a bare route has no film identity and does not invent a preview or session");
         await module.RestoreNavigationAsync(homeLocation, default);
         Check(source.Calls.Count == 4 && ReferenceEquals(retainedItems, module.Sections[0].Items) &&
             ReferenceEquals(retainedCard, retainedItems[0]) && module.Sections[0].HorizontalOffset == 192,
@@ -184,7 +187,7 @@ public static class FilmHomeTests
         var card = show.Items.Single();
         await module.OpenPlaybackAsync(card);
         Check(routes.SequenceEqual([FilmCapability.DataRoute, FilmCapability.PlaybackRoute]) &&
-            ReferenceEquals(module.Playback?.Item, card),
+            module.Playback?.Item.Id == card.Id && module.Playback.Request.Target.Id == card.PlaybackContext!.Target.Id,
             "film cards retain their catalog identity and request the hidden playback route");
         Check(module.Navigation.Count == 3 &&
             module.Navigation.Single(item => item.Route == FilmCapability.HomeRoute).ShowInSidebar &&
@@ -195,7 +198,7 @@ public static class FilmHomeTests
         await module.NavigateAsync(FilmCapability.PlaybackRoute, default);
         Check(module.IsPlayback && !module.IsHome && !module.IsData &&
             module.Heading == "播放页" && source.Calls.Count == calls,
-            "the playback route publishes local preview context without another data request");
+            "the playback route publishes its explicit identity without another catalog request");
     }
 
     private static async Task DataPagination()
@@ -439,7 +442,8 @@ public static class FilmHomeTests
     }
 
     private static FilmCardItem Card(string key) =>
-        new(key, "影片 " + key, "", key == "movie" ? "8.8" : "");
+        FilmPlaybackFixture.Card(key == "movie" ? "movie" : "tv",
+            key == "movie" ? 100 : key == "tv" ? 101 : key == "anime" ? 102 : 103, "影片 " + key, "") with { Id = key };
 
     private static FilmFilterOption Option(FilmDataSection section, string row, string label) =>
         section.FilterRows.Single(filter => filter.Key == row)

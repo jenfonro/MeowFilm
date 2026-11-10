@@ -1,5 +1,6 @@
 import { PrivateDocuments } from '@meowfilm/script-host';
 import { isUtf8 } from 'node:buffer';
+import { randomUUID } from 'node:crypto';
 
 export const metadataFailure = code => Object.assign(new Error(code), { code });
 export const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -22,7 +23,7 @@ function endpoint(value, template = false) {
   const substituted = template ? value.replace(slots[0], 'https%3A%2F%2Fexample.invalid%2F') : value;
   let url;
   try { url = new URL(substituted); } catch { throw metadataFailure('INVALID_REQUEST'); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash ||
+  if (!['http:', 'https:'].includes(url.protocol) || url.hash ||
       (!template && url.search) || /[{}]/.test(substituted) ||
       template && !value.slice(value.indexOf('://') + 3).match(/^[^/?#{}]+[/?]/)) {
     throw metadataFailure('INVALID_REQUEST');
@@ -49,7 +50,8 @@ function validate(id, value) {
  * not a second settings database. PrivateDocuments is atomic, not encryption. */
 export function createMetadataSettings(dataRoot, id) {
   const documents = new PrivateDocuments(dataRoot, id);
-  let snapshot;
+  let snapshot, reload = false, revision = randomUUID();
+  const same = (left, right) => Object.keys(defaults[id]).every(key => left[key] === right[key]);
   function load() {
     try {
       const bytes = documents.read('settings.json');
@@ -68,9 +70,16 @@ export function createMetadataSettings(dataRoot, id) {
         ? 'STORAGE_ERROR' : 'CORRUPT_STORAGE');
     }
   }
-  const read = () => snapshot ??= load();
+  function read() {
+    if (snapshot !== undefined && !reload) return snapshot;
+    const value = load();
+    if (snapshot !== undefined && !same(snapshot, value)) revision = randomUUID();
+    snapshot = value;
+    reload = false;
+    return snapshot;
+  }
   function visible(value) {
-    const result = { ...value };
+    const result = { ...value, revision };
     for (const key of secrets[id]) {
       delete result[key];
       result[`${key}Configured`] = value[key].length > 0;
@@ -84,16 +93,19 @@ export function createMetadataSettings(dataRoot, id) {
       if (!object(patch) || Object.keys(patch).some(key => !Object.hasOwn(defaults[id], key))) {
         throw metadataFailure('INVALID_REQUEST');
       }
-      const value = validate(id, { ...read(), ...patch });
+      const current = read();
+      const value = validate(id, { ...current, ...patch });
+      if (same(current, value)) return visible(current);
       try {
         documents.write('settings.json', Buffer.from(JSON.stringify({ version: 1, settings: value }) + '\n'));
       } catch {
         // rename may have committed before directory synchronization failed.
         // Reload the authoritative file next time instead of claiming rollback.
-        snapshot = undefined;
+        reload = true;
         throw metadataFailure('STORAGE_ERROR');
       }
       snapshot = value;
+      revision = randomUUID();
       return visible(value);
     },
   };

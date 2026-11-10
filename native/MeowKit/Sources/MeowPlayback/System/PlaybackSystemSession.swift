@@ -6,6 +6,22 @@ import ImageIO
 import UIKit
 import MeowContracts
 
+@MainActor
+struct PlaybackAudioSessionActions {
+    let activate: @MainActor () throws -> Void
+    let deactivate: @MainActor () throws -> Void
+
+    static var live: Self {
+        .init(activate: {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default, options: [])
+            try session.setActive(true)
+        }, deactivate: {
+            try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        })
+    }
+}
+
 /// Created lazily by the first valid play, never by coordinator initialization.
 /// The product must inject one coordinator; this is not a global service locator.
 @MainActor
@@ -18,6 +34,7 @@ final class PlaybackSystemSession {
     }
 
     private let audioSession = AVAudioSession.sharedInstance()
+    private let audioActions: PlaybackAudioSessionActions
     private let notificationObservers = PlaybackObservationScope()
     private let commandObservers = PlaybackObservationScope()
     private let navigationObservers = PlaybackObservationScope()
@@ -35,10 +52,12 @@ final class PlaybackSystemSession {
     private(set) var lastError: NativePlaybackError?
 
     init(
+        audioActions: PlaybackAudioSessionActions,
         onEvent: @escaping @MainActor (Event, UUID) -> Void,
         onCommand: @escaping @MainActor (PlaybackTransportCommand, UUID, PlaybackPlayPauseRoute?) -> Bool,
         onNavigation: @escaping @MainActor (PlaybackNavigationRoute) -> Bool
     ) {
+        self.audioActions = audioActions
         self.onEvent = onEvent
         self.onCommand = onCommand
         self.onNavigation = onNavigation
@@ -83,8 +102,7 @@ final class PlaybackSystemSession {
         guard !isActive else { return }
         // No mixing: music and film share one audio focus owner. No record,
         // microphone permission or route override is requested.
-        try audioSession.setCategory(.playback, mode: .default, options: [])
-        try audioSession.setActive(true)
+        try audioActions.activate()
         isActive = true
         lastError = nil
     }
@@ -92,7 +110,7 @@ final class PlaybackSystemSession {
     func deactivate() {
         guard isActive else { return }
         do {
-            try audioSession.setActive(false, options: [.notifyOthersOnDeactivation])
+            try audioActions.deactivate()
             isActive = false
             lastError = nil
         } catch {

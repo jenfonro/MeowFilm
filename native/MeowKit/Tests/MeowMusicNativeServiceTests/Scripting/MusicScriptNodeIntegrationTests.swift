@@ -33,8 +33,6 @@ private actor MusicScriptNodeLauncher: RuntimeLaunching {
         var enabled: Int32 = 1
         _ = setsockopt(fds[0], SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
         let session = UUID().uuidString.lowercased()
-        let key = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() +
-            UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let arguments = [node, root.appendingPathComponent("apps/ios/runtime/entries/aggregate.mjs").path,
                          "--meow-bootstrap-fd", String(fds[1])]
         var actions: posix_spawn_file_actions_t?, attributes: posix_spawnattr_t?
@@ -60,7 +58,7 @@ private actor MusicScriptNodeLauncher: RuntimeLaunching {
         }
         do {
             var configuration = try RuntimeJSON.encode(.object([
-                "sessionId": .string(session), "requestKey": .string(key), "dataRoot": .string(dataRoot.path),
+                "sessionId": .string(session), "dataRoot": .string(dataRoot.path),
             ]))
             configuration.append(10)
             let endpoint = try await Task.detached {
@@ -84,7 +82,7 @@ private actor MusicScriptNodeLauncher: RuntimeLaunching {
             }.value
             guard case .object(let fields) = endpoint, case .string(let address)? = fields["baseUrl"],
                   let url = URL(string: address) else { throw RuntimeLaunchError.payloadUnavailable }
-            let value = try RuntimeHTTPClient(baseURL: url, sessionID: session, requestKey: key)
+            let value = try RuntimeHTTPClient(baseURL: url)
             client = value
             return value
         } catch {

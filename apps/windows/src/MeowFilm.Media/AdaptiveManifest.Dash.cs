@@ -9,7 +9,7 @@ namespace MeowFilm.Media;
 internal sealed partial class AdaptiveManifest
 {
     private static readonly XNamespace DashNamespace = "urn:mpeg:dash:schema:mpd:2011";
-    private string Dash(string text, Uri parent, bool credentials)
+    private string Dash(string text, Uri parent)
     {
         XDocument document;
         try
@@ -34,8 +34,8 @@ internal sealed partial class AdaptiveManifest
         var period = periods[0];
         if (Attr(period, "start", "PT0S") != "PT0S") throw Unsupported();
         double seconds = Duration(Attr(period, "duration", Attr(mpd, "mediaPresentationDuration", "")));
-        var rootBase = Base(mpd, parent, credentials);
-        var periodBase = Base(period, rootBase.Uri, rootBase.Credentials);
+        var rootBase = Base(mpd, parent);
+        var periodBase = Base(period, rootBase);
         var output = new XElement(DashNamespace + "MPD",
             new XAttribute("type", "static"),
             new XAttribute("profiles", "urn:mpeg:dash:profile:isoff-main:2011"),
@@ -48,7 +48,7 @@ internal sealed partial class AdaptiveManifest
         foreach (var set in period.Elements(DashNamespace + "AdaptationSet"))
         {
             if (++sets > 16) throw new PlaybackException(PlaybackError.AdaptiveBudget);
-            var setBase = Base(set, periodBase.Uri, periodBase.Credentials);
+            var setBase = Base(set, periodBase);
             var outputSet = new XElement(DashNamespace + "AdaptationSet", new XAttribute("id", sets));
             CopyPresentationAttributes(set, outputSet);
             outputPeriod.Add(outputSet);
@@ -63,7 +63,7 @@ internal sealed partial class AdaptiveManifest
                     throw Invalid();
                 long bandwidth = UInt(Attr(rep, "bandwidth", ""), 1_000_000_000);
                 if (bandwidth == 0) throw Invalid();
-                var repBase = Base(rep, setBase.Uri, setBase.Credentials);
+                var repBase = Base(rep, setBase);
                 var outputRep = new XElement(DashNamespace + "Representation",
                     new XAttribute("id", tracks), new XAttribute("bandwidth", bandwidth), new XAttribute("mimeType", mime));
                 CopyPresentationAttributes(rep, outputRep);
@@ -78,7 +78,7 @@ internal sealed partial class AdaptiveManifest
                 {
                     var init = descriptor.Element(DashNamespace + "Initialization") ?? throw Unsupported();
                     list.Add(new XElement(DashNamespace + "Initialization", new XAttribute("sourceURL",
-                        Resource(repBase.Uri, repBase.Credentials, Attr(init, "sourceURL", ""),
+                        Resource(repBase, Attr(init, "sourceURL", ""),
                             AdaptiveResourceKind.Mp4Init, DashRange((string?)init.Attribute("range"))))));
                     var urls = descriptor.Elements(DashNamespace + "SegmentURL").ToArray();
                     if (urls.Length is 0 or > 4096) throw new PlaybackException(PlaybackError.AdaptiveBudget);
@@ -86,7 +86,7 @@ internal sealed partial class AdaptiveManifest
                     list.Add(TimelineElement(timeline));
                     foreach (var url in urls)
                         list.Add(new XElement(DashNamespace + "SegmentURL", new XAttribute("media",
-                            Resource(repBase.Uri, repBase.Credentials, Attr(url, "media", ""),
+                            Resource(repBase, Attr(url, "media", ""),
                                 AdaptiveResourceKind.Mp4Segment, DashRange((string?)url.Attribute("mediaRange"))))));
                 }
                 else
@@ -96,13 +96,13 @@ internal sealed partial class AdaptiveManifest
                     string template = Attr(descriptor, "media", "");
                     var timeline = Timeline(descriptor, scale, seconds, null);
                     list.Add(new XElement(DashNamespace + "Initialization", new XAttribute("sourceURL",
-                        Resource(repBase.Uri, repBase.Credentials, Expand(initialization, id, bandwidth, number, 0),
+                        Resource(repBase, Expand(initialization, id, bandwidth, number, 0),
                             AdaptiveResourceKind.Mp4Init))));
                     list.Add(TimelineElement(timeline));
                     foreach (var (time, duration) in timeline)
                     {
                         list.Add(new XElement(DashNamespace + "SegmentURL", new XAttribute("media",
-                            Resource(repBase.Uri, repBase.Credentials, Expand(template, id, bandwidth, number++, time),
+                            Resource(repBase, Expand(template, id, bandwidth, number++, time),
                                 AdaptiveResourceKind.Mp4Segment))));
                     }
                 }
@@ -112,11 +112,11 @@ internal sealed partial class AdaptiveManifest
         if (sets == 0) throw Invalid();
         return output.ToString(SaveOptions.DisableFormatting);
     }
-    private (Uri Uri, bool Credentials) Base(XElement element, Uri parent, bool credentials)
+    private Uri Base(XElement element, Uri parent)
     {
         var bases = element.Elements(DashNamespace + "BaseURL").ToArray();
         if (bases.Length > 1) throw Unsupported();
-        return bases.Length == 0 ? (parent, credentials) : transport.Resolve(parent, credentials, bases[0].Value.Trim());
+        return bases.Length == 0 ? parent : transport.Resolve(parent, bases[0].Value.Trim());
     }
     private static XElement? SegmentDescriptor(XElement element)
     {
@@ -183,7 +183,7 @@ internal sealed partial class AdaptiveManifest
 
     private static string Expand(string template, string id, long bandwidth, long number, long time)
     {
-        if (template.Length == 0 || template.Length > 16384) throw Invalid();
+        if (template.Length == 0) throw Invalid();
         var result = new StringBuilder();
         for (int i = 0; i < template.Length; i++)
         {

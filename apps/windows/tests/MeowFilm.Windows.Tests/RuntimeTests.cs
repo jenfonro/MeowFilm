@@ -25,7 +25,7 @@ public static class RuntimeTests
         return path;
     }
     private const string Identity = "aggregate";
-    private static RuntimeModule[] Modules => [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0"), new("tmdb", "0.1.0")];
+    private static RuntimeModule[] Modules => RuntimeHttpClientTests.Modules;
     private static string[] Namespaces => ["music.library.v1", "music.accounts.v1"];
     private static string ScriptData() => Path.Combine(NewData(), "script-runtime");
 
@@ -377,10 +377,9 @@ public static class RuntimeTests
               if (!text.endsWith('\n')) return;
               initialized = true;
               try { config = JSON.parse(text); } catch { process.exitCode = 4; finish(); return; }
-              if (Object.keys(config).sort().join(',') !== 'dataRoot,requestKey,sessionId' ||
-                  config.sessionId !== argv[3] || !/^[0-9a-f]{64}$/.test(config.requestKey) ||
+              if (Object.keys(config).sort().join(',') !== 'dataRoot,sessionId' ||
+                  config.sessionId !== argv[3] ||
                   typeof config.dataRoot !== 'string' ||
-                  [...process.argv, ...Object.values(process.env)].some(value => value.includes(config.requestKey)) ||
                   process.env.MEOWFILM_SCRIPT_DATA_ROOT !== undefined) {
                 process.exitCode = 5; finish(); return;
               }
@@ -389,8 +388,9 @@ public static class RuntimeTests
               if (mode === 'large-ready') { stream.write(' '.repeat(65537) + '\n'); return; }
               server = http.createServer(async (request, response) => {
                 request.resume();
-                if (request.headers.authorization !== 'Bearer ' + config.requestKey ||
-                    request.headers['x-meow-session'] !== config.sessionId) { response.destroy(); return; }
+                if (request.headers.authorization !== undefined || request.headers['x-meow-session'] !== undefined) {
+                  response.destroy(); return;
+                }
                 let value;
                 if (request.url === '/v1/describe' && request.method === 'GET') value = description;
                 else if (request.url === '/v1/music/invoke' && request.method === 'POST') {
@@ -413,7 +413,7 @@ public static class RuntimeTests
               });
               server.listen(0, '127.0.0.1', () => {
                 const ready = {protocol:mode === 'wrong-protocol' ? 'wrong' : 'runtime.http.v1',
-                  baseUrl:mode === 'wrong-endpoint' ? 'http://localhost:123' : `http://127.0.0.1:${server.address().port}`};
+                  baseUrl:mode === 'wrong-endpoint' ? 'file:///invalid-runtime' : `http://127.0.0.1:${server.address().port}`};
                 if (mode === 'extra-ready-field') ready.extra = true;
                 stream.write(JSON.stringify(ready) + '\n' + (mode === 'extra-ready-bytes' ? 'x' : ''));
               });

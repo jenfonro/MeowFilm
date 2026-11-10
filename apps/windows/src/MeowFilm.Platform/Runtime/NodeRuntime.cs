@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text.Json;
 using MeowFilm.Core.Runtime;
 using Microsoft.Win32.SafeHandles;
@@ -9,7 +8,7 @@ using Microsoft.Win32.SafeHandles;
 namespace MeowFilm.Platform.Runtime;
 
 /// <summary>Owns one child, its Job, private lifetime pipe and HTTP client.</summary>
-public sealed partial class NodeRuntime : IRuntimeSession
+public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSource
 {
     private const int HandshakeBytes = 64 * 1024;
     private readonly Process process;
@@ -21,13 +20,19 @@ public sealed partial class NodeRuntime : IRuntimeSession
     private readonly OwnedProcessJob job;
     private readonly object gate = new();
     private readonly TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly Uri businessOrigin;
+    private readonly CancellationTokenSource capability;
+    private readonly CancellationToken revoked;
     private Task? disposal;
 
     private NodeRuntime(Process process, NamedPipeServerStream pipe, RuntimeHttpClient client,
-        Task output, Task error, Task processExit, OwnedProcessJob job)
+        Task output, Task error, Task processExit, OwnedProcessJob job, Uri businessOrigin, CancellationToken ownerRevoked)
     {
         this.process = process; processId = process.Id; this.pipe = pipe; this.client = client;
         outputDrain = output; errorDrain = error; this.processExit = processExit; this.job = job;
+        this.businessOrigin = businessOrigin;
+        capability = CancellationTokenSource.CreateLinkedTokenSource(ownerRevoked);
+        revoked = capability.Token;
         pipeEnd = WatchPipeAsync(pipe);
         _ = MonitorAsync();
     }
@@ -37,14 +42,25 @@ public sealed partial class NodeRuntime : IRuntimeSession
     private static partial bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint clientProcessId);
 
     public int ProcessId => processId;
-    public bool IsConnected { get { lock (gate) return disposal is null && !processExit.IsCompleted && !pipeEnd.IsCompleted; } }
+    public bool IsConnected { get { lock (gate) return disposal is null && !revoked.IsCancellationRequested &&
+        !processExit.IsCompleted && !pipeEnd.IsCompleted; } }
     /// <summary>Proves release after the actual child, pipe and output drains stop;
     /// it is not a graceful-close acknowledgement.</summary>
     public Task Completion => completion.Task;
 
+    public Task<RuntimeConnection> CaptureConnectionAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            if (!IsConnected) throw new BridgeException("CLOSED");
+            return Task.FromResult(new RuntimeConnection(this, businessOrigin, revoked));
+        }
+    }
+
     public static async Task<NodeRuntime> StartAsync(string nodeExecutable, RuntimeBundle bundle,
         IReadOnlyList<RuntimeModule> expectedModules, string scriptDataRoot,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, CancellationToken ownerRevoked = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         string node, dataRoot;
@@ -61,7 +77,6 @@ public sealed partial class NodeRuntime : IRuntimeSession
         }
         catch { throw new BridgeException("INVALID_MESSAGE"); }
         var sessionId = Guid.NewGuid().ToString("D");
-        var requestKey = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
         var pipeName = "meowfilm-" + Guid.NewGuid().ToString("D");
         NamedPipeServerStream? server = null;
         Process? child = null;
@@ -103,18 +118,15 @@ public sealed partial class NodeRuntime : IRuntimeSession
             await connect.ConfigureAwait(false);
             if (!GetNamedPipeClientProcessId(server.SafePipeHandle, out var pid) || pid != (uint)child.Id)
                 throw new BridgeException("INVALID_MESSAGE");
-            var config = BridgeCodec.EncodeJSONValue(new { sessionId, requestKey, dataRoot });
-            try
-            {
-                if (config.Length + 1 > HandshakeBytes) throw new BridgeException("INVALID_MESSAGE");
-                await server.WriteAsync(config, deadline.Token).ConfigureAwait(false);
-                await server.WriteAsync("\n"u8.ToArray(), deadline.Token).ConfigureAwait(false);
-                await server.FlushAsync(deadline.Token).ConfigureAwait(false);
-            }
-            finally { CryptographicOperations.ZeroMemory(config); }
+            var config = BridgeCodec.EncodeJSONValue(new { sessionId, dataRoot });
+            if (config.Length + 1 > HandshakeBytes) throw new BridgeException("INVALID_MESSAGE");
+            await server.WriteAsync(config, deadline.Token).ConfigureAwait(false);
+            await server.WriteAsync("\n"u8.ToArray(), deadline.Token).ConfigureAwait(false);
+            await server.FlushAsync(deadline.Token).ConfigureAwait(false);
             var ready = await ReadReadyAsync(server, deadline.Token).ConfigureAwait(false);
-            client = new RuntimeHttpClient(ready, sessionId, requestKey);
-            runtime = new NodeRuntime(child, server, client, output, error, exited, job);
+            client = new RuntimeHttpClient(ready);
+            runtime = new NodeRuntime(child, server, client, output, error, exited, job,
+                RuntimeHttpProtocol.ValidateEndpoint(ready), ownerRevoked);
             var description = await client.DescribeAsync(deadline.Token).ConfigureAwait(false);
             if (!description.GetProperty("ok").GetBoolean())
                 throw new BridgeException(description.GetProperty("code").GetString()!);
@@ -185,6 +197,13 @@ public sealed partial class NodeRuntime : IRuntimeSession
     {
         if (!IsConnected) return Task.FromException<JsonElement>(new BridgeException("CLOSED"));
         return client.CallAsync(method, parameters, cancellationToken);
+    }
+
+    public IAsyncEnumerable<JsonElement> EventsAsync(string module, Guid sessionId, long after = 0,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsConnected) throw new BridgeException("CLOSED");
+        return client.EventsAsync(module, sessionId, after, cancellationToken);
     }
 
     public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
@@ -262,6 +281,7 @@ public sealed partial class NodeRuntime : IRuntimeSession
     {
         try
         {
+            try { await capability.CancelAsync().ConfigureAwait(false); } catch { failure ??= "INTERNAL"; }
             if (graceful)
             {
                 try { await client.ShutdownAsync().ConfigureAwait(false); }
@@ -290,6 +310,7 @@ public sealed partial class NodeRuntime : IRuntimeSession
         }
         finally
         {
+            capability.Dispose();
             if (failure is null) stopped.TrySetResult();
             else stopped.TrySetException(new BridgeException(failure));
         }

@@ -3,10 +3,27 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <VideoKernelRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\..\.cache\windows-video-kernel'))</VideoKernelRoot>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="LibVLCSharp" Version="[3.10.2]" />
     <PackageReference Include="LibVLCSharp.WPF" Version="[3.10.2]" />
     <PackageReference Include="VideoLAN.LibVLC.Windows" Version="[3.0.24]" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="$(VideoKernelRoot)\output\VideoKernelBuild.g.cs" />
+    <Content Include="$(VideoKernelRoot)\output\libmeowfilm_ffmpeg_plugin.dll">
+      <Link>libvlc\win-x64\plugins\demux\libmeowfilm_ffmpeg_plugin.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="$(VideoKernelRoot)\output\build-receipt.json">
+      <Link>video-kernel\build-receipt.json</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+  <Target Name="BuildPrivateVideoKernel" BeforeTargets="BeforeBuild">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\..\..\scripts\windows\build-video-kernel.ps1&quot; -Configuration $(Configuration)" />
+  </Target>
 </Project>

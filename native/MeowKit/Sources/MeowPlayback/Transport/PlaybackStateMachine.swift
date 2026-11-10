@@ -101,12 +101,38 @@ struct PlaybackStateMachine {
     @discardableResult
     mutating func begin(resource: PlaybackResource, owner: String, autoplay: Bool = true,
                         network: PlaybackNetworkOptions = .init()) -> UUID {
+        let token = beginIdentity(resourceID: resource.id, title: resource.title, owner: owner, autoplay: autoplay)
+        guard isPlayable else { return token }
+        do {
+            _ = try PlaybackNetworkPlan(resource: resource, options: network)
+        } catch {
+            fail(error, generation: token)
+            return token
+        }
+        if resource.startPosition > 0 {
+            pendingSeek = Seek(generation: token, id: UUID(), position: resource.startPosition)
+        }
+        updatePendingPhase()
+        record(.preparing)
+        return token
+    }
+
+    /// The already validated video capability does not enter or broaden music's
+    /// URL/header policy. Native video admission is not an AVPlayer resource.
+    mutating func beginVideo(resourceID: String, title: String, owner: String, autoplay: Bool) -> UUID {
+        let token = beginIdentity(resourceID: resourceID, title: title, owner: owner, autoplay: autoplay)
+        guard isPlayable else { return token }
+        updatePendingPhase(); record(.preparing)
+        return token
+    }
+
+    private mutating func beginIdentity(resourceID: String, title: String, owner: String, autoplay: Bool) -> UUID {
         finishOutstandingSeek(.replaced)
         record(.replaced)
         let token = UUID()
-        attempt = PlayAttempt(id: token, owner: owner, resourceID: resource.id)
-        snapshot = PlaybackSnapshot(owner: owner, resourceID: resource.id, phase: .preparing)
-        title = resource.title
+        attempt = PlayAttempt(id: token, owner: owner, resourceID: resourceID)
+        snapshot = PlaybackSnapshot(owner: owner, resourceID: resourceID, phase: .preparing)
+        self.title = title
         error = nil
         wantsPlayback = autoplay
         isReady = false
@@ -125,17 +151,6 @@ struct PlaybackStateMachine {
             fail(ContractError.invalidIdentifier, generation: token)
             return token
         }
-        do {
-            _ = try PlaybackNetworkPlan(resource: resource, options: network)
-        } catch {
-            fail(error, generation: token)
-            return token
-        }
-        if resource.startPosition > 0 {
-            pendingSeek = Seek(generation: token, id: UUID(), position: resource.startPosition)
-        }
-        updatePendingPhase()
-        record(.preparing)
         return token
     }
 
@@ -284,8 +299,10 @@ struct PlaybackStateMachine {
             snapshot.phase = .paused
             if lastReportedTransport != .paused { record(.paused) }
         case .waiting:
+            let changed = snapshot.phase != .buffering || !wantsPlayback
             wantsPlayback = true
             snapshot.phase = .buffering
+            if changed { recordProgress(force: true) }
         case .playing:
             wantsPlayback = true
             snapshot.phase = .playing
@@ -296,8 +313,13 @@ struct PlaybackStateMachine {
 
     mutating func stalled(generation token: UUID) {
         guard accepts(token), wantsPlayback, !isInterrupted, snapshot.phase != .ended else { return }
-        snapshot.phase = isReady ? .buffering : .preparing
+        let phase: PlaybackPhase = isReady ? .buffering : .preparing
+        guard snapshot.phase != phase else { return }
+        snapshot.phase = phase
         lastReportedTransport = .waiting
+        // A stalled clock does not advance position. Publish the real phase
+        // edge now rather than waiting for a later, non-duplicate time sample.
+        recordProgress(force: true)
     }
 
 
@@ -390,7 +412,8 @@ struct PlaybackStateMachine {
 
     private mutating func record(_ kind: PlaybackEvent.Kind) {
         guard let attempt else { return }
-        events.append(PlaybackEvent(attempt: attempt, kind: kind, snapshot: snapshot, error: error))
+        events.append(PlaybackEvent(attempt: attempt, kind: kind, snapshot: snapshot,
+                                    wantsPlayback: wantsPlayback, error: error))
     }
 
     private mutating func finishOutstandingSeek(
@@ -405,8 +428,8 @@ struct PlaybackStateMachine {
         ))
     }
 
-    private mutating func recordProgress() {
-        if let lastProgress, lastProgress.position == snapshot.position,
+    private mutating func recordProgress(force: Bool = false) {
+        if !force, let lastProgress, lastProgress.position == snapshot.position,
            lastProgress.duration == snapshot.duration { return }
         lastProgress = (snapshot.position, snapshot.duration)
         record(.progress)

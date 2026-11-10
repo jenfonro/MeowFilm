@@ -52,8 +52,6 @@ export function createFetch(node) {
         const method = incoming.statusCode === 303 && request.method !== 'HEAD' ||
           [301, 302].includes(incoming.statusCode) && request.method === 'POST' ? 'GET' : request.method;
         const redirectedHeaders = new Headers(request.headers);
-        if (target.origin !== next.origin) for (const key of ['authorization', 'cookie', 'proxy-authorization'])
-          redirectedHeaders.delete(key);
         if (method === 'GET') for (const key of ['content-length', 'content-type']) redirectedHeaders.delete(key);
         const redirected = new node.web.Request(next, { method, headers: redirectedHeaders,
           signal: request.signal, redirect: request.redirect,

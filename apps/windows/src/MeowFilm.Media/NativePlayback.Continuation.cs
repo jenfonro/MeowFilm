@@ -49,8 +49,12 @@ public sealed partial class NativePlayback : INativePlaybackContinuation
         IReadOnlyDictionary<string, string> headers, CancellationToken token = default) =>
         DispatchAsync(() => ReopenCoreAsync(continuation, uri, headers, null, token));
 
-    public async Task ReopenReadAsync(NativePlaybackContinuation continuation, INativeMediaReadLease lease,
-        CancellationToken token = default)
+    public Task ReopenReadAsync(NativePlaybackContinuation continuation, INativeMediaReadLease lease,
+        CancellationToken token = default) =>
+        TrackOwnedMediaRequestAsync(() => ReopenReadOwnedAsync(continuation, lease, token));
+
+    private async Task ReopenReadOwnedAsync(NativePlaybackContinuation continuation, INativeMediaReadLease lease,
+        CancellationToken token)
     {
         if (lease is null) throw Error(PlaybackError.InvalidReadLease);
         var input = new ReadLeaseMediaInput(lease);

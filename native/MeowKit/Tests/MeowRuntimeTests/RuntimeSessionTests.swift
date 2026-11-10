@@ -38,8 +38,7 @@ private actor RuntimeSessionLauncher: RuntimeLaunching {
         // A late executor still belongs to the shared App owner.
         await gate.wait()
         if let failure { throw failure }
-        let value = try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43210")!,
-            sessionID: "11111111-1111-4111-8111-111111111111", requestKey: String(repeating: "a", count: 64))
+        let value = try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43210")!)
         client = value
         return value
     }

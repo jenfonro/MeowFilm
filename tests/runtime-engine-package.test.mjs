@@ -42,10 +42,10 @@ function sourceFixture() {
   };
   for (const path of new Set(['package.json', 'package-lock.json', policyPath, receiptPath,
     artifactPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
-  for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime']) {
+  for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime', 'film-rules', 'film-playback']) {
     const location = `packages/${name}`;
     copy(`${location}/package.json`);
-    copy(`${location}/src`);
+    copy(`${location}/${name === 'film-rules' ? 'film-rules.js' : 'src'}`);
     const installed = join(root, 'node_modules/@meowfilm', name);
     mkdirSync(dirname(installed), { recursive: true });
     symlinkSync(join(root, location), installed, process.platform === 'win32' ? 'junction' : 'dir');
@@ -119,7 +119,7 @@ test('common native payload preserves exact build, ABI, SDK, source and license 
   assert.equal(manifest.status, 'complete');
   assert.equal(manifest.assemblyProfile, 'common-native');
   assert.equal(manifest.entry, 'app/entry.mjs');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film']);
   assert.equal(manifest.trustedNative.length, 1);
   const native = manifest.trustedNative[0];
   assert.equal(native.path, payloadPath(artifactPath));
@@ -174,7 +174,7 @@ function runIsolated(output, program) {
   } finally { rmSync(entry); }
 }
 
-test('packaged entry starts HTTP and executes all three owners without repository fallback', async t => {
+test('packaged entry starts HTTP and serves all seven App modules without repository fallback', async t => {
   const f = fixture(t);
   await f.pack();
   const result = runIsolated(f.output, `
@@ -182,8 +182,8 @@ test('packaged entry starts HTTP and executes all three owners without repositor
     import { join } from 'node:path';
     import { createRuntime, createRuntimeClient } from './app/entry.mjs';
     const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
-    const requestKey = 'a'.repeat(64);
-    const runtime = createRuntime({ sessionId, requestKey, dataRoot: join(process.cwd(), 'runtime-data') });
+    const runtime = createRuntime({ sessionId, dataRoot: join(process.cwd(), 'runtime-data'),
+      pan: {}, tmdb: {}, douban: {}, film: {} });
     const okay = reply => {
       assert.equal(reply.ok, true, JSON.stringify(reply));
       return reply.value;
@@ -191,12 +191,15 @@ test('packaged entry starts HTTP and executes all three owners without repositor
     let client;
     try {
       await runtime.start();
-      client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
+      client = createRuntimeClient({ baseUrl: runtime.baseUrl });
       const descriptor = await client.describe();
       assert.equal(descriptor.ok, true);
       assert.equal(descriptor.value.protocol, 'runtime.http.v1');
       assert.deepEqual(descriptor.value.modules.map(value => value.contract),
-        ['music.script.v3', 'cat.script.v2', 'source.runtime.v2']);
+        ['music.script.v3', 'cat.script.v2', 'source.runtime.v2', 'pan.runtime.v1',
+          'tmdb.data.v1', 'douban.data.v1', 'film.playback.v1']);
+      for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
+        'film.settings.get', 'film.library.get']) okay(await client.call(method));
       const installationId = '7bd84ef5-9557-4338-a67f-9dc4df2413f9';
       okay(await client.upload('music', installationId, 1, Buffer.from(
         'let n=0; lx.on(lx.EVENT_NAMES.request, async () => ++n);' +
@@ -233,7 +236,7 @@ test('packaged entry starts HTTP and executes all three owners without repositor
         action: 'search', payload: { keyword: 'fixture' },
       })), { list: [{ vod_id: 'fixture', vod_name: 'fixture' }] });
       assert.deepEqual(okay(await client.shutdown()), { closed: true, cleanupComplete: true });
-      console.log('PACKAGED_NATIVE_HTTP_THREE_OWNERS_OK');
+      console.log('PACKAGED_NATIVE_HTTP_SEVEN_MODULES_OK');
     } finally {
       await runtime.close();
       await client?.close();
@@ -241,7 +244,7 @@ test('packaged entry starts HTTP and executes all three owners without repositor
   `);
   assert.equal(result.signal, null, result.stderr);
   assert.equal(result.status, 0, result.stderr || result.error?.message);
-  assert.match(result.stdout, /PACKAGED_NATIVE_HTTP_THREE_OWNERS_OK/);
+  assert.match(result.stdout, /PACKAGED_NATIVE_HTTP_SEVEN_MODULES_OK/);
 });
 
 test('packaged pan entry imports and serves its contract without script engines or repository fallback', async t => {
@@ -251,12 +254,12 @@ test('packaged pan entry imports and serves its contract without script engines 
     import assert from 'node:assert/strict';
     import { join } from 'node:path';
     import { createPanRuntime, createRuntimeClient } from './app/pan-entry.mjs';
-    const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86', requestKey = 'a'.repeat(64);
-    const runtime = createPanRuntime({ sessionId, requestKey, dataRoot: join(process.cwd(), 'pan-data') });
+    const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
+    const runtime = createPanRuntime({ sessionId, dataRoot: join(process.cwd(), 'pan-data') });
     let client;
     try {
       await runtime.start();
-      client = createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey });
+      client = createRuntimeClient({ baseUrl: runtime.baseUrl });
       assert.deepEqual((await client.describe()).value.modules.map(item => item.id), ['pan']);
       assert.equal((await client.call('pan.providers')).value.providers.length, 7);
       const saved = await client.call('pan.settings.set', {

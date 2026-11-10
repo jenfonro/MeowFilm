@@ -2,22 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHttpClient, createHttpServer } from '../src/index.js';
-import { pair, credentials, deferred } from './http-fixture.js';
+import { pair, lifecycle, deferred } from './http-fixture.js';
 
 test('connection reuse does not bind session lifetime to one keepalive socket', async t => {
-  const { call, client, server, identity } = await pair(t, value => value);
+  const { call, client, server } = await pair(t, value => value);
   assert.equal((await call(1)).value, 1);
   await client.close();
-  const another = createHttpClient({ ...identity, baseUrl: server.baseUrl });
+  const another = createHttpClient({ baseUrl: server.baseUrl });
   t.after(() => another.close());
   assert.equal((await another.request({ path: '/v1/echo', body: 2 })).value, 2);
 });
 
-test('invalid endpoint/session/onClose fails before allocation', () => {
-  const identity = credentials();
-  for (const baseUrl of ['https://127.0.0.1:1', 'http://localhost:1', 'http://example.invalid:1',
-    'http://user:secret@127.0.0.1:1', 'http://127.0.0.1:1/callback', 'http://127.0.0.1:1/?key=secret']) {
-    assert.throws(() => createHttpClient({ ...identity, baseUrl }), { code: 'INVALID_REQUEST' });
+test('invalid endpoint or onClose fails before allocation', () => {
+  const identity = lifecycle();
+  for (const baseUrl of ['ftp://example.invalid',
+    'http://127.0.0.1:1/callback', 'http://127.0.0.1:1/?key=secret']) {
+    assert.throws(() => createHttpClient({ baseUrl }), { code: 'INVALID_REQUEST' });
   }
   assert.throws(() => createHttpServer({ ...identity, resolve() {}, onClose: 1 }), { code: 'INVALID_REQUEST' });
 });
@@ -38,7 +38,7 @@ test('session close callback runs once after terminal state and actual request d
 for (const scenario of ['truncated', 'redirect', 'wrong-id', 'wrong-contract', 'malformed-json', 'duplicate-key']) {
   test(`client rejects ${scenario} HTTP response without retry`, async t => {
     let requests = 0;
-    const identity = credentials();
+    const identity = lifecycle();
     const server = http.createServer((request, response) => {
       requests++;
       response.writeHead(scenario === 'redirect' ? 302 : 200, {
@@ -51,7 +51,7 @@ for (const scenario of ['truncated', 'redirect', 'wrong-id', 'wrong-contract', '
         : JSON.stringify({ ok: true, contract: scenario === 'wrong-contract' ? 'runtime.http.v0' : 'runtime.http.v1', value: null }));
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    const client = createHttpClient({ ...identity, baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const client = createHttpClient({ baseUrl: `http://127.0.0.1:${server.address().port}` });
     t.after(async () => { await client.close(); await new Promise(resolve => server.close(resolve)); });
     await assert.rejects(client.request({ path: '/v1/echo', body: {} }), error => ['CLOSED', 'INVALID_RESPONSE'].includes(error.code));
     assert.equal(requests, 1);

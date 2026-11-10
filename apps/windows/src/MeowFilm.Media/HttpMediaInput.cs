@@ -27,7 +27,6 @@ public sealed class HttpMediaInput : MediaInput
     private HttpResponseMessage? _response;
     private Stream? _stream;
     private Uri _uri;
-    private bool _sendHeaders = true;
     private string? _etag, _error;
     private long? _length, _responseEnd;
     private long _position, _wirePosition;
@@ -35,7 +34,6 @@ public sealed class HttpMediaInput : MediaInput
     private bool _allowAdaptive;
     internal string DemuxName { get; private set; } = "";
     internal Uri EffectiveUri => _uri;
-    internal bool HeadersAllowed => _sendHeaders;
     public string? LastErrorCode => Volatile.Read(ref _error);
     public long Position => Interlocked.Read(ref _position);
     public long? Length => _length;
@@ -94,7 +92,7 @@ public sealed class HttpMediaInput : MediaInput
         CancellationToken token, bool allowAdaptive)
     {
         options ??= new NativeHttpMediaOptions();
-        var copy = ValidateRequest(uri, headers, options, allowAdaptive);
+        var copy = ValidateRequest(uri, headers, allowAdaptive);
         token.ThrowIfCancellationRequested();
         var input = new HttpMediaInput(uri, copy, options, options.CreateClient(), token);
         input._allowAdaptive = allowAdaptive;
@@ -132,9 +130,9 @@ public sealed class HttpMediaInput : MediaInput
     }
 
     internal static Dictionary<string, string> ValidateRequest(Uri uri,
-        IReadOnlyDictionary<string, string> headers, NativeHttpMediaOptions options, bool allowAdaptive = false)
+        IReadOnlyDictionary<string, string> headers, bool allowAdaptive = false)
     {
-        options.Validate(uri);
+        NativeHttpMediaOptions.ValidateSyntax(uri);
         if (!allowAdaptive) RejectAdaptivePath(uri);
         if (headers is null || headers.Count > 32) throw new PlaybackException(PlaybackError.InvalidHeaders);
         var copy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -187,7 +185,7 @@ public sealed class HttpMediaInput : MediaInput
         while (true)
         {
             token.ThrowIfCancellationRequested();
-            _options.Validate(_uri);
+            NativeHttpMediaOptions.ValidateSyntax(_uri);
             if (!_allowAdaptive) RejectAdaptivePath(_uri);
             if (!visited.Add(_uri.AbsoluteUri)) throw new PlaybackException(PlaybackError.HttpRedirectFailed);
             using var request = new HttpRequestMessage(HttpMethod.Get, _uri)
@@ -195,10 +193,10 @@ public sealed class HttpMediaInput : MediaInput
                 Version = HttpVersion.Version11,
                 VersionPolicy = HttpVersionPolicy.RequestVersionExact
             };
-            if (_sendHeaders)
-                foreach (var (name, value) in _headers)
-                    if (!request.Headers.TryAddWithoutValidation(name, value))
-                        throw new PlaybackException(PlaybackError.UnsupportedHeaders);
+            foreach (var (name, value) in _headers)
+                if (!request.Headers.TryAddWithoutValidation(name, value))
+                    throw new PlaybackException(PlaybackError.UnsupportedHeaders);
+            NativeHttpMediaOptions.ApplyUserInfo(request);
             request.Headers.Range = new RangeHeaderValue(offset, null);
             request.Headers.AcceptEncoding.ParseAdd("identity");
             if (!initial) request.Headers.IfRange = new RangeConditionHeaderValue(EntityTagHeaderValue.Parse(_etag!));
@@ -213,13 +211,10 @@ public sealed class HttpMediaInput : MediaInput
                 if (location is null || redirects++ >= _options.MaximumRedirects)
                     throw new PlaybackException(PlaybackError.HttpRedirectFailed);
                 var next = location.IsAbsoluteUri ? location : new Uri(_uri, location);
-                _options.Validate(next);
-                if (_uri.Scheme == "https" && next.Scheme != "https")
-                    throw new PlaybackException(PlaybackError.HttpRedirectBlocked);
+                NativeHttpMediaOptions.ValidateSyntax(next);
                 // Range identity is pinned to the first final representation. A fresh signed
                 // resource/redirect must be re-resolved by the capability owner, never silently spliced.
                 if (!initial) throw new PlaybackException(PlaybackError.HttpRepresentationChanged);
-                _sendHeaders &= NativeHttpMediaOptions.Origin(_uri) == NativeHttpMediaOptions.Origin(next);
                 _uri = next;
                 CloseResponse();
                 continue;
@@ -405,7 +400,7 @@ public sealed class HttpMediaInput : MediaInput
 
     internal static string Classify(Exception error)
     {
-        // ConnectCallback exceptions can be wrapped by HttpClient. Only extract our fixed code;
+        // Transport exceptions can be wrapped by HttpClient. Only extract our fixed code;
         // no URI/response/header/exception body or inner exception is published.
         for (Exception? current = error; current is not null; current = current.InnerException)
             if (current is PlaybackException known) return known.Code;

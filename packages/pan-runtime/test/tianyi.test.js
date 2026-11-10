@@ -543,7 +543,7 @@ test('Tianyi persistent session expiry is retried only once and Cookie-only refr
 });
 
 function passwordFixture({
-  challenge = false, persistFailure = false, hostile = false,
+  challenge = false, persistFailure = false, externalReturn = false, submitRedirect,
   app = {}, result = 0, pre = '{SYNTHETIC}', expectedPre = '{SYNTHETIC}',
   expectedApp = {}, paddedContext = false,
 } = {}) {
@@ -589,11 +589,15 @@ function passwordFixture({
       } });
     }
     if (url.pathname.endsWith('loginSubmit.do')) {
+      if (submitRedirect && url.hostname === 'open.e.189.cn') {
+        return response('', submitRedirect, { location: 'http://external.invalid/api/logbox/oauth2/loginSubmit.do' });
+      }
       assert.equal(request.method, 'POST');
       assert.equal(header(request, 'Content-Type'), 'application/x-www-form-urlencoded');
       assert.equal(header(request, 'Referer'), 'https://open.e.189.cn');
       assert.equal(request.headers.Lt, 'synthetic-lt');
       assert.equal(request.headers.Reqid, 'synthetic-req');
+      if (submitRedirect) assert.equal(request.headers.Cookie, '');
       const form = new URLSearchParams(request.body.toString());
       const decrypt = field => {
         const value = form.get(field);
@@ -615,7 +619,11 @@ function passwordFixture({
         state: '', ...expectedApp,
       });
       if (challenge) return response({ result: -2, msg: '验证码 required' });
-      return response({ result, toUrl: hostile ? 'https://attacker.invalid/callback' : 'https://cloud.189.cn/complete' });
+      return response({ result, toUrl: externalReturn ? 'http://external.invalid/callback' : 'https://cloud.189.cn/complete' });
+    }
+    if (url.pathname === '/callback') {
+      assert.equal(request.headers.Cookie, '');
+      return response('', 302, { location: 'https://cloud.189.cn/complete' });
     }
     assert.equal(url.pathname, '/complete');
     assert.match(request.headers.Cookie, /cloudNonce=nonce/);
@@ -674,15 +682,23 @@ test('Tianyi password-only list obtains one RSA session before its first share r
   assert.equal(f.submitted.length, 1);
 });
 
-test('Tianyi password challenge, persistence failure and hostile redirect never claim refresh success', async () => {
+test('Tianyi password challenge and persistence failure never claim refresh success', async () => {
   for (const [options, code] of [
     [{ challenge: true }, 'CHALLENGE_REQUIRED'],
     [{ persistFailure: true }, 'STORAGE_ERROR'],
-    [{ hostile: true }, 'UPSTREAM_FORMAT'],
   ]) {
     const f = passwordFixture(options);
     await assert.rejects(tianyi.refresh({}, f.ctx), { code });
-    assert.equal(f.calls.some(call => new URL(call.url).hostname === 'attacker.invalid'), false);
+  }
+});
+
+test('Tianyi login permits external callbacks and 307/308 POST redirects without copying jar cookies', async () => {
+  for (const options of [{ externalReturn: true }, { submitRedirect: 307 }, { submitRedirect: 308 }]) {
+    const f = passwordFixture(options);
+    assert.deepEqual(await tianyi.refresh({}, f.ctx), { refreshed: true });
+    assert.deepEqual(f.submitted, [{ username: 'synthetic-user', password: f.password }]);
+    assert.equal(f.calls.filter(call => new URL(call.url).hostname === 'external.invalid').length, 1);
+    assert.match(f.ctx.credentials.cookie, /session=fresh/);
   }
 });
 
@@ -729,19 +745,21 @@ test('Tianyi cancellation after an awaited share or media response cannot return
   }
 });
 
-test('Tianyi media redirects are relative-safe and reject failure, cycles and HTTPS downgrade', async () => {
+test('Tianyi media redirects resolve relative or HTTP destinations and retain real failure/cycle errors', async () => {
   for (const behavior of ['relative', 'denied', 'cycle', 'downgrade']) {
     const f = fixture(url => {
       if (url.origin === 'https://cloud.189.cn') return response({ res_code: 0, fileDownloadUrl: 'https://media.invalid/start' });
       if (behavior === 'denied') return response('', 403);
       if (behavior === 'cycle') return response('', 302, { location: '/start' });
-      if (behavior === 'downgrade') return response('', 302, { location: 'http://media.invalid/end' });
+      if (behavior === 'downgrade') return url.pathname === '/start'
+        ? response('', 302, { location: 'http://media-user:media-password@media.invalid/end' }) : response('', 206);
       return url.pathname === '/start' ? response('', 302, { location: '/exact' }) : response('', 206);
     });
     const pending = tianyi.play({ file, mode: 'streaming' }, f.ctx);
     if (behavior === 'relative') assert.equal((await pending).url, 'https://media.invalid/exact');
+    else if (behavior === 'downgrade') assert.equal((await pending).url, 'http://media-user:media-password@media.invalid/end');
     else await assert.rejects(pending, { code: behavior === 'cycle' ? 'UPSTREAM_FORMAT' : 'UPSTREAM_HTTP' });
-    for (const call of f.calls.filter(item => new URL(item.url).origin === 'https://media.invalid')) {
+    for (const call of f.calls.filter(item => new URL(item.url).hostname === 'media.invalid')) {
       assert.equal(call.method, 'GET');
       assert.equal(call.responseMode, 'headers');
       assert.equal(header(call, 'Range'), 'bytes=0-0');

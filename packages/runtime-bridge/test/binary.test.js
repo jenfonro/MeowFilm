@@ -4,7 +4,7 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { PassThrough, Readable } from 'node:stream';
 import { BridgeError, HTTP_PROTOCOL, createHttpClient, createHttpServer } from '../src/index.js';
-import { credentials, deferred, pair, rawRequest, turn, until } from './http-fixture.js';
+import { lifecycle, deferred, pair, rawRequest, turn, until } from './http-fixture.js';
 
 const contract = 'bytes.test.v1';
 const codes = new Set(['UPSTREAM_FAILED']);
@@ -12,11 +12,11 @@ const success = (body, dispose = async () => {}, headers = { 'content-type': 'ap
   ({ status: 200, headers, body, dispose });
 const invalidResponse = { ok: false, contract: HTTP_PROTOCOL, code: 'INVALID_RESPONSE' };
 
-function exchange(baseUrl, identity, { path = '/v1/bytes', method = 'GET', body,
+function exchange(baseUrl, { path = '/v1/bytes', method = 'GET', body,
   headers = {}, pause = false, requestId = randomUUID() } = {}) {
   const head = deferred(), first = deferred(), ended = deferred(), closed = deferred(), chunks = [];
-  const outgoingHeaders = { authorization: `Bearer ${identity.key}`, 'x-meow-session': identity.sessionId,
-    'x-meow-request-id': requestId, ...(body === undefined ? {} : { 'content-length': Buffer.byteLength(body) }),
+  const outgoingHeaders = { 'x-meow-request-id': requestId,
+    ...(body === undefined ? {} : { 'content-length': Buffer.byteLength(body) }),
     ...headers };
   for (const name of Object.keys(outgoingHeaders)) if (outgoingHeaders[name] === undefined) delete outgoingHeaders[name];
   const fail = error => { head.reject(error); first.reject(error); ended.reject(error); };
@@ -37,7 +37,7 @@ function exchange(baseUrl, identity, { path = '/v1/bytes', method = 'GET', body,
 }
 
 async function binaryServer(t, handler, { expectCleanupFailure = false, ...options } = {}) {
-  const identity = credentials(), cleanup = [];
+  const identity = lifecycle(), cleanup = [];
   const server = createHttpServer({ ...identity, resolve: ({ method, url }) => {
     if (url.search) return;
     if (method === 'GET' && url.pathname === '/v1/bytes') {
@@ -59,8 +59,8 @@ async function binaryServer(t, handler, { expectCleanupFailure = false, ...optio
     if (expectCleanupFailure) await assert.rejects(server.close(), { code: 'INVALID_RESPONSE' });
     else await server.close();
   });
-  return { server, identity, cleanup: action => cleanup.push(action),
-    request: options => exchange(server.baseUrl, identity, options) };
+  return { server, cleanup: action => cleanup.push(action),
+    request: options => exchange(server.baseUrl, options) };
 }
 
 function assertJSON(reply, status, value) {
@@ -218,17 +218,10 @@ test('abort during downstream backpressure releases the source but awaits its re
   assert.equal(fixture.server.state.active, 0);
 });
 
-test('authentication and body validation reject malicious stream requests before handler dispatch', async t => {
+test('body and route validation reject malformed stream requests before handler dispatch', async t => {
   let calls = 0;
   const fixture = await binaryServer(t, () => { calls++; return success(Readable.from([Buffer.from('safe')])); });
   const cases = [
-    [{ headers: { authorization: undefined } }, 401, 'PERMISSION_DENIED'],
-    [{ headers: { authorization: 'Bearer wrong' } }, 401, 'PERMISSION_DENIED'],
-    [{ headers: { 'x-meow-session': randomUUID() } }, 401, 'PERMISSION_DENIED'],
-    [{ headers: { 'x-meow-session': undefined } }, 401, 'PERMISSION_DENIED'],
-    [{ headers: { host: 'example.invalid' } }, 401, 'PERMISSION_DENIED'],
-    [{ headers: { authorization: [`Bearer ${fixture.identity.key}`, `Bearer ${fixture.identity.key}`] } },
-      401, 'PERMISSION_DENIED'],
     [{ requestId: 'invalid-id' }, 400, 'INVALID_REQUEST'],
     [{ body: '{}' }, 400, 'INVALID_REQUEST'],
     [{ body: Buffer.from([0xff]), headers: { 'content-type': 'application/octet-stream' } }, 400, 'INVALID_REQUEST'],
@@ -806,7 +799,7 @@ test('abortActive remembers cleanup failures and waits for other handlers and di
 test('HTTP session close reports an earlier stream cleanup failure instead of cleanupComplete true',
   { timeout: 3000 }, async t => {
     const { createAppRuntime } = await import('../../../apps/runtime/bootstrap.mjs');
-    const identity = credentials(), closingModule = deferred(), release = deferred();
+    const identity = lifecycle(), closingModule = deferred(), release = deferred();
     const bytes = Buffer.from([0xff, 0xd8, 0, 0xff, 0xd9]);
     let moduleCloses = 0;
     const module = { id: 'tmdb', version: '0.1.0', contract: 'tmdb.data.v1', methods: {},
@@ -814,17 +807,17 @@ test('HTTP session close reports an earlier stream cleanup failure instead of cl
         { 'content-type': 'image/jpeg', 'content-length': bytes.length }),
       async close() { moduleCloses++; closingModule.resolve(); await release.promise; },
     };
-    const app = createAppRuntime({ sessionId: identity.sessionId, requestKey: identity.key, modules: [module] });
+    const app = createAppRuntime({ sessionId: identity.sessionId, modules: [module] });
     await app.start();
     t.after(async () => {
       release.resolve();
       await assert.rejects(app.close(), { code: 'INVALID_RESPONSE' });
     });
-    const picture = await exchange(app.baseUrl, identity, { path: '/v1/tmdb/images/original/bytes.jpg' }).ended;
+    const picture = await exchange(app.baseUrl, { path: '/v1/tmdb/images/original/bytes.jpg' }).ended;
     assert.equal(picture.status, 200);
     assert.deepEqual(picture.body, bytes);
     await until(() => app.state.active === 0);
-    const raw = exchange(app.baseUrl, identity, { path: '/v1/close', method: 'POST', body: '{}',
+    const raw = exchange(app.baseUrl, { path: '/v1/close', method: 'POST', body: '{}',
       headers: { 'content-type': 'application/json' } });
     let answered = false;
     raw.ended.then(() => { answered = true; }, () => {});
@@ -859,7 +852,7 @@ test('ordinary JSON handler errors preserve HTTP 200 and public error mappings',
 
 test('raw and existing JSON/upload routes coexist without changing their contracts', async t => {
   const fixture = await binaryServer(t, () => success(Readable.from([Buffer.from([0, 0xff])])));
-  const client = createHttpClient({ ...fixture.identity, baseUrl: fixture.server.baseUrl });
+  const client = createHttpClient({ baseUrl: fixture.server.baseUrl });
   fixture.cleanup(() => client.close());
   for (const value of [null, false, 3, '猫😀', [1, 2], { ok: true, value: 'business object' }]) {
     assert.deepEqual(await client.request({ path: '/v1/json', body: value }),

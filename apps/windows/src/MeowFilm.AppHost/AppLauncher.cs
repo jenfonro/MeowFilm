@@ -113,7 +113,7 @@ public static class AppLauncher
         async Task<StartupOutcome> StartCoreAsync(CancellationToken cancellationToken)
         {
             LocalDocumentStore? store = null;
-            AppRuntimeClient? runtime = null;
+            AppRuntimeConnectionHost? runtime = null;
             ArtworkService? artwork = null;
             AppAppearance? appearance = null;
             AppMediaControlSettings? mediaControls = null;
@@ -144,7 +144,7 @@ public static class AppLauncher
                 Directory.CreateDirectory(paths.Documents);
                 store = new LocalDocumentStore(paths.Documents, definition.NativeNamespaces,
                     definition.NativeCollections, definition.ProtectedNamespaces);
-                runtime = new AppRuntimeClient(async token =>
+                runtime = new AppRuntimeConnectionHost(async token =>
                 {
                     // Native pages and business owners never wait for this start:
                     // a failed runtime only makes script sources unavailable.
@@ -153,7 +153,7 @@ public static class AppLauncher
                         definition.RuntimeModules), token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
                     return await NodeRuntime.StartAsync(Path.Combine(root, "node.exe"), bundle,
-                        definition.RuntimeModules, paths.ScriptRuntime, token).ConfigureAwait(false);
+                        definition.RuntimeModules, paths.ScriptRuntime, token, ownerRevoked: token).ConfigureAwait(false);
                 });
                 cancellationToken.ThrowIfCancellationRequested();
                 createModules(runtime, store, modules);

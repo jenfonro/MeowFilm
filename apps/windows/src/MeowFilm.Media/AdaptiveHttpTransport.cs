@@ -7,13 +7,11 @@ namespace MeowFilm.Media;
 
 internal enum AdaptiveResourceKind { Manifest, TransportStream, Mp4Init, Mp4Segment, IdentityKey }
 
-internal sealed class AdaptiveResource(Uri uri, bool credentials, AdaptiveResourceKind kind,
+internal sealed class AdaptiveResource(Uri uri, AdaptiveResourceKind kind,
     long? offset = null, long? count = null)
 {
     internal readonly Uri OriginalUri = uri;
-    internal readonly bool OriginalCredentials = credentials;
     internal Uri Uri = uri;
-    internal bool Credentials = credentials;
     internal readonly AdaptiveResourceKind Kind = kind;
     internal readonly long? Offset = offset, Count = count;
     internal readonly SemaphoreSlim Gate = new(1, 1);
@@ -44,49 +42,40 @@ internal sealed class AdaptiveResource(Uri uri, bool credentials, AdaptiveResour
     }
 }
 
-/// <summary>Only registered adaptive resources. No ambient credentials/proxy or arbitrary client injection.</summary>
+/// <summary>Adaptive HTTP representations and bounded reads; no URL access policy.</summary>
 internal sealed partial class AdaptiveHttpTransport : IDisposable
 {
     private readonly NativeHttpMediaOptions _options;
     private readonly Dictionary<string, string> _headers;
-    private readonly string _credentialOrigin;
     private readonly HttpClient _client;
     private readonly Dictionary<string, AdaptiveResource> _representations = new(StringComparer.Ordinal);
     private readonly CancellationToken _lifetime;
-    private readonly Action<Uri>? _validateAddress;
     private readonly OfflineAdaptiveArchive? _offline;
     internal bool IsOffline => _offline is not null;
 
     internal AdaptiveHttpTransport(NativeHttpMediaOptions options, Dictionary<string, string> headers,
-        Uri credentialOrigin, CancellationToken lifetime,
-        Action<Uri>? validateAddress = null)
+        CancellationToken lifetime)
     {
         _options = options;
         _headers = new(headers, StringComparer.OrdinalIgnoreCase);
-        _credentialOrigin = NativeHttpMediaOptions.Origin(credentialOrigin);
         _client = options.CreateClient();
         _lifetime = lifetime;
-        _validateAddress = validateAddress;
     }
     internal AdaptiveHttpTransport(OfflineAdaptiveArchive offline, CancellationToken lifetime)
     {
         _offline = offline; _lifetime = lifetime; _options = new(); _headers = [];
-        _credentialOrigin = ""; _client = null!;
+        _client = null!;
     }
 
-    internal (Uri Uri, bool Credentials) Resolve(Uri parent, bool credentials, string reference)
+    internal Uri Resolve(Uri parent, string reference)
     {
-        if (_offline is not null) return (_offline.Resolve(parent, reference), false);
-        if (string.IsNullOrEmpty(reference) || reference.Length > 16384 ||
+        if (_offline is not null) return _offline.Resolve(parent, reference);
+        if (string.IsNullOrEmpty(reference) ||
             reference.Any(c => char.IsControl(c) || c == '\\') ||
             !Uri.TryCreate(parent, reference, out var uri))
             throw new PlaybackException(PlaybackError.AdaptiveInvalid);
-        _options.Validate(uri);
-        _validateAddress?.Invoke(uri);
-        if (parent.Scheme == "https" && uri.Scheme != "https")
-            throw new PlaybackException(PlaybackError.HttpRedirectBlocked);
-        return (uri, credentials && NativeHttpMediaOptions.Origin(uri) == _credentialOrigin &&
-            NativeHttpMediaOptions.Origin(parent) == _credentialOrigin);
+        NativeHttpMediaOptions.ValidateSyntax(uri);
+        return uri;
     }
 
     internal async Task<Response> OpenAsync(AdaptiveResource resource, long start, long? end,
@@ -102,7 +91,7 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
         if (resource.Independent) representation = resource.Representation ?? resource;
         else lock (_representations)
         {
-            string key = (resource.OriginalCredentials ? "1:" : "0:") + resource.OriginalUri.AbsoluteUri;
+            string key = resource.OriginalUri.AbsoluteUri;
             if (!_representations.TryGetValue(key, out representation!))
             {
                 if (_representations.Count >= 4096) throw new PlaybackException(PlaybackError.AdaptiveBudget);
@@ -121,20 +110,17 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
                 throw new PlaybackException(PlaybackError.HttpInvalidRange);
             bool range = resource.Offset.HasValue || start != 0 || end.HasValue;
             var uri = representation.Uri;
-            bool credentials = representation.Credentials;
             var visited = new HashSet<string>(StringComparer.Ordinal);
             for (int hop = 0; ; hop++)
             {
-                _options.Validate(uri);
-                _validateAddress?.Invoke(uri);
+                NativeHttpMediaOptions.ValidateSyntax(uri);
                 if (!visited.Add(uri.AbsoluteUri)) throw new PlaybackException(PlaybackError.HttpRedirectFailed);
-                var origin = NativeHttpMediaOptions.Origin(uri);
                 using var request = new HttpRequestMessage(HttpMethod.Get, uri)
                 {
                     Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact
                 };
-                if (credentials && origin == _credentialOrigin)
-                    foreach (var (name, value) in _headers) request.Headers.TryAddWithoutValidation(name, value);
+                foreach (var (name, value) in _headers) request.Headers.TryAddWithoutValidation(name, value);
+                NativeHttpMediaOptions.ApplyUserInfo(request);
                 request.Headers.AcceptEncoding.ParseAdd("identity");
                 if (range) request.Headers.Range = new RangeHeaderValue(upstreamStart, upstreamEnd);
                 if (representation.Opened)
@@ -150,7 +136,7 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
                     if (representation.Opened) throw new PlaybackException(PlaybackError.HttpRepresentationChanged);
                     if (hop >= _options.MaximumRedirects || response.Headers.Location is not { } location)
                         throw new PlaybackException(PlaybackError.HttpRedirectFailed);
-                    (uri, credentials) = Resolve(uri, credentials, location.OriginalString);
+                    uri = Resolve(uri, location.OriginalString);
                     response.Dispose(); response = null;
                     continue;
                 }
@@ -203,20 +189,13 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
                 if (range && tag is null || representation.Opened && (tag != representation.ETag || total != representation.Total))
                     throw new PlaybackException(PlaybackError.HttpRepresentationChanged);
                 representation.ETag = tag; representation.Total = total; representation.Opened = true;
-                representation.Uri = resource.Uri = uri; representation.Credentials = resource.Credentials = credentials;
+                representation.Uri = resource.Uri = uri;
                 var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
                 var owned = new Response(response, stream, length, resource.Count ?? total, start,
                     _options.ReadTimeout, _lifetime, token, representation.Gate);
                 response = null; held = false;
                 return owned;
             }
-        }
-        catch (Exception error) when (_validateAddress is not null &&
-            error is not (PlaybackException or OperationCanceledException or HttpRequestException or IOException))
-        {
-            // Trusted download-owner authority failures retain their fixed classifier.
-            // The ordinary playback transport has no injected policy and keeps its existing mapping.
-            throw;
         }
         catch (Exception error)
         {

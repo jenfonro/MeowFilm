@@ -159,6 +159,24 @@ test('Cat direct JSON preserves 12 MiB payloads Unicode keys config and manageme
   assert.equal((await rpc('invoke', { installationId: 'cat', siteId: 'site', operation: 'home', payload: '{}' })).code, 'INVALID_ARGUMENT');
 });
 
+test('Cat internal receipt purpose reaches the runtime without entering script payload or public RPC input', async t => {
+  const calls = [];
+  const module = createCatScriptModule({ dataRoot: temporary, runtimeFactory: () => ({
+    async invoke(target, options) { calls.push({ target, options }); return target.payload; },
+    async close() {},
+  }) });
+  t.after(() => module.close());
+  const input = { installationId: 'cat', siteId: 'site', operation: 'play', payload: { id: 0, flag: 0 } };
+  const invoke = module.methods['cat.script.invoke'];
+  assert.deepEqual(okay(await invoke(input, { mediaPurpose: 'receipt' })), input.payload);
+  assert.equal(calls[0].options.mediaPurpose, 'receipt');
+  assert.deepEqual(calls[0].target, input);
+  assert.equal(calls[0].options.signal.aborted, false);
+  assert.deepEqual(okay(await invoke(input)), input.payload);
+  assert.equal(Object.hasOwn(calls[1].options, 'mediaPurpose'), false);
+  assert.equal((await invoke({ ...input, mediaPurpose: 'receipt' })).code, 'INVALID_ARGUMENT');
+});
+
 test('Cat complete source accepts exactly 16 MiB and rejects the next byte without replacing it', async t => {
   const module = createCatScriptModule({ dataRoot: temporary, runtimeFactory: () => ({
     async install(spec) { return { bytes: Buffer.byteLength(spec.source) }; }, async close() {},

@@ -2,6 +2,7 @@ using MeowFilm.AppHost;
 using MeowFilm.App;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Film.Rules;
+using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
 using MeowFilm.Platform.Scripting;
@@ -36,7 +37,9 @@ internal static class Program
                     new NativeJavaScriptJsonEngine(FilmRuleService.LoadProgramSource()), storage);
                 pendingSources = new FilmSourceService(runtime, storage);
                 pendingMetadata = new FilmMetadataService(runtime);
-                capabilities.Add(new FilmCapability(pendingRules, pendingSources, pendingMetadata));
+                var capture = runtime as IRuntimeConnectionSource ?? throw new InvalidOperationException("RUNTIME_CAPTURE_UNAVAILABLE");
+                capabilities.Add(new FilmCapability(pendingRules, pendingSources, runtime, storage, playback,
+                    capture.CaptureConnectionAsync, pendingMetadata));
                 // The completed module owns these services. On a constructor
                 // failure the App resource callback still owns the partial pair.
                 pendingRules = null;
@@ -71,13 +74,15 @@ internal static class Program
                 };
                 // Platform callbacks are composed before this attachment. Host
                 // restoration is App-owned and independent of the selected page.
-                _ = capabilities.OfType<FilmCapability>().Single().StartSourcesAsync();
+                _ = film.StartSourcesAsync();
                 var settings = shell.MediaControls ?? throw new InvalidOperationException("MEDIA_CONTROLS_MISSING");
                 var attachment = pendingMediaAttachment = new AppMediaWindowAttachment(window, settings);
                 music.AttachDesktopLyricsOwner(window);
-                var systemMedia = new SystemMediaWindowAttachment(window, playback!,
+                var systemMedia = new AppSystemMediaAttachment(window, playback!, film,
                     [new("music", _ => music.StepAsync(true), _ => music.StepAsync(false),
-                        Play: _ => music.ResumePlaybackAsync())],
+                        Play: _ => music.ResumePlaybackAsync()),
+                     new("film", _ => film.StepAsync(true), _ => film.StepAsync(false), Kind: SystemPlaybackKind.Video,
+                        Play: _ => film.ResumePlaybackAsync())],
                     enabled: settings.IsAvailable && settings.Preferences.SystemMediaEnabled);
                 attachment.OwnSystemMedia(systemMedia, systemMedia.SetEnabled);
                 attachment.OwnShortcuts(new MediaShortcutWindowAttachment(window, settings, music.ExecuteMediaShortcutAsync));

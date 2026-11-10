@@ -29,17 +29,19 @@ check_tests() {
     echo "Selected tests were skipped." >&2; status=4
   fi
 }
+arch="$(uname -m)"
 if [ "$phase" = test ]; then
   logged javascript-source "${MEOWFILM_BUILD_NODE:-node}" scripts/verify-native-javascript.mjs || exit 4
+  logged video-kernel python3 -I -B scripts/prepare-ios-video-kernel.py --target "macos-$arch" || exit 4
   logged swift-test swift test --package-path native/MeowKit -j 2 --filter "$2" || status=4
   check_tests
   exit "$status"
 fi
-arch="$(uname -m)"
 settings=(-configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator'
   -jobs 2 ARCHS="$arch" ONLY_ACTIVE_ARCH=YES ENABLE_TESTABILITY=YES
   CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=)
 logged source-scope python3 -I -B scripts/check-source-scope.py || status=4
+logged video-kernel python3 -I -B scripts/prepare-ios-video-kernel.py --target "macos-$arch" --target "ios-simulator-$arch" || exit 4
 logged swift-build swift build --build-tests --package-path native/MeowKit -j 2 || status=4
 # The App targets cannot build against absent or stale runtime inputs.
 logged runtime-inputs python3 -I -B scripts/prepare-ios-runtime.py --sdk iphonesimulator --arch "$arch" || exit 4

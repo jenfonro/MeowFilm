@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http, { createServer } from 'node:http';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -27,28 +27,25 @@ async function upstream(t, handler) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 async function runtime(t, dataRoot, options = {}) {
-  const identity = { sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex') };
+  const identity = { sessionId: randomUUID() };
   const modules = [createTMDBDataModule({ dataRoot, ...options }),
     createDoubanDataModule({ dataRoot, ...options })];
   const app = createAppRuntime({ ...identity, modules });
   await app.start();
-  const client = createRuntimeClient({ ...identity, baseUrl: app.baseUrl });
+  const client = createRuntimeClient({ baseUrl: app.baseUrl });
   async function close() { await client.close(); await app.close(); }
   t.after(close);
-  return { app, client, identity, modules, close };
+  return { app, client, modules, close };
 }
 function value(reply) {
   assert.equal(reply.ok, true, JSON.stringify(reply));
   return reply.value;
 }
-function image(owner, path, { authenticated = true, onData } = {}) {
+function image(owner, path, { onData } = {}) {
   let request, response, headers;
   const result = new Promise((resolve, reject) => {
     const requestId = randomUUID();
-    request = http.get(owner.app.baseUrl + path, { agent: false, headers: authenticated ? {
-      authorization: `Bearer ${owner.identity.requestKey}`,
-      'x-meow-session': owner.identity.sessionId, 'x-meow-request-id': requestId,
-    } : {} }, incoming => {
+    request = http.get(owner.app.baseUrl + path, { agent: false, headers: { 'x-meow-request-id': requestId } }, incoming => {
       response = incoming; headers = incoming.headers;
       const chunks = [];
       incoming.on('data', chunk => { chunks.push(chunk); onData?.(chunk); });
@@ -68,7 +65,7 @@ test('TMDB App assembly serves requests and images when the unused Douban provid
   writeFileSync(entry, `
     import test from 'node:test';
     import assert from 'node:assert/strict';
-    import { randomBytes, randomUUID } from 'node:crypto';
+    import { randomUUID } from 'node:crypto';
     import { registerHooks } from 'node:module';
     import { verifyTMDBAssembly } from ${JSON.stringify(new URL('./tmdb-runtime-assembly-support.mjs', import.meta.url).href)};
     const provider = ${JSON.stringify(new URL('../apps/runtime/modules/metadata/douban.mjs', import.meta.url).href)};
@@ -85,7 +82,7 @@ test('TMDB App assembly serves requests and images when the unused Douban provid
         createSourceRuntimeModule, createTMDBDataModule } =
         await import(${JSON.stringify(new URL('../apps/runtime/entry.mjs', import.meta.url).href)});
       const dataRoot = ${JSON.stringify(dataRoot)};
-      const identity = { sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex') };
+      const identity = { sessionId: randomUUID() };
       const app = createAppRuntime({ ...identity, modules: [
         createMusicScriptModule({ dataRoot }), createCatScriptModule({ dataRoot: dataRoot + '/cat' }),
         createSourceRuntimeModule(), createTMDBDataModule({ dataRoot }),
@@ -93,14 +90,17 @@ test('TMDB App assembly serves requests and images when the unused Douban provid
       let client;
       t.after(async () => { await client?.close(); await app.close(); });
       await app.start();
-      client = createRuntimeClient({ ...identity, baseUrl: app.baseUrl });
+      client = createRuntimeClient({ baseUrl: app.baseUrl });
       const described = await client.describe();
       assert.equal(described.ok, true);
       assert.deepEqual(described.value.modules.map(module => [module.id, module.version, module.contract]), [
         ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
         ['source', '0.2.0', 'source.runtime.v2'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
       ]);
-      await verifyTMDBAssembly(t, { client, baseUrl: app.baseUrl, ...identity });
+      await verifyTMDBAssembly(t, { client, baseUrl: app.baseUrl });
+      for (const method of ['douban.data.settings.get', 'pan.providers'])
+        assert.deepEqual(await client.call(method),
+          { ok: false, contract: 'runtime.http.v1', code: 'METHOD_NOT_FOUND' });
       assert.equal((await client.shutdown()).ok, true);
       assert.equal(providerLoads, 0);
       await assert.rejects(import(provider), { name: 'SyntaxError', message: 'DOUBAN_PROVIDER_UNAVAILABLE' });
@@ -119,9 +119,9 @@ test('TMDB App assembly serves requests and images when the unused Douban provid
   assert.equal(checkTestSummary(result.stdout, 'TMDB provider isolation'), 1);
 });
 
-test('metadata and opt-in pan modules share one authenticated session without gaining source upload', async t => {
+test('metadata and opt-in pan modules share one HTTP lifecycle session without gaining source upload', async t => {
   const dataRoot = area(t);
-  const identity = { sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex') };
+  const identity = { sessionId: randomUUID() };
   let panClosed = 0;
   const app = createAppRuntime({ ...identity, modules: [
     createPanRuntimeModule({ dataRoot, transport: {
@@ -130,7 +130,7 @@ test('metadata and opt-in pan modules share one authenticated session without ga
     createTMDBDataModule({ dataRoot }), createDoubanDataModule({ dataRoot }),
   ] });
   await app.start();
-  const client = createRuntimeClient({ ...identity, baseUrl: app.baseUrl });
+  const client = createRuntimeClient({ baseUrl: app.baseUrl });
   t.after(async () => { await client.close(); await app.close(); });
   assert.deepEqual(value(await client.describe()).modules.map(module => module.id), ['pan', 'tmdb', 'douban']);
   assert.equal(value(await client.call('pan.providers')).providers.length, 7);
@@ -145,7 +145,7 @@ test('metadata and opt-in pan modules share one authenticated session without ga
 
 test('coassembled pan failures retain the pan contract without disrupting metadata reads', async t => {
   const dataRoot = area(t);
-  const identity = { sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex') };
+  const identity = { sessionId: randomUUID() };
   const app = createAppRuntime({ ...identity, modules: [
     { id: 'pan', version: '0.1.0', contract: 'pan.runtime.v1', close() {}, methods: {
       'pan.providers'() { throw new Error('not a public error'); },
@@ -154,7 +154,7 @@ test('coassembled pan failures retain the pan contract without disrupting metada
     createTMDBDataModule({ dataRoot }), createDoubanDataModule({ dataRoot }),
   ] });
   await app.start();
-  const client = createRuntimeClient({ ...identity, baseUrl: app.baseUrl });
+  const client = createRuntimeClient({ baseUrl: app.baseUrl });
   t.after(async () => { await client.close(); await app.close(); });
   for (const method of ['pan.providers', 'pan.settings.get']) {
     assert.deepEqual(await client.call(method), { ok: false, contract: 'pan.runtime.v1', code: 'PAN_FAILURE' });
@@ -229,6 +229,29 @@ test('runtime persists settings and credentials independently, redacts reads, pr
   assert.equal(JSON.parse(readFileSync(join(dataRoot, 'tmdb/settings.json'), 'utf8')).settings.accessToken, '');
 });
 
+test('metadata settings expose an opaque configuration epoch only for effective changes', async t => {
+  const root = area(t), settings = createMetadataSettings(root, 'tmdb');
+  const initial = settings.get();
+  assert.match(initial.revision, /^[0-9a-f-]{36}$/);
+  assert.equal(settings.get().revision, initial.revision);
+  assert.equal(settings.update({}).revision, initial.revision);
+  assert.equal(settings.update({ apiBase: initial.apiBase + '/' }).revision, initial.revision);
+  const first = settings.update({ accessToken: 'first-token' });
+  assert.notEqual(first.revision, initial.revision);
+  assert.equal(settings.update({ accessToken: ' first-token ' }).revision, first.revision);
+  const next = settings.update({ accessToken: 'next-token' });
+  assert.notEqual(next.revision, first.revision);
+  assert.equal(next.accessTokenConfigured, true);
+  assert.equal(first.accessTokenConfigured, true);
+  assert.equal(Object.hasOwn(next, 'accessToken'), false);
+  assert.throws(() => settings.update({ accessToken: 'bad\nvalue' }), { code: 'INVALID_REQUEST' });
+  assert.equal(settings.get().revision, next.revision);
+  const persisted = JSON.parse(readFileSync(join(root, 'tmdb/settings.json'), 'utf8'));
+  assert.deepEqual(Object.keys(persisted).sort(), ['settings', 'version']);
+  assert.equal(Object.hasOwn(persisted.settings, 'revision'), false);
+  assert.notEqual(createMetadataSettings(root, 'tmdb').get().revision, next.revision);
+});
+
 test('Douban HTML search goes through the public operation without inventing TMDB pagination', async t => {
   let observed;
   const base = await upstream(t, (request, response) => {
@@ -262,7 +285,6 @@ test('invalid settings and damaged documents fail without rewriting previous per
   const path = join(root, 'douban/settings.json'), original = readFileSync(path);
   for (const patch of [
     { unexpected: true }, { cookie: 'secret\r\nInjected: yes' }, { apiBase: 'file:///tmp' },
-    { imageBase: 'https://user:password@example.invalid' },
     { apiProxy: 'https://{url}/' }, { imageProxy: 'https://relay.invalid/no-placeholder' },
     { apiBase: 'https://example.invalid/?api_key=secret' },
     { apiBase: 'https://example.invalid/?' }, { imageBase: 'https://example.invalid/#' },
@@ -336,13 +358,19 @@ test('both sources retain stable image identity across proxy change and runtime 
     assert.equal(item.headers.cookie, undefined);
   }
   const count = seen.length;
-  assert.equal((await image(next, tmdbPath, { authenticated: false }).result).status, 401);
-  assert.equal(seen.length, count);
+  const publicImage = await image(next, tmdbPath).result;
+  assert.equal(publicImage.status, 200);
+  assert.deepEqual(publicImage.body, binary.body);
+  assert.equal(publicImage.headers['access-control-allow-origin'], '*');
+  assert.equal(seen.length, count + 1);
 });
 
-test('configuration is local, failures are fixed, and redirects never disclose API credentials', async t => {
-  let leaked = false;
-  const other = await upstream(t, (_request, response) => { leaked = true; json(response, {}); });
+test('configuration stays local and HTTP redirects preserve the explicitly configured API headers', async t => {
+  const received = [];
+  const other = await upstream(t, (request, response) => {
+    received.push(request.headers);
+    json(response, { id: 1 });
+  });
   const base = await upstream(t, (request, response) => {
     if (request.url.startsWith('/3/configuration')) json(response, {
       images: { base_url: 'http://external.invalid/', secure_base_url: 'https://external.invalid/',
@@ -360,13 +388,29 @@ test('configuration is local, failures are fixed, and redirects never disclose A
   assert.deepEqual(configuration.images, { base_url: '/v1/tmdb/images/', secure_base_url: '/v1/tmdb/images/',
     poster_sizes: ['w500', 'original'] });
   assert.equal(value(await owner.client.call('tmdb.data.settings.get')).imageBase, 'https://custom.invalid/tmdb-img');
-  assert.deepEqual(await owner.client.call('tmdb.data.request', { path: '/3/movie/1' }), {
-    ok: false, contract: 'tmdb.data.v1', code: 'UPSTREAM_HTTP',
-  });
-  assert.equal(leaked, false);
+  assert.deepEqual(value(await owner.client.call('tmdb.data.request', { path: '/3/movie/1' })), { id: 1 });
+  assert.equal(received.length, 1);
+  assert.equal(received[0].authorization, 'Bearer sensitive-test-token');
   assert.deepEqual(await owner.client.call('tmdb.data.request', { path: '/3/movie/2' }), {
     ok: false, contract: 'tmdb.data.v1', code: 'UPSTREAM_HTTP',
   });
+});
+
+test('metadata persists HTTP URL userinfo and the real transport sends its Basic credentials', async t => {
+  const received = [];
+  const base = await upstream(t, (request, response) => {
+    received.push(request.headers.authorization);
+    json(response, { id: '1' });
+  });
+  const endpoint = new URL(base);
+  endpoint.username = 'fixture-user';
+  endpoint.password = 'fixture-password';
+  const root = area(t), settings = createMetadataSettings(root, 'douban');
+  settings.update({ apiBase: endpoint.href, imageBase: endpoint.href });
+  assert.equal(new URL(createMetadataSettings(root, 'douban').read().apiBase).username, 'fixture-user');
+  const owner = await runtime(t, root);
+  assert.deepEqual(value(await owner.client.call('douban.data.request', { path: '/rexxar/api/v2/movie/1' })), { id: '1' });
+  assert.deepEqual(received, ['Basic ' + Buffer.from('fixture-user:fixture-password').toString('base64')]);
 });
 
 test('TMDB keeps independent multi-level API and GoProxy image prefixes through restart', async t => {
@@ -570,7 +614,7 @@ for (const [id, factory, path] of [
 });
 
 test('a stream cleanup failure cannot later be reported as cleanupComplete by runtime shutdown', async t => {
-  const identity = { sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex') };
+  const identity = { sessionId: randomUUID() };
   let released;
   const disposed = new Promise(done => { released = done; });
   const app = createAppRuntime({ ...identity, modules: [{
@@ -582,9 +626,9 @@ test('a stream cleanup failure cannot later be reported as cleanupComplete by ru
     async close() {},
   }] });
   await app.start();
-  const client = createRuntimeClient({ ...identity, baseUrl: app.baseUrl });
+  const client = createRuntimeClient({ baseUrl: app.baseUrl });
   t.after(async () => { await client.close(); await app.close().catch(() => {}); });
-  await image({ app, identity }, '/v1/tmdb/images/original/sample.png').result.catch(() => {});
+  await image({ app }, '/v1/tmdb/images/original/sample.png').result.catch(() => {});
   await disposed;
   assert.deepEqual(await client.shutdown(), { ok: false, contract: 'runtime.http.v1', code: 'INVALID_RESPONSE' });
   await assert.rejects(app.close(), { code: 'INVALID_RESPONSE' });

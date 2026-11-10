@@ -43,13 +43,13 @@ internal sealed partial class AdaptiveManifest(AdaptiveHttpTransport transport, 
         _resources.Add(path, resource);
         return new Uri(localOrigin, path).AbsoluteUri;
     }
-    private string Resource(Uri parent, bool credentials, string reference, AdaptiveResourceKind kind,
+    private string Resource(Uri parent, string reference, AdaptiveResourceKind kind,
         (long Offset, long Count)? range = null, AdaptiveEncryption? encryption = null)
     {
-        var target = transport.Resolve(parent, credentials, reference);
-        return Add(new(target.Uri, target.Credentials, kind, range?.Offset, range?.Count) { Encryption = encryption });
+        var target = transport.Resolve(parent, reference);
+        return Add(new(target, kind, range?.Offset, range?.Count) { Encryption = encryption });
     }
-    internal async Task<Uri> BuildAsync(byte[] bytes, Uri parent, bool credentials, CancellationToken token,
+    internal async Task<Uri> BuildAsync(byte[] bytes, Uri parent, CancellationToken token,
         int depth = 0, bool hlsChild = false)
     {
         token.ThrowIfCancellationRequested();
@@ -66,27 +66,27 @@ internal sealed partial class AdaptiveManifest(AdaptiveHttpTransport transport, 
             string sanitized;
             HlsWindow? window = null;
             if (text.StartsWith("#EXTM3U", StringComparison.Ordinal))
-                (sanitized, window) = await HlsAsync(text, parent, credentials, depth, token).ConfigureAwait(false);
-            else if (!hlsChild) sanitized = Dash(text, parent, credentials);
+                (sanitized, window) = await HlsAsync(text, parent, depth, token).ConfigureAwait(false);
+            else if (!hlsChild) sanitized = Dash(text, parent);
             else throw Invalid();
             var encoded = Encoding.UTF8.GetBytes(sanitized);
             if (encoded.Length > MaximumBytes ||
                 (_generatedBytes = checked(_generatedBytes + encoded.Length)) > 4 * MaximumBytes)
                 throw new PlaybackException(PlaybackError.AdaptiveBudget);
-            return new Uri(Add(new(parent, credentials, AdaptiveResourceKind.Manifest) { Manifest = encoded, Window = window }));
+            return new Uri(Add(new(parent, AdaptiveResourceKind.Manifest) { Manifest = encoded, Window = window }));
         }
         finally { _active.Remove(key); }
     }
-    private async Task<string> ChildAsync(Uri parent, bool credentials, string reference, int depth,
+    private async Task<string> ChildAsync(Uri parent, string reference, int depth,
         CancellationToken token)
     {
         if (singleMedia) throw Invalid();
-        var target = transport.Resolve(parent, credentials, reference);
-        var resource = new AdaptiveResource(target.Uri, target.Credentials, AdaptiveResourceKind.Manifest);
+        var target = transport.Resolve(parent, reference);
+        var resource = new AdaptiveResource(target, AdaptiveResourceKind.Manifest);
         byte[] bytes = await transport.ManifestAsync(resource, token).ConfigureAwait(false);
-        return (await BuildAsync(bytes, resource.Uri, resource.Credentials, token, depth + 1, true).ConfigureAwait(false)).AbsoluteUri;
+        return (await BuildAsync(bytes, resource.Uri, token, depth + 1, true).ConfigureAwait(false)).AbsoluteUri;
     }
-    private async Task<(string Text, HlsWindow? Window)> HlsAsync(string text, Uri parent, bool credentials, int depth, CancellationToken token)
+    private async Task<(string Text, HlsWindow? Window)> HlsAsync(string text, Uri parent, int depth, CancellationToken token)
     {
         var result = new StringBuilder("#EXTM3U\n");
         bool master = false, media = false, ended = false, target = false, map = false;
@@ -112,13 +112,13 @@ internal sealed partial class AdaptiveManifest(AdaptiveHttpTransport transport, 
             token.ThrowIfCancellationRequested();
             string line = raw.Trim();
             if (line.Length == 0) continue;
-            if (line.Length > 16384 || line.Any(c => c < 0x20)) throw Invalid();
+            if (line.Any(c => c < 0x20)) throw Invalid();
             if (!line.StartsWith('#'))
             {
                 if (stream is not null)
                 {
                     result.AppendLine(stream);
-                    result.AppendLine(await ChildAsync(parent, credentials, line, depth, token).ConfigureAwait(false));
+                    result.AppendLine(await ChildAsync(parent, line, depth, token).ConfigureAwait(false));
                     stream = null; variants++;
                 }
                 else
@@ -126,7 +126,7 @@ internal sealed partial class AdaptiveManifest(AdaptiveHttpTransport transport, 
                     if (duration is null || ended) throw Invalid();
                     media = true; segments++;
                     result.AppendLine("#EXTINF:" + duration + ",");
-                    string address = Resource(parent, credentials, line,
+                    string address = Resource(parent, line,
                         map ? AdaptiveResourceKind.Mp4Segment : AdaptiveResourceKind.TransportStream, range,
                         currentKey is null ? null : new(currentKey, explicitIV?.ToArray() ?? SequenceIV(sequence)));
                     result.AppendLine(address);
@@ -189,7 +189,7 @@ internal sealed partial class AdaptiveManifest(AdaptiveHttpTransport transport, 
                 {
                     var a = Attributes(value); Only(a, "URI", "BYTERANGE");
                     if (currentKey is not null && explicitIV is null) throw Invalid();
-                    string uri = Resource(parent, credentials, Required(a, "URI"), AdaptiveResourceKind.Mp4Init,
+                    string uri = Resource(parent, Required(a, "URI"), AdaptiveResourceKind.Mp4Init,
                         a.TryGetValue("BYTERANGE", out var r) ? HlsRange(r) : null,
                         currentKey is null ? null : new(currentKey, explicitIV!.ToArray()));
                     result.AppendLine("#EXT-X-MAP:URI=\"" + uri + "\"");
@@ -207,7 +207,7 @@ internal sealed partial class AdaptiveManifest(AdaptiveHttpTransport transport, 
                     var a = Attributes(value);
                     Only(a, "METHOD", "URI", "IV", "KEYFORMAT", "KEYFORMATVERSIONS");
                     // Resolve even unsupported keys. Never let native code fetch a key/URI itself.
-                    if (a.TryGetValue("URI", out var key)) transport.Resolve(parent, credentials, key);
+                    if (a.TryGetValue("URI", out var key)) transport.Resolve(parent, key);
                     if (a.GetValueOrDefault("KEYFORMAT", "identity") != "identity" ||
                         Required(a, "METHOD") is "SAMPLE-AES" or "SAMPLE-AES-CTR")
                         throw new PlaybackException(PlaybackError.AdaptiveDrmUnsupported);
@@ -219,12 +219,12 @@ internal sealed partial class AdaptiveManifest(AdaptiveHttpTransport transport, 
                     if (a["METHOD"] != "AES-128" || a.GetValueOrDefault("KEYFORMATVERSIONS", "1") != "1")
                         throw new PlaybackException(PlaybackError.AdaptiveEncryptionUnsupported);
                     if (transport.IsOffline) throw Invalid(); // Offline archives contain no keys or ciphertext.
-                    var resolved = transport.Resolve(parent, credentials, Required(a, "URI"));
-                    string identity = (resolved.Credentials ? "1:" : "0:") + resolved.Uri.AbsoluteUri;
+                    var resolved = transport.Resolve(parent, Required(a, "URI"));
+                    string identity = resolved.AbsoluteUri;
                     if (!_keys.TryGetValue(identity, out var ownedKey))
                     {
                         if (_keys.Count >= 256) throw new PlaybackException(PlaybackError.AdaptiveBudget);
-                        _keys.Add(identity, ownedKey = new(new(resolved.Uri, resolved.Credentials, AdaptiveResourceKind.IdentityKey)));
+                        _keys.Add(identity, ownedKey = new(new(resolved, AdaptiveResourceKind.IdentityKey)));
                     }
                     byte[]? iv = a.TryGetValue("IV", out var ivText) ? ParseIV(ivText) : null;
                     if (tag == "#EXT-X-SESSION-KEY")
@@ -251,7 +251,7 @@ internal sealed partial class AdaptiveManifest(AdaptiveHttpTransport transport, 
                     Only(a, "TYPE", "URI", "GROUP-ID", "NAME", "LANGUAGE", "DEFAULT", "AUTOSELECT", "CHANNELS");
                     if (Required(a, "TYPE") != "AUDIO") throw Unsupported();
                     Required(a, "GROUP-ID"); Required(a, "NAME");
-                    a["URI"] = await ChildAsync(parent, credentials, Required(a, "URI"), depth, token).ConfigureAwait(false);
+                    a["URI"] = await ChildAsync(parent, Required(a, "URI"), depth, token).ConfigureAwait(false);
                     result.AppendLine(tag + ":" + RenderAttributes(a)); master = true; break;
                 }
                 default:

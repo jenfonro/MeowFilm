@@ -9,11 +9,10 @@ import MeowRuntime
 public final class FilmSearchSession: ObservableObject {
     @Published public private(set) var snapshot: FilmSearchSnapshot
     private let processor: FilmSearchProcessor
-    private let transport: CatScriptTransport
+    private let data: FilmSearchData
     private let readSites: FilmSearchService.Sites
     private let readRules: FilmSearchService.Rules
     private let metadata: (any FilmSearchMetadataReading)?
-    private let metadataCache: FilmSearchMetadataCache?
     private let metadataRevision: UUID
     private let sourceOwner: FilmSourceService?
     private weak var service: FilmSearchService?
@@ -24,6 +23,18 @@ public final class FilmSearchSession: ObservableObject {
         var identities: Set<Data> = []
     }
     private var cursors: [Cursor] = []
+    struct Page {
+        let site: FilmSearchSite
+        let read: FilmSearchRead
+    }
+    private(set) var pages: [Page] = []
+    private(set) var metadataReads: [String: FilmSearchRead] = [:]
+    var admittedSources: [FilmPlaybackSource] { cursors.map { $0.site.playbackSource } }
+    func confirmedSearch(sourceKey: String) -> RuntimeValue? {
+        guard let cursor = cursors.first(where: { $0.site.key == sourceKey }), cursor.next > 1 else { return nil }
+        return .object(["sourceKey": .string(sourceKey), "page": .number(Double(cursor.next - 1)),
+                        "completed": .bool(cursor.finished)])
+    }
     private var aggregateRules: [String] = []
     private var coverSite = ""
     private var order: [String] = [], rawOrder: [String] = []
@@ -35,12 +46,13 @@ public final class FilmSearchSession: ObservableObject {
     private var token = UUID()
     private var task: Task<Void, Never>?
     private var retired: [UUID: Task<Void, Never>] = [:]
+    private var scopeWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
 
     init(query: String, service: FilmSearchService) {
         snapshot = FilmSearchSnapshot(sessionID: UUID(), query: query)
-        processor = service.processor; transport = service.transport
+        processor = service.processor; data = service.data
         readSites = service.sites; readRules = service.rules
-        metadata = service.metadata; metadataCache = service.metadataCache
+        metadata = service.metadata
         metadataRevision = service.metadataRevision
         sourceOwner = service.sourceOwner
         self.service = service
@@ -61,8 +73,8 @@ public final class FilmSearchSession: ObservableObject {
         }
     }
 
-    func hasDifferentSources(_ keys: Set<String>) -> Bool {
-        (prepared || !cursors.isEmpty) && Set(cursors.map { $0.site.key }) != keys
+    func hasDifferentSources(_ scope: [String: Int64]) -> Bool {
+        (prepared || !cursors.isEmpty) && FilmSearchService.authorizationScope(cursors.map(\.site)) != scope
     }
 
     func invalidateSources() {
@@ -79,6 +91,7 @@ public final class FilmSearchSession: ObservableObject {
     }
 
     public func cancel() {
+        finishSourceScope(.failure(CancellationError()))
         let run = token
         token = UUID()
         if let task {
@@ -112,6 +125,29 @@ public final class FilmSearchSession: ObservableObject {
         FilmSearchContext(session: self, card: card)
     }
 
+    /// Admission waits for the source list only, never for all site responses.
+    func waitForSourceScope() async throws {
+        if prepared { return }
+        guard !invalidated, snapshot.loading, snapshot.siteState != .failed else { throw FilmSearchError.unavailable }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled { continuation.resume(throwing: CancellationError()) }
+                else { scopeWaiters[id] = continuation }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.scopeWaiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    private func finishSourceScope(_ result: Result<Void, Error>) {
+        let waiting = Array(scopeWaiters.values)
+        scopeWaiters.removeAll()
+        for waiter in waiting { waiter.resume(with: result) }
+    }
+
     private func launch(initial: Bool, resuming: Bool = false) {
         let run = UUID(); token = run
         if !resuming || snapshot.round == 0 { snapshot.round += 1 }
@@ -129,9 +165,9 @@ public final class FilmSearchSession: ObservableObject {
 
     private enum Event: Sendable {
         case preparation([FilmSearchSite]?, [String]?)
-        case site(Int, RuntimeValue?)
-        case metadata(RuntimeValue?, String)
-        case detail(String, RuntimeValue?)
+        case site(Int, FilmSearchRead?)
+        case metadata(FilmSearchRead?, String)
+        case detail(String, FilmSearchRead?)
     }
 
     private func execute(initial: Bool, resuming: Bool, run: UUID) async {
@@ -139,8 +175,8 @@ public final class FilmSearchSession: ObservableObject {
         // Both modes always use the last settled round, including after an
         // interrupted round resumes. A streaming callback is never a new batch.
         let previousOrder = order, previousRawOrder = rawOrder
-        let transport = transport, metadata = metadata, processor = processor
-        let query = snapshot.query, cache = metadataCache
+        let data = data, metadata = metadata, processor = processor
+        let query = snapshot.query
         let readSites = readSites, readRules = readRules
         var displayFailed = false
         await withTaskGroup(of: Event.self) { group in
@@ -156,33 +192,34 @@ public final class FilmSearchSession: ObservableObject {
             } else {
                 for index in pendingSites {
                     let cursor = cursors[index]
-                    group.addTask { await Self.readSite(cursor, index: index, query: query, transport: transport) }
+                    group.addTask { await Self.readSite(cursor, index: index, query: query, data: data) }
                 }
             }
             let needsSearch = initial && snapshot.metadataSearch == nil && snapshot.metadataState == .loading
             if needsSearch, let metadata {
                 group.addTask {
                     do {
-                        var payload = try await metadata.search(query: query)
+                        var read = try await metadata.searchRead(query: query)
+                        let payload = read.value
                         var effectiveQuery = query
                         guard let results = payload.catField("results")?.catArray else { throw FilmSearchError.invalidResponse }
                         if results.isEmpty {
                             let fallback = try await processor.invoke(["operation": .string("fallback"), "query": .string(query)])
                             if let word = fallback.catField("query")?.catText, !word.isEmpty {
-                                let next = try await metadata.search(query: word)
-                                guard let nextResults = next.catField("results")?.catArray else { throw FilmSearchError.invalidResponse }
-                                if !nextResults.isEmpty { payload = next; effectiveQuery = word }
+                                let next = try await metadata.searchRead(query: word)
+                                guard let nextResults = next.value.catField("results")?.catArray else { throw FilmSearchError.invalidResponse }
+                                if !nextResults.isEmpty { read = next; effectiveQuery = word }
                             }
                         }
-                        return .metadata(payload, effectiveQuery)
+                        return .metadata(read, effectiveQuery)
                     } catch { return .metadata(nil, query) }
                 }
-            } else if initial, snapshot.metadataSearch != nil, let cache {
+            } else if initial, snapshot.metadataSearch != nil, let metadata {
                 for item in snapshot.tmdbItems where !settledDetails.contains(Self.metadataKey(item)) {
                     guard let type = item.catField("tmdbType")?.catText,
                           let id = item.catField("tmdbId")?.catInteger else { continue }
                     snapshot.metadataState = .loading
-                    group.addTask { await Self.readDetail(type: type, id: id, cache: cache) }
+                    group.addTask { await Self.readDetail(type: type, id: id, metadata: metadata) }
                 }
             }
             if prepared { completeSitesIfSettled() }
@@ -197,10 +234,11 @@ public final class FilmSearchSession: ObservableObject {
                             coverSite = sites.first(where: { $0.source.options.aggregateImages })?.key ?? ""
                             snapshot.noSources = sites.isEmpty
                             prepared = true
+                            finishSourceScope(.success(()))
                             if let sourceOwner {
                                 let current = await sourceOwner.snapshot
                                 guard valid(run) else { group.cancelAll(); continue }
-                                if hasDifferentSources(Set(FilmSearchService.searchableSites(current).map(\.key))) {
+                                if hasDifferentSources(FilmSearchService.authorizationScope(FilmSearchService.searchableSites(current))) {
                                     invalidateSources()
                                     group.cancelAll()
                                     continue
@@ -209,20 +247,24 @@ public final class FilmSearchSession: ObservableObject {
                             pendingSites = Set(cursors.indices)
                             for index in pendingSites {
                                 let cursor = cursors[index]
-                                group.addTask { await Self.readSite(cursor, index: index, query: query, transport: transport) }
+                                group.addTask { await Self.readSite(cursor, index: index, query: query, data: data) }
                             }
                             completeSitesIfSettled()
-                        } else { snapshot.siteState = .failed }
-                    case .site(let index, let payload):
-                        if let payload {
-                            try await acceptSite(payload, index: index, run: run)
+                        } else {
+                            snapshot.siteState = .failed
+                            finishSourceScope(.failure(FilmSearchError.unavailable))
+                        }
+                    case .site(let index, let read):
+                        if let read {
+                            try await acceptSite(read, index: index, run: run)
                             siteSucceededThisRound = true
                         }
                         guard valid(run) else { group.cancelAll(); continue }
                         pendingSites.remove(index)
                         completeSitesIfSettled()
-                    case .metadata(let payload, let effectiveQuery):
-                        if let payload {
+                    case .metadata(let read, let effectiveQuery):
+                        if let read {
+                            let payload = read.value
                             let mapped = try await processor.invoke(["operation": .string("tmdb"),
                                 "query": .string(query), "payload": payload])
                             guard valid(run), let items = mapped.catField("items")?.catArray else {
@@ -230,24 +272,26 @@ public final class FilmSearchSession: ObservableObject {
                             }
                             snapshot.tmdbItems = items
                             snapshot.metadataSearch = payload
+                            metadataReads["search"] = read
                             snapshot.metadataQuery = effectiveQuery
                             snapshot.metadataState = .completed
-                            if let cache {
+                            if let metadata {
                                 for item in items {
                                     guard let type = item.catField("tmdbType")?.catText,
                                           let id = item.catField("tmdbId")?.catInteger else { continue }
                                     snapshot.metadataState = .loading
-                                    group.addTask { await Self.readDetail(type: type, id: id, cache: cache) }
+                                    group.addTask { await Self.readDetail(type: type, id: id, metadata: metadata) }
                                 }
                             }
                         } else { snapshot.metadataState = .failed }
-                    case .detail(let key, let payload):
-                        if let payload, let index = snapshot.tmdbItems.firstIndex(where: { Self.metadataKey($0) == key }) {
+                    case .detail(let key, let read):
+                        if let read, let index = snapshot.tmdbItems.firstIndex(where: { Self.metadataKey($0) == key }) {
                             let enhanced = try await processor.invoke(["operation": .string("detail"),
-                                "item": snapshot.tmdbItems[index], "payload": payload])
+                                "item": snapshot.tmdbItems[index], "payload": read.value])
                             guard valid(run) else { group.cancelAll(); continue }
                             snapshot.tmdbItems[index] = enhanced
-                            snapshot.metadataDetails[key] = payload
+                            snapshot.metadataDetails[key] = read.value
+                            metadataReads[key] = read
                         }
                         settledDetails.insert(key)
                         completeMetadataIfSettled()
@@ -271,6 +315,7 @@ public final class FilmSearchSession: ObservableObject {
                     displayFailed = true
                     snapshot.siteState = .failed
                     snapshot.metadataState = .failed
+                    finishSourceScope(.failure(FilmSearchError.invalidResponse))
                     group.cancelAll()
                 }
             }
@@ -289,7 +334,9 @@ public final class FilmSearchSession: ObservableObject {
         guard valid(run) else { return }
         if snapshot.metadataState == .loading { snapshot.metadataState = .completed }
         if initial { initialSettled = true }
+        if !prepared { finishSourceScope(.failure(FilmSearchError.unavailable)) }
         snapshot.loading = false
+        snapshot.revision += 1
         snapshot.hasMore = cursors.contains { !$0.finished }
         order = snapshot.cards.map(\.displayKey)
         rawOrder = snapshot.rawCards.map(\.displayKey)
@@ -297,21 +344,25 @@ public final class FilmSearchSession: ObservableObject {
     }
 
     private nonisolated static func readSite(_ cursor: Cursor, index: Int, query: String,
-                                             transport: CatScriptTransport) async -> Event {
+                                             data: FilmSearchData) async -> Event {
         do {
-            let value = try await transport.invoke(cat: cursor.site.cat, site: cursor.site.source,
-                operation: "search", payload: .object(["wd": .string(query),
-                    "page": .number(Double(cursor.next)), "quick": .bool(false)]))
-            return .site(index, try sitePayload(value))
+            let read = try await data.search(site: cursor.site, query: query, page: cursor.next)
+            let payload = try sitePayload(read.value)
+            return .site(index, .init(value: payload, producer: read.producer, cacheEntry: read.cacheEntry))
         } catch { return .site(index, nil) }
     }
 
-    private nonisolated static func readDetail(type: String, id: Int, cache: FilmSearchMetadataCache) async -> Event {
-        do { return .detail("\(type):\(id)", try await cache.detail(type: type, id: id)) }
-        catch { return .detail("\(type):\(id)", nil) }
+    private nonisolated static func readDetail(type: String, id: Int,
+                                               metadata: any FilmSearchMetadataReading) async -> Event {
+        do {
+            let read = try await metadata.detailRead(type: type, id: id)
+            guard case .object = read.value else { throw FilmSearchError.invalidResponse }
+            return .detail("\(type):\(id)", read)
+        } catch { return .detail("\(type):\(id)", nil) }
     }
 
-    private func acceptSite(_ payload: RuntimeValue, index: Int, run: UUID) async throws {
+    private func acceptSite(_ read: FilmSearchRead, index: Int, run: UUID) async throws {
+        let payload = try Self.sitePayload(read.value)
         let cursor = cursors[index], site = cursor.site
         try await validateSource(site, run: run)
         let result = try await processor.invoke([
@@ -325,13 +376,15 @@ public final class FilmSearchSession: ObservableObject {
         try await validateSource(site, run: run)
         guard let items = result.catField("items")?.catArray else { throw FilmSearchError.invalidResponse }
         var next = cursor
-        let added = items.filter { item in
-            guard let id = item.catField("siteDetail")?.catText else { return false }
-            return next.identities.insert(Data(id.utf8)).inserted
+        let added = try items.filter { item in
+            guard let id = item.catField("detailId") else { throw FilmSearchError.invalidResponse }
+            _ = try FilmPlaybackIdentifier(id)
+            return next.identities.insert(try RuntimeJSON.encode(id)).inserted
         }
         if let pageCount = result.catField("pageCount")?.catInteger {
             next.finished = next.next >= pageCount
         } else { next.finished = items.isEmpty || added.isEmpty }
+        pages.append(Page(site: site, read: read))
         next.next += 1
         cursors[index] = next
         snapshot.siteItems.append(contentsOf: added)
@@ -342,7 +395,9 @@ public final class FilmSearchSession: ObservableObject {
         if let sourceOwner {
             let current = await sourceOwner.snapshot
             guard valid(run) else { throw CancellationError() }
-            guard FilmSearchService.searchableSites(current).contains(where: { $0.key == site.key }) else {
+            guard FilmSearchService.searchableSites(current).contains(where: {
+                $0.key == site.key && $0.cat.generation == site.cat.generation
+            }) else {
                 invalidateSources()
                 throw CancellationError()
             }
@@ -365,7 +420,7 @@ public final class FilmSearchSession: ObservableObject {
         if let sourceOwner {
             let current = await sourceOwner.snapshot
             guard valid(run) else { throw CancellationError() }
-            if hasDifferentSources(Set(FilmSearchService.searchableSites(current).map(\.key))) {
+            if hasDifferentSources(FilmSearchService.authorizationScope(FilmSearchService.searchableSites(current))) {
                 invalidateSources()
                 throw CancellationError()
             }
@@ -375,6 +430,7 @@ public final class FilmSearchSession: ObservableObject {
         }
         snapshot.cards = cards.map(FilmSearchCard.init)
         snapshot.rawCards = rawCards.map(FilmSearchCard.init)
+        snapshot.revision += 1
     }
 
     private func valid(_ run: UUID) -> Bool { token == run && !Task.isCancelled }

@@ -1,8 +1,10 @@
 #include "engine.h"
+#include "libunicode.h"
 #include <array>
+#include <climits>
+#include <cstdlib>
 #ifndef _WIN32
 #include <cerrno>
-#include <climits>
 #include <fcntl.h>
 #include <unistd.h>
 #endif
@@ -92,6 +94,67 @@ template<typename F> napi_value Protect(napi_env env, F fn) {
   } catch (...) { napi_throw_error(env, "SCRIPT_EXCEPTION", "SCRIPT_EXCEPTION"); return nullptr; }
 }
 static napi_value Undefined(napi_env env) { napi_value out; NCheck(napi_get_undefined(env, &out)); return out; }
+struct NormalizationBuffer {
+  void* data = nullptr;
+  ~NormalizationBuffer() { std::free(data); }
+  static void* Reallocate(void* opaque, void* pointer, size_t size) {
+    auto& buffer = *static_cast<NormalizationBuffer*>(opaque);
+    if (!size) { std::free(pointer); buffer.data = nullptr; return nullptr; }
+    // libunicode counts decomposed code points in an int.
+    if (size / sizeof(uint32_t) > static_cast<size_t>(INT_MAX)) return nullptr;
+    void* resized = std::realloc(pointer, size);
+    if (resized) buffer.data = resized;
+    return resized;
+  }
+};
+static napi_value NormalizeNFKC(napi_env env, napi_callback_info info) {
+  return Protect(env, [&] {
+    size_t argc = 1; napi_value argv[1];
+    NCheck(napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr));
+    Check(argc == 1);
+    napi_valuetype type; NCheck(napi_typeof(env, argv[0], &type)); Check(type == napi_string);
+    size_t length;
+    NCheck(napi_get_value_string_utf16(env, argv[0], nullptr, 0, &length));
+    if (!length) return argv[0];
+    std::u16string text(length + 1, 0);
+    NCheck(napi_get_value_string_utf16(env, argv[0], text.data(), text.size(), &length));
+    text.resize(length);
+    std::vector<uint32_t> points;
+    points.reserve(length);
+    for (size_t i = 0; i < length; ++i) {
+      uint32_t point = text[i];
+      if (point >= 0xd800 && point <= 0xdbff && i + 1 < length) {
+        uint32_t low = text[i + 1];
+        if (low >= 0xdc00 && low <= 0xdfff) {
+          point = 0x10000 + ((point - 0xd800) << 10) + low - 0xdc00;
+          ++i;
+        }
+      }
+      points.push_back(point);
+    }
+    Check(points.size() <= static_cast<size_t>(INT_MAX), "RESOURCE_LIMIT");
+    // The library clears its output on failure without freeing the growable buffer.
+    NormalizationBuffer buffer;
+    uint32_t* normalized = nullptr;
+    int count = unicode_normalize(&normalized, points.data(), static_cast<int>(points.size()),
+      UNICODE_NFKC, &buffer, NormalizationBuffer::Reallocate);
+    Check(count >= 0, "RESOURCE_LIMIT");
+    text.clear();
+    text.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+      uint32_t point = normalized[i];
+      if (point <= 0xffff) { text.push_back(static_cast<char16_t>(point)); }
+      else {
+        point -= 0x10000;
+        text.push_back(static_cast<char16_t>(0xd800 + (point >> 10)));
+        text.push_back(static_cast<char16_t>(0xdc00 + (point & 0x3ff)));
+      }
+    }
+    napi_value result;
+    NCheck(napi_create_string_utf16(env, text.data(), text.size(), &result));
+    return result;
+  });
+}
 static napi_value Invoke(napi_env env, napi_callback_info info) {
   return Protect(env, [&] {
     Invocation call(env, info); Command command;
@@ -205,6 +268,9 @@ static napi_value Initialize(napi_env env, napi_value exports) {
     NCheck(napi_set_named_property(env, exports, "create", create));
     NCheck(napi_create_uint32(env, 1, &abi)); NCheck(napi_set_named_property(env, exports, "abi", abi));
     NCheck(napi_create_uint32(env, 8, &napi)); NCheck(napi_set_named_property(env, exports, "napi", napi));
+    napi_value normalize;
+    NCheck(napi_create_function(env, "normalizeNFKC", NAPI_AUTO_LENGTH, NormalizeNFKC, nullptr, &normalize));
+    NCheck(napi_set_named_property(env, exports, "normalizeNFKC", normalize));
 #ifndef _WIN32
     napi_value duplicate;
     NCheck(napi_create_function(env, "duplicateBootstrapDescriptor", NAPI_AUTO_LENGTH,

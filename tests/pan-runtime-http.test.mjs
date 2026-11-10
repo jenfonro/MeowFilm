@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,18 +17,18 @@ function root(t) {
   return path;
 }
 async function connect(t, handler = () => assert.fail('unexpected upstream I/O')) {
-  const dataRoot = root(t), sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex');
+  const dataRoot = root(t), sessionId = randomUUID();
   let closes = 0;
-  const runtime = createPanRuntime({ sessionId, requestKey, dataRoot,
+  const runtime = createPanRuntime({ sessionId, dataRoot,
     pan: { transport: { request: handler, async close() { closes++; } } } });
   await runtime.start();
-  const client = createRuntimeClient({ sessionId, requestKey, baseUrl: runtime.baseUrl });
+  const client = createRuntimeClient({ baseUrl: runtime.baseUrl });
   t.after(async () => { await client.close(); await runtime.close(); });
-  return { client, runtime, auth: { sessionId, key: requestKey }, get closes() { return closes; } };
+  return { client, runtime, identity: { sessionId }, get closes() { return closes; } };
 }
 
-test('pan-only HTTP describes exact methods, rejects upload and authenticates before configuration writes', async t => {
-  const { client, runtime, auth } = await connect(t);
+test('pan-only HTTP describes exact methods, rejects upload and accepts external configuration writes without credentials', async t => {
+  const { client, runtime, identity } = await connect(t);
   const descriptor = (await client.describe()).value;
   assert.equal(descriptor.product, 'pan');
   assert.deepEqual(descriptor.modules, [{ id: 'pan', contract: 'pan.runtime.v1', version: '0.1.0',
@@ -37,19 +37,23 @@ test('pan-only HTTP describes exact methods, rejects upload and authenticates be
   assert.equal(providers.ok, true);
   assert.equal(providers.contract, 'pan.runtime.v1');
   assert.equal(providers.value.providers.length, 7);
-  const unauthorized = await rawRequest(runtime.baseUrl, { ...auth, key: 'f'.repeat(64) },
-    { path: '/v1/pan/settings.set', body: JSON.stringify({ provider: 'baidu',
-      credentials: { cookie: 'synthetic-must-not-save' } }) }).response;
-  assert.equal(unauthorized.status, 401);
-  assert.equal(unauthorized.value.code, 'PERMISSION_DENIED');
-  assert.equal((await client.call('pan.settings.get')).value.accounts.every(item => !item.configured), true);
+  const external = await rawRequest(runtime.baseUrl, {},
+    { path: '/v1/pan/settings.set', headers: { host: 'external.example.invalid',
+      origin: 'https://browser.example.invalid', 'x-meow-request-id': undefined },
+      body: JSON.stringify({ provider: 'baidu', credentials: { cookie: 'synthetic-external-cookie' } }) }).response;
+  assert.equal(external.status, 200);
+  assert.deepEqual(external.value, { ok: true, contract: 'pan.runtime.v1',
+    value: { provider: 'baidu', revision: 1, configured: true, fields: ['cookie'] } });
+  assert.equal(external.headers['access-control-allow-origin'], '*');
+  assert.match(external.headers['x-meow-request-id'], /^[0-9a-f-]{36}$/);
+  assert.equal((await client.call('pan.settings.get')).value.accounts.find(item => item.provider === 'baidu').configured, true);
   const changed = await client.call('pan.settings.set', { provider: 'baidu',
     credentials: { cookie: 'synthetic-cookie' } });
   assert.deepEqual(changed, { ok: true, contract: 'pan.runtime.v1',
-    value: { provider: 'baidu', revision: 1, configured: true, fields: ['cookie'] } });
+    value: { provider: 'baidu', revision: 2, configured: true, fields: ['cookie'] } });
   await assert.rejects(client.upload('pan', 'not-a-script', 1, Buffer.from('anything')),
     { code: 'METHOD_NOT_FOUND' });
-  const upload = await rawRequest(runtime.baseUrl, auth,
+  const upload = await rawRequest(runtime.baseUrl, identity,
     { method: 'PUT', path: '/v1/pan/sources/not-a-script/1', body: Buffer.from('anything'),
       headers: { 'Content-Type': 'application/octet-stream' } }).response;
   assert.equal(upload.status, 404);
@@ -135,13 +139,13 @@ test('HTTP shutdown cancels and physically drains upstream work without publishi
 
 test('default aggregate stays three modules and explicit pan shares that same HTTP owner', async t => {
   for (const pan of [undefined, {}]) {
-    const dataRoot = root(t), sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex');
+    const dataRoot = root(t), sessionId = randomUUID();
     const hostFactory = () => ({ list: () => [], async close() { return { cleanupComplete: true }; } });
-    const runtime = createRuntime({ sessionId, requestKey, dataRoot, pan,
+    const runtime = createRuntime({ sessionId, dataRoot, pan,
       music: { hostFactory }, source: { hostFactory },
       cat: { runtimeFactory: () => ({ async status() { return {}; }, async close() {} }) } });
     await runtime.start();
-    const client = createRuntimeClient({ sessionId, requestKey, baseUrl: runtime.baseUrl });
+    const client = createRuntimeClient({ baseUrl: runtime.baseUrl });
     try {
       assert.deepEqual((await client.describe()).value.modules.map(item => item.id),
         pan === undefined ? ['music', 'cat', 'source'] : ['music', 'cat', 'source', 'pan']);
