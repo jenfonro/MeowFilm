@@ -1989,6 +1989,7 @@ export const portableRealmSource = String.raw`
         search:['searchContent',[payload.keyword ?? payload.key ?? '', payload.quick ?? false, String(payload.page ?? 1)]],
         detail:['detailContent',[Array.isArray(payload.ids) ? payload.ids : [payload.id ?? payload.url ?? '']]],
         play:['playerContent',[payload.flag ?? '', payload.id ?? payload.url ?? '', payload.vipFlags ?? []]],
+        report:['report',[payload]],
         proxy:['proxy',null],
         action:['action',[payload.action ?? '', payload.value ?? null]],
         destroy:['destroy',[]],
@@ -2045,7 +2046,7 @@ export const portableRealmSource = String.raw`
             const methods = {
               init:'init', home:'homeContent', homeVideo:'homeVideoContent',
               category:'categoryContent', search:'searchContent', detail:'detailContent',
-              play:'playerContent', proxy:'proxy', action:'action', destroy:'destroy',
+              play:'playerContent', report:'report', proxy:'proxy', action:'action', destroy:'destroy',
             };
             return typeof exportsObject.spider?.[methods[name]] === 'function'
               || typeof exportsObject.spider?.[name] === 'function'

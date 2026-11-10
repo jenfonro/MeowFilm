@@ -97,7 +97,9 @@ public static partial class MusicUiTests
         var playback = (FilmPlaybackView)((FilmView)f.Film.View).FindName("PlaybackView");
         Equal(0, ((ItemsControl)playback.FindName("EpisodeCards")).Items.Count);
         Equal(Visibility.Collapsed, ((Button)playback.FindName("OverviewToggle")).Visibility);
-        True(!((Button)playback.FindName("PlayButton")).IsEnabled, "the actual playback surface keeps missing content unavailable");
+        True(((Button)playback.FindName("PlayButton")).IsEnabled && page.CanPlay &&
+            f.Runtime.Calls.Count(call => call.Method == "film.session.open") == 1,
+            "the real group session has one open and can request its actual source files without a preview gate");
         string location = f.Film.CaptureNavigationLocation();
         int requests = sources.Calls.Count;
         f.Click("BackButton"); await SearchFixture.Until(() => f.SearchHost is not null && f.Status == "");
@@ -130,6 +132,10 @@ public static partial class MusicUiTests
             second.TrySetResult(SearchFixture.Page(1, ("same", "目标 第二季", "更新至5集")));
             tmdb.TrySetResult(SearchFixture.Tmdb("tv", 7, "目标", "搜索已得简介"));
             await SearchFixture.Settle(context.Session);
+            await SearchFixture.Until(() => receiver.Overview == "详情tv" &&
+                f.Runtime.Calls.Any(call => call.Method == "film.session.command" &&
+                    FilmJson.Text(call.Input, "action") == "search.update" &&
+                    FilmJson.Text(FilmJson.Member(call.Input, "metadataTarget"), "kind") == "tv"));
             True(context.Sources.Count == 2 && context.Query == "不同显示名的原词" &&
                 context.Metadata!.Value.GetProperty("overview").GetString() == "详情tv" && receiver.Overview == "详情tv",
                 "existing playback object follows a late TMDB carrier and receives its complete metadata");
@@ -159,7 +165,9 @@ public static partial class MusicUiTests
             context.Sources.Count == 1 && SearchFixture.Text(context.Sources.Single(), "installationId") == "a" &&
             FilmSearchJson.Number(context.Sources.Single(), "generation") == 1 && context.Metadata is null,
             "real receiver keeps the clicked raw identity without widening to its aggregate");
-        True(page.Overview == "" && !page.HasOverview && page.Episodes.Count == 0, "raw playback does not invent a TMDB or preview overview");
+        True(page.Overview == "" && page.Episodes.Count == 0 &&
+            f.Runtime.Calls.Single(call => call.Method == "film.session.open").Input.GetProperty("target").GetProperty("kind").GetString() == "source",
+            "raw playback carries the exact source target and does not invent a TMDB or preview overview");
         var playback = (FilmPlaybackView)((FilmView)f.Film.View).FindName("PlaybackView");
         Equal(Visibility.Collapsed, ((Button)playback.FindName("OverviewToggle")).Visibility);
         Equal(1, metadata.Searches.Count); Equal(1, metadata.Details.Count); Equal(2, sources.Calls.Count);
@@ -329,6 +337,7 @@ public static partial class MusicUiTests
         internal readonly FilmCapability Film;
         internal readonly SearchResultsPage Page;
         internal readonly ShellWindow Shell;
+        internal readonly FilmSearchConsumerRuntime Runtime = new();
         internal TextBox Input => (TextBox)Shell.FindName("SearchBox");
         internal ComboBox Picker => (ComboBox)Shell.FindName("SearchTargetPicker");
         internal string Status => ((TextBlock)Shell.FindName("StatusText")).Text;
@@ -336,7 +345,10 @@ public static partial class MusicUiTests
             .SingleOrDefault(host => ReferenceEquals(host.Content, Page.View));
         private UnifiedScene(SearchScene music, SearchFixture search, FilmMetadataService? metadata)
         {
-            Music = music; Search = search; Film = new(new SearchHome(), search.Service, metadata); Page = new(music.Module, Film);
+            Music = music; Search = search;
+            Film = new(new SearchHome(), search.Service, new FilmPlaybackSession(Runtime.CaptureConnectionAsync, new FilmNativeProbe()),
+                new FilmLibrary(new FilmMemoryStore()), metadata);
+            Page = new(music.Module, Film);
             Shell = new ShellWindow([Music.Module, Film], [Page], async () =>
             { Page.Dispose(); await Film.DisposeAsync(); await Music.DisposeAsync(); }, () => Task.CompletedTask);
             Page.NavigationToken = () => Shell.GetPageNavigationToken(Page, Film.Id, FilmCapability.PlaybackRoute);
@@ -384,6 +396,7 @@ public static partial class MusicUiTests
             Music.Http.Release.TrySetResult();
             Shell.Close(); await Shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(15));
             Page.Dispose(); await Film.DisposeAsync();
+            Runtime.Dispose();
         }
     }
 }

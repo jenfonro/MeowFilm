@@ -7,12 +7,13 @@ const publicCodes = new Set(['INVALID_REQUEST', 'METHOD_NOT_FOUND', 'PERMISSION_
   'CLOSED', 'CANCELLED', 'TIMEOUT', 'INVALID_RESPONSE']);
 const success = value => ({ ok: true, contract: HTTP_PROTOCOL, value });
 const failureCode = id => ({ music: 'SCRIPT_FAILURE', source: 'SOURCE_FAILURE',
-  cat: 'SCRIPT_EXCEPTION', pan: 'PAN_FAILURE', tmdb: 'UPSTREAM_FORMAT', douban: 'UPSTREAM_FORMAT' })[id];
+  cat: 'SCRIPT_EXCEPTION', pan: 'PAN_FAILURE', tmdb: 'UPSTREAM_FORMAT', douban: 'UPSTREAM_FORMAT',
+  film: 'UPSTREAM_ERROR' })[id];
 
-/** Trusted session configuration; no platform bootstrap or persistent identity. */
-export function createAppRuntime({ sessionId, requestKey,
+/** Lifecycle session configuration; no platform bootstrap or persistent identity. */
+export function createAppRuntime({ sessionId,
   product = 'aggregate', modules, assemble } = {}) {
-  validateSession({ sessionId, key: requestKey });
+  validateSession({ sessionId });
   if (typeof product !== 'string' || !/^[a-z][a-z0-9-]{0,63}$(?![\s\S])/.test(product) ||
       assemble !== undefined && (modules !== undefined || typeof assemble !== 'function')) invalid();
   let disposed = false, disposal, shutdown, closing;
@@ -35,6 +36,7 @@ export function createAppRuntime({ sessionId, requestKey,
           contract.upload && typeof module.upload !== 'function' ||
           module.upload !== undefined && typeof module.upload !== 'function' ||
           module.image !== undefined && typeof module.image !== 'function' ||
+          module.events !== undefined && typeof module.events !== 'function' ||
           !module.methods || typeof module.methods !== 'object') invalid();
       const entries = Object.entries(module.methods);
       for (const [name, handler] of entries) {
@@ -47,7 +49,7 @@ export function createAppRuntime({ sessionId, requestKey,
         methods: entries.map(([name]) => name).sort() });
     }
   } catch (error) { void dispose().catch(() => {}); throw error; }
-  const server = createHttpServer({ sessionId, key: requestKey, resolve: ({ method, url }) => {
+  const server = createHttpServer({ sessionId, resolve: ({ method, url }) => {
     if (method === 'GET' && url.pathname === '/v1/describe' && !url.search) {
       return { contract: HTTP_PROTOCOL, codes: publicCodes,
         handler: () => success({ protocol: HTTP_PROTOCOL, product, modules: descriptors }) };
@@ -68,6 +70,17 @@ export function createAppRuntime({ sessionId, requestKey,
     const parts = url.pathname.split('/');
     const module = owners.get(parts[2]), contract = contracts[parts[2]];
     if (!module || parts[1] !== 'v1') return;
+    if (method === 'GET' && parts.length === 5 && parts[3] === 'events' && module.events) {
+      return { contract: module.contract, codes: contract.codes, responseType: 'stream',
+        handler: async (_input, context) => {
+          if (disposed) return { ok: false, contract: module.contract, code: 'CLOSED' };
+          try { return await module.events(url, context); }
+          catch (error) {
+            return { ok: false, contract: module.contract,
+              code: contract.codes.has(error?.code) ? error.code : failureCode(module.id) };
+          }
+        } };
+    }
     if (method === 'GET' && parts[3] === 'images' && module.image && !url.search) {
       return { contract: module.contract, codes: contract.codes, responseType: 'stream',
         handler: async (_input, context) => {

@@ -2,7 +2,7 @@
 
 App 装配后显式启动 `AppRuntimeClient` → 唯一 Node / HTTP 会话 → Windows 薄 entry → 公共 music 模块 → script-host。
 启动不执行用户脚本，不检测；脚本服务失败不阻塞原生目录、曲库、账号和官方播放。
-握手校验 `music@0.8.0`／`music.script.v3`、`cat@0.2.0`／`cat.script.v2`、`source@0.2.0`／`source.runtime.v2`、`tmdb@0.1.0`／`tmdb.data.v1`；音乐仍仅消费 music 模块。
+握手按序校验 `music@0.8.0`／`music.script.v3`、`cat@0.2.0`／`cat.script.v2`、`source@0.2.0`／`source.runtime.v2`、`pan@0.1.0`／`pan.runtime.v1`、`tmdb@0.1.0`／`tmdb.data.v1`、`douban@0.1.0`／`douban.data.v1`、`film@0.1.0`／`film.playback.v1` 七模块；音乐仍仅消费 music 模块。
 
 ## 薄适配
 

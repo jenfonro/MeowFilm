@@ -158,7 +158,7 @@ export async function packageWindowsRuntime({
       readFileSync(fd).equals(originalManifest),
     'MANIFEST_CHANGED', 'Shared runtime manifest changed before Windows packaging');
     manifest.entry = `${WINDOWS_OUTPUT}/entries/${product}.mjs`;
-    manifest.modules = ['music', 'cat', 'source', 'tmdb'];
+    manifest.modules = ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film'];
     manifest.platform = 'win32';
     manifest.transport = TRANSPORT;
     manifest.status = 'building';

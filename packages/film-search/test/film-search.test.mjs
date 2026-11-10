@@ -50,6 +50,8 @@ test('site mapping preserves the complete valid page, including more than 100 ro
   assert.equal(output.items.length, 237);
   assert.equal(new Set(output.items.map((item) => item.id)).size, 237);
   assert.equal(output.items[236].siteDetail, '236');
+  assert.equal(output.items[236].detailId, '236');
+  assert.deepEqual(output.items[236].raw, list[236]);
   assert.equal(output.items[236].rawTitle, '影片236x');
   assert.equal(output.items[236].poster, '/poster/236');
   assert.equal(output.page, 2);
@@ -57,6 +59,139 @@ test('site mapping preserves the complete valid page, including more than 100 ro
   assert.equal(output.hasMore, true);
   assert.equal(output.explicitPageCount, true);
   assert.equal(display(output.items, { rawListMode: true }).items.length, 237);
+});
+
+test('site identities keep original JSON types and complete raw rows instead of display strings', () => {
+  const list = [
+    { vod_id: 0, id: 'ignored', vod_name: ' 星河 第二季 ', vod_remarks: ' \t第2季第4集 · 双语\r\n',
+      vod_pic: ' /poster/zero ', source: { provider: 'fixture', flags: [0, '0', null] }, raw: { original: true } },
+    { id: '0', name: '星河 第二季', remark: '\n第2季第5集\t', extra: { file: '/原目录/零.mkv' } },
+    { vod_id: 7, vod_name: '星河 第二季' },
+    { id: '7', name: '星河 第二季' },
+    { id: '007', name: '星河 第二季' },
+    { id: ' 7 ', name: '星河 第二季' },
+    { id: Number.MAX_SAFE_INTEGER, name: '星河 第二季' },
+    { id: Number.MIN_SAFE_INTEGER, name: '星河 第二季' },
+    { id: '9007199254740993', name: '星河 第二季' },
+    { vod_id: null, id: 'fallback', name: '星河 第二季', remark: ' \t ' },
+  ];
+  const before = clone(list);
+  const output = site({ list });
+  assert.deepEqual(output.items.map((item) => item.detailId),
+    [0, '0', 7, '7', '007', ' 7 ', Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, '9007199254740993', 'fallback']);
+  assert.deepEqual(output.items.map((item) => item.siteDetail),
+    ['0', '0', '7', '7', '007', '7', String(Number.MAX_SAFE_INTEGER), String(Number.MIN_SAFE_INTEGER), '9007199254740993', 'fallback']);
+  assert.equal(new Set(output.items.map((item) => item.id)).size, list.length);
+  assert.deepEqual(output.items.map((item) => item.raw), before);
+  assert.equal(output.items[0].textBadge, '第2季第4集 · 双语');
+  assert.equal(output.items[0].poster, '/poster/zero');
+  assert.equal(output.items[0].rawTitle, '星河 第二季');
+  assert.equal(output.items.at(-1).textBadge, '');
+  assert.equal(output.items.at(-1).raw.remark, ' \t ');
+  const raw = display(output.items, { rawListMode: true });
+  assert.equal(raw.items.length, list.length);
+  for (const original of output.items) {
+    const item = raw.items.find((candidate) => candidate.detailId === original.detailId);
+    assert.equal(item.id, original.id);
+    assert.deepEqual(item.raw, original.raw);
+  }
+  assert.deepEqual(list, before);
+});
+
+test('only nonempty JSON strings and safe integer detail identities are admitted without alias coercion', () => {
+  const valid = [
+    { vod_id: null, id: 0, name: '星河' },
+    { vod_id: '0', id: false, vod_name: '星河' },
+    { id: -7, name: '星河' },
+  ];
+  const invalid = [
+    ...[true, false, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1, {}, ['x'], '', ' \t ']
+      .map((id) => ({ id, name: '星河' })),
+    { vod_id: '', id: 'not-a-fallback', name: '星河' },
+    { vod_id: false, id: 'not-a-fallback', name: '星河' },
+    { vod_id: 1.5, id: 'not-a-fallback', name: '星河' },
+    { id: null, name: '星河' }, { name: '星河' },
+    { vod_id: 'empty-title', vod_name: '', name: 'not-a-fallback' },
+  ];
+  const output = site({ list: [...valid, ...invalid] });
+  assert.deepEqual(output.items.map((item) => item.detailId), [0, '0', -7]);
+  assert.deepEqual(output.items.map((item) => item.raw), valid);
+  assert.equal(display(output.items, { rawListMode: true }).items.length, 3);
+});
+
+test('normal single-source cards retain raw remarks when the visible badge is normalized', () => {
+  const row = { vod_id: 0, vod_name: ' 星河 第二季 ', vod_remarks: ' \t第2季第4集 · 双语\n',
+    vod_play_from: '原始线路', vod_play_url: '原始不透明引用', sourceFields: { enabled: false, detail: '0' } };
+  const mapped = site({ list: [row] }).items[0];
+  const card = display([mapped]).items[0];
+  assert.equal(card.aggregateItems, undefined);
+  assert.equal(card.textBadge, '更新至第2季第4集');
+  assert.equal(card.detailId, 0);
+  assert.equal(card.siteDetail, '0');
+  assert.equal(card.siteKey, sources[0].siteKey);
+  assert.equal(card.installationId, sources[0].installationId);
+  assert.equal(card.siteId, sources[0].siteId);
+  assert.equal(card.generation, sources[0].generation);
+  assert.deepEqual(card.raw, row);
+  assert.equal(card.raw.vod_remarks, ' \t第2季第4集 · 双语\n');
+  assert.deepEqual(display([mapped], { rawListMode: true }).items[0].raw, row);
+  assert.equal(mapped.textBadge, '第2季第4集 · 双语');
+});
+
+test('raw, aggregate and TMDB members dedupe by typed detail identity without losing original source rows', () => {
+  const rows = [
+    { vod_id: 0, vod_name: '星河 第二季', vod_remarks: ' \t第2季第4集 · 双语\n',
+      sourceFields: { file: '/原目录/数字零.mkv', flags: ['原始', 0] } },
+    { vod_id: '0', vod_name: '星河 第二季', vod_remarks: '\n第2季第5集 \t', sourceFields: { token: null } },
+    { id: 7, name: '星河 第二季', remark: ' \t ', unknown: [false, '原字段'] },
+    { id: '7', name: '星河 第二季', remark: ' 第2季第6集 ', pic: ' /原图 ' },
+  ];
+  const a = site({ list: rows }).items;
+  const b = site({ list: rows }, { site: sources[1] }).items;
+  const duplicates = site({ list: rows.map((row) => ({ ...row, vod_name: '不应覆盖原行', vod_remarks: '重复备注' })) },
+    { page: 2 }).items;
+  const input = [...a, ...b, ...duplicates, a[0]];
+  const before = clone(input);
+  const raw = display(input, { rawListMode: true });
+  const grouped = display(input);
+  const tmdb = mapTMDB('星河', [{ id: 8, media_type: 'tv', name: '星河', poster_path: '/poster' }]).items;
+  const merged = display(input, { tmdbItems: tmdb });
+  const mergedRaw = display(input, { tmdbItems: tmdb, rawListMode: true });
+  assert.equal(raw.items.length, 8);
+  assert.equal(new Set(raw.order).size, 8);
+  assert.equal(grouped.items.length, 1);
+  assert.equal(grouped.items[0].aggregateKind, 'site');
+  assert.equal(grouped.items[0].aggregateSourceCount, 2);
+  assert.equal(grouped.items[0].textBadge, '更新至第2季第6集');
+  assert.equal(merged.items.length, 1);
+  assert.equal(merged.items[0].id, 'tmdb:tv:8');
+  assert.equal(merged.items[0].aggregateKind, 'tmdb');
+  assert.equal(merged.items[0].aggregateSourceCount, 2);
+  assert.equal(merged.items[0].textBadge, '更新至第2季第6集');
+  assert.equal(mergedRaw.items.length, 9);
+  const memberLists = [
+    raw.items, grouped.items[0].aggregateItems, merged.items[0].aggregateItems,
+    mergedRaw.items.find((item) => item.sourceKind === 'tmdb').aggregateItems,
+    mergedRaw.items.filter((item) => item.sourceKind === 'site'),
+  ];
+  for (const members of memberLists) {
+    assert.equal(members.length, 8);
+    for (const source of sources) {
+      const actual = members.filter((item) => item.siteKey === source.siteKey);
+      assert.deepEqual(actual.map((item) => item.detailId), [0, '0', 7, '7']);
+      for (const [index, item] of actual.entries()) {
+        assert.equal(item.installationId, source.installationId);
+        assert.equal(item.siteId, source.siteId);
+        assert.equal(item.generation, source.generation);
+        assert.equal(item.siteName, source.siteName);
+        assert.deepEqual(item.raw, rows[index]);
+        assert.equal(item.rawTitle, '星河 第二季');
+        assert.equal(item.textBadge, (rows[index].vod_remarks ?? rows[index].remark).trim());
+      }
+    }
+  }
+  assert.deepEqual(input, before);
+  assert.equal(tmdb[0].aggregateItems, undefined);
 });
 
 test('page count metadata and empty unknown pages expose their actual continuation state', () => {
@@ -79,6 +214,22 @@ test('page count metadata and empty unknown pages expose their actual continuati
     assert.equal(actual.pageCount, pageCount);
     assert.equal(actual.hasMore, hasMore);
     assert.equal(actual.explicitPageCount, pageCount !== null);
+  }
+});
+
+test('site projection does not treat repeated nonempty pages as consumer exhaustion', () => {
+  const list = [{ vod_id: 0, vod_name: '星河' }, { vod_id: '0', vod_name: '星河' }];
+  for (const payload of [{ list }, { list, pagecount: 3 }]) {
+    const first = site(payload);
+    const second = site(payload, { page: 2 });
+    assert.equal(first.hasMore, true);
+    assert.equal(second.hasMore, true);
+    assert.equal(second.page, 2);
+    assert.equal(second.pageCount, payload.pagecount ?? null);
+    assert.equal(second.explicitPageCount, payload.pagecount !== undefined);
+    assert.deepEqual(second.items.map((item) => item.detailId), [0, '0']);
+    assert.deepEqual(second.items.map((item) => item.id), first.items.map((item) => item.id));
+    assert.equal(display([...first.items, ...second.items], { rawListMode: true }).items.length, 2);
   }
 });
 
@@ -224,6 +375,31 @@ test('fixed cleaning and scoring observations retain zero scores and original ti
   assert.deepEqual(scored.map((item) => item.score), [1000, 900, 894, 0]);
   const tokens = site({ list: [{ id: 'x', name: 'alpha extra beta' }] }, { query: 'alpha beta' }).items;
   assert.equal(tokens[0].score, 640);
+});
+
+test('site cleaning keeps its exact pictograph, presentation emoji and selector behavior', () => {
+  for (const [text, expected] of [
+    ['星©™↔☀✨\u{1F004}\u{1F600}\u{1FAEA}\u{1F1E8}\u{1F1F3}河', '星河'],
+    ['星\u2600\u2606\u2700\u2701\u27BF河', '星\u2606\u2700\u2701河'],
+    ['星\uFE0E\uFE0F\u{E0100}河', '星\u{E0100}河'],
+    ['星\u{1F3FB}\u{1F3FF}河', '星河'],
+  ]) {
+    const output = site({ list: [{ id: 'emoji', name: text }] });
+    assert.equal(output.items.length, 1);
+    assert.equal(output.items[0].rawTitle, text);
+    assert.equal(output.items[0].title, text);
+    assert.equal(output.items[0].aggregateContentKey, expected, text);
+    assert.equal(output.items[0].groupKey, expected, text);
+  }
+});
+
+test('site cleaning preserves ordinary text and non-emoji astral characters', () => {
+  const text = '普通文字ABCé\u{20000}\u{30000}\u{1D11E}\u{1F100}\u{1F700}\u{1F800}\u{1FA00}';
+  const output = site({ list: [{ id: 'text', name: text }] });
+  assert.equal(output.items.length, 1);
+  assert.equal(output.items[0].rawTitle, text);
+  assert.equal(output.items[0].aggregateContentKey, text);
+  assert.equal(output.items[0].groupKey, '普通文字abcé\u{20000}\u{30000}\u{1D11E}\u{1F100}\u{1F700}\u{1F800}\u{1FA00}');
 });
 
 test('TMDB keeps first type plus group occurrence, numeric ID, original rank, and movie identities', () => {

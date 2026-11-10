@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "architecture": "win-x64",
+  "vlcPluginAbi": "3_0_0f",
+  "vlcCoreSha256": "c089f281affe1e85c61edd5996c2b496191f82fa5cdc7ef709b0c09bf754cdbe",
+  "sources": {
+    "ffmpeg": {
+      "version": "8.1.2",
+      "commit": "38b88335f99e76ed89ff3c93f877fdefce736c13",
+      "url": "https://github.com/FFmpeg/FFmpeg/archive/38b88335f99e76ed89ff3c93f877fdefce736c13.tar.gz",
+      "sha256": "2ae7e42343cfffb811d15cfe98b6d005f082595fcdf034d30a4ff90cfed9f9c6"
+    },
+    "vlcSdk": {
+      "version": "3.0.24",
+      "url": "https://download.videolan.org/pub/videolan/vlc/3.0.24/win64/vlc-3.0.24-win64.7z",
+      "sha256": "1ed59c09152e78aff84663fa76efab26057716576db74332858810e5ef54ae1f"
+    },
+    "libxml2": {
+      "version": "2.14.6",
+      "url": "https://download.gnome.org/sources/libxml2/2.14/libxml2-2.14.6.tar.xz",
+      "sha256": "7ce458a0affeb83f0b55f1f4f9e0e55735dbfc1a9de124ee86fb4a66b597203a"
+    }
+  },
+  "ffmpegConfigure": [
+    "--target-os=mingw32",
+    "--arch=x86_64",
+    "--disable-autodetect",
+    "--disable-everything",
+    "--disable-network",
+    "--disable-protocols",
+    "--disable-programs",
+    "--disable-doc",
+    "--disable-debug",
+    "--disable-shared",
+    "--enable-static",
+    "--disable-avdevice",
+    "--disable-avfilter",
+    "--disable-swscale",
+    "--disable-swresample",
+    "--disable-pthreads",
+    "--enable-w32threads",
+    "--disable-x86asm",
+    "--enable-avformat",
+    "--enable-avcodec",
+    "--enable-avutil",
+    "--enable-libxml2",
+    "--enable-demuxer=mov,matroska,avi,asf,flv,mpegts,mpegps,ogg,wav,flac,mp3,aac,ac3,eac3,amr,aiff,yuv4mpegpipe,h264,hevc,hls,dash",
+    "--enable-bsf=extract_extradata",
+    "--enable-parser=aac,aac_latm,ac3,dca,flac,h264,hevc,mpegaudio,mpegvideo,mpeg4video,opus,vp8,vp9,av1"
+  ],
+  "libxml2Cmake": [
+    "-DBUILD_SHARED_LIBS=OFF",
+    "-DLIBXML2_WITH_PROGRAMS=OFF",
+    "-DLIBXML2_WITH_TESTS=OFF",
+    "-DLIBXML2_WITH_PYTHON=OFF",
+    "-DLIBXML2_WITH_ICONV=OFF",
+    "-DLIBXML2_WITH_ZLIB=OFF",
+    "-DLIBXML2_WITH_LZMA=OFF",
+    "-DLIBXML2_WITH_ICU=OFF",
+    "-DLIBXML2_WITH_HTTP=OFF",
+    "-DLIBXML2_WITH_CATALOG=OFF",
+    "-DLIBXML2_WITH_MODULES=OFF"
+  ]
+}

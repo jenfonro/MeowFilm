@@ -85,7 +85,7 @@ test('capability ABI normalizes HTTP envelopes and validates returned bytes', as
     version: hostApiVersion,
     url: 'https://fixture.invalid/start',
     method: 'post',
-    headers: { 'X-Test': 'value' },
+    headers: { 'X-Test': 'value', Host: 'virtual.invalid', Origin: 'https://caller.invalid' },
     body: encoded('request'),
     timeoutMs: 1000,
     redirects: 2,
@@ -95,7 +95,7 @@ test('capability ABI normalizes HTTP envelopes and validates returned bytes', as
     version: hostApiVersion,
     url: 'https://fixture.invalid/start',
     method: 'POST',
-    headers: { 'x-test': ['value'] },
+    headers: { 'x-test': ['value'], host: ['virtual.invalid'], origin: ['https://caller.invalid'] },
     body: encoded('request'),
     timeoutMs: 1000,
     redirects: 2,
@@ -118,8 +118,31 @@ test('capability ABI normalizes HTTP envelopes and validates returned bytes', as
   await assert.rejects(client.call('http.request', {
     version: hostApiVersion,
     url: 'https://fixture.invalid/start',
-    headers: { Host: 'other.invalid' },
+    headers: { 'Content-Length': '1' },
   }), { code: 'PERMISSION_DENIED' });
+});
+
+test('capability HTTP preserves URL credentials and accepts ordinary origins without destination grants', async () => {
+  const calls = [];
+  const client = createCapabilityClient({
+    invoke(name, input) {
+      assert.equal(name, 'http.request');
+      calls.push(input);
+      return { version: hostApiVersion, status: 200, url: input.url, body: encoded('ok') };
+    },
+  });
+  for (const url of ['http://fixture-user:fixture-pass@127.0.0.1:19888/path?sig=a%2Fb',
+    'https://fixture-user:fixture-pass@site.invalid/path?sig=a%2Fb']) {
+    assert.equal((await client.call('http.request', {
+      version: hostApiVersion, url, headers: {
+        Host: 'virtual.invalid', Origin: 'https://caller.invalid',
+        Authorization: 'explicit-input', Cookie: 'explicit=input',
+      },
+    })).url, url);
+    assert.equal(calls.at(-1).url, url);
+    assert.deepEqual(calls.at(-1).headers, { host: ['virtual.invalid'], origin: ['https://caller.invalid'],
+      authorization: ['explicit-input'], cookie: ['explicit=input'] });
+  }
 });
 
 test('source HTTP uses the effective Content-Type for both headers and body encoding', async t => {

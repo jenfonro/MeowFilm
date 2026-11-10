@@ -40,6 +40,7 @@ open class PageViewController: UIViewController {
     private var foreground = false
     private var invalidated = false
     private weak var completedAppearanceTransition: (any UIViewControllerTransitionCoordinator)?
+    private weak var presentedPageModal: UIViewController?
     private weak var departingContainer: UIViewController?
     private var observers: [NSObjectProtocol] = []
     private var themeObservation: AnyCancellable?
@@ -115,6 +116,14 @@ open class PageViewController: UIViewController {
     open override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         finishAppearance()
+    }
+
+    open override func present(_ viewControllerToPresent: UIViewController, animated flag: Bool,
+                               completion: (() -> Void)? = nil) {
+        super.present(viewControllerToPresent, animated: flag, completion: completion)
+        if viewControllerToPresent.presentingViewController != nil {
+            presentedPageModal = viewControllerToPresent
+        }
     }
 
     open override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
@@ -312,16 +321,33 @@ open class PageViewController: UIViewController {
         presentError(message, retry: retry, acknowledged: nil)
     }
 
+    /// Dismiss a modal presented by this page. Follow-up work uses its actual
+    /// receipt, including a coordinator UIKit may retain during completion.
+    public func dismissPageModal(_ modal: UIViewController, completion: (() -> Void)? = nil) {
+        guard presentedViewController === modal || presentedPageModal === modal else { return }
+        if presentedPageModal === modal { presentedPageModal = nil }
+        var transition = modal.transitionCoordinator
+        // UIKit may invoke an alert action after automatic dismissal has already
+        // removed every presentation link. Its recorded owner still consumes it.
+        if presentedViewController !== modal, modal.presentingViewController == nil,
+           modal.viewIfLoaded?.window == nil, !modal.isBeingPresented, !modal.isBeingDismissed {
+            finishAppearance(transition: transition, completion: completion)
+            return
+        }
+        modal.dismiss(animated: true) { [weak self] in
+            self?.finishAppearance(transition: transition, completion: completion)
+        }
+        transition = modal.transitionCoordinator ?? transition
+    }
+
     private func presentError(_ message: String?, retry: (() -> Void)?, acknowledged: (() -> Void)?) -> Bool {
         guard let message, !message.isEmpty, canPresentPageAlert else { return false }
         let alert = UIAlertController(title: "错误", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "确定", style: .cancel) { _ in acknowledged?() })
         if let retry {
             alert.addAction(UIAlertAction(title: "重试", style: .default) { [weak self, weak alert] _ in
-                alert?.dismiss(animated: true) { [weak self] in
-                    guard self?.isPageActive == true else { return }
-                    retry()
-                }
+                guard let self, let alert else { return }
+                dismissPageModal(alert, completion: retry)
             })
         }
         present(alert, animated: true)
@@ -339,9 +365,11 @@ open class PageViewController: UIViewController {
         else { pageDidBecomeHidden() }
     }
 
-    private func finishAppearance(transition: (any UIViewControllerTransitionCoordinator)? = nil) {
+    private func finishAppearance(transition: (any UIViewControllerTransitionCoordinator)? = nil,
+                                  completion: (() -> Void)? = nil) {
         guard !invalidated else { return }
         if let transition { completedAppearanceTransition = transition }
+        completion?()
         if canPresentPageAlert { pageDidFinishAppearing() }
     }
 
@@ -381,6 +409,7 @@ open class PageViewController: UIViewController {
         guard !invalidated else { return }
         invalidated = true
         completedAppearanceTransition = nil
+        presentedPageModal = nil
         let wasActive = isPageActive
         isPageActive = false
         contentVisible = false

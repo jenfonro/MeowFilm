@@ -136,6 +136,58 @@ public static class AppRuntimeClientTests
             await BridgeTests.Expect("INTERNAL", () => port.DisposeAsync().AsTask());
             BridgeTests.Equal(1, session.Disposals);
         });
+        foreach (bool retry in new[] { false, true })
+            yield return new($"app-runtime: {(retry ? "retry" : "shutdown")} revokes linked borrowers outside the owner lock and drains after callback failure", async () =>
+            {
+                var drain = Pending<bool>();
+                var session = new Session { DisposalDrain = drain.Task };
+                CancellationToken owner = default;
+                int launches = 0;
+                var port = new AppRuntimeClient(token =>
+                {
+                    launches++; owner = token;
+                    return Task.FromResult<IRuntimeSession>(session);
+                });
+                port.Start();
+                using var borrowed = CancellationTokenSource.CreateLinkedTokenSource(owner);
+                Task? reentered = null;
+                bool callbackFinished = false, remainingCallback = false;
+                using var remaining = borrowed.Token.Register(() => remainingCallback = true);
+                using var failing = borrowed.Token.Register(() =>
+                {
+                    // A different thread must acquire the owner gate while cancellation is in progress.
+                    Task.Run(() =>
+                    {
+                        BridgeTests.Equal(retry ? RuntimeConnectionState.Recovering : RuntimeConnectionState.Closed, port.State);
+                        reentered = retry ? port.RetryAsync() : port.DisposeAsync().AsTask();
+                    }).WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+                    callbackFinished = true;
+                    throw new InvalidOperationException("synthetic-private-cancellation");
+                });
+                if (retry) session.IsConnected = false;
+                try
+                {
+                    var retirement = retry ? port.RetryAsync() : port.DisposeAsync().AsTask();
+                    BridgeTests.Equal(true, borrowed.IsCancellationRequested);
+                    BridgeTests.Equal(true, callbackFinished);
+                    BridgeTests.Equal(true, remainingCallback);
+                    BridgeTests.Equal(true, ReferenceEquals(retirement, reentered));
+                    BridgeTests.Equal(false, retirement.IsCompleted);
+                    var repeated = retry ? port.RetryAsync() : port.DisposeAsync().AsTask();
+                    BridgeTests.Equal(true, ReferenceEquals(retirement, repeated));
+                    await BridgeTests.Expect("CLOSED", () => port.CallAsync("music.script.sources.list"));
+                    drain.SetResult(true);
+                    await BridgeTests.Expect("INTERNAL", () => retirement);
+                    await BridgeTests.Expect("INTERNAL", () => retry ? port.RetryAsync() : port.DisposeAsync().AsTask());
+                    BridgeTests.Equal(1, launches);
+                    BridgeTests.Equal(1, session.Disposals);
+                }
+                finally
+                {
+                    drain.TrySetResult(true);
+                    await BridgeTests.Expect("INTERNAL", () => port.DisposeAsync().AsTask());
+                }
+            });
         yield return new("app-runtime: upload and calls preserve complete envelopes and exact source identity", async () =>
         {
             var session = new Session();
@@ -270,6 +322,8 @@ public static class AppRuntimeClientTests
         public ReadOnlyMemory<byte> Source;
         public CancellationToken UploadCancellation;
         public bool FailDisposal;
+        public bool IsConnected { get; set; } = true;
+        public Task? DisposalDrain;
         public Task<byte[]>? ImageResponse;
         public CancellationToken ImageCancellation;
         public Task<JsonElement> CallAsync(string method, object? parameters = null,
@@ -285,11 +339,11 @@ public static class AppRuntimeClientTests
             Source = source; Basename = basename; UploadCancellation = cancellationToken;
             return UploadResponse ?? Task.FromResult(Value(Uploads));
         }
-        public ValueTask DisposeAsync()
+        public async ValueTask DisposeAsync()
         {
             Disposals++;
-            return FailDisposal ? ValueTask.FromException(new InvalidOperationException("synthetic-private"))
-                : ValueTask.CompletedTask;
+            if (DisposalDrain is not null) await DisposalDrain.ConfigureAwait(false);
+            if (FailDisposal) throw new InvalidOperationException("synthetic-private");
         }
     }
 }

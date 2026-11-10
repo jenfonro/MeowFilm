@@ -22,7 +22,7 @@ public static class MediaTests
     {
         yield return new("media.contract.public-surface", Contract);
         yield return new("media.contract.initial-state-volume-dispose", () => Sta(InitialState));
-        yield return new("media.contract.invalid-uri-and-credentials", () => Sta(InvalidRequests));
+        yield return new("media.contract.invalid-uri", () => Sta(InvalidRequests));
         yield return new("media.contract.headers-fail-closed", () => Sta(HeaderRequests));
         yield return new("media.contract.invalid-seek", () => Sta(InvalidSeek));
         yield return new("media.contract.dispatcher-construction", Construction);
@@ -40,8 +40,10 @@ public static class MediaTests
         yield return new("media.native.wav-dummy-empty-header-overload", () => Sta(EmptyHeaders));
         yield return new("media.native.wav-dummy-cross-thread-commands-ui-events", () => Sta(CrossThread));
         yield return new("media.native.wav-dummy-repeat-release-no-idle-progress", () => Sta(RepeatRelease));
-        yield return new("media.http.production-and-explicit-loopback-policy", HttpPolicy);
-        yield return new("media.http.headers-snapshot-and-redirect-scope", HttpRedirectScope);
+        yield return new("media.http.direct-addresses", HttpPolicy);
+        yield return new("media.http.userinfo-read-redirect-and-explicit-authorization", HttpUserInfo);
+        yield return new("media.http.long-url-public-read", HttpLongUrl);
+        yield return new("media.http.headers-snapshot-and-redirects", HttpRedirectScope);
         yield return new("media.http.redirect-bounds-and-status-safe-errors", HttpSafeErrors);
         yield return new("media.http.adaptive-and-unclassified-content-rejected", HttpUnsupportedContent);
         yield return new("media.http.ranges-seek-and-bounded-native-buffer", HttpRanges);
@@ -55,6 +57,7 @@ public static class MediaTests
         yield return new("media.native.http-preflight-stop-and-latest-wins", () => Sta(HttpNativePreflight));
         yield return new("media.native.http-read-failure-not-ended", () => Sta(HttpNativeFailure));
         yield return new("media.native.http-no-header-original-direct-path", () => Sta(HttpNativeDirect));
+        yield return new("media.native.http-userinfo-no-header-decodes", () => Sta(HttpNativeUserInfo));
     }
 
     private static Task Contract()
@@ -131,12 +134,9 @@ public static class MediaTests
     {
         await using var player = New();
         foreach (var uri in new Uri?[] { null, new("relative", UriKind.Relative), new("ftp://example.invalid/a"),
-                     new("data:audio/wav,AAAA"), new("rtsp://example.invalid/a"), new("file://server/share/a.wav"),
+                     new("data:audio/wav,AAAA"), new("rtsp://example.invalid/a"),
                      new("file:///C:/fixture.wav?credential=fixture-canary"), new("file:///C:/fixture.wav#fragment") })
             await ExpectCode(() => player.OpenAsync("owner", "id", uri!, ""), PlaybackError.UnsupportedUri);
-        foreach (string text in new[] { "https://fixture-user:fixture-secret@example.invalid/a",
-                     "http://fixture-user@example.invalid/a", "https://:fixture-secret@example.invalid/a" })
-            await ExpectCode(() => player.OpenAsync("owner", "id", new Uri(text), ""), PlaybackError.UriCredentials);
         var valid = new Uri("https://example.invalid/a?fixture-token=not-a-real-secret");
         await ExpectCode(() => player.OpenAsync("", "id", valid, ""), PlaybackError.InvalidRequest);
         await ExpectCode(() => player.OpenAsync("owner", "", valid, ""), PlaybackError.InvalidRequest);
@@ -317,10 +317,6 @@ public static class MediaTests
         await ExpectCode(() => player.OpenAsync("video", "reject", new Uri("ftp://example.invalid/a"), ""), PlaybackError.UnsupportedUri);
         await ExpectCode(() => player.OpenAsync("video", "reject", new Uri("https://example.invalid/a"), "",
             new Dictionary<string, string> { ["Range"] = "fixture-canary" }), PlaybackError.UnsupportedHeaders);
-        // Native playback now admits adaptive input. Exercise a deterministic
-        // preflight address rejection, before replacement or DNS/socket work.
-        await ExpectCode(() => player.OpenAsync("video", "adaptive", new Uri("http://127.0.0.1:1/a.m3u8"), "",
-            HttpHeaders()), PlaybackError.HttpAddressBlocked);
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
         await ExpectCancelled(() => player.OpenAsync("video", "reject", wave.Uri, "", cancelled.Token));
@@ -516,22 +512,66 @@ public static class MediaTests
 
     private static async Task HttpPolicy()
     {
-        await using var server = new HttpFixture((_, _, _) => Task.CompletedTask);
-        await ExpectCode(() => HttpMediaInput.OpenAsync(server.Uri("/a.wav"), HttpHeaders()),
-            PlaybackError.HttpAddressBlocked);
-        foreach (string address in new[] { "127.0.0.1", "10.1.2.3", "169.254.169.254", "192.168.1.2",
-                     "172.16.0.1", "100.64.1.1", "[::1]", "[::ffff:127.0.0.1]", "[fe80::1]",
-                     "[fc00::1]", "[64:ff9b::7f00:1]", "[2002:7f00:1::]", "localhost" })
-            await ExpectCode(() => HttpMediaInput.OpenAsync(new Uri($"http://{address}/media"), HttpHeaders()),
-                PlaybackError.HttpAddressBlocked);
-        await ExpectCode(() => HttpMediaInput.OpenAsync(new Uri("https://public.invalid/a"), HttpHeaders(), server.Options()),
-            PlaybackError.HttpAddressBlocked);
-        await ExpectCode(() => HttpMediaInput.OpenAsync(new Uri($"http://127.0.0.1:{server.Port + 1}/a"), HttpHeaders(), server.Options()),
-            PlaybackError.HttpAddressBlocked);
-        ExpectSyncCode(() => NativeHttpMediaOptions.ForLoopbackTests([new Uri("http://localhost/")]),
-            PlaybackError.InvalidRequest);
+        byte[] wave = HttpWave();
+        await using var server = new HttpFixture((request, stream, token) => HttpRangeReply(request, stream, wave, token));
+        await using var second = new HttpFixture((request, stream, token) => HttpRangeReply(request, stream, wave, token));
+        foreach (var uri in new[] { server.Uri("/wave"), new Uri($"http://localhost:{server.Port}/wave"), second.Uri("/wave") })
+        {
+            using var input = await HttpMediaInput.OpenAsync(uri, HttpHeaders());
+            Check(input.CanSeek && ReadHttp(input, 71).SequenceEqual(wave.Take(71)));
+        }
         ExpectSyncCode(() => new NativeHttpMediaOptions(readTimeout: TimeSpan.Zero), PlaybackError.InvalidRequest);
-        Check(server.Requests.IsEmpty);
+        Check(server.Requests.Count == 2 && second.Requests.Count == 1);
+    }
+
+    private static async Task HttpUserInfo()
+    {
+        byte[] bytes = HttpWave();
+        foreach (var (userInfo, decoded) in new[]
+        {
+            ("fixture%20user:p%40ss%3Aword", "fixture user:p@ss:word"),
+            ("fixture-user", "fixture-user:"),
+            (":fixture-pass", ":fixture-pass")
+        })
+            foreach (bool explicitHeader in new[] { false, true })
+                foreach (string redirect in new[] { "none", "relative", "absolute" })
+                {
+                    const string explicitValue = "Bearer fixture-explicit-only";
+                    string basic = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes(decoded));
+                    string other = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("redirect-user:redirect-pass"));
+                    HttpFixture? fixture = null;
+                    await using var server = new HttpFixture(async (request, stream, token) =>
+                    {
+                        Check(request.Headers.GetValueOrDefault("Authorization") ==
+                            (explicitHeader ? explicitValue : request.Path == "/absolute-target" ? other : basic));
+                        if (request.Path == "/relative")
+                            await HttpReply(stream, 302, new() { ["Location"] = "/relative-target" }, ReadOnlyMemory<byte>.Empty, token);
+                        else if (request.Path == "/absolute")
+                            await HttpReply(stream, 302, new()
+                            { ["Location"] = $"http://redirect-user:redirect-pass@127.0.0.1:{fixture!.Port}/absolute-target" },
+                                ReadOnlyMemory<byte>.Empty, token);
+                        else await HttpRangeReply(request, stream, bytes, token);
+                    });
+                    fixture = server;
+                    var headers = new Dictionary<string, string>();
+                    if (explicitHeader) headers["aUtHoRiZaTiOn"] = explicitValue;
+                    using var input = await HttpMediaInput.OpenAsync(
+                        new Uri($"http://{userInfo}@127.0.0.1:{server.Port}/{redirect}"), headers);
+                    Check(ReadHttp(input, 71).SequenceEqual(bytes.Take(71)) && input.Seek(700) &&
+                        ReadHttp(input, 40).SequenceEqual(bytes.Skip(700).Take(40)));
+                    Check(server.Requests.Count == (redirect == "none" ? 2 : 3) &&
+                        server.Requests.All(request => !request.Path.Contains('@')));
+                }
+    }
+
+    private static async Task HttpLongUrl()
+    {
+        byte[] bytes = HttpWave();
+        string path = "/wave?fixture=" + new string('x', 17000);
+        await using var server = new HttpFixture((request, stream, token) => HttpRangeReply(request, stream, bytes, token));
+        using var input = await HttpMediaInput.OpenAsync(server.Uri(path), new Dictionary<string, string>());
+        Check(ReadHttp(input, 71).SequenceEqual(bytes.Take(71)) && server.Requests.Count == 1 &&
+            server.Requests.Single().Path == path);
     }
 
     private static async Task HttpRedirectScope()
@@ -540,7 +580,7 @@ public static class MediaTests
         HttpFixture? first = null;
         await using var second = new HttpFixture(async (request, stream, token) =>
         {
-            Check(request.Headers.Keys.All(key => !HttpHeaders().ContainsKey(key)));
+            Check(HttpHeaders().All(pair => request.Headers[pair.Key] == pair.Value));
             await HttpReply(stream, 302, new() { ["Location"] = first!.Uri("/return.wav").AbsoluteUri }, ReadOnlyMemory<byte>.Empty, token);
         });
         await using var owner = new HttpFixture(async (request, stream, token) =>
@@ -555,14 +595,12 @@ public static class MediaTests
                 await HttpReply(stream, 302, new() { ["Location"] = second.Uri("/bounce").AbsoluteUri }, ReadOnlyMemory<byte>.Empty, token);
             else
             {
-                if (request.Path == "/media.wav")
-                    Check(HttpHeaders().All(pair => request.Headers[pair.Key] == pair.Value));
-                else Check(request.Headers.Keys.All(key => !HttpHeaders().ContainsKey(key)));
+                Check(HttpHeaders().All(pair => request.Headers[pair.Key] == pair.Value));
                 await HttpRangeReply(request, stream, bytes, token);
             }
         });
         first = owner;
-        var options = NativeHttpMediaOptions.ForLoopbackTests([owner.Origin, second.Origin]);
+        var options = new NativeHttpMediaOptions();
         using (var input = await HttpMediaInput.OpenAsync(owner.Uri("/same"), HttpHeaders(), options))
         {
             Check(input.CanSeek);
@@ -622,12 +660,14 @@ public static class MediaTests
         await using var many = new HttpFixture((request, stream, token) => HttpReply(stream, 307,
             new() { ["Location"] = request.Path + "x" }, ReadOnlyMemory<byte>.Empty, token));
         await ExpectCode(() => HttpMediaInput.OpenAsync(many.Uri("/a"), HttpHeaders(),
-            NativeHttpMediaOptions.ForLoopbackTests([many.Origin], maximumRedirects: 2)), PlaybackError.HttpRedirectFailed);
+            new NativeHttpMediaOptions(maximumRedirects: 2)), PlaybackError.HttpRedirectFailed);
         Check(many.Requests.Count == 3);
-        await using var blocked = new HttpFixture((_, stream, token) => HttpReply(stream, 302,
-            new() { ["Location"] = "http://169.254.169.254/private" }, ReadOnlyMemory<byte>.Empty, token));
-        await ExpectCode(() => HttpMediaInput.OpenAsync(blocked.Uri("/a"), HttpHeaders(), blocked.Options()),
-            PlaybackError.HttpAddressBlocked);
+        byte[] bytes = HttpWave();
+        await using var target = new HttpFixture((request, stream, token) => HttpRangeReply(request, stream, bytes, token));
+        await using var redirected = new HttpFixture((_, stream, token) => HttpReply(stream, 302,
+            new() { ["Location"] = target.Uri("/media.wav").AbsoluteUri }, ReadOnlyMemory<byte>.Empty, token));
+        using var input = await HttpMediaInput.OpenAsync(redirected.Uri("/a"), HttpHeaders());
+        Check(ReadHttp(input, 71).SequenceEqual(bytes.Take(71)) && target.Requests.Count == 1);
     }
 
     private static async Task HttpUnsupportedContent()
@@ -956,6 +996,25 @@ public static class MediaTests
         await player.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
     }
 
+    private static async Task HttpNativeUserInfo()
+    {
+        byte[] bytes = HttpWave(8);
+        string basic = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("fixture user:p@ss:word"));
+        await using var server = new HttpFixture(async (request, stream, token) =>
+        {
+            Check(request.Headers.GetValueOrDefault("Authorization") == basic);
+            await HttpRangeReply(request, stream, bytes, token);
+        });
+        await using var player = New();
+        await Start(player, new Uri($"http://fixture%20user:p%40ss%3Aword@127.0.0.1:{server.Port}/media.wav"));
+        await AdaptiveMediaTests.Decoded(player);
+        Check(player.IsPlaying && server.Requests.Count > 0 &&
+            server.Requests.All(request => request.Headers.GetValueOrDefault("Authorization") == basic) &&
+            AdaptiveMediaTests.Field(AdaptiveMediaTests.Session(player)!, "Input") is not null);
+        await player.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(!player.HasMedia && player.LastErrorCode is null);
+    }
+
     private static byte[] ReadHttp(HttpMediaInput input, uint count)
     {
         using var buffer = new NativeBuffer();
@@ -987,7 +1046,7 @@ public static class MediaTests
         internal Uri Origin => new($"http://127.0.0.1:{Port}/");
         internal Uri Uri(string path) => new(Origin, path);
         internal NativeHttpMediaOptions Options(TimeSpan? requestTimeout = null, TimeSpan? readTimeout = null) =>
-            NativeHttpMediaOptions.ForLoopbackTests([Origin], requestTimeout, readTimeout);
+            new NativeHttpMediaOptions(requestTimeout, readTimeout);
 
         internal HttpFixture(Func<HttpRequest, NetworkStream, CancellationToken, Task> handler)
         {

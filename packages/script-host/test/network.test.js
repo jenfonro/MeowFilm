@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { gzipSync, deflateSync, brotliCompressSync } from 'node:zlib';
+import { Gunzip, gzipSync, deflateSync, brotliCompressSync } from 'node:zlib';
 import { createNodeNetwork, createScriptHost } from '../src/index.js';
 import { lxScript, target, deferred } from './fixtures.js';
 import { serverFor } from './http-fixture.js';
@@ -103,7 +103,7 @@ test('real POST JSON, urlencoded and binary multipart use exact byte bodies', as
   assert(result.multipart.text.includes('filename="fixture.bin"'));
 });
 
-test('cross-origin redirects do not need domain grants and strip credentials', async t => {
+test('cross-origin redirects preserve explicit caller headers without destination grants', async t => {
   let contacts = 0, received;
   const destination = await serverFor(t, (req, res) => {
     contacts++; received = req.headers; res.end('arrived');
@@ -112,14 +112,39 @@ test('cross-origin redirects do not need domain grants and strip credentials', a
     res.writeHead(302, { Location: `${destination.origin}/target` }); res.end();
   });
   const handler = `async () => (await ${requestExpression(redirect.origin, {
-    headers: { authorization: 'synthetic-only', cookie: 'fixture=true', 'x-fixture': 'yes' },
+    headers: { authorization: 'synthetic-only', cookie: 'fixture=true', host: 'source.virtual.invalid',
+      origin: 'https://caller.invalid', 'x-fixture': 'yes' },
   })}).body`;
   const allowed = await networkHost(t, [redirect, destination], handler);
   assert.equal(await allowed.invoke(target()), 'arrived');
   assert.equal(contacts, 1);
-  assert.equal(received.authorization, undefined);
-  assert.equal(received.cookie, undefined);
+  assert.equal(received.authorization, 'synthetic-only');
+  assert.equal(received.cookie, 'fixture=true');
+  assert.equal(received.host, 'source.virtual.invalid');
+  assert.equal(received.origin, 'https://caller.invalid');
   assert.equal(received['x-fixture'], 'yes');
+});
+
+test('LX HTTP accepts caller Host, Origin and URL credentials without destination grants', async t => {
+  let received;
+  const server = await serverFor(t, (request, response) => {
+    received = { path: request.url, headers: request.headers };
+    response.end('virtual-host-response');
+  });
+  const host = createScriptHost({ network: createNodeNetwork() });
+  t.after(() => host.close());
+  const url = new URL('/normal?opaque=a%2Fb', server.socketOrigin);
+  url.username = 'fixture-user'; url.password = 'fixture-password';
+  await host.install({ installationId: 'a', enabled: true, source: lxScript({
+    handler: `async () => (await ${requestExpression(url.href, {
+      headers: { Host: 'media.virtual.invalid', Origin: 'https://caller.invalid' },
+    })}).body`,
+  }) });
+  assert.equal(await host.invoke(target()), 'virtual-host-response');
+  assert.equal(received.path, '/normal?opaque=a%2Fb');
+  assert.equal(received.headers.host, 'media.virtual.invalid');
+  assert.equal(received.headers.origin, 'https://caller.invalid');
+  assert.equal(received.headers.authorization, 'Basic ' + Buffer.from('fixture-user:fixture-password').toString('base64'));
 });
 
 test('followRedirect extension can explicitly stop or follow redirects within the hop budget', async t => {
@@ -192,6 +217,43 @@ test('decoded gzip response headers describe the decoded bytes', async t => {
   });
 });
 
+test('complete JSON larger than the image budget survives stacked content decoding', async t => {
+  const body = Buffer.from(JSON.stringify({ value: 'x'.repeat(4 * 1024 * 1024 + 1), last: 'complete' }));
+  const compressed = brotliCompressSync(gzipSync(body));
+  const requests = observeRequests(t);
+  const server = await serverFor(t, (_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip, br',
+      'content-length': compressed.length });
+    res.end(compressed);
+  });
+  const result = await createNodeNetwork()({ url: server.socketOrigin,
+    signal: new AbortController().signal, validateURL: value => value });
+  assert.deepEqual(result.body, body);
+  assert.equal(JSON.parse(result.body).last, 'complete');
+  assert.equal(result.headers['content-encoding'], undefined);
+  assert.equal(result.headers['content-length'], undefined);
+  assertRequestsClosed(requests);
+});
+
+test('HEAD and no-content responses retain representation headers without inflating a missing body', async t => {
+  const requests = observeRequests(t);
+  const server = await serverFor(t, (req, res) => {
+    const status = Number(req.url.slice(1));
+    res.writeHead(status, { 'content-encoding': 'gzip', ...(status === 200 || status === 304
+      ? { 'content-length': '128' } : {}) });
+    res.end();
+  });
+  const network = createNodeNetwork();
+  for (const [method, status] of [['HEAD', 200], ['GET', 204], ['GET', 205], ['GET', 304]]) {
+    const response = await network({ url: `${server.socketOrigin}/${status}`, options: { method },
+      signal: new AbortController().signal, validateURL: value => value });
+    assert.equal(response.statusCode, status);
+    assert.equal(response.body.length, 0);
+    assert.equal(response.headers['content-encoding'], 'gzip');
+    assertRequestsClosed(requests);
+  }
+});
+
 test('corrupt compressed upstream data is a network failure, not a memory limit', async t => {
   const server = await serverFor(t, (_req, res) => {
     res.setHeader('content-encoding', 'gzip');
@@ -242,11 +304,11 @@ test('explicit LX abort physically closes a session-owned real HTTP request sock
   assert.equal(host.stats().networkRequests, 0);
 });
 
-test('restricted headers and unsupported request options fail before I/O', async t => {
+test('transport framing headers and unsupported request options fail before I/O', async t => {
   let contacts = 0;
   const server = await serverFor(t, (_req, res) => { contacts++; res.end('unexpected'); });
   for (const [options, code] of [
-    [{ headers: { Host: 'other.invalid' } }, 'PERMISSION_DENIED'],
+    [{ headers: { 'Content-Length': '10' } }, 'PERMISSION_DENIED'],
     [{ proxy: 'http://other.invalid' }, 'UNSUPPORTED_OPTION'],
   ]) {
     const host = await networkHost(t, [server],
@@ -289,6 +351,76 @@ function assertRequestsClosed(requests) {
     }
   }
 }
+
+function observeDecodePipeline(t, onDecoded = () => {}) {
+  const streams = [];
+  const requests = observeRequests(t, undefined, response => {
+    function inspect(stream) {
+      const original = stream.pipe;
+      t.mock.method(stream, 'pipe', function(destination, ...options) {
+        const state = { stream: destination, closed: false };
+        streams.push(state);
+        destination.once('close', () => { state.closed = true; });
+        inspect(destination);
+        const result = Reflect.apply(original, this, [destination, ...options]);
+        if (stream instanceof Gunzip) stream.once('data', onDecoded);
+        return result;
+      });
+    }
+    inspect(response);
+  });
+  return () => {
+    assertRequestsClosed(requests);
+    assert.ok(streams.some(value => value.stream instanceof Gunzip), 'a real decoder must have run');
+    for (const { stream, closed } of streams) {
+      assert.equal(closed, true, 'decoder and collector close before adapter settlement');
+      assert.equal(stream.destroyed, true);
+    }
+  };
+}
+
+test('successful compressed output closes the decoder and collector before returning the complete body', async t => {
+  const closed = observeDecodePipeline(t);
+  const body = Buffer.from('complete decoded payload');
+  const server = await serverFor(t, (_req, res) => {
+    res.writeHead(200, { 'content-encoding': 'gzip' });
+    res.end(gzipSync(body));
+  });
+  const result = await createNodeNetwork()({ url: server.socketOrigin,
+    signal: new AbortController().signal, validateURL: value => value });
+  assert.deepEqual(result.body, body);
+  closed();
+});
+
+test('cancellation during decoded output drains the decoder without waiting for the rest of the response',
+  { timeout: 5000 }, async t => {
+    const decoded = deferred(), controller = new AbortController();
+    const closed = observeDecodePipeline(t, () => decoded.resolve());
+    const server = await serverFor(t, (_req, res) => {
+      res.writeHead(200, { 'content-encoding': 'gzip' });
+      res.write(gzipSync(Buffer.alloc(128 * 1024, 97)));
+      // This complete compressed member arrives before the HTTP body ends.
+      // A full-compressed-response buffer could not reach the decoder yet.
+    });
+    const failure = assert.rejects(createNodeNetwork()({ url: server.socketOrigin,
+      signal: controller.signal, validateURL: value => value }), { code: 'CANCELLED' });
+    await decoded.promise;
+    controller.abort();
+    await failure;
+    closed();
+  });
+
+test('truncated compressed content drains every decoder and fails instead of publishing partial data', async t => {
+  const closed = observeDecodePipeline(t);
+  const compressed = gzipSync(Buffer.from('complete-data-only'));
+  const server = await serverFor(t, (_req, res) => {
+    res.writeHead(200, { 'content-encoding': 'gzip' });
+    res.end(compressed.subarray(0, compressed.length - 4));
+  });
+  await assert.rejects(createNodeNetwork()({ url: server.socketOrigin,
+    signal: new AbortController().signal, validateURL: value => value }), { code: 'NETWORK_ERROR' });
+  closed();
+});
 
 test('complete network adapter settles only after its request, response and socket close', async t => {
   const requests = observeRequests(t);

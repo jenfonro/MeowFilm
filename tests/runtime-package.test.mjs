@@ -90,6 +90,13 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   add('packages/source-runtime', '@meowfilm/source-runtime', '0.1.0',
     { files: ['src'] }, true);
   add('packages/pan-runtime', '@meowfilm/pan-runtime', '0.1.0', { files: ['src'] }, true);
+  add('packages/film-rules', '@meowfilm/film-rules', '0.1.0',
+    { files: ['film-rules.js'], main: './film-rules.js', exports: './film-rules.js' }, true);
+  file('packages/film-rules/film-rules.js', sourceCode);
+  add('packages/film-playback', '@meowfilm/film-playback', '0.1.0',
+    { files: ['src'], dependencies: {
+      '@meowfilm/film-rules': '0.1.0', '@meowfilm/script-host': '0.2.0',
+    } }, true);
   add('packages/unused-core', '@meowfilm/unused-core', '0.2.0',
     { dependencies: { 'music-lib': '~1.0.0' } }, true);
   add('packages/inactive-core', '@meowfilm/inactive-core', '0.1.0',
@@ -119,6 +126,7 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   file('apps/runtime/modules/cat-script.mjs', sourceCode);
   file('apps/runtime/modules/source-runtime.mjs', sourceCode);
   file('apps/runtime/modules/pan-runtime.mjs', sourceCode);
+  file('apps/runtime/modules/film-playback.mjs', `import '@meowfilm/film-playback';\n${sourceCode}`);
   for (const path of ['entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
     'modules/metadata-data.mjs', 'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
     'modules/metadata/tmdb.mjs', 'modules/metadata/douban.mjs']) {
@@ -170,10 +178,10 @@ test('interpreted workspace files still reject unsupported negative rules', asyn
   await fails(f, 'UNSAFE_PATH');
 });
 
-test('common runtime packaging stages only the script dependency closure with exact hashes', async () => {
+test('common runtime packaging stages the seven-module App closure with exact hashes', async () => {
   const f = fixture(), manifest = await f.pack();
   assert.equal(manifest.product, 'aggregate');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film']);
   assert.equal(manifest.schemaVersion, 1);
   assert.equal(manifest.status, 'complete');
   assert.equal(manifest.assemblyProfile, 'common-native');
@@ -181,7 +189,7 @@ test('common runtime packaging stages only the script dependency closure with ex
   assert.match(manifest.integrityScope, /not an upstream signature/);
   assert.deepEqual(manifest.files.filter(f => f.path.startsWith('app/')).map(f => f.path),
     ['app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/entry.mjs',
-      'app/modules/cat-script.mjs', 'app/modules/metadata-data.mjs', 'app/modules/metadata/douban.mjs',
+      'app/modules/cat-script.mjs', 'app/modules/film-playback.mjs', 'app/modules/metadata-data.mjs', 'app/modules/metadata/douban.mjs',
       'app/modules/metadata/network.mjs', 'app/modules/metadata/settings.mjs', 'app/modules/metadata/tmdb.mjs',
       'app/modules/music-script.mjs',
       'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs',
@@ -189,6 +197,7 @@ test('common runtime packaging stages only the script dependency closure with ex
   assert.deepEqual(manifest.dependencies.map(p => p.path).sort(), [
     'node_modules/@meowfilm/runtime-bridge', 'node_modules/@meowfilm/script-host',
     'node_modules/@meowfilm/source-runtime', 'node_modules/@meowfilm/pan-runtime',
+    'node_modules/@meowfilm/film-rules', 'node_modules/@meowfilm/film-playback',
     'node_modules/shared', 'node_modules/host-lib', 'node_modules/peer-lib',
     'node_modules/fixture-lib', 'node_modules/fixture-lib/node_modules/shared', 'node_modules/@fixture/token',
     'node_modules/music-lib', 'node_modules/@meowfilm/script-host/node_modules/fixture-dom',
@@ -208,6 +217,17 @@ test('common runtime packaging stages only the script dependency closure with ex
     assert.equal(file.bytes, bytes.length); assert.equal(file.sha256, sha256(bytes));
   }
 });
+
+for (const [workspace, file] of [
+  ['film-rules', 'film-rules.js'], ['film-playback', 'src/index.js'],
+]) {
+  test(`the App closure requires the ${workspace} workspace and its public file`, async () => {
+    const absent = fixture({ missing: [`packages/${workspace}`] });
+    await fails(absent, 'MISSING_SOURCE');
+    const missingFile = fixture({ omitFiles: [`packages/${workspace}/${file}`] });
+    await fails(missingFile, 'MISSING_PUBLIC_FILE');
+  });
+}
 
 test('hashes and manifest bytes are reproducible across absolute output directories', async () => {
   const f = fixture();

@@ -9,7 +9,7 @@ using System.Text.Json.Serialization;
 namespace MeowFilm.Media;
 
 /// <summary>Finite native VOD compiler/reader, not a scheduler, filesystem owner or download service.
-/// A trusted caller supplies address/authorization checks. One attempt
+/// One owned attempt
 /// produces one reproducible stream; URLs, headers and clear-text upstream validators are not archived.</summary>
 public sealed class NativeAdaptiveArchive : IAsyncDisposable
 {
@@ -33,28 +33,26 @@ public sealed class NativeAdaptiveArchive : IAsyncDisposable
     public long Length { get; private set; }
     public string Validator { get; private set; } = "";
 
-    private NativeAdaptiveArchive(Uri origin, IReadOnlyDictionary<string, string> headers,
-        NativeHttpMediaOptions options, Action<Uri> validateAddress, CancellationToken token)
+    private NativeAdaptiveArchive(IReadOnlyDictionary<string, string> headers,
+        NativeHttpMediaOptions options, CancellationToken token)
     {
         lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
-        transport = new(options, new(headers, StringComparer.OrdinalIgnoreCase), origin, lifetime.Token,
-            validateAddress);
+        transport = new(options, new(headers, StringComparer.OrdinalIgnoreCase), lifetime.Token);
         graph = new(transport, ArchiveOrigin, deterministic: true);
     }
     public static async Task<NativeAdaptiveArchive> CreateAsync(byte[] manifest, Uri resolvedAddress,
-        bool forwardCredentials, Uri credentialOrigin, IReadOnlyDictionary<string, string> headers,
-        NativeHttpMediaOptions options, long maximumBytes, Action<Uri> validateAddress, CancellationToken token = default)
+        IReadOnlyDictionary<string, string> headers,
+        NativeHttpMediaOptions options, long maximumBytes, CancellationToken token = default)
     {
         ArgumentNullException.ThrowIfNull(manifest); ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(validateAddress);
         if (maximumBytes is <= 0 or > ReadLeaseMediaInput.MaximumLength)
             throw new PlaybackException(PlaybackError.AdaptiveBudget);
         // Validate/copy headers using the same public playback boundary; never accept VLC options.
-        var safeHeaders = HttpMediaInput.ValidateRequest(credentialOrigin, headers, options, allowAdaptive: true);
-        var plan = new NativeAdaptiveArchive(credentialOrigin, safeHeaders, options, validateAddress, token);
+        var safeHeaders = HttpMediaInput.ValidateRequest(resolvedAddress, headers, allowAdaptive: true);
+        var plan = new NativeAdaptiveArchive(safeHeaders, options, token);
         try
         {
-            var root = await plan.graph.BuildAsync(manifest, resolvedAddress, forwardCredentials, plan.lifetime.Token).ConfigureAwait(false);
+            var root = await plan.graph.BuildAsync(manifest, resolvedAddress, plan.lifetime.Token).ConfigureAwait(false);
             long payloadBytes = 0;
             foreach (var pair in plan.graph.Resources)
             {

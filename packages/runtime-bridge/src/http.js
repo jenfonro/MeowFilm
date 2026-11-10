@@ -1,33 +1,27 @@
 import http from 'node:http';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import https from 'node:https';
+import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { BridgeError, HTTP_PROTOCOL } from './errors.js';
 import { checkJSON, encodeJSONValue, decodeJSONValue, parseJSON } from './json.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\s\S])/i;
-const keyPattern = /^[0-9a-f]{64}$(?![\s\S])/;
 const publicCodes = new Set(['INVALID_REQUEST', 'METHOD_NOT_FOUND', 'PERMISSION_DENIED',
   'CLOSED', 'CANCELLED', 'TIMEOUT', 'INVALID_RESPONSE']);
 const streamHeaderNames = new Set(['content-type', 'content-length', 'cache-control', 'etag', 'last-modified']);
 const invalid = () => { throw new BridgeError('INVALID_REQUEST'); };
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
-export function validateSession({ sessionId, key }) {
-  if (typeof sessionId !== 'string' || !uuid.test(sessionId) ||
-      typeof key !== 'string' || !keyPattern.test(key)) invalid();
+export function validateSession({ sessionId }) {
+  if (typeof sessionId !== 'string' || !uuid.test(sessionId)) invalid();
 }
 export function validateEndpoint(value) {
   let url;
   try { url = new URL(value); } catch { invalid(); }
-  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port ||
-      url.username || url.password || url.pathname !== '/' || url.search || url.hash) invalid();
+  if (!['http:', 'https:'].includes(url.protocol) || !url.hostname ||
+      url.pathname !== '/' || url.search || url.hash) invalid();
   return url;
-}
-function sameKey(left, right) {
-  const bytes = Buffer.from(left ?? '');
-  const expected = Buffer.from(`Bearer ${right}`);
-  return bytes.length === expected.length && timingSafeEqual(bytes, expected);
 }
 function envelope(value, contract, codes) {
   if (!object(value) || typeof value.ok !== 'boolean' || value.contract !== contract ||
@@ -190,13 +184,15 @@ function readBody(stream, { maximumBytes, limitCode, signal } = {}) {
 }
 
 /** One session listener. Handlers remain owned until they really settle. */
-export function createHttpServer({ sessionId, key, resolve: resolveRoute, onClose } = {}) {
-  validateSession({ sessionId, key });
+export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRoute, onClose } = {}) {
+  validateSession({ sessionId });
   if (typeof resolveRoute !== 'function' || onClose !== undefined && typeof onClose !== 'function') invalid();
   const active = new Map(), sockets = new Set();
   let baseUrl, starting, closing, closed = false, sequence = 0, streamCleanupFailed = false;
   const server = http.createServer({ requestTimeout: 0 }, (request, response) => {
-    const requestId = request.headers['x-meow-request-id'];
+    const requestId = request.headers['x-meow-request-id'] ?? randomUUID();
+    response.setHeader('access-control-allow-origin', '*');
+    response.setHeader('access-control-expose-headers', 'X-Meow-Request-Id, ETag');
     const controller = new AbortController();
     const abort = () => { if (!response.writableFinished) controller.abort(); };
     const send = (status, value) => {
@@ -216,19 +212,19 @@ export function createHttpServer({ sessionId, key, resolve: resolveRoute, onClos
       let route;
       try {
         if (closed) { send(403, failed('CLOSED')); request.resume(); return; }
-        const counts = new Map();
-        for (let i = 0; i < request.rawHeaders.length; i += 2) {
-          const name = request.rawHeaders[i].toLowerCase();
-          counts.set(name, (counts.get(name) ?? 0) + 1);
-        }
-        if (request.headers.host !== new URL(baseUrl).host ||
-            request.headers['x-meow-session'] !== sessionId ||
-            !sameKey(request.headers.authorization, key) ||
-            ['host', 'authorization', 'x-meow-session', 'x-meow-request-id'].some(name => counts.get(name) !== 1)) {
-          send(401, failed('PERMISSION_DENIED')); request.resume(); return;
-        }
         if (!uuid.test(requestId ?? '') || active.has(requestId)) {
           send(400, failed('INVALID_REQUEST')); request.resume(); return;
+        }
+        if (request.method === 'OPTIONS') {
+          response.setHeader('access-control-allow-methods', 'GET, POST, PUT, OPTIONS');
+          response.setHeader('access-control-allow-headers', request.headers['access-control-request-headers'] ?? '*');
+          if (request.headers['access-control-request-private-network'] === 'true') {
+            response.setHeader('access-control-allow-private-network', 'true');
+          }
+          response.writeHead(204);
+          response.end();
+          request.resume();
+          return;
         }
         if (!request.url.startsWith('/') || request.url.startsWith('//')) invalid();
         const url = new URL(request.url, baseUrl);
@@ -311,7 +307,7 @@ export function createHttpServer({ sessionId, key, resolve: resolveRoute, onClos
           resolve(baseUrl);
         };
         server.once('error', failure); server.once('listening', listening);
-        server.listen(0, '127.0.0.1');
+        server.listen(0);
       });
     },
     close() {
@@ -335,11 +331,11 @@ export function createHttpServer({ sessionId, key, resolve: resolveRoute, onClos
 }
 
 /** Standard HTTP client; no retry, redirects, response-size branch or body processing. */
-export function createHttpClient({ baseUrl, sessionId, key, timeout = 30000 } = {}) {
+export function createHttpClient({ baseUrl, timeout = 30000 } = {}) {
   const endpoint = validateEndpoint(baseUrl);
-  validateSession({ sessionId, key });
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 300000) invalid();
-  const agent = new http.Agent({ keepAlive: true });
+  const transport = endpoint.protocol === 'https:' ? https : http;
+  const agent = new transport.Agent({ keepAlive: true });
   const pending = new Set();
   let closed = false, closing;
   function request({ method = 'POST', path, body, contract = HTTP_PROTOCOL, codes = publicCodes,
@@ -351,7 +347,7 @@ export function createHttpClient({ baseUrl, sessionId, key, timeout = 30000 } = 
       if (typeof path !== 'string' || !path.startsWith('/v1/') || path.startsWith('//') ||
           !uuid.test(requestId) || !Number.isSafeInteger(deadline) || deadline < 1 || deadline > 300000) invalid();
       const url = new URL(path, endpoint);
-      if (url.origin !== endpoint.origin || url.pathname + url.search !== path || url.hash ||
+      if (url.pathname + url.search !== path || url.hash ||
           !['GET', 'POST', 'PUT'].includes(method)) invalid();
       if (raw && !(body instanceof Uint8Array)) invalid();
       bytes = method === 'GET' ? undefined : raw ? Buffer.from(body) : encodeJSONValue(body);
@@ -364,9 +360,8 @@ export function createHttpClient({ baseUrl, sessionId, key, timeout = 30000 } = 
       }, done: undefined };
       let drained;
       owner.done = new Promise(done => { drained = done; });
-      const outgoing = http.request(new URL(path, endpoint), {
-        method, agent, headers: { authorization: `Bearer ${key}`, 'x-meow-session': sessionId,
-          'x-meow-request-id': requestId,
+      const outgoing = transport.request(new URL(path, endpoint), {
+        method, agent, headers: { 'x-meow-request-id': requestId,
           ...(bytes === undefined ? {} : { 'content-type': raw ? 'application/octet-stream' : 'application/json',
             'content-length': bytes.length }) },
       });

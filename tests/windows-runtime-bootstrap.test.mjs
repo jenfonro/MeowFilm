@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { Duplex } from 'node:stream';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import {
   connectWindowsNamedPipe, parseWindowsLaunchArguments, startWindowsAppRuntime,
@@ -15,7 +15,7 @@ import { temporaryRoot } from '../scripts/windows/working-paths.mjs';
 const windows = { skip: process.platform !== 'win32' ? 'Requires Windows pipe connector' : false };
 const pipeArgs = (name = `meowfilm-${randomUUID()}`, session = randomUUID()) =>
   ['--meow-pipe', name, '--meow-session', session];
-const identity = () => ({ sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex'),
+const identity = () => ({ sessionId: randomUUID(),
   dataRoot: join(temporaryRoot, 'script-数据👨‍👩‍👦') });
 function bounded(promise) {
   let timer;
@@ -163,14 +163,14 @@ test('fragmented private config returns one ready line and complete business JSO
   const readyBytes = Buffer.concat(f.pipe.output).toString('utf8');
   assert.equal(readyBytes.split('\n').length, 2);
   assert.deepEqual(JSON.parse(readyBytes), { protocol: 'runtime.http.v1', baseUrl: runtime.baseUrl });
-  const client = createRuntimeClient({ ...f.input, baseUrl: runtime.baseUrl });
+  const client = createRuntimeClient({ baseUrl: runtime.baseUrl });
   t.after(() => client.close());
   const value = { text: '业务👨‍👩‍👦'.repeat(100000) };
   assert.deepEqual(await client.call('music.script.invoke', value), { ok: true, contract: 'music.script.v3', value });
   assert.equal(f.pipe.output.length, 1);
   await client.close(); // Closing an HTTP keepalive is unrelated to the private pipe lifetime.
   assert.equal(runtime.state.closed, false);
-  const next = createRuntimeClient({ ...f.input, baseUrl: runtime.baseUrl });
+  const next = createRuntimeClient({ baseUrl: runtime.baseUrl });
   t.after(() => next.close());
   assert.equal((await next.describe()).ok, true);
   await runtime.close();
@@ -179,10 +179,9 @@ test('fragmented private config returns one ready line and complete business JSO
 
 for (const mutation of [
   value => ({ ...value, sessionId: randomUUID() }),
-  value => ({ ...value, requestKey: 'private' }),
   value => ({ ...value, dataRoot: 'relative' }),
   value => ({ ...value, extra: true }),
-  value => ({ sessionId: value.sessionId, requestKey: value.requestKey }),
+  value => ({ sessionId: value.sessionId }),
   () => null, () => [],
 ]) {
   test('invalid private config is rejected before runtime creation', async t => {
@@ -232,7 +231,7 @@ for (const reason of ['end', 'error', 'close', 'extra-byte', 'cancel']) {
     const controller = new AbortController(), f = fixture(t, { signal: controller.signal });
     f.send();
     const runtime = await f.started, closed = once(f.pipe, 'close');
-    const client = createRuntimeClient({ ...f.input, baseUrl: runtime.baseUrl });
+    const client = createRuntimeClient({ baseUrl: runtime.baseUrl });
     t.after(() => client.close());
     const pending = assert.rejects(client.call('music.script.invoke', { wait: true }), { code: 'CLOSED' });
     const signal = await f.invocation.promise;

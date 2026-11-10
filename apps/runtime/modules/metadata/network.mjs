@@ -6,21 +6,20 @@ import { metadataFailure } from './settings.mjs';
 function address(value) {
   let url;
   try { url = new URL(value); } catch { throw metadataFailure('INVALID_REQUEST'); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) {
+  if (!['http:', 'https:'].includes(url.protocol) || url.hash) {
     throw metadataFailure('INVALID_REQUEST');
   }
   return url.href;
 }
 
-/** Reuse the existing buffered network adapter for metadata only. Redirects
- * require the source adapter's explicit policy; credentials do not travel
- * through an automatically followed Location. */
+/** Reuse the buffered HTTP adapter, including explicit headers on redirects.
+ * Cookie-jar consumers request individual hops and select their own cookies. */
 export function createMetadataRequest() {
   const network = createNodeNetwork();
   return async (url, { signal, ...options } = {}) => {
     try {
       const result = await network({ url, signal, validateURL: address,
-        options: { followRedirect: false, ...options } });
+        options });
       return { status: result.statusCode, headers: result.headers, body: result.body, url: result.url };
     } catch (error) {
       throw metadataFailure(signal?.aborted ? 'CANCELLED'

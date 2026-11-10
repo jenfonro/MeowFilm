@@ -169,9 +169,15 @@ internal sealed class DoubanFilmHomeSource : IFilmHomeSource
             string title = Text(item, "title");
             if (title.Length == 0) continue;
             string id = Scalar(item, "id");
+            string metadataId = id;
             if (id.Length == 0)
                 id = $"{section.Key}:{itemIndex.ToString(CultureInfo.InvariantCulture)}:{title}";
-            result.Add(new(id, title, Poster(item), Score(item)));
+            result.Add(new(id, title, Poster(item), Score(item))
+            {
+                PlaybackContext = metadataId.Length == 0 ? null : new(new(
+                    $"douban:{section.Kind}:{metadataId}", section.Kind == "movie" ? "movie" : "tv",
+                    title, "douban", metadataId))
+            });
         }
         return result;
     }

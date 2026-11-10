@@ -124,9 +124,7 @@ private final class FilmHTTPTransport: NSObject, URLSessionDataDelegate, @unchec
         if response.expectedContentLength > Self.maximumBytes {
             flight.failure = .responseTooLarge
         } else if let response = response as? HTTPURLResponse {
-            if (300..<400).contains(response.statusCode) {
-                flight.failure = .redirectDenied
-            } else if response.statusCode != 200 {
+            if response.statusCode != 200 {
                 flight.failure = .upstream(statusCode: response.statusCode)
             } else if response.expectedContentLength == 0 {
                 flight.failure = .invalidResponse
@@ -193,18 +191,17 @@ private final class FilmHTTPTransport: NSObject, URLSessionDataDelegate, @unchec
         lock.lock()
         let kind = flights[task.taskIdentifier]?.kind
         lock.unlock()
-        guard kind == .artwork, let address = request.url?.absoluteString,
-              let url = FilmPosterAddress.normalize(address) else {
+        guard let kind, let url = request.url,
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.host?.isEmpty == false else {
             completionHandler(nil)
             return
         }
-        completionHandler(FilmHTTPRequestKind.artwork.request(url))
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        completionHandler(challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust
-            ? .performDefaultHandling : .cancelAuthenticationChallenge, nil)
+        guard let target = kind == .artwork ? FilmPosterAddress.normalize(url.absoluteString) : url else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(kind.request(target))
     }
 
     deinit {

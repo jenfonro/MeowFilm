@@ -29,6 +29,14 @@
      <RadioButton Content="猫源管理" Tag="cats" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="猫源管理"/>
      <RadioButton Content="视频源管理" Tag="videos" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="视频源管理"/>
      <RadioButton Content="TMDB" Tag="tmdb" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="TMDB 设置" Visibility="{Binding HasMetadataSettings,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+     <StackPanel x:Name="BusinessNavigation" Orientation="Horizontal" Visibility="Collapsed">
+      <RadioButton Content="播放偏好" Tag="preferences" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
+      <RadioButton Content="站点净化" Tag="clean" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
+      <RadioButton Content="观看历史" Tag="history" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
+      <RadioButton Content="人工匹配" Tag="manual" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
+      <RadioButton Content="片源屏蔽" Tag="blocks" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
+      <RadioButton Content="收藏" Tag="favorites" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
+     </StackPanel>
     </StackPanel>
    </ScrollViewer>
   </Border>
@@ -67,6 +75,7 @@
     </Border>
    </ScrollViewer>
   </Grid>
+  <Grid x:Name="BusinessPage" Grid.Row="1" Visibility="Collapsed"/>
   <Grid x:Name="RulesPage" Grid.Row="1">
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">

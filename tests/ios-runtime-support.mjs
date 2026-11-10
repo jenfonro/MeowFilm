@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +22,7 @@ export function spawnRuntime(t, { preload = simulatedIOS, argv, entry, fixture, 
   mkdirSync(temporaryRoot, { recursive: true });
   const area = mkdtempSync(join(temporaryRoot, 'ios-runtime-'));
   t.after(() => rmSync(assertOwnedPath(temporaryRoot, area), { recursive: true, force: true }));
-  const configuration = { sessionId: randomUUID(), requestKey: randomBytes(32).toString('hex'),
+  const configuration = { sessionId: randomUUID(),
     dataRoot: join(area, 'scripts'), ...changes };
   if (fixture !== undefined) {
     entry = join(area, 'entry.mjs');
@@ -69,8 +69,7 @@ export function spawnRuntime(t, { preload = simulatedIOS, argv, entry, fixture, 
 
 export async function connect(runtime) {
   const baseUrl = await runtime.endpoint;
-  const { sessionId, requestKey } = runtime.configuration;
-  const client = createRuntimeClient({ baseUrl, sessionId, requestKey, timeout: 20000 });
+  const client = createRuntimeClient({ baseUrl, timeout: 20000 });
   return { client, baseUrl, closed: runtime.closed };
 }
 

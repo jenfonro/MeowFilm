@@ -14,6 +14,9 @@ public sealed partial class ShellWindow
     private bool _hiddenToTray, _closeChoiceQueued, _sessionEnding;
     private long _closeChoiceGeneration;
 
+    /// <summary>True only for the shell's tray hide, published before child visibility changes.</summary>
+    public bool IsHiddenToTray => _hiddenToTray;
+
     private void InitializeTrayIcon()
     {
         if (_closePreferences is null) return;

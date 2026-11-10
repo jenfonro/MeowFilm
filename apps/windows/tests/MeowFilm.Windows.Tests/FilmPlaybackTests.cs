@@ -17,13 +17,13 @@ public static class FilmPlaybackTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("film-playback: direct preview and movie or series cards need no detail requests",
-            () => MusicQualityConsumerTests.Sta(LocalPreview));
+        yield return new("film-playback: unseeded route is empty and explicit wire cards preserve movie or series identity",
+            () => MusicQualityConsumerTests.Sta(ExplicitData));
         yield return new("film-playback: episode buttons and mouse or keyboard layout switches retain one selection",
             () => MusicQualityConsumerTests.Sta(EpisodeInteraction));
         yield return new("film-playback: unavailable player and responsive page keep scrolling in each region",
             () => MusicQualityConsumerTests.Sta(ResponsivePlayer));
-        yield return new("film-playback: recommendations and navigation restore the cached film episode and layout",
+        yield return new("film-playback: recommendations and navigation restore exact identity and coordinates without old presentation state",
             () => MusicQualityConsumerTests.Sta(NavigationRecovery));
         yield return new("film-playback: flat tiles mark one current episode and keep system outlines in high contrast",
             () => MusicQualityConsumerTests.Sta(FlatTiles));
@@ -31,7 +31,7 @@ public static class FilmPlaybackTests
             () => MusicQualityConsumerTests.Sta(HoverLift));
         yield return new("film-playback: poster covers the whole information region behind its foreground",
             () => MusicQualityConsumerTests.Sta(BackdropPoster));
-        yield return new("film-playback: centered hero actions expose unavailable playback and retain each film favorite",
+        yield return new("film-playback: centered hero actions allow retry and persist each film favorite",
             () => MusicQualityConsumerTests.Sta(HeroActions));
         yield return new("film-playback: overlay text stays readable on bright dark and missing posters",
             () => MusicQualityConsumerTests.Sta(OverlayReadability));
@@ -39,54 +39,56 @@ public static class FilmPlaybackTests
             () => MusicQualityConsumerTests.Sta(AmbientTint));
     }
 
-    private static async Task LocalPreview()
+    private static async Task ExplicitData()
     {
         await using var scene = new Scene();
         var module = scene.Module;
         await module.InitializeAsync(default);
         await module.NavigateAsync(FilmCapability.PlaybackRoute, default);
         await Drain();
-        Check(FilmCapability.PlaybackRoute == "film-playback" &&
-            module.IsPlayback && module.Heading == "播放页", "direct route publishes the playback heading");
-        Check(scene.Source.Calls == 0, "direct local preview does not load home or film details");
-        CheckPreview(scene.Page);
-        Check(Visuals(scene.Playback).OfType<FrameworkElement>().All(element => element.ToolTip is null),
-            "film titles descriptions and disabled playback have no hover hints");
-        Check(ReferenceEquals(scene.Playback.DataContext, scene.Page) &&
-            Named<Grid>(scene.View, "PlaybackPage").IsVisible,
-            "FilmView presents the bound playback page");
-        Check(((IDesktopHeaderSource)scene.View).Header is
-            { Title: "播放页", SearchVisible: true, SearchEnabled: true, SearchTargetId: "film" },
-            "the shell receives the playback heading");
-
+        Check(FilmCapability.PlaybackRoute == "film-playback" && module.IsPlayback && module.Heading == "播放页" &&
+            !module.HasPlayback && module.Playback is null,
+            "an unseeded direct route never invents a default film");
+        Check(!scene.Playback.IsVisible && Named<TextBlock>(scene.View, "PlaybackEmpty").IsVisible,
+            "the unseeded route renders its real empty state, not an unbound playback layout");
+        Check(scene.Source.Calls == 0 && scene.Runtime.Calls.Count == 0,
+            "an unseeded route performs no business request");
         await module.NavigateAsync(FilmCapability.HomeRoute, default);
         int calls = scene.Source.Calls;
         Check(calls > 0 && module.Sections.All(section => section.Items.Count == 12),
-            "home is supplied by the local twelve-card source");
+            "the explicitly isolated home fixture supplies its full requested range");
         foreach (string key in new[] { "movie", "tv" })
         {
             var item = module.Sections.Single(section => section.Key == key).Items[0];
             await module.OpenPlaybackAsync(item);
             await Drain();
             var page = scene.Page;
-            Check(ReferenceEquals(page.Item, item) && page.Title == item.Title && page.Poster == item.Poster,
-                "opening a card retains its identity title and poster");
-            CheckPreview(page);
-            Check(key == "movie"
-                ? page.Episodes.Count == 1 && page.SelectedEpisode!.Label.Contains("正片", StringComparison.Ordinal)
-                : page.Episodes.Count > 1 && page.Episodes.Select(episode => episode.Number).Distinct().Count() ==
-                    page.Episodes.Count,
-                "movies offer the feature and series offer distinct episodes with descriptions");
-            Check(scene.Source.Calls == calls, "opening playback never asks the source for details");
+            Check(page.Item.Id == item.Id && page.Request.Target.Id == item.PlaybackContext!.Target.Id &&
+                page.Title == item.Title && page.Poster == item.Poster,
+                "opening a card preserves exact identity, title and poster");
+            CheckData(page);
+            Check(key == "movie" ? page.Episodes.Count == 0 && page.Candidates.Count == 1 && page.SelectedEpisode is null :
+                page.Episodes.Count == 12 && page.SelectedEpisode is { Number: 1 },
+                "a movie uses real file candidates; series use actual wire episodes");
+            Check(scene.Source.Calls == calls && !scene.Runtime.Calls.Any(call => call.Method.StartsWith("film.data.", StringComparison.Ordinal)),
+                "the native consumer does not repeat metadata or detail loading");
+            Check(ReferenceEquals(scene.Playback.DataContext, page) && Named<Grid>(scene.View, "PlaybackPage").IsVisible,
+                "FilmView binds the seeded playback page");
+            Check(Visuals(scene.Playback).OfType<FrameworkElement>().All(element => element.ToolTip is null),
+                "film titles descriptions and playback controls have no hover hints");
+            Check(((IDesktopHeaderSource)scene.View).Header is
+                { Title: "播放页", SearchVisible: true, SearchEnabled: true, SearchTargetId: "film" },
+                "the shell receives the playback heading and retains the film search entry");
             await module.RestoreNavigationAsync(FilmCapability.HomeRoute, default);
         }
-        Check(scene.Source.Calls == calls, "returning to the loaded home also retains its source results");
+        Check(scene.Source.Calls == calls && scene.Native.Commits == 0,
+            "navigation reuses the home results and fixtures do not pretend to play media");
     }
 
     private static async Task EpisodeInteraction()
     {
         await using var scene = new Scene();
-        await scene.Module.NavigateAsync(FilmCapability.PlaybackRoute, default);
+        await scene.OpenAsync();
         await Drain();
         var page = scene.Page;
         var view = scene.Playback;
@@ -94,7 +96,7 @@ public static class FilmPlaybackTests
         var list = Named<ItemsControl>(view, "EpisodeList");
         var rail = Named<ScrollViewer>(view, "HorizontalEpisodes");
         Check(page.Episodes.Count > 1 && page.IsHorizontalLayout && !page.IsListLayout &&
-            rail.IsVisible && !list.IsVisible, "preview starts with the horizontal episode cards");
+            rail.IsVisible && !list.IsVisible, "the explicit TMDB snapshot starts with horizontal episode cards");
         CheckEpisodeContent(cards, page);
         var chosen = page.Episodes[1];
         Click(EpisodeButton(cards, chosen));
@@ -145,7 +147,7 @@ public static class FilmPlaybackTests
     private static async Task ResponsivePlayer()
     {
         await using var scene = new Scene(840);
-        await scene.Module.NavigateAsync(FilmCapability.PlaybackRoute, default);
+        await scene.OpenAsync();
         await Drain();
         var view = scene.Playback;
         var player = Named<Grid>(view, "PlayerFrame");
@@ -153,9 +155,9 @@ public static class FilmPlaybackTests
         var hero = Named<Grid>(view, "HeroGrid");
         var scroll = Named<ScrollViewer>(view, "PageScroll");
         var play = Named<Button>(view, "PlayButton");
-        Check(!play.IsEnabled && Named<TextBlock>(view, "PlayerStatus").Text == "暂无片源" &&
-            AutomationProperties.GetName(play).Contains("暂无片源", StringComparison.Ordinal),
-            "unavailable playback is disabled with a visible and accessible reason");
+        Check(play.IsEnabled && Named<TextBlock>(view, "PlayerStatus").Text == "暂无可用片源" &&
+            AutomationProperties.GetName(play) == "播放或暂停" && scene.Native.Commits == 0,
+            "an unavailable snapshot remains honestly empty while allowing an explicit playback retry");
 
         foreach (double width in new[] { 1160d, 840d, 839d, 700d })
         {
@@ -168,7 +170,7 @@ public static class FilmPlaybackTests
             var playerOrigin = player.TranslatePoint(new Point(), hero);
             var metadataOrigin = metadata.TranslatePoint(new Point(), hero);
             Check(player.ActualWidth > 0 && metadata.ActualWidth > 0 &&
-                Math.Abs(player.ActualHeight - player.ActualWidth * 9 / 16) < 1,
+                Math.Abs(Named<Grid>(view, "VideoPicture").ActualHeight - player.ActualWidth * 9 / 16) < 1,
                 "the player keeps its sixteen-to-nine frame");
             Check(stacked
                 ? metadataOrigin.Y >= playerOrigin.Y + player.ActualHeight &&
@@ -209,7 +211,8 @@ public static class FilmPlaybackTests
         await Drain();
         CheckInsideViewport(scroll, Named<ItemsControl>(view, "EpisodeList"));
         CheckInsideViewport(scroll, Named<Grid>(view, "MetadataPanel"));
-        Check(!play.IsEnabled && scene.Source.Calls == 0, "resizing and scrolling never enable or resolve playback");
+        Check(play.IsEnabled && !scene.Page.HasOutput && scene.Native.Commits == 0 && scene.Source.Calls == 0,
+            "resizing and scrolling do not manufacture an output or resolve a source");
     }
 
     private static async Task NavigationRecovery()
@@ -227,74 +230,59 @@ public static class FilmPlaybackTests
         await Drain();
         string location = module.CaptureNavigationLocation();
         int calls = scene.Source.Calls;
-        Check(location.StartsWith(FilmCapability.PlaybackRoute, StringComparison.Ordinal) &&
-            location.Contains(item.Id, StringComparison.Ordinal), "captured playback location identifies its film");
-
+        Check(location.Contains(item.Id, StringComparison.Ordinal) && original.IsListLayout,
+            "captured navigation includes the exact film and selected coordinate");
         scene.View.Visibility = Visibility.Collapsed;
         await Drain();
         scene.View.Visibility = Visibility.Visible;
         await module.RestoreNavigationAsync(location, default);
         await Drain();
-        Check(ReferenceEquals(scene.Page, original) && original.IsListLayout &&
-            ReferenceEquals(scene.Playback.DataContext, original), "module visibility preserves the same playback model");
+        Check(!ReferenceEquals(scene.Page, original) && !scene.Page.IsListLayout &&
+            scene.Page.Request.Target.Id == original.Request.Target.Id && ReferenceEquals(scene.Playback.DataContext, scene.Page),
+            "restoration creates an accurate request, not an old search or presentation object");
         CheckSelection(scene, chosen);
         await module.NavigateAsync(FilmCapability.HomeRoute, default);
-        var updatedCard = item with { Title = item.Title + " 更新", Score = "8.8" };
-        var section = module.Sections.Single(section => section.Key == "tv");
-        section.Items[0] = updatedCard;
+        var updatedCard = FilmPlaybackFixture.RefreshMetadata(item with { Title = item.Title + " 更新", Score = "8.8" });
+        module.Sections.Single(section => section.Key == "tv").Items[0] = updatedCard;
         await module.OpenPlaybackAsync(updatedCard);
         await Drain();
-        Check(ReferenceEquals(scene.Page, original) && original.IsListLayout &&
-            Named<ItemsControl>(scene.Playback, "EpisodeList").IsVisible &&
-            ReferenceEquals(original.Item, updatedCard) &&
-            Named<TextBlock>(scene.Playback, "FilmTitle").Text == updatedCard.Title,
-            "reopening the same film retains its episode and layout while refreshing the card metadata");
-        await module.NavigateAsync(FilmCapability.HomeRoute, default);
+        Check(scene.Page.Item.Id == updatedCard.Id && scene.Page.Title == updatedCard.Title &&
+            scene.Page.SelectedEpisode is { Number: 1 } && !scene.Page.IsListLayout,
+            "a new card request has its own display metadata and coordinates");
         await module.RestoreNavigationAsync(location, default);
         await Drain();
-        Check(ReferenceEquals(scene.Page, original) && original.IsListLayout,
-            "return navigation restores the cached model and rendered layout");
         CheckSelection(scene, chosen);
-
+        var restored = scene.Page;
         var routes = new List<string>();
         module.NavigationRequested += (_, request) => routes.Add(request.Route);
         bool rejected = false;
         try { await module.OpenRecommendationAsync(new("outside-recommendations", "其他影片", "", "")); }
         catch (ArgumentException) { rejected = true; }
-        Check(rejected && routes.Count == 0 && ReferenceEquals(scene.Page, original) &&
-            module.CaptureNavigationLocation() == location, "an item outside the current recommendations cannot navigate");
-
-        var recommendation = original.Recommendations.First(candidate => candidate.Id != item.Id);
-        var related = Named<ItemsControl>(scene.Playback, "RelatedItems");
-        var button = Visuals(related).OfType<Button>()
-            .Single(candidate => ReferenceEquals(candidate.Tag, recommendation));
-        Click(button);
+        Check(rejected && routes.Count == 0 && ReferenceEquals(scene.Page, restored) &&
+            module.CaptureNavigationLocation() == location,
+            "a recommendation outside the actual response cannot navigate or change state");
+        var recommendation = restored.Recommendations.First();
+        Click(Visuals(Named<ItemsControl>(scene.Playback, "RelatedItems")).OfType<Button>()
+            .Single(button => ReferenceEquals(button.Tag, recommendation)));
         await Drain();
-        Check(routes.SequenceEqual(["film-playback"]), "a recommendation requests the same internal playback route");
+        Check(routes.SequenceEqual([FilmCapability.PlaybackRoute]), "recommendations use the same internal route");
         await module.NavigateAsync(routes[0], default);
         await Drain();
-        var recommended = scene.Page;
-        Check(!ReferenceEquals(recommended, original) && ReferenceEquals(recommended.Item, recommendation) &&
-            recommended.Title == recommendation.Title && recommended.Poster == recommendation.Poster &&
-            ReferenceEquals(scene.Playback.DataContext, recommended), "recommendation updates the bound film context");
-        string recommendedLocation = module.CaptureNavigationLocation();
-        Check(recommendedLocation != location &&
-            recommendedLocation.Contains(recommendation.Id, StringComparison.Ordinal),
-            "the recommended film has its own restorable location");
+        Check(scene.Page.Item.Id == recommendation.Id && scene.Page.Request.Target.Id == recommendation.PlaybackContext!.Target.Id &&
+            ReferenceEquals(scene.Playback.DataContext, scene.Page), "the actual recommendation identity is bound");
+        Check(module.CaptureNavigationLocation() != location, "different targets have different navigation locations");
         await module.RestoreNavigationAsync(location, default);
         await Drain();
-        Check(module.IsPlayback && ReferenceEquals(scene.Page, original) && original.IsListLayout &&
-            ReferenceEquals(scene.Playback.DataContext, original) &&
-            Named<ItemsControl>(scene.Playback, "EpisodeList").IsVisible,
-            "an older location still restores its film and layout after a recommendation");
+        Check(scene.Page.Request.Target.Id == original.Request.Target.Id && !scene.Page.IsListLayout,
+            "the original location remains restorable without retaining an old layout");
         CheckSelection(scene, chosen);
-        Check(scene.Source.Calls == calls, "navigation and recommendation changes do not reload the source");
+        Check(scene.Source.Calls == calls, "native navigation never reloads the settled home source");
     }
 
     private static async Task FlatTiles()
     {
         await using var scene = new Scene();
-        await scene.Module.NavigateAsync(FilmCapability.PlaybackRoute, default);
+        await scene.OpenAsync();
         await Drain();
         var view = scene.Playback;
         var page = scene.Page;
@@ -364,11 +352,11 @@ public static class FilmPlaybackTests
     private static async Task HoverLift()
     {
         await using var scene = new Scene();
-        await scene.Module.NavigateAsync(FilmCapability.PlaybackRoute, default);
+        await scene.OpenAsync();
         await Drain();
         var view = scene.Playback;
         var page = scene.Page;
-        var current = page.SelectedEpisode ?? throw new InvalidOperationException("Preview episode is missing");
+        var current = page.SelectedEpisode!;
         await CheckLift(Tiles(view, "EpisodeCards")[1], Named<ItemsControl>(view, "EpisodeCards"), 144);
         await CheckLift(Tiles(view, "RelatedItems")[0], Named<ItemsControl>(view, "RelatedItems"), 234);
         Click(Named<Button>(view, "ListLayout"));
@@ -383,7 +371,7 @@ public static class FilmPlaybackTests
         await Drain();
         Check(rowHover.Opacity == 0, "the row hover surface returns to transparent");
         Check(ReferenceEquals(page.SelectedEpisode, current) && current.IsSelected &&
-            !Named<Button>(view, "PlayButton").IsEnabled && scene.Source.Calls == 0,
+            !page.HasOutput && scene.Native.Commits == 0 && scene.Source.Calls == 0,
             "hover feedback neither changes the current episode nor starts playback");
     }
 
@@ -438,7 +426,7 @@ public static class FilmPlaybackTests
             "a landscape image covers the frame with a centered crop and no stretching");
 
         await using var scene = new Scene();
-        await scene.Module.NavigateAsync(FilmCapability.PlaybackRoute, default);
+        await scene.OpenAsync();
         await Drain();
         var view = scene.Playback;
         var panel = Named<Grid>(view, "MetadataPanel");
@@ -492,7 +480,7 @@ public static class FilmPlaybackTests
     {
         await using var scene = new Scene();
         var module = scene.Module;
-        await module.NavigateAsync(FilmCapability.PlaybackRoute, default);
+        await scene.OpenAsync();
         await Drain();
         var page = scene.Page;
         var view = scene.Playback;
@@ -523,18 +511,26 @@ public static class FilmPlaybackTests
                 "the short title playback favorite and overview action fit the desktop metadata viewport");
             CheckBackgroundCoverage(view);
         }
-        Check(!play.IsEnabled && AutomationProperties.GetName(play).Contains("暂无片源", StringComparison.Ordinal) &&
-            Visuals(play).OfType<TextBlock>().Any(text => text.Text == "暂无片源"),
-            "the hero offers an honestly disabled playback action with a visible and accessible reason");
+        Check(play.IsEnabled && AutomationProperties.GetName(play) == "播放或暂停" &&
+            Visuals(play).OfType<TextBlock>().Any(text => text.Text == "播放") && !page.HasOutput,
+            "the hero offers explicit retry without claiming a native media output");
         Check(favorite.IsEnabled && favorite.IsTabStop && favorite.Focusable && !page.IsFavorite &&
             favorite.IsChecked == false && Named<TextBlock>(view, "FavoriteLabel").Text == "收藏",
             "favorite starts off with a labelled keyboard-accessible toggle");
         var toggle = (IToggleProvider)new ToggleButtonAutomationPeer(favorite).GetPattern(PatternInterface.Toggle);
+        scene.Store.FailWrite = true;
+        toggle.Toggle();
+        await Drain();
+        Check(!page.IsFavorite && page.CanFavorite && toggle.ToggleState == ToggleState.Off &&
+            Named<TextBlock>(view, "FavoriteLabel").Text == "收藏" &&
+            scene.Store.Data is null && scene.Store.Writes == 1,
+            "failed UIA persistence restores the actual favorite and cannot retry through binding updates");
+        scene.Store.FailWrite = false;
         toggle.Toggle();
         await Drain();
         Check(page.IsFavorite && toggle.ToggleState == ToggleState.On &&
             Named<TextBlock>(view, "FavoriteLabel").Text == "已收藏" &&
-            AutomationProperties.GetName(favorite) == "取消收藏 " + page.Title,
+            AutomationProperties.GetName(favorite) == "取消收藏 " + page.Title && scene.Store.Writes == 2,
             "the UIA toggle updates the model, visible favorite label and accessible action");
         string location = module.CaptureNavigationLocation();
         await module.OpenRecommendationAsync(page.Recommendations[0]);
@@ -543,8 +539,9 @@ public static class FilmPlaybackTests
             "a different film has independent favorite state");
         await module.RestoreNavigationAsync(location, default);
         await Drain();
-        Check(ReferenceEquals(scene.Page, page) && page.IsFavorite && favorite.IsChecked == true,
-            "return navigation restores the favorite for the original film");
+        page = scene.Page;
+        Check(page.IsFavorite && favorite.IsChecked == true && scene.Store.Writes == 2,
+            "return navigation reads the original film favorite from its one durable owner");
         favorite.BringIntoView();
         var source = PresentationSource.FromVisual(favorite)!;
         var keyboard = new KeyboardProbe();
@@ -552,7 +549,8 @@ public static class FilmPlaybackTests
         favorite.RaiseEvent(new KeyEventArgs(keyboard, source, 1, Key.Space) { RoutedEvent = Keyboard.KeyUpEvent });
         await Drain();
         Check(!page.IsFavorite && favorite.IsChecked == false &&
-            Named<TextBlock>(view, "FavoriteLabel").Text == "收藏", "Space removes the favorite and updates its label");
+            Named<TextBlock>(view, "FavoriteLabel").Text == "收藏" && scene.Store.Writes == 3,
+            "Space removes the favorite once and updates its label without a second binding-triggered write");
         var overview = Named<TextBlock>(view, "OverviewText");
         var overviewToggle = Named<Button>(view, "OverviewToggle");
         Check(!page.OverviewExpanded && overview.Visibility == Visibility.Collapsed &&
@@ -571,7 +569,11 @@ public static class FilmPlaybackTests
             "another film begins with a collapsed overview");
         await module.RestoreNavigationAsync(location, default);
         await Drain();
-        Check(page.OverviewExpanded && overview.IsVisible, "return navigation restores the expanded overview");
+        page = scene.Page;
+        Check(!page.OverviewExpanded && !overview.IsVisible, "new presentation does not reuse an old expanded overview");
+        PressEnter(overviewToggle);
+        await Drain();
+        Check(page.OverviewExpanded && overview.IsVisible, "Enter expands the actual current presentation");
         PressEnter(overviewToggle);
         await Drain();
         Check(!page.OverviewExpanded && overview.Visibility == Visibility.Collapsed &&
@@ -584,7 +586,7 @@ public static class FilmPlaybackTests
         Check(!Named<FilmPlaybackPoster>(view, "Backdrop").IsVisible && !Named<Border>(view, "MetadataWash").IsVisible &&
             Bounds(title, content).Top < 1 &&
             favorite.Foreground is SolidColorBrush ink && ink.Color == SystemColors.WindowTextColor &&
-            play.Foreground is SolidColorBrush disabled && disabled.Color == SystemColors.GrayTextColor,
+            play.Foreground is SolidColorBrush actionInk && actionInk.Color == SystemColors.HighlightTextColor,
             "high contrast reclaims the image space and uses system colors for both actions");
         Check(scene.Source.Calls == 0, "hero and favorite interactions issue no source requests");
     }
@@ -592,7 +594,7 @@ public static class FilmPlaybackTests
     private static async Task OverlayReadability()
     {
         await using var scene = new Scene(907);
-        await scene.Module.NavigateAsync(FilmCapability.PlaybackRoute, default);
+        await scene.OpenAsync();
         await Drain();
         var view = scene.Playback;
         var panel = Named<Grid>(view, "MetadataPanel");
@@ -695,15 +697,15 @@ public static class FilmPlaybackTests
         Click(Visuals(Named<ItemsControl>(view, "RelatedItems")).OfType<Button>()
             .Single(button => ReferenceEquals(button.Tag, recommendation)));
         await Drain();
-        Check(ReferenceEquals(scene.Page.Item, recommendation), "the recommendation opens its own film");
+        Check(scene.Page.Item.Id == recommendation.Id, "the recommendation opens its own film identity");
         Check(CheckTint(view, tint, window) != first, "the ambient tint follows the newly opened poster");
 
         await module.NavigateAsync(FilmCapability.HomeRoute, default);
-        var blank = section.Items[1] with { Poster = "" };
+        var blank = FilmPlaybackFixture.RefreshMetadata(section.Items[1] with { Poster = "" });
         section.Items[1] = blank;
         await module.OpenPlaybackAsync(blank);
         await Drain();
-        Check(ReferenceEquals(scene.Page.Item, blank) && Named<FilmPlaybackPoster>(view, "Backdrop").PaletteBrush is null &&
+        Check(scene.Page.Item.Id == blank.Id && Named<FilmPlaybackPoster>(view, "Backdrop").PaletteBrush is null &&
             tint.Background is SolidColorBrush { Color.A: 0 }, "a film without a poster has no ambient tint");
 
         var converter = new FilmAmbientTintConverter();
@@ -770,17 +772,16 @@ public static class FilmPlaybackTests
     private static Rect Bounds(FrameworkElement element, Visual root) =>
         element.TransformToAncestor(root).TransformBounds(new Rect(element.RenderSize));
 
-    private static void CheckPreview(FilmPlaybackPage page)
+    private static void CheckData(FilmPlaybackPage page)
     {
-        Check(new[] { page.Title, page.Metadata, page.Genres, page.Directors, page.Cast,
-            page.Overview, page.SeasonLabel, page.EpisodeCountLabel }.All(value => !string.IsNullOrWhiteSpace(value)),
-            "local preview supplies film metadata and descriptions");
-        Check(page.Episodes.Count > 0 && page.Episodes.All(episode =>
-            new[] { episode.Title, episode.Overview, episode.Image, episode.Duration, episode.Label }
-                .All(value => !string.IsNullOrWhiteSpace(value))),
-            "every preview episode supplies a title image duration and synopsis");
-        Check(page.Recommendations.Count > 0 && page.Episodes.Count(episode => episode.IsSelected) == 1 &&
-            page.SelectedEpisode!.IsSelected, "preview provides recommendations and exactly one current episode");
+        Check(new[] { page.Title, page.Metadata, page.Genres, page.Directors, page.Cast, page.Overview, page.SeasonLabel }
+            .All(value => !string.IsNullOrWhiteSpace(value)), "explicit metadata is rendered completely");
+        if (page.Request.Target.Kind == "tv")
+            Check(page.Episodes.Count == 12 && page.Episodes.All(episode => new[]
+            { episode.Title, episode.Overview, episode.Image, episode.Duration, episode.Label }.All(value => value.Length > 0)) &&
+                page.Episodes.Count(episode => episode.IsSelected) == 1 && page.SelectedEpisode is { IsSelected: true },
+                "the complete supplied season has actual coordinates, images and one selected target");
+        Check(page.Recommendations.Count > 0 && !page.HasOutput, "recommendations do not imply media playback");
     }
 
     private static void CheckEpisodeContent(ItemsControl host, FilmPlaybackPage page)
@@ -798,14 +799,15 @@ public static class FilmPlaybackTests
 
     private static void CheckSelection(Scene scene, FilmEpisodeItem episode)
     {
-        Check(ReferenceEquals(scene.Page.SelectedEpisode, episode) && episode.IsSelected &&
+        var selected = scene.Page.SelectedEpisode;
+        Check(selected is { IsSelected: true } && selected.Season == episode.Season && selected.Number == episode.Number &&
             scene.Page.Episodes.Count(candidate => candidate.IsSelected) == 1 &&
-            Named<TextBlock>(scene.Playback, "PlayerEpisode").Text == episode.Label,
-            "one current episode owns both selection and the player title");
+            Named<TextBlock>(scene.Playback, "PlayerEpisode").Text.Length == 0 && !scene.Page.HasOutput,
+            "one exact target is selected, but no player title is invented before actual media output");
         var host = Named<ItemsControl>(scene.Playback, scene.Page.IsListLayout ? "EpisodeList" : "EpisodeCards");
         var badges = Visuals(host).OfType<TextBlock>().Where(text => text.IsVisible && text.Text == "当前").ToArray();
-        Check(badges.Length == 1 && Visuals(EpisodeButton(host, episode)).Contains(badges[0]),
-            "the rendered episode presentation has exactly one current badge on the selected episode");
+        Check(badges.Length == 1 && Visuals(EpisodeButton(host, selected!)).Contains(badges[0]),
+            "the actual selected episode has the sole current-target badge");
     }
 
     private static void CheckInsideViewport(ScrollViewer scroll, FrameworkElement element)
@@ -865,6 +867,9 @@ public static class FilmPlaybackTests
     private sealed class Scene : IAsyncDisposable
     {
         internal readonly StaticFilmSource Source = new();
+        internal readonly FilmRuntimeProbe Runtime = new();
+        internal readonly FilmNativeProbe Native = new();
+        internal readonly FilmMemoryStore Store = new();
         internal readonly FilmCapability Module;
         internal readonly FilmView View;
         internal readonly Window Window;
@@ -873,7 +878,7 @@ public static class FilmPlaybackTests
 
         internal Scene(double width = 1160)
         {
-            Module = new(Source);
+            Module = new(Source, new FilmPlaybackSession(Runtime.CaptureConnectionAsync, Native), new FilmLibrary(Store));
             View = (FilmView)Module.View;
             // Explicit content width avoids native offscreen window constraints.
             View.Width = width;
@@ -887,11 +892,18 @@ public static class FilmPlaybackTests
             Window.UpdateLayout();
         }
 
+        internal Task OpenAsync()
+        {
+            var card = FilmPlaybackFixture.Card(title: "显式离线影片");
+            return Module.OpenPlaybackAsync(card, card.PlaybackContext!);
+        }
+
         public async ValueTask DisposeAsync()
         {
             Window.Content = null;
             Window.Close();
             await Module.DisposeAsync();
+            await Runtime.DisposeAsync();
         }
     }
 
@@ -905,8 +917,7 @@ public static class FilmPlaybackTests
             cancellationToken.ThrowIfCancellationRequested();
             Calls++;
             IReadOnlyList<FilmCardItem> items = Enumerable.Range(1, 12)
-                .Select(index => new FilmCardItem($"{section.Key}:local:{index}", $"{section.Title} 本地影片 {index}",
-                    "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/poster-long-season.jpg", ""))
+                .Select(index => FilmPlaybackFixture.Card(section.Kind == "movie" ? "movie" : "tv", 100 + index, $"{section.Title} 本地影片 {index}"))
                 .Skip(start).Take(limit).ToArray();
             return Task.FromResult(items);
         }

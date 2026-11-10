@@ -94,7 +94,7 @@ export function connectWindowsNamedPipe(pipeName, {
 /**
  * One config line, one ready line, then a lifetime handle. Business traffic uses
  * the common HTTP listener. This function also permits connected-stream tests
- * without changing the production Windows pipe address or authentication gate.
+ * without changing the production Windows pipe address or process lifetime.
  */
 export async function startWindowsRuntimeOnPipe(stream, {
   sessionId, createRuntime, timeout = 5000, signal,
@@ -155,11 +155,11 @@ export async function startWindowsRuntimeOnPipe(stream, {
       const value = decodeJSONValue(Buffer.concat(chunks, length).subarray(0, -1));
       chunks = [];
       if (value === null || typeof value !== 'object' || Array.isArray(value) ||
-          Object.keys(value).length !== 3 || value.sessionId !== sessionId ||
-          !Object.hasOwn(value, 'requestKey') || !Object.hasOwn(value, 'dataRoot')) {
+          Object.keys(value).length !== 2 || value.sessionId !== sessionId ||
+          !Object.hasOwn(value, 'dataRoot')) {
         throw new BridgeError('INVALID_REQUEST');
       }
-      validateSession({ sessionId: value.sessionId, key: value.requestKey });
+      validateSession({ sessionId: value.sessionId });
       acceptConfig({ ...value, dataRoot: windowsScriptDataRoot(value.dataRoot) });
     } catch { stop('INVALID_REQUEST'); }
   };

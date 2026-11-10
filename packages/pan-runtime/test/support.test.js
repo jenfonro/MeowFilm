@@ -556,7 +556,7 @@ test('HTTP redirects are manual by default and same-origin explicit follow retai
   assert.equal(received[2].authorization, 'synthetic');
 });
 
-test('cross-origin redirects strip credentials, custom secrets and stale Host headers', async t => {
+test('cross-origin redirects preserve the explicit request headers including Host', async t => {
   let received;
   const destination = await localHTTP(t, (request, response) => {
     received = request.headers;
@@ -573,18 +573,23 @@ test('cross-origin redirects strip credentials, custom secrets and stale Host he
     Accept: 'application/json', Host: new URL(source.url).host,
   } });
   assert.equal(result.body.toString(), 'destination');
-  for (const name of ['cookie', 'authorization', 'proxy-authorization', 'x-private-token', 'referer']) {
-    assert.equal(received[name], undefined);
-  }
+  assert.equal(received.cookie, 'synthetic=one');
+  for (const name of ['authorization', 'proxy-authorization', 'x-private-token']) assert.equal(received[name], 'synthetic');
+  assert.equal(received.referer, 'https://example.test/?private=synthetic');
   assert.equal(received.accept, 'application/json');
-  assert.equal(received.host, new URL(destination.url).host);
+  assert.equal(received.host, new URL(source.url).host);
 });
 
-test('cross-origin 307 and 308 refuse to forward credential-bearing bodies', async t => {
-  let destinationCalls = 0;
+test('cross-origin 307 and 308 retain the exact POST body and content type', async t => {
+  const destinationCalls = [];
   const destination = await localHTTP(t, (request, response) => {
-    destinationCalls++;
-    response.end('unexpected');
+    const chunks = [];
+    request.on('data', bytes => chunks.push(bytes));
+    request.on('end', () => {
+      destinationCalls.push({ method: request.method, body: Buffer.concat(chunks).toString() });
+      assert.equal(request.headers['content-type'], 'application/json');
+      response.end('received');
+    });
   });
   const sourceCalls = [];
   const source = await localHTTP(t, (request, response) => {
@@ -599,12 +604,14 @@ test('cross-origin 307 and 308 refuse to forward credential-bearing bodies', asy
   const transport = transportFor(t);
   const body = JSON.stringify({ refreshToken: 'synthetic-token', password: 'synthetic-password' });
   for (const status of [307, 308]) {
-    await assert.rejects(transport.request({
+    const reply = await transport.request({
       url: `${source.url}/${status}`, redirect: 'follow', method: 'POST', body,
       headers: { 'Content-Type': 'application/json' },
-    }), code('UPSTREAM_HTTP'));
+    });
+    assert.equal(reply.status, 200);
+    assert.equal(reply.body.toString(), 'received');
   }
-  assert.equal(destinationCalls, 0);
+  assert.deepEqual(destinationCalls, [{ method: 'POST', body }, { method: 'POST', body }]);
   assert.deepEqual(sourceCalls, [{ method: 'POST', body }, { method: 'POST', body }]);
 });
 
@@ -643,12 +650,12 @@ test('redirect loops and malformed locations fail with closed errors', async t =
   await assert.rejects(transport.request({ url: server.url + '/bad', redirect: 'follow' }), code('UPSTREAM_FORMAT'));
 });
 
-test('HTTPS redirect policy refuses downgrade before requesting the HTTP destination', async t => {
+test('HTTPS redirects reach HTTP destinations without a downgrade access gate', async t => {
   let arrived = 0;
   const server = await localHTTP(t, (request, response) => {
     arrived++;
-    response.writeHead(302, { Location: server.url + '/downgrade' });
-    response.end();
+    if (request.url === '/downgrade') response.end('media');
+    else { response.writeHead(302, { Location: server.url + '/downgrade' }); response.end(); }
   });
   // Only the TLS connection is substituted; the redirect is a real local HTTP response.
   const original = https.request;
@@ -658,13 +665,27 @@ test('HTTPS redirect policy refuses downgrade before requesting the HTTP destina
   };
   try {
     const transport = transportFor(t);
-    await assert.rejects(transport.request({
+    const reply = await transport.request({
       url: 'https://synthetic.example.test/', redirect: 'follow',
-    }), code('UPSTREAM_HTTP'));
-    assert.equal(arrived, 1);
+    });
+    assert.equal(reply.body.toString(), 'media');
+    assert.equal(reply.url, server.url + '/downgrade');
+    assert.equal(arrived, 2);
   } finally { https.request = original; }
 });
 
+test('HTTP URL userinfo reaches the transport as Basic authorization', async t => {
+  const received = [];
+  const server = await localHTTP(t, (request, response) => {
+    received.push(request.headers.authorization);
+    response.end('accepted');
+  });
+  const url = new URL(server.url);
+  url.username = 'fixture-user'; url.password = 'fixture-password';
+  const reply = await transportFor(t).request({ url: url.href });
+  assert.equal(reply.body.toString(), 'accepted');
+  assert.deepEqual(received, ['Basic ' + Buffer.from('fixture-user:fixture-password').toString('base64')]);
+});
 test('cancellation waits for the active socket and does not abort an independent request', async t => {
   const pending = new Map(), both = deferred();
   const server = await localHTTP(t, (request, response) => {
@@ -740,7 +761,7 @@ test('pre-aborted and invalid requests make no upstream calls and reveal no call
   controller.abort(new Error('synthetic private signal reason'));
   await assert.rejects(transport.request({ url: server.url, signal: controller.signal }), code('CANCELLED'));
   for (const options of [
-    { url: 'ftp://example.test' }, { url: 'http://private:secret@example.test' },
+    { url: 'ftp://example.test' },
     { url: server.url, method: 'bad method' }, { url: server.url, headers: { 'X-Invalid': 'private\nheader' } },
     { url: server.url, timeout: -1 }, { url: server.url, redirect: 'automatic' }, { url: server.url, body: {} },
     { url: server.url, responseMode: 'automatic' },

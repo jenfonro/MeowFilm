@@ -2,7 +2,12 @@ using System.Buffers.Binary;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Net.Security;
+using System.Net.Sockets;
 using System.Runtime.ExceptionServices;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -132,17 +137,73 @@ public static class ArtworkTests
                 Equal(1, calls); Check(ReferenceEquals(first.Image, second.Image));
             }
         }));
-        yield return new("Native artwork public-only address rejection happens before transport", async () =>
+        yield return new("Native artwork invalid HTTP address syntax fails before transport", async () =>
         {
             var handler = new Handler((_, _) => throw new InvalidOperationException("No HTTP expected"));
             await using var service = new ArtworkService(handler);
-            foreach (string uri in new[] { "file:///C:/secret.png", "data:image/png;base64,AAAA", "https://user:password@example.test/x",
-                "http://127.0.0.1/x", "http://169.254.169.254/x", "https://192.168.1.1/x",
-                "https://[::1]/x", "https://[::ffff:127.0.0.1]/x", "http://x.local/x", "https://localhost/x",
-                "https://example.test:8080/x", "https://example.test/x#fragment", "https://example.test/\0" })
+            foreach (string uri in new[] { "", "http://", "http://:8080/x", "ftp://example.test/x",
+                "file:///C:/secret.png", "data:image/png;base64,AAAA",
+                "https://example.test/x#fragment", "https://example.test/\0" })
                 await Code("ARTWORK_ADDRESS", () => service.AcquireAsync(uri));
             Equal(0, handler.Count);
         });
+        yield return new("Native artwork ordinary HTTP host forms read and decode supplied image bytes", () => Sta(async () =>
+        {
+            var handler = new Handler((_, _) => Task.FromResult(Reply(Encode("png", 2, 3))));
+            await using var service = new ArtworkService(handler);
+            string[] addresses = ["http://169.254.169.254/x", "https://192.168.1.1/x",
+                "https://[::1]/x", "https://[::ffff:127.0.0.1]/x", "http://x.local/x",
+                "http://local/x", "http://x.localhost/x", "https://example.test:8080/x"];
+            foreach (string address in addresses)
+            {
+                using var lease = await service.AcquireAsync(address);
+                Equal(2, lease.Image.PixelWidth); Equal(3, lease.Image.PixelHeight); Check(lease.Image.IsFrozen);
+            }
+            Equal(addresses.Length, handler.Count); // Injected bodies, not proof of these hosts' DNS or reachability.
+        }));
+        foreach (string host in new[] { "127.0.0.1", "localhost" })
+            yield return new("Native artwork default HTTP reads custom port and long URL from " + host,
+                () => Sta(() => LocalArtworkAsync(host)));
+        yield return new("Native artwork URL userinfo sends Basic on actual HTTP reads", () => Sta(ArtworkUserInfoAsync));
+        foreach (string redirect in new[] { "relative", "absolute", "anonymous" })
+            yield return new("Native artwork URL userinfo follows actual redirect " + redirect, () => Sta(async () =>
+            {
+                await using var server = new RuntimeHttpClientTests.Server();
+                await using var service = new ArtworkService();
+                int port = new Uri(server.BaseUrl).Port;
+                var loading = service.AcquireAsync($"http://fixture%20user:p%40ss%3Aword@127.0.0.1:{port}/start");
+                await using (var request = await server.AcceptAsync())
+                {
+                    Equal("/start", request.Path);
+                    Equal("Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("fixture user:p@ss:word")),
+                        request.Headers["Authorization"]);
+                    string location = redirect == "relative" ? "/poster.png" : redirect == "absolute" ?
+                        $"http://redirect-user:redirect-pass@127.0.0.1:{port}/poster.png" : server.BaseUrl + "/poster.png";
+                    await request.ReplyAsync([], 302, extraHeaders: $"Location: {location}\r\n");
+                }
+                await using (var request = await server.AcceptAsync())
+                {
+                    Equal("/poster.png", request.Path);
+                    if (redirect == "anonymous") Check(!request.Headers.ContainsKey("Authorization"));
+                    else Equal("Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes(redirect == "relative" ?
+                        "fixture user:p@ss:word" : "redirect-user:redirect-pass")), request.Headers["Authorization"]);
+                    await request.ReplyAsync(Encode("png", 2, 3), contentType: "image/png");
+                }
+                using var lease = await loading;
+                Equal(2, lease.Image.PixelWidth); Equal(3, lease.Image.PixelHeight); Check(lease.Image.IsFrozen);
+            }));
+        yield return new("Native artwork actual HTTPS to HTTP redirect reads and decodes the target", () => Sta(ArtworkDowngradeAsync));
+        foreach (int status in new[] { 401, 403 })
+            yield return new("Native artwork actual upstream status remains denied " + status, () => Sta(async () =>
+            {
+                await using var server = new RuntimeHttpClientTests.Server();
+                await using var service = new ArtworkService();
+                var loading = service.AcquireAsync(server.BaseUrl + "/denied");
+                await using var request = await server.AcceptAsync();
+                Equal("GET", request.Method);
+                await request.ReplyAsync([], status, contentType: "image/png");
+                await Code("ARTWORK_DENIED", () => loading);
+            }));
         yield return new("Native artwork redirects have no credential cookie proxy or referrer authority", () => Sta(async () =>
         {
             var handler = new Handler((request, _) =>
@@ -162,16 +223,14 @@ public static class ArtworkTests
             using var lease = await service.AcquireAsync("https://first.example.test/cover.png");
             Equal(2, handler.Count); Equal(3, lease.Image.PixelHeight);
         }));
-        foreach (string redirect in new[] { "http://next.example.test/x", "https://127.0.0.1/x", "https://first.example.test/x" })
-            yield return new("Native artwork rejects downgrade private or cyclic redirect " + redirect, async () =>
-            {
-                var handler = new Handler((_, _) => { var reply = new HttpResponseMessage(HttpStatusCode.Redirect);
-                    reply.Headers.Location = new Uri(redirect); return Task.FromResult(reply); });
-                await using var service = new ArtworkService(handler);
-                await Code(redirect.Contains("127.", StringComparison.Ordinal) ? "ARTWORK_ADDRESS" : "ARTWORK_REDIRECT",
-                    () => service.AcquireAsync("https://first.example.test/x"));
-                Equal(1, handler.Count);
-            });
+        yield return new("Native artwork cyclic redirects fail without another request", async () =>
+        {
+            var handler = new Handler((_, _) => { var reply = new HttpResponseMessage(HttpStatusCode.Redirect);
+                reply.Headers.Location = new Uri("https://first.example.test/x"); return Task.FromResult(reply); });
+            await using var service = new ArtworkService(handler);
+            await Code("ARTWORK_REDIRECT", () => service.AcquireAsync("https://first.example.test/x"));
+            Equal(1, handler.Count);
+        });
         yield return new("Native artwork missing denied and malformed responses never become cache hits", () => Sta(async () =>
         {
             int round = 0;
@@ -561,6 +620,95 @@ public static class ArtworkTests
             Equal(1, second.Calls.Count); Check(second.Calls[0].Token.IsCancellationRequested);
             var late = new FakeLease(); second.Calls[0].Completion.SetResult(late); await Tick(); Check(late.Disposed);
         }));
+    }
+
+    private static async Task LocalArtworkAsync(string host)
+    {
+        await using var server = new RuntimeHttpClientTests.Server();
+        await using var service = new ArtworkService(); // Product's default SocketsHttpHandler, including DNS and connect.
+        string path = "/poster.png?fixture=" + new string('x', 17000);
+        var address = new UriBuilder(server.BaseUrl) { Host = host, Path = "/poster.png", Query = path[(path.IndexOf('?') + 1)..] }.Uri;
+        Check(address.Port is not (80 or 443));
+        var loading = service.AcquireAsync(address.AbsoluteUri);
+        await using var request = await server.AcceptAsync();
+        Equal("GET", request.Method); Equal(path, request.Path);
+        Check(!request.Headers.ContainsKey("Cookie") && !request.Headers.ContainsKey("Authorization"));
+        await request.ReplyAsync(Encode("png", 2, 3), contentType: "image/png");
+        using var lease = await loading;
+        Equal(2, lease.Image.PixelWidth); Equal(3, lease.Image.PixelHeight); Check(lease.Image.IsFrozen);
+    }
+
+    private static async Task ArtworkUserInfoAsync()
+    {
+        foreach (var (userInfo, decoded) in new[]
+        {
+            ("fixture%20user:p%40ss%3Aword", "fixture user:p@ss:word"),
+            ("fixture-user", "fixture-user:"),
+            (":fixture-pass", ":fixture-pass")
+        })
+        {
+            await using var server = new RuntimeHttpClientTests.Server();
+            await using var service = new ArtworkService();
+            int port = new Uri(server.BaseUrl).Port;
+            var loading = service.AcquireAsync($"http://{userInfo}@127.0.0.1:{port}/poster.png");
+            await using var request = await server.AcceptAsync();
+            Equal("GET", request.Method); Equal("/poster.png", request.Path);
+            Equal("Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes(decoded)), request.Headers["Authorization"]);
+            await request.ReplyAsync(Encode("png", 2, 3), contentType: "image/png");
+            using var lease = await loading;
+            Equal(2, lease.Image.PixelWidth); Equal(3, lease.Image.PixelHeight); Check(lease.Image.IsFrozen);
+        }
+    }
+
+    private static async Task ArtworkDowngradeAsync()
+    {
+        await using var target = new RuntimeHttpClientTests.Server();
+        using var key = RSA.Create(2048);
+        var certificateRequest = new CertificateRequest("CN=artwork-fixture", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var generated = certificateRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+        // Schannel requires an imported user key rather than CreateSelfSigned's ephemeral key.
+        using var certificate = X509CertificateLoader.LoadPkcs12(
+            generated.Export(X509ContentType.Pfx), null, X509KeyStorageFlags.UserKeySet);
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        int requests = 0;
+        var serving = RedirectAsync();
+        try
+        {
+            var handler = new SocketsHttpHandler
+            {
+                UseCookies = false, UseProxy = false, AllowAutoRedirect = false,
+                SslOptions = new() { RemoteCertificateValidationCallback = (_, observed, _, _) =>
+                    observed?.GetCertHashString() == certificate.Thumbprint }
+            };
+            await using var service = new ArtworkService(handler);
+            var loading = service.AcquireAsync($"https://localhost:{((IPEndPoint)listener.LocalEndpoint).Port}/start");
+            await using var request = await target.AcceptAsync();
+            Equal("GET", request.Method); Equal("/poster.png", request.Path);
+            await request.ReplyAsync(Encode("png", 2, 3), contentType: "image/png");
+            using var lease = await loading;
+            Equal(1, requests); Equal(2, lease.Image.PixelWidth); Equal(3, lease.Image.PixelHeight); Check(lease.Image.IsFrozen);
+            await serving;
+        }
+        finally { deadline.Cancel(); listener.Stop(); await serving; }
+
+        async Task RedirectAsync()
+        {
+            try
+            {
+                using var socket = await listener.AcceptTcpClientAsync(deadline.Token);
+                await using var stream = new SslStream(socket.GetStream(), leaveInnerStreamOpen: false);
+                await stream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = certificate }, deadline.Token);
+                using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+                Equal("GET /start HTTP/1.1", await reader.ReadLineAsync(deadline.Token));
+                while (!string.IsNullOrEmpty(await reader.ReadLineAsync(deadline.Token))) { }
+                Interlocked.Increment(ref requests);
+                byte[] header = Encoding.ASCII.GetBytes($"HTTP/1.1 302 Found\r\nLocation: {target.BaseUrl}/poster.png\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                await stream.WriteAsync(header, deadline.Token); await stream.FlushAsync(deadline.Token);
+            }
+            catch (OperationCanceledException) when (deadline.IsCancellationRequested) { }
+        }
     }
 
     private sealed class Handler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> action) : HttpMessageHandler

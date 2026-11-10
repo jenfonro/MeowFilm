@@ -61,7 +61,7 @@ test('Rexxar recent_hot keeps source IDs, rating, pagination and rewrites nested
   assert.equal(Object.hasOwn(result, 'cache_status'), false);
 });
 
-test('Rexxar movie/tv details, cast, image and related collections use explicit read-only scopes', async () => {
+test('Rexxar movie/tv details, cast, image and related collections preserve source data through GET', async () => {
   const paths = [
     'subject/recent_hot/tv', 'movie/categories', 'tv/categories', 'movie/showing', 'tv/showing', 'movie/recommend', 'tv/recommend',
     'movie/1292052', 'tv/3541415', 'movie/1292052/celebrities', 'tv/3541415/credits',
@@ -92,19 +92,29 @@ test('Rexxar movie/tv details, cast, image and related collections use explicit 
   assert.equal(fixture.calls.length, paths.length);
 });
 
-test('Rexxar request refuses URL/path injection, unknown fields and account mutations before network access', async () => {
+test('Rexxar GET accepts source paths without a registered resource list', async () => {
+  const paths = ['/3/movie/1', '/rexxar/api/v2/', '/rexxar/api/v2/user/1', '/rexxar/api/v2/account',
+    '/rexxar/api/v2/movie/1/rating', '/rexxar/api/v2/movie/1/interests', '/rexxar/api/v2/search',
+    '/rexxar/api/v2/movie/../account', '/rexxar/api/v2/movie/%2e%2e/account',
+    '/rexxar/api/v2/movie/%31', '/rexxar/api/v2/subject_collection/../items',
+    '/rexxar/api/v2/movie/1/photos/delete'];
+  const fixture = upstream(paths.map(() => reply({ id: '1' })));
+  for (const path of paths) {
+    assert.deepEqual(await requestDouban({ path }, { settings: defaults, request: fixture.request }), { id: '1' });
+    assert.equal(new URL(fixture.calls.at(-1).url).href, new URL(path, defaults.apiBase).href);
+    assert.equal(fixture.calls.at(-1).method, 'GET');
+  }
+  assert.equal(fixture.calls.length, paths.length);
+});
+
+test('Rexxar request rejects malformed path/query data and fields outside its GET contract', async () => {
   const request = async () => assert.fail('invalid request must not use the network');
   const inputs = [
     null, [], {}, { path: '/rexxar/api/v2/movie/1', url: 'https://other.test' },
     { path: '/rexxar/api/v2/movie/1', method: 'POST' }, { path: '/rexxar/api/v2/movie/1', headers: {} },
-    ...['https://m.douban.com/rexxar/api/v2/movie/1', '//other.test', '/3/movie/1',
-      '/rexxar/api/v2/', '/rexxar/api/v2/user/1', '/rexxar/api/v2/account',
-      '/rexxar/api/v2/movie/1/rating', '/rexxar/api/v2/movie/1/interests',
-      '/rexxar/api/v2/search', '/rexxar/api/v2/movie/1?method=POST', '/rexxar/api/v2/movie/1#x',
-      '/rexxar/api/v2/movie/../account', '/rexxar/api/v2/movie/%2e%2e/account',
-      '/rexxar/api/v2/movie/%31', '/rexxar/api/v2/movie/1\\other',
-      '/rexxar/api/v2/movie/1\n', '/rexxar/api/v2/subject_collection/../items',
-      '/rexxar/api/v2/movie/1/photos/delete'].map(path => ({ path })),
+    ...['https://m.douban.com/rexxar/api/v2/movie/1', '//other.test',
+      '/rexxar/api/v2/movie/1?method=POST', '/rexxar/api/v2/movie/1#x',
+      '/rexxar/api/v2/movie/1\\other', '/rexxar/api/v2/movie/1\n'].map(path => ({ path })),
     ...[null, [], { nested: {} }, { start: NaN }, { start: Infinity }, { x: [null] },
       { '\r\nCookie': 'x' }].map(query => ({ path: '/rexxar/api/v2/movie/1', query })),
   ];
@@ -145,6 +155,12 @@ test('API/search bases keep full prefixes and API wrappers receive the entire lo
     settings: settings({ apiBase: 'https://api.test/full%20prefix/电影' }), request: encoded.request,
   });
   assert.equal(encoded.calls[0].url, 'https://api.test/full%20prefix/%E7%94%B5%E5%BD%B1/rexxar/api/v2/movie/categories');
+  for (const apiBase of ['https://api.test/a/../b', 'https://api.test/a/%2e%2e/b']) {
+    const normalized = upstream([reply({ id: '1' })]);
+    await requestDouban({ path: '/rexxar/api/v2/movie/1' },
+      { settings: settings({ apiBase }), request: normalized.request });
+    assert.equal(normalized.calls[0].url, 'https://api.test/b/rexxar/api/v2/movie/1');
+  }
 });
 
 test('invalid base URLs and wrapper templates fail with fixed errors', async () => {
@@ -152,7 +168,7 @@ test('invalid base URLs and wrapper templates fail with fixed errors', async () 
   const templates = [
     'https://relay.test/', 'https://relay.test/{url}/{encodedUrl}', 'https://relay.test/{url}/{url}',
     'https://relay.test/{other}', 'https://{url}.relay.test/', 'https://relay.test/{url}#fragment',
-    'file:///relay/{url}', 'https://name:password@relay.test/{url}', 'https://relay.test/\r\n{url}',
+    'file:///relay/{url}', 'https://relay.test/\r\n{url}',
   ];
   for (const apiProxy of templates) {
     await assert.rejects(requestDouban({ path: '/rexxar/api/v2/movie/1' },
@@ -160,11 +176,25 @@ test('invalid base URLs and wrapper templates fail with fixed errors', async () 
     assert.throws(() => doubanImageTarget('/v1/douban/images/view/photo/p1.jpg',
       settings({ imageProxy: apiProxy })), failure('INVALID_REQUEST'));
   }
-  for (const apiBase of ['https://user:password@api.test', 'file:///tmp', 'https://api.test/base?key=x',
-    'https://api.test/base#fragment', 'https://api.test/a/../b', 'https://api.test/a/%2e%2e/b']) {
+  for (const apiBase of ['file:///tmp', 'https://api.test/base?key=x',
+    'https://api.test/base#fragment']) {
     await assert.rejects(requestDouban({ path: '/rexxar/api/v2/movie/1' },
       { settings: settings({ apiBase }), request }), failure('INVALID_REQUEST'));
   }
+});
+
+test('API, image and proxy configuration preserve explicit URL userinfo', async () => {
+  const config = settings({ apiBase: 'http://user:password@192.168.1.25/douban',
+    imageBase: 'http://image:password@images.test', apiProxy: 'http://proxy:password@relay.test/?url={encodedUrl}' });
+  const fixture = upstream([reply({ id: '1' })]);
+  assert.deepEqual(await requestDouban({ path: '/rexxar/api/v2/movie/1' },
+    { settings: config, request: fixture.request }), { id: '1' });
+  const url = new URL(fixture.calls[0].url);
+  assert.equal(url.username, 'proxy');
+  assert.equal(url.password, 'password');
+  assert.equal(url.searchParams.get('url'), 'http://user:password@192.168.1.25/douban/rexxar/api/v2/movie/1');
+  assert.equal(doubanImageTarget('/v1/douban/images/view/photo/p1.jpg', config).url,
+    'http://image:password@images.test/view/photo/p1.jpg');
 });
 
 test('Rexxar business errors never surface the upstream message or credentials', async () => {
@@ -233,6 +263,34 @@ test('web search maps window.__DATA__ to the server subjects.items[].target stru
   assert.equal(fixture.calls[0].headers['user-agent'].includes('Chrome/132.0.0.0'), true);
   assert.equal(Object.hasOwn(result, 'cache_status'), false);
   assert.equal(Object.hasOwn(result.subjects, 'start'), false);
+});
+
+test('search removes BMP and supplementary format controls without changing title/year mapping', async () => {
+  const controls = '\u00ad\u0600\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e' +
+    '\u200b\u200c\u200d\u200e\u200f\u202a\u202e\u2060\u2064\u2066\u2069\u206f\ufeff\ufff9\ufffb' +
+    '\u{110bd}\u{110cd}\u{13430}\u{1343f}\u{1bca0}\u{1bca3}\u{1d173}\u{1d17a}\u{e0001}\u{e0020}\u{e007f}';
+  const data = sampleSearch({ items: [...controls].map((character, index) => ({
+    id: index + 1, title: `真${character}实电影 (2024)`, labels: [{ text: '电影' }],
+  })) });
+  const before = structuredClone(data);
+  const result = await searchDouban({ query: '真实电影' },
+    { settings: defaults, request: upstream([reply(html(data))]).request });
+  assert.deepEqual(result.subjects.items.map(row => [row.target.title, row.target.year]),
+    [...controls].map(() => ['真实电影', '2024']));
+  assert.deepEqual(data, before);
+});
+
+test('search preserves non-format zero-width characters, variation marks and adjacent range gaps', async () => {
+  const significant = '\u034f\u0606\u061d\u06de\u0710\u0892\u08e3\u17b4\u180b\u180d\u180f\u2065\ufe00\ufe0e\ufe0f' +
+    '\ufff8\ufffc\u{110bc}\u{110be}\u{110cc}\u{110ce}\u{1342f}\u{13440}\u{1bc9f}\u{1bca4}' +
+    '\u{1d172}\u{1d17b}\u{e0000}\u{e0002}\u{e001f}\u{e0080}\u{e0100}\u{e01ef}';
+  const data = sampleSearch({ items: [...significant].map((character, index) => ({
+    id: index + 1, title: `真${character}实电影 (2024)`, labels: [{ text: '电影' }],
+  })) });
+  const result = await searchDouban({ query: '真实电影' },
+    { settings: defaults, request: upstream([reply(html(data))]).request });
+  assert.deepEqual(result.subjects.items.map(row => [row.target.title, row.target.year]),
+    [...significant].map(character => [`真${character}实电影`, '2024']));
 });
 
 test('search preserves missing/null covers and a valid empty result, using URL kind fallback', async () => {
@@ -348,10 +406,24 @@ test('login, captcha and proof-of-work pages report interaction without followin
       }
     }
   }
-  const fixture = upstream([reply('', 302, { location: 'https://sec.douban.com/c?red=PRIVATE' })]);
+  const fixture = upstream([
+    reply('', 302, { location: 'https://sec.douban.com/c?red=PRIVATE' }),
+    reply('<html><title>安全验证</title></html>'),
+  ]);
   await assert.rejects(searchDouban({ query: 'x' },
     { settings: defaults, request: fixture.request }), failure('WEB_INTERACTION_REQUIRED'));
-  assert.equal(fixture.calls.length, 1);
+  assert.equal(fixture.calls.length, 2);
+  assert.equal(fixture.calls[1].url, 'https://sec.douban.com/c?red=PRIVATE');
+});
+
+test('a login or challenge-shaped URL is not a network gate when the response is normal data', async () => {
+  const fixture = upstream([
+    reply('', 302, { location: 'https://sec.douban.com/challenge/normal' }),
+    reply(html({ items: [], total: 0 })),
+  ]);
+  const result = await searchDouban({ query: 'x' }, { settings: defaults, request: fixture.request });
+  assert.deepEqual(result.subjects.items, []);
+  assert.equal(fixture.calls.length, 2);
 });
 
 test('known source image domains and aliases produce identical identities while preserving specifications', () => {
@@ -418,7 +490,7 @@ test('nested pic/cover/avatar variants, arrays and relative image fields preserv
   assert.deepEqual(rewriteDoubanImages(result, defaults), result);
 });
 
-test('photo entity page URLs stay business links while nested image descriptors remain strict', async () => {
+test('photo entity page URLs stay business links while nested images permit ordinary HTTP URLs', async () => {
   const source = { id: '1', cover: {
     id: '2', type: 'photo', url: 'https://movie.douban.com/photos/photo/2/',
     sharing_url: 'https://www.douban.com/doubanapp/dispatch?uri=/photo/2/',
@@ -438,23 +510,37 @@ test('photo entity page URLs stay business links while nested image descriptors 
   assert.deepEqual(rewriteDoubanImages(source, settings({ imageBase: 'https://movie.douban.com' })), expected);
   assert.equal(source.cover.image.large.url, 'https://img3.doubanio.com/view/photo/l/public/p1.jpg');
   for (const value of ['https://unknown.test/p1.jpg', 'https://movie.douban.com/subject/1/', source.cover.url]) {
-    for (const image of [
-      { cover_url: value }, { cover: { url: value } },
-      { cover: { ...source.cover, image: { large: { url: value } } } },
-      { image: { type: 'photo', url: value } },
-    ]) assert.throws(() => rewriteDoubanImages(image, defaults), failure('UPSTREAM_FORMAT'));
+    for (const image of [{ cover_url: value }, { cover: { url: value } },
+      { image: { type: 'photo', url: value } }]) {
+      assert.deepEqual(rewriteDoubanImages(image, defaults), image);
+    }
+    assert.deepEqual(rewriteDoubanImages({ cover: { ...source.cover, image: { large: { url: value } } } }, defaults),
+      { cover: { ...expected.cover, image: { large: { url: value } } } });
   }
 });
 
-test('untrusted image URLs and malformed source paths fail explicitly without becoming a generic URL proxy', () => {
-  const values = ['https://unknown.test/p1.jpg', 'https://img3.doubanio.com.evil.test/p1.jpg',
+test('unregistered and signed HTTP image URLs remain usable without a generic runtime URL proxy', () => {
+  const direct = ['https://unknown.test/p1.jpg', 'https://img3.doubanio.com.evil.test/p1.jpg',
     'https://img3.doubanio.com@evil.test/p1.jpg', 'https://user:password@img3.doubanio.com/p1.jpg',
-    'https://unknown.test/extensionless', 'data:image/png;base64,PRIVATE', 'javascript:PRIVATE',
-    'https://img3.doubanio.com/view/../private/p1.jpg', 'https://img3.doubanio.com/view/%2e%2e/p1.jpg',
+    'https://unknown.test/extensionless',
     'https://img3.doubanio.com/p1.jpg?key=PRIVATE', 'https://img3.doubanio.com/p1.jpg#PRIVATE',
-    '/view/photo/%2F%2Fevil.test/p1.jpg', '//evil.test/p1.jpg', '/view/photo/p1.jpg?next=PRIVATE',
-    '/v1/douban/images/../private', 'https://img3.doubanio.com/view/photo/%252e%252e/p1.jpg'];
-  for (const value of values) assert.throws(() => rewriteDoubanImages({ cover_url: value }, defaults), failure('UPSTREAM_FORMAT'));
+    'https://img3.doubanio.com/view/photo/%252e%252e/p1.jpg'];
+  for (const value of direct) {
+    assert.equal(rewriteDoubanImages({ cover_url: value }, defaults).cover_url, value);
+    const config = settings({ imageProxy: 'https://relay.test/?u={encodedUrl}' });
+    assert.equal(rewriteDoubanImages({ cover_url: value }, config).cover_url,
+      'https://relay.test/?u=' + encodeURIComponent(value));
+  }
+  for (const [value, expected] of [
+    ['https://img3.doubanio.com/view/../private/p1.jpg', '/v1/douban/images/private/p1.jpg'],
+    ['https://img3.doubanio.com/view/%2e%2e/p1.jpg', '/v1/douban/images/p1.jpg'],
+    ['/view/photo/%2F%2Fevil.test/p1.jpg', 'https://img3.doubanio.com/view/photo/%2F%2Fevil.test/p1.jpg'],
+    ['//evil.test/p1.jpg', 'https://evil.test/p1.jpg'],
+    ['/view/photo/p1.jpg?next=PRIVATE', 'https://img3.doubanio.com/view/photo/p1.jpg?next=PRIVATE'],
+  ]) assert.equal(rewriteDoubanImages({ cover_url: value }, defaults).cover_url, expected);
+  for (const value of ['data:image/png;base64,PRIVATE', 'javascript:PRIVATE', '/v1/douban/images/../private']) {
+    assert.throws(() => rewriteDoubanImages({ cover_url: value }, defaults), failure('UPSTREAM_FORMAT'));
+  }
   assert.deepEqual(rewriteDoubanImages({ unexpected: 'https://untrusted.test/photo.jpg' }, defaults),
     { unexpected: 'https://untrusted.test/photo.jpg' });
   const source = { url: 'https://movie.douban.com/subject/1292052/', share_url: 'https://www.douban.com/doubanapp/dispatch',
@@ -473,8 +559,8 @@ test('ordinary business links with image-like suffixes remain intact within a Re
   const expected = structuredClone(source);
   expected.items[0].pic.normal = '/v1/douban/images/view/photo/l/public/p1.jpg';
   assert.deepEqual(result, expected);
-  assert.throws(() => rewriteDoubanImages({ cover_url: source.items[0].homepage }, defaults),
-    failure('UPSTREAM_FORMAT'));
+  assert.deepEqual(rewriteDoubanImages({ cover_url: source.items[0].homepage }, defaults),
+    { cover_url: source.items[0].homepage });
 });
 
 test('image targets use the current image base/proxy only, carry source UA/Referer, and never carry Cookie', () => {
@@ -586,18 +672,24 @@ test('relative redirects preserve base prefixes and already-wrapped redirects ar
   assert.equal(new URL(fixture.calls[2].url).searchParams.get('u'), logicalFinal);
 });
 
-test('redirect loops are bounded; missing, unsafe and credential-bearing redirect locations fail safely', async () => {
+test('redirect loops are bounded and malformed or non-HTTP locations fail explicitly', async () => {
   const fixture = upstream(Array.from({ length: 6 }, () => reply('', 302, { location: '/again' })));
   await assert.rejects(searchDouban({ query: 'x' },
     { settings: defaults, request: fixture.request }), failure('UPSTREAM_HTTP'));
   assert.equal(fixture.calls.length, 6);
   for (const headers of [{}, { location: 'file:///etc/passwd' },
-    { location: 'https://name:PRIVATE@elsewhere.test/path' }, { location: 'https://elsewhere.test/\r\nCookie:PRIVATE' }]) {
+    { location: 'https://elsewhere.test/\r\nCookie:PRIVATE' }]) {
     const invalid = upstream([reply('', 302, headers)]);
     await assert.rejects(searchDouban({ query: 'x' },
       { settings: defaults, request: invalid.request }), failure('UPSTREAM_FORMAT'));
     assert.equal(invalid.calls.length, 1);
   }
+  const userinfo = upstream([
+    reply('', 302, { location: 'http://name:PRIVATE@elsewhere.test/path' }),
+    reply(html({ items: [], total: 0 })),
+  ]);
+  await searchDouban({ query: 'x' }, { settings: defaults, request: userinfo.request });
+  assert.equal(userinfo.calls[1].url, 'http://name:PRIVATE@elsewhere.test/path');
 });
 
 test('cancellation is propagated to the injected request and normalized before and after each request', async () => {

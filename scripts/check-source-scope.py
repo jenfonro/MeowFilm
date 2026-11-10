@@ -12,6 +12,7 @@ LOCAL_PRODUCTS = {
     "MeowJavaScript": ("javascript", "../JavaScript"),
     "FilmRuleProgram": ("film-rules", "../../packages/film-rules"),
     "FilmSearchProgram": ("film-search", "../../packages/film-search"),
+    "MeowVideoKernel": ("videokernel", "../VideoKernel"),
 }
 
 def application_membership(base, project_text):

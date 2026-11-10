@@ -10,8 +10,12 @@ public sealed partial class NativePlayback
     /// or URL. Completes at accepted Play(), not first frame or proven codec/output support.
     /// Caller cancellation and lease revocation remain effective for the whole session.
     /// </summary>
-    public async Task OpenReadAsync(string ownerId, string identity, INativeMediaReadLease lease,
-        string title, CancellationToken token = default)
+    public Task OpenReadAsync(string ownerId, string identity, INativeMediaReadLease lease,
+        string title, CancellationToken token = default) =>
+        TrackOwnedMediaRequestAsync(() => OpenReadOwnedAsync(ownerId, identity, lease, title, token));
+
+    private async Task OpenReadOwnedAsync(string ownerId, string identity, INativeMediaReadLease lease,
+        string title, CancellationToken token)
     {
         if (lease is null) throw Error(PlaybackError.InvalidReadLease);
         var input = new ReadLeaseMediaInput(lease);

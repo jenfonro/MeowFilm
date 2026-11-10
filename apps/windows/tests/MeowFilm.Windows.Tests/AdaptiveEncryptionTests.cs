@@ -21,12 +21,12 @@ public static class AdaptiveEncryptionTests
         foreach (string profile in new[] { "ts-sequence", "ts-explicit", "master", "mp4", "ranges" })
             yield return Case("native decode seek rotation and release " + profile, () => Online(profile));
         yield return Case("plaintext capability Range has exact decrypted bytes", LocalRange);
-        yield return Case("key cross-origin redirect strips all caller headers", Redirect);
+        yield return Case("key cross-origin redirect preserves input headers", Redirect);
         foreach (bool body in new[] { false, true })
             yield return Case("native blocked " + (body ? "ciphertext" : "key") + " cancellation releases old generation",
                 () => Cancellation(body));
         foreach (string scenario in new[] { "short-key", "long-key", "padding", "cipher-size", "dref", "payload-playlist",
-            "key-file", "key-lan", "sample-aes", "keyformat", "iv", "map-no-iv", "live", "key-budget" })
+            "key-file", "sample-aes", "keyformat", "iv", "map-no-iv", "live", "key-budget" })
             yield return Case("native rejects unsafe encrypted input " + scenario, () => Rejected(scenario));
     }
     private static TestCase Case(string name, Func<Task> body) => new("adaptive-encryption: " + name, () => A.Sta(body));
@@ -83,7 +83,6 @@ public static class AdaptiveEncryptionTests
             return Invalid switch
             {
                 "key-file" => text.Replace("URI=\"key0\"", "URI=\"file:///C:/not-authorized\""),
-                "key-lan" => text.Replace("URI=\"key0\"", "URI=\"http://192.168.1.2/key\""),
                 "sample-aes" => text.Replace("METHOD=AES-128", "METHOD=SAMPLE-AES"),
                 "keyformat" => text.Replace("KEYFORMAT=\"identity\"", "KEYFORMAT=\"com.example.drm\""),
                 "iv" => text.Replace("KEYFORMAT=\"identity\"", "IV=0xnothex,KEYFORMAT=\"identity\""),
@@ -130,8 +129,8 @@ public static class AdaptiveEncryptionTests
                 IgnoreRange = Invalid == "no-range" };
         }
     }
-    private static NativePlayback New(params A.Origin[] origins) => new(Dispatcher.CurrentDispatcher, null, NativeAudioOutput.Dummy,
-        NativeHttpMediaOptions.ForLoopbackTests(origins.Select(o => o.Base), TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3)));
+    private static NativePlayback New() => new(Dispatcher.CurrentDispatcher, null, NativeAudioOutput.Dummy,
+        new NativeHttpMediaOptions(TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3)));
     private static Task Open(NativePlayback player, A.Origin origin, CancellationToken token = default) =>
         player.OpenAsync("film", "synthetic-encrypted", origin.Uri("root.m3u8"), "合成加密媒体", origin.Headers, token);
     private static List<byte[]> Keys(object adaptive)
@@ -143,7 +142,7 @@ public static class AdaptiveEncryptionTests
     private static async Task Online(string profile)
     {
         await using var origin = new A.Origin(); var vod = new Vod(profile); origin.Route = vod.Route;
-        await using var player = New(origin);
+        await using var player = New();
         await Open(player, origin); await A.Decoded(player);
         object session = A.Session(player)!; int port = A.Port(player);
         await player.SeekAsync(8); await Until(() => player.PositionSeconds >= 7, "native encrypted seek");
@@ -156,14 +155,12 @@ public static class AdaptiveEncryptionTests
     private static async Task LocalRange()
     {
         await using var origin = new A.Origin(); var vod = new Vod(); origin.Route = vod.Route;
-        await using var player = New(origin); await Open(player, origin); await A.Decoded(player); await player.PauseAsync();
+        await using var player = New(); await Open(player, origin); await A.Decoded(player); await player.PauseAsync();
         object adaptive = A.Adaptive(player)!, graph = A.Field(adaptive, "_manifest")!;
         var resources = (IDictionary)A.Field(graph, "_resources")!;
         string path = resources.Keys.Cast<string>().First(k =>
             ((Uri)A.Field(resources[k]!, "OriginalUri")!).AbsolutePath == "/s0");
-        string capability = (string)adaptive.GetType().GetProperty("Capability", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(adaptive)!;
         using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
-        client.DefaultRequestHeaders.UserAgent.ParseAdd(capability);
         using (var first = await client.GetAsync($"http://127.0.0.1:{A.Port(player)}{path}")) Check(first.IsSuccessStatusCode);
         using var request = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{A.Port(player)}{path}");
         request.Headers.Range = new RangeHeaderValue(7, 511);
@@ -177,9 +174,9 @@ public static class AdaptiveEncryptionTests
         await using var a = new A.Origin(); await using var b = new A.Origin { RequireAuthorization = false };
         var vod = new Vod(); a.Route = path => path.StartsWith("/key", StringComparison.Ordinal) ? A.Reply.Redirect(b.Uri(path).AbsoluteUri) : vod.Route(path);
         b.Route = vod.Route;
-        await using var player = New(a, b); await Open(player, a); await A.Decoded(player);
+        await using var player = New(); await Open(player, a); await A.Decoded(player);
         await player.SeekAsync(8); await Until(() => player.PositionSeconds >= 7, "redirect key seek");
-        Check(b.Requests.Count > 0 && b.Requests.All(r => !r.AnyCallerHeader && !r.LocalCapability), "cross-origin keys receive no caller credentials");
+        Check(b.Requests.Count > 0 && b.Requests.All(r => r.AnyCallerHeader && r.Authorized && !r.LocalCapability), "cross-origin key IO retains the explicit input headers");
         Check(a.Requests.All(r => r.Authorized), "same-origin payloads retain only their scoped credentials");
         await player.StopAsync();
     }
@@ -192,7 +189,7 @@ public static class AdaptiveEncryptionTests
             return body && path == "/s0" && Interlocked.Increment(ref calls) == 3 ? reply with { BlockBody = true, PrefixBytes = 16 } : reply;
         };
         using var cancelled = new CancellationTokenSource();
-        await using var player = New(origin); await Open(player, origin, cancelled.Token);
+        await using var player = New(); await Open(player, origin, cancelled.Token);
         await Until(() => origin.Blocked > 0, "native encrypted IO blocked");
         object session = A.Session(player)!; int port = A.Port(player); var keys = Keys(A.Adaptive(player)!);
         cancelled.Cancel(); await player.StopAsync().WaitAsync(TimeSpan.FromSeconds(2)); await A.Released(session, port);
@@ -206,7 +203,7 @@ public static class AdaptiveEncryptionTests
     {
         await using var origin = new A.Origin(); var vod = new Vod(scenario is "map-no-iv" or "dref" ? "mp4" : "ts-sequence") { Invalid = scenario };
         origin.Route = vod.Route;
-        await using var player = New(origin);
+        await using var player = New();
         var rejectedSynchronously = false;
         try { await Open(player, origin); }
         catch (PlaybackException) { rejectedSynchronously = true; }
@@ -215,7 +212,7 @@ public static class AdaptiveEncryptionTests
         Check(!player.HasMedia && (rejectedSynchronously || player.LastErrorCode is not null),
             "unsafe encrypted input cannot become native media");
         Check(origin.Requests.All(r => !r.LocalCapability), "no native capability upstream");
-        if (scenario is "key-file" or "key-lan" or "sample-aes" or "keyformat" or "live" or "iv" or "map-no-iv" or "key-budget")
+        if (scenario is "key-file" or "sample-aes" or "keyformat" or "live" or "iv" or "map-no-iv" or "key-budget")
             Check(origin.Requests.All(r => r.Path == "/root.m3u8"), "invalid graph cannot fetch a key or payload");
         await player.StopAsync();
     }

@@ -1,12 +1,12 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { createAppRuntime } from '../apps/runtime/bootstrap.mjs';
 import { createRuntimeClient } from '../apps/runtime/client.mjs';
 
 /** A real local HTTP exchange for public module tests; no platform launcher. */
 export function moduleHttp(t, module) {
-  const sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex');
-  const runtime = createAppRuntime({ sessionId, requestKey, modules: [module] });
-  const ready = runtime.start().then(() => createRuntimeClient({ baseUrl: runtime.baseUrl, sessionId, requestKey }));
+  const sessionId = randomUUID();
+  const runtime = createAppRuntime({ sessionId, modules: [module] });
+  const ready = runtime.start().then(() => createRuntimeClient({ baseUrl: runtime.baseUrl }));
   ready.catch(() => {});
   t.after(async () => {
     const client = await ready;
@@ -22,6 +22,6 @@ export function moduleHttp(t, module) {
     }
   };
   rpc.upload = async (id, revision, bytes, options) => (await ready).upload(module.id, id, revision, bytes, options);
-  rpc.transport = { ready, runtime, identity: { sessionId, key: requestKey } };
+  rpc.transport = { ready, runtime, identity: { sessionId } };
   return rpc;
 }

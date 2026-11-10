@@ -5,17 +5,17 @@ enum FilmPosterAddress {
 
     static func normalize(_ address: String) -> URL? {
         var address = address.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !address.isEmpty, address.utf16.count <= 8_192,
+        guard !address.isEmpty,
               address.rangeOfCharacter(from: .controlCharacters) == nil else { return nil }
         if address.hasPrefix("//") { address = "https:" + address }
         guard var parts = URLComponents(string: address),
               let scheme = parts.scheme?.lowercased(), scheme == "http" || scheme == "https",
-              parts.user == nil, parts.password == nil, parts.fragment == nil,
-              let host = parts.host?.lowercased(), !host.isEmpty,
-              parts.port == nil || parts.port == (scheme == "http" ? 80 : 443) else { return nil }
-        parts.scheme = "https"
-        parts.port = nil
-        if isDoubanHost(host) { parts.host = proxyHost }
+              let host = parts.host?.lowercased(), !host.isEmpty else { return nil }
+        if isDoubanHost(host) {
+            parts.scheme = "https"
+            parts.host = proxyHost
+            if parts.port == (scheme == "http" ? 80 : 443) { parts.port = nil }
+        }
         return parts.url
     }
 

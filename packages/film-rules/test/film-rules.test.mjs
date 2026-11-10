@@ -171,3 +171,26 @@ test('stored matching rows decode the reference JSON and literal forms', () => {
     { pattern: 'plain', replace: '', flags: '' }
   ]);
 });
+
+test('search cleaning keeps its exact pictograph, regional indicator and selector behavior', () => {
+  for (const [text, expected] of [
+    ['星©™↔☀✨\u{1F004}\u{1F600}\u{1FAEA}\u{1F1E8}\u{1F1F3}河', '星河'],
+    ['星\u2600\u2606\u2700\u2701\u27BF河', '星河'],
+    ['星\uFE0E\uFE0F\u{E0100}河', '星\uFE0E\u{E0100}河'],
+    ['星\u{1F3FB}\u{1F3FF}河', '星\u{1F3FB}\u{1F3FF}河'],
+  ]) {
+    const result = invoke({ operation: 'process', rules: empty(), request: { section: 'search', text } });
+    assert.equal(result.type, 'success');
+    assert.equal(result.processedText, expected, text);
+    assert.equal(result.groupKey, expected, text);
+    assert.deepEqual(result.errors, []);
+  }
+});
+
+test('search cleaning preserves ordinary text and non-emoji astral characters', () => {
+  const text = '普通文字ABCé\u{20000}\u{30000}\u{1D11E}\u{1F100}\u{1F700}\u{1F800}\u{1FA00}';
+  const result = invoke({ operation: 'process', rules: empty(), request: { section: 'search', text } });
+  assert.equal(result.processedText, text);
+  assert.equal(result.groupKey, '普通文字abcé\u{20000}\u{30000}\u{1D11E}\u{1F100}\u{1F700}\u{1F800}\u{1FA00}');
+  assert.deepEqual(result.errors, []);
+});

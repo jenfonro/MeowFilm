@@ -211,12 +211,12 @@ final class FilmSearchSessionTests: XCTestCase {
         await metadata.setSearch("另一个词", results: [tmdbRow(8, "斗破")])
         let retry = try service.session(for: "另一个词")
         await retry.drain()
-        XCTAssertNotNil(retry.snapshot.metadataDetails["tv:8"], "A failed detail is removed from the shared cache")
+        XCTAssertNotNil(retry.snapshot.metadataDetails["tv:8"], "A failed detail is read again through the data adapter")
         await metadata.setSearch("第三个词", results: [tmdbRow(8, "斗破")])
         let cached = try service.session(for: "第三个词")
         await cached.drain()
         let calls = await metadata.detailCalls
-        XCTAssertEqual(calls.filter { $0 == "tv:8" }.count, 2, "Successful detail is reused across queries")
+        XCTAssertEqual(calls.filter { $0 == "tv:8" }.count, 3, "Each query reads the authoritative data adapter; native retains no success cache")
         await service.close()
     }
 
@@ -284,8 +284,9 @@ final class FilmSearchSessionTests: XCTestCase {
         let entered = expectation(description: "preparation entered")
         let preparation = SearchPreparationReads(sites: [site("a")], entered: entered, gate: gate)
         let service = FilmSearchService(processor: try FilmSearchProcessor(),
-            transport: .init(request: { _, params in try await reads.read(params) },
-                             upload: { _, _, _ in throw FilmSearchError.unavailable }),
+            data: .init(read: { site, query, page in
+                .init(value: try await reads.read(site: site.source.key.siteKey, query: query, page: page))
+            }),
             sites: { await preparation.read() }, rules: { [] })
         let session = try service.session(for: "原词")
         await fulfillment(of: [entered], timeout: 3)
@@ -393,7 +394,7 @@ final class FilmSearchSessionTests: XCTestCase {
         XCTAssertThrowsError(try service.session(for: "斗破"))
     }
 
-    func testCancelledSameIDDetailStartsFreshCachesCurrentAndCloseDrainsLateOld() async throws {
+    func testCancelledSameIDDetailStartsFreshAndCloseDrainsLateOldWithoutNativeCache() async throws {
         let entered = expectation(description: "old tv:7 detail entered")
         let cancelled = expectation(description: "old detail observed cancellation without returning")
         let oldReturned = expectation(description: "old physical detail returned late-old")
@@ -406,8 +407,7 @@ final class FilmSearchSessionTests: XCTestCase {
         let engine = SearchDetailCloseObservedEngine(processor: try FilmSearchProcessor(), metadata: metadata,
             prematureClose: prematureEngineClose)
         let service = FilmSearchService(processor: FilmSearchProcessor(engine: engine),
-            transport: .init(request: { _, _ in throw FilmSearchError.unavailable },
-                             upload: { _, _, _ in throw FilmSearchError.unavailable }),
+            data: .init(read: { _, _, _ in throw FilmSearchError.unavailable }),
             sites: { [] }, rules: { [] }, metadata: metadata)
         addTeardownBlock {
             await metadata.releaseOld()
@@ -436,7 +436,7 @@ final class FilmSearchSessionTests: XCTestCase {
         XCTAssertEqual(cached.snapshot.metadataDetails["tv:7"], currentPayload)
         guard cached.snapshot.metadataDetails["tv:7"] == currentPayload else { return }
         let calls = await metadata.detailCalls
-        XCTAssertEqual(calls, ["tv:7", "tv:7"], "The cancelled task is not shared; the third query reuses the current success")
+        XCTAssertEqual(calls, ["tv:7", "tv:7", "tv:7"], "Every query reads the data owner rather than a native success/flight cache")
         let stillPending = await metadata.didReturnOld
         XCTAssertFalse(stillPending)
 
@@ -507,7 +507,7 @@ final class FilmSearchSessionTests: XCTestCase {
         XCTAssertFalse(third === new)
         await third.drain()
         let calls = await metadata.detailCalls
-        XCTAssertEqual(calls, ["tv:7", "tv:7", "tv:7"], "A successful configuration change discards the previous detail cache")
+        XCTAssertEqual(calls, ["tv:7", "tv:7", "tv:7"], "A settings change invalidates navigation ownership; each new query reads the data adapter")
         await metadata.releaseOld()
         await fulfillment(of: [returned], timeout: 3)
         await old.drain()
@@ -597,7 +597,12 @@ final class FilmSearchSessionTests: XCTestCase {
             let ruleStore = try DocumentStore(baseURL: base, namespace: FilmRuleService.documentNamespace)
             let owner = FilmSourceService(transport: runtime.transport, storeFactory: { sourceStore })
             let rules = try FilmRuleService(store: ruleStore)
-            let service = try FilmSearchService(sources: owner, rules: rules)
+            let service = try FilmSearchService(sources: owner, rules: rules,
+                data: .init(read: { site, query, page in
+                    .init(value: try await runtime.transport.invoke(cat: site.cat, site: site.source,
+                        operation: "search", payload: .object(["wd": .string(query),
+                            "page": .number(Double(page)), "quick": .bool(false)])))
+                }))
             await runtime.pause("invoke")
             let old = try service.session(for: "斗破")
             await runtime.waitUntilPaused()
@@ -730,10 +735,9 @@ final class FilmSearchSessionTests: XCTestCase {
 
     private func makeService(_ reads: SearchCatReads, sites: [FilmSearchSite], rules: [String] = [],
                              metadata: (any FilmSearchMetadataReading)? = nil) throws -> FilmSearchService {
-        FilmSearchService(processor: try FilmSearchProcessor(), transport: CatScriptTransport(request: { operation, params in
-            guard operation == "invoke" else { throw FilmSearchError.invalidResponse }
-            return try await reads.read(params)
-        }, upload: { _, _, _ in throw FilmSearchError.unavailable }), sites: { sites }, rules: { rules }, metadata: metadata)
+        FilmSearchService(processor: try FilmSearchProcessor(), data: .init(read: { site, query, page in
+            .init(value: try await reads.read(site: site.source.key.siteKey, query: query, page: page))
+        }), sites: { sites }, rules: { rules }, metadata: metadata)
     }
     private func site(_ key: String, installation: String = "cat", generation: Int64 = 1, order: Int = 0) -> FilmSearchSite {
         FilmSearchSite(cat: .init(installationId: installation, name: installation, sourceType: "local", generation: generation, state: "ready"),
@@ -762,10 +766,7 @@ private actor SearchCatReads {
     func failNext(_ site: String, page: Int) { failures.insert("\(site):\(page)") }
     func block(query: String, entered: XCTestExpectation, gate: SearchReadGate) { blocked = (query, entered, gate) }
     func block(site: String, page: Int, entered: XCTestExpectation, gate: SearchReadGate) { blockedSite = (site, page, entered, gate) }
-    func read(_ parameters: RuntimeValue) async throws -> RuntimeValue {
-        let site = parameters.catField("siteId")?.catText ?? ""
-        let payload = parameters.catField("payload") ?? .null
-        let query = payload.catField("wd")?.catText ?? "", page = payload.catField("page")?.catInteger ?? 0
+    func read(site: String, query: String, page: Int) async throws -> RuntimeValue {
         calls.append(Call(site: site, query: query, page: page))
         if let blocked, query == blocked.0 { blocked.1.fulfill(); await blocked.2.wait() }
         if let blockedSite, site == blockedSite.0, page == blockedSite.1 {

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createHttpClient, createHttpServer, HTTP_PROTOCOL } from '../src/index.js';
-import { pair, rawRequest, credentials, deferred, until, turn } from './http-fixture.js';
+import { pair, rawRequest, lifecycle, deferred, until, turn } from './http-fixture.js';
 
 const okay = reply => { assert.equal(reply.ok, true); return reply.value; };
 
@@ -51,14 +51,14 @@ test('registered methods round trip all JSON types and isolate malformed results
 });
 
 test('nested reverse HTTP callback runs while the forward request is waiting', async t => {
-  const identity = credentials();
+  const identity = lifecycle();
   const callbacks = createHttpServer({ ...identity, resolve: ({ method, url }) => {
     if (method !== 'POST' || url.pathname !== '/v1/capabilities/test.echo' || url.search) return;
     return { contentType: 'application/json', contract: HTTP_PROTOCOL,
       handler: async input => ({ ok: true, contract: HTTP_PROTOCOL, value: input.key }) };
   } });
   await callbacks.start();
-  const reverse = createHttpClient({ ...identity, baseUrl: callbacks.baseUrl });
+  const reverse = createHttpClient({ baseUrl: callbacks.baseUrl });
   t.after(async () => { await Promise.all([reverse.close(), callbacks.close()]); });
   const { call } = await pair(t, async input => okay(await reverse.request({
     path: '/v1/capabilities/test.echo', body: input,
@@ -117,18 +117,15 @@ test('timeout aborts HTTP and close waits for actual handler completion without 
   assert.equal(server.state.active, 0);
 });
 
-test('session identity and duplicate active request IDs reject before dispatch, completed IDs leave no history', async t => {
+test('duplicate active request IDs reject before dispatch, completed IDs leave no history', async t => {
   const entered = deferred(), release = deferred(); let calls = 0;
-  const { call, server, identity } = await pair(t, async input => {
+  const { call, server } = await pair(t, async input => {
     calls++; if (input === 'slow') { entered.resolve(); await release.promise; } return input;
   });
   const requestId = randomUUID();
   const pending = call('slow', { requestId }); await entered.promise;
   const duplicate = await call('other', { requestId });
   assert.equal(duplicate.code, 'INVALID_REQUEST'); assert.equal(calls, 1);
-  for (const headers of [{ authorization: 'Bearer wrong' }, { 'x-meow-session': randomUUID() }, { host: 'example.invalid' }]) {
-    assert.equal((await rawRequest(server.baseUrl, identity, { headers, body: '{}' }).response).status, 401);
-  }
   release.resolve(); await pending;
   await until(() => server.state.active === 0);
   assert.equal(okay(await call('again', { requestId })), 'again');

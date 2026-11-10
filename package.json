@@ -7,7 +7,9 @@
     "packages/runtime-bridge",
     "packages/script-host",
     "packages/source-runtime",
-    "packages/pan-runtime"
+    "packages/pan-runtime",
+    "packages/film-rules",
+    "packages/film-playback"
   ],
   "engines": {
     "node": "^24.0.0"

@@ -43,18 +43,15 @@ class ProductConfigurationTests(unittest.TestCase):
         self.assertEqual(project.count('path = "Navigation/MeowfilmCoordinator.swift";'), 1)
         self.assertEqual({p.name for p in (self.root / "apps/ios").glob("*.xcodeproj")}, {"Meowfilm.xcodeproj"})
 
-    def test_kugou_http_exception_is_exact_in_the_app_info(self):
+    def test_app_allows_arbitrary_http_without_scoped_ats_overrides(self):
         base = plistlib.loads((self.root / "apps/ios/Info.plist").read_bytes())
         app = plistlib.loads((self.root / "apps/ios/Info-Meowfilm.plist").read_bytes())
         self.assertNotIn("NSAppTransportSecurity", base)
         self.assertNotIn("NSLocalNetworkUsageDescription", base)
         self.assertIs(app["UIDesignRequiresCompatibility"], True)
-        self.assertEqual(app["NSAppTransportSecurity"], {
-            "NSExceptionDomains": {"d.kugou.com": {
-                "NSExceptionAllowsInsecureHTTPLoads": True,
-                "NSIncludesSubdomains": False,
-            }},
-        })
+        self.assertEqual(app["NSAppTransportSecurity"], {"NSAllowsArbitraryLoads": True})
+        committed = plistlib.loads((ROOT / "apps/ios/Info-Meowfilm.plist").read_bytes())
+        self.assertEqual(committed["NSAppTransportSecurity"], app["NSAppTransportSecurity"])
         self.assertEqual(app["UIApplicationSceneManifest"], {
             "UIApplicationSupportsMultipleScenes": False,
             "UISceneConfigurations": {
@@ -100,8 +97,8 @@ class ProductConfigurationTests(unittest.TestCase):
         host = next(line for line in project.splitlines()
                     if "isa = PBXNativeTarget;" in line and "name = MeowfilmRuntimeTests;" in line)
         self.assertNotIn("packageProductDependencies", host, "Hosted tests use the App's linked products")
-        self.assertIn("BUNDLE_LOADER", project)
-        self.assertIn("TEST_HOST", project)
+        self.assertEqual(project.count('BUNDLE_LOADER = "$(TEST_HOST)";'), 2)
+        self.assertEqual(project.count('TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Meowfilm.app/Meowfilm";'), 2)
         scheme = (self.root / "apps/ios/Meowfilm.xcodeproj/xcshareddata/xcschemes/MeowfilmAcceptance.xcscheme").read_text()
         self.assertIn('BlueprintName="MeowfilmRuntimeTests"', scheme)
 
@@ -136,6 +133,35 @@ class ProductConfigurationTests(unittest.TestCase):
         self.assertNotIn("CODE_SIGN_ENTITLEMENTS =", project)
         self.assertNotIn("DEVELOPMENT_TEAM", project)
         self.assertNotIn("PROVISIONING_PROFILE", project)
+
+    def test_video_kernel_licenses_are_shipped_once_as_app_resources(self):
+        project = self.project("Meowfilm")
+        resources = next(line for line in project.splitlines() if "isa = PBXResourcesBuildPhase;" in line)
+        for filename in ("NOTICE.md", "GPL-3.0-only.txt", "LGPL-2.1-only.txt", "LGPL-3.0-only.txt",
+                         "FFmpeg-LICENSE.md", "FFmpeg-IJG-NOTICE.txt"):
+            references = [line.split()[0] for line in project.splitlines()
+                          if f'path = "../../LICENSES/{filename}";' in line]
+            self.assertEqual(len(references), 1, filename)
+            builds = [line.split()[0] for line in project.splitlines()
+                      if f"isa = PBXBuildFile; fileRef = {references[0]};" in line]
+            self.assertEqual(len(builds), 1, filename)
+            self.assertIn(builds[0], resources)
+            self.assertTrue((ROOT / "LICENSES" / filename).is_file())
+
+    def test_synthetic_video_is_a_host_test_resource_not_an_app_resource(self):
+        project = self.project("Meowfilm")
+        reference = next(line.split()[0] for line in project.splitlines()
+                         if 'path = "../../native/VideoKernel/Tests/VideoKernelTests/Fixtures/ordinary.mp4";' in line)
+        build = next(line.split()[0] for line in project.splitlines()
+                     if f"isa = PBXBuildFile; fileRef = {reference};" in line)
+        phases = [line for line in project.splitlines() if "isa = PBXResourcesBuildPhase;" in line]
+        used = [line for line in phases if build in line]
+        self.assertEqual(len(used), 1)
+        phase = used[0].split()[0]
+        targets = [line for line in project.splitlines() if "isa = PBXNativeTarget;" in line and phase in line]
+        self.assertEqual(len(targets), 1)
+        self.assertIn("name = MeowfilmRuntimeTests;", targets[0])
+        self.assertTrue((ROOT / "native/VideoKernel/Tests/VideoKernelTests/Fixtures/ordinary.mp4").is_file())
 
     def test_generation_is_reproducible_without_changing_base_info(self):
         before = {path.relative_to(self.root).as_posix(): path.read_bytes()

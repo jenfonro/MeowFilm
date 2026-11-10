@@ -4,38 +4,30 @@ public enum RuntimeHTTPError: Error, Sendable, Equatable {
     case cancelled, timeout, closed, invalidRequest, invalidResponse, remote(String)
 }
 
-/// One trusted loopback session. Business modules borrow this client; only its
+/// One HTTP client. Business modules borrow this client; only its
 /// App owner closes it. URLSession owns the actual HTTP tasks and their drain.
 public final class RuntimeHTTPClient: @unchecked Sendable {
     private static let protocolName = "runtime.http.v1"
     private let baseURL: URL
-    private let sessionID: String
-    private let requestKey: String
     private let timeout: TimeInterval
     private let state = RuntimeHTTPState()
     private let session: URLSession
+    private let eventConfiguration: URLSessionConfiguration
 
-    public convenience init(baseURL: URL, sessionID: String, requestKey: String,
-                            timeout: TimeInterval = 30) throws {
-        try self.init(baseURL: baseURL, sessionID: sessionID, requestKey: requestKey,
-                      timeout: timeout, configuration: .ephemeral)
+    public convenience init(baseURL: URL, timeout: TimeInterval = 30) throws {
+        try self.init(baseURL: baseURL, timeout: timeout, configuration: .ephemeral)
     }
 
-    init(baseURL: URL, sessionID: String, requestKey: String, timeout: TimeInterval = 30,
+    init(baseURL: URL, timeout: TimeInterval = 30,
          configuration: URLSessionConfiguration) throws {
         guard let components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
-              components.scheme == "http", components.host == "127.0.0.1",
-              let port = components.port, (1...65535).contains(port),
-              components.user == nil, components.password == nil,
+              let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = components.host, !host.isEmpty,
+              components.port == nil || (1...65535).contains(components.port!),
               components.path.isEmpty || components.path == "/",
               components.query == nil, components.fragment == nil,
-              Self.validUUID(sessionID),
-              requestKey.utf8.count == 64,
-              requestKey.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
               timeout.isFinite, timeout > 0 else { throw RuntimeHTTPError.invalidRequest }
         self.baseURL = baseURL
-        self.sessionID = sessionID
-        self.requestKey = requestKey
         self.timeout = timeout
         configuration.httpShouldSetCookies = false
         configuration.httpCookieStorage = nil
@@ -44,11 +36,20 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = timeout
+        eventConfiguration = configuration.copy() as! URLSessionConfiguration
+        // Events have an idle timeout, but no whole-observation RPC deadline.
+        eventConfiguration.timeoutIntervalForResource = 0
         session = URLSession(configuration: configuration, delegate: RuntimeHTTPDelegate(state: state),
                              delegateQueue: nil)
     }
 
     public var isClosed: Bool { state.isClosed }
+
+    /// Observes irreversible client revocation, not HTTP drain or executor exit.
+    /// Cancelling a borrower only removes its wait; it never closes this client.
+    public func waitUntilClosed() async throws {
+        try await state.waitUntilClosed()
+    }
 
     public func describe() async throws -> RuntimeValue {
         try await request(method: "GET", path: "/v1/describe")
@@ -59,11 +60,12 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         guard case .object(let description) = try await describe(),
               description["protocol"] == .string(Self.protocolName),
               description["product"] == .string("aggregate"),
-              case .array(let modules)? = description["modules"], modules.count == 4 else {
+              case .array(let modules)? = description["modules"], modules.count == 7 else {
             throw RuntimeHTTPError.invalidResponse
         }
-        let expected: [(RuntimeModule, String)] = [(.music, "0.8.0"), (.cat, "0.2.0"),
-                                                   (.source, "0.2.0"), (.tmdb, "0.1.0")]
+        let expected: [(RuntimeModule, String)] = [(.music, "0.8.0"), (.cat, "0.2.0"), (.source, "0.2.0"),
+                                                   (.pan, "0.1.0"), (.tmdb, "0.1.0"), (.douban, "0.1.0"),
+                                                   (.film, "0.1.0")]
         for (module, version) in expected {
             let matches = modules.filter {
                 guard case .object(let fields) = $0 else { return false }
@@ -83,26 +85,31 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     /// The relative reference is both the public image identity and cache key.
-    /// Never accept a URL capable of replacing the trusted session endpoint.
-    public static func tmdbImageURL(_ path: String) -> URL? {
-        guard path.range(of: #"^/v1/tmdb/images/(original|[wh][1-9][0-9]*)/[A-Za-z0-9_-]+\.[A-Za-z0-9]+$"#,
-                         options: .regularExpression)?.upperBound == path.endIndex else { return nil }
+    /// Image references are protocol paths, not alternate runtime endpoints.
+    public static func metadataImageURL(_ path: String) -> URL? {
+        guard metadataImageProvider(path) != nil else { return nil }
         return URL(string: path)
     }
 
-    public func readTMDBImage(_ reference: URL) async throws -> Data {
+    private static func metadataImageProvider(_ path: String) -> RuntimeModule? {
+        if path.range(of: #"^/v1/tmdb/images/(original|[wh][1-9][0-9]*)/[A-Za-z0-9_-]+\.[A-Za-z0-9]+$"#,
+                      options: .regularExpression)?.upperBound == path.endIndex { return .tmdb }
+        guard path.range(of: #"\A/v1/douban/images/(?!\.{1,2}(?:/|\z))[A-Za-z0-9._~-]+(?:/(?!\.{1,2}(?:/|\z))[A-Za-z0-9._~-]+)*\z"#,
+                         options: .regularExpression)?.upperBound == path.endIndex else { return nil }
+        return .douban
+    }
+
+    public func readMetadataImage(_ reference: URL) async throws -> Data {
         guard reference.baseURL == nil, reference.scheme == nil,
-              Self.tmdbImageURL(reference.absoluteString) == reference else { throw RuntimeHTTPError.invalidRequest }
+              let provider = Self.metadataImageProvider(reference.absoluteString) else { throw RuntimeHTTPError.invalidRequest }
         guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         let requestID = UUID().uuidString.lowercased()
         var request = URLRequest(url: URL(string: reference.absoluteString, relativeTo: baseURL)!.absoluteURL,
                                  cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         request.httpShouldHandleCookies = false
-        request.setValue("Bearer \(requestKey)", forHTTPHeaderField: "Authorization")
-        request.setValue(sessionID, forHTTPHeaderField: "X-Meow-Session")
         request.setValue(requestID, forHTTPHeaderField: "X-Meow-Request-Id")
         request.setValue("image/*", forHTTPHeaderField: "Accept")
-        let read = RuntimeHTTPImageRead(requestID: requestID, state: state)
+        let read = RuntimeHTTPImageRead(requestID: requestID, provider: provider, state: state)
         let outgoing = request
         let data: Data = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -121,7 +128,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
 
     public func call(module: RuntimeModule, operation: String,
                      parameters: RuntimeValue = .object([:])) async throws -> RuntimeValue {
-        guard operation.range(of: #"^[a-z]+(?:\.[a-z]+)?$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
+        guard operation.range(of: #"^[a-z]+(?:\.[a-z]+)*$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
             throw RuntimeHTTPError.invalidRequest
         }
         let body: Data
@@ -129,6 +136,28 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         catch { throw RuntimeHTTPError.invalidRequest }
         return try await request(method: "POST", path: "/v1/\(module.rawValue)/\(operation)",
                                  body: body, module: module)
+    }
+
+    /// Observes snapshots without owning the business session or the App runtime.
+    /// The module identifier is independent of the finite RPC module registry.
+    public func events(moduleID: String, sessionID: UUID, after: Int64 = 0) throws -> RuntimeHTTPEvents {
+        guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
+        guard let first = moduleID.utf8.first, (97...122).contains(first),
+              moduleID.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }),
+              after >= 0, after <= 9_007_199_254_740_991 else { throw RuntimeHTTPError.invalidRequest }
+        let requestID = UUID().uuidString.lowercased(), id = UUID()
+        let url = URL(string: "/v1/\(moduleID)/events/\(sessionID.uuidString.lowercased())?after=\(after)",
+                      relativeTo: baseURL)!.absoluteURL
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
+        request.httpShouldHandleCookies = false
+        request.setValue(requestID, forHTTPHeaderField: "X-Meow-Request-Id")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        let state = state
+        let events = RuntimeHTTPEvents(sessionID: sessionID, requestID: requestID) { state.endEvents(id) }
+        guard state.startEvents(id, events.connection) else { throw RuntimeHTTPError.closed }
+        events.connection.start(request: request, configuration: eventConfiguration)
+        return events
     }
 
     public func upload(module: RuntimeModule, installationID: String, sourceRevision: Int,
@@ -174,8 +203,6 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         request.httpMethod = method
         request.httpBody = body
         request.httpShouldHandleCookies = false
-        request.setValue("Bearer \(requestKey)", forHTTPHeaderField: "Authorization")
-        request.setValue(sessionID, forHTTPHeaderField: "X-Meow-Session")
         request.setValue(requestID, forHTTPHeaderField: "X-Meow-Request-Id")
         if let body {
             request.setValue(raw ? "application/octet-stream" : "application/json", forHTTPHeaderField: "Content-Type")
@@ -238,11 +265,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         throw RuntimeHTTPError.remote(code)
     }
 
-    private static func validUUID(_ value: String) -> Bool {
-        value.utf8.count == 36 && UUID(uuidString: value) != nil
-    }
-
-    deinit { session.invalidateAndCancel() }
+    deinit { invalidate() }
 }
 
 private final class RuntimeHTTPRequest: @unchecked Sendable {
@@ -276,6 +299,8 @@ private final class RuntimeHTTPState: @unchecked Sendable {
     private var closed = false
     private var invalidated = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var closureWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private var events: [UUID: RuntimeHTTPEventConnection] = [:]
     var isClosed: Bool {
         lock.lock(); defer { lock.unlock() }
         return closed
@@ -287,15 +312,54 @@ private final class RuntimeHTTPState: @unchecked Sendable {
         lock.unlock()
     }
     func beginClose() -> Bool {
+        lock.lock()
+        guard !closed else { lock.unlock(); return false }
+        closed = true
+        let pending = Array(closureWaiters.values)
+        closureWaiters.removeAll()
+        let active = Array(events.values)
+        lock.unlock()
+        for waiter in pending { waiter.resume() }
+        for connection in active { connection.cancel(.closed) }
+        return true
+    }
+    func waitUntilClosed() async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                lock.lock()
+                if Task.isCancelled { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
+                if closed { lock.unlock(); continuation.resume(); return }
+                closureWaiters[id] = continuation
+                lock.unlock()
+            }
+        } onCancel: { self.cancelClosureWait(id) }
+        try Task.checkCancellation()
+    }
+    private func cancelClosureWait(_ id: UUID) {
+        lock.lock()
+        let waiter = closureWaiters.removeValue(forKey: id)
+        lock.unlock()
+        waiter?.resume(throwing: CancellationError())
+    }
+    func startEvents(_ id: UUID, _ connection: RuntimeHTTPEventConnection) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard !closed else { return false }
-        closed = true
+        events[id] = connection
         return true
+    }
+    func endEvents(_ id: UUID) {
+        lock.lock()
+        events.removeValue(forKey: id)
+        let pending = invalidated && events.isEmpty ? waiters : []
+        if invalidated && events.isEmpty { waiters.removeAll() }
+        lock.unlock()
+        for waiter in pending { waiter.resume() }
     }
     func waitForInvalidation() async {
         await withCheckedContinuation { continuation in
             lock.lock()
-            if invalidated { lock.unlock(); continuation.resume(); return }
+            if invalidated && events.isEmpty { lock.unlock(); continuation.resume(); return }
             waiters.append(continuation)
             lock.unlock()
         }
@@ -303,9 +367,12 @@ private final class RuntimeHTTPState: @unchecked Sendable {
     func didInvalidate() {
         lock.lock()
         closed = true; invalidated = true
-        let pending = waiters
-        waiters.removeAll()
+        let closing = Array(closureWaiters.values)
+        closureWaiters.removeAll()
+        let pending = events.isEmpty ? waiters : []
+        if events.isEmpty { waiters.removeAll() }
         lock.unlock()
+        for waiter in closing { waiter.resume() }
         for waiter in pending { waiter.resume() }
     }
 }
@@ -316,6 +383,7 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
     private static let maximumBytes = 4 * 1_024 * 1_024
     private let lock = NSLock()
     private let requestID: String
+    private let provider: RuntimeModule
     private let state: RuntimeHTTPState
     private var task: URLSessionDataTask?
     private var continuation: CheckedContinuation<Data, Error>?
@@ -323,7 +391,9 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
     private var bytes = Data()
     private var failure: Error?
     private var cancelled = false
-    init(requestID: String, state: RuntimeHTTPState) { self.requestID = requestID; self.state = state }
+    init(requestID: String, provider: RuntimeModule, state: RuntimeHTTPState) {
+        self.requestID = requestID; self.provider = provider; self.state = state
+    }
     func install(_ task: URLSessionDataTask, continuation: CheckedContinuation<Data, Error>) {
         lock.lock()
         self.task = task; self.continuation = continuation
@@ -381,7 +451,7 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
                     response.expectedContentLength == bytes.count else { throw RuntimeHTTPError.invalidResponse }
                 if response.statusCode != 200 {
                     _ = try RuntimeHTTPClient.value(data: bytes, response: response, requestID: requestID,
-                                                    module: .tmdb, imageFailure: true)
+                                                    module: provider, imageFailure: true)
                     throw RuntimeHTTPError.invalidResponse
                 }
                 return bytes

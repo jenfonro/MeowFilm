@@ -901,21 +901,21 @@ private actor DeclarationOrderRuntime {
 actor MusicScriptHTTPTestRuntime: RuntimeLaunching {
     typealias Response = @Sendable (String, RuntimeValue) async throws -> RuntimeValue
     private let response: Response
-    private let sessionID = UUID().uuidString.lowercased()
+    private let endpointHost = UUID().uuidString.lowercased() + ".invalid"
     private var client: RuntimeHTTPClient?
     init(_ response: @escaping Response) { self.response = response }
     func connect() throws -> RuntimeHTTPClient {
-        MusicScriptRegressionURLProtocol.registry.set(self, session: sessionID)
+        MusicScriptRegressionURLProtocol.registry.set(self, host: endpointHost)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MusicScriptRegressionURLProtocol.self]
-        let client = try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43210")!,
-            sessionID: sessionID, requestKey: String(repeating: "a", count: 64), configuration: configuration)
+        let client = try RuntimeHTTPClient(baseURL: URL(string: "http://\(endpointHost):43210")!,
+            configuration: configuration)
         self.client = client
         return client
     }
     func close() async {
         await client?.close()
-        MusicScriptRegressionURLProtocol.registry.set(nil, session: sessionID)
+        MusicScriptRegressionURLProtocol.registry.set(nil, host: endpointHost)
     }
     func waitForExit() {}
     static func success(_ value: RuntimeValue, contract: String = "music.script.v3") -> RuntimeValue {
@@ -952,11 +952,11 @@ actor MusicScriptHTTPTestRuntime: RuntimeLaunching {
 private final class MusicScriptRegressionHTTPRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var runtimes: [String: MusicScriptHTTPTestRuntime] = [:]
-    func set(_ runtime: MusicScriptHTTPTestRuntime?, session: String) {
-        lock.lock(); defer { lock.unlock() }; runtimes[session] = runtime
+    func set(_ runtime: MusicScriptHTTPTestRuntime?, host: String) {
+        lock.lock(); defer { lock.unlock() }; runtimes[host] = runtime
     }
-    func runtime(_ session: String) -> MusicScriptHTTPTestRuntime? {
-        lock.lock(); defer { lock.unlock() }; return runtimes[session]
+    func runtime(_ host: String) -> MusicScriptHTTPTestRuntime? {
+        lock.lock(); defer { lock.unlock() }; return runtimes[host]
     }
 }
 
@@ -970,7 +970,7 @@ private final class MusicScriptRegressionURLProtocol: URLProtocol, @unchecked Se
         lock.lock(); defer { lock.unlock() }
         loading = Task {
             do {
-                let id = request.value(forHTTPHeaderField: "X-Meow-Session") ?? ""
+                let id = request.url?.host ?? ""
                 guard let runtime = Self.registry.runtime(id) else { throw RuntimeHTTPError.closed }
                 let response = try await runtime.respond(request)
                 try Task.checkCancellation()

@@ -3,7 +3,6 @@ import Combine
 import MeowUI
 import MeowMusicFeature
 import MeowFilmFeature
-import AVKit
 
 @MainActor
 final class MeowfilmCoordinator: NSObject, MusicUIRouting {
@@ -22,6 +21,8 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private var accessGeneration: UUID?
     private var presentedError: String?
     private var startupErrorAcknowledged = false
+    private var filmNavigation: Task<Void, Never>?
+    private weak var filmPlayer: FilmPlayerViewController?
 
     init(window: UIWindow, assembly: MeowfilmAssembly,
          resetUserData: @escaping @MainActor () async throws -> Void) {
@@ -45,6 +46,9 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         navigation.didShowPage = { [weak self] page in
             guard let self else { return }
             self.root.setRootVisible(page === self.main, animated: false)
+            if !(page is FilmDetailViewController), self.filmPlayer == nil {
+                self.activateFilmPage(page)
+            }
             self.showPendingError()
         }
         root.onSelectPage = { [weak self] page in
@@ -64,6 +68,23 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             self.showPendingError()
         }.store(in: &observations)
         if let model = assembly.music { install(model) }
+        assembly.restoreFilmPlaybackUI = { [weak self] sessionID in
+            guard let self, let model = assembly.filmPlayback, model.sessionID == sessionID,
+                  UIApplication.shared.applicationState != .background else { return false }
+            if let page = self.filmPlayer, page.filmPlaybackModel === model {
+                return page.presentingViewController != nil && page.viewIfLoaded?.window != nil &&
+                    !page.isBeingPresented && !page.isBeingDismissed
+            }
+            guard self.root.presentedViewController == nil else { return false }
+            await model.open()?.value
+            guard model.sessionID == sessionID, self.assembly.filmPlayback === model else { return false }
+            return await withCheckedContinuation { continuation in
+                let accepted = self.presentFilmPlayer(model, restoring: true) { [weak self] in
+                    continuation.resume(returning: self?.filmPlayer?.presentingViewController != nil)
+                }
+                if !accepted { continuation.resume(returning: false) }
+            }
+        }
     }
 
     func becameActive() {
@@ -183,28 +204,88 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         main?.selectChannel(channel)
     }
 
-    private func showFilm(_ item: FilmItem) {
+    private func showFilm(_ item: FilmItem, kind: FilmPlaybackKind) {
+        let item = FilmItem(sourceID: item.sourceID, id: item.id, title: item.title,
+                            kind: FilmItemKind(rawValue: kind.rawValue) ?? item.kind,
+                            posterURL: item.posterURL, largePosterURL: item.largePosterURL,
+                            score: item.score, subtitle: item.subtitle)
+        let model: FilmPlaybackModel
+        do { model = try assembly.makeFilmPlayback(item: item, kind: kind) }
+        catch {
+            (navigation.topViewController as? PageViewController)?.showError(error.localizedDescription)
+            return
+        }
         let page = FilmDetailViewController(detail: FilmDetail(item: item), library: assembly.filmLibrary,
-            images: assembly.filmImages, themeProvider: assembly.appearance)
-        presentFilmDetail(page)
+            images: assembly.filmImages, themeProvider: assembly.appearance, model: model)
+        presentFilmDetail(page, model: model)
     }
 
     func showFilmSearchResult(_ context: FilmSearchContext) {
-        let page = FilmDetailViewController(searchContext: context, library: assembly.filmLibrary,
-            images: assembly.filmImages, themeProvider: assembly.appearance)
-        presentFilmDetail(page)
+        do {
+            let model = try assembly.makeFilmPlayback(context: context)
+            let page = FilmDetailViewController(searchContext: context, library: assembly.filmLibrary,
+                images: assembly.filmImages, themeProvider: assembly.appearance, model: model)
+            presentFilmDetail(page, model: model)
+        } catch {
+            (navigation.topViewController as? PageViewController)?.showError(error.localizedDescription)
+        }
     }
 
-    private func presentFilmDetail(_ page: FilmDetailViewController) {
-        page.onSelectItem = { [weak self] in self?.showFilm($0) }
-        page.onPlay = { [weak self, weak page] url in
-            guard let self, let page, self.navigation.topViewController === page else { return }
-            self.assembly.playback.pause()
-            let player = AVPlayerViewController()
-            player.player = AVPlayer(url: url)
-            page.present(player, animated: true) { player.player?.play() }
+    private func presentFilmDetail(_ page: FilmDetailViewController, model: FilmPlaybackModel) {
+        page.onSelectRelatedItem = { [weak self] in self?.showFilm($0, kind: $1) }
+        page.onSelectItem = { [weak self] item in
+            guard let kind = item.kind else { return }
+            self?.showFilm(item, kind: kind == .movie ? .movie : .tv)
+        }
+        page.onActivatePlayback = { [weak self, weak page] in
+            guard let self, let page, self.filmPlayer == nil else { return }
+            self.activateFilmPage(page)
+        }
+        page.onPresentPlayback = { [weak self, weak model] in
+            guard let self, let model,
+                  (self.navigation.topViewController as? any FilmPlaybackPage)?.filmPlaybackModel === model else { return }
+            self.presentFilmPlayer(model)
         }
         navigation.pushViewController(page, animated: true)
+    }
+
+    private func activateFilmPage(_ page: UIViewController) {
+        filmNavigation?.cancel()
+        let model = (page as? any FilmPlaybackPage)?.filmPlaybackModel
+        filmNavigation = Task { [weak self, weak page] in
+            guard let self, !Task.isCancelled else { return }
+            do {
+                if let model {
+                    try await self.assembly.activateFilm(model)
+                    try Task.checkCancellation()
+                    await model.open()?.value
+                } else {
+                    try await self.assembly.leaveFilm()
+                    try Task.checkCancellation()
+                }
+            } catch {
+                guard !(error is CancellationError), !Task.isCancelled else { return }
+                (page as? PageViewController)?.showError(error.localizedDescription)
+            }
+        }
+    }
+
+    @discardableResult
+    private func presentFilmPlayer(_ model: FilmPlaybackModel, restoring: Bool = false,
+                                   completion: (() -> Void)? = nil) -> Bool {
+        let applicationState = UIApplication.shared.applicationState
+        guard filmPlayer == nil, assembly.filmPlayback === model,
+              root.presentedViewController == nil, !root.isBeingDismissed,
+              applicationState == .active || restoring && applicationState != .background else { return false }
+        let page = FilmPlayerViewController(model: model, themeProvider: assembly.appearance)
+        filmPlayer = page
+        page.onDismiss = { [weak self] in
+            guard let self else { return }
+            self.filmPlayer = nil
+            if let top = self.navigation.topViewController { self.activateFilmPage(top) }
+        }
+        root.present(page, animated: true, completion: completion)
+        return true
     }
 
     private func install(_ model: MusicViewModel) {
@@ -227,12 +308,20 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 let page = FilmHomeViewController(model: filmHome,
                                                   images: self.assembly.filmImages,
                                                   themeProvider: appearance)
-                page.onSelectItem = { [weak self] in self?.showFilm($0) }
+                page.onSelectPlaybackItem = { [weak self, weak page] item, category in
+                    guard let category else {
+                        page?.showError("缺少影片类型")
+                        return
+                    }
+                    self?.showFilm(item, kind: category == .movie ? .movie : .tv)
+                }
                 page.onSelectCategory = { [weak self] model in
                     guard let self else { return }
                     let category = FilmCategoryViewController(model: model, images: self.assembly.filmImages,
                                                                themeProvider: appearance)
-                    category.onSelectItem = { [weak self] in self?.showFilm($0) }
+                    category.onSelectItem = { [weak self] in
+                        self?.showFilm($0, kind: model.category == .movie ? .movie : .tv)
+                    }
                     self.navigation.pushViewController(category, animated: true)
                 }
                 return page

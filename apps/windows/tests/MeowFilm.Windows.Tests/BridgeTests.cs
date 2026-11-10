@@ -219,17 +219,16 @@ public static class BridgeTests
     private static async Task JsHttp()
     {
         const string sessionId = "e4a110cc-4896-40ea-a866-07aab1893806";
-        var key = new string('b', 64); // Synthetic fixture identity.
         using var node = StartNode($$$"""
             import { createHttpServer } from {{{ModuleUrl}}};
             import { createHash } from 'node:crypto';
             import { createInterface } from 'node:readline';
-            const sessionId = {{{JsonSerializer.Serialize(sessionId)}}}, key = {{{JsonSerializer.Serialize(key)}}};
+            const sessionId = {{{JsonSerializer.Serialize(sessionId)}}};
             const lines = createInterface({input:process.stdin});
             let release, stopping, calls = 0;
             const held = new Promise(resolve => { release = resolve; });
             const okay = (value, contract = 'music.script.v3') => ({ok:true, contract, value});
-            const server = createHttpServer({sessionId, key, resolve: ({method, url}) => {
+            const server = createHttpServer({sessionId, resolve: ({method, url}) => {
               if (method === 'PUT' && url.pathname === '/v1/source/sources/candidate/3') return {
                 contentType:'application/octet-stream', contract:'source.runtime.v2', codes:new Set(),
                 handler:bytes => okay({sourceBytes:bytes.length, contentHash:createHash('sha256').update(bytes).digest('hex')}, 'source.runtime.v2')};
@@ -266,7 +265,7 @@ public static class BridgeTests
         {
             var baseUrl = await node.StandardOutput.ReadLineAsync().WaitAsync(TestDeadline)
                 ?? throw new InvalidOperationException("Missing HTTP fixture endpoint");
-            await using var client = new RuntimeHttpClient(baseUrl, sessionId, key);
+            await using var client = new RuntimeHttpClient(baseUrl);
             using var cancelledBeforeSend = new CancellationTokenSource(); cancelledBeforeSend.Cancel();
             try { await client.CallAsync("music.script.invoke", cancellationToken: cancelledBeforeSend.Token); throw new InvalidOperationException("Expected cancellation"); }
             catch (OperationCanceledException) { }

@@ -24,7 +24,7 @@
 | `web.interact` | 登录、验证码、动态页面等可选平台交互 |
 | `virtual.register/unregister` | generation 绑定的虚拟资源路由 |
 
-未知能力、未知字段、非法 typed bytes、非 HTTP(S) URL、URL userinfo、非法算法或错误响应均明确失败，不静默降级。请求头拒绝 Host、Content-Length、Transfer-Encoding、Upgrade 和代理认证等逐跳／传输控制字段；合法 Connection 提示由宿主处理而不透传。
+未知能力、未知字段、非法 typed bytes、非 HTTP(S) URL、非法算法或错误响应均明确失败，不静默降级。HTTP(S) URL 可包含调用方提供的 userinfo，Host／Origin 等显式请求头保留；Content-Length、Transfer-Encoding、Upgrade 和代理认证等逐跳／传输控制字段仍拒绝，合法 Connection 提示由宿主处理而不透传。
 
 ## 作用域与生命周期
 
@@ -46,7 +46,7 @@ Promise／原生 await／异步迭代与清理回调保留登记任务身份；A
 
 ## 网络与隔离
 
-ABI 不维护域名白名单。`http.request` 校验 HTTP(S) 语法、typed bytes 和重定向次数；Node owner 为每个请求建立一个覆盖完整重定向链的截止信号，跨 origin 重定向不转发 Authorization/Cookie。它不承诺阻断本机或私网地址。source 调用与初始化的默认等待上限均为 60 秒，清理为 3 秒；单次 HTTP 截止受所属调用/启动信号约束，不延长整个动作生命周期。
+ABI 不维护域名白名单或按 origin／本机／私网分类的访问门禁。`http.request` 校验 HTTP(S) 语法、typed bytes 和重定向次数；Node owner 为每个请求建立一个覆盖完整重定向链的截止信号。调用输入中的 Authorization、Cookie、Host、Origin 跨 origin 重定向继续保留；自动 Cookie jar 则每跳按实际目标和 profile 选择，不沿用上一目标的 jar Cookie，也不读取其它账号。source 调用与初始化的默认等待上限均为 60 秒，清理为 3 秒；单次 HTTP 截止受所属调用/启动信号约束，不延长整个动作生命周期。
 
 guest 只得到能力调用结果，不得到 Node socket、`fetch` 实现、Cookie jar、存储对象或宿主 callable。文件、进程、模块加载和任意 JVM 类不属于 ABI。
 
