@@ -723,6 +723,37 @@ final class MusicRecommendationModelTests: XCTestCase {
         try await delayedNextAfterPause(outputUnavailable: false)
     }
 
+    func testOutputUnavailableDuringCloseCannotRetireSourceBeforeAcceptedFactsDrain() async throws {
+        let service = RecommendationModelService(), player = RecommendationModelPlayer()
+        let model = MusicViewModel(service: service, player: player)
+        await model.load()
+        model.lastSelection = RecommendationModelService.selection
+        await model.prepareCurrent()
+        let native = try XCTUnwrap(model.nativeAttempt)
+        let sourceLifetime = MusicQueueAuthorization()
+        model.pendingSourceSelection = (UUID(), .quality("flac"), sourceLifetime)
+        let entered = expectation(description: "Terminal native fact awaiting persistence")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await service.blockRecord(gate)
+        defer { Task { await gate.release() } }
+        model.onPlaybackEvent(.init(attempt: .init(id: native.id, owner: "music", resourceID: native.resourceID),
+            kind: .stopped, snapshot: .init(owner: "music", resourceID: native.resourceID,
+                phase: .idle, position: 7, duration: 180), wantsPlayback: false, error: nil))
+        await fulfillment(of: [entered], timeout: 2)
+        model.prepareForClose()
+        model.onOutputUnavailable()
+        XCTAssertTrue(sourceLifetime.isActive, "Closing drains accepted facts before retiring source grants")
+        XCTAssertFalse(model.isClosed)
+        await gate.release()
+        await model.close()
+        let facts = await service.recordedFacts()
+        XCTAssertEqual(facts.map(\.kind), [.stopped])
+        XCTAssertEqual(facts.map(\.position), [7])
+        XCTAssertFalse(sourceLifetime.isActive)
+        XCTAssertTrue(model.isClosed)
+        XCTAssertEqual(player.resumes, 0)
+    }
+
     func testSystemToggleCancelsSuspendedResumeAndExplicitPlayStillWorks() async throws {
         try await cancelSuspendedResume(usingSystemToggle: true)
     }
@@ -1186,7 +1217,7 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
         try Task.checkCancellation()
         if fail { throw MusicServiceError.upstreamFailed }
         return .init(context: .init(kind: .fm, id: "synthetic-fm", title: title, platform: "wy"),
-            loadPage: { _ in .init(items: []) }, fmAction: action)
+            loadPage: { _ in .init(items: []) }, homeAction: action)
     }
     func openAccountQueue(platform: MusicAccountPlatform, kind: MusicAccountQueueKind,
                           title: String) throws -> MusicRemoteQueueSource { throw MusicServiceError.unsupported }

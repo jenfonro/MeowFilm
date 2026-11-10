@@ -18,10 +18,12 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
     private readonly HashSet<string> attempted = new(StringComparer.Ordinal);
     private readonly HashSet<Task> work = [];
     private MusicFeedbackSelection? selection;
-    private double position, duration, rate = 1;
+    private double position, duration, rate = 1, listened, mediaListened;
     private string mode = "circulation";
-    private long generation;
-    private bool started, running, preparing, closed, loading, releaseFaulted;
+    private long generation, observedAt;
+    private Guid playbackId;
+    private DateTimeOffset startedAt;
+    private bool started, running, validSample, preparing, closed, loading, releaseFaulted;
     private Task? disposal;
     private string? lastError;
     private static readonly string[] Platforms = ["wy", "tx", "kg"];
@@ -36,12 +38,13 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
         internal readonly MusicFeedbackAttempt Instance = new();
         internal MusicPlatformSession? Account;
         internal IMusicFeedbackSession? Session;
+        internal MusicFeedbackStart? Start;
         internal Task Begin = Task.CompletedTask;
         internal Task Cancel = Task.CompletedTask;
         internal Task? Release;
-        internal bool Eligible, Running, Finishing, Cancelled;
-        internal double Listened, MediaListened, Position, Duration, Rate = 1;
-        internal long At;
+        internal bool Eligible, AdmissionPending, Finishing, Cancelled;
+        internal double BeforeAdmission, MediaBeforeAdmission;
+        internal long AdmittedTimestamp;
     }
 
     public MusicFeedbackController(MusicFeedbackSettingsOwner settings, IMusicFeedbackProtocol protocol,
@@ -50,7 +53,14 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
         this.settings = settings; this.protocol = protocol; this.accounts = accounts; this.clock = clock ?? TimeProvider.System;
         settings.Changed += SettingsChanged;
     }
-    public string? LastError { get { lock (sync) return lastError; } }
+    public string? LastError { get { lock (sync) return lastError ?? (protocol as IMusicFeedbackPendingProtocol)?.LastError; } }
+    internal async Task InitializeAsync(CancellationToken token = default)
+    {
+        if (protocol is not IMusicFeedbackPendingProtocol pending) return;
+        try { await pending.InitializeAsync(token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch { SetError("FEEDBACK_STORAGE_FAILED"); } // Pending feedback cannot block startup/audio.
+    }
     public Task<MusicFeedbackSettings> ReadSettingsAsync(bool refresh = false, CancellationToken token = default) =>
         settings.ReadAsync(refresh, token);
     public Task<MusicFeedbackSettings> SaveSettingsAsync(long revision, IReadOnlyList<string> enabled, CancellationToken token = default) =>
@@ -65,6 +75,7 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
             FinishLocked("ui");
             selection = value with { Song = value.Song.Clone(), Context = value.Context?.Clone() };
             generation++; attempted.Clear(); started = false; running = false;
+            validSample = false; listened = mediaListened = 0; playbackId = Guid.NewGuid();
         }
     }
 
@@ -72,11 +83,13 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
     {
         lock (sync)
         {
-            if (selection?.EntryId != value.EntryId || closed || preparing) return;
-            selection = value with { Song = value.Song.Clone(), Context = value.Context?.Clone() };
+            if (selection is not { } current || current.EntryId != value.EntryId || closed || preparing) return;
+            // Mapping enrichment and handoffs cannot replace this occurrence's origin.
+            selection = current with { Song = value.Song.Clone() };
             foreach (var target in active.Values.ToArray())
                 if (MusicFeedbackIdentity.Resolve(selection.Song, target.Platform, target.Recording) != target.Recording)
                 { active.Remove(target.Platform); CancelLocked(target); }
+            BeginEligibleLocked();
         }
     }
 
@@ -86,6 +99,7 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
         {
             if (closed || preparing || selection?.EntryId != entryId) return;
             ObserveLocked(position, duration, true, rate, mode);
+            if (!started) startedAt = clock.GetUtcNow();
             started = true; BeginEligibleLocked();
             if (!settings.IsConfirmed && !loading)
             {
@@ -111,40 +125,46 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
 
     private void ObserveLocked(double nextPosition, double nextDuration, bool isPlaying, double nextRate, int nextMode)
     {
-        if (!ValidSample(nextPosition, nextDuration, nextRate))
-        {
-            running = false;
-            // Unknown duration, invalid samples and discontinuities cannot bridge
-            // two otherwise valid intervals into credited listening time.
-            foreach (var target in active.Values) target.Running = false;
-            return;
-        }
         long at = clock.GetTimestamp();
         foreach (var target in active.Values.ToArray())
-        {
             if (!Authorized(target))
-            { active.Remove(target.Platform); CancelLocked(target); continue; }
-            double wall = Math.Max(0, clock.GetElapsedTime(target.At, at).TotalSeconds);
-            double delta = nextPosition - target.Position;
-            if (target.Eligible && target.Running && target.Rate > 0 &&
-                (target.Platform != "kg" || target.Rate >= .25) && delta >= 0 && delta <= wall * target.Rate + 1.5)
-            {
-                target.Listened += Math.Min(wall, delta / target.Rate);
-                target.MediaListened += Math.Min(wall * target.Rate, delta);
-            }
-            target.At = at; target.Position = nextPosition; target.Duration = nextDuration;
-            target.Rate = nextRate; target.Running = isPlaying;
+            { active.Remove(target.Platform); CancelLocked(target); }
+        if (!ValidSample(nextPosition, nextDuration, nextRate))
+        {
+            running = false; validSample = false; observedAt = at;
+            foreach (var target in active.Values) target.AdmissionPending = false;
+            return;
         }
+        double wall = validSample ? Math.Max(0, clock.GetElapsedTime(observedAt, at).TotalSeconds) : 0;
+        double delta = nextPosition - position;
+        double wallCredit = 0, mediaCredit = 0;
+        if (validSample && running && delta >= 0 && delta <= wall * rate + 1.5)
+        {
+            wallCredit = Math.Min(wall, delta / rate);
+            mediaCredit = Math.Min(wall * rate, delta);
+        }
+        // Measure one interval once. A platform's admission only excludes the
+        // part before its account/consent became eligible; ACK is not a clock.
+        foreach (var target in active.Values.Where(t => t.Eligible && t.AdmissionPending))
+        {
+            double before = Math.Clamp(clock.GetElapsedTime(observedAt, target.AdmittedTimestamp).TotalSeconds, 0, wall);
+            target.BeforeAdmission += Math.Min(wallCredit, before);
+            target.MediaBeforeAdmission += Math.Min(mediaCredit, before * rate);
+            target.AdmissionPending = false;
+        }
+        listened += wallCredit; mediaListened += mediaCredit;
         position = nextPosition; duration = nextDuration; rate = nextRate; running = isPlaying;
+        observedAt = at; validSample = true;
         mode = nextMode switch { 1 => "circulation", 2 => "random", 3 => "single", _ => "" };
     }
 
-    private bool Authorized(Target target) => !target.Cancelled && settings.IsEnabled(target.Platform) &&
+    private bool Authorized(Target target) => !target.Cancelled &&
+        (settings.IsEnabled(target.Platform) || target.Platform == "wy" && settings.PreservesWyConsent) &&
         (target.Account is null || accounts.IsCurrent(target.Account));
 
     private static bool ValidSample(double position, double duration, double rate) =>
         double.IsFinite(position) && double.IsFinite(duration) && double.IsFinite(rate) &&
-        duration is > 0 and <= 86400 && position >= 0 && position <= duration && rate is > 0 and <= 16;
+        duration >= 0 && position >= 0 && (duration == 0 || position <= duration) && rate > 0;
 
     private void BeginEligibleLocked()
     {
@@ -153,7 +173,7 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
         foreach (string platform in Platforms)
         {
             if (!settings.IsEnabled(platform) || attempted.Contains(platform) || active.ContainsKey(platform) ||
-                platform == "kg" && rate < .25) continue;
+                protocol.RequiresDuration(platform) && duration == 0 || platform == "kg" && rate < .25) continue;
             var recording = MusicFeedbackIdentity.Resolve(selection.Song, platform);
             if (recording is null) continue;
             attempted.Add(platform);
@@ -172,6 +192,8 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
             {
                 deadline.CancelAfter(TimeSpan.FromSeconds(25));
                 account = await accounts.AcquireAsync(target.Platform, deadline.Token).ConfigureAwait(false);
+                if (account is not null && protocol is IMusicFeedbackPendingProtocol pending)
+                    await pending.QualifyAccountAsync(account, deadline.Token).ConfigureAwait(false);
                 deadline.Token.ThrowIfCancellationRequested();
             }
             MusicFeedbackStart request;
@@ -185,23 +207,20 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
                     attempted.Remove(target.Platform);
                     return;
                 }
-                target.Account = account; target.Position = position; target.Duration = duration;
-                target.Rate = rate; target.At = clock.GetTimestamp(); target.Running = running;
-                request = MusicFeedbackIdentity.Start(target.Instance, target.Selection, target.Recording, duration, position, rate, mode);
+                target.Account = account; target.Eligible = true;
+                target.BeforeAdmission = listened; target.MediaBeforeAdmission = mediaListened;
+                target.AdmittedTimestamp = clock.GetTimestamp(); target.AdmissionPending = true;
+                request = target.Start = MusicFeedbackIdentity.Start(target.Instance, target.Selection, target.Recording,
+                    duration, position, rate, mode) with
+                {
+                    PlaybackId = playbackId, EntryId = target.Selection.EntryId,
+                    StartedAt = startedAt, AdmittedAt = clock.GetUtcNow()
+                };
             }
             // Start's token is also the accepted session's revocation lifetime.
             // Its HTTP requests already have bounded deadlines in the transport.
             var session = await protocol.StartAsync(account, request, target.Cancellation.Token).ConfigureAwait(false);
-            lock (sync)
-            {
-                target.Session = session;
-                if (Authorized(target) && !closed && !target.Finishing && target.Generation == generation)
-                {
-                    target.Eligible = true;
-                    target.Position = position; target.Duration = duration; target.Rate = rate;
-                    target.At = clock.GetTimestamp(); target.Running = running;
-                }
-            }
+            lock (sync) target.Session = session;
         }
         catch (OperationCanceledException) { }
         catch { SetError("FEEDBACK_FAILED"); }
@@ -224,11 +243,17 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
             "ui" => "ui",
             _ => "interrupt"
         };
+        var endedAt = clock.GetUtcNow();
         foreach (var target in active.Values.ToArray())
         {
             target.Finishing = true;
-            var end = new MusicFeedbackEnd(target.Listened, target.MediaListened, target.Duration,
-                target.Position, target.Rate, reason, MusicFeedbackIdentity.PlaybackMode(target.Selection, mode));
+            var end = new MusicFeedbackEnd(target.Eligible ? Math.Max(0, listened - target.BeforeAdmission) : 0,
+                target.Eligible ? Math.Max(0, mediaListened - target.MediaBeforeAdmission) : 0, duration,
+                position, rate, reason, target.Start is { Recommendation.Kind: "fm" or "heartbeat" } start ? start.Mode : mode)
+            {
+                PlaybackId = playbackId, EndedAt = endedAt,
+                PlaybackListened = listened, PlaybackMediaListened = mediaListened
+            };
             QueueLocked(async () =>
             {
                 try
@@ -251,8 +276,20 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
         active.Clear(); selection = null; started = false; running = false; generation++; attempted.Clear();
     }
 
+    public void Invalidate()
+    {
+        lock (sync)
+        {
+            foreach (var target in targets.Where(t => t.Generation == generation).ToArray()) CancelLocked(target);
+            active.Clear(); attempted.Clear(); generation++;
+            started = running = validSample = false; listened = mediaListened = 0; playbackId = Guid.NewGuid();
+        }
+    }
+
     public void AccountChanged(string platform)
     {
+        if (platform == "wy" && protocol is IMusicFeedbackPendingProtocol pending)
+            pending.AuthorizationChanged(accountChanged: true);
         lock (sync)
         {
             foreach (var target in targets.Where(t => t.Platform == platform).ToArray()) CancelLocked(target);
@@ -261,9 +298,11 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
     }
     private void SettingsChanged()
     {
+        if (protocol is IMusicFeedbackPendingProtocol pending) pending.AuthorizationChanged(accountChanged: false);
         lock (sync)
         {
-            foreach (var target in targets.Where(t => !settings.IsEnabled(t.Platform)).ToArray())
+            foreach (var target in targets.Where(t => !settings.IsEnabled(t.Platform) &&
+                !(t.Platform == "wy" && settings.PreservesWyConsent)).ToArray())
             { active.Remove(target.Platform); CancelLocked(target); }
             foreach (string platform in Platforms.Where(settings.IsEnabled))
                 if (!active.ContainsKey(platform)) attempted.Remove(platform);
@@ -315,14 +354,37 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
 
     public async Task PrepareShutdownAsync(CancellationToken token = default)
     {
-        lock (sync) { preparing = true; FinishLocked("interrupt"); }
-        await DrainAsync(token).ConfigureAwait(false);
+        lock (sync)
+        {
+            preparing = true;
+            foreach (var target in targets.Where(t => !t.Eligible).ToArray()) CancelLocked(target);
+            FinishLocked("interrupt");
+        }
+        // Freeze local terminal work first. Suspend/cancel network separately
+        // from revocation, so safe pending events survive a normal exit.
+        var pending = protocol as IMusicFeedbackPendingProtocol;
+        Task suspend = pending?.PrepareShutdownAsync() ?? Task.CompletedTask;
+        await DrainLocalAsync(token).ConfigureAwait(false);
+        await suspend.WaitAsync(token).ConfigureAwait(false);
+        if (pending is not null) await pending.FlushLocalAsync().WaitAsync(token).ConfigureAwait(false);
+        if (pending?.LastError == "FEEDBACK_STORAGE_FAILED")
+            throw new MusicFeedbackException("FEEDBACK_STORAGE_FAILED");
         // Unknown local preference save is not a successful shutdown preparation.
         if (settings.RequiresReconciliation) throw new MusicFeedbackException("COMMIT_UNKNOWN");
         lock (sync) if (releaseFaulted) throw new MusicFeedbackException("FEEDBACK_RELEASE_FAILED");
     }
-    public void CancelShutdownPreparation() { lock (sync) if (!closed) preparing = false; }
+    public void CancelShutdownPreparation()
+    {
+        lock (sync) if (!closed) preparing = false;
+        (protocol as IMusicFeedbackPendingProtocol)?.Resume();
+    }
     public async Task DrainAsync(CancellationToken token = default)
+    {
+        await DrainLocalAsync(token).ConfigureAwait(false);
+        if (protocol is IMusicFeedbackPendingProtocol pending) await pending.DrainAsync(token).ConfigureAwait(false);
+        await DrainLocalAsync(token).ConfigureAwait(false);
+    }
+    private async Task DrainLocalAsync(CancellationToken token)
     {
         for (;;)
         {

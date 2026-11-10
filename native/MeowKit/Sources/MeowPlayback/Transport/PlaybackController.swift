@@ -458,8 +458,13 @@ public final class PlaybackController: ObservableObject {
         transport.kernel.onTransportRate = { [weak self, weak transport] rate in
             guard let self, let transport, self.videoTransport === transport, self.state.accepts(token),
                   self.state.shouldPlay else { return }
-            if rate > 0 { self.state.transport(generation: token, state: .playing) }
-            else { self.state.stalled(generation: token) }
+            if rate > 0 {
+                self.state.rateChanged(generation: token, rate: Double(rate), position: transport.position)
+                self.state.transport(generation: token, state: .playing, rate: Double(rate))
+            } else {
+                self.sampleCurrentProgress()
+                self.state.stalled(generation: token)
+            }
             self.publish()
         }
         transport.kernel.onEnd = { [weak self, weak transport] in
@@ -602,11 +607,19 @@ public final class PlaybackController: ObservableObject {
     @discardableResult
     public func setPreferredRate(_ rate: Double, attempt: PlayAttempt) -> Bool {
         guard isCurrent(attempt), state.isPlayable, rate.isFinite, (0.5...3).contains(rate) else { return false }
+        sampleCurrentProgress()
         preferredRate = rate
         if videoTransport == nil { player.defaultRate = Float(rate) }
         // Changing a paused/seeking/interrupted item must not start it.
         if state.shouldPlay, state.isReady, state.outstandingSeek == nil {
-            if let videoTransport { videoTransport.setRate(Float(rate)) } else { player.rate = Float(rate) }
+            if let videoTransport {
+                videoTransport.setRate(Float(rate))
+                state.rateChanged(generation: attempt.id, rate: Double(videoTransport.output.rate),
+                                  position: videoTransport.position)
+            } else {
+                player.rate = Float(rate)
+                state.rateChanged(generation: attempt.id, rate: Double(player.rate), position: player.currentTime().seconds)
+            }
         }
         publish()
         return true
@@ -666,7 +679,9 @@ public final class PlaybackController: ObservableObject {
     ) -> Bool {
         mutationDepth += 1
         defer { finishMutation() }
-        guard isCurrent(attempt), state.requestSeek(to: position) else { return false }
+        guard isCurrent(attempt) else { return false }
+        sampleCurrentProgress()
+        guard state.requestSeek(to: position) else { return false }
         var accepted = true
         if let completion {
             if let seek = state.outstandingSeek {
@@ -727,6 +742,8 @@ public final class PlaybackController: ObservableObject {
                 guard let self, let item, self.current(item, generation: generation) else { return }
                 // A requested rate is not actual playback. Only the separate
                 // timeControlStatus observer is allowed to produce `played`.
+                self.state.rateChanged(generation: generation, rate: Double(self.player.rate),
+                                       position: item.currentTime().seconds)
                 self.publish()
             }
         }
@@ -767,9 +784,23 @@ public final class PlaybackController: ObservableObject {
             controller.fail(NativePlaybackError.playbackFailed, generation: generation)
         }
         observe(.AVPlayerItemPlaybackStalled, item: item, generation: generation) { controller, _ in
+            controller.sampleCurrentProgress()
             controller.state.stalled(generation: generation)
             controller.publish()
         }
+        let center = NotificationCenter.default
+        let jumped = center.addObserver(forName: .AVPlayerItemTimeJumped, object: item, queue: .main) { [weak self, weak item] _ in
+            // Mark the native boundary on the delivery queue, before another
+            // progress callback can mistake a small external seek for listening.
+            MainActor.assumeIsolated {
+                guard let self, let item, self.current(item, generation: generation) else { return }
+                self.mutationDepth += 1
+                defer { self.finishMutation() }
+                self.state.timeJumped(generation: generation, position: item.currentTime().seconds)
+                self.publish()
+            }
+        }
+        itemObservers.insert { center.removeObserver(jumped) }
     }
 
     private func observe(
@@ -837,8 +868,10 @@ public final class PlaybackController: ObservableObject {
             return
         }
         switch player.timeControlStatus {
-        case .playing: state.transport(generation: generation, state: .playing)
-        case .waitingToPlayAtSpecifiedRate: state.transport(generation: generation, state: .waiting)
+        case .playing: state.transport(generation: generation, state: .playing, rate: Double(player.rate))
+        case .waitingToPlayAtSpecifiedRate:
+            sampleCurrentProgress()
+            state.transport(generation: generation, state: .waiting)
         case .paused: state.transport(generation: generation, state: .paused)
         @unknown default: break
         }

@@ -14,7 +14,11 @@ public sealed record MusicRecommendationPlaybackState(string EntryId, bool IsPla
 public sealed record MusicRecommendationFeedback(string SessionId, string BatchId, string EntryId,
     string Platform, string Kind, string Provider, string SourceType, string SourceId,
     string Algorithm, string Mode, string Submode, bool Automatic, bool FromHome,
-    string FeedbackSource = "");
+    string FeedbackSource = "")
+{
+    public JsonElement? Context { get; init; }
+    public JsonElement? Metadata { get; init; }
+}
 
 public sealed class MusicRecommendationSelection
 {

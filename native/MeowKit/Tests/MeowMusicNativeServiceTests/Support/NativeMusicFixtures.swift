@@ -57,9 +57,10 @@ enum NativeMusicFixture {
                         qq: any MusicPublicQQProviding = NativeMusicQQFixture(),
                         http: any MusicNativeHTTPTransport = NativeMusicNoNetwork(),
                         sourceDiscovery: (any MusicSourceDiscoveryCaching)? = nil,
-                        clock: @escaping @Sendable () -> Date = { date }) async throws -> NativeMusicService {
+                        clock: @escaping @Sendable () -> Date = { date },
+                        monotonicClock: @escaping @Sendable () -> TimeInterval = { 0 }) async throws -> NativeMusicService {
         let service = NativeMusicService(document: store, scripts: scripts, accounts: accounts, qq: qq,
-            sourceDiscovery: sourceDiscovery, transport: http, clock: clock, random: { 0 })
+            sourceDiscovery: sourceDiscovery, transport: http, clock: clock, monotonicClock: monotonicClock, random: { 0 })
         try await service.setAccess(available: true, generation: 1); return service
     }
 }

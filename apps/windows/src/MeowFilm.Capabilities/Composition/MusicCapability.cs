@@ -702,9 +702,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         {
             if (epoch != playbackEpoch || playback.OwnerId != Id || !playback.HasMedia) return;
             // Explicit discontinuity: never count a short seek as a listened interval.
-            SampleFeedback(false);
-            await playback.SeekAsync(seconds);
-            SampleFeedback(playback.IsPlaying);
+            SuspendFeedback();
+            try { await playback.SeekAsync(seconds); }
+            finally { ResumeFeedback(epoch); }
         });
     }
     private async Task<JsonElement> QueueCall(string method, object? parameters = null)
@@ -832,6 +832,14 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private void PlaybackChanged(object? sender, PropertyChangedEventArgs args)
     {
         if (stopping) return;
+        if (string.IsNullOrEmpty(args.PropertyName) ||
+            args.PropertyName is nameof(IMusicPlayback.DurationSeconds) or nameof(IMusicPlayback.HasMedia))
+            CheckMediaDuration();
+        if (string.IsNullOrEmpty(args.PropertyName) ||
+            args.PropertyName is nameof(IMusicPlayback.PositionSeconds) or nameof(IMusicPlayback.DurationSeconds) or
+            nameof(IMusicPlayback.IsPlaying) or nameof(IMusicPlayback.HasMedia) or
+            nameof(IMusicPlayback.OwnerId) or nameof(IMusicPlayback.Identity))
+            SampleFeedback();
         if (!OwnsCurrent || !playback.HasMedia) playbackRateReceipt = null;
         if ((!OwnsCurrent || !playback.HasMedia) && musicRecovery is not { Opening: true } ||
             args.PropertyName == nameof(IMusicPlayback.OwnerId) && playback.OwnerId is not null && playback.OwnerId != Id)
@@ -839,7 +847,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         if (args.PropertyName == nameof(IMusicPlayback.OwnerId) && playback.OwnerId != Id &&
             musicRecovery is { Opening: false })
             TrackMusicRecovery(RetireMusicRecovery());
-        SampleFeedback();
         ObserveRecommendationPlayback();
         ObserveMusicPreload();
         if (args.PropertyName == nameof(IMusicPlayback.PositionSeconds))
@@ -847,7 +854,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         else
         {
             if (args.PropertyName != nameof(IMusicPlayback.Volume)) SyncChorus();
-            if (args.PropertyName == nameof(IMusicPlayback.DurationSeconds)) CheckMediaDuration();
             playbackPresentation.Refresh();
             DesktopLyricBindings();
             Changed(nameof(CanHeartbeatCurrent));
@@ -872,29 +878,28 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private void AcceptPlaybackStarted(MusicRecovery? state)
     {
         if (state is not null && !CurrentRecovery(state)) return;
+        CheckMediaDuration();
+        if (state?.PendingFailure == "RECORDING_MISMATCH") return;
         if (recorded)
         {
             if (state is { ConfirmSourceOnStart: true })
             {
                 state.ConfirmSourceOnStart = false;
-                bool restartFeedback = state.RestartFeedbackOnStart;
-                state.RestartFeedbackOnStart = false;
                 ConfirmOfficialPlayback();
                 ConfirmPlaybackFileCache();
-                if (restartFeedback) StartFeedback();
+                StartFeedback(); SampleFeedback();
             }
             return;
         }
         if (state is not null)
         {
             state.ConfirmSourceOnStart = false;
-            state.RestartFeedbackOnStart = false;
         }
         var entry = openedEntry; var epoch = playbackEpoch; var stamp = statusEpoch;
         recorded = true; playbackEvent++;
         ConfirmOfficialPlayback();
         ConfirmPlaybackFileCache();
-        StartFeedback();
+        StartFeedback(observedStart: true);
         ObserveRecommendationPlayback();
         if (searchRecommendationStart is { } searchPreview)
             _ = TrackRecommendation(StartQueueRecommendationPreviewAsync(searchPreview));

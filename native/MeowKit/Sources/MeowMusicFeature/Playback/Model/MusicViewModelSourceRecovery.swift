@@ -9,8 +9,13 @@ extension MusicViewModel {
         guard fact.kind == .failed || invalidDuration,
               let provider = service as? any MusicSourcePlaybackServing,
               let service, let previous = candidate, let selection = lastSelection else { return false }
+        if invalidDuration { feedbackConsumer.invalidate(rejecting: true) }
         if sourceCommit?.attemptID == previous.attemptId {
             sourceCommit?.failure = fact; sourceCommit?.invalidDuration = invalidDuration
+            if invalidDuration {
+                terminalAttempt = previous.attemptId
+                if let nativeAttempt { player?.pause(nativeAttempt) }
+            }
             return true
         }
         guard sourceRecoveryTask == nil else { return true }
@@ -54,6 +59,7 @@ extension MusicViewModel {
         let task = Task { [weak self] in
             await prior?.value
             guard let self else { return }
+            await self.feedbackConsumer.flush()
             defer {
                 self.recoveryDrains[drainID] = nil
                 if self.lifecycle == epoch, self.selectionID == token, self.sourceRecoveryID == drainID {
@@ -141,6 +147,7 @@ extension MusicViewModel {
                     // precede the first native fact, so no old writer may exist.
                     _ = try? await service.record(.init(attemptId: previous.attemptId, occurrenceId: fact.occurrenceId,
                         resourceId: previous.resourceId, kind: .failed, position: fact.position))
+                    await self.feedbackConsumer.finish(reason: .exception)
                     let state = try await service.state()
                     try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: admission)
                     self.playbackState.state = state
@@ -154,6 +161,7 @@ extension MusicViewModel {
                 } else {
                     self.report(error, epoch: epoch)
                     self.playbackState.phase = .failed
+                    await self.feedbackConsumer.finish(reason: .exception)
                 }
             }
         }

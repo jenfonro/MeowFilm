@@ -88,23 +88,44 @@ extension NeteaseMusicAccountAdapter: MusicAccountHomeActionProvider {
             let body = data as? [String: Any]
             if action == .daily(branch: .style) { dailyStyle = try MusicNeteaseDailyStyle.selection(body?["tags"]) }
             let rows = body?["dailySongs"] ?? body?["songs"] ?? data
-            raw = try MusicNeteaseWire.rows(rows, maximum: 1000).map {
-                ($0["songInfo"] as? [String: Any]) ?? ($0["song"] as? [String: Any]) ?? $0
-            }
+            raw = try MusicNeteaseWire.rows(rows, maximum: 1000).map(Self.homeActionSong)
         } else { throw MusicServiceError.invalidRequest }
 
-        let rows = try await homeActionRows(raw, context: context, own: own, authorize: authorize)
+        let rows = try await homeActionRows(raw, action: action, context: context, own: own, authorize: authorize)
         try await authorize(); try check(own)
         return .init(rows: rows, nextPage: nil,
                      expiresAt: action == .daily(branch: .style) ? now().addingTimeInterval(60) : nil,
                      dailyStyle: dailyStyle)
     }
-    func homeActionRows(_ raw: [[String: Any]], context: MusicNeteaseContext, own: UUID,
+    static func homeActionSong(_ raw: [String: Any]) -> [String: Any] {
+        var song = (raw["songInfo"] as? [String: Any]) ?? (raw["song"] as? [String: Any]) ?? raw
+        for key in ["alg", "source", "sourceId"] {
+            if let value = raw[key] { song[key] = value }
+        }
+        return song
+    }
+    func homeActionRows(_ raw: [[String: Any]], action: MusicHomeAction, context: MusicNeteaseContext, own: UUID,
                         authorize: @escaping @Sendable () async throws -> Void) async throws -> [JSONValue] {
         var missing = Set<String>(), ids: [String] = [], metadata: [String: [String: Any]] = [:]
+        var origins: [(algorithm: String, source: String?, sourceID: String)] = []
+        let secrets = Array(context.cookies.values) + Array(context.device.values)
         for song in raw {
             let id = try MusicNeteaseWire.id(song["id"] ?? song["songId"])
             ids.append(id)
+            let value = song["alg"]
+            let algorithm = try MusicQQWire.string(value == nil || value is NSNull ? "" : value, maximum: 2000, empty: true)
+            let source: String?
+            if let rawSource = song["source"], !(rawSource is NSNull) {
+                source = try MusicAccountPublicText.profile(
+                    MusicQQWire.string(rawSource, maximum: 2000, empty: true), secrets: secrets)
+            } else { source = nil }
+            let sourceID: String
+            if let rawID = song["sourceId"], !(rawID is NSNull) {
+                let text = try (rawID as? String) ?? MusicNeteaseWire.id(rawID)
+                sourceID = try MusicAccountPublicText.profile(
+                    MusicQQWire.string(text, maximum: 2048, empty: true), secrets: secrets)
+            } else { sourceID = "" }
+            origins.append((try MusicAccountPublicText.profile(algorithm, secrets: secrets), source, sourceID))
             if let name = song["name"] as? String, !name.isEmpty { metadata[id] = song }
             else { missing.insert(id) }
         }
@@ -113,9 +134,24 @@ extension NeteaseMusicAccountAdapter: MusicAccountHomeActionProvider {
                                                     context: context, own: own, authorize: authorize)
             for row in rows { metadata[try MusicNeteaseWire.id(row["id"])] = row }
         }
-        let rows = try ids.compactMap { id -> JSONValue? in
+        let rows = try ids.enumerated().compactMap { index, id -> JSONValue? in
             guard let row = metadata[id] else { return nil }
-            return try Self.song(row, id: id)
+            guard case .object(var value) = try Self.song(row, id: id) else { throw MusicServiceError.upstreamInvalid }
+            let source: String, feedbackSource: String
+            switch action {
+            case .fm: source = "fm"; feedbackSource = "userfm"
+            case .ruleFM: source = "fm"; feedbackSource = ""
+            case .similar, .similarArtist: source = "similar"; feedbackSource = ""
+            case .daily(let branch):
+                source = "daily"; feedbackSource = branch == .default ? "dailySongRecommend" : ""
+            default: return .object(value)
+            }
+            value["_recommendation"] = .object([
+                "songId": .string(id), "source": .string(source), "sourceId": .string(""),
+                "feedbackSource": .string(origins[index].source ?? feedbackSource),
+                "feedbackSourceId": .string(origins[index].sourceID), "alg": .string(origins[index].algorithm)
+            ])
+            return .object(value)
         }
         try await authorize(); try check(own)
         return rows

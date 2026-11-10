@@ -28,6 +28,7 @@ public static partial class PlaybackRecoveryTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in FeedbackLifecycleCases()) yield return test;
         foreach (var test in CatalogNextRecoveryCases()) yield return test;
         foreach (var test in SelectionRegressionCases()) yield return test;
         foreach (var test in SourceLifecycleRegressionCases()) yield return test;
@@ -244,10 +245,10 @@ public static partial class PlaybackRecoveryTests
                 "pending native Started cannot publish source confirmation history or feedback");
             plan.Release.TrySetResult();
             await choose.WaitAsync(TimeSpan.FromSeconds(5));
-            await Until(() => f.App.ConfirmWrites == 2 && f.App.FeedbackProbe.Starts == 2,
+            await Until(() => f.App.ConfirmWrites == 2 && f.App.FeedbackProbe.Starts == 1,
                 "committed controlled source");
             Check(f.Module.CurrentSource == "QQ 音乐" && f.App.HistoryWrites == 1 &&
-                f.App.FeedbackProbe.Finishes.SequenceEqual(new[] { "source-change" }) &&
+                f.App.FeedbackProbe.Finishes.Count == 0 &&
                 f.Output.Prepares == 1 && f.Output.Commits == 1 && f.Output.Reopens == 0,
                 "commit publishes one seamless source transition without a new occurrence");
         });
@@ -260,9 +261,9 @@ public static partial class PlaybackRecoveryTests
             var choice = await TxChoice(f.Module);
             f.Output.Plan();
             await f.Module.SelectSourceChoiceAsync(choice);
-            await Until(() => f.App.ConfirmWrites == 2 && f.App.FeedbackProbe.Starts == 2, "handed-off source acceptance");
+            await Until(() => f.App.ConfirmWrites == 2 && f.App.FeedbackProbe.Starts == 1, "handed-off source acceptance");
             Check(f.Module.CurrentSource == "QQ 音乐" && f.App.HistoryWrites == 1 &&
-                f.App.FeedbackProbe.Finishes.SequenceEqual(new[] { "source-change" }) && f.Output.CandidateStarts == 0,
+                f.App.FeedbackProbe.Finishes.Count == 0 && f.Output.CandidateStarts == 0,
                 "a handoff emits no second Started and is not another queue occurrence");
         });
         yield return Test("official failed manual replacement leaves the accepted input untouched", async () =>
@@ -296,11 +297,11 @@ public static partial class PlaybackRecoveryTests
                 "failed exact refresh and pending alternate remain unpublished");
             alternate.Release.TrySetResult();
             await Until(() => f.Module.CurrentSource == "QQ 音乐" &&
-                f.App.ConfirmWrites == 2 && f.App.FeedbackProbe.Starts == 2,
+                f.App.ConfirmWrites == 2 && f.App.FeedbackProbe.Starts == 1,
                 "automatic alternate commit");
             Check(f.Output.Reopens == 3 && f.App.Resolutions.Count == 4 &&
                 f.App.HistoryWrites == 1 &&
-                f.App.FeedbackProbe.Finishes.SequenceEqual(new[] { "source-change" }),
+                f.App.FeedbackProbe.Finishes.Count == 0,
                 "bounded fallback publishes once");
         });
         yield return Test("official pending platform revocation cancels candidate without replacing the accepted source", async () =>
@@ -940,7 +941,8 @@ public static partial class PlaybackRecoveryTests
                     f.App.ResolutionFailure = row => Installation(row) is null &&
                         f.App.Resolutions.Count(value => Installation(value) is null) > 2 ? "MEDIA_UNAVAILABLE" : null;
                 f.Output.Fail(PlaybackError.HttpUnauthorized);
-                await Until(() => f.Output.Reopens == 2 && f.App.FeedbackProbe.Starts == 2,
+                await Until(() => f.Output.Reopens == 2 && f.Module.CanSwitchSource &&
+                    f.App.FeedbackProbe.Starts == 1,
                     "cross-type recovery committed");
                 var exact = f.App.Resolutions.Where(row =>
                     (Installation(row) == "recovery-script") == scriptFirst).ToArray();
@@ -956,7 +958,7 @@ public static partial class PlaybackRecoveryTests
                 Check(f.Output.Identity == identity && f.Module.CurrentTitle == title &&
                     f.Output.PositionSeconds == 37 && f.Output.PauseRequested && !f.Output.IsPlaying &&
                     f.App.HistoryWrites == 1 &&
-                    f.App.FeedbackProbe.Finishes.SequenceEqual(new[] { "source-change" }),
+                    f.App.FeedbackProbe.Finishes.Count == 0,
                     "cross-type recovery preserves queue identity position pause and the single play occurrence");
             });
         yield return Test("unified pending script revocation cancels official recovery without trying another source", async () =>
@@ -1091,7 +1093,8 @@ public static partial class PlaybackRecoveryTests
             f.Output.Plan(failure: PlaybackError.HttpUnauthorized);
             f.Output.Plan(startBeforeCompletion: true);
             f.Output.Fail(PlaybackError.HttpUnauthorized);
-            await Until(() => f.Output.Reopens == 2 && f.App.FeedbackProbe.Starts == 2,
+            await Until(() => f.Output.Reopens == 2 && f.Module.CanSwitchSource &&
+                f.App.FeedbackProbe.Starts == 1,
                 "second installation accepted");
             Check(f.Output.OpenedUris.Last().AbsolutePath == "/second-script-wy-320k.wav" &&
                 f.App.Resolutions.Count(row => Installation(row) == "first-script") == 2 &&
@@ -1100,6 +1103,7 @@ public static partial class PlaybackRecoveryTests
                 f.App.Resolutions.Select(row => row.GetProperty("sourceKey").GetString()).Distinct().Count() == 1,
                 "failure of one installation does not exclude another installation for the same platform and recording");
             Check(f.Output.Identity == identity && f.App.HistoryWrites == 1 &&
+                f.App.FeedbackProbe.Finishes.Count == 0 &&
                 f.App.Resolutions.All(row => Installation(row) is not null),
                 "disabled official platforms do not disable scripts or change queue identity");
         });
@@ -1120,11 +1124,13 @@ public static partial class PlaybackRecoveryTests
             int before = f.App.Resolutions.Count;
             f.Output.Plan();
             await f.Module.SelectSourceChoiceAsync(choice);
-            await Until(() => f.App.FeedbackProbe.Starts == 2, "manual mixed recording commit");
+            await Until(() => f.Output.Commits == 1 && f.App.FeedbackProbe.Starts == 1 &&
+                f.Module.CanSwitchSource, "manual mixed recording commit");
             Check(f.Output.OpenedUris.Last().AbsolutePath == "/selected-script-tx-flac.wav" &&
                 f.App.Resolutions.Count == before, "a listed choice is handed off without resolving again");
             Check(f.Output.Identity == identity && f.Module.CurrentTitle == title && f.Output.Commits == 1 &&
-                f.Output.Reopens == 0 && f.App.HistoryWrites == 1, "manual source choice retains the current queue song");
+                f.Output.Reopens == 0 && f.App.HistoryWrites == 1 && f.App.FeedbackProbe.Finishes.Count == 0,
+                "manual source choice retains the current queue song");
         });
         foreach (string action in new[] { "selection", "close" })
             yield return Test("unified held script resolution cannot open late media after " + action, async () =>
@@ -3285,7 +3291,9 @@ public static partial class PlaybackRecoveryTests
     private sealed class FeedbackProbe : MeowFilm.Capabilities.Feedback.IMusicPlaybackFeedback
     {
         internal int Starts;
+        internal int Invalidations;
         internal readonly List<string> Finishes = [];
+        internal readonly List<(double Position, bool Playing, double Rate)> Observations = [];
         private bool active;
         public string? LastError => null;
         public Task<MeowFilm.Capabilities.Feedback.MusicFeedbackSettings> ReadSettingsAsync(
@@ -3310,7 +3318,8 @@ public static partial class PlaybackRecoveryTests
             active = true;
         }
         public void Observe(string entryId, double position, double duration, bool isPlaying,
-            double rate = 1, int mode = 1) { }
+            double rate = 1, int mode = 1) => Observations.Add((position, isPlaying, rate));
+        public void Invalidate() { Invalidations++; active = false; }
         public void Finish(string reason = "ui")
         {
             if (!active) return;

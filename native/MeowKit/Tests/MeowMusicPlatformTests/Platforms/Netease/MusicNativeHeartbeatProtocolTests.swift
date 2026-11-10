@@ -314,12 +314,18 @@ import MeowMusicFeature
             XCTAssertEqual(page.total, ids.count + 1)
         } while cursor != nil
         for items in [live.items, legacy] {
+            let seed = try MusicQQWire.decode(XCTUnwrap(items.first?.data))
+            let seedAttribution = try MusicQQWire.object(seed["_recommendation"])
+            XCTAssertEqual(seedAttribution["source"] as? String, "heartbeat")
+            XCTAssertEqual(seedAttribution["feedbackSource"] as? String, "")
+            XCTAssertEqual(seedAttribution["alg"] as? String, "", "A local favorite must not borrow another song's algorithm")
             let songs = try items.dropFirst().map { try MusicQQWire.decode($0.data) }
             XCTAssertEqual(songs.compactMap { $0["songmid"] as? String }, ids.map(String.init))
             for (song, id) in zip(songs, ids) {
                 let attribution = try MusicQQWire.object(song["_recommendation"])
                 XCTAssertEqual(attribution["source"] as? String, "heartbeat")
-                XCTAssertEqual(attribution["feedbackSource"] as? String, "aiMode")
+                XCTAssertEqual(attribution["feedbackSource"] as? String, "")
+                XCTAssertEqual(attribution["feedbackSourceId"] as? String, "")
                 XCTAssertEqual(attribution["sourceId"] as? String, "501")
                 XCTAssertEqual(attribution["alg"] as? String, "alg-\(id)")
             }

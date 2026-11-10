@@ -219,8 +219,12 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var operationLabels: [UUID: String] = [:]
     var librarySyncRun: (id: UUID, cancel: @Sendable () -> Void)?
     var automaticLibrarySyncRuntime = MusicNativeAutomaticSyncRuntime()
-    let playbackFeedback = MusicNativeFeedbackController()
+    let playbackFeedback: MusicNativeFeedbackController
     var playbackFeedbackAdmission: MusicNativeFeedbackAdmission?
+    private let feedbackAccessCallbackID = UUID()
+    private var feedbackCloseTask: Task<Void, Never>?
+    var feedbackClosing = false
+    var queueFeedbackOrigins: [String: MusicNativeQueueFeedbackOrigin] = [:]
     var similarMode = MusicNativeSimilarRuntime()
     var fmPlayback: MusicNativeFMSession?
     var fmPreviews: [MusicHomeAction: MusicNativeFMPreviewEntry] = [:]
@@ -235,12 +239,14 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
                 audioFileCache: (any MusicAudioFileCaching)? = nil,
                 transport: (any MusicNativeHTTPTransport)? = nil,
                 clock: @escaping @Sendable () -> Date = { Date() },
+                monotonicClock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
                 random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
                 clientContexts: (any MusicNativeClientContextProviding)? = nil) {
         self.document = document; self.scripts = scripts; self.accounts = accounts; self.homeSnapshot = homeSnapshot
         self.audioFileCache = audioFileCache
         self.sourceDiscovery = sourceDiscovery ?? MusicNativeMemorySourceDiscoveryCache(clock: clock)
         now = clock; self.random = random
+        playbackFeedback = MusicNativeFeedbackController(clock: monotonicClock)
         self.enabledPlatforms = enabledPlatforms
         let owned = transport == nil ? URLSessionMusicNativeHTTPTransport() : nil
         ownedTransport = owned
@@ -257,15 +263,41 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         if next == generation { return }
         accessTransitions += 1
         defer { accessTransitions -= 1 }
+        if generation > 0 || !value {
+            (accounts as? any MusicNativeFeedbackLifecycleProviding)?.cancelPendingPlaybackFeedback(platform: nil)
+        }
         generation = next; available = value; epoch = UUID()
         clearTransient()
+        if value, let owner = accounts as? any MusicNativeFeedbackLifecycleProviding {
+            access.register(feedbackAccessCallbackID) { owner.cancelPendingPlaybackFeedback(platform: nil) }
+        }
         for cancel in operations.values { cancel() }
         await drainSimilarWork()
         await publicPlatforms.revoke()
         await audioFileCache?.cancelPending()
     }
+    /// Call after the playback consumer's local fact drain and before access
+    /// revocation. Drains local registrations into the account outbox, not its
+    /// remote receipts. A real access/settings revocation still clears it.
+    public func prepareForClose() async {
+        guard !closed else { return }
+        if feedbackCloseTask == nil {
+            feedbackClosing = true
+            stopPlaybackFeedbackDispatchForClose()
+            playbackFeedback.finishCurrent(reason: .interrupt)
+            playbackFeedback.invalidate(preservingEnds: true)
+            let feedback = playbackFeedback, owner = accounts as? any MusicNativeFeedbackLifecycleProviding
+            feedbackCloseTask = Task {
+                await feedback.flushRegistrations()
+                await owner?.preparePlaybackFeedbackForClose()
+            }
+        }
+        await feedbackCloseTask?.value
+        access.remove(feedbackAccessCallbackID)
+    }
     public func close() async {
         if closed { return }
+        await prepareForClose()
         // Library recordings reach disk before access is revoked.
         await flushSourceDiscoveryPersist()
         if closed { return }
@@ -307,6 +339,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         lastHomeRefreshObservation = nil
         playbackFeedback.invalidate()
         playbackFeedbackAdmission = nil
+        queueFeedbackOrigins.removeAll()
         librarySyncRun?.cancel()
         if let currentSourceSession { Task { await currentSourceSession.session.close() } }
         currentSourceSession = nil; clearPreparedSources(); sourceResults = [:]; sourceResultOrder = []
@@ -314,13 +347,26 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         parsedDocument = nil
         lyricEpoch = UUID()
     }
-    func invalidatePlayback() {
+    func invalidatePlayback(reason: MusicPlaybackFeedbackReport.Reason) {
+        if let admission = playbackFeedbackAdmission, admission.retiringReason == nil,
+           admission.authorization?.isActive == false {
+            playbackFeedback.invalidate(attemptID: admission.attemptID)
+            playbackFeedbackAdmission = nil
+        } else if let admission = playbackFeedbackAdmission, playbackFeedback.ownsAttempt(admission.attemptID) {
+            // Queue commit retires media, not the consumer's accepted facts.
+            // Its bounded drain finishes this attempt before admitting a new one.
+            if admission.retiringReason == nil {
+                playbackFeedbackAdmission?.retiringReason = reason
+                playbackFeedbackAdmission?.targets = playbackFeedback.retireCurrent(reason: reason)
+            }
+        } else {
+            playbackFeedback.finishCurrent(reason: reason)
+            playbackFeedback.invalidate(preservingEnds: true)
+            playbackFeedbackAdmission = nil
+        }
         clearPreparedSources()
         retireCachedPlaybackRecovery()
         retireAudioCacheAttempt()
-        playbackFeedback.finishCurrent(reason: .ui)
-        playbackFeedback.invalidate(preservingEnds: true)
-        playbackFeedbackAdmission = nil
         attempt = nil; lyricEpoch = UUID()
         cancelWork("playback"); cancelWork("lyrics")
     }
@@ -378,7 +424,10 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         // Publish the session time only after the same queue/storage CAS
         // commits; a failed write must not silently advance or rewind it.
         sessionPosition = draft.playback["position"]
-        playbackFeedbackAdmission = nil
+        if areas.contains("queue") {
+            let entries = Set(draft.queue["entries"].array.map { $0["id"].string })
+            queueFeedbackOrigins = queueFeedbackOrigins.filter { entries.contains($0.key) }
+        }
         if areas.contains("library") { scheduleSourceDiscoveryPersist() }
         // Synchronous CAS cannot interleave setAccess on this actor. Task
         // cancellation can race the commit; do not claim that it rolled back.

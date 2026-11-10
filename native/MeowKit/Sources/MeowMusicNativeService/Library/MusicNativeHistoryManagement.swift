@@ -71,12 +71,12 @@ extension NativeMusicService: MusicHistoryManaging {
                 return stateDTO(d)
             }
             clearSimilarRuntime()
-            invalidatePlayback()
+            invalidatePlayback(reason: .ui)
             return result
         } catch MusicServiceError.commitUnconfirmed {
             // transaction has already committed before detecting cancellation.
             // Old resolve/lyrics attempts must not survive a committed replace.
-            invalidatePlayback()
+            invalidatePlayback(reason: .ui)
             throw MusicServiceError.commitUnconfirmed
         }
     }

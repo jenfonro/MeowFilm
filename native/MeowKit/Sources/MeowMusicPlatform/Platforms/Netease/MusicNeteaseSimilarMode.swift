@@ -126,7 +126,8 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
             source = "moreRcmd"; sourceID = ""; heartbeat = nil
         }
 
-        var ordered: [(id: String, algorithm: String)] = [], metadata: [String: [String: Any]] = [:]
+        var ordered: [(id: String, algorithm: String, source: String, sourceID: String)] = []
+        var metadata: [String: [String: Any]] = [:]
         var missing: [String] = [], requested = Set<String>()
         for row in raw {
             let song = (row["songInfo"] as? [String: Any]) ?? (row["song"] as? [String: Any]) ?? row
@@ -134,7 +135,19 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
             let algorithm = source == "moreRcmd" ? algorithms[id] : row["alg"] ?? song["alg"]
             let text = try MusicQQWire.string(algorithm == nil || algorithm is NSNull ? "" : algorithm,
                                              maximum: 2000, empty: true)
-            ordered.append((id, text))
+            let rawSource = source == "moreRcmd" ? sources[id] : row["source"] ?? song["source"]
+            let feedbackSource = try MusicQQWire.string(rawSource == nil || rawSource is NSNull ? "" : rawSource,
+                                                       maximum: 2000, empty: true)
+            let rawSourceID = row["sourceId"] ?? song["sourceId"]
+            let feedbackSourceID: String
+            if let rawSourceID, !(rawSourceID is NSNull) {
+                feedbackSourceID = try (rawSourceID as? String) ?? MusicNeteaseWire.id(rawSourceID)
+            } else { feedbackSourceID = "" }
+            let secrets = Array(account.cookies.values) + Array(account.device.values)
+            ordered.append((id, try MusicAccountPublicText.profile(text, secrets: secrets),
+                try MusicAccountPublicText.profile(feedbackSource, secrets: secrets),
+                try MusicAccountPublicText.profile(MusicQQWire.string(feedbackSourceID, maximum: 2048, empty: true),
+                    secrets: secrets)))
             if Self.hasDisplayFields(song) { metadata[id] = song }
             else if requested.insert(id).inserted { missing.append(id) }
         }
@@ -160,19 +173,15 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
             guard case .object(var row) = try Self.song(song, id: item.id) else { throw MusicServiceError.upstreamInvalid }
             // Credential-free attribution for the existing feedback consumer;
             // this does not itself authorize feedback or include a media URL.
-            let feedbackSource: String
-            if source == "heartbeat" { feedbackSource = "aiMode" }
-            else if source == "moreRcmd" {
-                let value = sources[item.id]
-                let mapped = try MusicQQWire.string(value == nil || value is NSNull ? "" : value,
-                                                   maximum: 2000, empty: true)
-                feedbackSource = mapped.isEmpty ? "moreRcmd" : mapped
-            } else { feedbackSource = "" }
             row["_recommendation"] = .object([
                 "songId": .string(item.id), "alg": .string(item.algorithm),
                 "source": .string(source), "sourceId": .string(sourceID),
-                "feedbackSource": .string(feedbackSource)
+                "feedbackSource": .string(item.source), "feedbackSourceId": .string(item.sourceID)
             ])
+            if let heartbeat, case .object(var origin) = row["_recommendation"] {
+                origin["seedId"] = .string(heartbeat.seedID)
+                row["_recommendation"] = .object(origin)
+            }
             let data = try JSONEncoder().encode(JSONValue.object(row))
             guard data.count <= 16 * 1024 else { throw MusicServiceError.limit }
             bytes += data.count
@@ -186,7 +195,16 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
                 guard let song = heartbeatSeed ?? metadata[selected] else {
                     throw MusicServiceError.upstreamInvalid
                 }
-                let data = try JSONEncoder().encode(Self.song(song, id: selected))
+                guard case .object(var row) = try Self.song(song, id: selected) else { throw MusicServiceError.upstreamInvalid }
+                // This locally selected favorite is in the real heartbeat scene,
+                // but has no per-song algorithm/source returned by this batch.
+                row["_recommendation"] = .object([
+                    "songId": .string(selected), "source": .string("heartbeat"), "sourceId": .string(sourceID),
+                    "seedId": .string(heartbeat!.seedID), "alg": .string(""),
+                    "feedbackSource": .string(""), "feedbackSourceId": .string("")
+                ])
+                let data = try JSONEncoder().encode(JSONValue.object(row))
+                guard data.count <= 16 * 1024, bytes + data.count <= 4 * 1024 * 1024 else { throw MusicServiceError.limit }
                 items.insert(.init(platform: "wy", data: data), at: 0)
             }
         }

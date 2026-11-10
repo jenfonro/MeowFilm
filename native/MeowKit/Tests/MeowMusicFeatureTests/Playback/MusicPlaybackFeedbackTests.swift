@@ -8,8 +8,10 @@ import MeowContracts
 private actor FeedbackFeatureSink: MusicPlaybackFeedbackConsuming {
     var samples: [MusicPlaybackFeedbackSample] = []
     var cancellations: [String?] = []
+    var rejections: [String] = []
     func consumePlaybackFeedback(_ sample: MusicPlaybackFeedbackSample) { samples.append(sample) }
-    func cancelPlaybackFeedback(attemptID: String?) { cancellations.append(attemptID) }
+    func finishPlaybackFeedback(attemptID: String?, reason: MusicPlaybackFeedbackReport.Reason) { cancellations.append(attemptID) }
+    func rejectPlaybackFeedback(attemptID: String) { rejections.append(attemptID) }
     func recorded() -> [MusicPlaybackFeedbackSample] { samples }
 }
 
@@ -121,6 +123,70 @@ private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
         XCTAssertEqual(rows.first?.sequence, 1)
         XCTAssertFalse(rows.first?.hasPlayed ?? true)
         XCTAssertTrue(rows.first?.discontinuity ?? false)
+    }
+
+    func testOrdinaryRetirementDrainsAcceptedFactsBeforeFinishAndSuccessor() async {
+        let sink = FeedbackFeatureSink(), consumer = MusicPlaybackFeedbackConsumer(service: sink)
+        let id = UUID(), item = candidate(), gate = FeedbackSettingsGate()
+        consumer.consume(event(.played, id: id), candidate: item)
+        await consumer.flush()
+        let prior = Task { await gate.wait() }
+        await gate.started()
+        consumer.consume(event(.progress, id: id, position: 2), candidate: item, after: prior)
+        consumer.retire(reason: .ui)
+        consumer.invalidate() // Preparing the successor cannot cancel the retired listen.
+        consumer.consume(event(.played, id: UUID(), resource: "music:next"), candidate: candidate("next"))
+        await gate.release(); await consumer.flush()
+        let rows = await sink.recorded(), finishes = await sink.cancellations
+        XCTAssertEqual(rows.map(\.attemptID), ["observed", "observed", "next"])
+        XCTAssertEqual(rows.map(\.kind), [.playing, .progress, .playing])
+        XCTAssertEqual(rows.map(\.position), [0, 2, 0])
+        XCTAssertEqual(finishes, ["observed"])
+    }
+
+    func testOrdinaryRetirementCannotAdmitAnOldQueuedStart() async {
+        let sink = FeedbackFeatureSink(), consumer = MusicPlaybackFeedbackConsumer(service: sink)
+        consumer.consume(event(.played, id: UUID()), candidate: candidate())
+        consumer.retire(reason: .ui)
+        await consumer.flush()
+        let rows = await sink.recorded(); XCTAssertTrue(rows.isEmpty)
+    }
+
+    func testRejectionCancelsOrdinaryRetirementWaitingBehindFactWithoutFinish() async {
+        let sink = FeedbackFeatureSink(), consumer = MusicPlaybackFeedbackConsumer(service: sink)
+        let id = UUID(), item = candidate(), gate = FeedbackSettingsGate()
+        consumer.consume(event(.played, id: id), candidate: item)
+        await consumer.flush()
+        let prior = Task { await gate.wait() }
+        await gate.started()
+        let observed = consumer.consume(event(.progress, id: id, position: 2), candidate: item, after: prior)
+        consumer.retire(reason: .ui)
+        consumer.invalidate(rejecting: true)
+        await consumer.flush()
+        await gate.release(); await observed?.value
+        let rows = await sink.recorded(), finishes = await sink.cancellations, rejections = await sink.rejections
+        XCTAssertEqual(rows.map(\.kind), [.playing])
+        XCTAssertTrue(finishes.isEmpty); XCTAssertEqual(rejections, ["observed"])
+    }
+
+    func testNativeTimesRateAndHandoffFactsRemainOrderedWithoutImplicitFinish() async {
+        let sink = FeedbackFeatureSink(), consumer = MusicPlaybackFeedbackConsumer(service: sink)
+        let old = UUID(), next = UUID(), first = candidate(), second = candidate("next")
+        func observation(_ kind: PlaybackEvent.Kind, id: UUID, candidate: MusicPlaybackCandidate, at: Double) -> PlaybackEvent {
+            .init(attempt: .init(id: id, owner: "music", resourceID: candidate.resourceId), kind: kind,
+                snapshot: .init(owner: "music", resourceID: candidate.resourceId, phase: .playing, position: at, duration: 180),
+                wantsPlayback: true, observedAt: at, occurredAt: 1000 + at, rate: 2, discontinuity: kind == .progress)
+        }
+        consumer.consume(observation(.played, id: old, candidate: first, at: 1), candidate: first)
+        consumer.consume(observation(.progress, id: old, candidate: first, at: 2), candidate: first)
+        consumer.consume(observation(.played, id: next, candidate: second, at: 3), candidate: second)
+        await consumer.flush()
+        let rows = await sink.recorded(), finishes = await sink.cancellations
+        XCTAssertEqual(rows.map(\.attemptID), [first.attemptId, first.attemptId, second.attemptId])
+        XCTAssertEqual(rows.map(\.observedAt), [1, 2, 3]); XCTAssertEqual(rows.map(\.occurredAt), [1001, 1002, 1003])
+        XCTAssertTrue(rows.allSatisfy { $0.rate == 2 })
+        XCTAssertEqual(rows.map(\.sequence), [1, 2, 1])
+        XCTAssertTrue(finishes.isEmpty, "Only the native commit owner decides whether this is the same listen")
     }
 
     func testKGRequiresCurrentExplicitConfirmationAndCancelDoesNotWrite() async throws {

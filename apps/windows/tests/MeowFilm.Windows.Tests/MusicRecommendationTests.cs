@@ -12,10 +12,11 @@ using static MeowFilm.Windows.Tests.RecommendationTest;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class MusicRecommendationTests
+public static partial class MusicRecommendationTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("Recommendation per-occurrence source facts preserve all similar seeds and FM scene", SourceFacts);
         yield return new("Recommendation random non-tail independent take branch once per playback", () => RandomTrigger(true, false));
         yield return new("Recommendation random tail independent skip branch without tail fallback", () => RandomTrigger(false, true));
         foreach (bool active in new[] { false, true }) foreach (bool next in new[] { false, true })
@@ -506,7 +507,7 @@ public static class MusicRecommendationTests
         Check(N(await f.Q(), "total") == 121 && Current(await f.Q()) == seed && f.Selections.IsEmpty);
         var last = await Ok(f.Library, "music.queue.get", new { offset = 120, limit = 100 });
         Check(SongId(last.GetProperty("entries")[0].GetProperty("song")) == "129");
-        Check(f.Rec.GetFeedback(S(last.GetProperty("entries")[0], "id")) is { FeedbackSource: "aiMode", SourceId: "100" });
+        Check(f.Rec.GetFeedback(S(last.GetProperty("entries")[0], "id")) is { FeedbackSource: "", SourceId: "100" });
         await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(state, "id") });
         Check((await f.Q()).GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText() &&
             Current(await f.Q()) == seed);
@@ -518,7 +519,8 @@ public static class MusicRecommendationTests
         var state = await f.Rec.ExecuteAsync("music.recommendations.start", new { kind = "heartbeat", platform = "wy", entry = "favorites" });
         Check(f.Catalog.Calls.Single().Heartbeat is { Entry: MusicHeartbeatEntry.Favorites, SongId: null });
         Check(N(await f.Q(), "total") == 4 && Current(await f.Q()) != Current(before) && !state.GetProperty("continue").GetBoolean());
-        Check(f.Rec.GetFeedback(Current(await f.Q())) is { FromHome: true, FeedbackSource: "aiMode", SourceId: "100" });
+        Check(f.Rec.GetFeedback(Current(await f.Q())) is
+            { FromHome: true, FeedbackSource: "", SourceId: "100", Algorithm: "alg-10" });
         var recommendation = await f.Q(); int selections = f.Selections.Count;
         await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(state, "id") });
         var restored = await f.Q();
@@ -568,7 +570,7 @@ public static class MusicRecommendationTests
         Check(N(after, "total") == 4 && SongId(after.GetProperty("current").GetProperty("song")) == "10" &&
             Current(after) != Current(before) && !state.GetProperty("continue").GetBoolean());
         Check(f.Selections.Single() is { Play: true, Automatic: false } selection && selection.EntryId == Current(after) &&
-            f.Rec.GetFeedback(Current(after)) is { FromHome: true, FeedbackSource: "aiMode", SourceId: "100" });
+            f.Rec.GetFeedback(Current(after)) is { FromHome: true, FeedbackSource: "", SourceId: "100" });
         var returned = await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(state, "id") });
         var restored = await f.Q();
         JsonElement[] expected = original switch
@@ -879,7 +881,7 @@ public static class MusicRecommendationTests
         var state = await f.State(); var after = await f.Q();
         Check(N(state, "count") == 3 && N(state, "queueVersion") == N(after, "version") && Current(after) == tail &&
             !state.GetProperty("continue").GetBoolean() && f.Selections.Count == 1);
-        Check(f.Rec.GetFeedback(S(after.GetProperty("entries")[2], "id")) is { Kind: "queue", FeedbackSource: "moreRcmd" });
+        Check(f.Rec.GetFeedback(S(after.GetProperty("entries")[2], "id")) is { Kind: "queue", FeedbackSource: "" });
     }
     private static async Task QueueResumePendingNext()
     {

@@ -159,7 +159,7 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
         let result: MusicPlaybackState
         if let binding { result = try binding.authorization.perform(commit) }
         else { result = try commit() }
-        invalidatePlayback(); similarDidChangeQueue(.replace)
+        invalidatePlayback(reason: .ui); similarDidChangeQueue(.replace)
         return result
     }
 

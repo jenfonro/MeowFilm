@@ -17,13 +17,30 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
     private readonly object sync = new();
     private MusicFeedbackSettings current = new(0, Array.Empty<string>());
     private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
-    private bool loaded, uncertain, closed;
+    private bool loaded, uncertain, closed, preservesWyConsent;
     public event Action? Changed;
 
     public bool IsEnabled(string platform)
     { lock (sync) return !closed && loaded && !uncertain && current.Enabled.Contains(platform); }
     public bool IsConfirmed { get { lock (sync) return !closed && loaded && !uncertain; } }
     public bool RequiresReconciliation { get { lock (sync) return loaded && uncertain; } }
+    internal long ConfirmedRevision
+    { get { lock (sync) { if (closed || !loaded || uncertain) throw Error("COMMIT_UNKNOWN"); return current.Revision; } } }
+    // An in-process CAS that keeps WY enabled can suspend its network without
+    // revoking its listening facts. This is not persisted proof across a crash.
+    internal bool PreservesWyConsent { get { lock (sync) return !closed && preservesWyConsent; } }
+    internal long WyConsentRevision
+    {
+        get
+        {
+            lock (sync)
+            {
+                if (closed || !loaded || !current.Enabled.Contains("wy") || uncertain && !preservesWyConsent)
+                    throw Error("COMMIT_UNKNOWN");
+                return current.Revision;
+            }
+        }
+    }
 
     public async Task<MusicFeedbackSettings> ReadAsync(bool refresh = false, CancellationToken token = default)
     {
@@ -44,13 +61,15 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
             lock (sync)
             {
                 if (closed) throw Error("CLOSED");
+                preservesWyConsent = loaded && !uncertain && current.Revision == decoded.Revision &&
+                    current.Enabled.Contains("wy") && decoded.Enabled.Contains("wy");
                 current = decoded; fingerprint = saved.Fingerprint; loaded = true; uncertain = false;
             }
             Notify(); return decoded;
         }
         catch
         {
-            lock (sync) uncertain = true;
+            lock (sync) { uncertain = true; preservesWyConsent = false; }
             Notify(); throw;
         }
         finally { lane.Release(); }
@@ -76,6 +95,7 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
                 if (current.Revision != expectedRevision) throw Error("REVISION_CONFLICT");
                 token.ThrowIfCancellationRequested();
                 next = new(expectedRevision + 1, new ReadOnlyCollection<string>(targets));
+                preservesWyConsent = current.Enabled.Contains("wy") && targets.Contains("wy");
                 // Fence all reporting BEFORE admitting a settings mutation. A lost
                 // acknowledgment must not leave the old enabled policy operational.
                 uncertain = true;
@@ -92,8 +112,15 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
                 Notify(); return next;
             }
             catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict)
-            { throw Error("STORAGE_CONFLICT"); }
-            catch { throw Error("COMMIT_UNKNOWN"); }
+            {
+                lock (sync) preservesWyConsent = false;
+                Notify(); throw Error("STORAGE_CONFLICT");
+            }
+            catch
+            {
+                lock (sync) preservesWyConsent = false;
+                Notify(); throw Error("COMMIT_UNKNOWN");
+            }
         }
         finally { lane.Release(); }
     }

@@ -11,7 +11,7 @@ public actor MusicRemoteQueueSource {
     private let validateBinding: @Sendable () async throws -> Void
     private let release: @Sendable () async -> Void
     public nonisolated let dailyStyle: MusicDailyStyleEditing?
-    public nonisolated let fmAction: MusicHomeAction?
+    public nonisolated let homeAction: MusicHomeAction?
     private var pages: [String: MusicNativeTrackPage] = [:]
     private var loading = false
     private var savingStyle = false
@@ -25,11 +25,11 @@ public actor MusicRemoteQueueSource {
                 loadPage: @escaping @Sendable (String?) async throws -> MusicNativeTrackPage,
                 validate: @escaping @Sendable () async throws -> Void = {},
                 close: @escaping @Sendable () async -> Void = {},
-                dailyStyle: MusicDailyStyleEditing? = nil, fmAction: MusicHomeAction? = nil) {
+                dailyStyle: MusicDailyStyleEditing? = nil, homeAction: MusicHomeAction? = nil) {
         self.context = context; self.authorization = authorization
         load = loadPage; validateBinding = validate; release = close
         self.dailyStyle = dailyStyle
-        self.fmAction = fmAction
+        self.homeAction = homeAction
         // No constructor, capability cast or restoration starts a request.
     }
     public func validate() async throws {

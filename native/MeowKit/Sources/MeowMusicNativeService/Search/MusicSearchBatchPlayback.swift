@@ -54,7 +54,7 @@ extension NativeMusicService: MusicSearchBatchPlaying {
                 return stateDTO(document)
             }
         }
-        invalidatePlayback()
+        invalidatePlayback(reason: .ui)
         similarDidChangeQueue(.replace)
         if songs.count == 1, platformEnabled("wy"), accounts is any MusicNativeSimilarModeProviding,
            MusicNativeSimilarData.nativeID(songs[0]) != nil {

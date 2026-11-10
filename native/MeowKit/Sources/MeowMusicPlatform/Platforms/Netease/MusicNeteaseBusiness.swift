@@ -89,7 +89,17 @@ extension NeteaseMusicAccountAdapter {
         let rows = try songs.map { song -> JSONValue in
             let id = try MusicNeteaseWire.id(song["id"])
             guard seen.insert(id).inserted else { throw MusicServiceError.upstreamInvalid }
-            return try Self.song(song, id: id)
+            guard case .object(var value) = try Self.song(song, id: id) else { throw MusicServiceError.upstreamInvalid }
+            let algorithm = song["alg"]
+            let algorithmText = try MusicQQWire.string(algorithm == nil || algorithm is NSNull ? "" : algorithm,
+                                                       maximum: 2000, empty: true)
+            value["_recommendation"] = .object([
+                "songId": .string(id), "source": .string(kind), "sourceId": .string(""),
+                "feedbackSource": .string(kind == "daily" ? "dailySongRecommend" : "userfm"),
+                "alg": .string(try MusicAccountPublicText.profile(algorithmText,
+                    secrets: Array(context.cookies.values) + Array(context.device.values)))
+            ])
+            return .object(value)
         }
         // FM is one actual batch, not a fabricated page/played continuation.
         let result = MusicQQRecommendation(rows: rows, nextPage: nil, expiresAt: kind == "daily" ? boundary : nil)

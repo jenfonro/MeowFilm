@@ -133,9 +133,10 @@ public sealed partial class MusicPlatformHttp : IDisposable
         if (uri is null || !uri.IsAbsoluteUri || uri.Scheme != "https" || !uri.IsDefaultPort ||
             uri.UserInfo.Length != 0 || uri.Fragment.Length != 0 || request.Method != HttpMethod.Post) return false;
         return policy switch {
-            NativeHttpPolicy.Feedback => platform == "wy" && uri.Query.Length == 0 &&
-                (uri.Host == "music.163.com" && uri.AbsolutePath is "/weapi/w/nuser/account/get" or "/weapi/v3/song/detail" ||
-                 uri.Host == "clientlog.music.163.com" && uri.AbsolutePath == "/eapi/feedback/weblog"),
+            NativeHttpPolicy.Feedback => platform == "wy" &&
+                (uri.Host == "music.163.com" && uri.AbsolutePath == "/weapi/w/nuser/account/get" && uri.Query.Length == 0 ||
+                 uri.Host == "clientlog3.music.163.com" && uri.AbsolutePath == "/api/clientlog/encrypt/upload" &&
+                    uri.Query == "?multiupload=true" && request.Content is MultipartFormDataContent),
             NativeHttpPolicy.MusicLibrarySyncCloud => platform == "kg" && uri.Host == "gateway.kugou.com" &&
                 uri.AbsolutePath is "/v2/delete_list" or "/v1/modify_song_sort" &&
                 request.Headers.TryGetValues("x-router", out var router) &&
@@ -382,7 +383,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
                 using (request)
                 {
                 await CheckNativeBody(nativePolicy, request, token).ConfigureAwait(false);
-                if (nativePolicy is NativeHttpPolicy.QqQimei or NativeHttpPolicy.QqAccount or NativeHttpPolicy.QqProfile or
+                if (nativePolicy is NativeHttpPolicy.Feedback or NativeHttpPolicy.QqQimei or NativeHttpPolicy.QqAccount or NativeHttpPolicy.QqProfile or
                     NativeHttpPolicy.QqSession or NativeHttpPolicy.QqFeedbackJson or NativeHttpPolicy.QqFeedbackReport or
                     NativeHttpPolicy.PublicCatalogRead or NativeHttpPolicy.AccountDetails or NativeHttpPolicy.Chorus or
                     NativeHttpPolicy.VipPage)

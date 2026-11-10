@@ -43,10 +43,8 @@ extension NeteaseMusicAccountAdapter: MusicNeteaseFMProvider {
             return .init(artwork: Self.fmArtwork(data?["cover"] as? String))
         }
         let data = result["data"], body = data as? [String: Any]
-        let raw = try MusicNeteaseWire.rows(body?["songs"] ?? data, maximum: 100).map {
-            ($0["songInfo"] as? [String: Any]) ?? ($0["song"] as? [String: Any]) ?? $0
-        }
-        let rows = try await homeActionRows(raw, context: context, own: own, authorize: authorize)
+        let raw = try MusicNeteaseWire.rows(body?["songs"] ?? data, maximum: 100).map(Self.homeActionSong)
+        let rows = try await homeActionRows(raw, action: action, context: context, own: own, authorize: authorize)
         let limit: Int
         switch action {
         case .fm(_, _, .channel?) where preview: limit = 1

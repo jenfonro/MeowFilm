@@ -1,21 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using System.Net.Http;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Feedback;
 
 /// <summary>
-/// Borrowed native accounts/HTTP; no settings, media clock, automatic retry or durable work.
-/// Each playback/platform attempt is reserved before I/O. Only active sessions are retained.
+/// Native dispatch: WY owns durable local admission and file receipts; QQ/KG
+/// retain their independent protocols. All ports and the document store are borrowed.
 /// </summary>
 internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource accounts, MusicPlatformHttp http,
-    MusicPlatformClientContextOwner clients, TimeProvider? clock = null) : IMusicFeedbackProtocol
+    MusicPlatformClientContextOwner clients, TimeProvider? clock = null,
+    IDocumentStore? store = null, MusicFeedbackSettingsOwner? settings = null) : IMusicFeedbackProtocol, IMusicFeedbackPendingProtocol
 {
     private readonly IMusicPlatformSessionSource accounts = accounts ?? throw new ArgumentNullException(nameof(accounts));
     private readonly MusicPlatformHttp http = http ?? throw new ArgumentNullException(nameof(http));
-    private readonly MusicPlatformClientContextOwner clients = clients ?? throw new ArgumentNullException(nameof(clients));
     private readonly TimeProvider clock = clock ?? TimeProvider.System;
+    private readonly MusicFeedbackSettingsOwner? settings = settings;
+    private readonly NeteasePlaybackOutbox? wyOutbox = store is not null && settings is not null
+        ? new(store, settings, accounts, new(accounts, http, clients), clock ?? TimeProvider.System) : null;
+    private NeteasePlaybackFeedback? wy;
     private readonly object gate = new();
     private readonly CancellationTokenSource lifetime = new();
     private readonly HashSet<Task> pending = [];
@@ -42,8 +45,6 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         internal TaskCompletionSource? Finished;
         internal MusicFeedbackEnd? End;
         internal NativeMusicFeedbackQq? Qq;
-        internal MusicWyClientContext? Client;
-        internal MusicWyClientContext WyClient => Client!;
         internal Task? Disposal;
         internal Task? Release;
         internal bool Closed, Accepted;
@@ -66,6 +67,16 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
     {
         ArgumentNullException.ThrowIfNull(account);
         cancellationToken.ThrowIfCancellationRequested();
+        if (account.Platform == "wy")
+        {
+            lock (gate)
+            {
+                GuardAccount(account);
+                FeedbackProtocolRules.Require(wyOutbox is not null && settings is not null, "FEEDBACK_STORAGE_REQUIRED");
+                wy ??= new(wyOutbox, settings, accounts);
+                return wy.StartAsync(account, start, cancellationToken);
+            }
+        }
         start = FeedbackProtocolRules.Start(account, start);
         string fingerprint = FeedbackProtocolRules.Fingerprint(account, start);
         Session session;
@@ -73,6 +84,7 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         lock (start.Attempt.Gate)
         {
             GuardAccount(account);
+            FeedbackProtocolRules.Require(start.Attempt.State is null or Entry, "INSTANCE_MISMATCH");
             if (start.Attempt.State is Entry old)
             {
                 FeedbackProtocolRules.Require(old.Fingerprint == fingerprint, "INSTANCE_MISMATCH");
@@ -113,35 +125,6 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
             token.ThrowIfCancellationRequested();
         }
     }
-    private async Task Send(Session session, HttpRequestMessage request, CancellationToken token,
-        Action<JsonObject> validate)
-    {
-        void GuardClient()
-        {
-            Guard(session, token);
-            FeedbackProtocolRules.Require(session.Client is not null && clients.IsCurrent(session.Client),
-                clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
-        }
-        try { GuardClient(); }
-        catch { request.Dispose(); throw; }
-        try
-        {
-            // The transport owner must drain the physical request even after cancellation.
-            var result = await http.SendFeedbackJsonAsync(session.Account.Platform, request, token).ConfigureAwait(false);
-            GuardClient();
-            validate(result.Body);
-            session.Client = await clients.AcceptWyAsync(session.WyClient, session.Account.Cookie,
-                result.SetCookieHeaders, GuardClient, token).ConfigureAwait(false);
-            GuardClient();
-        }
-        catch (Exception error)
-        {
-            Guard(session, token);
-            if (error is MusicFeedbackException) throw;
-            if (error is OperationCanceledException) throw;
-            throw new MusicFeedbackException(FeedbackProtocolRules.SafeError(error));
-        }
-    }
     private async Task RunStart(Session session)
     {
         Exception? failure = null;
@@ -161,15 +144,6 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
                         cookies.GetValueOrDefault("KUGOU_API_DEV", "").Length > 0, "DEVICE_CONTEXT_REQUIRED");
                     // Only http://d.kugou.com is evidenced by the fixed CSCC source.
                     throw new MusicFeedbackException("UNVERIFIED_TLS_PROTOCOL");
-                case "wy":
-                    session.Client = await clients.AcquireWyAsync(session.Token).ConfigureAwait(false);
-                    await Send(session, FeedbackProtocolRequests.WyIdentity(session.Account, session.WyClient), session.Token,
-                        body => FeedbackProtocolRequests.VerifyWyIdentity(body, session.Account)).ConfigureAwait(false);
-                    await Send(session, FeedbackProtocolRequests.WyRecording(session.Account, session.Input.Recording, session.WyClient), session.Token,
-                        body => FeedbackProtocolRequests.VerifyWyRecording(body, session.Input)).ConfigureAwait(false);
-                    await Send(session, FeedbackProtocolRequests.WyReport(session.Account, session.Input, null, session.WyClient), session.Token,
-                        FeedbackProtocolRules.WySuccess).ConfigureAwait(false);
-                    break;
                 default: throw new MusicFeedbackException("UNSUPPORTED");
             }
             Guard(session, session.Token);
@@ -230,16 +204,8 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         {
             Guard(session, linked.Token);
             FeedbackProtocolRules.End(session.Input, end, clock.GetElapsedTime(session.At));
-            if (session.Qq is { } qq) await qq.Finish(end, linked.Token).ConfigureAwait(false);
-            else
-            {
-                // Revalidate live login, not merely the saved account generation, before the final write.
-                session.Client = await clients.AcquireWyAsync(linked.Token).ConfigureAwait(false);
-                await Send(session, FeedbackProtocolRequests.WyIdentity(session.Account, session.WyClient), linked.Token,
-                    body => FeedbackProtocolRequests.VerifyWyIdentity(body, session.Account)).ConfigureAwait(false);
-                await Send(session, FeedbackProtocolRequests.WyReport(session.Account, session.Input, end, session.WyClient), linked.Token,
-                    FeedbackProtocolRules.WySuccess).ConfigureAwait(false);
-            }
+            FeedbackProtocolRules.Require(session.Qq is not null, "UNSUPPORTED");
+            await session.Qq.Finish(end, linked.Token).ConfigureAwait(false);
             Guard(session, linked.Token);
             session.Qq?.Guard(linked.Token);
         }
@@ -336,10 +302,17 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         async Task Drain()
         {
             Cancel(lifetime);
+            var wyClose = wy is not null ? wy.DisposeAsync().AsTask() :
+                wyOutbox is not null ? wyOutbox.DisposeAsync().AsTask() : Task.CompletedTask;
             try { await Task.WhenAll(work).ConfigureAwait(false); } catch { /* Drain faulted/cancelled operations too. */ }
             Exception? releaseFailure = null;
             try { await Task.WhenAll(active.Select(DisposeSession)).ConfigureAwait(false); }
             catch (Exception error) { releaseFailure = Sanitize(error); }
+            try
+            {
+                await wyClose.ConfigureAwait(false);
+            }
+            catch (Exception error) { releaseFailure ??= Sanitize(error); }
             lock (gate)
             {
                 lifetime.Dispose();
@@ -348,4 +321,19 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
             }
         }
     }
+    public bool RequiresDuration(string platform) => platform != "wy";
+    public string? LastError => wyOutbox?.LastError;
+    public Task InitializeAsync(CancellationToken token = default) =>
+        wyOutbox?.InitializeAsync(token) ?? Task.CompletedTask;
+    public Task QualifyAccountAsync(MusicPlatformSession account, CancellationToken token)
+    {
+        lock (gate) GuardAccount(account);
+        return account.Platform == "wy" && wyOutbox is not null
+            ? wyOutbox.QualifyAccountAsync(account, token) : Task.CompletedTask;
+    }
+    public void AuthorizationChanged(bool accountChanged) => wyOutbox?.AuthorizationChanged(accountChanged);
+    public Task PrepareShutdownAsync() => wyOutbox?.PrepareShutdownAsync() ?? Task.CompletedTask;
+    public Task FlushLocalAsync() => wyOutbox?.FlushLocalAsync() ?? Task.CompletedTask;
+    public void Resume() => wyOutbox?.Resume();
+    public Task DrainAsync(CancellationToken token = default) => wyOutbox?.DrainAsync(token) ?? Task.CompletedTask;
 }
