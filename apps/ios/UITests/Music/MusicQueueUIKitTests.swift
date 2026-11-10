@@ -22,12 +22,12 @@ final class MusicQueueUIKitTests: XCTestCase {
         NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
         await wait("full player visible") { full.isPageVisible && !full.isBeingPresented }
         defer { release(full, root: root, window: window) }
-        let view = try XCTUnwrap(full.view as? MusicFullPlayerView)
-        view.onMore?()
-        let initialMenu = try XCTUnwrap(full.presentedViewController as? UIAlertController)
-        XCTAssertTrue(try XCTUnwrap(initialMenu.actions.first { $0.title == "当前歌曲心动" }).isEnabled)
-        XCTAssertFalse(initialMenu.actions.contains { $0.title == "返回原队列" })
-        await withCheckedContinuation { continuation in initialMenu.dismiss(animated: false) { continuation.resume() } }
+        let source = try XCTUnwrap(descendants(full.view).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.player.playbackSource"
+        })
+        let initialActions = try XCTUnwrap(source.menu).children.compactMap { $0 as? UIAction }
+        XCTAssertTrue(initialActions.contains { $0.title == "当前歌曲心动" })
+        XCTAssertFalse(initialActions.contains { $0.title == "返回原队列" })
         let original = model.queue.map(\.id), displayed = content.fence
         content.startCurrentHeartbeat(expected: displayed)
         await wait("current heartbeat committed") { model.similarMode?.active == true && !model.isChangingSimilarMode }
@@ -35,15 +35,9 @@ final class MusicQueueUIKitTests: XCTestCase {
         XCTAssertEqual(starts, [.currentHeartbeat(occurrenceID: "entry-1", expectedRevision: 7)])
         let snapshot = try XCTUnwrap(model.similarMode)
         XCTAssertFalse(snapshot.continueEnabled)
-        view.onMore?()
-        let activeMenu = try XCTUnwrap(full.presentedViewController as? UIAlertController)
-        XCTAssertTrue(activeMenu.actions.contains { $0.title == "返回原队列" })
-        await withCheckedContinuation { continuation in activeMenu.dismiss(animated: false) { continuation.resume() } }
-        content.setSimilarContinue(true, snapshot: snapshot.id, expected: content.fence)
-        await wait("heartbeat continuation enabled") { model.similarMode?.continueEnabled == true }
-        content.setSimilarContinue(false, snapshot: snapshot.id, expected: content.fence)
-        await wait("heartbeat continuation disabled") { model.similarMode?.continueEnabled == false }
-        XCTAssertEqual(model.similarMode?.id, snapshot.id, "Closing continuation must preserve the heartbeat session")
+        let activeActions = try XCTUnwrap(source.menu).children.compactMap { $0 as? UIAction }
+        XCTAssertTrue(activeActions.contains { $0.title == "返回原队列" })
+        XCTAssertFalse(activeActions.contains { $0.title == "自动续播" })
         content.returnFromRecommendations(snapshot: snapshot.id, expected: content.fence)
         await wait("explicit Return finished") { model.similarMode == nil && !model.isChangingSimilarMode }
         XCTAssertEqual(model.queue.map(\.id), original)
@@ -113,13 +107,19 @@ final class MusicQueueUIKitTests: XCTestCase {
         XCTAssertEqual(actions.similarCalls, 0)
         await service.exhaustRecommendations()
         await model.loadSimilarMode()
-        await wait("terminal status rendered") {
-            page.view.subviews.compactMap { $0 as? UILabel }.contains { $0.text == "推荐已结束" }
-        }
+        await wait("terminal candidates hidden") { page.recommendations.isHidden }
+        let heading = try XCTUnwrap(page.view.subviews.compactMap { $0 as? UILabel }.first {
+            $0.accessibilityIdentifier == "music.queue.recommendation.status"
+        })
+        XCTAssertTrue(heading.isHidden, "normal exhaustion has no status block")
         XCTAssertTrue(page.retry.isHidden)
         XCTAssertTrue(page.recommendations.isHidden)
         XCTAssertEqual(model.queue.count, 4)
         await model.close()
+    }
+
+    private func descendants(_ view: UIView) -> [UIView] {
+        view.subviews.flatMap { [$0] + descendants($0) }
     }
 
     func testSharedHeaderHasStableSizesAndOneIndicatorFollowingPartialPaging() async throws {
@@ -508,6 +508,7 @@ private actor QueueUIKitService: MusicServing, MusicSimilarModeServing, MusicQue
     func similarModeSnapshot() -> MusicSimilarModeSnapshot? { heartbeatSnapshot }
     func similarModeChanges() -> AsyncStream<Void> { .init { $0.finish() } }
     func canEnterSimilarMode() -> Bool { heartbeatEnabled }
+    func canEnterSongRecommendations() -> Bool { true }
     func previewSimilarMode() throws -> MusicSimilarModeSnapshot? {
         previewReads += 1; throw MusicServiceError.authRequired
     }

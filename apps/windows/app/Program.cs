@@ -13,6 +13,12 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        if (!AppInstallationLifetime.TryEnter())
+        {
+            System.Windows.MessageBox.Show("正在安装或卸载 meowfilm，请完成后重试。", "meowfilm",
+                System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
+            return;
+        }
         NativePlayback? playback = null;
         FilmRuleService? pendingRules = null;
         FilmSourceService? pendingSources = null;

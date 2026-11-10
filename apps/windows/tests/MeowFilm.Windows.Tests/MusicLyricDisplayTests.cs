@@ -189,9 +189,11 @@ public static partial class MusicLyricDisplayTests
                 await read.WaitAsync(TimeSpan.FromSeconds(3));
                 Equal(0, f.Module.Lyrics.Count); Equal(0, published.Count);
                 Check(!f.Module.CanCancelLyrics);
+                // The current application contract cancels this subscription, not
+                // its shared physical read. A new same-recording subscriber joins it.
                 var retry = f.Module.RefreshLyricsAsync();
                 await lookups.SecondLookupEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
-                Check(!retry.IsCompleted);
+                Check(!retry.IsCompleted && !release.Task.IsCompleted);
                 Equal(1, f.Http.Calls);
                 release.TrySetResult();
                 await retry;
@@ -256,6 +258,10 @@ public static partial class MusicLyricDisplayTests
                     Check(!published.Contains("OLD_SOURCE"));
                     var retry = f.Module.RestoreLyricsAsync();
                     await retry.WaitAsync(TimeSpan.FromSeconds(5));
+                    // Invalidating a source creates a new generation without
+                    // waiting for the old provider that ignores cancellation.
+                    Check(!release.Task.IsCompleted);
+                    Equal(2, f.Http.Calls);
                     release.TrySetResult();
                     Equal(2, f.Module.Lyrics.Count);
                     Equal("CURRENT_SOURCE", f.Module.Lyrics[0].Text);
@@ -378,7 +384,7 @@ public static partial class MusicLyricDisplayTests
             Equal("tx", f.Module.MetadataPlatforms[0].Platform);
             Check(f.Module.MetadataPlatforms.All(row => !row.Enabled));
             await f.Module.RefreshLyricsAsync();
-            Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls); Equal("", f.Module.LyricStatus);
+            Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls); Equal("暂无歌词", f.Module.LyricStatus);
             Check(!f.Module.CanCancelLyrics && f.Module.CanEditMetadata);
         }));
         yield return new("Native metadata changes restore visible player lyrics once without manual refresh", () => Sta(async () =>
@@ -466,7 +472,7 @@ public static partial class MusicLyricDisplayTests
             await using var next = await Fixture.Create(root, seed: false);
             await next.Module.ActivateGlobalSurfaceAsync(
                 MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail, default);
-            Equal(0, next.Module.Lyrics.Count); Equal("", next.Module.LyricStatus);
+            Equal(0, next.Module.Lyrics.Count); Equal("暂无歌词", next.Module.LyricStatus);
             Equal(0, next.Http.Calls); Equal(0, next.Runtime.Calls);
             next.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
         }));
@@ -483,7 +489,7 @@ public static partial class MusicLyricDisplayTests
                 f.Module.MetadataPlatforms.Single(row => row.Platform == "wy"), false);
             Equal(writes, f.Access.LibraryWrites);
             await f.Module.RefreshLyricsAsync();
-            Equal("", f.Module.LyricStatus); Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls);
+            Equal("暂无歌词", f.Module.LyricStatus); Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls);
             Equal("", f.Module.Status);
         }));
     }
@@ -599,8 +605,8 @@ public static partial class MusicLyricDisplayTests
         var song = queue.GetProperty("current").GetProperty("song");
         return (song, song.GetProperty("sources")[0].GetProperty("sourceKey").GetString()!);
     }
-    private static void Check(bool value, [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
-    { if (!value) throw new InvalidOperationException("Lyric display assertion failed at line " + line); }
+    private static void Check(bool value, [System.Runtime.CompilerServices.CallerArgumentExpression(nameof(value))] string? expression = null)
+    { if (!value) throw new InvalidOperationException("Lyric display assertion failed: " + expression); }
     private static void Equal<T>(T expected, T actual)
     { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}, got {actual}"); }
     private static JsonElement Ok(JsonElement result)

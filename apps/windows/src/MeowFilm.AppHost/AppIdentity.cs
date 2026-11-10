@@ -25,8 +25,8 @@ public static class AppIdentity
         Array.AsReadOnly(new[] { "music.accounts.v1", "music.platform-context.v1" });
     public static IReadOnlyList<string> NativeNamespaces { get; } = Array.AsReadOnly(new[]
     {
-        "app.appearance.v1", "app.media-controls.v1", "music.library.v1", "music.files.v1", "music.accounts.v1", "music.feedback.v1",
+        "app.appearance.v1", "app.window.v1", "app.media-controls.v1", "music.library.v1", "music.files.v1", "music.accounts.v1", "music.feedback.v1",
         "music.playback-sources.v1", "music.playback-files.v1", "music.chorus.v1", "music.platform-context.v1",
-        "music.song-matches.v1", "music.home.v1", "film.magic-rules.v1", "film.video-sources.v1"
+        "music.song-matches.v1", "music.home.v1", "music.fm-selection.v1", "film.magic-rules.v1", "film.video-sources.v1"
     });
 }

@@ -34,7 +34,6 @@
  <Grid Margin="20,18,8,14">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <desktop:NoticeOutlet Message="{Binding QueueSurfaceStatus}"/>
-  <desktop:NoticeOutlet Message="{Binding QueueRecommendationStatus}"/>
   <Grid Margin="0,0,12,14">
    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -133,7 +132,7 @@
   </ListBox>
   <Grid Grid.Row="2" Margin="0,16,12,0"
         Visibility="{Binding HasQueueRecommendations,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
    <DockPanel Margin="0,0,0,8">
     <CheckBox DockPanel.Dock="Right" Content="续播" IsChecked="{Binding RecommendationContinue,Mode=OneWay}"
               IsEnabled="{Binding CanChangeRecommendationContinue}" Click="Continue_Click"
@@ -146,9 +145,7 @@
             Style="{StaticResource MeowFilm.QuietButton}" Padding="6,4"/>
     <TextBlock Text="为你推荐" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
    </DockPanel>
-   <TextBlock Grid.Row="1" Text="{Binding QueueRecommendationEmptyText}" FontSize="13"
-              Foreground="{DynamicResource MeowFilm.Brush.Muted}"/>
-   <ListBox x:Name="RecommendationList" Grid.Row="2" ItemsSource="{Binding RecommendationCandidates}"
+   <ListBox x:Name="RecommendationList" Grid.Row="1" ItemsSource="{Binding RecommendationCandidates}"
             MaxHeight="232" BorderThickness="0" Background="Transparent"
             ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
             VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"

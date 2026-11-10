@@ -137,6 +137,7 @@ public sealed partial class MusicCapability
             // A fused result is not a WY playlist or a single-platform search.
             // The controller resolves the exact selected recording separately.
             result["sourceType"] = "search"; result["searchKeyword"] = searchKeyword;
+            result["queueSource"] = new { id = "search", title = "搜索结果", kind = "search" };
             return result;
         }
         if (!IsCatalogPage || catalogLoadedPlatform is not ("wy" or "tx" or "kg")) return result;

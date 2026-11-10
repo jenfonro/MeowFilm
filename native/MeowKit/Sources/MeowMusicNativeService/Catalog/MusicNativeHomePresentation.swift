@@ -128,8 +128,10 @@ enum MusicNativeHomePresentation {
             return "fm:\(mode.rawValue):\(submode):\(entry?.rawValue ?? "")"
         case .ruleFM(let ruleID, let tabID, _): return "fm:rule:\(ruleID):\(tabID)"
         case .similar(let ids, _): return "similar:song:" + ids.joined(separator: ",")
+        case .similarArtist(let ids, _): return "similar:artist:" + ids.joined(separator: ",")
         case .daily(let branch): return "daily:" + branch.rawValue
         case .heartbeat: return "heartbeat"
+        case .heartbeatSong(let id): return "heartbeat:" + id
         case .songCollection(let ids):
             // Same FNV-1a fingerprint as the reference; never Swift's randomized
             // Hasher, a title, or a preview/playlist ID masquerading as a queue.

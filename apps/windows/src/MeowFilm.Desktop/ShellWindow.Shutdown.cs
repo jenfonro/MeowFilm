@@ -13,6 +13,7 @@ public sealed partial class ShellWindow
     public async Task AbortAsync()
     {
         if (_forceShutdown is null) throw new InvalidOperationException("SHUTDOWN_FAILED");
+        DismissCloseChoice(restoreFocus: false);
         _isClosing = _forceStarted = true;
         _state.IsInteractive = false;
         RetireHeaderPresentation();

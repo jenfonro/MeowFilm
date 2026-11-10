@@ -12,8 +12,8 @@ extension NativeMusicService: MusicHomeActionQueueServing {
         switch action {
         case .fm: kind = "fm"
         case .ruleFM: kind = "rule-fm"
-        case .similar: kind = "similar"
-        case .heartbeat: kind = "heartbeat"
+        case .similar, .similarArtist: kind = "similar"
+        case .heartbeat, .heartbeatSong: kind = "heartbeat"
         case .daily(let branch): kind = "daily-" + branch.rawValue
         case .songCollection: kind = "song-collection"
         }

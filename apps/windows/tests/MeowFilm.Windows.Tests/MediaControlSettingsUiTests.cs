@@ -42,7 +42,7 @@ public static class MediaControlSettingsUiTests
         await using var owner = new AppMediaControlSettings(new DocumentStore());
         await using var appearance = new AppAppearance(new DocumentStore());
         await owner.LoadAsync(); await appearance.LoadAsync();
-        var general = new GeneralSettingsView(appearance, [], owner);
+        var general = new GeneralSettingsView(appearance, [], mediaControls: owner);
         using var mount = new Mount(general);
         var area = (RadioButton)general.FindName("ShortcutsArea");
         Check(area.Visibility == Visibility.Visible);
@@ -469,17 +469,26 @@ public static class MediaControlSettingsUiTests
     {
         await using var owner = new AppMediaControlSettings(new DocumentStore());
         await using var appearance = new AppAppearance(new DocumentStore());
-        await owner.LoadAsync(); await appearance.LoadAsync();
+        await using var closePreferences = new AppClosePreferences(new DocumentStore());
+        await owner.LoadAsync(); await appearance.LoadAsync(); await closePreferences.LoadAsync();
         var shell = new ShellWindow([new SettingsNavigationTests.Module("music", "音乐")], [],
-            () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance, mediaControls: owner);
+            () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance,
+            closePreferences: closePreferences, mediaControls: owner);
         try
         {
             Check(ReferenceEquals(shell.MediaControls, owner));
             var general = Descendants(shell).OfType<GeneralSettingsView>().Single();
             var page = (ContentControl)general.FindName("ShortcutsPage");
             Check(page.Content is MediaControlSettingsView view && ReferenceEquals(view.DataContext, owner));
+            var windowPage = (StackPanel)general.FindName("WindowBehaviorPage");
+            Check(ReferenceEquals(windowPage.DataContext, closePreferences));
+            ((RadioButton)general.FindName("WindowArea")).IsChecked = true;
+            Check(windowPage.Visibility == Visibility.Visible && page.Visibility == Visibility.Collapsed);
+            ((RadioButton)general.FindName("ShortcutsArea")).IsChecked = true;
+            Check(page.Visibility == Visibility.Visible && windowPage.Visibility == Visibility.Collapsed &&
+                page.Content is MediaControlSettingsView restored && ReferenceEquals(restored.DataContext, owner));
         }
-        finally { shell.Close(); await shell.ShutdownCompletion; }
+        finally { await shell.AbortAsync(); }
     }
 
     private static Button Editor(MediaControlSettingsView view, MediaShortcutAction action, bool global = false) =>

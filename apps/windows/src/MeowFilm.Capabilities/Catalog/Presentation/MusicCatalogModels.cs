@@ -58,7 +58,7 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     public bool CanPlay => DirectPlay && CanOpen && (Song is not null || Kind is "song" or "playlist" or "daily" or "fm" or "similar" or "heartbeat" or "album");
     public bool CanOpen => Available && (Song is not null || MusicCatalogDto.SupportsAction(Platform, Kind));
     public bool CanFavorite => Available && Song is not null;
-    public bool CanSimilar => CanFavorite && Platform == "wy" && ActionId.Length > 0;
+    public bool CanSimilar => CanFavorite && Recommendations.RecommendationJson.NativeId(Song!.Raw).Length > 0;
     public bool CanHeartbeatFavorites => CanOpen && Platform == "wy" && IsCloudFavorites;
     public string AlbumId => Song is { } song ? MusicCatalogDto.Text(SongJson.PrimaryInfo(song.Raw), "albumId") : "";
     public bool CanAlbum => CanFavorite && Platform == "wy" && AlbumId.Length > 0;

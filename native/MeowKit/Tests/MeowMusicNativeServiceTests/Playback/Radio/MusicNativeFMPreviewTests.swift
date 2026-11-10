@@ -13,9 +13,12 @@ private actor FMPreviewOwner: MusicNativeAccountProviding, MusicNativeFMProvidin
                    onRead: (@Sendable () -> Void)? = nil) {
         self.gate = gate; self.failure = failure; self.onRead = onRead
     }
-    func changeAccount() {
+    func changeAccount(scope: String = "synthetic-account") {
         binding.authorization.revoke()
-        binding = .init(scope: "synthetic-account", revision: UUID(), loggedIn: true)
+        binding = .init(scope: scope, revision: UUID(), loggedIn: true)
+    }
+    func nativeFMPreferenceScope(_ binding: MusicNativeHomeBinding) throws -> String {
+        try checkNativeHomeBinding(binding); return binding.scope
     }
     func nativeHomeBinding() -> MusicNativeHomeBinding { binding }
     func checkNativeHomeBinding(_ value: MusicNativeHomeBinding) throws {
@@ -46,12 +49,42 @@ private actor FMPreviewOwner: MusicNativeAccountProviding, MusicNativeFMProvidin
     func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage { throw MusicServiceError.unsupported }
     func nativeCollections(platform: MusicAccountPlatform, cursor: String?) throws -> MusicAccountCollectionPage { throw MusicServiceError.unsupported }
     func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicNativeTrackPage { throw MusicServiceError.unsupported }
-    func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) throws -> [MusicPlaybackOption] { throw MusicServiceError.unsupported }
-    func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) throws -> MusicNativeAudio { throw MusicServiceError.unsupported }
+    func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) -> [MusicPlaybackOption] {
+        [.init(installationId: "official:synthetic", generation: 1, siteId: "wy", sourceKey: sourceKey,
+               qualities: ["128k"], title: "Synthetic", version: "1", contentHash: String(repeating: "a", count: 64))]
+    }
+    func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) -> MusicNativeAudio {
+        .init(url: URL(string: "https://m701.music.126.net/synthetic.mp3")!)
+    }
 }
 
 final class MusicNativeFMPreviewTests: XCTestCase {
     private let fm = MusicHomeAction.fm(mode: .scene, submode: "ELECTRONIC", entry: .channel)
+    func testFMSelectionPersistsAcrossServiceRestartAndIsIsolatedByLocalAccount() async throws {
+        let owner = FMPreviewOwner(), store = NativeMusicMemoryDocument()
+        await owner.changeAccount(scope: "account-A")
+        let service = try await NativeMusicFixture.service(store, accounts: owner)
+        let first = try await service.rememberedFM()
+        XCTAssertEqual(first, .fm(mode: .default, submode: "", entry: nil))
+        let source = try await service.openHomeActionQueue(fm, title: "电音")
+        let start = try await MusicAccountQueueFixture.start(service, source)
+        let state = try await service.replaceRemoteQueue(source, start: start, expectedRevision: 0, intent: .init())
+        _ = try await service.updateSettings(.init(ifRevision: state.settingsRevision, mode: .single))
+        let remembered = try await service.rememberedFM()
+        XCTAssertEqual(remembered, fm.fmConfiguration)
+        let snapshot = try await service.fmPlaybackSnapshot()
+        XCTAssertTrue(try XCTUnwrap(snapshot).continueEnabled)
+        let sameMode = try await service.state(); XCTAssertEqual(sameMode.mode, .single)
+        await source.close(); await service.close()
+        let cold = try await NativeMusicFixture.service(store, accounts: owner)
+        let restored = try await cold.rememberedFM(); XCTAssertEqual(restored, fm.fmConfiguration)
+        await owner.changeAccount(scope: "account-B")
+        let other = try await cold.rememberedFM(); XCTAssertEqual(other, .fm(mode: .default, submode: "", entry: nil))
+        await owner.changeAccount(scope: "account-A")
+        let original = try await cold.rememberedFM(); XCTAssertEqual(original, fm.fmConfiguration)
+        await cold.close()
+    }
+
     func testPreviewIsLazySingleFlightAndDoesNotReadOrWriteQueueOrStartPlayback() async throws {
         let owner = FMPreviewOwner(), document = NativeMusicMemoryDocument()
         let service = try await NativeMusicFixture.service(document, accounts: owner)
@@ -117,13 +150,27 @@ final class MusicNativeFMPreviewTests: XCTestCase {
         let first = try await service.queue()
         XCTAssertEqual(first.entries.first?.remoteSessionID, source.id)
         let initialCalls = await owner.calls; XCTAssertEqual(initialCalls.count, 1)
-        _ = try await service.advanceFM(source, direction: .next, reason: .manual,
-                                      expectedRevision: first.revision, intent: .init())
+        let option = try await service.sourceAvailability(for: track.ref)
+        let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: try XCTUnwrap(first.currentId),
+            selection: XCTUnwrap(option.options.first).selection(quality: "128k"))
+        _ = try await service.recordSimilarPlaybackFact(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+            resourceId: candidate.resourceId, kind: .playing, position: 1))
+        let pending = await service.fmPlayback?.pending
+        await pending?.value
         let queue = try await service.queue()
         XCTAssertEqual(queue.entries.map { $0.track.sources.first?.nativeId }, ["1", "2"])
+        XCTAssertEqual(queue.currentId, first.currentId, "the playback boundary appends without navigating")
         XCTAssertTrue(queue.entries.allSatisfy { $0.remoteSessionID == source.id })
         let calls = await owner.calls; XCTAssertEqual(calls.map(\.1), [true, false])
         await source.close(); await service.close()
+    }
+    func testFMSelectionDocumentRejectsMalformedOrNonFMValues() throws {
+        let daily = try MJ.parse(JSONEncoder().encode(MusicHomeAction.daily(branch: .default)))
+        for value in [MJ.array([]), .obj([("account", .string("not-an-action"))]), .obj([("account", daily)])] {
+            var document = try MusicDocument(nil, runID: "fixture")
+            document.playback["fmSelections"] = value
+            XCTAssertThrowsError(try document.validate()) { XCTAssertEqual($0 as? MusicServiceError, .corruptDocument) }
+        }
     }
     func testRuleCoverIsNotAPlayableBatchAndSourceNameDoesNotSplitConfiguration() async throws {
         let owner = FMPreviewOwner(), document = NativeMusicMemoryDocument()

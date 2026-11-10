@@ -51,9 +51,8 @@ public sealed class MusicLyricWordView : Control
         IsVisibleChanged += (_, _) =>
         {
             if (!IsVisible) StopHighlight();
-            presenter?.RefreshWords();
+            presenter?.InvalidateViewport();
         };
-        SizeChanged += (_, _) => presenter?.RefreshWords();
     }
 
     private static void OnWordChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)
@@ -71,7 +70,7 @@ public sealed class MusicLyricWordView : Control
         else Present(Position, null, recalibrate: true);
     }
 
-    internal void Present(double position, double? rate, bool recalibrate)
+    internal bool Present(double position, double? rate, bool recalibrate)
     {
         var next = Word is { } word && double.IsFinite(position)
             ? MusicLyricTiming.Progress(word.Time, word.Duration, position) : 0;
@@ -79,17 +78,26 @@ public sealed class MusicLyricWordView : Control
             ? (timed.Time + timed.Duration - position) / rate.Value : 0;
         var animate = remaining > 0 && textSize.Width > 0;
         // Viewport/layout events do not restart a clock already following this sample.
-        if (!recalibrate && animate && highlightClip.HasAnimatedProperties) return;
-        if (!animate && !highlightClip.HasAnimatedProperties && next == progress) return;
-        highlightClip.BeginAnimation(RectangleGeometry.RectProperty, null);
+        if (!recalibrate && animate && highlightClip.HasAnimatedProperties) return true;
+        if (!animate && !highlightClip.HasAnimatedProperties && next == progress) return false;
         progress = next;
-        highlightClip.Rect = ProgressClip(next);
-        if (!animate) return;
+        if (!animate)
+        {
+            if (highlightClip.HasAnimatedProperties)
+                highlightClip.BeginAnimation(RectangleGeometry.RectProperty, null);
+            highlightClip.Rect = ProgressClip(next);
+            return false;
+        }
         var animation = new RectAnimation(ProgressClip(next), ProgressClip(1),
             TimeSpan.FromSeconds(remaining))
         { FillBehavior = FillBehavior.Stop };
+        var clock = animation.CreateClock();
+        // A stopped replacement clock keeps WPF's old snapshot until the next tick.
+        // Align before attaching so this render pass presents the accepted seek sample.
+        clock.Controller!.SeekAlignedToLastTick(TimeSpan.Zero, TimeSeekOrigin.BeginTime);
         highlightClip.Rect = ProgressClip(1);
-        highlightClip.BeginAnimation(RectangleGeometry.RectProperty, animation, HandoffBehavior.SnapshotAndReplace);
+        highlightClip.ApplyAnimationClock(RectangleGeometry.RectProperty, clock, HandoffBehavior.SnapshotAndReplace);
+        return true;
     }
 
     internal void StopHighlight()
@@ -110,7 +118,7 @@ public sealed class MusicLyricWordView : Control
         normalText = highlightedText = null;
         InvalidateMeasure();
         InvalidateVisual();
-        presenter?.RefreshWords();
+        presenter?.InvalidateViewport();
     }
 
     protected override void OnPropertyChanged(DependencyPropertyChangedEventArgs e)
@@ -159,6 +167,13 @@ public sealed class MusicLyricWordView : Control
     {
         EnsureText();
         return textSize;
+    }
+
+    protected override Size ArrangeOverride(Size arrangeBounds)
+    {
+        var result = base.ArrangeOverride(arrangeBounds);
+        presenter?.InvalidateViewport();
+        return result;
     }
 
     protected override void OnRender(DrawingContext drawing)

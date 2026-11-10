@@ -131,7 +131,7 @@ public sealed class MusicSourceRow : INotifyPropertyChanged
 }
 
 public sealed record MusicLyricRow(double Time, string Text, string Translation, string Romanization = "",
-    IReadOnlyList<MusicLyricWord>? Words = null, string Timing = "");
+    IReadOnlyList<MusicLyricWord>? Words = null);
 public sealed record MusicLyricWord(string Text, double Time, double Duration);
 public sealed record MusicLyricSourceRow(string SourceKey, string Label);
 public sealed record MusicRecordingRow(string SongId, string SourceKey, string Platform, string Label);

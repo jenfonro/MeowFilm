@@ -1,12 +1,14 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 
 namespace MeowFilm.Capabilities;
 
 // One animation clock per viewer, replaced on seek/manual scrolling, never a
-// media clock or polling loop. Offset is physical because lyrics wrap.
+// media clock or polling loop. Manual browsing uses physical offsets for middle-line
+// hit testing; automatic following arranges once and animates only the presentation.
 internal static class MusicLyricScroll
 {
     private sealed class Motion
@@ -14,8 +16,17 @@ internal static class MusicLyricScroll
         internal double? Target;
         internal long Epoch;
         internal bool Moving;
+        internal bool Manual;
+        internal TranslateTransform? Presentation;
+        internal MusicLyricList? List;
         internal Action? Settled;
     }
+
+    internal static double ManualTarget(ScrollViewer viewer) =>
+        State(viewer) is { Moving: true, Manual: true, Target: { } target } ? target : PresentedOffset(viewer);
+
+    private static double PresentedOffset(ScrollViewer viewer) =>
+        viewer.VerticalOffset - (State(viewer).Presentation?.Y ?? 0);
 
     private static readonly DependencyProperty MotionProperty = DependencyProperty.RegisterAttached(
         "Motion", typeof(Motion), typeof(MusicLyricScroll));
@@ -38,12 +49,21 @@ internal static class MusicLyricScroll
         state.Target = null;
         state.Moving = false;
         state.Settled = null;
-        var offset = viewer.VerticalOffset;
+        var offset = PresentedOffset(viewer);
+        if (state.Presentation is { } presentation)
+        {
+            presentation.BeginAnimation(TranslateTransform.YProperty, null);
+            presentation.Y = 0;
+            state.Presentation = null;
+            state.List?.EndPresentationMotion(presentation);
+            state.List = null;
+        }
         viewer.BeginAnimation(OffsetProperty, null);
         viewer.SetValue(OffsetProperty, offset);
     }
 
-    internal static void Move(ScrollViewer viewer, double target, bool manual = false, Action? settled = null)
+    internal static void Move(ScrollViewer viewer, double target, bool manual = false, Action? settled = null,
+        TranslateTransform? presentation = null, MusicLyricList? list = null)
     {
         target = Math.Clamp(target, 0, viewer.ScrollableHeight);
         var state = State(viewer);
@@ -53,18 +73,47 @@ internal static class MusicLyricScroll
             if (!state.Moving) QueueSettled(viewer, state);
             return;
         }
-        var from = viewer.VerticalOffset;
+        var from = PresentedOffset(viewer);
         Stop(viewer);
         state.Target = target;
+        state.Manual = manual;
         state.Settled = settled;
         viewer.SetValue(OffsetProperty, target);
         if (!SystemParameters.ClientAreaAnimation || SystemParameters.HighContrast || Math.Abs(from - target) < .5)
         {
+            viewer.UpdateLayout();
             QueueSettled(viewer, state);
             return;
         }
         state.Moving = true;
         var epoch = state.Epoch;
+        if (presentation is not null)
+        {
+            // The list caches one page on each side. No intermediate off-screen
+            // rows need to be created just to animate a distant seek/return.
+            viewer.UpdateLayout();
+            var shift = Math.Clamp(viewer.VerticalOffset - from, -viewer.ViewportHeight, viewer.ViewportHeight);
+            state.Presentation = presentation;
+            state.List = list;
+            list?.BeginPresentationMotion(presentation, shift);
+            var translation = new DoubleAnimation(shift, 0, TimeSpan.FromMilliseconds(420))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                FillBehavior = FillBehavior.Stop
+            };
+            translation.Completed += (_, _) =>
+            {
+                if (epoch != state.Epoch) return;
+                state.Moving = false;
+                presentation.BeginAnimation(TranslateTransform.YProperty, null);
+                state.Presentation = null;
+                state.List?.EndPresentationMotion(presentation);
+                state.List = null;
+                QueueSettled(viewer, state);
+            };
+            presentation.BeginAnimation(TranslateTransform.YProperty, translation, HandoffBehavior.SnapshotAndReplace);
+            return;
+        }
         var animation = new DoubleAnimation(from, target, TimeSpan.FromMilliseconds(manual ? 180 : 420))
         {
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },

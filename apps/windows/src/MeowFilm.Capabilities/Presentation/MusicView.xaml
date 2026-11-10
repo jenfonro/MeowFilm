@@ -227,7 +227,6 @@
                 Foreground="{DynamicResource MeowFilm.Brush.Muted}" VerticalAlignment="Top"/>
     </StackPanel>
    </DockPanel>
-   <local:MusicRecommendationView/>
    <desktop:NoticeOutlet Message="{Binding Status}"/>
     <desktop:NoticeOutlet Message="{Binding SearchStatus}"/>
   </StackPanel>

@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using System.Runtime.InteropServices;
 using System.IO;
 using System.Text.Json;
@@ -280,6 +281,52 @@ public static partial class MusicUiTests
                 Equal("打开桌面歌词", AutomationProperties.GetName(button));
             }));
 
+        yield return Case("desktop lyrics footer keeps source FM quality and desktop controls inside both widths", () =>
+            WithDesktopLyrics((f, _) =>
+            {
+                var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+                var detailFooter = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
+                foreach (var player in new[] { (MusicPlayerView)f.Module.PlayerView, detailFooter })
+                {
+                    FrameworkElement surface = ReferenceEquals(player, detailFooter) ? detail : player;
+                    // Render owns this viewport; the shown anchor Window must not re-layout the surface.
+                    var source = (Button)player.FindName("PlaybackSourceButton");
+                    // Exercise the widest visible source/FM/quality chrome without requiring an online account.
+                    ((StackPanel)source.Content).Children.OfType<TextBlock>().Last().Text = new string('宽', 24);
+                    ((Button)player.FindName("FmChannelButton")).Visibility = Visibility.Visible;
+                    ((Button)player.FindName("QualityButton")).Visibility = Visibility.Visible;
+                    foreach (int width in new[] { 1110, 860 })
+                    {
+                        Render(surface, width, ReferenceEquals(player, detailFooter) ? 600 : 80);
+                        True(Math.Abs(player.ActualWidth - width) < .5, "the actual footer spans the requested viewport");
+                        AssertPlayerBounds(player, width);
+                        var transport = (FrameworkElement)player.FindName("TransportPanel");
+                        var transportRight = transport.TranslatePoint(new(transport.ActualWidth, 0), player).X;
+                        var progress = (FrameworkElement)player.FindName("Progress");
+                        var progressBottom = progress.TranslatePoint(new(0, progress.ActualHeight), player).Y;
+                        var names = new[] { "PlaybackSourceButton", "FmChannelButton", "QualityButton",
+                            "PlaylistButton", "DesktopLyricsButton", "VolumeButton", "MoreButton" };
+                        var bounds = names.Select(name => (FrameworkElement)player.FindName(name))
+                            .Select(control => new Rect(control.TranslatePoint(new(), player), control.RenderSize)).ToArray();
+                        foreach (var rect in bounds)
+                        {
+                            True(rect.Width > 0 && rect.Height > 0, "all right controls have a measured hit area");
+                            True(rect.Left >= transportRight - .5, "right controls do not overlap the centered transport");
+                            True(rect.Top >= progressBottom - .5, "right controls remain below the seek hit area");
+                        }
+                        for (int i = 0; i < bounds.Length; i++)
+                            for (int j = i + 1; j < bounds.Length; j++)
+                                True(bounds[i].Right <= bounds[j].Left + .5 || bounds[j].Right <= bounds[i].Left + .5 ||
+                                    bounds[i].Bottom <= bounds[j].Top + .5 || bounds[j].Bottom <= bounds[i].Top + .5,
+                                    "source FM quality and desktop controls have distinct hit areas");
+                        GeneralAppearanceTests.SavePreview(player,
+                            "media-control-footer-max-" + (ReferenceEquals(player, detailFooter) ? "detail-" : "ordinary-") + width,
+                            width, 80);
+                    }
+                }
+                return Task.CompletedTask;
+            }));
+
         yield return Case("desktop lyrics follows playback time and shares source translation visibility with full detail", () =>
             WithDesktopLyrics(async (f, owner) =>
             {
@@ -321,6 +368,52 @@ public static partial class MusicUiTests
                 Equal("打开桌面歌词", AutomationProperties.GetName(detailButton));
                 True(f.Module.IsLyrics && f.Module.NeedsLyrics, "closing desktop lyrics leaves the complete player active");
                 f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+            }));
+
+        yield return Case("desktop lyrics and full detail receive complete replacement lyric snapshots", () =>
+            WithDesktopLyrics(async (f, owner) =>
+            {
+                await SaveDesktopLyricFixture(f);
+                await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                var window = f.Module.DesktopLyricsWindow!;
+                var original = (TextBlock)window.FindName("CurrentLine");
+                var translation = (TextBlock)window.FindName("CurrentTranslation");
+                var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+                owner.Content = detail;
+                await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
+                Render(detail, 1110, 800); await Drain();
+                f.Playback.Tick(6);
+                await f.Rpc("music.lyrics.local.save", new { song = f.Module.Songs[0].Raw,
+                    text = "[00:00]新第一行\n[00:05]新第二行" });
+                f.Calls.TransformNext("music.lyrics.local.get", reply =>
+                {
+                    var result = JsonNode.Parse(reply.GetRawText())!;
+                    result["lines"]![1]!["translation"] = "replacement source translation";
+                    return JsonSerializer.SerializeToElement(result);
+                });
+                var snapshots = new List<string[]>();
+                NotifyCollectionChangedEventHandler published = (_, _) =>
+                {
+                    if (f.Module.Lyrics.Count > 0)
+                        snapshots.Add(f.Module.Lyrics.Select(row => row.Text).ToArray());
+                };
+                f.Module.Lyrics.CollectionChanged += published;
+                try
+                {
+                    await f.Module.RefreshLyricsAsync(); await Drain();
+                    Equal(1, snapshots.Count);
+                    True(snapshots[0].SequenceEqual(["新第一行", "新第二行"]), "no consumer observes a partial replacement");
+                    Equal("新第二行", original.Text);
+                    Equal("replacement source translation", translation.Text);
+                    True(Visuals(detail).OfType<TextBlock>().Any(text => text.Name == "LyricTranslation" &&
+                        text.Text == "replacement source translation" && text.IsVisible),
+                        "full detail receives the same provider translation as the desktop consumer");
+                }
+                finally
+                {
+                    f.Module.Lyrics.CollectionChanged -= published;
+                    f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+                }
             }));
 
         yield return Case("desktop lyrics reports empty and unplayed state without inventing a translation", async () =>
@@ -400,11 +493,17 @@ public static partial class MusicUiTests
                     var desktop = f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                     await hold.Arrived.Task;
                     var request = f.Calls.Log.Last(call => call.Method == "music.lyrics.local.get");
-                    var detail = f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
+                    using var detailRequest = new CancellationTokenSource();
+                    var detail = f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, detailRequest.Token);
                     try
                     {
                         Equal(1, f.Calls.Count("music.lyrics.local.get"));
-                        if (closeDetail) f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+                        if (closeDetail)
+                        {
+                            // Shell owns and retires the nonblocking activation independently of shared lyrics.
+                            detailRequest.Cancel();
+                            f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+                        }
                         else f.Module.DesktopLyricsWindow!.Close();
                         True(!request.Token.IsCancellationRequested && f.Module.NeedsLyrics,
                             "closing only one consumer cannot cancel the shared presentation request");

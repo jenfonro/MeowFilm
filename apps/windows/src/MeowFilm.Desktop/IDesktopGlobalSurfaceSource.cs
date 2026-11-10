@@ -20,7 +20,7 @@ public sealed class DesktopGlobalSurfaceRequestEventArgs(DesktopGlobalSurface su
 public interface IDesktopGlobalSurfaceSource
 {
     FrameworkElement GetGlobalSurface(DesktopGlobalSurface surface);
-    /// <summary>For PlayerDetail, completion supplies a render-ready first frame before the shell starts its entrance.</summary>
+    /// <summary>Starts content work. PlayerDetail is presented immediately; data readiness never gates its entrance.</summary>
     Task ActivateGlobalSurfaceAsync(DesktopGlobalSurface surface, CancellationToken cancellationToken);
     void DeactivateGlobalSurface(DesktopGlobalSurface surface);
     event EventHandler<DesktopGlobalSurfaceRequestEventArgs>? GlobalSurfaceRequested;

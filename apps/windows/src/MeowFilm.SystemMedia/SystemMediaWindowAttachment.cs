@@ -10,11 +10,16 @@ public sealed class SystemMediaWindowAttachment : IAsyncDisposable
 {
     private readonly Window window;
     private readonly SystemMediaSession session;
-    private bool disposed;
 
     public SystemMediaWindowAttachment(Window window, NativePlayback playback,
         IEnumerable<SystemPlaybackOwner> owners, bool enabled = true)
-        : this(window, CreateSession(window, playback, owners, enabled)) { }
+        : this(window, new SystemMediaSession.NativeSource(playback), new WindowsSystemMediaBackend(window), owners, enabled) { }
+
+    // Tests replace only this module's playback/backend ports; HWND acquisition
+    // remains in the production constructor and lifecycle ownership stays here.
+    internal SystemMediaWindowAttachment(Window window, ISystemPlayback playback,
+        ISystemMediaBackend backend, IEnumerable<SystemPlaybackOwner> owners, bool enabled = true)
+        : this(window, CreateSession(window, playback, backend, owners, enabled)) { }
 
     internal SystemMediaWindowAttachment(Window window, SystemMediaSession session)
     {
@@ -23,10 +28,9 @@ public sealed class SystemMediaWindowAttachment : IAsyncDisposable
         window.Closed += Closed;
     }
 
-    private static SystemMediaSession CreateSession(Window window, NativePlayback playback,
-        IEnumerable<SystemPlaybackOwner> owners, bool enabled)
+    private static SystemMediaSession CreateSession(Window window, ISystemPlayback playback,
+        ISystemMediaBackend backend, IEnumerable<SystemPlaybackOwner> owners, bool enabled)
     {
-        var backend = new WindowsSystemMediaBackend(window);
         try { return new SystemMediaSession(playback, backend, owners, window.Dispatcher, enabled); }
         catch { backend.Dispose(); throw; }
     }
@@ -36,11 +40,9 @@ public sealed class SystemMediaWindowAttachment : IAsyncDisposable
 
     public void SetEnabled(bool enabled) => session.SetEnabled(enabled);
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (disposed) return;
-        disposed = true;
         window.Closed -= Closed;
-        await session.DisposeAsync();
+        return session.DisposeAsync();
     }
 }

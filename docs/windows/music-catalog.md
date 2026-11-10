@@ -65,7 +65,7 @@
 - 歌手卡进入 `catalog-artist/wy/{id}`，只发一次 `music.catalog.artist`，同一响应发布歌手身份、头像和完整有界 `hotSongs`。热门歌曲“播放全部”只消费当前已发布批次，不再次读取歌手详情或预取专辑。
 - Windows 入口卡片的日期 `dayOfMonth` 和包含歌曲信息的完整 `subtitle` 由平台 producer 提供，常态和悬停使用同一份文案；完整推荐批次与卡片投影分开，不把字段缺失解释为空歌单。
 - 网易云 Cube 的 `recommendModule` 按真实动作发布入口类型；当前栏目中缺名称或封面的歌单按 ID 去重，从公开 `/api/tag/tab/playlists` 批量补齐摘要，不读取隐藏标签独有歌单或成员详情。补齐只填缺失字段，保留栏目文案、已有封面、预览和图片查询参数；批量回执必须与请求身份完整对应。
-- 首页 producer 为账号入口发布明确的 `requiresAccount`、`display` 和 `available`。新读取的游客首页只包含当前公开内容；私有入口不进入该响应的显示投影，因此不加载其图片、预览或成员，空状态也按显示投影计数。此前成功的首页在游客更新完成前可以继续展示，但不提供旧账号授权。栏目动作与栏目成员使用同一准入字段，不再根据错误文案猜测可见性。
+- 首页 producer 为账号入口发布明确的 `requiresAccount`、`display` 和 `available`。游客首页的每日推荐仍不进入显示投影；有真实种子／动作的 FM、相似、心动入口保留显示和操作，点击后由当前账号观察报告登录要求，不读取旧账号私有成员。空状态按显示投影计数。此前成功的首页在游客更新完成前可以继续展示，但不提供旧账号授权。栏目动作与栏目成员使用同一准入字段，不再根据错误文案猜测可见性。
 - 网易云 `ALBUM_LOGO` 仅在 action `coverUrl` 是有效且不同的真实封面时，同时保留原 `coverImg` 装饰地址；相同或无效替换不产生第二次图片读取。可信 `*.music.126.net`／`*.music.163.net` 的明文图片地址在平台归一化边界升级为 HTTPS；`p1`～`p4` CDN 仅对已验证且不含其他字段的 `imageView`／`type`／`thumbnail` 或独立 `param` 静态缩略参数保留无查询的图片身份，未知、重复或附带字段不借此规则改写。实际加载由公共 Artwork 传输请求有界缩略图，不下载完整原图；PNG/JPEG/GIF 与 WebP 按实际字节进入对应的静态解码路径，见[原生公共图像](artwork.md)。
 - 歌手频道和详情优先消费 `img1v1Url` 方形头像，再使用 `picUrl`；缺失或为空的标题/封面可选字段不会遮挡后续真实字段。
 - 页面、平台、筛选、账号或搜索词变化会同步提升相关请求代次并取消旧请求；旧回执不能覆盖新页面状态。账号变化退休首页请求权限并重新读取，保留最后成功展示。
@@ -91,8 +91,8 @@
 - 首页首批发布后可立即交互；同一页面生命周期主动追随 continuation，直到接口结束。追加保留卡片引用、横向位置和纵向滚动，不再依赖滚轮触发栏目请求。失败保留已成功内容，取消或重复游标停止链路；图片仍由 Artwork 视口机制加载。搜索、频道和歌单详情各自现有分页契约不变。
 - 普通单曲栏目点击任一首，将该栏目已发布的完整成员按原顺序一次替换队列，从点击项起播，不混入其他栏目。明确提供 `playbackSource: {type: playlist, id}`（或栏目歌单 action）时，准备真实完整歌单，再按点击歌曲的领域身份起播；该来源保存在卡片外壳，不扩充 lean song。
 - 卡片播放准备态由发起卡片拥有。A加载时只A转圈，悬停B不转移；显式点B撤销旧意图，旧回执不能清B的状态。成功／失败／取消复位，不再显示全局完整歌单加载说明。
-- 网易云首页 `heartbeat` action 是可播放原生入口；不依赖 song/list action ID，也不被未知卡片过滤。云喜欢列表保留普通歌单打开／播放动作，另提供基于其真实 favorites 身份的随机心动入口；浏览歌单曲和真实当前曲的入口参数及退出行为见[个人目录 UI](music-catalog-personal-ui.md)。
-- 普通播放建立新队列之后，presentation 在独立推荐工作生命周期中读取 native 当前 session，再准入 `kind:queue` 候选预览，不把网络预览串进暂停／下一首命令队列，也不从每帧播放通知启动推荐。候选选择和续播通过 recommendation command 转发，原目录条目的 source／context 继续由曲库 owner 保存。
+- 网易云首页 `heartbeat` action 是保留展示曲 `songId` 的可播放原生入口；不被未知卡片过滤。云喜欢列表保留普通歌单打开／播放动作，另提供基于其真实 favorites 身份的心动入口；真实当前曲的入口参数及退出行为见[个人目录 UI](music-catalog-personal-ui.md)。
+- 只有搜索直接播放单曲成功建立队列之后，presentation 才在独立推荐工作生命周期中读取 native 当前 session，再准入 `kind:queue` 候选预览；普通栏目／歌单不自动建立推荐。不把网络预览串进暂停／下一首命令队列，也不从每帧播放通知启动推荐。候选选择和续播通过 recommendation command 转发，原目录条目的 source／context 继续由曲库 owner 保存。
 - FM 的目录预览选择与播放器已提交模式分别归属 Catalog 和 native session。播放器弹层只消费后者；四主模式与 43 场景、旧按钮代次拒绝以及非 FM 循环控件保持的规则见[个人目录 UI](music-catalog-personal-ui.md#全局播放器与候选)。
 
 ## 横幅与榜单
@@ -110,8 +110,8 @@
 - 读取歌单和改变本地曲库／队列是两个阶段。`prepare` 完整读取并验证同一歌单快照，返回短期、单次使用 token；此时不修改曲库或队列。
 - `commit` 允许 `play`、`save` 或 `next`，并核对 token、相应动作字段、账号与目录代次。播放未指定 index／memberId、但指定 expectedSongId 时，在完整快照中选择该领域歌曲的首次出现；缺失返回 SNAPSHOT_CHANGED，不提交。显式 index／memberId 的校验语义不变。提交进入唯一 `MusicLibraryOwner` 串行边界。
 - `next` 仅接受 `{token, action:"next", expectedVersion}`，返回 `{ok:true,currentId,version,mode}`。它复用完整 stage，以准备前捕获的队列版本在 library 串行边界校验，一次把全部歌曲作为连续段插入当前曲之后；保留重复 occurrence、旧队列、当前曲和模式，随机模式沿用 next priority。空队列只选中首曲，不启动媒体；空 stage 返回 `INVALID_REQUEST`，调用方仍须 discard。没有逐首或分批提交。
-- `next` 经推荐队列公共 admission lane 按 `Append` 通知协调器；`play` 为 `Replace`，`save` 仅共享 lane。版本冲突返回 `REVISION_CONFLICT`，不写入任何歌曲且消费 token；进入 library 等待后取消也消费 token，实际 CAS 准入后则按真实持久化结果结算。
-- 音乐主视图隐藏／卸载，以及实际切换搜索 tab，同步撤销原栏目未提交意图；重复选择当前 tab 不撤销。搜索歌曲栏目使用稳定领域 ID，播放继续保留整个栏目顺序及点击位置。
+- `next` 经推荐队列公共 admission lane 按 `PlayNext` 通知协调器；`play` 为 `Replace`，`save` 仅共享 lane。版本冲突返回 `REVISION_CONFLICT`，不写入任何歌曲且消费 token；进入 library 等待后取消也消费 token，实际 CAS 准入后则按真实持久化结果结算。
+- 音乐主视图隐藏／卸载，以及实际切换搜索 tab，同步撤销原栏目未提交意图；重复选择当前 tab 不撤销。搜索歌曲栏目使用稳定领域 ID，直接播放只将所点歌曲入队；普通单曲栏目的整栏播放契约不变。
 - `next` 失败或明确取消后先保守关闭播放控制并撤销旧预取，再以应用 lifetime 读取权威队列的 persistence 恢复状态；仍 pending 或读取失败时不假定已保存，不重放 commit、不重启当前媒体。队列浮窗是否打开不影响该恢复。
 - `prepare` 的成功回执即使与取消交错也必须先被实际接收；presentation 取得 token 后再 `discard`，不能丢失回执并把 stage 留给 TTL。
 - `discard` 只释放未消费 token。取消或失败不会生成半歌单；提交结果未知时不得重放提交。

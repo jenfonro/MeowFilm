@@ -109,6 +109,6 @@ internal static class MusicDto
     }
     internal static int Mode(JsonElement value)
     {
-        var mode = Integer(value, "mode"); Require(mode <= 3); return (int)mode;
+        var mode = Integer(value, "mode"); Require(mode is >= 1 and <= 3); return (int)mode;
     }
 }

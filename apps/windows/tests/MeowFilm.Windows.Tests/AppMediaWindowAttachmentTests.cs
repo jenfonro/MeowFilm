@@ -1,5 +1,10 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Interop;
 using MeowFilm.App;
 using MeowFilm.AppHost;
 using MeowFilm.Desktop;
@@ -20,6 +25,7 @@ public static class AppMediaWindowAttachmentTests
         yield return Case("retry retains only resources whose release failed", RetryRemaining);
         yield return Case("partial startup ownership is released once", PartialStartup);
         yield return Case("real settings save busy and failure preserve the active registration", SaveNotifications);
+        yield return Case("shell asks and hides without stopping; shared save wait seals all commands and cancellation restores", ShellClosePreparation);
     }
 
     private static TestCase Case(string name, Func<Task> action) => new("app-media." + name, () => Sta(action));
@@ -249,6 +255,154 @@ public static class AppMediaWindowAttachmentTests
             system.Backend.Updates == updates, "failed write status with unchanged authority does not re-register or disable SMTC");
     }
 
+    private static async Task ShellClosePreparation()
+    {
+        var store = new QualityFixture.DocumentStore();
+        await using var settings = new AppMediaControlSettings(store);
+        await using var appearance = new AppAppearance(store);
+        await using var closePreferences = new AppClosePreferences(store);
+        await settings.LoadAsync(); await settings.SaveAsync(ShortcutFixture.Preferences());
+        await appearance.LoadAsync(); await closePreferences.LoadAsync();
+        var prepare = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var domainEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int domainPreparations = 0;
+        var domain = new Preparation(() =>
+        {
+            domainPreparations++;
+            domainEntered.TrySetResult();
+            return prepare.Task;
+        });
+        var module = new SettingsNavigationTests.Module("media-close-probe", "媒体关闭测试");
+        AppMediaWindowAttachment? owner = null;
+        var shutdown = new AppShutdown([module, domain], [new(() => owner!.DisposeAsync())],
+            sharedParticipants: [settings, appearance, closePreferences]);
+        var tray = new TrayIcon();
+        var shell = new ShellWindow([module], [], shutdown.CloseAsync, shutdown.ForceReleaseAsync,
+            shutdown.CancelShutdownPreparationAsync, TimeProvider.System, appearance, closePreferences,
+            (_, _, _, _) => tray, mediaControls: settings)
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual, Left = -32000, Top = -32000,
+            ShowActivated = false, ShowInTaskbar = false
+        };
+        shell.Closed += (_, _) => closed.TrySetResult();
+        var native = new ShortcutNative();
+        var actions = new List<MediaShortcutAction>();
+        SystemFixture? system = null;
+        Task? saving = null;
+        bool stoppedForPreparation = false, restoredAfterShared = false;
+        void AvailabilityChanged(object? sender, PropertyChangedEventArgs args)
+        {
+            if (args.PropertyName != nameof(IDesktopMediaControlSettings.IsAvailable)) return;
+            if (!settings.IsAvailable) stoppedForPreparation = true;
+            else if (stoppedForPreparation) restoredAfterShared = appearance.CanEdit && closePreferences.CanEdit;
+        }
+        settings.PropertyChanged += AvailabilityChanged;
+        var commands = Enum.GetValues<SystemPlaybackCommand>();
+        var timeout = TimeSpan.FromSeconds(3);
+        try
+        {
+            owner = new AppMediaWindowAttachment(shell, settings);
+            system = new SystemFixture(shell);
+            owner.OwnSystemMedia(system.Attachment, system.Attachment.SetEnabled);
+            owner.OwnShortcuts(new MediaShortcutWindowAttachment(shell, settings, action =>
+            {
+                actions.Add(action); return Task.CompletedTask;
+            }, native));
+            shell.Show(); await Pump();
+            var handle = new WindowInteropHelper(shell).Handle;
+            var dialog = (CloseWindowDialog)shell.FindName("CloseDialog");
+            Check(ReferenceEquals(shell.MediaControls, settings) && native.Latest.Success && system.Backend.Enabled,
+                "the real shell and both attachments share the restored media settings");
+            void Post(ShortcutNative.Call registration)
+            {
+                var gesture = ShortcutFixture.GlobalGesture;
+                nint packed = (nint)((KeyInterop.VirtualKeyFromKey(gesture.Key) << 16) | (int)gesture.Modifiers);
+                bool posted = PostMessageW(handle, MediaShortcutNative.HotKeyMessage, registration.Id, packed);
+                int error = posted ? 0 : Marshal.GetLastWin32Error();
+                Check(posted, $"queued shell hotkey; {ShortcutNative.WindowEvidence(handle)} id=0x{registration.Id:X} error={error}");
+            }
+            async Task AcceptAll(string stage)
+            {
+                int calls = system.Player.Calls.Count, shortcuts = actions.Count;
+                foreach (var command in commands)
+                {
+                    system.Backend.Request(command, 30); await Pump();
+                    Check(system.Player.Calls.Count == ++calls &&
+                        system.Player.Calls.Last() == command.ToString().ToLowerInvariant(), stage + " accepts " + command);
+                }
+                Post(native.Latest); await Pump();
+                Check(actions.Count == shortcuts + 1, stage + " accepts the global shortcut");
+            }
+            await AcceptAll("initial shell");
+            var active = native.Latest;
+            shell.Close(); await Pump();
+            Check(dialog.IsOpen && settings.IsAvailable && system.Backend.Enabled && native.Latest == active &&
+                domainPreparations == 0 && !shell.ShutdownCompletion.IsCompleted,
+                "close inquiry does not start preparation or retire either media channel");
+            await AcceptAll("close inquiry");
+            ((Button)dialog.FindName("MinimizeChoice")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            await Pump();
+            Check(!shell.IsVisible && !dialog.IsOpen && settings.IsAvailable && system.Backend.Enabled &&
+                native.Latest == active && domainPreparations == 0 && closePreferences.Behavior == WindowCloseBehavior.Ask,
+                "one-time tray hiding retains both channels and does not rewrite the close preference");
+            await AcceptAll("hidden shell");
+            shell.Show(); await Pump();
+            shell.Close(); await Pump();
+            Check(dialog.IsOpen, "a fresh close still asks after the one-time tray choice");
+            store.HoldNamespace = AppAppearance.DocumentNamespace;
+            saving = appearance.SaveAsync("#315A7D");
+            await store.Entered.Task.WaitAsync(timeout);
+            Check(!saving.IsCompleted && settings.IsAvailable, "a real accepted appearance save is awaiting physical settlement");
+            int acceptedSystem = system.Player.Calls.Count, acceptedShortcuts = actions.Count;
+            Post(active);
+            foreach (var command in commands) system.Backend.Request(command, 30);
+            ((Button)dialog.FindName("ExitChoice")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            Check(!settings.IsAvailable && !system.Backend.Enabled && native.Unregistered.Contains(active.Id) &&
+                !saving.IsCompleted && domainPreparations == 0 && closePreferences.CanEdit,
+                "media admission stops synchronously before awaiting appearance and preparing later participants");
+            Post(active);
+            foreach (var command in commands) system.Backend.Request(command, 30);
+            await Pump();
+            Check(system.Player.Calls.Count == acceptedSystem && actions.Count == acceptedShortcuts &&
+                system.Backend.Disposals == 0 && !saving.IsCompleted && domainPreparations == 0,
+                "both queued and new Play/Pause/Stop/Next/Previous/Seek and hotkeys are rejected throughout the shared-save wait");
+            store.Release.TrySetResult();
+            await saving.WaitAsync(timeout);
+            await domainEntered.Task.WaitAsync(timeout);
+            Check(!settings.IsAvailable && !appearance.CanEdit && !closePreferences.CanEdit &&
+                appearance.ThemeColor == "#315A7D" && store.Data.ContainsKey(AppAppearance.DocumentNamespace),
+                "the actual save settles before domain preparation while media admission remains closed");
+            prepare.TrySetException(new InvalidOperationException("synthetic-preparation-failure"));
+            await shell.ShutdownCompletion.WaitAsync(timeout); await Pump();
+            var cancel = (Button)shell.FindName("CancelShutdownButton");
+            Check(shell.IsVisible && cancel.IsEnabled && restoredAfterShared,
+                "failed preparation remains cancellable and rollback reopens media only after later shared owners");
+            cancel.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Pump();
+            Check(settings.IsAvailable && system.Backend.Enabled && native.Latest.Success &&
+                appearance.CanEdit && closePreferences.CanEdit && closePreferences.Behavior == WindowCloseBehavior.Ask &&
+                ((Grid)shell.FindName("ContentDeck")).IsEnabled,
+                "actual shell cancellation restores both channels from unchanged authoritative preferences");
+            await AcceptAll("cancelled preparation");
+        }
+        finally
+        {
+            store.Release.TrySetResult();
+            prepare.TrySetResult();
+            if (saving is not null) await saving;
+            settings.PropertyChanged -= AvailabilityChanged;
+            await shell.AbortAsync();
+            await closed.Task.WaitAsync(timeout);
+            if (owner is not null) await owner.DisposeAsync();
+        }
+        Check(system!.Backend.Disposals == 1 && tray.Disposals == 1 && native.Allocated.SequenceEqual(native.Released),
+            "shell cleanup releases its single system attachment, tray and all real hotkey registration identities");
+    }
+
+    [DllImport("user32.dll", ExactSpelling = true, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessageW(nint hwnd, int message, nint wParam, nint lParam);
+
     private static async Task Fails(Task task, string code)
     {
         try { await task; throw new InvalidOperationException("Expected failure: " + code); }
@@ -288,13 +442,21 @@ public static class AppMediaWindowAttachmentTests
         }
     }
 
+    private sealed class TrayIcon : IDesktopTrayIcon
+    {
+        internal int Disposals;
+        public bool TryShow() => true;
+        public void Dispose() => Disposals++;
+    }
+
     private sealed class SystemFixture
     {
         internal readonly Player Player = new();
         internal readonly Backend Backend = new();
         internal readonly SystemMediaWindowAttachment Attachment;
         internal SystemFixture(Window window, bool enabled = true) =>
-            Attachment = new(window, new SystemMediaSession(Player, Backend, [new("audio")], window.Dispatcher, enabled));
+            Attachment = new(window, new SystemMediaSession(Player, Backend,
+                [new("audio", Next: _ => Player.NextAsync(), Previous: _ => Player.PreviousAsync())], window.Dispatcher, enabled));
     }
 
     private sealed class Player : ISystemPlayback
@@ -306,6 +468,8 @@ public static class AppMediaWindowAttachmentTests
         public Task PlayAsync() { Calls.Add("play"); return Task.CompletedTask; }
         public Task PauseAsync() { Calls.Add("pause"); return Task.CompletedTask; }
         public Task StopAsync() { Calls.Add("stop"); return Task.CompletedTask; }
+        internal Task NextAsync() { Calls.Add("next"); return Task.CompletedTask; }
+        internal Task PreviousAsync() { Calls.Add("previous"); return Task.CompletedTask; }
         public Task SeekAsync(double seconds) { Calls.Add("seek"); return Task.CompletedTask; }
     }
 
@@ -314,7 +478,7 @@ public static class AppMediaWindowAttachmentTests
         internal int Updates, Disposals;
         internal bool Enabled;
         public event EventHandler<SystemPlaybackRequest>? Requested;
-        internal void Request(SystemPlaybackCommand command) => Requested?.Invoke(this, new(command));
+        internal void Request(SystemPlaybackCommand command, double positionSeconds = 0) => Requested?.Invoke(this, new(command, positionSeconds));
         public void Update(SystemPlaybackState state) { Updates++; Enabled = state.HasMedia; }
         public void Disable() => Enabled = false;
         public void Dispose() => Disposals++;

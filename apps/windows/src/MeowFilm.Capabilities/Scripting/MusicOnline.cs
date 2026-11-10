@@ -13,7 +13,7 @@ public sealed partial class MusicCapability
     private readonly Dictionary<string, string> recordingChoices = [];
     private readonly Dictionary<string, string> recordingPlatforms = [];
     private readonly HashSet<string> explicitRecordings = [];
-    public ObservableCollection<MusicLyricRow> Lyrics { get; } = [];
+    public ObservableCollection<MusicLyricRow> Lyrics => lyricRows;
     public ObservableCollection<MusicRecordingRow> RecordingCandidates { get; } = [];
     public bool HasRecordingCandidates => RecordingCandidates.Count > 0;
     public MusicRecordingRow? SelectedRecording

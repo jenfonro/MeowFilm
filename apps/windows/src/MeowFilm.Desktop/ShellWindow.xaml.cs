@@ -57,12 +57,16 @@ public sealed partial class ShellWindow : Window
 
     public ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
         Func<Task> shutdown, Func<Task> forceShutdown, Func<Task>? cancelShutdown = null,
-        IDesktopAppearance? appearance = null, IDesktopMediaControlSettings? mediaControls = null)
-        : this(modules, pages, shutdown, forceShutdown, cancelShutdown, TimeProvider.System, appearance, mediaControls) { }
+        IDesktopAppearance? appearance = null, IDesktopClosePreferences? closePreferences = null,
+        IDesktopMediaControlSettings? mediaControls = null)
+        : this(modules, pages, shutdown, forceShutdown, cancelShutdown, TimeProvider.System, appearance,
+            closePreferences, mediaControls: mediaControls) { }
 
     internal ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
         Func<Task> shutdown, Func<Task>? forceShutdown, Func<Task>? cancelShutdown, TimeProvider timeProvider,
-        IDesktopAppearance? appearance = null, IDesktopMediaControlSettings? mediaControls = null)
+        IDesktopAppearance? appearance = null, IDesktopClosePreferences? closePreferences = null,
+        Func<Window, Action, Action, Action, IDesktopTrayIcon>? trayIconFactory = null,
+        IDesktopMediaControlSettings? mediaControls = null)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
         _timeProvider = timeProvider;
@@ -85,8 +89,12 @@ public sealed partial class ShellWindow : Window
         _cancelShutdown = cancelShutdown;
         _shutdown = shutdown;
         MediaControls = mediaControls;
+        _closePreferences = closePreferences;
+        _trayIconFactory = trayIconFactory;
         InitializeComponent();
-        InitializeGeneralSettings(appearance);
+        InitializeGeneralSettings(appearance, closePreferences);
+        CloseDialog.ChoiceRequested += OnCloseChoiceRequested;
+        CloseDialog.CancelRequested += CancelCloseChoice;
         AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, e) =>
         {
             Notices.Show(e.Outlet, e.Message);
@@ -144,11 +152,13 @@ public sealed partial class ShellWindow : Window
         _nativeCaption = new(this, MaximizeButton, ToggleMaximize);
         base.OnSourceInitialized(e);
         _nativeCaption.SetImmersiveBorder(false);
+        InitializeTrayIcon();
     }
 
     protected override void OnStateChanged(EventArgs e)
     {
         base.OnStateChanged(e);
+        if (WindowState != WindowState.Minimized) _trayRestoreState = WindowState;
         if (MaximizeGlyph is not null) UpdateCaption();
         if (PlayerDetailMaximizeGlyph is not null) UpdatePlayerDetailChrome();
     }
@@ -607,6 +617,7 @@ public sealed partial class ShellWindow : Window
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (CloseDialog.IsOpen) return; // The close dialog owns keyboard navigation and Escape.
         if (_isClosing) return;
         // Let a native range editor cancel its own gesture before Escape closes
         // the full player. The shell must not depend on a music-specific type.
@@ -885,9 +896,21 @@ public sealed partial class ShellWindow : Window
     protected override void OnClosing(CancelEventArgs e)
     {
         base.OnClosing(e);
-        if (_allowClose || e.Cancel) return;
+        if (_allowClose || _sessionEnding || e.Cancel) return;
         e.Cancel = true;
         if (_isClosing) return;
+        if (_closePreferences is not null)
+        {
+            QueueCloseChoice();
+            return;
+        }
+        BeginShutdown();
+    }
+
+    private void BeginShutdown()
+    {
+        if (_isClosing || _isClosed) return;
+        DismissCloseChoice(restoreFocus: false);
         _isClosing = true;
         _state.IsInteractive = false;
         _retryPlan = null;
@@ -978,7 +1001,7 @@ public sealed partial class ShellWindow : Window
     {
         _shutdownWaitInProgress = false;
         // Forced exit fences every late result, including a successful callback after the decision.
-        if (_isClosed || _allowClose || _closeQueued || _forceStarted) return;
+        if (_isClosed || _allowClose || _closeQueued || _forceStarted || _sessionEnding) return;
         if (succeeded)
         {
             ShutdownSucceeded = true;
@@ -1013,6 +1036,9 @@ public sealed partial class ShellWindow : Window
         DisposePresentationMotion();
         _isClosed = true;
         _isClosing = true;
+        DismissCloseChoice(restoreFocus: false);
+        _trayIcon?.Dispose();
+        _trayIcon = null;
         CancelActive();
         CancelPageActivation();
         foreach (var request in _requests.ToArray()) request.Cancel();

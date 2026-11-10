@@ -171,7 +171,11 @@ public sealed partial class MusicPlatformCatalog
                     PJ.Require(NativeMusicSong.NativeId(song) == memberId, "IDENTITY_MISMATCH");
                     songs.Add(memberId, song);
                 }
-                return (Info: PlatformSongs.Playlist("wy", list!), Snapshot: revision, PageIds: pageIds,
+                var playlist = PlatformSongs.Playlist("wy", list!);
+                if (c.Session is not null && PJ.Scalar(PJ.At(list, "specialType")) == "5" &&
+                    PJ.Scalar(PJ.At(list, "creator", "userId")) == c.Session.UserId)
+                    playlist["heartbeatAccountId"] = c.Session.UserId;
+                return (Info: playlist, Snapshot: revision, PageIds: pageIds,
                     Songs: songs, Total: total);
             });
             info = membership.Info; snapshot = membership.Snapshot;
@@ -232,6 +236,7 @@ public sealed partial class MusicPlatformCatalog
         }
         page["id"] = p.Id; page["name"] = info["name"]?.DeepClone(); page["cover"] = info["cover"]?.DeepClone();
         page["snapshot"] = snapshot;
+        if (info["heartbeatAccountId"] is { } heartbeatAccount) page["heartbeatAccountId"] = heartbeatAccount.DeepClone();
         return page;
     }
     private static void CheckSnapshot(string? expected, string actual)

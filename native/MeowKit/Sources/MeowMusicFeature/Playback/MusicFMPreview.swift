@@ -11,6 +11,7 @@ public struct MusicNativeFMResponse: Sendable {
     }
 }
 public protocol MusicNativeFMProviding: MusicNativeHomeProviding {
+    func nativeFMPreferenceScope(_ binding: MusicNativeHomeBinding) async throws -> String
     func nativeFM(_ action: MusicHomeAction, preview: Bool,
                   binding: MusicNativeHomeBinding) async throws -> MusicNativeFMResponse
 }
@@ -31,9 +32,27 @@ public extension MusicHomeAction {
     /// Source labels do not create a different radio configuration.
     var fmConfiguration: MusicHomeAction? {
         switch self {
-        case .fm: return self
+        case .fm(let mode, let submode, _): return .fm(mode: mode, submode: submode, entry: nil)
         case .ruleFM(let rule, let tab, _): return .ruleFM(ruleID: rule, tabTagID: tab, sourceName: "")
         default: return nil
         }
     }
+}
+
+public struct MusicFMPlaybackSnapshot: Sendable {
+    public let id: UUID
+    public let action: MusicHomeAction
+    public let continueEnabled: Bool
+    public let loading: Bool
+    public let error: MusicServiceError?
+    public let errorID: UUID?
+    public init(id: UUID, action: MusicHomeAction, continueEnabled: Bool, loading: Bool, error: MusicServiceError?, errorID: UUID? = nil) {
+        self.id = id; self.action = action; self.continueEnabled = continueEnabled; self.loading = loading; self.error = error; self.errorID = errorID
+    }
+}
+
+public protocol MusicFMPlaybackServing: Sendable {
+    func rememberedFM() async throws -> MusicHomeAction
+    func fmPlaybackSnapshot() async throws -> MusicFMPlaybackSnapshot?
+    func setFMContinue(_ enabled: Bool, sessionID: UUID) async throws
 }

@@ -23,28 +23,53 @@ public static partial class MusicUiTests
             () => RecommendationRetirementRace(restoreOnly: false));
         yield return Case("recommendation consumer old RestoreOnly draining recovery cannot stop or replace a newer selection",
             () => RecommendationRetirementRace(restoreOnly: true));
-        yield return Case("recommendation consumer FM retry deadline releases identical observation once under reentrant Changed",
+        yield return Case("recommendation consumer reentrant UI updates and elapsed time never create a new playback observation",
             RecommendationRetryObservationRace);
         yield return Case("recommendation consumer committed FM configuration rejects old snapshots and retired action keys",
             RecommendationCommittedFmRace);
         yield return Case("recommendation consumer candidate replacement rejects old tokens before a native choose command",
             RecommendationCandidateRace);
         yield return Case("recommendation consumer heartbeat return refreshes ABEC and retires proof without restarting playing media",
-            () => RecommendationHeartbeatReturn(paused: false));
+            () => RecommendationSourceReturn("heartbeat", paused: false));
         yield return Case("recommendation consumer heartbeat return preserves paused media position without Stop Open or Resume",
-            () => RecommendationHeartbeatReturn(paused: true));
+            () => RecommendationSourceReturn("heartbeat", paused: true));
+        yield return Case("recommendation consumer active recommendation return preserves playing ABEC media and latest loop",
+            () => RecommendationSourceReturn("queue", paused: false));
+        yield return Case("recommendation consumer active recommendation return preserves paused ABEC media and latest loop",
+            () => RecommendationSourceReturn("queue", paused: true));
     }
 
-    private static async Task RecommendationHeartbeatReturn(bool paused)
+    private static async Task RecommendationSourceReturn(string kind, bool paused)
     {
         await using var f = await RecommendationRaceScene.Create();
-        f.App.UseHeartbeatCoordinator();
-        var original = await f.App.Replace("2", "1", "3");
+        f.App.UseRecommendationCoordinator(kind);
+        True((await f.App.ExecuteAsync("music.queue.replace", new {
+            songs = new[] { "2", "1", "3" }.Select(RecommendationTest.Song).ToArray(), index = 1,
+            context = new { sourceTitle = "原歌单", sourcePlatform = "wy", sourceType = "playlist", sourceId = "100",
+                queueSource = new { id = "100", title = "原歌单", kind = "playlist", platform = "wy" } }
+        })).GetProperty("ok").GetBoolean(), "establish original playlist");
+        var original = await f.App.Queue();
         string seed = original.GetProperty("entries")[1].GetProperty("id").GetString()!;
-        True((await f.App.ExecuteAsync("music.queue.select", new { id = seed })).GetProperty("ok").GetBoolean(), "select original B");
-        var started = await f.App.ExecuteAsync("music.recommendations.start",
-            new { kind = "heartbeat", platform = "wy", entry = "current", songId = "1", seedEntryId = seed });
+        True(await f.App.Select(original), "original B reaches the real module selection consumer");
+        f.Playback.Start(); await f.Module.SeekAsync(14);
+        if (paused) await f.Playback.PauseAsync();
+        await Drain();
+        int seedOpens = f.Playback.Opens.Count, seedStops = f.Playback.Stopped.Count, seedResumes = f.Playback.Resumes;
+        var started = kind == "heartbeat"
+            ? await f.App.ExecuteAsync("music.recommendations.start",
+                new { kind, platform = "wy", entry = "current", songId = "1", playlistId = "100", seedEntryId = seed })
+            : await f.App.ExecuteAsync("music.recommendations.start",
+                new { kind, platform = "wy", seedEntryId = seed, restore = true });
         Equal("ready", started.GetProperty("status").GetString());
+        Equal(seed, (await f.App.Queue()).GetProperty("currentId").GetString());
+        Equal(seed, f.Playback.Identity);
+        Equal(14d, f.Playback.PositionSeconds);
+        True(f.Playback.IsPlaying == !paused && f.Playback.HasMedia, "entering preserves current media and intent");
+        Equal(seedOpens, f.Playback.Opens.Count); Equal(seedStops, f.Playback.Stopped.Count); Equal(seedResumes, f.Playback.Resumes);
+        if (kind == "queue")
+            True((await f.App.ExecuteAsync("music.recommendations.continue",
+                new { id = started.GetProperty("id").GetString(), enabled = false })).GetProperty("ok").GetBoolean(), "disable automatic fetch");
+        await f.Module.ChangeModeAsync(2);
         var recommendations = await f.App.Queue();
         string current = recommendations.GetProperty("entries")[2].GetProperty("id").GetString()!;
         var observed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -65,9 +90,10 @@ public static partial class MusicUiTests
         await f.Playback.SeekAsync(43);
         if (paused) await f.Playback.PauseAsync();
         await Drain();
-        True(f.Module.CanReturnRecommendation && f.Module.HasActiveRecommendation, "heartbeat return is available after the committed snapshot");
+        True(f.Module.CanReturnRecommendation && f.Module.HasActiveRecommendation, "source return is available after the committed snapshot");
+        Equal("随机播放", f.Module.PlaybackModeText);
         var proof = f.App.FeedbackProbe.Selection?.Recommendation;
-        True(proof is { Value.Kind: "heartbeat" } && proof.IsCurrent(), "UI feedback carries live heartbeat occurrence proof");
+        True(proof is not null && proof.Value.Kind == kind && proof.IsCurrent(), "UI feedback carries live source occurrence proof");
         int opens = f.Playback.Opens.Count, stops = f.Playback.Stopped.Count, resumes = f.Playback.Resumes;
         int resolves = f.App.ResolveCalls, callbacks = f.App.CoordinatorSelections;
         int commands = f.App.RecommendationCalls.Count, feedbackStarts = f.App.FeedbackProbe.Starts, feedbackFinishes = f.App.FeedbackProbe.Finishes;
@@ -80,6 +106,10 @@ public static partial class MusicUiTests
             new[] { original.GetProperty("entries")[0], original.GetProperty("entries")[1],
                 playingQueue.GetProperty("current"), original.GetProperty("entries")[2] }.Select(e => e.GetRawText())), "ABC returns as ABEC");
         Equal(current, restored.GetProperty("currentId").GetString());
+        Equal(2, restored.GetProperty("mode").GetInt32());
+        Equal(original.GetProperty("source").GetRawText(), restored.GetProperty("source").GetRawText());
+        Equal("随机播放", f.Module.PlaybackModeText);
+        Equal("网络歌单", f.Module.PlaybackQueueSourceText);
         Equal(current, f.Playback.Identity);
         Equal(43d, f.Playback.PositionSeconds);
         True(f.Playback.HasMedia && f.Playback.IsPlaying == !paused && f.Module.CanSeek, "same media and playback state survive return");
@@ -111,7 +141,8 @@ public static partial class MusicUiTests
         Equal("default", f.Module.PlaybackFmMode);
         f.App.PublishConfiguration(queue, "scene", "HOT_SONG");
         await Drain();
-        Equal("热歌", f.Module.PlaybackModeText);
+        Equal("热歌", f.Module.PlaybackFmTitle);
+        Equal("列表循环", f.Module.PlaybackModeText);
         f.App.Emit(old);
         await Drain();
         Equal("HOT_SONG", f.Module.PlaybackFmScene);
@@ -220,68 +251,34 @@ public static partial class MusicUiTests
         await using var f = await RecommendationRaceScene.Create();
         var queue = await f.App.Replace("801");
         True(await f.App.Select(queue).WaitAsync(TimeSpan.FromSeconds(5)), "initial callback reached the real module");
-        Equal(0, f.App.Observations.Count); // Open's initial false is not a Pause or a Started event.
-
-        long future = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeMilliseconds();
-        f.App.Publish(queue, future);
-        await Drain();
-        True(f.Module.HasActiveRecommendation && f.Module.CanRetryRecommendation, "active FM error snapshot was consumed");
-        f.Playback.Start();
-        await Drain();
-        Equal(1, f.App.Observations.Count);
-        var started = f.App.Observations[0];
-        True(started.IsPlaying && started.HasStarted && started.MediaReady && started.IsLocal,
-            "test uses an actual public playback Started event");
-
-        for (int i = 0; i < 8; i++) f.Playback.Pulse();
-        f.App.Publish(queue, future); // A newer revision is not a new retry deadline.
-        await Drain();
-        for (int i = 0; i < 8; i++) f.Playback.Pulse();
-        await Drain();
-        Equal(1, f.App.Observations.Count); // Zero duplicate delivery before retryAt.
-
-        long expired = DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeMilliseconds();
+        Equal(0, f.App.Observations.Count);
+        f.App.Publish(queue); await Drain();
         int reentries = 0;
         f.App.OnObservation = _ =>
         {
-            // Bound a broken implementation's recursion, but do not hide it.
-            // Exercise both the source Changed callback and synchronous media
-            // reentry before OnPlaybackAsync returns to the UI consumer.
-            if (++reentries <= 3)
-            {
-                f.App.Publish(queue, expired);
-                f.Playback.Pulse();
-            }
+            if (++reentries <= 3) { f.App.Publish(queue); f.Playback.Pulse(); }
         };
         PropertyChangedEventHandler repeatFromBinding = (_, args) =>
         {
-            if (args.PropertyName == nameof(MusicCapability.RecommendationStatus)) f.Playback.Pulse();
+            if (args.PropertyName == nameof(MusicCapability.PlaybackQueueSourceText)) f.Playback.Pulse();
         };
         f.Module.PropertyChanged += repeatFromBinding;
         try
         {
-            f.App.Publish(queue, expired); // No clock sleeps, production timers or high-frequency polling.
-            await Drain();
-            for (int i = 0; i < 8; i++) f.Playback.Pulse();
-            await Drain();
-            Equal(2, f.App.Observations.Count);
-            Equal(1, reentries);
-            Equal(started, f.App.Observations[1]); // Exactly the same started/playing/ready value is re-admitted.
-
-            for (int i = 0; i < 3; i++) f.App.Publish(queue, expired);
-            await Drain();
-            for (int i = 0; i < 8; i++) f.Playback.Pulse();
-            await Drain();
-            Equal(2, f.App.Observations.Count);
-            Equal(1, reentries);
-            Equal(1, f.Playback.Opens.Count);
-            Equal(1, f.App.ResolveCalls);
-        }
-        finally
-        {
-            f.Module.PropertyChanged -= repeatFromBinding;
+            f.Playback.Start(); await Drain();
+            var started = f.App.Observations.Single();
+            True(started.IsPlaying && started.HasStarted && started.MediaReady && started.PlaybackEvent > 0, "actual Started creates one playback event");
+            for (int i = 0; i < 8; i++) { f.App.Publish(queue); f.Playback.Pulse(); }
+            await Drain(); Equal(1, f.App.Observations.Count); Equal(1, reentries);
             f.App.OnObservation = null;
+            await f.Playback.PauseAsync(); await Drain();
+            await f.Playback.ResumeAsync(); await Drain();
+            await f.Module.SeekAsync(37); await Drain();
+            Equal(37d, f.Playback.PositionSeconds);
+            True(f.App.Observations.All(value => value.PlaybackEvent == started.PlaybackEvent), "pause/resume and seek preserve the event identity");
+            Equal(1, f.Playback.Opens.Count); Equal(1, f.App.ResolveCalls);
         }
+        finally { f.Module.PropertyChanged -= repeatFromBinding; f.App.OnObservation = null; }
     }
 
     private sealed class RecommendationRaceScene : IAsyncDisposable
@@ -334,10 +331,10 @@ public static partial class MusicUiTests
         public override event Action<JsonElement>? Changed;
         public override IMusicPlaybackFeedback Feedback => FeedbackProbe;
 
-        internal void UseHeartbeatCoordinator()
+        internal void UseRecommendationCoordinator(string kind)
         {
             var catalog = new RecommendationTest.Catalog();
-            catalog.Reply("heartbeat", "10", "11", "12");
+            catalog.Reply(kind == "heartbeat" ? "heartbeat" : "queue-recommendations", "10", "11", "12");
             queue = new(library);
             coordinator = new(catalog, queue, (selection, token) =>
             {
@@ -402,14 +399,14 @@ public static partial class MusicUiTests
             True(result.GetProperty("ok").GetBoolean(), method + ": " + result.GetRawText());
             return result;
         }
-        internal void Publish(JsonElement queue, long retryAt)
+        internal void Publish(JsonElement queue)
         {
             snapshot = JsonSerializer.SerializeToElement(new
             {
                 ok = true, id = "consumer-race", revision = ++revision, kind = "fm", platform = "wy",
-                active = true, status = "error", loading = false, waiting = false, @continue = true, play = true,
+                active = true, status = "error", loading = false, @continue = true, play = true,
                 error = "NETWORK", batch = 1, canRetry = true, canReturn = false, requiresReconcile = false,
-                reconcileIds = Array.Empty<string>(), retryAt, queueVersion = queue.GetProperty("version").GetInt64(),
+                reconcileIds = Array.Empty<string>(), queueVersion = queue.GetProperty("version").GetInt64(),
                 currentId = queue.GetProperty("currentId").GetString(), anchorId = queue.GetProperty("currentId").GetString(),
                 count = queue.GetProperty("total").GetInt32(), failures = 1,
                 mode = "default", submode = "", ruleId = "", tabTagId = ""

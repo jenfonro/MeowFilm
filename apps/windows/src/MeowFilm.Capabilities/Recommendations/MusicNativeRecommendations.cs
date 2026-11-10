@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Recommendations;
 
@@ -19,6 +20,7 @@ public sealed partial class MusicNativeApplication
 {
     private readonly MusicRecommendationQueuePort recommendationQueue;
     private readonly MusicRecommendationCoordinator recommendations;
+    private readonly MusicFmPreferences fmPreferences;
     private RecommendationBinding? recommendationBinding;
     private long recommendationBindingEpoch;
     private int recommendationBindingChanges;
@@ -222,14 +224,40 @@ public sealed partial class MusicNativeApplication
                 if (recommendationPreludes++ == 0) recommendationPreludesDrained = new(TaskCreationOptions.RunContinuationsAsynchronously);
             }
             using var start = CancellationTokenSource.CreateLinkedTokenSource(token, generation);
-            Task<JsonElement> work;
+            using var frame = sessions.Begin(awaitPhysical: true);
+            Task<JsonElement>? work = null;
+            MusicPlatformSession? fmAccount = null;
             try
             {
                 // Reconcile BEFORE a new coordinator session is registered. A
                 // first saved-account notification must not cancel that new session.
                 var restored = await accounts.EnsureInitialObservationAsync(start.Token).ConfigureAwait(false);
                 if (!Okay(restored)) return restored;
+                var input = parameters is JsonElement json ? json : JsonSerializer.SerializeToElement(parameters);
+                if (input.ValueKind == JsonValueKind.Object && input.TryGetProperty("kind", out var kind) &&
+                    kind.GetString() == "fm")
+                {
+                    work = recommendations.TryReuseFmStart(input, start.Token);
+                    if (work is null)
+                    {
+                        start.Token.ThrowIfCancellationRequested();
+                        // This admitted read belongs to startup, not its cancellable
+                        // subscriber. The catalog inherits this exact account lease.
+                        fmAccount = await sessions.AcquireAsync("wy", CancellationToken.None).ConfigureAwait(false);
+                        start.Token.ThrowIfCancellationRequested();
+                        if (fmAccount is not null && !input.TryGetProperty("mode", out _))
+                        {
+                            var value = JsonNode.Parse(input.GetRawText())!.AsObject();
+                            var saved = await fmPreferences.ReadAsync(fmAccount.UserId, CancellationToken.None).ConfigureAwait(false);
+                            foreach (var pair in saved)
+                                if (pair.Key is "mode" or "submode" || pair.Value!.GetValue<string>().Length > 0)
+                                    value[pair.Key] = pair.Value!.DeepClone();
+                            parameters = value;
+                        }
+                    }
+                }
                 start.Token.ThrowIfCancellationRequested();
+                if (fmAccount is not null && !accounts.IsCurrent(fmAccount)) return Failed("STALE_SESSION");
                 lock (gate)
                 {
                     if (closed || stopping || recommendationPreparing) return Failed("CLOSED");
@@ -237,7 +265,7 @@ public sealed partial class MusicNativeApplication
                     if (recommendationBindingChanges != 0 || !ReferenceEquals(recommendationBinding, binding) ||
                         Volatile.Read(ref binding.Revoked) != 0) return Failed("PLAYBACK_UNAVAILABLE");
                     // Register before releasing the same gate that seals startup.
-                    work = recommendations.ExecuteAsync(method, parameters, start.Token);
+                    work ??= recommendations.ExecuteAsync(method, parameters, start.Token);
                 }
             }
             finally
@@ -246,7 +274,13 @@ public sealed partial class MusicNativeApplication
             }
             // Keep the token link alive until the coordinator's physical flight
             // settles, but do not count that flight again as a startup prelude.
-            return await work.ConfigureAwait(false);
+            var started = await work.ConfigureAwait(false);
+            if (fmAccount is not null && Okay(started) && started.TryGetProperty("error", out var error) &&
+                error.GetString() == "" && started.TryGetProperty("mode", out var mode) && mode.GetString()?.Length > 0)
+            {
+                await SaveFmSelectionAsync(fmAccount, started, start.Token).ConfigureAwait(false);
+            }
+            return started;
         }
         lock (gate)
         {
@@ -259,8 +293,32 @@ public sealed partial class MusicNativeApplication
         }
         var result = await recommendations.ExecuteAsync(method, parameters, token).ConfigureAwait(false);
         if (method == "music.recommendations.reconcile" && Okay(result))
+        {
+            if (result.TryGetProperty("mode", out var mode) && mode.GetString()?.Length > 0)
+                await SaveFmSelectionAsync(null, result, token).ConfigureAwait(false);
             await ResumeReconciledRecommendationsAsync().ConfigureAwait(false);
+        }
         return result;
+    }
+
+    private async Task SaveFmSelectionAsync(MusicPlatformSession? account, JsonElement snapshot, CancellationToken token)
+    {
+        bool Current() => !token.IsCancellationRequested && (account is null || accounts.IsCurrent(account)) &&
+            recommendations.IsFmSelectionCurrent(snapshot);
+        lock (gate)
+        {
+            if (closed || stopping || recommendationPreparing || !Current()) return;
+            if (recommendationPreludes++ == 0) recommendationPreludesDrained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+        try
+        {
+            account ??= await accounts.AcquireSettledAsync("wy", CancellationToken.None).ConfigureAwait(false);
+            if (account is null || !Current()) return;
+            // Do not cancel an already admitted preference CAS. Narrow close
+            // waits this operation, but never counts the coordinator flight twice.
+            await fmPreferences.SaveAsync(account.UserId, snapshot, Current, CancellationToken.None).ConfigureAwait(false);
+        }
+        finally { lock (gate) if (--recommendationPreludes == 0) recommendationPreludesDrained.TrySetResult(); }
     }
 
     private async Task ResumeReconciledRecommendationsAsync()
@@ -300,8 +358,8 @@ public sealed partial class MusicNativeApplication
         // A session cancellation fences queue/media commits, not admitted reads.
         // Retain the service result so narrow preparation includes physical settle.
         token.ThrowIfCancellationRequested();
-        using var frame = sessions.Begin(awaitPhysical: true);
-        return await request.ReadAsync(catalog).ConfigureAwait(false);
+        using var frame = sessions.Begin(awaitPhysical: true, inheritLease: true);
+        return await request.ReadAsync(catalog, CancellationToken.None).ConfigureAwait(false);
     }
 
     private void RecommendationAccountChanged(string platform) => recommendations.Invalidate(platform);
@@ -319,7 +377,7 @@ public sealed partial class MusicNativeApplication
             ? action.GetString() switch
             {
                 "play" => MusicRecommendationQueueChange.Replace,
-                "next" => MusicRecommendationQueueChange.Append,
+                "next" => MusicRecommendationQueueChange.PlayNext,
                 _ => null
             } : null;
         return change is { } kind

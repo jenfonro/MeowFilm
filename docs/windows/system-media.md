@@ -41,11 +41,17 @@
 
 ## 关闭
 
-Shell 的首次 `Closing` 会在事件处理后取消原生关闭并执行两阶段准备，因此附件不在 `Closing` 中永久解绑：
+`Window.Closing` 是可取消的关闭意图，不终止系统媒体 attachment。关闭询问打开、取消询问、隐藏到托盘及恢复窗口均保持同一个会话，继续发布元数据和接收命令；这些操作不等于进入退出准备。
 
-- 共享设置先准备，将 `IsAvailable` 置为 false；组合附件禁用 SMTC，快捷键附件释放注册并拒绝新输入，尚未执行的旧请求失效。
-- 准备失败后取消关闭，将 `IsAvailable` 恢复为 true；两个通道依当前权威开关重新启用，保留的订阅继续生效。
-- 实际 `Closed` 或附件 `DisposeAsync` 才永久封准入并解绑；实际关闭时 SMTC 窗口附件调用 `Suspend`：
+真正退出准备通过 App 已有 sharedParticipants 顺序执行，不在系统媒体层另建 preparation 所有者：
+
+- 共享媒体设置先将 `IsAvailable` 置为 false；组合附件禁用 SMTC，快捷键附件释放注册并拒绝新输入，尚未执行的旧请求失效。此后不再接收任何系统媒体命令，包括直接操作唯一 `NativePlayback` 的 Pause／Stop／Seek，不停止已在播放的媒体。
+- 音乐 owner 随后封闭业务命令并排空已接纳工作；之前已开始的系统命令继续遵守原有取消与实际排空语义。
+- 准备失败后取消退出，业务 owner 恢复后共享设置恢复 `IsAvailable`；两个通道依当前权威开关重新启用，保留的订阅继续生效。
+
+真正释放由 App 生命周期调用 attachment 的 `DisposeAsync`：正常关闭先完成模块 preparation 和 disposal，强制清理则等待 owner 的 Abort 实际完成。两条路径都在释放 attachment 后，才通过 App 的资源回调释放 `NativePlayback`。准备失败后取消退出不会释放 attachment。
+
+实际 `Closed` 或附件 `DisposeAsync` 才永久封准入并解绑。系统媒体附件的重复 `DisposeAsync` 共享 session 的完成结果，实际关闭或会话释放调用不可恢复的 `Suspend`：
 
 1. 停止发布状态；
 2. 解绑播放器和 WinRT 事件；
@@ -54,4 +60,4 @@ Shell 的首次 `Closing` 会在事件处理后取消原生关闭并执行两阶
 
 组合附件清理时先封准入，等待已接纳的快捷键动作实际结束、完成原生注册释放，再释放系统媒体附件。子附件释放失败会向宿主报告；再次清理只重试未成功释放的资源，不永久缓存失败任务。
 
-系统媒体会话 `DisposeAsync` 释放 backend，并等待已接纳系统命令最多 5 秒。超时明确为 `SYSTEM_MEDIA_DRAIN_FAILED`，不能把非合作命令当成已经终止。更新、命令和禁用错误只发布固定错误代码，不暴露操作系统或媒体来源原文。
+系统媒体会话 `DisposeAsync` 释放 backend 一次，并等待已接纳命令最多 5 秒。已经投递到 dispatcher 的旧事件与排队命令在会话终止后失效，不再调用播放 owner 或播放器。超时明确为 `SYSTEM_MEDIA_DRAIN_FAILED`，不能把非合作命令当成已经终止，App 也不得据此继续释放播放器。更新、命令和禁用错误只发布固定错误代码，不暴露操作系统或媒体来源原文。

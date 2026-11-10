@@ -24,8 +24,8 @@ extension MusicViewModel {
             currentId: current.currentId, total: current.total, position: current.position,
             canNext: navigation.canNext, canPrevious: navigation.canPrevious,
             nextPreviewID: navigation.nextPreviewID, previousPreviewID: navigation.previousPreviewID,
-            fmNextPreviewID: navigation.fmNextPreviewID, fmPreviousPreviewID: navigation.fmPreviousPreviewID,
-            sourceCollectionID: current.sourceCollectionID, requestQuality: next.requestQuality
+            sourceCollectionID: current.sourceCollectionID, requestQuality: next.requestQuality,
+            queueSourceTitle: current.queueSourceTitle
         )
         if reconciled != current { playbackState.state = reconciled }
     }
