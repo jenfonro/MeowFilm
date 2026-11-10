@@ -104,15 +104,31 @@ public sealed partial class MusicPlatformCatalog
         var items = rows.Select(PlatformSongs.Wy).ToArray();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var song in items) PJ.Require(seen.Add(NativeMusicSong.NativeId(song)), "IDENTITY_MISMATCH");
+        var cookies = PJ.Cookies(c.Session);
+        var secrets = new[] { PJ.Cookie(cookies, "MUSIC_U"), PJ.Cookie(cookies, "__csrf") }.Where(value => value.Length > 0).ToArray();
+        string FeedbackText(JsonNode? value, bool identifier = false)
+        {
+            if (value is null) return "";
+            string text = identifier && value is JsonValue scalar && scalar.TryGetValue<long>(out _)
+                ? PJ.Id(value) : PJ.Text(value);
+            if (text.Length == 0) return "";
+            // Preserve exact feedback metadata; reject oversized or reflected
+            // credentials instead of truncating it into a different attribution.
+            PJ.Require(!secrets.Any(secret => text.Contains(secret, StringComparison.Ordinal)), "INVALID_RESPONSE");
+            return PJ.Input(text, 4096);
+        }
         var provenance = rows.Select((r, i) =>
         {
             string id = NativeMusicSong.NativeId(items[i]);
             var metadata = PJ.Obj(("id", id),
-                ("alg", PJ.Metadata(PJ.First(algorithms?[id], r["alg"], PJ.At(r, "songInfo", "alg")))),
+                ("alg", FeedbackText(PJ.First(algorithms?[id], r["alg"], PJ.At(r, "songInfo", "alg")))),
                 ("source", kind));
-            if (kind == "heartbeat") metadata["feedbackSource"] = "aiMode";
-            else if (kind == "queue-recommendations")
-                metadata["feedbackSource"] = PJ.Metadata(sources?[id]) is { Length: > 0 } source ? source : "moreRcmd";
+            if (FeedbackText(PJ.First(sources?[id], r["source"], PJ.At(r, "songInfo", "source"))) is { Length: > 0 } source)
+            {
+                metadata["feedbackSource"] = source;
+                if (FeedbackText(PJ.First(r["sourceId"], PJ.At(r, "songInfo", "sourceId")), identifier: true) is { Length: > 0 } sourceId)
+                    metadata["feedbackSourceId"] = sourceId;
+            }
             return metadata;
         }).ToArray();
         return PJ.Obj(("platform", c.Platform), ("kind", kind), ("items", PJ.Arr(items)), ("count", items.Length),

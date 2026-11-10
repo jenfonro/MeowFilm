@@ -203,7 +203,7 @@ extension NativeMusicService {
         }
         // Reselecting the same occurrence is a new user play intent. Publish
         // invalidation only after CAS, including cancellation of physical work.
-        if changesCurrent { invalidatePlayback() }
+        if changesCurrent { invalidatePlayback(reason: .ui) }
         similarDidChangeQueue(similarChange)
         return result
     }
@@ -239,7 +239,7 @@ extension NativeMusicService {
             return .init(state: stateDTO(d), selectedId: id)
         }
         if reason == .ended { attempt?.endedConsumed = true }
-        if result.selectedId != nil { invalidatePlayback() }
+        if result.selectedId != nil { invalidatePlayback(reason: reason == .ended ? .playend : .ui) }
         if result.selectedId != nil { similarDidChangeQueue(.select) }
         return result
     }
@@ -302,6 +302,6 @@ extension NativeMusicService {
             d.queue["serial"] = .n(max(old["serial"].int, snapshot["entries"].array.map { Int($0["id"].string.dropFirst(6)) ?? 0 }.max() ?? 0))
             d.queue["revision"] = .n(expectedRevision + 1); d.resetPosition(); return stateDTO(d)
         }
-        invalidatePlayback(); similarDidChangeQueue(.replace); return result
+        invalidatePlayback(reason: .ui); similarDidChangeQueue(.replace); return result
     }
 }

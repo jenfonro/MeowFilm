@@ -12,6 +12,7 @@
 | 音乐播放 | [歌曲资料与智能播放](music/smart-playback.md) | 共用歌曲事实、平台搜索证据、自动／手动来源、准备提交与错源 |
 | 音乐队列 | [播放来源与自动续播](music/playback-sessions.md) | 全局循环、来源会话、候选与插队、续取、恢复和入口资格 |
 | 音乐歌单 | [所有权与订阅关系](music/playlist-ownership.md) | 自管内容、网络引用、平台订阅及同步隔离 |
+| 播放反馈 | [真实播放反馈](music/playback-feedback.md) | 共用事实、平台准入、计量、来源归属、结束与安全待发 |
 | 音乐验证 | [逐端自查](music/self-check.md) | 调用链核对、请求分类、合成场景及证据报告格式，不另定义业务规则 |
 | 来源宿主能力 | [capability ABI](../runtime/source-capability-abi.md) | HTTP、Cookie、存储、编码、加解密、Web 交互和虚拟路由的跨平台语义 |
 

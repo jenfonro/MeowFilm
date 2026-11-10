@@ -111,6 +111,40 @@
 - 特殊来源会话的当前 schema 为 2，平台与 source ID 使用当前字段，队列身份与授权按当前契约校验；心动、相似及主动推荐恢复保留队列与适用的续播状态，不恢复推荐反馈 proof，搜索自动推荐候选不持久化。私人 FM 选择按本机网易账号保存，不恢复旧循环值。无效持久文档明确失败并保留原文件；可淘汰缓存按各自的未命中规则处理，不清扫用户数据。
 - `MusicServing` 要求当前来源可用性与播放元数据契约；来源列表由 `sourceAvailability` 提供。播放 owner 消费带身份的 event／fact。
 
+## 原生播放反馈事实与生命周期
+
+双端共同语义见[真实播放反馈](../common/music/playback-feedback.md)。
+
+`MusicViewModel.onPlaybackEvent` 在原生 owner、resource、native attempt、录音时长及文件／账号授权核对后，把不可变 `PlaybackEvent` 交给 `MusicPlaybackFeedbackConsumer`。事件携带原生捕获的单调观测时间、Unix 发生时间、实际 rate 和连续性边界；URL 解析、预加载、恢复位置、兼容 snapshot 及本地历史记账都不是远端播放开始。
+
+`MusicNativeFeedbackController` 对同一听音 occurrence 只计算一次连续媒体区间，再向符合可靠录音映射、独立开关和有效账号的平台分发。`listened` 是实际听音秒数，`mediaListened` 是媒体进展秒数；暂停、缓冲、seek 和不可信采样不补时间，倍速分别计量。无固定采样间隔或累计听音截断。账号准入前的进展不倒补，准入后的真实进展不会因等待 start ACK 丢失；未知曲长不阻断不要求曲长的平台。酷狗既有正曲长／最低 rate 要求仍属于其平台边界。
+
+同 occurrence、可信录音的成功 URL／脚本／音质交接保留 instance、累计与重复防护，只打断原生连续区间；准备失败不退休旧听音。真正切歌、同曲的不同队列项及自然结束后的重播建立新 instance。已知错源立即停止输出并 `rejectPlaybackFeedback`，不将其累计交给替代音频。可恢复媒体失败标记为不可用，只有最终耗尽才结束为 `exception`。
+
+反馈准入在前序本地事实之后，本次本地记账在本次反馈准入之后，两者都不等待网络回执。普通结束冻结最后真实事实；已 dispatch 的 start 获明确成功后可配对冻结 end，不能更新新遍；未知结果不自动重放。`finishPlaybackFeedback(attemptID:reason:)` 绑定退役 attempt，结束原因保留 `playend`／`interrupt`／`exception`／`ui`。
+
+普通切歌先保留已准入旧遍的排队事实，排空后冻结旧 end，再准入新遍；退休期间不再为旧遍新增平台准入，未准入的 queued start 丢弃。错源、账号／访问撤销仍立即拒绝，不等待排队事实，也不借新队列身份结算旧遍。
+
+正常关闭先同步调用模型 `prepareForClose()`，封住新播放操作与反馈物理发送，在原 owner／candidate 下停止输出；`close()` 的并发调用共享同一本地 drain，排空已接收事实并冻结 `interrupt`（用户主动切歌为 `ui`），再退休队列及来源 grant。App shutdown 等该本地 drain 与 `NativeMusicService.prepareForClose()` 返回后，才撤销访问、关闭账号客户端和其余资源；服务只等待本地账号准入／持久登记，网易安全未发交给账号 owner 保留，不等待网络 ACK。已发送但结果未知的事件及依赖它的 end 丢弃，不被普通 lease 释放恢复或转交新账号。
+
+来源 proof 只负责准入时的 occurrence／录音／来源真实性。准入后由独立 `MusicPlaybackFeedbackLease` 围栏原账号及设置代次，正常关闭推荐读取 lease 不抹掉已捕获来源；账号退出／切换、访问撤销及设置 CAS 撤销仍取消旧反馈，不能转交新账号。lease 释放一次，取消的物理 worker 仍追踪到实际完成。QQ 的 `registered` 仍是本地登记，不冒充远端 start ACK；酷狗现有协议与明文路由的显式同意边界不变。
+
+平台 adapter 负责最终 wire、业务确认及适用的待发归属；共用事实层不存凭据或持久待发，不推断网易字段、设备或页面环境。事实与请求成功不代表云端排行刷新、听歌次数或推荐模型已经生效。
+
+### 网易协议与有限待发
+
+网易仅使用 `POST https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true`，multipart 字段为 `file`，文件内容由 `MusicNeteasePlaybackLogCodec.encode(metadata:records:)` 编为 NCBLv3／Zstd。每次 filename 为本地随机 `play_<uuid>`，不含平台账号或设备身份。meta 只放原账号真实 `MUSIC_U`，请求 Cookie 使用该账号已有值，UA 为 `Meowfilm`；不生成官方 `URS_APPID/appver/buildver`、页面 refer、设备字段或额外 BI／Weblog 请求。
+
+records 每行为 `epoch整数秒\x01_plv或_pld\x01平铺JSON\n`，`_logTime` 保留原事件毫秒，歌曲 `id` 为数值。start 的 `time/realtime` 均为 0；end 的 `time` 为累计媒体进展整数秒，`realtime` 为真实听音整数秒；向下取整只发生在序列化时，`end` 保留真实原因，`play_speed` 为实际速率。普通网易歌单使用 `source=list`。FM 优先保留逐曲上游 `source/sourceId`，仅普通 FM 未返回来源时使用已证默认 `source=userfm`，规则频道（`ruleFM`）缺来源时省略，不让预览或元数据补全覆盖原归属；心动使用 `play_scene=heartbeat`，逐曲 `source/sourceId/alg` 只取真实上游值，缺失即省略，不把心动收藏歌单或相似模式标签推成远端来源。网易允许未知曲长，不沿用 QQ／酷狗的 86400 秒、rate 16 或 dispatch clock 校验。确认须同时满足 HTTP 200、数值业务 `code=200` 和 `data.successfiles` 包含此次精确 filename，响应 Cookie 不进入凭据。
+
+`NativeMusicAccountService` 持有 `MusicNeteaseFeedbackOutbox`，复用注入的 `DocumentStore`，单文档 key 为 `music.netease-playback-pending.v1`；最多 256 事件、保留 7 天，超出淘汰完整未确认配对。这两个数是本地资源边界。仅存必要事件、原始时间、非秘密账号记录 scope 和设置代次，不存 Cookie／token、媒体 URL、实时来源 proof 或其它遥测；`registered` 仅表示已持久准入，远端 `confirmed` 单独记录。start 确认前不得发送同遍 end。
+
+发送前先持久写入 `inflight`。超时、连接中断、取消、错误／不精确 ACK 和进程中断均按未知处理，不重放；仅固定上传路由在无响应、发送字节为 0 且系统明确报告未联网／DNS／连接建立失败时回到 `pending`。写盘失败不准入、不进入发送；inflight／ACK 落盘失败停止本进程后续发送，冷启动丢弃遗留 inflight。启动先读取权威设置，账号验证就绪或新的真实反馈只触发一次有界 drain，无业务轮询定时器；冷启动只恢复原账号记录及同一设置代次的安全未发。
+
+关闭开关在设置 CAS 前同步取消并清除对应队列；CAS 失败也不继续本次旧授权。登出、换账号及真实访问撤销同样清除取消；正常 shutdown 先停止发送、冻结本地 start／end 再保留安全 pending，并在普通访问退休前移除正常关闭的清队列回调。取消的物理 worker 仍计入账号 close 报告，直到实际收尾，不将取消当作网络完成。离线 fixture、账号 owner 和真实 NativeService 消费者测试分别覆盖协议、安全恢复和关闭交接。
+
+官方实包的精确文件 ACK 证明官方容器／事件通道被接收，不替代本产品仅含 `MUSIC_U` 的 metadata 与最小事件 schema 的线上接收验证；后者当前未覆盖。组件测试与构建不证明个人排行次数、刷新时点或推荐效果。
+
 ## 平台客户端上下文
 
 App 通过 `MeowfilmResources` 与 `MeowfilmAssembly` 注入受保护客户端存储和稳定 owner；具体平台交接如下。

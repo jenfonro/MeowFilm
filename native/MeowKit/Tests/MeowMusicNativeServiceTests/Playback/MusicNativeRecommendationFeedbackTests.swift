@@ -18,10 +18,11 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         let targets = try await service.similarFeedbackTargets(entry: recommended, context: recommended["context"])
         let target = try XCTUnwrap(targets.first), proof = try XCTUnwrap(target.recommendationProof)
         XCTAssertEqual(target.nativeID, "301")
-        XCTAssertEqual(target.source, "aiMode"); XCTAssertEqual(target.sourceID, "900")
+        XCTAssertEqual(target.source, "synthetic-heart-source"); XCTAssertEqual(target.sourceID, "actual-source-id")
+        XCTAssertEqual(target.origin?.kind, .heartbeat); XCTAssertEqual(target.origin?.sourceID, "900")
         XCTAssertEqual(target.algorithm, "synthetic-heart")
         XCTAssertEqual(proof.occurrenceID, recommended["id"].string)
-        try proof.check(nativeID: "301", source: "aiMode", sourceID: "900", algorithm: "synthetic-heart")
+        try proof.check(nativeID: "301", source: "synthetic-heart-source", sourceID: "actual-source-id", algorithm: "synthetic-heart")
 
         var copied = recommended
         copied["id"] = .string("entry-999")
@@ -32,7 +33,7 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         mismatched["song"] = try MusicModel.normalize(RecommendationFeedbackAccounts.track("302"))
         let mismatchTargets = try await service.similarFeedbackTargets(entry: mismatched, context: mismatched["context"])
         XCTAssertNil(mismatchTargets.first?.recommendationProof)
-        XCTAssertNotEqual(mismatchTargets.first?.source, "aiMode")
+        XCTAssertNotEqual(mismatchTargets.first?.source, "synthetic-heart-source")
         var alternative = recommended
         let alternateSong = try MusicModel.normalize(RecommendationFeedbackAccounts.track("302"))
         let alternateSource = try XCTUnwrap(alternateSong["sources"].array.first)
@@ -43,7 +44,7 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
             "another native recording cannot borrow the recommended recording's proof")
 
         await service.close()
-        XCTAssertThrowsError(try proof.check(nativeID: "301", source: "aiMode", sourceID: "900", algorithm: "synthetic-heart"))
+        XCTAssertThrowsError(try proof.check(nativeID: "301", source: "synthetic-heart-source", sourceID: "actual-source-id", algorithm: "synthetic-heart"))
         let cold = try await NativeMusicFixture.service(store, accounts: owner)
         _ = try await cold.similarModeSnapshot()
         let coldTargets = try await cold.similarFeedbackTargets(entry: recommended, context: recommended["context"])
@@ -135,7 +136,8 @@ private actor RecommendationFeedbackAccounts: MusicNativeAccountProviding, Music
             value["_recommendation"] = .obj([
                 ("songId", .string(id)), ("source", .string(source)),
                 ("sourceId", .string(heartbeat ? "900" : "")),
-                ("feedbackSource", .string(heartbeat ? "aiMode" : "sourceMap-synthetic")),
+                ("feedbackSource", .string(heartbeat ? "synthetic-heart-source" : "sourceMap-synthetic")),
+                ("feedbackSourceId", .string(heartbeat ? "actual-source-id" : "")),
                 ("alg", .string(heartbeat ? "synthetic-heart" : "synthetic-queue"))
             ])
         }

@@ -42,7 +42,9 @@ private actor FMPreviewOwner: MusicNativeAccountProviding, MusicNativeFMProvidin
             ("songmid", .string(String(serial))),
             ("name", .string("Synthetic \(serial)")), ("singer", .string("Artist")),
             ("albumName", .string("Album")), ("duration", .n(180)), ("img", .string(cover.absoluteString)),
-            ("types", .array([.obj([("type", .string("128k"))])]))
+            ("types", .array([.obj([("type", .string("128k"))])])),
+            ("_recommendation", .obj([("songId", .string(String(serial))), ("source", .string("fm")),
+                ("sourceId", .string("")), ("feedbackSource", .string("userfm")), ("alg", .string("fm-alg-\(serial)"))]))
         ]).bytes)
         return .init(tracks: [track], artwork: cover)
     }
@@ -182,6 +184,7 @@ final class MusicNativeFMPreviewTests: XCTestCase {
         let callsBefore = await owner.calls; XCTAssertEqual(callsBefore.count, 1)
         XCTAssertEqual(document.snapshot().2, 0)
         let source = try await service.openHomeActionQueue(b, title: "B")
+        XCTAssertEqual(source.homeAction, b)
         let page = try await service.remoteQueuePage(source, cursor: nil)
         XCTAssertEqual(page.items.first?.sources.first?.nativeId, "2")
         XCTAssertFalse(preview?.authorization.isActive == true)
@@ -228,6 +231,63 @@ final class MusicNativeFMPreviewTests: XCTestCase {
         await owner.configure()
         let replacement = try await service.fmPreview(fm)
         XCTAssertNotNil(replacement?.artwork); XCTAssertTrue(replacement?.authorization.isActive == true)
+        await source.close(); await service.close()
+    }
+
+    func testInitialAndBufferedFMBatchesKeepPerOccurrenceActionAndAlgorithm() async throws {
+        let owner = FMPreviewOwner(), store = NativeMusicMemoryDocument()
+        let service = try await NativeMusicFixture.service(store, accounts: owner)
+        let source = try await service.openHomeActionQueue(fm, title: "Scene FM")
+        let start = try await MusicAccountQueueFixture.start(service, source)
+        let initial = try await service.replaceRemoteQueue(source, start: start, expectedRevision: 0, intent: .init())
+        let firstID = try XCTUnwrap(initial.currentId)
+        func target(_ id: String) async throws -> MusicPlaybackFeedbackTarget {
+            let d = try MusicDocument(store.snapshot().0, runID: "fixture")
+            let entry = try XCTUnwrap(d.queue["entries"].array.first { $0["id"].string == id })
+            let targets = try await service.similarFeedbackTargets(entry: entry, context: entry["context"])
+            return try XCTUnwrap(targets.first { $0.platform == .netease })
+        }
+        let first = try await target(firstID)
+        XCTAssertEqual(first.algorithm, "fm-alg-1"); XCTAssertEqual(first.origin?.kind, .fm)
+        XCTAssertEqual(first.origin?.action, fm); XCTAssertEqual(first.recommendationProof?.occurrenceID, firstID)
+        let gate = NativeMusicGate(); await owner.configure(gate: gate)
+        let options = try await service.sourceAvailability(for: .init(kind: .queue, id: firstID))
+        let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: firstID,
+            selection: XCTUnwrap(options.options.first).selection(quality: "128k"))
+        _ = try await service.recordSimilarPlaybackFact(.init(attemptId: candidate.attemptId, occurrenceId: firstID,
+            resourceId: candidate.resourceId, kind: .playing, position: 1))
+        await gate.started()
+        try await service.setFMContinue(false, sessionID: source.id)
+        let pending = await service.fmPlayback?.pending
+        await gate.release(); await pending?.value
+        let paused = try await service.queue(); XCTAssertEqual(paused.entries.count, 1)
+        try await service.setFMContinue(true, sessionID: source.id)
+        let resumed = try await service.queue(), secondID = try XCTUnwrap(resumed.entries.last?.id)
+        XCTAssertEqual(resumed.entries.count, 2)
+        let second = try await target(secondID)
+        XCTAssertEqual(second.algorithm, "fm-alg-2"); XCTAssertEqual(second.origin?.action, fm)
+        XCTAssertNotEqual(first.recommendationProof?.occurrenceID, second.recommendationProof?.occurrenceID)
+        await source.close()
+        let retired = try await target(secondID)
+        XCTAssertNil(retired.recommendationProof); XCTAssertEqual(retired.algorithm, "")
+        await service.close()
+    }
+
+    func testSharedPreviewConfigurationKeepsPlaybackEntryForSourceAndNextBatch() async throws {
+        let owner = FMPreviewOwner(), service = try await NativeMusicFixture.service(accounts: owner)
+        let configuration = try XCTUnwrap(fm.fmConfiguration)
+        _ = try await service.fmPreview(configuration)
+        let source = try await service.openHomeActionQueue(fm, title: "Scene FM")
+        XCTAssertEqual(source.homeAction, fm)
+        let page = try await service.remoteQueuePage(source, cursor: nil)
+        XCTAssertEqual(page.items.first?.sources.first?.nativeId, "1")
+        let initialCalls = await owner.calls
+        XCTAssertEqual(initialCalls.count, 1, "The shared preview must transfer without fetching another first batch")
+        let next = try await source.nextFMBatch(intent: .init())
+        XCTAssertEqual(next.count, 1)
+        let calls = await owner.calls
+        XCTAssertEqual(calls.map(\.0), [configuration, fm])
+        XCTAssertEqual(calls.map(\.1), [true, false])
         await source.close(); await service.close()
     }
 }

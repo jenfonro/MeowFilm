@@ -199,7 +199,7 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         XCTAssertEqual(requests, [.heartbeat(lastID: nil, fromHome: true, context: nil),
                                   .heartbeat(lastID: "202", fromHome: false, context: nil)])
         let live = await service.liveRecommendation(entryID: current.id)
-        XCTAssertEqual(live?.value["feedbackSource"].string, "aiMode")
+        XCTAssertEqual(live?.value["feedbackSource"].string, "synthetic-heart-source")
         let returned = try await service.exitSimilarMode()
         XCTAssertEqual(returned.action, .keepCurrent)
         let original = try await service.queue()
@@ -230,7 +230,7 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         for entry in queue.entries.dropFirst() {
             let proof = await service.liveRecommendation(entryID: entry.id)
             XCTAssertEqual(proof?.value["songId"].id, entry.track.sources.first?.nativeId)
-            XCTAssertEqual(proof?.value["feedbackSource"].string, "aiMode")
+            XCTAssertEqual(proof?.value["feedbackSource"].string, "synthetic-heart-source")
         }
         await service.close()
     }
@@ -457,6 +457,45 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         await service.close()
     }
 
+    func testCommittedSimilarHeartbeatAndRecommendationOriginsDoNotTransferToInsertedOccurrences() async throws {
+        let cases: [(MusicSimilarModeStart, MusicPlaybackFeedbackOrigin.Kind, [String])] = [
+            (.songRoaming(sourceIDs: ["777"], sourceName: "Seed"), .similar, ["777"]),
+            (.artistRoaming(sourceIDs: ["888"], sourceName: "Artist"), .similar, ["888"]),
+            (.heartbeat, .heartbeat, ["100"]),
+            (.recommendations(occurrenceID: "entry-1", expectedRevision: 0), .recommendations, ["100"])
+        ]
+        for (start, kind, seeds) in cases {
+            let owner = SimilarModeAccountFixture([["301", "302"]], metadata: true)
+            let store = NativeMusicMemoryDocument(try fixtureDocument())
+            let service = try await NativeMusicFixture.service(store, accounts: owner)
+            _ = try await service.startSimilarMode(start)
+            func targets(_ entry: MJ) async throws -> [MusicPlaybackFeedbackTarget] {
+                try await service.similarFeedbackTargets(entry: entry, context: entry["context"])
+            }
+            let d = try MusicDocument(store.snapshot().0, runID: "fixture")
+            let row = try XCTUnwrap(d.queue["entries"].array.first { $0["song"]["sources"].array.first?["musicInfo"]["songmid"].id == "301" })
+            let admitted = try await targets(row)
+            let target = try XCTUnwrap(admitted.first)
+            XCTAssertEqual(target.algorithm, "alg-301"); XCTAssertEqual(target.origin?.kind, kind)
+            XCTAssertEqual(target.origin?.seedIDs, seeds)
+            XCTAssertEqual(target.recommendationProof?.occurrenceID, row["id"].string)
+            let state = try await service.state()
+            _ = try await service.changeQueue(.append([.init(kind: .queue, id: row["id"].string)], next: true),
+                                              expectedRevision: state.revision)
+            let after = try MusicDocument(store.snapshot().0, runID: "fixture")
+            let previousIDs = Set(d.queue["entries"].array.map { $0["id"].string })
+            let inserted = try XCTUnwrap(after.queue["entries"].array.first { !previousIDs.contains($0["id"].string) })
+            XCTAssertNotEqual(inserted["id"], row["id"])
+            XCTAssertEqual(inserted["song"], row["song"])
+            let duplicate = try await targets(inserted)
+            XCTAssertNil(duplicate.first?.recommendationProof); XCTAssertEqual(duplicate.first?.algorithm, "")
+            await owner.revoke()
+            let revoked = try await targets(row)
+            XCTAssertNil(revoked.first?.recommendationProof)
+            await service.close()
+        }
+    }
+
     private func fixtureDocument(count: Int = 2) throws -> Data {
         var d = try MusicDocument(nil, runID: "fixture")
         d.queue["entries"] = .array(try (0..<count).map { index in
@@ -480,7 +519,7 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
     }
 }
 
-actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativeSimilarModeProviding {
+actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativeSimilarModeProviding, MusicNativeFeedbackProviding {
     var requests: [MusicNativeSimilarModeRequest] = []
     var batches: [[String]]
     var nextGate: NativeMusicGate?
@@ -491,10 +530,13 @@ actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativeSimilar
     var resolutions = 0
     var hasMore: [Bool?]
     let metadata: Bool
+    let feedback: NativeFeedbackAccounts?
     var names: [String: String]
     var nextFailure: MusicServiceError?
-    init(_ batches: [[String]], hasMore: [Bool?] = [], metadata: Bool = false, names: [String: String] = [:]) {
+    init(_ batches: [[String]], hasMore: [Bool?] = [], metadata: Bool = false, names: [String: String] = [:],
+         feedback: NativeFeedbackAccounts? = nil) {
         self.batches = batches; self.hasMore = hasMore; self.metadata = metadata; self.names = names
+        self.feedback = feedback
     }
     nonisolated static func track(_ id: String, name: String? = nil, recommendation: MJ = .null) -> MusicNativeTrackData {
         var song = MJ.obj([("songmid", .string(id)),
@@ -540,7 +582,7 @@ actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativeSimilar
         switch request {
         case .heartbeat(let last, _, _):
             offset = nil
-            source = "heartbeat"; feedbackSource = "aiMode"; sourceID = "900"
+            source = "heartbeat"; feedbackSource = "synthetic-heart-source"; sourceID = "900"
             context = .init(playlistID: "900", seedID: last ?? "100")
         case .songRoaming, .artistRoaming:
             source = "similar"; feedbackSource = ""; sourceID = ""; context = nil; offset = nil
@@ -567,6 +609,11 @@ actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativeSimilar
     func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) -> MusicNativeAudio {
         resolutions += 1
         return .init(url: URL(string: "https://m701.music.126.net/synthetic.mp3")!)
+    }
+    func beginPlaybackFeedback(platform: MusicAccountPlatform,
+                               authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackLease {
+        guard let feedback else { throw MusicServiceError.unsupported }
+        return try await feedback.beginPlaybackFeedback(platform: platform, authorization: authorization)
     }
 }
 

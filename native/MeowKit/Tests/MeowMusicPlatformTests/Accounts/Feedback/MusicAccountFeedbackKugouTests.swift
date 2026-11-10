@@ -67,7 +67,8 @@ import MeowMusicFeature
         let target = MusicPlaybackFeedbackTarget(platform: .kugou, nativeID: MusicKugouFixture.baseHash,
                                                 mixsongID: "22", automatic: true)
         let report = MusicPlaybackFeedbackReport(instanceID: UUID(), target: target, event: .end, duration: 180,
-            listened: 12.5, mediaListened: 25, position: 25, rate: 2, reason: .interrupt)
+            listened: 12.5, mediaListened: 25, position: 25, rate: 2, reason: .interrupt,
+            startedAt: 1_800_000_000, occurredAt: 1_800_000_012.5)
         let result = try await provider.feedback(report, credential: MusicKugouFixture.credential(),
                                                 session: session, guard: .init())
         XCTAssertEqual(result.receipt, .confirmed); XCTAssertEqual(result.session?.mixsongID, "22")

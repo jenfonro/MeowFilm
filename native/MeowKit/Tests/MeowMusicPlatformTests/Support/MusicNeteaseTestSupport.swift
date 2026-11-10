@@ -3,6 +3,7 @@ import CommonCrypto
 import CryptoKit
 import MeowAccounts
 import MeowMusicFeature
+import MeowStorage
 @testable import MeowMusicPlatform
 
 // Synthetic HTTP peer, no platform connection, user credential or reference
@@ -137,7 +138,22 @@ actor MusicNeteaseTestHTTP: MusicAccountHTTPTransport {
     func hold(_ path: String, _ gate: MusicAccountTestGate) { block = (path, gate) }
     func recorded() -> [Record] { records }
     func send(_ request: MusicAccountHTTPRequest) async throws -> MusicAccountHTTPResponse {
-        let path = request.url.path, form = try MusicNeteaseFixture.form(request.body)
+        let path = request.url.path
+        if request.url == MusicAccountFeedbackNeteaseWire.uploadURL {
+            guard request.method == "POST", request.headers["Cache-Control"] == "no-store" else {
+                throw MusicServiceError.invalidRequest
+            }
+            records.append(.init(request: request, payload: nil))
+            if let block, block.0 == path { await block.1.wait() }
+            if var values = overrides[path], !values.isEmpty {
+                let response = values.count == 1 ? values[0] : values.removeFirst()
+                overrides[path] = values; return response
+            }
+            return try MusicNeteaseFixture.response(["code": 200,
+                "data": ["successfiles": [MusicAccountFeedbackFixture.uploadFilename(request)]]],
+                headers: ["set-cookie": "MUSIC_U=synthetic-feedback-replacement; Path=/; HttpOnly"])
+        }
+        let form = try MusicNeteaseFixture.form(request.body)
         guard request.method == "POST", request.headers["Cache-Control"] == "no-store" else { throw MusicServiceError.invalidRequest }
         var payload: [String: Any] = [:]
         if path.hasPrefix("/eapi/") {
@@ -222,10 +238,10 @@ struct MusicNeteaseNativeFixture {
     let http: MusicNeteaseTestHTTP
     let accounts: AccountSessionCoordinator
     let service: NativeMusicAccountService
-    init(restored: Bool = true) throws {
+    init(restored: Bool = true, urlCacheStore: DocumentStore? = nil) throws {
         http = MusicNeteaseTestHTTP(clock: clock); accounts = AccountSessionCoordinator(store: store)
         service = NativeMusicAccountService(accounts: accounts, scopes: [.netease: identity],
-                                            transport: http, clock: { [clock] in clock.now() })
+                                            transport: http, urlCacheStore: urlCacheStore, clock: { [clock] in clock.now() })
         if restored { try store.write(.init(credential: MusicNeteaseFixture.credential()), for: identity) }
     }
     func enable() async throws { _ = try await service.setAccess(available: true, generation: 1) }

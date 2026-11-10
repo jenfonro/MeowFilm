@@ -607,6 +607,7 @@ public static partial class MusicUiTests
         public void Started(string entryId, double position, double duration, double rate = 1, int mode = 1) => Starts++;
         public void Observe(string entryId, double position, double duration, bool isPlaying, double rate = 1, int mode = 1) { }
         public void Finish(string reason = "ui") => Finishes++;
+        public void Invalidate() => Selection = null;
     }
 
     private sealed class RecommendationRacePlayback : IMusicPlayback

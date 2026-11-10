@@ -154,7 +154,7 @@ extension MusicViewModel {
             case .replace, .collection, .clear: stopFM(); notices.queueNotice = nil
             default: if next.total == 0 { stopFM() }
             }
-            if startPlayback || next.currentId != before.currentId { invalidateSelection(stopMedia: true) }
+            if startPlayback || next.currentId != before.currentId { invalidateSelection(stopMedia: true, reason: .ui) }
             token = selectionID
             playbackState.state = next; try await refreshQueue(service, epoch: epoch, selection: token)
             try checkRequest()

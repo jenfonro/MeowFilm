@@ -29,8 +29,22 @@ public struct PlaybackEvent {
     /// User intent at this event's identity/time, not inferred from transport
     /// phase (buffering, seek and interruption can pause actual output).
     public let wantsPlayback: Bool
+    public let observedAt: TimeInterval, occurredAt: TimeInterval
+    public let rate: Double
+    public let discontinuity: Bool
     /// Only the controller's sanitized NativePlaybackError / ContractError.
     public let error: Error?
+
+    public init(attempt: PlayAttempt, kind: Kind, snapshot: PlaybackSnapshot,
+                wantsPlayback: Bool, error: Error? = nil,
+                observedAt: TimeInterval = ProcessInfo.processInfo.systemUptime,
+                occurredAt: TimeInterval = Date().timeIntervalSince1970,
+                rate: Double = 1, discontinuity: Bool = false) {
+        self.attempt = attempt; self.kind = kind; self.snapshot = snapshot; self.error = error
+        self.wantsPlayback = wantsPlayback
+        self.observedAt = observedAt; self.occurredAt = occurredAt
+        self.rate = rate; self.discontinuity = discontinuity
+    }
 
     var isExit: Bool { kind == .replaced || kind == .stopped }
 }

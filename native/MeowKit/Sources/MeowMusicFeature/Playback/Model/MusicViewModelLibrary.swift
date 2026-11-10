@@ -60,7 +60,7 @@ extension MusicViewModel {
             let service = try requireService(), before = try await service.state()
             try check(epoch)
             let restored = try await service.restoreHistory(id: playlist.id, expectedRevision: before.revision)
-            try check(epoch); stopFM(); invalidateSelection(stopMedia: true); playbackState.state = restored; notices.queueNotice = nil
+            try check(epoch); stopFM(); invalidateSelection(stopMedia: true, reason: .ui); playbackState.state = restored; notices.queueNotice = nil
             try await refreshQueue(service, epoch: epoch)
             // History restore, like app restore, does not auto-sound.
         } catch { report(error, epoch: epoch, operation: "恢复历史队列", kind: .queue) }
@@ -151,7 +151,7 @@ extension MusicViewModel {
                                                             expectedRevision: before.revision)
             try checkRequest()
             try await (service as? any MusicSimilarModeServing)?.cancelSimilarMode()
-            try checkRequest(); stopFM(); invalidateSelection(stopMedia: true); token = selectionID
+            try checkRequest(); stopFM(); invalidateSelection(stopMedia: true, reason: .ui); token = selectionID
             playbackState.state = restored; notices.queueNotice = nil
             try await refreshQueue(service, epoch: epoch, selection: token)
             try checkRequest()

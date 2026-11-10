@@ -206,6 +206,11 @@ public static partial class MusicUiTests
             await RecommendationUntil(() => f.Reports.Starts.Count == 1);
             var start = f.Reports.Starts.Single();
             Equal("userfm", start.Source); Equal("playFm", start.Mode); Equal("native-recommendation-alg", start.Algorithm);
+            True(start.Recommendation is { Context: { } context, Metadata: { } metadata } &&
+                context.GetProperty("mode").GetString() == "DEFAULT" &&
+                metadata.GetProperty("id").GetString() == start.Recording.Id &&
+                metadata.GetProperty("alg").GetString() == "native-recommendation-alg",
+                "actual native batch context and per-recording metadata reach the playback protocol");
             await f.Module.CancelRecommendationAsync();
             await f.Module.StepAsync(true); f.Playback.Start();
             await RecommendationUntil(() => f.Reports.Starts.Count == 2);

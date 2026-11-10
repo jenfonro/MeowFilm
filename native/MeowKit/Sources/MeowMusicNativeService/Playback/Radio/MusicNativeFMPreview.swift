@@ -139,7 +139,7 @@ extension NativeMusicService: MusicFMPreviewServing {
                 try await self.checkHomeBinding(binding, epoch: own)
             }, close: { [weak self] in
                 transferred?.cancel(); await reader.close(); await self?.releaseFMQueue(id)
-            }, fmAction: key)
+            }, homeAction: action)
     }
     private func releaseFMQueue(_ id: UUID) {
         access.remove(id); fmQueues.removeValue(forKey: id)?.1.revoke()

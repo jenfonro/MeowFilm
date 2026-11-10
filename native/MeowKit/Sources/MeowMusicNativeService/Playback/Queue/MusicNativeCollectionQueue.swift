@@ -36,7 +36,7 @@ extension NativeMusicService: MusicCollectionQueueServing {
         }
         // Match changeQueue: invalidate the old playback/lyrics work only after
         // a confirmed CAS, never on malformed input or a revision/write failure.
-        invalidatePlayback()
+        invalidatePlayback(reason: .ui)
         similarDidChangeQueue(.replace)
         return result
     }

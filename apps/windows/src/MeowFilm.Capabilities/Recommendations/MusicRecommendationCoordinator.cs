@@ -48,7 +48,8 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         internal CandidateBatch? Candidates;
         internal HeartbeatContext? Heartbeat;
     }
-    private sealed record Song(JsonElement Value, string NativeId, string Algorithm, string FeedbackSource);
+    private sealed record Song(JsonElement Value, string NativeId, string Algorithm, string FeedbackSource,
+        JsonElement? Context, JsonElement Metadata);
     private sealed record HeartbeatContext(string PlaylistId, string StartMusicId, string SongId, bool FromHome, long Count);
     private sealed record Candidate(string Id, Song Song);
     private sealed record CandidateBatch(long Epoch, MusicRecommendationRequest Request,

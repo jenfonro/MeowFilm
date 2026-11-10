@@ -25,7 +25,7 @@ extension NativeMusicService: MusicQueueRecommendationServing {
             throw MusicServiceError.targetChanged
         }
         let state = try appendQueueRecommendations(item, selectedIndex: index)
-        invalidatePlayback()
+        invalidatePlayback(reason: .ui)
         similarMode.playing = nil; similarMode.playbackEvent = nil; similarMode.eventOccurrence = nil
         emitSimilar()
         return .init(state: state, action: .playCurrent)
@@ -240,7 +240,8 @@ extension NativeMusicService {
                 return stateDTO(draft)
             }
         }
-        item.liveRecommendations.merge(live) { _, new in new }
+        retainQueueFeedbackOrigins(live, authorization: lease.authorization,
+                                   seedIDs: MusicNativeSimilarData.nativeID(item.seed).map { [$0] } ?? [])
         item.revision = state.revision; item.currentEntryID = state.currentId ?? ""
         if selectedIndex != nil { item.active = true }
         item.songs = []; item.recommendations = [:]; item.candidateID = UUID()
@@ -257,18 +258,12 @@ extension NativeMusicService {
 
     /// Durable row labels are display data. Only this live occurrence map and
     /// its still-active exact-account lease may authorize recommendation proof.
-    func liveRecommendation(entryID: String) -> (lease: MusicAccountQueueLease, value: MJ)? {
+    func liveRecommendation(entryID: String) -> MusicNativeQueueFeedbackOrigin? {
         guard let d = try? read(),
               let entry = d.queue["entries"].array.first(where: { $0["id"].string == entryID }),
               let nativeID = MusicNativeSimilarData.nativeID(entry["song"]) else { return nil }
-        if let session = similarMode.active, session.lease.authorization.isActive,
-           let value = session.liveRecommendations[entryID], value["songId"].id == nativeID {
-            return (session.lease, value)
-        }
-        if let item = similarMode.queue, let lease = item.lease, lease.authorization.isActive,
-           let value = item.liveRecommendations[entryID], value["songId"].id == nativeID {
-            return (lease, value)
-        }
-        return nil
+        guard let value = queueFeedbackOrigins[entryID], value.authorization.isActive,
+              value.value["songId"].id == nativeID else { return nil }
+        return value
     }
 }

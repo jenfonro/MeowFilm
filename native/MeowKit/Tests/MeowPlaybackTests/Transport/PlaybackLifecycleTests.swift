@@ -174,7 +174,7 @@ final class PlaybackLifecycleTests: XCTestCase {
         XCTAssertEqual(event.snapshot.duration, 130)
     }
 
-    func testNaturalEndIsOncePerAttemptEvenAfterLegacyReplay() throws {
+    func testNaturalEndKeepsObservedPositionAndIsOncePerAttemptEvenAfterLegacyReplay() throws {
         var state = PlaybackStateMachine()
         let token = state.begin(resource: try resource(), owner: "one")
         state.ready(generation: token, duration: 120, ranges: [])
@@ -184,7 +184,8 @@ final class PlaybackLifecycleTests: XCTestCase {
         let events = state.takeEvents()
         XCTAssertEqual(events.map(\.kind), [.ended])
         XCTAssertEqual(events.first?.attempt.id, token)
-        XCTAssertEqual(events.first?.snapshot.position, 120)
+        XCTAssertEqual(events.first?.snapshot.position, 0)
+        XCTAssertEqual(state.snapshot.position, 120)
         state.resume()
         let seek = try XCTUnwrap(state.takeSeekIfPossible())
         XCTAssertFalse(state.end(generation: token), "End cannot finish an active replay seek")

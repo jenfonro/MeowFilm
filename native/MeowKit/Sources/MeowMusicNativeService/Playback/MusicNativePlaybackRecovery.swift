@@ -116,8 +116,6 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
                 pin: pin, activeAttemptID: attemptID, reservedAttemptID: attemptID, ready: false)
             try musicRequire(final.version == live.version && final.contentHash == live.contentHash, .targetChanged)
             _ = try media(valid) // Work above may have outlived the URL's expiry.
-            playbackFeedback.invalidate(attemptID: previousAttemptID, preservingEnds: true)
-            playbackFeedbackAdmission = nil
             let publish = { [self] in try access.perform {
                 attempt?.recovery?.attemptID = attemptID
                 attempt?.recovery?.url = valid.url

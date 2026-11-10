@@ -100,7 +100,11 @@ public final class URLSessionMusicAccountTransport: NSObject, MusicAccountHTTPTr
             let response = try await transfer(value, trace: trace)
             trace.record(.completed, http: response.status)
             return response
-        } catch { trace.failed(error); throw MusicServiceError.sanitized(error) }
+        } catch {
+            trace.failed(error)
+            if error is MusicAccountFeedbackNotSent { throw error }
+            throw MusicServiceError.sanitized(error)
+        }
     }
     private func transfer(_ value: MusicAccountHTTPRequest, trace: MusicRequestTrace) async throws -> MusicAccountHTTPResponse {
         try Task.checkCancellation()
@@ -180,7 +184,10 @@ public final class URLSessionMusicAccountTransport: NSObject, MusicAccountHTTPTr
         if let failure = value.failure { continuation.resume(throwing: failure) }
         else if value.cancelled { continuation.resume(throwing: MusicServiceError.cancelled) }
         else if let error {
-            continuation.resume(throwing: MusicServiceError.sanitized(error))
+            if MusicAccountFeedbackNotSent.matches(error as NSError, url: value.url,
+                bytesSent: task.countOfBytesSent, responseReceived: value.response != nil) {
+                continuation.resume(throwing: MusicAccountFeedbackNotSent.connectionUnavailable)
+            } else { continuation.resume(throwing: MusicServiceError.sanitized(error)) }
         } else if let response = value.response {
             continuation.resume(returning: .init(status: response.statusCode, data: value.data, headers: value.headers))
         } else { continuation.resume(throwing: MusicServiceError.upstreamInvalid) }

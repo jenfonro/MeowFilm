@@ -10,6 +10,9 @@ extension MusicViewModel {
         await prepareCurrent(forceSelection: forceSelection, automatic: false)
     }
     func prepareCurrent(forceSelection: Bool, automatic: Bool, admission: QueuePlaybackAdmission? = nil) async {
+        let selection = selectionID
+        await feedbackConsumer.flushRetirements()
+        guard selection == selectionID else { return }
         let trace = MusicRequestTrace(.playback,
             platform: current?.track.sources.first.flatMap { MusicPublicBrowsePlatform(rawValue: $0.platform) })
         trace.record(.started)
@@ -42,7 +45,7 @@ extension MusicViewModel {
             return
         }
         if isResolving {
-            invalidateSelection(stopMedia: true, preservingQueueIntent: admission?.intent)
+            invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: admission?.intent)
         }
         let token = selectionID
         do {
@@ -78,7 +81,7 @@ extension MusicViewModel {
     func checkSelection(_ epoch: UUID, token: UUID, occurrenceID: String,
                                 admission: QueuePlaybackAdmission?) throws {
         try check(epoch); try admission?.check()
-        guard token == selectionID, current?.id == occurrenceID else { throw MusicServiceError.staleResult }
+        guard !isClosing, token == selectionID, current?.id == occurrenceID else { throw MusicServiceError.staleResult }
     }
 
     /// A discovery CAS may only enrich the current recording, once. Read both
@@ -119,7 +122,7 @@ extension MusicViewModel {
         guard let current, let service, player != nil else { return }
         do { try admission?.check() } catch { report(error, epoch: epoch); return }
         let before = state, entries = queue, oldAttempt = resolvingAttempt ?? candidate?.attemptId
-        invalidateSelection(stopMedia: true, preservingQueueIntent: admission?.intent)
+        invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: admission?.intent)
         feedbackAutomatic = automatic
         let token = selectionID
         playbackState.isResolving = true; error = nil
@@ -132,6 +135,7 @@ extension MusicViewModel {
             }
         }
         do {
+            await feedbackConsumer.flush()
             if let oldAttempt { try await service.cancel(attemptId: oldAttempt) }
             try checkSelection(epoch, token: token, occurrenceID: current.id, admission: admission)
             if useAudioCache, try await startCachedAudio(selection: nil, automatic: automatic,
@@ -345,7 +349,7 @@ extension MusicViewModel {
             occurrenceID: current.id, position: position,
             remainsPaused: phase == .paused)
         do { try admission?.check() } catch { report(error, epoch: epoch); return }
-        invalidateSelection(stopMedia: true, preservingQueueIntent: admission?.intent)
+        invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: admission?.intent)
         feedbackAutomatic = automatic
         let token = selectionID, attemptId = UUID().uuidString.lowercased()
         let settingsRevision = state.settingsRevision
@@ -355,6 +359,7 @@ extension MusicViewModel {
         defer { if selectionID == token { playbackState.isResolving = false; resolutionTask = nil; resolvingAttempt = nil } }
         do {
             let service = try requireService()
+            await feedbackConsumer.flush()
             if let oldAttempt { try await service.cancel(attemptId: oldAttempt) }
             try check(epoch); try admission?.check(); guard selectionID == token else { return }
             if useAudioCache, try await startCachedAudio(selection: selection, automatic: automatic,
@@ -427,7 +432,10 @@ extension MusicViewModel {
         // its acknowledgement reaches MainActor. Stop that media, not the new
         // transaction; its own source/access/intent fences govern admission.
         if isChangingQueue { stopOwned() }
-        else { invalidateSelection(stopMedia: true) }
+        else {
+            feedbackConsumer.invalidate(rejecting: true)
+            invalidateSelection(stopMedia: true)
+        }
     }
 
     func observeAudioAuthorization(_ value: MusicPlaybackCandidate, native: MusicPlayerAttempt) {
