@@ -2,6 +2,7 @@ import XCTest
 import UIKit
 import MeowContracts
 @testable import MeowPlayback
+@testable import MeowMusicFeature
 
 /// Real decoding, first-frame presentation and media ownership. Only the
 /// fallible system audio operation is controlled; this is not device audio proof.
@@ -15,7 +16,11 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         }, deactivate: { deactivations += 1 }))
         let movie = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "ordinary", withExtension: "mp4"))
         var events: [PlaybackVideoEvent] = []
-        let film = try controller.bindVideo(owner: "film") { events.append($0) }
+        var handoffCaptures = 0, handoffs = 0
+        let film = try controller.bindVideo(owner: "film", willCommit: {
+            handoffCaptures += 1
+            return { handoffs += 1 }
+        }) { events.append($0) }
         let fixture = try AudioAdmissionHost(controller: controller, film: film)
         addTeardownBlock { try await fixture.close() }
         let donor = controller.playAttempt(resource: try .init(id: "audio-admission-music",
@@ -53,6 +58,8 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         XCTAssertEqual(controller.player.rate, 0)
         XCTAssertNil(film.currentAttempt)
         XCTAssertEqual(deactivations, 0, "A failed acquire cannot release someone else's system focus")
+        XCTAssertEqual(handoffCaptures, 0)
+        XCTAssertEqual(handoffs, 0, "Audio admission failure cannot retire music business work")
 
         failActivation = false
         var acceptedReleases = 0
@@ -68,11 +75,225 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         XCTAssertEqual(events.filter { $0.kind == .started }.map(\.attemptID), ["audio-accepted"])
         XCTAssertTrue(controller.wantsPlayback)
         XCTAssertEqual(acceptedReleases, 0)
+        XCTAssertEqual(handoffCaptures, 1)
+        XCTAssertEqual(handoffs, 1)
         try await film.close()
         XCTAssertEqual(acceptedReleases, 1)
         XCTAssertEqual(deactivations, 1)
         XCTAssertNil(controller.currentAttempt)
         XCTAssertFalse(controller.wantsPlayback)
+    }
+
+    func testSuccessfulVideoCommitRetiresPendingOnlyMusicAndRejectsLateResolutionWithoutStoppingVideo() async throws {
+        let file = try musicFile()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let controller = PlaybackController(audioSessionActions: .init(activate: {}, deactivate: {}))
+        let service = VideoHandoffMusicService(file: file)
+        let music = MusicViewModel(service: service, playback: controller)
+        let binding = try bindMusic(music, to: controller)
+        defer { binding.cancel(); controller.stop() }
+        await music.load()
+        music.lastSelection = VideoHandoffMusicService.selection
+        let resolving = VideoHandoffMusicGate(entered: expectation(description: "Music source held without a native attempt"))
+        await service.holdResolution(resolving)
+        let request = Task { await music.prepareCurrent() }
+        defer { Task { await resolving.release() }; request.cancel() }
+        await fulfillment(of: [resolving.entered], timeout: 5)
+        XCTAssertNil(controller.currentAttempt)
+        XCTAssertTrue(music.isResolving)
+        let queue = music.queue
+        var prepared = false
+        let film = try controller.bindVideo(owner: "film", willCommit: {
+            XCTAssertTrue(prepared)
+            XCTAssertTrue(music.isResolving)
+            XCTAssertNil(controller.currentAttempt)
+            return music.mediaHandoffCompletion()
+        }) { event in if event.kind == .prepared { prepared = true } }
+        let host = try AudioAdmissionHost(controller: controller, film: film)
+        addTeardownBlock {
+            do { try await host.close() }
+            catch { await music.close(); throw error }
+            await music.close()
+        }
+        let media = try movieReceipt("pending-only")
+        let video = try await film.play(media, paused: true)
+        XCTAssertEqual(controller.currentAttempt, video)
+        XCTAssertNil(music.activeNativeAttemptID)
+        XCTAssertFalse(music.isResolving)
+        XCTAssertEqual(music.queue, queue)
+        await resolving.release()
+        await request.value
+        await music.flushPlaybackFacts()
+        XCTAssertEqual(controller.currentAttempt, video, "A late, non-cooperative source receipt cannot steal video")
+        XCTAssertNil(controller.player.currentItem)
+        XCTAssertNil(music.activeNativeAttemptID)
+        XCTAssertEqual(music.phase, .idle)
+        XCTAssertNil(music.error)
+        let cancelled = await service.cancelledAttempts()
+        XCTAssertEqual(cancelled.count, 1)
+        try await film.close()
+        XCTAssertNil(controller.currentAttempt, "Video close does not automatically resume music")
+
+        await music.togglePlayback()
+        await waitForMusic(controller, model: music)
+        XCTAssertEqual(controller.currentAttempt?.owner, "music")
+        XCTAssertEqual(controller.currentAttempt?.id, music.activeNativeAttemptID)
+        XCTAssertEqual(music.queue, queue)
+    }
+
+    func testSuccessfulVideoCommitPersistsMusicExitAndRetiresDelayedNextWithoutTakingNewVideo() async throws {
+        let file = try musicFile()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let controller = PlaybackController(audioSessionActions: .init(activate: {}, deactivate: {}))
+        let service = VideoHandoffMusicService(file: file)
+        let music = MusicViewModel(service: service, playback: controller)
+        let binding = try bindMusic(music, to: controller)
+        defer { binding.cancel(); controller.stop() }
+        await music.load()
+        music.lastSelection = VideoHandoffMusicService.selection
+        await music.prepareCurrent()
+        await waitForMusic(controller, model: music)
+        let donor = try XCTUnwrap(controller.currentAttempt)
+        let candidate = try XCTUnwrap(music.candidate)
+        XCTAssertTrue(controller.setNowPlayingMetadata(.init(title: "Old music"), attempt: donor))
+        let gate = VideoHandoffMusicGate(entered: expectation(description: "Old queue advance awaiting acknowledgement"))
+        await service.holdAdvance(gate)
+        let next = Task { await music.next() }
+        defer { Task { await gate.release() }; next.cancel() }
+        await fulfillment(of: [gate.entered], timeout: 5)
+        let queue = music.queue
+        let film = try controller.bindVideo(owner: "film", willCommit: {
+            XCTAssertEqual(controller.currentAttempt, donor)
+            return music.mediaHandoffCompletion()
+        }) { _ in }
+        let host = try AudioAdmissionHost(controller: controller, film: film)
+        addTeardownBlock {
+            do { try await host.close() }
+            catch { await music.close(); throw error }
+            await music.close()
+        }
+        let media = try movieReceipt("music-next")
+        let video = try await film.play(media, paused: true)
+        XCTAssertEqual(controller.currentAttempt, video)
+        XCTAssertNil(music.activeNativeAttemptID)
+        XCTAssertFalse(music.isChangingQueue)
+        XCTAssertEqual(music.phase, .idle)
+        await gate.release()
+        await next.value
+        await music.flushPlaybackFacts()
+        XCTAssertEqual(controller.currentAttempt, video)
+        XCTAssertEqual(music.queue, queue, "A late queue acknowledgement cannot overwrite the retired UI selection")
+        XCTAssertNil(music.error)
+        let facts = await service.recordedFacts()
+        let exit = try XCTUnwrap(facts.last { $0.kind == .stopped })
+        XCTAssertEqual(exit.attemptId, candidate.attemptId)
+        XCTAssertEqual(exit.occurrenceId, candidate.occurrenceId)
+        XCTAssertEqual(exit.resourceId, candidate.resourceId)
+        XCTAssertEqual(exit.position, music.position, accuracy: 0.15)
+        XCTAssertTrue(facts.contains { $0.kind == .playing && $0.attemptId == candidate.attemptId })
+        XCTAssertFalse(controller.setNowPlayingMetadata(.init(title: "Late old music"), attempt: donor))
+        XCTAssertEqual(controller.nowPlayingMetadata?.title, "Synthetic video")
+        XCTAssertFalse(controller.systemCommand(.play, generation: donor.id))
+        XCTAssertEqual(controller.currentAttempt, video)
+        try await film.close()
+        XCTAssertNil(controller.currentAttempt)
+        XCTAssertNil(music.activeNativeAttemptID)
+    }
+
+    func testFailedOrCancelledVideoPreparationKeepsMusicBusinessIdentityAndOriginalIntent() async throws {
+        for paused in [false, true] {
+            let file = try musicFile()
+            defer { try? FileManager.default.removeItem(at: file) }
+            let controller = PlaybackController(audioSessionActions: .init(activate: {}, deactivate: {}))
+            let service = VideoHandoffMusicService(file: file)
+            let music = MusicViewModel(service: service, playback: controller)
+            let binding = try bindMusic(music, to: controller)
+            await music.load()
+            music.lastSelection = VideoHandoffMusicService.selection
+            await music.prepareCurrent()
+            await waitForMusic(controller, model: music)
+            let donor = try XCTUnwrap(controller.currentAttempt)
+            if paused { XCTAssertTrue(controller.systemCommand(.pause, generation: donor.id)) }
+            let item = controller.player.currentItem, candidate = music.candidate, selection = music.selectionID
+            var handoffs = 0
+            let film = try controller.bindVideo(owner: "film", willCommit: {
+                handoffs += 1
+                return music.mediaHandoffCompletion()
+            }) { _ in }
+            let host = try AudioAdmissionHost(controller: controller, film: film)
+            do {
+                let missing = try PlaybackVideoMediaLease(attemptID: "missing",
+                    input: .init(resourceID: "missing", url: URL(fileURLWithPath: "/missing/synthetic.mp4"),
+                                 title: "Missing video")) {}
+                do { _ = try await film.play(missing); XCTFail("The missing input cannot commit") } catch {}
+                let cancelled = try movieReceipt("cancelled")
+                do {
+                    _ = try await film.play(cancelled, waitForCommit: { throw CancellationError() })
+                    XCTFail("A cancelled preparation cannot commit")
+                } catch { XCTAssertEqual(error as? PlaybackVideoError, .cancelled) }
+                XCTAssertEqual(handoffs, 0)
+                XCTAssertEqual(controller.currentAttempt, donor)
+                XCTAssertTrue(controller.player.currentItem === item)
+                XCTAssertEqual(controller.wantsPlayback, !paused)
+                XCTAssertEqual(music.activeNativeAttemptID, donor.id)
+                XCTAssertEqual(music.candidate?.attemptId, candidate?.attemptId)
+                XCTAssertEqual(music.selectionID, selection)
+                XCTAssertNil(music.error)
+                try await film.close()
+                XCTAssertEqual(controller.currentAttempt, donor)
+                XCTAssertEqual(controller.wantsPlayback, !paused)
+            } catch {
+                try? await host.close()
+                await music.close()
+                binding.cancel()
+                throw error
+            }
+            try await host.close()
+            await music.close()
+            binding.cancel()
+        }
+    }
+
+    private func bindMusic(_ music: MusicViewModel, to controller: PlaybackController) throws -> PlaybackOwnerLease {
+        try controller.bind(owner: "music", onPlayPause: { [weak music] attempt, command in
+            music?.acceptPlayPause(command, attempt: attempt) ?? false
+        }, onOutputUnavailable: { [weak music] in music?.onOutputUnavailable() }) { [weak music] event in
+            music?.onPlayback(event)
+        }
+    }
+
+    private func waitForMusic(_ controller: PlaybackController, model: MusicViewModel) async {
+        let ready = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                controller.currentAttempt?.owner == "music" && controller.snapshot.phase == .playing &&
+                    model.phase == .playing
+            }
+        }, evaluatedWith: nil)
+        await fulfillment(of: [ready], timeout: 10)
+        XCTAssertEqual(controller.snapshot.phase, .playing)
+        XCTAssertEqual(model.phase, .playing)
+    }
+
+    private func movieReceipt(_ id: String) throws -> PlaybackVideoMediaLease {
+        let movie = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "ordinary", withExtension: "mp4"))
+        return try .init(attemptID: id,
+            input: .init(resourceID: id, url: movie, title: "Synthetic video")) {}
+    }
+
+    private func musicFile() throws -> URL {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".wav")
+        var data = Data()
+        func text(_ value: String) { data.append(contentsOf: value.utf8) }
+        func number<T: FixedWidthInteger>(_ value: T) {
+            var little = value.littleEndian
+            withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
+        }
+        let length: UInt32 = 30 * 8000 * 2
+        text("RIFF"); number(36 + length); text("WAVEfmt "); number(UInt32(16))
+        number(UInt16(1)); number(UInt16(1)); number(UInt32(8000)); number(UInt32(16000))
+        number(UInt16(2)); number(UInt16(16)); text("data"); number(length)
+        data.append(Data(count: Int(length))); try data.write(to: file)
+        return file
     }
 
     func testFailedAudioReleaseRemainsFailedAfterEmptyCloseSystemRecoveryOrNewMusic() async throws {
@@ -157,6 +378,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
                 input: .init(resourceID: "controller-first", url: movie, title: "Synthetic video")) {}
             let transport = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()))
             try await transport.prepare()
+            film.surface.stage(transport.output.presentationLayer)
             try await transport.renderFirstVideoFrame()
             let admission = controller.admitVideo(owner: film.owner, candidate: transport)
             _ = try controller.commitVideo(transport, lease: film, admission: admission, paused: false)
@@ -191,6 +413,81 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
             catch { XCTAssertEqual(error as? PlaybackVideoError, .outputFailed) }
         }
     }
+}
+
+/// Only business receipts are controlled. Music uses the shared AVPlayer and
+/// video uses real decoding/first-frame output on that same controller.
+private actor VideoHandoffMusicService: MusicServing {
+    static let selection = MusicPlaybackSelection(installationId: "official:wy", generation: 1,
+        siteId: "wy", sourceKey: "synthetic", quality: "128k")
+    private let file: URL
+    private let entries: [MusicQueueEntry] = ["first", "second"].map {
+        .init(id: $0, track: .init(ref: .init(kind: .queue, id: $0), songId: $0, title: $0,
+            duration: 30, sources: [.init(sourceKey: "synthetic", platform: "wy", nativeId: $0)]))
+    }
+    private var index = 0, revision = 1, position = 0.0
+    private var resolution: VideoHandoffMusicGate?, advanceGate: VideoHandoffMusicGate?
+    private var facts: [MusicPlaybackFact] = []
+    private var cancelled: [String] = []
+    init(file: URL) { self.file = file }
+    func holdResolution(_ gate: VideoHandoffMusicGate) { resolution = gate }
+    func holdAdvance(_ gate: VideoHandoffMusicGate) { advanceGate = gate }
+    func recordedFacts() -> [MusicPlaybackFact] { facts }
+    func cancelledAttempts() -> [String] { cancelled }
+    func state() -> MusicPlaybackState {
+        .init(revision: revision, mode: .loop, currentId: entries[index].id, total: entries.count,
+            position: position, canNext: index == 0, canPrevious: index == 1)
+    }
+    func queue() -> MusicQueueSnapshot { .init(revision: revision, currentId: entries[index].id, entries: entries) }
+    func advance(_ direction: MusicDirection, reason: MusicAdvanceReason, expectedRevision: Int) async throws -> MusicAdvanceResult {
+        guard expectedRevision == revision else { throw MusicServiceError.staleRevision }
+        index = direction == .next ? 1 : 0; revision += 1; position = 0
+        let result = MusicAdvanceResult(state: state(), selectedId: entries[index].id)
+        let gate = advanceGate; advanceGate = nil
+        await gate?.wait()
+        return result
+    }
+    func sourceAvailability(for ref: MusicReference) -> MusicSourceAvailability {
+        .init(options: [.init(installationId: Self.selection.installationId, generation: 1, siteId: "wy",
+            sourceKey: Self.selection.sourceKey, qualities: ["128k"], title: "Synthetic", version: "1",
+            contentHash: "")], scriptState: .ready)
+    }
+    func resolve(attemptId: String, occurrenceId: String, selection: MusicPlaybackSelection) async -> MusicPlaybackCandidate {
+        let gate = resolution; resolution = nil
+        await gate?.wait() // Deliberately returns a receipt after cancellation.
+        return .init(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
+            url: file, title: occurrenceId, requestedQuality: "128k", resolvedSelection: selection)
+    }
+    func cancel(attemptId: String?) { if let attemptId { cancelled.append(attemptId) } }
+    func record(_ fact: MusicPlaybackFact) -> Bool { facts.append(fact); position = fact.position; return true }
+    func platforms() -> [MusicPlatform] { [] }
+    func search(platform: String, query: String, page: Int, limit: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
+    func collections() -> [MusicCollection] { [] }
+    func tracks(in collection: MusicCollection) -> [MusicRemoteTrack] { [] }
+    func createPlaylist(name: String, refs: [MusicReference]) throws -> MusicCollection { throw MusicServiceError.unsupported }
+    func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) throws -> MusicCollection { throw MusicServiceError.unsupported }
+    func removePlaylist(_ collection: MusicCollection) throws { throw MusicServiceError.unsupported }
+    func changeQueue(_ change: MusicQueueChange, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
+    func updateSettings(_ change: MusicSettingsChange) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
+    func metadataPreferences() throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
+    func updateMetadataPreferences(_ change: MusicMetadataPreferencesChange) throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
+    func metadataCandidates(occurrenceID: String) throws -> MusicMetadataCandidates { throw MusicServiceError.unsupported }
+    func lyrics(occurrenceId: String, sourceKey: String) -> MusicLyricsSnapshot { .init(occurrenceId: occurrenceId, state: .none, lines: []) }
+    func playedSongs() -> [MusicPlayedSong] { [] }
+    func playedPlaylists() -> [MusicPlayedPlaylist] { [] }
+    func restoreHistory(id: String, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
+}
+
+private actor VideoHandoffMusicGate {
+    nonisolated let entered: XCTestExpectation
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    init(entered: XCTestExpectation) { self.entered = entered }
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation { continuation = $0; entered.fulfill() }
+    }
+    func release() { released = true; continuation?.resume(); continuation = nil }
 }
 
 @MainActor

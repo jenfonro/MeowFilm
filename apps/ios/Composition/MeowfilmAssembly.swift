@@ -221,6 +221,8 @@ final class MeowfilmAssembly: ObservableObject {
         do {
             lease = try playback.bind(owner: "music", onPlayPause: { [weak model] attempt, command in
                 model?.acceptPlayPause(command, attempt: attempt) ?? false
+            }, onOutputUnavailable: { [weak model] in
+                model?.onOutputUnavailable()
             }) { [weak self, weak model] event in
                 model?.onPlayback(event)
                 self?.refreshCommands()
@@ -295,7 +297,9 @@ final class MeowfilmAssembly: ObservableObject {
                           request: @escaping @Sendable () async throws -> FilmPlaybackRequest) throws -> FilmPlaybackModel {
         guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
         if filmMedia == nil {
-            let media = try MeowfilmFilmMedia(playback: playback)
+            let media = try MeowfilmFilmMedia(playback: playback, willCommit: { [weak self] in
+                self?.music?.mediaHandoffCompletion()
+            })
             media.restoreUI = restoreFilmPlaybackUI
             filmMedia = media
         }
@@ -483,12 +487,13 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
         }
     }
 
-    init(playback: PlaybackController) throws {
+    init(playback: PlaybackController,
+         willCommit: @escaping @MainActor () -> (@MainActor () -> Void)?) throws {
         self.playback = playback
         lease = try playback.bindVideo(owner: "film", commands: .init(
             previous: { [weak self] attempt in self?.navigate(attempt, forward: false) ?? false },
             next: { [weak self] attempt in self?.navigate(attempt, forward: true) ?? false }
-        )) { [weak self] event in self?.receive(event) }
+        ), willCommit: willCommit) { [weak self] event in self?.receive(event) }
         lease.restorePictureInPictureUI = { [weak self] in
             guard let self, let current else { return false }
             return await restoreUI?(current.sessionID) ?? false
