@@ -34,6 +34,27 @@ final class FilmCatalogIdentityTests: XCTestCase {
         }
     }
 
+    func testOpaqueSourceAndItemIDsRemainByteDistinctInSetsAndCodable() throws {
+        let composed = "é", decomposed = "e\u{301}"
+        let identities = [
+            FilmItemIdentity(sourceID: composed, itemID: composed),
+            FilmItemIdentity(sourceID: decomposed, itemID: composed),
+            FilmItemIdentity(sourceID: composed, itemID: decomposed),
+            FilmItemIdentity(sourceID: decomposed, itemID: decomposed),
+        ]
+        let unique = Set(identities)
+        XCTAssertEqual(unique.count, 4)
+        let restored = try JSONDecoder().decode(Set<FilmItemIdentity>.self, from: JSONEncoder().encode(unique))
+        XCTAssertEqual(restored.count, 4)
+        XCTAssertEqual(restored, unique)
+        for original in identities {
+            let identity = try JSONDecoder().decode(FilmItemIdentity.self, from: JSONEncoder().encode(original))
+            XCTAssertTrue(identity.sourceID.utf8.elementsEqual(original.sourceID.utf8))
+            XCTAssertTrue(identity.itemID.utf8.elementsEqual(original.itemID.utf8))
+            XCTAssertTrue(restored.contains(identity))
+        }
+    }
+
     func testLegacyJSONRetainsUnknownTMDBKindWithoutUsingTitleOrSubtitleAsEvidence() throws {
         let data = Data(#"{"sourceID":"tmdb","id":"19","title":"电影 第1季","score":"9.0","subtitle":"剧集"}"#.utf8)
         let item = try JSONDecoder().decode(FilmItem.self, from: data)

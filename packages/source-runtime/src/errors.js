@@ -42,6 +42,21 @@ export const sourceSafeError = (error, fallback = 'SCRIPT_EXCEPTION') => {
   return sourceFault(fallback);
 };
 
+export function sourcePreprocessError(error) {
+  const safe = sourceSafeError(error, 'SCRIPT_PROTOCOL_ERROR');
+  if (safe.code !== 'SCRIPT_PROTOCOL_ERROR') return safe;
+  // Acorn wraps the engine's overflow as a SyntaxError with a source location.
+  // This is a resource failure, unlike an ordinary invalid source program.
+  if (error?.name === 'SyntaxError' &&
+      /^Not enough stack space to parse input \(\d+:\d+\)$/.test(error.message) ||
+      error?.name === 'InternalError' &&
+      /stack overflow|out of memory|allocation failed/.test(error.message) ||
+      error?.name === 'RangeError' && error.message === 'Maximum call stack size exceeded') {
+    return sourceFault('RESOURCE_LIMIT');
+  }
+  return safe;
+}
+
 export function sourceRequire(condition, code = 'INVALID_ARGUMENT') {
   if (!condition) throw sourceFault(code);
 }

@@ -26,7 +26,7 @@ const movieValue = (id = 42, patch = {}) => ({ id, title: '真实电影', releas
   images: { posters: [] }, ...patch });
 const tvValue = (id = 43, patch = {}) => ({ id, name: '真实剧集', first_air_date: '2024-01-01',
   overview: '实际剧集简介', genres: [], seasons: [{ season_number: 1, episode_count: 2 }],
-  status: 'Ended', ...patch });
+  credits: { cast: [] }, similar: { results: [] }, images: { posters: [] }, status: 'Ended', ...patch });
 const doubanValue = (id = '51', patch = {}) => ({ id, title: '真实电影', year: '2024',
   intro: '豆瓣实际简介', genres: ['剧情'], ...patch });
 const detailValue = (id = 'detail-a', patch = {}) => ({ list: [{ vod_id: id,
@@ -54,7 +54,7 @@ const tick = () => new Promise(done => setImmediate(done));
 const success = value => ({ ok: true, value });
 const failure = code => ({ ok: false, code });
 
-function fixture(t, { maximumBytes } = {}) {
+function fixture(t, { maximumBytes, dataRoot } = {}) {
   let at = initialTime;
   const observed = [];
   const instances = new Map([[source.key, { ...source, state: 'ready', enabled: true, sites: [{ key: source.siteId }] }],
@@ -101,7 +101,7 @@ function fixture(t, { maximumBytes } = {}) {
           return handlers[id][operation](params, signal);
         }])) }]));
   const cache = createPlaybackCache({ now: () => at, ...(maximumBytes ? { maximumBytes } : {}) });
-  const data = createPlaybackData({ modules, cache, now: () => at });
+  const data = createPlaybackData({ modules, cache, dataRoot, now: () => at });
   t.after(async () => { await data.close(); await cache.close(); });
   return { data, cache, modules, handlers, observed, instances, accountRows, revisions,
     now: () => at, setTime: value => { at = value; }, advance: duration => { at += duration; },
@@ -122,7 +122,7 @@ test('E08 Cat search keeps raw pagination and typed detail/flag/play IDs, withou
   assert.equal(f.calls('cat', 'invoke').length, 1);
   const detail = await f.data.detail(source, 0);
   assert.equal(detail.detailId, 0);
-  const [selected] = recognizeCandidates(detail, { source, target: movieTarget });
+  const [selected] = await recognizeCandidates(detail, { source, target: movieTarget });
   assert.equal(selected.playId, 0); assert.equal(selected.flag, 0); assert.equal(selected.lineId, 0);
   const descriptor = await f.data.resolve(selected);
   const play = f.calls('cat', 'invoke').at(-1).params;
@@ -239,7 +239,7 @@ test('E38/E42/N1 Cat and portable media accept normal local and external HTTP ad
     for (const url of ['http://127.0.0.1:49000/proxy/installation-a/4/resource/media',
       'http://192.168.1.2:49000/movie?part=1', 'https://user:password@media.invalid/direct.mp4']) {
       f.handlers[candidate.source.engine].invoke = () => success({ url, headers: { Host: 'media.virtual.invalid' } });
-      const result = await f.data.resolve(candidate);
+      const result = await f.data.refresh(candidate);
       assert.equal(result.url, url);
       assert.deepEqual(result.headers, { Host: 'media.virtual.invalid' });
     }
@@ -274,6 +274,7 @@ test('E08/E48 public data operations reject invalid inputs asynchronously withou
     () => f.data.seasonMetadata(movieTarget, 1), () => f.data.metadataSources({ ...movieTarget, metadataId: 0 }),
     () => f.data.resolve({}), () => f.data.refresh(candidate(), { mode: 'invented' }),
     () => f.data.report(rawCandidate(), {}), () => f.data.seed({}), () => f.data.handoff({}), () => f.data.cachedEntry({}),
+    () => f.data.invalidate({}), () => f.data.invalidate(''),
   ]) await assert.rejects(request(), { code: 'INVALID_REQUEST' });
   assert.equal(f.observed.length, 0);
 });
@@ -612,7 +613,9 @@ test('E03 exact TMDB /3 paths, append/query/imageSize and original metadata shap
   assert.deepEqual(f.calls('tmdb', 'request').at(-1).params, { path: '/3/tv/43/season/0', imageSize: 'original', query: { language: 'zh-CN' } });
   await f.data.metadata('tmdb', '/3/movie/42', {}, { imageSize: 'w500' });
   await f.data.metadata('tmdb', '/3/movie/42', {}, { imageSize: 'w780' });
-  assert.equal(f.calls('tmdb', 'request').length, 4);
+  assert.equal(f.calls('tmdb', 'request').length, 5);
+  assert.deepEqual(f.calls('tmdb', 'request')[1].params, { path: '/3/tv/43',
+    imageSize: 'original', query: { language: 'zh-CN' } });
   await assert.rejects(async () => f.data.metadata('tmdb', '/movie/42'), { code: 'INVALID_REQUEST' });
   await assert.rejects(async () => f.data.metadata('tmdb', '/3/movie/42', { page: [] }), { code: 'INVALID_REQUEST' });
 });
@@ -663,24 +666,31 @@ test('E25 CN broadcast midnight refreshes once per day, not immediately on the s
 test('E25 season expiration uses real air dates/episode numbers, including unsorted days and undated tail', async t => {
   const f = fixture(t);
   const boundary = Date.parse('2026-11-09T00:00:00+08:00');
-  f.handlers.tmdb.request = () => success({ season_number: 2, episodes: [
+  const parent = tvValue(43, { seasons: [2, 3, 4].map(season_number => ({
+    season_number, episode_count: season_number === 2 ? 10 : 9,
+  })) });
+  let season = { season_number: 2, episodes: [
     { episode_number: 10, air_date: '2026-11-12' }, { episode_number: 3, air_date: '2026-11-09' },
     { episode_number: 1, air_date: '2026-01-01' },
-  ] });
+  ] };
+  f.handlers.tmdb.request = ({ path }) => success(path === '/3/tv/43' ? parent : season);
+  const seasonCalls = () => f.calls('tmdb', 'request').filter(row => row.params.path.includes('/season/'));
   await f.data.seasonMetadata(tvTarget, 2); f.setTime(boundary - 1); await f.data.seasonMetadata(tvTarget, 2);
-  assert.equal(f.calls('tmdb', 'request').length, 1);
+  assert.equal(seasonCalls().length, 1);
   f.setTime(boundary); await f.data.seasonMetadata(tvTarget, 2); await f.data.seasonMetadata(tvTarget, 2);
-  assert.equal(f.calls('tmdb', 'request').length, 2);
-  f.handlers.tmdb.request = () => success({ season_number: 3, episodes: [
+  assert.equal(seasonCalls().length, 2);
+  season = { season_number: 3, episodes: [
     { episode_number: 9, air_date: null }, { episode_number: 2, air_date: '2025-01-01' },
-  ] });
+  ] };
   await f.data.seasonMetadata(tvTarget, 3); f.advance(DAY); await f.data.seasonMetadata(tvTarget, 3);
-  assert.equal(f.calls('tmdb', 'request').length, 4);
-  f.handlers.tmdb.request = () => success({ season_number: 4, episodes: [
-    { episode_number: 9, air_date: '2025-01-01' }, { episode_number: 2, air_date: null },
-  ] });
+  assert.equal(seasonCalls().length, 4);
+  season = { season_number: 4, episodes: [
+    { episode_number: 9, air_date: '2025-01-01' },
+    ...Array.from({ length: 8 }, (_, index) => ({ episode_number: index + 1, air_date: null })),
+  ] };
   await f.data.seasonMetadata(tvTarget, 4); f.advance(DAY); await f.data.seasonMetadata(tvTarget, 4);
-  assert.equal(f.calls('tmdb', 'request').length, 5);
+  assert.equal(seasonCalls().length, 5);
+  assert.equal(f.calls('tmdb', 'request').filter(row => row.params.path === '/3/tv/43').length, 1);
 });
 
 test('E24 metadata keys use opaque configuration revision and image size, not configured booleans', async t => {
@@ -700,6 +710,7 @@ test('E25 empty/malformed metadata success cannot be cached, partial detail cann
   f.handlers.tmdb.request = () => success({ id: 42, title: '只有搜索卡片' });
   await assert.rejects(f.data.targetMetadata(movieTarget), { code: 'UPSTREAM_FORMAT' });
   f.handlers.tmdb.request = () => success(movieValue());
+  f.advance(1);
   const req = requestFor(movieTarget);
   const partial = { ...req, value: { id: 42, title: '真实电影' }, completeness: 'partial',
     fetchedAt: f.now(), settings: { revision: f.revisions.tmdb } };
@@ -818,7 +829,7 @@ test('CR-01 E04/D2 complete Douban primary maps and resolves first episode witho
   assert.deepEqual(first, { season: 1, episode: 1, globalEpisode: 1 });
   const detail = { detailId: 'detail-a',
     lines: [{ id: 'actual', episodes: [{ id: 'actual-e1', playId: 'actual-e1', name: 'S01E01.mkv' }] }] };
-  const [actual] = recognizeCandidates(detail, { target: { ...target, ...first }, source,
+  const [actual] = await recognizeCandidates(detail, { target: { ...target, ...first }, source,
     metadata: primary });
   assert.deepEqual([actual.season, actual.episode, actual.globalEpisode], [1, 1, 1]);
   assert.equal((await f.data.resolve(actual)).url, 'https://media.invalid/raw.mp4');
@@ -1359,6 +1370,8 @@ test('E48 unknown thrown/outer error prose is redacted while known network/forma
   await assert.rejects(f.data.resolve(rawCandidate()), error => error.code === 'UPSTREAM_ERROR' && error.message === 'UPSTREAM_ERROR');
   f.handlers.cat.invoke = () => failure('TIMEOUT');
   await assert.rejects(f.data.resolve(rawCandidate()), { code: 'TIMEOUT' });
+  f.handlers.cat.invoke = () => failure('RESOURCE_LIMIT');
+  await assert.rejects(f.data.resolve(rawCandidate()), { code: 'RESOURCE_LIMIT' });
   f.handlers.cat.invoke = () => failure('SECRET_RAW_TEXT');
   await assert.rejects(f.data.resolve(rawCandidate()), { code: 'UPSTREAM_ERROR' });
   f.handlers.cat.invoke = () => success('not-json');
@@ -1415,4 +1428,220 @@ test('E03/E24 actual metadata module owner revision and protocol integrate witho
   assert.equal(new URL(observed.at(-1).url).pathname, '/rexxar/api/v2/movie/51');
   assert.equal((await data.cachedEntry(requestFor(target))).settings.revision,
     (await douban.methods['douban.data.settings.get']({})).value.revision);
+});
+
+test('F1/F4 Cat home/category/search/detail share process ownership and refresh only exact catalog/query/ID', async t => {
+  const f = fixture(t);
+  let version = 1;
+  f.handlers.cat.invoke = ({ operation, payload }) => success(JSON.stringify(
+    operation === 'detail' ? detailValue(payload.id, { version })
+      : { class: [{ type_id: 0, type_name: '原始分类' }], list: [{ vod_id: version }],
+        pagecount: 1, original: { operation, payload, version } }));
+  const home = await f.data.catalog(source, 'home', { filter: true });
+  await f.data.catalog(source, 'home', { filter: true });
+  const category = { tid: 0, page: 1, filter: true, extend: { tag: '剧情' } };
+  await f.data.catalog(source, 'category', category);
+  await f.data.search(source, '准确查询');
+  await f.data.detail(source, 0);
+  assert.equal(f.calls('cat', 'invoke').length, 4);
+  assert.deepEqual(home.original, { operation: 'home', payload: { filter: true }, version: 1 });
+  version = 2;
+  const next = await f.data.catalog(source, 'home', { filter: true }, { refresh: true });
+  assert.equal(next.original.version, 2);
+  assert.equal((await f.data.catalog(source, 'category', category)).original.version, 1);
+  await f.data.search(source, '准确查询');
+  await f.data.detail(source, 0);
+  assert.equal(f.calls('cat', 'invoke').length, 5);
+  await f.data.search(source, '准确查询', 1, { refresh: true });
+  const detail = await f.data.detail(source, 0, { refresh: true });
+  assert.equal(detail.raw.list[0].version, 2);
+  assert.equal(f.calls('cat', 'invoke').length, 7);
+  await f.data.catalog(source, 'category', { ...category, page: 2 });
+  assert.equal(f.calls('cat', 'invoke').length, 8);
+  await assert.rejects(f.data.catalog(source, 'play', {}), { code: 'INVALID_REQUEST' });
+});
+
+test('F1 Cat and pan response/prepare/account-match/address caches never persist across data-owner restarts', async t => {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'film-process-cache-'));
+  t.after(() => rmSync(dataRoot, { recursive: true, force: true }));
+  const line = { id: 'share-line', episodes: [{ id: 0, share: share() }] };
+  for (let restart = 0; restart < 2; restart++) {
+    const f = fixture(t, { dataRoot });
+    f.accountRows.find(row => row.provider === 'quark_tv').configured = true;
+    await f.data.catalog(source, 'home');
+    await f.data.search(source, '相同查询');
+    await f.data.detail(source, 0);
+    await f.data.expand(source, line);
+    await f.data.resolve(candidate());
+    await f.data.resolve(rawCandidate());
+    await f.data.resolve(rawCandidate(portable));
+    await f.data.catalog(source, 'home');
+    await f.data.search(source, '相同查询');
+    await f.data.detail(source, 0);
+    await f.data.expand(source, line);
+    await f.data.resolve(candidate());
+    await f.data.resolve(rawCandidate());
+    await f.data.resolve(rawCandidate(portable));
+    assert.equal(f.calls('cat', 'invoke').length, 4);
+    assert.equal(f.calls('source', 'invoke').length, 1);
+    assert.equal(f.calls('pan', 'list').length, 1);
+    assert.equal(f.calls('pan', 'prepare').length, 1);
+    assert.equal(f.calls('pan', 'account.match').length, 1);
+    assert.equal(f.calls('pan', 'play').length, 1);
+    await f.data.close();
+  }
+});
+
+test('F1/F4 Cat/source direct play caches exact source/flag/typed play IDs while reports always invoke', async t => {
+  for (const selectedSource of [source, portable]) await t.test(selectedSource.engine, async t => {
+    const f = fixture(t), engine = selectedSource.engine;
+    const otherSource = { ...selectedSource, installationId: 'other-installation', key: `${engine}:other-installation` };
+    f.instances.set(otherSource.key, { ...f.instances.get(selectedSource.key), ...otherSource });
+    const selected = rawCandidate(selectedSource, { flag: 0, playId: 0 });
+    const others = [rawCandidate(selectedSource, { flag: '0', playId: 0 }),
+      rawCandidate(selectedSource, { flag: 0, playId: '0' }), rawCandidate(otherSource, { flag: 0, playId: 0 })];
+    let issued = 0;
+    f.handlers[engine].invoke = ({ operation, action, payload }) => success((operation ?? action) === 'report'
+      ? { ok: true } : { url: `https://media.invalid/direct-${++issued}.mp4`,
+        header: { Referer: 'https://example.invalid/' }, original: { flag: payload.flag, id: payload.id } });
+    const first = await f.data.resolve(selected);
+    assert.deepEqual(first.original, { flag: 0, id: 0 });
+    assert.deepEqual(first.headers, { Referer: 'https://example.invalid/' });
+    assert.deepEqual(await f.data.resolve({ ...selected, id: 'another-consumer', lineLabel: '展示名称变化' }), first);
+    const separate = await Promise.all(others.map(item => f.data.resolve(item)));
+    assert.equal(issued, 4);
+    const requests = f.observed.length;
+    await f.data.invalidateAddress(selected);
+    assert.equal(f.observed.length, requests, 'address revocation does not resolve or validate a source');
+    assert.deepEqual(await Promise.all(others.map(item => f.data.resolve(item))), separate);
+    assert.equal(issued, 4);
+    f.advance(1);
+    const reloaded = await f.data.resolve(selected);
+    assert.notEqual(reloaded.url, first.url);
+    assert.equal(reloaded.resolvedAt, f.now());
+    assert.equal(issued, 5);
+    f.advance(1);
+    const refreshed = await f.data.refresh(selected);
+    assert.notEqual(refreshed.url, reloaded.url);
+    assert.equal(refreshed.resolvedAt, f.now());
+    assert.deepEqual(await f.data.resolve(selected), refreshed);
+    assert.deepEqual(await Promise.all(others.map(item => f.data.resolve(item))), separate);
+    assert.equal(issued, 6);
+    const payload = { sessionId: 'direct-session', event: 'progress', positionSeconds: 1, durationSeconds: 2 };
+    await f.data.report(selected, payload);
+    await f.data.report(selected, payload);
+    const reports = f.calls(engine, 'invoke').filter(row => (row.params.operation ?? row.params.action) === 'report');
+    assert.equal(reports.length, 2);
+    assert.deepEqual(reports.map(row => row.params.payload), [{ flag: 0, id: 0, ...payload }, { flag: 0, id: 0, ...payload }]);
+    assert.equal(issued, 6);
+  });
+});
+
+test('F1 Cat/source direct addresses expire at the short boundary or an earlier upstream expiration', async t => {
+  for (const selectedSource of [source, portable]) await t.test(selectedSource.engine, async t => {
+    const f = fixture(t), selected = rawCandidate(selectedSource);
+    let issued = 0, upstreamTTL;
+    f.handlers[selectedSource.engine].invoke = () => success({ url: `https://media.invalid/direct-${++issued}.mp4`,
+      ...(upstreamTTL === undefined ? {} : { expiresAt: f.now() + upstreamTTL }) });
+    const first = await f.data.resolve(selected);
+    assert.equal(first.expiresAt, f.now() + ADDRESS);
+    f.advance(ADDRESS - 1);
+    assert.deepEqual(await f.data.resolve(selected), first);
+    assert.equal(issued, 1);
+    f.advance(1);
+    assert.notEqual((await f.data.resolve(selected)).url, first.url);
+    assert.equal(issued, 2);
+    upstreamTTL = 25_000;
+    const shorter = await f.data.refresh(selected);
+    assert.equal(shorter.expiresAt, f.now() + upstreamTTL);
+    f.advance(upstreamTTL - 1);
+    assert.deepEqual(await f.data.resolve(selected), shorter);
+    assert.equal(issued, 3);
+    f.advance(1);
+    assert.notEqual((await f.data.resolve(selected)).url, shorter.url);
+    assert.equal(issued, 4);
+    upstreamTTL = 2 * ADDRESS;
+    assert.equal((await f.data.refresh(selected)).expiresAt, f.now() + ADDRESS);
+    assert.equal(issued, 5);
+  });
+});
+
+test('F1/F5 Cat/source direct play coalesces after a consumer leaves and cannot publish after address revocation', async t => {
+  for (const selectedSource of [source, portable]) await t.test(selectedSource.engine, async t => {
+    const entered = deferred(), gate = deferred(), revokedEntered = deferred(), revokedGate = deferred();
+    t.after(() => { gate.resolve(); revokedGate.resolve(); });
+    const f = fixture(t), selected = rawCandidate(selectedSource), consumer = new AbortController();
+    f.handlers[selectedSource.engine].invoke = async (_params, signal) => {
+      entered.resolve(signal); await gate.promise; return success({ url: 'https://media.invalid/accepted.mp4' });
+    };
+    const rejected = assert.rejects(f.data.resolve(selected, { signal: consumer.signal }), { code: 'CANCELLED' });
+    const signal = await entered.promise;
+    const joined = f.data.resolve(selected);
+    consumer.abort();
+    await rejected;
+    assert.equal(signal.aborted, false);
+    gate.resolve();
+    const accepted = await joined;
+    assert.deepEqual(await f.data.resolve(selected), accepted);
+    assert.equal(f.calls(selectedSource.engine, 'invoke').length, 1);
+    f.handlers[selectedSource.engine].invoke = async (_params, signal) => {
+      revokedEntered.resolve(signal); await revokedGate.promise; return success({ url: 'https://media.invalid/revoked.mp4' });
+    };
+    const revoked = assert.rejects(f.data.refresh(selected), { code: 'CANCELLED' });
+    const revokedSignal = await revokedEntered.promise;
+    let drained = false;
+    const invalidation = f.data.invalidateAddress(selected).then(() => { drained = true; });
+    await revoked;
+    assert.equal(revokedSignal.aborted, true);
+    await tick();
+    assert.equal(drained, false);
+    revokedGate.resolve();
+    await invalidation;
+    f.handlers[selectedSource.engine].invoke = () => success({ url: 'https://media.invalid/current.mp4' });
+    assert.equal((await f.data.resolve(selected)).url, 'https://media.invalid/current.mp4');
+    assert.equal(f.calls(selectedSource.engine, 'invoke').length, 3);
+  });
+});
+
+test('F4 expand refresh replaces only the selected share list and unchanged tokens retain prepared files', async t => {
+  const f = fixture(t);
+  const line = url => ({ id: url, episodes: [{ id: 0, share: share('quark', { url }) }] });
+  const first = line('https://pan.quark.cn/s/first'), other = line('https://pan.quark.cn/s/other');
+  await f.data.expand(source, first);
+  await f.data.expand(source, other);
+  await f.data.resolve(candidate());
+  f.handlers.pan.list = () => success({ files: [] });
+  const refreshed = await f.data.expand(source, first, { refresh: true });
+  assert.deepEqual(refreshed.episodes, []);
+  assert.equal((await f.data.expand(source, other)).episodes.length, 1);
+  await f.data.resolve(candidate());
+  assert.equal(f.calls('pan', 'list').length, 3);
+  assert.equal(f.calls('pan', 'prepare').length, 1);
+  assert.equal(f.calls('pan', 'play').length, 1);
+});
+
+test('F4 address invalidation only revokes that address and never resolves or clears other files/prepares', async t => {
+  const f = fixture(t), selected = candidate(), other = candidate(ref('quark', 'another-file'));
+  await f.data.resolve(selected);
+  await f.data.resolve(other);
+  const requests = f.observed.length;
+  await f.data.invalidateAddress(selected);
+  assert.equal(f.observed.length, requests);
+  await f.data.resolve(other);
+  assert.equal(f.calls('pan', 'play').length, 2);
+  await f.data.resolve(selected);
+  assert.equal(f.calls('pan', 'play').length, 3);
+  assert.equal(f.calls('pan', 'prepare').length, 2);
+});
+
+test('F6 source/group target metadata entry/raw reads return null without metadata work', async t => {
+  const f = fixture(t);
+  for (const kind of ['source', 'group']) {
+    const target = { kind, metadataProvider: 'tmdb', metadataId: 42 };
+    assert.equal(await f.data.targetMetadataEntry(target), null);
+    assert.equal(await f.data.targetMetadata(target), null);
+    assert.equal(await f.data.seasonMetadataEntry(target, 1), null);
+    assert.equal(await f.data.seasonMetadata(target, 1), null);
+  }
+  assert.equal(f.observed.length, 0);
 });

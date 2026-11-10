@@ -8,7 +8,6 @@ using System.Windows.Media;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
-using MeowFilm.Platform.Scripting;
 using MeowFilm.Media;
 using MeowFilm.Platform.Storage;
 
@@ -50,10 +49,11 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     private bool stopping;
     private bool disposed;
 
-    public FilmCapability(FilmRuleService rules, FilmSourceService sources, IFilmSearchMetadata? metadata = null)
-        : this(new DoubanFilmHomeSource(), rules, sources,
-            new FilmSearchService(new NativeJavaScriptJsonEngine(FilmSearchService.LoadProgramSource()), sources, rules, metadata),
-            metadata as FilmMetadataService)
+    public FilmCapability(FilmRuleService rules, FilmSourceService sources, IRuntimeClient runtime, FilmMetadataService? metadata = null)
+        : this(new DoubanFilmHomeSource(runtime), rules, sources,
+            new FilmSearchService((runtime as IRuntimeConnectionSource ?? throw new InvalidOperationException("RUNTIME_CAPTURE_UNAVAILABLE"))
+                .CaptureConnectionAsync, sources, metadata is null ? null : metadata.ResolveImage),
+            metadata)
     {
     }
 
@@ -69,8 +69,8 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     public FilmCapability(FilmRuleService rules, FilmSourceService sources, IRuntimeClient runtime,
         IDocumentStore storage, NativePlayback playback,
         Func<CancellationToken, Task<RuntimeConnection>> capture, FilmMetadataService metadata)
-        : this(new DoubanFilmHomeSource(), rules, sources,
-            new FilmSearchService(new NativeJavaScriptJsonEngine(FilmSearchService.LoadProgramSource()), sources, rules, metadata),
+        : this(new DoubanFilmHomeSource(runtime), rules, sources,
+            new FilmSearchService(capture, sources, metadata.ResolveImage),
             metadata, new FilmPlaybackSession(capture, new FilmNativeMedia(playback),
                 prepareOpen: (page, parameters, reconnect, token) =>
                     PreparePlaybackOpenAsync(sources, capture, page, parameters, reconnect, token)),
@@ -155,7 +155,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     }
 
     /// <summary>Called by App composition, never by view visibility. Failures stay
-    /// observable on the source service and do not disable native rule settings.</summary>
+    /// observable on the source service; rule settings use the same Node owner.</summary>
     public Task StartSourcesAsync()
     {
         if (stopping || disposed || sources is null) return Task.CompletedTask;
@@ -194,25 +194,17 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         if (filmPlayback is not null) await filmPlayback.LeaveAsync(retainedOwner: filmPlayback.CanRetainMedia);
         if (route == DataRoute)
         {
-            if (ActiveData.LoadsOnEntry)
+            if (ActiveData.CanSeedFromHome)
             {
-                if (ActiveData.CanSeedFromHome)
-                {
-                    var home = Sections.Single(section => section.Key == ActiveData.Key);
-                    ActiveData.Seed(home.Items);
-                }
-                await StartDataLoad(
-                    ActiveData,
-                    generation,
-                    NextDataLimit(ActiveData),
-                    cancellationToken);
-                cancellationToken.ThrowIfCancellationRequested();
+                var home = Sections.Single(section => section.Key == ActiveData.Key);
+                ActiveData.Seed(home.Items);
             }
+            await StartDataLoad(ActiveData, generation, DataPageSize, cancellationToken, replace: true);
+            cancellationToken.ThrowIfCancellationRequested();
             return;
         }
 
-        var targets = Sections.Where(section => section.LoadsOnEntry && !requests.ContainsKey(section)).ToArray();
-        if (targets.Length == 0) return;
+        var targets = Sections.Where(section => !requests.ContainsKey(section)).ToArray();
         await Task.WhenAll(targets.Select(section =>
             StartSectionLoad(section, generation, cancellationToken)));
         cancellationToken.ThrowIfCancellationRequested();
@@ -304,18 +296,24 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         requested(this, new(PlaybackRoute));
     }
 
-    public void ReceiveSearchPlayback(FilmCardItem item)
+    public async Task ReceiveSearchPlaybackAsync(FilmCardItem item, CancellationToken token = default)
     {
         ArgumentNullException.ThrowIfNull(item);
         if (stopping || disposed) throw new InvalidOperationException("CLOSED");
         var context = item.SearchContext ?? throw new ArgumentException("Missing search context.", nameof(item));
         if (!ReferenceEquals(search?.Current, context.Session))
             throw new ArgumentException("Retired search session.", nameof(item));
+        long ticket = ++navigationGeneration;
         var page = playbackPages.Values.FirstOrDefault(candidate =>
             candidate.SearchContext is { } selected && selected.SameSelection(context));
         if (page is null)
         {
-            page = FilmPlaybackPage.FromSearch(item, filmPlayback, library);
+            var request = await context.HandoffAsync(token);
+            token.ThrowIfCancellationRequested();
+            if (ticket != navigationGeneration) throw new OperationCanceledException(token);
+            if (stopping || disposed || !ReferenceEquals(search?.Current, context.Session))
+                throw new FilmPlaybackException("STALE_SESSION");
+            page = FilmPlaybackPage.FromSearch(item, request, filmPlayback, library);
             playbackPages.Add(page.NavigationIdentity, page);
         }
         else page.UpdateItem(item);
@@ -383,15 +381,13 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     {
         if (filmPlayback is null) throw new FilmPlaybackException("CAPABILITY_UNAVAILABLE");
         long ticket = navigationGeneration;
-        if (rules is not null) await rules.InitializeAsync(token);
         if (ticket != navigationGeneration || !ReferenceEquals(Playback, page) || stopping || disposed) return;
         var request = page.CaptureRequest;
         await filmPlayback.OpenAsync(page, new
         {
             platform = "windows", target = request.Target.Wire(), sources = request.Sources,
             query = request.Query, results = request.Results, search = request.Search, metadata = request.Metadata,
-            cacheEntries = request.CacheEntries,
-            rules = rules?.GetSavedSnapshot()
+            cacheEntries = request.CacheEntries, resultHints = request.ResultHints, searchReference = request.SearchReference
         }, token);
         if (ticket == navigationGeneration && ReferenceEquals(Playback, page) && !stopping && !disposed)
             await page.LoadFavoriteAsync();
@@ -429,7 +425,8 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     }
 
     private void PlaybackSourcesChanged(object? sender, EventArgs args) => filmPlayback?.SourcesChanged(PlaybackSources());
-    private void PlaybackFailed(object? sender, string error) => OperationFailed?.Invoke(this, "播放操作失败");
+    private void PlaybackFailed(object? sender, string error) =>
+        OperationFailed?.Invoke(this, FilmPlaybackError.Message(error, "播放操作失败"));
     private void PlaybackMediaChanged(object? sender, EventArgs args)
     {
         Changed(nameof(PlaybackMedia));
@@ -485,15 +482,26 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         if (stopping || disposed || !IsHome || !Sections.Contains(section) ||
             requests.ContainsKey(section) || !section.CanRetry)
             return;
-        await StartSectionLoad(section, navigationGeneration, lifetime.Token);
+        await StartSectionLoad(section, navigationGeneration, lifetime.Token, refresh: true);
     }
+
+    internal Task RefreshSectionAsync(FilmHomeSection section) =>
+        !stopping && !disposed && IsHome && Sections.Contains(section) && !requests.ContainsKey(section)
+            ? StartSectionLoad(section, navigationGeneration, lifetime.Token, refresh: true)
+            : Task.CompletedTask;
+
+    internal Task RefreshDataAsync() =>
+        !stopping && !disposed && IsData && dataRequest is null
+            ? StartDataLoad(ActiveData, navigationGeneration, DataPageSize, lifetime.Token, replace: true, refresh: true)
+            : Task.CompletedTask;
 
     internal async Task RetryDataAsync()
     {
         var section = ActiveData;
         if (stopping || disposed || !IsData || dataRequest is not null || !section.CanRetry)
             return;
-        await StartDataLoad(section, navigationGeneration, NextDataLimit(section), lifetime.Token);
+        await StartDataLoad(section, navigationGeneration, NextDataLimit(section), lifetime.Token,
+            replace: section.ReloadPending, refresh: true);
     }
 
     internal async Task LoadMoreDataAsync()
@@ -501,7 +509,9 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         var section = ActiveData;
         if (stopping || disposed || !IsData || dataRequest is not null || !section.CanPage)
             return;
-        await StartDataLoad(section, navigationGeneration, NextDataLimit(section), lifetime.Token);
+        await StartDataLoad(section, navigationGeneration, NextDataLimit(section), lifetime.Token,
+            replace: section.ReloadPending,
+            refresh: section.State is FilmDataSectionState.Failed or FilmDataSectionState.Cancelled);
     }
 
     internal async Task SelectDataFilterAsync(FilmFilterOption option)
@@ -522,7 +532,8 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     private Task StartSectionLoad(
         FilmHomeSection section,
         long generation,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool refresh = false)
     {
         var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
         requests.Add(section, request);
@@ -539,9 +550,13 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
             {
                 await Task.Yield();
                 request.Token.ThrowIfCancellationRequested();
-                var items = await source.LoadAsync(section.Definition, request.Token);
+                var items = await source.LoadAsync(section.Definition with { Refresh = refresh }, request.Token);
                 request.Token.ThrowIfCancellationRequested();
-                if (CanPublish(section, request, generation)) section.Complete(items);
+                if (CanPublish(section, request, generation))
+                {
+                    section.Complete(items);
+                    NotifyCacheError(section.Cache);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -549,7 +564,11 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
             }
             catch
             {
-                if (CanPublish(section, request, generation)) section.Fail();
+                if (CanPublish(section, request, generation))
+                {
+                    section.Fail();
+                    OperationFailed?.Invoke(this, "栏目加载失败");
+                }
             }
             finally
             {
@@ -573,15 +592,18 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         FilmDataSection section,
         long generation,
         int limit,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool replace = false,
+        bool refresh = false)
     {
         if (limit < 1 || limit > DataPageSize) throw new ArgumentOutOfRangeException(nameof(limit));
-        int start = section.NextStart;
-        var definition = section.Definition;
+        int start = replace ? 0 : section.NextStart;
+        int reloadCount = Math.Max(section.NextStart, DataPageSize);
+        var definition = section.Definition with { Refresh = refresh };
         var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
         dataRequest = request;
         dataRequestSection = section;
-        section.Begin();
+        section.Begin(replace);
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Task operation = completion.Task;
         operations.Add(operation);
@@ -594,10 +616,39 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
             {
                 await Task.Yield();
                 request.Token.ThrowIfCancellationRequested();
-                var items = await source.LoadAsync(definition, start, limit, request.Token);
-                request.Token.ThrowIfCancellationRequested();
-                if (CanPublishData(section, request, generation))
-                    section.Complete(items, start, limit);
+                if (replace)
+                {
+                    var items = new List<FilmCardItem>();
+                    FilmMetadataCache? cache = null;
+                    int next = 0;
+                    bool more;
+                    do
+                    {
+                        var page = await source.LoadAsync(definition, next, DataPageSize, request.Token);
+                        request.Token.ThrowIfCancellationRequested();
+                        items.AddRange(page);
+                        next = checked(next + page.Count);
+                        more = page.Count >= DataPageSize;
+                        if ((page as FilmHomePage)?.Cache is { } state &&
+                            (cache is null || cache.ErrorCode.Length == 0 &&
+                                (state.ErrorCode.Length > 0 || cache.Status != "stale"))) cache = state;
+                    } while (more && next < reloadCount);
+                    if (CanPublishData(section, request, generation))
+                    {
+                        section.Replace(items, next, more, cache);
+                        NotifyCacheError(cache);
+                    }
+                }
+                else
+                {
+                    var items = await source.LoadAsync(definition, start, limit, request.Token);
+                    request.Token.ThrowIfCancellationRequested();
+                    if (CanPublishData(section, request, generation))
+                    {
+                        section.Complete(items, start, limit);
+                        NotifyCacheError(section.Cache);
+                    }
+                }
             }
             catch (OperationCanceledException)
             {
@@ -605,7 +656,11 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
             }
             catch
             {
-                if (CanPublishData(section, request, generation)) section.Fail();
+                if (CanPublishData(section, request, generation))
+                {
+                    section.Fail();
+                    OperationFailed?.Invoke(this, "影片数据加载失败");
+                }
             }
             finally
             {
@@ -619,6 +674,12 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
                 completion.TrySetResult();
             }
         }
+    }
+
+    private void NotifyCacheError(FilmMetadataCache? cache)
+    {
+        if (cache?.ErrorCode is { Length: > 0 } code)
+            OperationFailed?.Invoke(this, FilmPlaybackError.Message(code, "影片数据刷新失败"));
     }
 
     private bool CanPublishData(

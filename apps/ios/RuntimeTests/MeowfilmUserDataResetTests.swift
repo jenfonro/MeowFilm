@@ -7,7 +7,7 @@ final class MeowfilmUserDataResetTests: XCTestCase {
     func testFilmDocumentsAndScriptRuntimeAreErasedOnlyAfterColdLaunch() throws {
         let f = try ResetFixture()
         defer { f.dispose() }
-        let paths = ["documents/film.magic-rules.v1/rules.json",
+        let paths = ["script-runtime/film-rules/rules.json",
                      "documents/film.video-sources.v1/catalog.json",
                      "script-runtime/cat/fixture.json"]
             .map { f.support.appendingPathComponent("meowfilm/" + $0) }

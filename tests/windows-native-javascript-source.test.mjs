@@ -17,31 +17,34 @@ test('Native JavaScript source verification rejects altered engine and derivatio
   const root = fileURLToPath(new URL('../', import.meta.url));
   const fixture = mkdtempSync(resolve(tmpdir(), 'meowfilm-native-lock-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
-  for (const path of ['scripts/quickjs-native.json', 'LICENSES/quickjs-native-MIT.txt', 'LICENSES/Unicode-3.0.txt', 'native/JavaScript/quickjs',
-    'native/JavaScript/patches']) {
+  for (const path of ['scripts/script-host-native.json', 'LICENSES/quickjs-ng-LICENSE.txt', 'LICENSES/Unicode-3.0.txt', 'native/JavaScript/quickjs',
+    'native/JavaScript/patches', 'packages/script-host/native/task-context.patch',
+    'packages/script-host/native/arraybuffer-ownership.patch']) {
     mkdirSync(dirname(resolve(fixture, path)), { recursive: true });
     cpSync(resolve(root, path), resolve(fixture, path), { recursive: true });
   }
   verifyNativeJavaScript(fixture);
   for (const path of ['native/JavaScript/quickjs/libregexp.c',
     'native/JavaScript/quickjs/libunicode-table.h', 'native/JavaScript/patches/regexp-compile-interrupt.patch',
-    'LICENSES/quickjs-native-MIT.txt', 'LICENSES/Unicode-3.0.txt']) {
+    'packages/script-host/native/task-context.patch', 'packages/script-host/native/arraybuffer-ownership.patch',
+    'LICENSES/quickjs-ng-LICENSE.txt', 'LICENSES/Unicode-3.0.txt']) {
     const file = resolve(fixture, path), original = readFileSync(file);
     writeFileSync(file, Buffer.concat([original, Buffer.from('\n')]));
     assert.throws(() => verifyNativeJavaScript(fixture), /hash differs/);
     writeFileSync(file, original);
   }
-  const file = resolve(fixture, 'scripts/quickjs-native.json');
+  const file = resolve(fixture, 'scripts/script-host-native.json');
   const manifest = JSON.parse(readFileSync(file, 'utf8'));
-  for (const key of ['patch', 'unicodeLicense']) {
-    const changed = { ...manifest };
-    delete changed[key];
+  for (const key of ['patches', 'unicodeLicense']) {
+    const changed = structuredClone(manifest);
+    if (key === 'patches') delete changed.patches;
+    else delete changed.sources.quickjs.unicodeLicense;
     writeFileSync(file, JSON.stringify(changed));
-    assert.throws(() => verifyNativeJavaScript(fixture), key === 'patch' ? /patch manifest/ : /Unicode license manifest/);
+    assert.throws(() => verifyNativeJavaScript(fixture), key === 'patches' ? /patch manifest/ : /Unicode license manifest/);
   }
   const alteredLicense = Buffer.from('UNICODE LICENSE V3\nCopyright changed\n');
   writeFileSync(resolve(fixture, 'LICENSES/Unicode-3.0.txt'), alteredLicense);
-  manifest.unicodeLicense.sha256 = createHash('sha256').update(alteredLicense).digest('hex');
+  manifest.sources.quickjs.unicodeLicense.sha256 = createHash('sha256').update(alteredLicense).digest('hex');
   writeFileSync(file, JSON.stringify(manifest));
   assert.throws(() => verifyNativeJavaScript(fixture), /Unicode license differs from the source notice/);
 });

@@ -1,7 +1,6 @@
-using System.Net;
-using System.Net.Http;
-using System.Text;
+using System.Text.Json;
 using MeowFilm.Capabilities;
+using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -11,10 +10,12 @@ public static class FilmHomeTests
     {
         yield return new("film-home: skeletons end on empty failure cancellation and never cover pagination",
             () => MusicQualityConsumerTests.Sta(SkeletonStates));
-        yield return new("film-home: ranged Douban requests parse bounded cards and rewrite poster hosts",
+        yield return new("film-home: runtime entry reads preserve request range cache state and original image identity",
             RequestContract);
-        yield return new("film-home: independent section failure caches results and retries only that section",
+        yield return new("film-home: independent section failure preserves snapshots and retries only that section",
             () => MusicQualityConsumerTests.Sta(IndependentSections));
+        yield return new("film-home: explicit refresh retains successful home and category snapshots on stale errors",
+            () => MusicQualityConsumerTests.Sta(RefreshSnapshots));
         yield return new("film-home: data routes preserve four contexts and page from 12 to 24 to 48",
             () => MusicQualityConsumerTests.Sta(DataPagination));
         yield return new("film-home: server-compatible filters reset requests and keep Douban anime scope",
@@ -50,75 +51,97 @@ public static class FilmHomeTests
 
     private static async Task RequestContract()
     {
-        var handler = new RecordingHandler();
-        using var source = new DoubanFilmHomeSource(handler);
+        await using var runtime = new FilmRuntimeProbe();
+        JsonElement raw = JsonSerializer.Deserialize<JsonElement>(HomePayload);
+        JsonElement Entry(string status = "fresh", string? code = null) => FilmJson.Encode(new
+        {
+            value = raw, completeness = "partial", fetchedAt = 1000, expiresAt = 2000,
+            cache = new { status, error = code is null ? null : new { code },
+                components = new { baseData = new { status = "ready", fetchedAt = 1000 } } }
+        });
+        runtime.Intercept = (method, input, _) =>
+        {
+            var wire = BridgeCodec.DecodeJSONValue(BridgeCodec.EncodeJSONValue(input));
+            var refresh = FilmJson.Member(wire, "refresh");
+            Check(method == "film.data.metadata.entry" && FilmJson.Text(wire, "provider") == "douban" &&
+                FilmJson.Member(wire, "query").ValueKind == JsonValueKind.Object &&
+                refresh.ValueKind is JsonValueKind.Undefined or JsonValueKind.False or JsonValueKind.True,
+                "the encoded runtime request has the metadata entry shape and never sends refresh:null");
+            return Task.FromResult(FilmRuntimeProbe.Ok(Entry()));
+        };
+        using var source = new DoubanFilmHomeSource(runtime);
         var section = FilmSectionDefinition.Home[0];
         var items = await source.LoadAsync(section, 24, 24, default);
 
-        Check(handler.Request is not null, "request captured");
-        var request = handler.Request!;
-        Check(request.Method == HttpMethod.Get, "GET only");
-        Check(request.RequestUri == DoubanFilmHomeSource.BuildAddress(section, 24, 24),
-            "fixed ranged recent_hot address");
-        string query = Uri.UnescapeDataString(request.RequestUri!.Query);
-        Check(query.Contains("start=24", StringComparison.Ordinal) &&
-            query.Contains("limit=24", StringComparison.Ordinal) &&
-            query.Contains("category=热门", StringComparison.Ordinal) &&
-            query.Contains("type=全部", StringComparison.Ordinal), "fixed ranged request query");
-        Check(request.Headers.UserAgent.ToString() == "Mozilla/5.0", "fixed user agent");
-        Check(request.Headers.Accept.ToString() == "application/json, text/plain, */*", "fixed accept");
-        Check(request.Headers.Referrer == new Uri("https://m.douban.com/"), "fixed referrer");
-        Check(request.Headers.TryGetValues("Origin", out var origins) &&
-            origins.SequenceEqual(["https://m.douban.com"]), "fixed origin");
+        var request = runtime.Calls.Single();
+        var query = request.Parameters.GetProperty("query");
+        Check(request.Method == "film.data.metadata.entry" &&
+            FilmJson.Text(request.Parameters, "provider") == "douban" &&
+            FilmJson.Text(request.Parameters, "path") == "/rexxar/api/v2/subject/recent_hot/movie" &&
+            FilmJson.Integer(query, "start") == 24 && FilmJson.Integer(query, "limit") == 24 &&
+            FilmJson.Text(query, "category") == "热门" && FilmJson.Text(query, "type") == "全部" &&
+            FilmJson.Member(request.Parameters, "refresh").ValueKind == JsonValueKind.Undefined,
+            "ordinary ranged reads let the runtime check freshness");
 
         Check(items.Count == 3, "blank titles are filtered");
         Check(items[0].Id == "100" && items[0].Title == "第一部" &&
-            items[0].Poster == "https://img.doubanio.cmliussss.net/view/photo/s_ratio_poster/public/p100.jpg" &&
+            items[0].Poster == "/v1/douban/images/view/photo/s_ratio_poster/public/p100.jpg" &&
             items[0].Score == "8.6" && items[0].PlaybackContext?.Target is
                 { Id: "douban:movie:100", Kind: "movie", MetadataProvider: "douban", MetadataId: "100" },
-            "normal poster, numeric score and independent Douban identity");
+            "runtime image reference, numeric score and independent Douban identity");
         Check(items[1].Poster.EndsWith("/large.jpg", StringComparison.Ordinal) &&
             items[1].Score.Length == 0, "large fallback and zero score");
         Check(items[2].Id.StartsWith("movie:27:", StringComparison.Ordinal) &&
             items[2].Poster.EndsWith("/cover.jpg", StringComparison.Ordinal) &&
             items[2].Score == "9" && items[2].PlaybackContext is null,
             "a ranged display fallback is not fabricated into a playable metadata identity");
+        var complete = await source.LoadAsync(section, 10024, 1, default);
+        Check(complete.Count == 3 && complete[2].Id.StartsWith("movie:10027:", StringComparison.Ordinal),
+            "runtime results are not truncated and loaded ranges have no additional client offset ceiling");
 
         foreach (var definition in FilmSectionDefinition.Home)
         {
-            var address = DoubanFilmHomeSource.BuildAddress(definition);
-            Check(address.Scheme == "https" && address.Host == "m.douban.com" &&
-                address.AbsolutePath.EndsWith("/" + definition.Kind, StringComparison.Ordinal) &&
-                address.Query.Contains("start=0", StringComparison.Ordinal) &&
-                address.Query.Contains("limit=12", StringComparison.Ordinal),
-                "all home sections stay on the fixed origin and range");
+            var home = await source.LoadAsync(definition, 0, 12, default);
+            var input = runtime.Calls.Last().Parameters;
+            Check(FilmJson.Text(input, "path") == "/rexxar/api/v2/subject/recent_hot/" + definition.Kind &&
+                FilmJson.Integer(input.GetProperty("query"), "start") == 0 &&
+                FilmJson.Integer(input.GetProperty("query"), "limit") == 12 &&
+                home[0].PlaybackContext?.Target.Kind == definition.Kind,
+                "each home section preserves its movie or TV resource identity and range");
         }
-        var filtered = section with { Category = "最新", Type = "日本" };
-        Check(Uri.UnescapeDataString(DoubanFilmHomeSource.BuildAddress(filtered).Query)
-            .Contains("category=最新&type=日本", StringComparison.Ordinal),
-            "known filter combinations extend the fixed request whitelist");
+        var filtered = section with { Category = "最新", Type = "日本", Refresh = true };
+        await source.LoadAsync(filtered, 0, 24, default);
+        request = runtime.Calls.Last();
+        Check(FilmJson.Text(request.Parameters.GetProperty("query"), "category") == "最新" &&
+            FilmJson.Text(request.Parameters.GetProperty("query"), "type") == "日本" &&
+            FilmJson.Bool(request.Parameters, "refresh"), "explicit refresh sends the selected filter and force flag");
         try
         {
-            _ = DoubanFilmHomeSource.BuildAddress(section with { Category = "任意" });
+            await source.LoadAsync(section with { Category = "任意" }, 0, 12, default);
             throw new InvalidOperationException("Expected unknown film filter rejection");
         }
         catch (ArgumentException)
         {
         }
 
-        using var redirect = new DoubanFilmHomeSource(new StaticHandler(new(HttpStatusCode.Redirect)
+        runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Ok(Entry("stale", "UPSTREAM_ERROR")));
+        var stale = (FilmHomePage)await source.LoadAsync(filtered, 0, 24, default);
+        Check(stale.Count == 3 && stale.Cache.Status == "stale" && stale.Cache.ErrorCode == "UPSTREAM_ERROR" &&
+            stale.Cache.Components.GetProperty("baseData").GetProperty("status").GetString() == "ready",
+            "a failed refresh returns old success together with its actual cache error and component state");
+        runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Failure("UPSTREAM_ERROR"));
+        await Failure(() => source.LoadAsync(section, 0, 12, default), "UPSTREAM_ERROR");
+        runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Ok(FilmJson.Encode(new
         {
-            Headers = { Location = new Uri("https://example.com/") }
-        }));
-        await Failure(() => redirect.LoadAsync(section, 0, 12, default), "REDIRECT_DENIED");
-
-        var oversizedContent = new ByteArrayContent([1]);
-        oversizedContent.Headers.ContentLength = DoubanFilmHomeSource.MaximumResponseBytes + 1;
-        using var oversized = new DoubanFilmHomeSource(new StaticHandler(new(HttpStatusCode.OK)
-        {
-            Content = oversizedContent
-        }));
-        await Failure(() => oversized.LoadAsync(section, 0, 12, default), "LIMIT");
+            value = new { items = "invalid" }, cache = new { status = "fresh", components = new { } }
+        })));
+        await Failure(() => source.LoadAsync(section, 0, 12, default), "INVALID_RESPONSE");
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        int before = runtime.Calls.Count;
+        try { await source.LoadAsync(section, 0, 12, cancelled.Token); throw new InvalidOperationException("Expected cancellation"); }
+        catch (OperationCanceledException) { }
+        Check(runtime.Calls.Count == before, "cancelled consumers do not admit another runtime read");
     }
 
     private static async Task IndependentSections()
@@ -159,19 +182,25 @@ public static class FilmHomeTests
         await module.RestoreNavigationAsync(FilmCapability.PlaybackRoute, default);
         Check(module.CaptureNavigationLocation() == FilmCapability.PlaybackRoute && !module.HasPlayback && runtime.Calls.Count == 0,
             "a bare route has no film identity and does not invent a preview or session");
-        await module.RestoreNavigationAsync(homeLocation, default);
-        Check(source.Calls.Count == 4 && ReferenceEquals(retainedItems, module.Sections[0].Items) &&
+        var restored = module.RestoreNavigationAsync(homeLocation, default);
+        await source.WaitForCalls(8);
+        Check(ReferenceEquals(retainedCard, retainedItems[0]) && !module.Sections[0].ShowSkeleton,
+            "restoration shows the snapshot while the owner checks freshness");
+        foreach (var section in FilmSectionDefinition.Home)
+        {
+            if (section.Key == "anime") source.Fail(section.Key);
+            else source.Complete(section.Key, Card(section.Key));
+        }
+        await restored;
+        Check(source.Calls.Count == 8 && ReferenceEquals(retainedItems, module.Sections[0].Items) &&
             ReferenceEquals(retainedCard, retainedItems[0]) && module.Sections[0].HorizontalOffset == 192,
-            "route restoration preserves ready collection, cards and offset without requests");
-
-        await module.NavigateAsync(FilmCapability.HomeRoute, default);
-        Check(source.Calls.Count == 4, "resolved success and failure states are reused");
+            "route restoration revalidates through the owner and preserves equal cards and offset");
 
         var anime = module.Sections.Single(section => section.Key == "anime");
         var retry = module.RetrySectionAsync(anime);
-        await source.WaitForCalls(5);
-        Check(source.Calls.Last() is { Key: "anime", Start: 0, Limit: 12 },
-            "retry requests only the failed home section");
+        await source.WaitForCalls(9);
+        Check(source.Calls.Last() is { Key: "anime", Start: 0, Limit: 12, Section.Refresh: true },
+            "retry forces only the failed home section");
         source.Complete("anime", Card("anime"));
         await retry;
         Check(anime.Items.Single().Title == "影片 anime" && !anime.CanRetry,
@@ -201,6 +230,73 @@ public static class FilmHomeTests
             "the playback route publishes its explicit identity without another catalog request");
     }
 
+    private static async Task RefreshSnapshots()
+    {
+        await using var runtime = new FilmRuntimeProbe();
+        bool stale = false, fail = false, empty = false;
+        runtime.Intercept = (_, input, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (fail) return Task.FromResult(FilmRuntimeProbe.Failure("UPSTREAM_ERROR"));
+            var query = input.GetProperty("query");
+            int start = FilmJson.Integer(query, "start")!.Value;
+            int limit = FilmJson.Integer(query, "limit")!.Value;
+            return Task.FromResult(FilmRuntimeProbe.Ok(FilmJson.Encode(new
+            {
+                value = new { items = Enumerable.Range(start + 1, empty ? 0 : limit).Select(id => new
+                { id, title = "影片 " + id, pic = new { normal = "/v1/douban/images/" + id + ".jpg" } }) },
+                completeness = "partial", fetchedAt = 1000, expiresAt = 2000,
+                cache = new { status = stale ? "stale" : "fresh", error = stale && start == 0 ? new { code = "UPSTREAM_ERROR" } : null,
+                    components = new { } }
+            })));
+        };
+        await using var module = new FilmCapability(new DoubanFilmHomeSource(runtime));
+        var errors = new List<string>();
+        module.OperationFailed += (_, message) => errors.Add(message);
+        await module.NavigateAsync(FilmCapability.HomeRoute, default);
+        var home = module.Sections[0];
+        var card = home.Items[0];
+        stale = true;
+        await module.RefreshSectionAsync(home);
+        Check(home.Items.Count == 12 && ReferenceEquals(home.Items[0], card) && home.Cache?.Status == "stale" &&
+            home.Cache.ErrorCode == "UPSTREAM_ERROR" && errors.Count == 1 &&
+            FilmJson.Bool(runtime.Calls.Last().Parameters, "refresh"),
+            "explicit home refresh exposes the runtime error and keeps the same successful cards");
+        fail = true;
+        await module.RefreshSectionAsync(home);
+        Check(home.Items.Count == 12 && ReferenceEquals(home.Items[0], card) && errors.Count == 2,
+            "a transport rejection also retains the successful home snapshot");
+        stale = false; fail = false;
+        await module.OpenDataAsync(home);
+        await module.LoadMoreDataAsync();
+        var cards = module.ActiveData.Items.ToArray();
+        Check(cards.Length == 48, "category keeps normal first and subsequent page sizes");
+        stale = true;
+        int before = runtime.Calls.Count;
+        await module.RefreshDataAsync();
+        var calls = runtime.Calls.Skip(before).ToArray();
+        Check(module.ActiveData.Items.SequenceEqual(cards) && module.ActiveData.Cache is { Status: "stale", ErrorCode: "UPSTREAM_ERROR" } &&
+            errors.Count == 3 && calls.Length == 2 && calls.All(call => FilmJson.Bool(call.Parameters, "refresh")) &&
+            calls.Select(call => FilmJson.Integer(call.Parameters.GetProperty("query"), "start")).SequenceEqual(new int?[] { 0, 24 }),
+            "refresh revalidates only loaded ranges and preserves all old successful content on stale responses");
+        fail = true;
+        await module.RefreshDataAsync();
+        Check(module.ActiveData.Items.SequenceEqual(cards) && module.ActiveData.PageActionText == "重试" && errors.Count == 4,
+            "rejected category refresh keeps loaded content and its retry action");
+        fail = false; stale = false;
+        await module.LoadMoreDataAsync();
+        Check(module.ActiveData.Items.Count == 48 && module.ActiveData.Cache?.Status == "fresh" &&
+            runtime.Calls.TakeLast(2).All(call => FilmJson.Bool(call.Parameters, "refresh")),
+            "retry refreshes the rejected loaded ranges instead of silently appending a new page");
+        empty = true;
+        await module.RefreshDataAsync();
+        Check(module.ActiveData.Items.Count == 0 && !module.ActiveData.CanPage && module.ActiveData.Cache?.Status == "fresh",
+            "a successful empty category response removes previous cards and paging state");
+        await module.NavigateAsync(FilmCapability.HomeRoute, default);
+        Check(module.Sections.All(section => section.Items.Count == 0 && !section.ShowSkeleton && !section.CanRetry),
+            "successful empty owner responses replace all old home snapshots");
+    }
+
     private static async Task DataPagination()
     {
         var source = new PagedFilmSource();
@@ -214,10 +310,10 @@ public static class FilmHomeTests
         Check(module.IsData && !module.IsHome && module.Heading == "影片数据" &&
             module.ActiveData.Key == "tv" && module.ActiveData.Title == "热门剧集",
             "data route publishes the selected context");
-        Check(module.ActiveData.Items.Count == 24, "the seed is supplemented to the first 24 cards");
+        Check(module.ActiveData.Items.Count == 24, "the seed is revalidated and completed to the first 24 cards");
         Check(source.Calls.Where(call => call.Key == "tv")
             .Select(call => (call.Start, call.Limit))
-            .SequenceEqual([(0, 12), (12, 12)]), "first page reuses the seed without refetching it");
+            .SequenceEqual([(0, 12), (0, 24)]), "the first category range is checked by the owner despite a home snapshot");
 
         await module.LoadMoreDataAsync();
         Check(module.ActiveData.Items.Count == 48 &&
@@ -227,8 +323,9 @@ public static class FilmHomeTests
         await module.NavigateAsync(FilmCapability.HomeRoute, default);
         int cachedCalls = source.Calls.Count;
         await module.OpenDataAsync(tv);
-        Check(module.ActiveData.Items.Count == 48 && source.Calls.Count == cachedCalls,
-            "reopening a populated context reuses its cached data");
+        Check(module.ActiveData.Items.Count == 48 && source.Calls.Count == cachedCalls + 2 &&
+            source.Calls.TakeLast(2).Select(call => (call.Start, call.Limit)).SequenceEqual([(0, 24), (24, 24)]),
+            "reopening a populated context checks each loaded range without losing the full display");
 
         foreach (var home in module.Sections.Where(section => section.Key != "tv"))
         {
@@ -237,22 +334,22 @@ public static class FilmHomeTests
             Check(module.ActiveData.Key == home.Key && module.ActiveData.Title == home.Title &&
                 module.ActiveData.Items.Count == 24,
                 $"data context {home.Key} uses its matching title and cache");
-            Check(source.Calls.Last() is { Start: 12, Limit: 12 } call && call.Key == home.Key,
-                $"data context {home.Key} supplements its own seed");
+            Check(source.Calls.Last() is { Start: 0, Limit: 24 } call && call.Key == home.Key,
+                $"data context {home.Key} revalidates its own first range");
         }
 
         var retrySource = new PagedFilmSource();
         await using var retryModule = new FilmCapability(retrySource);
         await retryModule.NavigateAsync(FilmCapability.HomeRoute, default);
-        retrySource.FailOnce("movie", 12);
+        retrySource.FailOnce("movie", 0);
         await retryModule.OpenDataAsync(retryModule.Sections[0]);
         Check(retryModule.ActiveData.Items.Count == 12 &&
             retryModule.ActiveData.PageActionText == "重试" && retryModule.ActiveData.CanPage,
-            "a failed supplement retains the seed and exposes retry");
+            "a failed first-range check retains the seed and exposes retry");
         await retryModule.LoadMoreDataAsync();
         Check(retryModule.ActiveData.Items.Count == 24 &&
-            retrySource.Calls.Last() is { Key: "movie", Start: 12, Limit: 12 },
-            "retry completes the original first-page range");
+            retrySource.Calls.Last() is { Key: "movie", Start: 0, Limit: 24, Section.Refresh: true },
+            "retry forces and completes the original first-page range");
 
         retrySource.FailOnce("movie", 24);
         await retryModule.LoadMoreDataAsync();
@@ -428,8 +525,8 @@ public static class FilmHomeTests
         await home;
         var data = draining.OpenDataAsync();
         await drainingSource.WaitForCalls(5);
-        Check(drainingSource.Calls[4] is { Section.Key: "movie", Start: 12, Limit: 12 },
-            "settled home data seeds the pending data request");
+        Check(drainingSource.Calls[4] is { Section.Key: "movie", Start: 0, Limit: 24 },
+            "settled home data is shown while its category range is checked");
         var preparation = draining.PrepareShutdownAsync();
         Check(!preparation.IsCompleted, "shutdown waits for physical data-source settlement");
         drainingSource.CompleteRange(4, 1, "late");
@@ -480,24 +577,14 @@ public static class FilmHomeTests
         if (!value) throw new InvalidOperationException(message);
     }
 
-    private sealed class RecordingHandler : HttpMessageHandler
-    {
-        internal HttpRequestMessage? Request { get; private set; }
-
-        protected override Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request,
-            CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            Request = request;
-            const string payload = """
+    private const string HomePayload = """
                 {
                   "items": [
                     {
                       "id": 100,
                       "title": "第一部",
                       "pic": {
-                        "normal": "http://img1.doubanio.com/view/photo/s_ratio_poster/public/p100.jpg",
+                        "normal": "/v1/douban/images/view/photo/s_ratio_poster/public/p100.jpg",
                         "large": "https://img2.doubanio.com/ignored.jpg"
                       },
                       "rating": { "value": 8.6 }
@@ -517,23 +604,6 @@ public static class FilmHomeTests
                   ]
                 }
                 """;
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(payload, Encoding.UTF8, "application/json")
-            });
-        }
-    }
-
-    private sealed class StaticHandler(HttpResponseMessage response) : HttpMessageHandler
-    {
-        protected override Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request,
-            CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(response);
-        }
-    }
 
     private sealed record FilmCall(FilmSectionDefinition Section, int Start, int Limit)
     {

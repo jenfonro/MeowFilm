@@ -11,7 +11,7 @@
 
 ## 参考规则与分页例外
 
-清洗、正则、分组、代表项、相关度、TMDB 回退、去重、详情备注和排序直接适配 `meowfilm-server` 的固定提交 `934a03e5aeda7edbcef0cfb037734fed93bfe881`，不另定义近似算法。规则在客户端执行，通用运行器只负责取数与既有调用契约。
+清洗、正则、分组、代表项、相关度、TMDB 回退、去重、详情备注和排序直接适配 `meowfilm-server` 的固定提交 `934a03e5aeda7edbcef0cfb037734fed93bfe881`，不另定义近似算法。规则由 Node 影视 owner 通过共享 QuickJS-NG 0.18.0 执行，与设置预览及播放识别采用同一内核；客户端只消费投影和准确身份，不再执行正则或聚合。
 
 以下是相对参考的明确分页改动：
 
@@ -25,10 +25,10 @@
 
 ## TMDB 数据、配置与图片
 
-搜索与播放通过同一个 App 运行器的 `film.data.search`／`film.data.metadata` 读取内容，
+搜索会话与播放通过同一个 App 运行器的数据 owner 读取内容，底层保留 `film.data.search`／`film.data.metadata` 契约，
 共用[影视数据 owner](../../runtime/film-playback.md) 的缓存、完整度、配置代次和在途合并，
 不另建原生成功详情缓存。TMDB 设置与图片仍由
-[元数据模块](../../runtime/metadata-data.md) 持有；聚合规则仍在客户端。
+[元数据模块](../../runtime/metadata-data.md) 持有；聚合规则由 Node 规则 owner 保存。
 综合搜索使用 `/3/search/multi`、`{query:原查询,page:1,language:'zh-CN'}`、
 `imageSize:'w500'`；完整详情按原 `movie`／`tv` 类型与 ID 请求，
 使用 `{language:'zh-CN',append_to_response:'credits,similar,images'}`、
@@ -53,7 +53,9 @@ TMDB 图片以 `/v1/tmdb/images/...` 相对引用作为缓存身份，真正读�
 
 ## 搜索到播放／详情的交接
 
-点击时交接实际查询及会话范围、目标组和三类卡片身份、全部已加载所属来源，以及已取得的 TMDB 类型／ID和详情。交接必须进入真实播放／详情接收位置，不止定义无消费者的数据对象。
+客户端通过 `film.search.open({query,sources})` 创建会话，订阅 `/v1/film/events/{sessionId}` 的完整 `snapshot` 事件。每个快照同时包含 `cards/rawCards`，切换视图只选数组；`command` 的 `more/stop/resume` 控制取数，`release` 释放会话，断开事件连接不隐式停止搜索。`sequence/revision` 单调递增，重连先获得最新完整快照，不保留无限事件历史。每个会话固定启动时的规则快照，保存新规则只影响新任务。
+
+点击时以 `film.search.handoff({sessionId,selectionId,sources})` 获取实际查询、会话范围、目标、全部来源及已取得的 TMDB 资料。播放 open／`search.update` 携带 `searchReference:{sessionId,selectionId}`，由 Node 重读该选择的事实与固定规则；客户端不从展示标题推导目标或自制缓存种子。`displayKey` 为不透明标识，不拆解其中分组文本；派生文本遇到孤立 UTF16 码元沿规则文本协议用 UInt16 数组传输，原始 `raw` 不改写。交接必须进入真实播放／详情接收位置，不止定义无消费者的数据对象。
 
 - 聚合不能仅剩代表项；后续已加载页的成员不能丢失。
 - 原始列表点击保持原单源身份，不扩大为聚合，也不冒用 TMDB 简介。

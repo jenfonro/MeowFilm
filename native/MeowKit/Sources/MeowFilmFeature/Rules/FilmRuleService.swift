@@ -1,40 +1,32 @@
 import Foundation
-import MeowJavaScript
-import MeowStorage
+import MeowRuntime
 
-/// Owns the engine and saved snapshot; borrows the app's namespace-scoped store.
-/// Business normalization and processing are performed exclusively by shared JS.
+/// Borrows the App runtime. Node alone owns rules and their persisted document;
+/// this actor keeps only the last acknowledged presentation snapshot.
 public actor FilmRuleService {
-    public static let documentNamespace = "film.magic-rules.v1"
-    public static let documentKey = "rules"
-
-    private let engine: any JavaScriptJSONEngine
-    private let store: DocumentStore
+    public typealias Request = @Sendable (String, RuntimeValue) async throws -> RuntimeValue
+    private let request: Request
     private var saved: FilmRuleSet?
-    private var documentBytes: Data?
+    public private(set) var revision: RuntimeValue?
     private var tail: Task<Void, Never>?
     private var cancellations: [UUID: @Sendable () -> Void] = [:]
     private var preparation: Task<Void, Never>?
     private var preparationID = UUID()
     private var prepared = false
     private var clearing = false
+    private var clearWork: Task<FilmRuleSet, Error>?
     private var closed = false
     private var closing: Task<Void, Never>?
 
-    /// Injected engines use FilmRuleText's JSON representation for process
-    /// results: scalar strings or exact UInt16 arrays, never lossy replacements.
-    public init(engine: any JavaScriptJSONEngine, store: DocumentStore) {
-        self.engine = engine
-        self.store = store
+    public init(connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
+        let transport = FilmPlaybackTransport(connectionProvider: connection)
+        request = { try await transport.call($0, parameters: $1) }
     }
 
-    public init(store: DocumentStore) throws {
-        self.engine = NativeJavaScriptJSONEngine(source: try FilmRuleNativeProgram.load())
-        self.store = store
-    }
+    public init(request: @escaping Request) { self.request = request }
 
     public func initialize() async throws {
-        try await run { service in try await service.initializeCore() }
+        try await run { service in try await service.refresh() }
     }
 
     public func savedSnapshot() throws -> FilmRuleSet {
@@ -46,39 +38,38 @@ public actor FilmRuleService {
     /// Saves all four groups, including other sections' pending edits.
     public func save(_ draft: FilmRuleSet) async throws -> FilmRuleSet {
         try await run { service in
-            try await service.initializeCore()
-            let receipt: Receipt = try await service.invoke(Command(operation: "save", rules: draft))
-            return try service.commit(receipt)
+            try await service.commit("rules.set", fields: ["rules": try Self.value(draft)])
         }
     }
 
     public func restoreDefaults(_ section: FilmRuleSection, draft: FilmRuleSet? = nil) async throws -> FilmRuleSet {
         try await run { service in
-            try await service.initializeCore()
-            let receipt: Receipt = try await service.invoke(Command(
-                operation: "restore", rules: draft ?? service.saved, section: section))
-            return try service.commit(receipt)
+            var fields: RuntimeObject = ["section": .string(section.rawValue)]
+            fields["rules"] = try draft.map(Self.value)
+            return try await service.commit("rules.restore", fields: fields)
         }
     }
 
-    /// The editor and business consumers use the same entry point. A supplied
-    /// draft does not initialize, read or persist the saved document.
+    /// Preview goes directly to Node, with no preliminary get or local execution.
+    /// A supplied draft never changes the acknowledged saved snapshot.
     public func process(_ request: FilmRuleRequest, draft: FilmRuleSet? = nil) async throws -> FilmRuleResult {
         try await run { service in
-            if draft == nil { try await service.initializeCore() }
-            return try await service.invoke(Command(operation: "process", rules: draft ?? service.saved, request: request))
+            var fields: RuntimeObject = ["request": try Self.value(request)]
+            fields["rules"] = try draft.map(Self.value)
+            return try await service.invoke("rules.preview", fields: fields)
         }
     }
 
     public func normalizeNewMatchRule(_ pattern: String, replace: String = "") async throws -> FilmMatchRule? {
         try await run { service in
-            try await service.invoke(Command(operation: "newMatch", pattern: pattern, replace: replace))
+            try await service.invoke("rules.normalize", fields: ["kind": .string("match"),
+                "pattern": .string(pattern), "replace": .string(replace)])
         }
     }
 
     public func normalizeNewCleanRule(_ pattern: String) async throws -> String {
         try await run { service in
-            try await service.invoke(Command(operation: "newClean", pattern: pattern))
+            try await service.invoke("rules.normalize", fields: ["kind": .string("clean"), "pattern": .string(pattern)])
         }
     }
 
@@ -86,8 +77,11 @@ public actor FilmRuleService {
     /// cannot shorten the drain or authorize an early resume.
     public func prepareShutdown() async {
         let drain = beginPreparation()
+        preparationID = UUID()
         let id = preparationID
+        clearWork?.cancel()
         await drain.value
+        _ = await clearWork?.result
         if preparation != nil, preparationID == id { prepared = true }
     }
 
@@ -105,72 +99,73 @@ public actor FilmRuleService {
         guard !closed else { throw FilmRuleServiceError.closed }
         guard preparation == nil else { throw FilmRuleServiceError.shuttingDown }
         clearing = true
-        defer { clearing = false }
-        await prepareShutdown()
-        guard !closed else { throw FilmRuleServiceError.closed }
+        let drain = beginPreparation(), id = preparationID
         defer {
-            preparation = nil
-            prepared = false
+            clearing = false
+            if preparationID == id {
+                preparation = nil
+                prepared = false
+            }
+            clearWork = nil
         }
-        try store.remove(key: Self.documentKey)
-        documentBytes = nil
-        saved = nil
+        await drain.value
+        guard !closed else { throw FilmRuleServiceError.closed }
+        guard preparationID == id else { throw FilmRuleServiceError.shuttingDown }
+        try Task.checkCancellation()
+        // The RPC is admitted only after the old client work physically drains.
+        // An acknowledged clear publishes Node's fresh default snapshot.
+        let work = Task { try await self.commit("rules.clear", fields: [:]) }
+        clearWork = work
+        _ = try await withTaskCancellationHandler {
+            try await work.value
+        } onCancel: { work.cancel() }
     }
 
     public func close() async {
         if let closing { await closing.value; return }
         closed = true
         let drain = beginPreparation()
-        let engine = engine
-        let task = Task {
-            await drain.value
-            await engine.close()
-        }
+        let clear = clearWork
+        clear?.cancel()
+        let task = Task { await drain.value; _ = await clear?.result }
         closing = task
         await task.value
     }
 
-    private func initializeCore() async throws {
-        if saved != nil { return }
+    private func refresh() async throws {
+        _ = try await commit("rules.get", fields: [:])
+    }
+
+    private func commit(_ operation: String, fields: RuntimeObject) async throws -> FilmRuleSet {
+        let response = try await request(operation, .object(fields))
         try Task.checkCancellation()
-        let bytes = try store.read(key: Self.documentKey)
-        let document: Document?
-        do { document = try bytes.map { try JSONDecoder().decode(Document.self, from: $0) } }
-        catch { throw FilmRuleServiceError.corruptDocument }
-        let receipt: Receipt = try await invoke(Command(operation: "initialize", document: document))
-        guard let changed = receipt.changed else { throw FilmRuleServiceError.invalidEngineResponse }
-        var nextBytes = bytes
-        if changed {
-            let replacement = try JSONEncoder().encode(receipt.document)
-            try Task.checkCancellation()
-            try store.compareAndSwap(key: Self.documentKey, expected: bytes, replacement: replacement)
-            nextBytes = replacement
+        guard let receipt = response.filmObject, let rules = receipt["rules"],
+              let revision = receipt["revision"], revision != .null else {
+            throw FilmRuleServiceError.invalidResponse
         }
-        // There is no suspension between the acknowledged write and publishing
-        // its exact snapshot; accepted storage completion is never a rollback.
-        documentBytes = nextBytes
-        saved = receipt.rules
+        let snapshot: FilmRuleSet = try Self.decode(rules)
+        saved = snapshot
+        self.revision = revision
+        return snapshot
     }
 
-    private func commit(_ receipt: Receipt) throws -> FilmRuleSet {
-        let replacement = try JSONEncoder().encode(receipt.document)
+    private func invoke<Response: Decodable>(_ operation: String, fields: RuntimeObject) async throws -> Response {
+        let value = try await request(operation, .object(fields))
         try Task.checkCancellation()
-        try store.compareAndSwap(key: Self.documentKey, expected: documentBytes, replacement: replacement)
-        documentBytes = replacement
-        saved = receipt.rules
-        return receipt.rules
+        return try Self.decode(value)
     }
 
-    private func invoke<Response: Decodable>(_ command: Command) async throws -> Response {
-        try Task.checkCancellation()
-        let response = try await engine.invoke(JSONEncoder().encode(command))
-        try Task.checkCancellation()
-        do { return try JSONDecoder().decode(Response.self, from: response) }
-        catch { throw FilmRuleServiceError.invalidEngineResponse }
+    private static func value<Value: Encodable>(_ value: Value) throws -> RuntimeValue {
+        try RuntimeJSON.decode(JSONEncoder().encode(value))
     }
 
-    /// Actor reentrancy alone would allow saves to overtake each other at an
-    /// engine await. The task chain serializes the whole operation, including CAS.
+    private static func decode<Value: Decodable>(_ value: RuntimeValue) throws -> Value {
+        do { return try JSONDecoder().decode(Value.self, from: RuntimeJSON.encode(value)) }
+        catch { throw FilmRuleServiceError.invalidResponse }
+    }
+
+    /// Serialize accepted client edits and their display receipts. Persistence,
+    /// concurrent owners and task rule snapshots are managed exclusively by Node.
     private func run<Value: Sendable>(
         _ operation: @escaping @Sendable (isolated FilmRuleService) async throws -> Value
     ) async throws -> Value {
@@ -204,27 +199,4 @@ public actor FilmRuleService {
         return drain
     }
 
-    private struct Command: Encodable {
-        let operation: String
-        var rules: FilmRuleSet? = nil
-        var section: FilmRuleSection? = nil
-        var request: FilmRuleRequest? = nil
-        var pattern: String? = nil
-        var replace: String? = nil
-        var document: Document? = nil
-    }
-
-    /// Persisted matching rows are encoded strings, not the editor's objects.
-    private struct Document: Codable {
-        let episodeCleanRegexRules: [String]
-        let episodeRules: [String]
-        let movieRules: [String]
-        let aggregateRegexRules: [String]
-    }
-
-    private struct Receipt: Decodable {
-        let document: Document
-        let rules: FilmRuleSet
-        let changed: Bool?
-    }
 }

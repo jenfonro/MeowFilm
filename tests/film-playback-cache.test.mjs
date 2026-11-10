@@ -634,3 +634,50 @@ test('E24/E48: JSON optional undefined object fields are omitted, but undefined 
     assert.equal(cache.read('bad-array'), undefined);
   }
 });
+
+test('F4 retained stale success remains available after expiry and failed refresh without changing its data', async t => {
+  let now = 1000;
+  const cache = createPlaybackCache({ now: () => now });
+  t.after(() => cache.close());
+  await cache.load('metadata', () => ({ title: 'old', fetchedAt: now }),
+    options({ retainStale: true, ttl: 100 }));
+  now = 1100;
+  assert.equal(cache.read('metadata'), undefined);
+  assert.deepEqual(cache.read('metadata', { allowStale: true }), { title: 'old', fetchedAt: 1000 });
+  await rejection(cache.load('metadata', () => { throw Object.assign(new Error('synthetic'), { code: 'TIMEOUT' }); },
+    options({ retainStale: true, ttl: 100, refresh: true })), 'TIMEOUT');
+  assert.deepEqual(cache.read('metadata', { allowStale: true }), { title: 'old', fetchedAt: 1000 });
+});
+
+test('F5 revoked/closed work has no publication authority even when its producer ignores cancellation', async () => {
+  for (const operation of ['invalidate', 'close']) {
+    const cache = createPlaybackCache(), gate = deferred();
+    const published = [];
+    const work = cache.load('metadata', () => gate.promise, options({ publish: value => published.push(value) }));
+    const cancelled = rejection(work, 'CANCELLED');
+    await turn();
+    let drained = false;
+    const draining = cache[operation]().then(() => { drained = true; });
+    await cancelled;
+    assert.equal(drained, false);
+    gate.resolve({ title: 'late' });
+    await draining;
+    assert.deepEqual(published, []);
+    await cache.close();
+  }
+});
+
+test('F4/F5 forced refresh merges current work and publishes before returning even when memory cannot retain it', async t => {
+  const cache = createPlaybackCache({ maximumBytes: 1000 });
+  t.after(() => cache.close());
+  const gate = deferred(), published = [];
+  await cache.load('metadata', () => [1], options());
+  const settings = options({ refresh: true, publish: value => published.push(value) });
+  const first = cache.load('metadata', () => gate.promise, settings);
+  const second = cache.load('metadata', () => assert.fail('duplicate refresh'), settings);
+  const value = Array.from({ length: 2000 }, (_, index) => index);
+  gate.resolve(value);
+  assert.deepEqual(await first, value);
+  assert.deepEqual(await second, value);
+  assert.deepEqual(published, [value]);
+});

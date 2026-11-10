@@ -31,7 +31,6 @@ check_tests() {
 }
 arch="$(uname -m)"
 if [ "$phase" = test ]; then
-  logged javascript-source "${MEOWFILM_BUILD_NODE:-node}" scripts/verify-native-javascript.mjs || exit 4
   logged video-kernel python3 -I -B scripts/prepare-ios-video-kernel.py --target "macos-$arch" || exit 4
   logged swift-test swift test --package-path native/MeowKit -j 2 --filter "$2" || status=4
   check_tests

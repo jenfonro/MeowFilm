@@ -64,7 +64,7 @@ public static class RuntimeHttpClientTests
                 await exchange.ReplyAsync(Success(Description(), RuntimeHttpProtocol.Name));
             }
             var declared = RuntimeHttpProtocol.ValidateDescription((await describe).GetProperty("value"), "aggregate", Modules);
-            BridgeTests.Equal(66, declared.Count);
+            BridgeTests.Equal(79, declared.Count);
             var close = client.ShutdownAsync();
             await using (var exchange = await server.AcceptAsync())
             {
@@ -172,7 +172,8 @@ public static class RuntimeHttpClientTests
                 ("douban.data.settings.get", "/v1/douban/settings.get", "douban.data.v1", "WEB_INTERACTION_REQUIRED", "AUTH_REQUIRED"),
                 ("film.library.get", "/v1/film/library.get", "film.playback.v1", "STORAGE_CHANGED", "SOURCE_CLEANUP"),
                 ("film.library.remove", "/v1/film/library.remove", "film.playback.v1", "LIBRARY_UPDATE_FAILED", "SOURCE_CLEANUP"),
-                ("film.session.media.release", "/v1/film/session.media.release", "film.playback.v1", "MEDIA_CLOSE_FAILED", "SOURCE_CLEANUP")
+                ("film.session.media.release", "/v1/film/session.media.release", "film.playback.v1", "MEDIA_CLOSE_FAILED", "SOURCE_CLEANUP"),
+                ("film.rules.preview", "/v1/film/rules.preview", "film.playback.v1", "RESOURCE_LIMIT", "SOURCE_CLEANUP")
             })
             {
                 var input = new { id = "fixture-lease" };
@@ -404,7 +405,10 @@ public static class RuntimeHttpClientTests
                 "film.session.open", "film.session.command", "film.session.snapshot", "film.session.release",
                 "film.session.attempt", "film.session.media.release", "film.settings.get", "film.settings.set",
                 "film.library.get", "film.library.remove", "film.manual.update",
-                "film.data.search", "film.data.detail", "film.data.metadata", "film.data.cache.entry", "film.data.invalidate"
+                "film.data.catalog", "film.data.search", "film.data.detail", "film.data.metadata",
+                "film.data.metadata.entry", "film.data.cache.entry", "film.data.invalidate",
+                "film.rules.get", "film.rules.set", "film.rules.restore", "film.rules.preview", "film.rules.normalize", "film.rules.clear",
+                "film.search.open", "film.search.snapshot", "film.search.command", "film.search.release", "film.search.handoff"
             } }
         }
     };

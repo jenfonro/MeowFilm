@@ -188,7 +188,8 @@ final class RuntimeHTTPClientTests: XCTestCase {
             (.pan, "providers", "pan.runtime.v1", "LOGIN_EXPIRED", "NO_MATCH"),
             (.tmdb, "settings.get", "tmdb.data.v1", "NETWORK_ERROR", "PAN_FAILURE"),
             (.douban, "settings.get", "douban.data.v1", "WEB_INTERACTION_REQUIRED", "AUTH_REQUIRED"),
-            (.film, "library.get", "film.playback.v1", "MEDIA_DRM_UNSUPPORTED", "SOURCE_CLEANUP")
+            (.film, "library.get", "film.playback.v1", "MEDIA_DRM_UNSUPPORTED", "SOURCE_CLEANUP"),
+            (.film, "rules.preview", "film.playback.v1", "RESOURCE_LIMIT", "SOURCE_CLEANUP")
         ] {
             RuntimeTestURLProtocol.fixture.set { request, transport in
                 XCTAssertEqual(request.url?.path, "/v1/\(module.rawValue)/\(operation)")

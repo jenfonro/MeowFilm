@@ -1,6 +1,7 @@
 {
   "variables": {
     "runtime_native": "../../tmp/build/runtime-native",
+    "quickjs_source": "../../native/JavaScript/quickjs",
     "openssl_library%": "../../tmp/build/runtime-native/openssl-build/libcrypto.a"
   },
   "target_defaults": {
@@ -35,12 +36,12 @@
       "target_name": "quickjs",
       "type": "static_library",
       "defines": ["QUICKJS_NG_BUILD"],
-      "include_dirs": ["<(runtime_native)/quickjs"],
+      "include_dirs": ["<(quickjs_source)"],
       "sources": [
-        "<(runtime_native)/quickjs/quickjs.c",
-        "<(runtime_native)/quickjs/dtoa.c",
-        "<(runtime_native)/quickjs/libregexp.c",
-        "<(runtime_native)/quickjs/libunicode.c"
+        "<(quickjs_source)/quickjs.c",
+        "<(quickjs_source)/dtoa.c",
+        "<(quickjs_source)/libregexp.c",
+        "<(quickjs_source)/libunicode.c"
       ]
     },
     {
@@ -68,7 +69,7 @@
         "<(runtime_native)/openssl/include"
       ],
       "include_dirs": [
-        "<(runtime_native)/quickjs",
+        "<(quickjs_source)",
         "<(runtime_native)/zlib"
       ],
       "sources": ["native/addon.cc", "native/engine.cc", "native/value.cc", "native/algorithms.cc"],
@@ -86,6 +87,7 @@
           }
         }],
         ["OS=='win'", {
+          "defines!": ["_HAS_EXCEPTIONS=0"],
           "msvs_settings": {
             "VCCLCompilerTool": { "RuntimeTypeInfo": "true" }
           },

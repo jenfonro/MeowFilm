@@ -8,11 +8,28 @@ import MeowRuntime
 
 @MainActor
 final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
+    private var mountedWindows: [(page: UIViewController, window: UIWindow, previousKeyWindow: UIWindow?)] = []
     private let firstID = String(repeating: "a", count: 64)
     private let secondID = String(repeating: "b", count: 64)
     private let otherLineID = String(repeating: "c", count: 64)
     private let otherSourceID = String(repeating: "d", count: 64)
     private let seasonTwoID = String(repeating: "e", count: 64)
+
+    override func setUp() async throws {
+        try await super.setUp()
+        addTeardownBlock {
+            await MainActor.run {
+                while let mounted = self.mountedWindows.last {
+                    self.unmount(mounted.page, mounted.window)
+                }
+            }
+        }
+        try await runnerAction { $0.activate() }
+        try await waitFor("Runner and scene are really foreground active") {
+            UIApplication.shared.applicationState == .active &&
+                UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
+        }
+    }
 
     func testPrimaryPlayKeepsExactSecondFromCurrentPreparedAttemptOrRawTarget() async throws {
         for proof in SelectionProof.allCases {
@@ -38,14 +55,17 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             let model = try makeModel(server, media, fields: fields)
             await model.open()?.value
             let before = try XCTUnwrap(model.snapshot)
-            let page = try detailPage(model), window = mount(page)
+            let page = try detailPage(model), window = try mount(page)
             defer { unmount(page, window) }
             var presentations = 0
             page.onPresentPlayback = { presentations += 1 }
-            await visible(page)
+            try await visible(page)
+            await model.waitForPendingWork()
 
             let initial = await server.calls()
-            XCTAssertEqual(initial.map(\.operation), ["session.open"], "\(proof)")
+            XCTAssertEqual(initial.map(\.operation), ["session.open", "session.command"], "\(proof)")
+            XCTAssertEqual(initial.compactMap(\.action), ["browse.refresh"])
+            XCTAssertEqual(initial.last?.input.filmObject?["refresh"], .bool(false))
             XCTAssertNotNil(find("film.file.second", page.view))
             let play = try button("film.detail.play", page.view)
             XCTAssertTrue(play.isEnabled)
@@ -53,7 +73,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             await model.waitForPendingWork()
 
             let commands = await server.calls().filter { $0.operation == "session.command" }
-            XCTAssertEqual(commands.compactMap(\.action), ["select.candidate"], "\(proof)")
+            XCTAssertEqual(commands.compactMap(\.action), ["browse.refresh", "select.candidate"], "\(proof)")
             XCTAssertEqual(commands.last?.input.filmObject?["candidateId"], .string(secondID), "\(proof)")
             XCTAssertEqual(model.snapshot?.current, before.current, "The page must not manufacture a new current")
             XCTAssertEqual(model.snapshot?.target, before.target)
@@ -77,11 +97,12 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             let model = try makeModel(server, media, fields: fields)
             await model.open()?.value
             let before = try XCTUnwrap(model.snapshot)
-            let page = try detailPage(model), window = mount(page)
+            let page = try detailPage(model), window = try mount(page)
             defer { unmount(page, window) }
             var presentations = 0
             page.onPresentPlayback = { presentations += 1 }
-            await visible(page)
+            try await visible(page)
+            await model.waitForPendingWork()
 
             let sourceID = destination == .line ? "result-a" : "result-other"
             let lineID: RuntimeValue = destination == .line ? .string("0") : .number(0)
@@ -97,7 +118,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
                 invoke(try menuAction("测试站 · 另一详情", button("film.detail.source", page.view).menu))
             }
             await model.waitForPendingWork()
-            await waitFor("The browsed list is rendered") { self.find("film.file.new-range", page.view) != nil }
+            try await waitFor("The browsed list is rendered") { self.find("film.file.new-range", page.view) != nil }
             let browsed = try XCTUnwrap(model.snapshot)
             XCTAssertEqual(browsed.browsing.sourceID, sourceID)
             XCTAssertEqual(browsed.browsing.lineID, destination == .line ? .string("0") : .number(0))
@@ -109,7 +130,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             XCTAssertTrue(media.inputs.isEmpty)
             XCTAssertEqual(presentations, 0, "Browsing alone must not open the player")
             let browseCalls = await server.calls()
-            XCTAssertEqual(browseCalls.map(\.operation), ["session.open", "session.command"])
+            XCTAssertEqual(browseCalls.map(\.operation), ["session.open", "session.command", "session.command"])
+            XCTAssertEqual(browseCalls.compactMap(\.action), ["browse.refresh", "browse"])
             XCTAssertEqual(browseCalls.last?.action, "browse")
             XCTAssertEqual(browseCalls.last?.input.filmObject?["sourceId"], .string(sourceID))
             XCTAssertEqual(browseCalls.last?.input.filmObject?["lineId"], destination == .line ? lineID : nil)
@@ -119,7 +141,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             play.sendActions(for: .touchUpInside)
             await model.waitForPendingWork()
             let commands = await server.calls().filter { $0.operation == "session.command" }
-            XCTAssertEqual(commands.compactMap(\.action), ["browse", "select.candidate"])
+            XCTAssertEqual(commands.compactMap(\.action), ["browse.refresh", "browse", "select.candidate"])
             XCTAssertEqual(commands.last?.input.filmObject?["candidateId"], .string(expectedID))
             XCTAssertEqual(model.snapshot?.current, before.current)
             XCTAssertTrue(media.inputs.isEmpty)
@@ -137,11 +159,12 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         let server = FilmUIKitPlaybackServer(.object(fields)), media = FilmUIKitPlaybackMedia()
         let model = try makeModel(server, media, fields: fields)
         await model.open()?.value
-        let page = try detailPage(model), window = mount(page)
+        let page = try detailPage(model), window = try mount(page)
         defer { unmount(page, window) }
         var presentations = 0
         page.onPresentPlayback = { presentations += 1 }
-        await visible(page)
+        try await visible(page)
+        await model.waitForPendingWork()
 
         let before = try XCTUnwrap(model.snapshot)
         XCTAssertNil(before.current); XCTAssertNil(before.attempt)
@@ -158,8 +181,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         await model.waitForPendingWork()
 
         let calls = await server.calls()
-        XCTAssertEqual(calls.map(\.operation), ["session.open", "session.command"])
-        XCTAssertEqual(calls.compactMap(\.action), ["select.candidate"])
+        XCTAssertEqual(calls.map(\.operation), ["session.open", "session.command", "session.command"])
+        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "select.candidate"])
         XCTAssertEqual(calls.last?.input.filmObject?["candidateId"], .string(firstID))
         XCTAssertNil(calls.last?.input.filmObject?["episode"])
         XCTAssertNil(model.snapshot?.current)
@@ -175,11 +198,12 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             let model = try makeModel(server, media, fields: fields)
             await model.open()?.value
             let before = try XCTUnwrap(model.snapshot)
-            let page = try detailPage(model), window = mount(page)
+            let page = try detailPage(model), window = try mount(page)
             defer { unmount(page, window) }
             var presentations = 0
             page.onPresentPlayback = { presentations += 1 }
-            await visible(page)
+            try await visible(page)
+            await model.waitForPendingWork()
             XCTAssertEqual(before.current?.candidate.position, FilmEpisodePosition(season: 1, episode: 2, globalEpisode: 2))
             XCTAssertEqual(before.target.position, .init(season: 1, episode: 2))
 
@@ -196,7 +220,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             await server.reply(to: "browse.season", with: .object(changed))
             invoke(try menuAction("第二季", button("film.detail.season", page.view).menu))
             await model.waitForPendingWork()
-            await waitFor("Season two is displayed without selecting an episode") {
+            try await waitFor("Season two is displayed without selecting an episode") {
                 (self.find("film.detail.season", page.view) as? UIButton)?.title(for: .normal) == "TMDB · 第二季"
             }
 
@@ -215,8 +239,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             XCTAssertTrue(media.inputs.isEmpty)
             XCTAssertEqual(presentations, 0)
             let browseCalls = await server.calls()
-            XCTAssertEqual(browseCalls.map(\.operation), ["session.open", "session.command"])
-            XCTAssertEqual(browseCalls.compactMap(\.action), ["browse.season"])
+            XCTAssertEqual(browseCalls.map(\.operation), ["session.open", "session.command", "session.command"])
+            XCTAssertEqual(browseCalls.compactMap(\.action), ["browse.refresh", "browse.season"])
             XCTAssertEqual(browseCalls.last?.input.filmObject?["season"], .number(2))
 
             let play = try button("film.detail.play", page.view)
@@ -225,7 +249,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             await model.waitForPendingWork()
 
             let commands = await server.calls().filter { $0.operation == "session.command" }
-            XCTAssertEqual(commands.compactMap(\.action), ["browse.season", "select.candidate"])
+            XCTAssertEqual(commands.compactMap(\.action), ["browse.refresh", "browse.season", "select.candidate"])
             XCTAssertEqual(commands.last?.input.filmObject?["candidateId"], .string(secondID))
             XCTAssertEqual(model.snapshot?.current, before.current)
             XCTAssertEqual(model.snapshot?.target, before.target)
@@ -260,11 +284,12 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             let model = try makeModel(server, media, fields: fields)
             await model.open()?.value
             let before = try XCTUnwrap(model.snapshot)
-            let page = try detailPage(model), window = mount(page)
+            let page = try detailPage(model), window = try mount(page)
             defer { unmount(page, window) }
             var presentations = 0
             page.onPresentPlayback = { presentations += 1 }
-            await visible(page)
+            try await visible(page)
+            await model.waitForPendingWork()
 
             XCTAssertFalse(before.previewEpisodes)
             XCTAssertTrue(before.browsing.files.isEmpty)
@@ -273,7 +298,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             play.sendActions(for: .touchUpInside)
             await model.waitForPendingWork()
             let calls = await server.calls()
-            XCTAssertEqual(calls.map(\.operation), ["session.open"], "\(unavailable)")
+            XCTAssertEqual(calls.map(\.operation), ["session.open", "session.command"], "\(unavailable)")
+            XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh"])
             XCTAssertEqual(model.snapshot?.current, before.current)
             XCTAssertEqual(model.snapshot?.target, before.target)
             XCTAssertTrue(media.inputs.isEmpty)
@@ -291,9 +317,10 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         let model = try makeModel(server, media, fields: fields)
         await model.open()?.value
         let before = try XCTUnwrap(model.snapshot)
-        let page = try detailPage(model), window = mount(page)
+        let page = try detailPage(model), window = try mount(page)
         defer { unmount(page, window) }
-        await visible(page)
+        try await visible(page)
+        await model.waitForPendingWork()
         var rejected = fields
         rejected["stage"] = .string("unavailable"); rejected["error"] = .string("NO_MATCH")
         await server.reply(to: "select.candidate", with: .object(rejected))
@@ -304,8 +331,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         await model.waitForPendingWork()
 
         let calls = await server.calls()
-        XCTAssertEqual(calls.map(\.operation), ["session.open", "session.command"])
-        XCTAssertEqual(calls.compactMap(\.action), ["select.candidate"])
+        XCTAssertEqual(calls.map(\.operation), ["session.open", "session.command", "session.command"])
+        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "select.candidate"])
         XCTAssertEqual(calls.last?.input.filmObject?["candidateId"], .string(secondID))
         XCTAssertEqual(model.snapshot?.stage, "unavailable")
         XCTAssertEqual(model.snapshot?.error, "NO_MATCH")
@@ -475,25 +502,53 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         let control = UIButton(type: .system)
         control.addAction(action, for: .touchUpInside); control.sendActions(for: .touchUpInside)
     }
-    private func mount(_ page: UIViewController) -> UIWindow {
-        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-        let window = scene.map(UIWindow.init(windowScene:)) ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+    private func mount(_ page: UIViewController) throws -> UIWindow {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first {
+            $0.activationState == .foregroundActive
+        }, "The activated runner must have a foreground scene")
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        mountedWindows.append((page, window, previous))
         window.rootViewController = page; window.makeKeyAndVisible(); window.layoutIfNeeded()
         page.view.layoutIfNeeded()
-        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
         return window
     }
     private func unmount(_ page: UIViewController, _ window: UIWindow) {
+        let index = mountedWindows.firstIndex { $0.window === window }!
+        let previous = mountedWindows.remove(at: index).previousKeyWindow
         PageViewController.invalidatePages(in: page); window.isHidden = true; window.rootViewController = nil
+        previous?.makeKey()
     }
-    private func visible(_ page: PageViewController) async {
-        await waitFor("The detail page is visible") { page.isPageVisible && page.canPresentPageAlert }
+    private func visible(_ page: PageViewController) async throws {
+        try await waitFor("The detail page is visible in the real active key window") {
+            UIApplication.shared.applicationState == .active &&
+                page.view.window?.windowScene?.activationState == .foregroundActive &&
+                page.view.window?.isKeyWindow == true && page.isPageVisible && page.canPresentPageAlert
+        }
     }
-    private func waitFor(_ description: String, _ predicate: @escaping @MainActor () -> Bool) async {
+    private enum FixtureFailure: Error { case prerequisite(String) }
+    private func waitFor(_ description: String, file: StaticString = #filePath, line: UInt = #line,
+                         _ predicate: @escaping @MainActor () -> Bool) async throws {
         let ready = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated { predicate() } },
                                 evaluatedWith: nil)
         let result = await XCTWaiter.fulfillment(of: [ready], timeout: 4)
-        XCTAssertEqual(result, .completed, description)
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.map { scene in
+            "activation=\(scene.activationState.rawValue), windows=\(scene.windows.map { "key=\($0.isKeyWindow), hidden=\($0.isHidden)" })"
+        }
+        XCTAssertEqual(result, .completed,
+                       "\(description); application=\(UIApplication.shared.applicationState.rawValue), scenes=\(scenes)",
+                       file: file, line: line)
+        if result != .completed { throw FixtureFailure.prerequisite(description) }
+    }
+    private func runnerAction(_ action: @escaping @MainActor (XCUIApplication) -> Void) async throws {
+        let identifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
+        await withCheckedContinuation { continuation in
+            RunLoop.main.perform {
+                MainActor.assumeIsolated { action(XCUIApplication(bundleIdentifier: identifier)) }
+                continuation.resume()
+            }
+        }
     }
 }
 

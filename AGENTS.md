@@ -1,8 +1,8 @@
 # AGENTS.md
 
 meowfilm 的 iPhone 与 Windows 原生客户端：
-- iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供原生业务、平台、账号、播放和持久化能力。公共 Node 运行器随 App 启动恢复启用猫源，并持有影视智能播放、业务数据缓存与本地播放资料；客户端影视规则静态链接原生 QuickJS。
-- Windows：WPF / .NET 原生桌面应用；公共 Node 运行器随 App 启动，影视使用同一智能播放与数据契约，音乐脚本仅在启用、调用或显式检测时执行。既有原生音乐、本地收藏和规则管理不因新增影视业务而依赖运行器；客户端影视规则内嵌原生 QuickJS。
+- iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供原生业务、平台、账号、播放和持久化能力。公共 Node 运行器随 App 启动恢复启用猫源，并持有影视规则、搜索、智能播放、业务数据缓存与本地播放资料。
+- Windows：WPF / .NET 原生桌面应用；公共 Node 运行器随 App 启动，影视使用同一规则、搜索、智能播放与数据契约，音乐脚本仅在启用、调用或显式检测时执行。既有原生音乐和本地收藏不因影视业务而迁入运行器。
 
 ## 命令
 
@@ -37,8 +37,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 ```
 
 - 需要 PATH 上的 .NET SDK（10 或更高）、Node.js、npm 与 Git；参考环境为 .NET SDK 10.0.402、Node.js 24.21.0。
-- 原生规则引擎需要 CMake 3.20+ 和 Windows C 编译器（MSVC，或通过标准 CMake 环境选择的工具链）；源码随仓库锁定，普通增量构建自动生成 DLL，不下载依赖或使用预编译来源不明的二进制。
-- 通用脚本宿主的 Node addon 还需要 Python、Perl、NASM 与 MSVC x64 开发环境（`cl`／`nmake` 在 PATH）；首次构建按 `scripts/script-host-native.json` 下载校验依赖，后续复用默认缓存。
+- 通用脚本宿主与影视规则共用 Node addon，需要 Python、Perl、NASM 与 MSVC x64 开发环境（`cl`／`nmake` 在 PATH）；首次构建按 `scripts/script-host-native.json` 下载校验依赖，后续复用默认缓存。
 - 随 App 发布的 Node 运行时由 `scripts/windows/node-runtime.json` 锁定，并与 `LICENSES/node-LICENSE.txt` 对应；构建时 PATH 上的 `node.exe` 须与其一致。
 - 默认完整发布目录自带 Node、引擎依赖和 .NET，不要求目标电脑安装开发工具；`-FrameworkDependent` 另需系统 .NET Desktop Runtime。
 
@@ -73,8 +72,8 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层
 - `packages/runtime-bridge/` — runtime.http.v1 完整 HTTP 请求／响应、取消与连接生命周期
 - `packages/pan-runtime/` — 内置网盘账号、分享与取址能力；同进程异步 I/O，不创建脚本执行环境
-- `packages/film-playback/` — 影视智能会话、唯一业务数据缓存、本地历史/人工匹配/屏蔽/偏好，以及受控二进制媒体流；不复制原生收藏或图片缓存
-- `packages/film-search/` — 双端客户端共享的影视搜索整合规则资源，由各自原生 QuickJS 执行；不在通用运行器聚合搜索
+- `packages/film-playback/` — 影视规则配置、搜索/智能播放会话、唯一业务数据缓存、本地历史/人工匹配/屏蔽/偏好，以及受控二进制媒体流；不复制原生收藏或图片缓存
+- `packages/film-rules/`、`packages/film-search/` — Node 影视 owner 使用的纯计算程序，共用宿主 QuickJS-NG；不在客户端执行或持久化规则
 - `scripts/` — iOS 工程生成、结构检查、测试、构建打包与发布，`scripts/tests/` 为脚本测试；Node 共用工具
 - `scripts/windows/` — Windows 构建、测试、打包与结构检查
 - `tests/` — Node 测试
@@ -137,7 +136,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - 按风险覆盖实际受影响的契约与消费者：编译、静态检查、单元、组件或集成测试；必要时覆盖失败、取消、恢复和资源释放路径。
 - 可机械核对的目录、依赖和契约约束接入 `scripts`（Windows 为 `scripts/windows`）中的现有检查。
 - 通用运行器原生引擎仅按 `scripts/script-host-native.json` 的精确来源、版本、ABI／架构、补丁、根锁、构建输入及文件／许可哈希放行；用 `node scripts/quickjs/build-native.mjs` 构建，再由 `scripts/package-runtime.mjs --product aggregate --profile common-native --output <absolute-directory>` 复制受信产物。无 WASM／asm.js 回退；其他 native/WASM 仍拒绝，打包不安装／修锁。平台包装尚未迁移时，不将通用运行器通过表述为平台 App 通过。
-- 客户端影视规则引擎独立按 `scripts/quickjs-native.json` 锁定源码与许可，通过 `native/JavaScript` 薄 C ABI 构建；不属于 Node 脚本宿主闭包，也不放宽通用打包的二进制策略。
+- 影视纯计算与第三方脚本共用锁定的 QuickJS-NG 0.18.0 源码、Unicode 表及平台载体，但 Runtime/Context、线程和生命周期独立；影视通过 `NativeJsonProgram` 使用 JSON 字符串边界，客户端不再链接第二份引擎。
 - iOS 脚本引擎使用 App 内置 `MeowScriptHost.framework`，复用通用原生核心与固定依赖，构建目标明确区分 device／simulator。原生载体随 App 签名；构建回执、内置身份和 JS／SDK 清单不能用签名前 Mach-O 全文件 hash 代替安装后签名边界，也不能据此放宽桌面 `.node` 校验。
 - 长期测试验证现行行为与契约；删除／重构后的旧实现及引用清理检查只做当次验证，通过后移除，不堆入长期测试。功能、安全、取消与资源释放等有效回归保留。
 - 编译成功、测试替身和真实业务验证分别记录，不互相冒充；不为刷绿删除有效断言、隐藏失败或用空测试集代替验证。

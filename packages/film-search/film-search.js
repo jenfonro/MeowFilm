@@ -1,5 +1,5 @@
 // Search algorithms adapted from meowfilm-server 934a03e5aeda7edbcef0cfb037734fed93bfe881.
-// Native JSON hosts own I/O, sessions, pagination and cancellation. See README.md.
+// The Node search owner handles I/O, sessions, pagination and cancellation. See README.md.
 (() => {
 'use strict';
 

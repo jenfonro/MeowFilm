@@ -392,6 +392,10 @@ struct JSRuntime {
     void *host_promise_rejection_tracker_opaque;
 
     struct list_head job_list; /* list of JSJobEntry.link */
+    JSHostTaskContext *host_task;
+    JSHostTaskContext *host_execution_task;
+    JSHostTaskContext *host_execution_owner;
+    JSHostExecutionOwnerSelector *host_execution_owner_selector;
 
     bool module_normalize_has_attr;
     union {
@@ -1072,10 +1076,18 @@ struct JSModuleDef {
     JSValue private_value; /* private value for C modules */
 };
 
+struct JSHostTaskContext {
+    size_t ref_count;
+    void *opaque;
+    JSHostTaskFinalizer *finalizer;
+};
+
 typedef struct JSJobEntry {
     struct list_head link;
     JSContext *ctx;
     JSJobFunc *job_func;
+    JSHostTaskContext *host_task;
+    JSHostTaskContext *execution_task;
     int argc;
     JSValue argv[];
 } JSJobEntry;
@@ -2486,9 +2498,78 @@ void JS_SetSharedArrayBufferFunctions(JSRuntime *rt,
     rt->sab_funcs = *sf;
 }
 
-/* return 0 if OK, < 0 if exception */
-int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
-                  int argc, JSValueConst *argv)
+JSHostTaskContext *JS_NewHostTaskContext(JSRuntime *rt, void *opaque,
+                                         JSHostTaskFinalizer *finalizer)
+{
+    JSHostTaskContext *task = js_malloc_rt(rt, sizeof(*task));
+    if (!task)
+        return NULL;
+    task->ref_count = 1;
+    task->opaque = opaque;
+    task->finalizer = finalizer;
+    return task;
+}
+
+JSHostTaskContext *JS_DupHostTaskContext(JSHostTaskContext *task)
+{
+    if (task)
+        task->ref_count++;
+    return task;
+}
+
+void JS_FreeHostTaskContext(JSRuntime *rt, JSHostTaskContext *task)
+{
+    if (task && --task->ref_count == 0) {
+        if (task->finalizer)
+            task->finalizer(task->opaque);
+        js_free_rt(rt, task);
+    }
+}
+
+void *JS_GetHostTaskOpaque(JSHostTaskContext *task)
+{
+    return task ? task->opaque : NULL;
+}
+
+JSHostTaskContext *JS_GetHostTaskContext(JSRuntime *rt)
+{
+    return rt->host_task;
+}
+
+void JS_SetHostTaskContext(JSRuntime *rt, JSHostTaskContext *task)
+{
+    JSHostTaskContext *previous = rt->host_task;
+    rt->host_task = JS_DupHostTaskContext(task);
+    JS_FreeHostTaskContext(rt, previous);
+}
+
+void JS_SetHostExecutionContext(JSRuntime *rt, JSHostTaskContext *task)
+{
+    JSHostTaskContext *previous = rt->host_execution_task;
+    rt->host_execution_task = JS_DupHostTaskContext(task);
+    JS_FreeHostTaskContext(rt, previous);
+}
+
+JSHostTaskContext *JS_GetHostExecutionOwner(JSRuntime *rt)
+{
+    return rt->host_execution_owner;
+}
+
+void JS_SetHostExecutionOwner(JSRuntime *rt, JSHostTaskContext *task)
+{
+    JSHostTaskContext *previous = rt->host_execution_owner;
+    rt->host_execution_owner = JS_DupHostTaskContext(task);
+    JS_FreeHostTaskContext(rt, previous);
+}
+
+void JS_SetHostExecutionOwnerSelector(JSRuntime *rt, JSHostExecutionOwnerSelector *selector)
+{
+    rt->host_execution_owner_selector = selector;
+}
+
+static int js_enqueue_job_with_task(JSContext *ctx, JSJobFunc *job_func,
+                                    int argc, JSValueConst *argv,
+                                    JSHostTaskContext *task)
 {
     JSRuntime *rt = ctx->rt;
     JSJobEntry *e;
@@ -2501,12 +2582,34 @@ int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
         return -1;
     e->ctx = ctx;
     e->job_func = job_func;
+    e->host_task = JS_DupHostTaskContext(task);
+    e->execution_task = JS_DupHostTaskContext(rt->host_execution_task ? rt->host_execution_task : task);
     e->argc = argc;
     for(i = 0; i < argc; i++) {
         e->argv[i] = js_dup(argv[i]);
     }
     list_add_tail(&e->link, &rt->job_list);
     return 0;
+}
+
+int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
+                  int argc, JSValueConst *argv)
+{
+    return js_enqueue_job_with_task(ctx, job_func, argc, argv, ctx->rt->host_task);
+}
+
+JSHostTaskContext *JS_GetPendingJobTaskContext(JSRuntime *rt)
+{
+    if (list_empty(&rt->job_list))
+        return NULL;
+    return list_entry(rt->job_list.next, JSJobEntry, link)->host_task;
+}
+
+JSHostTaskContext *JS_GetPendingJobExecutionContext(JSRuntime *rt)
+{
+    if (list_empty(&rt->job_list))
+        return NULL;
+    return list_entry(rt->job_list.next, JSJobEntry, link)->execution_task;
 }
 
 bool JS_IsJobPending(JSRuntime *rt)
@@ -2540,7 +2643,19 @@ int JS_ExecutePendingJob(JSRuntime *rt, JSContext **pctx)
     e = list_entry(rt->job_list.next, JSJobEntry, link);
     list_del(&e->link);
     ctx = e->ctx;
+    JSHostTaskContext *previous = JS_DupHostTaskContext(rt->host_task);
+    JSHostTaskContext *previous_execution = JS_DupHostTaskContext(rt->host_execution_task);
+    JS_SetHostTaskContext(rt, e->host_task);
+    /* The host may select a live registration over its resolver at dispatch. */
+    if (!rt->host_execution_task)
+        JS_SetHostExecutionContext(rt, e->execution_task);
     res = e->job_func(e->ctx, e->argc, vc(e->argv));
+    JS_SetHostTaskContext(rt, previous);
+    JS_FreeHostTaskContext(rt, previous);
+    JS_SetHostExecutionContext(rt, previous_execution);
+    JS_FreeHostTaskContext(rt, previous_execution);
+    JS_FreeHostTaskContext(rt, e->execution_task);
+    JS_FreeHostTaskContext(rt, e->host_task);
     for(i = 0; i < e->argc; i++)
         JS_FreeValue(ctx, e->argv[i]);
     if (JS_IsException(res))
@@ -2644,12 +2759,17 @@ void JS_FreeRuntime(JSRuntime *rt)
     int i;
 
     rt->in_free = true;
+    JS_SetHostTaskContext(rt, NULL);
+    JS_SetHostExecutionContext(rt, NULL);
+    JS_SetHostExecutionOwner(rt, NULL);
     JS_FreeValueRT(rt, rt->current_exception);
 
     list_for_each_safe(el, el1, &rt->job_list) {
         JSJobEntry *e = list_entry(el, JSJobEntry, link);
         for(i = 0; i < e->argc; i++)
             JS_FreeValueRT(rt, e->argv[i]);
+        JS_FreeHostTaskContext(rt, e->execution_task);
+        JS_FreeHostTaskContext(rt, e->host_task);
         js_free_rt(rt, e);
     }
     init_list_head(&rt->job_list);
@@ -6438,6 +6558,16 @@ static bool js_class_has_bytecode(JSClassID class_id)
             class_id == JS_CLASS_ASYNC_GENERATOR_FUNCTION);
 }
 
+bool JS_HasActiveScriptFrame(JSRuntime *rt)
+{
+    for (JSStackFrame *sf = rt->current_stack_frame; sf; sf = sf->prev_frame) {
+        if (JS_VALUE_GET_TAG(sf->cur_func) == JS_TAG_OBJECT &&
+            js_class_has_bytecode(JS_VALUE_GET_OBJ(sf->cur_func)->class_id))
+            return true;
+    }
+    return false;
+}
+
 /* return NULL without exception if not a function or no bytecode */
 static JSFunctionBytecode *JS_GetFunctionBytecode(JSValueConst val)
 {
@@ -7780,6 +7910,8 @@ void JS_ComputeMemoryUsage(JSRuntime *rt, JSMemoryUsage *s)
             {
                 JSArrayBuffer *abuf = p->u.array_buffer;
                 if (abuf) {
+                    s->array_buffer_count++;
+                    s->array_buffer_size += abuf->byte_length;
                     s->memory_used_count += 1;
                     s->memory_used_size += sizeof(*abuf);
                     if (abuf->data) {
@@ -21662,6 +21794,8 @@ typedef enum JSAsyncGeneratorStateEnum {
 
 typedef struct JSAsyncGeneratorRequest {
     struct list_head link;
+    JSHostTaskContext *host_task;
+    JSHostTaskContext *execution_owner;
     /* completion */
     int completion_type; /* GEN_MAGIC_x */
     JSValue result;
@@ -21689,6 +21823,8 @@ static void js_async_generator_free(JSRuntime *rt,
         JS_FreeValueRT(rt, req->promise);
         JS_FreeValueRT(rt, req->resolving_funcs[0]);
         JS_FreeValueRT(rt, req->resolving_funcs[1]);
+        JS_FreeHostTaskContext(rt, req->host_task);
+        JS_FreeHostTaskContext(rt, req->execution_owner);
         js_free_rt(rt, req);
     }
     if (s->state != JS_ASYNC_GENERATOR_STATE_COMPLETED &&
@@ -21808,6 +21944,8 @@ static void js_async_generator_resolve_or_reject(JSContext *ctx,
     JS_FreeValue(ctx, next->promise);
     JS_FreeValue(ctx, next->resolving_funcs[0]);
     JS_FreeValue(ctx, next->resolving_funcs[1]);
+    JS_FreeHostTaskContext(ctx->rt, next->host_task);
+    JS_FreeHostTaskContext(ctx->rt, next->execution_owner);
     js_free(ctx, next);
 }
 
@@ -21882,11 +22020,20 @@ static void js_async_generator_resume_next(JSContext *ctx,
 {
     JSAsyncGeneratorRequest *next;
     JSValue func_ret, value;
+    JSHostTaskContext *previous = JS_DupHostTaskContext(ctx->rt->host_task);
+    JSHostTaskContext *previous_execution = JS_DupHostTaskContext(ctx->rt->host_execution_task);
+    JSHostTaskContext *previous_owner = JS_DupHostTaskContext(ctx->rt->host_execution_owner);
 
     for(;;) {
         if (list_empty(&s->queue))
             break;
         next = list_entry(s->queue.next, JSAsyncGeneratorRequest, link);
+        JSHostTaskContext *owner = ctx->rt->host_execution_owner_selector
+            ? ctx->rt->host_execution_owner_selector(next->execution_owner, previous_owner)
+            : next->execution_owner;
+        JS_SetHostExecutionOwner(ctx->rt, owner);
+        JS_SetHostExecutionContext(ctx->rt, owner);
+        JS_SetHostTaskContext(ctx->rt, next->host_task);
         switch(s->state) {
         case JS_ASYNC_GENERATOR_STATE_EXECUTING:
             /* only happens when restarting execution after await() */
@@ -21976,7 +22123,13 @@ static void js_async_generator_resume_next(JSContext *ctx,
             abort();
         }
     }
- done: ;
+ done:
+    JS_SetHostTaskContext(ctx->rt, previous);
+    JS_FreeHostTaskContext(ctx->rt, previous);
+    JS_SetHostExecutionContext(ctx->rt, previous_execution);
+    JS_FreeHostTaskContext(ctx->rt, previous_execution);
+    JS_SetHostExecutionOwner(ctx->rt, previous_owner);
+    JS_FreeHostTaskContext(ctx->rt, previous_owner);
 }
 
 static JSValue js_async_generator_resolve_function(JSContext *ctx,
@@ -22041,6 +22194,8 @@ static JSValue js_async_generator_next(JSContext *ctx, JSValueConst this_val,
     req = js_mallocz(ctx, sizeof(*req));
     if (!req)
         goto fail;
+    req->host_task = JS_DupHostTaskContext(ctx->rt->host_task);
+    req->execution_owner = JS_DupHostTaskContext(ctx->rt->host_execution_owner);
     req->completion_type = magic;
     req->result = js_dup(argv[0]);
     req->promise = js_dup(promise);
@@ -55597,6 +55752,7 @@ typedef struct JSPromiseFunctionData {
 
 typedef struct JSPromiseReactionData {
     struct list_head link; /* not used in promise_reaction_job */
+    JSHostTaskContext *host_task;
     JSValue resolving_funcs[2];
     JSValue handler;
 } JSPromiseReactionData;
@@ -55666,6 +55822,7 @@ static void promise_reaction_data_free(JSRuntime *rt,
     JS_FreeValueRT(rt, rd->resolving_funcs[0]);
     JS_FreeValueRT(rt, rd->resolving_funcs[1]);
     JS_FreeValueRT(rt, rd->handler);
+    JS_FreeHostTaskContext(rt, rd->host_task);
     js_free_rt(rt, rd);
 }
 
@@ -55769,7 +55926,7 @@ static void fulfill_or_reject_promise(JSContext *ctx, JSValueConst promise,
         args[2] = rd->handler;
         args[3] = js_bool(is_reject);
         args[4] = value;
-        JS_EnqueueJob(ctx, promise_reaction_job, 5, args);
+        js_enqueue_job_with_task(ctx, promise_reaction_job, 5, args, rd->host_task);
         list_del(&rd->link);
         promise_reaction_data_free(ctx->rt, rd);
     }
@@ -56574,6 +56731,7 @@ static __exception int perform_promise_then(JSContext *ctx,
         handler = resolve_reject[i];
         if (!JS_IsFunction(ctx, handler))
             handler = JS_UNDEFINED;
+        rd->host_task = JS_DupHostTaskContext(ctx->rt->host_task);
         rd->handler = js_dup(handler);
         rd_array[i] = rd;
     }
@@ -56591,7 +56749,7 @@ static __exception int perform_promise_then(JSContext *ctx,
         args[2] = rd->handler;
         args[3] = js_bool(i);
         args[4] = s->promise_result;
-        JS_EnqueueJob(ctx, promise_reaction_job, 5, args);
+        js_enqueue_job_with_task(ctx, promise_reaction_job, 5, args, rd->host_task);
         for(i = 0; i < 2; i++)
             promise_reaction_data_free(ctx->rt, rd_array[i]);
     }
@@ -59647,7 +59805,7 @@ enum {
 static JSValue js_array_buffer_transfer(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv, int magic)
 {
-    JSArrayBuffer *abuf;
+    JSArrayBuffer *abuf, *new_abuf;
     uint64_t new_len, old_len, max_len, *pmax_len;
     uint8_t *bs, *new_bs;
     JSReallocArrayBufferDataFunc *realloc_func;
@@ -59681,41 +59839,47 @@ static JSValue js_array_buffer_transfer(JSContext *ctx, JSValueConst this_val,
     }
     /* create an empty AB */
     if (new_len == 0) {
-        JS_DetachArrayBuffer(ctx, this_val);
         ret = js_array_buffer_constructor2(ctx, JS_UNDEFINED, 0, pmax_len,
                                            JS_CLASS_ARRAY_BUFFER);
+        if (JS_IsException(ret))
+            return ret;
+        JS_DetachArrayBuffer(ctx, this_val);
         goto fini;
     }
     bs = abuf->data;
     old_len = abuf->byte_length;
     realloc_func = abuf->realloc_func;
     opaque = abuf->opaque;
-    /* if length mismatch, realloc. Otherwise, use the same backing buffer. */
-    if (new_len != old_len) {
-        if (!realloc_func)
-            return JS_ThrowTypeError(ctx, "array buffer is not resizable");
-        /* XXX: we are currently limited to 2 GB; check before reallocating,
-           new_len does not necessarily fit in a size_t */
-        if (new_len > INT32_MAX)
-            return JS_ThrowRangeError(ctx, "invalid array buffer length");
-        new_bs = realloc_func(ctx->rt, opaque, bs, new_len);
-        if (!new_bs)
-            return JS_ThrowOutOfMemory(ctx);
-        bs = new_bs;
-        if (new_len > old_len)
-            memset(bs + old_len, 0, new_len - old_len);
-    }
-    /* neuter the source */
-    abuf->data = NULL;
-    abuf->byte_length = 0;
-    abuf->detached = true;
-    abuf->realloc_func = NULL;
-    abuf->opaque = NULL;
-    js_array_buffer_update_typed_arrays(abuf);
+    if (new_len != old_len && !realloc_func)
+        return JS_ThrowTypeError(ctx, "array buffer is not resizable");
+    /* Construct before reallocating or detaching. On failure the source
+       retains both its allocation and its external owner. */
     ret = js_array_buffer_constructor3(ctx, JS_UNDEFINED, new_len, pmax_len,
                                        JS_CLASS_ARRAY_BUFFER, bs,
                                        realloc_func, opaque,
                                        /*alloc_flag*/false);
+    if (JS_IsException(ret))
+        return ret;
+    new_abuf = JS_GetOpaque(ret, JS_CLASS_ARRAY_BUFFER);
+    /* if length mismatch, realloc. Otherwise, use the same backing buffer. */
+    if (new_len != old_len) {
+        /* The constructor checked the existing 2 GB ArrayBuffer bound. */
+        new_bs = realloc_func(ctx->rt, opaque, bs, new_len);
+        if (!new_bs) {
+            new_abuf->data = NULL;
+            new_abuf->realloc_func = NULL;
+            new_abuf->opaque = NULL;
+            JS_FreeValue(ctx, ret);
+            return JS_ThrowOutOfMemory(ctx);
+        }
+        bs = new_bs;
+        if (new_len > old_len)
+            memset(bs + old_len, 0, new_len - old_len);
+    }
+    new_abuf->data = bs;
+    /* Ownership moved to ret; detaching must not release that storage. */
+    abuf->realloc_func = NULL;
+    JS_DetachArrayBuffer(ctx, this_val);
 fini:
     if (magic == JS_ARRAY_BUFFER_TRANSFER_TO_IMMUTABLE) {
         if (JS_IsException(ret))
@@ -63219,6 +63383,7 @@ static const JSClassShortDef js_weakref_class_def[] = {
 
 typedef struct JSFinRecEntry {
     struct list_head link;
+    JSHostTaskContext *host_task;
     JSValueConst target;
     JSValue held_val;
     JSValue token;
@@ -63254,6 +63419,7 @@ static void js_finrec_free(JSRuntime *rt, JSFinRecEntry *fre)
     JS_FreeValueRT(rt, fre->token);
     JS_FreeValueRT(rt, fre->cb);
     JS_FreeContext(fre->ctx);
+    JS_FreeHostTaskContext(rt, fre->host_task);
     js_free_rt(rt, fre);
 }
 
@@ -63350,6 +63516,7 @@ static JSValue js_finrec_register(JSContext *ctx, JSValueConst this_val,
     }
     fre->cb = js_dup(frd->cb);
     fre->ctx = JS_DupContext(frd->ctx);
+    fre->host_task = JS_DupHostTaskContext(ctx->rt->host_task);
     fre->target = target;
     fre->held_val = js_dup(held_val);
     fre->token = js_dup(token);
@@ -63513,7 +63680,7 @@ static void reset_weak_ref(JSRuntime *rt, JSWeakRefRecord **first_weak_ref)
                 JSValueConst args[2];
                 args[0] = fre->cb;
                 args[1] = fre->held_val;
-                JS_EnqueueJob(fre->ctx, js_finrec_job, 2, args);
+                js_enqueue_job_with_task(fre->ctx, js_finrec_job, 2, args, fre->host_task);
             }
             js_finrec_free(rt, fre);
             break;
@@ -65033,3 +65200,14 @@ uintptr_t js_std_cmd(int cmd, ...) {
 #undef malloc
 #undef free
 #undef realloc
+
+bool JS_HasPendingJobMatching(JSRuntime *rt, JSHostJobPredicate *predicate, void *opaque)
+{
+    struct list_head *el;
+    list_for_each(el, &rt->job_list) {
+        JSJobEntry *e = list_entry(el, JSJobEntry, link);
+        if (predicate(e->host_task, e->execution_task, opaque))
+            return true;
+    }
+    return false;
+}

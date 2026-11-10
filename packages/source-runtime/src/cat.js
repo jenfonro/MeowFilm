@@ -1,5 +1,7 @@
 import { parse } from 'acorn';
-import { sourceFault, sourceObject, sourceRequire, sourceSafeError } from './errors.js';
+import {
+  sourceFault, sourceObject, sourcePreprocessError, sourceRequire, sourceSafeError,
+} from './errors.js';
 
 const actions = Object.freeze([
   'init',
@@ -18,8 +20,7 @@ const entries = Object.freeze([
   '__meowCat', '__JS_SPIDER__', '__jsEvalReturn', 'spider', 'Spider', 'rule',
 ]);
 
-function normalizeScript(value) {
-  let source = String(value ?? '');
+function normalizeScript(source) {
   sourceRequire(source.trim().length > 0);
   let program;
   try {
@@ -28,8 +29,8 @@ function normalizeScript(value) {
       sourceType: 'module',
       allowHashBang: true,
     });
-  } catch {
-    throw sourceFault('SCRIPT_PROTOCOL_ERROR');
+  } catch (error) {
+    throw sourcePreprocessError(error);
   }
 
   const replacements = [];
@@ -142,7 +143,9 @@ export class CatAdapter {
   }
 
   async start() {
-    const descriptor = await this.kernel.loadSandbox('cat', normalizeScript(this.source.script), {
+    const source = String(this.source.script ?? '');
+    const normalized = this.kernel.preprocess(() => normalizeScript(source));
+    const descriptor = await this.kernel.loadSandbox('cat', normalized, {
       entries,
       actions,
     });

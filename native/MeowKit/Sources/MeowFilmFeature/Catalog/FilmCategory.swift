@@ -61,14 +61,17 @@ struct FilmCategoryFilter: Equatable {
 public struct FilmCategoryPage: Sendable {
     public let items: [FilmItem]
     public let nextOffset: Int?
+    public let cache: FilmMetadataCache?
 
-    public init(items: [FilmItem], nextOffset: Int?) {
+    public init(items: [FilmItem], nextOffset: Int?, cache: FilmMetadataCache? = nil) {
         self.items = items
         self.nextOffset = nextOffset
+        self.cache = cache
     }
 }
 
 public protocol FilmCategorySource: FilmSource {
     var categories: [FilmCategory] { get }
-    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int) async throws -> FilmCategoryPage
+    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int,
+                      refresh: Bool) async throws -> FilmCategoryPage
 }

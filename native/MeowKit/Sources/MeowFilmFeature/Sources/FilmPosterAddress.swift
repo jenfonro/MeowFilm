@@ -1,4 +1,5 @@
 import Foundation
+import MeowRuntime
 
 enum FilmPosterAddress {
     private static let proxyHost = "img.doubanio.cmliussss.net"
@@ -7,6 +8,7 @@ enum FilmPosterAddress {
         var address = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !address.isEmpty,
               address.rangeOfCharacter(from: .controlCharacters) == nil else { return nil }
+        if let reference = RuntimeHTTPClient.metadataImageURL(address) { return reference }
         if address.hasPrefix("//") { address = "https:" + address }
         guard var parts = URLComponents(string: address),
               let scheme = parts.scheme?.lowercased(), scheme == "http" || scheme == "https",

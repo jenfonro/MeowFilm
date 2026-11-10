@@ -60,31 +60,19 @@ final class FilmTMDBServiceTests: XCTestCase {
         }
     }
 
-    func testSourceSearchReadsFilmDataAndExportsTheExactProducerEntry() async throws {
+    func testSearchTransportUsesBusinessOpenInsteadOfRawSearchOrCacheExport() async throws {
         let client = try client()
         addTeardownBlock { await client.close() }
-        let site = FilmSearchSite(cat: .init(installationId: "fixture", name: "fixture", sourceType: "local", generation: 3),
-            source: .init(key: .init(installationId: "fixture", siteKey: "site"), name: "来源",
-                          api: "fixture", actions: ["search"], methods: [:]))
-        let raw: RuntimeValue = .object(["list": .array([
-            .object(["vod_id": .number(0), "vod_name": .string("原标题"), "vod_remarks": .string("原备注"),
-                     "unknown": .object(["complete": .bool(true)])])]), "pagecount": .number(4)])
-        let input: RuntimeObject = ["source": .object(site.playbackSource.value), "query": .string("原词"), "page": .number(3)]
-        var key = input; key["kind"] = .string("search")
-        let seed: RuntimeValue = .object(["kind": .string("search"), "source": .object(site.playbackSource.value),
-            "query": .string("原词"), "page": .number(3), "value": raw, "completeness": .string("complete"),
-            "fetchedAt": .number(123_456)])
-        let received = expectation(description: "Content and original cache export")
-        received.expectedFulfillmentCount = 2
-        let wire = TMDBAdapterWire(expected: [("data.search", .object(input)), ("data.cache.entry", .object(key))],
-            value: .object(["raw": raw, "items": raw.catField("list")!, "page": .number(3), "hasMore": .bool(true)]),
-            seed: seed, received: received)
+        let received = expectation(description: "One business request")
+        let expected: RuntimeValue = .object(["query": .string("原词"), "sources": .array([])])
+        let snapshot: RuntimeValue = .object(["sessionId": .string(UUID().uuidString.lowercased())])
+        let wire = TMDBAdapterWire(expected: [("search.open", expected)], value: snapshot, seed: .null, received: received)
         TMDBAdapterProtocol.set { wire.receive($0) }
-        let result = try await FilmSearchData(connection: { client }).search(site: site, query: "原词", page: 3)
-        XCTAssertEqual(result.value, raw); XCTAssertEqual(result.cacheEntry, seed)
-        XCTAssertTrue(result.producer === client)
+        let transport = FilmSearchTransport(connection: { client })
+        let result = try await transport.call("search.open", ["query": .string("原词"), "sources": .array([])])
+        XCTAssertEqual(result, snapshot)
         await fulfillment(of: [received], timeout: 3)
-        XCTAssertEqual(wire.count, 2)
+        XCTAssertEqual(wire.count, 1)
     }
 
     func testMetadataImageReferencesRemainRelativeForBothProviders() throws {

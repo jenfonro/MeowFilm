@@ -1,44 +1,35 @@
 # Film rules
 
-`film-rules.js` is a plain JavaScript resource. It defines `globalThis.meowfilmProcess(request)` and needs no module loader, packages, I/O or script runner. The Windows host embeds it as `MeowFilm.FilmRules.js` and supplies the native JSON engine.
+`film-rules.js` defines the pure JSON entry `globalThis.meowfilmProcess(request)`. `playback-rules.js` extends that entry with playback matching, metadata hints, season/episode parsing and quality recognition. Both run on the shared QuickJS-NG 0.18.0 native core through `@meowfilm/script-host/native-json`; the Node owner reuses one dedicated program, Runtime and thread. Third-party script instances have separate lifetimes.
 
-The behavior source is `meowfilm-server` commit `934a03e5aeda7edbcef0cfb037734fed93bfe881`: the magic-settings page in `Meowfilm/frontend/src/pages/dashboard/DashboardPage.vue`, its `shared/episodeMarkerNormalize.js` / `normalize.js` dependencies, the initial rule tables in `backend/internal/db/defaults.go`, and the save-stage string normalization in `backend/server/dashboard/dashboard.go` / `backend/internal/db/config_repo.go`. The selected chain is the settings page, including its save/read normalization. It does not use the server playback or search recognition algorithms.
-
-The host operations are:
+The rule behavior comes from the magic-settings page and save normalization in `meowfilm-server` commit `934a03e5aeda7edbcef0cfb037734fed93bfe881`. Its page processing and save normalization remain the reference. The Node document stores the current decoded rules directly; it does not read native rule documents or encoded rule arrays.
 
 | operation | input | output |
 | --- | --- | --- |
-| `initialize` | `document` (null or persisted four string arrays) | `{document, rules, changed}`; empty groups receive database defaults |
-| `save` | `rules` | `{document, rules}`; all four groups, with no regexp validation |
-| `restore` | `section`, full draft `rules` | `{document, rules}`; selected section restored, whole draft saved |
+| `defaults` | none | `{rules}` |
+| `save` | full `rules` | `{rules}` after save normalization |
+| `restore` | `section`, full draft `rules` | `{rules}`; selected section restored, other draft edits retained |
 | `newMatch` | `pattern`, `replace` | parsed matching row or null |
 | `newClean` | `pattern` | normalized cleaning input |
-| `process` | `request: {section, text, query?}`, `rules` | common processing result |
+| `process` | `request: {section,text,query?}`, `rules` | rule result for internal computation |
+| `preview` | same as `process` | rule result with exact `FilmRuleText` wire values |
+| `recognition.batch` | `rules`, `requests` | `{value: [...]}` |
+| `recognition.matches` | `rules`, `rows`, `target` | `{value: boolean[]}` |
+| `recognition.candidates` | `rules`, normalized `detail`, `target`, `source` | `{value: [...]}` with per-file parsed text/coordinates/quality |
 
-Sections are `episode`, `movie`, `search`. A rule set contains `episodeCleanRegexRules: string[]`, `episodeRules: {pattern, replace, flags}[]`, `movieRules` of the same shape, and `aggregateRegexRules: string[]`. Matching rows are persisted as encoded JSON strings, retaining the reference distinction between stored data and the decoded page snapshot. The native service owns serialization, snapshots, CAS writes and engine lifetime. The program owns defaults, parsing, normalization, compilation, processing and row previews.
+Sections are `episode`, `movie`, `search`. Rules contain `episodeCleanRegexRules: string[]`, `episodeRules: {pattern,replace?,flags?}[]`, `movieRules` of the same shape, and `aggregateRegexRules: string[]`. Initial defaults contain two episode matching rows; restoring the episode section installs three. Saved empty groups remain empty across restart. Saving applies the page's JS trim, the reference handler's Unicode whitespace trim and response decoding; draft preview keeps draft semantics. Invalid regexes may be saved and produce the existing preview errors.
 
-`FilmRuleService.PrepareShutdownAsync(CancellationToken)` pauses admission and cancels/drains all admitted work, including callers waiting for serial execution. An accepted document write still settles with its real receipt and saved snapshot. Cancelling the preparation token cancels only that caller's wait; admission stays paused and subsequent preparation calls wait for the same drain. `Resume()` rejects an unfinished drain and otherwise reopens admission using the same service, engine, snapshot and storage fingerprint. `GetSavedSnapshot()` remains available while prepared. `DisposeAsync()` shares the drain and then releases the engine once; repeated preparation/disposal is safe, and disposal permanently prevents resume. New work while preparing throws `InvalidOperationException`; after disposal starts it throws `ObjectDisposedException`.
+The result retains `type/text`, `inputText`, `processedText`, `matched`, one-based `matchedRuleIndex`, `rewriteApplied`, nullable `rewrittenText`, `groupKey`, `trailingDigits`, `errors` and cumulative `previews`. Output selects `rewrittenText ?? processedText`. First-hit matching, search query-tail protection and deterministic resetting of `g`/`y` expressions are shared by preview and playback. Valid text is a string. A preview string with isolated UTF16 code units is represented by its complete UInt16 array, including nested errors/previews. Rule configuration itself uses Unicode scalar strings, as required by the HTTP bridge.
 
-`process` is the only execution path for both drafts and saved rules. It returns `type/text` as shown by the reference page, `inputText`, `processedText` (before matching replacement), `matched`, one-based `matchedRuleIndex`, `rewriteApplied`, nullable `rewrittenText`, `groupKey`, `trailingDigits`, `errors` and cumulative `previews`. An earlier invalid match can coexist with a later successful match. Search errors retain partial cleaning and previews. Empty rewriting is a matched error; absent replacement has `rewrittenText: null`. `FilmRuleResult.OutputText` selects rewritten text when present, otherwise processed text.
+Playback matching runs its full title chain in QuickJS: NFKC, Unicode case conversion, format controls, aliases, metadata identity, year and season checks, aggregate cleaning and canonical comparison. File-name/path season/episode extraction and regex-based quality inference run there in one detail batch. Node retains provider protocol decoding, accurate resource IDs, hashing, metadata coordinate mapping, scheduling and media ownership.
 
-An empty episode matching group still returns the completed cleaning in `processedText` and therefore `OutputText`, consistently for drafts and saved rules. The reference status remains `error` / `无匹配规则`, with no match or rewrite; cleaning previews are retained. Processing a draft does not save it, and saving an empty matching group does not refill it in the current service session.
+`recognition.batch` request kinds are `episode`, `season`, `movie`, `search`, `quality`, `metadata` and `match`. Most accept `{kind,text,query?}`. Metadata accepts `{kind:"metadata",record,contentKind:"movie"|"tv"}` and returns `{title,query,year,season}` with null for absent year/season. Matching accepts `{kind:"match",record,target}`. Batches preserve input order and the complete input list. No rule-count, string-length or result-count limit is introduced; native execution budgets remain resource boundaries.
 
-Reference behavior intentionally retained: initial episode defaults have two rows; section restore has three. Empty groups remain empty after save and refill on the next service initialization. Restore and any row save submit the complete draft. Existing-row matching patterns are not parsed like new `/pattern/flags` input. Movies use the original trimmed filename. Episode processing stops on the first regex hit even when the output is not an episode number. Search tail protection uses the optional query and the two reference probes.
-
-Saving applies the page's JS trim, then the handler/DB's Go Unicode `strings.TrimSpace` and empty-row filtering, then the page's response decode. These stages cannot be merged: Go trims U+0085 NEL but not U+FEFF BOM, whereas JS trim does the opposite. Draft processing does not perform this save-only normalization, and backend trim never enters the encoded matching-row JSON's pattern or replacement. Reopening reads the persisted string arrays through the same page decoder.
-
-The fixed scenarios in `test/reference-cases.json` cover defaults, first hit, empty/invalid rules, input and replacement normalization, flags, cleaning order/previews, movie year boundaries, search key and tail context. The additional JS tests cover full-panel save, empty-group initialization, cleaned results without matching rows, read/save decoding, immutable inputs and cache replacement. `FilmRulesTests.cs` shares the fixed scenarios with the real native engine and separately covers service dispatch, CAS failures, real document reopen, draft/saved cleaned results, cancellation, timeout, preparation/resume and shutdown. Its named forward-reference compilation and global empty-replacement regressions use the public service, require pending work before cancellation, and check both the actual call and preparation drain before recovery. These cases also exercise the unchanged two-second production budget without caller cancellation; five seconds is only the test scheduling allowance, not an engine budget.
-
-Run only this package's tests:
+Node integration, persistent ownership and lifecycle are documented in [film-playback](../film-playback/README.md).
 
 ```sh
 node --test packages/film-rules/test/film-rules.test.mjs
+node --test tests/film-rules-service.test.mjs tests/film-playback-recognition.test.mjs
 ```
 
-For migration evidence, read and execute the original page functions against the fixed scenarios (requires Go for the isolated standard-library save-stage helper):
-
-```sh
-node packages/film-rules/test/compare-server.mjs /root/code/meowfilm-server/Meowfilm
-```
-
-The reference comparison passes the real frontend payload through Go `strings.TrimSpace` before decoding the response, including mixed NEL/BOM cases; it does not run the complete server HTTP/DB stack. It is a port check, not a runtime dependency or a permanent duplicate of the processing algorithms. Windows native tests and the affected build are owned by the integrating session; a passing Node run does not establish native execution, interruption or resource packaging.
+The first command keeps the pure-program reference fixtures in an explicit Node vm test context. The second uses the real native program and separately establishes owner/recognition behavior, cancellation and release. Windows addon and iOS NodeMobile verification remain platform integration checks; a Linux test result does not claim those platforms passed.

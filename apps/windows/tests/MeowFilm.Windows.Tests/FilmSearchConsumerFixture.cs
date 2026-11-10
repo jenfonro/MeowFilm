@@ -13,6 +13,13 @@ internal sealed class FilmSearchConsumerRuntime : IRuntimeClient, IRuntimeConnec
     internal readonly List<(string Method, JsonElement Input)> Calls = [];
     internal Func<string, JsonElement, CancellationToken, Task<JsonElement>>? Respond;
     private readonly Dictionary<Guid, (JsonElement Value, Channel<JsonElement> Events)> sessions = [];
+    private readonly Dictionary<Guid, (JsonElement Value, Channel<JsonElement> Events)> searches = [];
+    internal Func<Guid, JsonElement, JsonElement>? SearchOpen;
+    internal Func<JsonElement, JsonElement, JsonElement>? SearchCommand;
+    internal Func<JsonElement, JsonElement>? SearchHandoff;
+    internal Guid LastSearchId { get; private set; }
+    internal int SearchDeliveries { get; private set; }
+    internal int SearchOpens => Calls.Count(call => call.Method == "film.search.open");
     internal Guid LastSessionId { get; private set; }
     internal RuntimeConnection Connection => new(this, new Uri("http://127.0.0.1:34101"), Revoked.Token);
     public Task<RuntimeConnection> CaptureConnectionAsync(CancellationToken cancellationToken = default)
@@ -32,6 +39,7 @@ internal sealed class FilmSearchConsumerRuntime : IRuntimeClient, IRuntimeConnec
     }
     internal JsonElement Handle(string method, JsonElement input)
     {
+        if (method.StartsWith("film.search.", StringComparison.Ordinal)) return HandleSearch(method, input);
         if (method == "film.session.open")
         {
             var id = Guid.NewGuid();
@@ -63,7 +71,15 @@ internal sealed class FilmSearchConsumerRuntime : IRuntimeClient, IRuntimeConnec
     public async IAsyncEnumerable<JsonElement> EventsAsync(string module, Guid sessionId, long after = 0,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        await foreach (var value in sessions[sessionId].Events.Reader.ReadAllAsync(cancellationToken)) yield return value;
+        if (searches.TryGetValue(sessionId, out var search))
+        {
+            SearchDeliveries++;
+            yield return search.Value;
+            await foreach (var value in search.Events.Reader.ReadAllAsync(cancellationToken))
+            { SearchDeliveries++; yield return value; }
+        }
+        else
+            await foreach (var value in sessions[sessionId].Events.Reader.ReadAllAsync(cancellationToken)) yield return value;
     }
     internal void Publish(Guid sessionId, FilmPlaybackTarget target, JsonElement metadata)
     {
@@ -72,6 +88,46 @@ internal sealed class FilmSearchConsumerRuntime : IRuntimeClient, IRuntimeConnec
         sessions[sessionId] = (value, session.Events);
         session.Events.Writer.TryWrite(value);
     }
+    internal JsonElement SearchValue(Guid id) => searches[id].Value;
+    private JsonElement HandleSearch(string method, JsonElement input)
+    {
+        if (method == "film.search.open")
+        {
+            LastSearchId = Guid.NewGuid();
+            var value = SearchOpen!(LastSearchId, input);
+            searches.Add(LastSearchId, (value, Channel.CreateUnbounded<JsonElement>()));
+            return Success(value);
+        }
+        var id = Guid.Parse(FilmJson.RequiredText(input, "sessionId"));
+        var search = searches[id];
+        if (method == "film.search.snapshot") return Success(search.Value);
+        if (method == "film.search.release")
+        {
+            search.Events.Writer.TryComplete();
+            return Success(new { released = true });
+        }
+        if (method == "film.search.handoff") return Success(SearchHandoff!(input));
+        if (method == "film.search.command")
+        {
+            var next = SearchCommand is { } command ? command(input, search.Value) : search.Value;
+            searches[id] = (next, search.Events);
+            return Success(next);
+        }
+        throw new InvalidOperationException("Unexpected search operation " + method);
+    }
+    internal void PublishSearch(JsonElement snapshot)
+    {
+        var id = Guid.Parse(FilmJson.RequiredText(snapshot, "sessionId"));
+        var search = searches[id];
+        searches[id] = (snapshot, search.Events);
+        search.Events.Writer.TryWrite(snapshot);
+    }
+    internal void ReconnectSearch(Guid id)
+    {
+        var value = searches[id].Value;
+        searches[id] = (value, Channel.CreateUnbounded<JsonElement>());
+    }
+    internal void DisconnectSearch(Guid id) => searches[id].Events.Writer.TryComplete();
     public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
         ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Search does not upload sources.");

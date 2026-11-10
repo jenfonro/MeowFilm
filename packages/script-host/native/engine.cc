@@ -1,7 +1,11 @@
 #include "engine.h"
 #include "algorithms.h"
 #include <algorithm>
+#include <exception>
 #include <limits>
+#ifdef _WIN32
+#include <process.h>
+#endif
 
 namespace meow {
 int64_t Now() {
@@ -63,6 +67,24 @@ class TaskScope {
     previous(JS_DupHostTaskContext(JS_GetHostTaskContext(rt))) { JS_SetHostTaskContext(rt, task); }
   ~TaskScope() { JS_SetHostTaskContext(runtime, previous); JS_FreeHostTaskContext(runtime, previous); }
 };
+class FlagScope {
+  bool& flag;
+  bool previous;
+ public:
+  explicit FlagScope(bool& value) : flag(value), previous(value) { flag = true; }
+  ~FlagScope() { flag = previous; }
+};
+class PreprocessStackScope {
+  JSRuntime* runtime;
+  size_t previous;
+ public:
+  PreprocessStackScope(JSRuntime* rt, size_t stack) : runtime(rt), previous(stack) {
+    // The existing stack top remains the origin: this is a finite total budget,
+    // not an extra allowance on each call. No guest code may enter this scope.
+    JS_SetMaxStackSize(runtime, JS_DEFAULT_STACK_SIZE);
+  }
+  ~PreprocessStackScope() { JS_SetMaxStackSize(runtime, previous); }
+};
 Value Snapshot::Read() const {
   Value out = Value::Obj();
 #define FIELD(name) out.Set(#name, Value::Num(static_cast<double>(name.load(std::memory_order_relaxed))))
@@ -78,6 +100,7 @@ Engine::Engine(Value options) : spec(std::move(options)), initialization(std::ma
   Check(spec.Get("guestSource").kind == Value::String || spec.Get("guestSource").kind == Value::Null);
   auto stack = spec.Get("maxStackBytes").Integer();
   Check(stack > 0 && stack <= 1024 * 1024);  // Independent execution-stack contract.
+  maxStackBytes = static_cast<size_t>(stack);
   auto ms = spec.Get("timeoutMs").Integer();
   if (ms) initialization->deadline = Now() + static_cast<int64_t>(ms);
   cleanupTimeoutMs = static_cast<int64_t>(spec.Get("cleanupTimeoutMs").Integer());
@@ -88,11 +111,45 @@ Engine::Engine(Value options) : spec(std::move(options)), initialization(std::ma
 }
 Engine::~Engine() {
   // All public and environment-close paths join before dropping the TSFN owner.
-  if (thread.joinable()) std::terminate();
+  if (threadStarted) std::terminate();
 }
 void Engine::Start() {
-  auto self = shared_from_this();
-  thread = std::thread([self] { self->Run(); });
+  // Cover the largest supported 1 MiB JS budget plus native entry/unwind
+  // headroom. Darwin's default secondary thread has only 512 KiB in total.
+  constexpr size_t stackBytes = 2 * 1024 * 1024;
+  auto owner = std::make_unique<std::shared_ptr<Engine>>(shared_from_this());
+#ifdef _WIN32
+  auto handle = _beginthreadex(nullptr, stackBytes, [](void* data) -> unsigned {
+    std::unique_ptr<std::shared_ptr<Engine>> self(static_cast<std::shared_ptr<Engine>*>(data));
+    (*self)->Run();
+    return 0;
+  }, owner.get(), STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+  Check(handle != 0, "RESOURCE_LIMIT");
+  thread = reinterpret_cast<HANDLE>(handle);
+#else
+  pthread_attr_t attributes;
+  Check(pthread_attr_init(&attributes) == 0, "RESOURCE_LIMIT");
+  int status = pthread_attr_setstacksize(&attributes, stackBytes);
+  if (status == 0) status = pthread_create(&thread, &attributes, [](void* data) -> void* {
+    std::unique_ptr<std::shared_ptr<Engine>> self(static_cast<std::shared_ptr<Engine>*>(data));
+    (*self)->Run();
+    return nullptr;
+  }, owner.get());
+  pthread_attr_destroy(&attributes);
+  Check(status == 0, "RESOURCE_LIMIT");
+#endif
+  owner.release();  // The successfully started thread owns this reference.
+  threadStarted = true;
+}
+void Engine::Join() {
+  if (!threadStarted) return;
+#ifdef _WIN32
+  if (WaitForSingleObject(thread, INFINITE) != WAIT_OBJECT_0 || !CloseHandle(thread)) std::terminate();
+  thread = nullptr;
+#else
+  if (pthread_join(thread, nullptr) != 0) std::terminate();
+#endif
+  threadStarted = false;
 }
 void Engine::Admit(Command command) {
   std::lock_guard<std::mutex> lock(mutex);
@@ -168,8 +225,9 @@ void Engine::Result(uint64_t id, Value value, const std::string& code) {
   message->id = id; message->ok = code.empty(); message->code = code; message->value = std::move(value);
   Send(std::move(message));
 }
-int Engine::Interrupt(JSRuntime* runtime, void* opaque) {
+int Engine::Interrupt(JSContext* ctx, void* opaque) {
   auto* engine = static_cast<Engine*>(opaque);
+  auto* runtime = JS_GetRuntime(ctx);
   if (engine->stopping.load(std::memory_order_relaxed)) return 1;
   // A host resolver polls even before entering a getter. Only actual script
   // frames make a completion/cancel race an interrupted user turn.
@@ -240,7 +298,10 @@ std::string Engine::CurrentError(JSContext* ctx) {
 void Engine::Initialize() {
   runtime = JS_NewRuntime();
   Check(runtime != nullptr, "RESOURCE_LIMIT"); snapshot.runtimeCount = 1;
-  JS_SetMaxStackSize(runtime, static_cast<size_t>(spec.Get("maxStackBytes").Integer()));
+  const auto& heap = spec.Get("maxHeapBytes");
+  if (heap.kind != Value::Null && heap.Integer())
+    JS_SetMemoryLimit(runtime, static_cast<size_t>(heap.Integer()));
+  JS_SetMaxStackSize(runtime, maxStackBytes);
   JS_SetInterruptHandler(runtime, Interrupt, this);
   JS_SetHostExecutionOwnerSelector(runtime, JobExecutionTask);
   auto* initTask = NewTask(runtime, initialization);
@@ -266,6 +327,14 @@ void Engine::Initialize() {
       JSValue fn = JS_NewCFunctionMagic(current->ctx, Bridge, names[i], 0, JS_CFUNC_generic_magic, i);
       if (JS_DefinePropertyValueStr(current->ctx, global.value, names[i], fn, JS_PROP_CONFIGURABLE) < 0)
         throw Fault(CurrentError(current->ctx));
+    }
+    // Only a two-realm owner's trusted core can capture this capability.
+    // Single-realm LX/JSON programs and the guest never receive it.
+    if (!isGuest && spec.Get("guestSource").kind == Value::String) {
+      JSValue fn = JS_NewCFunctionMagic(current->ctx, Bridge, "__meowPreprocess", 1,
+        JS_CFUNC_generic_magic, 11);
+      if (JS_DefinePropertyValueStr(current->ctx, global.value, "__meowPreprocess", fn,
+          JS_PROP_CONFIGURABLE) < 0) throw Fault(CurrentError(current->ctx));
     }
     std::string text = source.Text();
     current->methods = JS_Eval(current->ctx, text.data(), text.size(),
@@ -347,6 +416,7 @@ void Engine::Execute(Command command) {
   std::map<uint64_t, Call>::iterator entry;
   try { entry = calls.emplace(command.id, std::move(call)).first; }
   catch (...) { JS_FreeHostTaskContext(runtime, call.task); throw; }
+  snapshot.activeCalls = calls.size();
   TaskScope scope(runtime, entry->second.task);
   BeginExecution(entry->second.task);
   try {
@@ -394,6 +464,7 @@ void Engine::FinishCall(std::map<uint64_t, Call>::iterator entry, Value value, c
   Result(call.id, std::move(value), status ? CancelCode(status) : code);
   JS_FreeValue(call.ctx, call.promise); JS_FreeHostTaskContext(runtime, call.task);
   calls.erase(entry);
+  snapshot.activeCalls = calls.size();
 }
 void Engine::Poll() {
   // Reject cancelled I/O before deciding whether a call has runnable cleanup.
@@ -641,6 +712,8 @@ JSValue Engine::SetTimer(Context& context, int argc, JSValueConst* argv, bool re
   return JS_NewFloat64(context.ctx, id);
 }
 JSValue Engine::CrossCall(Context& from, Context& to, int argc, JSValueConst* argv, bool synchronous) {
+  // A guest-origin helper must not borrow the core's preprocessing budget.
+  FlagScope crossing(crossingGuest);
   Check(argc >= 2 && !JS_IsUndefined(to.methods), "STALE_SESSION");
   auto method = Utf8(QString(from.ctx, argv[0]));
   if (synchronous) Check(guestHelpers.count(method) != 0, "UNSUPPORTED_OPTION");
@@ -688,8 +761,11 @@ JSValue Engine::Bridge(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   auto& context = *static_cast<Context*>(JS_GetContextOpaque(ctx)); auto& engine = *context.engine;
   try {
     engine.CheckCancelled();
+    // Preprocessing is pure and synchronous: no host calls, timers, context
+    // switches, nested scopes or guest re-entry while the larger budget is live.
+    Check(!engine.preprocessing, "UNSUPPORTED_OPTION");
     auto* authority = TaskControl(JS_GetHostTaskContext(engine.runtime));
-    if ((operation == 0 || operation == 2 || operation == 4 || operation == 5 ||
+    if ((operation == 0 || operation == 2 || operation == 4 || operation == 5 || operation == 11 ||
          operation == 6 || operation == 7 || operation == 10) && authority && authority->Status())
       throw Fault("STALE_SESSION");
     switch (operation) {
@@ -763,6 +839,22 @@ JSValue Engine::Bridge(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
         return engine.CrossCall(context, *engine.guest, argc, argv, false);
       case 5: Check(engine.core != nullptr, "UNSUPPORTED_OPTION");
         return engine.CrossCall(context, *engine.core, argc, argv, true);
+      case 11: {
+        Check(!context.guest && !engine.crossingGuest, "UNSUPPORTED_OPTION");
+        Check(argc == 1 && JS_IsFunction(ctx, argv[0]) && !JS_IsAsyncFunction(argv[0]));
+        QValue result(ctx, JS_UNDEFINED);
+        {
+          FlagScope active(engine.preprocessing);
+          PreprocessStackScope stack(engine.runtime, engine.maxStackBytes);
+          result.value = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, nullptr);
+        }
+        // Restore before inspecting errors or returning to any caller. Never
+        // assimilate a Promise/thenable or run pending jobs inside the scope.
+        if (JS_IsException(result.value)) throw Fault(engine.CurrentError(ctx));
+        engine.CheckCancelled();
+        Check(JS_IsString(result.value));
+        return result.Release();
+      }
       case 6: case 7: return engine.SetTimer(context, argc, argv, operation == 7);
       case 8: case 9:
         if (argc && JS_IsNumber(argv[0])) {

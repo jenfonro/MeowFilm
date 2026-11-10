@@ -20,7 +20,7 @@ void Engine::PrepareJoin() {
   napi_status status = napi_create_async_work(env, nullptr, name,
     [](napi_env, void* data) {
       auto& engine = *static_cast<Engine*>(data);
-      if (engine.thread.joinable()) engine.thread.join();
+      engine.Join();
       engine.snapshot.threadCount = 0;
       engine.snapshot.stopped.store(true, std::memory_order_release);
     },

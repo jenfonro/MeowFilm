@@ -7,7 +7,11 @@
 #include <map>
 #include <mutex>
 #include <set>
-#include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
 
 namespace meow {
 int64_t Now();
@@ -59,7 +63,6 @@ class Engine : public std::enable_shared_from_this<Engine> {
   napi_async_cleanup_hook_handle cleanupHook = nullptr;
   napi_async_work joinWork = nullptr;
   std::shared_ptr<Engine> joinOwner;
-  std::thread thread;
   std::atomic<bool> stopping{false};
   bool joining = false, environmentClosing = false;  // Node owner only
   Snapshot snapshot;
@@ -67,6 +70,7 @@ class Engine : public std::enable_shared_from_this<Engine> {
   explicit Engine(Value spec);
   ~Engine();
   void Start();
+  void Join();
   void Admit(Command command);
   void Cancel(uint64_t id, const std::string& reason);
   void Stop(const std::string& reason);
@@ -79,9 +83,15 @@ class Engine : public std::enable_shared_from_this<Engine> {
   static void CallNode(napi_env env, napi_value callback, void* context, void* data);
   static JSValue Bridge(JSContext*, JSValueConst, int, JSValueConst*, int);
   static JSValue CrossResult(JSContext*, JSValueConst, int, JSValueConst*, int, JSValueConst*);
-  static int Interrupt(JSRuntime*, void*);
+  static int Interrupt(JSContext*, void*);
 
  private:
+#ifdef _WIN32
+  HANDLE thread = nullptr;
+#else
+  pthread_t thread{};
+#endif
+  bool threadStarted = false;  // Node owner until handed to the join work.
   Value spec;
   std::mutex mutex;
   std::condition_variable changed;
@@ -93,6 +103,8 @@ class Engine : public std::enable_shared_from_this<Engine> {
   JSHostTaskContext* interruptedTask = nullptr;  // Retains a generator owner after its frame unwinds.
   Control* interrupted = nullptr;  // interruptedTask/controls retains the cause until EndExecution.
   bool completingHost = false;
+  bool preprocessing = false, crossingGuest = false;
+  size_t maxStackBytes;
   int64_t cleanupTimeoutMs;
   std::string stopReason = "STALE_SESSION";
   JSRuntime* runtime = nullptr;

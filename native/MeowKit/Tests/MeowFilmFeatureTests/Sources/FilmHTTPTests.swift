@@ -74,25 +74,21 @@ final class FilmHTTPTests: XCTestCase {
         }
     }
 
-    func testArtworkAndHomeFollowCrossOriginRedirectsToLocalNodeEndpoints() async throws {
-        for artwork in [false, true] {
-            let destination = FilmHTTPStub(url: try XCTUnwrap(URL(string:
-                "http://127.0.0.1:19191/" + UUID().uuidString)))
-            let first = FilmHTTPStub(status: 302, redirectTo: destination.url)
-            defer { first.close(); destination.close() }
-            let http = FilmHTTP(configuration: FilmHTTPStub.configuration())
-            let bytes: Data
-            if artwork { bytes = try await http.readArtwork(first.url) }
-            else { bytes = try await http.readHome(first.url) }
-            XCTAssertEqual(bytes, Data([1, 2, 3]))
-            XCTAssertEqual(first.requests.count, 1)
-            XCTAssertEqual(destination.requests.map(\.url), [destination.url])
-            let request = try XCTUnwrap(destination.requests.first)
-            XCTAssertFalse(request.httpShouldHandleCookies)
-            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
-            XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Origin"), artwork ? nil : "https://m.douban.com")
-        }
+    func testArtworkFollowsCrossOriginRedirectsToLocalNodeEndpoints() async throws {
+        let destination = FilmHTTPStub(url: try XCTUnwrap(URL(string:
+            "http://127.0.0.1:19191/" + UUID().uuidString)))
+        let first = FilmHTTPStub(status: 302, redirectTo: destination.url)
+        defer { first.close(); destination.close() }
+        let http = FilmHTTP(configuration: FilmHTTPStub.configuration())
+        let bytes = try await http.readArtwork(first.url)
+        XCTAssertEqual(bytes, Data([1, 2, 3]))
+        XCTAssertEqual(first.requests.count, 1)
+        XCTAssertEqual(destination.requests.map(\.url), [destination.url])
+        let request = try XCTUnwrap(destination.requests.first)
+        XCTAssertFalse(request.httpShouldHandleCookies)
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+        XCTAssertNil(request.value(forHTTPHeaderField: "Origin"))
     }
 
     func testRejectedResponseStopsReadingAtHeaders() async throws {

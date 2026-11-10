@@ -114,7 +114,11 @@ std::string ExceptionCode(JSContext* ctx) {
     QValue message(ctx, JS_GetPropertyStr(ctx, error.value, "message"));
     if (JS_IsString(name.value) && JS_IsString(message.value)) {
       try {
-        if (Utf8(QString(ctx, name.value)) == "InternalError") {
+        auto errorName = Utf8(QString(ctx, name.value));
+        if (errorName == "RangeError" &&
+            Utf8(QString(ctx, message.value)) == "Maximum call stack size exceeded")
+          return "RESOURCE_LIMIT";
+        if (errorName == "InternalError") {
           auto text = Utf8(QString(ctx, message.value));
           if (text.find("stack overflow") != std::string::npos ||
               text.find("out of memory") != std::string::npos ||
@@ -342,8 +346,15 @@ JSValue ToQuick(JSContext* ctx, const Value& v) {
         buffer = QCheck(ctx, JS_NewArrayBufferCopy(ctx, nullptr, 0));
       } else {
         auto* owner = new std::shared_ptr<Bytes>(v.bytes);
-        buffer = JS_NewArrayBuffer(ctx, v.bytes->data(), v.bytes->size(),
-          [](JSRuntime*, void* opaque, void*) { delete static_cast<std::shared_ptr<Bytes>*>(opaque); }, owner, false);
+        buffer = JS_NewArrayBuffer(ctx, v.bytes->data(), v.bytes->size(), 0,
+          [](JSRuntime*, void* opaque, void*, size_t size) -> void* {
+            auto* owner = static_cast<std::shared_ptr<Bytes>*>(opaque);
+            if (!size) { delete owner; return nullptr; }
+            // vector<uint8_t>::resize preserves the old allocation on failure.
+            // The owner follows transfers and is released exactly once at size 0.
+            try { (*owner)->resize(size); return (*owner)->data(); }
+            catch (...) { return nullptr; }
+          }, owner, false);
         if (JS_IsException(buffer)) { delete owner; throw Fault(ExceptionCode(ctx)); }
       }
       QValue held(ctx, buffer);

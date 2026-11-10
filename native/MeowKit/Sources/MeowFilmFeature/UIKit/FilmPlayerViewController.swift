@@ -183,7 +183,8 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         external.menu = UIMenu(title: "外部播放器", children: FilmExternalPlayer.allCases.map { player in
             UIAction(title: player.title) { [weak model] _ in model?.openExternalPlayer(player) }
         })
-        controls.addArrangedSubview(external)
+        let retry = control("重试地址", id: "retry-media") { [weak model] in model?.retryMedia() }
+        controls.addArrangedSubview(row([retry, external], equal: true))
     }
 
     private func render() {
@@ -222,11 +223,18 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         stateLabel.text = snapshot?.error.map { FilmPlaybackError(code: $0).localizedDescription } ??
             (busy ? "准备中" : snapshot?.stage == "ended" ? "播放结束" : nil)
         let reported = snapshot?.reportError.map { FilmPlaybackError(code: $0) }
-        if model.actionError == nil, model.observationError == nil, reported == nil { shownError = nil }
-        if let error = model.actionError ?? model.observationError ?? reported, error != shownError, canPresentPageAlert {
+        let metadata = snapshot?.metadataError.map { FilmPlaybackError(code: $0) }
+        let session = snapshot?.error.map { FilmPlaybackError(code: $0) }
+        if model.actionError == nil, model.observationError == nil, reported == nil, metadata == nil, session == nil {
+            shownError = nil
+        }
+        if let error = model.actionError ?? model.observationError ?? reported ?? metadata ?? session,
+           error != shownError, canPresentPageAlert {
             let presented: Bool
             if model.actionError == nil, model.observationError != nil {
                 presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.reconnect() })
+            } else if model.actionError == nil, model.observationError == nil, reported == nil, metadata != nil {
+                presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.refreshBrowsing() })
             } else {
                 presented = showError(error.localizedDescription, acknowledged: { [weak model] in model?.acknowledgeError() })
             }

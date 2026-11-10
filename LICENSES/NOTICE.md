@@ -323,34 +323,15 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   its hash, consumed source inputs and the bundle hash are recorded in the
   iOS native build receipt. Other platforms retain their native Node Web values.
 
-## Native QuickJS-NG — MIT
-
-- Source: https://github.com/quickjs-ng/quickjs, v0.18.0,
-  commit `d7215b0ad3fc2c562e8317fd9bca058fd4863804`.
-- License: `quickjs-native-MIT.txt`; original copyright notices remain in the
-  engine sources under `native/JavaScript/quickjs`.
-- Local changes add interrupt polling during RegExp compilation (including
-  capture pre-scans), execution opcode dispatch, forward/backward references,
-  assertion/backtracking stack loops and the global empty-replacement loop.
-  Interruption is propagated as uncatchable engine errors. The reproducible patch
-  is `native/JavaScript/patches/regexp-compile-interrupt.patch`.
-- Upstream, patched-source, patch and license hashes: `scripts/quickjs-native.json`.
-- Windows links the engine into `meowfilm_js.dll` through the application's
-  JSON-only C adapter; iOS statically links the same source through the local
-  `MeowJavaScript` Swift package and bundles `quickjs-native-MIT.txt`.
-  The upstream command-line interpreter, libc/I/O module
-  and module loader are not included. This client-side engine is independent
-  of the Node script host and does not replace its native script-execution engine.
-
-### Native Unicode tables — Unicode License V3
+## Native Unicode tables — Unicode License V3
 
 - Source: `libunicode-table.h` in the same QuickJS-NG commit
   `d7215b0ad3fc2c562e8317fd9bca058fd4863804`, included by `libunicode.c`
-  and compiled into the Windows `meowfilm_js.dll` and the iOS static engine.
+  and compiled into the shared Node addon and iOS `MeowScriptHost.framework`.
 - Copyright © 1991-2026 Unicode, Inc.
 - License: `Unicode-3.0.txt` is the complete original copyright and permission
   notice extracted from that table's header, without the C comment delimiters.
-  The table and this license are hash-pinned in `scripts/quickjs-native.json`;
+  The table and this license are hash-pinned in `scripts/script-host-native.json`;
   source verification also checks that the standalone notice matches the header.
 - The Windows license package includes this notice and its manifest entry.
   The iOS App also bundles `Unicode-3.0.txt` as a resource.
@@ -358,13 +339,15 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
 
 ## QuickJS-NG — MIT
 
-- Source: `https://github.com/quickjs-ng/quickjs`, version `0.14.0`, commit
-  `3c051980ab7e783dfbfb1c70c014ce5e05ecf24c`.
+- Source: `https://github.com/quickjs-ng/quickjs`, version `0.18.0`, commit
+  `d7215b0ad3fc2c562e8317fd9bca058fd4863804`.
 - License: `quickjs-ng-LICENSE.txt`, unchanged upstream text and copyrights.
 - The common runtime compiles QuickJS as a native library in the Node-API 8
   extension `script_host_native.node`; iOS embeds the same implementation in the
-  signed `MeowScriptHost.framework`, separate from the client's rule engine.
-  One library serves independent script
+  signed `MeowScriptHost.framework`. Scripts and pure JSON application programs
+  compile the same checked-in source and Unicode tables under
+  `native/JavaScript/quickjs`, locked by `scripts/script-host-native.json`.
+  One library serves independent script and application
   runtimes and native execution threads; no WebAssembly or asm.js engine is shipped.
 - `packages/script-host/native/task-context.patch` preserves task identity across
   Promise reactions, native await, generators, finalizers and scheduled jobs. It
@@ -372,22 +355,18 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   queued requests use their own cancellation control without replacing authority.
   The existing cancellation cleanup window is unchanged. It
   does not introduce a script memory quota or change the upstream license.
-- `packages/script-host/native/bigint-uintn.patch`, applied after that patch,
-  corrects the upstream `BigInt.asUintN` unsigned truncation and sign extension
-  for short and multi-limb integers, including limb-width boundaries. It preserves
-  coercion order, `BigInt.asIntN` semantics and the existing allocation boundary;
-  the upstream license and copyrights remain unchanged.
-- `packages/script-host/native/utf16-cstring.patch`, applied after the two patches
-  above, corrects upstream UTF-16 CString ownership for non-normal wide strings.
-  Slices and indirect storage are copied into an owned normal string before
-  returning data to the paired free API; normal wide strings retain their
-  zero-copy path. The upstream license and copyrights remain unchanged.
+- `native/JavaScript/patches/regexp-compile-interrupt.patch` polls the owning
+  runtime during regular-expression compilation, capture discovery, bytecode
+  execution, bidirectional references and global empty replacements. Interrupted
+  native operations propagate an uncatchable engine interruption.
+- The former BigInt unsigned-truncation and UTF-16 CString patches are covered
+  by 0.18's upstream implementations; their behavior regressions remain.
 - `packages/script-host/native/arraybuffer-ownership.patch`, applied last,
-  corrects ArrayBuffer detach and transfer ownership for externally backed
-  buffers. Detaching consumes the release callback once; transfers preserve
-  bytes without reallocating externally owned memory and detach the original
-  only after successful allocation. Ordinary inbound buffers keep their existing
-  backing path. The upstream license and copyrights remain unchanged.
+  makes ArrayBuffer transfer allocate the destination before changing storage
+  or detaching its source. The 0.18 realloc callback follows the external owner
+  through transfers, preserves its old allocation on failure and releases it
+  exactly once. Ordinary inbound buffers retain their owned backing path.
+  The upstream license and copyrights remain unchanged.
 
 ## OpenSSL — Apache-2.0
 

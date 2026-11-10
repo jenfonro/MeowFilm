@@ -20,50 +20,56 @@ enum FilmPlaybackPresentation {
                 title: snapshot.target.title, kind: kind))
         } else { baseline = original }
         let fields = snapshot.metadata.filmObject ?? [:]
-        let title = text(fields, "title", "name") ?? baseline.title
-        let score = number(fields["vote_average"]) ?? number(fields["rating"]?.filmObject?["value"])
-        let poster = artwork(fields["poster_path"]) ?? image(fields["pic"]) ??
-            image(fields["cover"]) ?? artwork(fields["cover_url"])
+        let hasDetail = succeeded(snapshot.metadataCache, component: "detail")
+        let supplement = provider == .douban ? snapshot.metadataSupplement?.metadata.filmObject ?? [:] : [:]
+        let title = field(fields, "title", "name").map { $0.filmText ?? "" } ?? baseline.title
+        let rating = field(fields, "vote_average", "rating")
+        let score = rating.flatMap { number($0.filmObject?["value"] ?? $0) }
+        let poster = field(fields, "poster_path", "pic", "cover", "cover_url")
         let large = artwork(fields["pic"]?.filmObject?["large"])
+        let supplementalPoster = artwork(supplement["poster_path"])
         let item = FilmItem(sourceID: baseline.item.sourceID, id: baseline.item.id, title: title,
                             kind: provider == nil ? baseline.item.kind : kind,
-                            posterURL: poster ?? baseline.item.posterURL,
-                            largePosterURL: large ?? baseline.item.largePosterURL,
-                            score: score.map { String(format: "%.1f", $0) } ?? baseline.item.score,
+                            posterURL: image(poster) ?? supplementalPoster ?? (poster == nil && !hasDetail ? baseline.item.posterURL : nil),
+                            largePosterURL: large ?? supplementalPoster ?? (poster == nil && !hasDetail ? baseline.item.largePosterURL : nil),
+                            score: rating == nil && !hasDetail ? baseline.item.score : score.map { String(format: "%.1f", $0) } ?? "",
                             subtitle: baseline.item.subtitle)
-        let seasonRows = fields["seasons"]?.filmArray ?? fields["doubanSeasons"]?.filmArray ??
-            snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.seasons
+        let seasonField = field(fields, "seasons", "doubanSeasons")
+        let seasonRows = seasonField == nil && !succeeded(snapshot.metadataCache, component: "seasons")
+            ? displayMetadata?.seasons : seasonField?.filmArray ?? []
         let seasons = seasonRows?.compactMap { raw -> FilmSeason? in
             guard let row = raw.filmObject, let number = integer(row["season_number"] ?? row["season"]) else { return nil }
             let episodes = snapshot.episodes.filter { $0.position.season == number }.map(episode)
             return .init(id: row["id"]?.filmScalar ?? "season-\(number)",
                          title: text(row, "name", "title") ?? "第 \(number) 季", number: number, episodes: episodes)
         } ?? baseline.seasons
-        let credits = fields["credits"]?.filmObject
-        let directors = credits?["crew"]?.filmArray?.filter { $0.filmObject?["job"] == .string("Director") } ??
-            fields["directors"]?.filmArray ?? []
-        let cast = credits?["crew"] != nil || credits?["cast"] != nil || fields["directors"] != nil || fields["actors"] != nil
-            ? directors.compactMap { person($0, role: "导演") } +
-                (credits?["cast"]?.filmArray ?? fields["actors"]?.filmArray ?? []).compactMap { person($0) }
-            : baseline.cast
-        let similar = fields["similar"]?.filmObject?["results"]?.filmArray?.compactMap { raw -> FilmItem? in
-            guard let row = raw.filmObject, let id = row["id"]?.filmScalar,
-                  let title = text(row, "title", "name"), let provider else { return nil }
-            return .init(sourceID: provider.rawValue, id: id, title: title,
-                         kind: provider == .tmdb ? kind : nil,
-                         posterURL: artwork(row["poster_path"]),
-                         score: row["vote_average"]?.filmNumber.map { String(format: "%.1f", $0) } ?? "")
-        } ?? baseline.similarItems
-        let logo = fields["images"]?.filmObject?["logos"]?.filmArray?.compactMap { value in
-            artwork(value.filmObject?["file_path"])
-        }.first
-        return FilmDetail(item: item, backdropURL: artwork(fields["backdrop_path"]) ?? baseline.backdropURL,
-                          title: title, logoURL: logo ?? baseline.logoURL,
-                          summary: text(fields, "overview", "intro") ?? baseline.summary,
-                          releaseDate: text(fields, "release_date", "first_air_date") ??
-                            fields["pubdate"]?.filmArray?.compactMap(\.filmText).joined(separator: " · ") ?? baseline.releaseDate,
-                          seasonCount: integer(fields["number_of_seasons"]) ?? baseline.seasonCount,
-                          episodeCount: integer(fields["number_of_episodes"] ?? fields["episodes_count"]) ?? baseline.episodeCount,
+        let primaryCast = cast(fields), supplementalCast = cast(supplement)
+        let cast = primaryCast.flatMap { $0.isEmpty ? nil : $0 } ??
+            supplementalCast.flatMap { $0.isEmpty ? nil : $0 } ?? primaryCast ??
+            (succeeded(snapshot.metadataCache, component: "credits") ? [] : baseline.cast)
+        let primarySimilar = similar(fields, provider: provider, kind: kind)
+        let supplementalSimilar = similar(supplement, provider: .tmdb,
+                                           kind: snapshot.metadataSupplement.flatMap { FilmItemKind(rawValue: $0.kind.rawValue) })
+        let similar = primarySimilar.flatMap { $0.isEmpty ? nil : $0 } ??
+            supplementalSimilar.flatMap { $0.isEmpty ? nil : $0 } ?? primarySimilar ??
+            (succeeded(snapshot.metadataCache, component: "similar") ? [] : baseline.similarItems)
+        let logo = logo(fields) ?? logo(supplement) ??
+            (fields["images"] == nil && !succeeded(snapshot.metadataCache, component: "images") ? baseline.logoURL : nil)
+        let summary = field(fields, "overview", "intro")
+        let summaryText = summary?.filmText ?? ""
+        let displaySummary = summaryText.isEmpty
+            ? text(supplement, "overview") ?? (summary == nil && !hasDetail ? baseline.summary : "")
+            : summaryText
+        let releaseDate = field(fields, "release_date", "first_air_date", "pubdate")
+        let episodeCount = field(fields, "number_of_episodes", "episodes_count")
+        return FilmDetail(item: item,
+                          backdropURL: artwork(fields["backdrop_path"]) ?? artwork(supplement["backdrop_path"]) ??
+                            (fields["backdrop_path"] == nil && !hasDetail ? baseline.backdropURL : nil),
+                          title: title, logoURL: logo, summary: displaySummary,
+                          releaseDate: releaseDate == nil && !hasDetail ? baseline.releaseDate : releaseDate?.filmText ??
+                            releaseDate?.filmArray?.compactMap(\.filmText).joined(separator: " · "),
+                          seasonCount: fields["number_of_seasons"] == nil && !hasDetail ? baseline.seasonCount : integer(fields["number_of_seasons"]),
+                          episodeCount: episodeCount == nil && !hasDetail ? baseline.episodeCount : integer(episodeCount),
                           seasons: seasons, cast: cast, similarItems: similar)
     }
 
@@ -75,15 +81,48 @@ enum FilmPlaybackPresentation {
 
     static func artwork(_ value: RuntimeValue?) -> URL? {
         guard let text = value?.filmText, !text.isEmpty else { return nil }
-        if text.hasPrefix("/v1/tmdb/images/") || text.hasPrefix("/v1/douban/images/") {
-            return URL(string: text)
-        }
+        if let reference = RuntimeHTTPClient.metadataImageURL(text) { return reference }
         guard let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
         return url
     }
 
     private static func text(_ fields: RuntimeObject, _ names: String...) -> String? {
         names.compactMap { fields[$0]?.filmText }.first { !$0.isEmpty }
+    }
+
+    private static func field(_ fields: RuntimeObject, _ names: String...) -> RuntimeValue? {
+        names.compactMap { fields[$0] }.first
+    }
+
+    private static func succeeded(_ cache: FilmMetadataCache?, component: String) -> Bool {
+        guard let fields = cache?.components[component]?.filmObject else { return false }
+        return fields["status"] == .string("ready") || fields["status"] == .string("empty") ||
+            fields["fetchedAt"]?.filmNumber != nil
+    }
+
+    private static func cast(_ fields: RuntimeObject) -> [FilmCastMember]? {
+        guard fields["credits"] != nil || fields["directors"] != nil || fields["actors"] != nil else { return nil }
+        let credits = fields["credits"]?.filmObject
+        let directors = credits?["crew"]?.filmArray?.filter { $0.filmObject?["job"] == .string("Director") } ??
+            fields["directors"]?.filmArray ?? []
+        return directors.compactMap { person($0, role: "导演") } +
+            (credits?["cast"]?.filmArray ?? fields["actors"]?.filmArray ?? []).compactMap { person($0) }
+    }
+
+    private static func similar(_ fields: RuntimeObject, provider: FilmMetadataProvider?,
+                                kind: FilmItemKind?) -> [FilmItem]? {
+        guard fields["similar"] != nil else { return nil }
+        return (fields["similar"]?.filmObject?["results"]?.filmArray ?? []).compactMap { raw in
+            guard let row = raw.filmObject, let id = row["id"]?.filmScalar,
+                  let title = text(row, "title", "name"), let provider else { return nil }
+            return .init(sourceID: provider.rawValue, id: id, title: title, kind: provider == .tmdb ? kind : nil,
+                         posterURL: artwork(row["poster_path"]),
+                         score: row["vote_average"]?.filmNumber.map { String(format: "%.1f", $0) } ?? "")
+        }
+    }
+
+    private static func logo(_ fields: RuntimeObject) -> URL? {
+        fields["images"]?.filmObject?["logos"]?.filmArray?.compactMap { artwork($0.filmObject?["file_path"]) }.first
     }
 
     private static func person(_ value: RuntimeValue, role: String? = nil) -> FilmCastMember? {

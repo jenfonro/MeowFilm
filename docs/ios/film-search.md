@@ -2,13 +2,14 @@
 
 ## 装配与类型
 
-业务规则、分页和数据交接的唯一契约见[共同影视搜索契约](../common/film/search.md)，共享程序输入见 [FilmSearchProgram](../../packages/film-search/README.md)。本端没有另一套 Swift 清洗或聚合算法。
+业务规则、分页和数据交接的唯一契约见[共同影视搜索契约](../common/film/search.md)，Node 整合程序见[共享搜索程序](../../packages/film-search/README.md)。本端没有 Swift 清洗、季集识别、评分或聚合算法，也不装载客户端 JS 引擎。
 
-- `MeowfilmAssembly.filmSearch` 装配 `FilmSearchService`，借用既有 `FilmSourceService`／`FilmRuleService`，内容由 `FilmSearchData` 调用同一个 App runtime 的 `film.data.search`。来源管理仍由 Cat owner 负责。`FilmSearchProcessor` 通过现有原生 QuickJS 执行 `FilmSearchProgram.source()`；保存的聚合正则来自原规则 owner，不另建配置。稳定源键编码安装／站点，代次单独校验；接受响应前后核对当前源身份；来源快照观察使在途换代或禁用立即取消旧会话。
-- `FilmSearchSession` 持有独立来源游标、当前轮未结算读取、两模式上一结算轮顺序及完整 `FilmSearchSnapshot`。每轮记录成功响应，全部源请求失败标记 `.failed`，与成功空页区分；失败页不进游标，保留显式 more。整体错误只在没有累计可见结果时呈现，不逐源报错。取消后恢复同一个在途轮，只重做未结算读取；已得页与已得元数据不重取。同词按完整 UTF-8 查询复用当前或调用方实际持有的会话，不保存任意关键词历史结果字典。新词撤销旧请求，Service 只跟踪物理排空中的退役工作，结算后移除；关闭搜索内容释放当前 ownership，详情持有的快照仍可读取。
-- `FilmSearchMetadataReading` 的生产适配为 `FilmTMDBService`，借用同一个 App `RuntimeSession`，通过 `film.data.metadata` 返回原始 TMDB JSON。内容与 `film.data.cache.entry` 从同一实际 client 取得，保留 producer、原时间、配置 revision 和完整度，不建第二个原生成功缓存或在途合并器。原始搜索响应、有效查询及详情仍可作为当前 snapshot 展示；`FilmSearchContext.metadataDetail` 缺少完整详情时按 TMDB 类型＋数值 ID 读取已保存 search 原行，不能将该 partial 交为 full。普通取消退出本读者并排空原生请求，Node 已受理 producer 可完成入缓存；配置／来源撤权与 runtime close 才物理取消 producer。无 metadata 注入的协议测试仍为 `.unavailable`；生产错误不会转换为空成功。
+- `MeowfilmAssembly.filmSearch` 装配 `FilmSearchService`，借用既有 `FilmSourceService` 与 App runtime；`FilmSearchTransport` 固定同一个 runtime epoch。`film.search.open` 只传原查询和当前准入来源，包含 `order`／`options.aggregateImages` 的布尔值。来源管理仍由原生来源 owner 负责；稳定源键编码安装／站点，代次单独校验。来源换代、禁用及配置变化撤销旧会话的 UI 发布资格，不擅自重搜。
+- `FilmSearchSession` 只持有 Node 身份、完整 `FilmSearchSnapshot`、订阅及消费者生命周期。分页游标、成功页、TMDB 回退、规则快照、两模式顺序和成员关系全由 Node 管理。`snapshot.sequence` 与 `revision` 相同，沿 `/v1/film/events/{sessionId}` 接收完整 `cards`／`rawCards`；不从原始页重算卡片。`search.command more` 分页，切换模式不请求。成功空、通道失败、不可用和取消分别展示；SSE 断开保留已得卡片并显示错误，显式重试用同 session 的 `search.snapshot` 和新订阅，不重发 `open`。
+- `cancel()` 同步撤销旧 SSE／在途回执的 UI 发布资格、结束本地 loading，再串行发送 `stop`；不取消 Node 已接纳的内容 producer。stop 回执只接纳序列／轮次、通道、loading、hasMore 等控制状态，保留已有卡片、原始条目及 metadata 展示；即使 open 或 SSE 晚到后 stop 返回了新卡，也要等明确 resume 才重新发布。保留真实 session ID 供停止、恢复和释放。同词按精确 UTF-8 查询复用当前或调用方持有的会话，只发 `resume`，不重取已成功页。新词停止旧会话；Service 弱跟踪仍由导航持有的会话，消费者释放时排空已接纳 open 并向其真实 ID 发送 `release`。搜索关闭不关闭共享 runtime。
+- 原始 metadata 搜索响应、有效查询及详情只是当前 snapshot 的展示数据。`FilmSearchContext.metadataDetail` 缺少详情时按明确 TMDB 类型＋数值 ID 读取 snapshot 中的原 search 行；不根据标题猜关联，不把 partial 升级为 full。`FilmTMDBService` 保留既有独立元数据消费者接口，但不再被原生搜索会话逐项调度。缓存、原时间、revision 和完整度由 Node 保管，客户端不生成缓存 seed 或新鲜度。
 - `MeowfilmSearchComposition` 在应用层协调两个业务，将影视 `FilmSearchResultsContent` 注入既有 `MusicSearchViewController`／结果分页容器。`MeowUI.SearchTargetOption`、`SearchResultCategory`、`SearchResultContent` 只定义中性输入和内容生命周期；音乐算法不导入影视。页头、历史和四分类沿用既有搜索页。影视结果只是无页头的内容控制器，复用 `FilmPosterCell`，搜索补文本角标和来源／聚合／类型标签；首页默认配置和评分语义不变。
-- 实际 `MeowfilmCoordinator.showFilmSearchResult` 将 `FilmSearchContext` 交给真实 `FilmPlaybackModel` 和 `FilmDetailViewController`，正式播放进入 `FilmPlayerViewController`，不旁路到裸 URL 播放器。`selectedCard` 保留原选择身份，`card` 表示当前承载卡；组卡被迟到的 TMDB 吸收时，沿共享程序返回的原成员身份跟随。来源成员用 typed `detailId` 和完整 `raw` 交接；尚无可靠 metadata 的聚合使用 `group`，原始列表始终单源。首次 open 和晚到 `search.update` 使用原查询／范围、成功页及准确 producer；跨 owner 降 hints，不借新 client 给旧事实补证明。页面重进保当前已选 target／文件，不退回初始卡片；正在播放时迟到资料不能重启或换集。触发与媒体生命周期见[影视会话](../runtime/film-playback.md)。
+- 实际 `MeowfilmCoordinator.showFilmSearchResult` 将 `FilmSearchContext` 交给真实 `FilmPlaybackModel` 和 `FilmDetailViewController`，正式播放进入 `FilmPlayerViewController`，不旁路到裸 URL 播放器。`selectedCard` 保留原 opaque 选择身份；准确 target、可靠 TMDB 关联、全体聚合成员、原始单源及 typed `detailId` 均由 `search.handoff` 返回，不从显示标题重建。回执携带 `searchReference:{sessionId,selectionId}`，`session.open` 通过 reference 重读同一 Node owner 的事实和规则快照；晚到 `search.update` 也只传 reference／revision／当前来源。跨 runtime 的交接明确失败，不给旧事实补证明。仅明确重进的 `retargeted` 请求附 `resumeTarget`，完整保留运行器已确认的 metadata、season／episode／globalEpisode、source／line／candidate（包括数字 0）；普通初进不携带该字段，以跟随 Node 最新 handoff。正在播放时迟到资料不能重启或换集。触发与媒体生命周期见[影视会话](../runtime/film-playback.md)。
 
 ## 真实 TMDB 接线
 
@@ -22,11 +23,20 @@ HTTP／设置／图片的唯一协议见[元数据运行器](../runtime/metadata
 
 以下是可执行测试入口，不能代替具体测试运行结果：
 
-- Swift：`bash scripts/test-native.sh test --filter FilmSearchSessionTests`，覆盖完整页、分页、静默单源失败／全源失败与成功空页区分、两模式轮次、TMDB 回退与缓存、详情失败时精确类型／ID 复用 search 元数据、在途交接、取消恢复、源换代／禁用、关闭排空和快照释放。
+- Swift：`bash scripts/test-native.sh test --filter 'FilmSearchSessionTests|FilmSearchHandoffTests|FilmSearchAuthorizationScopeTests|FilmSearchStableIdentityTests|FilmPlaybackSearchContextTests|FilmTMDBServiceTests'`，验证完整 Node 卡片、两模式顺序、错误／空／不可用、SSE、停止即撤发布、同 session 恢复、来源准入、准确 handoff 和关闭排空；播放 context 测试验证晚到 reference 更新和重进坐标。stop 迟到数据回归为 `FilmSearchSessionTests/testStopReceiptKeepsEveryDisplayedFieldAfterRejectedSSEUntilSameSessionResume`、`testCancelledAcceptedOpenBindsIdentityWithoutPublishingStopCardsAndResumesThenReleases`；保留既有 SSE／accepted more 取消断言。搜索算法、逐源游标和缓存行为由 Node 搜索测试覆盖，不再用 Swift 替身实现另一套算法。
 - 跨查询详情回归分别验证原生旧 UI 发布被撤销、真实 Node producer 优雅完成、同键缓存复用及配置失效后的物理取消；不能再以原生成功详情字典的调用次数证明统一缓存正确。可控 continuation gate 覆盖晚到旧读者；真实宿主补充 Node 缓存及网络证据。
-- scheme `MeowfilmAcceptance`：`-only-testing:MeowfilmAcceptanceUITests/FilmSearchUIKitTests`，使用真实 `FilmPosterCell` 断言长标题、窄宽、普通／聚合／电影／剧集文本，并保存附件 `film-search-existing-posters-narrow-three-kinds`；另覆盖真实 QuickJS 内容、模式切换和 live context。
+- scheme `MeowfilmAcceptance` 的 UIKit 精确方法：`MeowfilmAcceptanceUITests/FilmSearchUIKitTests/testExistingPosterAddsSearchBadgeAndSourceLabelAtNarrowAndWideWidths`、`testSearchContentUsesExistingPostersKeepsBothModesAndDeliversLiveContext`、`testRawTypedZeroCardsKeepSeparateNavigationAndRealFavoritesAcrossReload`（后两项使用同一 target/class 前缀）。使用真实 `FilmPosterCell` 断言长标题、窄宽、普通／聚合／电影／剧集文本，并保存附件 `film-search-existing-posters-narrow-three-kinds`；固定 Node wire 回执覆盖模式切换和 live context，不冒充引擎执行。
 - 同 scheme：`-only-testing:MeowfilmAcceptanceUITests/SearchPageViewControllerTests`；`MusicUIKitRegressionTests` 下的 `testAdditionalSearchCategoryIsLazyAndTargetSubmissionAlwaysSelectsRequestedCategory`、`testGlobalSearchAddsAllFourCategoriesWhenMusicPlaylistSearchIsDisabled`、`testNewMusicSubmissionDuringPendingAdditionalSwipeDoesNotStartSupersededDomain`。
-- 同 scheme：`-only-testing:MeowfilmRuntimeTests/MeowfilmFilmSearchHostTests`，实际 App 协调器验证入口默认目标、真实搜索卡片点击、在途 TMDB 交接、详情释放、第二轮后返回再进入及请求次数；另以临时安装的 Cat HTTP 程序验证真实 transport 完整125条页与第二页。该类的 TMDB 是注入替身，真实 adapter／NodeMobile 覆盖由下列宿主提供。
+- 同 scheme 的真实 NodeMobile 精确入口如下。实际 App 协调器验证入口默认目标、真实卡片点击、在途成员交接、详情释放、第二轮后返回再进入及请求次数；临时 Cat HTTP 程序验证完整125条页与第二页；额外验证 Unicode 规则预览与真实搜索输入／聚合结果一致和孤立 UTF16。规则与搜索都经真实 NodeMobile，TMDB 使用 loopback 合成成功空上游并恢复原配置，不访问公网。通道不可用的独立语义仍由消费者协议测试覆盖。
+
+```text
+-only-testing:MeowfilmRuntimeTests/MeowfilmFilmSearchHostTests/testRealCatSearchReadsCompleteInstalledSourcePagesAndRetainsDetailIdentity
+-only-testing:MeowfilmRuntimeTests/MeowfilmFilmSearchHostTests/testActualCoordinatorEntryUsesMusicAndFilmPageDefaultsWithoutSubmitting
+-only-testing:MeowfilmRuntimeTests/MeowfilmFilmSearchHostTests/testActualSearchTapUsesTheDataOwnerAndLiveGroupRawDirectoriesWithoutAnotherSearch
+-only-testing:MeowfilmRuntimeTests/MeowfilmFilmSearchHostTests/testNodeMobilePreviewAndSearchUseIdenticalUnicodeRulesInputAndSnapshot
+-only-testing:MeowfilmRuntimeTests/MeowfilmFilmSearchHostTests/testNodeMobileSearchKeepsDerivedLoneUTF16AndOriginalTypedMembers
+```
+
 - App 增量构建 scheme 为 `Meowfilm`；上述 UIKit／宿主测试及其构建使用 `MeowfilmAcceptance`。既有海报布局、按压和详情回归可选 `FilmUIKitTests` 的相关方法，不要求全量 UI 测试。
 
 ### 真实 TMDB 宿主
@@ -39,7 +49,8 @@ RuntimeHTTPClientTests/testTMDB
 RuntimeHTTPClientTests/testAppDescribeRequiresExactSevenModuleVersionsContractsAndTMDBMethods
 RuntimeEmbeddedLauncherTests/testPayloadRequiresTheCompleteSevenModuleHTTPAssembly
 RuntimeMetadataImageTests
-FilmSearchSessionTests/testMetadataSettingsChangeRevokesSameWordAndCacheWithoutDestroyingOldDetailOrAutoSearching
+FilmSearchSessionTests/testNewWordFencesOldPublishingButKeepsRetainedNavigationIdentity
+FilmSearchSessionTests/testMetadataChangeNeedsExplicitNewSessionWithoutDiscardingRetainedDisplay
 ```
 
 适配测试验证完整 JSON 和真实 HTTP 参数；HTTP 测试覆盖无访问凭据与端口变化下稳定身份、502／错 ID／redirect／断流／读取预算、物理取消与 owner 关闭。它们不是 NodeMobile 宿主的替代品。

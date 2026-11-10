@@ -6,17 +6,19 @@
 
 列表净化含剧集净化与集数匹配；另有电影匹配、搜索列表净化。四组规则及对应测试移植自 `meowfilm-server` 设置页的完整读取／初始化／保存／恢复／测试链路，不混用服务端另一条后端识别算法。固定参考提交、输入输出和特殊行为见 [film-rules](../../packages/film-rules/README.md)。
 
-`FilmRuleService.ProcessAsync(request)` 使用已保存快照；`ProcessAsync(request, draft)` 使用明确草稿。两者调用同一程序、返回同一 `FilmRuleResult`，测试不保存草稿。请求包含分区、文本以及搜索分区可空查询词；业务可直接消费 `OutputText`、命中、分组键、尾号保护与错误等结果，无需再写净化算法。实际影视搜索读取已保存搜索净化规则，接通状态见[影视搜索](film-search.md)；正式播放的规则与 Node 会话边界见[影视播放页](film-playback.md)。
+`FilmRuleService.ProcessAsync(request)` 通过 `film.rules.preview` 使用 Node 已保存快照；`ProcessAsync(request, draft)` 仅为预览提交明确草稿。两者由 Node 执行同一程序、返回同一 `FilmRuleResult`，预览不保存草稿。请求包含分区、文本以及搜索分区可空查询词；业务可直接消费 `OutputText`、命中、分组键、尾号保护与错误等结果，无需再写净化算法。实际影视搜索由 Node 捕获已保存规则快照并产生原始／聚合卡片，接通状态见[影视搜索](film-search.md)；正式播放的规则与 Node 会话边界见[影视播放页](film-playback.md)。
 
 `ProcessedText` 始终表示已执行预处理后的文本，即使集数匹配组为空而报告“无匹配规则”，仍保留清洗结果；没有匹配替换时 `OutputText` 直接使用它，不退回未清洗原文。
 
-逐行保存、新增、删除提交四组完整草稿；分区恢复默认同样保存完整草稿。新增输入统一由 JS normalizer 判定，UI 不另设 .NET 空白门禁。非法正则允许保存，在处理时报告；空组保存后保持为空，在下次服务初始化时按服务端首次默认补齐。首次默认与页面恢复默认有意保留参考差异。处理顺序、flags、替换、电影预处理及搜索尾号保护均由共用 JS 程序负责，不使用 .NET Regex 重写。
+逐行保存、新增、删除提交四组完整草稿；分区恢复默认同样保存完整草稿。新增输入统一由 Node 的 JS normalizer 判定，UI 不另设 .NET 空白门禁。非法正则允许保存，在处理时报告；正常新文档中的空组保存后及重启后都保持为空，只有首次创建文档、显式恢复或清除才采用对应默认。首次默认与页面恢复默认有意保留参考差异。处理顺序、flags、替换、电影预处理及搜索尾号保护均由共用 JS 程序负责，不使用 .NET Regex 重写。
 
 保存保留页面 JS trim → 服务端 Go Unicode TrimSpace／空行过滤 → 页面响应解码的阶段顺序；NEL 与 BOM 在两种 trim 中不同，不能合并为空白字符并集。未保存草稿不执行后端保存规范化，匹配规则编码后的 JSON 内部 pattern／replace 也不受 Go trim 影响。
 
-原生 `NativeJavaScriptJsonEngine` 在一个后台线程串行持有 QuickJS-NG；源码和许可锁定于 `scripts/quickjs-native.json`，C ABI 与资源边界见 [native/JavaScript](../../native/JavaScript/README.md)。规则程序随 App 内嵌，无 Node、WASM、HTTP 或脚本 RPC 依赖；pattern／replace 仅作为 JSON 数据传入。超时、取消、内存失败后释放原生上下文，可重新执行同一固定程序。
+规则执行与新规则文档统一归 App 的 Node 运行器。`FilmRuleService` 使用同一 `film.playback.v1` 业务信封调用 `film.rules.get/set/restore/preview/normalize/clear`，仅保留已确认的显示快照和页面草稿，不嵌入规则 JS、单独规则 DLL 或客户端规则文档。已有客户端规则不导入／合并；运行器不存在、方法缺失或调用失败时展示真实错误，不回退原生规则执行。
 
-`film.magic-rules.v1` 是普通客户端文档，CAS 成功后才发布已保存快照。关闭准备暂停准入并取消／排空操作；已接纳写入等待真实存储回执。取消关闭后复用服务、规则快照和存储指纹；最终关闭才释放引擎。
+保存／恢复／清除仅在成功回执后更新显示快照与 revision；失败保留原快照。重新读取设置由 Node 返回当前快照。新搜索与播放任务由 Node 捕获规则；搜索到播放携带 `searchReference` 继续使用该搜索的规则快照，不从客户端回灌 rules。已开始任务及当前媒体不因规则保存被重置，规则变更不清原始来源缓存。
+
+关闭准备暂停客户端调用准入、取消并排空已接纳 RPC；取消关闭恢复准入，最终关闭只释放本消费者，不接管 App 运行器生命周期。规则文本传输使用共同 `FilmRuleText`：正常文本为字符串，孤立 UTF16 为 UInt16 数组，结果、错误与逐行预览保持原码元。搜索展示可读取同一数组投影，导航仍使用 Node 的合法 opaque `displayKey` 和原 JSON 身份。
 
 ## 猫源管理
 
@@ -24,7 +26,7 @@
 
 本地导入读取 `.js`，网络导入由公共运行器下载；明确重新导入可以选择已有安装身份。本地编辑名称、更新重新选文件；网络编辑名称／URL、更新读取保存 URL。首次成功导入默认启用。修改时间首次为导入时间，成功替换内容后为更新时间；失败、无变化及重启不刷新时间。更新失败保留旧版本，重启只作用于指定安装。
 
-停用回收脚本，保留视频源清单，停用期间不能重启或检测；删除父源同步清除其客户端映射、选项、检测与删除记录。App 装配完成即恢复已启用猫源，启动失败可在猫源管理刷新重试，不阻断纯客户端规则功能。
+停用回收脚本，保留视频源清单，停用期间不能重启或检测；删除父源同步清除其客户端映射、选项、检测与删除记录。App 装配完成即恢复已启用猫源，启动失败可在猫源管理刷新重试；规则同样依赖运行器，运行器不可用时不能离线执行。
 
 管理请求取消、桥接失败（含默认 30 秒 RPC 的 `TIMEOUT`）或错误回执，都不能证明 Node 没有提交或已经完成回滚。客户端先撤销缓存代次的检测资格，再由来源服务使用自己的生命周期读取状态，观察目标 starting 结束；页面切换或调用方取消不丢弃该协调，关闭准备与最终关闭可取消并排空它。协调后仍向调用方抛出原管理异常，`BridgeException(TIMEOUT)` 不改成取消或成功。
 
@@ -52,7 +54,7 @@ Node 管理已完成、客户端同步文档保存失败时，也先撤销旧代
 
 受理后的保存等待真实回执；切页或关闭准备不丢弃已经受理的保存，owner 排空后才确认关闭。只有成功保存才撤销当前搜索与共享详情缓存复用资格，取消在途旧请求；不自动查询，下次显式进入／提交同词建立新会话，旧播放详情保留原数据。图片仍按相对引用使用正常缓存，不因基址改变重新命名。
 
-运行器文件位于 `%LOCALAPPDATA%/meowfilm/aggregate/script-runtime/tmdb/settings.json`，沿用当前用户目录权限与应用私有文件机制，不声称 DPAPI 或额外加密；不导出或记录凭据目录。空凭据不预判不可用，允许显式配置代理提供认证。设置与图片真实运行器测试／离屏截图入口见[影视搜索](film-search.md#tmdb-真实接通增量测试)。
+运行器文件位于 `%LOCALAPPDATA%/meowfilm/aggregate/script-runtime/tmdb/settings.json`，沿用当前用户目录权限与应用私有文件机制，不声称 DPAPI 或额外加密；不导出或记录凭据目录。空凭据不预判不可用，允许显式配置代理提供认证。设置与图片真实运行器测试／离屏截图入口见[影视搜索](film-search.md#真实运行器与执行依赖)。
 
 ## 播放资料与偏好
 
@@ -66,7 +68,7 @@ Node 管理已完成、客户端同步文档保存失败时，也先撤销旧代
 
 沿用 WPF 主题、原生键盘焦点、统一通知与确认浮层；表格在自身视口横向滚动。规则测试结果是业务内容，操作错误走通知，不插入教程／解释性占位文案。
 
-长期测试分别归属 `FilmRulesTests`、`NativeJavaScriptTests`、`FilmSourcesTests`、`FilmSourceRuntimeTests`、`FilmSettingsUiTests`、`FilmPlaybackSettingsTests`、`FilmLibraryTests`、`SettingsNavigationTests`；共享规则与 Cat 管理另有定向 Node 用例。`FilmSourcesTests` 覆盖超时后延迟协调、失败回执、已提交变更后本地写失败、删除记录及关闭排空；`FilmSourceRuntimeTests` 使用真实默认 RPC 超时验证 Node 回滚后直接完成五阶段检测，并覆盖真实更新成功后一次客户端写前存储故障。替身验证只证明客户端请求与状态契约，真实原生执行、脚本 fixture 路由及 Windows 界面／构建须分别记录。本轮不包含 iOS 实施、用户环境安装、实际媒体播放或所有外部脚本兼容承诺。
+长期测试分别归属 `FilmRulesTests`、`FilmRulesRuntimeTests`、`FilmSourcesTests`、`FilmSourceRuntimeTests`、`FilmSettingsUiTests`、`FilmPlaybackSettingsTests`、`FilmLibraryTests`、`SettingsNavigationTests`；共享规则与 Cat 管理另有定向 Node 用例。规则消费者／设置用例使用明确业务接口替身，真实规则语义、HTTP 传输及重启持久化由 `FilmRulesRuntimeTests` 经过实际 Node 与公共 addon 验证，不再为测试保留第二份原生引擎。`FilmSourcesTests` 覆盖超时后延迟协调、失败回执、已提交变更后本地写失败、删除记录及关闭排空；`FilmSourceRuntimeTests` 使用真实默认 RPC 超时验证 Node 回滚后直接完成五阶段检测，并覆盖真实更新成功后一次客户端写前存储故障。测试入口不等于执行通过，Windows 界面／构建和实际载体须分别记录；不默认重跑不受本轮影响的来源或缓存组。
 
 来源回归还包含初次详情脚本错误的 search 回退、HTTP／导航失败边界及其真实 Node 对照；真实 Worker 单次内存超限用默认 256MiB 引擎上限和一次 512MiB 申请，验证未取消调用下失效检测不写入、同源码新代次经显式刷新后恢复。测试只在受控私有卷计数触发一次，关闭沿公开 owner 排空并验证 Node 进程退出，不修改宿主限制或模拟 failure。
 

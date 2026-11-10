@@ -85,6 +85,49 @@ final class FilmPlaybackWireTests: XCTestCase {
         XCTAssertTrue(snapshot.browsing.files.isEmpty)
         XCTAssertEqual(snapshot.browsing.sourceID, "result-b")
     }
+    func testRefreshingBrowseKeepsSuccessfulFilesAndDefaultsToFalseWhenAbsent() throws {
+        let file: RuntimeValue = .object(["id": .string("old"), "name": .string("旧成功文件"),
+                                          "candidateId": .string("old-candidate")])
+        var browsing: RuntimeObject = [
+            "sourceId": .string("result-a"), "lineId": .number(0), "loading": .bool(true),
+            "error": .null, "lines": .array([]), "episodes": .array([file]), "originalEpisodes": .array([file])
+        ]
+        for refreshing in [RuntimeValue?.none, .bool(false), .bool(true)] {
+            browsing["refreshing"] = refreshing
+            let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(browsing: .object(browsing)))
+            XCTAssertTrue(snapshot.browsing.loading)
+            XCTAssertEqual(snapshot.browsing.refreshing, refreshing == .bool(true))
+            XCTAssertEqual(snapshot.browsing.files.map(\.candidateID), ["old-candidate"])
+            XCTAssertEqual(snapshot.browsing.originalFiles.map(\.candidateID), ["old-candidate"])
+        }
+        browsing["refreshing"] = .string("true")
+        XCTAssertThrowsError(try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(browsing: .object(browsing))))
+    }
+
+    func testRefreshSessionFailureKeepsSuccessfulDirectoryButBrowsingFailureHidesIt() throws {
+        let file: RuntimeValue = .object(["id": .string("old"), "name": .string("旧成功文件"),
+                                          "candidateId": .string("old-candidate")])
+        var browsing: RuntimeObject = [
+            "sourceId": .string("result-a"), "lineId": .number(0), "loading": .bool(false),
+            "refreshing": .bool(false), "error": .null, "lines": .array([]),
+            "episodes": .array([file]), "originalEpisodes": .array([file])
+        ]
+        var fields = try FilmPlaybackFixture.snapshot(browsing: .object(browsing)).filmRequiredObject()
+        fields["error"] = .string("UPSTREAM_HTTP")
+        let failedRefresh = try FilmPlaybackSnapshot(value: .object(fields))
+        XCTAssertEqual(failedRefresh.error, "UPSTREAM_HTTP")
+        XCTAssertNil(failedRefresh.browsing.error)
+        XCTAssertFalse(failedRefresh.browsing.refreshing)
+        XCTAssertEqual(failedRefresh.browsing.files.map(\.candidateID), ["old-candidate"])
+        XCTAssertEqual(failedRefresh.browsing.originalFiles.map(\.candidateID), ["old-candidate"])
+        browsing["error"] = .string("STALE_SOURCE")
+        fields["browsing"] = .object(browsing)
+        let failedBrowse = try FilmPlaybackSnapshot(value: .object(fields))
+        XCTAssertEqual(failedBrowse.browsing.error, "STALE_SOURCE")
+        XCTAssertTrue(failedBrowse.browsing.files.isEmpty)
+        XCTAssertTrue(failedBrowse.browsing.originalFiles.isEmpty)
+    }
+
     func testDirectoryRetainsAbsoluteRootUnicodeAndAccurateCandidateIdentity() throws {
         let file = try FilmPlaybackFile(.object(["id": .string("opaque"), "candidateId": .string("candidate"),
                                                 "name": .string("片.mp4"), "path": .string("/目录/片.mp4")]))
@@ -180,7 +223,7 @@ final class FilmPlaybackWireTests: XCTestCase {
     func testArtworkProjectionAcceptsLocalEndpointsAndPreservesURLComponents() throws {
         for address in ["http://localhost:19191/image.jpg", "http://[::1]:19191/image.jpg",
                         "https://user:synthetic@artwork.invalid:8443/image.jpg#detail",
-                        "/v1/tmdb/images/fixture", "/v1/douban/images/fixture"] {
+                        "/v1/tmdb/images/original/fixture.jpg", "/v1/douban/images/fixture"] {
             XCTAssertEqual(FilmPlaybackPresentation.artwork(.string(address))?.absoluteString, address)
         }
     }

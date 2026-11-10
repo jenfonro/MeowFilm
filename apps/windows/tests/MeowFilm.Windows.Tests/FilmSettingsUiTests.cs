@@ -15,9 +15,7 @@ using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
-using MeowFilm.Core.Scripting;
 using MeowFilm.Desktop;
-using MeowFilm.Platform.Scripting;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -30,7 +28,7 @@ public static class FilmSettingsUiTests
     {
         yield return Case("draft testing passes all four groups and query without saving", DraftTesting);
         yield return Case("row save add delete and section restore preserve whole panel scope", RuleEditing);
-        yield return Case("native new-rule inputs share JavaScript whitespace semantics through the loaded view", NativeRuleInputs);
+        yield return Case("new-rule inputs reach the Node normalizer without native whitespace or regex interpretation", NativeRuleInputs);
         yield return Case("rule cancellation and errors cannot publish into a hidden view", RuleLifetime);
         yield return Case("local scripts preserve valid UTF8 bytes and reject invalid UTF8", LocalScriptEncoding);
         yield return Case("cat edits toggles restart and bulk deletion reach the source owner", CatManagement);
@@ -67,8 +65,8 @@ public static class FilmSettingsUiTests
         movie.Rows[0].Replace = "draft-movie";
         scene.Box("SearchInput").Text = "作品2 更新";
         scene.Box("SearchQuery").Text = "作品2";
-        int writes = scene.Store.Writes;
-        scene.Engine.Result = new()
+        int writes = scene.RulesRuntime.Writes;
+        scene.RulesRuntime.Result = new()
         {
             Section = FilmRuleSection.Search, Type = "success", Text = "净化后：作品2",
             InputText = "作品2 更新", ProcessedText = "作品2", GroupKey = "作品2",
@@ -76,12 +74,12 @@ public static class FilmSettingsUiTests
         };
         Click(Button(scene.View, "测试搜索列表净化"));
         await Until(() => !scene.View.RulesBusy);
-        var call = scene.Engine.Requests.Last(request => request.GetProperty("operation").GetString() == "process");
+        var call = scene.RulesRuntime.Requests.Last(request => request.Method == "film.rules.preview").Input;
         Check(call.GetProperty("request").GetProperty("query").GetString() == "作品2", "query tail context reaches the service");
         Check(call.GetProperty("rules").GetProperty("episodeRules")[0].GetProperty("pattern").GetString() == "draft-episode" &&
             call.GetProperty("rules").GetProperty("movieRules")[0].GetProperty("replace").GetString() == "draft-movie",
             "test consumes the current entire draft");
-        Check(scene.Store.Writes == writes && scene.Rules.GetSavedSnapshot().EpisodeRules[0].Pattern == "episode",
+        Check(scene.RulesRuntime.Writes == writes && scene.Rules.GetSavedSnapshot().EpisodeRules[0].Pattern == "episode",
             "testing neither writes nor changes the saved owner snapshot");
         var result = scene.Element<StackPanel>("SearchResults");
         Check(Texts(result).Contains("聚合 Key：作品2") && Texts(result).Contains("搜索尾号保护：2"),
@@ -90,7 +88,7 @@ public static class FilmSettingsUiTests
         movie.Rows[0].Pattern = "next-draft";
         Check(result.Children.Count == 0, "changing a draft clears stale results");
         await scene.Select("cats"); await scene.Select("rules");
-        Check(movie.Rows[0].Pattern == "next-draft" && scene.Store.Writes == writes,
+        Check(movie.Rows[0].Pattern == "next-draft" && scene.RulesRuntime.Writes == writes,
             "switching settings pages preserves unsaved draft without saving it");
     }
 
@@ -103,7 +101,7 @@ public static class FilmSettingsUiTests
         await Until(() => !scene.View.RulesBusy);
         Check(scene.Rules.GetSavedSnapshot().EpisodeCleanRegexRules.SequenceEqual(["clean-draft"]) &&
             scene.Rules.GetSavedSnapshot().MovieRules[0].Replace == "movie-draft", "a row save persists every group's draft");
-        Check(!scene.Engine.Requests.Any(request => request.GetProperty("operation").GetString() is "newClean" or "newMatch"),
+        Check(!scene.RulesRuntime.Requests.Any(request => request.Method == "film.rules.normalize"),
             "existing-row edits do not use new-rule parsing");
         var editor = scene.Editor("MovieEditor");
         ((TextBox)editor.FindName("NewPattern")).Text = "/added/gi";
@@ -150,119 +148,67 @@ public static class FilmSettingsUiTests
 
     private static async Task NativeRuleInputs()
     {
-        await using var store = new MemoryStore();
-        await using var rules = new FilmRuleService(new NativeJavaScriptJsonEngine(FilmRuleService.LoadProgramSource()), store);
-        await using var sources = new FilmSourceService(new RecordingRuntime(0), store);
-        await rules.SaveAsync(new FilmRuleSet
+        await using var scene = await Scene.Create();
+        foreach (string name in new[] { "MovieEditor", "EpisodeEditor" })
         {
-            EpisodeCleanRegexRules = ["^never$"],
-            EpisodeRules = [new("^never$", "unused")],
-            MovieRules = [new("^never$", "unused")],
-            AggregateRegexRules = ["^never$"]
-        });
-        var view = new FilmSettingsView(rules, sources);
-        var window = new Window { Content = view, Width = 1248, Height = 820, Left = -10000, Top = -10000,
-            WindowStyle = WindowStyle.None, ShowActivated = false, ShowInTaskbar = false };
-        var notices = new List<string>();
-        window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
-        {
-            if (args.Message.Length > 0) notices.Add(args.Message);
-        }));
-        try
-        {
-            window.Show();
-            await Until(() => view.RulesLoaded && !view.RulesBusy);
-            foreach (var (name, section) in new[]
-            {
-                ("MovieEditor", FilmRuleSection.Movie), ("EpisodeEditor", FilmRuleSection.Episode)
-            })
-            {
-                var editor = (FilmSettingsRuleEditor)view.FindName(name);
-                var pattern = (TextBox)editor.FindName("NewPattern");
-                var replace = (TextBox)editor.FindName("NewReplace");
-                var add = (Button)editor.FindName("AddButton");
-                async Task InvokeAdd()
-                {
-                    add.BringIntoView(); view.UpdateLayout(); await Drain();
-                    Check(add.IsEnabled && add.IsLoaded && add.IsVisible, "real new-rule button accepts input");
-                    ((IInvokeProvider)new ButtonAutomationPeer(add).GetPattern(PatternInterface.Invoke)).Invoke();
-                }
-                pattern.Text = "\u0085"; replace.Text = "X";
-                Check(pattern.Text == "\u0085", "WPF preserves the NEL input");
-                int writes = store.Writes;
-                await InvokeAdd();
-                await Until(() => store.Writes > writes && !view.RulesBusy);
-                var saved = rules.GetSavedSnapshot();
-                var matches = section == FilmRuleSection.Movie ? saved.MovieRules : saved.EpisodeRules;
-                Check(matches[^1].Pattern == "\u0085" && matches[^1].Replace == "X",
-                    "the native normalizer accepts NEL and saves the same rule");
-                var request = new FilmRuleRequest(section, "a\u0085b");
-                Check((await rules.ProcessAsync(request)).OutputText == "aXb" &&
-                    (await rules.ProcessAsync(request, saved)).OutputText == "aXb",
-                    "saved and draft consumers share the native rule result");
-
-                pattern.Text = "b"; replace.Text = "Y";
-                writes = store.Writes;
-                await InvokeAdd();
-                await Until(() => store.Writes > writes && !view.RulesBusy);
-                Check((await rules.ProcessAsync(new(section, "ab"))).OutputText == "aY",
-                    "ordinary rule input remains functional");
-
-                pattern.Text = " \t\uFEFF"; replace.Text = "invalid";
-                writes = store.Writes;
-                int count = editor.Rows.Count, noticeCount = notices.Count;
-                await InvokeAdd();
-                await Until(() => notices.Count > noticeCount && !view.RulesBusy);
-                Check(notices[^1].Contains("请输入正则", StringComparison.Ordinal) &&
-                    store.Writes == writes && editor.Rows.Count == count,
-                    "JavaScript whitespace reaches the shared normalizer and cannot be saved");
-            }
-            await using var reopened = new FilmRuleService(
-                new NativeJavaScriptJsonEngine(FilmRuleService.LoadProgramSource()), store);
-            await reopened.InitializeAsync();
-            foreach (var section in new[] { FilmRuleSection.Movie, FilmRuleSection.Episode })
-                Check((await reopened.ProcessAsync(new(section, "a\u0085b"))).OutputText == "aXb",
-                    "both NEL rules survive reopening the saved document");
+            var editor = scene.Editor(name);
+            var pattern = (TextBox)editor.FindName("NewPattern");
+            var replace = (TextBox)editor.FindName("NewReplace");
+            pattern.Text = "\u0085"; replace.Text = "X";
+            scene.RulesRuntime.Normalize = new FilmMatchRule("\u0085", "X");
+            Click((Button)editor.FindName("AddButton")); await Until(() => !scene.View.RulesBusy);
+            var call = scene.RulesRuntime.Requests.Last(request => request.Method == "film.rules.normalize");
+            var saved = scene.Rules.GetSavedSnapshot();
+            Check(call.Input.GetProperty("kind").GetString() == "match" && call.Input.GetProperty("pattern").GetString() == "\u0085" &&
+                (name == "MovieEditor" ? saved.MovieRules : saved.EpisodeRules)[^1] == new FilmMatchRule("\u0085", "X"),
+                "each editor sends the exact WPF NEL input to Node and saves its receipt without native trimming");
+            pattern.Text = " \t\uFEFF"; replace.Text = "invalid"; scene.RulesRuntime.Normalize = null;
+            int count = editor.Rows.Count, writes = scene.RulesRuntime.Writes, notices = scene.Notices.Count;
+            Click((Button)editor.FindName("AddButton")); await Until(() => !scene.View.RulesBusy);
+            Check(scene.RulesRuntime.Requests.Last(request => request.Method == "film.rules.normalize").Input.GetProperty("pattern").GetString() == " \t\uFEFF" &&
+                editor.Rows.Count == count && scene.RulesRuntime.Writes == writes && scene.Notices.Count > notices && scene.Notices[^1].Contains("请输入正则", StringComparison.Ordinal),
+                "Node's empty normalization receipt prevents save and reports the existing UI error");
         }
-        finally
-        {
-            window.Content = null; window.Close(); await Drain();
-        }
+        await using var reopened = new FilmRuleService(scene.RulesRuntime);
+        await reopened.InitializeAsync();
+        Check(reopened.GetSavedSnapshot().MovieRules[^1].Pattern == "\u0085" &&
+            reopened.GetSavedSnapshot().EpisodeRules[^1].Pattern == "\u0085",
+            "a new settings consumer reads both acknowledged Node rule groups");
     }
 
     private static async Task RuleLifetime()
     {
         await using var scene = await Scene.Create();
         scene.Box("EpisodeInput").Text = "一集";
-        scene.Engine.HoldProcess = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        scene.RulesRuntime.HoldProcess = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Click(Button(scene.View, "测试列表净化与集数匹配"));
-        await Until(() => scene.Engine.ProcessEntered);
+        await Until(() => scene.RulesRuntime.ProcessEntered);
         Check(scene.View.RulesBusy && !scene.Element<StackPanel>("RuleSections").IsEnabled, "busy rules remain legible but cannot mutate");
         Capture(scene.View, "film-settings-rules-busy.png");
         await scene.Select("cats");
-        scene.Engine.HoldProcess.SetResult();
+        scene.RulesRuntime.HoldProcess.SetResult();
         await Until(() => !scene.View.RulesBusy);
-        Check(scene.Engine.ProcessCancelled && scene.Element<StackPanel>("EpisodeResults").Children.Count == 0,
+        Check(scene.RulesRuntime.ProcessCancelled && scene.Element<StackPanel>("EpisodeResults").Children.Count == 0,
             "a noncooperative late result cannot publish after the page was hidden");
-        scene.Engine.HoldProcess = null;
+        scene.RulesRuntime.HoldProcess = null;
         await scene.Select("rules");
-        scene.Engine.FailProcess = true;
+        scene.RulesRuntime.FailProcess = true;
         Click(Button(scene.View, "测试列表净化与集数匹配")); await Until(() => !scene.View.RulesBusy);
-        Check(scene.Notices.Any(message => message.Contains("fixture engine failure", StringComparison.Ordinal)) &&
-            scene.View.CanEditRules, "engine failure uses the existing notice route and releases busy state");
-        scene.Engine.FailProcess = false;
-        scene.Engine.Result = new() { Section = FilmRuleSection.Episode, Type = "success", Text = "命中第 1 条",
+        Check(scene.Notices.Any(message => message.Contains("fixture rule service failure", StringComparison.Ordinal)) &&
+            scene.View.CanEditRules, "rule service failure uses the existing notice route and releases busy state");
+        scene.RulesRuntime.FailProcess = false;
+        scene.RulesRuntime.Result = new() { Section = FilmRuleSection.Episode, Type = "success", Text = "命中第 1 条",
             InputText = "一集", ProcessedText = "一集", Matched = true, MatchedRuleIndex = 1, RewrittenText = "E1" };
         Click(Button(scene.View, "测试列表净化与集数匹配")); await Until(() => !scene.View.RulesBusy);
         Check(Texts(scene.Element<StackPanel>("EpisodeResults")).Contains("改写结果：E1"), "testing can recover after failure");
         scene.Box("EpisodeInput").Text = "离页输入";
-        scene.Engine.ProcessEntered = scene.Engine.ProcessCancelled = false;
-        scene.Engine.HoldProcess = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        scene.RulesRuntime.ProcessEntered = scene.RulesRuntime.ProcessCancelled = false;
+        scene.RulesRuntime.HoldProcess = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Click(Button(scene.View, "测试列表净化与集数匹配"));
-        await Until(() => scene.Engine.ProcessEntered);
+        await Until(() => scene.RulesRuntime.ProcessEntered);
         scene.Window.Content = null; await Drain();
-        scene.Engine.HoldProcess.SetResult(); await Until(() => !scene.View.RulesBusy);
-        Check(scene.Engine.ProcessCancelled && scene.Element<StackPanel>("EpisodeResults").Children.Count == 0,
+        scene.RulesRuntime.HoldProcess.SetResult(); await Until(() => !scene.View.RulesBusy);
+        Check(scene.RulesRuntime.ProcessCancelled && scene.Element<StackPanel>("EpisodeResults").Children.Count == 0,
             "unloading cancels the request and rejects a noncooperative completion");
     }
 
@@ -333,14 +279,14 @@ public static class FilmSettingsUiTests
 
         var restore = Button(scene.View, "恢复列表净化默认规则");
         string original = scene.Editor("EpisodeCleanEditor").Rows[0].Pattern;
-        int restores = scene.Engine.Requests.Count(request => request.GetProperty("operation").GetString() == "restore");
+        int restores = scene.RulesRuntime.Requests.Count(request => request.Method == "film.rules.restore");
         Click(restore); await Drain();
         scene.Window.Width = 1050; scene.Window.Height = 650;
         scene.Window.UpdateLayout(); await Drain();
         AssertCentered();
         Click(scene.Element<Button>("PopupCancel")); await Drain();
         Check(!popup.IsOpen && scene.Editor("EpisodeCleanEditor").Rows[0].Pattern == original &&
-            scene.Engine.Requests.Count(request => request.GetProperty("operation").GetString() == "restore") == restores &&
+            scene.RulesRuntime.Requests.Count(request => request.Method == "film.rules.restore") == restores &&
             scene.Store.Writes == writes, "resized restore confirmation can be cancelled without changing rules or writing");
 
         await scene.Select("cats");
@@ -583,7 +529,7 @@ public static class FilmSettingsUiTests
     private sealed class Scene : IAsyncDisposable
     {
         internal readonly MemoryStore Store = new();
-        internal readonly RecordingEngine Engine = new();
+        internal readonly RecordingRules RulesRuntime = new();
         internal readonly RecordingRuntime Runtime;
         internal readonly FilmRuleService Rules;
         internal readonly FilmSourceService Sources;
@@ -593,7 +539,7 @@ public static class FilmSettingsUiTests
         private Scene(int cats)
         {
             Runtime = new(cats);
-            Rules = new(Engine, Store); Sources = new(Runtime, Store);
+            Rules = new(RulesRuntime); Sources = new(Runtime, Store);
             View = new(Rules, Sources);
             Window = new() { Content = View, Width = 1248, Height = 820, Left = -10000, Top = -10000,
                 WindowStyle = WindowStyle.None, ShowActivated = false, ShowInTaskbar = false };
@@ -635,54 +581,58 @@ public static class FilmSettingsUiTests
         }
         public async ValueTask DisposeAsync()
         {
-            Engine.HoldProcess?.TrySetResult();
+            RulesRuntime.HoldProcess?.TrySetResult();
             Window.Content = null; Window.Close(); await Drain();
             await Rules.DisposeAsync(); await Sources.DisposeAsync(); await Store.DisposeAsync();
         }
     }
 
-    // These ports test UI/service wiring. Rule engine semantics are covered by FilmRulesTests.
-    private sealed class RecordingEngine : IJavaScriptJsonEngine
+    // Wire receipts test UI/service wiring. Actual rule semantics belong to the shared runtime suite.
+    private sealed class RecordingRules : IRuntimeClient
     {
-        internal readonly List<JsonElement> Requests = [];
+        internal readonly List<(string Method, JsonElement Input)> Requests = [];
         internal TaskCompletionSource? HoldProcess;
         internal bool ProcessEntered, ProcessCancelled, FailProcess;
+        internal int Writes;
+        internal FilmMatchRule? Normalize = new("added", "$1", "gi");
         internal FilmRuleResult Result = new() { Section = FilmRuleSection.Episode, Type = "success", Text = "命中第 1 条" };
-        private static FilmRuleSet Seed => new()
+        private FilmRuleSet saved = new()
         {
             EpisodeCleanRegexRules = ["clean"], EpisodeRules = [new("episode", "E$1", "i")],
             MovieRules = [new("movie", "", "i")], AggregateRegexRules = ["search"]
         };
-        public async Task<JsonElement> InvokeAsync(object request, CancellationToken cancellationToken = default)
+        public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
-            var value = JsonSerializer.SerializeToElement(request, Json); Requests.Add(value);
-            string operation = value.GetProperty("operation").GetString()!;
-            if (operation == "process")
+            var value = FilmJson.Encode(parameters ?? new { }); Requests.Add((method, value));
+            JsonElement reply;
+            if (method == "film.rules.preview")
             {
                 ProcessEntered = true;
                 using var registration = cancellationToken.Register(() => ProcessCancelled = true);
-                if (HoldProcess is not null) await HoldProcess.Task; // Deliberately late, to exercise the view fence.
-                if (FailProcess) throw new InvalidOperationException("fixture engine failure");
-                return JsonSerializer.SerializeToElement(Result, Json);
+                if (HoldProcess is not null) await HoldProcess.Task;
+                if (FailProcess) throw new InvalidOperationException("fixture rule service failure");
+                reply = JsonSerializer.SerializeToElement(Result, FilmRuleService.Json);
             }
-            if (operation == "newMatch") return JsonSerializer.SerializeToElement(new FilmMatchRule("added", "$1", "gi"), Json);
-            if (operation == "newClean") return JsonSerializer.SerializeToElement("added-clean", Json);
-            var rules = operation == "initialize" ? Seed : value.GetProperty("rules").Deserialize<FilmRuleSet>(Json)!;
-            if (operation == "restore")
-                rules = rules with { EpisodeCleanRegexRules = ["restored-clean"], EpisodeRules = [new("restored-episode", "E$1", "i")] };
-            return JsonSerializer.SerializeToElement(new
+            else if (method == "film.rules.normalize")
+                reply = value.GetProperty("kind").GetString() == "match"
+                    ? JsonSerializer.SerializeToElement(Normalize, FilmRuleService.Json) : FilmJson.Encode("added-clean");
+            else
             {
-                changed = false, rules,
-                document = new
+                if (method == "film.rules.set") { saved = value.GetProperty("rules").Deserialize<FilmRuleSet>(Json)!; Writes++; }
+                else if (method == "film.rules.restore")
                 {
-                    rules.EpisodeCleanRegexRules,
-                    episodeRules = rules.EpisodeRules.Select(rule => JsonSerializer.Serialize(rule, Json)).ToArray(),
-                    movieRules = rules.MovieRules.Select(rule => JsonSerializer.Serialize(rule, Json)).ToArray(),
-                    rules.AggregateRegexRules
+                    saved = value.GetProperty("rules").Deserialize<FilmRuleSet>(Json)! with
+                    { EpisodeCleanRegexRules = ["restored-clean"], EpisodeRules = [new("restored-episode", "E$1", "i")] };
+                    Writes++;
                 }
-            }, Json);
+                else if (method != "film.rules.get") throw new InvalidOperationException(method);
+                reply = FilmRuleConsumerRuntime.Snapshot(saved, "acknowledged-" + Writes);
+            }
+            return FilmSearchConsumerRuntime.Success(reply);
         }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Rules do not upload source.");
     }
 
     private sealed class MemoryStore : IDocumentStore

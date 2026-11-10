@@ -863,13 +863,17 @@ test('cancelled source reactions cannot borrow B identity through the positional
   assert.equal(session.stats().pendingAdapterTasks, 0);
 });
 
-test('positional host hook is hidden before source and LX user initialization', async t => {
+test('positional host and preprocessing hooks are hidden before source and LX user initialization', async t => {
   const hidden = `[
     typeof __meowHostArgs, typeof globalThis.__meowHostArgs,
     Object.hasOwn(globalThis, '__meowHostArgs'),
-    Function('return typeof __meowHostArgs')()
+    Function('return typeof __meowHostArgs')(),
+    typeof __meowPreprocess, typeof globalThis.__meowPreprocess,
+    Object.hasOwn(globalThis, '__meowPreprocess'),
+    Function('return typeof __meowPreprocess')()
   ]`;
-  const expected = ['undefined', 'undefined', false, 'undefined'];
+  const expected = ['undefined', 'undefined', false, 'undefined',
+    'undefined', 'undefined', false, 'undefined'];
   const { session } = await sourceSession(t, {
     source: `const atLoad = ${hidden};
       export default { searchContent() { return {atLoad, current:${hidden}}; } };`,

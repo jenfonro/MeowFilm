@@ -105,6 +105,14 @@ test('metadata settings cannot use an undeclared public workspace', t => {
   assert.throws(() => verifyBoundaries(f.root), /undeclared shared runtime package/);
 });
 
+test('film assembly consumes its declared public business owner', t => {
+  const f = fixture(t);
+  f.write('packages/film-playback/package.json', { name: '@meowfilm/film-playback' });
+  f.write('apps/runtime/modules/film-playback.mjs',
+    "import { createPlaybackService } from '@meowfilm/film-playback';");
+  assert.deepEqual(verifyBoundaries(f.root), { packages: 3 });
+});
+
 for (const owner of ['packages/a/src/index.js', 'apps/runtime/modules/cat-script.mjs']) {
   test(`${owner} can contain import vocabulary without declaring a dependency`, t => {
     const f = fixture(t);

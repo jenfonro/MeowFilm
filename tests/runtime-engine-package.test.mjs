@@ -42,10 +42,11 @@ function sourceFixture() {
   };
   for (const path of new Set(['package.json', 'package-lock.json', policyPath, receiptPath,
     artifactPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
-  for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime', 'film-rules', 'film-playback']) {
+  for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime', 'film-rules', 'film-search', 'film-playback']) {
     const location = `packages/${name}`;
     copy(`${location}/package.json`);
-    copy(`${location}/${name === 'film-rules' ? 'film-rules.js' : 'src'}`);
+    for (const file of name === 'film-rules' ? ['film-rules.js', 'playback-rules.js']
+      : name === 'film-search' ? ['film-search.js'] : ['src']) copy(`${location}/${file}`);
     const installed = join(root, 'node_modules/@meowfilm', name);
     mkdirSync(dirname(installed), { recursive: true });
     symlinkSync(join(root, location), installed, process.platform === 'win32' ? 'junction' : 'dir');
@@ -200,6 +201,15 @@ test('packaged entry starts HTTP and serves all seven App modules without reposi
           'tmdb.data.v1', 'douban.data.v1', 'film.playback.v1']);
       for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
         'film.settings.get', 'film.library.get']) okay(await client.call(method));
+      const rules = okay(await client.call('film.rules.get'));
+      assert.equal(typeof rules.revision, 'string');
+      const preview = okay(await client.call('film.rules.preview', {
+        request: { section: 'episode', text: '中文E12' },
+        rules: { ...rules.rules, episodeCleanRegexRules: [],
+          episodeRules: [{ pattern: '\\\\p{Script=Han}+(E\\\\d+)', replace: '$1', flags: 'u' }] },
+      }));
+      assert.equal(preview.matched, true);
+      assert.equal(preview.rewrittenText, 'E12');
       const installationId = '7bd84ef5-9557-4338-a67f-9dc4df2413f9';
       okay(await client.upload('music', installationId, 1, Buffer.from(
         'let n=0; lx.on(lx.EVENT_NAMES.request, async () => ++n);' +
@@ -331,8 +341,8 @@ for (const change of ['omitted', 'reordered', 'unreviewed']) {
   test(`native policy rejects an ${change} ownership patch`, async t => {
     const f = fixture(t), patches = f.policy.patches;
     if (change === 'omitted') patches.pop();
-    else if (change === 'reordered') [patches[2], patches[3]] = [patches[3], patches[2]];
-    else patches[3].path = 'packages/script-host/native/unreviewed.patch';
+    else if (change === 'reordered') [patches[1], patches[2]] = [patches[2], patches[1]];
+    else patches[2].path = 'packages/script-host/native/unreviewed.patch';
     f.write(policyPath, f.policy);
     await rejected(f, 'INVALID_NATIVE_POLICY');
   });
@@ -340,7 +350,7 @@ for (const change of ['omitted', 'reordered', 'unreviewed']) {
 
 for (const path of ['packages/script-host/binding.gyp', 'scripts/quickjs/build-native.mjs',
   'scripts/quickjs/build-source-sdk.mjs', 'packages/script-host/native/task-context.patch',
-  'packages/script-host/native/bigint-uintn.patch', 'packages/script-host/native/utf16-cstring.patch',
+  'native/JavaScript/patches/regexp-compile-interrupt.patch',
   'packages/script-host/native/arraybuffer-ownership.patch']) {
   test(`changed build input requires a new valid build: ${path}`, async t => {
     const f = fixture(t);

@@ -134,7 +134,7 @@ public sealed record FilmPlaybackTarget(string Id, string Kind, string Title,
 public sealed record FilmPlaybackRequest(FilmPlaybackTarget Target,
     IReadOnlyList<JsonElement>? Sources = null, string? Query = null,
     JsonElement? Results = null, JsonElement? Search = null, JsonElement? Metadata = null,
-    JsonElement? CacheEntries = null)
+    JsonElement? CacheEntries = null, JsonElement? ResultHints = null, JsonElement? SearchReference = null)
 {
     // Only the producer of the original source results/cache may bind this proof.
     // Navigation persistence intentionally loses it: process-local authority is not JSON.
@@ -145,7 +145,8 @@ public sealed record FilmPlaybackRequest(FilmPlaybackTarget Target,
     {
         Target = Target with { Source = Target.Source?.Clone(), Members = Target.Members?.Clone() },
         Sources = Sources?.Select(value => value.Clone()).ToArray(),
-        Results = Results?.Clone(), Search = Search?.Clone(), Metadata = Metadata?.Clone(), CacheEntries = CacheEntries?.Clone()
+        Results = Results?.Clone(), Search = Search?.Clone(), Metadata = Metadata?.Clone(), CacheEntries = CacheEntries?.Clone(),
+        ResultHints = ResultHints?.Clone(), SearchReference = SearchReference?.Clone()
     };
 }
 
@@ -237,11 +238,15 @@ internal sealed class FilmPlaybackSnapshot
         Sequence = sequence;
         Target = FilmJson.Target(FilmJson.Member(Raw, "target"));
         Target.Validate();
+        MetadataCache = FilmMetadataCache.Read(FilmJson.Member(Raw, "metadataCache"));
+        MetadataSupplement = FilmMetadataSupplement.Read(FilmJson.Member(Raw, "metadataSupplement"));
     }
     internal JsonElement Raw { get; }
     internal Guid SessionId { get; }
     internal long Sequence { get; }
     internal FilmPlaybackTarget Target { get; }
+    internal FilmMetadataCache? MetadataCache { get; }
+    internal FilmMetadataSupplement? MetadataSupplement { get; }
     internal JsonElement Metadata => FilmJson.Member(Raw, "metadata");
     internal JsonElement Browsing => FilmJson.Member(Raw, "browsing");
     internal JsonElement Attempt => FilmJson.Member(Raw, "attempt");

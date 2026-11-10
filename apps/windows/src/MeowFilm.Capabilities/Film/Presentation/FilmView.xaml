@@ -125,9 +125,14 @@
         <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <TextBlock Text="{Binding Title}" Style="{StaticResource MeowFilm.SectionHeading}"
                    Margin="0" VerticalAlignment="Center"/>
-        <Button Grid.Column="1" Content="查看更多" Tag="{Binding}"
+        <StackPanel Grid.Column="1" Orientation="Horizontal">
+        <Button Content="刷新" Click="HomeRefresh_Click" Style="{StaticResource Film.MoreButton}"
+                IsEnabled="{Binding CanRefresh}" Margin="0,0,12,0"
+                AutomationProperties.Name="{Binding Title,StringFormat=刷新 {0}}"/>
+        <Button Content="查看更多" Tag="{Binding}"
                 Click="More_Click" Style="{StaticResource Film.MoreButton}"
                 AutomationProperties.Name="{Binding Title,StringFormat=查看更多 {0}}"/>
+        </StackPanel>
        </Grid>
        <local:FilmShelf ItemActivated="Shelf_ItemActivated"
                         RetryRequested="Shelf_RetryRequested"/>
@@ -145,8 +150,13 @@
     </DataTrigger></Style.Triggers>
    </Style></ScrollViewer.Style>
    <StackPanel Margin="40,12,40,36">
-    <TextBlock x:Name="DataTitle" Text="{Binding ActiveData.Title}" Margin="0,0,0,16"
+    <Grid Margin="0,0,0,16">
+     <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+    <TextBlock x:Name="DataTitle" Text="{Binding ActiveData.Title}"
                Style="{StaticResource MeowFilm.SectionHeading}"/>
+    <Button Grid.Column="1" Content="刷新" Click="DataRefresh_Click" Style="{StaticResource Film.MoreButton}"
+            IsEnabled="{Binding ActiveData.CanRefresh}" AutomationProperties.Name="刷新影片数据"/>
+    </Grid>
     <Border Margin="0,0,0,24" Padding="18,9" CornerRadius="16"
             Style="{StaticResource MeowFilm.Surface}">
      <ItemsControl x:Name="DataFilters" ItemsSource="{Binding ActiveData.FilterRows}">

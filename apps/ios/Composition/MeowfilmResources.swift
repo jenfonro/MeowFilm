@@ -60,8 +60,7 @@ struct MeowfilmResources: Sendable {
         }
         musicScripts = NativeMusicScriptService(connection: connection)
         filmMetadata = FilmTMDBService(connection: connection)
-        filmRules = try FilmRuleService(store: Self.documentFactory(
-            base: libraryRoot, namespace: FilmRuleService.documentNamespace)())
+        filmRules = FilmRuleService(connection: connection)
         filmSourceSettings = FilmSourceService(transport: CatScriptTransport(connectionProvider: connection),
             storeFactory: Self.documentFactory(base: libraryRoot, namespace: FilmSourceService.documentNamespace))
         let protectedRoot = root.appendingPathComponent("encrypted-documents-v1", isDirectory: true)

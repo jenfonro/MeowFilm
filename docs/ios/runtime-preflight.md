@@ -18,9 +18,9 @@ python3 -I -B scripts/ios-node-preflight.py --simulator <UDID>
 App 嵌入两个 framework：
 
 - 官方 `NodeMobile.framework` 提供 Node 主控和 Cat Worker。
-- `MeowScriptHost.framework` 提供同一套原生 Node-API 8 执行核心；QuickJS-NG 0.14、四份固定补丁、OpenSSL libcrypto 和 zlib 静态进入该 framework，并限制导出。LX／source 每实例使用独立 Runtime／线程，不是每脚本复制 framework 或新建 Node 进程。
+- `MeowScriptHost.framework` 提供同一套原生 Node-API 8 执行核心；QuickJS-NG 0.18.0、锁定派生补丁、OpenSSL libcrypto 和 zlib 静态进入该 framework，并限制导出。LX／source／影视纯 JSON 程序各自使用独立 Runtime／Context／线程，不是每脚本复制 framework 或新建 Node 进程。
 
-客户端影视规则的 QuickJS-NG 0.18 继续由 `MeowJavaScript` 独立静态链接。两套引擎有不同职责及补丁，不能依赖链接顺序混用符号。许可和来源分别保留。
+影视规则、搜索及匹配统一由 Node 加载共享程序并通过该原生载体执行；客户端只调用 `film.rules.*`／`film.search.*`／播放会话接口，不再静态链接另一套引擎。规则和脚本状态隔离，取消／截止保持真实资源排空与恢复；共享核心和 Unicode 表许可随 App 分发。
 
 NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网络实现。iOS 因此只在构建期从锁定的 Undici 6.29.1 打包 `Request`／`Response`／`Headers`／`FormData` 纯值闭包为 `cat-web-values.cjs`，不发布完整 npm 包、fetch／dispatcher／llhttp 或 WASM；网络仍经现有 managed `node:http`，Buffer／Blob／WebStream 仍用 Node 原生值。该产物、实际输入和许可纳入 receipt 与编译身份。其他平台仍用原生 Web 值构造器。缺失的 `CustomEvent` 仅在 Cat realm 内以原生 `Event` 子类提供，不改宿主全局或启动开关。
 
@@ -40,7 +40,7 @@ NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网
 - Cat 实际 HTTP 五阶段请求、私有卷、客户端选项、删除标记及结果返回后管理换代。
 - source 的实际原生装载、调用、卸载，以及 Reader 的统一结果，不新增阅读 UI。
 - TMDB 真实模块经可控 HTTP 上游验证设置／实际 Film adapter 搜索与详情／受信二进制图片／实际 Artwork 消费者，精确选择见[影视搜索](film-search.md#真实-tmdb-宿主)。合成上游不是公网账号验证。
-- 同进程客户端规则引擎与运行器引擎共存；Unicode 原样 JSON 键及业务 `blob`／`token` 字段。
+- 同一真实 NodeMobile 的 source 与影视规则使用共享载体、独立 Runtime／Context；规则固定场景、Unicode／UTF16、取消／截止恢复，以及规则预览与搜索输入一致性。Unicode 原样 JSON 键及业务 `blob`／`token` 字段仍保留。
 - 音乐模块关闭后 Cat 仍可用，App 最终关 listener 和全部执行资源并等 Node 线程返回。
 
 独立预检的 Cat 安装／调用链还验证 Web 值、原生事件分发及脚本内 loopback fetch；不能只验证普通 `require('http')` 而漏掉 Web 值的隐式依赖。

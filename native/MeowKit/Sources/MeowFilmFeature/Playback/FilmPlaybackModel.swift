@@ -31,7 +31,7 @@ public final class FilmPlaybackModel: ObservableObject {
     private let makeRequest: @Sendable () async throws -> FilmPlaybackRequest
     private let searchContext: FilmSearchContext?
     private var searchObservation: AnyCancellable?
-    private var searchAdmissionTask: Task<Void, Error>?
+    private var searchAdmissionTask: Task<FilmPlaybackRequest, Error>?
     private var searchUpdateTask: Task<Void, Never>?
     private var searchScope: [FilmPlaybackSource] = []
     private var searchRevision = -1
@@ -154,7 +154,10 @@ public final class FilmPlaybackModel: ObservableObject {
         if closingTask != nil { return reopenAfterDrain() }
         if let openingTask { return openingTask }
         guard !closed else { return nil }
-        if snapshot != nil { observeRuntimeClosure(); observe(); observeSearchContext(); return nil }
+        if snapshot != nil {
+            observeRuntimeClosure(); observe(); observeSearchContext()
+            return refreshBrowsing(refresh: false)
+        }
         if allocatedSessionID != nil { return reopenAfterDrain() }
         opening = true; actionError = nil
         let generation = generation
@@ -162,21 +165,20 @@ public final class FilmPlaybackModel: ObservableObject {
             guard let self else { return }
             defer { self.opening = false; self.openingTask = nil }
             do {
-                let base = try await self.makeRequest()
-                guard !self.closed, self.generation == generation else { return }
-                let request: FilmPlaybackRequest
+                let base: FilmPlaybackRequest
                 if let context = self.searchContext {
-                    let admission = Task { try await context.session.waitForSourceScope() }
+                    // Search composition supplies the one authoritative Node
+                    // handoff. This pre-open wait owns no playback session.
+                    let admission = Task { try await self.makeRequest() }
                     self.searchAdmissionTask = admission
-                    do { try await admission.value }
+                    do { base = try await admission.value }
                     catch { self.searchAdmissionTask = nil; throw error }
                     self.searchAdmissionTask = nil
-                    let producer = try await self.transport.producer()
-                    request = try context.playbackRequest(base: base, owner: producer, target: self.reentryTarget)
-                    self.searchRevision = context.snapshot.revision
+                    self.searchRevision = context.handoffRevision
                 } else {
-                    request = self.reentryTarget.map { base.retargeted($0) } ?? base
+                    base = try await self.makeRequest()
                 }
+                let request = self.reentryTarget.map { base.retargeted($0) } ?? base
                 guard !self.closed, self.generation == generation else { return }
                 self.searchScope = request.sources
                 // Once admitted, an open is drained rather than cancelled: its
@@ -217,6 +219,7 @@ public final class FilmPlaybackModel: ObservableObject {
             if self.retained {
                 self.closed = false; self.retained = false
                 self.observe(); self.observeSearchContext()
+                await self.refreshBrowsing(refresh: false)?.value
                 return
             }
             if !self.isReleased { await self.closeSession() }
@@ -319,12 +322,12 @@ public final class FilmPlaybackModel: ObservableObject {
         accept(value)
     }
 
-    private func accept(_ value: FilmPlaybackSnapshot) {
+    private func accept(_ value: FilmPlaybackSnapshot, reconcileMedia: Bool = true) {
         guard value.sessionID == allocatedSessionID else { return }
         if let current = snapshot, value.sequence <= current.sequence { return }
         snapshot = value
         reentryTarget = value.target
-        reconcilePreparation()
+        if reconcileMedia { reconcilePreparation() }
     }
 
     private func observeSearchContext() {
@@ -351,10 +354,10 @@ public final class FilmPlaybackModel: ObservableObject {
                 do {
                     let owner = try await self.transport.producer()
                     guard !Task.isCancelled, !self.closed, !self.runtimeClosed, self.generation == generation else { return }
-                    guard let target = self.snapshot?.target else { return }
-                    let fields = try context.playbackUpdate(sources: self.searchScope, owner: owner, target: target)
-                    self.searchRevision = context.snapshot.revision
-                    await self.enqueueAction("search.update", parameters: fields, ui: true)?.value
+                    let update = try await context.playbackUpdate(sources: self.searchScope, owner: owner)
+                    guard !Task.isCancelled, !self.closed, !self.runtimeClosed, self.generation == generation else { return }
+                    self.searchRevision = update.revision
+                    await self.enqueueAction("search.update", parameters: update.fields, ui: true)?.value
                 } catch {
                     if !Self.cancelled(error), !self.closed, self.generation == generation {
                         self.actionError = Self.failure(error)
@@ -457,9 +460,9 @@ public final class FilmPlaybackModel: ObservableObject {
             requiresExplicitPlay = false
             commandAdmission = UUID(); awaitingIntent = commandAdmission
             intent = commandAdmission
-            // The durable block decision may reject without replacing anything.
+            // Blocking or retry may reject without replacing anything.
             // Hold publication, not the exact pending media/receipt it can retain.
-            if action != "block" {
+            if action != "block" && action != "media.retry" {
                 blockedAttemptID = snapshot?.attempt?.id
                 cancelPreparation()
             }
@@ -516,8 +519,8 @@ public final class FilmPlaybackModel: ObservableObject {
                     // Older SSE attempts cannot reacquire publication while it waits.
                     awaitingIntent = nil; blockedAttemptID = nil
                 }
-                accept(value)
-                reconcilePreparation()
+                accept(value, reconcileMedia: false)
+                if command.action != "browse.refresh" { reconcilePreparation() }
                 if command.action == "play", command.intent == commandAdmission,
                    let previousCurrent, committed === previousCurrent,
                    previousCurrent.started, !previousCurrent.retired, !previousCurrent.terminal,
@@ -532,7 +535,7 @@ public final class FilmPlaybackModel: ObservableObject {
                    command.ui || (error as? FilmPlaybackError)?.code != "STALE_SESSION" {
                     actionError = Self.failure(error)
                 }
-                if command.action == "block" { reconcilePreparation() }
+                if command.action == "block" || command.action == "media.retry" { reconcilePreparation() }
             }
         }
         commandWorker = nil
@@ -567,6 +570,17 @@ public final class FilmPlaybackModel: ObservableObject {
         send("browse", parameters: fields)
     }
     public func browseSeason(_ number: Int) { send("browse.season", parameters: ["season": .number(Double(number))]) }
+    @discardableResult
+    public func refreshBrowsing(refresh: Bool = true) -> Task<Void, Never>? {
+        if refresh { actionError = nil }
+        return send("browse.refresh", parameters: refresh ? [:] : ["refresh": .bool(false)])
+    }
+    @discardableResult
+    public func retryMedia(attemptID: String? = nil) -> Task<Void, Never>? {
+        let id = attemptID ?? snapshot?.attempt?.id ?? snapshot?.current?.attemptID
+        actionError = nil
+        return send("media.retry", parameters: id.map { ["attemptId": .string($0)] } ?? [:])
+    }
     public func browseMetadata(_ id: String, keepSource: Bool = false) {
         var fields: RuntimeObject = ["metadataSourceId": .string(id)]
         if keepSource { fields["keepSource"] = .bool(true) }
@@ -1082,6 +1096,7 @@ public final class FilmPlaybackModel: ObservableObject {
 
     private static let mediaActions: Set<String> = [
         "prepare", "play", "select.episode", "select.candidate", "pan", "quality", "switch", "block", "next", "previous", "stop",
+        "media.retry",
     ]
     private static func cancelled(_ error: Error) -> Bool {
         error is CancellationError || (error as? FilmPlaybackError)?.code == "CANCELLED"

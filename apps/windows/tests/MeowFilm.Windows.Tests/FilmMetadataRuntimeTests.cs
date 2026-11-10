@@ -13,7 +13,6 @@ using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop.Artwork;
 using MeowFilm.Platform.Runtime;
-using MeowFilm.Platform.Scripting;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -25,8 +24,6 @@ public static class FilmMetadataRuntimeTests
     private const string OriginalPoster = "/v1/tmdb/images/original/poster.png";
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("real App adapter search detail artwork and restart preserve stable identities", SearchArtwork);
-        yield return Case("source failures stay errors and failed detail preserves complete original search metadata", Failures);
         yield return Case("native settings preserve replace clear failed drafts and restore after restart", Settings);
         yield return Case("ordinary metadata cancellation leaves a late complete response in the Node cache", Cancellation);
         yield return Case("concurrent complete details share the Node producer and exact request keys remain isolated", MetadataKeys);
@@ -102,7 +99,7 @@ public static class FilmMetadataRuntimeTests
             "complete detail uses the exact identity, language and full append set");
     }
 
-    private static async Task SearchArtwork()
+    internal static async Task SearchArtwork()
     {
         await using var api = new RuntimeHttpClientTests.Server();
         await using var images = new RuntimeHttpClientTests.Server();
@@ -110,10 +107,7 @@ public static class FilmMetadataRuntimeTests
         await using var first = await RuntimeHost.OpenAsync(data);
         await first.Metadata.SaveSettingsAsync(new Dictionary<string, object?>
         { ["apiBase"] = api.BaseUrl + "/api", ["imageBase"] = api.BaseUrl + "/img" });
-        var sources = new SearchSources(SearchFixture.Source("a"))
-        { Read = (_, _, page, _) => Task.FromResult(SearchFixture.Page(2, (page.ToString(), "站源", ""))) };
-        await using var search = new FilmSearchService(new SearchEngine(), sources,
-            _ => Task.FromResult<IReadOnlyList<string>>([]), first.Metadata);
+        await using var search = new FilmSearchService(first.Client.CaptureConnectionAsync, new SearchSources(), first.Metadata.ResolveImage);
         var session = search.Start("原查询2");
         await using (var exchange = await api.AcceptAsync())
         {
@@ -132,15 +126,16 @@ public static class FilmMetadataRuntimeTests
         await SearchFixture.Settle(session);
         var item = session.Items.Single(value => value.GetProperty("sourceKind").GetString() == "tmdb");
         var context = new FilmSearchContext(session, item);
+        var handoff = await context.HandoffAsync(default);
         Check(context.Query == "原查询2" && context.MetadataSearchPayload!.Value.GetProperty("marker").GetString() == "完整原响应" &&
-            context.Metadata!.Value.GetProperty("overview").GetString() == "真实详情回执" &&
-            context.Metadata!.Value.GetProperty("poster_path").GetString() == OriginalPoster, "full search and detail JSON reach the native context");
+            handoff.Metadata!.Value.GetProperty("overview").GetString() == "真实详情回执" &&
+            handoff.Metadata!.Value.GetProperty("poster_path").GetString() == OriginalPoster, "full search and detail JSON reach the native context");
         string searchPoster = context.MetadataSearchPayload!.Value.GetProperty("results")[0].GetProperty("poster_path").GetString()!;
         Check(searchPoster == Poster &&
             context.MetadataSearchPayload!.Value.GetProperty("raw").GetProperty("unknown").GetProperty("text").GetString() == "  搜索原字段  " &&
             context.MetadataSearchPayload!.Value.GetProperty("raw").GetProperty("unknown").GetProperty("nullable").ValueKind == JsonValueKind.Null,
             "search keeps w500 image references and complete unknown raw fields independently of full detail");
-        CompleteDetail(context.Metadata!.Value, "真实详情回执");
+        CompleteDetail(handoff.Metadata!.Value, "真实详情回执");
         Check(item.GetProperty("poster").GetString() == OriginalPoster && first.Metadata.ResolveImage(searchPoster) == searchPoster,
             "the enhanced card uses original detail while stable search image references stay unchanged");
         await search.LoadMoreAsync();
@@ -197,14 +192,13 @@ public static class FilmMetadataRuntimeTests
         Console.WriteLine($"TMDB_RUNTIME restart=true; oldProcess={oldProcess}; currentProcess={second.ProcessId}; stableCache=true; publicNetwork=false");
     }
 
-    private static async Task Failures()
+    internal static async Task Failures()
     {
         await using var upstream = new RuntimeHttpClientTests.Server();
         await using var host = await RuntimeHost.OpenAsync(NewData());
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?>
         { ["apiBase"] = upstream.BaseUrl, ["imageBase"] = upstream.BaseUrl + "/img" });
-        await using var search = new FilmSearchService(new SearchEngine(), new SearchSources(),
-            _ => Task.FromResult<IReadOnlyList<string>>([]), host.Metadata);
+        await using var search = new FilmSearchService(host.Client.CaptureConnectionAsync, new SearchSources(), host.Metadata.ResolveImage);
         var failed = search.Start("失败2");
         await using (var exchange = await upstream.AcceptAsync())
             await exchange.ReplyAsync(Json(new { error = "synthetic upstream failure" }), 503);
@@ -229,8 +223,9 @@ public static class FilmMetadataRuntimeTests
         }
         await SearchFixture.Settle(session);
         var context = new FilmSearchContext(session, session.Items.Single());
+        var handoff = await context.HandoffAsync(default);
         Check(session.MetadataState == FilmSearchChannelState.Completed && context.Query == "目标2" && context.MetadataQuery == "目标" &&
-            context.Metadata!.Value.GetProperty("overview").GetString() == "已得搜索简介" &&
+            handoff.Metadata!.Value.GetProperty("overview").GetString() == "已得搜索简介" &&
             context.MetadataSearchPayload!.Value.GetProperty("marker").GetString() == "完整原响应",
             "the failed real movie detail cannot discard the effective fallback query or full original search metadata");
         await using var artwork = new ArtworkService(readTrusted: host.Client.ReadImageAsync);
@@ -273,11 +268,11 @@ public static class FilmMetadataRuntimeTests
         string documents = Path.Combine(data, "documents");
         Directory.CreateDirectory(documents);
         await using (var store = new LocalDocumentStore(documents,
-            [FilmRuleService.DocumentNamespace, FilmSourceService.DocumentNamespace]))
+            [FilmSourceService.DocumentNamespace]))
         {
-            var rules = new FilmRuleService(new NativeJavaScriptJsonEngine(FilmRuleService.LoadProgramSource()), store);
+            var rules = new FilmRuleService(host.Client);
             var sources = new FilmSourceService(host.Client, store);
-            await using var film = new FilmCapability(rules, sources, host.Metadata);
+            await using var film = new FilmCapability(rules, sources, host.Client, host.Metadata);
             var view = (FilmSettingsView)film.SettingsView;
             view.Width = 900; view.Height = 650;
             using var surface = Mount(view);

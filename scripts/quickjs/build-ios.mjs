@@ -136,6 +136,8 @@ export async function buildIOSNative(target) {
       'scripts/quickjs/build-source-sdk.mjs', 'scripts/prepare-ios-runtime.py',
       'scripts/ios-node-mobile.json', ...nativeInputs, ...sourceInputs, ...sdkCandidates, ...catWebCandidates,
       ...Object.values(policy.sources).flatMap(source => [source.archivePath, source.license.path]),
+      ...policy.patches.map(patch => patch.path),
+      ...Object.values(policy.sources).flatMap(source => source.unicodeLicense ? [source.unicodeLicense.path] : []),
       ...mobile.inputs.map(input => input.path),
     ]);
     const beforeMap = new Map(before.map(input => [input.path, input.sha256]));
@@ -223,6 +225,8 @@ export async function buildIOSNative(target) {
       for (const input of targetSpec.sources) {
         const source = input.startsWith('<(runtime_native)/')
           ? resolve(root, policy.build.cache, input.slice('<(runtime_native)/'.length))
+          : input.startsWith('<(quickjs_source)/')
+          ? resolve(root, policy.sources.quickjs.sourcePath, input.slice('<(quickjs_source)/'.length))
           : resolve(root, 'packages/script-host', input);
         const object = resolve(objectDirectory, `${targetSpec.target_name}-${basename(source)}.o`);
         const args = [...flags, ...headers, '-DNAPI_VERSION=8', '-DNODE_GYP_MODULE_NAME=script_host_native',
@@ -233,6 +237,7 @@ export async function buildIOSNative(target) {
         const inputIdentity = hash(JSON.stringify({
           compiler: toolchain.compiler, args,
           inputs: before.filter(input => input.path.startsWith('packages/script-host/native/')
+            || input.path.startsWith(policy.sources.quickjs.sourcePath + '/')
             || input.path.startsWith(policy.build.cache + '/')
             || input.path.startsWith(mobile.headerDirectory + '/')),
           ...(source.endsWith('/addon.cc') ? { bindingIdentity } : {}),

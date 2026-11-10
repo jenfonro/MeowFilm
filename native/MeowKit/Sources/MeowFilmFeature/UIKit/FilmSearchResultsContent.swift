@@ -13,6 +13,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     private let images: ArtworkImages
     private var theme: PageTheme
     private var observation: AnyCancellable?
+    private var errorObservation: AnyCancellable?
     private let modes = UISegmentedControl(items: ["聚合", "原始列表"])
     private let more = UIButton(type: .system), cancelButton = UIButton(type: .system)
     private let activity = UIActivityIndicatorView(style: .medium)
@@ -99,6 +100,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
             guard session !== next || observation == nil else { return }
             let changed = session !== next
             observation?.cancel()
+            errorObservation?.cancel()
             session = next
             if changed {
                 offsets.removeAll()
@@ -106,6 +108,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
                 shownMetadataError = nil
             }
             observation = next.$snapshot.receive(on: RunLoop.main).sink { [weak self] _ in self?.render() }
+            errorObservation = next.$error.receive(on: RunLoop.main).sink { [weak self] _ in self?.render() }
             if changed, isViewLoaded { collection.setContentOffset(.zero, animated: false) }
             render()
         } catch { presentError("影视搜索不可用") }
@@ -115,6 +118,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     public func close() {
         if let session { service.release(session) }
         observation?.cancel(); observation = nil
+        errorObservation?.cancel(); errorObservation = nil
     }
     public func applyTheme(_ theme: PageTheme) {
         self.theme = theme
@@ -148,7 +152,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
             self.collection.setContentOffset(restoringOffset, animated: false)
         }
         modes.isHidden = state.siteItems.isEmpty
-        empty.isHidden = !visible.isEmpty || state.loading || state.failed
+        empty.isHidden = !visible.isEmpty || state.loading || state.failed || session?.error != nil
         let cancelled = state.siteState == .cancelled || state.metadataState == .cancelled
         empty.text = cancelled ? "已取消" : state.noSources ? "尚未启用可搜索来源" : "未找到影片"
         more.isHidden = !state.hasMore
@@ -159,8 +163,8 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         case .unavailable: metadataStatus.text = "TMDB 不可用"
         default: metadataStatus.text = nil
         }
-        if state.failed, shownSessionError != state.sessionID {
-            if presentError("影视搜索不可用") { shownSessionError = state.sessionID }
+        if state.failed || session?.error != nil, shownSessionError != state.sessionID {
+            if presentError(session?.error?.localizedDescription ?? "影视搜索失败") { shownSessionError = state.sessionID }
         } else if state.metadataState == .failed, shownMetadataError != state.sessionID {
             if presentError("TMDB 搜索失败") { shownMetadataError = state.sessionID }
         }

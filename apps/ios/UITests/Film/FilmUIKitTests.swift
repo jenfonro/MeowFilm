@@ -152,7 +152,6 @@ final class FilmUIKitTests: XCTestCase {
         try await performRunnerAction { $0.activate() }
         let source = FilmFailingUIKitSource()
         let model = FilmCategoryModel(category: .anime, source: source)
-        await model.loadIfNeeded()?.value
         let page = FilmCategoryViewController(model: model, images: artworkImages(), themeProvider: FilmUIKitTheme())
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
@@ -213,7 +212,6 @@ final class FilmUIKitTests: XCTestCase {
         try await performRunnerAction { $0.activate() }
         let source = FilmFailingUIKitSource()
         let model = FilmHomeModel(sources: [source])
-        await model.loadIfNeeded()?.value
         let page = FilmHomeViewController(model: model, images: artworkImages(), themeProvider: FilmUIKitTheme())
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
@@ -274,10 +272,6 @@ final class FilmUIKitTests: XCTestCase {
         try await performRunnerAction { $0.activate() }
         let source = FilmPaginationFailingUIKitSource()
         let model = FilmCategoryModel(category: .anime, source: source)
-        await model.loadIfNeeded()?.value
-        let originalItems = model.items
-        XCTAssertEqual(originalItems.count, 3)
-        XCTAssertEqual(source.offsets, [0])
         let page = FilmCategoryViewController(model: model, images: artworkImages(), themeProvider: FilmUIKitTheme())
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
@@ -288,6 +282,10 @@ final class FilmUIKitTests: XCTestCase {
             model.close()
             previousKeyWindow?.makeKey()
         }
+        await waitFor("initial category page completed") { !model.isLoading && model.items.count == 3 }
+        let originalItems = model.items
+        XCTAssertEqual(originalItems.count, 3)
+        XCTAssertEqual(source.offsets, [0])
         let more = try button("film.category.more", in: page.view)
         let collection = try XCTUnwrap(identified("film.category.grid", in: page.view) as? UICollectionView)
         XCTAssertTrue(more.isEnabled)
@@ -366,8 +364,8 @@ final class FilmUIKitTests: XCTestCase {
             }
         }
         let secondReads = await second.loadCount
-        XCTAssertEqual(first.homeReads, 1)
-        XCTAssertEqual(secondReads, 1)
+        XCTAssertEqual(first.homeReads, 2)
+        XCTAssertEqual(secondReads, 2)
     }
 
     func testPosterRailsFitThreeCompleteCardsAndTheEdgeOfAFourthAtPhoneWidths() async throws {
@@ -535,7 +533,7 @@ final class FilmUIKitTests: XCTestCase {
         try assertText(secondItem.title, in: collection)
         XCTAssertNil(identified("film.poster.first.shared", in: collection))
 
-        model.selectSource(id: "first")
+        await model.selectSource(id: "first")?.value
         await waitFor("cached first source rendered") {
             collection.layoutIfNeeded()
             return self.identified("film.poster.first.shared", in: collection) != nil
@@ -546,7 +544,7 @@ final class FilmUIKitTests: XCTestCase {
         XCTAssertEqual(model.selectedSourceID, "first")
         firstReads = await first.loadCount
         secondReads = await second.loadCount
-        XCTAssertEqual(firstReads, 1)
+        XCTAssertEqual(firstReads, 2)
         XCTAssertEqual(secondReads, 1)
     }
 
@@ -610,7 +608,7 @@ final class FilmUIKitTests: XCTestCase {
         XCTAssertTrue(navigation.topViewController === page)
         XCTAssertEqual(routed, [selected])
         let reads = await source.loadCount
-        XCTAssertEqual(reads, 1, "Returning from details must keep the loaded home snapshot")
+        XCTAssertEqual(reads, 2, "Returning keeps the visible snapshot while consulting the data owner again")
         XCTAssertNotNil(identified("film.poster.fixture.selected", in: collection))
     }
 
@@ -1292,7 +1290,7 @@ private actor FilmUIKitSource: FilmSource {
         self.sections = sections
     }
 
-    func loadHome() async throws -> [FilmHomeSection] {
+    func loadHome(refresh: Bool) async throws -> [FilmHomeSection] {
         loadCount += 1
         return sections
     }
@@ -1301,10 +1299,10 @@ private actor FilmUIKitSource: FilmSource {
 private struct FilmCategoryUIKitSource: FilmCategorySource {
     let descriptor = FilmSourceDescriptor(id: "fixture", title: "测试")
     let categories = FilmCategory.allCases
-    func loadHome() async throws -> [FilmHomeSection] {
-        [.init(id: "movie", title: "热门电影", items: try await loadCategory(.movie, filters: [:], offset: 0).items)]
+    func loadHome(refresh: Bool) async throws -> [FilmHomeSection] {
+        [.init(id: "movie", title: "热门电影", items: try await loadCategory(.movie, filters: [:], offset: 0, refresh: refresh).items)]
     }
-    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int) async throws -> FilmCategoryPage {
+    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int, refresh: Bool) async throws -> FilmCategoryPage {
         .init(items: (0..<12).map { FilmItem(sourceID: "fixture", id: "\($0)", title: "影片 \($0)") }, nextOffset: nil)
     }
 }
@@ -1316,12 +1314,12 @@ private final class FilmFailingUIKitSource: FilmCategorySource {
     private(set) var homeReads = 0
     private(set) var categoryReads = 0
 
-    func loadHome() async throws -> [FilmHomeSection] {
+    func loadHome(refresh: Bool) async throws -> [FilmHomeSection] {
         homeReads += 1
         throw URLError(.notConnectedToInternet)
     }
 
-    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int) async throws -> FilmCategoryPage {
+    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int, refresh: Bool) async throws -> FilmCategoryPage {
         categoryReads += 1
         throw URLError(.notConnectedToInternet)
     }
@@ -1333,9 +1331,9 @@ private final class FilmPaginationFailingUIKitSource: FilmCategorySource {
     nonisolated let categories: [FilmCategory] = [.anime]
     private(set) var offsets: [Int] = []
 
-    func loadHome() async throws -> [FilmHomeSection] { [] }
+    func loadHome(refresh: Bool) async throws -> [FilmHomeSection] { [] }
 
-    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int) async throws -> FilmCategoryPage {
+    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int, refresh: Bool) async throws -> FilmCategoryPage {
         offsets.append(offset)
         guard offset == 0 else { throw URLError(.notConnectedToInternet) }
         return .init(items: (0..<3).map {
@@ -1350,12 +1348,12 @@ private final class FilmEmptyCategoryUIKitSource: FilmCategorySource {
     nonisolated let categories: [FilmCategory] = [.movie]
     private(set) var homeReads = 0
 
-    func loadHome() async throws -> [FilmHomeSection] {
+    func loadHome(refresh: Bool) async throws -> [FilmHomeSection] {
         homeReads += 1
         return [.init(id: "movie", title: "分类源栏目", items: [])]
     }
 
-    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int) async throws -> FilmCategoryPage {
+    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int, refresh: Bool) async throws -> FilmCategoryPage {
         .init(items: [.init(sourceID: descriptor.id, id: "selected", title: "分类源影片")], nextOffset: nil)
     }
 }
