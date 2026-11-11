@@ -1,5 +1,6 @@
 """Build-input preparation: local fixtures only, no network or Node download."""
 import importlib.util
+import io
 import json
 import plistlib
 from pathlib import Path
@@ -16,6 +17,77 @@ spec.loader.exec_module(prepare)
 
 
 class PrepareIOSRuntimeTests(unittest.TestCase):
+    def archive_fixture(self):
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, "w") as package:
+            package.writestr("NodeMobile.xcframework/Info.plist", b"fixture")
+            package.writestr("include/node/node_api.h", b"pinned-header")
+        payload = data.getvalue()
+        pinned = {"archive": {"url": "https://download.invalid/fixture.zip",
+                              "sha256": prepare.hashlib.sha256(payload).hexdigest()}}
+        return payload, pinned
+
+    def test_two_workspaces_share_download_but_keep_private_archive_and_framework(self):
+        payload, pinned = self.archive_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(prepare, "SHARED_DOWNLOADS", root / "shared"), \
+                    patch.object(prepare.urllib.request, "urlopen", return_value=io.BytesIO(payload)) as download:
+                for name in ("one", "two"):
+                    with patch.object(prepare, "NODE_MOBILE", root / name):
+                        framework = prepare.node_mobile(pinned)
+                        self.assertEqual(framework, root / name / "ios/NodeMobile.xcframework")
+                self.assertEqual(download.call_count, 1)
+                (root / "one/fixture.zip").write_bytes(b"private change")
+                (root / "one/ios/include/node/node_api.h").write_bytes(b"private header change")
+                self.assertEqual((root / "two/fixture.zip").read_bytes(), payload)
+                self.assertEqual((root / "shared" / pinned["archive"]["sha256"]).read_bytes(), payload)
+                self.assertEqual((root / "two/ios/include/node/node_api.h").read_bytes(), b"pinned-header")
+
+    def test_bad_download_is_not_published_and_can_be_retried(self):
+        payload, pinned = self.archive_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(prepare, "SHARED_DOWNLOADS", root / "shared"), \
+                    patch.object(prepare, "NODE_MOBILE", root / "workspace"), \
+                    patch.object(prepare.urllib.request, "urlopen",
+                                 side_effect=[io.BytesIO(b"bad"), io.BytesIO(payload)]):
+                with self.assertRaisesRegex(ValueError, "SHA-256"):
+                    prepare.node_mobile(pinned)
+                self.assertEqual(list((root / "shared").iterdir()), [])
+                self.assertFalse((root / "workspace/fixture.zip").exists())
+                self.assertTrue(prepare.node_mobile(pinned).is_dir())
+
+    def test_modified_shared_archive_is_rejected_before_private_extraction(self):
+        payload, pinned = self.archive_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shared = root / "shared"
+            shared.mkdir()
+            (shared / pinned["archive"]["sha256"]).write_bytes(b"modified")
+            with patch.object(prepare, "SHARED_DOWNLOADS", shared), \
+                    patch.object(prepare, "NODE_MOBILE", root / "workspace"), \
+                    patch.object(prepare.urllib.request, "urlopen", side_effect=AssertionError("must verify cache")):
+                with self.assertRaisesRegex(ValueError, "SHA-256"):
+                    prepare.node_mobile(pinned)
+                self.assertFalse((root / "workspace/ios").exists())
+
+    def test_concurrent_publisher_is_verified_without_overwriting_its_archive(self):
+        payload, pinned = self.archive_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original_link = prepare.os.link
+
+            def competing_link(source, destination):
+                Path(destination).write_bytes(payload)
+                original_link(source, destination)
+
+            with patch.object(prepare, "SHARED_DOWNLOADS", root), \
+                    patch.object(prepare.urllib.request, "urlopen", return_value=io.BytesIO(payload)), \
+                    patch.object(prepare.os, "link", side_effect=competing_link):
+                self.assertEqual(prepare.shared_node_archive(pinned).read_bytes(), payload)
+                self.assertEqual([path.name for path in root.iterdir()], [pinned["archive"]["sha256"]])
+
     def test_current_release_license_matches_the_pinned_policy(self):
         value = prepare.policy()
         self.assertEqual(value["version"], "18.20.4")

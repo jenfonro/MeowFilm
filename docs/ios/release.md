@@ -10,6 +10,8 @@
 
 视频输入由 `scripts/prepare-ios-video-kernel.py` 按 `scripts/ios-video-kernel.json` 锁定的 FFmpeg 8.1.2 源码、补丁与目标构建；`build-ios.sh` 准备 `ios-arm64`，原生测试入口选择对应 Mac／模拟器目标。`native/VideoKernel` 的 `MeowVideoKernel` 经 `MeowPlayback` 静态接入，负责解复用、解码与系统 sample-buffer 输出，不是 Node addon，也不是新增的业务／媒体会话 owner。视频来源与适用许可引用 `LICENSES` 的唯一正文。目标产物准备和工程资源齐全不代表合并后的 iOS App 已编译、签名或真实播放通过，须分别取得平台证据。
 
+下载及 FFmpeg 完整依赖库按[构建依赖缓存](../common/dependency-cache.md)跨副本复用。缓存命中仍验证来源与文件身份，同配方正在构建时等待；本副本的源码、编译目录、安装输入及 XCFramework 打包路径保持不变。`--sources-only`、`--target`、`--verify` 调用方式不变。
+
 设备与模拟器目标分别校验，不能按构建机架构猜测产物平台。原生构建回执记录签名前文件身份；侧载重签后的运行校验依赖正式签名域及内置构建身份，不要求 Mach-O 签名区保持原始 hash。该规则只适用于 App 内置载体，不开放上传原生代码或削弱桌面引擎校验。详细边界见[运行底座预检](runtime-preflight.md)。
 
 `build/ios/` 只包含：
