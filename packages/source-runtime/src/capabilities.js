@@ -93,13 +93,25 @@ function bytes(value, code = 'INVALID_ARGUMENT') {
   return new Uint8Array(value);
 }
 
+function unicodeScalarString(value, code) {
+  for (let index = 0; index < value.length; index++) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(++index);
+      sourceRequire(next >= 0xdc00 && next <= 0xdfff, code);
+    } else {
+      sourceRequire(unit < 0xdc00 || unit > 0xdfff, code);
+    }
+  }
+}
+
 function jsonClone(value, code = 'INVALID_ARGUMENT') {
   const ancestors = new Set(), frames = [];
   const visit = (input, depth) => {
     sourceRequire(depth <= 64, code);
     if (input === null || typeof input === 'boolean') return input;
     if (typeof input === 'string') {
-      sourceRequire(input.isWellFormed(), code);
+      unicodeScalarString(input, code);
       return input;
     }
     if (typeof input === 'number') {
@@ -126,7 +138,7 @@ function jsonClone(value, code = 'INVALID_ARGUMENT') {
     const index = frame.index++;
     if (frame.array && !(index in frame.input)) continue;
     const [key, child] = frame.array ? [index, frame.input[index]] : frame.entries[index];
-    if (!frame.array) sourceRequire(key.isWellFormed(), code);
+    if (!frame.array) unicodeScalarString(key, code);
     Object.defineProperty(frame.output, key, {
       value: visit(child, frame.depth + 1), enumerable: true, configurable: true, writable: true,
     });

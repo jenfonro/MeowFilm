@@ -142,6 +142,8 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
     {
         public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("Image requests are not part of this fixture.");
+        public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Image requests are not part of this fixture.");
 
         internal int Calls, Disposals;
         public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,

@@ -10,6 +10,6 @@ QuickJS-NG 0.18.0 的 C 引擎由 `scripts/script-host-native.json` 锁定上游
 
 复建使用 `node scripts/quickjs/build-native.mjs` 或 iOS 对应的 `build-ios.mjs`。首次准备时在默认缓存中临时解包锁定归档，严格按锁中顺序应用三个补丁，再核对共享源码全部文件哈希及 MIT／Unicode 许可。普通增量构建直接编译同一份已校验源码，不另保留第二份用于编译的 QuickJS。
 
-公开 `@meowfilm/script-host/native-json` 的 `NativeJsonProgram` 接收源码，沿 `globalThis.meowfilmProcess` 执行纯程序。`invoke(value,{signal})` 只以 JSON 字符串跨 N-API，完整保留 JSON 的深层结构、数值及孤立 UTF16，不继承通用对象桥的深度或 Unicode 数据约束。输入在接纳时序列化；输出在 QuickJS 内序列化后由 Node 解析。程序不提供 Node、网络、文件、宿主 capability 或定时器。
+公开 `@meowfilm/script-host/native-json` 的 `NativeJsonProgram` 接收源码，沿 `globalThis.meowfilmProcess` 执行纯程序。`invoke(value,{signal,timeoutMs})` 只以 JSON 字符串跨 N-API，完整保留 JSON 的深层结构、数值及孤立 UTF16，不继承通用对象桥的深度或 Unicode 数据约束。输入在接纳时序列化；输出在 QuickJS 内序列化后由 Node 解析。程序不提供 Node、网络、文件、宿主 capability 或定时器。
 
-每个 program 持有独立线程／Runtime／Context，复用同平台脚本宿主原生载体；多个搜索会话可共享一个 program，调用串行执行，排队取消仅撤销该项。引擎内存 64 MiB、栈 512 KiB、每次执行截止 2 秒，仅作执行资源边界，不限制规则条数、文本或结果长度。取消、超时或执行异常等待真实线程 join 和 Runtime 释放后，未取消队列用同一源码重建同一内核继续执行。`close()` 撤销队列、打断当前计算并等待真实释放；关闭后不再接纳请求。
+每个 program 持有独立线程／Runtime／Context，复用同平台脚本宿主原生载体；多个搜索会话可共享一个 program，调用串行执行，排队取消仅撤销该项。引擎内存 64 MiB、栈 512 KiB，每次执行默认截止 2 秒；调用方可传明确的单次预算，小说净化按每条规则的预算执行，排队等待不消耗执行预算。这些仅作执行资源边界，不限制规则条数、文本或结果长度。取消、超时或执行异常等待真实线程 join 和 Runtime 释放后，未取消队列用同一源码重建同一内核继续执行。`close()` 撤销队列、打断当前计算并等待真实释放；关闭后不再接纳请求。

@@ -25,6 +25,8 @@ function bootstrap(source) {
  * A pure JSON program on the shared native core, with its own thread and Runtime.
  * Calls share program state and execute serially. A failed turn is fully released
  * before the next admitted call initializes the same source again.
+ * timeoutMs is a positive safe integer, applied when the queued turn is admitted
+ * to NativeEngine; omitted budgets retain the existing 2s default.
  */
 export class NativeJsonProgram {
   #source;
@@ -40,15 +42,16 @@ export class NativeJsonProgram {
     this.#source = bootstrap(source);
   }
 
-  async invoke(value, { signal } = {}) {
+  async invoke(value, { signal, timeoutMs = 2_000 } = {}) {
     if (this.#closed) throw fault('STALE_SESSION');
     if (signal?.aborted) throw fault('CANCELLED');
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw fault('INVALID_ARGUMENT');
     const input = JSON.stringify(value);
     if (typeof input !== 'string') throw fault('INVALID_ARGUMENT');
     if (this.#closed) throw fault('STALE_SESSION');
     if (signal?.aborted) throw fault('CANCELLED');
     return new Promise((resolve, reject) => {
-      const entry = { input, signal, resolve, reject };
+      const entry = { input, signal, timeoutMs, resolve, reject };
       entry.abort = () => {
         if (this.#running === entry) return; // The active NativeEngine call owns interruption.
         const index = this.#queue.indexOf(entry);
@@ -88,13 +91,14 @@ export class NativeJsonProgram {
           this.#engine = NativeEngine.create({
             source: this.#source, signal: entry.signal,
             maxHeapBytes: 64 * 1024 * 1024, maxStackBytes: 512 * 1024,
-            timeoutMs: 2_000, cleanupTimeoutMs: 1,
+            timeoutMs: entry.timeoutMs, cleanupTimeoutMs: 1,
           });
         }
         const text = await this.#engine.call('invoke', [entry.input], {
-          signal: entry.signal, timeoutMs: 2_000,
+          signal: entry.signal, timeoutMs: entry.timeoutMs,
         });
         if (this.#closed) throw fault('STALE_SESSION');
+        if (entry.signal?.aborted) throw fault('CANCELLED');
         this.#settle(entry, null, JSON.parse(text));
       } catch (error) {
         if (this.#closed) error = fault('STALE_SESSION');

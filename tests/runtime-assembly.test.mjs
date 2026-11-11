@@ -65,6 +65,36 @@ test('explicit session termination disposes each module exactly once while keepa
   await runtime.close(); await runtime.close(); assert.equal(closes, 1);
 });
 
+test('novel lowerCamel operations coexist with nested film operations on the public HTTP client', async t => {
+  const observed = [];
+  const modules = [['source', 'library.releaseImage'], ['film', 'session.media.release']].map(([id, operation]) => {
+    const module = fixture(id);
+    module.methods = {
+      [contracts[id].prefix + operation]: async input => {
+        observed.push([id, operation, input]);
+        return { ok: true, contract: contracts[id].contract, value: { released: true } };
+      },
+    };
+    return module;
+  });
+  const { client } = await connect(t, modules);
+  const image = { reference: '/v1/source/images/fixture' }, media = { id: 'fixture-lease' };
+  assert.deepEqual(await client.call('source.runtime.library.releaseImage', image),
+    { ok: true, contract: 'source.runtime.v2', value: { released: true } });
+  assert.deepEqual(await client.call('film.session.media.release', media),
+    { ok: true, contract: 'film.playback.v1', value: { released: true } });
+  for (const method of ['source.runtime.library.releaseImage.extra', 'film.session.media.release.extra']) {
+    assert.deepEqual(await client.call(method),
+      { ok: false, contract: 'runtime.http.v1', code: 'METHOD_NOT_FOUND' });
+  }
+  for (const operation of ['Library.releaseImage', 'library.ReleaseImage', 'library..releaseImage',
+    'library/releaseImage', '../library.releaseImage', 'library.releaseImage?x=1',
+    'library.releaseImage#fragment', 'library.releaseImage\n']) {
+    await assert.rejects(client.call('source.runtime.' + operation), { code: 'METHOD_NOT_FOUND' });
+  }
+  assert.deepEqual(observed, [['source', 'library.releaseImage', image], ['film', 'session.media.release', media]]);
+});
+
 test('HTTP close accepts only an empty object and rejects every other shape before side effects', async t => {
   let closes = 0;
   const { runtime, client, identity } = await connect(t, [fixture('music', () => { closes++; })]);

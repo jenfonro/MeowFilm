@@ -12,6 +12,8 @@
 
 `apps/runtime/client.mjs` 的 `createRuntimeClient({baseUrl,timeout?})` 接受合法 HTTP(S) 根端点，包括域名、非回环和默认端口；不要求访问凭据。它提供 `call(logicalMethod,params,options)`、`upload(module,id,sourceRevision,bytes,{basename?,signal?,timeout?})`、`describe()`、`shutdown()` 和本地 `close()`。`call` 在本地将明确逻辑业务名映射到 HTTP 路由，不提供第二套 wire 协议。
 
+普通请求保留默认 30000ms 截止及显式 `timeout`（1 至 300000ms 正安全整数）。仅 `source.runtime.rules.process` 使用无批次 deadline 入口，不应用客户端默认或单次 `options.timeout`；调用方通过 `signal` 取消，客户端 `close()` 撤销其传输，规则实际执行预算仍由 Node owner 逐条控制。
+
 ## 路由与 JSON
 
 | HTTP 路由 | 输入 | 结果 |
@@ -21,7 +23,7 @@
 | `POST /v1/{module}/{operation}` | `application/json`，body 即业务参数 | 业务值；`sources.list`、`management.describe` 等是字面 operation 段 |
 | `POST /v1/close` | `{}` | 停止全部模块、取消其他交换并等待实际排空，成功值为 `{closed:true,cleanupComplete:true}` |
 
-成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。通用默认三模块为 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.2.0/source.runtime.v2`。iOS／Windows 正式 App 按此前三项、`pan@0.1.0/pan.runtime.v1`、`tmdb@0.1.0/tmdb.data.v1`、`douban@0.1.0/douban.data.v1`、`film@0.1.0/film.playback.v1`、`netease@0.1.0/netease.token.v1` 的顺序精确装配八模块；元数据只读请求、持久设置和二进制图片路由见[元数据契约](metadata-data.md)，影视会话、事件与媒体资源见[影视播放契约](film-playback.md)，按需实时 token 见[网易订阅 token](netease-token.md)。
+成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。通用默认三模块为 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.3.0/source.runtime.v2`。iOS／Windows 正式 App 按此前三项、`pan@0.1.0/pan.runtime.v1`、`tmdb@0.1.0/tmdb.data.v1`、`douban@0.1.0/douban.data.v1`、`film@0.1.0/film.playback.v1`、`netease@0.1.0/netease.token.v1` 的顺序精确装配八模块；元数据只读请求、持久设置和二进制图片路由见[元数据契约](metadata-data.md)，影视会话、事件与媒体资源见[影视播放契约](film-playback.md)，按需实时 token 见[网易订阅 token](netease-token.md)。
 
 受信 Node 装配可显式加入 [pan.runtime.v1](pan-runtime.md)，使用 `POST /v1/pan/{operation}`；pan 不支持源码上传。`pan-entry.mjs` 提供同进程 pan-only 入口，或 `createRuntime({...,pan:{}})` 共用 aggregate HTTP 会话。通用默认 `createRuntime()` 不装配 pan；正式 App 显式装配它，双端平台握手按序精确匹配八模块及其版本、契约，不接受模块缺项／多项／重复项。Windows 还严格核对全部模块的完整方法清单；iOS 仅对 TMDB 与 netease 严格核对方法清单，其余模块沿各自既有方法契约。
 
@@ -60,6 +62,8 @@
 `dispose()` 的真实拒绝保留为本会话清理失败，不保存底层异常或请求历史。之后每次 `abortActive()` 和 `close()` 都在实际工作 settle 后以 `BridgeError('INVALID_RESPONSE')` 拒绝，即使当时 `state.active` 已为 0；`close()` 仍执行一次 `onClose` 并等待其完成。普通上游、流传输及响应格式错误不记为会话清理失败。由此 HTTP `/v1/close` 可报告标准失败信封，不能在清理已失败时返回 `cleanupComplete:true`；完整图片仍保持已送达的原始成功响应，不二次发送 JSON。
 
 `createHttpClient` 保持 JSON 客户端契约，不提供原始流消费能力；原始流调用方使用其平台 HTTP API；请求 ID 可用于相关性，不需要会话认证。
+
+`request(options)` 应用默认或显式 `timeout`；`requestWithoutDeadline(options)` 明确不创建批次截止 timer，不应用 `timeout`，仅保留调用方 `signal`、客户端关闭及真实传输失败的终止路径。两个入口共用同一传输、响应校验、取消和排空流程，不以超时哨兵值切换策略，也不在共享 transport 中识别业务路由。请求 settle 和客户端 `close()` 等待本地传输及响应读取排空；远端 handler 的实际完成仍由服务端 owner 排空，不能用本地关闭代替。
 
 ## 完整源码候选
 

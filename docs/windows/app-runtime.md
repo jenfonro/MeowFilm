@@ -14,11 +14,12 @@ App 通过已验证的管道发送一行 UTF-8 JSON `{sessionId,dataRoot}`，Nod
 
 `RuntimeHttpClient` 接受合法 HTTP(S) 根端点，包括域名、非回环和默认端口；App 默认使用启动握手返回的本机 URL。不走系统代理、不跟随重定向、不自动重放业务。每次请求携带独立 UUID `X-Meow-Request-Id`，核对响应 ID、内容类型、状态及严格信封；公开契约见 [Runtime bridge](../runtime/runtime-bridge.md)。
 
-- `GET /v1/describe` 核对 `runtime.http.v1`、`aggregate`、准确模块及完整方法清单，顺序为：`music@0.8.0` / `music.script.v3`、`cat@0.2.0` / `cat.script.v2`、`source@0.2.0` / `source.runtime.v2`、`pan@0.1.0` / `pan.runtime.v1`、`tmdb@0.1.0` / `tmdb.data.v1`、`douban@0.1.0` / `douban.data.v1`、`film@0.1.0` / `film.playback.v1`、`netease@0.1.0` / `netease.token.v1`；缺项、多项、重复项或不符版本不接受。
+- `GET /v1/describe` 核对 `runtime.http.v1`、`aggregate`、准确模块及完整方法清单，顺序为：`music@0.8.0` / `music.script.v3`、`cat@0.2.0` / `cat.script.v2`、`source@0.3.0` / `source.runtime.v2`、`pan@0.1.0` / `pan.runtime.v1`、`tmdb@0.1.0` / `tmdb.data.v1`、`douban@0.1.0` / `douban.data.v1`、`film@0.1.0` / `film.playback.v1`、`netease@0.1.0` / `netease.token.v1`；缺项、多项、重复项或不符版本不接受。
 - 普通调用为 `POST /v1/{module}/{operation}`，参数直接是 JSON，成功信封为 `{ok:true,contract,value}`，失败为 `{ok:false,contract,code}`；结果不再是 JSON 字符串。
 - 源码经 `UploadSourceAsync` 完整 raw PUT，由 installationId 与明确 sourceRevision 绑定。异步上传借用调用方字节直到实际发送任务结束，包括取消；业务层不管理 begin/chunk/read/release。
-- `ReadImageAsync` 只接受受信运行器相对图片引用，经同一客户端携带请求 ID；成功读二进制、错误解包 `502` 模块信封，读取中受原生图片资源预算约束，取消等待物理响应释放。图片契约见[元数据运行器](../runtime/metadata-data.md)。
+- `ReadImageAsync` 只接受运行器相对图片引用，经同一客户端携带请求 ID；成功读二进制、错误解包 `502` 所属模块信封，取消等待物理响应释放。元数据消费者保留其图片预算，小说完整正文图片使用无额度重载；图片契约见[元数据运行器](../runtime/metadata-data.md)与[书源仓库](../runtime/source-library.md)。
 - 单请求取消终止其 HTTP 交换，不撤销其他请求或共同启动。App 的 epoch fence 拒绝旧代次迟到结果；恢复不会重放业务。
+- 小说纯规则只走 `source.runtime.rules.process`／`POST /v1/source/rules.process`。一次 transform 发送完整 rules 与 conversion，Node 按规则逐条计时；该路由不使用短固定 HTTP 批次总时限，由调用 owner 或连接取消并等待实际交换结束。其他 source 方法仍保持默认 30 秒，网易 token 保持 60 秒。
 
 业务 JSON 保留 64 层、严格 UTF-8、Unicode、无重复键和安全数值契约，不加总大小配额。源码的 16 MiB 是公共输入契约。原生文档、账号和敏感信息不通过反向 RPC 暴露给运行器。
 
@@ -28,6 +29,6 @@ App 装配后显式调用 `AppRuntimeClient.Start()`，启动唯一公共宿主�
 
 正常关闭先请求 `/v1/close` 并核对 `closed`、`cleanupComplete`，再退役 HTTP、管道和进程，等待真实退出；异常或启动失败同样释放已取得的资源。管道断开或取消信号本身不是清理成功回执。CLI 只输出固定 `WINDOWS_RUNTIME_START_FAILED`，不输出来源、凭据或底层异常；不自动重启。
 
-LX/source 使用逐实例原生线程及 QuickJS Runtime，CatNode 使用逐实例 Node Worker；具体边界由[共用核心](../runtime/script-runtime.md)定义。客户端[影视规则引擎](film-settings.md)独立于此脚本宿主。source 的 CatVod 是独立 Spider 输入，不替代 CatNode；本次不新增原生阅读 UI。管道 PID/Job 及执行隔离不等于恶意脚本安全沙箱。
+LX/source 使用逐实例原生线程及 QuickJS Runtime，CatNode 使用逐实例 Node Worker；具体边界由[共用核心](../runtime/script-runtime.md)定义。[影视规则](film-settings.md)与搜索由 Node film owner 持有，小说纯规则由 Node source owner 执行；客户端不保留独立规则引擎或嵌入程序。source 的 CatVod 是独立 Spider 输入，不替代 CatNode；原生[小说页面与阅读器](novel.md)消费同一 source 书源仓库，继续持有书架、历史、偏好及净化配置。关闭小说 owner 只取消并排空本 owner 接纳的调用，不关闭共享运行器。管道 PID/Job 及执行隔离不等于恶意脚本安全沙箱。
 
 恢复见[显式恢复](runtime-recovery.md)，最终载荷见[打包](runtime-packaging.md)，source 能力见[来源 capability ABI](../runtime/source-capability-abi.md)。

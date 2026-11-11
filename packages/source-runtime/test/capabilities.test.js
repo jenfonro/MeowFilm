@@ -37,14 +37,15 @@ test('capability JSON business values accept 64 levels while control fields do n
     assert.deepEqual(await client.call('storage.get', input), value);
   }
   const special = {
-    ['__proto__']: { value: 1 }, constructor: { prototype: 'data' },
+    ['__proto__']: { value: 1 }, constructor: { prototype: 'data' }, ['📚']: '中文👨‍👩‍👧‍👦\u0000',
   };
   const shared = { left: special, right: special };
   assert.deepEqual(await client.call('storage.set', { ...input, value: shared }), shared);
   const count = values.length;
   for (const value of [
     nested(65), nested(65, true), { ok: true, value: nested(64) }, cycle,
-    '\ud800', { ['\ud800']: 1 }, Infinity, Number.MAX_SAFE_INTEGER + 1, 1n,
+    '\ud800', '\udc00', 'a\ud800b', '\udc00\ud800', { ['\ud800']: 1 }, { ['\udc00']: 1 },
+    Infinity, Number.MAX_SAFE_INTEGER + 1, 1n,
     undefined, new Uint8Array([1]), new ArrayBuffer(1),
   ]) {
     await assert.rejects(client.call('storage.set', { ...input, value }), { code: 'INVALID_ARGUMENT' });

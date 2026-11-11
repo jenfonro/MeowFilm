@@ -21,7 +21,7 @@ try {
         stage = 'cat';
         modules.push(createCatScriptModule({ dataRoot: join(dataRoot, 'cat') }));
         stage = 'source';
-        modules.push(createSourceRuntimeModule({ platform: 'ios' }));
+        modules.push(createSourceRuntimeModule({ dataRoot, platform: 'ios' }));
         stage = 'pan';
         modules.push(createPanRuntimeModule({ dataRoot }));
         stage = 'tmdb';

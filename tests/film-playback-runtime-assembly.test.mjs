@@ -25,7 +25,7 @@ test('E49/E50: the common embedding factory retains its default three-module con
   const description = await client.describe();
   assert.equal(description.ok, true);
   assert.deepEqual(description.value.modules.map(({ id, version, contract }) => [id, version, contract]), [
-    ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.2.0', 'source.runtime.v2'],
+    ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.3.0', 'source.runtime.v2'],
   ]);
   assert.equal((await client.call('music.script.sources.list')).ok, true);
 });
@@ -108,7 +108,7 @@ for (const platform of ['ios', 'windows']) {
         assert.equal(description.value.protocol, 'runtime.http.v1');
         assert.equal(description.value.product, 'aggregate');
         assert.deepEqual(description.value.modules.map(({ id, version, contract }) => [id, version, contract]), [
-          ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.2.0', 'source.runtime.v2'],
+          ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.3.0', 'source.runtime.v2'],
           ['pan', '0.1.0', 'pan.runtime.v1'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
           ['douban', '0.1.0', 'douban.data.v1'], ['film', '0.1.0', 'film.playback.v1'],
           ['netease', '0.1.0', 'netease.token.v1'],

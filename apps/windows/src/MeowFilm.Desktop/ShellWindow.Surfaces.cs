@@ -166,6 +166,7 @@ public sealed partial class ShellWindow
     private bool CanPresentPlayerSurface(ModuleSession session) =>
         !_isClosing &&
         _current is { IsSettingsOpen: false } &&
+        (_currentPage is not null || _current.Module is not IDesktopImmersiveSource { IsImmersive: true }) &&
         ReferenceEquals(_playerSession, session) &&
         session.Module.PlayerView is not null;
 

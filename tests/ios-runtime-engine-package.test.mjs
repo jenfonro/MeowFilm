@@ -47,6 +47,8 @@ test('iOS wrapper packages the eight-module App closure and separate pre-sign fr
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/film-rules/film-rules.js'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/film-rules/playback-rules.js'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/film-search/film-search.js'));
+  assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/novel-rules/novel-rules.js'));
+  assert.ok(manifest.files.some(file => file.path === 'app/modules/source-rules.mjs'));
   for (const license of ['quickjs-ng-LICENSE.txt', 'openssl-LICENSE.txt', 'zlib-LICENSE.txt', 'NOTICE.md',
     'undici-LICENSE.txt', 'Unicode-3.0.txt', 'api-enhanced-MIT.txt', 'npm-node-compat-ISC.txt'])
     assert.ok(manifest.files.some(file => file.path === `licenses/${license}`));

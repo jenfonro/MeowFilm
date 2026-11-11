@@ -11,6 +11,8 @@ public static class RuntimeRecoveryTests
     {
         public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("Image requests are not part of this fixture.");
+        public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Image requests are not part of this fixture.");
 
         public bool IsConnected { get; set; } = true;
         public int Calls, Uploads, Disposals;

@@ -64,11 +64,12 @@ public static class RuntimeHttpClientTests
                 await exchange.ReplyAsync(Success(Description(), RuntimeHttpProtocol.Name));
             }
             var declared = RuntimeHttpProtocol.ValidateDescription((await describe).GetProperty("value"), "aggregate", Modules);
-            BridgeTests.Equal(83, declared.Count);
+            BridgeTests.Equal(96, declared.Count);
             BridgeTests.Equal(true, declared.Contains("netease.token.get"));
             BridgeTests.Equal(true, declared.Contains("film.rules.group.set"));
             BridgeTests.Equal(true, declared.Contains("film.rules.group.defaults"));
             BridgeTests.Equal(true, declared.Contains("film.rules.group.preview"));
+            BridgeTests.Equal(true, declared.Contains("source.runtime.rules.process"));
             var close = client.ShutdownAsync();
             await using (var exchange = await server.AcceptAsync())
             {
@@ -78,6 +79,194 @@ public static class RuntimeHttpClientTests
                 await exchange.ReplyAsync(Success(new { closed = true, cleanupComplete = true }, RuntimeHttpProtocol.Name));
             }
             await close;
+        });
+        yield return new("runtime-http: source library routes binary images and fixed source errors retain their contract", async () =>
+        {
+            await using var server = new Server();
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
+            var list = client.CallAsync("source.runtime.library.list", new { });
+            await using (var exchange = await server.AcceptAsync())
+            {
+                CheckCorrelation(exchange, server);
+                BridgeTests.Equal("POST", exchange.Method);
+                BridgeTests.Equal("/v1/source/library.list", exchange.Path);
+                await exchange.ReplyAsync(Success(new { sources = Array.Empty<object>() }, "source.runtime.v2"));
+            }
+            BridgeTests.Equal(0, (await list).GetProperty("value").GetProperty("sources").GetArrayLength());
+            const string reference = "/v1/source/images/opaque-reference";
+            byte[] pixels = [137, 80, 78, 71, 13, 10, 26, 10];
+            var image = client.ReadImageAsync(reference, 1024);
+            await using (var exchange = await server.AcceptAsync())
+            {
+                CheckCorrelation(exchange, server);
+                BridgeTests.Equal("GET", exchange.Method);
+                BridgeTests.Equal(reference, exchange.Path);
+                await exchange.ReplyAsync(pixels, contentType: "image/png");
+            }
+            BridgeTests.Equal(true, (await image).SequenceEqual(pixels));
+            var release = client.CallAsync("source.runtime.library.releaseImage", new { reference });
+            await using (var exchange = await server.AcceptAsync())
+            {
+                CheckCorrelation(exchange, server);
+                BridgeTests.Equal("/v1/source/library.releaseImage", exchange.Path);
+                BridgeTests.Equal(reference, BridgeCodec.DecodeJSONValue(exchange.Body).GetProperty("reference").GetString());
+                await exchange.ReplyAsync(Success(new { released = true }, "source.runtime.v2"));
+            }
+            BridgeTests.Equal(true, (await release).GetProperty("value").GetProperty("released").GetBoolean());
+            foreach (string contract in new[] { "source.runtime.v2", "tmdb.data.v1", "douban.data.v1" })
+            {
+                var missing = client.ReadImageAsync(reference, 1024);
+                await using (var exchange = await server.AcceptAsync())
+                    await exchange.ReplyAsync(Failure("SOURCE_NOT_FOUND", contract), status: 502);
+                await BridgeTests.Expect(contract == "source.runtime.v2" ? "SOURCE_NOT_FOUND" : "INVALID_RESPONSE", () => missing);
+            }
+            foreach (string invalid in new[] { "/v1/source/images/../private", reference + "?cookie=fixture", reference + "#fragment" })
+                await BridgeTests.Expect("INVALID_REQUEST", () => client.ReadImageAsync(invalid, 1024));
+            foreach (string code in new[] { "SOURCE_INTEGRITY", "SOURCE_ENCODING", "STALE_SOURCE", "SOURCE_NOT_FOUND", "SOURCE_DISABLED",
+                "UNSUPPORTED_PROTOCOL", "UNSUPPORTED_ACTION", "UNSUPPORTED_RULE", "UNSUPPORTED_DEPENDENCY",
+                "CAPABILITY_UNAVAILABLE", "SOURCE_CLEANUP", "SOURCE_FAILURE", "HTTP_ERROR", "VIRTUAL_ROUTE_NOT_FOUND" })
+                BridgeTests.Equal(code, new BridgeException(code).Code);
+            BridgeTests.Equal("INTERNAL", new BridgeException("synthetic-private-source-error").Code);
+        });
+        yield return new("runtime-http: novel pure rules use their fixed source route and preserve source errors cancellation and close", async () =>
+        {
+            await using var server = new Server();
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
+            var input = new { request = new { operation = "matchUrl", pattern = "https://fixture.invalid/.*", url = "https://fixture.invalid/book" } };
+            var call = client.CallAsync("source.runtime.rules.process", input);
+            await using (var exchange = await server.AcceptAsync())
+            {
+                CheckCorrelation(exchange, server);
+                BridgeTests.Equal("POST", exchange.Method);
+                BridgeTests.Equal("/v1/source/rules.process", exchange.Path);
+                BridgeTests.Equal(true, JsonElement.DeepEquals(BridgeCodec.Value(input), BridgeCodec.DecodeJSONValue(exchange.Body)));
+                await exchange.ReplyAsync(Success(true, "source.runtime.v2"));
+            }
+            BridgeTests.Equal(true, (await call).GetProperty("value").GetBoolean());
+            foreach (string code in new[] { "TIMEOUT", "SOURCE_FAILURE", "CANCELLED", "CAPABILITY_UNAVAILABLE" })
+            {
+                var failed = client.CallAsync("source.runtime.rules.process", input);
+                await using var exchange = await server.AcceptAsync();
+                await exchange.ReplyAsync(Failure(code, "source.runtime.v2"));
+                BridgeTests.Equal(code, (await failed).GetProperty("code").GetString());
+            }
+            using var cancellation = new CancellationTokenSource();
+            var cancelled = client.CallAsync("source.runtime.rules.process", input, cancellation.Token);
+            await using var pending = await server.AcceptAsync();
+            cancellation.Cancel();
+            try { await cancelled; throw new InvalidOperationException("Expected rule cancellation"); }
+            catch (OperationCanceledException) { }
+            await pending.AssertDisconnectedAsync();
+            var closing = client.CallAsync("source.runtime.rules.process", input);
+            await using var unfinished = await server.AcceptAsync();
+            await client.DisposeAsync();
+            await BridgeTests.Expect("CLOSED", () => closing);
+            await unfinished.AssertDisconnectedAsync();
+            BridgeTests.Throws("METHOD_UNAVAILABLE", () => client.CallAsync("source.runtime.rules.unknown", input));
+        });
+        yield return new("runtime-http: full-size source images exceed card budgets with declared and chunked bodies", async () =>
+        {
+            await using var server = new Server();
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
+            const string reference = "/v1/source/images/full-size";
+            const int cardBudget = 4 * 1024 * 1024;
+            byte[] pixels = new byte[cardBudget + 1]; new Random(17).NextBytes(pixels);
+            var ids = new HashSet<string>();
+            foreach (bool chunked in new[] { false, true })
+            {
+                var full = client.ReadImageAsync(reference);
+                await using (var exchange = await server.AcceptAsync())
+                {
+                    CheckCorrelation(exchange, server);
+                    BridgeTests.Equal("GET", exchange.Method);
+                    BridgeTests.Equal(reference, exchange.Path);
+                    BridgeTests.Equal(0, exchange.Body.Length);
+                    BridgeTests.Equal(true, ids.Add(exchange.Headers["X-Meow-Request-Id"]));
+                    if (chunked) await exchange.ReplyChunkedAsync(pixels);
+                    else await exchange.ReplyAsync(pixels, contentType: "image/png");
+                }
+                var received = await full;
+                BridgeTests.Equal(true, pixels.SequenceEqual(received));
+                var capped = client.ReadImageAsync(reference, cardBudget);
+                await using (var exchange = await server.AcceptAsync())
+                {
+                    if (!chunked) await exchange.BeginImageAsync(pixels.Length);
+                    else
+                    {
+                        try { await exchange.ReplyChunkedAsync(pixels); }
+                        catch (IOException) { } // The bounded reader may reset an oversized stream.
+                    }
+                }
+                await BridgeTests.Expect("RESOURCE_LIMIT", () => capped);
+            }
+        });
+        yield return new("runtime-http: unbounded images retain trusted paths response identity MIME and source failures", async () =>
+        {
+            await using var server = new Server();
+            await using var target = new Server();
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
+            const string reference = "/v1/source/images/full-size";
+            byte[] pixels = [137, 80, 78, 71, 13, 10, 26, 10];
+            foreach (string invalid in new[] { "https://example.test/page.png", server.BaseUrl + reference, "//example.test/page.png",
+                "/v1/source/images/../private", "/v1/source/images/%2e%2e", reference + "?private=fixture", reference + "#fragment" })
+                await BridgeTests.Expect("INVALID_REQUEST", () => client.ReadImageAsync(invalid));
+            using (var cancelled = new CancellationTokenSource())
+            {
+                cancelled.Cancel();
+                try { await client.ReadImageAsync(reference, cancelled.Token); throw new InvalidOperationException("Expected cancellation"); }
+                catch (OperationCanceledException) { }
+            }
+            BridgeTests.Equal(false, server.HasConnection);
+            foreach (var (status, requestId, mime, extra) in new[]
+            {
+                (307, (string?)null, "image/png", "Location: " + target.BaseUrl + reference + "\r\n"),
+                (200, (string?)Guid.NewGuid().ToString("D"), "image/png", ""),
+                (200, (string?)"duplicate", "image/png", ""),
+                (200, (string?)null, "application/json", ""),
+                (200, (string?)null, "image/png", "Content-Encoding: gzip\r\n")
+            })
+            {
+                var read = client.ReadImageAsync(reference);
+                await using (var exchange = await server.AcceptAsync())
+                    await exchange.ReplyAsync(pixels, status, requestId, mime, extra);
+                await BridgeTests.Expect("INVALID_RESPONSE", () => read);
+                BridgeTests.Equal(false, target.HasConnection);
+            }
+            foreach (string contract in new[] { "source.runtime.v2", "tmdb.data.v1", "douban.data.v1" })
+            {
+                var read = client.ReadImageAsync(reference);
+                await using (var exchange = await server.AcceptAsync())
+                    await exchange.ReplyAsync(Failure("SOURCE_NOT_FOUND", contract), status: 502);
+                await BridgeTests.Expect(contract == "source.runtime.v2" ? "SOURCE_NOT_FOUND" : "INVALID_RESPONSE", () => read);
+            }
+            var empty = client.ReadImageAsync(reference);
+            await using (var exchange = await server.AcceptAsync())
+                await exchange.ReplyAsync([], contentType: "image/png");
+            await BridgeTests.Expect("INVALID_RESPONSE", () => empty);
+            var truncated = client.ReadImageAsync(reference);
+            await using (var exchange = await server.AcceptAsync())
+                await exchange.ReplyAsync(pixels, contentType: "image/png", declaredBytes: pixels.Length + 1);
+            await BridgeTests.Expect("CLOSED", () => truncated);
+        });
+        yield return new("runtime-http: unbounded image cancellation and close physically settle unfinished bodies", async () =>
+        {
+            await using var server = new Server();
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
+            const string reference = "/v1/source/images/full-size";
+            using var cancellation = new CancellationTokenSource();
+            var first = client.ReadImageAsync(reference, cancellation.Token);
+            await using var exchange = await server.AcceptAsync();
+            await exchange.BeginImageAsync(100);
+            cancellation.Cancel();
+            try { await first; throw new InvalidOperationException("Expected cancellation"); }
+            catch (OperationCanceledException) { }
+            await exchange.AssertDisconnectedAsync();
+            var second = client.ReadImageAsync(reference);
+            await using var pending = await server.AcceptAsync();
+            await pending.BeginImageAsync(100);
+            await client.DisposeAsync();
+            await BridgeTests.Expect("CLOSED", () => second);
+            await pending.AssertDisconnectedAsync();
         });
         foreach (var (name, mutate) in new (string, Action<JsonObject>)[]
         {
@@ -303,6 +492,9 @@ public static class RuntimeHttpClientTests
             await using var waiting = await server.AcceptAsync();
             var token = client.CallAsync("netease.token.get");
             await using var tokenExchange = await server.AcceptAsync();
+            var rules = client.CallAsync("source.runtime.rules.process", new { request = new
+                { operation = "transform", title = "", blocks = Array.Empty<object>(), rules = Array.Empty<object>() } });
+            await using var rulesExchange = await server.AcceptAsync();
             var other = client.CallAsync("music.script.sources.list");
             await using (var exchange = await server.AcceptAsync())
                 await exchange.ReplyAsync(Success(new { items = Array.Empty<object>() }));
@@ -310,6 +502,9 @@ public static class RuntimeHttpClientTests
             await BridgeTests.Expect("TIMEOUT", () => stalled).WaitAsync(TimeSpan.FromSeconds(35));
             await waiting.AssertDisconnectedAsync();
             BridgeTests.Equal(false, token.IsCompleted);
+            BridgeTests.Equal(false, rules.IsCompleted);
+            await rulesExchange.ReplyAsync(Success(new { title = "", blocks = Array.Empty<object>() }, "source.runtime.v2"));
+            BridgeTests.Equal(true, (await rules).GetProperty("ok").GetBoolean());
             await tokenExchange.ReplyAsync(Success(new { token = "SYNTHETIC_FRESH_TOKEN" }, "netease.token.v1"));
             BridgeTests.Equal(true, (await token).GetProperty("ok").GetBoolean());
             BridgeTests.Equal(false, server.HasConnection);
@@ -428,7 +623,7 @@ public static class RuntimeHttpClientTests
         });
     }
 
-    internal static RuntimeModule[] Modules => [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.2.0"),
+    internal static RuntimeModule[] Modules => [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.3.0"),
         new("pan", "0.1.0"), new("tmdb", "0.1.0"), new("douban", "0.1.0"), new("film", "0.1.0"),
         new("netease", "0.1.0")];
     internal static object Description() => new
@@ -448,9 +643,13 @@ public static class RuntimeHttpClientTests
                 "cat.script.edit", "cat.script.update", "cat.script.restart", "cat.script.enable", "cat.script.uninstall",
                 "cat.script.invoke", "cat.script.management.describe", "cat.script.management.sync"
             } },
-            new { id = "source", version = "0.2.0", contract = "source.runtime.v2", methods = new[]
+            new { id = "source", version = "0.3.0", contract = "source.runtime.v2", methods = new[]
             {
-                "source.runtime.load", "source.runtime.unload", "source.runtime.invoke", "source.runtime.status", "source.runtime.close"
+                "source.runtime.load", "source.runtime.unload", "source.runtime.invoke", "source.runtime.status", "source.runtime.close",
+                "source.runtime.library.list", "source.runtime.library.get", "source.runtime.library.import", "source.runtime.library.save",
+                "source.runtime.library.update", "source.runtime.library.remove", "source.runtime.library.export", "source.runtime.library.invoke",
+                "source.runtime.library.image", "source.runtime.library.releaseImage", "source.runtime.web.pending", "source.runtime.web.respond",
+                "source.runtime.rules.process"
             } },
             new { id = "pan", version = "0.1.0", contract = "pan.runtime.v1", methods = new[]
             {

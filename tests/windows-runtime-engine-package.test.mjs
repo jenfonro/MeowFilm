@@ -68,7 +68,8 @@ function verifyManifest(output, manifest) {
     'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/entry.mjs',
     'app/modules/cat-script.mjs', 'app/modules/film-playback.mjs',
     ...metadataFiles.map(file => `app/${file}`), 'app/modules/music-script.mjs',
-    'app/modules/netease-token.mjs', 'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs',
+    'app/modules/netease-token.mjs', 'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-library.mjs',
+    'app/modules/source-rules.mjs', 'app/modules/source-runtime.mjs', 'app/modules/source-web.mjs',
     'app/pan-entry.mjs',
     'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
   ]);
@@ -84,7 +85,7 @@ function packagingFixture({
   const inert = 'throw new Error("Synthetic fixture must not execute");\n';
   write(source, 'package.json', manifest);
   for (const name of ['runtime-bridge', 'script-host', 'source-runtime', 'pan-runtime',
-    'film-rules', 'film-search', 'film-playback', 'netease-token', 'inactive-core']) {
+    'film-rules', 'film-search', 'film-playback', 'netease-token', 'novel-rules', 'inactive-core']) {
     const location = `packages/${name}`, installed = `node_modules/@meowfilm/${name}`;
     const pkg = {
       name: `@meowfilm/${name}`, version: '1.0.0', type: 'module', license: 'MIT', exports: './src/index.js',
@@ -102,7 +103,8 @@ function packagingFixture({
   }
   write(source, 'package-lock.json', lock);
   for (const file of ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs',
-    'modules/pan-runtime.mjs', 'modules/film-playback.mjs', 'modules/netease-token.mjs', 'modules/source-candidates.mjs'])
+    'modules/pan-runtime.mjs', 'modules/film-playback.mjs', 'modules/netease-token.mjs', 'modules/source-candidates.mjs',
+    'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs'])
     write(source, `apps/runtime/${file}`, inert);
   if (!missingCommonModule) {
     write(source, 'apps/runtime/modules/music-script.mjs', inert);
@@ -288,10 +290,11 @@ function nativeFixture(t) {
     for (const path of new Set(['package.json', 'package-lock.json', 'scripts/script-host-native.json',
       artifactPath, receiptPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
     for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
-      'film-rules', 'film-search', 'film-playback', 'netease-token']) {
+      'film-rules', 'film-search', 'film-playback', 'netease-token', 'novel-rules']) {
       copy(`packages/${name}/package.json`);
       for (const file of name === 'film-rules' ? ['film-rules.js', 'playback-rules.js']
-        : name === 'film-search' ? ['film-search.js'] : ['src']) copy(`packages/${name}/${file}`);
+        : name === 'film-search' ? ['film-search.js']
+        : name === 'novel-rules' ? ['index.js', 'novel-rules.js'] : ['src']) copy(`packages/${name}/${file}`);
       const installed = join(source, 'node_modules/@meowfilm', name);
       mkdirSync(dirname(installed), { recursive: true });
       symlinkSync(join(source, 'packages', name), installed, process.platform === 'win32' ? 'junction' : 'dir');

@@ -7,6 +7,7 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 const runtimeTrees = new Map([
   ['apps/runtime', {
     files: ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
+      'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs',
       'modules/music-script.mjs', 'modules/cat-script.mjs', 'modules/source-runtime.mjs', 'modules/pan-runtime.mjs',
       'modules/film-playback.mjs', 'modules/netease-token.mjs',
       'modules/metadata-data.mjs', 'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
@@ -16,8 +17,9 @@ const runtimeTrees = new Map([
   ['apps/windows/runtime', { files: ['bootstrap.mjs', 'entries/aggregate.mjs'], directories: ['entries'] }],
 ]);
 const sharedImports = new Set([
-  'node:buffer', 'node:crypto', 'node:http', 'node:https',
+  'node:buffer', 'node:crypto', 'node:http', 'node:https', 'node:stream',
   '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
+  '@meowfilm/novel-rules', '@meowfilm/script-host/native-json',
   '@meowfilm/pan-runtime', '@meowfilm/film-playback', '@meowfilm/netease-token',
 ]);
 const windowsImports = new Set(['node:net', 'node:path', '@meowfilm/runtime-bridge']);

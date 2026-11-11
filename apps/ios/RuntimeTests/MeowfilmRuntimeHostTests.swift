@@ -687,7 +687,7 @@ final class MeowfilmMusicStartupHostTests: XCTestCase {
         let settingsPage = try XCTUnwrap(root.navigation.topViewController as? MeowfilmSettingsViewController)
         await waitForStartupUI { settingsPage.canPresentPageAlert }
         let table = try XCTUnwrap(startupDescendants(settingsPage.view).compactMap { $0 as? UITableView }.first)
-        XCTAssertEqual(table.numberOfRows(inSection: 0), 2)
+        XCTAssertEqual(table.numberOfRows(inSection: 0), 3)
 
         await fixture.prepare { throw MusicServiceError.storageFailed }
         await waitForStartupUI {
@@ -701,7 +701,7 @@ final class MeowfilmMusicStartupHostTests: XCTestCase {
         XCTAssertTrue(root.navigation.topViewController === settingsPage)
         XCTAssertFalse(activity.isAnimating)
         XCTAssertTrue(settings.isEnabled)
-        XCTAssertEqual(table.numberOfRows(inSection: 0), 2)
+        XCTAssertEqual(table.numberOfRows(inSection: 0), 3)
         XCTAssertEqual(resetRequests, 0)
         XCTAssertFalse(startupDescendants(startupPage.view).compactMap { ($0 as? UILabel)?.text }
             .contains("本地数据不可用"), "The error belongs only to the alert")

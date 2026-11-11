@@ -32,6 +32,93 @@ public static partial class MusicUiTests
         yield return Case("unified search pending film stop cannot overwrite a newer film submission", UnifiedStopNewQuery);
         yield return Case("unified search pending film stop keeps later tabs and resumes the same search", UnifiedStopTabs);
         yield return Case("unified search pending film stop cannot remount results after page exit", UnifiedStopExit);
+        yield return Case("unified search novel target five result classes route book and preserve original query", UnifiedNovel);
+        yield return Case("unified search retired novel preparation cannot start after tab changes or page exit", UnifiedNovelPreparation);
+        yield return Case("unified search same-word target change cancels novel work without discarding retained pages", UnifiedNovelRetirement);
+    }
+    private static async Task UnifiedNovel()
+    {
+        await using var f = await UnifiedScene.Create();
+        await f.Submit("合成小说", "novel");
+        await SearchFixture.Until(() => !f.Novel.Search.Loading && f.Novel.Search.Books.Count == 1);
+        True(f.Page.Targets.Select(t => t.Id).SequenceEqual(new[] { "music", "film", "novel" }) &&
+            f.Page.Tabs.Select(t => t.Id).SequenceEqual(new[] { "overview", "songs", "playlists", "film", "novel" }),
+            "three domain targets and all five result classes are exposed by the real page");
+        Equal(0, f.Runtime.SearchOpens);
+        int count = f.Novel.Search.Books.Count;
+        await f.Page.OpenNovelAsync(f.Novel.Search.Books.Single());
+        await SearchFixture.Until(() => f.Novel.Route == NovelCapability.BookRoute && f.Novel.Session?.Chapters.Count > 0);
+        True(f.Novel.Library.Entries.Count == 0, "opening metadata does not record reading history");
+        f.Click("BackButton");
+        await SearchFixture.Until(() => f.SearchHost is not null && f.Page.SelectedTarget == "novel");
+        Equal("合成小说", f.Page.Query); Equal(count, f.Novel.Search.Books.Count);
+        await f.Page.OpenTabAsync("film"); Equal("film", f.Page.SelectedTarget);
+        await f.Page.OpenTabAsync("songs"); Equal("music", f.Page.SelectedTarget);
+    }
+    private static async Task UnifiedNovelPreparation()
+    {
+        foreach (bool leaving in new[] { false, true })
+        {
+            var runtime = new NovelTests.Runtime();
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            // Deliberately non-cooperative preparation also exercises the submission
+            // fence after the await, not only cancellation of a well-behaved client.
+            runtime.Listing = async _ => { entered.TrySetResult(); await release.Task; };
+            await using var f = await UnifiedScene.Create(novelRuntime: runtime);
+            int web = 0; f.Novel.Sources.InteractAsync = (_, _) => { web++; return Task.FromResult<object?>(null); };
+            await f.Submit("生命周期", "music");
+            var pending = f.Page.OpenTabAsync("novel");
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                if (leaving) await f.Navigate(f.Film, FilmCapability.HomeRoute);
+                else await f.Page.OpenTabAsync("film");
+                release.TrySetResult(); await pending; await Drain();
+                True(!runtime.Calls.Any(c => c.Method == "source.runtime.library.invoke"), "retired preparation does not admit a source invocation");
+                True(web == 0 && runtime.Calls.All(c => c.Method != "source.runtime.web.respond"), "hidden preparation cannot open or commit Web");
+                True(f.Page.Error == "" && (!leaving ? f.Page.SelectedTarget == "film" : f.SearchHost is null), "late completion does not change the current page or error");
+            }
+            finally { release.TrySetResult(); }
+        }
+    }
+    private static async Task UnifiedNovelRetirement()
+    {
+        var runtime = new NovelTests.Runtime();
+        await using var f = await UnifiedScene.Create(novelRuntime: runtime);
+        await f.Submit("同词", "novel"); await SearchFixture.Until(() => !f.Novel.Search.Loading && f.Novel.Search.Books.Count == 1);
+        var retained = f.Novel.Search.Books.Single(); int firstPage = f.Novel.Search.States.Single().Page;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        runtime.Read = async (_, _, input, token) =>
+        {
+            Equal(firstPage + 1, input.GetProperty("page").GetInt32()); entered.TrySetResult();
+            using var registration = token.Register(() => retired.TrySetResult());
+            return await release.Task;
+        };
+        int web = 0; f.Novel.Sources.InteractAsync = (_, _) => { web++; return Task.FromResult<object?>(null); };
+        var more = f.Page.LoadMoreNovelAsync();
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            // The first shell Submit has already returned; its PageRequest is gone.
+            await f.Submit("同词", "film"); await retired.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            release.TrySetResult(NovelJson.Value(new { books = new[] { new { name = "迟到书", bookUrl = "https://late.invalid/book" } } }));
+            await more; await Drain();
+            True(f.Page.SelectedTarget == "film" && f.Page.Error == "" && web == 0, "same-word target change retires novel without hidden UI or error");
+            True(f.Novel.Search.Books.SequenceEqual(new[] { retained }) && f.Novel.Search.States.Single().Page == firstPage,
+                "late page cannot publish, while accepted results and page cursor stay retained");
+            True(runtime.Calls.All(c => c.Method != "source.runtime.web.respond"), "retired result cannot commit Web state");
+            int calls = runtime.Calls.Count(c => c.Method == "source.runtime.library.invoke");
+            runtime.Read = (_, _, input, _) => Task.FromResult(NovelJson.Value(new
+                { books = new[] { new { name = "第二页", author = "作者", bookUrl = "https://novel.invalid/second" } } }));
+            await f.Page.OpenTabAsync("novel"); await SearchFixture.Until(() => !f.Novel.Search.Loading && f.Novel.Search.Books.Count == 2);
+            Equal(firstPage + 1, f.Novel.Search.States.Single().Page);
+            True(f.Novel.Search.Books.Any(book => book.SourceIdentity == retained.SourceIdentity) && runtime.Calls.Count(c => c.Method == "source.runtime.library.invoke") == calls + 1,
+                "return resumes only the cancelled page, not a fresh page-one search");
+        }
+        finally { release.TrySetResult(NovelJson.Value(new { books = Array.Empty<object>() })); }
     }
     private static async Task UnifiedMusic()
     {
@@ -453,6 +540,8 @@ public static partial class MusicUiTests
         internal SearchSources Sources => Search.Sources;
         internal readonly FilmCapability Film;
         internal readonly SearchResultsPage Page;
+        internal readonly NovelCapability Novel;
+        private readonly NovelRuleRuntimeFixture novelRules = new();
         internal readonly ShellWindow Shell;
         internal FilmSearchConsumerRuntime Runtime => Search.Runtime;
         internal TextBox Input => (TextBox)Shell.FindName("SearchBox");
@@ -460,26 +549,35 @@ public static partial class MusicUiTests
         internal string Status => ((TextBlock)Shell.FindName("StatusText")).Text;
         internal ContentControl? SearchHost => (Shell.FindName("ContentDeck") as Grid)!.Children.OfType<ContentControl>()
             .SingleOrDefault(host => ReferenceEquals(host.Content, Page.View));
-        private UnifiedScene(SearchScene music, SearchFixture search, FilmMetadataService? metadata)
+        private UnifiedScene(SearchScene music, SearchFixture search, FilmMetadataService? metadata, NovelTests.Runtime? novelRuntime)
         {
             Music = music; Search = search;
             Film = new(new SearchHome(), search.Service, new FilmPlaybackSession(Runtime.CaptureConnectionAsync, new FilmNativeProbe()),
                 new FilmLibrary(new FilmMemoryStore()), metadata);
-            Page = new(music.Module, Film);
-            Shell = new ShellWindow([Music.Module, Film], [Page], async () =>
-            { Page.Dispose(); await Film.DisposeAsync(); await Music.DisposeAsync(); }, () => Task.CompletedTask);
+            Novel = new(new NovelSourceService(novelRuntime ?? new NovelTests.Runtime()), new NovelLibrary(new NovelTests.MemoryStore()),
+                new NovelRuleProgram(novelRules));
+            Page = new(music.Module, Film, Novel);
+            Shell = new ShellWindow([Music.Module, Film, Novel], [Page], async () =>
+            { Page.Dispose(); await Novel.DisposeAsync(); await Film.DisposeAsync(); await Music.DisposeAsync(); }, () => Task.CompletedTask);
             Page.NavigationToken = () => Shell.GetPageNavigationToken(Page, Film.Id, FilmCapability.PlaybackRoute);
             Page.NavigateToPlaybackAsync = async (item, token) =>
             {
                 token.ThrowIfCancellationRequested(); await Film.ReceiveSearchPlaybackAsync(item, token);
                 await Shell.NavigateFromPageAsync(Page, Film.Id, FilmCapability.PlaybackRoute);
             };
+            Page.NovelNavigationToken = () => Shell.GetPageNavigationToken(Page, Novel.Id, NovelCapability.BookRoute);
+            Page.NavigateToNovelAsync = async (item, token) =>
+            {
+                await Novel.ReceiveBookAsync(item, token);
+                await Shell.NavigateFromPageAsync(Page, Novel.Id, NovelCapability.BookRoute);
+            };
         }
-        internal static async Task<UnifiedScene> Create(SearchSources? sources = null, FilmMetadataService? metadata = null, FilmSearchConsumerRuntime? runtime = null)
+        internal static async Task<UnifiedScene> Create(SearchSources? sources = null, FilmMetadataService? metadata = null,
+            FilmSearchConsumerRuntime? runtime = null, NovelTests.Runtime? novelRuntime = null)
         {
             var music = await SearchScene.Create(scriptRuntime: new QualityFixture.ScriptRuntime());
             await music.Policy(["wy"], ["wy"]);
-            var f = new UnifiedScene(music, new SearchFixture(sources, runtime), metadata);
+            var f = new UnifiedScene(music, new SearchFixture(sources, runtime), metadata, novelRuntime);
             try
             {
                 // Mount without a default request, then use the actual native library route.
@@ -510,7 +608,7 @@ public static partial class MusicUiTests
         {
             Music.Http.Release.TrySetResult();
             Shell.Close(); await Shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(15));
-            Page.Dispose(); await Film.DisposeAsync();
+            Page.Dispose(); await Novel.DisposeAsync(); await novelRules.DisposeAsync(); await Film.DisposeAsync();
             await Search.DisposeAsync();
         }
     }

@@ -41,7 +41,7 @@ final class MeowfilmDockView: UIView {
         fadedBackdrop.layer.mask = fadeMask
         navigation.axis = .horizontal
         navigation.distribution = .fillEqually
-        for page in [MeowfilmPrimaryPage.recommend, .film, .library] {
+        for page in [MeowfilmPrimaryPage.recommend, .film, .novel, .library] {
             let button = UIButton(type: .system)
             var configuration = UIButton.Configuration.plain()
             configuration.title = page.title
@@ -147,10 +147,11 @@ final class MeowfilmDockView: UIView {
             switch page {
             case .recommend, .channels: kind = .home
             case .film: kind = .film
+            case .novel: kind = .home
             case .library: kind = .person
             }
             let isSelected = highlighted == page
-            button.configuration?.image = PageIcon.image(kind, filled: isSelected)
+            button.configuration?.image = page == .novel ? UIImage(systemName: isSelected ? "book.closed.fill" : "book.closed") : PageIcon.image(kind, filled: isSelected)
             button.configuration?.baseForegroundColor = isSelected ? NavigationColors.selected : NavigationColors.unselected
             button.accessibilityTraits = isSelected ? [.button, .selected] : .button
         }

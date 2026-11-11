@@ -97,6 +97,13 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertFalse(app.otherElements["app.page.library"].exists)
         attach("03-film")
 
+        app.buttons["app.primary.novel"].tap()
+        XCTAssertTrue(app.otherElements["novel.home"].waitForExistence(timeout: 5))
+        assertPageOwnsHeader("novel", controls: ["app.menu", "search.open"])
+        assertPrimaryNavigation(selected: "novel")
+        XCTAssertTrue(app.segmentedControls["novel.sections"].exists)
+        attach("03-novel")
+
         app.buttons["app.primary.recommend"].tap()
         XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
         assertPageOwnsHeader("recommend", controls: ["app.menu", "search.open", "app.feature"])
@@ -865,9 +872,9 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
             format: "identifier BEGINSWITH %@", "app.primary."
         )).allElementsBoundByIndex.sorted { $0.frame.minX < $1.frame.minX }
         XCTAssertEqual(buttons.map(\.identifier), [
-            "app.primary.recommend", "app.primary.film", "app.primary.library",
+            "app.primary.recommend", "app.primary.film", "app.primary.novel", "app.primary.library",
         ], file: file, line: line)
-        XCTAssertEqual(buttons.map(\.label), ["首页", "影视", "我的"], file: file, line: line)
+        XCTAssertEqual(buttons.map(\.label), ["首页", "影视", "小说", "我的"], file: file, line: line)
         waitSelected(app.buttons["app.primary." + selected])
         for button in buttons {
             if !button.isHittable { acknowledgeMusicContentFailureIfPresent(file: file, line: line) }

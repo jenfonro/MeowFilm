@@ -76,7 +76,10 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!RuntimeHttpProtocol.ValidMethod(method)) throw new BridgeException("INVALID_MESSAGE");
-        return ExecuteAsync((session, token) => session.CallAsync(method, parameters, token), cancellationToken);
+        // Rule consumers own cancellation and must drain their accepted exchange
+        // before retiring a book, browser interaction or native module.
+        return ExecuteAsync((session, token) => session.CallAsync(method, parameters, token), cancellationToken,
+            waitForCompletion: method == "source.runtime.rules.process");
     }
     public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
         ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
@@ -91,6 +94,14 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
         if (!RuntimeHttpProtocol.ValidImageReference(reference) || maximumBytes <= 0)
             throw new BridgeException("INVALID_REQUEST");
         return ExecuteAsync((session, token) => session.ReadImageAsync(reference, maximumBytes, token),
+            cancellationToken, waitForCompletion: true, discard: bytes =>
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes));
+    }
+    public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!RuntimeHttpProtocol.ValidImageReference(reference)) throw new BridgeException("INVALID_REQUEST");
+        return ExecuteAsync((session, token) => session.ReadImageAsync(reference, token),
             cancellationToken, waitForCompletion: true, discard: bytes =>
                 System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes));
     }
@@ -112,8 +123,8 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
             cancellationToken.ThrowIfCancellationRequested(); CheckCurrent(epoch);
             var operation = invoke(session, request.Token);
             Observe(operation);
-            // Upload borrows caller-owned bytes until its actual sender settles.
-            // Cancelling only the wait would let callers clear an in-use buffer.
+            // Owned exchanges must settle before their caller releases a borrowed
+            // buffer or retires its rule consumer; cancellation cannot just end the wait.
             var result = waitForCompletion ? await operation.ConfigureAwait(false) :
                 await operation.WaitAsync(request.Token).ConfigureAwait(false);
             try

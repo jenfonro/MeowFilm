@@ -15,6 +15,9 @@ import {
 
 import { BridgeError, encodeJSONValue, validateJSONValue } from '@meowfilm/runtime-bridge';
 import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
+import { createSourceLibrary } from './source-library.mjs';
+import { createSourceWebBroker } from './source-web.mjs';
+import { createSourceRules } from './source-rules.mjs';
 import { contracts } from '../contracts.mjs';
 
 export const sourceRuntimeContract = contracts.source.contract;
@@ -95,6 +98,7 @@ function errorCode(error) {
     HTTP_ERROR: 'HTTP_ERROR',
     INVALID_RESPONSE: 'INVALID_RESPONSE',
     STORAGE_ERROR: 'STORAGE_ERROR',
+    CORRUPT_STORAGE: 'CORRUPT_STORAGE',
     SCRIPT_CLEANUP: 'SOURCE_CLEANUP',
     VIRTUAL_ROUTE_NOT_FOUND: 'VIRTUAL_ROUTE_NOT_FOUND',
   })[code] ?? 'SOURCE_FAILURE';
@@ -105,6 +109,8 @@ export function createSourceRuntimeModule({
   network = createNodeNetwork(),
   capabilityOwner,
   platform = 'unknown',
+  dataRoot,
+  documents,
 } = {}) {
   requireValue(typeof hostFactory === 'function' &&
     typeof network === 'function' &&
@@ -112,9 +118,20 @@ export function createSourceRuntimeModule({
     (capabilityOwner === undefined ||
       typeof capabilityOwner?.invoke === 'function' &&
       typeof capabilityOwner?.releaseProfiles === 'function'));
-  const owner = capabilityOwner ?? createNodeSourceCapabilities({ network });
+  let library;
+  const web = createSourceWebBroker();
+  const owner = capabilityOwner ?? createNodeSourceCapabilities({
+    network, web: input => web.interact(input),
+    onProfileChange: prefix => library?.profileChanged(prefix),
+  });
   const capabilities = createCapabilityClient({
-    invoke: (name, input, context) => owner.invoke(name, input, context),
+    invoke: (name, input, context) => {
+      try { library?.prepareCapability(name, input, context); }
+      catch (error) {
+        throw new ScriptHostError(error?.code === 'STALE_SOURCE' ? 'STALE_SESSION' : error?.code);
+      }
+      return owner.invoke(name, input, context);
+    },
   });
   const adapter = createPortableSourceAdapter({
     capabilities,
@@ -129,6 +146,7 @@ export function createSourceRuntimeModule({
   const initialLoads = new Map();
   const profileInstallations = new Set();
   const lifetime = new AbortController();
+  const rules = createSourceRules();
   let closed = false;
   let closing;
 
@@ -138,6 +156,8 @@ export function createSourceRuntimeModule({
     requireValue(!closed, 'CLOSED');
     requireValue(!signal?.aborted, 'CANCELLED');
   };
+  library = createSourceLibrary({ dataRoot, documents, host, owner, web, network,
+    fail: code => new Failure(code), errorCode, guard, lifetime });
   const current = id => host.list().find(value => value.installationId === id);
   const instance = (binding, live = current(binding.installationId)) => {
     requireValue(live && live.generation === binding.generation, 'STALE_SOURCE');
@@ -228,7 +248,10 @@ export function createSourceRuntimeModule({
     if (closing) return closing;
     closed = true;
     lifetime.abort();
+    web.close();
+    library.retireAll();
     sources.close();
+    const rulesClosed = rules.close();
     closing = (async () => {
       let result;
       let hostClosed = true;
@@ -237,11 +260,13 @@ export function createSourceRuntimeModule({
       catch { hostClosed = false; }
       finally {
         await operations.drain();
+        try { await rulesClosed; } catch { hostClosed = false; }
+        try { await library.close(); } catch { profilesReleased = false; }
         for (const id of bindings.keys()) profileInstallations.add(id);
         const released = await Promise.allSettled(
           [...profileInstallations].map(id => releaseProfiles(id)),
         );
-        profilesReleased = released.every(value => value.status === 'fulfilled');
+        profilesReleased &&= released.every(value => value.status === 'fulfilled');
         bindings.clear();
         profileInstallations.clear();
       }
@@ -252,11 +277,16 @@ export function createSourceRuntimeModule({
   }
 
   const methods = {
+    'source.runtime.rules.process': method(['request'], ['request'], async (params, signal) => {
+      try { return await rules.process(params.request, { signal }); }
+      catch (error) { throw new Failure(error?.code); }
+    }),
     'source.runtime.load': method([
       'sourceRevision', 'installationId', 'revision', 'expectedRevision', 'protocol', 'version', 'metadata',
     ], ['sourceRevision', 'installationId', 'revision', 'expectedRevision'], (params, signal) => {
       guard(signal);
       identifier(params.installationId);
+      requireValue(!library.owns(params.installationId), 'STALE_SOURCE');
       integer(params.revision, 1);
       integer(params.expectedRevision);
       if (params.protocol !== undefined) {
@@ -408,6 +438,7 @@ export function createSourceRuntimeModule({
       (params, signal) => {
         guard(signal);
         identifier(params.installationId);
+        requireValue(!library.owns(params.installationId), 'STALE_SOURCE');
         integer(params.revision, 1);
         if (params.generation !== undefined) integer(params.generation, 1);
         const initial = interruptUnload(params);
@@ -441,6 +472,7 @@ export function createSourceRuntimeModule({
       'installationId', 'revision', 'generation', 'action', 'payload', 'timeoutMs',
     ], ['installationId', 'revision', 'generation', 'action', 'payload'], async (params, signal) => {
       identifier(params.installationId);
+      requireValue(!library.owns(params.installationId), 'STALE_SOURCE');
       identifier(params.action);
       integer(params.revision, 1);
       integer(params.generation, 1);
@@ -493,6 +525,71 @@ export function createSourceRuntimeModule({
     },
   };
 
+  const libraryFields = {
+    'library.list': [[], []],
+    'library.get': [['installationId'], ['installationId']],
+    'library.import': [['text', 'url', 'fileName'], []],
+    'library.save': [['installationId', 'expectedRevision', 'definition'],
+      ['installationId', 'expectedRevision', 'definition']],
+    'library.update': [['installationId', 'expectedRevision', 'patch'],
+      ['installationId', 'expectedRevision', 'patch']],
+    'library.remove': [['installationId', 'expectedRevision'], ['installationId', 'expectedRevision']],
+    'library.export': [['installationIds'], ['installationIds']],
+    'library.invoke': [['installationId', 'revision', 'action', 'payload'],
+      ['installationId', 'revision', 'action', 'payload']],
+    'library.image': [['installationId', 'revision', 'url', 'bookUrl', 'kind'],
+      ['installationId', 'revision', 'url', 'bookUrl', 'kind']],
+    'library.releaseImage': [['reference'], ['reference']],
+  };
+  for (const [name, [allowed, required]] of Object.entries(libraryFields)) {
+    methods[`source.runtime.${name}`] = method(allowed, required, (params, signal) => {
+      if (params.installationId !== undefined) identifier(params.installationId);
+      if (params.expectedRevision !== undefined) integer(params.expectedRevision, 1);
+      if (params.revision !== undefined) integer(params.revision, 1);
+      if (name === 'library.import') {
+        requireValue((typeof params.text === 'string') !== (typeof params.url === 'string'));
+        requireValue(params.text === undefined || typeof params.text === 'string');
+        requireValue(params.url === undefined || typeof params.url === 'string');
+        requireValue(params.fileName === undefined || typeof params.fileName === 'string');
+      }
+      if (name === 'library.update') {
+        fields(params.patch, ['name', 'group', 'enabled', 'enabledExplore', 'order'], []);
+        requireValue(Object.keys(params.patch).length > 0);
+        for (const key of ['name', 'group']) if (params.patch[key] !== undefined) {
+          requireValue(typeof params.patch[key] === 'string' &&
+            (key !== 'name' || params.patch[key].trim().length > 0));
+        }
+        for (const key of ['enabled', 'enabledExplore']) if (params.patch[key] !== undefined) {
+          requireValue(typeof params.patch[key] === 'boolean');
+        }
+        if (params.patch.order !== undefined) requireValue(Number.isSafeInteger(params.patch.order));
+      }
+      if (name === 'library.export') {
+        requireValue(Array.isArray(params.installationIds));
+        params.installationIds.forEach(identifier);
+      }
+      if (name === 'library.invoke') { identifier(params.action); requireValue(object(params.payload)); }
+      if (name === 'library.image') {
+        requireValue(typeof params.url === 'string' && typeof params.bookUrl === 'string' &&
+          ['cover', 'content'].includes(params.kind));
+      }
+      if (name === 'library.releaseImage') {
+        requireValue(typeof params.reference === 'string' &&
+          /^\/v1\/source\/images\/[A-Za-z0-9-]+$/.test(params.reference));
+      }
+      library.interrupt(name, params);
+      return library.methods[name](params, signal);
+    });
+  }
+  methods['source.runtime.web.pending'] = method([], [], () => web.pending());
+  methods['source.runtime.web.respond'] = method(['id', 'result', 'cancelled'], ['id'], params => {
+    identifier(params.id);
+    requireValue(params.cancelled === undefined || typeof params.cancelled === 'boolean');
+    requireValue(!(params.cancelled === true && Object.hasOwn(params, 'result')));
+    requireValue(params.cancelled === true || Object.hasOwn(params, 'result'));
+    return web.respond(params);
+  });
+
   const close = async () => {
     try { return success(await shutdown()); }
     catch (error) { return failure(error); }
@@ -501,5 +598,6 @@ export function createSourceRuntimeModule({
     try { guard(signal); return success(sources.put(input, bytes, signal)); }
     catch (error) { return failure(error); }
   }
-  return { id: 'source', version: contracts.source.version, contract: sourceRuntimeContract, methods, upload, close };
+  return { id: 'source', version: contracts.source.version, contract: sourceRuntimeContract,
+    methods, upload, close, image: (reference, context) => library.image(reference, context) };
 }

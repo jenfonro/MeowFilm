@@ -16,7 +16,8 @@ let package = Package(
         .library(name: "MeowMusicFeature", targets: ["MeowMusicFeature"]),
         .library(name: "MeowMusicPlatform", targets: ["MeowMusicPlatform"]),
         .library(name: "MeowMusicNativeService", targets: ["MeowMusicNativeService"]),
-        .library(name: "MeowFilmFeature", targets: ["MeowFilmFeature"])
+        .library(name: "MeowFilmFeature", targets: ["MeowFilmFeature"]),
+        .library(name: "MeowNovelFeature", targets: ["MeowNovelFeature"])
     ],
     dependencies: [
         .package(path: "../VideoKernel")
@@ -34,6 +35,8 @@ let package = Package(
         .target(name: "MeowMusicPlatform", dependencies: ["MeowMusicFeature", "MeowContracts", "MeowJSON", "MeowAccounts", "MeowStorage", "MeowRuntime"], linkerSettings: [.linkedLibrary("z")]),
         .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowRuntime", "MeowStorage"], linkerSettings: [.linkedLibrary("z")]),
         .target(name: "MeowFilmFeature", dependencies: ["MeowUI", "MeowJSON", "MeowStorage", "MeowRuntime"]),
+        .target(name: "MeowNovelFeature", dependencies: ["MeowUI", "MeowStorage", "MeowRuntime"]),
+        .testTarget(name: "MeowNovelFeatureTests", dependencies: ["MeowNovelFeature", "MeowStorage", "MeowRuntime"]),
         .testTarget(name: "MeowJSONTests", dependencies: ["MeowJSON"]),
         .testTarget(name: "MeowAccountTests", dependencies: ["MeowAccounts", "MeowContracts"]),
         .testTarget(name: "MeowCoreTests", dependencies: ["MeowContracts", "MeowStorage"]),

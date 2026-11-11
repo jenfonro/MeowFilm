@@ -9,6 +9,7 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Net.Codecrete.QrCodeGenerator" Version="[3.2.1]" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="[1.0.4314.35]" />
     <ProjectReference Include="../MeowFilm.Desktop/MeowFilm.Desktop.csproj" />
     <ProjectReference Include="../MeowFilm.Platform/MeowFilm.Platform.csproj" />
     <ProjectReference Include="../MeowFilm.Media/MeowFilm.Media.csproj" />
