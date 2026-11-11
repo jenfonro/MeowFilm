@@ -3,8 +3,8 @@ import CoreGraphics
 
 /// Measured text heights keep metadata, progress and controls in separate rows.
 struct MusicMiniPlayerLayout: Equatable, Sendable {
-    let titleLineHeight, artistLineHeight, lyricLineHeight: Double
-    var compactHeight: Double { max(58, titleLineHeight + 24) }
+    let compactTitleLineHeight, titleLineHeight, artistLineHeight, lyricLineHeight: Double
+    var compactHeight: Double { max(58, compactTitleLineHeight + 24) }
     var expandedInfoHeight: Double {
         max(116, 16 + titleLineHeight + 6 + artistLineHeight + 8 + lyricLineHeight + 16)
     }

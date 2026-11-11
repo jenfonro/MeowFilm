@@ -4766,6 +4766,106 @@ final class MusicPlayerContentModelTests: XCTestCase {
         await content.model.close()
     }
 
+    func testCardButtonsHaveIndependentStableSlotsAcrossSizesAndText() async throws {
+        let saved = MusicRemoteTrack(ref: .init(kind: .library, id: "favorite"),
+                                    songId: "favorite", title: "Favorite")
+        let service = MusicUIKitRegressionService(localTracks: [saved], collectionKind: "favorites")
+        let (content, _) = try makeDock(service: service)
+        addTeardownBlock { await content.model.close() }
+        let second = MusicQueueEntry(id: "second", track: .init(ref: .init(kind: .queue, id: "second"),
+                                                               songId: "second", title: "Second"))
+        await service.configureNavigation(content.model.queue + [second])
+        await content.model.load()
+        content.favorites.setActive(true)
+        await content.favorites.flush()
+        XCTAssertTrue(content.favorites.loaded, "Hit testing requires authoritative favorites eligibility")
+        XCTAssertNil(content.favorites.error)
+        let host = UIView(frame: CGRect(x: 0, y: 0, width: 430, height: 800))
+        let controls = MusicPlaybackControlsView(content: content, layout: .compact)
+        host.addSubview(controls)
+        let compact = try ["play", "queue"].map { try dockButton($0, in: controls) }
+        let card = try ["favorite", "previous", "card.play", "next", "card.queue"].map {
+            try dockButton($0, in: controls)
+        }
+        XCTAssertFalse(compact[0] === card[2])
+        XCTAssertFalse(compact[1] === card[4])
+        for width in [CGFloat(292), CGFloat(408)] {
+            for category in [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge] {
+                let traits = UITraitCollection(preferredContentSizeCategory: category)
+                func layout(_ style: MusicPlaybackControlsView.Layout) {
+                    controls.setLayout(style, compatibleWith: traits)
+                    let height = CGFloat(style == .compact ? controls.miniLayout.compactHeight
+                                                         : controls.miniLayout.expandedHeight)
+                    controls.frame = CGRect(x: 0, y: 700 - height, width: width, height: height)
+                    controls.layoutIfNeeded()
+                }
+                layout(.compact)
+                let slots = (compact + card).map { $0.convert($0.bounds, to: host) }
+                XCTAssertTrue(compact.allSatisfy { $0.alpha == 1 && $0.isUserInteractionEnabled && $0.isEnabled })
+                XCTAssertTrue(card.allSatisfy { $0.alpha == 0 && !$0.isUserInteractionEnabled &&
+                    $0.accessibilityElementsHidden })
+                for button in compact { XCTAssertTrue(controls.hitTest(button.center, with: nil) === button) }
+                for style in [MusicPlaybackControlsView.Layout.card, .compact, .card] {
+                    layout(style)
+                    for (button, slot) in zip(compact + card, slots) {
+                        XCTAssertEqual(button.convert(button.bounds, to: host), slot)
+                    }
+                    let visible = style == .card ? card : compact
+                    let hidden = style == .card ? compact : card
+                    XCTAssertTrue(hidden.allSatisfy { $0.alpha == 0 && !$0.isUserInteractionEnabled &&
+                        $0.accessibilityElementsHidden })
+                    XCTAssertTrue(visible.allSatisfy { $0.alpha == 1 && $0.isUserInteractionEnabled &&
+                        $0.isEnabled && !$0.accessibilityElementsHidden && controls.bounds.contains($0.frame) })
+                    for button in visible {
+                        XCTAssertTrue(controls.hitTest(button.center, with: nil) === button)
+                    }
+                }
+            }
+        }
+    }
+
+    func testIndependentDockButtonsSharePlaybackStateAndKeepQueueActionSeparate() async throws {
+        let (content, surface) = try makeDock()
+        let player = MusicDockTogglePlayer()
+        content.model.player = player
+        defer { content.model.player = nil }
+        addTeardownBlock { await content.model.close() }
+        let compactPlay = try dockButton("play", in: surface)
+        let cardPlay = try dockButton("card.play", in: surface)
+        var destinations: [MusicPlaybackDestination] = []
+        surface.onPresent = { destinations.append($0) }
+        for (index, play) in [compactPlay, cardPlay].enumerated() {
+            if index == 1 { await expandDock(content) }
+            content.model.playbackState.phase = .paused
+            await deliverUpdates()
+            let pausedImages = [compactPlay, cardPlay].map { $0.image(for: .normal)?.pngData() }
+            content.model.playbackState.phase = .playing
+            await deliverUpdates()
+            for (button, image) in zip([compactPlay, cardPlay], pausedImages) {
+                XCTAssertNotNil(image)
+                XCTAssertNotEqual(button.image(for: .normal)?.pngData(), image)
+            }
+            let paused = expectation(description: "visible dock button pauses once")
+            player.onPause = { paused.fulfill() }
+            play.sendActions(for: .touchUpInside)
+            await fulfillment(of: [paused], timeout: 2)
+            XCTAssertEqual(player.pauses.count, index + 1)
+            XCTAssertEqual(player.pauses.last, content.model.nativeAttempt)
+            XCTAssertTrue(destinations.isEmpty)
+        }
+        for name in ["card.queue", "queue"] {
+            if name == "queue" { surface.collapse(); await deliverUpdates() }
+            try dockButton(name, in: surface).sendActions(for: .touchUpInside)
+        }
+        XCTAssertEqual(destinations, [.queue, .queue])
+        XCTAssertEqual(player.pauses.count, 2)
+        content.model.accessState.isAvailable = false
+        await deliverUpdates()
+        for name in ["play", "queue", "card.play", "card.queue"] {
+            XCTAssertFalse(try dockButton(name, in: surface).isEnabled)
+        }
+    }
+
     func testCardControlHoldEndsOnOutsideTouchAndFullPageLeavesDockInPlace() async throws {
         let (content, surface) = try makeDock()
         let root = PageViewController(themeProvider: content.appearance)
@@ -4774,7 +4874,7 @@ final class MusicPlayerContentModelTests: XCTestCase {
         let bottom = surface.frame.maxY
         await expandDock(content)
         surface.layoutIfNeeded()
-        let order = try ["favorite", "previous", "play", "next", "queue"].map { try dockButton($0, in: surface) }
+        let order = try ["favorite", "previous", "card.play", "next", "card.queue"].map { try dockButton($0, in: surface) }
         XCTAssertEqual(order.map(\.frame.midX), order.map(\.frame.midX).sorted())
         let slider = try XCTUnwrap(dockViews(surface).compactMap { $0 as? MusicProgressSlider }.first)
         // Layout and Dynamic Type checks are not a five-second preview test.
@@ -4888,7 +4988,7 @@ final class MusicPlayerContentModelTests: XCTestCase {
             XCTAssertTrue(full.view.hitTest(button.center, with: nil) === button)
         }
         XCTAssertFalse(fullPlay === order[2])
-        XCTAssertEqual(fullPlay.layer.sublayers?.first { $0.name == "play.progress.track" }?.opacity, 0)
+        XCTAssertEqual(fullPlay.layer.sublayers?.first { $0.name == "play.outline" }?.opacity, 0)
         do {
             let responsiveControls = MusicPlaybackControlsView(content: content, layout: .full)
             responsiveControls.setFullViewport(viewportHeight: 844, safeHeight: 763)
@@ -4959,7 +5059,7 @@ final class MusicPlayerContentModelTests: XCTestCase {
         defer { observation.cancel() }
         var queueOpened = false
         surface.onPresent = { queueOpened = $0 == .queue }
-        try dockButton("queue", in: surface).sendActions(for: .touchUpInside)
+        try dockButton("card.queue", in: surface).sendActions(for: .touchUpInside)
         XCTAssertTrue(queueOpened)
         XCTAssertNotEqual(content.model.phase, .playing)
         await fulfillment(of: [collapsed], timeout: 7)
@@ -5830,6 +5930,19 @@ private actor MusicUIKitResultInspectionSession: MusicSourceInspectionSession {
         throw MusicServiceError.unsupported
     }
     func close() { closeCount += 1; pair.continuation.finish() }
+}
+
+@MainActor
+private final class MusicDockTogglePlayer: MusicPlaybackDriving {
+    var pauses: [MusicPlayerAttempt] = []
+    var onPause: (() -> Void)?
+    func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
+        XCTFail("Unexpected playback"); return .init(id: UUID(), resourceID: resource.id)
+    }
+    func pause(_ attempt: MusicPlayerAttempt) { pauses.append(attempt); onPause?() }
+    func resume(_ attempt: MusicPlayerAttempt) { XCTFail("Unexpected resume") }
+    func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool { XCTFail("Unexpected seek"); return false }
+    func stop(_ attempt: MusicPlayerAttempt) { XCTFail("Unexpected stop") }
 }
 
 @MainActor
