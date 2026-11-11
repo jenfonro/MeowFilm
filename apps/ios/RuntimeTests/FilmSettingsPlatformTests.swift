@@ -7,8 +7,9 @@ import MeowRuntime
 import MeowStorage
 @testable import MeowFilmFeature
 @testable import MeowUI
+@testable import Meowfilm
 
-/// Exercises actual local owners and UIKit. The RPC boundary is a fixture, not Node evidence.
+/// UIKit uses real Node rules; source management alone uses a protocol fixture.
 @MainActor
 final class FilmSettingsPlatformTests: XCTestCase {
     private var hostedWindows: [(window: UIWindow, previousKeyWindow: UIWindow?)] = []
@@ -19,6 +20,13 @@ final class FilmSettingsPlatformTests: XCTestCase {
         _ = try await foregroundScene()
     }
 
+    private func makeFixture() async throws -> FilmSettingsFixture {
+        let resources = try await hostResources()
+        let fixture = try await FilmSettingsFixture(client: try await resources.scriptSession.connection())
+        addTeardownBlock { try await fixture.removeFiles() }
+        return fixture
+    }
+
     override func tearDown() async throws {
         // Also restore the App window if a throwing assertion interrupted a test.
         while let entry = hostedWindows.last { unhost(entry.window) }
@@ -26,8 +34,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testDraftSurvivesNavigationAndWholeDraftSaveRestoreAndTestNeverSaves() async throws {
-        let fixture = try FilmSettingsFixture()
-        defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         let rules = fixture.rules
         try await rules.initialize()
         let owner = FilmRulesDraft(service: rules)
@@ -55,36 +62,39 @@ final class FilmSettingsPlatformTests: XCTestCase {
         XCTAssertEqual(restored.episodeCleanRegexRules.first, "^保留")
         XCTAssertNotEqual(restored.movieRules.first?.pattern, "(电影)")
         owner.edit(.movie, index: 0, rule: .init(pattern: "["))
-        let before = try fixture.rulesStore.read(key: FilmRuleService.documentKey)
+        let before = try await fixture.ruleRPC.saved()
         let test = FilmRuleTestController(owner: owner, section: .movie, themeProvider: FilmSettingsTheme())
         test.loadViewIfNeeded(); test.input.text = "电影 2026"; test.runTest()
         await eventually { !test.testing && test.result != nil }
         XCTAssertFalse(try XCTUnwrap(test.result).errors.isEmpty)
-        XCTAssertEqual(try fixture.rulesStore.read(key: FilmRuleService.documentKey), before)
+        let after = try await fixture.ruleRPC.saved()
+        XCTAssertEqual(after, before)
         XCTAssertEqual(owner.rules(.movie).first?.pattern, "[")
         await rules.close(); await fixture.sources.close()
     }
 
     func testRulesSaveFailureRetainsDraftAndRetryCommitsWithoutLosingOtherGroups() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         try await fixture.rules.initialize()
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
-        let bytes = try XCTUnwrap(fixture.rulesStore.read(key: FilmRuleService.documentKey))
+        let original = try await fixture.ruleRPC.saved()
         owner.edit(.episodeClean, index: 0, rule: .init(pattern: "^修改"))
-        try fixture.rulesStore.write(Data("{}".utf8), key: FilmRuleService.documentKey)
-        do { try await owner.save(); XCTFail("CAS conflict must remain a failure") } catch {}
+        await fixture.ruleRPC.failWrites(true)
+        do { try await owner.save(); XCTFail("Node storage failure must remain a failure") } catch {}
         XCTAssertEqual(owner.rules(.episodeClean).first?.pattern, "^修改")
         let saved = try await fixture.rules.savedSnapshot()
         XCTAssertNotEqual(saved.episodeCleanRegexRules.first, "^修改")
-        try fixture.rulesStore.write(bytes, key: FilmRuleService.documentKey)
+        let failed = try await fixture.ruleRPC.saved()
+        XCTAssertEqual(failed, original)
+        await fixture.ruleRPC.failWrites(false)
         try await owner.save()
         let committed = try await fixture.rules.savedSnapshot()
         XCTAssertEqual(committed.episodeCleanRegexRules.first, "^修改")
         await fixture.rules.close(); await fixture.sources.close()
     }
 
-    func testModelStartsIndependentLocalOwnersAndCloseDoesNotCloseServices() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+    func testModelLoadsNodeRulesAndLocalSourcesAndCloseDoesNotCloseServices() async throws {
+        let fixture = try await makeFixture()
         let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(connection: {
             XCTFail("Starting local settings must not request TMDB"); throw FilmSearchError.unavailable
         }), didSave: {})
@@ -98,7 +108,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         model.start()
         await eventually { model.rules.draft != nil && model.snapshot != nil }
         let calls = await fixture.runtime.calls
-        XCTAssertTrue(calls.isEmpty, "Model cannot launch Node or run detection")
+        XCTAssertTrue(calls.isEmpty, "Opening settings never runs source detection")
         model.rules.edit(.episodeClean, index: 0, rule: .init(pattern: "长期草稿"))
         model.close(); model.start()
         await eventually { model.snapshot != nil }
@@ -114,7 +124,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testSettingsMenuKeepsTMDBIndependentWhenPlaybackIsUnavailable() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(connection: { throw FilmSearchError.unavailable }), didSave: {})
         let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources, tmdb: tmdb)
         XCTAssertNil(model.playback)
@@ -143,7 +153,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testSettingsMenuRoutesAllPlaybackAreasAlongsideTMDB() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(connection: { throw FilmSearchError.unavailable }), didSave: {})
         let playback = FilmPlaybackSettingsModel(transport: .init(
             request: { _, _ in throw FilmPlaybackError(code: "CLOSED") },
@@ -203,7 +213,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testVideoOptionsAreDurableExclusiveOrderedAndFailedSaveDoesNotPublish() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         try await fixture.sources.refresh()
         let first = FilmSourceKey(installationId: "a", siteKey: "site")
         let second = FilmSourceKey(installationId: "b", siteKey: "site")
@@ -239,7 +249,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testVideoDetectionCancellationOnHiddenPageDoesNotPublishLateResult() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         try await fixture.sources.refresh()
         await fixture.runtime.pauseProbes()
         let key = FilmSourceKey(installationId: "a", siteKey: "site")
@@ -260,7 +270,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testCatActionsSelectionConfirmationAndDisabledParent() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         try await fixture.sources.refresh()
         let cats = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
         let window = try await host(cats); defer { unhost(window) }
@@ -290,7 +300,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testNarrowWideLargeTypeAndEmptyScreensProduceRealUIKitAttachments() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         try await fixture.rules.initialize(); try await fixture.sources.initialize()
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
         for width: CGFloat in [320, 768] {
@@ -350,7 +360,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testSavingClearedLastAndMiddleRuleEndsEditorWithoutChangingSuccessor() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         try await fixture.rules.initialize()
         for index in [2, 1] {
             _ = try await fixture.rules.save(.init(episodeCleanRegexRules: ["first", "middle", "last"],
@@ -392,7 +402,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
 
     func testCatBatchDeleteRetryContinuesAfterReceiptAndCancelDoesNotDeleteMore() async throws {
         for retry in [true, false] {
-            let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+            let fixture = try await makeFixture()
             try await fixture.sources.refresh()
             await fixture.runtime.failDeletionOnce("b")
             let page = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
@@ -417,7 +427,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testVideoBatchPersistenceFailureRetryRetainsCompletedReceipts() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         try await fixture.sources.refresh()
         let snapshot = await fixture.sources.snapshot
         let keys = snapshot.videos.map(\.key)
@@ -441,7 +451,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testCatBatchDeleteRetrySkipsCommittedDeletionWhenFollowingStatusFails() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         try await fixture.sources.refresh()
         await fixture.runtime.failStatusAfterDeletion("a")
         let page = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
@@ -467,7 +477,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testVideoListBatchConfirmationCancelsThenDeletesSelectedRows() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         try await fixture.sources.refresh()
         let page = FilmVideoSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
@@ -487,7 +497,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testBatchDetectionRemainsCancellableAfterDeselectingEveryRow() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         try await fixture.sources.refresh(); await fixture.runtime.pauseProbes()
         let page = FilmVideoSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
@@ -518,7 +528,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
 
     func testReturningFromAcceptedLocalBatchUpdateDoesNotPresentOrSubmitNextItem() async throws {
         for secondLocal in [true, false] {
-            let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+            let fixture = try await makeFixture()
             await fixture.runtime.setLocal(secondLocal ? ["a", "b"] : ["a"])
             try await fixture.sources.refresh()
             await fixture.runtime.pauseUpdates()
@@ -563,7 +573,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testRuntimeFailureRetriesFromItsAlertAndCanRetryAgain() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         await fixture.runtime.failStarts(2)
         do { try await fixture.sources.start(); XCTFail("First startup must fail") } catch {}
         let page = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
@@ -584,13 +594,13 @@ final class FilmSettingsPlatformTests: XCTestCase {
     }
 
     func testRuleResultDisplayDoesNotReplaceLosslessBusinessText() async throws {
-        let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+        let fixture = try await makeFixture()
         try await fixture.rules.initialize()
         _ = try await fixture.rules.save(.init(movieRules: [.init(pattern: "^.", replace: "x")]))
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
         let page = FilmRuleTestController(owner: owner, section: .movie, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
-        let before = try fixture.rulesStore.read(key: FilmRuleService.documentKey)
+        let before = try await fixture.ruleRPC.saved()
         page.input.becomeFirstResponder(); page.input.insertText("🎬")
         try selectRow(page, "film.rule.test.run")
         await eventually { !page.testing && page.result != nil }
@@ -599,13 +609,14 @@ final class FilmSettingsPlatformTests: XCTestCase {
         XCTAssertEqual(try row(page, "film.rule.test.output").title, "x\u{FFFD}")
         XCTAssertEqual(page.input.text, "🎬")
         XCTAssertEqual(owner.rules(.movie).first?.pattern, "^.")
-        XCTAssertEqual(try fixture.rulesStore.read(key: FilmRuleService.documentKey), before)
+        let after = try await fixture.ruleRPC.saved()
+        XCTAssertEqual(after, before)
         await fixture.rules.close(); await fixture.sources.close()
     }
 
     func testCatBatchRestartRetriesOnlyUnconfirmedItemsAndCancelDoesNotRestartMore() async throws {
         for retries in [0, 1, 2] {
-            let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+            let fixture = try await makeFixture()
             try await fixture.sources.refresh()
             await fixture.runtime.failRestarts("b", count: max(1, retries))
             let page = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
@@ -651,7 +662,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
 
     func testCatDetailCommittedDeletionStatusFailureRetriesOrCancelsWithoutAnotherUninstall() async throws {
         for choice in ["成功", "重试", "取消"] {
-            let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+            let fixture = try await makeFixture()
             try await fixture.sources.refresh()
             if choice != "成功" { await fixture.runtime.failStatusAfterDeletion("a") }
             let page = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
@@ -698,7 +709,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
 
     func testCatDetailDeletionReceiptAfterReturningDoesNotPopAnotherDetail() async throws {
         for statusFails in [false, true] {
-            let fixture = try FilmSettingsFixture(); defer { fixture.removeFiles() }
+            let fixture = try await makeFixture()
             try await fixture.sources.refresh()
             await fixture.runtime.pauseDeletion()
             if statusFails { await fixture.runtime.failStatusAfterDeletion("a") }
@@ -850,27 +861,54 @@ private final class FilmSettingsTheme: PageThemeProviding {
     let pageThemeChanges = Empty<Void, Never>().eraseToAnyPublisher()
 }
 
-private struct FilmSettingsFixture: Sendable {
+@MainActor
+private final class FilmSettingsFixture {
     let base: URL
-    let rulesStore: DocumentStore
     let sourceStore: DocumentStore
     let rules: FilmRuleService
     let sources: FilmSourceService
     let runtime: FilmSettingsRPCFixture
-    init() throws {
+    let ruleRPC: FilmSettingsRuleRPC
+    private let original: RuntimeValue
+    init(client: RuntimeHTTPClient) async throws {
         base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        rulesStore = try DocumentStore(baseURL: base, namespace: FilmRuleService.documentNamespace)
         sourceStore = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-        rules = try FilmRuleService(store: rulesStore)
+        ruleRPC = FilmSettingsRuleRPC(client: client)
+        original = try await ruleRPC.saved()
+        let rpc = ruleRPC
+        rules = FilmRuleService(request: { try await rpc.call($0, $1) })
         runtime = FilmSettingsRPCFixture()
         let runtime = runtime, store = sourceStore
         sources = FilmSourceService(transport: .init(
             request: { operation, params in try await runtime.call(operation, params) },
             upload: { id, revision, bytes in try await runtime.upload(id, revision, bytes) }),
                                     storeFactory: { store })
+        // Match the old fresh-owner fixture, not the simulator's saved edits.
+        // Teardown restores the original Node receipt.
+        _ = try await rpc.call("rules.clear", .object([:]))
     }
-    func removeFiles() { try? FileManager.default.removeItem(at: base) }
+    func removeFiles() async throws {
+        await ruleRPC.failWrites(false)
+        _ = try await ruleRPC.call("rules.set", .object(["rules": original]))
+        await rules.close(); await sources.close()
+        try FileManager.default.removeItem(at: base)
+    }
+}
+
+private actor FilmSettingsRuleRPC {
+    let client: RuntimeHTTPClient
+    private var failedWrites = false
+    init(client: RuntimeHTTPClient) { self.client = client }
+    func failWrites(_ value: Bool) { failedWrites = value }
+    func saved() async throws -> RuntimeValue {
+        let receipt = try await client.call(module: .film, operation: "rules.get")
+        return try receipt.filmRequiredObject().filmValue("rules")
+    }
+    func call(_ operation: String, _ input: RuntimeValue) async throws -> RuntimeValue {
+        if failedWrites && operation == "rules.set" { throw RuntimeHTTPError.remote("STORAGE_ERROR") }
+        return try await client.call(module: .film, operation: operation, parameters: input)
+    }
 }
 
 /// Drives the production batch/confirmation/retry UI with a real DocumentStore

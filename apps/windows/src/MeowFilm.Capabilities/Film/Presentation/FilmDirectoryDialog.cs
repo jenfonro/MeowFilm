@@ -104,7 +104,8 @@ internal sealed class FilmDirectoryDialog : Window
     internal bool IsCurrent(FilmPlaybackPage value) => ReferenceEquals(page, value) &&
         JsonElement.DeepEquals(FilmJson.Member(browsing, "sourceId"), FilmJson.Member(value.RawBrowsing, "sourceId")) &&
         JsonElement.DeepEquals(FilmJson.Member(browsing, "lineId"), FilmJson.Member(value.RawBrowsing, "lineId")) &&
-        !value.ListLoading && value.ListError.Length == 0;
+        JsonElement.DeepEquals(FilmJson.Member(browsing, "originalEpisodes"), FilmJson.Member(value.RawBrowsing, "originalEpisodes")) &&
+        (!value.ListLoading || FilmJson.Bool(value.RawBrowsing, "refreshing")) && value.ListError.Length == 0;
     internal void RefreshCurrent()
     {
         if (!directory.UpdateCurrent(page.CurrentCandidateId)) return;

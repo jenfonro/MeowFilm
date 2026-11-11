@@ -229,10 +229,10 @@ test('runtime persists settings and credentials independently, redacts reads, pr
   assert.equal(JSON.parse(readFileSync(join(dataRoot, 'tmdb/settings.json'), 'utf8')).settings.accessToken, '');
 });
 
-test('metadata settings expose an opaque configuration epoch only for effective changes', async t => {
+test('metadata settings expose a restart-stable configuration identity only for effective changes', async t => {
   const root = area(t), settings = createMetadataSettings(root, 'tmdb');
   const initial = settings.get();
-  assert.match(initial.revision, /^[0-9a-f-]{36}$/);
+  assert.match(initial.revision, /^[0-9a-f]{64}$/);
   assert.equal(settings.get().revision, initial.revision);
   assert.equal(settings.update({}).revision, initial.revision);
   assert.equal(settings.update({ apiBase: initial.apiBase + '/' }).revision, initial.revision);
@@ -249,7 +249,8 @@ test('metadata settings expose an opaque configuration epoch only for effective 
   const persisted = JSON.parse(readFileSync(join(root, 'tmdb/settings.json'), 'utf8'));
   assert.deepEqual(Object.keys(persisted).sort(), ['settings', 'version']);
   assert.equal(Object.hasOwn(persisted.settings, 'revision'), false);
-  assert.notEqual(createMetadataSettings(root, 'tmdb').get().revision, next.revision);
+  assert.equal(createMetadataSettings(root, 'tmdb').get().revision, next.revision);
+  assert.equal(createMetadataSettings(area(t), 'tmdb').get().revision, initial.revision);
 });
 
 test('Douban HTML search goes through the public operation without inventing TMDB pagination', async t => {

@@ -13,7 +13,8 @@ public sealed record FilmSearchSource(FilmCatSource Cat, FilmVideoSource Site)
     {
         key = Key, engine = "cat", installationId = Cat.InstallationId, siteId = Site.Key.SiteKey,
         generation = Cat.Generation, name = Site.Name, enabled = Site.Options.Enabled,
-        searchable = Site.Options.SearchEnabled
+        searchable = Site.Options.SearchEnabled, aggregateImages = Site.Options.AggregateImages,
+        order = Site.Order
     });
 }
 
@@ -25,8 +26,6 @@ public interface IFilmSearchSources
     event EventHandler? Changed;
     IReadOnlyList<FilmSearchSource> CurrentSearchSources { get; }
     Task<IReadOnlyList<FilmSearchSource>> ReadSearchSourcesAsync(CancellationToken token);
-    Task<FilmSearchData> SearchAsync(FilmSearchSource source, string query, int page, CancellationToken token);
-    bool IsSearchSourceCurrent(FilmSearchSource source);
 }
 
 /// <summary>The adapter returns original TMDB JSON; image resolution belongs to data access.</summary>
@@ -49,40 +48,27 @@ public sealed class FilmSearchContext
     public FilmSearchSession Session { get; }
     public string Query => Session.Query;
     public string SessionId => Session.Id;
-    public long Revision => Session.Revision;
+    public long Revision => Session.ReferenceRevision;
     public string MetadataQuery => Session.MetadataQuery;
     public JsonElement? MetadataSearchPayload => Session.MetadataSearchPayload;
     public string DisplayKey { get; }
     public JsonElement Item { get; }
-    internal bool IsRawSelection => DisplayKey.StartsWith("site:", StringComparison.Ordinal);
     internal bool SameSelection(FilmSearchContext other) =>
-        ReferenceEquals(Session, other.Session) && Item.GetRawText() == other.Item.GetRawText();
-    // Playback retains the live session, so a first-round click also sees later members/details.
-    public JsonElement CurrentItem => Session.CurrentItem(Item);
-    public JsonElement CarrierItem => IsRawSelection ? CurrentItem : Session.Carrier(Item);
-    public IReadOnlyList<JsonElement> Sources
-    {
-        get
-        {
-            var item = CarrierItem;
-            return item.TryGetProperty("aggregateItems", out var members) && members.ValueKind == JsonValueKind.Array
-                ? Array.AsReadOnly(members.EnumerateArray().Select(value => value.Clone()).ToArray())
-                : FilmSearchJson.Text(item, "sourceKind") == "site" ? Array.AsReadOnly(new[] { item }) : [];
-        }
-    }
-    public JsonElement? Metadata => IsRawSelection ? null : Session.Detail(CarrierItem);
+        ReferenceEquals(Session, other.Session) && DisplayKey == other.DisplayKey;
+    internal object Reference => new { sessionId = SessionId, selectionId = DisplayKey };
+    internal Task<FilmPlaybackRequest> HandoffAsync(CancellationToken token) => Session.Service.HandoffAsync(this, token);
 }
 
 internal static class FilmSearchJson
 {
     internal static string Text(JsonElement value, string key) => value.ValueKind == JsonValueKind.Object &&
-        value.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.String ? field.GetString()! : "";
-    internal static long Number(JsonElement value, string key) => value.ValueKind == JsonValueKind.Object &&
-        value.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.Number && field.TryGetInt64(out long number) ? number : 0;
-    internal static JsonElement[] Items(JsonElement value) => value.GetProperty("items").EnumerateArray()
-        .Select(item => item.Clone()).ToArray();
-    internal static string SiteIdentity(JsonElement item) => JsonSerializer.Serialize(new object[]
-        { Text(item, "siteKey"), FilmJson.Member(item, "detailId") });
-    internal static string MetadataIdentity(JsonElement item) => JsonSerializer.Serialize(new object[]
-        { Text(item, "tmdbType"), Number(item, "tmdbId") });
+        value.TryGetProperty(key, out var field) ? DisplayText(field) : "";
+    internal static string DisplayText(JsonElement field)
+    {
+        if (field.ValueKind == JsonValueKind.String) return field.GetString()!;
+        if (field.ValueKind != JsonValueKind.Array) return "";
+        var units = field.EnumerateArray().Select(unit => (char)unit.GetUInt16()).ToArray();
+        // WPF text is a projection only; the original JSON remains the transport identity.
+        return System.Text.Encoding.Unicode.GetString(System.Text.Encoding.Unicode.GetBytes(units));
+    }
 }

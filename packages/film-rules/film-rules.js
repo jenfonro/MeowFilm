@@ -62,32 +62,6 @@
     return { pattern: normalizeRegexText(raw), flags: '' };
   }
 
-  function decodeEpisodeRule(rule) {
-    const raw = typeof rule === 'string' ? rule.trim() : '';
-    if (!raw) return null;
-    if (raw.startsWith('{') && raw.endsWith('}')) {
-      try {
-        const obj = JSON.parse(raw);
-        if (obj && typeof obj === 'object' && typeof obj.pattern === 'string' && obj.pattern.trim()) {
-          return {
-            pattern: normalizeRegexText(obj.pattern.trim()),
-            replace: typeof obj.replace === 'string' ? obj.replace : '',
-            flags: typeof obj.flags === 'string' ? obj.flags : ''
-          };
-        }
-      } catch (_) {}
-    }
-    if (raw.startsWith('/') && raw.lastIndexOf('/') > 0) {
-      const last = raw.lastIndexOf('/');
-      return {
-        pattern: normalizeRegexText(raw.slice(1, last).trim()),
-        replace: '',
-        flags: raw.slice(last + 1).trim()
-      };
-    }
-    return { pattern: normalizeRegexText(raw), replace: '', flags: '' };
-  }
-
   function normalizeMagicRuleRow(rule) {
     return {
       pattern: normalizeRegexText(rule && typeof rule.pattern === 'string' ? rule.pattern.trim() : ''),
@@ -118,56 +92,36 @@
       '')).filter(Boolean);
   }
 
-  function readDocument(document) {
-    return {
-      episodeCleanRegexRules: cleanRows(document.episodeCleanRegexRules),
-      episodeRules: document.episodeRules.map(decodeEpisodeRule).filter(Boolean),
-      movieRules: document.movieRules.map(decodeEpisodeRule).filter(Boolean),
-      aggregateRegexRules: cleanRows(document.aggregateRegexRules)
-    };
-  }
-
   function prepareSave(rules) {
-    // Keep both save-time normalizations and response decoding, as in the page.
-    const document = {
+    // Retain the page/handler save normalization. Encoded rows are only a
+    // normalization intermediate; the Node owner persists decoded rules.
+    const normalized = {
       episodeCleanRegexRules: cleanRows(rules.episodeCleanRegexRules),
       episodeRules: rules.episodeRules.map(normalizeMagicRuleRow).map(encodeEpisodeRule).filter(Boolean),
       movieRules: rules.movieRules.map(normalizeMagicRuleRow).map(encodeEpisodeRule).filter(Boolean),
       aggregateRegexRules: cleanRows(rules.aggregateRegexRules)
     };
-    for (const group of GROUPS) document[group] = storedRows(document[group]);
-    return { document, rules: readDocument(document) };
+    for (const group of GROUPS) normalized[group] = storedRows(normalized[group]);
+    const decode = (row) => {
+      const value = JSON.parse(row);
+      return { pattern: normalizeRegexText(value.pattern.trim()),
+        replace: value.replace, flags: value.flags || '' };
+    };
+    return { rules: {
+      episodeCleanRegexRules: cleanRows(normalized.episodeCleanRegexRules),
+      episodeRules: normalized.episodeRules.map(decode),
+      movieRules: normalized.movieRules.map(decode),
+      aggregateRegexRules: cleanRows(normalized.aggregateRegexRules)
+    } };
   }
 
-  function initialDocument() {
-    // defaults.go seeds two episode rules. Its JSON patterns contain doubled
-    // backslashes; dashboard decoding removes one level on every read.
-    const seed = (row) => JSON.stringify({ ...row, pattern: row.pattern.replace(/\\/g, '\\\\') });
+  function initialRules() {
     return {
       episodeCleanRegexRules: DEFAULT_EPISODE_CLEAN_RULES.slice(),
-      episodeRules: DEFAULT_EPISODE_RULES.slice(1).map(seed),
-      movieRules: DEFAULT_MOVIE_RULES.map(seed),
+      episodeRules: DEFAULT_EPISODE_RULES.slice(1).map(row => ({ ...row })),
+      movieRules: DEFAULT_MOVIE_RULES.map(row => ({ ...row })),
       aggregateRegexRules: DEFAULT_AGGREGATE_REGEX_RULES.slice()
     };
-  }
-
-  function initialize(document) {
-    const defaults = initialDocument();
-    let changed = document == null;
-    if (document == null) document = defaults;
-    const next = {};
-    for (const group of GROUPS) {
-      if (!Array.isArray(document[group]) || document[group].some((row) => typeof row !== 'string')) {
-        throw new Error('Invalid film rule document');
-      }
-      if (!document[group].length) {
-        next[group] = defaults[group];
-        changed = true;
-      } else {
-        next[group] = document[group].slice();
-      }
-    }
-    return { document: next, rules: readDocument(next), changed };
   }
 
   function restore(section, draft) {
@@ -254,7 +208,10 @@
         } else {
           cache[index] = new RegExp(String(row.pattern || '').trim(), String(row.flags || '').trim() || 'i');
         }
-      } catch (_) { cache[index] = null; }
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        cache[index] = null;
+      }
     }
     const regex = cache[index];
     if (regex) regex.lastIndex = 0;
@@ -397,6 +354,7 @@
   }
 
   function process(request, rules) {
+    request = { ...request, text: ruleText(request.text), query: ruleText(request.query) };
     const input = String(request.text || '').trim();
     const result = {
       section: request.section, type: '', text: '', inputText: input, processedText: input,
@@ -411,9 +369,34 @@
     }
   }
 
+  function ruleText(value) {
+    if (!Array.isArray(value)) return value;
+    if (value.some(unit => !Number.isInteger(unit) || unit < 0 || unit > 65535)) {
+      throw new Error('Invalid film rule text');
+    }
+    return value.map(unit => String.fromCharCode(unit)).join('');
+  }
+
+  function wireText(value) {
+    if (typeof value === 'string') {
+      for (let index = 0; index < value.length; index++) {
+        const unit = value.charCodeAt(index);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = value.charCodeAt(index + 1);
+          if (next >= 0xdc00 && next <= 0xdfff) { index++; continue; }
+        } else if (unit < 0xdc00 || unit > 0xdfff) continue;
+        return Array.from({ length: value.length }, (_, i) => value.charCodeAt(i));
+      }
+    } else if (Array.isArray(value)) return value.map(wireText);
+    else if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, wireText(item)]));
+    }
+    return value;
+  }
+
   globalThis.meowfilmProcess = function (request) {
     switch (request.operation) {
-      case 'initialize': return initialize(request.document);
+      case 'defaults': return { rules: initialRules() };
       case 'save': return prepareSave(request.rules);
       case 'restore': return restore(request.section, request.rules);
       case 'newMatch': {
@@ -425,6 +408,7 @@
         return parsed ? (parsed.flags ? `/${parsed.pattern}/${parsed.flags}` : parsed.pattern) : '';
       }
       case 'process': return process(request.request, request.rules);
+      case 'preview': return wireText(process(request.request, request.rules));
       default: throw new Error('Unknown film rule operation');
     }
   };

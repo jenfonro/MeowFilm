@@ -11,6 +11,61 @@ import MeowRuntime
 import MeowUI
 @testable import Meowfilm
 
+/// Registered by the test bundle, independent of the selected test classes.
+@objc(MeowfilmRuntimeTestBundle)
+final class MeowfilmRuntimeTestBundle: NSObject {
+    private static let observer = Observer()
+
+    override init() {
+        super.init()
+        _ = Self.observer
+    }
+
+    private final class Observer: NSObject, XCTestObservation {
+        private let lock = NSLock()
+        private var finished = false
+
+        override init() {
+            super.init()
+            XCTestObservationCenter.shared.addTestObserver(self)
+        }
+
+        func testBundleDidFinish(_ testBundle: Bundle) {
+            guard testBundle == Bundle(for: MeowfilmRuntimeTestBundle.self) else { return }
+            lock.lock()
+            guard !finished else { lock.unlock(); return }
+            finished = true
+            lock.unlock()
+
+            let done = DispatchSemaphore(value: 0)
+            Task { @MainActor in
+                let message: String
+                if let app = UIApplication.shared.delegate as? MeowfilmAppDelegate, let assembly = app.assembly {
+                    assembly.shutdown()
+                    await assembly.waitForShutdown()
+                    if let error = assembly.shutdownError {
+                        message = "MEOWFILM_RUNTIME_BUNDLE_SHUTDOWN_FAILED \(error)"
+                    } else {
+                        message = "MEOWFILM_RUNTIME_BUNDLE_SHUTDOWN_COMPLETE"
+                    }
+                } else {
+                    message = "MEOWFILM_RUNTIME_BUNDLE_SHUTDOWN_NO_ASSEMBLY"
+                }
+                FileHandle.standardError.write(Data((message + "\n").utf8))
+                done.signal()
+            }
+            if Thread.isMainThread {
+                // Async shutdown must keep its MainActor and URLSession work runnable.
+                while done.wait(timeout: .now()) == .timedOut {
+                    _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+                }
+            } else {
+                done.wait()
+            }
+        }
+    }
+}
+
 /// Runs inside the real Meowfilm App process (TEST_HOST): the App's embedded
 /// Node Mobile framework, its signed runtime payload and the native script owner.
 final class MeowfilmRuntimeHostTests: XCTestCase {
@@ -47,7 +102,7 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: frameworks.appendingPathComponent("MeowScriptHost.framework/MeowScriptHost").path))
         XCTAssertNotNil(Bundle.main.url(forResource: "nodejs-mobile-LICENSE", withExtension: "txt"))
-        let nativeLicense = try XCTUnwrap(Bundle.main.url(forResource: "quickjs-native-MIT", withExtension: "txt"))
+        let nativeLicense = try XCTUnwrap(Bundle.main.url(forResource: "quickjs-ng-LICENSE", withExtension: "txt"))
         XCTAssertTrue(try String(contentsOf: nativeLicense, encoding: .utf8).contains("Fabrice Bellard"))
         let unicodeLicense = try XCTUnwrap(Bundle.main.url(forResource: "Unicode-3.0", withExtension: "txt"))
         XCTAssertTrue(try String(contentsOf: unicodeLicense, encoding: .utf8).contains("1991-2026 Unicode, Inc."))
@@ -127,7 +182,7 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
     }
 
     @MainActor
-    func testNativeSourceAndClientRulesCoexistInTheSameApp() async throws {
+    func testNativeSourceAndNodeRulesUseIndependentRuntimesInTheSameApp() async throws {
         let resources = try await hostResources()
         let client = try await resources.scriptSession.connection()
         let sourceID = "ios-source-" + UUID().uuidString.lowercased()
@@ -139,6 +194,8 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
               list: [{ vod_id: keyword, vod_name: keyword }],
               digest: CryptoJS.MD5('abc').toString(),
               '\u00e9': 'composed', 'e\u0301': 'decomposed',
+              unicode: { upper: 'ß中文'.toUpperCase(), lower: 'İK'.toLowerCase(),
+                nfkc: 'Ａ①ﬃ'.normalize('NFKC') },
               token: 'business-token', blob: { value: 'business-value' }
             };
           }
@@ -162,15 +219,11 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
             ]))
         }
 
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let rules = try FilmRuleService(store: DocumentStore(baseURL: directory,
-            namespace: FilmRuleService.documentNamespace))
+        let rules = FilmRuleService(connection: { client })
         do {
             try await rules.initialize()
-            // Both locked QuickJS versions execute concurrently inside the same
-            // signed App; successful linking alone cannot prove symbol ownership.
+            // Source and film rules share the signed native carrier while
+            // retaining independent QuickJS Runtime/Context lifetimes.
             async let rule = rules.process(.init(section: .movie, text: "电影"),
                 draft: .init(movieRules: [.init(pattern: "电影", replace: "影片", flags: "u")]))
             async let script = client.call(module: .source, operation: "invoke", parameters: .object([
@@ -188,6 +241,8 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
             XCTAssertEqual(value["e\u{0301}"], .string("decomposed"))
             XCTAssertEqual(value["token"], .string("business-token"))
             XCTAssertEqual(value["blob"], .object(["value": .string("business-value")]))
+            XCTAssertEqual(value["unicode"], .object(["upper": .string("SS中文"),
+                "lower": .string("i\u{0307}k"), "nfkc": .string("A1ffi")]))
             XCTAssertEqual(value["list"], .array([.object([
                 "vod_id": .string("书源中文"), "vod_name": .string("书源中文")
             ])]))
@@ -196,6 +251,165 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
             await rules.close()
             throw error
         }
+    }
+
+    @MainActor
+    func testPortableCatPreprocessingFailurePreservesCurrentGeneration() async throws {
+        let resources = try await hostResources()
+        let client = try await resources.scriptSession.connection()
+        let id = "ios-preprocess-cat-" + UUID().uuidString.lowercased()
+        let source = """
+        let count = 0;
+        export default {
+          searchContent(keyword) { return { source: 'original', count: ++count, keyword }; }
+        };
+        """
+        addTeardownBlock {
+            if let current = try await Self.portableSourceInstance(client, id: id) {
+                _ = try await client.call(module: .source, operation: "unload", parameters: .object([
+                    "installationId": .string(id),
+                    "revision": try XCTUnwrap(current["revision"]),
+                    "generation": try XCTUnwrap(current["generation"])
+                ]))
+            }
+        }
+        _ = try await client.upload(module: .source, installationID: id, sourceRevision: 1,
+            source: Data(source.utf8), basename: "preprocess.js")
+        let loaded = try await client.call(module: .source, operation: "load", parameters: .object([
+            "installationId": .string(id), "sourceRevision": .number(1),
+            "revision": .number(1), "expectedRevision": .number(0), "protocol": .string("cat")
+        ]))
+        guard case .object(let load) = loaded, case .object(let instance)? = load["instance"],
+              case .number(let generation)? = instance["generation"] else {
+            return XCTFail("Missing Cat preprocessing instance")
+        }
+        XCTAssertEqual(instance["state"], .string("ready"))
+        let first = try await client.call(module: .source, operation: "invoke", parameters: .object([
+            "installationId": .string(id), "revision": .number(1), "generation": .number(generation),
+            "action": .string("search"), "payload": .object(["keyword": .string("before")])
+        ]))
+        XCTAssertEqual(first, .object([
+            "source": .string("original"), "count": .number(1), "keyword": .string("before")
+        ]))
+
+        let exhausted = "export default " + String(repeating: "(", count: 4096) + "{}"
+            + String(repeating: ")", count: 4096) + ";"
+        // The source HTTP contract maps SCRIPT_PROTOCOL_ERROR to SOURCE_FAILURE
+        // and RESOURCE_LIMIT to LIMIT; neither failure may publish the candidate.
+        let candidates = [("export default {", "SOURCE_FAILURE"), (exhausted, "LIMIT")]
+        for (index, candidate) in candidates.enumerated() {
+            let revision = index + 2
+            _ = try await client.upload(module: .source, installationID: id, sourceRevision: revision,
+                source: Data(candidate.0.utf8), basename: "preprocess.js")
+            do {
+                _ = try await client.call(module: .source, operation: "load", parameters: .object([
+                    "installationId": .string(id), "sourceRevision": .number(Double(revision)),
+                    "revision": .number(Double(revision)), "expectedRevision": .number(1),
+                    "protocol": .string("cat")
+                ]))
+                XCTFail("An invalid preprocessing candidate must not load")
+            } catch {
+                XCTAssertEqual(error as? RuntimeHTTPError, .remote(candidate.1))
+            }
+            let current = try await Self.portableSourceInstance(client, id: id)
+            XCTAssertEqual(current, instance, "Failed preprocessing must preserve the exact published identity")
+            let result = try await client.call(module: .source, operation: "invoke", parameters: .object([
+                "installationId": .string(id), "revision": .number(1), "generation": .number(generation),
+                "action": .string("search"), "payload": .object(["keyword": .string(candidate.1)])
+            ]))
+            XCTAssertEqual(result, .object([
+                "source": .string("original"), "count": .number(Double(index + 2)),
+                "keyword": .string(candidate.1)
+            ]), "The original source and its state must survive the failed candidate")
+        }
+        let unloaded = try await client.call(module: .source, operation: "unload", parameters: .object([
+            "installationId": .string(id), "revision": .number(1), "generation": .number(generation)
+        ]))
+        XCTAssertEqual(unloaded, .object(["unloaded": .bool(true), "cleanupComplete": .bool(true)]))
+        let removed = try await Self.portableSourceInstance(client, id: id)
+        XCTAssertNil(removed)
+    }
+
+    @MainActor
+    func testPortableLegadoPreprocessingExhaustionRecoversSameGeneration() async throws {
+        let resources = try await hostResources()
+        let client = try await resources.scriptSession.connection()
+        let exhausted = String(repeating: "(", count: 4096) + "1"
+            + String(repeating: ")", count: 4096)
+        for (script, code) in [("function (", "SOURCE_FAILURE"), (exhausted, "LIMIT")] {
+            let id = "ios-preprocess-legado-" + UUID().uuidString.lowercased()
+            let definition = RuntimeValue.object([
+                "bookSourceName": .string("Preprocessing fixture"),
+                "bookSourceUrl": .string("https://preprocess.invalid/"),
+                "coverDecodeJs": .string(script),
+                "exploreUrl": .string("""
+                @js: function ready() { return "Ready::https://preprocess.invalid/ready"; } ready()
+                """)
+            ])
+            addTeardownBlock {
+                if let current = try await Self.portableSourceInstance(client, id: id) {
+                    _ = try await client.call(module: .source, operation: "unload", parameters: .object([
+                        "installationId": .string(id),
+                        "revision": try XCTUnwrap(current["revision"]),
+                        "generation": try XCTUnwrap(current["generation"])
+                    ]))
+                }
+            }
+            _ = try await client.upload(module: .source, installationID: id, sourceRevision: 1,
+                source: RuntimeJSON.encode(definition), basename: "preprocess.json")
+            let loaded = try await client.call(module: .source, operation: "load", parameters: .object([
+                "installationId": .string(id), "sourceRevision": .number(1),
+                "revision": .number(1), "expectedRevision": .number(0), "protocol": .string("legado")
+            ]))
+            guard case .object(let load) = loaded, case .object(let instance)? = load["instance"],
+                  case .number(let generation)? = instance["generation"] else {
+                return XCTFail("Missing Legado preprocessing instance")
+            }
+            XCTAssertEqual(instance["state"], .string("ready"))
+            let expected = RuntimeValue.object(["kinds": .array([.object([
+                "title": .string("Ready"), "url": .string("https://preprocess.invalid/ready"),
+                "style": .object([:])
+            ])])])
+            let before = try await client.call(module: .source, operation: "invoke", parameters: .object([
+                "installationId": .string(id), "revision": .number(1), "generation": .number(generation),
+                "action": .string("exploreKinds"), "payload": .object([:])
+            ]))
+            XCTAssertEqual(before, expected)
+            do {
+                _ = try await client.call(module: .source, operation: "invoke", parameters: .object([
+                    "installationId": .string(id), "revision": .number(1), "generation": .number(generation),
+                    "action": .string("image"), "payload": .object([:])
+                ]))
+                XCTFail("Invalid coverDecodeJs must fail preprocessing")
+            } catch {
+                XCTAssertEqual(error as? RuntimeHTTPError, .remote(code))
+            }
+            let current = try await Self.portableSourceInstance(client, id: id)
+            XCTAssertEqual(current, instance, "A preprocessing failure must not replace or retire the owner")
+            let after = try await client.call(module: .source, operation: "invoke", parameters: .object([
+                "installationId": .string(id), "revision": .number(1), "generation": .number(generation),
+                "action": .string("exploreKinds"), "payload": .object([:])
+            ]))
+            XCTAssertEqual(after, expected)
+            let unloaded = try await client.call(module: .source, operation: "unload", parameters: .object([
+                "installationId": .string(id), "revision": .number(1), "generation": .number(generation)
+            ]))
+            XCTAssertEqual(unloaded, .object(["unloaded": .bool(true), "cleanupComplete": .bool(true)]))
+            let removed = try await Self.portableSourceInstance(client, id: id)
+            XCTAssertNil(removed)
+        }
+    }
+
+    private static func portableSourceInstance(_ client: RuntimeHTTPClient, id: String) async throws -> RuntimeObject? {
+        guard case .object(let status) = try await client.call(module: .source, operation: "status"),
+              case .array(let instances)? = status["instances"] else {
+            throw RuntimeHTTPError.invalidResponse
+        }
+        for value in instances {
+            guard case .object(let instance) = value else { throw RuntimeHTTPError.invalidResponse }
+            if instance["installationId"] == .string(id) { return instance }
+        }
+        return nil
     }
 
     @MainActor

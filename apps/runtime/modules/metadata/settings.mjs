@@ -1,6 +1,6 @@
 import { PrivateDocuments } from '@meowfilm/script-host';
 import { isUtf8 } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 export const metadataFailure = code => Object.assign(new Error(code), { code });
 export const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -50,7 +50,9 @@ function validate(id, value) {
  * not a second settings database. PrivateDocuments is atomic, not encryption. */
 export function createMetadataSettings(dataRoot, id) {
   const documents = new PrivateDocuments(dataRoot, id);
-  let snapshot, reload = false, revision = randomUUID();
+  let snapshot, reload = false;
+  const revision = value => createHash('sha256').update(JSON.stringify([id,
+    Object.keys(defaults[id]).map(key => [key, value[key]])])).digest('hex');
   const same = (left, right) => Object.keys(defaults[id]).every(key => left[key] === right[key]);
   function load() {
     try {
@@ -73,13 +75,12 @@ export function createMetadataSettings(dataRoot, id) {
   function read() {
     if (snapshot !== undefined && !reload) return snapshot;
     const value = load();
-    if (snapshot !== undefined && !same(snapshot, value)) revision = randomUUID();
     snapshot = value;
     reload = false;
     return snapshot;
   }
   function visible(value) {
-    const result = { ...value, revision };
+    const result = { ...value, revision: revision(value) };
     for (const key of secrets[id]) {
       delete result[key];
       result[`${key}Configured`] = value[key].length > 0;
@@ -105,7 +106,6 @@ export function createMetadataSettings(dataRoot, id) {
         throw metadataFailure('STORAGE_ERROR');
       }
       snapshot = value;
-      revision = randomUUID();
       return visible(value);
     },
   };

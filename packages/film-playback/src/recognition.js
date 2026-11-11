@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto';
 import { decodePanResource } from '@meowfilm/script-host/cat-output';
-import { normalizeNFKC } from '@meowfilm/script-host/unicode';
 import { buildEpisodeMap } from './episodes.js';
-import { isIdentifier, isSearchProjection, resultDetailId } from './identity.js';
-import { createRecognitionRules, providerFamily, recognizeQuality } from './rules.js';
+import { isIdentifier, resultDetailId } from './identity.js';
+import { invokeRecognition, providerFamily } from './rules.js';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const identity = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -151,89 +150,16 @@ function mapIndex(map, key) {
   return index;
 }
 
-const titleText = value => typeof value === 'string' ? normalizeNFKC(value).trim() : '';
-// Unicode 15.0 Cf ranges: NodeMobile's V8 without ICU cannot parse property escapes.
-const titleKey = value => titleText(value).toLowerCase().replace(/[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\u{110bd}\u{110cd}\u{13430}-\u{1343f}\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0001}\u{e0020}-\u{e007f}\s.\-_,，:：;；!！?？·•/\\|]+/gu, '');
-const yearValue = value => /^(?:18|19|20|21)\d{2}$/.test(String(value)) ? Number(value) : undefined;
-
-function resultYear(record) {
-  for (const value of [record.year, record.vod_year, record.release_date?.slice?.(0, 4),
-    record.first_air_date?.slice?.(0, 4), ...(Array.isArray(record.pubdate) ? record.pubdate.map(value => value?.slice?.(0, 4)) : [])]) {
-    const year = yearValue(value);
-    if (year !== undefined) return year;
-  }
-  const name = titleText(record.rawTitle ?? record.vod_name ?? record.title ?? record.name);
-  return yearValue(/[（(]\s*((?:18|19|20|21)\d{2})\s*[)）]\s*$/.exec(name)?.[1]);
-}
-
-function resultTitles(record) {
-  // rawTitle is the site title before an aggregate card replaced its display
-  // title with metadata. A group/display key alone is not identity evidence.
-  const first = record.rawTitle ?? record.vod_name ?? record.title ?? record.name;
-  return [first, record.originalTitle, record.original_title, record.original_name,
-    ...(Array.isArray(record.aka) ? record.aka : []),
-    ...(Array.isArray(record.localized_name) ? record.localized_name : [record.localized_name]),
-    ...(Array.isArray(record.aliases) ? record.aliases : [])].map(titleText).filter(Boolean);
-}
-
-function resultKind(record) {
-  const value = record.kind ?? record.contentKind ?? record.media_type ?? record.tmdbType ?? record.target_type;
-  if (value === 'movie' || value === 'tv') return value;
-  return ({ 电影: 'movie', 电视剧: 'tv', 剧集: 'tv' })[record.type_name];
-}
-
-function resultSeason(record, recognition) {
-  const explicit = coordinate(record.season) ?? coordinate(record.season_number) ?? coordinate(record.seasonHint);
-  if (explicit !== undefined) return explicit;
-  return recognition.season(titleText(record.rawTitle ?? record.vod_name ?? record.title ?? record.name)) ??
-    recognition.season(titleText(record.vod_remarks ?? record.remark));
-}
-
-function canonicalTitle(value, kind, recognition, query) {
-  let title = titleText(value).replace(/[（(]\s*(?:18|19|20|21)\d{2}\s*[)）]\s*$/, '').trim();
-  if (kind === 'movie') {
-    // Feed observed digits to the shared query-tail protection, even when
-    // source annotations follow a sequel number. Do not strip a movie's number.
-    return titleKey(recognition.search(title, title.match(/\d+/g)?.at(-1) ?? title).text);
-  }
-  title = title.replace(/第\s*(?:\d+|[一二三四五六七八九十百千两零〇]+)\s*季/gi, ' ')
-    .replace(/\b(?:s|season)\s*\d{1,3}\b/gi, ' ');
-  query = titleText(query).replace(/第\s*(?:\d+|[一二三四五六七八九十百千两零〇]+)\s*季/gi, ' ')
-    .replace(/\b(?:s|season)\s*\d{1,3}\b/gi, ' ').trim();
-  return titleKey(recognition.search(title, query).text);
-}
-
 /** Smart eligibility only. Ordinary menus keep the full raw search page. */
-export function matchesResult(raw, { target, rules } = {}) {
-  if (!object(raw) || !target || !['movie', 'tv', 'source', 'group'].includes(target.kind)) return false;
-  // Source scope is checked by the caller's exact installation/detail identity,
-  // not by pretending an arbitrary script title has a metadata counterpart.
-  if (target.kind === 'source') return true;
-  if (isSearchProjection(raw)) raw = { ...raw, ...raw.raw,
-    rawTitle: raw.raw.rawTitle ?? raw.raw.vod_name ?? raw.raw.title ?? raw.raw.name ?? raw.rawTitle };
-  const kind = resultKind(raw);
-  if (target.kind !== 'group' && kind !== undefined && kind !== target.kind) return false;
-  const recognition = createRecognitionRules(rules);
-  const rawSeason = resultSeason(raw, recognition), targetSeason = resultSeason(target, recognition);
-  if (rawSeason !== undefined && targetSeason !== undefined && rawSeason !== targetSeason) return false;
-  const rawYear = resultYear(raw), targetYear = resultYear(target);
-  const laterSeason = target.kind === 'tv' && rawSeason > 1 && rawSeason === targetSeason;
-  if (rawYear !== undefined && targetYear !== undefined && rawYear !== targetYear && !laterSeason) return false;
-  const provider = raw.metadataProvider ?? (raw.tmdbId > 0 ? 'tmdb' : undefined);
-  const metadataId = raw.metadataId ?? (raw.tmdbId > 0 ? raw.tmdbId
-    : raw.metadataProvider !== undefined ? raw.id : undefined);
-  if (provider === target.metadataProvider && metadataId !== undefined && target.metadataId !== undefined) {
-    return String(metadataId) === String(target.metadataId);
-  }
-  const targets = resultTitles(target);
-  const titles = resultTitles(raw);
-  return targets.some(title => {
-    const expected = canonicalTitle(title, target.kind, recognition, title);
-    return expected && titles.some(value => canonicalTitle(value, target.kind, recognition, title) === expected);
-  });
+export function matchesResults(rows, { target, rules, signal } = {}) {
+  return invokeRecognition(rules, { operation: 'recognition.matches', rows, target }, { signal });
 }
 
-export function recognizeCandidates(detail, { target, source = detail?.source, metadata, rules } = {}) {
+export async function matchesResult(raw, options) {
+  return (await matchesResults([raw], options))[0];
+}
+
+export async function recognizeCandidates(detail, { target, source = detail?.source, metadata, rules, signal } = {}) {
   if (!target || !['movie', 'tv', 'source', 'group'].includes(target.kind) || !source?.key) invalidDetail();
   // normalizeDetail also accepts the expanded lines produced by data.expand.
   // Their opaque row ID must never become the script's playId.
@@ -248,7 +174,15 @@ export function recognizeCandidates(detail, { target, source = detail?.source, m
     }
     if (target.source.detailId !== undefined && target.source.detailId !== detailId) return [];
   }
-  const recognition = createRecognitionRules(rules);
+  const texts = await invokeRecognition(rules, { operation: 'recognition.candidates', target: { kind: target.kind },
+    source: { manualSeasonHint: source.manualSeasonHint },
+    detail: { season: normalized.season, lines: normalized.lines.map(line =>
+      ({ season: line.season, episodes: line.episodes.map(item => ({
+        name: item.name, fileName: item.fileName, path: item.path, season: item.season, episode: item.episode,
+        quality: item.quality, hdr: item.hdr, fps: item.fps,
+        ...(item.file ? { file: { name: item.file.name, path: item.file.path } } : {}),
+      })) })) } }, { signal });
+  let textIndex = 0;
   const map = buildEpisodeMap(target.kind === 'group' ? null : metadata);
   const local = mapIndex(map, item => `${item.season}:${item.episode}`);
   const global = mapIndex(map, item => item.globalEpisode);
@@ -257,15 +191,9 @@ export function recognizeCandidates(detail, { target, source = detail?.source, m
   const candidates = [];
   for (const line of normalized.lines) {
     for (const item of line.episodes) {
-      const path = item.path ?? item.file?.path;
-      const parts = typeof path === 'string' ? path.split(/[/\\]/).filter(Boolean) : [];
-      const fileName = item.file?.name ?? item.fileName ?? (parts.length ? parts[parts.length - 1] : item.name);
-      const parsedFile = recognition.episode(fileName);
-      const parsed = parsedFile.episode === undefined ? recognition.episode(item.name) : parsedFile;
-      const season = coordinate(item.season) ?? parsed.season ??
-        (parts.length > 1 ? recognition.season(parts.slice(0, -1).reverse().join('/')) : undefined) ??
-        coordinate(line.season) ?? coordinate(normalized.season) ?? coordinate(source.manualSeasonHint);
-      const episode = coordinate(item.episode) ?? parsed.episode;
+      const parsed = texts[textIndex++];
+      if (!parsed.eligible) continue;
+      const { fileName, path, season, episode, movie, quality } = parsed;
       const explicitGlobal = coordinate(item.globalEpisode);
       let mapped = explicitGlobal === undefined ? undefined : global.get(explicitGlobal);
       if (mapped && (season !== undefined && season !== mapped.season || episode !== undefined && episode !== mapped.episode)) {
@@ -277,9 +205,6 @@ export function recognizeCandidates(detail, { target, source = detail?.source, m
         const localMatch = local.get(`1:${episode}`);
         if (explicitGlobal === undefined || localMatch?.globalEpisode === explicitGlobal) mapped = localMatch;
       }
-      const movie = target.kind === 'movie' && (recognition.movie(fileName) || episode === undefined);
-      if (target.kind === 'movie' && !movie) continue;
-      const quality = recognizeQuality(item, [fileName, item.name, path]);
       const resourceIdentity = fileIdentity(item.file, item.share, sourceIdentity, detailId, line.id, item.playId);
       const provider = item.file?.provider ?? item.provider ?? line.provider;
       const candidate = { id: identity([sourceIdentity, detailId, line.id, resourceIdentity]),

@@ -45,8 +45,10 @@ test('iOS wrapper packages the eight-module App closure and separate pre-sign fr
   assert.ok(imports.some(({ from, to }) => from === '../../../runtime/entry.mjs' && to === '../../entry.mjs'));
   assert.ok(manifest.dependencies.some(dependency => dependency.name === '@meowfilm/film-playback'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/film-rules/film-rules.js'));
+  assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/film-rules/playback-rules.js'));
+  assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/film-search/film-search.js'));
   for (const license of ['quickjs-ng-LICENSE.txt', 'openssl-LICENSE.txt', 'zlib-LICENSE.txt', 'NOTICE.md',
-    'undici-LICENSE.txt', 'api-enhanced-MIT.txt', 'npm-node-compat-ISC.txt'])
+    'undici-LICENSE.txt', 'Unicode-3.0.txt', 'api-enhanced-MIT.txt', 'npm-node-compat-ISC.txt'])
     assert.ok(manifest.files.some(file => file.path === `licenses/${license}`));
   assert.deepEqual(readFileSync(join(f.output, 'licenses/undici-LICENSE.txt')),
     readFileSync(join(f.root, f.receipt.catWebValues.license.path)));

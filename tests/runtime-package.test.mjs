@@ -93,9 +93,12 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   add('packages/film-rules', '@meowfilm/film-rules', '0.1.0',
     { files: ['film-rules.js'], main: './film-rules.js', exports: './film-rules.js' }, true);
   file('packages/film-rules/film-rules.js', sourceCode);
+  add('packages/film-search', '@meowfilm/film-search', '0.1.0',
+    { files: ['film-search.js'], main: './film-search.js', exports: './film-search.js' }, true);
+  file('packages/film-search/film-search.js', sourceCode);
   add('packages/film-playback', '@meowfilm/film-playback', '0.1.0',
     { files: ['src'], dependencies: {
-      '@meowfilm/film-rules': '0.1.0', '@meowfilm/script-host': '0.2.0',
+      '@meowfilm/film-rules': '0.1.0', '@meowfilm/film-search': '0.1.0', '@meowfilm/script-host': '0.2.0',
     } }, true);
   add('packages/netease-token', '@meowfilm/netease-token', '0.1.0', { files: ['src'] }, true);
   add('packages/unused-core', '@meowfilm/unused-core', '0.2.0',
@@ -199,7 +202,8 @@ test('common runtime packaging stages the eight-module App closure with exact ha
   assert.deepEqual(manifest.dependencies.map(p => p.path).sort(), [
     'node_modules/@meowfilm/runtime-bridge', 'node_modules/@meowfilm/script-host',
     'node_modules/@meowfilm/source-runtime', 'node_modules/@meowfilm/pan-runtime',
-    'node_modules/@meowfilm/film-rules', 'node_modules/@meowfilm/film-playback', 'node_modules/@meowfilm/netease-token',
+    'node_modules/@meowfilm/film-rules', 'node_modules/@meowfilm/film-search', 'node_modules/@meowfilm/film-playback',
+    'node_modules/@meowfilm/netease-token',
     'node_modules/shared', 'node_modules/host-lib', 'node_modules/peer-lib',
     'node_modules/fixture-lib', 'node_modules/fixture-lib/node_modules/shared', 'node_modules/@fixture/token',
     'node_modules/music-lib', 'node_modules/@meowfilm/script-host/node_modules/fixture-dom',
@@ -221,7 +225,7 @@ test('common runtime packaging stages the eight-module App closure with exact ha
 });
 
 for (const [workspace, file] of [
-  ['film-rules', 'film-rules.js'], ['film-playback', 'src/index.js'],
+  ['film-rules', 'film-rules.js'], ['film-search', 'film-search.js'], ['film-playback', 'src/index.js'],
 ]) {
   test(`the App closure requires the ${workspace} workspace and its public file`, async () => {
     const absent = fixture({ missing: [`packages/${workspace}`] });

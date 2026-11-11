@@ -137,7 +137,9 @@ async function assertRealBusiness(client) {
     netease: ['get'],
     film: ['session.open', 'session.command', 'session.snapshot', 'session.release', 'session.attempt',
       'session.media.release', 'settings.get', 'settings.set', 'library.get', 'library.remove', 'manual.update',
-      'data.search', 'data.detail', 'data.metadata', 'data.cache.entry', 'data.invalidate'],
+      'data.catalog', 'data.search', 'data.detail', 'data.metadata', 'data.metadata.entry', 'data.cache.entry', 'data.invalidate',
+      'rules.get', 'rules.set', 'rules.restore', 'rules.preview', 'rules.normalize', 'rules.clear',
+      'search.open', 'search.snapshot', 'search.command', 'search.release', 'search.handoff'],
   };
   for (const module of description.modules) {
     const prefix = { music: 'music.script.', cat: 'cat.script.', source: 'source.runtime.',

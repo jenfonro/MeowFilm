@@ -123,7 +123,7 @@ export class NativeEngine {
   }
 
   constructor({
-    source, guestSource, guestHelpers = [], maxStackBytes = 256 * 1024,
+    source, guestSource, guestHelpers = [], maxStackBytes = 256 * 1024, maxHeapBytes = 0,
     onHostCall, onEvent, signal, timeoutMs = 60_000, cleanupTimeoutMs = 100,
   }) {
     this.pending = new Map();
@@ -140,7 +140,7 @@ export class NativeEngine {
     this.exited = new Promise(resolve => { this.resolveExit = resolve; });
     try {
       this.native = loadBinding().create({
-        source, guestSource, guestHelpers, maxStackBytes, timeoutMs, cleanupTimeoutMs,
+        source, guestSource, guestHelpers, maxStackBytes, maxHeapBytes, timeoutMs, cleanupTimeoutMs,
       }, message => this.receive(message));
     } catch (error) {
       this.pending.get(0).reject(error);

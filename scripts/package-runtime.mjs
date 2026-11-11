@@ -31,7 +31,7 @@ const NATIVE_ARTIFACT = 'packages/script-host/build/Release/script_host_native.n
 const NATIVE_RECEIPT = 'packages/script-host/build/Release/script-host-native.json';
 const SOURCE_SDK = 'packages/script-host/build/Release/source-sdk.js';
 const NATIVE_SOURCES = Object.freeze({
-  quickjs: { version: '0.14.0', commit: '3c051980ab7e783dfbfb1c70c014ce5e05ecf24c',
+  quickjs: { version: '0.18.0', commit: 'd7215b0ad3fc2c562e8317fd9bca058fd4863804',
     repository: 'quickjs-ng/quickjs', license: 'LICENSES/quickjs-ng-LICENSE.txt' },
   openssl: { version: '3.5.9', commit: '45e844fa2a14ec92d146bd8f5778ac130b6625fb',
     repository: 'openssl/openssl', license: 'LICENSES/openssl-LICENSE.txt' },
@@ -175,10 +175,11 @@ function trustedNative(root, inputs, target) {
   check(policy.schemaVersion === 1 && policy.abi === 1 && policy.napi === 8
     && isObject(policy.sources) && Object.keys(policy.sources).length === 3
     && isDeepStrictEqual(policy.artifact, { path: NATIVE_ARTIFACT, manifest: NATIVE_RECEIPT })
-    && Array.isArray(policy.patches) && policy.patches.length === 4
-    && ['task-context.patch', 'bigint-uintn.patch', 'utf16-cstring.patch',
-      'arraybuffer-ownership.patch'].every((name, index) =>
-      policy.patches[index]?.path === `packages/script-host/native/${name}`
+    && Array.isArray(policy.patches) && policy.patches.length === 3
+    && ['native/JavaScript/patches/regexp-compile-interrupt.patch',
+      'packages/script-host/native/task-context.patch',
+      'packages/script-host/native/arraybuffer-ownership.patch'].every((path, index) =>
+      policy.patches[index]?.path === path
       && policy.patches[index]?.source === 'quickjs' && digest(policy.patches[index]?.sha256))
     && Array.isArray(policy.mandatoryInputs) && Array.isArray(policy.inputDirectories)
     && policy.inputDirectories.includes('packages/script-host/native')
@@ -194,12 +195,20 @@ function trustedNative(root, inputs, target) {
       && source.url === `https://codeload.github.com/${expected.repository}/tar.gz/${expected.commit}`
       && digest(source.sha256) && source.license?.path === expected.license && digest(source.license.sha256)
       && source.archivePath === `tmp/build/runtime-native/${name}.tar.gz`
-      && source.sourcePath === `tmp/build/runtime-native/${name}`,
+      && source.sourcePath === (name === 'quickjs' ? 'native/JavaScript/quickjs' : `tmp/build/runtime-native/${name}`),
     'INVALID_NATIVE_POLICY', `Unreviewed native source: ${name}`);
     sources[name] = { version: source.version, commit: source.commit, url: source.url, sha256: source.sha256 };
     check(fileHash(root, source.license.path) === source.license.sha256,
       'NATIVE_LICENSE_MISMATCH', `Native license does not match policy: ${name}`);
   }
+  const quickjs = policy.sources.quickjs;
+  check(isObject(quickjs.files) && Object.keys(quickjs.files).length > 0 &&
+    Object.entries(quickjs.files).every(([file, hash]) => /^[a-z0-9-]+\.[ch]$/.test(file) && digest(hash)),
+  'INVALID_NATIVE_POLICY', 'QuickJS must pin the shared source files');
+  const unicode = quickjs.unicodeLicense;
+  check(unicode?.path === 'LICENSES/Unicode-3.0.txt' && unicode.source === 'libunicode-table.h' &&
+    digest(unicode.sha256) && fileHash(root, unicode.path) === unicode.sha256,
+  'NATIVE_LICENSE_MISMATCH', 'QuickJS Unicode license differs from policy');
   check(receipt.schemaVersion === 1 && receipt.abi === policy.abi && receipt.napi === policy.napi
     && isDeepStrictEqual(receipt.sources, sources)
     && (ios || isDeepStrictEqual(receipt.nodeHeaders, policy.nodeHeaders))
@@ -227,6 +236,7 @@ function trustedNative(root, inputs, target) {
     ...policy.mandatoryInputs,
     ...policy.patches.map(input => input.path),
     ...Object.values(policy.sources).flatMap(source => [source.license.path, source.archivePath]),
+    unicode.path,
     ...policy.inputDirectories.flatMap(path => inputFiles(root, safeRelative(path))),
   ];
   for (const path of required) {
@@ -244,6 +254,12 @@ function trustedNative(root, inputs, target) {
       && tree.files.every(path => typeof path === 'string' && path.startsWith(`${source.sourcePath}/`)
         && recorded.has(path)),
     'NATIVE_INPUT_MISMATCH', `Build receipt omits the native source inventory: ${name}`);
+    if (source.files) {
+      const pinned = Object.keys(source.files).map(file => `${source.sourcePath}/${file}`).sort();
+      check(isDeepStrictEqual([...tree.files].sort(), pinned) &&
+        pinned.every(path => recorded.get(path) === source.files[posix.basename(path)]),
+      'NATIVE_INPUT_MISMATCH', 'Shared QuickJS sources differ from the locked build');
+    }
   }
   if (ios) {
     const web = receipt.catWebValues;
@@ -579,7 +595,7 @@ function buildGraph(root, product, target) {
     if (value.link) safeRelative(value.resolved);
   }
   const selected = ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
-    'film-rules', 'film-playback', 'netease-token'];
+    'film-rules', 'film-search', 'film-playback', 'netease-token'];
   const workspacePaths = new Map(selected.map(name => [`packages/${name}`, `node_modules/@meowfilm/${name}`]));
   const nodes = new Map(), edges = [], omitted = [];
   const inputs = [{ path: 'package.json', sha256: rootJSON.hash }, { path: 'package-lock.json', sha256: lockJSON.hash }];
@@ -908,8 +924,9 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
         } : {}),
         sources: receipt.sources, patches: policy.patches,
         sdk: { ...receipt.sdk, path: `${node.path}/build/Release/source-sdk.js` },
-        licenses: Object.values(policy.sources).map(source => ({ ...source.license,
-          path: `licenses/${posix.basename(source.license.path)}` })).concat(ios ? [{
+        licenses: Object.values(policy.sources).flatMap(source =>
+          [source.license, ...(source.unicodeLicense ? [source.unicodeLicense] : [])].map(license => ({ ...license,
+            path: `licenses/${posix.basename(license.path)}` }))).concat(ios ? [{
           ...receipt.catWebValues.license, path: 'licenses/undici-LICENSE.txt',
         }] : []),
       };
@@ -927,8 +944,10 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
           copy(receipt.catWebValues.path, `${node.path}/build/Release/cat-web-values.cjs`, receipt.catWebValues.sha256);
           copy(receipt.catWebValues.license.path, 'licenses/undici-LICENSE.txt', receipt.catWebValues.license.sha256);
         }
-        for (const { license } of Object.values(policy.sources)) {
-          copy(license.path, `licenses/${posix.basename(license.path)}`, license.sha256);
+        for (const source of Object.values(policy.sources)) {
+          for (const license of [source.license, ...(source.unicodeLicense ? [source.unicodeLicense] : [])]) {
+            copy(license.path, `licenses/${posix.basename(license.path)}`, license.sha256);
+          }
         }
       }
       for (const entry of node.required) {

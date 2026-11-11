@@ -1,49 +1,40 @@
 using System;
-using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-using MeowFilm.Core.Scripting;
-using MeowFilm.Platform.Storage;
+using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities.Film.Rules;
 
-/// <summary>Owns the engine and saved rules; borrows the application's document store.</summary>
+/// <summary>Settings drafts and acknowledged display snapshots. Node owns rules and their execution.</summary>
 public sealed class FilmRuleService : IAsyncDisposable
 {
-    public const string DocumentNamespace = "film.magic-rules.v1";
-    public const string ProgramResourceName = "MeowFilm.FilmRules.js";
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
-    private readonly IJavaScriptJsonEngine engine;
-    private readonly IDocumentStore store;
+    internal static readonly JsonSerializerOptions Json = CreateJson();
+    private readonly FilmPlaybackClient client;
     private readonly SemaphoreSlim serial = new(1, 1);
     private readonly object lifecycle = new();
     private CancellationTokenSource pending = new();
     private FilmRuleSet? saved;
-    private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
+    public string Revision { get; private set; } = "";
     private TaskCompletionSource? drained;
     private Task? preparation;
     private Task? disposal;
     private int active;
     private int closed;
 
-    public FilmRuleService(IJavaScriptJsonEngine engine, IDocumentStore store)
+    public FilmRuleService(IRuntimeClient runtime)
     {
-        this.engine = engine ?? throw new ArgumentNullException(nameof(engine));
-        this.store = store ?? throw new ArgumentNullException(nameof(store));
-    }
-
-    public static string LoadProgramSource()
-    {
-        using var stream = typeof(FilmRuleService).Assembly.GetManifestResourceStream(ProgramResourceName)
-            ?? throw new InvalidOperationException("Film rule program resource is missing.");
-        using var reader = new StreamReader(stream);
-        return reader.ReadToEnd();
+        client = new(runtime ?? throw new ArgumentNullException(nameof(runtime)));
     }
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
-        RunAsync(async token => { await InitializeCoreAsync(token).ConfigureAwait(false); return true; }, cancellationToken);
+        RunAsync(async token =>
+        {
+            Accept(await CallAsync("get", new { }, token).ConfigureAwait(false));
+            return true;
+        }, cancellationToken);
 
     public FilmRuleSet GetSavedSnapshot()
     {
@@ -57,9 +48,8 @@ public sealed class FilmRuleService : IAsyncDisposable
         var owned = Copy(rules);
         return RunAsync(async token =>
         {
-            await InitializeCoreAsync(token).ConfigureAwait(false);
-            var result = await engine.InvokeAsync(new { operation = "save", rules = Encode(owned) }, token).ConfigureAwait(false);
-            return await CommitAsync(result, token).ConfigureAwait(false);
+            var result = await CallAsync("set", new { rules = owned }, token).ConfigureAwait(false);
+            return Accept(result);
         }, cancellationToken);
     }
 
@@ -75,12 +65,9 @@ public sealed class FilmRuleService : IAsyncDisposable
         string key = SectionKey(section);
         return RunAsync(async token =>
         {
-            await InitializeCoreAsync(token).ConfigureAwait(false);
-            var result = await engine.InvokeAsync(new
-            {
-                operation = "restore", section = key, rules = Encode(draft ?? saved!)
-            }, token).ConfigureAwait(false);
-            return await CommitAsync(result, token).ConfigureAwait(false);
+            var input = new System.Collections.Generic.Dictionary<string, object?> { ["section"] = key };
+            if (draft is not null) input["rules"] = draft;
+            return Accept(await CallAsync("restore", input, token).ConfigureAwait(false));
         }, cancellationToken);
     }
 
@@ -96,13 +83,17 @@ public sealed class FilmRuleService : IAsyncDisposable
         string key = SectionKey(request.Section);
         return RunAsync(async token =>
         {
-            if (rules is null) await InitializeCoreAsync(token).ConfigureAwait(false);
-            var result = await engine.InvokeAsync(new
+            var previewRequest = new System.Collections.Generic.Dictionary<string, object?>
             {
-                operation = "process",
-                request = new { section = key, text = request.Text, query = request.Query },
-                rules = Encode(rules ?? saved!)
-            }, token).ConfigureAwait(false);
+                ["section"] = key, ["text"] = request.Text
+            };
+            if (request.Query is not null) previewRequest["query"] = request.Query;
+            var input = new System.Collections.Generic.Dictionary<string, object?>
+            {
+                ["request"] = previewRequest
+            };
+            if (rules is not null) input["rules"] = rules;
+            var result = await CallAsync("preview", input, token).ConfigureAwait(false);
             return result.Deserialize<FilmRuleResult>(Json) ??
                 throw new InvalidOperationException("Film rule result is missing.");
         }, cancellationToken);
@@ -111,79 +102,34 @@ public sealed class FilmRuleService : IAsyncDisposable
     public Task<FilmMatchRule?> NormalizeNewMatchRuleAsync(string pattern, string replace = "",
         CancellationToken cancellationToken = default) => RunAsync(async token =>
         {
-            var result = await engine.InvokeAsync(new { operation = "newMatch", pattern, replace }, token).ConfigureAwait(false);
+            var result = await CallAsync("normalize", new { kind = "match", pattern, replace }, token).ConfigureAwait(false);
             return result.ValueKind == JsonValueKind.Null ? null : result.Deserialize<FilmMatchRule>(Json);
         }, cancellationToken);
 
     public Task<string> NormalizeNewCleanRuleAsync(string pattern, CancellationToken cancellationToken = default) =>
         RunAsync(async token =>
         {
-            var result = await engine.InvokeAsync(new { operation = "newClean", pattern }, token).ConfigureAwait(false);
-            return result.GetString() ?? "";
+            var result = await CallAsync("normalize", new { kind = "clean", pattern }, token).ConfigureAwait(false);
+            return result.Deserialize<string>(Json) ?? "";
         }, cancellationToken);
 
-    private async Task InitializeCoreAsync(CancellationToken cancellationToken)
-    {
-        if (saved is not null) return;
-        var snapshot = await store.ReadAsync(DocumentNamespace, cancellationToken).ConfigureAwait(false);
-        JsonElement? document = null;
-        if (snapshot.Data is not null)
-        {
-            try
-            {
-                using var parsed = JsonDocument.Parse(snapshot.Data);
-                ValidateDocument(parsed.RootElement);
-                document = parsed.RootElement.Clone();
-            }
-            catch (JsonException) { throw new DocumentStoreException(DocumentStoreError.Corrupt); }
-        }
-        var result = await engine.InvokeAsync(new { operation = "initialize", document }, cancellationToken).ConfigureAwait(false);
-        var next = DecodeRules(result);
-        var nextFingerprint = snapshot.Fingerprint;
-        if (result.GetProperty("changed").GetBoolean())
-        {
-            byte[] bytes = DocumentBytes(result);
-            nextFingerprint = await store.WriteAsync(DocumentNamespace, bytes, snapshot.Fingerprint, cancellationToken).ConfigureAwait(false);
-        }
-        fingerprint = nextFingerprint;
-        Volatile.Write(ref saved, next);
-    }
+    public Task<FilmRuleSet> ClearAsync(CancellationToken cancellationToken = default) =>
+        RunAsync(async token => Accept(await CallAsync("clear", new { }, token).ConfigureAwait(false)), cancellationToken);
 
-    private async Task<FilmRuleSet> CommitAsync(JsonElement result, CancellationToken cancellationToken)
+    private Task<JsonElement> CallAsync(string operation, object input, CancellationToken token) =>
+        client.CallAsync("rules." + operation, JsonSerializer.SerializeToElement(input, Json), token);
+
+    private FilmRuleSet Accept(JsonElement result)
     {
         var next = DecodeRules(result);
-        byte[] bytes = DocumentBytes(result);
-        var receipt = await store.WriteAsync(DocumentNamespace, bytes, fingerprint, cancellationToken).ConfigureAwait(false);
-        // An accepted store write can finish despite caller cancellation. Publish
-        // its receipt and matching snapshot together; never report a false rollback.
-        fingerprint = receipt;
+        Revision = FilmJson.RequiredText(result, "revision");
         Volatile.Write(ref saved, next);
         return Copy(next);
-    }
-
-    private static byte[] DocumentBytes(JsonElement result)
-    {
-        var document = result.GetProperty("document");
-        ValidateDocument(document);
-        return JsonSerializer.SerializeToUtf8Bytes(document, Json);
-    }
-
-    private static void ValidateDocument(JsonElement document)
-    {
-        if (document.ValueKind != JsonValueKind.Object) throw new DocumentStoreException(DocumentStoreError.Corrupt);
-        foreach (string group in new[] { "episodeCleanRegexRules", "episodeRules", "movieRules", "aggregateRegexRules" })
-        {
-            if (!document.TryGetProperty(group, out var rows) || rows.ValueKind != JsonValueKind.Array ||
-                rows.EnumerateArray().Any(row => row.ValueKind != JsonValueKind.String))
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
-        }
     }
 
     private static FilmRuleSet DecodeRules(JsonElement result) => Copy(
         result.GetProperty("rules").Deserialize<FilmRuleSet>(Json) ??
             throw new InvalidOperationException("Film rule snapshot is missing."));
-
-    private static JsonElement Encode(FilmRuleSet rules) => JsonSerializer.SerializeToElement(rules, Json);
 
     private static FilmRuleSet Copy(FilmRuleSet rules)
     {
@@ -244,7 +190,7 @@ public sealed class FilmRuleService : IAsyncDisposable
 
     /// <summary>
     /// Pauses admission and cancels/drains admitted work, including serial waiters
-    /// and accepted storage writes. Cancellation stops only this caller's wait.
+    /// and accepted RPCs. Cancellation stops only this caller's wait.
     /// </summary>
     public Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
     {
@@ -272,7 +218,7 @@ public sealed class FilmRuleService : IAsyncDisposable
         await work.ConfigureAwait(false);
     }
 
-    /// <summary>Resumes the same engine and saved snapshot only after preparation has drained.</summary>
+    /// <summary>Resumes admission only after preparation has drained.</summary>
     public void Resume()
     {
         lock (lifecycle)
@@ -301,11 +247,44 @@ public sealed class FilmRuleService : IAsyncDisposable
     {
         await Task.Yield();
         await prepare.ConfigureAwait(false);
-        try { await engine.DisposeAsync().ConfigureAwait(false); }
-        finally
+        serial.Dispose();
+        pending.Dispose();
+    }
+
+    private static JsonSerializerOptions CreateJson()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        options.Converters.Add(new RuleTextConverter());
+        return options;
+    }
+
+    // FilmRuleText's wire representation: valid Unicode remains text; isolated
+    // UTF16 code units use UInt16 arrays, including in nested errors and previews.
+    private sealed class RuleTextConverter : JsonConverter<string>
+    {
+        public override string Read(ref Utf8JsonReader reader, Type type, JsonSerializerOptions options)
         {
-            serial.Dispose();
-            pending.Dispose();
+            if (reader.TokenType == JsonTokenType.String) return reader.GetString()!;
+            if (reader.TokenType != JsonTokenType.StartArray) throw new JsonException("Invalid rule text.");
+            var units = new System.Collections.Generic.List<char>();
+            while (reader.Read() && reader.TokenType != JsonTokenType.EndArray) units.Add((char)reader.GetUInt16());
+            if (reader.TokenType != JsonTokenType.EndArray) throw new JsonException("Invalid rule text.");
+            return new string(units.ToArray());
+        }
+        public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
+        {
+            bool isolated = false;
+            for (int index = 0; index < value.Length; index++)
+            {
+                char unit = value[index];
+                if (!char.IsSurrogate(unit)) continue;
+                if (char.IsHighSurrogate(unit) && index + 1 < value.Length && char.IsLowSurrogate(value[index + 1])) index++;
+                else { isolated = true; break; }
+            }
+            if (!isolated) { writer.WriteStringValue(value); return; }
+            writer.WriteStartArray();
+            foreach (char unit in value) writer.WriteNumberValue(unit);
+            writer.WriteEndArray();
         }
     }
 }

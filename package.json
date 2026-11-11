@@ -9,6 +9,7 @@
     "packages/source-runtime",
     "packages/pan-runtime",
     "packages/film-rules",
+    "packages/film-search",
     "packages/film-playback",
     "packages/netease-token"
   ],

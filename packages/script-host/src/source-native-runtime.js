@@ -8,10 +8,11 @@ globalThis.URL = URL;
 globalThis.URLSearchParams = URLSearchParams;
 const host = globalThis.__meowHostArgs;
 const guest = globalThis.__meowGuest;
+const preprocess = globalThis.__meowPreprocess;
 const taskContext = globalThis.__meowTaskContext;
 const emit = globalThis.__meowEmit;
 for (const name of ['__meowHost', '__meowHostArgs', '__meowGuest', '__meowTaskContext', '__meowNative',
-  '__meowEmit', '__meowCore']) delete globalThis[name];
+  '__meowEmit', '__meowCore', '__meowPreprocess']) delete globalThis[name];
 let session, sandbox;
 const operations = new Map();
 
@@ -39,6 +40,7 @@ export const runtime = Object.freeze({
     if (session) throw sourceFault('STALE_SESSION');
     session = new SourceSession({
       ...input,
+      preprocess,
       capabilities: createCapabilityClient({
         invoke(name, value, context) {
           if (name.startsWith('encoding.') || name.startsWith('crypto.')) {

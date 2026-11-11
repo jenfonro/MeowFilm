@@ -20,7 +20,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     init(baseURL: URL, timeout: TimeInterval = 30,
-         configuration: URLSessionConfiguration) throws {
+         configuration: URLSessionConfiguration, delegateQueue: OperationQueue? = nil) throws {
         guard let components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
               let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = components.host, !host.isEmpty,
@@ -41,7 +41,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         // Events have an idle timeout, but no whole-observation RPC deadline.
         eventConfiguration.timeoutIntervalForResource = 0
         session = URLSession(configuration: configuration, delegate: RuntimeHTTPDelegate(state: state),
-                             delegateQueue: nil)
+                             delegateQueue: delegateQueue)
     }
 
     public var isClosed: Bool { state.isClosed }

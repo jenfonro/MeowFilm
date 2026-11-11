@@ -1,28 +1,29 @@
 import CoreFoundation
 import Foundation
+import MeowRuntime
 
 public struct DoubanFilmSource: FilmCategorySource {
     public let descriptor = FilmSourceDescriptor(id: "douban", title: "豆瓣")
     public let categories = FilmCategory.allCases
-    private let http: FilmHTTP
+    private let connection: @Sendable () async throws -> RuntimeHTTPClient
 
-    public init() {
-        http = FilmHTTP()
+    public init(connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
+        self.connection = connection
     }
 
-    init(http: FilmHTTP) {
-        self.http = http
-    }
-
-    public func loadHome() async throws -> [FilmHomeSection] {
+    public func loadHome(refresh: Bool = false) async throws -> [FilmHomeSection] {
         try Task.checkCancellation()
         return try await withThrowingTaskGroup(of: (Int, FilmHomeSection).self) { group in
             for (index, section) in DoubanHomeSection.all.enumerated() {
                 group.addTask {
-                    let bytes = try await http.readHome(section.url)
+                    let (bytes, cache) = try await read(kind: section.kind, query: [
+                        "start": .number(0), "limit": .number(12),
+                        "category": .string(section.category), "type": .string(section.type)
+                    ], refresh: refresh)
                     try Task.checkCancellation()
                     let items = try Self.parse(bytes, sourceID: descriptor.id)
-                    return (index, FilmHomeSection(id: section.id, title: section.title, items: Array(items.prefix(12))))
+                    return (index, FilmHomeSection(id: section.id, title: section.title,
+                                                  items: Array(items.prefix(12)), cache: cache))
                 }
             }
             var sections: [Int: FilmHomeSection] = [:]
@@ -34,19 +35,36 @@ public struct DoubanFilmSource: FilmCategorySource {
         }
     }
 
-    public func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int) async throws -> FilmCategoryPage {
-        let url = Self.categoryURL(category, filters: filters, offset: offset)
-        let bytes = try await http.readHome(url)
+    public func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int,
+                             refresh: Bool = false) async throws -> FilmCategoryPage {
+        let kind = category == .movie ? "movie" : "tv"
+        let (bytes, cache) = try await read(kind: kind, query: Self.categoryQuery(category, filters: filters, offset: offset),
+                                          refresh: refresh)
         try Task.checkCancellation()
         let rows = try Self.rows(bytes)
         let items = Self.parseRows(rows, sourceID: descriptor.id)
         let count = rows.count
-        return FilmCategoryPage(items: items, nextOffset: count < 24 ? nil : offset + count)
+        return FilmCategoryPage(items: items, nextOffset: count < 24 ? nil : offset + count, cache: cache)
     }
 
-    static func categoryURL(_ category: FilmCategory, filters: [String: String], offset: Int) -> URL {
+    private func read(kind: String, query: RuntimeObject, refresh: Bool) async throws -> (Data, FilmMetadataCache) {
+        var parameters: RuntimeObject = [
+            "provider": .string("douban"), "path": .string("/rexxar/api/v2/subject/recent_hot/" + kind),
+            "query": .object(query)
+        ]
+        if refresh { parameters["refresh"] = .bool(true) }
+        let client = try await connection()
+        let result = try await client.call(module: .film, operation: "data.metadata.entry", parameters: .object(parameters))
+        try Task.checkCancellation()
+        guard !client.isClosed else { throw RuntimeHTTPError.closed }
+        guard let fields = result.filmObject, let value = fields["value"], let cache = fields["cache"] else {
+            throw FilmHomeError.invalidResponse
+        }
+        return (try RuntimeJSON.encode(value), try FilmMetadataCache(value: cache))
+    }
+
+    static func categoryQuery(_ category: FilmCategory, filters: [String: String], offset: Int) -> RuntimeObject {
         let values = category.defaultFilters.merging(filters) { _, new in new }
-        let kind = category == .movie ? "movie" : "tv"
         let requestCategory: String
         let type: String
         switch category {
@@ -63,12 +81,8 @@ public struct DoubanFilmSource: FilmCategorySource {
             requestCategory = "show"
             type = values["area"]!
         }
-        var parts = URLComponents(string: "https://m.douban.com/rexxar/api/v2/subject/recent_hot/" + kind)!
-        parts.queryItems = [URLQueryItem(name: "start", value: String(offset)),
-                            URLQueryItem(name: "limit", value: "24"),
-                            URLQueryItem(name: "category", value: requestCategory),
-                            URLQueryItem(name: "type", value: type)]
-        return parts.url!
+        return ["start": .number(Double(offset)), "limit": .number(24),
+                "category": .string(requestCategory), "type": .string(type)]
     }
 
     static func parse(_ bytes: Data, sourceID: String = "douban") throws -> [FilmItem] {
@@ -150,12 +164,4 @@ private struct DoubanHomeSection: Sendable {
         .init(id: "show", title: "热门综艺", kind: "tv", category: "show", type: "show")
     ]
 
-    var url: URL {
-        var parts = URLComponents(string: "https://m.douban.com/rexxar/api/v2/subject/recent_hot/" + kind)!
-        parts.queryItems = [
-            URLQueryItem(name: "start", value: "0"), URLQueryItem(name: "limit", value: "12"),
-            URLQueryItem(name: "category", value: category), URLQueryItem(name: "type", value: type)
-        ]
-        return parts.url!
-    }
 }

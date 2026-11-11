@@ -281,6 +281,7 @@
        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="{Binding NoOutput,Converter={StaticResource MeowFilm.BoolToVisibility}}">
         <TextBlock x:Name="PlayerStatus" Text="{Binding StatusText}" Style="{StaticResource Film.VideoText}" TextAlignment="Center" FontSize="14"/>
         <Button Content="重连" Click="Reconnect_Click" Style="{StaticResource Film.PlaybackAction}" Margin="0,12,0,0" Visibility="{Binding ConnectionFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+        <Button Content="重新取址" Click="RetryMedia_Click" Style="{StaticResource Film.PlaybackAction}" Margin="0,12,0,0" Visibility="{Binding CanRetryMedia,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
        </StackPanel>
       </Grid>
       <!-- Controls stay outside the native HWND picture; WPF overlays cannot safely cover its airspace. -->
@@ -306,6 +307,7 @@
         <Button x:Name="PanButton" Content="网盘" Click="Pan_Click" Style="{StaticResource Film.PlaybackAction}" Margin="0,0,6,6" AutomationProperties.Name="切换网盘"/>
         <Button x:Name="QualityButton" Content="画质" Click="Quality_Click" Style="{StaticResource Film.PlaybackAction}" Margin="0,0,6,6" AutomationProperties.Name="切换画质"/>
         <Button x:Name="SwitchButton" Content="换源" Click="Switch_Click" Style="{StaticResource Film.PlaybackAction}" Margin="0,0,6,6" AutomationProperties.Name="临时换源"/>
+        <Button x:Name="RetryMediaButton" Content="重新取址" Click="RetryMedia_Click" Style="{StaticResource Film.PlaybackAction}" Margin="0,0,6,6" IsEnabled="{Binding CanRetryMedia}" AutomationProperties.Name="重试当前媒体地址"/>
         <Button x:Name="BlockButton" Content="片源错误" Click="Block_Click" Style="{StaticResource Film.PlaybackAction}" Margin="0,0,12,6" IsEnabled="{Binding HasCurrent}" AutomationProperties.Name="屏蔽当前片源"/>
         <ComboBox x:Name="RateBox" SelectedIndex="1" SelectionChanged="Rate_Changed" MinHeight="32" Width="74" Margin="0,0,6,6" IsEnabled="{Binding HasOutput}" AutomationProperties.Name="播放倍速">
          <ComboBoxItem Content="0.75×" Tag="0.75"/><ComboBoxItem Content="1×" Tag="1"/><ComboBoxItem Content="1.25×" Tag="1.25"/><ComboBoxItem Content="1.5×" Tag="1.5"/><ComboBoxItem Content="2×" Tag="2"/>
@@ -341,7 +343,7 @@
          <Setter Property="Visibility" Value="Collapsed"/>
         </Trigger></Style.Triggers>
        </Style></Grid.Style>
-       <local:FilmPlaybackPoster x:Name="Backdrop" Address="{Binding Poster}" IsBackdrop="True"
+       <local:FilmPlaybackPoster x:Name="Backdrop" Address="{Binding Backdrop}" IsBackdrop="True"
                                  IsHitTestVisible="False"/>
        <Border x:Name="MetadataWash" Background="{DynamicResource MeowFilm.Brush.Window}">
         <Border.OpacityMask>
@@ -434,6 +436,7 @@
     <StackPanel Margin="0,28,0,14">
      <DockPanel Margin="0,0,0,10">
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+       <Button x:Name="RefreshBrowsingButton" Content="刷新" Click="RefreshBrowsing_Click" Style="{StaticResource Film.PlaybackAction}" Margin="8,0,0,0" IsEnabled="{Binding CanRefreshBrowsing}" AutomationProperties.Name="刷新当前资料或目录"/>
        <Button x:Name="RawDirectory" Content="查看原始列表" Click="Directory_Click" Style="{StaticResource Film.PlaybackAction}" Margin="8,0,0,0" Visibility="{Binding CanBrowseRaw,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
        <Button Content="加载更多" Click="SearchMore_Click" Style="{StaticResource Film.PlaybackAction}" Margin="8,0,0,0" IsEnabled="{Binding CanSearchMore}" AutomationProperties.Name="继续搜索未完成来源"/>
       </StackPanel>

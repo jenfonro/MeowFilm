@@ -148,6 +148,51 @@ export async function prepareSource(name, source) {
   const patches = policy.patches.filter(patch => patch.source === name);
   const identity = { version: source.version, commit: source.commit, sha256: source.sha256, patches };
   await downloadDependency(source, { snapshot: archive });
+  if (source.files) {
+    // Checked-in shared sources are immutable build inputs, never a disposable
+    // dependency cache. The archive and ordered patches reproduce these hashes.
+    const paths = Object.keys(source.files).sort().map(file => {
+      if (!/^[a-z0-9-]+\.[ch]$/.test(file)) throw new Error(`Invalid shared source file: ${file}`);
+      return `${source.sourcePath}/${file}`;
+    });
+    await verifySourceInventory(source, paths);
+    for (const path of paths) {
+      if (await fileHash(path) !== source.files[basename(path)]) throw new Error(`Modified shared source: ${path}`);
+    }
+    for (const patch of patches) {
+      if (await fileHash(patch.path) !== patch.sha256) throw new Error(`Patch hash mismatch: ${patch.path}`);
+    }
+    const sharedIdentity = { ...identity, sourcePath: source.sourcePath, files: source.files };
+    const record = await exists(recordPath) ? JSON.parse(await readFile(recordPath, 'utf8')) : null;
+    if (JSON.stringify(record?.identity) !== JSON.stringify(sharedIdentity)) {
+      const temporary = resolve(cache, `${name}.prepare`);
+      if (await exists(temporary)) throw new Error(`Unfinished native source preparation: ${pathOf(temporary)}`);
+      await mkdir(temporary);
+      try {
+        await run('tar', ['-xzf', archive, '--strip-components=1', '-C', temporary]);
+        for (const patch of patches) await applyPatch({ sourcePath: pathOf(temporary) }, patch);
+        for (const path of paths) {
+          if (await fileHash(resolve(temporary, basename(path))) !== source.files[basename(path)]) {
+            throw new Error(`Shared source does not match patched archive: ${path}`);
+          }
+        }
+        if (source.license && await fileHash(resolve(temporary, 'LICENSE')) !== source.license.sha256) {
+          throw new Error('Shared source license differs from the archive');
+        }
+        await writeFile(recordPath, JSON.stringify({ identity: sharedIdentity, files: await hashInputs(paths) }, null, 2) + '\n');
+      } finally { await rm(temporary, { recursive: true }); }
+    }
+    if (source.unicodeLicense) {
+      const license = source.unicodeLicense;
+      if (await fileHash(license.path) !== license.sha256) throw new Error(`Unicode license mismatch: ${license.path}`);
+      const notice = (await readFile(resolve(root, source.sourcePath, license.source), 'utf8'))
+        .match(/\/\*\n(UNICODE LICENSE V3\n[\s\S]*?)\*\//)?.[1];
+      if (!notice || !Buffer.from(notice).equals(await readFile(resolve(root, license.path)))) {
+        throw new Error('Unicode license differs from the shared source notice');
+      }
+    }
+    return paths;
+  }
   if (await exists(recordPath)) {
     const record = JSON.parse(await readFile(recordPath, 'utf8'));
     const paths = record.files.map(input => input.path);
@@ -302,6 +347,8 @@ async function buildNative() {
     'package.json', 'package-lock.json', ...policy.mandatoryInputs,
     'scripts/quickjs/build-source-sdk.mjs', ...nativeInputs, ...sourceInputs,
     ...Object.values(policy.sources).flatMap(source => [source.archivePath, source.license.path]),
+    ...policy.patches.map(patch => patch.path),
+    ...Object.values(policy.sources).flatMap(source => source.unicodeLicense ? [source.unicodeLicense.path] : []),
     ...sdkCandidates,
   ];
   // Snapshot source/lock/tool inputs BEFORE any native compilation or SDK bundling.
@@ -382,6 +429,8 @@ async function buildNative() {
     'package.json', 'package-lock.json', ...policy.mandatoryInputs,
     'scripts/quickjs/build-source-sdk.mjs', ...nativeInputs, ...sourceInputs, ...sdkInputs,
     ...Object.values(policy.sources).flatMap(source => [source.archivePath, source.license.path]),
+    ...policy.patches.map(patch => patch.path),
+    ...Object.values(policy.sources).flatMap(source => source.unicodeLicense ? [source.unicodeLicense.path] : []),
     policy.nodeHeaders.archivePath, ...sdkDependencies,
   ];
   const sdkHashes = new Map(sdkResult.inputs.map(input => [input.path, input.sha256]));

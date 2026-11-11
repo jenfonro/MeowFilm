@@ -1,76 +1,93 @@
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { createContext, runInContext } from 'node:vm';
+import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
 
-// Run the existing platform-neutral program once without installing its entry
-// point on Node's global object. Its expression caches retain one ruleset/group.
-const context = createContext({});
 const require = createRequire(import.meta.url);
-runInContext(readFileSync(require.resolve('@meowfilm/film-rules'), 'utf8'), context);
-const processRules = context.meowfilmProcess;
-const defaults = processRules({ operation: 'initialize', document: null }).rules;
+export const filmRuleSource = [require.resolve('@meowfilm/film-rules'),
+  require.resolve('@meowfilm/film-rules/playback')].map(path => readFileSync(path, 'utf8')).join('\n');
+// Public semantic identity; no dependency on private build receipts at runtime.
+export const filmRuleKernelRevision = createHash('sha256')
+  .update('quickjs-ng@0.18.0:d7215b0ad3fc2c562e8317fd9bca058fd4863804;')
+  .update('unicode:5840a921ac11664b505ee37b1219f518fff2a04972fe848b4bdf1e85c5a0bd83;')
+  .update(filmRuleSource).digest('hex');
+const executors = new WeakMap();
 const groups = ['episodeCleanRegexRules', 'episodeRules', 'movieRules', 'aggregateRegexRules'];
-
-function invalidRules() {
-  throw Object.assign(new Error('Invalid film recognition rules'), { code: 'INVALID_RULES' });
+const fail = code => Object.assign(new Error(code), { code });
+const nativeErrors = {
+  TIMEOUT: 'TIMEOUT', CANCELLED: 'CANCELLED', RESOURCE_LIMIT: 'RESOURCE_LIMIT',
+  INVALID_ARGUMENT: 'INVALID_REQUEST', SCRIPT_EXCEPTION: 'SCRIPT_FAILURE',
+  STALE_SESSION: 'CLOSED', NATIVE_ARTIFACT_INVALID: 'CAPABILITY_UNAVAILABLE',
+  NATIVE_ABI_MISMATCH: 'CAPABILITY_UNAVAILABLE',
+};
+export function filmRuleFailure(error) {
+  return fail(nativeErrors[error?.code] ?? 'SCRIPT_FAILURE');
 }
 
-function normalizedRules(value) {
-  if (value === undefined) return defaults;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) invalidRules();
-  const rules = {};
+export function validRuleText(value) {
+  if (typeof value !== 'string') return false;
+  for (let index = 0; index < value.length; index++) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(++index);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+  }
+  return true;
+}
+
+export function validateRules(value, { partial = false } = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw fail('INVALID_RULES');
   for (const group of groups) {
-    const rows = Object.hasOwn(value, group) ? value[group] : defaults[group];
-    if (!Array.isArray(rows)) invalidRules();
-    const matching = group === 'episodeRules' || group === 'movieRules';
-    if (rows.some(row => matching
-      ? !row || typeof row !== 'object' || typeof row.pattern !== 'string' ||
-        row.replace !== undefined && typeof row.replace !== 'string' ||
-        row.flags !== undefined && typeof row.flags !== 'string'
-      : typeof row !== 'string')) invalidRules();
-    rules[group] = rows;
+    if (partial && !Object.hasOwn(value, group)) continue;
+    const rows = value[group], matching = group === 'episodeRules' || group === 'movieRules';
+    if (!Array.isArray(rows) || rows.some(row => matching
+      ? !row || typeof row !== 'object' || !validRuleText(row.pattern) ||
+        row.replace !== undefined && !validRuleText(row.replace) ||
+        row.flags !== undefined && !validRuleText(row.flags)
+      : !validRuleText(row))) throw fail('INVALID_RULES');
   }
-  return rules;
+  return value;
 }
 
-function seasonNumber(text) {
-  const match = /(?:^|[^a-z0-9])s(?:eason)?\s*0*(\d+)(?=e|\b|[^a-z0-9])/i.exec(text) ??
-    /第\s*(\d+)\s*(?:季|部|篇)/.exec(text);
-  const value = match ? Number(match[1]) : NaN;
-  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+// The capability stays inside Node. JSON snapshots contain only rules/revision.
+export function bindRuleSnapshot(snapshot, invoke) {
+  executors.set(snapshot, invoke);
+  return snapshot;
 }
 
-function episodeNumber(text) {
-  const match = /s\s*\d+\s*e(?:p)?\s*0*(\d+)(?!\d)/i.exec(text) ??
-    /(?:^|[^a-z0-9])e(?:p)?\s*0*(\d+)(?!\d)/i.exec(text);
-  const value = match ? Number(match[1]) : NaN;
-  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+export async function invokeFilmRules(rules, request, { signal } = {}) {
+  const invoke = rules && executors.get(rules);
+  if (invoke) return invoke({ ...request, rules: rules.rules }, { signal });
+  const draft = rules?.rules ?? rules;
+  if (draft !== undefined) validateRules(draft, { partial: true });
+  const program = new NativeJsonProgram(filmRuleSource);
+  try { return await program.invoke({ ...request, rules: draft }, { signal }); }
+  catch (error) { throw filmRuleFailure(error); }
+  finally { await program.close(); }
 }
 
-export function createRecognitionRules(value) {
-  const rules = normalizedRules(value);
-  function process(section, text, query) {
-    return processRules({ operation: 'process', rules, request: { section, text, query } });
-  }
+export async function invokeRecognition(rules, request, options) {
+  const response = await invokeFilmRules(rules, request, options);
+  if (response.error) throw fail(response.error);
+  return response.value;
+}
+
+/** One call per page/metadata batch. Saved snapshots reuse their owner's program. */
+export function createRecognitionRules(rules) {
+  const draft = rules?.rules ?? rules;
+  if (draft !== undefined) validateRules(draft, { partial: true });
+  const batch = (requests, options) => invokeRecognition(rules,
+    { operation: 'recognition.batch', requests }, options);
+  const one = async (request, options) => (await batch([request], options))[0];
   return {
-    episode(text) {
-      const result = process('episode', text);
-      const output = result.rewrittenText ?? result.processedText;
-      const episode = episodeNumber(output);
-      const season = seasonNumber(output) ?? seasonNumber(result.processedText);
-      return { ...(season === undefined ? {} : { season }), ...(episode === undefined ? {} : { episode }) };
-    },
-    season(text) {
-      return seasonNumber(process('episode', text).processedText);
-    },
-    movie(text) {
-      return process('movie', text).matched;
-    },
-    search(text, query = text) {
-      const result = process('search', text, query);
-      if (result.errors.length) invalidRules();
-      return { text: result.processedText, key: result.groupKey };
-    },
+    batch,
+    episode: (text, options) => one({ kind: 'episode', text }, options),
+    season: async (text, options) => (await one({ kind: 'season', text }, options)) ?? undefined,
+    movie: (text, options) => one({ kind: 'movie', text }, options),
+    search: (text, query = text, options) => one({ kind: 'search', text, query }, options),
+    metadata: (record, contentKind, options) => one({ kind: 'metadata', record, contentKind }, options),
+    quality: (text, options) => one({ kind: 'quality', text }, options),
   };
 }
 
@@ -87,43 +104,24 @@ export function providerFamily(provider) {
   }
 }
 
+// Fixed grade aliases for policy/UI constraints. Filename/path recognition and
+// regexp-based quality inference execute in playback-rules.js on QuickJS.
+const qualityAliases = new Map([
+  ...['4k', '2160p', 'uhd'].map(value => [value, '4k']),
+  ...['1080p', '1080i', 'fhd'].map(value => [value, '1080p']),
+  ...['720p', 'hd'].map(value => [value, '720p']),
+]);
+for (const separator of ['', '·', ' ', '_', '-']) {
+  qualityAliases.set(`4k${separator}hdr`, '4k_hdr');
+  for (const suffix of ['fps', '60', '60fps', '60帧']) qualityAliases.set(`4k${separator}${suffix}`, '4k_fps');
+}
 export function qualityKey(value) {
   if (typeof value !== 'string') return '';
-  const text = value.trim().toLowerCase();
-  if (/^4k(?:[· _-]?hdr)$/.test(text)) return '4k_hdr';
-  if (/^4k(?:[· _-]?(?:fps|60(?:fps|帧)?))$/.test(text)) return '4k_fps';
-  if (['4k', '2160p', 'uhd'].includes(text)) return '4k';
-  if (['1080p', '1080i', 'fhd'].includes(text)) return '1080p';
-  if (['720p', 'hd'].includes(text)) return '720p';
-  return '';
-}
-
-// Only observed labels/metadata contribute quality. These are resource labels,
-// not a claim about the codec, HDR output or resolution of a later play URL.
-export function recognizeQuality(record, texts) {
-  const explicit = qualityKey(record.quality);
-  if (!explicit && typeof record.quality === 'string' && record.quality.trim()) return record.quality.trim();
-  const text = texts.filter(value => typeof value === 'string').join(' ');
-  let quality = explicit;
-  if (!quality) {
-    // Callers supply filename, display name and actual path in that order.
-    // A parent directory must not override a more specific file marker.
-    for (const value of texts) {
-      if (typeof value !== 'string') continue;
-      if (/(?:^|[^a-z0-9])(?:8k|4320p)(?=$|[^a-z0-9])/i.test(value)) quality = '8K';
-      else if (/(?:^|[^a-z0-9])(?:4k|2160p|uhd)(?=$|[^a-z0-9])/i.test(value)) quality = '4k';
-      else if (/(?:^|[^a-z0-9])(?:1080[pi]|fhd)(?=$|[^a-z0-9])/i.test(value)) quality = '1080p';
-      else if (/(?:^|[^a-z0-9])720p(?=$|[^a-z0-9])/i.test(value)) quality = '720p';
-      if (quality) break;
-    }
+  // Only ASCII aliases are accepted; this does not consult a Unicode case table.
+  let key = '';
+  for (const character of value.trim()) {
+    const unit = character.charCodeAt(0);
+    key += unit >= 65 && unit <= 90 ? String.fromCharCode(unit + 32) : character;
   }
-  if (quality === '4k') {
-    if (record.hdr === true || record.hdr !== false &&
-      /(?:^|[^a-z0-9])(?:hdr(?:10\+?)?|dv)(?=$|[^a-z0-9])|dolby[ ._-]*vision|杜比视界|臻彩/i.test(text)) {
-      return '4k_hdr';
-    }
-    if (Number(record.fps) >= 59 || record.fps === undefined &&
-      /(?:^|[^a-z0-9])60\s*(?:fps|帧)(?=$|[^a-z0-9])/i.test(text)) return '4k_fps';
-  }
-  return quality;
+  return qualityAliases.get(key) ?? '';
 }

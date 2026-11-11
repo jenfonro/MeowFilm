@@ -10,6 +10,10 @@
 
 存储等能力的 JSON 业务值保留 64 层格式边界；内部参数列表、scope 和异步完成信封不挤占业务值深度。宿主适配中的树转换不依赖逐层 JavaScript 递归；这不移除用户脚本自身的执行栈限制，也不放宽循环、非法 Unicode 或非有限／不安全数值的拒绝。
 
+Portable guest 常态执行栈仍为 256 KiB。可信 core 仅在同步、纯字符串的 Cat 脚本标准化与 capability 脚本转换（含完整 AST 遍历）期间使用 QuickJS-NG 默认的有限 1 MiB 栈作用域；不重置栈顶，不执行 guest、宿主回调、thenable 或 pending jobs，正常、异常及取消退出均恢复原预算。该入口由 core 私有捕获，guest 不可访问或通过跨 realm helper 借用；独立 JSON 程序的 512 KiB 预算不变。普通预处理语法错误为 `SCRIPT_PROTOCOL_ERROR`，Acorn 栈耗尽包装及原生栈溢出为 `RESOURCE_LIMIT`，取消／超时保留原分类。
+
+原生 owner 线程显式保留 2 MiB 物理栈，覆盖已有最大 1 MiB 执行预算及宿主调用／异常展开余量，不依赖平台默认线程栈大小；该空间不增加脚本执行预算，关闭仍等待线程实际退出并 join。
+
 普通 HTTP、ABI bytes 和会话状态没有运行器自设内存配额。`maximumParseBytes` 是解析入口预算，仅用于 DOM/规则等实际解析，不作为通用请求或状态上限。取消信号和 installation/generation scope 由宿主上下文携带，不暴露宿主对象。source scope 固定含 installationId、generation、protocol、siteId: source 和宿主生成的 requestId，用户输入不能覆盖。
 
 当前能力：

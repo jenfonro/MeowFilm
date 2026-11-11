@@ -6,8 +6,6 @@
   <ItemGroup>
     <Resource Include="Accounts/Presentation/Assets/*.png" />
     <Resource Include="Film/Presentation/Assets/*.jpg" />
-    <EmbeddedResource Include="../../../../packages/film-rules/film-rules.js" LogicalName="MeowFilm.FilmRules.js" />
-    <EmbeddedResource Include="../../../../packages/film-search/film-search.js" LogicalName="MeowFilm.FilmSearch.js" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Net.Codecrete.QrCodeGenerator" Version="[3.2.1]" />

@@ -19,7 +19,10 @@ final class MeowfilmAssembly: ObservableObject {
     let playback = PlaybackController(volumePreferences: PlaybackVolumePreferences())
     let appearance = MusicAppearancePreferencesStore()
     let filmLibrary = FilmLibrary()
-    let filmSources: [any FilmSource] = [DoubanFilmSource()]
+    lazy var filmSources: [any FilmSource] = [DoubanFilmSource { [weak self] in
+        guard let resources = await self?.resources else { throw FilmHomeError.network }
+        return try await resources.scriptSession.connection()
+    }]
     private let filmHTTP = FilmHTTP()
     lazy var filmImages = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { [weak self, filmHTTP] in
         if $0.scheme == nil {
@@ -128,9 +131,8 @@ final class MeowfilmAssembly: ObservableObject {
             return
         }
         self.resources = resources
-        do { filmSearch = try FilmSearchService(sources: resources.filmSourceSettings, rules: resources.filmRules,
-                data: FilmSearchData { try await resources.scriptSession.connection() }, metadata: resources.filmMetadata) }
-        catch { failedStartup(); return }
+        filmSearch = FilmSearchService(sources: resources.filmSourceSettings,
+            connection: { try await resources.scriptSession.connection() })
         let publicQQ = resources.musicPublicQQ
         self.publicQQ = publicQQ
         let tmdb = FilmTMDBSettingsModel(service: resources.filmMetadata) { [weak filmSearch = self.filmSearch] in
@@ -149,7 +151,7 @@ final class MeowfilmAssembly: ObservableObject {
         guard !closed, !Task.isCancelled else { return }
         scriptStartup = Task {
             // The source owner publishes a failed startup in its observable
-            // snapshot. Local rules are initialized independently by their model.
+            // snapshot. Node rules are initialized independently by their model.
             do { try await resources.filmSourceSettings.start() }
             catch { /* Source state owns the user-visible failure and retry. */ }
         }
@@ -290,8 +292,8 @@ final class MeowfilmAssembly: ObservableObject {
         guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
         return try makeFilmPlayback(searchContext: context) { [weak self, context] in
             guard let self else { throw FilmPlaybackError(code: "CLOSED") }
-            let target = try await context.playbackTarget()
-            return try await self.filmRequest(target: target, resources: resources)
+            let sources = try await self.filmPlaybackSources(resources: resources)
+            return try await context.playbackRequest(sources: sources, owner: resources.scriptSession.connection())
         }
     }
 
@@ -317,6 +319,10 @@ final class MeowfilmAssembly: ObservableObject {
     }
 
     private func filmRequest(target: FilmPlaybackTarget, resources: MeowfilmResources) async throws -> FilmPlaybackRequest {
+        FilmPlaybackRequest(target: target, sources: try await filmPlaybackSources(resources: resources))
+    }
+
+    private func filmPlaybackSources(resources: MeowfilmResources) async throws -> [FilmPlaybackSource] {
         await scriptStartup?.value
         try Task.checkCancellation()
         guard !closed else { throw FilmPlaybackError(code: "CLOSED") }
@@ -329,17 +335,7 @@ final class MeowfilmAssembly: ObservableObject {
                   cat.canDetect else { return nil }
             return FilmSearchSite(cat: cat, source: video).playbackSource
         }
-        let rules = try await resources.filmRules.savedSnapshot()
-        func matches(_ values: [FilmMatchRule]) -> RuntimeValue {
-            .array(values.map { .object(["pattern": .string($0.pattern), "replace": .string($0.replace),
-                                         "flags": .string($0.flags)]) })
-        }
-        let ruleValue: RuntimeValue = .object([
-            "episodeCleanRegexRules": .array(rules.episodeCleanRegexRules.map(RuntimeValue.string)),
-            "episodeRules": matches(rules.episodeRules), "movieRules": matches(rules.movieRules),
-            "aggregateRegexRules": .array(rules.aggregateRegexRules.map(RuntimeValue.string)),
-        ])
-        return FilmPlaybackRequest(target: target, sources: sources, rules: ruleValue)
+        return sources
     }
 
     func activateFilm(_ model: FilmPlaybackModel) async throws {

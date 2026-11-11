@@ -74,8 +74,7 @@ public enum FilmRuleServiceError: Error, Equatable, Sendable {
     case closed
     case shuttingDown
     case notInitialized
-    case corruptDocument
-    case invalidEngineResponse
+    case invalidResponse
 }
 
 extension FilmRuleServiceError: LocalizedError {
@@ -84,8 +83,7 @@ extension FilmRuleServiceError: LocalizedError {
         case .closed: return "规则服务已关闭"
         case .shuttingDown: return "规则服务正在停止"
         case .notInitialized: return "规则尚未加载"
-        case .corruptDocument: return "规则文档已损坏"
-        case .invalidEngineResponse: return "规则引擎返回无效结果"
+        case .invalidResponse: return "规则服务返回无效结果"
         }
     }
 }

@@ -1,50 +1,52 @@
 import Foundation
 import XCTest
+import MeowRuntime
 @testable import MeowFilmFeature
 
 final class DoubanFilmSourceTests: XCTestCase {
-    func testFourHomeColumnsUseWindowsRoutesAndKeepOrderWhenResponsesFinishInReverse() async throws {
+    func testFourHomeColumnsUseRuntimeEntryAndKeepOrderWhenResponsesFinishInReverse() async throws {
         let expected = [
             (id: "movie", title: "热门电影", kind: "movie", category: "热门", type: "全部"),
             (id: "tv", title: "热门剧集", kind: "tv", category: "tv", type: "tv"),
             (id: "anime", title: "新番放送", kind: "tv", category: "tv", type: "tv_animation"),
             (id: "show", title: "热门综艺", kind: "tv", category: "show", type: "show")
         ]
-        let started = expectation(description: "four bounded requests started")
+        let started = expectation(description: "four runtime requests started")
         started.expectedFulfillmentCount = 4
-        let stubs = expected.map { section in
-            FilmHTTPStub(url: address(kind: section.kind, category: section.category, type: section.type),
-                         bodyChunks: [Data(#"{"items":[{"id":100,"title":"真实首页项"}]}"#.utf8)],
-                         held: true, started: { started.fulfill() })
+        let fixture = FilmMetadataHTTPFixture(held: true, started: { started.fulfill() }) { _ in
+            Self.entry(items: (100..<120).map {
+                .object(["id": .number(Double($0)), "title": .string("真实首页项")])
+            })
         }
-        defer { stubs.forEach { $0.close() } }
-        let source = DoubanFilmSource(http: FilmHTTP(configuration: FilmHTTPStub.configuration()))
+        defer { fixture.close() }
+        let client = try fixture.connection()
+        addTeardownBlock { await client.close() }
+        let source = DoubanFilmSource { client }
         XCTAssertEqual(source.descriptor, FilmSourceDescriptor(id: "douban", title: "豆瓣"))
         let load = Task { try await source.loadHome() }
         await fulfillment(of: [started], timeout: 3)
-        for stub in stubs.reversed() { stub.finish() }
+        fixture.finish()
         let sections = try await load.value
         XCTAssertEqual(sections.map(\.id), expected.map(\.id))
         XCTAssertEqual(sections.map(\.title), expected.map(\.title))
         XCTAssertEqual(sections.map { $0.items.first?.sourceID }, ["douban", "douban", "douban", "douban"])
         XCTAssertEqual(sections.map { $0.items.first?.id }, ["100", "100", "100", "100"])
-        for (definition, stub) in zip(expected, stubs) {
-            let request = try XCTUnwrap(stub.requests.first)
-            XCTAssertEqual(stub.requests.count, 1)
-            let url = try XCTUnwrap(request.url)
-            XCTAssertEqual(url.scheme, "https")
-            XCTAssertEqual(url.host, "m.douban.com")
-            XCTAssertEqual(url.path, "/rexxar/api/v2/subject/recent_hot/" + definition.kind)
-            let parts = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
-            let query = Dictionary(uniqueKeysWithValues: (parts.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-            XCTAssertEqual(query, ["start": "0", "limit": "12",
-                                   "category": definition.category, "type": definition.type])
-            XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertEqual(request.timeoutInterval, 15)
-            XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "Mozilla/5.0")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json, text/plain, */*")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Referer"), "https://m.douban.com/")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Origin"), "https://m.douban.com")
+        XCTAssertEqual(sections.map { $0.items.count }, [12, 12, 12, 12])
+        XCTAssertEqual(sections.map { $0.cache?.status }, [.fresh, .fresh, .fresh, .fresh])
+        let inputs = fixture.inputs
+        XCTAssertEqual(inputs.count, 4)
+        for definition in expected {
+            let input = try XCTUnwrap(inputs.first { $0["query"]?.filmObject?["type"] == .string(definition.type) })
+            XCTAssertEqual(input["provider"], .string("douban"))
+            XCTAssertEqual(input["path"], .string("/rexxar/api/v2/subject/recent_hot/" + definition.kind))
+            XCTAssertEqual(input["query"], .object(["start": .number(0), "limit": .number(12),
+                "category": .string(definition.category), "type": .string(definition.type)]))
+            XCTAssertNil(input["refresh"])
+        }
+        for request in fixture.requests {
+            XCTAssertEqual(request.url?.host, fixture.baseURL.host)
+            XCTAssertEqual(request.url?.path, "/v1/film/data.metadata.entry")
+            XCTAssertEqual(request.httpMethod, "POST")
             XCTAssertFalse(request.httpShouldHandleCookies)
             XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
             XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
@@ -117,38 +119,40 @@ final class DoubanFilmSourceTests: XCTestCase {
         }
     }
 
-    func testSourcePropagatesHTTPFailureInsteadOfReturningAnEmptyHome() async throws {
-        let definitions = [("movie", "热门", "全部"), ("tv", "tv", "tv"),
-                           ("tv", "tv", "tv_animation"), ("tv", "show", "show")]
-        let stubs = definitions.enumerated().map { index, definition in
-            FilmHTTPStub(url: address(kind: definition.0, category: definition.1, type: definition.2),
-                         status: index == 0 ? 503 : 200,
-                         bodyChunks: [Data(#"{"items":[]}"#.utf8)])
-        }
-        defer { stubs.forEach { $0.close() } }
-        let source = DoubanFilmSource(http: FilmHTTP(configuration: FilmHTTPStub.configuration()))
+    func testSourcePropagatesRuntimeFailureInsteadOfReturningAnEmptyHome() async throws {
+        let fixture = FilmMetadataHTTPFixture(response: { _ in throw RuntimeHTTPError.remote("UPSTREAM_HTTP") })
+        defer { fixture.close() }
+        let client = try fixture.connection()
+        addTeardownBlock { await client.close() }
+        let source = DoubanFilmSource { client }
         do {
             _ = try await source.loadHome()
             XCTFail("An upstream failure must not look like an empty success.")
         } catch {
-            XCTAssertEqual(error as? FilmHomeError, .upstream(statusCode: 503))
+            XCTAssertEqual(error as? RuntimeHTTPError, .remote("UPSTREAM_HTTP"))
         }
     }
 
     func testCategoryUsesBothMovieFiltersAndKeepsFullPagesAndRawOffsets() async throws {
-        let url = DoubanFilmSource.categoryURL(.movie, filters: ["category": "豆瓣高分", "area": "日本"], offset: 24)
-        let query = Dictionary(uniqueKeysWithValues: URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.map {
-            ($0.name, $0.value!)
+        let fixture = FilmMetadataHTTPFixture(response: { _ in
+            var rows: [RuntimeValue] = (0..<23).map {
+                .object(["id": .number(Double($0)), "title": .string("影片 \($0)")])
+            }
+            rows.append(.object(["id": .number(0), "title": .string("重复影片")]))
+            return Self.entry(items: rows)
         })
-        XCTAssertEqual(query, ["category": "豆瓣高分", "type": "日本", "start": "24", "limit": "24"])
-        var rows: [[String: Any]] = (0..<23).map { ["id": $0, "title": "影片 \($0)"] }
-        rows.append(["id": 0, "title": "重复影片"])
-        let stub = FilmHTTPStub(url: url, status: 200, bodyChunks: [try JSONSerialization.data(withJSONObject: ["items": rows])])
-        defer { stub.close() }
-        let source = DoubanFilmSource(http: FilmHTTP(configuration: FilmHTTPStub.configuration()))
+        defer { fixture.close() }
+        let client = try fixture.connection()
+        addTeardownBlock { await client.close() }
+        let source = DoubanFilmSource { client }
         let page = try await source.loadCategory(.movie, filters: ["category": "豆瓣高分", "area": "日本"], offset: 24)
         XCTAssertEqual(page.items.count, 23, "Category results must not be truncated to the home preview's 12 cards.")
         XCTAssertEqual(page.nextOffset, 48, "Duplicate or invalid rows still consume an upstream offset.")
+        let input = try XCTUnwrap(fixture.inputs.first)
+        XCTAssertEqual(input["path"], .string("/rexxar/api/v2/subject/recent_hot/movie"))
+        XCTAssertEqual(input["query"], .object(["category": .string("豆瓣高分"), "type": .string("日本"),
+            "start": .number(24), "limit": .number(24)]))
+        XCTAssertNil(input["refresh"])
     }
 
     func testCategoryRoutesKeepExistingAnimeSourceAndShortPageEndsPagination() async throws {
@@ -158,26 +162,56 @@ final class DoubanFilmSourceTests: XCTestCase {
             (.anime, [:], "tv", "tv_animation"),
             (.show, ["area": "show_foreign"], "show", "show_foreign")
         ]
+        let fixture = FilmMetadataHTTPFixture()
+        defer { fixture.close() }
+        let client = try fixture.connection()
+        addTeardownBlock { await client.close() }
+        let source = DoubanFilmSource { client }
         for (category, filters, expectedCategory, expectedType) in definitions {
-            let url = DoubanFilmSource.categoryURL(category, filters: filters, offset: 0)
-            let query = Dictionary(uniqueKeysWithValues: URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.map {
-                ($0.name, $0.value!)
-            })
-            XCTAssertEqual(query["category"], expectedCategory)
-            XCTAssertEqual(query["type"], expectedType)
-            let stub = FilmHTTPStub(url: url, status: 200, bodyChunks: [Data(#"{"items":[]}"#.utf8)])
-            let source = DoubanFilmSource(http: FilmHTTP(configuration: FilmHTTPStub.configuration()))
             let page = try await source.loadCategory(category, filters: filters, offset: 0)
             XCTAssertTrue(page.items.isEmpty)
             XCTAssertNil(page.nextOffset)
-            stub.close()
+            let input = try XCTUnwrap(fixture.inputs.last)
+            XCTAssertEqual(input["path"], .string("/rexxar/api/v2/subject/recent_hot/tv"))
+            XCTAssertEqual(input["query"], .object(["category": .string(expectedCategory), "type": .string(expectedType),
+                "start": .number(0), "limit": .number(24)]))
         }
     }
 
-    private func address(kind: String, category: String, type: String) -> URL {
-        var parts = URLComponents(string: "https://m.douban.com/rexxar/api/v2/subject/recent_hot/" + kind)!
-        parts.queryItems = [URLQueryItem(name: "start", value: "0"), URLQueryItem(name: "limit", value: "12"),
-                            URLQueryItem(name: "category", value: category), URLQueryItem(name: "type", value: type)]
-        return parts.url!
+    func testExplicitRefreshAndStaleEntryPreserveContentErrorAndRuntimeImageReferences() async throws {
+        let fixture = FilmMetadataHTTPFixture(response: { _ in
+            Self.entry(items: [.object(["id": .string("100"), "title": .string("旧资料"), "pic": .object([
+                "normal": .string("/v1/douban/images/view/photo/s_ratio_poster/public/p100.jpg"),
+                "large": .string("/v1/douban/images/view/photo/raw/public/p100.jpg")
+            ])])], status: "stale", error: "NETWORK_ERROR")
+        })
+        defer { fixture.close() }
+        let client = try fixture.connection()
+        addTeardownBlock { await client.close() }
+        let source = DoubanFilmSource { client }
+        let home = try await source.loadHome(refresh: true)
+        XCTAssertTrue(home.allSatisfy { $0.cache?.status == .stale && $0.cache?.errorCode == "NETWORK_ERROR" })
+        let page = try await source.loadCategory(.anime, filters: [:], offset: 0, refresh: true)
+        XCTAssertEqual(page.items.first?.id, "100")
+        XCTAssertEqual(page.cache?.status, .stale)
+        XCTAssertEqual(page.cache?.errorCode, "NETWORK_ERROR")
+        XCTAssertEqual(page.cache?.components["items"], .object(["state": .string("ready")]))
+        XCTAssertEqual(page.items.first?.posterURL?.absoluteString,
+                       "/v1/douban/images/view/photo/s_ratio_poster/public/p100.jpg")
+        XCTAssertEqual(page.items.first?.largePosterURL?.absoluteString,
+                       "/v1/douban/images/view/photo/raw/public/p100.jpg")
+        XCTAssertTrue(fixture.inputs.allSatisfy { $0["refresh"] == .bool(true) })
+        XCTAssertEqual(fixture.inputs.count, 5)
+        _ = try await source.loadCategory(.anime, filters: [:], offset: 0)
+        XCTAssertNil(fixture.inputs.last?["refresh"])
+        XCTAssertEqual(fixture.inputs.count, 6, "The source must consult Node even when it returned an old entry before.")
+    }
+
+    private static func entry(items: [RuntimeValue], status: String = "fresh", error: String? = nil) -> RuntimeValue {
+        var cache: RuntimeObject = ["status": .string(status),
+            "components": .object(["items": .object(["state": .string("ready")])])]
+        cache["error"] = error.map { .object(["code": .string($0)]) }
+        return .object(["value": .object(["items": .array(items)]), "completeness": .string("complete"),
+            "fetchedAt": .number(1), "expiresAt": .number(2), "cache": .object(cache)])
     }
 }

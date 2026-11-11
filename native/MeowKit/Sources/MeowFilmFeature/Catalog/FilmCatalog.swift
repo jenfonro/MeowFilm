@@ -26,6 +26,19 @@ public struct FilmItemIdentity: Hashable, Codable, Sendable {
         self.kind = sourceID == "tmdb" ? kind : nil
     }
 
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.sourceID.utf8.elementsEqual(rhs.sourceID.utf8) &&
+            lhs.itemID.utf8.elementsEqual(rhs.itemID.utf8) && lhs.kind == rhs.kind
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(sourceID.utf8.count)
+        for byte in sourceID.utf8 { hasher.combine(byte) }
+        hasher.combine(itemID.utf8.count)
+        for byte in itemID.utf8 { hasher.combine(byte) }
+        hasher.combine(kind)
+    }
+
     private enum CodingKeys: String, CodingKey { case sourceID, itemID, kind }
 
     public init(from decoder: any Decoder) throws {
@@ -68,15 +81,17 @@ public struct FilmHomeSection: Equatable, Sendable {
     public let id: String
     public let title: String
     public let items: [FilmItem]
+    public let cache: FilmMetadataCache?
 
-    public init(id: String, title: String, items: [FilmItem]) {
+    public init(id: String, title: String, items: [FilmItem], cache: FilmMetadataCache? = nil) {
         self.id = id
         self.title = title
         self.items = items
+        self.cache = cache
     }
 }
 
 public protocol FilmSource: Sendable {
     var descriptor: FilmSourceDescriptor { get }
-    func loadHome() async throws -> [FilmHomeSection]
+    func loadHome(refresh: Bool) async throws -> [FilmHomeSection]
 }

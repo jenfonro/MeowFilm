@@ -316,12 +316,12 @@ public static class FilmPresentationTests
             await module.RestoreNavigationAsync(FilmCapability.HomeRoute, default);
             await module.RestoreNavigationAsync(dataLocation, default);
             await Drain();
-            Check(source.Calls.Count == retainedCalls &&
+            Check(source.Calls.Count == retainedCalls + 6 &&
                 ReferenceEquals(items, view.FindName("DataItems")) &&
                 Visuals(items).OfType<FilmCard>().Contains(retainedDataCard) &&
                 Math.Abs(data.VerticalOffset - dataOffset) < .5 &&
                 module.ActiveData.FilterRows[0].Options.Single(option => option.Label == "最新电影").IsSelected,
-                "restoration preserves data controls, filter, scroll and request count");
+                "restoration revalidates the four home ranges and two loaded data ranges while preserving controls, filter and scroll");
             Check(((IDesktopHeaderSource)view).Header is
                 { Title: "影片数据", SearchVisible: true, SearchEnabled: true, SearchTargetId: "film" },
                 "shell header contribution follows the data route");

@@ -73,7 +73,7 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         }
     }
     public bool CanLoadMore => session?.CanLoadMore == true;
-    public bool HasMore => session?.Cursors.Any(cursor => !cursor.Ended) == true;
+    public bool HasMore => session?.HasMore == true;
     public string MetadataStatus => session?.MetadataState switch
     {
         FilmSearchChannelState.Unavailable => "TMDB 不可用",
@@ -107,6 +107,7 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         active = false;
         submission++;
         view.ReleaseMusic();
+        _ = film.Search.StopAsync();
     }
     public async Task SubmitAsync(string query, string target, CancellationToken token)
     {
@@ -132,7 +133,7 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         tab = target == "film" ? "film" : "overview";
         RefreshTabs();
         if (target == "film") { session = film.Search.Start(query, token); PublishFilm(); }
-        else await PresentMusicAsync(operation, query, "overview", submit: true, token);
+        else { await film.Search.StopAsync(); await PresentMusicAsync(operation, query, "overview", submit: true, token); }
         if (IsCurrent(operation, token)) { view.Present(); RestoreScroll(); }
     }
     public async Task OpenTabAsync(string next)
@@ -142,9 +143,12 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         string word = query;
         var token = NavigationToken?.Invoke() ?? default;
         RememberScroll();
+        bool leavingFilm = tab == "film" && next != "film";
         tab = next;
         RefreshTabs();
         error = ""; Changed(nameof(Error));
+        if (leavingFilm) await film.Search.StopAsync();
+        if (!IsCurrent(operation, token)) return;
         try
         {
             if (next == "film") { session = film.Search.Start(word, token); PublishFilm(); }
@@ -184,6 +188,8 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
     }
     private void PublishFilm()
     {
+        error = session?.Error is { Length: > 0 } failure ? FilmPlaybackError.Message(failure, "搜索不可用") : "";
+        Changed(nameof(Error));
         var values = (raw ? session?.RawItems : session?.Items) ?? [];
         var cards = values.Select(item => new FilmCardItem(
             FilmSearchJson.Text(item, "id"), FilmSearchJson.Text(item, "title"),

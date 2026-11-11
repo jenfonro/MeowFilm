@@ -59,12 +59,7 @@ final class FilmSearchUIKitTests: XCTestCase {
 
     func testSearchContentUsesExistingPostersKeepsBothModesAndDeliversLiveContext() async throws {
         let reads = FilmSearchUIKitReads()
-        let service = FilmSearchService(processor: try FilmSearchProcessor(), data: .init(read: { _, _, page in
-            .init(value: try await reads.read(page: page))
-        }), sites: {
-            [FilmSearchSite(cat: .init(installationId: "cat", name: "猫源", sourceType: "local", generation: 4),
-                source: .init(key: .init(installationId: "cat", siteKey: "site"), name: "来源", api: "fixture", actions: ["search"], methods: [:]))]
-        }, rules: { ["高清"] })
+        let service = FilmSearchService(transport: reads.transport, sites: { [FilmSearchUIKitReads.site] })
         let content = FilmSearchResultsContent(service: service, images: ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { _ in throw FilmSearchError.unavailable }, theme: PageTheme())
         content.view.frame = CGRect(x: 0, y: 0, width: 375, height: 720)
         content.loadViewIfNeeded()
@@ -103,8 +98,9 @@ final class FilmSearchUIKitTests: XCTestCase {
         XCTAssertEqual(grid.numberOfItems(inSection: 0), 1)
         content.submit("原查询")
         XCTAssertTrue(content.session === session)
-        let calls = await reads.pages
-        XCTAssertEqual(calls, [1, 1, 2], "Only the explicit retry repeats the failed first page")
+        let calls = await reads.calls
+        XCTAssertEqual(calls.map(\.0), ["search.open", "search.command", "search.command"])
+        XCTAssertEqual(calls.dropFirst().map { $0.1.filmObject?["action"] }, [.string("more"), .string("more")])
         content.close()
         await service.close()
     }
@@ -116,11 +112,8 @@ final class FilmSearchUIKitTests: XCTestCase {
         let site = FilmSearchSite(cat: .init(installationId: "fixture", name: "fixture", sourceType: "local", generation: 4),
             source: .init(key: .init(installationId: "fixture", siteKey: "site"), name: "同一来源",
                           api: "fixture", actions: ["search"], methods: [:]))
-        let service = FilmSearchService(processor: try FilmSearchProcessor(), data: .init(read: { _, _, _ in
-            .init(value: .object(["list": .array([.number(0), .string("0")].map { id in
-                .object(["vod_id": id, "vod_name": .string("同一标题"), "vod_remarks": .string("原备注")])
-            }), "pagecount": .number(1)]))
-        }), sites: { [site] }, rules: { [] })
+        let reads = FilmSearchUIKitReads(typedZero: true)
+        let service = FilmSearchService(transport: reads.transport, sites: { [site] })
         addTeardownBlock { await service.close() }
         let images = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { _ in throw FilmSearchError.unavailable }
         let content = FilmSearchResultsContent(service: service, images: images, theme: PageTheme())
@@ -142,8 +135,10 @@ final class FilmSearchUIKitTests: XCTestCase {
         XCTAssertNotEqual(zero.detail.item.identity, stringZero.detail.item.identity)
         XCTAssertEqual(zero.detail.item.id, zero.selectedCard.id)
         XCTAssertEqual(stringZero.detail.item.id, stringZero.selectedCard.id)
-        XCTAssertEqual(try zero.playbackTarget().value["source"]?.filmObject?["detailId"], .number(0))
-        XCTAssertEqual(try stringZero.playbackTarget().value["source"]?.filmObject?["detailId"], .string("0"))
+        let numericRequest = try await zero.playbackRequest(sources: [site.playbackSource], owner: nil)
+        let stringRequest = try await stringZero.playbackRequest(sources: [site.playbackSource], owner: nil)
+        XCTAssertEqual(numericRequest.target.value["source"]?.filmObject?["detailId"], .number(0))
+        XCTAssertEqual(stringRequest.target.value["source"]?.filmObject?["detailId"], .string("0"))
         let pages = [zero, stringZero].map {
             FilmDetailViewController(searchContext: $0, library: library, images: images, themeProvider: SearchUIKitTheme())
         }
@@ -182,13 +177,59 @@ private final class SearchUIKitTheme: PageThemeProviding {
 }
 
 private actor FilmSearchUIKitReads {
-    var pages: [Int] = []
-    private var failFirst = true
-    func read(page: Int) throws -> RuntimeValue {
-        pages.append(page)
-        if failFirst { failFirst = false; throw FilmSearchError.unavailable }
-        return .object(["pagecount": .number(2), "list": .array([
-            .object(["vod_id": .string(page == 1 ? "\u{e9}" : "e\u{301}"), "vod_name": .string(page == 1 ? "真实标题" : "真实标题高清"), "vod_remarks": .string("更新至12集")])])])
+    static let id = UUID(uuidString: "7188ca12-b5ea-4f08-a967-f9af9b3ed5bf")!
+    static let site = FilmSearchSite(cat: .init(installationId: "fixture", name: "fixture", sourceType: "local", generation: 4),
+        source: .init(key: .init(installationId: "fixture", siteKey: "site"), name: "同一来源", api: "fixture", actions: ["search"], methods: [:]))
+    private(set) var calls: [(String, RuntimeValue)] = []
+    private var round = 0
+    let typedZero: Bool
+    init(typedZero: Bool = false) { self.typedZero = typedZero }
+    nonisolated var transport: FilmSearchTransport {
+        .init(request: { try await self.call($0, $1) }, observation: { _, _, _ in
+            try await self.observe()
+        })
+    }
+    private var observer: CheckedContinuation<Void, Error>?
+    private func observe() async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled { continuation.resume(throwing: CancellationError()) }
+                else { observer = continuation }
+            }
+        } onCancel: { Task { await self.cancelObservation() } }
+    }
+    private func cancelObservation() {
+        observer?.resume(throwing: CancellationError()); observer = nil
+    }
+    func call(_ operation: String, _ input: RuntimeValue) throws -> RuntimeValue {
+        calls.append((operation, input))
+        if operation == "search.release" { return .object(["released": .bool(true)]) }
+        if operation == "search.command" { round += 1 }
+        let a = row(typedZero ? .number(0) : .string("é"), key: "site:a")
+        let b = row(typedZero ? .string("0") : .string("e\u{301}"), key: "site:b")
+        if operation == "search.handoff" {
+            let selection = try input.filmRequiredObject().filmString("selectionId")
+            let target = FilmPlaybackTarget(id: selection, kind: .source, title: "Node单源", source: ["key": .string(Self.site.key), "detailId": selection == "site:a" ? .number(0) : .string("0")])
+            return .object(["target": .object(target.value), "sources": .array([.object(Self.site.playbackSource.value)]),
+                "selectionId": .string(selection), "revision": .number(1), "query": .string("原查询"),
+                "results": .array([]), "resultHints": .array([]), "search": .array([]), "metadata": .null, "cacheEntries": .array([]),
+                "searchReference": .object(["sessionId": .string(Self.id.uuidString.lowercased()), "selectionId": .string(selection)])])
+        }
+        let rows: [RuntimeValue] = typedZero || round > 1 ? [a, b] : round == 1 ? [a] : []
+        let group: RuntimeValue = .object(["id": .string("group:opaque"), "displayKey": .string("group:opaque"), "title": .string("真实标题"),
+            "sourceKind": .string("site"), "siteLabel": .string(rows.count > 1 ? "聚合" : "同一来源"), "aggregateItems": .array(rows)])
+        return .object(["sessionId": .string(Self.id.uuidString.lowercased()), "query": .string("原查询"),
+            "round": .number(Double(round + 1)), "revision": .number(Double(round + 1)), "sequence": .number(Double(round + 1)),
+            "siteState": .string(rows.isEmpty ? "failed" : "completed"), "metadataState": .string("unavailable"),
+            "loading": .bool(false), "hasMore": .bool(!typedZero && round < 2), "noSources": .bool(false),
+            "cards": .array(rows.isEmpty ? [] : [group]), "rawCards": .array(rows), "siteItems": .array(rows), "tmdbItems": .array([]),
+            "metadataSearch": .null, "metadataQuery": .string("原查询"), "metadataDetails": .object([:])])
+    }
+    private func row(_ id: RuntimeValue, key: String) -> RuntimeValue {
+        .object(["id": .string(key), "displayKey": .string(key), "detailId": id,
+            "siteDetail": typedZero ? .string("0") : id, "title": .string("真实标题"), "sourceKind": .string("site"),
+            "siteKey": .string(Self.site.key), "siteLabel": .string("同一来源"), "textBadge": .string("更新至12集"),
+            "raw": .object(["vod_id": id, "vod_name": .string("真实标题"), "vod_remarks": .string("更新至12集")])])
     }
 }
 #endif

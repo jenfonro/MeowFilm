@@ -86,11 +86,11 @@ private actor RuntimeHTTPCloseCompletion {
 
 final class RuntimeHTTPClientTests: XCTestCase {
     private let otherRequestID = "11111111-1111-4111-8111-111111111111"
-    private func client(timeout: TimeInterval = 30) throws -> RuntimeHTTPClient {
+    private func client(timeout: TimeInterval = 30, delegateQueue: OperationQueue? = nil) throws -> RuntimeHTTPClient {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [RuntimeTestURLProtocol.self]
         return try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43210")!,
-                                     timeout: timeout, configuration: config)
+                                     timeout: timeout, configuration: config, delegateQueue: delegateQueue)
     }
     private func reply(_ value: RuntimeValue, contract: String = "music.script.v3") -> RuntimeValue {
         .object(["ok": .bool(true), "contract": .string(contract), "value": value])
@@ -188,7 +188,8 @@ final class RuntimeHTTPClientTests: XCTestCase {
             (.pan, "providers", "pan.runtime.v1", "LOGIN_EXPIRED", "NO_MATCH"),
             (.tmdb, "settings.get", "tmdb.data.v1", "NETWORK_ERROR", "PAN_FAILURE"),
             (.douban, "settings.get", "douban.data.v1", "WEB_INTERACTION_REQUIRED", "AUTH_REQUIRED"),
-            (.film, "library.get", "film.playback.v1", "MEDIA_DRM_UNSUPPORTED", "SOURCE_CLEANUP")
+            (.film, "library.get", "film.playback.v1", "MEDIA_DRM_UNSUPPORTED", "SOURCE_CLEANUP"),
+            (.film, "rules.preview", "film.playback.v1", "RESOURCE_LIMIT", "SOURCE_CLEANUP")
         ] {
             RuntimeTestURLProtocol.fixture.set { request, transport in
                 XCTAssertEqual(request.url?.path, "/v1/\(module.rawValue)/\(operation)")
@@ -744,26 +745,28 @@ final class RuntimeHTTPClientTests: XCTestCase {
     }
 
     func testConfirmedClosureIsObservableBeforeBlockedHTTPDrainCompletes() async throws {
-        let client = try client(), drain = DispatchSemaphore(value: 0)
+        let delegateQueue = OperationQueue()
+        delegateQueue.maxConcurrentOperationCount = 1
+        let client = try client(delegateQueue: delegateQueue)
         let entered = expectation(description: "HTTP request is parked")
-        let stopping = expectation(description: "HTTP cancellation is awaiting physical drain")
+        let stopping = expectation(description: "HTTP transport received cancellation")
         RuntimeTestURLProtocol.fixture.set { _, transport in
-            transport.onStop {
-                stopping.fulfill()
-                XCTAssertEqual(drain.wait(timeout: .now() + 5), .success)
-            }
+            transport.onStop { stopping.fulfill() }
             entered.fulfill()
         }
         let request = Task { try await client.describe() }
         await fulfillment(of: [entered], timeout: 2)
+        // URLProtocol.stopLoading may overlap session invalidation. Hold the
+        // actual completion/invalidation queue to keep the owner's drain pending.
+        delegateQueue.isSuspended = true
+        defer { delegateQueue.isSuspended = false }
         let completion = RuntimeHTTPCloseCompletion()
         let closing = Task { await client.close(); await completion.finish() }
-        defer { drain.signal() }
         try await client.waitUntilClosed()
         await fulfillment(of: [stopping], timeout: 2)
         let finished = await completion.finished
         XCTAssertFalse(finished, "Revocation must not wait for HTTP drain, but owner close must")
-        drain.signal()
+        delegateQueue.isSuspended = false
         await closing.value
         do { _ = try await request.value; XCTFail("owner invalidated HTTP") }
         catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }

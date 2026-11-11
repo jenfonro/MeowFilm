@@ -142,14 +142,16 @@ public struct FilmPlaybackRequest: Sendable {
     public let search: [RuntimeValue]
     public let metadata: RuntimeValue?
     public let cacheEntries: [RuntimeValue]
-    public let rules: RuntimeValue?
+    public let searchReference: RuntimeValue?
+    public private(set) var resumeTarget: FilmPlaybackTarget?
 
     public init(target: FilmPlaybackTarget, sources: [FilmPlaybackSource], query: String? = nil,
                 results: [RuntimeValue] = [], resultHints: [RuntimeValue] = [], search: [RuntimeValue] = [],
-                metadata: RuntimeValue? = nil, cacheEntries: [RuntimeValue] = [], rules: RuntimeValue? = nil) {
+                metadata: RuntimeValue? = nil, cacheEntries: [RuntimeValue] = [], searchReference: RuntimeValue? = nil) {
         self.target = target; self.sources = sources; self.query = query
         self.results = results; self.resultHints = resultHints; self.search = search; self.metadata = metadata
-        self.cacheEntries = cacheEntries; self.rules = rules
+        self.cacheEntries = cacheEntries; self.searchReference = searchReference
+        resumeTarget = nil
     }
 
     var value: RuntimeValue {
@@ -161,15 +163,18 @@ public struct FilmPlaybackRequest: Sendable {
         ]
         fields["query"] = query.map(RuntimeValue.string)
         fields["metadata"] = metadata
-        fields["rules"] = rules
+        fields["searchReference"] = searchReference
+        fields["resumeTarget"] = resumeTarget.map { .object($0.value) }
         return .object(fields)
     }
 
     func retargeted(_ target: FilmPlaybackTarget) -> Self {
-        let sameMetadata = target.metadataProvider == self.target.metadataProvider &&
+        let sameMetadata = target.kind == self.target.kind && target.metadataProvider == self.target.metadataProvider &&
             target.value["metadataId"] == self.target.value["metadataId"]
-        return .init(target: target, sources: sources, query: query, results: results, resultHints: resultHints,
-                     search: search, metadata: sameMetadata ? metadata : nil, cacheEntries: cacheEntries, rules: rules)
+        var request = Self(target: target, sources: sources, query: query, results: results, resultHints: resultHints,
+                     search: search, metadata: sameMetadata ? metadata : nil, cacheEntries: cacheEntries, searchReference: searchReference)
+        if searchReference != nil { request.resumeTarget = target }
+        return request
     }
 }
 
@@ -353,6 +358,7 @@ public struct FilmPlaybackBrowsing: Equatable, Sendable {
     public let lineID: FilmPlaybackIdentifier?
     public let season: Int?
     public let loading: Bool
+    public let refreshing: Bool
     public let error: String?
     public let lines: [FilmPlaybackLine]
     public let files: [FilmPlaybackFile]
@@ -363,6 +369,8 @@ public struct FilmPlaybackBrowsing: Equatable, Sendable {
         lineID = try fields.filmOptional("lineId").map(FilmPlaybackIdentifier.init)
         season = fields["season"]?.filmInteger
         loading = try fields.filmBool("loading"); error = fields["error"]?.filmText
+        if fields["refreshing"] != nil { refreshing = try fields.filmBool("refreshing") }
+        else { refreshing = false }
         lines = try fields.filmArray("lines").map(FilmPlaybackLine.init)
         let files = try fields.filmArray("episodes").map(FilmPlaybackFile.init)
         // A failed current list must never expose a previous list's playable rows.
@@ -421,6 +429,24 @@ public struct FilmPlaybackCurrent: Equatable, Sendable {
     }
 }
 
+public struct FilmPlaybackMetadataSupplement: Equatable, Sendable {
+    public let provider: FilmMetadataProvider
+    public let metadataID: FilmPlaybackIdentifier
+    public let kind: FilmPlaybackKind
+    public let metadata: RuntimeValue
+
+    init(_ value: RuntimeValue) throws {
+        let fields = try value.filmRequiredObject()
+        guard try fields.filmString("provider") == "tmdb",
+              let kind = FilmPlaybackKind(rawValue: try fields.filmString("kind")),
+              kind == .movie || kind == .tv else { throw FilmPlaybackError.invalidResponse }
+        provider = .tmdb
+        metadataID = try FilmPlaybackIdentifier(fields.filmValue("metadataId"))
+        self.kind = kind
+        metadata = try fields.filmValue("metadata")
+    }
+}
+
 public struct FilmPlaybackSnapshot: Equatable, Sendable {
     public let sessionID: UUID
     public let sequence: Int64
@@ -428,6 +454,8 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
     public let stage: String
     public let error: String?
     public let metadata: RuntimeValue
+    public let metadataCache: FilmMetadataCache?
+    public let metadataSupplement: FilmPlaybackMetadataSupplement?
     public let metadataSources: [FilmPlaybackMetadataSource]
     public let metadataSourceID: String?
     public let metadataError: String?
@@ -452,6 +480,17 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
         target = try FilmPlaybackTarget(fields.filmValue("target"))
         stage = try fields.filmString("stage"); error = fields["error"]?.filmText
         metadata = try fields.filmValue("metadata")
+        if let cache = fields["metadataCache"], cache != .null {
+            do { metadataCache = try FilmMetadataCache(value: cache) }
+            catch { throw FilmPlaybackError.invalidResponse }
+        } else {
+            metadataCache = nil
+        }
+        if let supplement = fields["metadataSupplement"], supplement != .null {
+            metadataSupplement = try FilmPlaybackMetadataSupplement(supplement)
+        } else {
+            metadataSupplement = nil
+        }
         metadataSources = try fields["metadataSources"].map { value in
             guard let values = value.filmArray else { throw FilmPlaybackError.invalidResponse }
             return try values.map(FilmPlaybackMetadataSource.init)

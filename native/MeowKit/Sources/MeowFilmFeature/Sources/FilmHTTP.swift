@@ -12,32 +12,10 @@ public final class FilmHTTP: Sendable {
     }
 
     public func readArtwork(_ url: URL) async throws -> Data {
-        guard let url = FilmPosterAddress.normalize(url.absoluteString) else {
+        guard let url = FilmPosterAddress.normalize(url.absoluteString), url.scheme != nil else {
             throw FilmHomeError.invalidResponse
         }
-        return try await transport.read(url, kind: .artwork)
-    }
-
-    func readHome(_ url: URL) async throws -> Data {
-        try await transport.read(url, kind: .home)
-    }
-}
-
-private enum FilmHTTPRequestKind: Equatable, Sendable {
-    case home
-    case artwork
-
-    func request(_ url: URL) -> URLRequest {
-        var request = URLRequest(url: url)
-        request.httpShouldHandleCookies = false
-        request.timeoutInterval = self == .home ? 15 : 30
-        if self == .home {
-            request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
-            request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
-            request.setValue("https://m.douban.com/", forHTTPHeaderField: "Referer")
-            request.setValue("https://m.douban.com", forHTTPHeaderField: "Origin")
-        }
-        return request
+        return try await transport.read(url)
     }
 }
 
@@ -47,17 +25,12 @@ private final class FilmHTTPTransport: NSObject, URLSessionDataDelegate, @unchec
     private let lock = NSLock()
 
     private final class Flight: @unchecked Sendable {
-        let kind: FilmHTTPRequestKind
         var task: URLSessionDataTask?
         var continuation: CheckedContinuation<Data, Error>?
         var bytes = Data()
         var acceptedResponse = false
         var cancelled = false
         var failure: FilmHomeError?
-
-        init(kind: FilmHTTPRequestKind) {
-            self.kind = kind
-        }
     }
 
     private var flights: [Int: Flight] = [:]
@@ -75,9 +48,9 @@ private final class FilmHTTPTransport: NSObject, URLSessionDataDelegate, @unchec
         super.init()
     }
 
-    func read(_ url: URL, kind: FilmHTTPRequestKind) async throws -> Data {
+    func read(_ url: URL) async throws -> Data {
         try Task.checkCancellation()
-        let flight = Flight(kind: kind)
+        let flight = Flight()
         let bytes: Data = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 start(flight, url: url, continuation: continuation)
@@ -96,7 +69,7 @@ private final class FilmHTTPTransport: NSObject, URLSessionDataDelegate, @unchec
             continuation.resume(throwing: CancellationError())
             return
         }
-        let task = session.dataTask(with: flight.kind.request(url))
+        let task = session.dataTask(with: request(url))
         task.delegate = self
         flight.task = task
         flight.continuation = continuation
@@ -189,19 +162,26 @@ private final class FilmHTTPTransport: NSObject, URLSessionDataDelegate, @unchec
                     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
                     completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         lock.lock()
-        let kind = flights[task.taskIdentifier]?.kind
+        let active = flights[task.taskIdentifier] != nil
         lock.unlock()
-        guard let kind, let url = request.url,
+        guard active, let url = request.url,
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               url.host?.isEmpty == false else {
             completionHandler(nil)
             return
         }
-        guard let target = kind == .artwork ? FilmPosterAddress.normalize(url.absoluteString) : url else {
+        guard let target = FilmPosterAddress.normalize(url.absoluteString) else {
             completionHandler(nil)
             return
         }
-        completionHandler(kind.request(target))
+        completionHandler(self.request(target))
+    }
+
+    private func request(_ url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpShouldHandleCookies = false
+        request.timeoutInterval = 30
+        return request
     }
 
     deinit {

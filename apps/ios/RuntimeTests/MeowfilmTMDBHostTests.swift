@@ -550,11 +550,17 @@ private let tmdbHostSearch: RuntimeValue = .object([
 private let tmdbHostTV: RuntimeValue = .object([
     "id": .number(7), "name": .string("受控剧集"), "poster_path": .string("/tv.png"),
     "overview": .string("已得剧集详情"), "number_of_episodes": .number(24),
-    "genres": .array([]), "seasons": .array([]), "extra": .object(["kept": .bool(true)])
+    "genres": .array([]), "seasons": .array([]), "extra": .object(["kept": .bool(true)]),
+    "credits": .object(["cast": .array([]), "crew": .array([])]),
+    "similar": .object(["results": .array([])]),
+    "images": .object(["logos": .array([]), "backdrops": .array([]), "posters": .array([])])
 ])
 private let tmdbHostMovie: RuntimeValue = .object([
     "id": .number(42), "title": .string("受控电影"), "poster_path": .string("/movie.png"),
-    "overview": .string("已得电影详情"), "genres": .array([]), "runtime": .number(90)
+    "overview": .string("已得电影详情"), "genres": .array([]), "runtime": .number(90),
+    "credits": .object(["cast": .array([]), "crew": .array([])]),
+    "similar": .object(["results": .array([])]),
+    "images": .object(["logos": .array([]), "backdrops": .array([]), "posters": .array([])])
 ])
 
 private final class TMDBHostImageSequence: @unchecked Sendable {

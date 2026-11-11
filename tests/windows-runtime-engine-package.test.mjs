@@ -84,12 +84,13 @@ function packagingFixture({
   const inert = 'throw new Error("Synthetic fixture must not execute");\n';
   write(source, 'package.json', manifest);
   for (const name of ['runtime-bridge', 'script-host', 'source-runtime', 'pan-runtime',
-    'film-rules', 'film-playback', 'netease-token', 'inactive-core']) {
+    'film-rules', 'film-search', 'film-playback', 'netease-token', 'inactive-core']) {
     const location = `packages/${name}`, installed = `node_modules/@meowfilm/${name}`;
     const pkg = {
       name: `@meowfilm/${name}`, version: '1.0.0', type: 'module', license: 'MIT', exports: './src/index.js',
       ...(name === 'script-host' ? { dependencies: { '@meowfilm/source-runtime': '1.0.0' } } : {}),
-      ...(name === 'film-playback' ? { dependencies: { '@meowfilm/film-rules': '1.0.0' } } : {}),
+      ...(name === 'film-playback' ? { dependencies: {
+        '@meowfilm/film-rules': '1.0.0', '@meowfilm/film-search': '1.0.0' } } : {}),
     };
     write(source, `${location}/package.json`, pkg);
     if (!(missingShared && name === 'script-host')) write(source, `${location}/src/index.js`, inert);
@@ -287,9 +288,10 @@ function nativeFixture(t) {
     for (const path of new Set(['package.json', 'package-lock.json', 'scripts/script-host-native.json',
       artifactPath, receiptPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
     for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
-      'film-rules', 'film-playback', 'netease-token']) {
+      'film-rules', 'film-search', 'film-playback', 'netease-token']) {
       copy(`packages/${name}/package.json`);
-      copy(`packages/${name}/${name === 'film-rules' ? 'film-rules.js' : 'src'}`);
+      for (const file of name === 'film-rules' ? ['film-rules.js', 'playback-rules.js']
+        : name === 'film-search' ? ['film-search.js'] : ['src']) copy(`packages/${name}/${file}`);
       const installed = join(source, 'node_modules/@meowfilm', name);
       mkdirSync(dirname(installed), { recursive: true });
       symlinkSync(join(source, 'packages', name), installed, process.platform === 'win32' ? 'junction' : 'dir');

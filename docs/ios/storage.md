@@ -5,7 +5,8 @@
 | 数据 | 存储 | 位置 |
 | --- | --- | --- |
 | 曲库、队列、历史、设置（`music.library.v1`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
-| 影视规则与视频映射／选项／删除记录 | 普通文档 | `meowfilm/documents/film.magic-rules.v1`、`film.video-sources.v1`，参与备份 |
+| 影视规则 | Node 私有文档 | `meowfilm/script-runtime/film-rules/rules.json`，原生仅保编辑草稿／展示快照 |
+| 视频映射／选项／删除记录 | 普通文档 | `meowfilm/documents/film.video-sources.v1`，参与备份 |
 | 音乐脚本安装、源码与私有数据 | Node 私有文档 | Application Support 下 `meowfilm/script-runtime/music`，参与备份 |
 | 播放展示、来源发现、首页快照、账号 URL 与副歌点缓存 | 普通文档 | Caches 下 `meowfilm/documents` |
 | 客户端设备会话（`music.client-context.<平台>.v1`）、QQ 设备身份（`music.qq-public.v1`） | 加密文档 | Application Support 下 `meowfilm/encrypted-documents-v1`，排除备份 |
@@ -85,4 +86,4 @@ Cat 继续使用 `meowfilm/script-runtime/cat`，客户端视频选项、排序�
 
 ## 影视设置
 
-`film.magic-rules.v1/rules` 保存共享 JS 的四组文档；`film.video-sources.v1/catalog` 保存客户端视频映射、排序、四选项、检测结果、猫源管理元数据及 tombstone。均以 DocumentStore CAS 写入后发布状态，不存脚本源码、运行端口或 generation。Node 在 `meowfilm/script-runtime` 保存自身安装和私有卷，不拥有客户端视频选项。详细身份、删除恢复与调用边界见[影视设置](film-settings.md)。
+Node 在 `meowfilm/script-runtime/film-rules/rules.json` 唯一保存四组规则，通过 `film.rules.*` 读写；客户端不保存或回灌规则文档，不兼容旧客户端数据。`film.video-sources.v1/catalog` 仍由 DocumentStore CAS 保存客户端视频映射、排序、四选项、检测结果、猫源管理元数据及 tombstone，不存脚本源码、运行端口或 generation。Node 同目录树中的脚本安装和私有卷不等于拥有客户端视频选项。详细身份、删除恢复与调用边界见[影视设置](film-settings.md)。

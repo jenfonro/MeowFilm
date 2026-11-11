@@ -9,7 +9,7 @@ const codes = new Set([
   'STALE_SOURCE', 'CAPABILITY_UNAVAILABLE', 'NOT_CONFIGURED', 'CHALLENGE_REQUIRED',
   'UPSTREAM_REDIRECT', 'PAN_FAILURE', 'UNSUPPORTED_OPERATION', 'STORAGE_ERROR', 'CORRUPT_STORAGE',
   'WEB_INTERACTION_REQUIRED', 'MEDIA_UNAVAILABLE', 'SOURCE_FAILURE', 'CAT_FAILURE',
-  'SCRIPT_FAILURE', 'SCRIPT_PROTOCOL_ERROR', 'STALE_METADATA',
+  'SCRIPT_FAILURE', 'SCRIPT_PROTOCOL_ERROR', 'STALE_METADATA', 'RESOURCE_LIMIT',
 ]);
 
 function failure(code) {
@@ -150,11 +150,11 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     entries.delete(key);
   }
 
-  function find(key, minimumCompleteness, at = time()) {
+  function find(key, minimumCompleteness, at = time(), allowStale = false) {
     const entry = entries.get(key);
     if (!entry) return undefined;
-    if (entry.expiresAt <= at) {
-      remove(key);
+    if (entry.expiresAt <= at && !allowStale) {
+      if (!entry.retainStale) remove(key);
       return undefined;
     }
     if (completenessRank[entry.completeness] < completenessRank[minimumCompleteness]) return undefined;
@@ -163,7 +163,7 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     return entry;
   }
 
-  function retain(flight, result, ttl) {
+  function retain(flight, result, ttl, retainStale, publish) {
     if (!flight.authorized || closed) {
       throw failure('CANCELLED');
     }
@@ -178,12 +178,16 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     // draining. That producer must not repopulate the cache with the old value.
     if (flight.seeded) return result.value;
     const expiresAt = expiration(ttl, result.value, at);
+    publish?.(result.value);
     const bytes = 256 + flight.key.length * 2 + flight.dependencyBytes + result.bytes;
     // A large result is delivered whole; it simply does not displace retained data.
-    if (expiresAt === at || bytes > maximumBytes) return result.value;
+    if (expiresAt === at && !retainStale || bytes > maximumBytes) {
+      remove(flight.key);
+      return result.value;
+    }
     remove(flight.key);
     while (retainedBytes + bytes > maximumBytes) remove(entries.keys().next().value);
-    entries.set(flight.key, { ...flight.info, value: result.value, expiresAt, bytes });
+    entries.set(flight.key, { ...flight.info, value: result.value, expiresAt, retainStale, bytes });
     retainedBytes += bytes;
     return result.value;
   }
@@ -194,27 +198,29 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     flight.controller.abort();
   }
 
-  function read(key, { minimumCompleteness = 'partial' } = {}) {
+  function read(key, { minimumCompleteness = 'partial', allowStale = false } = {}) {
     open();
     keyValue(key);
     completenessValue(minimumCompleteness);
-    return find(key, minimumCompleteness)?.value;
+    requireValue(typeof allowStale === 'boolean');
+    return find(key, minimumCompleteness, time(), allowStale)?.value;
   }
 
   async function load(key, producer, {
-    ttl, completeness, dependencies = [], signal,
+    ttl, completeness, dependencies = [], signal, refresh = false, retainStale = false, publish,
   } = {}) {
     open();
     keyValue(key);
     completenessValue(completeness);
     ttlValue(ttl);
     requireValue(typeof producer === 'function' &&
-      (signal === undefined || signal instanceof AbortSignal));
+      (signal === undefined || signal instanceof AbortSignal) && typeof refresh === 'boolean' &&
+      typeof retainStale === 'boolean' && (publish === undefined || typeof publish === 'function'));
     if (signal?.aborted) throw failure('CANCELLED');
     const dependency = dependenciesValue(dependencies);
 
     scope(key, dependency.value);
-    const cached = find(key, completeness);
+    const cached = refresh ? undefined : find(key, completeness);
     if (cached) return cached.value;
     const active = flights.get(key);
     if (active && completenessRank[active.completeness] >= completenessRank[completeness]) {
@@ -243,7 +249,7 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     }).then(value => {
       if (!flight.authorized || closed) throw failure('CANCELLED');
       const result = snapshot(value);
-      return retain(flight, result, ttl);
+      return retain(flight, result, ttl, retainStale, publish);
     }).catch(error => { throw normalizedError(error); }).finally(() => {
       if (flights.get(key) === flight) flights.delete(key);
       pending.delete(flight);
@@ -254,10 +260,13 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     return waitFor(flight, signal);
   }
 
-  function seed(key, value, { ttl, expiresAt, completeness, dependencies = [] } = {}) {
+  function seed(key, value, { ttl, expiresAt, completeness, dependencies = [], retainStale = false, publish,
+    replace = false, supersede = true } = {}) {
     open();
     keyValue(key);
     completenessValue(completeness);
+    requireValue(typeof retainStale === 'boolean' && typeof replace === 'boolean' && typeof supersede === 'boolean' &&
+      (publish === undefined || typeof publish === 'function'));
     if (expiresAt === undefined) ttlValue(ttl);
     else requireValue(Number.isFinite(expiresAt));
     const dependency = dependenciesValue(dependencies);
@@ -268,16 +277,17 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
       until = expiresAt ?? expiration(ttl, result.value, at);
     } catch (error) { throw normalizedError(error); }
     // An expired handoff has no publication or revocation authority.
-    if (until <= at) {
+    if (until <= at && !retainStale) {
       const current = find(key, 'partial', at);
       return current && isDeepStrictEqual(current.dependencies, dependency.value) ? current.value : undefined;
     }
     scope(key, dependency.value);
-    const previous = find(key, 'partial', at);
-    if (previous && (completenessRank[previous.completeness] > completenessRank[completeness] ||
+    const previous = find(key, 'partial', at, retainStale);
+    if (!replace && previous && (completenessRank[previous.completeness] > completenessRank[completeness] ||
         previous.completeness === completeness && previous.expiresAt >= until)) return previous.value;
+    publish?.(result.value);
     for (const flight of pending) {
-      if (flight.key === key && flight.authorized &&
+      if (supersede && flight.key === key && flight.authorized &&
           completenessRank[completeness] >= completenessRank[flight.completeness]) flight.seeded = true;
     }
     const bytes = 256 + key.length * 2 + dependency.bytes + result.bytes;
@@ -290,7 +300,7 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     remove(key);
     while (retainedBytes + bytes > maximumBytes) remove(entries.keys().next().value);
     entries.set(key, { key, completeness, dependencies: dependency.value,
-      value: result.value, expiresAt: until, bytes });
+      value: result.value, expiresAt: until, retainStale, bytes });
     retainedBytes += bytes;
     return result.value;
   }

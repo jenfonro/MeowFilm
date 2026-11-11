@@ -35,7 +35,7 @@ Windows 包装使用当前 `common-native` 通用运行器；仅 `--product aggr
 
 Windows 平台模块按序为 `music@0.8.0`、`cat@0.2.0`、`source@0.2.0`、`pan@0.1.0`、`tmdb@0.1.0`、`douban@0.1.0`、`film@0.1.0`、`netease@0.1.0`，契约分别为 `music.script.v3`、`cat.script.v2`、`source.runtime.v2`、`pan.runtime.v1`、`tmdb.data.v1`、`douban.data.v1`、`film.playback.v1`、`netease.token.v1`；平台 manifest 与实际 entry、原生 describe 严格一致。通用默认 `createRuntime` 仍为原三模块。完整 HTTP 源码/JSON 不使用平台业务分片。
 
-载荷包含公共 `app/` 入口及八模块、`app/windows/` 两个包装文件，以及 `@meowfilm/{runtime-bridge,script-host,source-runtime,pan-runtime,film-playback,film-rules,netease-token}` 和根锁解析的运行依赖。`script-host/build/Release/` 的原生 addon、SDK、构建回执只按公共策略精确路径及哈希放行，不加载 WASM/asm.js 或任意附加 native binary。
+载荷包含公共 `app/` 入口及八模块、`app/windows/` 两个包装文件，以及 `@meowfilm/{runtime-bridge,script-host,source-runtime,pan-runtime,film-playback,film-rules,film-search,netease-token}` 和根锁解析的运行依赖。`script-host/build/Release/` 的原生 addon、SDK、构建回执只按公共策略精确路径及哈希放行，不加载 WASM/asm.js 或任意附加 native binary。
 
 `scripts/script-host-native.json` 固定 QuickJS-NG、OpenSSL、zlib、Node headers、补丁、构建工具和输入；回执记录真实平台/架构、源码树、文件哈希和构建命令。Node-API ABI、来源、许可、SDK 和所有输入必须匹配；打包不重建、不安装、不修锁。中央许可及包内实际许可均按库存复制，见[许可说明](../licenses.md)。
 
@@ -45,7 +45,7 @@ Windows 平台模块按序为 `music@0.8.0`、`cat@0.2.0`、`source@0.2.0`、`pa
 - 拒绝路径穿越、大小写/Unicode 冲突、非受信二进制、额外平台文件；测试/缓存/隐私文件不入包，许可不因 files 裁剪丢失。
 - 新输出独占创建，完成前核对完整 byte/hash inventory 与输入未变；失败保留 failed 清单。manifest 不自哈希。
 
-客户端影视规则仍独立使用 `native/JavaScript` 和 `scripts/quickjs-native.json`，正常 .NET 增量构建生成 `meowfilm_js.dll`；它不是 Node addon，也不混入运行器闭包。固定规则程序嵌入 Capabilities，规则数据由客户端持有。
+影视规则与搜索程序属于 Node 载荷，由公共 script-host 原生 addon 执行并使用独立 Runtime／Context。Windows Capabilities 不再内嵌两份 JS 资源，Platform 不再构建／复制独立规则 DLL，App 不登记客户端规则文档。规则唯一存储、预览及搜索投影通过现有 film HTTP／SSE 访问；缺失运行器时返回真实错误，不保留旧引擎依赖或回退。源码与许可使用 `scripts/script-host-native.json` 的共同锁和构建回执。
 
 视频内核同样不属于 Node 载荷。`MeowFilm.Media.csproj` 通过 `scripts/windows/build-video-kernel.ps1` 增量构建并复制私有 `libmeowfilm_ffmpeg_plugin.dll` 和 receipt；输入由 `apps/windows/native/VideoKernel/video-kernel.lock.json` 锁定 FFmpeg 8.1.2、VLC 3.0.24 SDK、libxml2、ABI／架构及配置。现有 libVLC 仍唯一解码／渲染，插件只解复用，具体见[原生媒体实现](media-playback.md)。原生 DLL 构建证据不代表合并后 Media C#、整 App、真实帧或最终分发闭包已验证；不得手动替换 DLL 或放宽运行器 native scope。
 

@@ -1,6 +1,6 @@
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -321,6 +321,10 @@
+@@ -392,6 +392,10 @@
      void *host_promise_rejection_tracker_opaque;
  
      struct list_head job_list; /* list of JSJobEntry.link */
@@ -11,7 +11,7 @@
  
      bool module_normalize_has_attr;
      union {
-@@ -977,10 +981,18 @@
+@@ -1072,10 +1076,18 @@
      JSValue private_value; /* private value for C modules */
  };
  
@@ -30,7 +30,7 @@
      int argc;
      JSValue argv[];
  } JSJobEntry;
-@@ -2111,9 +2123,78 @@
+@@ -2486,9 +2498,78 @@
      rt->sab_funcs = *sf;
  }
  
@@ -112,7 +112,7 @@
  {
      JSRuntime *rt = ctx->rt;
      JSJobEntry *e;
-@@ -2126,12 +2207,34 @@
+@@ -2501,12 +2582,34 @@
          return -1;
      e->ctx = ctx;
      e->job_func = job_func;
@@ -147,7 +147,7 @@
  }
  
  bool JS_IsJobPending(JSRuntime *rt)
-@@ -2165,7 +2268,19 @@
+@@ -2540,7 +2643,19 @@
      e = list_entry(rt->job_list.next, JSJobEntry, link);
      list_del(&e->link);
      ctx = e->ctx;
@@ -167,7 +167,7 @@
      for(i = 0; i < e->argc; i++)
          JS_FreeValue(ctx, e->argv[i]);
      if (JS_IsException(res))
-@@ -2268,12 +2383,17 @@
+@@ -2644,12 +2759,17 @@
      int i;
  
      rt->in_free = true;
@@ -185,7 +185,7 @@
          js_free_rt(rt, e);
      }
      init_list_head(&rt->job_list);
-@@ -6020,6 +6140,16 @@
+@@ -6438,6 +6558,16 @@
              class_id == JS_CLASS_ASYNC_GENERATOR_FUNCTION);
  }
  
@@ -202,7 +202,7 @@
  /* return NULL without exception if not a function or no bytecode */
  static JSFunctionBytecode *JS_GetFunctionBytecode(JSValueConst val)
  {
-@@ -7324,6 +7454,8 @@
+@@ -7780,6 +7910,8 @@
              {
                  JSArrayBuffer *abuf = p->u.array_buffer;
                  if (abuf) {
@@ -211,7 +211,7 @@
                      s->memory_used_count += 1;
                      s->memory_used_size += sizeof(*abuf);
                      if (abuf->data) {
-@@ -20771,6 +20903,8 @@
+@@ -21662,6 +21794,8 @@
  
  typedef struct JSAsyncGeneratorRequest {
      struct list_head link;
@@ -220,7 +220,7 @@
      /* completion */
      int completion_type; /* GEN_MAGIC_x */
      JSValue result;
-@@ -20798,6 +20932,8 @@
+@@ -21689,6 +21823,8 @@
          JS_FreeValueRT(rt, req->promise);
          JS_FreeValueRT(rt, req->resolving_funcs[0]);
          JS_FreeValueRT(rt, req->resolving_funcs[1]);
@@ -229,7 +229,7 @@
          js_free_rt(rt, req);
      }
      if (s->state != JS_ASYNC_GENERATOR_STATE_COMPLETED &&
-@@ -20915,6 +21051,8 @@
+@@ -21808,6 +21944,8 @@
      JS_FreeValue(ctx, next->promise);
      JS_FreeValue(ctx, next->resolving_funcs[0]);
      JS_FreeValue(ctx, next->resolving_funcs[1]);
@@ -238,7 +238,7 @@
      js_free(ctx, next);
  }
  
-@@ -20989,11 +21127,20 @@
+@@ -21882,11 +22020,20 @@
  {
      JSAsyncGeneratorRequest *next;
      JSValue func_ret, value;
@@ -259,7 +259,7 @@
          switch(s->state) {
          case JS_ASYNC_GENERATOR_STATE_EXECUTING:
              /* only happens when restarting execution after await() */
-@@ -21083,7 +21230,13 @@
+@@ -21976,7 +22123,13 @@
              abort();
          }
      }
@@ -274,7 +274,7 @@
  }
  
  static JSValue js_async_generator_resolve_function(JSContext *ctx,
-@@ -21148,6 +21301,8 @@
+@@ -22041,6 +22194,8 @@
      req = js_mallocz(ctx, sizeof(*req));
      if (!req)
          goto fail;
@@ -283,7 +283,7 @@
      req->completion_type = magic;
      req->result = js_dup(argv[0]);
      req->promise = js_dup(promise);
-@@ -52724,6 +52879,7 @@
+@@ -55597,6 +55752,7 @@
  
  typedef struct JSPromiseReactionData {
      struct list_head link; /* not used in promise_reaction_job */
@@ -291,7 +291,7 @@
      JSValue resolving_funcs[2];
      JSValue handler;
  } JSPromiseReactionData;
-@@ -52765,6 +52921,7 @@
+@@ -55666,6 +55822,7 @@
      JS_FreeValueRT(rt, rd->resolving_funcs[0]);
      JS_FreeValueRT(rt, rd->resolving_funcs[1]);
      JS_FreeValueRT(rt, rd->handler);
@@ -299,7 +299,7 @@
      js_free_rt(rt, rd);
  }
  
-@@ -52873,7 +53030,7 @@
+@@ -55769,7 +55926,7 @@
          args[2] = rd->handler;
          args[3] = js_bool(is_reject);
          args[4] = value;
@@ -308,7 +308,7 @@
          list_del(&rd->link);
          promise_reaction_data_free(ctx->rt, rd);
      }
-@@ -53644,6 +53801,7 @@
+@@ -56574,6 +56731,7 @@
          handler = resolve_reject[i];
          if (!JS_IsFunction(ctx, handler))
              handler = JS_UNDEFINED;
@@ -316,7 +316,7 @@
          rd->handler = js_dup(handler);
          rd_array[i] = rd;
      }
-@@ -53666,7 +53824,7 @@
+@@ -56591,7 +56749,7 @@
          args[2] = rd->handler;
          args[3] = js_bool(i);
          args[4] = s->promise_result;
@@ -325,7 +325,7 @@
          for(i = 0; i < 2; i++)
              promise_reaction_data_free(ctx->rt, rd_array[i]);
      }
-@@ -60092,6 +60250,7 @@
+@@ -63219,6 +63377,7 @@
  
  typedef struct JSFinRecEntry {
      struct list_head link;
@@ -333,7 +333,7 @@
      JSValueConst target;
      JSValue held_val;
      JSValue token;
-@@ -60127,6 +60286,7 @@
+@@ -63254,6 +63413,7 @@
      JS_FreeValueRT(rt, fre->token);
      JS_FreeValueRT(rt, fre->cb);
      JS_FreeContext(fre->ctx);
@@ -341,7 +341,7 @@
      js_free_rt(rt, fre);
  }
  
-@@ -60223,6 +60383,7 @@
+@@ -63350,6 +63510,7 @@
      }
      fre->cb = js_dup(frd->cb);
      fre->ctx = JS_DupContext(frd->ctx);
@@ -349,7 +349,7 @@
      fre->target = target;
      fre->held_val = js_dup(held_val);
      fre->token = js_dup(token);
-@@ -60386,7 +60547,7 @@
+@@ -63513,7 +63674,7 @@
                  JSValueConst args[2];
                  args[0] = fre->cb;
                  args[1] = fre->held_val;
@@ -358,7 +358,7 @@
              }
              js_finrec_free(rt, fre);
              break;
-@@ -60881,3 +61042,14 @@
+@@ -65033,3 +65194,14 @@
  #undef malloc
  #undef free
  #undef realloc
@@ -375,7 +375,7 @@
 +}
 --- a/quickjs.h
 +++ b/quickjs.h
-@@ -603,6 +603,7 @@
+@@ -604,6 +604,7 @@
      int64_t c_func_count, array_count;
      int64_t fast_array_count, fast_array_elements;
      int64_t binary_object_count, binary_object_size;
@@ -383,7 +383,7 @@
  } JSMemoryUsage;
  
  JS_EXTERN void JS_ComputeMemoryUsage(JSRuntime *rt, JSMemoryUsage *s);
-@@ -1202,12 +1203,38 @@
+@@ -1283,12 +1284,38 @@
  JS_EXTERN int JS_SetModulePrivateValue(JSContext *ctx, JSModuleDef *m, JSValue val);
  JS_EXTERN JSValue JS_GetModulePrivateValue(JSContext *ctx, JSModuleDef *m);
  

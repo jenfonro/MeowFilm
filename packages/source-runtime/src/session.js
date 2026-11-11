@@ -5,7 +5,8 @@ import {
   countDomNodes, DocumentRegistry, domHTML, htmlToText, isDomNode, parseMarkup,
 } from './dom.js';
 import {
-  sourceClone, sourceFault, sourceIdentifier, sourceObject, sourceRequire, sourceSafeError,
+  sourceClone, sourceFault, sourceIdentifier, sourceObject, sourcePreprocessError,
+  sourceRequire, sourceSafeError,
 } from './errors.js';
 import { SourceHttpClient, trustedCapabilityContext } from './http.js';
 import { normalizeSourceDefinition } from './importers.js';
@@ -160,13 +161,14 @@ function operationSignal(parents, timeoutMs) {
 
 class SessionKernel {
   constructor({
-    source, protocol, capabilities, createSandbox, profile, capabilityScope,
+    source, protocol, capabilities, createSandbox, preprocess, profile, capabilityScope,
     metadata, limits, onDiagnostic, signal,
   }) {
     Object.assign(this, {
       source, protocol, capabilities, createSandbox, profile, capabilityScope,
       metadata, limits, onDiagnostic, signal,
     });
+    this.runPreprocessor = preprocess;
     this.http = new SourceHttpClient({
       capabilities, profile, scope: capabilityScope,
     });
@@ -271,14 +273,18 @@ class SessionKernel {
     return hostValue(result, this.limits.maximumNodes, this.limits.maximumParseBytes);
   }
 
+  preprocess(operation) {
+    try { return this.runPreprocessor(operation); }
+    catch (error) { throw sourcePreprocessError(error); }
+  }
+
   async evaluateScript(source, bindings, invocation, {
     returnLastExpression = true,
     transform = {},
   } = {}) {
-    const transformed = transformCapabilityScript(String(source), {
-      ...transform,
-      returnLastExpression,
-    });
+    const text = String(source);
+    const options = { ...transform, returnLastExpression };
+    const transformed = this.preprocess(() => transformCapabilityScript(text, options));
     const result = await this.sandbox.evaluate(transformed, guestValue(bindings), {
       signal: invocation.signal,
       timeoutMs: invocation.timeoutMs,
@@ -762,6 +768,7 @@ export class SourceSession {
     protocol,
     capabilities,
     createSandbox,
+    preprocess = operation => operation(),
     metadata = {},
     limits = {},
     onDiagnostic,
@@ -770,6 +777,7 @@ export class SourceSession {
     sourceRequire(Number.isSafeInteger(generation) && generation > 0);
     sourceRequire(capabilities?.version === hostApiVersion && typeof capabilities.call === 'function');
     sourceRequire(typeof createSandbox === 'function');
+    sourceRequire(typeof preprocess === 'function');
     sourceObject(metadata);
     sourceObject(limits);
     sourceRequire(Object.keys(limits).every(key => Object.hasOwn(defaults, key)));
@@ -779,6 +787,7 @@ export class SourceSession {
     this.requestedProtocol = protocol;
     this.capabilitiesClient = capabilities;
     this.createSandbox = createSandbox;
+    this.preprocess = preprocess;
     this.metadata = sourceClone(metadata);
     this.limits = Object.freeze({ ...defaults, ...limits });
     for (const value of Object.values(this.limits)) sourceRequire(Number.isSafeInteger(value) && value > 0);
@@ -805,6 +814,7 @@ export class SourceSession {
         protocol: this.protocol,
         capabilities: this.capabilitiesClient,
         createSandbox: this.createSandbox,
+        preprocess: this.preprocess,
         profile: `source:${this.installationId}:${this.generation}`,
         capabilityScope: {
           installationId: this.installationId,

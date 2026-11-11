@@ -1,0 +1,14 @@
+{
+  "name": "@meowfilm/film-search",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "exports": {
+    ".": "./film-search.js"
+  },
+  "files": ["film-search.js"],
+  "scripts": {
+    "test": "node --test test/film-search.test.mjs"
+  }
+}

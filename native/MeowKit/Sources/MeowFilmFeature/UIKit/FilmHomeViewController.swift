@@ -91,13 +91,13 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
         render()
     }
 
-    public override func pageDidBecomeActive() {
+    public override func pageDidBecomeVisible() {
         model.loadIfNeeded()
         render()
     }
 
     public override func pageDidBecomeInactive() { model.close() }
-    public override func pageDidBecomeHidden() { resetPressFeedback() }
+    public override func pageDidBecomeHidden() { model.cancel(); resetPressFeedback() }
     public override func pageDidFinishAppearing() { presentError() }
 
     public override func applyTheme() {

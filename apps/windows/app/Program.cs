@@ -5,7 +5,6 @@ using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
-using MeowFilm.Platform.Scripting;
 using MeowFilm.SystemMedia;
 using System.IO;
 
@@ -33,8 +32,7 @@ internal static class Program
                 playback = new NativePlayback();
                 capabilities.Add(new MusicCapability(runtime, storage, playback,
                     Path.Combine(AppDataPaths.Current.Documents, "music-playback-cache")));
-                pendingRules = new FilmRuleService(
-                    new NativeJavaScriptJsonEngine(FilmRuleService.LoadProgramSource()), storage);
+                pendingRules = new FilmRuleService(runtime);
                 pendingSources = new FilmSourceService(runtime, storage);
                 pendingMetadata = new FilmMetadataService(runtime);
                 var capture = runtime as IRuntimeConnectionSource ?? throw new InvalidOperationException("RUNTIME_CAPTURE_UNAVAILABLE");
@@ -68,7 +66,7 @@ internal static class Program
                 page.NavigateToPlaybackAsync = async (item, token) =>
                 {
                     token.ThrowIfCancellationRequested();
-                    film.ReceiveSearchPlayback(item);
+                    await film.ReceiveSearchPlaybackAsync(item, token);
                     // The page lease is admission only; leaving retires that lease itself.
                     await shell.NavigateFromPageAsync(page, film.Id, "film-playback");
                 };

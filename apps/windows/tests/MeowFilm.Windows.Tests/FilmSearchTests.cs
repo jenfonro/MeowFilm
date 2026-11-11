@@ -1,8 +1,7 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Capabilities;
-using MeowFilm.Core.Scripting;
 using MeowFilm.Core.Runtime;
-using MeowFilm.Platform.Scripting;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -10,385 +9,287 @@ public static class FilmSearchTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("complete pages exceed twelve and one hundred with independent cursors", CompletePages);
-        yield return Case("missing page counts repeated identities and silent explicit same-page retry", PageBoundaries);
-        yield return Case("first-round late ranking and later-round aggregate upgrades freeze both orders", RoundOrder);
-        yield return Case("TMDB raw fallback boundaries preserve original payload and effective query", MetadataFallback);
-        yield return Case("TMDB details delegate freshness per query and more retains its displayed metadata", MetadataOwner);
-        yield return Case("new-query cancellation fences noncooperative old results", QueryCancellation);
-        yield return Case("retired physical work releases owner tracking while playback retains its snapshot", RetiredSnapshot);
-        yield return Case("all source failures remain retryable and distinct from successful empty results", AllSourceFailures);
-        yield return Case("source generation replacement recovers the same query without refetching retained pages", GenerationRecovery);
-        yield return Case("prepare resume retains completed pages and metadata with a fresh lease", PrepareResume);
-        yield return Case("prepare resume recovers only interrupted source pages and missing metadata details", PrepareResumeInFlight);
-        yield return Case("hanging detail receives cancellation and physically drains before engine close", DetailShutdown);
-        yield return Case("cross-query details cannot inherit another waiter cancellation or publish late data", DetailOwnership);
-        yield return Case("in-flight playback follows original members into a late TMDB carrier", LateCarrier);
-        yield return Case("Node data search selects enabled sources and sends original query and page", FilmSourcesTests.SearchWire);
+        yield return Case("complete full projections preserve numeric zero string zero raw fields and same-source aggregate members", CompletePages);
+        yield return Case("first-round stream and later appended cards keep the exact Node order without native sorting", RoundOrder);
+        yield return Case("failed empty unavailable and no-source channels stay distinct; more is explicit", ChannelStates);
+        yield return Case("new query and source configuration changes revoke old UI publication", Invalidation);
+        yield return Case("stop same-word resume and disconnect reuse Node session with monotonic complete snapshots", Resume);
+        yield return Case("stop fences late SSE and stop receipts update status without publishing new cards", StopPublication);
+        yield return Case("accepted open stopped or retired before receipt keeps only its ID until explicit resume or release", OpenPublication);
+        yield return Case("close waits for accepted open then stops releases and drains observation", Close);
+        yield return Case("runtime unavailable and malformed snapshots remain real errors", Errors);
+        yield return Case("Node source snapshots preserve enabled search scope order and cover option", FilmSourcesTests.SearchWire);
     }
-    private static TestCase Case(string name, Func<Task> action) =>
-        new("film-search: " + name, () => MusicQualityConsumerTests.Sta(action));
-
+    private static TestCase Case(string name, Func<Task> action) => new("film-search: " + name, () => MusicQualityConsumerTests.Sta(action));
+    private static void Check(bool value, string reason) => SearchFixture.Check(value, reason);
     private static async Task CompletePages()
     {
-        var sources = new SearchSources(SearchFixture.Source("a", order: 0), SearchFixture.Source("b", order: 1));
-        sources.Read = (source, _, page, _) => Task.FromResult(SearchFixture.Json(new
-        {
-            pagecount = source.Cat.InstallationId == "a" ? 2 : 1,
-            list = Enumerable.Range(page == 1 ? 0 : 151, source.Cat.InstallationId == "a" ? 151 : 17)
-                .Select(id => new { vod_id = id.ToString(), vod_name = source.Cat.InstallationId + id + "独立影片" }).ToArray()
-        }));
-        await using var f = new SearchFixture(sources);
-        var session = f.Service.Start("独立影片");
-        await SearchFixture.Settle(session);
-        SearchFixture.Check(session.RawItems.Count == 168 && session.Items.Count == 168, "both full first pages survive native mapping");
-        SearchFixture.Check(session.MetadataState == FilmSearchChannelState.Unavailable && session.CanLoadMore,
-            "production-shaped missing metadata is unavailable, not a fake empty success");
-        await f.Service.LoadMoreAsync();
-        SearchFixture.Check(session.RawItems.Count == 319 && !session.CanLoadMore, "full second page has no client-side limit");
-        SearchFixture.Check(sources.Calls.Select(call => (call.Source.Cat.InstallationId, call.Page))
-            .SequenceEqual(new[] { ("a", 1), ("b", 1), ("a", 2) }), "each source advances independently");
-        SearchFixture.Check(ReferenceEquals(session, f.Service.Start("独立影片")) && sources.Calls.Count == 3,
-            "same word reuses the settled snapshot");
+        await using var f = new SearchFixture();
+        var raw = Enumerable.Range(0, 151).Select(index => SearchFixture.Member(f.Sources.Sources[0], index, "原名" + index)).ToArray();
+        var zero = SearchFixture.Member(f.Sources.Sources[0], "0", "原名0");
+        raw = raw.Append(zero).ToArray();
+        var cards = new[] { SearchFixture.Card("group:original", "site", "Node代表", raw) };
+        f.Runtime.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"), cards, raw, hasMore: true);
+        var session = f.Service.Start("原查询2"); await SearchFixture.Settle(session);
+        Check(session.RawItems.Count == 152 && session.Items.Count == 1 && session.CanLoadMore, "full page and same-source aggregation are consumed without limits");
+        Check(JsonElement.DeepEquals(session.Items[0], cards[0]) && session.Items[0].GetProperty("aggregateItems").GetArrayLength() == 152, "all members and original fields survive");
+        Check(session.RawItems[0].GetProperty("detailId").ValueKind == JsonValueKind.Number &&
+            session.RawItems[^1].GetProperty("detailId").ValueKind == JsonValueKind.String &&
+            session.RawItems[0].GetProperty("raw").GetProperty("unknown").GetString() == "  原始字段  ", "0 and string zero are different intact identities");
+        var open = f.Runtime.Calls.Single(call => call.Method == "film.search.open").Input;
+        Check(open.GetProperty("query").GetString() == "原查询2" && !open.TryGetProperty("rules", out _) &&
+            open.GetProperty("sources")[0].GetProperty("aggregateImages").GetBoolean() &&
+            open.GetProperty("sources")[0].GetProperty("order").GetInt32() == 0, "only source configuration and query go to Node");
+        Check(ReferenceEquals(session, f.Service.Start("原查询2")) && f.Runtime.SearchOpens == 1, "same-word reentry reuses the session");
     }
-
-    private static async Task PageBoundaries()
-    {
-        var sources = new SearchSources(SearchFixture.Source("a"), SearchFixture.Source("b", order: 1));
-        int failures = 0;
-        sources.Read = (source, _, page, _) =>
-        {
-            if (source.Cat.InstallationId == "b" && failures++ == 0) throw new InvalidOperationException("fixture source failure");
-            return Task.FromResult(SearchFixture.Json(new { list = source.Cat.InstallationId == "a" || page == 1
-                ? new[] { new { vod_id = "same", vod_name = source.Cat.InstallationId + "影片" } } : [] }));
-        };
-        await using var f = new SearchFixture(sources);
-        var session = f.Service.Start("影片"); await SearchFixture.Settle(session);
-        SearchFixture.Check(session.Items.Count == 1 && session.SitesState == FilmSearchChannelState.Completed && session.CanLoadMore,
-            "single source failure is silent and does not prevent round settlement");
-        await Task.Yield(); SearchFixture.Check(sources.Calls.Count == 2, "no automatic source retry");
-        await f.Service.LoadMoreAsync();
-        SearchFixture.Check(session.RawItems.Count == 2 && session.CanLoadMore, "repeated page deduplicates and the failed source explicitly retries page one");
-        await f.Service.LoadMoreAsync();
-        SearchFixture.Check(!session.CanLoadMore && sources.Calls.Select(call => (call.Source.Cat.InstallationId, call.Page))
-            .SequenceEqual(new[] { ("a", 1), ("b", 1), ("a", 2), ("b", 1), ("b", 2) }),
-            "without metadata duplicate/empty pages terminate; successful source never restarts");
-    }
-
     private static async Task RoundOrder()
     {
-        var release = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var sources = new SearchSources(SearchFixture.Source("a"), SearchFixture.Source("b", order: 1));
-        sources.Read = (source, _, page, _) => source.Cat.InstallationId == "b" ? release.Task : Task.FromResult(page == 1
-            ? SearchFixture.Page(2, ("low", "无关", ""))
-            : SearchFixture.Page(2, ("upgrade", "无关", ""), ("new", "新增", "")));
-        await using var f = new SearchFixture(sources);
-        var session = f.Service.Start("目标");
-        try
-        {
-            await SearchFixture.Until(() => session.Items.Count == 1);
-            SearchFixture.Check(!session.CanLoadMore && SearchFixture.Text(session.Items[0], "title") == "无关", "first source streams while more remains closed");
-            await f.Service.LoadMoreAsync(); SearchFixture.Check(sources.Calls.Count == 2, "first round is still in progress");
-            release.TrySetResult(SearchFixture.Page(1, ("high", "目标", "")));
-            await SearchFixture.Settle(session);
-            SearchFixture.Check(SearchFixture.Text(session.Items[0], "title") == "目标", "late high-relevance first-round card precedes earlier low hit");
-            var order = session.Items.Select(item => SearchFixture.Text(item, "displayKey")).ToArray();
-            var rawOrder = session.RawItems.Select(item => SearchFixture.Text(item, "displayKey")).ToArray();
-            var original = new FilmSearchContext(session, session.Items[1]);
-            await f.Service.LoadMoreAsync();
-            SearchFixture.Check(order.SequenceEqual(session.Items.Take(order.Length).Select(item => SearchFixture.Text(item, "displayKey"))), "old aggregate positions remain frozen");
-            SearchFixture.Check(rawOrder.SequenceEqual(session.RawItems.Take(rawOrder.Length).Select(item => SearchFixture.Text(item, "displayKey"))), "raw positions are independently frozen");
-            SearchFixture.Check(original.Sources.Count == 2 && SearchFixture.Text(original.CurrentItem, "siteLabel") == "聚合",
-                "ordinary selection upgrades in place with all members including the new page");
-        }
-        finally { release.TrySetResult(SearchFixture.Page(1)); }
-    }
-
-    private static async Task MetadataFallback()
-    {
-        foreach (string mode in new[] { "success", "person", "empty", "failure" })
-        {
-            var metadata = new SearchMetadata
-            {
-                ReadSearch = (word, _) => mode == "failure" ? Task.FromException<JsonElement>(new InvalidOperationException("search failed")) :
-                    Task.FromResult(mode == "person" ? SearchFixture.Json(new { results = new[] { new { media_type = "person", id = 9, name = "目标" } } }) :
-                    word == "目标2" ? SearchFixture.Json(new { marker = "original", results = Array.Empty<object>() }) :
-                    mode == "empty" ? SearchFixture.Json(new { marker = "fallback", results = Array.Empty<object>() }) : SearchFixture.Tmdb("tv", 7, "目标", "已取得简介")),
-                ReadDetail = (_, _, _) => Task.FromException<JsonElement>(new InvalidOperationException("single detail failed"))
-            };
-            await using var f = new SearchFixture(new SearchSources(), metadata);
-            var session = f.Service.Start("目标2"); await SearchFixture.Settle(session);
-            SearchFixture.Check(metadata.Searches.SequenceEqual(mode is "person" or "failure" ? new[] { "目标2" } : ["目标2", "目标"]),
-                mode + ": fallback is driven by successful raw results emptiness, never mapping emptiness or failure");
-            if (mode == "success")
-            {
-                var context = new FilmSearchContext(session, session.Items.Single());
-                SearchFixture.Check(context.Query == "目标2" && context.MetadataQuery == "目标" &&
-                    context.MetadataSearchPayload!.Value.GetProperty("results")[0].GetProperty("overview").GetString() == "已取得简介" &&
-                    context.Metadata!.Value.GetProperty("overview").GetString() == "已取得简介", "failed detail preserves complete original search metadata and the actual fallback query");
-                SearchFixture.Check(session.MetadataState == FilmSearchChannelState.Completed, "one detail failure does not fail the search channel");
-            }
-            else if (mode == "empty") SearchFixture.Check(session.MetadataQuery == "目标2" &&
-                session.MetadataSearchPayload!.Value.GetProperty("marker").GetString() == "original", "empty fallback retains original response and effective word");
-            else if (mode == "failure") SearchFixture.Check(session.MetadataState == FilmSearchChannelState.Error, "original failure is explicit metadata error");
-        }
-    }
-
-    private static async Task MetadataOwner()
-    {
-        var metadata = new SearchMetadata { ReadSearch = (word, _) => Task.FromResult(SearchFixture.Tmdb(word == "电影" ? "movie" : "tv", 7, word, "搜索简介")) };
-        var sources = new SearchSources(SearchFixture.Source("a")) { Read = (_, _, page, _) => Task.FromResult(SearchFixture.Page(2, (page.ToString(), "站源", ""))) };
-        await using var f = new SearchFixture(sources, metadata);
-        var first = f.Service.Start("剧集"); await SearchFixture.Settle(first);
-        SearchFixture.Check(new FilmSearchContext(first, first.Items.Single(item => SearchFixture.Text(item, "sourceKind") == "tmdb"))
-            .Metadata!.Value.GetProperty("overview").GetString() == "详情tv", "full detail reaches context");
+        await using var f = new SearchFixture();
+        var member = SearchFixture.Member(f.Sources.Sources[0], "1", "无关");
+        var first = SearchFixture.Card("group:low", "site", "无关", [member]);
+        var high = SearchFixture.Card("group:high", "site", "目标", [SearchFixture.Member(f.Sources.Sources[0], "2", "目标")]);
+        f.Runtime.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"), [first], [member], loading: true);
+        var session = f.Service.Start("目标"); await session.Work;
         await f.Service.LoadMoreAsync();
-        SearchFixture.Check(metadata.Searches.Count == 1 && metadata.Details.Count == 1, "more never repeats TMDB search/detail");
-        await SearchFixture.Settle(f.Service.Start("别名"));
-        SearchFixture.Check(metadata.Details.Count == 2, "a new query delegates detail freshness to the data owner rather than an App-lifetime success cache");
-        await SearchFixture.Settle(f.Service.Start("电影"));
-        SearchFixture.Check(metadata.Details.SequenceEqual(new[] { ("tv", 7L), ("tv", 7L), ("movie", 7L) }),
-            "each new query delegates its exact type and ID; more alone retains its current display snapshot");
-    }
-
-    private static async Task QueryCancellation()
-    {
-        var late = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var sources = new SearchSources(SearchFixture.Source("a"))
-        { Read = (_, query, _, _) => query == "旧词" ? late.Task : Task.FromResult(SearchFixture.Page(1, ("new", "新词", ""))) };
-        await using var f = new SearchFixture(sources);
-        var old = f.Service.Start("旧词");
-        try
-        {
-            await SearchFixture.Until(() => sources.Calls.Count == 1);
-            var current = f.Service.Start("新词"); await SearchFixture.Settle(current);
-            late.TrySetResult(SearchFixture.Page(1, ("late", "旧词", ""))); await SearchFixture.Settle(old);
-            await SearchFixture.Until(() => f.Service.TrackedSessions == 1);
-            SearchFixture.Check(ReferenceEquals(f.Service.Current, current) && old.Items.Count == 0 &&
-                SearchFixture.Text(current.Items.Single(), "title") == "新词", "noncooperative old delivery never publishes into either new or cancelled state");
-        }
-        finally { late.TrySetResult(SearchFixture.Page(1)); }
-    }
-
-    private static async Task RetiredSnapshot()
-    {
-        var sources = new SearchSources(SearchFixture.Source("a"))
-        { Read = (_, query, _, _) => Task.FromResult(SearchFixture.Page(1, ("same", query, "原始备注"))) };
-        await using var f = new SearchFixture(sources);
-        var old = f.Service.Start("旧影片"); await SearchFixture.Settle(old);
-        var context = new FilmSearchContext(old, old.Items.Single());
-        var current = f.Service.Start("新影片");
-        await SearchFixture.Settle(current);
-        await SearchFixture.Until(() => f.Service.TrackedSessions == 1);
-        SearchFixture.Check(context.Query == "旧影片" && context.Sources.Count == 1 &&
-            SearchFixture.Text(context.Sources[0], "rawTitle") == "旧影片" && !old.CanLoadMore,
-            "retirement releases only owner resources, not the playback-owned data snapshot");
-        try { _ = old.Cancellation.Token; throw new InvalidOperationException("retired cancellation source was not disposed"); }
-        catch (ObjectDisposedException) { }
-        f.Service.InvalidateQuery("新的音乐词");
-        await SearchFixture.Until(() => f.Service.TrackedSessions == 0);
-        SearchFixture.Check(f.Service.Current is null && context.Sources.Count == 1 && context.Query == "旧影片",
-            "a different music query also retires service tracking without discarding a playback snapshot");
-        try { _ = current.Cancellation.Token; throw new InvalidOperationException("invalidated cancellation source was not disposed"); }
-        catch (ObjectDisposedException) { }
-    }
-
-    private static async Task AllSourceFailures()
-    {
-        var sources = new SearchSources(SearchFixture.Source("a"))
-        { Read = (_, _, _, _) => Task.FromException<JsonElement>(new InvalidOperationException("fixture source error")) };
-        await using var f = new SearchFixture(sources);
-        var session = f.Service.Start("影片"); await SearchFixture.Settle(session);
-        SearchFixture.Check(session.SitesState == FilmSearchChannelState.Error && session.CanLoadMore && sources.Calls.Count == 1,
-            "all failures retain a generic channel error and explicit same-page retry");
-        sources.Read = (_, _, _, _) => Task.FromResult(SearchFixture.Page(1));
+        Check(!f.Runtime.Calls.Any(call => FilmJson.Text(call.Input, "action") == "more"), "first round cannot load more");
+        f.Runtime.PublishSearch(SearchFixture.Snapshot(Guid.Parse(session.Id), session.Query, [high, first], [member], revision: 2, hasMore: true));
+        await SearchFixture.Until(() => session.Revision == 2);
+        var upgraded = SearchFixture.Card("group:low", "site", "新代表", [member, SearchFixture.Member(f.Sources.Sources[0], "3", "无关 第二季")]);
+        var appended = SearchFixture.Card("group:new", "site", "新增", [SearchFixture.Member(f.Sources.Sources[0], "4", "新增")]);
+        f.Runtime.SearchCommand = (_, _) => SearchFixture.Snapshot(Guid.Parse(session.Id), session.Query,
+            [high, upgraded, appended], [member], revision: 3, round: 2);
         await f.Service.LoadMoreAsync();
-        SearchFixture.Check(session.SitesState == FilmSearchChannelState.Completed && !session.CanLoadMore &&
-            sources.Calls.Select(call => call.Page).SequenceEqual(new[] { 1, 1 }), "successful empty page is a completed result, not an error");
+        Check(session.Items.Select(item => FilmJson.Text(item, "displayKey")).SequenceEqual(["group:high", "group:low", "group:new"]) &&
+            FilmJson.Text(session.Items[1], "title") == "新代表" && session.Items[1].GetProperty("aggregateItems").GetArrayLength() == 2,
+            "Node's first-round ranking later positions and in-place member/representative update remain exact");
+        Check(f.Runtime.Calls.Count(call => call.Method == "film.search.command" && FilmJson.Text(call.Input, "action") == "more") == 1, "one user action sends one business command");
     }
-
-    private static async Task GenerationRecovery()
+    private static async Task ChannelStates()
     {
-        var sources = new SearchSources(SearchFixture.Source("stable"), SearchFixture.Source("replaced", order: 1));
-        sources.Read = (source, _, _, _) => Task.FromResult(SearchFixture.Page(2,
-            (source.Cat.Generation.ToString(), source.Cat.InstallationId + source.Cat.Generation + "影片", "")));
-        await using var f = new SearchFixture(sources);
-        var session = f.Service.Start("影片"); await SearchFixture.Settle(session);
-        sources.Sources[1] = SearchFixture.Source("replaced", order: 1, generation: 2); sources.Publish();
-        await SearchFixture.Until(() => session.SitesState == FilmSearchChannelState.Cancelled);
-        SearchFixture.Check(ReferenceEquals(session, f.Service.Start("影片")), "same query retains its context identity across source replacement");
-        await SearchFixture.Settle(session);
-        SearchFixture.Check(sources.Calls.Count(call => call.Source.Cat.InstallationId == "stable") == 1 && sources.Calls.Count == 3,
-            "valid completed source pages are not refetched");
-        SearchFixture.Check(session.CanLoadMore && session.RawItems.All(item => SearchFixture.Text(item, "installationId") != "replaced" ||
-            item.GetProperty("generation").GetInt64() == 2), "retired-generation members are removed and current source restarts with its own page one");
-        sources.Sources.Add(SearchFixture.Source("newly-enabled", order: 2)); sources.Publish();
-        SearchFixture.Check(session.SitesState == FilmSearchChannelState.Cancelled, "a newly enabled source also invalidates the captured source set");
-        f.Service.Start("影片"); await SearchFixture.Settle(session);
-        SearchFixture.Check(sources.Calls.Count == 4 && sources.Calls[^1].Source.Cat.InstallationId == "newly-enabled" && sources.Calls[^1].Page == 1,
-            "same-query recovery admits the new source without reloading either retained source");
+        await using var f = new SearchFixture();
+        f.Runtime.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"), [], [], siteState: "failed", metadataState: "unavailable", hasMore: true);
+        var failed = f.Service.Start("失败"); await SearchFixture.Settle(failed);
+        Check(failed.SitesState == FilmSearchChannelState.Error && failed.MetadataState == FilmSearchChannelState.Unavailable && failed.CanLoadMore,
+            "source failures remain retryable and metadata unavailable remains distinct");
+        await Task.Yield(); Check(f.Runtime.Calls.Count(call => call.Method == "film.search.command") == 0, "no automatic retry");
+        await f.Service.LoadMoreAsync();
+        f.Runtime.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"), [], []);
+        var empty = f.Service.Start("空页"); await SearchFixture.Settle(empty);
+        Check(empty.SitesState == FilmSearchChannelState.Completed && !empty.CanLoadMore, "successful empty result is complete");
+        f.Runtime.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"), [], [], noSources: true);
+        var none = f.Service.Start("无源"); await SearchFixture.Settle(none);
+        Check(none.SitesState == FilmSearchChannelState.NoSources, "no sources is not failure or successful empty search");
     }
-
-    private static async Task PrepareResume()
+    private static async Task Invalidation()
     {
-        var metadata = new SearchMetadata();
-        var sources = new SearchSources(SearchFixture.Source("a")) { Read = (_, _, _, _) => Task.FromResult(SearchFixture.Page(2, ("1", "站源", ""))) };
-        await using var f = new SearchFixture(sources, metadata);
-        var session = f.Service.Start("目标"); await SearchFixture.Settle(session);
-        string raw = session.RawItems[0].GetRawText();
-        await f.Service.PrepareShutdownAsync();
-        SearchFixture.Check(f.Engine.Disposals == 0, "preparation borrows the engine without closing it");
-        f.Service.Resume();
-        SearchFixture.Check(ReferenceEquals(session, f.Service.Start("目标")), "resume and same-query entry use the retained snapshot");
-        await SearchFixture.Settle(session);
-        SearchFixture.Check(session.CanLoadMore && sources.Calls.Count == 1 && metadata.Searches.Count == 1 && metadata.Details.Count == 1 &&
-            session.RawItems[0].GetRawText() == raw, "resume renews cancellation without refetching completed pages or metadata");
+        await using var f = new SearchFixture();
+        var old = f.Service.Start("旧词"); await SearchFixture.Settle(old);
+        var latest = f.Service.Start("新词"); await SearchFixture.Settle(latest);
+        f.Runtime.PublishSearch(SearchFixture.Snapshot(Guid.Parse(old.Id), old.Query, [], [], revision: 99));
+        await Task.Yield();
+        Check(ReferenceEquals(f.Service.Current, latest) && old.Revision < 99, "late retired snapshots cannot publish");
+        f.Sources.Sources[0] = SearchFixture.Source("a", generation: 2); f.Sources.Publish();
+        Check(f.Service.Current is null && latest.Retired && f.Runtime.SearchOpens == 2, "generation changes revoke without implicitly searching");
+        var next = f.Service.Start("新词"); await SearchFixture.Settle(next);
+        Check(next != latest && f.Runtime.SearchOpens == 3, "explicit reentry opens with the new source snapshot");
+        f.Sources.Sources[0] = f.Sources.Sources[0] with { Site = f.Sources.Sources[0].Site with { Order = 2 } };
+        f.Sources.Publish(); Check(f.Service.Current is null, "source ordering changes also revoke derived display");
     }
-
-    private static async Task DetailShutdown()
+    private static async Task Resume()
     {
+        await using var f = new SearchFixture();
+        var session = f.Service.Start("保留"); await SearchFixture.Settle(session);
+        var original = session.Items[0].GetRawText();
+        await f.Service.StopAsync();
+        Check(!session.CanLoadMore, "stopped session cannot schedule more");
+        Check(ReferenceEquals(session, f.Service.Start("保留")), "same-word return uses the same Node identity");
+        await session.Work;
+        Check(f.Runtime.SearchOpens == 1 && f.Runtime.Calls.Any(call => call.Method == "film.search.snapshot") &&
+            f.Runtime.Calls.Any(call => FilmJson.Text(call.Input, "action") == "resume"), "return snapshots and resumes without another open");
+        f.Runtime.DisconnectSearch(Guid.Parse(session.Id));
+        await SearchFixture.Until(() => session.Error.Length > 0);
+        await session.Work;
+        Check(session.Error == "DISCONNECTED" && session.Items[0].GetRawText() == original && !session.CanLoadMore, "disconnect retains display and reports a real error");
+        Check(f.Runtime.Calls.Count(call => call.Method == "film.search.command" && FilmJson.Text(call.Input, "action") == "stop") == 2 &&
+            !f.Runtime.Revoked.IsCancellationRequested, "event disconnect explicitly stops new scheduling without revoking the data producer");
+        await session.Observing;
+        // A fresh event subscription gets Node's latest full snapshot.
+        f.Runtime.ReconnectSearch(Guid.Parse(session.Id));
+        f.Service.Start("保留"); await session.Work;
+        var newest = SearchFixture.Snapshot(Guid.Parse(session.Id), session.Query, [], [], revision: 8);
+        f.Runtime.PublishSearch(newest); await SearchFixture.Until(() => session.Revision == 8);
+        f.Runtime.PublishSearch(SearchFixture.Snapshot(Guid.Parse(session.Id), session.Query, [SearchFixture.Card("old", "site", "旧", [])], [], revision: 7));
+        await Task.Yield(); Check(session.Revision == 8 && session.Items.Count == 0 && f.Runtime.SearchOpens == 1, "out-of-order snapshots cannot roll back current state");
+    }
+    private static async Task Close()
+    {
+        var receipt = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var metadata = new SearchMetadata { ReadDetail = async (_, _, token) =>
+        await using var f = new SearchFixture();
+        f.Runtime.Respond = async (method, input, _) =>
         {
-            entered.TrySetResult();
-            try { await Task.Delay(Timeout.Infinite, token); }
-            finally { cancelled.TrySetResult(); await release.Task; }
-            return SearchFixture.Json(new { overview = "unreachable" });
-        } };
-        var f = new SearchFixture(new SearchSources(), metadata);
-        try
-        {
-            var session = f.Service.Start("目标"); await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            var closing = f.Service.DisposeAsync().AsTask();
-            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            SearchFixture.Check(!closing.IsCompleted && f.Engine.Disposals == 0, "close cancels physical detail but does not release engine before actual drain");
-            release.TrySetResult(); await closing.WaitAsync(TimeSpan.FromSeconds(10));
-            SearchFixture.Check(f.Engine.Disposals == 1 && f.Service.TrackedSessions == 0 && !session.Loading && f.Sources.Subscribers == 0, "close drains hung-until-cancel detail and releases engine/observers once");
-        }
-        finally { release.TrySetResult(); await f.DisposeAsync(); }
-    }
-
-    private static async Task PrepareResumeInFlight()
-    {
-        int interruptedReads = 0, detailReads = 0;
-        var sources = new SearchSources(SearchFixture.Source("stable"), SearchFixture.Source("interrupted", order: 1));
-        sources.Read = async (source, _, _, token) =>
-        {
-            if (source.Cat.InstallationId == "interrupted" && ++interruptedReads == 1)
-                await Task.Delay(Timeout.Infinite, token);
-            return SearchFixture.Page(2, (source.Cat.InstallationId, "目标 第一季", "更新至3集"));
+            if (method != "film.search.open") return f.Runtime.Handle(method, input);
+            entered.SetResult(); return await receipt.Task;
         };
-        var metadata = new SearchMetadata { ReadDetail = async (_, _, token) =>
-        {
-            if (++detailReads == 1) await Task.Delay(Timeout.Infinite, token);
-            return SearchFixture.Json(new { name = "目标", overview = "恢复所得详情", seasons = Array.Empty<object>() });
-        } };
-        await using var f = new SearchFixture(sources, metadata);
-        var session = f.Service.Start("目标");
-        await SearchFixture.Until(() => session.SiteItems.Count == 1 && metadata.Details.Count == 1 && session.Items.Count > 0);
-        var context = new FilmSearchContext(session, session.Items.First());
-        await f.Service.PrepareShutdownAsync();
-        SearchFixture.Check(!session.Loading && f.Engine.Disposals == 0, "preparation physically settles interrupted work and retains the native engine");
-        f.Service.Resume();
-        await SearchFixture.Settle(session);
-        SearchFixture.Check(ReferenceEquals(session, f.Service.Current) && session.CanLoadMore &&
-            session.RawItems.Count(item => SearchFixture.Text(item, "sourceKind") == "site") == 2 &&
-            session.RawItems.Count(item => SearchFixture.Text(item, "sourceKind") == "tmdb") == 1 &&
-            sources.Calls.Count(call => call.Source.Cat.InstallationId == "stable") == 1 &&
-            sources.Calls.Where(call => call.Source.Cat.InstallationId == "interrupted").Select(call => call.Page).SequenceEqual(new[] { 1, 1 }),
-            "the retained successful source is untouched and only the unacknowledged page resumes");
-        SearchFixture.Check(metadata.Searches.Count == 1 && metadata.Details.Count == 2 && context.Sources.Count == 2 &&
-            context.MetadataSearchPayload!.Value.GetProperty("results")[0].GetProperty("overview").GetString() == "搜索简介" &&
-            context.Metadata!.Value.GetProperty("overview").GetString() == "恢复所得详情",
-            "resume reuses the original search payload and obtains only the cancelled missing detail");
-    }
+        var session = f.Service.Start("关闭"); await entered.Task;
+        var close = f.Service.PrepareShutdownAsync(); Check(!close.IsCompleted, "accepted open is drained before close");
+        f.Runtime.Respond = null;
+        var envelope = f.Runtime.Handle("film.search.open", FilmJson.Encode(new { query = session.Query }));
+        receipt.SetResult(envelope); await close;
+        f.Service.Resume(); await session.Work;
+        Check(f.Runtime.Calls.Any(call => FilmJson.Text(call.Input, "action") == "stop") &&
+            f.Runtime.Calls.Any(call => FilmJson.Text(call.Input, "action") == "resume"), "shutdown preparation can resume the same session");
+        await f.Service.DisposeAsync();
+        Check(f.Service.TrackedSessions == 0 && f.Runtime.Calls.Count(call => call.Method == "film.search.release") == 1 && !f.Runtime.Revoked.IsCancellationRequested,
+            "search release drains native observation without closing the borrowed runtime");
 
-    private static async Task DetailOwnership()
-    {
-        var oldRelease = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var oldCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var metadata = new SearchMetadata();
-        int calls = 0;
-        metadata.ReadDetail = async (_, _, token) =>
+        await using var retired = new SearchFixture();
+        var old = retired.Service.Start("退役关闭"); await SearchFixture.Settle(old);
+        var releasing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var released = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        retired.Runtime.Respond = (method, input, _) =>
         {
-            if (++calls != 1) return SearchFixture.Json(new { name = "目标", overview = "current" });
-            using var registration = token.Register(() => oldCancelled.TrySetResult());
-            return await oldRelease.Task; // A late noncooperative adapter receipt.
+            if (method != "film.search.release") return Task.FromResult(retired.Runtime.Handle(method, input));
+            releasing.TrySetResult(); return released.Task;
         };
-        await using var f = new SearchFixture(new SearchSources(), metadata);
-        var old = f.Service.Start("旧查询");
         try
         {
-            await SearchFixture.Until(() => metadata.Details.Count == 1);
-            f.Service.InvalidateQuery("新查询");
-            await oldCancelled.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            var current = f.Service.Start("新查询"); await SearchFixture.Settle(current);
-            SearchFixture.Check(metadata.Details.Count == 2 && new FilmSearchContext(current, current.Items.Single()).Metadata!.Value
-                .GetProperty("overview").GetString() == "current", "new query has its own waiter after the previous query cancelled");
-            oldRelease.TrySetResult(SearchFixture.Json(new { name = "目标", overview = "late-old" }));
-            await SearchFixture.Settle(old);
-            var third = f.Service.Start("第三查询"); await SearchFixture.Settle(third);
-            SearchFixture.Check(metadata.Details.Count == 3 && new FilmSearchContext(third, third.Items.Single()).Metadata!.Value
-                .GetProperty("overview").GetString() == "current" &&
-                !old.Details.ContainsKey(JsonSerializer.Serialize(new object[] { "tv", 7L })),
-                "each query reconsults the data owner; a cancelled late receipt cannot seed even its retired display snapshot");
+            retired.Service.InvalidateQuery("新词"); await releasing.Task;
+            var drain = retired.Service.PrepareShutdownAsync();
+            Check(!drain.IsCompleted, "shutdown drains an already accepted retired release");
+            released.SetResult(FilmSearchConsumerRuntime.Success(new { released = true })); await drain;
+            Check(retired.Runtime.Calls.Count(call => call.Method == "film.search.command" && FilmJson.Text(call.Input, "action") == "stop") == 1 &&
+                retired.Runtime.Calls.Count(call => call.Method == "film.search.release") == 1,
+                "shutdown never schedules another stop behind the retired session's release");
         }
-        finally { oldRelease.TrySetResult(SearchFixture.Json(new { })); }
+        finally { released.TrySetResult(FilmSearchConsumerRuntime.Failure("CLOSED")); }
     }
-
-    private static async Task LateCarrier()
+    private static async Task StopPublication()
     {
-        var second = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var tmdb = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var sources = new SearchSources(SearchFixture.Source("a"), SearchFixture.Source("b", order: 1))
-        { Read = (source, _, _, _) => source.Cat.InstallationId == "a" ? Task.FromResult(SearchFixture.Page(1, ("same", "目标 第一季", "更新至3集"))) : second.Task };
-        var metadata = new SearchMetadata { ReadSearch = (_, _) => tmdb.Task };
-        await using var f = new SearchFixture(sources, metadata);
-        var session = f.Service.Start("原始查询");
+        await using var f = new SearchFixture();
+        f.Runtime.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"),
+            [SearchFixture.Card("original", "site", "已显示", [])], [], loading: true);
+        var session = f.Service.Start("停止原词"); await session.Work;
+        var original = session.Items[0].GetRawText();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var receipt = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        CancellationToken accepted = default;
+        f.Runtime.Respond = (method, input, token) =>
+        {
+            if (method != "film.search.command" || FilmJson.Text(input, "action") != "stop")
+                return Task.FromResult(f.Runtime.Handle(method, input));
+            accepted = token; entered.TrySetResult(); return receipt.Task;
+        };
         try
         {
-            await SearchFixture.Until(() => session.Items.Count == 1);
-            var selected = new FilmSearchContext(session, session.Items.Single());
-            var raw = new FilmSearchContext(session, session.RawItems.Single());
-            string rawIdentity = raw.Item.GetRawText();
-            second.TrySetResult(SearchFixture.Page(1, ("same", "目标 第二季", "更新至5集")));
-            tmdb.TrySetResult(SearchFixture.Json(new { results = new object[]
+            var stopped = f.Service.StopAsync(); await entered.Task;
+            int deliveries = f.Runtime.SearchDeliveries;
+            var late = SearchFixture.Card("late", "site", "不得发布", []);
+            f.Runtime.PublishSearch(SearchFixture.Snapshot(Guid.Parse(session.Id), session.Query, [late], [late], revision: 2));
+            await SearchFixture.Until(() => f.Runtime.SearchDeliveries > deliveries);
+            Check(session.Items[0].GetRawText() == original && session.RawItems.Count == 0 && session.Loading && !stopped.IsCompleted,
+                "late SSE cannot change the stopped display while the accepted stop RPC is pending");
+            var ack = SearchFixture.Snapshot(Guid.Parse(session.Id), session.Query, [late], [late], revision: 3,
+                siteState: "cancelled", metadataState: "cancelled");
+            f.Runtime.PublishSearch(ack);
+            receipt.SetResult(FilmSearchConsumerRuntime.Success(ack)); await stopped;
+            Check(!session.Loading && session.SitesState == FilmSearchChannelState.Cancelled &&
+                session.MetadataState == FilmSearchChannelState.Cancelled && session.Items[0].GetRawText() == original &&
+                session.RawItems.Count == 0 && !accepted.IsCancellationRequested && !f.Runtime.Revoked.IsCancellationRequested,
+                "stop receipt updates cancellation status but not cards and never aborts the borrowed producer");
+            f.Runtime.Respond = null;
+            f.Service.Start(session.Query); await session.Work;
+            Check(f.Runtime.SearchOpens == 1 && session.Items.Single().GetProperty("title").GetString() == "不得发布",
+                "only explicit resume reacquires the latest full Node projection without reopening");
+        }
+        finally { receipt.TrySetResult(FilmSearchConsumerRuntime.Failure("CLOSED")); }
+    }
+    private static async Task OpenPublication()
+    {
+        foreach (string reason in new[] { "stop", "query", "sources" })
+        {
+            bool retire = reason != "stop";
+            await using var f = new SearchFixture();
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var receipt = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+            CancellationToken accepted = default;
+            f.Runtime.Respond = (method, input, token) =>
             {
-                new { media_type = "movie", id = 7, title = "目标", overview = "电影简介" },
-                new { media_type = "tv", id = 7, name = "目标", overview = "剧集简介" }
-            } }));
-            await SearchFixture.Settle(session);
-            SearchFixture.Check(selected.Query == "原始查询" && SearchFixture.Text(selected.Item, "sourceKind") == "site" &&
-                SearchFixture.Text(selected.CurrentItem, "sourceKind") == "tmdb" && SearchFixture.Text(selected.CarrierItem, "tmdbType") == "tv" &&
-                selected.Sources.Count == 2 && selected.Metadata!.Value.GetProperty("overview").GetString() == "详情tv",
-                "original selected identity has an explicit late TMDB carrier with all members and metadata");
-            SearchFixture.Check(SearchFixture.Text(raw.CurrentItem, "sourceKind") == "site" && SearchFixture.Text(raw.CurrentItem, "installationId") == "a" &&
-                SearchFixture.Text(raw.CurrentItem, "siteDetail") == "same" && FilmSearchJson.Number(raw.CurrentItem, "generation") == 1 &&
-                raw.Item.GetRawText() == rawIdentity && SearchFixture.Text(raw.CurrentItem, "id") == SearchFixture.Text(raw.Item, "id") &&
-                SearchFixture.Text(raw.CurrentItem, "displayKey") == raw.DisplayKey &&
-                SearchFixture.Text(raw.CurrentItem, "siteKey") == SearchFixture.Text(raw.Item, "siteKey") &&
-                raw.Sources.Count == 1 && raw.Metadata is null &&
-                SearchFixture.Text(raw.CarrierItem, "sourceKind") == "site", "raw selection preserves only its exact original source without TMDB enrichment");
-            var movie = new FilmSearchContext(session, session.Items.Single(item => SearchFixture.Text(item, "tmdbType") == "movie"));
-            SearchFixture.Check(SearchFixture.Text(movie.CurrentItem, "tmdbType") == "movie" && movie.Sources.Count == 0 &&
-                movie.Metadata!.Value.GetProperty("overview").GetString() == "详情movie", "identical TMDB numeric IDs and titles never cross movie/tv identity");
-            SearchFixture.Check(metadata.Searches.Count == 1 && sources.Calls.Count == 2, "following late membership never searches again");
+                if (method != "film.search.open") return Task.FromResult(f.Runtime.Handle(method, input));
+                accepted = token; entered.TrySetResult(); return receipt.Task;
+            };
+            try
+            {
+                var session = f.Service.Start("open竞态"); await entered.Task;
+                var publications = new List<int>(); session.Changed += (_, _) => publications.Add(session.Items.Count);
+                Task stopped;
+                if (reason == "query") { f.Service.InvalidateQuery("另一个词"); stopped = session.Work; }
+                else if (reason == "sources")
+                {
+                    f.Sources.Sources[0] = SearchFixture.Source("a", generation: 2); f.Sources.Publish();
+                    stopped = session.Work;
+                }
+                else stopped = f.Service.StopAsync();
+                f.Runtime.Respond = null;
+                var allocated = f.Runtime.Handle("film.search.open", FilmJson.Encode(new { query = session.Query }));
+                receipt.SetResult(allocated); await stopped;
+                Check(session.Id == FilmJson.Text(allocated.GetProperty("value"), "sessionId") && session.Items.Count == 0 &&
+                    session.RawItems.Count == 0 && publications.All(count => count == 0) &&
+                    !accepted.IsCancellationRequested && !f.Runtime.Revoked.IsCancellationRequested,
+                    "an accepted late open binds only its ID; stopped and retired presentations never receive its cards");
+                if (retire)
+                {
+                    await SearchFixture.Until(() => f.Service.TrackedSessions == 0);
+                    Check(f.Service.Current is null && f.Runtime.Calls.Count(call => call.Method == "film.search.release") == 1,
+                        "retired open is stopped and released after its real allocation receipt");
+                }
+                else
+                {
+                    Check(f.Runtime.Calls.Any(call => FilmJson.Text(call.Input, "action") == "stop"), "late open receives stop after allocation");
+                    f.Service.Start(session.Query); await session.Work;
+                    Check(session.Items.Count == 1 && f.Runtime.SearchOpens == 1, "explicit resume restores late Node cards without duplicate open");
+                }
+            }
+            finally { receipt.TrySetResult(FilmSearchConsumerRuntime.Failure("CLOSED")); }
         }
-        finally { second.TrySetResult(SearchFixture.Page(1)); tmdb.TrySetResult(SearchFixture.Tmdb("tv", 7, "目标", "")); }
+        await using var unopened = new SearchFixture();
+        var pending = unopened.Service.Start("未接纳");
+        await unopened.Service.StopAsync();
+        Check(unopened.Runtime.SearchOpens == 0 && pending.Items.Count == 0 && !pending.Loading &&
+            pending.SitesState == FilmSearchChannelState.Cancelled && pending.MetadataState == FilmSearchChannelState.Cancelled,
+            "stop before admission schedules no open and settles the presentation as cancelled");
+        unopened.Service.Start(pending.Query); await pending.Work;
+        Check(unopened.Runtime.SearchOpens == 1 && pending.Items.Count == 1, "explicit return can perform the first unaccepted open once");
+    }
+    private static async Task Errors()
+    {
+        await using var f = new SearchFixture();
+        f.Runtime.Respond = (_, _, _) => Task.FromResult(FilmSearchConsumerRuntime.Failure("CAPABILITY_UNAVAILABLE"));
+        var failed = f.Service.Start("不可用"); await failed.Work;
+        Check(failed.Error == "CAPABILITY_UNAVAILABLE" && failed.Items.Count == 0 && !failed.Loading && f.Runtime.SearchOpens == 1, "no fake success or old execution fallback");
+        f.Runtime.Respond = null;
+        f.Runtime.SearchOpen = (_, _) => FilmJson.Encode(new { sessionId = "bad", query = "无效" });
+        var malformed = f.Service.Start("无效"); await malformed.Work;
+        Check(malformed.SitesState == FilmSearchChannelState.Error && malformed.Error.Length > 0, "invalid snapshots surface failure");
     }
 }
 
 internal sealed class SearchFixture : IAsyncDisposable
 {
-    internal SearchFixture(SearchSources? sources = null, IFilmSearchMetadata? metadata = null)
+    private readonly bool ownsRuntime;
+    internal SearchFixture(SearchSources? sources = null, FilmSearchConsumerRuntime? runtime = null)
     {
-        Sources = sources ?? new(); Engine = new();
-        Service = new(Engine, Sources, _ => Task.FromResult<IReadOnlyList<string>>([]), metadata);
+        ownsRuntime = runtime is null;
+        Sources = sources ?? new(Source("a")); Runtime = runtime ?? new();
+        Runtime.SearchOpen ??= (id, input) => Snapshot(id, FilmJson.Text(input, "query"),
+            [Card("group:default", "site", "目标", [Member(Source("a"), "same", "目标")])], [Member(Source("a"), "same", "目标")], hasMore: true);
+        Runtime.SearchHandoff ??= input => Handoff(Guid.Parse(FilmJson.Text(input, "sessionId")), FilmJson.Text(input, "selectionId"),
+            FilmJson.Text(Runtime.SearchValue(Guid.Parse(FilmJson.Text(input, "sessionId"))), "query"), new("group:default", "group", "目标", Members: FilmJson.Encode(new[] { new { sourceKey = Source("a").Key, detailId = "same" } })),
+            Sources.CurrentSearchSources.Select(source => source.Wire).ToArray());
+        Service = new(Runtime.CaptureConnectionAsync, Sources);
     }
     internal SearchSources Sources { get; }
-    internal SearchEngine Engine { get; }
+    internal FilmSearchConsumerRuntime Runtime { get; }
     internal FilmSearchService Service { get; }
     internal static void Check(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
     internal static JsonElement Json(object value) => JsonSerializer.SerializeToElement(value);
@@ -402,58 +303,51 @@ internal sealed class SearchFixture : IAsyncDisposable
         string[] actions = ["search"]; var methods = new Dictionary<string, string>();
         return new(new(installation, installation, "local", null, true, 1, null, "idle", null, generation, "ready", "fixture", null,
             [new(site, installation, "fixture", actions, methods)]),
-            new(new(installation, site), installation, "fixture", actions, methods, new(), order));
+            new(new(installation, site), installation, "fixture", actions, methods, new(AggregateImages: true), order));
     }
-    internal static async Task Settle(FilmSearchSession session) => await session.Work.WaitAsync(TimeSpan.FromSeconds(20));
+    internal static JsonElement Member(FilmSearchSource source, object detailId, string title) => FilmJson.Encode(new
+    {
+        id = "raw:" + JsonSerializer.Serialize(detailId), displayKey = "site:" + source.Key + ":" + JsonSerializer.Serialize(detailId), sourceKind = "site",
+        siteKey = source.Key, installationId = source.Cat.InstallationId, generation = source.Cat.Generation, siteId = source.Site.Key.SiteKey,
+        detailId, title, siteLabel = source.Site.Name, textBadge = "高清", poster = "", raw = new { vod_id = detailId, vod_name = title, vod_remarks = "  原备注  ", unknown = "  原始字段  " }
+    });
+    internal static JsonElement Card(string key, string kind, string title, JsonElement[] members, string? label = null) => FilmJson.Encode(new
+    {
+        id = key, displayKey = key, sourceKind = kind, title, poster = "", textBadge = "2023", siteLabel = label ?? (kind == "tmdb" ? "剧集" : "聚合"),
+        aggregateItems = members, tmdbType = kind == "tmdb" ? "tv" : "", tmdbId = kind == "tmdb" ? 7 : 0
+    });
+    internal static JsonElement Snapshot(Guid id, string query, JsonElement[] cards, JsonElement[] rawCards,
+        long revision = 1, int round = 1, bool loading = false, bool hasMore = false, string siteState = "completed",
+        string metadataState = "completed", bool noSources = false, JsonElement? metadataSearch = null) => FilmJson.Encode(new
+    {
+        sessionId = id, query, revision, sequence = revision, round, loading, hasMore, noSources, siteState, metadataState,
+        cards, rawCards, siteItems = rawCards, tmdbItems = Array.Empty<object>(), metadataSearch, metadataQuery = query, metadataDetails = new { }
+    });
+    internal static JsonElement Handoff(Guid id, string selectionId, string query, FilmPlaybackTarget target,
+        IReadOnlyList<JsonElement> sources, JsonElement? results = null, JsonElement? search = null, JsonElement? metadata = null,
+        JsonElement? cacheEntries = null, JsonElement? resultHints = null, long revision = 1) => FilmJson.Encode(new
+    {
+        target = target.Wire(), query, sources, results, search, metadata, cacheEntries, resultHints, selectionId, revision,
+        searchReference = new { sessionId = id, selectionId }
+    });
+    internal static async Task Settle(FilmSearchSession session)
+    {
+        await session.Work.WaitAsync(TimeSpan.FromSeconds(20));
+        await Until(() => !session.Loading);
+    }
     internal static async Task Until(Func<bool> done)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         while (!done()) await Task.Delay(5, timeout.Token);
     }
-    public ValueTask DisposeAsync() => Service.DisposeAsync();
-}
-internal sealed class SearchEngine : IJavaScriptJsonEngine
-{
-    private readonly NativeJavaScriptJsonEngine engine = new(FilmSearchService.LoadProgramSource());
-    internal int Disposals;
-    public Task<JsonElement> InvokeAsync(object request, CancellationToken cancellationToken = default) => engine.InvokeAsync(request, cancellationToken);
-    public ValueTask DisposeAsync() { Disposals++; return engine.DisposeAsync(); }
+    public async ValueTask DisposeAsync() { await Service.DisposeAsync(); if (ownsRuntime) Runtime.Dispose(); }
 }
 internal sealed class SearchSources(params FilmSearchSource[] sources) : IFilmSearchSources
 {
-    internal RuntimeConnection? DataOwner;
-    internal Func<FilmSearchSource, string, int, JsonElement, JsonElement?>? CacheEntry;
-    private event EventHandler? changed;
-    public event EventHandler? Changed { add => changed += value; remove => changed -= value; }
-    internal int Subscribers => changed?.GetInvocationList().Length ?? 0;
-    internal List<FilmSearchSource> Sources { get; } = [.. sources];
-    internal List<(FilmSearchSource Source, string Query, int Page)> Calls { get; } = [];
-    internal Func<FilmSearchSource, string, int, CancellationToken, Task<JsonElement>> Read =
-        (_, _, _, _) => Task.FromResult(SearchFixture.Page(1));
+    internal List<FilmSearchSource> Sources { get; } = sources.ToList();
+    public event EventHandler? Changed;
     public IReadOnlyList<FilmSearchSource> CurrentSearchSources => Sources.ToArray();
     public Task<IReadOnlyList<FilmSearchSource>> ReadSearchSourcesAsync(CancellationToken token)
-    { token.ThrowIfCancellationRequested(); return Task.FromResult<IReadOnlyList<FilmSearchSource>>(Sources.ToArray()); }
-    public async Task<FilmSearchData> SearchAsync(FilmSearchSource source, string query, int page, CancellationToken token)
-    {
-        Calls.Add((source, query, page));
-        var raw = await Read(source, query, page, token);
-        return new(SearchFixture.Json(new { items = raw.GetProperty("list"), page, raw }), DataOwner,
-            CacheEntry?.Invoke(source, query, page, raw));
-    }
-    public bool IsSearchSourceCurrent(FilmSearchSource source) => Sources.Any(current => current.Key == source.Key && current.Cat.Generation == source.Cat.Generation);
-    internal void Publish() => changed?.Invoke(this, EventArgs.Empty);
-}
-internal sealed class SearchMetadata : IFilmSearchMetadata
-{
-    internal RuntimeConnection? DataOwner;
-    internal List<string> Searches { get; } = [];
-    internal List<(string Type, long Id)> Details { get; } = [];
-    internal Func<string, CancellationToken, Task<JsonElement>> ReadSearch = (_, _) => Task.FromResult(SearchFixture.Tmdb("tv", 7, "目标", "搜索简介"));
-    internal Func<string, long, CancellationToken, Task<JsonElement>> ReadDetail = (type, _, _) => Task.FromResult(SearchFixture.Json(new
-    { name = "目标", title = "目标", overview = "详情" + type, first_air_date = "2023-01-01", release_date = "2023-01-01", seasons = Array.Empty<object>() }));
-    public async Task<FilmSearchData> SearchAsync(string query, CancellationToken token)
-    { Searches.Add(query); return new(await ReadSearch(query, token), DataOwner); }
-    public async Task<FilmSearchData> DetailAsync(string type, long id, CancellationToken token)
-    { Details.Add((type, id)); return new(await ReadDetail(type, id, token), DataOwner); }
-    public string ResolveImage(string path) => path.Length == 0 ? "" : "https://fixture.invalid" + path;
+    { token.ThrowIfCancellationRequested(); return Task.FromResult(CurrentSearchSources); }
+    internal void Publish() => Changed?.Invoke(this, EventArgs.Empty);
 }

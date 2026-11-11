@@ -6,7 +6,7 @@
 
 构建机需要 Node 24（参考 24.21.0）及根锁依赖 `npm ci --ignore-scripts`；客户端不需要用户安装 Node。`prepare-ios-runtime.py` 校验 `scripts/ios-node-mobile.json` 锁定的 Node Mobile 18.20.4 archive／许可，复用 `.cache/nodejs-mobile/ios/NodeMobile.xcframework`，并按 iOS SDK／架构准备 `MeowScriptHost.framework` 和公共载荷。`package-ios-runtime.mjs` 包装公共 `common-native` 打包器，包含 `complete`／`runtime.http.v1` manifest、iOS entry、按序 music／cat／source／pan／tmdb／douban／film／netease 八模块、影视业务依赖、规则 SDK 与 token 的锁定 jsdom 依赖和许可，不包含 Windows 入口或 WASM／asm.js 引擎。
 
-`build-ios.sh`、`test-native.sh compile|all` 自动准备这些输入；直接运行 Xcode 前先准备相同目标的载体与载荷。可用 `MEOWFILM_BUILD_NODE` 指定构建工具 Node 路径；它不改变 App 内嵌版本。工程嵌入并签名 NodeMobile 和 MeowScriptHost，载荷及适用许可随 App 分发。影视规则另经本地 `MeowJavaScript` SwiftPM 包静态链接锁定 QuickJS-NG 派生 C 源码；`FilmRuleProgram` 携带唯一共享 JS，中央 `quickjs-native-MIT.txt` 和 `Unicode-3.0.txt` 由 Xcode 随 App 打包。准备工具同时校验 `scripts/quickjs-native.json`，不下载另一套客户端规则引擎或现场应用补丁。CI 两个工作流均恢复锁定依赖，不使用系统已装 Node 的隐式状态。
+`build-ios.sh`、`test-native.sh compile|all` 自动准备这些输入；直接运行 Xcode 前先准备相同目标的载体与载荷。可用 `MEOWFILM_BUILD_NODE` 指定构建工具 Node 路径；它不改变 App 内嵌版本。工程嵌入并签名 NodeMobile 和 MeowScriptHost，载荷及适用许可随 App 分发。影视规则／搜索程序由 Node 加载，共用 `scripts/script-host-native.json` 锁定的 QuickJS-NG 0.18.0 原生载体、派生补丁与 Unicode 表，不再通过 SwiftPM 静态链接另一套客户端规则核心；中央引擎 MIT 与 `Unicode-3.0.txt` 由 Xcode 随 App 打包。CI 两个工作流均恢复锁定依赖，不使用系统已装 Node 的隐式状态。
 
 视频输入由 `scripts/prepare-ios-video-kernel.py` 按 `scripts/ios-video-kernel.json` 锁定的 FFmpeg 8.1.2 源码、补丁与目标构建；`build-ios.sh` 准备 `ios-arm64`，原生测试入口选择对应 Mac／模拟器目标。`native/VideoKernel` 的 `MeowVideoKernel` 经 `MeowPlayback` 静态接入，负责解复用、解码与系统 sample-buffer 输出，不是 Node addon，也不是新增的业务／媒体会话 owner。视频来源与适用许可引用 `LICENSES` 的唯一正文。目标产物准备和工程资源齐全不代表合并后的 iOS App 已编译、签名或真实播放通过，须分别取得平台证据。
 

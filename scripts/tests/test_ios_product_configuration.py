@@ -71,10 +71,10 @@ class ProductConfigurationTests(unittest.TestCase):
         self.assertIn('path = "../../.cache/nodejs-mobile/ios/NodeMobile.xcframework";', project)
         self.assertIn('path = "../../.cache/ios-runtime/$(MEOW_RUNTIME_SDK)-$(MEOW_RUNTIME_ARCH)/Runtime";', project)
         self.assertIn('path = "../../LICENSES/nodejs-mobile-LICENSE.txt";', project)
-        self.assertIn('path = "../../LICENSES/quickjs-native-MIT.txt";', project)
+        self.assertIn('path = "../../LICENSES/quickjs-ng-LICENSE.txt";', project)
         self.assertIn('path = "../../LICENSES/Unicode-3.0.txt";', project)
         resources = next(line for line in project.splitlines() if "isa = PBXResourcesBuildPhase;" in line)
-        for license_name in ("quickjs-native-MIT.txt", "Unicode-3.0.txt", "NOTICE.md", "GPL-3.0-only.txt"):
+        for license_name in ("quickjs-ng-LICENSE.txt", "Unicode-3.0.txt", "NOTICE.md", "GPL-3.0-only.txt"):
             reference = next(line.split()[0] for line in project.splitlines()
                              if f'path = "../../LICENSES/{license_name}";' in line)
             build = next(line.split()[0] for line in project.splitlines()

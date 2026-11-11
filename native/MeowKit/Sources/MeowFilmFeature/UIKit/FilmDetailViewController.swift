@@ -403,7 +403,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     }
 
     private func canPlay(_ snapshot: FilmPlaybackSnapshot) -> Bool {
-        guard !snapshot.browsing.loading, snapshot.browsing.error == nil else { return false }
+        guard !(snapshot.browsing.loading && !snapshot.browsing.refreshing), snapshot.browsing.error == nil else { return false }
         if snapshot.browsing.sourceID != nil {
             return playbackCandidateID(snapshot) != nil
         }
@@ -528,6 +528,8 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         default: playbackState.text = nil
         }
         let metadataChanged = displayedSnapshot?.metadata != snapshot.metadata ||
+            displayedSnapshot?.metadataCache != snapshot.metadataCache ||
+            displayedSnapshot?.metadataSupplement != snapshot.metadataSupplement ||
             displayedSnapshot?.target.metadataProvider != snapshot.target.metadataProvider ||
             displayedSnapshot?.target.kind != snapshot.target.kind ||
             displayedSnapshot?.target.value["metadataId"] != snapshot.target.value["metadataId"] ||
@@ -622,6 +624,11 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         if !snapshot.searchComplete {
             actions.append(UIAction(title: "加载更多来源") { [weak model] _ in model?.send("search.more") })
         }
+        actions.append(UIMenu(options: .displayInline, children: [
+            UIAction(title: snapshot.browsing.sourceID == nil ? "刷新资料" : "刷新目录",
+                     identifier: .init("film.detail.refresh")) { [weak model] _ in model?.refreshBrowsing() },
+            UIAction(title: "重试地址", identifier: .init("film.detail.retry-media")) { [weak model] _ in model?.retryMedia() }
+        ]))
         sourceButton.menu = UIMenu(title: "来源", children: actions)
         sourceButton.setTitle(snapshot.sources.first { $0.id == snapshot.browsing.sourceID }?.source.name ??
                               snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.provider.title ??
@@ -672,7 +679,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             choices.insert(UIMenu(title: "分季资料", children: metadataActions), at: 0)
         }
         seasonButton.menu = UIMenu(title: "季度", children: choices)
-        if browsing.loading { showEpisodeState("加载中"); return }
+        if browsing.loading && !browsing.refreshing { showEpisodeState("加载中"); return }
         if let error = browsing.error { showEpisodeState(FilmPlaybackError(code: error).localizedDescription); return }
         episodeRail.isHidden = false; episodeStateContainer.isHidden = true
         if browsing.sourceID != nil {
@@ -736,14 +743,20 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private var displayedPlaybackError: FilmPlaybackError?
     private func presentPlaybackError() {
         let reported = model?.snapshot?.reportError.map { FilmPlaybackError(code: $0) }
-        if model?.actionError == nil, model?.observationError == nil, reported == nil { displayedPlaybackError = nil }
-        guard let model, let error = model.actionError ?? model.observationError ?? reported,
+        let metadata = model?.snapshot?.metadataError.map { FilmPlaybackError(code: $0) }
+        let session = model?.snapshot?.error.map { FilmPlaybackError(code: $0) }
+        if model?.actionError == nil, model?.observationError == nil, reported == nil, metadata == nil, session == nil {
+            displayedPlaybackError = nil
+        }
+        guard let model, let error = model.actionError ?? model.observationError ?? reported ?? metadata ?? session,
               error != displayedPlaybackError, canPresentPageAlert else { return }
         let presented: Bool
         if model.actionError == nil, model.observationError != nil {
             presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.reconnect() })
         } else if model.snapshot == nil {
             presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.open() })
+        } else if model.actionError == nil, model.observationError == nil, reported == nil, metadata != nil {
+            presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.refreshBrowsing() })
         } else {
             presented = showError(error.localizedDescription, acknowledged: { [weak model] in model?.acknowledgeError() })
         }

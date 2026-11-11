@@ -83,13 +83,14 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
         add(attachment)
     }
 
-    func testBundledNativeRulesUseTheSameSavedAndDraftEntryWithoutNode() async throws {
-        XCTAssertNotNil(Bundle.main.url(forResource: "quickjs-native-MIT", withExtension: "txt"))
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try DocumentStore(baseURL: directory, namespace: FilmRuleService.documentNamespace)
-        let service = try FilmRuleService(store: store)
+    func testNodeMobileRulesUseSameSavedAndDraftEntryAndKeepIsolatedUTF16() async throws {
+        let resources = try await hostResources(), client = try await resources.scriptSession.connection()
+        let service = FilmRuleService(connection: { client })
+        let original = try await client.call(module: .film, operation: "rules.get").filmRequiredObject().filmValue("rules")
+        addTeardownBlock {
+            _ = try await client.call(module: .film, operation: "rules.set", parameters: .object(["rules": original]))
+            await service.close()
+        }
         do {
             try await service.initialize()
             let rules = FilmRuleSet(episodeCleanRegexRules: ["^广告"],
@@ -102,24 +103,175 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
                 let draft = try await service.process(request, draft: rules)
                 XCTAssertEqual(saved, draft)
             }
-            let bytes = try store.read(key: FilmRuleService.documentKey)
+            let bytes = try await client.call(module: .film, operation: "rules.get")
             _ = try await service.process(.init(section: .movie, text: "电影"), draft: .init(movieRules: [.init(pattern: "[")]))
-            XCTAssertEqual(try store.read(key: FilmRuleService.documentKey), bytes)
-            // Real iOS Foundation + the bundled native program, not a macOS
-            // decoder or RPC double. JS without u can split a surrogate pair.
+            let unchanged = try await client.call(module: .film, operation: "rules.get")
+            XCTAssertEqual(unchanged, bytes)
+            // Actual NodeMobile and Foundation JSON boundary. Without u a
+            // legal JS replacement can split a surrogate pair.
             let utf16Rules = FilmRuleSet(movieRules: [.init(pattern: "^.", replace: "x")])
             let utf16Draft = try await service.process(.init(section: .movie, text: "🎬"), draft: utf16Rules)
+            XCTAssertEqual(utf16Draft.type, "success"); XCTAssertTrue(utf16Draft.matched)
+            XCTAssertEqual(utf16Draft.rewrittenText?.utf16, [0x78, 0xDFAC])
             XCTAssertEqual(utf16Draft.outputText.utf16, [0x78, 0xDFAC])
+            XCTAssertEqual(utf16Draft.text.utf16, Array("命中第 1 条：x".utf16) + [0xDFAC])
+            XCTAssertEqual(utf16Draft.inputText.utf16, [0xD83C, 0xDFAC])
             XCTAssertEqual(utf16Draft.outputText.displayString, "x\u{FFFD}")
-            XCTAssertEqual(try store.read(key: FilmRuleService.documentKey), bytes)
+            let stillUnchanged = try await client.call(module: .film, operation: "rules.get")
+            XCTAssertEqual(stillUnchanged, bytes)
             _ = try await service.save(utf16Rules)
             let utf16Saved = try await service.process(.init(section: .movie, text: "🎬"))
             XCTAssertEqual(utf16Saved, utf16Draft)
+            XCTAssertEqual(try JSONDecoder().decode(FilmRuleResult.self, from: JSONEncoder().encode(utf16Saved)), utf16Saved)
             let unicode = try await service.process(.init(section: .movie, text: "🎬"),
                 draft: .init(movieRules: [.init(pattern: "^.", replace: "x", flags: "u")]))
             XCTAssertEqual(unicode.outputText.utf16, [0x78])
+            let chinese = try await service.process(.init(section: .movie, text: "中文"), draft: utf16Rules)
+            XCTAssertEqual(chinese.outputText.utf16, [0x78, 0x6587])
+            let savedBeforeCleaning = try await client.call(module: .film, operation: "rules.get")
+            let search = try await service.process(.init(section: .search, text: "\u{20000}"),
+                draft: .init(aggregateRegexRules: ["^."]))
+            XCTAssertEqual(search.type, "success")
+            XCTAssertEqual(search.processedText.utf16, [0xDC00])
+            XCTAssertEqual(search.groupKey.utf16, [0xDC00])
+            XCTAssertEqual(search.previews.map(\.utf16), [[0xDC00]])
+            XCTAssertEqual(search.outputText.utf16, [0xDC00])
+            let episode = try await service.process(.init(section: .episode, text: "\u{20000}"),
+                draft: .init(episodeCleanRegexRules: [".$"], episodeRules: [.init(pattern: ".")]))
+            XCTAssertEqual(episode.type, "success")
+            XCTAssertEqual(episode.processedText.utf16, [0xD840])
+            XCTAssertEqual(episode.previews.map(\.utf16), [[0xD840]])
+            XCTAssertNil(episode.rewrittenText)
+            XCTAssertEqual(episode.outputText.utf16, [0xD840])
+            let savedAfterCleaning = try await client.call(module: .film, operation: "rules.get")
+            XCTAssertEqual(savedAfterCleaning, savedBeforeCleaning)
             await service.close()
         } catch { await service.close(); throw error }
+    }
+
+    /// Fixed dashboard/server expectations, now through the real App RPC path.
+    func testNodeMobileEntryMatchesEverySharedReferenceCaseTwice() async throws {
+        let resources = try await hostResources(), client = try await resources.scriptSession.connection()
+        let service = FilmRuleService(connection: { client })
+        let original = try await client.call(module: .film, operation: "rules.get").filmRequiredObject().filmValue("rules")
+        addTeardownBlock {
+            _ = try await client.call(module: .film, operation: "rules.set", parameters: .object(["rules": original]))
+            await service.close()
+        }
+        try await service.clearData()
+        let initial = try await service.savedSnapshot()
+        for section in FilmRuleSection.allCases { _ = try await service.restoreDefaults(section) }
+        let restored = try await service.savedSnapshot()
+        let before = try await client.call(module: .film, operation: "rules.get")
+        let fixtures = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(FilmRuleNodeMobileReferenceCases.json.utf8)) as? [[String: Any]])
+        XCTAssertFalse(fixtures.isEmpty)
+        for fixture in fixtures {
+            let name = try XCTUnwrap(fixture["name"] as? String)
+            let setup = try XCTUnwrap(fixture["setup"] as? String)
+            let base: FilmRuleSet
+            switch setup {
+            case "initial": base = initial
+            case "restored": base = restored
+            case "empty": base = FilmRuleSet()
+            default: XCTFail("Unknown fixture setup: \(setup)"); continue
+            }
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(base)) as? [String: Any])
+            if let edits = fixture["rules"] as? [String: Any] {
+                for (key, value) in edits {
+                    if key == "episodeRules" || key == "movieRules" {
+                        let rows = try XCTUnwrap(value as? [[String: Any]])
+                        object[key] = rows.map { row -> [String: Any] in
+                            var complete: [String: Any] = ["replace": "", "flags": ""]
+                            complete.merge(row) { _, new in new }
+                            return complete
+                        }
+                    } else { object[key] = value }
+                }
+            }
+            let rules = try JSONDecoder().decode(FilmRuleSet.self, from: JSONSerialization.data(withJSONObject: object))
+            let request = try JSONDecoder().decode(FilmRuleRequest.self, from: JSONSerialization.data(withJSONObject: XCTUnwrap(fixture["request"])))
+            let expected = try XCTUnwrap(fixture["expected"] as? [String: Any])
+            for _ in 0..<2 {
+                let result = try await service.process(request, draft: rules)
+                var actual = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(result)) as? [String: Any])
+                if result.matchedRuleIndex == nil { actual["matchedRuleIndex"] = NSNull() }
+                if result.rewrittenText == nil { actual["rewrittenText"] = NSNull() }
+                for (key, value) in expected {
+                    let observed = try XCTUnwrap(actual[key], "\(name): \(key)")
+                    let expectedBytes = try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys])
+                    let actualBytes = try JSONSerialization.data(withJSONObject: observed, options: [.fragmentsAllowed, .sortedKeys])
+                    XCTAssertEqual(actualBytes, expectedBytes, "\(name): \(key)")
+                }
+            }
+        }
+        let request = FilmRuleRequest(section: .search, text: "作品2", query: "作品2")
+        let saved = try await service.process(request), draft = try await service.process(request, draft: restored)
+        XCTAssertEqual(saved, draft)
+        let after = try await client.call(module: .film, operation: "rules.get")
+        XCTAssertEqual(after, before)
+        print("EVIDENCE film-rules shared fixtures=\(fixtures.count); repeated=2; carrier=NodeMobile; entry=FilmRuleService.process")
+    }
+
+    func testNodeMobileUnicodeAssertionsCapturesAndStatefulRulesRepeatExactly() async throws {
+        let resources = try await hostResources(), client = try await resources.scriptSession.connection()
+        let service = FilmRuleService(connection: { client })
+        addTeardownBlock { await service.close() }
+        let cases: [(String, String, String, String, String)] = [
+            (#"(\p{Script=Han}+)"#, "$1!", "gu", "猫🎬第12集", "猫!🎬第!12集!"),
+            ("k", "x", "iu", "K", "x"),
+            ("(?<=a)(b)(?=c)", "[$1]", "g", "abc", "a[b]c"),
+            ("(?<first>a)(b)", "$2$<first>", "", "ab", "ba"),
+            ("a", "x", "g", "aa", "xx"),
+            ("a", "x", "y", "aa", "xa")
+        ]
+        for (pattern, replace, flags, input, output) in cases {
+            for _ in 0..<2 {
+                let result = try await service.process(.init(section: .movie, text: input),
+                    draft: .init(movieRules: [.init(pattern: pattern, replace: replace, flags: flags)]))
+                XCTAssertEqual(result.type, "success", pattern)
+                XCTAssertEqual(result.outputText, FilmRuleText(output), pattern)
+                XCTAssertTrue(result.errors.isEmpty, pattern)
+            }
+        }
+    }
+
+    func testNodeMobileRuleCancellationDeadlineCompilationAndGlobalDeletionDrainThenRecover() async throws {
+        let resources = try await hostResources(), client = try await resources.scriptSession.connection()
+        let service = FilmRuleService(connection: { client })
+        addTeardownBlock { await service.close() }
+        let cases: [(FilmRuleSection, FilmRuleSet, String)] = [
+            (.movie, .init(movieRules: [.init(pattern: "^(a+)+$", replace: "x")]), String(repeating: "a", count: 64) + "!"),
+            (.movie, .init(movieRules: [.init(pattern: "(?<=" + String(repeating: "a", count: 1_048_576) + ")b", replace: "x", flags: "i")]), "b"),
+            (.search, .init(aggregateRegexRules: ["/(?=a{4096})a/ig"]), String(repeating: "a", count: 1_048_576))
+        ]
+        for (section, rules, input) in cases {
+            for cancel in [true, false] {
+                var started = DispatchTime.now().uptimeNanoseconds
+                let operation = Task { try await service.process(.init(section: section, text: input), draft: rules) }
+                if cancel {
+                    // Schedules consumer cancellation; native-entry/uncatchable
+                    // interruption is independently verified by native-json tests.
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                    started = DispatchTime.now().uptimeNanoseconds
+                    operation.cancel()
+                }
+                do { _ = try await operation.value; XCTFail("Native work cannot return a caught syntax error") }
+                catch {
+                    if cancel { XCTAssertTrue(error is CancellationError, "\(error)") }
+                    else { XCTAssertEqual((error as? FilmPlaybackError)?.code, "TIMEOUT") }
+                }
+                XCTAssertLessThan(Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000, 5)
+                let match = try await service.process(.init(section: .movie, text: "ab"),
+                    draft: .init(movieRules: [.init(pattern: "(?<=a)b", replace: "x", flags: "i")]))
+                XCTAssertEqual(match.outputText, FilmRuleText("ax")); XCTAssertTrue(match.errors.isEmpty)
+                let deletion = try await service.process(.init(section: .search, text: "aaaaab"),
+                    draft: .init(aggregateRegexRules: ["/(?=a{4})a/ig"]))
+                XCTAssertEqual(deletion.outputText, FilmRuleText("aaab")); XCTAssertTrue(deletion.errors.isEmpty)
+                let invalid = try await service.process(.init(section: .movie, text: "b"),
+                    draft: .init(movieRules: [.init(pattern: "[")]))
+                XCTAssertFalse(invalid.errors.isEmpty)
+            }
+        }
     }
 
     func testCatUsesRealNodeMobileRoutesAndClientOwnedPersistence() async throws {

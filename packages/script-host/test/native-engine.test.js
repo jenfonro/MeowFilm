@@ -60,6 +60,92 @@ test('native owners retain state, run concurrent calls and exit exactly once', {
   assert.equal(await b.call('add'), 2);
 });
 
+test('synchronous and async native throws retain their error codes without resetting the owner',
+  { timeout }, async t => {
+    const engine = await create(t, {
+      source: `(() => {
+        let count = 0;
+        return {
+          fail(code) { throw { code }; },
+          async failAsync(code) { throw { code }; },
+          ping() { return ++count; },
+        };
+      })()`,
+    });
+    let count = 0;
+    for (const code of ['RESOURCE_LIMIT', 'STALE_SESSION']) for (const method of ['fail', 'failAsync']) {
+      await assert.rejects(engine.call(method, [code]), { code }, `${method}/${code}`);
+      assert.equal(await engine.call('ping'), ++count, `${method}/${code}: the same owner remains usable`);
+    }
+    const stats = await engine.stats({ refresh: true });
+    assert.equal(stats.activeCalls, 0);
+    assert.equal(stats.runtimeCount, 1); assert.equal(stats.contextCount, 1); assert.equal(stats.threadCount, 1);
+    assert.equal(stats.stopped, false);
+  });
+
+test('the maximum supported stack budget reports real recursion exhaustion, recovers and physically closes',
+  { timeout }, async t => {
+    const engine = await create(t, {
+      maxStackBytes: 1024 * 1024,
+      source: `(() => {
+        let count = 0;
+        return {
+          next() { return ++count; },
+          exhaust() {
+            function recurse(depth) { return 1 + recurse(depth + 1); }
+            return recurse(0);
+          },
+        };
+      })()`,
+    });
+    let exited = false;
+    engine.exited.then(() => { exited = true; });
+    assert.equal(await engine.call('next'), 1);
+    await assert.rejects(engine.call('exhaust'), { code: 'RESOURCE_LIMIT' });
+    assert.equal(await engine.call('next'), 2, 'recursion failure must preserve the same owner state');
+    assert.equal(exited, false);
+    const live = await engine.stats({ refresh: true });
+    assert.equal(live.runtimeCount, 1);
+    assert.equal(live.contextCount, 1);
+    assert.equal(live.threadCount, 1);
+    assert.equal(live.activeCalls, 0);
+    assert.equal(live.stopped, false);
+
+    const closing = engine.stop();
+    assert.equal(engine.stop(), closing);
+    const closed = await closing;
+    await engine.exited;
+    assert.equal(exited, true, 'stop must await the real owner exit');
+    assert.equal(closed.stopped, true);
+    for (const key of ['runtimeCount', 'contextCount', 'threadCount', 'activeCalls', 'hostCalls',
+      'timers', 'heapBytes', 'heapObjects', 'byteBuffers', 'byteBufferBytes', 'jobsPending']) {
+      assert.equal(closed[key], 0, key);
+    }
+    await assert.rejects(engine.call('next'), { code: 'STALE_SESSION' });
+  });
+
+test('stop rejects a running synchronous native turn before reporting real release',
+  { timeout }, async t => {
+    let entered;
+    const began = new Promise(resolve => { entered = resolve; });
+    const engine = await create(t, {
+      source: `({ run() { __meowEmit('entered', null); for (;;) {} } })`,
+      onEvent(name) { if (name === 'entered') entered(); },
+    });
+    await withoutFallbackStop(engine, async () => {
+      const active = assert.rejects(engine.call('run'), { code: 'STALE_SESSION' });
+      await began;
+      const stopped = engine.stop();
+      await active;
+      const stats = await stopped;
+      assert.equal(stats.stopped, true);
+      for (const key of ['threadCount', 'runtimeCount', 'contextCount', 'activeCalls',
+        'hostCalls', 'timers', 'jobsPending', 'heapBytes', 'byteBuffers', 'byteBufferBytes']) {
+        assert.equal(stats[key], 0, key);
+      }
+    });
+  });
+
 test('typed bridge snapshots subviews, Unicode keys and byte leaves without sharing identity', { timeout }, async t => {
   let observed;
   const engine = await create(t, {

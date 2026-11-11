@@ -12,7 +12,7 @@ NODE_MOBILE_FRAMEWORK = "../../.cache/nodejs-mobile/ios/NodeMobile.xcframework"
 RUNTIME_PAYLOAD = "../../.cache/ios-runtime/$(MEOW_RUNTIME_SDK)-$(MEOW_RUNTIME_ARCH)/Runtime"
 SCRIPT_HOST_FRAMEWORK = "../../.cache/ios-native/$(MEOW_RUNTIME_SDK)-$(MEOW_RUNTIME_ARCH)/MeowScriptHost.framework"
 NODE_MOBILE_LICENSE = "../../LICENSES/nodejs-mobile-LICENSE.txt"
-NATIVE_JAVASCRIPT_LICENSE = "../../LICENSES/quickjs-native-MIT.txt"
+NATIVE_JAVASCRIPT_LICENSE = "../../LICENSES/quickjs-ng-LICENSE.txt"
 NATIVE_UNICODE_LICENSE = "../../LICENSES/Unicode-3.0.txt"
 PROJECT_NOTICES = "../../LICENSES/NOTICE.md"
 PROJECT_LICENSE = "../../LICENSES/GPL-3.0-only.txt"
@@ -120,7 +120,7 @@ def generate():
     obj("runtimePayload", f'isa = PBXFileReference; lastKnownFileType = folder; name = Runtime; path = {quoted(RUNTIME_PAYLOAD)}; sourceTree = "<group>";')
     obj("runtimePayloadBuild", f"isa = PBXBuildFile; fileRef = {ids['runtimePayload']};")
     obj("nodeLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = nodejs-mobile-LICENSE.txt; path = {quoted(NODE_MOBILE_LICENSE)}; sourceTree = "<group>";')
-    obj("javascriptLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = quickjs-native-MIT.txt; path = {quoted(NATIVE_JAVASCRIPT_LICENSE)}; sourceTree = "<group>";')
+    obj("javascriptLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = quickjs-ng-LICENSE.txt; path = {quoted(NATIVE_JAVASCRIPT_LICENSE)}; sourceTree = "<group>";')
     obj("javascriptLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['javascriptLicense']};")
     obj("unicodeLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = Unicode-3.0.txt; path = {quoted(NATIVE_UNICODE_LICENSE)}; sourceTree = "<group>";')
     obj("unicodeLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['unicodeLicense']};")
@@ -241,6 +241,7 @@ def generate():
     runtime_test_settings = (
         f'PRODUCT_BUNDLE_IDENTIFIER = {bundle_identifier}.runtime-tests; PRODUCT_NAME = {runtime_test_name}; '
         'GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; TARGETED_DEVICE_FAMILY = 1; '
+        'INFOPLIST_KEY_NSPrincipalClass = MeowfilmRuntimeTestBundle; '
         'SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; CODE_SIGN_STYLE = Automatic; '
         # The test shares the App's products directory, so the host and its
         # processed NodeMobile.framework are both found under BUILT_PRODUCTS_DIR.

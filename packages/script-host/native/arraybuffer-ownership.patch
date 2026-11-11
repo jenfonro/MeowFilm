@@ -1,15 +1,6 @@
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -56666,6 +56666,8 @@
-         return;
-     if (abuf->free_func)
-         abuf->free_func(ctx->rt, abuf->opaque, abuf->data);
-+    abuf->free_func = NULL;
-+    abuf->opaque = NULL;
-     abuf->data = NULL;
-     abuf->byte_length = 0;
-     abuf->detached = true;
-@@ -56787,7 +56789,7 @@
+@@ -59805,7 +59805,7 @@
  static JSValue js_array_buffer_transfer(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv, int magic)
  {
@@ -17,67 +8,74 @@
 +    JSArrayBuffer *abuf, *new_abuf;
      uint64_t new_len, old_len, max_len, *pmax_len;
      uint8_t *bs, *new_bs;
-     JSValue ret;
-@@ -56818,33 +56820,47 @@
-                 pmax_len = &max_len;
-         }
+     JSReallocArrayBufferDataFunc *realloc_func;
+@@ -59839,41 +59839,47 @@
      }
--    /* create an empty AB */
--    if (new_len == 0) {
-+    old_len = abuf->byte_length;
-+    /* External storage may not use the runtime allocator. Copy before
-+       detaching, so allocation failure leaves its data and owner intact. */
-+    if (new_len == 0 || abuf->free_func != js_array_buffer_free) {
-+        ret = js_array_buffer_constructor2(ctx, JS_UNDEFINED, new_len, pmax_len,
-+                                           JS_CLASS_ARRAY_BUFFER);
+     /* create an empty AB */
+     if (new_len == 0) {
+-        JS_DetachArrayBuffer(ctx, this_val);
+         ret = js_array_buffer_constructor2(ctx, JS_UNDEFINED, 0, pmax_len,
+                                            JS_CLASS_ARRAY_BUFFER);
 +        if (JS_IsException(ret))
 +            return ret;
-+        new_abuf = JS_GetOpaque(ret, JS_CLASS_ARRAY_BUFFER);
-+        if (new_len && old_len)
-+            memcpy(new_abuf->data, abuf->data, min_int(new_len, old_len));
-         JS_DetachArrayBuffer(ctx, this_val);
--        ret = js_array_buffer_constructor2(ctx, JS_UNDEFINED, 0, pmax_len,
--                                           JS_CLASS_ARRAY_BUFFER);
++        JS_DetachArrayBuffer(ctx, this_val);
          goto fini;
      }
      bs = abuf->data;
--    old_len = abuf->byte_length;
+     old_len = abuf->byte_length;
+     realloc_func = abuf->realloc_func;
+     opaque = abuf->opaque;
 -    /* if length mismatch, realloc. Otherwise, use the same backing buffer. */
-+    /* Allocate the destination object before reallocating owned storage,
-+       so construction failure cannot detach the original buffer. */
-+    ret = js_array_buffer_constructor3(ctx, JS_UNDEFINED, new_len, pmax_len,
-+                                       JS_CLASS_ARRAY_BUFFER, bs,
-+                                       abuf->free_func, abuf->opaque,
-+                                       /*alloc_flag*/false);
-+    if (JS_IsException(ret))
-+        return ret;
-+    new_abuf = JS_GetOpaque(ret, JS_CLASS_ARRAY_BUFFER);
-     if (new_len != old_len) {
-         new_bs = js_realloc(ctx, bs, new_len);
+-    if (new_len != old_len) {
+-        if (!realloc_func)
+-            return JS_ThrowTypeError(ctx, "array buffer is not resizable");
+-        /* XXX: we are currently limited to 2 GB; check before reallocating,
+-           new_len does not necessarily fit in a size_t */
+-        if (new_len > INT32_MAX)
+-            return JS_ThrowRangeError(ctx, "invalid array buffer length");
+-        new_bs = realloc_func(ctx->rt, opaque, bs, new_len);
 -        if (!new_bs)
-+        if (!new_bs) {
-+            new_abuf->free_func = NULL;
-+            new_abuf->opaque = NULL;
-+            new_abuf->data = NULL;
-+            JS_FreeValue(ctx, ret);
-             return JS_EXCEPTION;
-+        }
-         bs = new_bs;
-         if (new_len > old_len)
-             memset(bs + old_len, 0, new_len - old_len);
-     }
--    /* neuter the backing buffer */
+-            return JS_ThrowOutOfMemory(ctx);
+-        bs = new_bs;
+-        if (new_len > old_len)
+-            memset(bs + old_len, 0, new_len - old_len);
+-    }
+-    /* neuter the source */
 -    abuf->data = NULL;
 -    abuf->byte_length = 0;
 -    abuf->detached = true;
+-    abuf->realloc_func = NULL;
+-    abuf->opaque = NULL;
 -    js_array_buffer_update_typed_arrays(abuf);
--    ret = js_array_buffer_constructor3(ctx, JS_UNDEFINED, new_len, pmax_len,
--                                       JS_CLASS_ARRAY_BUFFER, bs,
--                                       abuf->free_func, NULL,
--                                       /*alloc_flag*/false);
++    if (new_len != old_len && !realloc_func)
++        return JS_ThrowTypeError(ctx, "array buffer is not resizable");
++    /* Construct before reallocating or detaching. On failure the source
++       retains both its allocation and its external owner. */
+     ret = js_array_buffer_constructor3(ctx, JS_UNDEFINED, new_len, pmax_len,
+                                        JS_CLASS_ARRAY_BUFFER, bs,
+                                        realloc_func, opaque,
+                                        /*alloc_flag*/false);
++    if (JS_IsException(ret))
++        return ret;
++    new_abuf = JS_GetOpaque(ret, JS_CLASS_ARRAY_BUFFER);
++    /* if length mismatch, realloc. Otherwise, use the same backing buffer. */
++    if (new_len != old_len) {
++        /* The constructor checked the existing 2 GB ArrayBuffer bound. */
++        new_bs = realloc_func(ctx->rt, opaque, bs, new_len);
++        if (!new_bs) {
++            new_abuf->data = NULL;
++            new_abuf->realloc_func = NULL;
++            new_abuf->opaque = NULL;
++            JS_FreeValue(ctx, ret);
++            return JS_ThrowOutOfMemory(ctx);
++        }
++        bs = new_bs;
++        if (new_len > old_len)
++            memset(bs + old_len, 0, new_len - old_len);
++    }
 +    new_abuf->data = bs;
-+    /* Ownership moved to ret; detach must not free the transferred data. */
-+    abuf->free_func = NULL;
++    /* Ownership moved to ret; detaching must not release that storage. */
++    abuf->realloc_func = NULL;
 +    JS_DetachArrayBuffer(ctx, this_val);
  fini:
      if (magic == JS_ARRAY_BUFFER_TRANSFER_TO_IMMUTABLE) {

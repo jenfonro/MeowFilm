@@ -25,15 +25,13 @@ public static partial class MusicUiTests
     private static async Task UnifiedCards()
     {
         string longTitle = string.Concat(Enumerable.Repeat("很长的原始影片标题", 12));
-        var sources = new SearchSources(SearchFixture.Source("来源甲"))
-        { Read = (_, _, _, _) => Task.FromResult(SearchFixture.Page(1,
-            ("ordinary", longTitle, "高清"), ("s1", "聚合片 第一季", "更新至3集"), ("s2", "聚合片 第二季", "更新至5集"), ("tmdb", "元数据片", ""))) };
-        var metadata = new SearchMetadata
-        {
-            ReadSearch = (_, _) => Task.FromResult(SearchFixture.Tmdb("tv", 8, "元数据片", "已得简介")),
-            ReadDetail = (_, _, _) => Task.FromResult(SearchFixture.Json(new { name = "元数据片", overview = "已得简介", seasons = Array.Empty<object>() }))
-        };
-        await using var f = await UnifiedScene.Create(sources, metadata);
+        var sourceConfig = SearchFixture.Source("来源甲");
+        await using var f = await UnifiedScene.Create(new(sourceConfig));
+        var ordinary = SearchFixture.Member(sourceConfig, "ordinary", longTitle);
+        var members = new[] { SearchFixture.Member(sourceConfig, "s1", "聚合片 第一季"), SearchFixture.Member(sourceConfig, "s2", "聚合片 第二季") };
+        f.Runtime.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"),
+            [ordinary, SearchFixture.Card("group:aggregate", "site", "聚合片", members), SearchFixture.Card("tmdb:tv:7", "tmdb", "元数据片", [])],
+            [ordinary, .. members]);
         await f.Submit("原查询", "film"); await SearchFixture.Settle(f.Film.Search.Current!);
         True(f.Page.Cards.Count == 3 && f.Page.Cards.Select(card => card.Subtitle).ToHashSet().SetEquals(["来源甲", "聚合", "剧集"]),
             "the actual search projection contains exactly the three card semantics");
@@ -86,10 +84,14 @@ public static partial class MusicUiTests
     }
     private static async Task UnifiedModes()
     {
-        var sources = new SearchSources(SearchFixture.Source("a"));
-        sources.Read = (_, _, page, _) => Task.FromResult(SearchFixture.Page(2,
-            Enumerable.Range((page - 1) * 24, 24).Select(index => (index.ToString(), "影片" + index + "独立", "高清")).ToArray()));
-        await using var f = await UnifiedScene.Create(sources);
+        await using var f = await UnifiedScene.Create();
+        var sourceConfig = f.Sources.Sources[0];
+        var raw = Enumerable.Range(0, 48).Select(index => SearchFixture.Member(sourceConfig, index.ToString(), "影片" + index + "独立")).ToArray();
+        var aggregate = raw.Select((member, index) => SearchFixture.Card("group:" + index, "site", "影片" + index, [member])).ToArray();
+        f.Runtime.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"), aggregate[..24], raw[..24], hasMore: true);
+        f.Runtime.SearchCommand = (input, previous) => FilmJson.Text(input, "action") == "more"
+            ? SearchFixture.Snapshot(Guid.Parse(FilmJson.Text(previous, "sessionId")), FilmJson.Text(previous, "query"), aggregate, raw, revision: 2, round: 2)
+            : previous;
         await f.Submit("影片", "film"); await SearchFixture.Settle(f.Film.Search.Current!);
         using var source = SearchRenderSource(f.Shell, out var root);
         SearchLayout(root, 860, 800); await Drain();
@@ -100,15 +102,15 @@ public static partial class MusicUiTests
         True(offset > 0, "real search scroll has a restorable position");
         var first = f.Page.Cards.Select(card => card.SearchContext!.DisplayKey).ToArray();
         f.Page.RawListMode = true; await Drain(); SearchLayout(root, 860, 800);
-        var raw = f.Page.Cards.Select(card => card.SearchContext!.DisplayKey).ToArray();
-        True(raw.All(key => key.StartsWith("site:", StringComparison.Ordinal)), "raw mode retains exact source identities");
+        var rawKeys = f.Page.Cards.Select(card => card.SearchContext!.DisplayKey).ToArray();
+        True(rawKeys.All(key => key.StartsWith("site:", StringComparison.Ordinal)), "raw mode retains exact source identities");
         await f.Page.LoadMoreAsync(); await Drain(); SearchLayout(root, 860, 800);
-        True(raw.SequenceEqual(f.Page.Cards.Take(raw.Length).Select(card => card.SearchContext!.DisplayKey)), "raw older round remains in place");
+        True(rawKeys.SequenceEqual(f.Page.Cards.Take(rawKeys.Length).Select(card => card.SearchContext!.DisplayKey)), "raw older round remains in place");
         f.Page.RawListMode = false; await Drain();
         True(first.SequenceEqual(f.Page.Cards.Take(first.Length).Select(card => card.SearchContext!.DisplayKey)) &&
             Math.Abs(scroll.VerticalOffset - offset) < 1, "aggregate order and independent scroll return unchanged");
         f.Page.RawListMode = true; await Drain();
-        Equal(2, sources.Calls.Count); Equal(48, f.Page.Cards.Count);
+        Equal(1, f.Runtime.SearchOpens); Equal(1, f.Runtime.Calls.Count(call => call.Method == "film.search.command" && FilmJson.Text(call.Input, "action") == "more")); Equal(48, f.Page.Cards.Count);
         source.RootVisual = null;
     }
     private static HwndSource SearchRenderSource(ShellWindow shell, out FrameworkElement root)
