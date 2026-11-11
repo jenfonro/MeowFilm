@@ -100,9 +100,9 @@ final class PlaybackVideoTestWindow {
         -> @MainActor (PlaybackVideoEvent) -> Void {
         { [weak controller] event in
             if event.kind == .prepared {
-                // Read this exact private weak field only; never replace a transport.
+                // Read the lifetime holder's actual private weak field; never replace a transport.
                 if let controller,
-                   let candidate = Mirror(reflecting: controller).descendant("videoCandidate") as? PlaybackVideoTransport,
+                   let candidate = Mirror(reflecting: controller).descendant("lifetime", "videoCandidate") as? PlaybackVideoTransport,
                    candidate.media.attemptID == event.attemptID {
                     self.stage(candidate)
                 } else {

@@ -33,6 +33,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     private let tonearm = MusicTonearmView()
     private let lyricPreview = UIButton(type: .custom)
     private let lyricPreviewLabels = (0..<3).map { _ in UILabel() }
+    private let lyricViewport = UIView()
     private let lyricTable = UITableView(frame: .zero, style: .plain)
     private let lyricStatus = UILabel()
     private let previewTime = UILabel()
@@ -58,13 +59,17 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     private var linesByID: [Int: MusicLyricLine] = [:]
     private var displayedFence: MusicReferencePlayerFence?
     private var followedLine: Int?
+    private var centerAfterSeekSample = false
     private var applyingLyrics = false
+    private var lyricRevision = UUID()
     private var lyricExpanded = false
     private var rendering = false
     private var recordWidth: CGFloat = 0
     private var lyricTranslation: Bool?
     private var lyricTheme: PageTheme?
     private var lyricViewportSize = CGSize.zero
+    private var lyricHeights: [Int: CGFloat] = [:]
+    private var lyricsPositioned = false
     private var previewWidth: CGFloat = 0
     private var previewIdentity: [Int?] = []
     private var markerDragging = false
@@ -83,7 +88,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         controls = MusicPlaybackControlsView(content: content, layout: .full)
         super.init(style: .full, palette: content.appearance.effectivePalette)
         accessibilityIdentifier = "music.player.page"
-        for item in [lyricBackdrop, recordScroll, tonearm, lyricPreview, lyricTable, controls,
+        for item in [lyricBackdrop, recordScroll, tonearm, lyricPreview, lyricViewport, controls,
                      translationToggle, backgroundToggle, close, route, sourceButton,
                      previewRule, previewTime, previewSeek, followLyrics] {
             addSubview(item)
@@ -128,8 +133,9 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
 
         lyricTable.backgroundColor = .clear
         lyricTable.separatorStyle = .none
-        lyricTable.rowHeight = UITableView.automaticDimension
-        lyricTable.estimatedRowHeight = 46
+        // Exact, state-independent heights keep distant seeks and font emphasis
+        // from correcting the scroll offset after movement has already begun.
+        lyricTable.estimatedRowHeight = 0
         lyricTable.delegate = self
         lyricTable.allowsSelection = false
         lyricTable.bounces = false
@@ -139,7 +145,9 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         lyricTable.contentInsetAdjustmentBehavior = .never
         lyricTable.register(MusicLyricCell.self, forCellReuseIdentifier: MusicLyricCell.reuseIdentifier)
         lyricTable.accessibilityIdentifier = "music.player.lyrics"
-        lyricTable.layer.mask = lyricMask
+        lyricViewport.addSubview(lyricTable)
+        lyricViewport.layer.mask = lyricMask
+        lyricViewport.clipsToBounds = true
         lyricStatus.textAlignment = .center
         lyricStatus.isAccessibilityElement = true
 
@@ -188,6 +196,20 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
             content.queueChanges.sink { [weak self] in self?.synchronizeRecords(); self?.updateSource() },
             content.metadataChanges.sink { [weak self] in self?.updateLyrics() },
             content.artworkChanges.sink { [weak self] in self?.updateArtwork() },
+            content.seekChanges.sink { [weak self] _ in
+                guard let self else { return }
+                self.centerAfterSeekSample = self.centerAfterSeekSample || self.lyricSelection.isManual
+                _ = self.lyricSelection.confirm(accepted: true, current: self.content.fence,
+                                               permitted: self.content.isAvailable)
+                // The accepted media position, not the slider's requested time,
+                // remains the source of the next scrolling destination.
+                self.followedLine = self.activeLine ?? self.lines.first?.id
+                self.updatePreviewControls()
+            },
+            content.positionSamples.sink { [weak self] _ in
+                guard let self, self.rendering, self.lyricExpanded else { return }
+                self.updateLyricClock(calibrate: true)
+            },
             content.appearanceChanges.sink { [weak self] in self?.updateAppearance() },
             content.clockChanges.sink { [weak self] in
                 guard let self, self.rendering else { return }
@@ -311,27 +333,28 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         }
 
         let lyricsBottomGap = veryShortHeight ? 0 : max(0, safeHeight * 0.036)
-        lyricTable.frame = CGRect(x: 0, y: contentFrame.minY + 10, width: width,
-                                  height: max(0, contentFrame.height - 10 - lyricsBottomGap))
-        lyricBackdrop.frame = lyricTable.frame
+        lyricViewport.frame = CGRect(x: 0, y: contentFrame.minY + 10, width: width,
+                                     height: max(0, contentFrame.height - 10 - lyricsBottomGap))
+        lyricTable.frame = lyricViewport.bounds
+        lyricBackdrop.frame = lyricViewport.frame
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         backdropMask.frame = lyricBackdrop.bounds
-        lyricMask.frame = lyricTable.bounds
+        lyricMask.frame = lyricViewport.bounds
         CATransaction.commit()
         if lyricViewportSize != lyricTable.bounds.size {
+            let widthChanged = lyricViewportSize.width != lyricTable.bounds.width
             lyricViewportSize = lyricTable.bounds.size
-            lyricTable.layoutIfNeeded()
-            updateLyricInsets()
-            reanchorLyrics()
+            if widthChanged { lyricHeights.removeAll() }
+            updateLyricGeometry()
         }
 
-        let markerTop = lyricTable.frame.midY + (lyricSelection.isDragging ? 0 : -22)
+        let markerTop = lyricViewport.frame.midY + (lyricSelection.isDragging ? 0 : -22)
         previewTime.frame = CGRect(x: 12, y: markerTop, width: 44, height: 44)
         previewSeek.frame = CGRect(x: width - 56, y: markerTop, width: 44, height: 44)
         previewRule.frame = CGRect(x: 56, y: markerTop + 21.5,
                                    width: max(0, width - 112), height: 1)
-        followLyrics.frame = CGRect(x: 12, y: lyricTable.frame.maxY - 48, width: 44, height: 44)
+        followLyrics.frame = CGRect(x: 12, y: lyricViewport.frame.maxY - 48, width: 44, height: 44)
         controls.layoutIfNeeded()
         let moreAnchor = controls.moreAnchor
         let moreFrame = moreAnchor.convert(moreAnchor.bounds, to: self)
@@ -358,15 +381,19 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
                                               rate: content.clock.rate, active: false)
     }
 
-    func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell,
-                   forRowAt indexPath: IndexPath) {
-        guard !tableView.isDragging, indexPath.row == 0 || indexPath.row == lines.count - 1 else { return }
-        updateLyricInsets()
-        reanchorLyrics()
+    func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        guard let id = lyricDataSource.itemIdentifier(for: indexPath), let line = linesByID[id] else { return 0 }
+        if let height = lyricHeights[id] { return height }
+        let height = MusicLyricCell.height(for: line, width: tableView.bounds.width,
+            preferences: content.appearance.preferences, traits: traitCollection)
+        lyricHeights[id] = height
+        return height
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         if scrollView === lyricTable {
+            lyricTable.setContentOffset(lyricTable.contentOffset, animated: false)
+            centerAfterSeekSample = false
             lyricSelection.begin(content.fence, selected: centeredLyric() ?? activeLine, dragging: true,
                                  playbackLine: content.model.currentLyricIndex)
             followedLine = nil
@@ -377,6 +404,10 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        if scrollView === recordScroll {
+            updateTonearm()
+            return
+        }
         guard scrollView === lyricTable, lyricSelection.isDragging, let id = centeredLyric() else { return }
         lyricSelection.preview(id)
         updateLyricClock()
@@ -437,49 +468,54 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         let previous = linesByID
         lines = next
         linesByID = Dictionary(uniqueKeysWithValues: next.map { ($0.id, $0) })
+        lyricHeights.removeAll()
+        lyricsPositioned = false
         var snapshot = NSDiffableDataSourceSnapshot<Int, Int>()
         snapshot.appendSections([0])
         snapshot.appendItems(next.map(\.id))
         snapshot.reconfigureItems(next.filter { previous[$0.id] != nil && previous[$0.id] != $0 }.map(\.id))
         applyingLyrics = true
+        let revision = UUID()
+        lyricRevision = revision
         followedLine = nil
         lyricDataSource.apply(snapshot, animatingDifferences: false) { [weak self] in
-            guard let self else { return }
+            guard let self, self.lyricRevision == revision else { return }
             self.applyingLyrics = false
-            self.lyricTable.layoutIfNeeded()
-            self.updateLyricInsets()
+            self.updateLyricGeometry()
             self.updateLyricClock()
             self.updateLyricPreview(force: true)
         }
     }
 
-    private func updateLyricClock() {
+    private func updateLyricClock(calibrate: Bool = false) {
         updatePreviewControls()
         guard !applyingLyrics else { return }
+        if calibrate, centerAfterSeekSample {
+            centerAfterSeekSample = false
+            followedLine = nil
+        }
         let active = activeLine
         let visualActive = visualActiveLine
         let selected = lyricSelection.selected
         let clock = content.clock
-        var resized = false
         for index in lyricTable.indexPathsForVisibleRows ?? [] {
             guard let id = lyricDataSource.itemIdentifier(for: index),
                   let cell = lyricTable.cellForRow(at: index) as? MusicLyricCell else { continue }
             let timed = !lyricSelection.isManual && id == active
-            resized = cell.updateState(selected: id == selected, active: id == visualActive, timed: timed,
+            if calibrate {
+                cell.updateTime(clock.position, playing: rendering && lyricExpanded && clock.playing && timed,
+                                rate: clock.rate, active: timed)
+            }
+            cell.updateState(selected: id == selected, active: id == visualActive, timed: timed,
                 previewDragging: lyricSelection.isDragging, position: clock.position,
                 playing: rendering && lyricExpanded && clock.playing && timed,
-                rate: clock.rate) || resized
-        }
-        if resized {
-            lyricTable.performBatchUpdates(nil) { [weak self] _ in
-                self?.updateLyricInsets()
-                self?.reanchorLyrics()
-            }
+                rate: clock.rate)
         }
         guard rendering, lyricExpanded, !lyricSelection.isManual, !lyricTable.isDragging,
-              !lyricTable.isDecelerating, let active, followedLine != active else { return }
-        followedLine = active
-        centerLyric(active, animated: !UIAccessibility.isReduceMotionEnabled)
+              !lyricTable.isDecelerating, let target = active ?? lines.first?.id,
+              followedLine != target || !lyricsPositioned else { return }
+        followedLine = target
+        centerLyric(target, animated: lyricsPositioned && !UIAccessibility.isReduceMotionEnabled)
     }
 
     private func refreshVisibleLyrics() {
@@ -488,12 +524,8 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
                   let cell = lyricTable.cellForRow(at: index) as? MusicLyricCell else { continue }
             configure(cell, line: line)
         }
-        if !applyingLyrics {
-            lyricTable.performBatchUpdates(nil) { [weak self] _ in
-                self?.updateLyricInsets()
-                self?.reanchorLyrics()
-            }
-        }
+        lyricHeights.removeAll()
+        updateLyricGeometry()
     }
 
     private func updatePreviewControls() {
@@ -543,18 +575,13 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     }
 
     private func centerLyric(_ id: Int, animated: Bool) {
-        guard let index = lyricDataSource.indexPath(for: id) else { return }
+        guard lyricTable.bounds.width > 0, lyricTable.bounds.height > 0,
+              let index = lyricDataSource.indexPath(for: id) else { return }
         lyricTable.layoutIfNeeded()
         let point = CGPoint(x: lyricTable.contentOffset.x, y: centeredOffset(for: index))
+        lyricsPositioned = true
         guard lyricTable.contentOffset != point else { return }
-        if animated {
-            UIView.animate(withDuration: 0.35, delay: 0,
-                           options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseInOut]) {
-                self.lyricTable.setContentOffset(point, animated: false)
-            }
-        } else {
-            lyricTable.setContentOffset(point, animated: false)
-        }
+        lyricTable.setContentOffset(point, animated: animated)
     }
 
     private func updateLyricInsets() {
@@ -573,20 +600,26 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         }
     }
 
-    private func reanchorLyrics() {
-        guard lyricExpanded, !applyingLyrics, !lyricSelection.isDragging,
+    private func updateLyricGeometry() {
+        guard !applyingLyrics, lyricTable.bounds.width > 0 else { return }
+        UIView.performWithoutAnimation {
+            lyricTable.beginUpdates()
+            lyricTable.endUpdates()
+            lyricTable.layoutIfNeeded()
+            updateLyricInsets()
+        }
+        guard lyricExpanded, !lyricSelection.isDragging,
               !lyricTable.isDragging, !lyricTable.isDecelerating else { return }
-        if let selected = lyricSelection.selected { centerLyric(selected, animated: false) }
-        else if let active = activeLine { centerLyric(active, animated: false) }
+        if let target = lyricSelection.selected ?? activeLine ?? lines.first?.id {
+            followedLine = target
+            centerLyric(target, animated: lyricsPositioned && !UIAccessibility.isReduceMotionEnabled)
+        }
     }
 
     private func confirmLyric() {
         guard let target = lyricSelection.target(lines: content.model.lyricLines, current: content.fence,
             permitted: content.isAvailable, duration: content.clock.duration) else { return }
-        let confirmed = lyricSelection.confirm(accepted: content.seek(to: target, expected: content.fence),
-                                                current: content.fence, permitted: content.isAvailable)
-        if confirmed { followedLine = nil }
-        updateLyricClock()
+        _ = content.seek(to: target, expected: content.fence)
     }
 
     private func resumeLyricFollowing() {
@@ -603,8 +636,10 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
 
     private func toggleLyrics() {
         lyricSelection.cancel()
+        centerAfterSeekSample = false
         lyricExpanded.toggle()
         followedLine = nil
+        lyricsPositioned = false
         updateVisibility()
         updateLyricClock()
         updateRotation()
@@ -624,7 +659,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         recordScroll.isHidden = lyricExpanded
         lyricPreview.isHidden = lyricExpanded
         tonearm.isHidden = lyricExpanded || tonearm.bounds.isEmpty
-        lyricTable.isHidden = !lyricExpanded
+        lyricViewport.isHidden = !lyricExpanded
         lyricBackdrop.isHidden = !content.appearance.preferences.showsLyricBackground(expanded: lyricExpanded)
         updateLyricTools()
         updateAccessibilityAction()
@@ -633,6 +668,8 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
 
     private func reconcilePlayback() {
         if displayedFence != content.fence {
+            if displayedFence?.occurrence != content.fence.occurrence { lyricsPositioned = false }
+            centerAfterSeekSample = false
             displayedFence = content.fence
             lyricSelection.cancel()
             followedLine = nil
@@ -649,6 +686,12 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     }
 
     private func synchronizeRecords() {
+        let old = records.slots[records.center].entry?.id
+        if records.phase == .idle, old != nil, old != content.model.current?.id {
+            // Button/system navigation replaces the center in place. Retire the
+            // old element before supplying the incoming artwork, never on image updates.
+            discs[records.center].resetAfterDeparture()
+        }
         records.synchronize(current: content.model.current, previous: content.model.recordPreview(.previous),
                             next: content.model.recordPreview(.next))
         let theme = PageTheme(palette: content.appearance.effectivePalette, dark: false)
@@ -688,7 +731,9 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
             }
         }, onCompletion: { [weak self] in
             guard let self, self.records.token == token else { return }
+            let outgoing = self.records.center
             if self.records.finish(token, currentID: self.content.model.current?.id) {
+                if outgoing != self.records.center { self.discs[outgoing].resetAfterDeparture() }
                 self.synchronizeRecords()
                 self.setNeedsLayout()
                 self.layoutIfNeeded()
@@ -838,7 +883,23 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
                                      !lyricExpanded &&
                                      content.clock.playing && !UIAccessibility.isReduceMotionEnabled)
         }
-        tonearm.setPlaying(content.clock.playing)
+        updateTonearm()
+    }
+
+    private func updateTonearm() {
+        let model = content.model
+        let navigatingToPlayback = model.isNavigating &&
+            (model.navigationPlaybackIntent?.isActive == true ||
+             (model.fmAdvanceIntent?.isActive == true && model.fmShouldPlay))
+        let engaged = model.phase == .playing || model.phase == .buffering ||
+            model.phase == .preparing || navigatingToPlayback
+        if records.phase != .idle, recordScroll.bounds.width > 0 {
+            let page = recordScroll.contentOffset.x / recordScroll.bounds.width
+            let nearest = min(2, max(0, page.rounded()))
+            tonearm.setContactProgress(engaged ? max(0, 1 - abs(page - nearest) * 2) : 0)
+        } else {
+            tonearm.setPlaying(engaged)
+        }
     }
 }
 #endif

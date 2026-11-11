@@ -96,9 +96,13 @@ final class PlaybackSeekCompletions {
         }
     }
 
-    isolated deinit {
-        cancelAll()
-        deliverPending()
+    // The controller's lifetime holder releases this registry on MainActor.
+    // Keep final cancellation synchronous without the isolated-deinit runtime.
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            cancelAll()
+            deliverPending()
+        }
     }
 }
 

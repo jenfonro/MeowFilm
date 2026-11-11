@@ -6,11 +6,7 @@ import ImageIO
 import UIKit
 import MeowContracts
 
-@MainActor
-struct PlaybackAudioSessionActions {
-    let activate: @MainActor () throws -> Void
-    let deactivate: @MainActor () throws -> Void
-
+extension PlaybackAudioSessionActions {
     static var live: Self {
         .init(activate: {
             let session = AVAudioSession.sharedInstance()
@@ -37,7 +33,11 @@ final class PlaybackSystemSession {
     private let audioSession = AVAudioSession.sharedInstance()
     private let notificationCenter: NotificationCenter
     private let registerCommandTarget: @MainActor (MPRemoteCommand, @escaping CommandHandler) -> (@MainActor () -> Void)
-    private let audioActions: PlaybackAudioSessionActions
+    private let audioOperations: PlaybackAudioSessionOperations
+    private let onAudioChange: @MainActor () -> Void
+    private var audioRevision = UUID()
+    private var activation: Task<NativePlaybackError?, Never>?
+    private var deactivation: Task<NativePlaybackError?, Never>?
     private let notificationObservers = PlaybackObservationScope()
     private let outputObservers = PlaybackObservationScope()
     private let commandObservers = PlaybackObservationScope()
@@ -53,7 +53,8 @@ final class PlaybackSystemSession {
     private var playPause: PlaybackPlayPauseRoute?
     private var playPauseRevision: UUID?
     private var generation: UUID?
-    private var isActive = false
+    private var notificationGeneration: UUID?
+    private(set) var isActive = false
     private var artworkData: Data?
     private var artwork: MPMediaItemArtwork?
     private(set) var lastError: NativePlaybackError?
@@ -64,13 +65,15 @@ final class PlaybackSystemSession {
         onCommand: @escaping @MainActor (PlaybackTransportCommand, UUID, PlaybackPlayPauseRoute?) -> Bool,
         onNavigation: @escaping @MainActor (PlaybackNavigationRoute) -> Bool,
         onOutputUnavailable: @escaping @MainActor () -> Void = {},
+        onAudioChange: @escaping @MainActor () -> Void = {},
         notificationCenter: NotificationCenter = .default,
         registerCommandTarget: @escaping @MainActor (MPRemoteCommand, @escaping CommandHandler) -> (@MainActor () -> Void) = { command, handler in
             let target = command.addTarget(handler: handler)
             return { command.removeTarget(target) }
         }
     ) {
-        self.audioActions = audioActions
+        self.audioOperations = PlaybackAudioSessionOperations(actions: audioActions)
+        self.onAudioChange = onAudioChange
         self.onEvent = onEvent
         self.onCommand = onCommand
         self.onNavigation = onNavigation
@@ -80,6 +83,7 @@ final class PlaybackSystemSession {
     }
 
     func beginSession(generation: UUID) {
+        audioRevision = UUID(); activation = nil; deactivation = nil; lastError = nil
         // Invalidate before removal, even if a target already has a callback
         // queued on another thread. Session notifications are scoped as well.
         self.generation = nil
@@ -91,6 +95,7 @@ final class PlaybackSystemSession {
         playPause = nil; playPauseRevision = nil
         self.generation = generation
         refreshOutputObservation()
+        notificationGeneration = generation
         installNotifications(generation: generation)
         let center = MPRemoteCommandCenter.shared()
         center.previousTrackCommand.isEnabled = false
@@ -115,26 +120,65 @@ final class PlaybackSystemSession {
         }
     }
 
-    func activate() throws {
-        guard !isActive else { return }
-        // No mixing: music and film share one audio focus owner. No record,
-        // microphone permission or route override is requested.
-        try audioActions.activate()
-        isActive = true
-        lastError = nil
+    func observeAudioAdmission(generation: UUID) {
+        guard self.generation == nil, notificationGeneration != generation else { return }
+        notificationObservers.cancel()
+        notificationGeneration = generation
+        installNotifications(generation: generation)
     }
 
-    func deactivate() {
-        guard isActive else { return }
-        do {
-            try audioActions.deactivate()
-            isActive = false
-            lastError = nil
-        } catch {
-            // Keep the active flag so a subsequent stop/deinit can retry.
-            // Never include the underlying error's potential URL/credentials.
-            lastError = .audioSessionDeactivationFailed
+    func endAudioAdmission(generation: UUID) {
+        guard self.generation == nil, notificationGeneration == generation else { return }
+        notificationGeneration = nil
+        notificationObservers.cancel()
+    }
+
+    /// Submission is synchronous; only the blocking OS work and completion are
+    /// deferred. This preserves pause/resume order even within one main turn.
+    func activate() -> Task<NativePlaybackError?, Never> {
+        if let activation { return activation }
+        deactivation = nil
+        let revision = UUID(); audioRevision = revision
+        let operation = audioOperations.enqueue(active: true)
+        let task = Task { [weak self] in
+            let failure = await operation.value
+            guard let self, self.audioRevision == revision else { return failure }
+            self.activation = nil
+            self.isActive = failure == nil
+            // Admission failures belong to the requesting attempt/candidate;
+            // they must not publish an error on a still-healthy donor.
+            if failure == nil { self.lastError = nil }
+            self.onAudioChange()
+            return failure
         }
+        activation = task
+        return task
+    }
+
+    @discardableResult
+    func deactivate() -> Task<NativePlaybackError?, Never> {
+        if let deactivation { return deactivation }
+        let revision = UUID(); audioRevision = revision
+        activation = nil; isActive = false
+        let operation = audioOperations.enqueue(active: false)
+        let task = Task { [weak self] in
+            let failure = await operation.value
+            guard let self, self.audioRevision == revision else { return failure }
+            self.deactivation = nil
+            self.lastError = failure
+            self.onAudioChange()
+            return failure
+        }
+        deactivation = task
+        return task
+    }
+
+    private func audioWasLost() {
+        audioRevision = UUID(); activation = nil; deactivation = nil; isActive = false
+        // Join any in-flight activation before discarding the OS fact. It may
+        // have succeeded after the interruption notification reached main.
+        _ = audioOperations.enqueue(active: false)
+        audioOperations.invalidateActivation()
     }
 
     func update(
@@ -232,9 +276,11 @@ final class PlaybackSystemSession {
         }
     }
 
-    func endSession() {
+    @discardableResult
+    func endSession() -> Task<NativePlaybackError?, Never> {
         let ownedMetadata = generation != nil
         generation = nil
+        notificationGeneration = nil
         notificationObservers.cancel()
         commandObservers.cancel()
         navigationObservers.cancel()
@@ -244,7 +290,7 @@ final class PlaybackSystemSession {
         artworkData = nil; artwork = nil
         refreshOutputObservation()
         if ownedMetadata { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil }
-        deactivate()
+        return deactivate()
     }
 
     func invalidate() {
@@ -329,7 +375,7 @@ final class PlaybackSystemSession {
                   let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
             switch type {
             case .began:
-                session.isActive = false
+                session.audioWasLost()
                 session.onEvent(.interruptionBegan, generation)
             case .ended:
                 let rawOptions = (notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? NSNumber)?.uintValue ?? 0
@@ -339,11 +385,11 @@ final class PlaybackSystemSession {
             }
         }
         observe(AVAudioSession.mediaServicesWereLostNotification, generation: generation) { session, _ in
-            session.isActive = false
+            session.audioWasLost()
             session.onEvent(.mediaServicesReset, generation)
         }
         observe(AVAudioSession.mediaServicesWereResetNotification, generation: generation) { session, _ in
-            session.isActive = false
+            session.audioWasLost()
             session.onEvent(.mediaServicesReset, generation)
         }
     }
@@ -355,15 +401,17 @@ final class PlaybackSystemSession {
         let center = notificationCenter
         let observer = center.addObserver(forName: name, object: audioSession, queue: .main) { [weak self] notification in
             MainActor.assumeIsolated {
-                guard let self, self.generation == generation else { return }
+                guard let self, self.notificationGeneration == generation else { return }
                 action(self, notification)
             }
         }
         notificationObservers.insert { center.removeObserver(observer) }
     }
 
-    isolated deinit {
-        invalidate()
+    // The controller's lifetime holder releases this adapter on MainActor,
+    // including when the public controller's last reference was off-main.
+    nonisolated deinit {
+        MainActor.assumeIsolated { invalidate() }
     }
 }
 #endif

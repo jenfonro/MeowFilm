@@ -13,6 +13,42 @@ public static partial class MusicUiTests
 {
     private static IEnumerable<TestCase> LyricInteractionCases()
     {
+        yield return Case("hidden and unloaded lyric previews retire their hold and follow without a media tick", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
+            f.Module.Lyrics.Clear();
+            for (int i = 0; i < 80; i++) f.Module.Lyrics.Add(new(i * 2, $"歌词 {i}", ""));
+            var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+            using var source = LyricInputSource(detail);
+            Render(detail, 860, 600); await Drain();
+            var list = (MusicLyricList)detail.FindName("LyricList");
+            var scroll = Visuals(list).OfType<ScrollViewer>().First();
+            double CenterError() => list.ItemContainerGenerator.ContainerFromIndex(20) is FrameworkElement row
+                ? Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y - scroll.ViewportHeight * .24)
+                : double.PositiveInfinity;
+            await f.Playback.SeekAsync(40); await f.Playback.PauseAsync();
+            await Until(() => CenterError() < 2);
+            foreach (bool unload in new[] { false, true })
+            {
+                list.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120)
+                    { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+                await Task.Delay(250); await Drain();
+                True(f.Module.HasLyricPreview, "manual browsing starts a four-second preview");
+                if (unload) source.RootVisual = null;
+                else detail.Visibility = Visibility.Hidden;
+                await Drain();
+                True(!f.Module.HasLyricPreview, "leaving the visible detail retires its preview");
+                if (unload) source.RootVisual = detail;
+                else detail.Visibility = Visibility.Visible;
+                Render(detail, 860, 600); await Drain();
+                await Until(() => CenterError() < 2);
+                True(!f.Playback.IsPlaying && !f.Module.HasLyricPreview,
+                    "restoring the detail follows the paused position without another media tick");
+            }
+            f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+            source.RootVisual = null;
+        });
         yield return Case("lyric loading empty failure and late cancellation stay inside the lyric region", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();

@@ -73,17 +73,23 @@ internal sealed class MusicPresentation
         var palette = module.PlayerPalette(sampled);
         var next = (GradientBrush)MusicPlayerArtwork.Backdrop(palette);
         var prior = PlayerBackground as GradientBrush;
-        if (animate && (page?.IsVisible == true || player?.IsVisible == true || detail?.IsVisible == true) &&
-            SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast &&
-            prior is not null && prior.GradientStops.Count == next.GradientStops.Count)
+        bool colorsChanged = prior is null || !prior.GradientStops
+            .Select(stop => (Color)stop.GetAnimationBaseValue(GradientStop.ColorProperty))
+            .SequenceEqual(next.GradientStops.Select(stop => stop.Color));
+        if (colorsChanged)
         {
-            next = next.Clone();
-            for (int i = 0; i < next.GradientStops.Count; i++)
-                next.GradientStops[i].BeginAnimation(GradientStop.ColorProperty,
-                    new ColorAnimation(prior.GradientStops[i].Color, next.GradientStops[i].Color,
-                        TimeSpan.FromMilliseconds(300)) { FillBehavior = FillBehavior.Stop });
+            if (animate && (page?.IsVisible == true || player?.IsVisible == true || detail?.IsVisible == true) &&
+                SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast &&
+                prior is not null && prior.GradientStops.Count == next.GradientStops.Count)
+            {
+                next = next.Clone();
+                for (int i = 0; i < next.GradientStops.Count; i++)
+                    next.GradientStops[i].BeginAnimation(GradientStop.ColorProperty,
+                        new ColorAnimation(prior.GradientStops[i].Color, next.GradientStops[i].Color,
+                            TimeSpan.FromMilliseconds(300)) { FillBehavior = FillBehavior.Stop });
+            }
+            PlayerBackground = next;
         }
-        PlayerBackground = next;
         PlayerProgress = MusicPlayerArtwork.Progress(palette);
         module.RefreshPlayerBackground();
     }

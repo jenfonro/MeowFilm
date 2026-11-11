@@ -181,6 +181,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         (CanEdit || OwnsCurrent && (playback.HasMedia || musicRecovery?.Recovering == true));
     private bool OwnsCurrent => current is not null && playback.OwnerId == Id && playback.Identity == current.EntryId;
     public string PlaybackPresentationKey => (current?.EntryId ?? "") + ":" + playbackEpoch;
+    public string CurrentTrackIdentity => current is null ? "" : (current.EntryId ?? "") + "\0" + current.Id;
     public bool CanSeek => CanPlay && OwnsCurrent && playback.HasMedia;
     public string PlayGlyph => OwnsCurrent && playback.IsPlaying ? "Ⅱ" : "▶";
     public double PositionSeconds => OwnsCurrent ? playback.PositionSeconds : 0;
@@ -209,7 +210,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             nameof(CanPlayCollection), nameof(DetailArtwork), nameof(DetailCountText),
             nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(CanPlayContentDetail), nameof(CurrentTitle),
             nameof(CurrentArtist), nameof(CurrentAlbum), nameof(HasCurrent), nameof(CurrentArtwork), nameof(CanPlay), nameof(Mode), nameof(ModeText),
-            nameof(PlaybackPresentationKey),
+            nameof(PlaybackPresentationKey), nameof(CurrentTrackIdentity),
             nameof(PlaybackRateText), nameof(CanSwitchSource) })
             Changed(name);
         OnlineBindings();

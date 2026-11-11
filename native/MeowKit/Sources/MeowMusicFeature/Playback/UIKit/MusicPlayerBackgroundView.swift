@@ -36,21 +36,24 @@ class MusicPlayerBackgroundView: UIView {
                            blue: b + (1 - b) * amount, alpha: 1)
         let next = [head.cgColor, pale.cgColor]
         guard next != colors else { return }
-        if animated, !UIAccessibility.isReduceMotionEnabled {
-            let animation = CABasicAnimation(keyPath: "colors")
-            animation.fromValue = gradient.presentation()?.colors ?? colors
-            animation.toValue = next
-            animation.duration = 0.3
-            gradient.add(animation, forKey: "player.palette")
-        }
+        let previous = gradient.presentation()?.colors ?? gradient.colors
         colors = next
         backgroundColor = pale
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        gradient.removeAnimation(forKey: "player.palette")
         gradient.colors = next
         gradient.locations = [0, style == .card ? 0.82 : 1]
         gradient.startPoint = CGPoint(x: 0.5, y: 0)
         gradient.endPoint = CGPoint(x: 0.5, y: 1)
+        if animated, let previous, !UIAccessibility.isReduceMotionEnabled {
+            let animation = CABasicAnimation(keyPath: "colors")
+            animation.fromValue = previous
+            animation.toValue = next
+            animation.duration = 0.3
+            animation.beginTime = gradient.convertTime(CACurrentMediaTime(), from: nil)
+            gradient.add(animation, forKey: "player.palette")
+        }
         CATransaction.commit()
     }
 

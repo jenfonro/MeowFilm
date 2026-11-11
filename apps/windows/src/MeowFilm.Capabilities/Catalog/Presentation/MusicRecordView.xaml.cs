@@ -16,12 +16,15 @@ public partial class MusicRecordView : UserControl
         typeof(string), typeof(MusicRecordView), new PropertyMetadata("", Changed));
     public static readonly DependencyProperty PlayingProperty = DependencyProperty.Register(nameof(Playing),
         typeof(bool), typeof(MusicRecordView), new PropertyMetadata(false, Changed));
+    public static readonly DependencyProperty TrackIdentityProperty = DependencyProperty.Register(nameof(TrackIdentity),
+        typeof(string), typeof(MusicRecordView), new PropertyMetadata("", Changed));
     public static readonly DependencyProperty SwipeEnabledProperty = DependencyProperty.Register(nameof(SwipeEnabled),
         typeof(bool), typeof(MusicRecordView), new PropertyMetadata(false, SwipeStateChanged));
     public static readonly DependencyProperty SwipeIdentityProperty = DependencyProperty.Register(nameof(SwipeIdentity),
         typeof(string), typeof(MusicRecordView), new PropertyMetadata("", SwipeStateChanged));
     public string Address { get => (string)GetValue(AddressProperty); set => SetValue(AddressProperty, value); }
     public bool Playing { get => (bool)GetValue(PlayingProperty); set => SetValue(PlayingProperty, value); }
+    public string TrackIdentity { get => (string)GetValue(TrackIdentityProperty); set => SetValue(TrackIdentityProperty, value); }
     public bool SwipeEnabled { get => (bool)GetValue(SwipeEnabledProperty); set => SetValue(SwipeEnabledProperty, value); }
     public string SwipeIdentity { get => (string)GetValue(SwipeIdentityProperty); set => SetValue(SwipeIdentityProperty, value); }
     public static readonly DependencyProperty PaletteBrushProperty = DependencyProperty.Register(nameof(PaletteBrush),
@@ -90,9 +93,12 @@ public partial class MusicRecordView : UserControl
         var record = (MusicRecordView)value;
         if (record.Cover is null) return;
         if (args.Property == AddressProperty)
-        {
-            record.Release(); record.retainedAngle = 0; record.Rotation.Angle = 0;
             record.Cover.Address = record.Address;
+        if (args.Property == TrackIdentityProperty)
+        {
+            // A committed swipe has already taken the old disc out of view.
+            // Artwork updates and media retries do not end a track's posture.
+            record.Release(); record.retainedAngle = 0; record.Rotation.Angle = 0;
         }
         record.Sync();
     }

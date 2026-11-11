@@ -52,7 +52,7 @@ private final class PlaybackLyricGate: @unchecked Sendable {
 final class MusicPlaybackLyricCacheTests: XCTestCase {
     private typealias Cache = MusicPlaybackLyricCache
     private func line(_ text: String, translation: String = "", words: [MusicLyricWord] = []) -> MusicLyricLine {
-        .init(index: 0, time: 0, end: 5, text: text, translation: translation, timing: "line", words: words)
+        .init(index: 0, time: 0, end: 5, text: text, translation: translation, words: words)
     }
     private func snapshot(_ text: String = "歌词", occurrence: String = "first") -> MusicLyricsSnapshot {
         .init(occurrenceId: occurrence, state: .ready, lines: [line(text)])

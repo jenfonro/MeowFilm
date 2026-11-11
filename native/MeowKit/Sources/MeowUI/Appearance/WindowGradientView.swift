@@ -65,8 +65,8 @@ open class WindowGradientView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         gradient.frame = canvas.bounds
+        gradient.locations = gradientStops.map { NSNumber(value: $0.location) }
         CATransaction.commit()
-        updateStops(animated: false)
     }
 
     public func applyTheme() {
@@ -76,22 +76,32 @@ open class WindowGradientView: UIView {
                     !UIAccessibility.isReduceMotionEnabled)
     }
 
-    private func updateStops(animated: Bool) {
+    private var gradientStops: [PageGradientStop] {
         let height = window?.bounds.height ?? bounds.height
         let top = window?.safeAreaInsets.top ?? safeAreaInsets.top
-        let stops = theme.gradientStops(safeTopFraction: height > 0 ? Double(top / height) : 0)
+        return theme.gradientStops(safeTopFraction: height > 0 ? Double(top / height) : 0)
+    }
+
+    private func updateStops(animated: Bool) {
+        let stops = gradientStops
         let colors = stops.map { UIColor($0.color).cgColor }
         let locations = stops.map { NSNumber(value: $0.location) }
-        if animated, let previous = gradient.presentation()?.colors {
-            let animation = CABasicAnimation(keyPath: "colors")
-            animation.fromValue = previous
-            animation.toValue = colors
-            animation.duration = 0.3
-            gradient.add(animation, forKey: "page.colorway")
-        }
+        let colorsChanged = gradient.colors as? [CGColor] != colors
+        let previous = gradient.presentation()?.colors ?? gradient.colors
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        gradient.colors = colors
+        if colorsChanged {
+            gradient.removeAnimation(forKey: "page.colorway")
+            gradient.colors = colors
+            if animated, let previous {
+                let animation = CABasicAnimation(keyPath: "colors")
+                animation.fromValue = previous
+                animation.toValue = colors
+                animation.duration = 0.3
+                animation.beginTime = gradient.convertTime(CACurrentMediaTime(), from: nil)
+                gradient.add(animation, forKey: "page.colorway")
+            }
+        }
         gradient.locations = locations
         gradient.startPoint = CGPoint(x: 0.5, y: 0)
         gradient.endPoint = CGPoint(x: 0.5, y: 1)

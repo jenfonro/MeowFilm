@@ -7,7 +7,7 @@ import MeowUI
 @MainActor
 final class MusicTonearmView: UIView {
     private static let rotationKey = "tonearm.rotation"
-    private var playing = false
+    private var contactProgress: CGFloat = 0
     private var dark = false
 
     override init(frame: CGRect) {
@@ -36,19 +36,25 @@ final class MusicTonearmView: UIView {
     }
 
     func setPlaying(_ value: Bool) {
+        setContactProgress(value ? 1 : 0, animated: true)
+    }
+
+    /// 0 is lifted, 1 is in contact. Gesture/scroll owners supply progress directly.
+    func setContactProgress(_ progress: CGFloat, animated: Bool = false) {
+        let progress = min(1, max(0, progress))
         let reduceMotion = UIAccessibility.isReduceMotionEnabled
-        guard playing != value ||
-                (reduceMotion && layer.animation(forKey: Self.rotationKey) != nil) else { return }
+        let hasAnimation = layer.animation(forKey: Self.rotationKey) != nil
+        guard contactProgress != progress || (hasAnimation && (!animated || reduceMotion)) else { return }
         let current = layer.presentation()?.transform ?? layer.transform
         let currentAngle = atan2(current.m12, current.m11)
-        let targetAngle: CGFloat = value ? 10 * .pi / 180 : 0
-        playing = value
+        let targetAngle = progress * 10 * .pi / 180
+        contactProgress = progress
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         layer.removeAnimation(forKey: Self.rotationKey)
         transform = CGAffineTransform(rotationAngle: targetAngle)
-        if !reduceMotion {
+        if animated && !reduceMotion && UIView.areAnimationsEnabled {
             let animation = CABasicAnimation(keyPath: "transform.rotation.z")
             animation.fromValue = currentAngle
             animation.toValue = targetAngle
@@ -61,7 +67,7 @@ final class MusicTonearmView: UIView {
 
     @objc private func reduceMotionChanged() {
         guard UIAccessibility.isReduceMotionEnabled else { return }
-        setPlaying(playing)
+        setContactProgress(contactProgress)
     }
 
     private func updateShadow() {

@@ -21,7 +21,7 @@ final class MusicNativePlatformLyricsTests: XCTestCase {
             XCTAssertEqual(result.state, .ready)
             XCTAssertEqual(result.lines.map(\.text), platform == "kw" ? ["AB", "C"] : ["你好", "世界"])
             XCTAssertEqual(result.lines[0].translation, platform == "kw" ? "Translation" : "Hello")
-            XCTAssertTrue(result.lines.allSatisfy { $0.timing == "word" })
+            XCTAssertTrue(result.lines.allSatisfy { !$0.words.isEmpty })
             let afterScripts = await scripts.calls(), accountCalls = await accounts.events()
             XCTAssertEqual(afterScripts, scriptCalls, "no source/list/resolve/lyric call, including on a failed Node")
             XCTAssertTrue(accountCalls.isEmpty)

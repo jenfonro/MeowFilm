@@ -80,11 +80,13 @@ public final class PlaybackOwnerLease {
     private weak var router: PlaybackOwnerRouter?
     private let owner: String
     private let id: UUID
+    private var removal: (@MainActor @Sendable () -> Void)?
 
     fileprivate init(router: PlaybackOwnerRouter, owner: String, id: UUID) {
         self.router = router
         self.owner = owner
         self.id = id
+        removal = { [weak router] in router?.remove(owner: owner, id: id) }
     }
 
     public var isCancelled: Bool { router?.contains(owner: owner, id: id) != true }
@@ -101,12 +103,22 @@ public final class PlaybackOwnerLease {
     }
 
     public func cancel() {
-        let current = router
+        let remove = removal
+        removal = nil
         router = nil
-        current?.remove(owner: owner, id: id)
+        remove?()
     }
 
-    isolated deinit { cancel() }
+    nonisolated deinit {
+        guard let removal else { return }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { removal() }
+        } else {
+            // Capture only the sendable cancellation action, never the dying
+            // lease or a strong router whose final release must remain on main.
+            DispatchQueue.main.async { removal() }
+        }
+    }
 }
 
 enum PlaybackNavigationDirection: Equatable, Sendable {

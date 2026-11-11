@@ -109,12 +109,13 @@ public static class MusicLyricTiming
         {
             var line = lines[i]; double? next = lines.Skip(i + 1).FirstOrDefault(l => l.Time > line.Time)?.Time;
             double time = Math.Max(0, line.Time);
-            double? end = line.End ?? next ?? (duration > time ? duration : (double?)null);
+            double? wordEnd = line.End ?? next;
+            double? end = wordEnd ?? (duration > time ? duration : (double?)null);
             line.Time = time;
             line.End = Math.Max(line.Time, end ?? time);
             // Seek bounds are nonnegative; word intervals keep the source boundary after a negative offset.
             for (int j = 0; j < line.Words.Count; j++)
-                line.Words[j].Duration ??= Math.Max(0, (j + 1 < line.Words.Count ? line.Words[j + 1].Time : end ?? line.Words[j].Time) - line.Words[j].Time);
+                line.Words[j].Duration ??= Math.Max(0, (j + 1 < line.Words.Count ? line.Words[j + 1].Time : wordEnd ?? line.Words[j].Time) - line.Words[j].Time);
         }
         return lines;
     }

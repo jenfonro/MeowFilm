@@ -17,6 +17,7 @@ using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
 using MeowFilm.AppHost;
 using MeowFilm.Desktop;
+using MeowFilm.Desktop.Artwork;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Feedback;
@@ -232,6 +233,116 @@ public static partial class MusicUiTests
                 window.Content = null;
                 window.Close();
             }
+        });
+        yield return Case("record posture survives same-track artwork pause visibility and canceled swipes", async () =>
+        {
+            foreach (var size in new[] { 60, 300 })
+            {
+                var record = new MusicRecordView
+                {
+                    Width = size, Height = size, Address = "fixture://same-cover", TrackIdentity = "song:1",
+                    SwipeIdentity = "attempt:1", SwipeEnabled = true
+                };
+                ArtworkScope.SetLoader(record, new PlayerArtworkFixture());
+                using var source = new System.Windows.Interop.HwndSource(new System.Windows.Interop.HwndSourceParameters("record-posture-fixture")
+                {
+                    WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                    PositionX = -32000, PositionY = -32000, Width = size, Height = size
+                });
+                source.RootVisual = record; Render(record, size, size); await Drain();
+                var rotation = (RotateTransform)record.FindName("Rotation");
+                Equal(0d, rotation.Angle);
+                rotation.Angle = 63;
+                record.Visibility = Visibility.Hidden; await Drain();
+                record.Visibility = Visibility.Visible; await Drain();
+                record.Address = "fixture://updated-cover"; await Drain();
+                Equal(63d, rotation.Angle);
+                record.Address = ""; await Drain();
+                Equal(63d, rotation.Angle);
+                record.SwipeIdentity = "attempt:2"; await Drain();
+                Equal(63d, rotation.Angle);
+                record.Playing = true; await Task.Delay(200); await Drain();
+                record.Playing = false; await Task.Delay(40); await Drain();
+                var paused = rotation.Angle;
+                if (SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast)
+                    True(paused > 63 && paused < 75, "playing continues from the existing posture");
+                await Task.Delay(160); await Drain();
+                True(Math.Abs(rotation.Angle - paused) < .01, "pause freezes the disc");
+                record.Address = "fixture://same-cover";
+                record.SetValue(MusicRecordView.PaletteBrushProperty, Brushes.Teal);
+                await Drain();
+                True(Math.Abs(rotation.Angle - paused) < .01, "same-track cover and theme retain the paused angle");
+                record.Visibility = Visibility.Hidden; await Drain();
+                record.Visibility = Visibility.Visible; await Drain();
+                True(Math.Abs(rotation.Angle - paused) < .01, "hide and show retain the paused posture");
+                source.RootVisual = null; await Drain();
+                source.RootVisual = record; Render(record, size, size); await Drain();
+                True(Math.Abs(rotation.Angle - paused) < .01, "unload and reload retain the same track posture");
+                record.BeginSwipe(size / 2); record.UpdateSwipe(0); record.EndSwipe(commit: false);
+                await Until(() => Math.Abs(record.SwipeOffset) < .5);
+                True(Math.Abs(rotation.Angle - paused) < .01, "canceling a swipe does not reset the disc");
+                record.Playing = true; await Task.Delay(200); await Drain();
+                record.Playing = false; await Task.Delay(40); await Drain();
+                if (SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast)
+                    True(rotation.Angle > paused && rotation.Angle < paused + 12, "resume continues from the retained posture");
+                record.Playing = true; await Task.Delay(160); await Drain();
+                record.Visibility = Visibility.Hidden; await Drain();
+                var hidden = rotation.Angle;
+                await Task.Delay(160); await Drain();
+                True(Math.Abs(rotation.Angle - hidden) < .01, "hidden discs retain their last visible posture");
+                record.Playing = false;
+                record.Visibility = Visibility.Visible; await Drain();
+                True(Math.Abs(rotation.Angle - hidden) < .01, "pausing while hidden returns at the retained angle");
+                paused = hidden;
+
+                var commits = 0;
+                record.SwipeCommitted += (_, e) =>
+                {
+                    True(Math.Abs(record.SwipeOffset) >= size - .5, "the old disc leaves before the queue commit");
+                    True(Math.Abs(rotation.Angle - paused) < .01, "the visible outgoing disc never rewinds");
+                    record.TrackIdentity = "song:2";
+                    Equal("fixture://same-cover", record.Address);
+                    Equal(0d, rotation.Angle);
+                    commits++;
+                    record.ResolveSwipe(e.Identity);
+                };
+                record.BeginSwipe(size / 2); record.UpdateSwipe(0);
+                // Compact discs also require the product's 48-DIP commit threshold.
+                record.UpdateSwipe(-size); record.EndSwipe(commit: true);
+                await Until(() => commits == 1 && Math.Abs(record.SwipeOffset) < .5);
+                rotation.Angle = 91;
+                record.Address = ""; Equal(91d, rotation.Angle);
+                record.TrackIdentity = "song:3"; Equal(0d, rotation.Angle);
+                rotation.Angle = 17;
+                record.TrackIdentity = "song:4"; Equal(0d, rotation.Angle);
+                record.TrackIdentity = "song:1"; Equal(0d, rotation.Angle);
+                source.RootVisual = null;
+            }
+        });
+        yield return Case("footer and detail records follow the same track identity independently of media attempts", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+            Render(f.Module.PlayerView, 860, 92); Render(detail, 860, 600); await Drain();
+            var footer = Visuals(f.Module.PlayerView).OfType<MusicRecordView>().Single();
+            var full = (MusicRecordView)detail.FindName("DetailRecord");
+            await Drain();
+            Equal(f.Module.CurrentTrackIdentity, footer.TrackIdentity);
+            Equal(footer.TrackIdentity, full.TrackIdentity);
+            var identity = footer.TrackIdentity;
+            var attempt = f.Module.PlaybackPresentationKey;
+            var rotations = new[] { footer, full }.Select(record => (RotateTransform)record.FindName("Rotation")).ToArray();
+            foreach (var rotation in rotations) rotation.Angle = 63;
+            await f.Playback.StopAsync();
+            await f.Module.TogglePlaybackAsync(); await Drain();
+            True(attempt != f.Module.PlaybackPresentationKey, "reopening media advances its request identity");
+            Equal(identity, f.Module.CurrentTrackIdentity);
+            foreach (var rotation in rotations) Equal(63d, rotation.Angle);
+            await f.Module.StepAsync(true); await Drain();
+            True(identity != f.Module.CurrentTrackIdentity, "a queue step changes the track identity");
+            Equal(f.Module.CurrentTrackIdentity, footer.TrackIdentity);
+            Equal(footer.TrackIdentity, full.TrackIdentity);
+            foreach (var rotation in rotations) Equal(0d, rotation.Angle);
         });
         yield return Case("record swipe cancellation fences identity visibility resize and interrupted return", async () =>
         {

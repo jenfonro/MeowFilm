@@ -76,7 +76,7 @@
     <Ellipse Canvas.Left="53" Canvas.Top="103" Width="414" Height="414" Fill="#0AFFFFFF" Stroke="#20FFFFFF" StrokeThickness="1"/>
     <local:MusicRecordView x:Name="DetailRecord" Canvas.Left="66" Canvas.Top="116" Width="388" Height="388"
      Address="{Binding CurrentArtwork}" Playing="{Binding IsPlaying}" SwipeEnabled="{Binding CanPlay}"
-     SwipeIdentity="{Binding PlaybackPresentationKey}" SwipeCommitted="DetailRecord_SwipeCommitted"
+     TrackIdentity="{Binding CurrentTrackIdentity}" SwipeIdentity="{Binding PlaybackPresentationKey}" SwipeCommitted="DetailRecord_SwipeCommitted"
      AutomationProperties.Name="唱片切歌"/>
     <Canvas Canvas.Left="244" Canvas.Top="8" Width="220" Height="130" IsHitTestVisible="False">
      <Canvas.RenderTransform><RotateTransform x:Name="NeedleRotation" CenterX="17" CenterY="17"/></Canvas.RenderTransform>

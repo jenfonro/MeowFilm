@@ -425,23 +425,27 @@ public struct MusicPlaybackFact: Sendable {
 
 public struct MusicLyricWord: Codable, Equatable, Sendable {
     public let time: Double
+    /// Source duration, or the interval to a subsequent real lyric marker.
+    /// Zero highlights immediately at `time` and holds until the line leaves.
     public let duration: Double
     public let text: String
     public init(time: Double, duration: Double, text: String) { self.time = time; self.duration = duration; self.text = text }
 }
 public struct MusicLyricLine: Codable, Equatable, Sendable, Identifiable {
     public let index: Int
+    /// Nonnegative line seek position; source word times may precede zero.
     public let time: Double
+    /// Line display boundary; never a substitute for a word's missing end marker.
     public let end: Double
     public let text: String
     public let translation: String
-    public let timing: String
+    /// Empty for line-only lyrics. Entries require real source timestamps.
     public let words: [MusicLyricWord]
     public var id: Int { index }
     public init(index: Int, time: Double, end: Double, text: String, translation: String = "",
-                timing: String = "estimated", words: [MusicLyricWord] = []) {
+                words: [MusicLyricWord] = []) {
         self.index = index; self.time = time; self.end = end; self.text = text; self.translation = translation
-        self.timing = timing; self.words = words
+        self.words = words
     }
 }
 public struct MusicLyricsSnapshot: Sendable {

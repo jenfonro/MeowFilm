@@ -68,6 +68,8 @@ public final class MusicPlayerContentModel {
     private let artworkUpdates = PassthroughSubject<Void, Never>()
     private let appearanceUpdates = PassthroughSubject<Void, Never>()
     private let clockUpdates = PassthroughSubject<Void, Never>()
+    private let positionUpdates = PassthroughSubject<Double, Never>()
+    private let seekUpdates = PassthroughSubject<Void, Never>()
     private let favoriteUpdates = PassthroughSubject<Void, Never>()
     private let dockUpdates = PassthroughSubject<Void, Never>()
     private let accessUpdates = PassthroughSubject<Void, Never>()
@@ -78,6 +80,8 @@ public final class MusicPlayerContentModel {
     var artworkChanges: AnyPublisher<Void, Never> { artworkUpdates.eraseToAnyPublisher() }
     var appearanceChanges: AnyPublisher<Void, Never> { appearanceUpdates.eraseToAnyPublisher() }
     var clockChanges: AnyPublisher<Void, Never> { clockUpdates.eraseToAnyPublisher() }
+    var positionSamples: AnyPublisher<Double, Never> { positionUpdates.eraseToAnyPublisher() }
+    var seekChanges: AnyPublisher<Void, Never> { seekUpdates.eraseToAnyPublisher() }
     var favoriteChanges: AnyPublisher<Void, Never> { favoriteUpdates.eraseToAnyPublisher() }
     var dockChanges: AnyPublisher<Void, Never> { dockUpdates.eraseToAnyPublisher() }
     var accessChanges: AnyPublisher<Void, Never> { accessUpdates.eraseToAnyPublisher() }
@@ -120,8 +124,12 @@ public final class MusicPlayerContentModel {
             self?.metadataUpdates.send()
             self?.updateClock()
         }
-        observe(Publishers.CombineLatest(model.clock.$position, model.clock.$duration)
-            .dropFirst().map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.updateClock() }
+        observe(model.clock.$duration.dropFirst().map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.updateClock() }
+        subscriptions.append(model.clock.$position.dropFirst().receive(on: RunLoop.main).sink { [weak self] position in
+            guard let self, position == self.model.position else { return }
+            self.updateClock()
+            self.positionUpdates.send(position)
+        })
         observe(Publishers.CombineLatest3(playback.$snapshot, playback.$currentAttempt, playback.$preferredRate)
             .dropFirst().map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.updateClock() }
         observe(Publishers.CombineLatest(playback.$currentAttempt, playback.$snapshot.map(\.phase).removeDuplicates())
@@ -203,7 +211,9 @@ public final class MusicPlayerContentModel {
     @discardableResult
     func seek(to position: Double, expected: MusicReferencePlayerFence) -> Bool {
         guard expected.admits(fence, permitted: isAvailable) else { return false }
-        return model.seek(to: position)
+        guard model.seek(to: position) else { return false }
+        seekUpdates.send()
+        return true
     }
 
     func setMode(_ mode: MusicPlaybackMode, expected: MusicReferencePlayerFence) {
