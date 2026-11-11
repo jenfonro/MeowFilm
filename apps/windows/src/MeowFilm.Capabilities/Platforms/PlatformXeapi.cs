@@ -119,7 +119,7 @@ internal static class PlatformXeapi
     internal static HttpRequestMessage Request(string path, JsonObject parameters, MusicPlatformSession session,
         MusicWyClientContext client, KeyState state)
     {
-        PJ.Require(path is "/api/v3/discovery/recommend/songs" or "/api/homepage/category/daily/song/list" or "/api/song/enhance/player/url/v1");
+        PJ.Require(path is "/api/v3/discovery/recommend/songs" or "/api/homepage/category/daily/song/list" or "/api/homepage/daily/song/config/get" or "/api/homepage/daily/song/tag/save" or "/api/song/enhance/player/url/v1");
         var cookies = MusicWyRequestContext.Cookies(client, session.Cookie); var device = Device(cookies);
         var version = PJ.Cookie(cookies, "os") == "android" ? PJ.Cookie(cookies, "appver", "9.1.65") : "9.1.65";
         var osver = PJ.Cookie(cookies, "os") == "android" ? PJ.Cookie(cookies, "osver", "16") : "16";

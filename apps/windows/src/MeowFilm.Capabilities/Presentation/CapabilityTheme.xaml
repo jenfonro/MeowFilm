@@ -230,4 +230,43 @@
   <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
   <Setter Property="Foreground" Value="{Binding Foreground,RelativeSource={RelativeSource AncestorType=DataGridCell}}"/>
  </Style>
+  <Style x:Key="Music.FilterTag" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
+   <Setter Property="Width" Value="78"/>
+   <Setter Property="Height" Value="31"/>
+   <Setter Property="MinHeight" Value="0"/>
+   <Setter Property="Margin" Value="0,0,12,14"/>
+   <Setter Property="Padding" Value="8,2"/>
+   <Setter Property="FontSize" Value="13"/>
+   <Setter Property="Foreground" Value="#495164"/>
+   <Setter Property="Background" Value="#F4F5F7"/>
+   <Setter Property="BorderBrush" Value="#E3E5E9"/>
+   <Setter Property="BorderThickness" Value="1"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+    <Border x:Name="Pill" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="16" Padding="{TemplateBinding Padding}">
+     <ContentPresenter x:Name="TagContent" TextElement.Foreground="{TemplateBinding Foreground}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    </Border>
+    <ControlTemplate.Triggers>
+     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Pill" Property="Background" Value="#EAECF0"/></Trigger>
+     <Trigger Property="IsPressed" Value="True"><Setter TargetName="Pill" Property="Background" Value="#DFE2E7"/></Trigger>
+     <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Pill" Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Focus}"/><Setter TargetName="Pill" Property="BorderThickness" Value="2"/></Trigger>
+     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter TargetName="Pill" Property="Background" Value="{DynamicResource {x:Static SystemColors.ControlBrushKey}}"/><Setter TargetName="Pill" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"/><Setter TargetName="TagContent" Property="TextElement.Foreground" Value="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"/></Trigger>
+     <MultiDataTrigger><MultiDataTrigger.Conditions>
+      <Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=(desktop:DesktopTheme.IsHighContrast)}" Value="True"/>
+      <Condition Binding="{Binding Selected}" Value="True"/>
+     </MultiDataTrigger.Conditions>
+      <Setter TargetName="Pill" Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+      <Setter TargetName="Pill" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+      <Setter TargetName="TagContent" Property="TextElement.Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+     </MultiDataTrigger>
+     <MultiTrigger><MultiTrigger.Conditions><Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsKeyboardFocused" Value="True"/></MultiTrigger.Conditions><Setter TargetName="Pill" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
+     <MultiDataTrigger><MultiDataTrigger.Conditions>
+      <Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=(desktop:DesktopTheme.IsHighContrast)}" Value="True"/>
+      <Condition Binding="{Binding Selected}" Value="True"/>
+      <Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=IsKeyboardFocused}" Value="True"/>
+     </MultiDataTrigger.Conditions><Setter TargetName="Pill" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/></MultiDataTrigger>
+     <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".45"/></Trigger>
+    </ControlTemplate.Triggers>
+   </ControlTemplate></Setter.Value></Setter>
+  </Style>
 </ResourceDictionary>

@@ -8,7 +8,6 @@
     <x:Static x:Key="MeowFilm.Brush.ItemHover" Member="local:AppearanceColors.ItemHover"/>
     <x:Static x:Key="MeowFilm.Brush.ItemSelected" Member="local:AppearanceColors.ItemSelected"/>
     <x:Static x:Key="MeowFilm.Brush.InputSurface" Member="local:AppearanceColors.InputSurface"/>
-    <SolidColorBrush x:Key="MeowFilm.Brush.Sidebar" Color="#66FFFFFF"/>
     <SolidColorBrush x:Key="MeowFilm.Brush.SidebarBorder" Color="#80E5E7EB"/>
     <SolidColorBrush x:Key="MeowFilm.Brush.Surface" Color="#FFFFFF" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#374151" />

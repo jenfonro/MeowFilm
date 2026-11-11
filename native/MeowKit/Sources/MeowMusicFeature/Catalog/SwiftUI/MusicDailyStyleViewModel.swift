@@ -101,13 +101,8 @@ final class MusicDailyStyleViewModel: ObservableObject {
         var values = selected
         if values.contains(id) {
             values.remove(id)
-        } else if selectedCategory.maximum == 1 {
-            values = [id]
-        } else if values.count < selectedCategory.maximum {
-            values.insert(id)
         } else {
-            error = "最多选择 \(selectedCategory.maximum) 项"
-            return
+            values.insert(id)
         }
         choices[category] = values
     }
@@ -129,8 +124,16 @@ final class MusicDailyStyleViewModel: ObservableObject {
                 try selection.validate(in: categories)
                 try await source.validate()
                 guard current(id) else { return }
-                _ = try await page.saveDailyStyle(selection)
+                let result = try await page.saveDailyStyle(selection)
                 guard current(id) else { return }
+                if let actual = page.dailyStyle {
+                    category = actual.category
+                    choices = [actual.category: Set(actual.tags.map(\.id))]
+                }
+                guard !result.selectionChanged else {
+                    error = "推荐风格与提交不一致，已显示当前生效选择"
+                    return
+                }
                 saved = true
             } catch {
                 if current(id) { self.error = MusicServiceError.sanitized(error).localizedDescription }

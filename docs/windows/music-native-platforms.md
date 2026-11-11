@@ -4,9 +4,9 @@
 
 ## 所有权与装配
 
-- `MusicPlatformCatalog` 是固定平台内容读取的原生 owner，公开契约为 `IMusicPlatformCatalog`。
+- `MusicPlatformCatalog` 是固定平台内容读取的原生 owner，读取契约为 `IMusicPlatformCatalog`；网易风格偏好由同一实例的独立 `IMusicDailyStylePreferences` 契约拥有。
 - 网易云、QQ、酷狗从 `IMusicPlatformSessionSource` 借用当前账号会话；酷我和咪咕只使用匿名公共元数据链，绝不借用其他平台账号。
-- Catalog 不持久化账号、不修改云端内容、不启动 Node、不调用本地服务，也不拥有页面状态。
+- Catalog 不持久化账号、不启动 Node、不调用本地服务，也不拥有页面状态。只有显式风格确认通过独立偏好接口写入云端；目录读取没有隐式保存副作用。
 - 账号 owner 在登录、退出、换号或会话失效时调用 `Invalidate`；消费者不能自行缓存 Cookie 或重建会话。
 - WY／KG 请求显式消费当前客户端快照，客户端字段与可选账号只在 wire 边界组合；QQ 类型搜索按需消费同一客户端 owner 的匿名 QIMEI／GetSession，精确歌曲和歌单读取不额外登记。构造目录不初始化或登记客户端。
 - WY 普通／VIP EAPI 的 Cookie 按加密 header 中的字符串原值构造；缺少可选 CSRF 时保留空字符串，不转换为 JSON 字面量。WEAPI、EAPI 和 VIP EAPI 各自保留原有固定包络。
@@ -113,6 +113,29 @@ Invalidate
 - 分页结果保留平台、页码、页大小、总量、`more` 和 continuation。未知总量使用 `null`，不能用当前页长度伪造。搜索页的 `more` 需平台声明还有后续；没有显式游标的平台短页即末页，QQ 按平台 `nextpage`，空页始终结束；即使平台 `total` 更大也如此。
 
 咪咕歌曲搜索使用原生 group 单位：单页 group 数不超过请求页长，完整展开各 group 的录音版本，不另设 32／1000 版本额度；group 排名、总量和 copyright 身份必须完整保留。其他平台与歌单搜索仍使用 item 单位。
+
+## 网易云每日风格偏好
+
+现有 `MusicNativeApplication` 的 Catalog owner 可将同一 `MusicPlatformCatalog` 实例以 `IMusicDailyStylePreferences` 交给页面；该接口不扩展 `IMusicPlatformCatalog` 为通用写接口，也不单独创建会话、HTTP 或客户端 owner。
+
+- `OpenDailyStyleEditorAsync(token)` 用当前网易账号读取 `/api/homepage/daily/song/config/get`，返回 `MusicDailyStyleEditor(AccountScope, AccountGeneration, UserId, Categories)`。分类为 `MusicDailyStyleCategory(Id, Name, Tags)`，标签为 `MusicDailyStyleTag(Id, Name)`；顺序、身份和名称来自 `data.categorys[] / tagVOList[]`。缺失、重号或无名的目录明确失败。Editor 没有凭据；打开或取消编辑不写偏好。
+- `SaveDailyStyleAsync(editor, MusicDailyStyleSelection(CategoryId, TagIds), token)` 只接受开启编辑时的账号身份，在派发前和每次响应后沿用会话复核。换号返回 `NotSent / STALE_SESSION`，不会改借新号写入。页面仍须用自身编辑代次拒绝旧账号回执。
+- 保存复制草稿，要求非空、唯一、同一分类的目录成员，并在真正写入前重读配置核对成员。没有硬编码分类、标签、单选类别或选中数量上限。`tags` 为 JSON 字符串，内含数值 `categoryId` 和数值 `tagIds[]`；正整数及 JavaScript 安全整数范围属于固定上游数值协议。
+- 一次确认只发送一次 `/api/homepage/daily/song/tag/save`，不自动重试、不做补偿写。token 在准入前已取消则返回 `NotSent / CANCELLED`；准入后继续等待真实写入及回读，调用方取消不能伪装回滚。账号失效、截止或关闭仍围住传输，并等待物理收尾。
+- 普通风格读取保留既有 1 分钟缓存和同 key 在途合并。保存准入及写入结算后，仅推进该账号风格分支的内存代次、删除该分支旧 cache/flight，并围住活动读取，使旧请求以 `SNAPSHOT_CHANGED` 失去发布资格。随后以同一账号在新有效代次读取 `/api/homepage/category/daily/song/list`，可合并该代次读取并建立新的 1 分钟缓存；不能接回保存前的 flight 或缓存。默认日推和其他分支不变。
+
+保存结果是 `MusicDailyStyleSaveResult(Status, Readback, SelectionMatches, ErrorCode)`：
+
+| Status | 含义 |
+| --- | --- |
+| `NotSent` | 偏好写入尚未派发；参数、配置、账号或准入失败 |
+| `Rejected` | 已解码的服务业务响应拒绝写入；`ErrorCode` 保留服务错误分类 |
+| `Confirmed` | 服务确认写入成功；仍需检查真实回读及选择是否匹配 |
+| `Unknown` | 已派发但无法确认写入结果，可能已生效；先读取核对，不自动重试 |
+
+`Readback` 仅在真实回读并通过最终账号检查后非空，沿用 `DailyAsync(Style)` 的 `category/tags/items/scope` 批次形状。`SelectionMatches` 在有回读时按分类和无序标签集合比较，否则为 null。写入确认后回读失败仍是 `Confirmed`，但 `Readback` 为 null 且提供错误；写入失败后回读成功可展示实际选择，同时保留原写入状态与错误。回读或最终会话检查失败时 `ErrorCode` 报该失败，状态仍保留已知写入事实。
+
+数量依据：固定上游 [recommend_category_configs.js](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced/blob/19c7dad6db7d660954c7a615a686ff0acb030f91/module/recommend_category_configs.js)、[recommend_category_set.js](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced/blob/19c7dad6db7d660954c7a615a686ff0acb030f91/module/recommend_category_set.js) 和 [recommend_category_songs.js](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced/blob/19c7dad6db7d660954c7a615a686ff0acb030f91/module/recommend_category_songs.js) 确认上述字段和 XEAPI 配方，没有声明选中数量限制。尚未证实服务是否另有限制，不将 iOS 既有 `3000=1 / 其他=5` 常量当作协议；真实服务限制通过服务错误保留。
 
 ## 会话与账号隔离
 

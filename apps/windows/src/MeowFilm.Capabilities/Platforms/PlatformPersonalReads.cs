@@ -12,34 +12,35 @@ public sealed partial class MusicPlatformCatalog
     public Task<JsonElement> DailyAsync(MusicDailyRequest request, CancellationToken cancellationToken = default)
     {
         PJ.Require(request is not null && Enum.IsDefined(request.Branch)); var p = request!;
-        return RunAsync(p.Platform, "daily", p, p.Refresh, c =>
+        return RunAsync(p.Platform, p.Branch == MusicDailyBranch.Style ? "daily-style" : "daily", p, p.Refresh, c =>
         {
             PJ.Require(c.Platform == "wy", "UNSUPPORTED"); c.Auth();
             var style = p.Branch == MusicDailyBranch.Style;
             return c.Xeapi(style ? "/api/homepage/category/daily/song/list" : "/api/v3/discovery/recommend/songs",
-                style ? new() : PJ.Obj(("ispush", false)), data =>
-                {
-                    var body = data["data"] as JsonObject ?? data;
-                    // A missing array, failed signature/decryption or failed upstream code never becomes empty success.
-                    var rows = PJ.Rows(PJ.First(body["dailySongs"], data["recommend"]), 1000);
-                    var branch = style ? "style" : "default";
-                    var batch = Batch(c, "daily", rows, PJ.Obj(("branch", branch)));
-                    var now = DateTimeOffset.UtcNow;
-                    var local = now.ToOffset(TimeSpan.FromHours(8));
-                    var six = new DateTimeOffset(local.Year, local.Month, local.Day, 6, 0, 0, local.Offset);
-                    if (six <= local) six = six.AddDays(1);
-                    batch["expiresAt"] = (style ? now.AddMinutes(1) : six).ToUnixTimeMilliseconds();
-                    batch["id"] = "daily:" + branch; batch["branch"] = branch;
-                    batch["name"] = style ? "风格推荐" : "每日推荐";
-                    batch["collectionType"] = "daily"; batch["engine"] = "NeteaseCollection"; batch["source"] = "wy"; batch["more"] = false;
-                    batch["cover"] = PJ.S(PJ.Array(batch["items"]).FirstOrDefault(), "cover_url");
-                    batch["category"] = PJ.At(body, "tags", "categoryId") is { } category ? PJ.Id(category) : "";
-                    var tags = PJ.At(body, "tags", "tagVOList");
-                    batch["tags"] = PJ.Arr(PJ.Rows(tags ?? new JsonArray(), 100).Select(t =>
-                        PJ.Obj(("id", PJ.Id(t["tagId"])), ("name", PJ.Metadata(t["tagName"])))));
-                    return batch;
-                });
+                style ? new() : PJ.Obj(("ispush", false)), data => DailyBatch(c, data, style));
         }, cancellationToken, privateCache: true);
+    }
+    private static JsonObject DailyBatch(Call c, JsonObject data, bool style)
+    {
+        var body = data["data"] as JsonObject ?? data;
+        // A missing array, failed signature/decryption or failed upstream code never becomes empty success.
+        var rows = PJ.Rows(PJ.First(body["dailySongs"], data["recommend"]), 1000);
+        var branch = style ? "style" : "default";
+        var batch = Batch(c, "daily", rows, PJ.Obj(("branch", branch)));
+        var now = DateTimeOffset.UtcNow;
+        var local = now.ToOffset(TimeSpan.FromHours(8));
+        var six = new DateTimeOffset(local.Year, local.Month, local.Day, 6, 0, 0, local.Offset);
+        if (six <= local) six = six.AddDays(1);
+        batch["expiresAt"] = (style ? now.AddMinutes(1) : six).ToUnixTimeMilliseconds();
+        batch["id"] = "daily:" + branch; batch["branch"] = branch;
+        batch["name"] = style ? "风格推荐" : "每日推荐";
+        batch["collectionType"] = "daily"; batch["engine"] = "NeteaseCollection"; batch["source"] = "wy"; batch["more"] = false;
+        batch["cover"] = PJ.S(PJ.Array(batch["items"]).FirstOrDefault(), "cover_url");
+        batch["category"] = PJ.At(body, "tags", "categoryId") is { } category ? PJ.Id(category) : "";
+        var tags = PJ.At(body, "tags", "tagVOList");
+        batch["tags"] = PJ.Arr(DailyStyleTags(tags ?? new JsonArray()).Select(t =>
+            PJ.Obj(("id", t.Id), ("name", t.Name))));
+        return batch;
     }
     private static readonly string[] FmScenes = ["NIGHT_EMO", "EXERCISE", "SLEEP_HELP", "RELAX", "CHEERFUL", "LYRICAL", "CURE", "FOCUS",
         "SWEET", "RHYTHM_BLUES", "RAINY", "GAMES", "RAP", "K_POP", "ORIGINAL_MUSICIAL", "ELECTRONIC", "COMMUTE",

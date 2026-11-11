@@ -84,6 +84,7 @@ public sealed partial class MusicCapability
     private Task NavigateCoreAsync(string route, CancellationToken cancellationToken, bool remember)
     {
         if (stopping) return Task.CompletedTask;
+        if (route != location.Route) RetireDailyStyleEditor();
         InvalidateCatalogAction();
         if (remember) RememberLocation();
         if (route == "catalog-discovery") return LoadDiscoveryAsync(false, cancellationToken);

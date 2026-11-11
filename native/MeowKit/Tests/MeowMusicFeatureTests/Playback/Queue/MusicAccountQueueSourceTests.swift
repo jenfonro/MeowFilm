@@ -91,16 +91,22 @@ final class MusicAccountQueueSourceTests: XCTestCase {
         }
     }
 
-    func testDailyStyleSelectionLimitsMatchOriginalCategories() throws {
-        let tags = (1...6).map { MusicDailyStyleTag(id: String($0), name: "合成\($0)") }
-        let categories = [MusicDailyStyleCategory(id: "3000", name: "单选", tags: tags),
-                          MusicDailyStyleCategory(id: "1000", name: "多选", tags: tags)]
-        XCTAssertNoThrow(try MusicDailyStyleSelection(category: "3000", tags: [tags[0]]).validate(in: categories))
-        XCTAssertThrowsError(try MusicDailyStyleSelection(category: "3000", tags: Array(tags.prefix(2))).validate(in: categories))
-        XCTAssertNoThrow(try MusicDailyStyleSelection(category: "1000", tags: Array(tags.prefix(5))).validate(in: categories))
-        XCTAssertThrowsError(try MusicDailyStyleSelection(category: "1000", tags: tags).validate(in: categories))
-        XCTAssertThrowsError(try MusicDailyStyleSelection(category: "1000", tags: [tags[0], tags[0]]).validate(in: categories))
+    func testDailyStyleSelectionAcceptsDynamicCategoryMembersAndRejectsInvalidSelections() throws {
+        let tags = (1...12).map { MusicDailyStyleTag(id: String($0), name: "合成\($0)") }
+        let other = MusicDailyStyleTag(id: "50", name: "另一类别成员")
+        let categories = [MusicDailyStyleCategory(id: "3000", name: "服务分类甲", tags: tags),
+                          MusicDailyStyleCategory(id: "1000", name: "服务分类乙", tags: tags),
+                          MusicDailyStyleCategory(id: "dynamic-category", name: "动态类别", tags: tags),
+                          MusicDailyStyleCategory(id: "other", name: "另一类别", tags: [other])]
+        for category in ["3000", "1000", "dynamic-category"] {
+            XCTAssertNoThrow(try MusicDailyStyleSelection(category: category, tags: [tags[0]]).validate(in: categories))
+            XCTAssertNoThrow(try MusicDailyStyleSelection(category: category, tags: tags).validate(in: categories))
+            XCTAssertThrowsError(try MusicDailyStyleSelection(category: category, tags: []).validate(in: categories))
+            XCTAssertThrowsError(try MusicDailyStyleSelection(category: category, tags: [tags[0], tags[0]]).validate(in: categories))
+            XCTAssertThrowsError(try MusicDailyStyleSelection(category: category, tags: [tags[0], other]).validate(in: categories))
+        }
         XCTAssertThrowsError(try MusicDailyStyleSelection(category: "unknown", tags: [tags[0]]).validate(in: categories))
+        XCTAssertThrowsError(try MusicDailyStyleSelection(category: "other", tags: [tags[0]]).validate(in: categories))
     }
 
     func testPassiveConstructionCachedPagesAndRevocationAlsoRejectCachedRead() async throws {

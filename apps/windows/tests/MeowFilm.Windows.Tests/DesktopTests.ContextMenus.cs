@@ -190,6 +190,13 @@ public static partial class DesktopTests
                 Layout(menu);
                 await appearance.SaveAsync("#FF2800");
                 await DrainAsync();
+                var background = (Border)shell.FindName("ApplicationBackground");
+                Same(shell.Background, background.Background, "the background visual follows the saved theme brush");
+                Same(background, ((SidebarBackdrop)shell.FindName("SidebarMaterial")).Source,
+                    "sidebar theme changes use the application background visual");
+                True(((LinearGradientBrush)background.Background).GradientStops.Select(stop => stop.Color)
+                    .SequenceEqual(((LinearGradientBrush)AppearanceColors.Background("#FF2800"))
+                        .GradientStops.Select(stop => stop.Color)), "the saved custom color drives every background stop");
                 foreach (string token in new[] { "FloatingSurface", "ItemHover", "ItemSelected", "InputSurface" })
                 {
                     var brush = (SolidColorBrush)first["MeowFilm.Brush." + token];

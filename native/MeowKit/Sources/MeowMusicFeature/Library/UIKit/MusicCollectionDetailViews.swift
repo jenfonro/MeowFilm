@@ -97,22 +97,17 @@ final class MusicCollectionDetailActionBar: UIView {
 @MainActor
 final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
     private enum Metrics {
-        static let cardInset: CGFloat = 12
-        static let cardTop: CGFloat = 10
-        static let cardBottom: CGFloat = 12
-        static let cardPadding: CGFloat = 12
+        static let informationInset: CGFloat = 12
+        static let informationTop: CGFloat = 10
+        static let informationBottom: CGFloat = 12
+        static let informationPadding: CGFloat = 12
         static let coverRatio: CGFloat = 0.3
         static let copyGap: CGFloat = 16
         static let saveSide: CGFloat = 44
     }
 
     let actionBar: MusicCollectionDetailActionBar
-    private let card = UIView()
-    private let ambient = UIView()
-    private let ambientArtwork = UIImageView()
-    private let ambientBlur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
-    private let ambientMask = CAGradientLayer()
-    private let accentWash = CAGradientLayer()
+    private let information = UIView()
     private let cover = UIView()
     private let artwork = MusicArtworkView(size: 0)
     private let titleLabel = UILabel()
@@ -120,6 +115,8 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
     private let countLabel = UILabel()
     private let save = UIButton(type: .system)
 
+    private let styleChoice = UIButton(type: .system)
+    var onStyle: (() -> Void)?
     var onPlay: (() -> Void)?
     var onSave: (() -> Void)?
     var onEdit: (() -> Void)?
@@ -127,8 +124,8 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
     var onSearchChange: ((String) -> Void)?
     var onSearchVisibilityChange: (() -> Void)?
 
+    private var isRecommendation = false
     private(set) var hasContent = false
-    private var representedArtwork: URL?
     private var currentTheme = PageTheme()
     private(set) var collapseProgress: CGFloat = 0
     var isSearchVisible: Bool { actionBar.searchVisible }
@@ -140,32 +137,15 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
         clipsToBounds = false
         backgroundColor = .clear
 
-        card.accessibilityIdentifier = "music.collection.infoCard"
-        card.layer.cornerRadius = 18
-        card.layer.cornerCurve = .continuous
-        card.layer.borderWidth = 1
-        card.layer.shadowOffset = CGSize(width: 0, height: 8)
-        card.layer.shadowRadius = 18
-        addSubview(card)
-
-        let content = UIView()
-        content.clipsToBounds = true
-        content.layer.cornerRadius = 18
-        content.layer.cornerCurve = .continuous
-        content.tag = 1
-        card.addSubview(content)
-        content.layer.addSublayer(accentWash)
-
-        ambient.isUserInteractionEnabled = false
-        ambient.accessibilityElementsHidden = true
-        ambient.clipsToBounds = true
-        ambient.isHidden = true
-        ambient.layer.mask = ambientMask
-        ambientArtwork.contentMode = .scaleAspectFill
-        ambientArtwork.clipsToBounds = true
-        ambient.addSubview(ambientArtwork)
-        ambient.addSubview(ambientBlur)
-        content.addSubview(ambient)
+        information.accessibilityIdentifier = "music.collection.information"
+        addSubview(information)
+        styleChoice.accessibilityIdentifier = "music.dailyStyle.current"
+        styleChoice.titleLabel?.font = .systemFont(ofSize: 13)
+        styleChoice.titleLabel?.lineBreakMode = .byTruncatingTail
+        styleChoice.layer.cornerRadius = 15
+        styleChoice.isHidden = true
+        styleChoice.addAction(UIAction { [weak self] _ in self?.onStyle?() }, for: .touchUpInside)
+        addSubview(styleChoice)
 
         cover.accessibilityIdentifier = "music.collection.cover"
         cover.isAccessibilityElement = true
@@ -178,7 +158,7 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
         artwork.layer.cornerRadius = 10
         artwork.isAccessibilityElement = false
         cover.addSubview(artwork)
-        card.addSubview(cover)
+        information.addSubview(cover)
 
         titleLabel.font = .systemFont(ofSize: 20, weight: .bold)
         titleLabel.numberOfLines = 2
@@ -187,14 +167,14 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
         countLabel.font = .systemFont(ofSize: 13)
         for label in [titleLabel, ownerLabel, countLabel] {
             label.isAccessibilityElement = false
-            card.addSubview(label)
+            information.addSubview(label)
         }
 
         save.setImage(PageIcon.image(.heart, size: 22), for: .normal)
         save.accessibilityLabel = "收藏歌单"
         save.accessibilityIdentifier = "music.collection.save"
         save.addAction(UIAction { [weak self] _ in self?.onSave?() }, for: .touchUpInside)
-        card.addSubview(save)
+        information.addSubview(save)
 
         actionBar.play.addAction(UIAction { [weak self] _ in self?.onPlay?() }, for: .touchUpInside)
         actionBar.edit.addAction(UIAction { [weak self] _ in self?.onEdit?() }, for: .touchUpInside)
@@ -204,14 +184,6 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
             self.onSearchChange?(self.actionBar.searchField.text ?? "")
         }, for: .editingChanged)
 
-        artwork.onImage = { [weak self] image, _ in
-            self?.ambientArtwork.image = image
-            self?.ambient.isHidden = false
-        }
-        artwork.onFailure = { [weak self] _ in
-            self?.ambientArtwork.image = nil
-            self?.ambient.isHidden = true
-        }
         applyTheme(currentTheme)
     }
 
@@ -231,23 +203,23 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
         canEdit: Bool,
         showsRename: Bool,
         canRename: Bool,
-        theme: PageTheme
+        theme: PageTheme,
+        recommendation: Bool = false
     ) {
         guard let content else {
             hasContent = false
             isHidden = true
             actionBar.isHidden = true
-            representedArtwork = nil
             artwork.load(nil)
-            ambientArtwork.image = nil
-            ambient.isHidden = true
             setNeedsLayout()
             return
         }
+        isRecommendation = recommendation
         hasContent = true
         isHidden = false
         actionBar.isHidden = false
 
+        information.isHidden = recommendation
         titleLabel.text = content.title
         ownerLabel.text = content.owner
         countLabel.text = "\(content.count)首"
@@ -255,13 +227,7 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
             .compactMap { $0 }.joined(separator: "，")
         accessibilityIdentifier = "music.collection.header"
 
-        let coverURL = content.artwork
-        if representedArtwork != coverURL {
-            representedArtwork = coverURL
-            ambientArtwork.image = nil
-            ambient.isHidden = true
-        }
-        artwork.load(coverURL)
+        artwork.load(recommendation ? nil : content.artwork)
 
         if actionBar.searchField.text != searchQuery { actionBar.searchField.text = searchQuery }
         actionBar.play.configure(title: playTitle, count: "\(filteredCount)首", playing: isPlaying,
@@ -277,24 +243,32 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
         actionBar.setNeedsLayout()
     }
 
+    func configureStyle(title: String?, enabled: Bool) {
+        styleChoice.isHidden = title == nil
+        styleChoice.setTitle(title.map { $0 + "  ▾" }, for: .normal)
+        styleChoice.accessibilityLabel = title.map { "选择推荐风格，" + $0 }
+        styleChoice.isEnabled = enabled
+        setNeedsLayout()
+    }
+
     func preferredHeight(for width: CGFloat) -> CGFloat {
         guard hasContent else { return 0 }
-        return ceil(Self.heroHeight(for: width)) + actionBar.preferredHeight
+        return heroHeight(for: width) + actionBar.preferredHeight + (styleChoice.isHidden ? 0 : 52)
     }
 
-    /// Height occupied by the scrolling card; the remaining header space reserves the pinned bar.
+    /// Height occupied by the scrolling information; the remaining header space reserves the pinned bar.
     func heroHeight(for width: CGFloat) -> CGFloat {
-        hasContent ? ceil(Self.heroHeight(for: width)) : 0
+        hasContent && !isRecommendation ? ceil(Self.heroHeight(for: width)) : 0
     }
 
-    /// 0 shows the complete card; 1 means it has left the visible content.
+    /// 0 shows the complete information; 1 means it has left the visible content.
     func setCollapseProgress(_ progress: CGFloat) {
         let value = min(1, max(0, progress))
         guard abs(value - collapseProgress) > 0.001 else { return }
         collapseProgress = value
-        card.alpha = max(0, 1 - value * 1.25)
+        information.alpha = max(0, 1 - value * 1.25)
         let scale = 1 - value * 0.04
-        card.transform = CGAffineTransform(translationX: 0, y: -value * 10).scaledBy(x: scale, y: scale)
+        information.transform = CGAffineTransform(translationX: 0, y: -value * 10).scaledBy(x: scale, y: scale)
     }
 
     func setSearchVisible(_ visible: Bool, focus: Bool = false) {
@@ -320,23 +294,13 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
     func applyTheme(_ theme: PageTheme) {
         currentTheme = theme
         let accent = UIColor(theme.accent)
-        card.backgroundColor = UIColor(theme.surface.mixed(with: theme.accent, ratio: theme.dark ? 0.1 : 0.06))
-            .withAlphaComponent(theme.dark ? 0.92 : 0.86)
-        card.layer.borderColor = accent.withAlphaComponent(theme.dark ? 0.3 : 0.2).cgColor
-        card.layer.shadowColor = (theme.dark ? UIColor.black : accent).cgColor
-        card.layer.shadowOpacity = theme.dark ? 0.28 : 0.14
-        accentWash.colors = [
-            accent.withAlphaComponent(theme.dark ? 0.2 : 0.14).cgColor,
-            accent.withAlphaComponent(0).cgColor,
-        ]
-        accentWash.startPoint = CGPoint(x: 0, y: 0)
-        accentWash.endPoint = CGPoint(x: 1, y: 1)
         titleLabel.textColor = UIColor(theme.ink)
         ownerLabel.textColor = accent
         countLabel.textColor = UIColor(theme.muted)
         artwork.backgroundColor = UIColor(theme.chip)
         save.tintColor = accent
-        ambient.alpha = theme.dark ? 0.16 : 0.2
+        styleChoice.tintColor = accent
+        styleChoice.backgroundColor = UIColor(theme.chip)
         actionBar.applyTheme(theme)
     }
 
@@ -344,43 +308,32 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
         super.layoutSubviews()
         guard hasContent else { return }
         let width = bounds.width
-        let cardFrame = CGRect(x: Metrics.cardInset, y: Metrics.cardTop,
-                               width: max(0, width - Metrics.cardInset * 2),
-                               height: Self.cardHeight(for: width))
-        let transform = card.transform
-        card.transform = .identity
-        card.frame = cardFrame
-        card.transform = transform
-        card.layer.shadowPath = UIBezierPath(roundedRect: card.bounds, cornerRadius: 18).cgPath
-        if let content = card.viewWithTag(1) {
-            content.frame = card.bounds
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            accentWash.frame = content.bounds
-            CATransaction.commit()
-            ambient.frame = content.bounds
-            ambientArtwork.frame = ambient.bounds.insetBy(dx: -30, dy: -30)
-            ambientBlur.frame = ambientArtwork.frame
-            ambientMask.frame = ambient.bounds
-            ambientMask.colors = [UIColor.black.cgColor, UIColor.clear.cgColor]
-            ambientMask.startPoint = CGPoint(x: 0, y: 0.5)
-            ambientMask.endPoint = CGPoint(x: 1, y: 0.5)
+        if !styleChoice.isHidden {
+            let size = styleChoice.sizeThatFits(CGSize(width: width - 56, height: 30))
+            styleChoice.frame = CGRect(x: 16, y: heroHeight(for: width) + actionBar.preferredHeight + 8,
+                                       width: min(width - 32, size.width + 24), height: 30)
         }
-
+        let informationFrame = CGRect(x: Metrics.informationInset, y: Metrics.informationTop,
+                               width: max(0, width - Metrics.informationInset * 2),
+                               height: Self.informationHeight(for: width))
+        let transform = information.transform
+        information.transform = .identity
+        information.frame = informationFrame
+        information.transform = transform
         let coverSide = Self.coverSide(for: width)
-        cover.frame = CGRect(x: Metrics.cardPadding, y: Metrics.cardPadding,
+        cover.frame = CGRect(x: Metrics.informationPadding, y: Metrics.informationPadding,
                              width: coverSide, height: coverSide)
         artwork.frame = cover.bounds
         cover.layer.shadowPath = UIBezierPath(roundedRect: cover.bounds, cornerRadius: 10).cgPath
 
-        let cardWidth = card.bounds.width
+        let informationWidth = information.bounds.width
         let copyX = cover.frame.maxX + Metrics.copyGap
-        let copyWidth = max(0, cardWidth - copyX - Metrics.cardPadding)
+        let copyWidth = max(0, informationWidth - copyX - Metrics.informationPadding)
         let measuredTitle = titleLabel.sizeThatFits(CGSize(width: copyWidth, height: 60)).height
         let titleHeight: CGFloat = measuredTitle > 30 ? 56 : 28
         let metaHeight: CGFloat = 19.5
         let copyHeight = titleHeight + 8 + metaHeight * 2
-        let copyY = max(Metrics.cardPadding, cover.frame.midY - copyHeight / 2)
+        let copyY = max(Metrics.informationPadding, cover.frame.midY - copyHeight / 2)
         let metaWidth = save.isHidden ? copyWidth : max(0, copyWidth - Metrics.saveSide - 4)
         titleLabel.frame = CGRect(x: copyX, y: copyY, width: copyWidth, height: titleHeight)
         ownerLabel.frame = CGRect(x: copyX, y: titleLabel.frame.maxY + 8,
@@ -388,7 +341,7 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
         countLabel.frame = CGRect(x: copyX, y: ownerLabel.frame.maxY,
                                   width: metaWidth, height: metaHeight)
         save.frame = save.isHidden ? .zero : CGRect(
-            x: cardWidth - Metrics.cardPadding - Metrics.saveSide + 6,
+            x: informationWidth - Metrics.informationPadding - Metrics.saveSide + 6,
             y: (ownerLabel.frame.minY + countLabel.frame.maxY - Metrics.saveSide) / 2,
             width: Metrics.saveSide,
             height: Metrics.saveSide
@@ -424,15 +377,15 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
     }
 
     private static func coverSide(for width: CGFloat) -> CGFloat {
-        max(0, width - (Metrics.cardInset + Metrics.cardPadding) * 2) * Metrics.coverRatio
+        max(0, width - (Metrics.informationInset + Metrics.informationPadding) * 2) * Metrics.coverRatio
     }
 
-    private static func cardHeight(for width: CGFloat) -> CGFloat {
-        coverSide(for: width) + Metrics.cardPadding * 2
+    private static func informationHeight(for width: CGFloat) -> CGFloat {
+        coverSide(for: width) + Metrics.informationPadding * 2
     }
 
     private static func heroHeight(for width: CGFloat) -> CGFloat {
-        Metrics.cardTop + cardHeight(for: width) + Metrics.cardBottom
+        Metrics.informationTop + informationHeight(for: width) + Metrics.informationBottom
     }
 }
 @MainActor

@@ -250,7 +250,8 @@ public static partial class MusicCatalogTests
             f.Module.View.Measure(new(1100, 760)); f.Module.View.Arrange(new Rect(0, 0, 1100, 760));
             f.Module.View.UpdateLayout(); await Drain();
             var second = f.Module.ChannelSections.Single().Items[1];
-            var host = Descendants<Button>(f.Module.View).Single(button => ReferenceEquals(button.Tag, second));
+            var host = Descendants<Button>(f.Module.View).Single(button => ReferenceEquals(button.Tag, second) &&
+                button.IsVisible && button.IsEnabled && button.IsHitTestVisible && button.ContextMenu is not null);
             int reads = f.Client.Log.Count;
             OpenContentMenu(host);
             Equal(reads, f.Client.Log.Count);
@@ -1764,6 +1765,10 @@ public static partial class MusicCatalogTests
             True(Descendants<Border>(tile).First().Background is SolidColorBrush { Color.A: 0 },
                 "generic button hover brush must not tint the playlist caption");
             var play = Descendants<Button>(tile).Single(b => ReferenceEquals(b.Style, view.FindResource("Catalog.CoverPlay")));
+            CardMotion.Transition((FrameworkElement)tile, true, false); await Drain(); tile.UpdateLayout();
+            True(play.ActualWidth == 44 && play.ActualHeight == 44, "only the central play target owns playback");
+            var origin = play.TranslatePoint(new Point(), tile);
+            True(origin.X > 0 && origin.Y > 0, "the play target leaves artwork outside its bounds");
             play.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             for (var i = 0; i < 500 && f.Playback.Opens.Count == 0; i++) { await Task.Delay(10); await Drain(); }
             Equal(1, f.Client.Count("music.catalog.playlist.prepare")); Equal(1, f.Client.Count("music.catalog.playlist.commit"));
@@ -2167,13 +2172,33 @@ public static partial class MusicCatalogTests
             Equal("1101", MusicSongFixture.NativeId(f.Module.Songs[100].Raw));
             var calls = f.Client.Count("music.catalog.playlist");
             await f.Module.NavigateAsync("catalog-home", default);
+            await f.Configure(new { nextDetail = 0 });
             await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
-            Equal(calls, f.Client.Count("music.catalog.playlist"));
-            Equal(200, f.Module.Songs.Count);
-            Equal("第 2 页", f.Module.CatalogPageText);
+            Equal(calls + 1, f.Client.Count("music.catalog.playlist"));
+            p = f.Client.Last("music.catalog.playlist");
+            Equal(1, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
+            True(p.GetProperty("refresh").GetBoolean(), "returning to a network playlist refreshes its members");
+            True(!p.TryGetProperty("snapshot", out _), "returning starts without the old member snapshot");
+            Equal(100, f.Module.Songs.Count);
+            Equal("第 1 页", f.Module.CatalogPageText);
             True(!f.Module.CanCatalogPrevious, "the accumulated song surface does not expose a page-back control");
+            await f.Configure(new { nextDetail = 100 });
+            await f.Module.LoadMoreCatalogPlaylistAsync();
+            p = f.Client.Last("music.catalog.playlist");
+            Equal(2, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
+            Equal(64, p.GetProperty("snapshot").GetString()!.Length);
+            Equal(200, f.Module.Songs.Count);
+            Equal("1001", MusicSongFixture.NativeId(f.Module.Songs[0].Raw));
+            Equal("1101", MusicSongFixture.NativeId(f.Module.Songs[100].Raw));
+            True(!f.Module.CanCatalogPrevious, "appending after re-entry does not expose previous");
+            // The preceding page may use the song-detail cache instead of advancing this transport fixture.
+            await f.Configure(new { nextDetail = 200 });
             await f.Module.LoadMoreCatalogPlaylistAsync();
             Equal(205, f.Module.Songs.Count);
+            p = f.Client.Last("music.catalog.playlist");
+            Equal(3, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
+            Equal(64, p.GetProperty("snapshot").GetString()!.Length);
+            True(!f.Module.CanCatalogPrevious, "the final accumulated page does not expose previous");
             True(!f.Module.CanLoadMoreCatalogPlaylist, "the final page terminates scroll pagination");
             calls = f.Client.Count("music.catalog.playlist");
             await f.Module.LoadMoreCatalogPlaylistAsync();
@@ -2181,7 +2206,8 @@ public static partial class MusicCatalogTests
             await f.Configure(new { nextDetail = 0 });
             await f.Module.RefreshCatalogAsync();
             p = f.Client.Last("music.catalog.playlist");
-            Equal(1, p.GetProperty("page").GetInt32()); True(p.GetProperty("refresh").GetBoolean(), "playlist refresh");
+            Equal(1, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
+            True(p.GetProperty("refresh").GetBoolean(), "playlist refresh");
             True(!p.TryGetProperty("snapshot", out _), "fresh first page has no old snapshot");
         });
         yield return Case("snapshot changed response cannot replace current native page", async () =>

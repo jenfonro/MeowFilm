@@ -131,7 +131,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     public string CollectionArtwork => IsCollectionPage ? Songs.FirstOrDefault(row => row.Cover.Length > 0)?.Cover ?? "" : "";
     public bool CanPlayCollection => CanEdit && IsCollectionPage && total > 0;
     public string DetailArtwork => IsCatalogDetailPage ? catalogArtwork : CollectionArtwork;
-    public string DetailCountText => IsContentDetailPage ? total.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
+    public string DetailCountText => IsCatalogDetailPage ? catalogSummaryCount?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "" :
+        IsContentDetailPage ? total.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
     public string DetailSectionTitle => IsCatalogArtist ? "热门歌曲" : "歌曲";
     public string DetailArtworkName => IsCatalogArtist ? "歌手头像" : "歌单封面";
     public bool CanPlayContentDetail => IsCatalogDetailPage ? CanPlayCatalogPlaylist : CanPlayCollection;
@@ -166,6 +167,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     public bool CanReorderPlaylist => CanEdit && HasCollection && IsSongList;
     public bool CanLoadMoreCollection => CanEdit && IsCollectionPage && Songs.Count < total &&
         collectionPageCancellation is null;
+    public string CurrentSongId => current?.Id ?? "";
     public string CurrentTitle => current?.Title ?? "未在播放";
     public string CurrentArtist => current?.Artist ?? "";
     public string CurrentAlbum => current?.Album ?? "";
@@ -208,7 +210,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             nameof(CanImportLocalLyrics), nameof(CanRemoveLocalLyrics), nameof(CanEditFeedback), nameof(CanEditSearchPreferences),
             nameof(CanPreviousPage), nameof(CanNextPage), nameof(CountText), nameof(PageText), nameof(CollectionArtwork),
             nameof(CanPlayCollection), nameof(DetailArtwork), nameof(DetailCountText),
-            nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(CanPlayContentDetail), nameof(CurrentTitle),
+            nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(CanPlayContentDetail), nameof(CurrentSongId), nameof(CurrentTitle),
             nameof(CurrentArtist), nameof(CurrentAlbum), nameof(HasCurrent), nameof(CurrentArtwork), nameof(CanPlay), nameof(Mode), nameof(ModeText),
             nameof(PlaybackPresentationKey), nameof(CurrentTrackIdentity),
             nameof(PlaybackRateText), nameof(CanSwitchSource) })
@@ -498,7 +500,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         var origin = loadGeneration;
         return RunAsync(async () =>
         {
-            if (song is null) return;
+            if (song is null || IsDailyStyle && !Songs.Any(row => ReferenceEquals(row, song))) return;
             var favorite = await Call("music.library.detail", new { id = "favorites", limit = 1 }, lifetime.Token);
             await Call("music.library.addSongs", new { id = "favorites", ifRevision = MusicDto.Integer(favorite.GetProperty("collection"), "revision"),
                 songs = new[] { song.Raw } }, lifetime.Token);
@@ -512,7 +514,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         var queueContext = CaptureFeedbackContext();
         return RunAsync(async () =>
         {
-            if (song is null) return;
+            if (song is null || IsDailyStyle && !Songs.Any(row => ReferenceEquals(row, song))) return;
             await QueueCall("music.queue.append", new { songs = new[] { song.Raw }, next = true, context = queueContext });
             await ReadQueue(lifetime.Token);
             InvalidateQueueSurface();

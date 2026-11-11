@@ -162,3 +162,7 @@ generation
 - 保持现有 App 数据身份和命名空间。
 - 当前格式变化时同时修改 producer、consumer、契约和全部夹具。
 - 不兼容数据保持原样并明确失败；未经用户授权不删除、清空、覆盖或改写。
+
+### 风格偏好装配
+
+`MusicNativeApplication` 从同一 `MusicNativeCatalogOwner` 转发 `IMusicDailyStylePreferences`，目录 owner 使用现有 `MusicPlatformCatalog` 的账号绑定实现；不建立第二份平台／账号 owner。UI 将打开时取得的 `MusicDailyStyleEditor(AccountScope, AccountGeneration, UserId, Categories)` 直接传回保存，平台在写入前复核该身份，不能凭当前平台字符串将旧草稿写给新账号。两层转发纳入现有待完成操作计数与关闭排空；UI 打开编辑器时核对编辑代次和账号观察值；确认前取消不写，确认准入时独立捕获保存账号并要求真实读取，之后仅关闭浮层不取消写入，也不因编辑代次变化丢弃结算。写入开始和结算均退休该账号的风格 UI 快照，包括保存期间导航产生的快照。结算时若同账号已回到风格页，先退休当前加载及旧成员，再安全发布真实 Readback；缺少回读则清除返回期间的旧选择并要求重新读取。结算不发布到其他页面或账号；离页时风格快照仍失效，返回后重新读取。Unknown 或 Confirmed 缺少回读时，关闭并重开编辑器仍不能再次写入，须显式读取核对。平台保存退休保存前风格读取，真实回读是歌曲与选择的唯一结果来源。

@@ -138,49 +138,200 @@ import MeowPlayback
     }
 
     func testDailyRecommendationCannotBeSavedButSelectedTrackPlaysCompleteSource() async throws {
+        try await activateRecommendationRunner()
         let service = NetworkPlaylistUIKitService(), router = NetworkPlaylistUIKitRouter()
         let model = MusicViewModel(service: service, playback: PlaybackController())
         await model.load()
         addTeardownBlock { await model.close() }
         let appearance = MusicAppearancePreferencesStore()
-        let page = MusicBrowseViewController(title: "每日推荐", model: model, browser: service,
-            request: .discovery(.daily(.netease)), appearance: appearance, router: router)
+        let page = MusicCollectionViewController(model: model,
+            recommendation: .discovery(.daily(.netease)), browser: service,
+            appearance: appearance, router: router)
+        page.loadViewIfNeeded()
+        let list = try XCTUnwrap(page.view.subviews.compactMap { $0 as? UITableView }.first)
+        // This case isolates complete-source playback from browsing pagination.
+        // Do not let UITableView's initial willDisplay consume the tail;
+        // the row selection below still goes through the real controller method.
+        list.delegate = nil
         let navigation = PageNavigationController(themeProvider: appearance)
         navigation.setViewControllers([page], animated: false)
-        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
         navigation.loadViewIfNeeded(); window.rootViewController = navigation; window.makeKeyAndVisible()
         window.layoutIfNeeded(); navigation.view.layoutIfNeeded()
-        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
-        defer { PageViewController.invalidatePages(in: navigation); window.isHidden = true; window.rootViewController = nil }
-        let list = try XCTUnwrap(page.view.subviews.compactMap { $0 as? UICollectionView }.first)
+        XCTAssertEqual(UIApplication.shared.applicationState, .active)
+        defer {
+            PageViewController.invalidatePages(in: navigation)
+            window.isHidden = true; window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
         let ready = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
             list.layoutIfNeeded()
-            return page.canPresentPageAlert && list.numberOfSections == 1 && list.numberOfItems(inSection: 0) == 30 &&
-                list.cellForItem(at: IndexPath(item: 1, section: 0)) != nil &&
-                self.descendants(page.pageHeader).compactMap { $0 as? PageHeaderButton }
-                    .contains { $0.menu?.children.contains { $0.title == "继续加载" } == true }
+            return page.canPresentPageAlert && list.numberOfSections == 1 && list.numberOfRows(inSection: 0) == 30 &&
+                list.cellForRow(at: IndexPath(row: 1, section: 0)) != nil
         } }, evaluatedWith: nil)
         await fulfillment(of: [ready], timeout: 4)
-        let more = try XCTUnwrap(descendants(page.pageHeader).compactMap { $0 as? PageHeaderButton }
-            .first { $0.accessibilityLabel == "更多" })
-        let menu = try XCTUnwrap(more.menu)
-        XCTAssertFalse(menu.children.contains { $0.title == "收藏歌单" })
-        XCTAssertTrue(menu.children.contains { $0.title == "继续加载" })
+        XCTAssertFalse(descendants(page.view).contains {
+            $0.accessibilityIdentifier == "music.collection.save" && !$0.isHidden
+        })
+        let branches = try XCTUnwrap(descendants(page.pageHeader).compactMap { $0 as? UISegmentedControl }.first)
+        XCTAssertEqual(branches.selectedSegmentIndex, 0)
+        XCTAssertGreaterThan(branches.bounds.width, 160)
+        let bar = try XCTUnwrap(page.view.subviews.compactMap { $0 as? MusicCollectionDetailActionBar }.first)
+        XCTAssertEqual(bar.frame.minY, list.frame.minY, accuracy: 0.5)
+        attachRecommendationView(navigation.view, name: "daily-default-light")
         XCTAssertTrue(model.queue.isEmpty, "浏览推荐页不能提前提交队列")
-        page.collectionView(list, didSelectItemAt: IndexPath(item: 1, section: 0))
+        XCTAssertEqual(list.numberOfRows(inSection: 0), 30)
+        page.tableView(list, didSelectRowAt: IndexPath(row: 1, section: 0))
         let played = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
             model.queue.count == 31 && model.current?.track.songId == "daily-1" && !model.isPreparingRemoteQueue
         } }, evaluatedWith: nil)
         await fulfillment(of: [played], timeout: 4)
         XCTAssertEqual(model.queue.map(\.track.songId), (0..<31).map { "daily-\($0)" })
-        XCTAssertEqual(list.numberOfItems(inSection: 0), 30, "未展示的尾页仍必须加入完整播放队列")
-        XCTAssertFalse(try XCTUnwrap(more.menu).children.contains { $0.title == "收藏歌单" })
+        XCTAssertEqual(list.numberOfRows(inSection: 0), 30, "未展示的尾页仍必须加入完整播放队列")
         let opened = await service.openedAccountSources, committed = await service.committedSource
         let selected = await service.committedIndex, displayedWrites = await service.displayedQueueWrites
         XCTAssertEqual(opened.count, 1); XCTAssertEqual(committed, opened.first)
         XCTAssertEqual(selected, 1); XCTAssertEqual(displayedWrites, 0)
         XCTAssertTrue(model.queue.allSatisfy { $0.remoteSessionID == committed && $0.sourceTitle == "每日推荐" })
+    }
+
+    func testDailyBranchesKeepQueueAndStyleSheetCancelKeepsConfirmedSelection() async throws {
+        try await activateRecommendationRunner()
+        let service = NetworkPlaylistUIKitService(), router = NetworkPlaylistUIKitRouter()
+        let model = MusicViewModel(service: service, playback: PlaybackController())
+        await model.load()
+        addTeardownBlock { await model.close() }
+        let appearance = MusicAppearancePreferencesStore()
+        let page = MusicCollectionViewController(model: model,
+            recommendation: .accountRecommendation(.netease, kind: "daily", title: "每日推荐"),
+            browser: service, appearance: appearance, router: router)
+        let navigation = PageNavigationController(themeProvider: appearance)
+        navigation.setViewControllers([page], animated: false)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        navigation.loadViewIfNeeded(); window.rootViewController = navigation; window.makeKeyAndVisible()
+        window.layoutIfNeeded(); navigation.view.layoutIfNeeded()
+        XCTAssertEqual(UIApplication.shared.applicationState, .active)
+        defer {
+            PageViewController.invalidatePages(in: navigation)
+            window.isHidden = true; window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        let table = try XCTUnwrap(page.view.subviews.compactMap { $0 as? UITableView }.first)
+        let branches = try XCTUnwrap(descendants(page.pageHeader).compactMap { $0 as? UISegmentedControl }.first)
+        let ready = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            page.canPresentPageAlert && table.numberOfRows(inSection: 0) >= 30
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [ready], timeout: 4)
+        let queueBefore = model.queue.map(\.id)
+        table.setContentOffset(CGPoint(x: 0, y: 144), animated: false)
+        branches.selectedSegmentIndex = 1; branches.sendActions(for: .valueChanged)
+        let styleReady = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            table.layoutIfNeeded()
+            return self.descendants(page.view).compactMap { $0 as? UIButton }.contains {
+                $0.accessibilityIdentifier == "music.dailyStyle.current" && $0.isEnabled &&
+                $0.title(for: .normal)?.contains("服务标签甲") == true
+            }
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [styleReady], timeout: 4)
+        XCTAssertEqual(table.contentOffset.y, 0, accuracy: 0.5)
+        XCTAssertEqual(model.queue.map(\.id), queueBefore)
+        let capsule = try XCTUnwrap(descendants(page.view).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.dailyStyle.current"
+        })
+        let bar = try XCTUnwrap(page.view.subviews.compactMap { $0 as? MusicCollectionDetailActionBar }.first)
+        let capsuleFrame = capsule.convert(capsule.bounds, to: page.view)
+        let firstRow = table.convert(table.rectForRow(at: IndexPath(row: 0, section: 0)), to: page.view)
+        XCTAssertGreaterThanOrEqual(capsuleFrame.minY, bar.frame.maxY)
+        XCTAssertLessThanOrEqual(capsuleFrame.maxY, firstRow.minY)
+        XCTAssertEqual(bar.frame.minY, table.frame.minY, accuracy: 0.5)
+        attachRecommendationView(navigation.view, name: "daily-style-light")
+        window.overrideUserInterfaceStyle = .dark
+        let darkReady = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            navigation.view.layoutIfNeeded()
+            return page.theme.dark && capsule.traitCollection.userInterfaceStyle == .dark &&
+                capsule.backgroundColor == UIColor(page.theme.chip)
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [darkReady], timeout: 4)
+        XCTAssertTrue(page.theme.dark)
+        guard page.theme.dark, capsule.traitCollection.userInterfaceStyle == .dark,
+              capsule.backgroundColor == UIColor(page.theme.chip) else { return }
+        table.setContentOffset(CGPoint(x: 0, y: 120), animated: false)
+        table.layoutIfNeeded()
+        XCTAssertEqual(bar.frame.minY, table.frame.minY, accuracy: 0.5)
+        XCTAssertLessThan(capsule.convert(capsule.bounds, to: page.view).maxY, bar.frame.maxY)
+        attachRecommendationView(navigation.view, name: "daily-style-dark-pinned")
+        table.setContentOffset(.zero, animated: false)
+        table.layoutIfNeeded()
+        capsule.sendActions(for: .touchUpInside)
+        let presented = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            guard let wrapper = page.presentedViewController as? PageNavigationController,
+                  let editor = wrapper.topViewController as? MusicDailyStyleViewController else { return false }
+            return UIApplication.shared.applicationState == .active && editor.canPresentPageAlert &&
+                editor.theme.dark && self.descendants(editor.pageHeader)
+                .compactMap { $0 as? PageHeaderTextButton }.contains { $0.isEnabled }
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [presented], timeout: 4)
+        let wrapper = try XCTUnwrap(page.presentedViewController as? PageNavigationController)
+        let editor = try XCTUnwrap(wrapper.topViewController as? MusicDailyStyleViewController)
+        XCTAssertTrue(editor.theme.dark)
+        attachRecommendationView(wrapper.view, name: "daily-style-editor-dark")
+        let close = try XCTUnwrap(descendants(editor.pageHeader).compactMap { $0 as? PageHeaderButton }
+            .first { $0.accessibilityLabel == "关闭" })
+        close.sendActions(for: .touchUpInside)
+        let dismissed = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            page.presentedViewController == nil && page.canPresentPageAlert
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [dismissed], timeout: 4)
+        XCTAssertTrue(capsule.title(for: .normal)?.contains("服务标签甲") == true)
+        let writes = await service.styleWrites
+        XCTAssertEqual(writes, 0)
+        XCTAssertEqual(model.queue.map(\.id), queueBefore)
+        branches.selectedSegmentIndex = 0; branches.sendActions(for: .valueChanged)
+        let returned = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            capsule.isHidden && branches.selectedSegmentIndex == 0 && table.numberOfRows(inSection: 0) >= 30
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [returned], timeout: 4)
+        XCTAssertEqual(table.contentOffset.y, 0, accuracy: 0.5)
+        XCTAssertEqual(model.queue.map(\.id), queueBefore)
+    }
+
+    // Activate the actual XCTest runner; synthetic lifecycle notifications do not
+    // foreground a newly presented sheet or complete UIKit's presentation transitions.
+    private func activateRecommendationRunner() async throws {
+        let identifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
+        await withCheckedContinuation { continuation in
+            RunLoop.main.perform {
+                MainActor.assumeIsolated { XCUIApplication(bundleIdentifier: identifier).activate() }
+                continuation.resume()
+            }
+        }
+        let active = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            UIApplication.shared.applicationState == .active
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [active], timeout: 4)
+    }
+
+    private func attachRecommendationView(_ view: UIView, name: String) {
+        view.layoutIfNeeded()
+        let image = UIGraphicsImageRenderer(size: view.bounds.size).image { renderer in
+            if view.window != nil {
+                XCTAssertTrue(view.drawHierarchy(in: view.bounds, afterScreenUpdates: true))
+            } else {
+                view.layer.render(in: renderer.cgContext)
+            }
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func descendants(_ view: UIView) -> [UIView] {
@@ -202,7 +353,7 @@ import MeowPlayback
 }
 
 private actor NetworkPlaylistUIKitService: MusicServing, MusicAccountBrowsing, MusicNetworkPlaylistServing,
-    MusicPublicBrowsing, MusicRemoteQueueServing, MusicDisplayedQueuePlaying {
+    MusicPublicBrowsing, MusicRemoteQueueServing, MusicDisplayedQueuePlaying, MusicHomeActionQueueServing {
     private(set) var memberReads = 0
     private(set) var openedAccountSources: [UUID] = []
     private(set) var committedSource: UUID?
@@ -269,10 +420,40 @@ private actor NetworkPlaylistUIKitService: MusicServing, MusicAccountBrowsing, M
         openedAccountSources.append(source.id)
         return source
     }
+    private(set) var styleWrites = 0
+    static let styleSelection = MusicDailyStyleSelection(category: "1000", tags: [.init(id: "7", name: "服务标签甲")])
+    func openHomeActionQueue(_ action: MusicHomeAction, title: String) throws -> MusicRemoteQueueSource {
+        guard case .daily(let branch) = action else { throw MusicServiceError.unsupported }
+        if branch == .default {
+            return try openAccountQueue(platform: .netease, kind: .recommendation(kind: "daily"), title: title)
+        }
+        return MusicRemoteQueueSource(
+            context: .init(kind: .recommendation, id: "daily-style", title: title, platform: "wy"),
+            loadPage: { _ in try Self.stylePage(Self.styleSelection) },
+            dailyStyle: .init(categories: {
+                [.init(id: "1000", name: "服务分类甲", tags: [
+                    .init(id: "7", name: "服务标签甲"), .init(id: "8", name: "服务标签乙"),
+                    .init(id: "9", name: "服务返回的长标签")]),
+                 .init(id: "2000", name: "服务分类乙", tags: [.init(id: "10", name: "服务标签丙")])]
+            }, save: { selection in try await self.saveStyle(selection) }), homeAction: action)
+    }
+    private static func stylePage(_ selection: MusicDailyStyleSelection) throws -> MusicNativeTrackPage {
+        let tracks = (0..<12).map { index in
+            MusicRemoteTrack(ref: .init(kind: .handle, id: "style-\(index)"), songId: "style-\(index)",
+                title: "风格歌曲 \(index + 1)", artist: "Fixture",
+                sources: [.init(sourceKey: "wy:style-\(index)", platform: "wy", nativeId: "style-\(index)")])
+        }
+        return .init(items: try tracks.map { .init(platform: "wy", data: try JSONEncoder().encode($0)) },
+                     total: tracks.count, dailyStyle: selection)
+    }
+    private func saveStyle(_ selection: MusicDailyStyleSelection) throws -> MusicDailyStyleSave {
+        styleWrites += 1
+        return .init(page: try Self.stylePage(selection), saveConfirmed: true, selectionChanged: false)
+    }
     func remoteQueuePage(_ source: MusicRemoteQueueSource, cursor: String?) async throws -> MusicBrowsePage {
         let page = try await source.page(cursor: cursor)
         return .init(items: try page.items.map { try JSONDecoder().decode(MusicRemoteTrack.self, from: $0.data) },
-                     cursor: page.cursor)
+                     cursor: page.cursor, dailyStyle: page.dailyStyle)
     }
     func replaceRemoteQueue(_ source: MusicRemoteQueueSource, start: MusicRemoteQueueStart,
                             expectedRevision: Int, intent: MusicQueueAuthorization) async throws -> MusicPlaybackState {
