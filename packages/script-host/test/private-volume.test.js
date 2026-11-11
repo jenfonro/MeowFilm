@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PrivateVolume } from '../src/private-volume.js';
+import { PrivateVolume, removePrivateVolume } from '../src/private-volume.js';
 
 function fixture(t, onWrite = () => {}) {
   const root = fs.mkdtempSync(join(tmpdir(), 'meowfilm-volume-'));
@@ -37,6 +37,32 @@ const callbackResult = operation => new Promise((resolve, reject) =>
   operation(error => error ? reject(error) : resolve()));
 const assertClosed = fd => assert.throws(() => fs.fstatSync(fd), { code: 'EBADF' });
 
+test('App directory aliases do not weaken guest volume isolation or scoped removal', async t => {
+  const base = fs.mkdtempSync(join(tmpdir(), 'meowfilm-volume-alias-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const actual = join(base, 'actual'), alias = join(base, 'alias');
+  fs.mkdirSync(actual);
+  fs.symlinkSync(actual, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  fs.writeFileSync(join(actual, 'settings.json'), 'HOST');
+  const volume = new PrivateVolume(alias, 'fixture');
+  t.after(() => volume.close());
+  const other = new PrivateVolume(alias, 'other');
+  t.after(() => other.close());
+  const api = volume.facade();
+  other.facade().writeFileSync('/other.txt', 'OTHER');
+  api.writeFileSync('/own.txt', 'OWN');
+  assert.equal(api.readFileSync('/own.txt', 'utf8'), 'OWN');
+  assert.throws(() => api.readFileSync('../settings.json'), { code: 'ENOENT' });
+  fs.linkSync(join(actual, 'settings.json'), join(volume.root, 'linked.json'));
+  assert.throws(() => api.readFileSync('/linked.json'), { code: 'EPERM' });
+  fs.symlinkSync(other.root, join(volume.root, 'other'), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(() => api.readFileSync('/other/other.txt'), { code: 'EPERM' });
+  await volume.close();
+  assert.equal(removePrivateVolume(alias, 'fixture'), true);
+  assert.equal(fs.readFileSync(join(actual, 'settings.json'), 'utf8'), 'HOST');
+  assert.equal(other.facade().readFileSync('/other.txt', 'utf8'), 'OTHER');
+});
+
 test('private writes preserve bytes, encoding, append, flags and creation mode', async t => {
   let writes = 0;
   const { api, path } = fixture(t, () => writes++);
@@ -51,7 +77,7 @@ test('private writes preserve bytes, encoding, append, flags and creation mode',
   api.writeFileSync('/data', 'Z', { flag: 'r+' });
   assert.deepEqual(fs.readFileSync(path('data')), Buffer.from([90, 66, 233, 67]));
   api.writeFileSync('/data', new DataView(Uint8Array.from([0, 120, 121, 0]).buffer, 1, 2), {
-    flag: fs.constants.O_WRONLY | fs.constants.O_TRUNC,
+    flag: fs.constants.O_WRONLY | fs.constants.O_TRUNC | fs.constants.O_CREAT,
   });
   assert.equal(fs.readFileSync(path('data'), 'utf8'), 'xy');
   assert.equal(writes, 5);

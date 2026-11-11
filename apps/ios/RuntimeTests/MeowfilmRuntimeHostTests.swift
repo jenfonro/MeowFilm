@@ -115,6 +115,25 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
     }
 
     @MainActor
+    func testAppOwnedRuntimeLoadsMusicAndFilmSettingsWithoutReplacingUserData() async throws {
+        let resources = try await hostResources()
+        let connection = try await resources.scriptSession.connection()
+        try await connection.validateAppModules()
+        _ = try await resources.musicScripts.scriptSources()
+        _ = try await resources.filmMetadata.settings()
+        guard case .object(let settings) = try await connection.call(module: .film, operation: "settings.get"),
+              case .bool? = settings["iosAutoPrepare"] else {
+            return XCTFail("Missing film playback settings")
+        }
+        guard case .object(let status) = try await connection.call(module: .cat, operation: "status"),
+              case .array? = status["instances"] else {
+            return XCTFail("Missing Cat source management")
+        }
+        let shared = try await resources.scriptSession.connection()
+        XCTAssertTrue(connection === shared)
+    }
+
+    @MainActor
     func testEmbeddedNodeServesAnLXScriptThroughTheNativeOwner() async throws {
         let resources = try await hostResources()
         let service = resources.musicScripts

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import fs, { mkdtempSync, readFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -10,8 +10,7 @@ import { createRecognitionRules, filmRuleFailure } from '../packages/film-playba
 import { matchesResults } from '../packages/film-playback/src/recognition.js';
 
 const empty = () => ({ episodeCleanRegexRules: [], episodeRules: [], movieRules: [], aggregateRegexRules: [] });
-function fixture(t) {
-  const dataRoot = mkdtempSync(join(tmpdir(), 'film-rules-owner-'));
+function fixture(t, dataRoot = mkdtempSync(join(tmpdir(), 'film-rules-owner-'))) {
   const service = createFilmRulesService({ dataRoot });
   t.after(async () => { await service.close(); rmSync(dataRoot, { recursive: true, force: true }); });
   return { service, dataRoot, path: join(dataRoot, 'film-rules', 'rules.json') };
@@ -31,6 +30,96 @@ test('real QuickJS owner initializes defaults and reopens only its current docum
   const reopened = createFilmRulesService({ dataRoot: f.dataRoot });
   t.after(() => reopened.close());
   assert.deepEqual(await reopened.snapshot(), saved);
+});
+
+test('App-managed root, ancestor and module directory aliases support first save, restart and clear', async t => {
+  for (const kind of ['root', 'ancestor', 'module-directory']) {
+    await t.test(kind, async sub => {
+      const base = mkdtempSync(join(tmpdir(), 'film-rules-alias-')), actual = join(base, 'actual');
+      sub.after(() => rmSync(base, { recursive: true, force: true }));
+      mkdirSync(actual);
+      const dataRoot = kind === 'module-directory' ? join(base, 'data') :
+        kind === 'ancestor' ? join(base, 'linked', 'application-support', 'script-runtime') : join(base, 'linked');
+      if (kind === 'module-directory') mkdirSync(dataRoot);
+      fs.symlinkSync(actual, kind === 'module-directory' ? join(dataRoot, 'film-rules') : join(base, 'linked'), 'junction');
+      const f = fixture(sub, dataRoot);
+      assert.equal(existsSync(f.path), false);
+      const initial = await f.service.get();
+      assert.deepEqual(JSON.parse(readFileSync(f.path, 'utf8')), { rules: initial.rules });
+      const saved = await f.service.set({ rules: empty() });
+      await f.service.close();
+      const reopened = createFilmRulesService({ dataRoot });
+      sub.after(() => reopened.close());
+      assert.deepEqual(await reopened.snapshot(), saved);
+      const restored = await reopened.restore({ section: 'movie' });
+      const actualPath = kind === 'ancestor' ?
+        join(actual, 'application-support', 'script-runtime', 'film-rules', 'rules.json') :
+        kind === 'root' ? join(actual, 'film-rules', 'rules.json') : join(actual, 'rules.json');
+      assert.deepEqual(JSON.parse(readFileSync(actualPath, 'utf8')), { rules: restored.rules });
+      await reopened.clear();
+      assert.equal(existsSync(actualPath), false);
+    });
+  }
+});
+
+test('linked rules documents and module directories support reads, atomic replacement and restart', async t => {
+  for (const kind of ['file-symlink', 'hardlink', 'directory-symlink']) {
+    await t.test(kind, async sub => {
+      const f = fixture(sub), directory = join(f.dataRoot, 'film-rules'), actual = join(f.dataRoot, 'actual');
+      mkdirSync(actual);
+      const linkedFile = join(actual, 'rules.json');
+      const rules = { ...empty(), aggregateRegexRules: ['linked'] }, bytes = JSON.stringify({ rules });
+      writeFileSync(linkedFile, bytes);
+      if (kind === 'directory-symlink') fs.symlinkSync(actual, directory, 'junction');
+      else {
+        mkdirSync(directory);
+        if (kind === 'file-symlink') fs.symlinkSync(linkedFile, f.path);
+        else fs.linkSync(linkedFile, f.path);
+      }
+      assert.deepEqual((await f.service.get()).rules, rules);
+      const saved = await f.service.set({ rules: empty() });
+      assert.deepEqual(JSON.parse(readFileSync(f.path, 'utf8')), { rules: saved.rules });
+      if (kind === 'directory-symlink') {
+        assert.deepEqual(JSON.parse(readFileSync(linkedFile, 'utf8')), { rules: saved.rules });
+      } else {
+        assert.equal(readFileSync(linkedFile, 'utf8'), bytes, 'atomic replacement preserves the other linked entry');
+      }
+      await f.service.close();
+      const reopened = createFilmRulesService({ dataRoot: f.dataRoot });
+      sub.after(() => reopened.close());
+      assert.deepEqual(await reopened.get(), saved);
+      await reopened.clear();
+      assert.equal(existsSync(f.path), false);
+      if (kind !== 'directory-symlink') assert.equal(readFileSync(linkedFile, 'utf8'), bytes);
+    });
+  }
+});
+
+test('an App root alias uses its current destination while preserving content fingerprint checks', async t => {
+  const base = mkdtempSync(join(tmpdir(), 'film-rules-alias-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const original = join(base, 'original'), other = join(base, 'other'), linked = join(base, 'linked');
+  mkdirSync(original);
+  mkdirSync(join(other, 'film-rules'), { recursive: true });
+  fs.symlinkSync(original, linked, 'junction');
+  const f = fixture(t, linked);
+  await f.service.get();
+  const bytes = readFileSync(f.path, 'utf8'), otherPath = join(other, 'film-rules', 'rules.json');
+  writeFileSync(otherPath, bytes);
+  fs.unlinkSync(linked);
+  fs.symlinkSync(other, linked, 'junction');
+  const saved = await f.service.set({ rules: empty() });
+  assert.equal(readFileSync(join(original, 'film-rules', 'rules.json'), 'utf8'), bytes);
+  assert.deepEqual(JSON.parse(readFileSync(otherPath, 'utf8')), { rules: saved.rules });
+  await f.service.close();
+  const reopened = createFilmRulesService({ dataRoot: linked });
+  t.after(() => reopened.close());
+  const current = await reopened.get();
+  assert.deepEqual(current, saved);
+  writeFileSync(otherPath, bytes);
+  await assert.rejects(reopened.set({ rules: empty() }), { code: 'STORAGE_CHANGED' });
+  assert.strictEqual(await reopened.get(), current);
+  assert.equal(readFileSync(otherPath, 'utf8'), bytes);
 });
 
 test('draft preview and normalization use QuickJS without persisting or replacing saved rules', async t => {
@@ -69,6 +158,57 @@ test('a failed first read can recover after the local storage failure is correct
   rmSync(f.path, { recursive: true });
   assert.equal((await f.service.snapshot()).rules.episodeRules.length, 2);
   assert.equal(existsSync(f.path), true);
+});
+
+test('malformed JSON, invalid rules and invalid UTF-8 remain explicit corruption without overwriting data', async t => {
+  for (const [name, bytes] of [
+    ['JSON', Buffer.from('{')],
+    ['rules', Buffer.from(JSON.stringify({ rules: { episodeRules: [] } }))],
+    ['UTF-8', Buffer.concat([Buffer.from('{"rules":{"value":"'), Buffer.from([0xff]), Buffer.from('"}}')])],
+  ]) {
+    await t.test(name, async sub => {
+      const f = fixture(sub), previous = await f.service.get();
+      writeFileSync(f.path, bytes);
+      const reopened = createFilmRulesService({ dataRoot: f.dataRoot });
+      sub.after(() => reopened.close());
+      await assert.rejects(reopened.get(), { code: 'CORRUPT_STORAGE' });
+      await assert.rejects(f.service.set({ rules: empty() }), { code: 'CORRUPT_STORAGE' });
+      assert.strictEqual(await f.service.get(), previous);
+      assert.deepEqual(readFileSync(f.path), bytes);
+    });
+  }
+});
+
+test('open/write/fsync/close/rename failures preserve rules on disk and in memory and remove the temporary file', async t => {
+  for (const method of ['openSync', 'writeFileSync', 'fsyncSync', 'closeSync', 'renameSync']) {
+    await t.test(method, async sub => {
+      const f = fixture(sub), previous = await f.service.get(), bytes = readFileSync(f.path);
+      const original = fs[method], open = fs.openSync;
+      let temporaryFD, failed = false;
+      if (method === 'closeSync') {
+        sub.mock.method(fs, 'openSync', function(path, ...rest) {
+          const descriptor = open.call(this, path, ...rest);
+          if (typeof path === 'string' && path.includes('.rules-')) temporaryFD = descriptor;
+          return descriptor;
+        });
+      }
+      const mocked = sub.mock.method(fs, method, function(...args) {
+        const targeted = method === 'openSync' ? typeof args[0] === 'string' && args[0].includes('.rules-') :
+          method === 'closeSync' ? args[0] === temporaryFD : true;
+        if (targeted && !failed) {
+          failed = true;
+          throw Object.assign(new Error('synthetic private storage diagnostic'), { code: 'EIO' });
+        }
+        return original.apply(this, args);
+      });
+      await assert.rejects(f.service.set({ rules: empty() }), { code: 'STORAGE_ERROR', message: 'STORAGE_ERROR' });
+      mocked.mock.restore();
+      assert.equal(failed, true);
+      assert.strictEqual(await f.service.get(), previous);
+      assert.deepEqual(readFileSync(f.path), bytes);
+      assert.deepEqual(fs.readdirSync(join(f.dataRoot, 'film-rules')), ['rules.json']);
+    });
+  }
 });
 
 test('restore saves the full draft and only restores the selected section', async t => {

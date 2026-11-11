@@ -1,12 +1,11 @@
 import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { isUtf8 } from 'node:buffer';
 import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
 import { bindRuleSnapshot, filmRuleFailure, filmRuleKernelRevision, filmRuleSource, validateRules, validRuleText } from './rules.js';
 
 const fault = code => Object.assign(new Error(code), { code });
-const noFollow = fs.constants.O_NOFOLLOW ?? 0;
 const digest = value => createHash('sha256').update(value).digest('hex');
 function freeze(value) {
   if (value && typeof value === 'object') {
@@ -14,34 +13,6 @@ function freeze(value) {
     Object.freeze(value);
   }
   return value;
-}
-function state(path) {
-  try { return fs.lstatSync(path); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-}
-function canonicalRoot(path) {
-  try { return fs.realpathSync(path); }
-  catch (error) {
-    if (error.code !== 'ENOENT' || dirname(path) === path) throw fault('STORAGE_ERROR');
-    return join(canonicalRoot(dirname(path)), basename(path));
-  }
-}
-function directory(path, create = false) {
-  let current = parse(path).root;
-  for (const part of relative(current, path).split(sep).filter(Boolean)) {
-    current = join(current, part);
-    let entry = state(current);
-    if (!entry && create) {
-      fs.mkdirSync(current, { mode: 0o700 });
-      entry = fs.lstatSync(current);
-    }
-    if (!entry) return false;
-    if (!entry.isDirectory() || entry.isSymbolicLink()) throw fault('STORAGE_ERROR');
-  }
-  return true;
-}
-function regular(entry) {
-  if (!entry.isFile() || entry.isSymbolicLink()) throw fault('STORAGE_ERROR');
 }
 function copyRules(rules) {
   return { episodeCleanRegexRules: [...rules.episodeCleanRegexRules],
@@ -58,7 +29,7 @@ function previewText(value) {
 export function createFilmRulesService({ dataRoot } = {}) {
   if (typeof dataRoot !== 'string' || !isAbsolute(dataRoot) || dataRoot.includes('\0') ||
       dataRoot.split(/[\\/]/).includes('..')) throw fault('INVALID_REQUEST');
-  const root = join(canonicalRoot(resolve(dataRoot)), 'film-rules');
+  const root = join(resolve(dataRoot), 'film-rules');
   const path = join(root, 'rules.json');
   const program = new NativeJsonProgram(filmRuleSource), jobs = new Set();
   let closed = false, closing, initialized, committed, fingerprint = null;
@@ -75,14 +46,7 @@ export function createFilmRulesService({ dataRoot } = {}) {
   function readDisk() {
     let descriptor;
     try {
-      if (!directory(root)) return null;
-      const entry = state(path);
-      if (!entry) return null;
-      regular(entry);
-      descriptor = fs.openSync(path, fs.constants.O_RDONLY | noFollow);
-      const opened = fs.fstatSync(descriptor);
-      regular(opened);
-      if (entry.dev !== opened.dev || entry.ino !== opened.ino) throw fault('STORAGE_ERROR');
+      descriptor = fs.openSync(path, fs.constants.O_RDONLY);
       const bytes = fs.readFileSync(descriptor);
       let document;
       try {
@@ -92,6 +56,7 @@ export function createFilmRulesService({ dataRoot } = {}) {
       } catch { throw fault('CORRUPT_STORAGE'); }
       return { rules: copyRules(document.rules), fingerprint: digest(bytes) };
     } catch (error) {
+      if (descriptor === undefined && error.code === 'ENOENT') return null;
       throw fault(error.code === 'CORRUPT_STORAGE' ? error.code : 'STORAGE_ERROR');
     } finally {
       if (descriptor !== undefined) {
@@ -105,12 +70,12 @@ export function createFilmRulesService({ dataRoot } = {}) {
   function write(rules) {
     let temporary = join(root, `.rules-${randomUUID()}.tmp`), descriptor, failure;
     try {
-      directory(root, true);
+      fs.mkdirSync(root, { recursive: true, mode: 0o700 });
       fs.chmodSync(root, 0o700);
       unchanged();
       const bytes = JSON.stringify({ rules });
       const next = digest(bytes);
-      descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow, 0o600);
+      descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
       fs.writeFileSync(descriptor, bytes);
       fs.fsyncSync(descriptor);
       fs.closeSync(descriptor); descriptor = undefined;
@@ -223,8 +188,8 @@ export function createFilmRulesService({ dataRoot } = {}) {
         const { rules } = await invokeNative({ operation: 'defaults' }, { signal });
         open(signal);
         unchanged();
-        try { if (state(path)) fs.unlinkSync(path); }
-        catch { throw fault('STORAGE_ERROR'); }
+        try { fs.unlinkSync(path); }
+        catch (error) { if (error.code !== 'ENOENT') throw fault('STORAGE_ERROR'); }
         fingerprint = null;
         return committed = snapshotOf(rules);
       }, options);

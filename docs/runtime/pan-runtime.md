@@ -14,7 +14,7 @@ await runtime.start();
 await runtime.close();
 ```
 
-`sessionId` 是 [runtime.http.v1](runtime-bridge.md) 的生命周期代次；普通 HTTP 调用无需 session 或启动密钥。`dataRoot` 是绝对目录。同进程总装配 `createRuntime({sessionId,dataRoot,pan:{}})` 可显式加入 pan；省略 `pan` 时默认三模块不变。pan-only 入口不加载原生脚本引擎。
+`sessionId` 是 [runtime.http.v1](runtime-bridge.md) 的生命周期代次；普通 HTTP 调用无需 session 或启动密钥。`dataRoot` 是由 App 指定的绝对目录，运行器管理其下的 pan 自有数据。同进程总装配 `createRuntime({sessionId,dataRoot,pan:{}})` 可显式加入 pan；省略 `pan` 时默认三模块不变。pan-only 入口不加载原生脚本引擎。
 
 新模块没有源码上传接口。`describe` 中为 `pan@0.1.0/pan.runtime.v1`；所有业务请求是 `POST /v1/pan/{operation}`，完整 JSON body，不增加摘要、加密、分片或大小分类。Node 调用端用 `client.call('pan.' + operation, params)`。成功与错误信封复用现有 HTTP 契约。
 
@@ -48,7 +48,7 @@ await runtime.close();
 {"version":1,"accounts":{"baidu":{"revision":1,"credentials":{"cookie":"synthetic-example"}}}}
 ```
 
-目录／文件权限分别为 `0700/0600`（由平台文件系统执行），拒绝符号链接、硬链接文件和路径穿越；损坏文件明确报错，不重置覆盖，不迁移旧客户端数据。**不加密，也不保证同用户进程或恶意脚本无法读取**；没有密钥文件、平台秘密桥或自定义加密壳。单个 dataRoot 应只由一个运行器管理，不支持多进程同时写同一份配置。
+目录／文件权限分别为 `0700/0600`（由平台文件系统执行）。祖先目录、dataRoot 与 pan 目录可使用系统或 App 管理的目录别名，不要求调用方先解析真实路径。自有文件的符号链接和硬链接按正常文件 I/O 读取；写入仍以原子 rename 替换 `accounts.json` 目录项，不改写原链接目标的内容。dataRoot 不接受相对路径、NUL 或 `..` 路径段；非普通文件、损坏文档与文件系统错误明确报错，不重置覆盖，不迁移旧客户端数据。读取时系统报告 `ENOENT` 视为尚无文档；路径被普通文件阻挡时写入仍失败，不覆盖阻挡文件。**不加密，也不保证同用户进程或恶意脚本无法读取**；没有密钥文件、平台秘密桥或自定义加密壳。单个 dataRoot 应只由一个运行器管理，不支持多进程同时写同一份配置。
 
 写入先同步暂存文件，再以原子 rename 为提交点；成功后的磁盘与内存配置一致，不承诺断电时目录项的额外耐久性保证。
 

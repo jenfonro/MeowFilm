@@ -1,10 +1,9 @@
 import fs from 'node:fs';
 import { isUtf8 } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
-import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { defaultPreferences, normalizePreferences } from './policy.js';
 
-const noFollow = fs.constants.O_NOFOLLOW ?? 0;
 const codes = new Set([
   'INVALID_REQUEST', 'CLOSED', 'STORAGE_ERROR', 'CORRUPT_STORAGE',
   'STORAGE_CHANGED', 'INVALID_PREFERENCES', 'LIBRARY_UPDATE_FAILED',
@@ -175,42 +174,6 @@ function freeze(value) {
   return value;
 }
 
-function state(path) {
-  try { return fs.lstatSync(path); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-}
-
-function directory(path, create) {
-  let current = parse(path).root;
-  for (const part of relative(current, path).split(sep).filter(Boolean)) {
-    current = join(current, part);
-    let entry = state(current);
-    if (!entry && create) {
-      fs.mkdirSync(current, { mode: 0o700 });
-      entry = fs.lstatSync(current);
-    }
-    if (!entry) return false;
-    if (!entry.isDirectory() || entry.isSymbolicLink()) throw failure('STORAGE_ERROR');
-  }
-  return true;
-}
-
-function regular(entry) {
-  if (!entry.isFile() || entry.isSymbolicLink() || entry.nlink !== 1) throw failure('STORAGE_ERROR');
-}
-
-// The App supplies this trusted root; platform aliases such as /var are valid.
-// Pin its canonical location before checking our owned subtree and document.
-function canonicalRoot(path) {
-  try { return fs.realpathSync(path); }
-  catch (error) {
-    if (error.code !== 'ENOENT') throw failure('STORAGE_ERROR');
-    const parent = dirname(path);
-    if (parent === path) throw failure('STORAGE_ERROR');
-    return join(canonicalRoot(parent), basename(path));
-  }
-}
-
 /**
  * One trusted local owner, one document: <dataRoot>/film-playback/library.json.
  * read/update return immutable internal snapshots (including sensitive shares).
@@ -219,7 +182,7 @@ function canonicalRoot(path) {
 export function createPlaybackLibrary({ dataRoot } = {}) {
   requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot) &&
     !dataRoot.includes('\0') && !dataRoot.split(/[\\/]/).includes('..'));
-  const root = join(canonicalRoot(resolve(dataRoot)), 'film-playback');
+  const root = join(resolve(dataRoot), 'film-playback');
   const path = join(root, 'library.json');
   let closed = false;
   let updating = false;
@@ -227,23 +190,17 @@ export function createPlaybackLibrary({ dataRoot } = {}) {
   function readDisk() {
     let fd;
     try {
-      if (!directory(root, false)) return null;
+      fd = fs.openSync(path, fs.constants.O_RDONLY);
       fs.chmodSync(root, 0o700);
-      const entry = state(path);
-      if (!entry) return null;
-      regular(entry);
-      fd = fs.openSync(path, fs.constants.O_RDONLY | noFollow);
-      const opened = fs.fstatSync(fd);
-      regular(opened);
-      if (entry.dev !== opened.dev || entry.ino !== opened.ino) throw failure('STORAGE_ERROR');
-      fs.fchmodSync(fd, 0o600);
       const bytes = fs.readFileSync(fd);
+      fs.fchmodSync(fd, 0o600);
       try {
         requireValue(isUtf8(bytes));
         return validate(JSON.parse(bytes.toString('utf8')));
       }
       catch { throw failure('CORRUPT_STORAGE'); }
     } catch (error) {
+      if (fd === undefined && error.code === 'ENOENT') return null;
       throw failure(error.code === 'CORRUPT_STORAGE' ? error.code : 'STORAGE_ERROR');
     } finally {
       if (fd !== undefined) {
@@ -272,11 +229,11 @@ export function createPlaybackLibrary({ dataRoot } = {}) {
   function write(bytes) {
     let fd, temporary, error;
     try {
-      directory(root, true);
+      fs.mkdirSync(root, { recursive: true, mode: 0o700 });
       fs.chmodSync(root, 0o700);
       temporary = join(root, `.library-${randomUUID()}.tmp`);
       fd = fs.openSync(temporary,
-        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow, 0o600);
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
       fs.fchmodSync(fd, 0o600);
       fs.writeFileSync(fd, bytes, 'utf8');
       fs.fsyncSync(fd);

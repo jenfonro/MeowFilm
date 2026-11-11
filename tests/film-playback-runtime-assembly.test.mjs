@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRuntime, createRuntimeClient } from '../apps/runtime/entry.mjs';
@@ -32,7 +32,10 @@ test('E49/E50: the common embedding factory retains its default three-module con
 
 for (const platform of ['ios', 'windows']) {
   test(`E42/E48/E49/E50: the ${platform} App entry assembles eight real owners and connects provider invalidation`, t => {
-    const dataRoot = join(area(t), 'data');
+    const base = area(t), actual = join(base, 'private', 'var'), alias = join(base, 'var');
+    mkdirSync(actual, { recursive: true });
+    symlinkSync(actual, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const dataRoot = join(alias, 'data');
     const bootstrap = new URL(`../apps/${platform}/runtime/bootstrap.mjs`, import.meta.url).href;
     const entry = new URL(`../apps/${platform}/runtime/entries/aggregate.mjs`, import.meta.url).href;
     const sharedBootstrap = new URL('../apps/runtime/bootstrap.mjs', import.meta.url).href;
