@@ -59,7 +59,9 @@ export class PrivateVolume {
     requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot));
     identifier(installationId);
     this.root = resolve(dataRoot, 'volumes', installationId);
-    for (const parent of [resolve(dataRoot), resolve(dataRoot, 'volumes'), this.root]) {
+    // The App supplies dataRoot; only the guest volume is an isolation boundary.
+    fs.mkdirSync(dataRoot, { recursive: true });
+    for (const parent of [resolve(dataRoot, 'volumes'), this.root]) {
       if (fs.existsSync(parent)) requireValue(!fs.lstatSync(parent).isSymbolicLink(), 'PERMISSION_DENIED');
       else fs.mkdirSync(parent);
     }
@@ -590,12 +592,6 @@ class SourceReadable extends Readable {
 export function atomicWrite(path, bytes) {
   const parent = dirname(path);
   fs.mkdirSync(parent, { recursive: true });
-  const directory = fs.lstatSync(parent);
-  requireValue(directory.isDirectory() && !directory.isSymbolicLink(), 'PERMISSION_DENIED');
-  if (fs.existsSync(path)) {
-    const target = fs.lstatSync(path);
-    requireValue(target.isFile() && !target.isSymbolicLink() && target.nlink === 1, 'PERMISSION_DENIED');
-  }
   const temporary = join(parent, `.${randomBytes(16).toString('hex')}.tmp`);
   let fd, failure;
   try {
@@ -604,8 +600,6 @@ export function atomicWrite(path, bytes) {
     fs.fsyncSync(fd);
     fs.closeSync(fd); fd = undefined;
     fs.renameSync(temporary, path);
-    const saved = fs.lstatSync(path);
-    requireValue(saved.isFile() && !saved.isSymbolicLink() && saved.nlink === 1, 'STORAGE_ERROR');
     syncDirectory(parent);
   } catch (error) {
     failure = error;
@@ -625,14 +619,11 @@ export function removePrivateVolume(dataRoot, installationId) {
   requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot));
   identifier(installationId);
   const root = resolve(dataRoot);
-  const rootState = fs.lstatSync(root);
-  requireValue(rootState.isDirectory() && !rootState.isSymbolicLink(), 'PERMISSION_DENIED');
   const volumes = resolve(root, 'volumes');
   let volumesState;
   try { volumesState = fs.lstatSync(volumes); }
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
-  requireValue(volumesState.isDirectory() && !volumesState.isSymbolicLink() &&
-    inside(root, fs.realpathSync(volumes)), 'PERMISSION_DENIED');
+  requireValue(volumesState.isDirectory() && !volumesState.isSymbolicLink(), 'PERMISSION_DENIED');
   const target = resolve(volumes, installationId);
   requireValue(dirname(target) === volumes, 'INVALID_ARGUMENT');
   let targetState;

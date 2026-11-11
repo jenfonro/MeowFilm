@@ -42,6 +42,8 @@ NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网
 
 每个 App 进程只启动一次 Node；不可恢复失败后脚本不可用，不自动重启，也不通过 `process.exit` 杀掉整个 App。它不是恶意原生代码安全沙箱，取消和独立执行不等于整个进程崩溃／OOM 隔离。
 
+启动失败仅向 stderr 输出 `IOS_RUNTIME_START_FAILED stage=<静态阶段> category=<白名单错误类别>`，并设置退出码 1。阶段区分 `arguments`、`native-binding`、`bootstrap-channel`、`configuration`、`assembly`、八模块各自初始化、`listen` 和 `endpoint`；模块阶段使用固定模块 ID。类别仅保留明确列入白名单的协议、存储、原生载体、通道和系统 I/O 错误码，其余固定为 `UNKNOWN`，非法阶段固定为 `unknown`。不输出异常 message、stack、路径、配置或凭据；该记录只定位失败阶段和类别，不能还原未记录的原始异常。成功握手仍仅交接 `baseUrl`，运行期逃逸异常仍使用 `IOS_RUNTIME_FAILED`。
+
 ## 验证内容与成功判据
 
 独立预检的检查项包括实际 Node／N-API／目标身份、正式 framework 加载、异步原生回调、typed bytes、明确脚本算法、线程取消及真实退出；同时保留有用途的文件、Node crypto、HTTP 和 Worker 能力检查。正式 App 宿主的用例范围包括：

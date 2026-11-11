@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { existsSync, statSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { atomicWrite } from './private-volume.js';
 import { clone, fault, identifier, requireValue, safeError } from './errors.js';
@@ -27,8 +27,7 @@ export function normalizeCatConfig(input) {
   return value;
 }
 function settingsBytes(path) {
-  const state = lstatSync(path);
-  requireValue(state.isFile() && !state.isSymbolicLink() && state.nlink === 1, 'CORRUPT_STORAGE');
+  requireValue(statSync(path).isFile(), 'CORRUPT_STORAGE');
   return readFileSync(path, 'utf8');
 }
 export function validateCatSettings(input) {

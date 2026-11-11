@@ -3,8 +3,8 @@ import { request as httpsRequest } from 'node:https';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createHash } from 'node:crypto';
-import { readFileSync, existsSync, mkdirSync, lstatSync, realpathSync, rmSync } from 'node:fs';
-import { resolve, join, isAbsolute, relative, sep } from 'node:path';
+import { readFileSync, existsSync, mkdirSync, statSync, rmSync } from 'node:fs';
+import { resolve, join, isAbsolute } from 'node:path';
 import { parse } from 'acorn';
 import { ScriptHost } from './host.js';
 import { WorkerSession, workerResult } from './worker-session.js';
@@ -25,10 +25,6 @@ const execution = spec => spec && [spec.sourceHash, spec.config, spec.version, s
 const sameExecution = (a, b) => same(execution(a), execution(b));
 const hopByHop = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailer', 'transfer-encoding', 'upgrade']);
-const inside = (root, path) => {
-  const delta = relative(root, path);
-  return delta === '' || delta !== '..' && !delta.startsWith('..' + sep) && !isAbsolute(delta);
-};
 export function cleanHopByHop(input) {
   const headers = { ...input };
   const connections = Object.entries(headers)
@@ -125,15 +121,8 @@ export class CatRuntime {
     if (!this.initialization) {
       this.initialization = (async () => {
         mkdirSync(this.dataRoot, { recursive: true });
-        const rootState = lstatSync(this.dataRoot);
-        requireValue(rootState.isDirectory() && !rootState.isSymbolicLink(), 'PERMISSION_DENIED');
-        this.dataRoot = realpathSync(this.dataRoot);
         this.sourcesRoot = join(this.dataRoot, 'sources');
         mkdirSync(this.sourcesRoot, { recursive: true });
-        const sources = lstatSync(this.sourcesRoot);
-        requireValue(sources.isDirectory() && !sources.isSymbolicLink() &&
-          inside(this.dataRoot, realpathSync(this.sourcesRoot)), 'PERMISSION_DENIED');
-        this.sourcesIdentity = { dev: sources.dev, ino: sources.ino };
         this.settings = new CatSettingsFile(this.dataRoot);
         this.host = new ScriptHost({ adapters: {
           cat: input => this.workerSession(input),
@@ -302,21 +291,13 @@ export class CatRuntime {
     return this.limits?.[name] ?? this.host.limits[name];
   }
   sourcePath(sourceHash) {
-    try {
-      const state = lstatSync(this.sourcesRoot);
-      requireValue(state.isDirectory() && !state.isSymbolicLink() &&
-        state.dev === this.sourcesIdentity.dev && state.ino === this.sourcesIdentity.ino &&
-        inside(this.dataRoot, realpathSync(this.sourcesRoot)), 'CORRUPT_STORAGE');
-      return join(this.sourcesRoot, sourceHash + '.js');
-    } catch (error) { throw safeError(error, 'CORRUPT_STORAGE'); }
+    return join(this.sourcesRoot, sourceHash + '.js');
   }
   readSource(sourceHash) {
     try {
       const file = this.sourcePath(sourceHash);
-      requireValue(existsSync(file), 'CORRUPT_STORAGE');
-      const state = lstatSync(file);
-      requireValue(state.isFile() && !state.isSymbolicLink() && state.nlink === 1 &&
-        inside(this.sourcesRoot, realpathSync(file)), 'CORRUPT_STORAGE');
+      const state = statSync(file);
+      requireValue(state.isFile(), 'CORRUPT_STORAGE');
       requireValue(state.size <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
       const bytes = readFileSync(file);
       requireValue(bytes.length <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
@@ -327,13 +308,11 @@ export class CatRuntime {
     try {
       requireValue(/^[a-f0-9]{64}$/.test(sourceHash), 'CORRUPT_STORAGE');
       const file = this.sourcePath(sourceHash);
-      let state;
-      try { state = lstatSync(file); }
-      catch (error) { if (error.code === 'ENOENT') return; throw error; }
-      requireValue(state.isFile() && !state.isSymbolicLink() && state.nlink === 1 &&
-        inside(this.sourcesRoot, realpathSync(file)), 'CORRUPT_STORAGE');
       rmSync(file, { maxRetries: 3, retryDelay: 100 });
-    } catch (error) { throw safeError(error, 'STORAGE_ERROR'); }
+    } catch (error) {
+      if (error.code === 'ENOENT') return;
+      throw safeError(error, 'STORAGE_ERROR');
+    }
   }
   async apply(next, { background = false, only = null, signal } = {}) {
     requireValue(!signal?.aborted, 'CANCELLED');

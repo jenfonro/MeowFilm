@@ -7,6 +7,13 @@ CatNode／source／pan／TMDB／豆瓣模块，负责规则、搜索聚合、匹
 历史、人工匹配、错误片源屏蔽和偏好。业务不连接 meowfilm-server 的登录、
 数据库或播放 API。收藏仍由现有客户端 owner 保存；规则在 Node 保存，客户端仅持编辑草稿与展示快照。
 
+本地资料库与规则文档分别位于 `<dataRoot>/film-playback/library.json` 和
+`<dataRoot>/film-rules/rules.json`。App 提供 `dataRoot`，owner 按正常文件系统路径语义访问，
+支持根、祖先及模块目录别名和文档链接，按需创建目录。保存通过同目录独占临时文件、
+fsync 与 rename 原子替换文档路径；文件链接的其他目录项保留原内容。
+保存前比对已提交文档内容，外部改写返回 `STORAGE_CHANGED`；格式损坏与真实 I/O 失败
+分别返回 `CORRUPT_STORAGE`、`STORAGE_ERROR`，失败不发布新快照。
+
 双端 aggregate entry 显式装配八个模块；通用 `createRuntime` 未显式启用
 pan／metadata／film 时保持原默认三个模块。`connectFilmPlayback` 在 provider
 变更前后比较真实 generation／revision，再通知数据、会话及媒体 owner 撤权。

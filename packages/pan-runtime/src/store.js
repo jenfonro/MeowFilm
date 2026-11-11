@@ -1,34 +1,14 @@
 import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { PanError, requireValue } from './errors.js';
 import { object, parseJSON } from './values.js';
 
-const noFollow = fs.constants.O_NOFOLLOW ?? 0;
 const empty = () => ({ version: 1, accounts: {} });
 
 function state(path) {
-  try { return fs.lstatSync(path); }
+  try { return fs.statSync(path); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-}
-
-function directory(path, create) {
-  let current = parse(path).root;
-  for (const part of relative(current, path).split(sep).filter(Boolean)) {
-    current = join(current, part);
-    let entry = state(current);
-    if (!entry && create) {
-      fs.mkdirSync(current, { mode: 0o700 });
-      entry = fs.lstatSync(current);
-    }
-    if (!entry) return false;
-    requireValue(entry.isDirectory() && !entry.isSymbolicLink(), 'STORAGE_ERROR');
-  }
-  return true;
-}
-
-function regular(entry) {
-  requireValue(entry.isFile() && !entry.isSymbolicLink() && entry.nlink === 1, 'STORAGE_ERROR');
 }
 
 function document(value, code) {
@@ -55,15 +35,14 @@ export class PanStore {
   read() {
     let fd;
     try {
-      if (!directory(this.#root, false)) return empty();
+      const root = state(this.#root);
+      if (!root) return empty();
+      requireValue(root.isDirectory(), 'STORAGE_ERROR');
       fs.chmodSync(this.#root, 0o700);
       const entry = state(this.#path);
       if (!entry) return empty();
-      regular(entry);
-      fd = fs.openSync(this.#path, fs.constants.O_RDONLY | noFollow);
-      const opened = fs.fstatSync(fd);
-      regular(opened);
-      requireValue(entry.dev === opened.dev && entry.ino === opened.ino, 'STORAGE_ERROR');
+      requireValue(entry.isFile(), 'STORAGE_ERROR');
+      fd = fs.openSync(this.#path, fs.constants.O_RDONLY);
       fs.fchmodSync(fd, 0o600);
       const bytes = fs.readFileSync(fd);
       let value;
@@ -84,19 +63,16 @@ export class PanStore {
       document(value, 'STORAGE_ERROR');
       const bytes = Buffer.from(JSON.stringify(value));
       this.read();
-      directory(this.#root, true);
+      fs.mkdirSync(this.#root, { recursive: true, mode: 0o700 });
       fs.chmodSync(this.#root, 0o700);
       temporary = join(this.#root, `.accounts-${randomUUID()}.tmp`);
       fd = fs.openSync(temporary,
-        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow, 0o600);
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
       fs.fchmodSync(fd, 0o600);
       fs.writeFileSync(fd, bytes);
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = undefined;
-      directory(this.#root, false);
-      const existing = state(this.#path);
-      if (existing) regular(existing);
       // Commit point: a successful rename must not be reported as an uncommitted write.
       fs.renameSync(temporary, this.#path);
       temporary = undefined;

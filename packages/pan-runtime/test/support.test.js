@@ -275,46 +275,111 @@ test('store has no fallible directory sync after the rename commit point', t => 
 test('store propagates read and directory failures instead of resetting accounts', t => {
   const root = temporary(t), store = new PanStore(root);
   store.write({ version: 1, accounts: {} });
-  fsFailure('readFileSync', () => {
+  for (const method of ['statSync', 'readFileSync', 'chmodSync']) fsFailure(method, () => {
     assert.throws(() => store.read(), code('STORAGE_ERROR'));
     assert.throws(() => store.write({ version: 1, accounts: {} }), code('STORAGE_ERROR'));
   });
-  fsFailure('chmodSync', () => assert.throws(() => store.read(), code('STORAGE_ERROR')));
   assert.deepEqual(store.read(), { version: 1, accounts: {} });
 });
 
-test('store rejects symbolic links, hard links and non-regular files without changing their targets', t => {
+test('store reads symbolic and hard links and atomically replaces only its document entry', t => {
   const base = temporary(t), target = join(base, 'target');
-  fs.writeFileSync(target, '{"version":1,"accounts":{}}');
+  const before = { version: 1, accounts: { baidu: { revision: 1, credentials: { cookie: 'synthetic-one' } } } };
+  const after = { version: 1, accounts: { baidu: { revision: 2, credentials: { cookie: 'synthetic-two' } } } };
+  fs.writeFileSync(target, JSON.stringify(before));
   const original = fs.readFileSync(target);
-  for (const link of ['symbolic', 'hard', 'directory']) {
+  for (const link of ['symbolic', 'hard']) {
     const root = join(base, link), folder = join(root, 'pan'), path = join(folder, 'accounts.json');
     fs.mkdirSync(folder, { recursive: true });
-    if (link === 'symbolic') fs.symlinkSync(target, path);
-    else if (link === 'hard') fs.linkSync(target, path);
-    else fs.mkdirSync(path);
+    if (link === 'symbolic') fs.symlinkSync(target, path, 'file');
+    else fs.linkSync(target, path);
     const store = new PanStore(root);
-    assert.throws(() => store.read(), code('STORAGE_ERROR'));
-    assert.throws(() => store.write({ version: 1, accounts: {} }), code('STORAGE_ERROR'));
+    assert.deepEqual(store.read(), before);
+    fsFailure('renameSync', () => assert.throws(() => store.write(after), code('STORAGE_ERROR')));
+    assert.deepEqual(store.read(), before);
     assert.deepEqual(fs.readFileSync(target), original);
+    assert.deepEqual(fs.readdirSync(folder), ['accounts.json']);
+    store.write(after);
+    store.close();
+    assert.deepEqual(new PanStore(root).read(), after);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path, 'utf8')), after);
+    assert.deepEqual(fs.readFileSync(target), original);
+    assert.deepEqual(fs.readdirSync(folder), ['accounts.json']);
   }
 });
 
-test('store rejects links in the data root and pan directory and rejects traversal', t => {
+for (const location of ['ancestor', 'dataRoot', 'pan']) {
+  for (const existing of [false, true]) {
+    test(`store ${existing ? 'updates existing data' : 'creates new data'} through a ${location} directory alias`, t => {
+      const base = temporary(t), target = join(base, 'target'), alias = join(base, 'alias');
+      fs.mkdirSync(target);
+      const root = location === 'ancestor' ? join(alias, 'nested', 'data') :
+        location === 'dataRoot' ? alias : join(base, 'root');
+      const folder = location === 'ancestor' ? join(target, 'nested', 'data', 'pan') :
+        location === 'dataRoot' ? join(target, 'pan') : target;
+      if (location === 'pan') fs.mkdirSync(root);
+      fs.symlinkSync(target, location === 'pan' ? join(root, 'pan') : alias,
+        process.platform === 'win32' ? 'junction' : 'dir');
+      const before = { version: 1, accounts: { baidu: { revision: 1, credentials: { cookie: 'synthetic-one' } } } };
+      const after = { version: 1, accounts: { baidu: { revision: 2, credentials: { cookie: 'synthetic-two' } } } };
+      const path = join(folder, 'accounts.json');
+      if (existing) {
+        fs.mkdirSync(folder, { recursive: true });
+        fs.writeFileSync(path, JSON.stringify(before));
+      }
+      const store = new PanStore(root);
+      assert.deepEqual(store.read(), existing ? before : { version: 1, accounts: {} });
+      store.write(after);
+      assert.deepEqual(JSON.parse(fs.readFileSync(path, 'utf8')), after);
+      store.close();
+      assert.deepEqual(new PanStore(root).read(), after);
+      assert.deepEqual(fs.readdirSync(folder), ['accounts.json']);
+    });
+  }
+}
+
+test('store rejects directory documents without changing their contents', t => {
   const base = temporary(t), target = join(base, 'target');
   fs.mkdirSync(target);
-  fs.symlinkSync(target, join(base, 'linked-root'));
-  const root = join(base, 'actual');
-  fs.mkdirSync(root);
-  fs.symlinkSync(target, join(root, 'pan'));
-  for (const dataRoot of [join(base, 'linked-root', 'nested'), root]) {
-    const store = new PanStore(dataRoot);
+  fs.writeFileSync(join(target, 'retained'), 'synthetic existing content');
+  for (const link of [false, true]) {
+    const root = join(base, link ? 'linked' : 'actual'), folder = join(root, 'pan'), path = join(folder, 'accounts.json');
+    fs.mkdirSync(folder, { recursive: true });
+    if (link) fs.symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir');
+    else {
+      fs.mkdirSync(path);
+      fs.writeFileSync(join(path, 'retained'), 'synthetic existing content');
+    }
+    const store = new PanStore(root);
     assert.throws(() => store.read(), code('STORAGE_ERROR'));
     assert.throws(() => store.write({ version: 1, accounts: {} }), code('STORAGE_ERROR'));
+    assert.equal(fs.readFileSync(join(path, 'retained'), 'utf8'), 'synthetic existing content');
+    assert.deepEqual(fs.readdirSync(path), ['retained']);
+    assert.deepEqual(fs.readdirSync(folder), ['accounts.json']);
   }
-  assert.deepEqual(fs.readdirSync(target), []);
+});
+
+test('store reports real non-directory path failures without changing existing files', t => {
+  for (const location of ['ancestor', 'dataRoot', 'pan']) {
+    const base = temporary(t), blocked = join(base, location === 'pan' ? 'pan' : 'blocked');
+    fs.writeFileSync(blocked, 'synthetic existing file');
+    const root = location === 'ancestor' ? join(blocked, 'nested') : location === 'dataRoot' ? blocked : base;
+    const store = new PanStore(root);
+    // Windows stat reports ENOENT below a file; a subsequent write must still fail.
+    if (process.platform === 'win32' && location !== 'pan')
+      assert.deepEqual(store.read(), { version: 1, accounts: {} });
+    else assert.throws(() => store.read(), code('STORAGE_ERROR'));
+    assert.throws(() => store.write({ version: 1, accounts: {} }), code('STORAGE_ERROR'));
+    assert.equal(fs.readFileSync(blocked, 'utf8'), 'synthetic existing file');
+    assert.deepEqual(fs.readdirSync(base), [location === 'pan' ? 'pan' : 'blocked']);
+  }
+});
+
+test('store requires an absolute data root without NUL or parent traversal', t => {
+  const base = temporary(t);
   assert.throws(() => new PanStore(`${base}/../outside`), code('INVALID_REQUEST'));
   assert.throws(() => new PanStore('relative'), code('INVALID_REQUEST'));
+  assert.throws(() => new PanStore(`${base}\0`), code('INVALID_REQUEST'));
 });
 
 test('HTTP reuses keepalive sockets and leaves non-2xx protocol decisions to the caller', async t => {
