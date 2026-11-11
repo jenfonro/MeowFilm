@@ -11,13 +11,17 @@ final class FilmRuleReferenceTests: XCTestCase {
         let request = FilmRuleRequest(section: .movie, text: "🎬", query: "ＡK中文"), draft = FilmRuleSet(movieRules: [.init(pattern: "^.", replace: "x")])
         let first = try await service.process(request, draft: draft)
         let second = try await service.process(request)
+        let grouped = try await service.process(request, group: .movie, rules: draft.movieRules)
         XCTAssertEqual(first, second)
+        XCTAssertEqual(grouped, first)
         XCTAssertEqual(first.outputText.utf16, [0x78, 0xDFAC])
         await filmRuleFailure(FilmRuleServiceError.notInitialized) { try await service.savedSnapshot() }
         let calls = await rpc.calls
-        XCTAssertEqual(calls.map(\.0), ["rules.preview", "rules.preview"])
+        XCTAssertEqual(calls.map(\.0), ["rules.preview", "rules.preview", "rules.group.preview"])
         XCTAssertEqual(calls[0].1, .object(["request": try filmRuleValue(request), "rules": try filmRuleValue(draft)]))
         XCTAssertEqual(calls[1].1, .object(["request": try filmRuleValue(request)]))
+        XCTAssertEqual(calls[2].1, .object(["request": try filmRuleValue(request), "group": .string("movie"),
+                                           "rules": try filmRuleValue(draft.movieRules)]))
         await service.close()
     }
 

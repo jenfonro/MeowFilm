@@ -316,7 +316,7 @@ final class MusicRecordDiscView: UIView {
             self.theme = theme
             setNeedsDisplay()
         }
-        let material = MusicRecordMaterials(palette: theme.palette)
+        let material = MusicRecordMaterials(colors: theme.palette)
         let reflect = UIColor(material.reflect)
         let sheenAngle = 36 * Double.pi / 180
         sheen.endPoint = CGPoint(x: 0.5 + CGFloat(sin(sheenAngle)) * 0.5,
@@ -499,7 +499,7 @@ final class MusicRecordDiscView: UIView {
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext(),
               let space = CGColorSpace(name: CGColorSpace.sRGB) else { return }
-        let material = MusicRecordMaterials(palette: theme.palette)
+        let material = MusicRecordMaterials(colors: theme.palette)
         // Keep the reference colored glass. Lift only its inner edge toward the
         // page color, so removing the dark collar does not erase the whole disc.
         let ring = UIColor(theme.dark ? material.ring :

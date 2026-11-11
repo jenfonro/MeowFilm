@@ -88,7 +88,7 @@ public final class MusicPlayerContentModel {
     var isAvailable: Bool { model.isAvailable && !model.isClosed }
     var dockExpanded: Bool { mini.expanded }
     var artwork: UIImage? { artworkIdentity?.url.flatMap { images[$0] } }
-    var controlTheme: PageTheme { .init(palette: appearance.preferences.colorPalette, dark: false) }
+    var controlTheme: PageTheme { .init(colors: appearance.preferences.colorPalette, dark: false) }
     var fence: MusicReferencePlayerFence {
         .init(occurrence: model.current?.id, attempt: model.activeNativeAttemptID,
               access: model.searchAccessGeneration, queueRevision: model.state.revision,

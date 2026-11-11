@@ -110,7 +110,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     func showSettings() {
-        let page = MeowfilmSettingsViewController(themeProvider: assembly.appearance)
+        let page = MeowfilmSettingsViewController(themeProvider: assembly.appearance, resetUserData: resetUserData)
         page.openMusic = { [weak self, weak page] in
             guard let self else { return }
             guard let model = assembly.music else {
@@ -118,7 +118,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 return
             }
             navigation.pushViewController(MusicSettingsViewController(
-                model: model, appearance: assembly.appearance, router: self, resetUserData: resetUserData
+                model: model, appearance: assembly.appearance, router: self
             ), animated: true)
         }
         page.openFilm = { [weak self, weak page] in
@@ -130,6 +130,10 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             navigation.pushViewController(FilmSettingsViewController(
                 model: settings, themeProvider: assembly.appearance
             ), animated: true)
+        }
+        page.openPreferences = { [weak self] in
+            guard let self else { return }
+            navigation.pushViewController(MusicAppearanceSettingsViewController(store: assembly.appearance), animated: true)
         }
         navigation.pushViewController(page, animated: true)
     }

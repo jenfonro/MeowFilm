@@ -21,7 +21,7 @@ final class MusicChannelsPickerViewController: HostingPageViewController<MusicCh
         self.onSelect = onSelect
         super.init(themeProvider: appearance, content: MusicChannelsPickerContent(
             channels: channels, selectedID: selectedID, emptyTitle: emptyTitle,
-            theme: PageTheme(palette: appearance.pageColorway), close: {}, select: { _ in }))
+            theme: PageTheme(colors: appearance.pagePalette), close: {}, select: { _ in }))
     }
 
     override var usesPageHeader: Bool { false }

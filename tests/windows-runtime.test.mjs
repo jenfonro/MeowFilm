@@ -138,7 +138,8 @@ async function assertRealBusiness(client) {
     film: ['session.open', 'session.command', 'session.snapshot', 'session.release', 'session.attempt',
       'session.media.release', 'settings.get', 'settings.set', 'library.get', 'library.remove', 'manual.update',
       'data.catalog', 'data.search', 'data.detail', 'data.metadata', 'data.metadata.entry', 'data.cache.entry', 'data.invalidate',
-      'rules.get', 'rules.set', 'rules.restore', 'rules.preview', 'rules.normalize', 'rules.clear',
+      'rules.get', 'rules.set', 'rules.group.set', 'rules.group.defaults', 'rules.group.preview',
+      'rules.restore', 'rules.preview', 'rules.normalize', 'rules.clear',
       'search.open', 'search.snapshot', 'search.command', 'search.release', 'search.handoff'],
   };
   for (const module of description.modules) {
@@ -353,7 +354,7 @@ async function runProduct(t, entry, payload, dataRoot, manifest) {
   assert.equal(typeof previousRevision, 'string');
   assert.notEqual(previousRevision, '');
   assert.notEqual(revision, '');
-  assert.notEqual(revision, previousRevision);
+  assert.equal(revision, previousRevision);
   assert.deepEqual({ ...restoredSettings, value: restoredConfiguration }, {
     ok: true, contract: 'tmdb.data.v1', value: previousConfiguration,
   });

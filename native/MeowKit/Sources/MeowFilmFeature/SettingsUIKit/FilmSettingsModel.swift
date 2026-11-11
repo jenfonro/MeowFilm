@@ -8,6 +8,7 @@ public final class FilmSettingsModel: ObservableObject {
     public let rules: FilmRulesDraft
     public let sources: FilmSourceService
     public let tmdb: FilmTMDBSettingsModel
+    public let douban: FilmDoubanSettingsModel
     public let playback: FilmPlaybackSettingsModel?
     @Published public private(set) var snapshot: FilmSourceSnapshot?
     @Published public private(set) var loadError: String?
@@ -18,9 +19,10 @@ public final class FilmSettingsModel: ObservableObject {
     private var generation = UUID()
 
     public init(rules: FilmRuleService, sources: FilmSourceService, tmdb: FilmTMDBSettingsModel,
+                douban: FilmDoubanSettingsModel,
                 playback: FilmPlaybackSettingsModel? = nil) {
         self.rules = FilmRulesDraft(service: rules); self.sources = sources
-        self.tmdb = tmdb; self.playback = playback
+        self.tmdb = tmdb; self.douban = douban; self.playback = playback
     }
     public func start(loadError: String? = nil) {
         close()

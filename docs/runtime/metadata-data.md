@@ -96,6 +96,10 @@ API 请求将到 `https://metadata.example.invalid/3/movie/42`；图片到 `http
 
 get 用 `cookieConfigured` 替代原值。域名替换／路径前缀型代理直接配置 base；URL 包装型代理必须显式配置包含**一个** `{url}` 或 `{encodedUrl}` 的 HTTP(S) 模板。例如 `https://relay.example.invalid/?url={encodedUrl}`。`apiProxy` 用于数据与搜索，`imageProxy` 用于图片；模板不参与稳定图片身份。将凭据发送到显式配置的数据代理意味着信任该代理，运行器不会替第三方代理保证保密。
 
+iOS 的“刮削设置”在同一页面切换 TMDB／豆瓣，由 `FilmTMDBSettingsModel` 和 `FilmDoubanSettingsModel` 经 App 唯一 runtime 连接提交设置。豆瓣数据代理与图片代理独立选择，默认直连，不提供服务器代理；仅自定义路线展开完整 base 和显式代理模板。未知的已有地址／模板组合按自定义加载，原样保留。数据代理提供 CORS 预设 `https://ciao-cors.is-an.org/{encodedUrl}` 和 cors-anywhere 预设 `https://cors-anywhere.com/{url}`，两者经同一 `apiProxy` 包装官方 API／搜索 base。参考实现的 `m.douban.cmliussss.net`／`.com` 只给出 API 基址映射，没有网页搜索 CDN 映射，因此不作为原生数据代理预设；已有此类 API 地址仍按自定义保留，不猜测搜索代理主机。图片 CDN 预设独立使用 `https://img.doubanio.cmliussss.net` 或 `https://img.doubanio.cmliussss.com`，不配置图片包装模板。预设只在显式保存时生效，不自动探测、回退或改写未知配置。
+
+原生凭据输入框不回显已保存值，仅显示配置状态；空输入保存省略凭据，显式清除才提交空字符串，保存失败保留草稿与清除意图。两供应商保存成功后均调用 `FilmSearchService.metadataSettingsChanged()` 撤销旧元数据会话复用，后续请求使用 runtime 新配置，不自动搜索或创建第二份原生存储。Cookie 只提交给豆瓣设置 owner，图片继续使用 runtime 图片通道，不从表单附加 Cookie。
+
 ## 数据请求
 
 ### TMDB `request`

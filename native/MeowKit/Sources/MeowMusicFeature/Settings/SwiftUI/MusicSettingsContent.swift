@@ -4,7 +4,7 @@ import UIKit
 import MeowUI
 
 enum MusicSettingsDestination: CaseIterable, Hashable {
-    case aggregation, sources, exclusions, search, playback, appearance, metadata
+    case aggregation, sources, exclusions, search, playback, metadata
 
     var title: String {
         switch self {
@@ -13,7 +13,6 @@ enum MusicSettingsDestination: CaseIterable, Hashable {
         case .exclusions: return "错源管理"
         case .search: return "搜索设置"
         case .playback: return "播放设置"
-        case .appearance: return "偏好设置"
         case .metadata: return "歌词／封面设置"
         }
     }
@@ -25,7 +24,6 @@ enum MusicSettingsDestination: CaseIterable, Hashable {
         case .exclusions: return "speaker.slash"
         case .search: return "magnifyingglass"
         case .playback: return "play.circle"
-        case .appearance: return "slider.horizontal.3"
         case .metadata: return "text.alignleft"
         }
     }
@@ -37,7 +35,6 @@ enum MusicSettingsDestination: CaseIterable, Hashable {
         case .exclusions: return "music.settings.exclusions"
         case .search: return "settings.search"
         case .playback: return "music.settings.playback"
-        case .appearance: return "settings.preferences"
         case .metadata: return "music.settings.metadata"
         }
     }
@@ -46,19 +43,17 @@ enum MusicSettingsDestination: CaseIterable, Hashable {
 @MainActor
 public struct MusicSettingsContent: View {
     let theme: PageTheme
-    var preferenceValue = ""
-    var canResetUserData = false
-    var requestingReset = false
+    var lockLyric = true
     /// Durable home/channel catalogue source; nil hides the row until read.
     var catalogSource: MusicHomeSourceSelection? = nil
     var savingCatalogSource = false
     var open: (MusicSettingsDestination) -> Void = { _ in }
-    var resetUserData: () -> Void = {}
+    var setLockLyric: (Bool) -> Void = { _ in }
     var selectCatalogSource: (MusicPublicBrowsePlatform) -> Void = { _ in }
 
     public var body: some View {
         List {
-            Section("音乐设置") {
+            Section {
                 ForEach([MusicSettingsDestination.aggregation, .sources, .exclusions, .search, .playback, .metadata], id: \.self) {
                     destination in
                     destinationRow(destination)
@@ -78,23 +73,12 @@ public struct MusicSettingsContent: View {
                 }
             }
             .headerProminence(.increased)
-            Section("偏好") {
-                destinationRow(.appearance)
+            Section("歌词") {
+                Toggle("锁屏歌词", isOn: Binding(get: { lockLyric }, set: setLockLyric))
+                    .accessibilityIdentifier("music.settings.lockLyric")
+                    .modifier(MusicSettingsRowStyle(theme: theme))
             }
             .headerProminence(.increased)
-            if canResetUserData {
-                Section("本机数据") {
-                    Button(role: .destructive, action: resetUserData) {
-                        Text(requestingReset ? "正在记录清除请求…" : "清除本机用户数据")
-                            .foregroundStyle(Color(uiColor: .systemRed))
-                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                    }
-                    .disabled(requestingReset)
-                    .accessibilityIdentifier("settings.clearUserData")
-                    .modifier(MusicSettingsRowStyle(theme: theme))
-                }
-                .headerProminence(.increased)
-            }
         }
         .modifier(MusicSettingsListStyle(theme: theme))
     }
@@ -102,15 +86,7 @@ public struct MusicSettingsContent: View {
     private func destinationRow(_ destination: MusicSettingsDestination) -> some View {
         Button { open(destination) } label: {
             MusicSettingsLinkRow(theme: theme) {
-                HStack(spacing: 12) {
-                    MusicSettingsIconLabel(symbol: destination.symbol, title: destination.title, theme: theme)
-                    if destination == .appearance, !preferenceValue.isEmpty {
-                        Spacer(minLength: 8)
-                        Text(preferenceValue)
-                            .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
-                            .lineLimit(1)
-                    }
-                }
+                MusicSettingsIconLabel(symbol: destination.symbol, title: destination.title, theme: theme)
             }
         }
         .accessibilityIdentifier(destination.accessibilityIdentifier)
@@ -215,7 +191,17 @@ struct MusicSettingsRowStyle: ViewModifier {
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
             .listRowSeparatorTint(Color(uiColor: UIColor(theme.border)))
-            .listRowBackground(Color(uiColor: UIColor(theme.surface)).opacity(0.58))
+            .listRowBackground(
+                Color(uiColor: UIColor(theme.surface)).opacity(0.58)
+                    .overlay {
+                        Rectangle().strokeBorder(
+                            LinearGradient(colors: [0.12, 0.24, 0.52].map {
+                                Color(uiColor: UIColor(theme.border)).opacity($0)
+                            }, startPoint: .top, endPoint: .bottom),
+                            lineWidth: 0.7
+                        )
+                    }
+            )
     }
 }
 

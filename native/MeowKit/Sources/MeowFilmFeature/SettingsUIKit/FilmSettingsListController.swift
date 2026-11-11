@@ -74,7 +74,7 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
                 field.leadingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.leadingAnchor),
                 field.trailingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.trailingAnchor),
             ])
-            cell.backgroundColor = UIColor(theme.surface)
+            applyBackground(cell, at: indexPath)
             cell.selectionStyle = .none
             return cell
         }
@@ -86,7 +86,7 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
         content.secondaryTextProperties.color = UIColor(theme.muted)
         content.textProperties.numberOfLines = 0; content.secondaryTextProperties.numberOfLines = 0
         cell.contentConfiguration = content
-        cell.backgroundColor = UIColor(theme.surface)
+        applyBackground(cell, at: indexPath)
         cell.isAccessibilityElement = true
         cell.accessibilityIdentifier = row.id
         cell.accessibilityLabel = row.title
@@ -97,6 +97,12 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
         if !row.enabled { cell.accessibilityTraits.insert(.notEnabled) }
         if row.selected { cell.accessibilityTraits.insert(.selected) }
         return cell
+    }
+    private func applyBackground(_ cell: UITableViewCell, at index: IndexPath) {
+        cell.backgroundColor = .clear
+        cell.backgroundView = SettingsRowBackgroundView(theme: theme, first: index.row == 0,
+            last: index.row == sections[index.section].rows.count - 1)
+        cell.contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 56).isActive = true
     }
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)

@@ -24,6 +24,7 @@ struct MeowfilmResources: Sendable {
     let filmRules: FilmRuleService
     let filmSourceSettings: FilmSourceService
     let filmMetadata: FilmTMDBService
+    let filmDoubanSettings: FilmDoubanSettingsService
 
     init() throws {
         // A sideloading host may rewrite the installed bundle identifier while
@@ -61,6 +62,7 @@ struct MeowfilmResources: Sendable {
         musicScripts = NativeMusicScriptService(connection: connection)
         let neteaseToken = RuntimeMusicNeteaseTokenProvider(connection: connection)
         filmMetadata = FilmTMDBService(connection: connection)
+        filmDoubanSettings = FilmDoubanSettingsService(connection: connection)
         filmRules = FilmRuleService(connection: connection)
         filmSourceSettings = FilmSourceService(transport: CatScriptTransport(connectionProvider: connection),
             storeFactory: Self.documentFactory(base: libraryRoot, namespace: FilmSourceService.documentNamespace))

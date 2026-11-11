@@ -113,10 +113,10 @@ final class MusicFullPlayerMotionTests: XCTestCase {
             XCTAssertTrue(fixture.content.artwork === fixture.images.cached(fixture.secondArtwork))
             XCTAssertFalse(fixture.content.artwork === original)
             self.assertAngle(fixture.rotor, degrees: 60)
-            XCTAssertTrue(fixture.content.appearance.selectFixedPalette(.sky))
+            XCTAssertTrue(fixture.content.appearance.selectFixedPalette(.preset(.sky)))
             await self.drainUpdates()
-            XCTAssertEqual(fixture.content.appearance.preferences.colorPalette, .sky)
-            XCTAssertEqual(fixture.content.appearance.effectivePalette, .sky)
+            XCTAssertEqual(fixture.content.appearance.preferences.colorPalette, .preset(.sky))
+            XCTAssertEqual(fixture.content.appearance.effectivePalette, .preset(.sky))
             self.assertAngle(fixture.rotor, degrees: 60)
             XCTAssertTrue(self.centerDisc(in: fixture.scroll) === fixture.disc)
         }

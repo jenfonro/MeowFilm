@@ -23,7 +23,7 @@ final class MusicAccountDetailViewController: MusicSettingsPageViewController<Mu
         self.platform = platform
         self.actions = actions
         super.init(appearance: appearance, content: MusicAccountDetailContent(
-            state: state, platform: platform, theme: PageTheme(palette: appearance.pageColorway), actions: actions
+            state: state, platform: platform, theme: PageTheme(colors: appearance.pagePalette), actions: actions
         ))
         pageTitle = platform.title
         modalPresentationStyle = .overFullScreen

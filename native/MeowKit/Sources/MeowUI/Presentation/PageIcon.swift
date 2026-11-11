@@ -8,7 +8,7 @@ public enum PageIcon {
         case home, channels, film, person, menu, search, recognize, plus, append, more, play, pause, queue, down
         case playerDown, playerPlay, playerPause, lyricPlay, previous, next
         case heart, translation, image, remove, playing, miniResume, reorder, multiSelect
-        case back, close
+        case back, close, list, grid
     }
     public static func image(_ kind: Kind, filled: Bool = false, size: CGFloat = 23) -> UIImage {
         UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { renderer in
@@ -61,10 +61,17 @@ public enum PageIcon {
         }
         switch kind {
         case .home: line([(3,10),(12,3),(21,10),(21,21),(15,21),(15,14),(9,14),(9,21),(3,21)], close: true)
-        case .channels:
+        case .channels, .grid:
             for x in [3.0, 14.0] { for y in [3.0, 14.0] {
                 p.addRoundedRect(in: .init(x: x, y: y, width: 7, height: 7), cornerSize: .init(width: 2, height: 2))
             } }
+        case .list:
+            for y in [4.0, 14.0] {
+                p.addRoundedRect(in: .init(x: 3, y: y, width: 6, height: 6),
+                                 cornerSize: .init(width: 1, height: 1))
+                line([(12, y + 1), (21, y + 1)])
+                line([(12, y + 5), (19, y + 5)])
+            }
         case .film:
             p.addRoundedRect(in: .init(x: 3, y: 3, width: 18, height: 18), cornerSize: .init(width: 2, height: 2))
             line([(7,3),(7,21)]); line([(17,3),(17,21)])

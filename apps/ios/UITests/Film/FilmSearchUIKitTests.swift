@@ -171,7 +171,7 @@ final class FilmSearchUIKitTests: XCTestCase {
 
 @MainActor
 private final class SearchUIKitTheme: PageThemeProviding {
-    let pageColorway = PageColorway.allCases[0]
+    let pagePalette = PagePalette.preset(.lilac)
     let animatesPageColorway = false
     var pageThemeChanges: AnyPublisher<Void, Never> { Empty(completeImmediately: false).eraseToAnyPublisher() }
 }

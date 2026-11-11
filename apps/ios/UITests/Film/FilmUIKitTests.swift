@@ -1360,7 +1360,7 @@ private final class FilmEmptyCategoryUIKitSource: FilmCategorySource {
 
 @MainActor
 private final class FilmUIKitTheme: PageThemeProviding {
-    let pageColorway = PageColorway.allCases[0]
+    let pagePalette = PagePalette.preset(.lilac)
     let animatesPageColorway = false
     var pageThemeChanges: AnyPublisher<Void, Never> {
         Empty(completeImmediately: false).eraseToAnyPublisher()

@@ -149,6 +149,38 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
         } catch { await service.close(); throw error }
     }
 
+    func testNodeMobileGroupSaveAndDraftPreviewPreserveAssociatedSavedGroups() async throws {
+        let resources = try await hostResources(), client = try await resources.scriptSession.connection()
+        let service = FilmRuleService(connection: { client })
+        let original = try await client.call(module: .film, operation: "rules.get").filmRequiredObject().filmValue("rules")
+        addTeardownBlock {
+            _ = try await client.call(module: .film, operation: "rules.set", parameters: .object(["rules": original]))
+            await service.close()
+        }
+        let saved = FilmRuleSet(episodeCleanRegexRules: ["^广告"],
+                                episodeRules: [.init(pattern: "第([0-9]+)集", replace: "E$1")],
+                                movieRules: [.init(pattern: "电影", replace: "影片")])
+        _ = try await service.save(saved)
+        let before = try await client.call(module: .film, operation: "rules.get")
+        let defaults = try await service.defaults(.episode)
+        XCTAssertEqual(defaults.count, 3)
+        let preview = try await service.process(.init(section: .episode, text: "草稿第12集"),
+                                                group: .episodeClean, rules: [.init(pattern: "^草稿")])
+        XCTAssertEqual(preview.rewrittenText?.displayString, "E12")
+        let utf16 = try await service.process(.init(section: .movie, text: "🎬"), group: .movie,
+                                              rules: [.init(pattern: "^.", replace: "x")])
+        XCTAssertEqual(utf16.outputText.utf16, [0x78, 0xDFAC])
+        let afterPreview = try await client.call(module: .film, operation: "rules.get")
+        XCTAssertEqual(before, afterPreview)
+        let committed = try await service.save(.episodeClean, rules: [.init(pattern: " ^草稿 ")])
+        XCTAssertEqual(committed.episodeCleanRegexRules, ["^草稿"])
+        XCTAssertEqual(committed.episodeRules, saved.episodeRules)
+        XCTAssertEqual(committed.movieRules, saved.movieRules)
+        XCTAssertEqual(committed.aggregateRegexRules, saved.aggregateRegexRules)
+        let result = try await service.process(.init(section: .episode, text: "草稿第12集"))
+        XCTAssertEqual(result.rewrittenText?.displayString, "E12")
+    }
+
     /// Fixed dashboard/server expectations, now through the real App RPC path.
     func testNodeMobileEntryMatchesEverySharedReferenceCaseTwice() async throws {
         let resources = try await hostResources(), client = try await resources.scriptSession.connection()

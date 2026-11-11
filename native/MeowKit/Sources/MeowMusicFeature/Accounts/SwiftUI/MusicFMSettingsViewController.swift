@@ -24,7 +24,7 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
         self.onSelected = onSelected
         super.init(
             themeProvider: appearance,
-            content: MusicFMSettingsContent(theme: PageTheme(palette: appearance.pageColorway))
+            content: MusicFMSettingsContent(theme: PageTheme(colors: appearance.pagePalette))
         )
         pageTitle = MusicFMModeChoice.title(for: model.activeHomeFM)
         overrideUserInterfaceStyle = .light
@@ -36,7 +36,7 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
     }
 
     public override func loadView() {
-        view = MusicPlayerBackgroundView(style: .full, palette: themeProvider.pageColorway)
+        view = MusicPlayerBackgroundView(style: .full, palette: themeProvider.pagePalette)
     }
 
     public override func viewDidLoad() {
@@ -78,7 +78,7 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
     public override func applyTheme() {
         super.applyTheme()
         (viewIfLoaded as? MusicPlayerBackgroundView)?.apply(
-            palette: themeProvider.pageColorway, animated: themeProvider.animatesPageColorway
+            palette: themeProvider.pagePalette, animated: themeProvider.animatesPageColorway
         )
         render()
     }

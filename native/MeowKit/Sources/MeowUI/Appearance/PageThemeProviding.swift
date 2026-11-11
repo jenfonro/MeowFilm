@@ -6,7 +6,7 @@ import Combine
 /// to the injected owner, never to the shared page or navigation container.
 @MainActor
 public protocol PageThemeProviding: AnyObject {
-    var pageColorway: PageColorway { get }
+    var pagePalette: PagePalette { get }
     var animatesPageColorway: Bool { get }
     var pageThemeChanges: AnyPublisher<Void, Never> { get }
 }

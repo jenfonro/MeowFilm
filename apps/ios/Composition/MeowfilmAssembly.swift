@@ -138,12 +138,15 @@ final class MeowfilmAssembly: ObservableObject {
         let tmdb = FilmTMDBSettingsModel(service: resources.filmMetadata) { [weak filmSearch = self.filmSearch] in
             filmSearch?.metadataSettingsChanged()
         }
+        let douban = FilmDoubanSettingsModel(service: resources.filmDoubanSettings) { [weak filmSearch = self.filmSearch] in
+            filmSearch?.metadataSettingsChanged()
+        }
         let playbackSettings = FilmPlaybackSettingsModel(transport: FilmPlaybackTransport {
             try await resources.scriptSession.connection()
         })
         playbackSettings.playbackSnapshot = { [weak self] in self?.filmPlayback?.snapshot }
         let filmSettings = FilmSettingsModel(rules: resources.filmRules, sources: resources.filmSourceSettings,
-                                             tmdb: tmdb, playback: playbackSettings)
+                                             tmdb: tmdb, douban: douban, playback: playbackSettings)
         self.filmSettings = filmSettings
         filmSettings.start()
         guard !closed, !Task.isCancelled else { return }

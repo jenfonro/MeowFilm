@@ -4,6 +4,8 @@
 
 The rule behavior comes from the magic-settings page and save normalization in `meowfilm-server` commit `934a03e5aeda7edbcef0cfb037734fed93bfe881`. Its page processing and save normalization remain the reference. The Node document stores the current decoded rules directly; it does not read native rule documents or encoded rule arrays.
 
+The iOS page keeps one draft per group and submits that page only. The Node document owner exposes `rules.group.set`, `rules.group.defaults` and `rules.group.preview`; the pure program API below stays unchanged. A group save normalizes only the selected rows with the same QuickJS save operation, then merges them into the latest committed document inside the owner's existing serial write queue. Other groups are neither submitted nor normalized. Defaults and previews never persist; a preview combines the selected draft with saved associated groups. Existing whole-document `rules.set` and `rules.restore` semantics remain available to Windows.
+
 | operation | input | output |
 | --- | --- | --- |
 | `defaults` | none | `{rules}` |

@@ -24,6 +24,27 @@ function previewText(value) {
   return validRuleText(value) || Array.isArray(value) &&
     value.every(unit => Number.isInteger(unit) && unit >= 0 && unit <= 65535);
 }
+const ruleGroups = {
+  episodeClean: ['episodeCleanRegexRules', 'episode'],
+  episode: ['episodeRules', 'episode'],
+  movie: ['movieRules', 'movie'],
+  search: ['aggregateRegexRules', 'search'],
+};
+const emptyRules = () => ({ episodeCleanRegexRules: [], episodeRules: [], movieRules: [], aggregateRegexRules: [] });
+function groupInfo(group) {
+  if (typeof group !== 'string' || !Object.hasOwn(ruleGroups, group)) throw fault('INVALID_REQUEST');
+  return ruleGroups[group];
+}
+function groupDraft(group, rows) {
+  const [key] = groupInfo(group);
+  const draft = { ...emptyRules(), [key]: rows };
+  validateRules(draft);
+  return copyRules(draft);
+}
+function validatePreview(request) {
+  if (!request || !['episode', 'movie', 'search'].includes(request.section) || !previewText(request.text) ||
+      request.query !== undefined && !previewText(request.query)) throw fault('INVALID_REQUEST');
+}
 
 /** The sole rules document owner. Every accepted write publishes only after rename. */
 export function createFilmRulesService({ dataRoot } = {}) {
@@ -154,6 +175,33 @@ export function createFilmRulesService({ dataRoot } = {}) {
         return committed = snapshotOf(normalized.rules);
       }, options);
     },
+    setGroup({ group, rules }, options) {
+      const [key] = groupInfo(group), draft = groupDraft(group, rules);
+      return mutate(async signal => {
+        const normalized = await invokeNative({ operation: 'save', rules: draft }, { signal });
+        open(signal);
+        const merged = { ...copyRules(committed.rules), [key]: normalized.rules[key] };
+        write(merged);
+        return committed = snapshotOf(merged);
+      }, options);
+    },
+    async groupDefaults({ group }, options) {
+      const [key, section] = groupInfo(group);
+      const result = await invokeNative({ operation: 'restore', section, rules: emptyRules() }, options);
+      return result.rules[key];
+    },
+    async previewGroup({ group, rules, request }, { signal } = {}) {
+      const [key, section] = groupInfo(group), draft = groupDraft(group, rules);
+      validatePreview(request);
+      if (request.section !== section) throw fault('INVALID_REQUEST');
+      open(signal);
+      await writes;
+      open(signal);
+      const saved = committed?.rules ?? readDisk()?.rules ??
+        (await invokeNative({ operation: 'defaults' }, { signal })).rules;
+      return invokeNative({ operation: 'preview', request,
+        rules: { ...copyRules(saved), [key]: draft[key] } }, { signal });
+    },
     restore({ section, rules }, options) {
       if (!['episode', 'movie', 'search'].includes(section)) throw fault('INVALID_REQUEST');
       const draft = rules === undefined ? undefined : inputRules(rules);
@@ -166,8 +214,7 @@ export function createFilmRulesService({ dataRoot } = {}) {
     },
     async preview({ request, rules }, { signal } = {}) {
       open(signal);
-      if (!request || !['episode', 'movie', 'search'].includes(request.section) || !previewText(request.text) ||
-          request.query !== undefined && !previewText(request.query)) throw fault('INVALID_REQUEST');
+      validatePreview(request);
       let selected;
       if (rules === undefined) {
         await writes;

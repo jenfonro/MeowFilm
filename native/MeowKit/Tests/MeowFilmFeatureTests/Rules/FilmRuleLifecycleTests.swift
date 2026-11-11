@@ -4,6 +4,54 @@ import MeowRuntime
 @testable import MeowFilmFeature
 
 final class FilmRuleLifecycleTests: XCTestCase {
+    func testCancelledGroupPreviewPhysicallyDrainsAndCannotPublishItsLateReply() async throws {
+        let entered = expectation(description: "group preview entered"), cancelled = expectation(description: "group preview cancelled")
+        let rpc = FilmRuleControlledRPC(entered: entered, cancelled: cancelled), service = rpc.service
+        await rpc.ignoreCancellation()
+        let preview = try RuntimeJSON.decode(Data(#"{"section":"movie","type":"success","text":"late","inputText":"pending","processedText":"pending","matched":true,"matchedRuleIndex":1,"rewriteApplied":true,"rewrittenText":"late","groupKey":"","trailingDigits":"","errors":[],"previews":["pending"]}"#.utf8))
+        await rpc.setResponse(preview)
+        let running = Task {
+            try await service.process(.init(section: .movie, text: "pending"), group: .movie,
+                                      rules: [.init(pattern: "pending", replace: "late")])
+        }
+        await fulfillment(of: [entered], timeout: 5)
+        let preparation = Task { await service.prepareShutdown() }
+        await fulfillment(of: [cancelled], timeout: 5)
+        await filmRuleFailure(FilmRuleServiceError.shuttingDown) { try await service.resume() }
+        await rpc.release.release(); await preparation.value
+        await filmRuleCancelled { try await running.value }
+        await filmRuleFailure(FilmRuleServiceError.notInitialized) { try await service.savedSnapshot() }
+        try await service.resume()
+        let receipt = FilmRuleSet(movieRules: [.init(pattern: "acknowledged")])
+        await rpc.setResponse(.object(["rules": try filmRuleValue(receipt), "revision": .string("next")]))
+        let saved = try await service.save(.movie, rules: receipt.movieRules)
+        XCTAssertEqual(saved, receipt)
+        let calls = await rpc.invocations
+        XCTAssertEqual(calls, 2)
+        await service.close()
+    }
+
+    func testCancelledGroupSaveDrainsAndDoesNotPublishLateReceipt() async throws {
+        let entered = expectation(description: "group write entered"), cancelled = expectation(description: "group write cancelled")
+        let rpc = FilmRuleControlledRPC(entered: entered, cancelled: cancelled), service = rpc.service
+        await rpc.ignoreCancellation()
+        await rpc.setResponse(.object(["rules": try filmRuleValue(FilmRuleSet(movieRules: [.init(pattern: "late")])),
+                                      "revision": .string("late")]))
+        let running = Task { try await service.save(.movie, rules: [.init(pattern: "pending")]) }
+        await fulfillment(of: [entered], timeout: 5)
+        let preparation = Task { await service.prepareShutdown() }
+        await fulfillment(of: [cancelled], timeout: 5)
+        await filmRuleFailure(FilmRuleServiceError.shuttingDown) { try await service.resume() }
+        await rpc.release.release(); await preparation.value
+        await filmRuleCancelled { try await running.value }
+        await filmRuleFailure(FilmRuleServiceError.notInitialized) { try await service.savedSnapshot() }
+        let revision = await service.revision
+        XCTAssertNil(revision)
+        try await service.resume()
+        try await service.initialize()
+        await service.close()
+    }
+
     func testCallerCancellationSkipsQueuedRPCAndServiceRecovers() async throws {
         let entered = expectation(description: "RPC entered"), cancelled = expectation(description: "RPC cancelled")
         let rpc = FilmRuleControlledRPC(entered: entered, cancelled: cancelled), service: FilmRuleService

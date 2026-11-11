@@ -25,7 +25,7 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
         transfer = MusicAccountTransferState(owner: model)
         self.router = router
         super.init(appearance: appearance, content: MusicAccountsSettingsContent(
-            state: state, transfer: transfer, theme: PageTheme(palette: appearance.pageColorway)
+            state: state, transfer: transfer, theme: PageTheme(colors: appearance.pagePalette)
         ))
         pageTitle = "平台账号"
     }

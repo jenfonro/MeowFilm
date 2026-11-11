@@ -10,74 +10,145 @@ import MeowPlayback
 
 @MainActor
 final class MusicSettingsPlatformTests: XCTestCase {
-    func testUserDataResetRequiresDestructiveConfirmationAndCancelDoesNotRequestIt() throws {
-        let domain = "MusicResetUI." + UUID().uuidString
+    func testMusicSettingsLockLyricControlPersistsAndReportsFailedWrites() throws {
+        let domain = "MusicLockLyricSettings." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
         let appearance = MusicAppearancePreferencesStore(defaults: defaults)
         let service = makeService()
         let owner = makeOwner(service: service, accounts: service)
-        var requests = 0
-        let page = MusicSettingsViewController(model: owner, appearance: appearance,
-            router: MusicSettingsRouterFixture(), resetUserData: { requests += 1 })
-        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
-        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
-        window.rootViewController = page; window.makeKeyAndVisible()
-        defer { window.isHidden = true; window.rootViewController = nil }
-        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
-        let visible = expectation(for: NSPredicate { _, _ in
-            MainActor.assumeIsolated { page.canPresentPageAlert }
-        }, evaluatedWith: page)
-        wait(for: [visible], timeout: 3)
-        let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: page.view.bounds).image { _ in
-            page.view.drawHierarchy(in: page.view.bounds, afterScreenUpdates: true)
-        })
-        attachment.name = "Settings user data reset"; attachment.lifetime = .keepAlways
-        add(attachment)
-        page.confirmUserDataReset()
-        let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
-        XCTAssertEqual(alert.title, "清除本机用户数据？")
-        XCTAssertTrue(alert.message?.contains("云端数据和 App 外的原始文件不受影响") == true)
-        XCTAssertTrue(alert.message?.contains("重新打开") == true)
-        XCTAssertEqual(alert.actions.map(\.style), [.cancel, .destructive])
-        XCTAssertEqual(alert.actions.map(\.title), ["取消", "清除并等待重启"])
-        XCTAssertEqual(requests, 0, "Opening the confirmation is not consent")
-        let cancelled = expectation(description: "confirmation dismissed without consent")
-        page.dismiss(animated: false) { cancelled.fulfill() }
-        wait(for: [cancelled], timeout: 3)
-        XCTAssertEqual(requests, 0)
-        let closed = expectation(description: "owner closed")
-        Task { await owner.close(); closed.fulfill() }
-        wait(for: [closed], timeout: 3)
+        defer {
+            let closed = expectation(description: "lock lyric owner closed")
+            Task { await owner.close(); closed.fulfill() }
+            wait(for: [closed], timeout: 3)
+        }
+        let router = MusicSettingsRouterFixture()
+        let page = MusicSettingsViewController(model: owner, appearance: appearance, router: router)
+        try withSettingsComponent(page) {
+            XCTAssertEqual(page.pageTitle, "音乐设置")
+            waitForSettingsComponent("direct lock lyric switch visible") {
+                self.settingsDescendants(page.view).compactMap { $0 as? UISwitch }.count == 1
+            }
+            let control = try XCTUnwrap(settingsDescendants(page.view).compactMap { $0 as? UISwitch }.first)
+            XCTAssertTrue(control.isOn)
+            control.setOn(false, animated: false); control.sendActions(for: .valueChanged)
+            waitForSettingsComponent("lock lyric preference persisted") { !appearance.preferences.lockLyric }
+            XCTAssertFalse(MusicAppearancePreferencesStore(defaults: defaults).preferences.lockLyric)
+
+            let corrupt = Data("invalid-preferences".utf8)
+            defaults.set(corrupt, forKey: MusicAppearancePreferencesStore.preferencesKey)
+            waitForSettingsComponent("music page ready for error feedback") { page.canPresentPageAlert }
+            let current = try XCTUnwrap(settingsDescendants(page.view).compactMap { $0 as? UISwitch }.first)
+            current.setOn(true, animated: false); current.sendActions(for: .valueChanged)
+            waitForSettingsComponent("failed lock lyric write reported") { page.presentedViewController is UIAlertController }
+            XCTAssertEqual((page.presentedViewController as? UIAlertController)?.message, "音乐偏好读取失败")
+            XCTAssertFalse(appearance.preferences.lockLyric)
+            XCTAssertEqual(defaults.data(forKey: MusicAppearancePreferencesStore.preferencesKey), corrupt)
+        }
     }
 
-    func testConfirmedUserDataResetIsSingleFlightAndFailureAllowsRetry() throws {
-        let domain = "MusicResetUI." + UUID().uuidString
+    /// A UIKit component host checks geometry and persistence, not App routing.
+    func testLibraryPlaylistToggleChangesCellGeometryPreservesScrollAnchorAndPersistsAcrossStores() throws {
+        let domain = "MusicLibraryLayout." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
+        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
         let service = makeService()
         let owner = makeOwner(service: service, accounts: service)
-        var requests = 0
-        let requested = expectation(description: "confirmed request")
-        let retried = expectation(description: "retry request")
-        let page = MusicSettingsViewController(model: owner, appearance: .init(defaults: defaults),
-            router: MusicSettingsRouterFixture(), resetUserData: {
-                requests += 1
-                if requests == 1 { requested.fulfill() } else { retried.fulfill() }
-                throw MusicServiceError.storageFailed
-            })
-        page.loadViewIfNeeded()
-        page.requestUserDataReset()
-        page.requestUserDataReset()
-        wait(for: [requested], timeout: 3)
-        XCTAssertEqual(requests, 1)
-        page.requestUserDataReset()
-        wait(for: [retried], timeout: 3)
-        XCTAssertEqual(requests, 2)
-        let closed = expectation(description: "owner closed")
-        Task { await owner.close(); closed.fulfill() }
-        wait(for: [closed], timeout: 3)
+        defer {
+            let closed = expectation(description: "library layout owner closed")
+            Task { await owner.close(); closed.fulfill() }
+            wait(for: [closed], timeout: 3)
+        }
+        let items = (0..<72).map {
+            MusicCollection(id: "layout-\($0)", title: "合成歌单 \($0)", count: $0 + 1)
+        }
+        let loaded = expectation(description: "synthetic library loaded")
+        Task {
+            await service.setCollections(items)
+            await owner.load()
+            loaded.fulfill()
+        }
+        wait(for: [loaded], timeout: 3)
+        XCTAssertEqual(owner.collections.map(\.id), items.map(\.id))
+        XCTAssertEqual(appearance.preferences.playlistView, .grid)
+        let router = MusicSettingsRouterFixture()
+        let page = MusicLibraryViewController(model: owner, appearance: appearance, router: router)
+        try withSettingsComponent(page) {
+            let collection = try XCTUnwrap(settingsDescendants(page.view).compactMap { $0 as? UICollectionView }.first)
+            waitForSettingsComponent("all playlists rendered") {
+                collection.layoutIfNeeded()
+                return collection.numberOfSections == 1 && collection.numberOfItems(inSection: 0) == items.count &&
+                    !collection.visibleCells.isEmpty
+            }
+            XCTAssertGreaterThan(collection.contentSize.height, collection.bounds.height * 2)
+            collection.scrollToItem(at: IndexPath(item: 36, section: 0), at: .top, animated: false)
+            collection.layoutIfNeeded()
+            // Leave the top row partly visible, as during an ordinary scroll.
+            collection.setContentOffset(CGPoint(x: 0, y: collection.contentOffset.y + 17), animated: false)
+            collection.layoutIfNeeded()
+            let visible = collection.visibleCells.filter { $0.frame.intersects(collection.bounds) }.sorted {
+                $0.frame.minY == $1.frame.minY ? $0.frame.minX < $1.frame.minX : $0.frame.minY < $1.frame.minY
+            }
+            let anchor = try XCTUnwrap(visible.first)
+            let anchorID = try XCTUnwrap(anchor.accessibilityIdentifier)
+            let expectedIDs = Set(items.map { "music.library.collection." + $0.id })
+            XCTAssertEqual(anchorID, "music.library.collection." + items[36].id)
+            XCTAssertTrue(visible.allSatisfy { expectedIDs.contains($0.accessibilityIdentifier ?? "") })
+            let originalSize = anchor.bounds.size
+            let originalY = anchor.convert(anchor.bounds, to: page.view).minY
+            XCTAssertLessThan(originalSize.width, collection.bounds.width / 2)
+            XCTAssertTrue(visible.dropFirst().contains {
+                abs($0.frame.minY - anchor.frame.minY) < 1 && $0.frame.minX > anchor.frame.minX
+            }, "Grid layout places multiple real cells on the same row")
+            XCTAssertGreaterThan(collection.contentOffset.y, -collection.adjustedContentInset.top + originalSize.height)
+            XCTAssertLessThan(collection.contentOffset.y,
+                collection.contentSize.height - collection.bounds.height + collection.adjustedContentInset.bottom - originalSize.height)
+
+            page.togglePlaylistAppearance()
+            waitForSettingsComponent("list layout rendered with the same playlist visible") {
+                collection.layoutIfNeeded()
+                return collection.visibleCells.contains {
+                    $0.accessibilityIdentifier == anchorID && $0.bounds.width > collection.bounds.width * 0.8
+                }
+            }
+            let listAnchor = try XCTUnwrap(collection.visibleCells.first { $0.accessibilityIdentifier == anchorID })
+            XCTAssertEqual(appearance.preferences.playlistView, .list)
+            XCTAssertGreaterThan(listAnchor.bounds.width, originalSize.width * 2)
+            XCTAssertLessThan(listAnchor.bounds.height, originalSize.height)
+            XCTAssertTrue(listAnchor.frame.intersects(collection.bounds))
+            XCTAssertEqual(listAnchor.convert(listAnchor.bounds, to: page.view).minY, originalY, accuracy: 1)
+            let listIDs = collection.visibleCells.compactMap(\.accessibilityIdentifier)
+            XCTAssertEqual(listIDs.count, collection.visibleCells.count)
+            XCTAssertTrue(listIDs.contains(anchorID))
+            XCTAssertTrue(Set(listIDs).isSubset(of: expectedIDs))
+            XCTAssertGreaterThan(collection.contentOffset.y, -collection.adjustedContentInset.top + listAnchor.bounds.height)
+            XCTAssertLessThan(collection.contentOffset.y,
+                collection.contentSize.height - collection.bounds.height + collection.adjustedContentInset.bottom - listAnchor.bounds.height)
+            let reopenedList = MusicAppearancePreferencesStore(defaults: try XCTUnwrap(UserDefaults(suiteName: domain)))
+            XCTAssertEqual(reopenedList.preferences.playlistView, .list)
+
+            page.togglePlaylistAppearance()
+            waitForSettingsComponent("grid layout restored with the same playlist visible") {
+                collection.layoutIfNeeded()
+                return collection.visibleCells.contains {
+                    $0.accessibilityIdentifier == anchorID && abs($0.bounds.width - originalSize.width) < 1 &&
+                        abs($0.bounds.height - originalSize.height) < 1
+                }
+            }
+            let gridAnchor = try XCTUnwrap(collection.visibleCells.first { $0.accessibilityIdentifier == anchorID })
+            XCTAssertEqual(appearance.preferences.playlistView, .grid)
+            XCTAssertEqual(gridAnchor.bounds.width, originalSize.width, accuracy: 1)
+            XCTAssertEqual(gridAnchor.bounds.height, originalSize.height, accuracy: 1)
+            XCTAssertTrue(gridAnchor.frame.intersects(collection.bounds))
+            XCTAssertEqual(gridAnchor.convert(gridAnchor.bounds, to: page.view).minY, originalY, accuracy: 1)
+            let gridIDs = collection.visibleCells.compactMap(\.accessibilityIdentifier)
+            XCTAssertEqual(gridIDs.count, collection.visibleCells.count)
+            XCTAssertTrue(gridIDs.contains(anchorID))
+            XCTAssertTrue(Set(gridIDs).isSubset(of: expectedIDs))
+            let reopenedGrid = MusicAppearancePreferencesStore(defaults: try XCTUnwrap(UserDefaults(suiteName: domain)))
+            XCTAssertEqual(reopenedGrid.preferences.playlistView, .grid)
+        }
     }
 
     func testSourceManagementRendersBuiltInAndScriptSwitchesTogetherAndWritesThroughBindings() throws {
@@ -93,7 +164,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
         wait(for: [loaded], timeout: 3)
         XCTAssertEqual(MusicSettingsDestination.sources.title, "音源管理")
         XCTAssertEqual(MusicSettingsDestination.sources.accessibilityIdentifier, "music.settings.sources")
-        let host = UIHostingController(rootView: MusicSourceManagementContent(state: state, theme: PageTheme(palette: appearance.pageColorway)))
+        let host = UIHostingController(rootView: MusicSourceManagementContent(state: state, theme: PageTheme(colors: appearance.pagePalette)))
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
         let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
@@ -121,6 +192,24 @@ final class MusicSettingsPlatformTests: XCTestCase {
         })
         screenshot.name = "Unified music sources"; screenshot.lifetime = .keepAlways
         add(screenshot)
+        host.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+        window.frame = CGRect(x: 0, y: 0, width: 320, height: 844)
+        waitForSettingsComponent("narrow large type sources laid out") {
+            window.layoutIfNeeded(); host.view.layoutIfNeeded()
+            return host.view.window === window && host.view.bounds.width == 320 &&
+                host.traitCollection.preferredContentSizeCategory == .accessibilityExtraExtraExtraLarge &&
+                !views(host.view).compactMap { $0 as? UICollectionView }.flatMap(\.visibleCells).isEmpty &&
+                !views(host.view).compactMap { $0 as? UISwitch }.isEmpty
+        }
+        for toggle in views(host.view).compactMap({ $0 as? UISwitch }) {
+            let frame = toggle.convert(toggle.bounds, to: host.view)
+            XCTAssertGreaterThanOrEqual(frame.minX, 0)
+            XCTAssertLessThanOrEqual(frame.maxX, host.view.bounds.width)
+        }
+        let largeType = XCTAttachment(image: UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+            XCTAssertTrue(host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true))
+        })
+        largeType.name = "Music sources 320 AXXXL"; largeType.lifetime = .keepAlways; add(largeType)
         state.close()
         let closed = expectation(description: "source settings closed")
         Task { await model.close(); closed.fulfill() }
@@ -152,7 +241,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
             XCTAssertNil(page.title)
             XCTAssertNil(page.navigationItem.title)
         }
-        XCTAssertEqual(root.pageTitle, "设置")
+        XCTAssertEqual(root.pageTitle, "音乐设置")
         XCTAssertEqual(accounts.pageTitle, "平台账号")
         XCTAssertEqual(login.pageTitle, MusicAccountPlatform.qq.title)
         XCTAssertEqual(detail.pageTitle, MusicAccountPlatform.qq.title)
@@ -616,6 +705,37 @@ final class MusicSettingsPlatformTests: XCTestCase {
         MusicViewModel(service: service, player: MusicSettingsPlayerFixture(), accounts: accounts)
     }
 
+    private func settingsDescendants(_ view: UIView) -> [UIView] {
+        [view] + view.subviews.flatMap(settingsDescendants)
+    }
+
+    private func waitForSettingsComponent(_ description: String, until predicate: @escaping @MainActor () -> Bool) {
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            MainActor.assumeIsolated { predicate() }
+        }, object: nil)
+        wait(for: [ready], timeout: 3)
+        XCTAssertTrue(predicate(), description)
+    }
+
+    private func withSettingsComponent(_ page: PageViewController, body: () throws -> Void) rethrows {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let previousWindow = scene?.windows.first { $0.isKeyWindow }
+        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController = page; window.makeKeyAndVisible()
+        defer {
+            PageViewController.invalidatePages(in: page)
+            window.isHidden = true; window.rootViewController = nil
+            previousWindow?.makeKey()
+        }
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        waitForSettingsComponent("component page visible") {
+            page.view.layoutIfNeeded()
+            return page.isPageVisible
+        }
+        try body()
+    }
+
     private func prepareQR(_ state: MusicAccountLoginState) async {
         state.start()
         await state.model.flush()
@@ -681,10 +801,12 @@ private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing, M
     private var sends: [MusicAccountPlatform] = [], submits: [MusicAccountPlatform] = []
     private var settingsRevision = 0
     private var official = MusicAccountPlatform.allCases
+    private var collectionItems: [MusicCollection] = []
 
     init(image: Data) { self.image = image }
     func completeQR(as phase: MusicAccountStatus.Phase) { qrCompletion = phase }
     func holdQRCheck(_ gate: MusicSettingsQRCheckGate) { qrGate = gate }
+    func setCollections(_ value: [MusicCollection]) { collectionItems = value }
     func smsCalls() -> (sends: [MusicAccountPlatform], submits: [MusicAccountPlatform]) { (sends, submits) }
     func setStatus(_ phase: MusicAccountStatus.Phase, platform: MusicAccountPlatform) {
         let value = MusicAccountStatus(platform: platform, phase: phase, canLogin: true)
@@ -736,7 +858,7 @@ private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing, M
     func state() -> MusicPlaybackState { .init(settingsRevision: settingsRevision, officialSources: official) }
     func platforms() -> [MusicPlatform] { [] }
     func search(platform: String, query: String, page: Int, limit: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
-    func collections() -> [MusicCollection] { [] }
+    func collections() -> [MusicCollection] { collectionItems }
     func tracks(in collection: MusicCollection) -> [MusicRemoteTrack] { [] }
     func createPlaylist(name: String, refs: [MusicReference]) throws -> MusicCollection { throw MusicServiceError.unsupported }
     func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) throws -> MusicCollection { throw MusicServiceError.unsupported }

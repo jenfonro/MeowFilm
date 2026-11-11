@@ -24,6 +24,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     private var loading = false
     private var loadError: String?
     private var shownLoadError: String?
+    private var renderedPlaylistAppearance: MusicPlaylistAppearance?
     public init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting) {
         self.model = model; self.router = router
         super.init(appearance: appearance)
@@ -71,10 +72,9 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         observe(model.libraryChanges) { [weak self] in self?.render() }
         observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
         observe(model.playbackChanges) { [weak self] in self?.renderHeartbeat() }
-        observe(appearance.$preferences.map(\.playlistView).removeDuplicates().dropFirst().eraseToAnyPublisher()) {
+        observe(appearance.$preferences.map(\.playlistView).removeDuplicates().eraseToAnyPublisher()) {
             [weak self] _ in
-            self?.collection.collectionViewLayout.invalidateLayout()
-            self?.updateVisibleCells()
+            self?.updatePlaylistLayout()
         }
         render()
     }
@@ -153,6 +153,31 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             self.runPageTask { await self.model.createPlaylist(name) }
         })
         present(alert, animated: true)
+    }
+
+    public func togglePlaylistAppearance() {
+        let next: MusicPlaylistAppearance = appearance.preferences.playlistView == .grid ? .list : .grid
+        if !appearance.set(\.playlistView, next), let error = appearance.persistenceError { showError(error) }
+    }
+
+    private func updatePlaylistLayout() {
+        guard renderedPlaylistAppearance != appearance.preferences.playlistView else { return }
+        renderedPlaylistAppearance = appearance.preferences.playlistView
+        let anchor = collection.indexPathsForVisibleItems.compactMap { path -> (IndexPath, CGRect)? in
+            collection.layoutAttributesForItem(at: path).map { (path, $0.frame) }
+        }.min { left, right in
+            left.1.minY == right.1.minY ? left.1.minX < right.1.minX : left.1.minY < right.1.minY
+        }
+        let relativeY = anchor.map { $0.1.minY - collection.contentOffset.y }
+        collection.collectionViewLayout.invalidateLayout()
+        collection.layoutIfNeeded()
+        if let anchor, let relativeY, let frame = collection.layoutAttributesForItem(at: anchor.0)?.frame {
+            let top = -collection.adjustedContentInset.top
+            let bottom = max(top, collection.contentSize.height - collection.bounds.height + collection.adjustedContentInset.bottom)
+            collection.setContentOffset(CGPoint(x: collection.contentOffset.x,
+                y: min(bottom, max(top, frame.minY - relativeY))), animated: false)
+        }
+        updateVisibleCells()
     }
 
     private func reconcileAccess() {
