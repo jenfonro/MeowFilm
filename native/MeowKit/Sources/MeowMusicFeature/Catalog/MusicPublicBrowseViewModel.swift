@@ -56,7 +56,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     /// Offset of the first displayed song in the source snapshot. Account
     /// pages are not necessarily 30 rows; never infer this from pageNumber.
     public private(set) var trackOffset = 0
-    public var canPrevious: Bool { !back.isEmpty && !isLoading }
+    public var canPrevious: Bool { !isHome && !back.isEmpty && !isLoading }
     public var queueRequest: MusicPublicBrowseQueueRequest? {
         guard let collection, let snapshot, loaded, contentIsCurrent, !isLoading else { return nil }
         return .init(collection: collection, snapshot: snapshot)
@@ -128,9 +128,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     private var failedRequest: MusicPublicBrowseRequest?
     private var back: [String?] = []
     private var loadedPages: [String: Loaded] = [:]
+    private var homeTask: (id: UUID, work: Task<Void, Never>)?
     private var task: Task<Loaded, Error>?
     private var tabTask: Task<[MusicPublicBrowseItem], Error>?
-    private var loadingCursor: String?
     private var actionTask: Task<Void, Error>?
     private var dailyStyleTask: Task<MusicDailyStyleSave, Error>?
     private var revocationTask: Task<Void, Never>?
@@ -264,6 +264,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     private func invalidate(clear: Bool) {
         pageEpoch = UUID(); actionEpoch = UUID(); loadEpoch = UUID()
         issuedIntent = nil
+        homeTask?.work.cancel(); homeTask = nil
         task?.cancel(); task = nil; actionTask?.cancel(); actionTask = nil
         tabTask?.cancel(); tabTask = nil
         dailyStyleTask?.cancel(); dailyStyleTask = nil
@@ -291,9 +292,10 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     /// navigation/source/access change retires their page identity.
     private func invalidateHomeRead() {
         loadEpoch = UUID()
+        homeTask?.work.cancel(); homeTask = nil
         task?.cancel(); task = nil
         tabTask?.cancel(); tabTask = nil
-        isLoading = false; loadingCursor = nil
+        isLoading = false
         error = nil; errorDiagnosticID = nil
         failedPage = nil; failedRequest = nil
         loadedPages = [:]
@@ -433,13 +435,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         return result
     }
     public func refresh() async {
-        if isHome, isLoading, loadingCursor == nil {
-            // Match the reference's single homeTask; repeated pull/activation
-            // must not cancel and restart the same first-page request.
-            if let task { _ = try? await task.value }
-            return
-        }
         if isHome {
+            // Reentry joins the complete home read, including its continuations.
+            if let homeTask { await homeTask.work.value; return }
             invalidateHomeRead()
             homeNeedsRefresh = false
             await load(cursor: nil, direction: 0, refresh: true)
@@ -572,18 +570,22 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     }
     public func retry() async {
         guard !isActing else { return }
-        if isHome, let failedPage, failedPage.cursor == nil {
-            await refresh()
-        } else if let failedPage { await load(cursor: failedPage.cursor, direction: failedPage.direction, requestOverride: failedRequest) }
+        if isHome {
+            if let failedPage, failedPage.cursor != nil {
+                await load(cursor: failedPage.cursor, direction: failedPage.direction)
+            } else { await refresh() }
+            return
+        }
+        if let failedPage { await load(cursor: failedPage.cursor, direction: failedPage.direction, requestOverride: failedRequest) }
         else if !loaded { await refresh() }
         else { await load(cursor: currentCursor, direction: 0) }
     }
     public func next() async {
-        guard let nextCursor, !isLoading else { return }
+        guard !isHome, let nextCursor, !isLoading else { return }
         await load(cursor: nextCursor, direction: 1)
     }
     public func appendNext() async {
-        guard let cursor = nextCursor, !isLoading, sections.allSatisfy({ $0.error == nil }) else { return }
+        guard !isHome, let cursor = nextCursor, !isLoading, sections.allSatisfy({ $0.error == nil }) else { return }
         if usesPageNavigation { await next(); return }
         await load(cursor: cursor, direction: 2)
     }
@@ -677,15 +679,38 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             }
     }
     public func previous() async {
-        guard !back.isEmpty, !isLoading else { return }
+        guard canPrevious else { return }
         await load(cursor: back[back.count - 1], direction: -1)
     }
     private func load(cursor: String?, direction: Int, refresh: Bool = false,
                       requestOverride: MusicPublicBrowseRequest? = nil) async {
-        guard available, visible, !isLoading else { return }
-        guard let offset = cursorOffsets[cursor ?? ""] else { error = .staleResult; return }
+        guard isHome else {
+            await loadPage(cursor: cursor, direction: direction, refresh: refresh, requestOverride: requestOverride)
+            return
+        }
+        if let homeTask { await homeTask.work.value; return }
+        guard available, visible, !Task.isCancelled else { return }
+        let id = UUID()
+        let work = Task {
+            var cursor = cursor, direction = direction, refresh = refresh
+            while !Task.isCancelled, available, visible, homeTask?.id == id {
+                guard await loadPage(cursor: cursor, direction: direction, refresh: refresh),
+                      error == nil, sections.allSatisfy({ $0.error == nil }),
+                      let next = nextCursor else { return }
+                cursor = next; direction = 2; refresh = false
+            }
+        }
+        homeTask = (id, work)
+        defer { if homeTask?.id == id { homeTask = nil } }
+        await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
+    }
+    @discardableResult
+    private func loadPage(cursor: String?, direction: Int, refresh: Bool = false,
+                          requestOverride: MusicPublicBrowseRequest? = nil) async -> Bool {
+        guard available, visible, !isLoading else { return false }
+        guard let offset = cursorOffsets[cursor ?? ""] else { error = .staleResult; return false }
         if direction > 0, let cursor, back.contains(where: { $0 == cursor }) {
-            error = .invalidResponse; return
+            error = .invalidResponse; return false
         }
         let own = UUID(), access = generation, request = requestOverride ?? request, service = service
         let day = Calendar.current.startOfDay(for: Date())
@@ -698,7 +723,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         tabTask?.cancel(); tabTask = nil
         loadEpoch = own
         if !isHome { pageEpoch = own }
-        isLoading = true; loadingCursor = cursor; error = nil; errorDiagnosticID = nil
+        isLoading = true; error = nil; errorDiagnosticID = nil
         let newTask = Task<Loaded, Error> {
             try await MusicRequestTrace.$current.withValue(trace) {
             if var cached {
@@ -818,7 +843,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             unpublished = result.source
             try Task.checkCancellation()
             guard available, visible, generation == access, loadEpoch == own else {
-                return
+                return false
             }
             if isDaily {
                 guard Calendar.current.isDate(day, inSameDayAs: Date()),
@@ -849,6 +874,11 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 throw MusicServiceError.invalidResponse
             }
             if direction != 0, let old = snapshot, old != result.snapshot { throw MusicServiceError.staleResult }
+            if isHome, direction == 2, let failure = result.page.sections.compactMap(\.error).first {
+                // The service has not committed this failed batch's cursor.
+                // Keep successful content and retry the same continuation.
+                throw failure
+            }
             sectionDiagnosticIDs = Dictionary(uniqueKeysWithValues: result.page.sections.compactMap { section in
                 guard let error = section.error else { return nil }
                 trace.record(.failed, failure: error)
@@ -873,7 +903,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 // new selection. Section-local retries keep their old target.
                 if requestOverride == nil, !isHome { contentIsCurrent = false }
                 failedPage = (nil, 0); failedRequest = requestOverride
-                return
+                return false
             }
             if direction == 2 {
                 merged = sections
@@ -933,9 +963,10 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             failedPage = nil; failedRequest = nil
             watchSource()
             trace.record(.completed)
+            return true
         } catch {
             trace.failed(error)
-            guard available, visible, generation == access, loadEpoch == own, !Task.isCancelled else { return }
+            guard available, visible, generation == access, loadEpoch == own, !Task.isCancelled else { return false }
             let safe = MusicServiceError.sanitized(error)
             if safe != .cancelled {
                 self.error = safe; errorDiagnosticID = trace.logicalID
@@ -950,6 +981,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 trackPageOccurrences = [:]; detailSourcePositions = [:]
                 contentIsCurrent = false
             }
+            return false
         }
     }
     private func watchSource() {
