@@ -6,7 +6,7 @@ import UIKit
 public enum PageIcon {
     public enum Kind: Sendable {
         case home, channels, film, person, menu, search, recognize, plus, append, more, play, pause, queue, down
-        case playerDown, playerPlay, playerPause, lyricPlay, previous, next, miniPrevious, miniNext
+        case playerDown, playerPlay, playerPause, lyricPlay, previous, next
         case heart, translation, image, remove, playing, miniResume, reorder, multiSelect
         case back, close
     }
@@ -103,8 +103,6 @@ public enum PageIcon {
         case .miniResume: line([(8,5),(19,12),(8,19)], close: true)
         case .previous: line([(19,20),(9,12),(19,4)], close: true); line([(5,19),(5,5)])
         case .next: line([(5,4),(15,12),(5,20)], close: true); line([(19,5),(19,19)])
-        case .miniPrevious: line([(5,5),(5,19)]); line([(19,5),(9,12),(19,19)], close: true)
-        case .miniNext: line([(19,5),(19,19)]); line([(5,5),(15,12),(5,19)], close: true)
         case .heart:
             // The original SVG's circular lobes, not an SF Symbol substitute.
             p.move(to: .init(x: 20.84, y: 4.61))

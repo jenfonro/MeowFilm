@@ -50,6 +50,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         cover.accessibilityIdentifier = "music.miniPlayer.open"
         cover.addAction(UIAction { [weak self] _ in self?.presentPlayer() }, for: .touchUpInside)
         addSubview(cover)
+        controls.clipsToBounds = true
         addSubview(controls)
         controls.onPresent = { [weak self] in self?.onPresent?($0) }
         controls.onMore = { [weak self] in self?.onMore?() }
@@ -157,6 +158,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         controls.frame = bounds
         layer.cornerRadius = form == .compact ? bounds.height / 2 : 24
         cardBackground.layer.cornerRadius = layer.cornerRadius
+        controls.layer.cornerRadius = layer.cornerRadius
         layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
         let size: CGFloat = form == .compact ? 42 : 84
         let top = form == .compact ? CGFloat(controls.miniLayout.compactArtworkTop) : 16

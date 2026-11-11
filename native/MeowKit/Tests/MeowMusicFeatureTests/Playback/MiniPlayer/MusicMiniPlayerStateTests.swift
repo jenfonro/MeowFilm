@@ -19,14 +19,17 @@ final class MusicMiniPlayerStateTests: XCTestCase {
     }
 
     func testMetadataProgressAndControlsStaySeparatedWithLargerText() {
-        let normal = MusicMiniPlayerLayout(titleLineHeight: 22, artistLineHeight: 15, lyricLineHeight: 20)
-        let large = MusicMiniPlayerLayout(titleLineHeight: 44, artistLineHeight: 30, lyricLineHeight: 40)
+        let normal = MusicMiniPlayerLayout(compactTitleLineHeight: 18, titleLineHeight: 22,
+                                          artistLineHeight: 15, lyricLineHeight: 20)
+        let large = MusicMiniPlayerLayout(compactTitleLineHeight: 36, titleLineHeight: 44,
+                                         artistLineHeight: 30, lyricLineHeight: 40)
         for layout in [normal, large] {
             XCTAssertGreaterThanOrEqual(layout.seekTop,
                 16 + layout.titleLineHeight + 6 + layout.artistLineHeight + 8 + layout.lyricLineHeight + 16)
             XCTAssertGreaterThan(layout.controlsTop, layout.seekTop + 46)
             XCTAssertGreaterThanOrEqual(layout.expandedHeight, layout.controlsTop + 56 + 8)
             XCTAssertEqual(layout.compactArtworkTop + 21, layout.compactHeight / 2)
+            XCTAssertEqual(layout.compactHeight, max(58, layout.compactTitleLineHeight + 24))
             let controls = layout.compactControlFrame(width: 292)
             XCTAssertGreaterThanOrEqual(controls.minX, 0)
             XCTAssertLessThanOrEqual(controls.maxX, 292)
@@ -34,6 +37,10 @@ final class MusicMiniPlayerStateTests: XCTestCase {
         }
         XCTAssertGreaterThan(large.expandedHeight, normal.expandedHeight)
         XCTAssertGreaterThan(large.compactHeight, normal.compactHeight)
+        let cardText = MusicMiniPlayerLayout(compactTitleLineHeight: normal.compactTitleLineHeight,
+                                            titleLineHeight: 44, artistLineHeight: 30, lyricLineHeight: 40)
+        XCTAssertEqual(cardText.compactHeight, normal.compactHeight,
+                       "The card title cannot move the independent capsule controls")
     }
 
     func testHomePreviewExpiresAfterFiveSecondsAndNewActivationRestartsIt() {

@@ -30,19 +30,22 @@ final class MusicPlaybackControlsView: UIView {
     private let artist = UILabel(), lyricPreview = UILabel()
     private let elapsed = UILabel(), durationLabel = UILabel()
     private let play = UIButton(type: .system), queue = UIButton(type: .system)
+    private let compactPlay = UIButton(type: .system), compactQueue = UIButton(type: .system)
     private let previous = UIButton(type: .system), nextButton = UIButton(type: .system)
     private let favorite = UIButton(type: .system), mode = UIButton(type: .system)
     private let more = UIButton(type: .system), quality = UIButton(type: .system)
     private let collapse = UIButton(type: .system)
     private let recommendation = UIButton(type: .system)
     private let progress = MusicProgressSlider()
-    private let playTrack = CAShapeLayer(), playProgress = CAShapeLayer()
+    private let compactTrack = CAShapeLayer(), compactProgress = CAShapeLayer()
+    private let playOutline = CAShapeLayer()
     private var subscriptions: [AnyCancellable] = []
     private var scrubFence: MusicReferencePlayerFence?
     private var rendering = false
     private var layout: Layout
     private var fullViewportHeight: CGFloat?
     private var fullSafeHeight: CGFloat?
+    private var compactTitleFont = UIFont.systemFont(ofSize: 14, weight: .semibold)
     private var titleFont = UIFont.systemFont(ofSize: 14, weight: .semibold)
     private var displayedTheme: PageTheme?
     private struct ModeMenuState: Equatable {
@@ -69,7 +72,8 @@ final class MusicPlaybackControlsView: UIView {
     private var displayedMode: ModeMenuState?
     var moreAnchor: UIView { more }
     var miniLayout: MusicMiniPlayerLayout {
-        .init(titleLineHeight: Double(titleFont.lineHeight), artistLineHeight: Double(artist.font.lineHeight),
+        .init(compactTitleLineHeight: Double(compactTitleFont.lineHeight),
+              titleLineHeight: Double(titleFont.lineHeight), artistLineHeight: Double(artist.font.lineHeight),
               lyricLineHeight: Double(lyricPreview.font.lineHeight + 4))
     }
     var fullHeight: CGFloat {
@@ -82,17 +86,20 @@ final class MusicPlaybackControlsView: UIView {
         self.layout = layout
         super.init(frame: .zero)
         for item in [title, artist, lyricPreview, elapsed, durationLabel, progress,
-                     play, queue, previous, nextButton, favorite, mode, more, quality, collapse, recommendation] {
+                     play, queue, compactPlay, compactQueue, previous, nextButton, favorite, mode,
+                     more, quality, collapse, recommendation] {
             addSubview(item)
         }
-        for ring in [playTrack, playProgress] {
+        for ring in [compactTrack, compactProgress, playOutline] {
             ring.fillColor = UIColor.clear.cgColor
             ring.lineCap = .round
-            play.layer.insertSublayer(ring, at: 0)
         }
-        playTrack.name = "play.progress.track"
-        playProgress.name = "play.progress.played"
-        playProgress.strokeEnd = 0
+        for ring in [compactTrack, compactProgress] { compactPlay.layer.insertSublayer(ring, at: 0) }
+        play.layer.insertSublayer(playOutline, at: 0)
+        compactTrack.name = "play.progress.track"
+        compactProgress.name = "play.progress.played"
+        compactProgress.strokeEnd = 0
+        playOutline.name = "play.outline"
         title.isUserInteractionEnabled = false
         elapsed.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         durationLabel.font = elapsed.font
@@ -103,7 +110,8 @@ final class MusicPlaybackControlsView: UIView {
         progress.accessibilityLabel = "播放进度"
         for (button, kind, label) in [
             (play, PageIcon.Kind.play, "播放或暂停"), (queue, .queue, "播放队列"),
-            (previous, .miniPrevious, "上一首"), (nextButton, .miniNext, "下一首"),
+            (compactPlay, .play, "播放或暂停"), (compactQueue, .queue, "播放队列"),
+            (previous, .previous, "上一首"), (nextButton, .next, "下一首"),
             (favorite, .heart, "收藏"), (more, .more, "更多")
         ] {
             button.setImage(PageIcon.image(kind), for: .normal)
@@ -116,8 +124,10 @@ final class MusicPlaybackControlsView: UIView {
         recommendation.preferredMenuElementOrder = .fixed
         mode.preferredMenuElementOrder = .fixed
         let prefix = layout == .full ? "music.player" : "music.miniPlayer"
-        play.accessibilityIdentifier = "\(prefix).play"
-        queue.accessibilityIdentifier = "\(prefix).queue"
+        play.accessibilityIdentifier = layout == .full ? "\(prefix).play" : "\(prefix).card.play"
+        queue.accessibilityIdentifier = layout == .full ? "\(prefix).queue" : "\(prefix).card.queue"
+        compactPlay.accessibilityIdentifier = "music.miniPlayer.play"
+        compactQueue.accessibilityIdentifier = "music.miniPlayer.queue"
         previous.accessibilityIdentifier = "\(prefix).previous"
         nextButton.accessibilityIdentifier = "\(prefix).next"
         favorite.accessibilityIdentifier = "\(prefix).favorite"
@@ -131,13 +141,15 @@ final class MusicPlaybackControlsView: UIView {
         collapse.accessibilityLabel = "收起播放器"
         collapse.accessibilityIdentifier = "music.miniPlayer.collapse"
         collapse.addAction(UIAction { [weak self] _ in self?.onCollapse?() }, for: .touchUpInside)
-        play.addAction(UIAction { [weak content] _ in content?.togglePlayback() }, for: .touchUpInside)
+        for button in [play, compactPlay] {
+            button.addAction(UIAction { [weak content] _ in content?.togglePlayback() }, for: .touchUpInside)
+        }
         previous.addAction(UIAction { [weak content] _ in content?.navigate(.previous) }, for: .touchUpInside)
         nextButton.addAction(UIAction { [weak content] _ in content?.navigate(.next) }, for: .touchUpInside)
         favorite.addAction(UIAction { [weak content] _ in content?.toggleFavorite() }, for: .touchUpInside)
-        queue.addAction(UIAction { [weak self] _ in
-            self?.onPresent?(.queue)
-        }, for: .touchUpInside)
+        for button in [queue, compactQueue] {
+            button.addAction(UIAction { [weak self] _ in self?.onPresent?(.queue) }, for: .touchUpInside)
+        }
         more.addAction(UIAction { [weak self] _ in self?.onMore?() }, for: .touchUpInside)
         quality.showsMenuAsPrimaryAction = true
         progress.addAction(UIAction { [weak self] _ in
@@ -173,19 +185,18 @@ final class MusicPlaybackControlsView: UIView {
         self.layout = layout
         updateFonts(compatibleWith: traits)
         if layout == .compact { scrubFence = nil }
-        for item in [artist, progress, elapsed, durationLabel, previous, nextButton, favorite] {
+        for item in [artist, progress, elapsed, durationLabel, play, queue, previous, nextButton, favorite] {
             setVisible(item, layout != .compact)
         }
+        for item in [compactPlay, compactQueue] { setVisible(item, layout == .compact) }
         setVisible(lyricPreview, layout == .card)
         setVisible(collapse, layout == .card)
         for item in [mode, more, quality, recommendation] { setVisible(item, layout == .full) }
         recommendation.isHidden = layout != .full
         for (button, kind, size) in [
-            (previous, layout == .compact ? PageIcon.Kind.miniPrevious : .previous,
-             layout == .full ? CGFloat(25) : layout == .card ? 26 : 23),
-            (nextButton, layout == .compact ? .miniNext : .next,
-             layout == .full ? CGFloat(25) : layout == .card ? 26 : 23),
-            (queue, PageIcon.Kind.queue, layout == .full ? CGFloat(24) : layout == .card ? 26 : 23)
+            (previous, PageIcon.Kind.previous, layout == .full ? CGFloat(25) : 26),
+            (nextButton, PageIcon.Kind.next, layout == .full ? CGFloat(25) : 26),
+            (queue, PageIcon.Kind.queue, layout == .full ? CGFloat(24) : 26)
         ] {
             button.setImage(PageIcon.image(kind, size: size), for: .normal)
         }
@@ -270,16 +281,17 @@ final class MusicPlaybackControlsView: UIView {
         progress.frame = CGRect(x: 16, y: seekTop, width: max(0, width - 32), height: 28)
         elapsed.frame = CGRect(x: 16, y: seekTop + 28, width: 80, height: 18)
         durationLabel.frame = CGRect(x: width - 96, y: seekTop + 28, width: 80, height: 18)
-        if compact {
-            let frame = miniLayout.compactControlFrame(width: Double(width))
-            play.frame = CGRect(x: frame.minX, y: frame.minY, width: 44, height: 44)
-            queue.frame = CGRect(x: frame.minX + 44, y: frame.minY, width: 44, height: 44)
-        } else {
-            let cellWidth = max(0, width - 32) / 5
-            for (index, button) in [favorite, previous, play, nextButton, queue].enumerated() {
-                button.frame = CGRect(x: 16 + CGFloat(index) * cellWidth, y: CGFloat(miniLayout.controlsTop),
-                                      width: cellWidth, height: 56)
-            }
+        let metrics = miniLayout
+        let frame = metrics.compactControlFrame(width: Double(width))
+            .offsetBy(dx: 0, dy: height - CGFloat(metrics.compactHeight))
+        compactPlay.frame = CGRect(x: frame.minX, y: frame.minY, width: 44, height: 44)
+        compactQueue.frame = CGRect(x: frame.minX + 44, y: frame.minY, width: 44, height: 44)
+        // Both sets belong to the dock's fixed bottom edge, not to each other's slots.
+        let controlsTop = height - CGFloat(metrics.expandedHeight - metrics.controlsTop)
+        let cellWidth = max(0, width - 32) / 5
+        for (index, button) in [favorite, previous, play, nextButton, queue].enumerated() {
+            button.frame = CGRect(x: 16 + CGFloat(index) * cellWidth, y: controlsTop,
+                                  width: cellWidth, height: 56)
         }
         layoutPlayRing()
     }
@@ -313,12 +325,15 @@ final class MusicPlaybackControlsView: UIView {
         let playing = content.model.phase == .playing
         let playKind: PageIcon.Kind = layout == .full
             ? (playing ? .playerPause : .playerPlay) : (playing ? .pause : .play)
-        play.setImage(PageIcon.image(playKind, size: layout == .full ? 34 : layout == .card ? 28 : 18),
+        play.setImage(PageIcon.image(playKind, size: layout == .full ? 34 : 28),
                       for: .normal)
+        compactPlay.setImage(PageIcon.image(playing ? .pause : .play, size: 18), for: .normal)
         play.isEnabled = content.isAvailable
+        compactPlay.isEnabled = content.isAvailable
         previous.isEnabled = content.model.canPrevious
         nextButton.isEnabled = content.model.canNext
         queue.isEnabled = content.isAvailable
+        compactQueue.isEnabled = content.isAvailable
         progress.isEnabled = content.isAvailable && content.model.activeNativeAttemptID != nil
         quality.isEnabled = content.isAvailable && content.model.current != nil
         updateMode()
@@ -467,7 +482,7 @@ final class MusicPlaybackControlsView: UIView {
 
     private func updateFavorite() {
         let liked = content.model.current.map { content.favorites.isFavorite($0.track) } ?? false
-        favorite.setImage(PageIcon.image(.heart, filled: liked, size: layout == .card ? 26 : 23), for: .normal)
+        favorite.setImage(PageIcon.image(.heart, filled: liked, size: layout == .full ? 23 : 26), for: .normal)
         if layout == .full {
             favorite.tintColor = liked
                 ? UIColor(red: 0.90, green: 0.36, blue: 0.41, alpha: 1)
@@ -506,9 +521,11 @@ final class MusicPlaybackControlsView: UIView {
     }
 
     func updateFonts(compatibleWith traits: UITraitCollection) {
-        titleFont = UIFontMetrics(forTextStyle: .subheadline).scaledFont(
-            for: .systemFont(ofSize: layout == .full ? 16 : layout == .card ? 16 : 14,
-                             weight: layout == .full ? .medium : .semibold),
+        let metrics = UIFontMetrics(forTextStyle: .subheadline)
+        compactTitleFont = metrics.scaledFont(
+            for: .systemFont(ofSize: 14, weight: .semibold), compatibleWith: traits)
+        titleFont = layout == .compact ? compactTitleFont : metrics.scaledFont(
+            for: .systemFont(ofSize: 16, weight: layout == .full ? .medium : .semibold),
             compatibleWith: traits)
         artist.font = UIFontMetrics(forTextStyle: .caption1).scaledFont(
             for: .systemFont(ofSize: layout == .full ? 13 : 12), compatibleWith: traits)
@@ -530,7 +547,7 @@ final class MusicPlaybackControlsView: UIView {
                 button.tintColor = UIColor(theme.muted)
             }
         } else {
-            for button in [play, queue, previous, nextButton, favorite, mode, more, collapse] {
+            for button in [play, queue, compactPlay, compactQueue, previous, nextButton, favorite, mode, more, collapse] {
                 button.tintColor = UIColor(theme.ink)
             }
         }
@@ -550,24 +567,29 @@ final class MusicPlaybackControlsView: UIView {
         progress.thumbColor = layout == .full ? muted : (card ? ink : .white)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        playTrack.strokeColor = ink.withAlphaComponent(card ? 0.85 : 0.18).cgColor
-        playProgress.strokeColor = ink.cgColor
-        playTrack.lineWidth = card ? 1.5 : 2
-        playProgress.lineWidth = 2
-        playTrack.opacity = layout == .full ? 0 : 1
-        playProgress.opacity = layout == .compact ? 1 : 0
+        compactTrack.strokeColor = ink.withAlphaComponent(0.18).cgColor
+        compactProgress.strokeColor = ink.cgColor
+        compactTrack.lineWidth = 2
+        compactProgress.lineWidth = 2
+        playOutline.strokeColor = ink.withAlphaComponent(0.85).cgColor
+        playOutline.lineWidth = 1.5
+        playOutline.opacity = layout == .full ? 0 : 1
         CATransaction.commit()
     }
 
     private func layoutPlayRing() {
-        let diameter: CGFloat = layout == .compact ? 32 : 52
-        let radius = min(diameter, min(play.bounds.width, play.bounds.height)) / 2 - 1
-        let path = UIBezierPath(arcCenter: CGPoint(x: play.bounds.midX, y: play.bounds.midY),
-                                radius: max(0, radius), startAngle: -.pi / 2, endAngle: .pi * 1.5,
-                                clockwise: true).cgPath
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        for ring in [playTrack, playProgress] { ring.frame = play.bounds; ring.path = path }
+        for (button, diameter, rings) in [
+            (compactPlay, CGFloat(32), [compactTrack, compactProgress]),
+            (play, CGFloat(52), [playOutline])
+        ] {
+            let radius = min(diameter, min(button.bounds.width, button.bounds.height)) / 2 - 1
+            let path = UIBezierPath(arcCenter: CGPoint(x: button.bounds.midX, y: button.bounds.midY),
+                                    radius: max(0, radius), startAngle: -.pi / 2, endAngle: .pi * 1.5,
+                                    clockwise: true).cgPath
+            for ring in rings { ring.frame = button.bounds; ring.path = path }
+        }
         CATransaction.commit()
     }
 
@@ -576,7 +598,7 @@ final class MusicPlaybackControlsView: UIView {
         if layout == .compact {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            playProgress.strokeEnd = CGFloat(MusicMiniPlayerText.progress(position: clock.position, duration: clock.duration))
+            compactProgress.strokeEnd = CGFloat(MusicMiniPlayerText.progress(position: clock.position, duration: clock.duration))
             CATransaction.commit()
             return
         }

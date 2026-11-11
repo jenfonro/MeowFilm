@@ -3,7 +3,7 @@ import UIKit
 import Combine
 import MeowContracts
 @testable import MeowPlayback
-import MeowMusicFeature
+@testable import MeowMusicFeature
 import MeowMusicNativeService
 import MeowFilmFeature
 import MeowStorage
@@ -715,6 +715,132 @@ final class MeowfilmMusicStartupHostTests: XCTestCase {
     private func startupDescendants(_ view: UIView) -> [UIView] {
         [view] + view.subviews.flatMap(startupDescendants)
     }
+}
+
+/// Real foreground scene required for presentation-layer animation and native frames.
+@MainActor
+final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
+    func testCardMorphKeepsButtonsStationaryDuringExpansionAndReversal() async throws {
+        XCTAssertFalse(UIAccessibility.isReduceMotionEnabled, "This case exercises the animated morph")
+        XCTAssertTrue(UIView.areAnimationsEnabled)
+        let foreground = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
+            }
+        }, evaluatedWith: nil)
+        await fulfillment(of: [foreground], timeout: 5)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let network = MusicStartupNoNetwork()
+        let service = NativeMusicService(document: MusicStartupDocument(failure: nil),
+                                        qq: network, transport: network)
+        let playback = PlaybackController()
+        let model = MusicViewModel(service: service, playback: playback)
+        model.nativeAttempt = .init(id: UUID(), resourceID: "music:dock")
+        model.playbackState.queue = [.init(id: "dock", track: .init(ref: .init(kind: .queue, id: "dock"),
+            songId: "dock", title: "Goodbye", artist: "Ramsey"))]
+        model.playbackState.state = .init(currentId: "dock", total: 1)
+        model.playbackState.phase = .paused
+        let content = MusicPlayerContentModel(model: model, playback: playback,
+            appearance: MusicAppearancePreferencesStore(defaults: UserDefaults(suiteName: UUID().uuidString)!),
+            presentation: MusicMiniPlayerPresentation())
+        addTeardownBlock { await model.close(); await service.close() }
+        let surface = MusicPlayerSurface(content: content)
+        let root = PageViewController(themeProvider: content.appearance)
+        let previousWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.windowLevel = .normal + 1
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true; window.rootViewController = nil
+            previousWindow?.makeKey()
+        }
+        root.view.addSubview(surface)
+        let bottom = root.view.bounds.height - 86
+        func layoutDock() {
+            surface.frame = CGRect(x: 14, y: bottom - surface.dockHeight,
+                                   width: root.view.bounds.width - 28, height: surface.dockHeight)
+        }
+        surface.onSizeChanged = layoutDock
+        defer { surface.onSizeChanged = nil }
+        layoutDock()
+        root.view.layoutIfNeeded()
+        func expandDock() async {
+            let intent = content.presentation.beginHomePlayback()
+            XCTAssertTrue(content.presentation.finishHomePlayback(intent, playback: .init(
+                occurrenceID: "dock", nativeAttemptID: model.activeNativeAttemptID!,
+                accessGeneration: model.accountAccessGeneration)))
+            await withCheckedContinuation { continuation in
+                RunLoop.main.perform { continuation.resume() }
+            }
+            XCTAssertTrue(content.dockExpanded)
+        }
+        func descendants(_ view: UIView) -> [UIView] {
+            view.subviews.flatMap { [$0] + descendants($0) }
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let buttons = try ["favorite", "previous", "card.play", "next", "card.queue", "play", "queue"].map { name in
+            try XCTUnwrap(descendants(surface).compactMap { $0 as? UIButton }.first {
+                $0.accessibilityIdentifier == "music.miniPlayer." + name
+            })
+        }
+        let frames = buttons.map { $0.convert($0.bounds, to: window) }
+        let compactHeight = surface.bounds.height
+        func checkSlots() throws {
+            for (button, expected) in zip(buttons, frames) {
+                let layer = try XCTUnwrap(button.layer.presentation())
+                let actual = layer.convert(layer.bounds, to: try XCTUnwrap(window.layer.presentation()))
+                XCTAssertEqual(actual.minX, expected.minX, accuracy: 0.5)
+                XCTAssertEqual(actual.minY, expected.minY, accuracy: 0.5)
+                XCTAssertEqual(actual.width, expected.width, accuracy: 0.5)
+                XCTAssertEqual(actual.height, expected.height, accuracy: 0.5)
+            }
+        }
+        func attachFrame(_ name: String) throws {
+            XCTAssertEqual(window.windowScene?.activationState, .foregroundActive)
+            let layer = try XCTUnwrap(window.layer.presentation())
+            let image = UIGraphicsImageRenderer(size: window.bounds.size).image { context in
+                layer.render(in: context.cgContext)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = name; attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        try attachFrame("dock-morph-compact")
+        await expandDock()
+        for index in 0..<4 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            try checkSlots()
+            if index == 0 {
+                let height = try XCTUnwrap(surface.layer.presentation()).bounds.height
+                XCTAssertGreaterThan(height, compactHeight)
+                XCTAssertLessThan(height, surface.dockHeight)
+            }
+            if index == 1 { try attachFrame("dock-morph-expanding") }
+        }
+        surface.collapse()
+        try await Task.sleep(nanoseconds: 80_000_000)
+        try checkSlots()
+        try attachFrame("dock-morph-reversing")
+        await expandDock()
+        for _ in 0..<4 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            try checkSlots()
+        }
+        try await Task.sleep(nanoseconds: 700_000_000)
+        try checkSlots()
+        try attachFrame("dock-morph-card")
+        XCTAssertEqual(surface.form, .card)
+        surface.collapse()
+        try await Task.sleep(nanoseconds: 500_000_000)
+        try checkSlots()
+        XCTAssertEqual(surface.form, .compact)
+        XCTAssertTrue(buttons.prefix(5).allSatisfy { $0.alpha == 0 && !$0.isUserInteractionEnabled })
+        XCTAssertTrue(buttons.suffix(2).allSatisfy { $0.alpha == 1 && $0.isUserInteractionEnabled })
+    }
+
 }
 
 /// Exercises the real Assembly shutdown entry with only synthetic local media
