@@ -48,6 +48,8 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     var availabilityGate: MusicCollectionGate?
     var metadataEnabled: Set<MusicPublicBrowsePlatform> = [.netease]
     var metadataFailure: MusicServiceError?
+    var metadataCandidatesOverride: [MusicMetadataCandidate]?
+    var metadataGate: MusicCollectionGate?
     var lyricSourceKeys: [String] = []
     var cacheLookups = 0, cacheDiscards = 0, resolveCalls = 0, lyricCalls = 0
     var resultSelection: @Sendable (MusicPlaybackSelection) -> MusicPlaybackSelection = { $0 }
@@ -186,18 +188,29 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
         settingsRevision += 1
         return metadataPreferences()
     }
-    func metadataCandidates(occurrenceID: String) throws -> MusicMetadataCandidates {
+    func metadataCandidates(occurrenceID: String) async throws -> MusicMetadataCandidates {
         if let metadataFailure { throw metadataFailure }
         guard current == occurrenceID, let entry = entries.first(where: { $0.id == occurrenceID }) else {
             throw MusicServiceError.targetChanged
         }
-        return .init(occurrenceID: occurrenceID, queueRevision: revision, preferences: metadataPreferences(),
+        let candidates = metadataCandidatesOverride ?? entry.track.sources.map {
+            MusicMetadataCandidate(source: $0, artwork: entry.track.artwork)
+        }
+        let result = MusicMetadataCandidates(occurrenceID: occurrenceID, queueRevision: revision, preferences: metadataPreferences(),
             track: entry.track, contentRevision: nil, contentFingerprint: entry.track.songId,
-            candidates: entry.track.sources.filter {
-                MusicPublicBrowsePlatform(rawValue: $0.platform).map(metadataEnabled.contains) == true
-            }.map { .init(source: $0, artwork: entry.track.artwork) })
+            candidates: candidates.filter {
+                MusicPublicBrowsePlatform(rawValue: $0.source.platform).map(metadataEnabled.contains) == true
+            })
+        if let gate = metadataGate { metadataGate = nil; await gate.wait() }
+        return result
     }
     func failMetadata(_ error: MusicServiceError) { metadataFailure = error }
+    func replaceMetadataEntry(_ entry: MusicQueueEntry, candidates: [MusicMetadataCandidate],
+                              gate: MusicCollectionGate? = nil) {
+        entries = [entry]; current = entry.id
+        metadataCandidatesOverride = candidates; metadataGate = gate
+        metadataEnabled = [.netease, .qq]
+    }
     func addMetadataSource(_ source: MusicNativeSource) {
         entries = entries.map { entry in
             let track = entry.track
@@ -283,6 +296,37 @@ private actor MusicModelAccountSessions: MusicAccountsServing, MusicAccountSessi
     func checkLogin(challengeID: UUID) throws -> MusicLoginProgress { throw MusicServiceError.unsupported }
     func cancelLogin(challengeID: UUID) {}
     func logout(platform: MusicAccountPlatform) throws { throw MusicServiceError.unsupported }
+}
+
+private struct MusicMetadataCacheAccounts: MusicAccountsServing, MusicNativeCacheScopeProviding {
+    let scope = MusicNativeCacheScope(scope: "metadata-test")
+    func nativeCacheScope() -> MusicNativeCacheScope { scope }
+    func checkNativeCacheScope(_ scope: MusicNativeCacheScope) throws { try scope.authorization.check() }
+    func statuses() -> [MusicAccountStatus] { [] }
+    func validate(platform: MusicAccountPlatform) throws -> MusicAccountStatus { throw MusicServiceError.unsupported }
+    func beginLogin(platform: MusicAccountPlatform) throws -> MusicLoginChallenge { throw MusicServiceError.unsupported }
+    func checkLogin(challengeID: UUID) throws -> MusicLoginProgress { throw MusicServiceError.unsupported }
+    func cancelLogin(challengeID: UUID) {}
+    func logout(platform: MusicAccountPlatform) throws { throw MusicServiceError.unsupported }
+}
+
+private actor MusicMetadataDisplayCache: MusicPlaybackDisplayCaching {
+    private var snapshot: MusicPlaybackDisplaySnapshot?
+    let stored: @Sendable () -> Void
+    init(stored: @escaping @Sendable () -> Void) { self.stored = stored }
+    func read(_ identity: MusicPlaybackDisplayIdentity,
+              authorization: MusicQueueAuthorization) -> MusicPlaybackDisplaySnapshot? {
+        authorization.isActive && snapshot?.identity == identity ? snapshot : nil
+    }
+    func storeArtwork(_ data: Data, sourceKey: String, identity: MusicPlaybackDisplayIdentity,
+                      authorization: MusicQueueAuthorization) {
+        guard authorization.isActive else { return }
+        snapshot = .init(identity: identity, artworkSourceKey: sourceKey, artwork: data)
+        stored()
+    }
+    func storeLyrics(_ lines: [MusicLyricLine], sourceKey: String,
+                     identity: MusicPlaybackDisplayIdentity, authorization: MusicQueueAuthorization) {}
+    func clear() { snapshot = nil }
 }
 
 @MainActor private final class MusicModelPlayer: MusicPlaybackDriving {
@@ -616,6 +660,144 @@ final class MusicViewModelTests: XCTestCase {
         XCTAssertEqual(model.lyricState, "none"); XCTAssertTrue(model.lyricLines.isEmpty)
         XCTAssertEqual(player.resources.count, 1)
         await model.close()
+    }
+
+    @MainActor func testArtworkRetainsTheEntryCoverWhileCandidatesLoadAndGainHigherPrioritySources() async {
+        let service = MusicModelService(), metadata = MusicPlaybackMetadata()
+        let original = URL(string: "https://artwork.invalid/original.png")!
+        let preferred = URL(string: "https://artwork.invalid/preferred.png")!
+        let originalSource = MusicNativeSource(sourceKey: "qq-cover", platform: "tx", nativeId: "cover")
+        let extra = MusicNativeSource(sourceKey: "wy-cover", platform: "wy", nativeId: "cover")
+        func entry(_ sources: [MusicNativeSource]) -> MusicQueueEntry {
+            .init(id: "entry", track: .init(ref: .init(kind: .queue, id: "entry"), songId: "song",
+                title: "Song", sources: sources, artwork: original))
+        }
+        var covers: [URL?] = []
+        metadata.configure(service: service, accounts: nil) { covers.append($0.artwork) }
+        metadata.setAccess(available: true, generation: UUID())
+        covers.removeAll()
+        let started = expectation(description: "metadata candidates held")
+        let gate = MusicCollectionGate { started.fulfill() }
+        let first = entry([originalSource])
+        await service.replaceMetadataEntry(first, candidates: [.init(source: originalSource, artwork: original)], gate: gate)
+        metadata.select(first, lyricsEnabled: false)
+        XCTAssertEqual(covers, [original], "The entry cover must be published before a metadata read finishes")
+        await fulfillment(of: [started], timeout: 2)
+        await gate.release(); await metadata.flush()
+        let enriched = entry([extra, originalSource])
+        await service.replaceMetadataEntry(enriched, candidates: [
+            .init(source: extra, artwork: preferred), .init(source: originalSource, artwork: original)])
+        metadata.select(enriched, lyricsEnabled: false)
+        await metadata.flush()
+        XCTAssertTrue(covers.allSatisfy { $0 == original }, "Candidate discovery must not clear or replace an existing cover")
+        metadata.close()
+    }
+
+    @MainActor func testArtworkFailureBeforeMetadataLoadSkipsDuplicateURLsAndLateFailures() async {
+        let service = MusicModelService(), metadata = MusicPlaybackMetadata()
+        let failed = URL(string: "https://artwork.invalid/failed.png")!
+        let fallback = URL(string: "https://artwork.invalid/fallback.png")!
+        let sources = (0..<3).map { MusicNativeSource(sourceKey: "wy-\($0)", platform: "wy", nativeId: "\($0)") }
+        let entry = MusicQueueEntry(id: "entry", track: .init(ref: .init(kind: .queue, id: "entry"),
+            songId: "song", title: "Song", sources: sources, artwork: failed))
+        let started = expectation(description: "metadata candidates held")
+        let gate = MusicCollectionGate { started.fulfill() }
+        await service.replaceMetadataEntry(entry, candidates: [
+            .init(source: sources[0], artwork: failed), .init(source: sources[1], artwork: failed),
+            .init(source: sources[2], artwork: fallback)], gate: gate)
+        var cover: URL?
+        metadata.configure(service: service, accounts: nil) { cover = $0.artwork }
+        metadata.setAccess(available: true, generation: UUID())
+        metadata.select(entry, lyricsEnabled: false)
+        await fulfillment(of: [started], timeout: 2)
+        metadata.artworkFailed(failed)
+        await gate.release(); await metadata.flush()
+        XCTAssertEqual(cover, fallback)
+        metadata.artworkFailed(failed)
+        XCTAssertEqual(cover, fallback, "A late failure for the previous URL cannot advance the current cover")
+        metadata.artworkFailed(fallback)
+        XCTAssertNil(cover, "All failed URLs must settle instead of cycling")
+        metadata.close()
+    }
+
+    @MainActor func testEarlyArtworkBytesPersistAfterAdmissionAndRestoreForTheRetainedURL() async {
+        let service = MusicModelService(), metadata = MusicPlaybackMetadata()
+        let url = URL(string: "https://artwork.invalid/cached.png")!
+        let source = MusicNativeSource(sourceKey: "wy-cover", platform: "wy", nativeId: "cover")
+        let entry = MusicQueueEntry(id: "entry", track: .init(ref: .init(kind: .queue, id: "entry"),
+            songId: "song", title: "Song", sources: [source], artwork: url))
+        let started = expectation(description: "metadata candidates held")
+        let stored = expectation(description: "early image persisted after source admission")
+        let gate = MusicCollectionGate { started.fulfill() }
+        let cache = MusicMetadataDisplayCache { stored.fulfill() }
+        let data = Data([1, 2, 3])
+        var bytes: Data?
+        metadata.configure(service: service, accounts: MusicMetadataCacheAccounts()) { bytes = $0.cachedArtwork }
+        metadata.setDisplayCache(cache)
+        metadata.setAccess(available: true, generation: UUID())
+        await service.replaceMetadataEntry(entry, candidates: [.init(source: source, artwork: url)], gate: gate)
+        metadata.select(entry, lyricsEnabled: false)
+        await fulfillment(of: [started], timeout: 2)
+        metadata.capturedArtwork(data, url: url)
+        XCTAssertEqual(bytes, data)
+        await gate.release(); await metadata.flush()
+        await fulfillment(of: [stored], timeout: 2)
+        metadata.clearSelection()
+        metadata.select(entry, lyricsEnabled: false, restoreOnly: true)
+        await metadata.flush()
+        XCTAssertEqual(bytes, data, "Selecting the entry URL must still consume the persisted image bytes")
+        metadata.close()
+    }
+
+    @MainActor func testMissingArtworkUsesCandidatesAndExplicitPolicyChangesReplaceTheCover() async throws {
+        let service = MusicModelService(), metadata = MusicPlaybackMetadata()
+        let first = URL(string: "https://artwork.invalid/netease.png")!
+        let second = URL(string: "https://artwork.invalid/qq.png")!
+        let sources = [MusicNativeSource(sourceKey: "wy-cover", platform: "wy", nativeId: "cover"),
+                       MusicNativeSource(sourceKey: "qq-cover", platform: "tx", nativeId: "cover")]
+        let entry = MusicQueueEntry(id: "entry", track: .init(ref: .init(kind: .queue, id: "entry"),
+            songId: "song", title: "Song", sources: sources))
+        await service.replaceMetadataEntry(entry, candidates: [
+            .init(source: sources[0], artwork: first), .init(source: sources[1], artwork: second)])
+        var cover: URL?
+        metadata.configure(service: service, accounts: nil) { cover = $0.artwork }
+        metadata.setAccess(available: true, generation: UUID())
+        metadata.select(entry, lyricsEnabled: false); await metadata.flush()
+        XCTAssertEqual(cover, first)
+        _ = try await service.updateMetadataPreferences(.init(ifRevision: 0, enabledPlatforms: [.qq]))
+        metadata.select(entry, lyricsEnabled: false, force: true); await metadata.flush()
+        XCTAssertEqual(cover, second)
+        _ = try await service.updateMetadataPreferences(.init(ifRevision: 1, enabledPlatforms: []))
+        metadata.select(entry, lyricsEnabled: false, force: true); await metadata.flush()
+        XCTAssertNil(cover, "Explicitly disabled metadata cannot be recovered from the previous display")
+        metadata.close()
+    }
+
+    @MainActor func testArtworkSelectionRejectsOldMetadataAfterTrackChangeAndAccessRevocation() async {
+        let service = MusicModelService(), metadata = MusicPlaybackMetadata()
+        let source = MusicNativeSource(sourceKey: "wy-cover", platform: "wy", nativeId: "cover")
+        func entry(_ id: String) -> MusicQueueEntry {
+            .init(id: id, track: .init(ref: .init(kind: .queue, id: id), songId: id, title: id,
+                sources: [source], artwork: URL(string: "https://artwork.invalid/\(id).png")))
+        }
+        let old = entry("old"), next = entry("next")
+        let started = expectation(description: "old metadata held")
+        let gate = MusicCollectionGate { started.fulfill() }
+        var cover: URL?, occurrence: String?
+        metadata.configure(service: service, accounts: nil) { cover = $0.artwork; occurrence = $0.occurrenceID }
+        metadata.setAccess(available: true, generation: UUID())
+        await service.replaceMetadataEntry(old, candidates: [.init(source: source, artwork: old.track.artwork)], gate: gate)
+        metadata.select(old, lyricsEnabled: false)
+        let oldRead = Task { await metadata.flush() }
+        await fulfillment(of: [started], timeout: 2)
+        await service.replaceMetadataEntry(next, candidates: [.init(source: source, artwork: next.track.artwork)])
+        metadata.select(next, lyricsEnabled: false); await metadata.flush()
+        XCTAssertEqual(cover, next.track.artwork); XCTAssertEqual(occurrence, next.id)
+        await gate.release(); await oldRead.value
+        XCTAssertEqual(cover, next.track.artwork); XCTAssertEqual(occurrence, next.id)
+        metadata.setAccess(available: false, generation: UUID())
+        XCTAssertNil(cover); XCTAssertNil(occurrence)
+        metadata.close()
     }
 
     @MainActor func testProgressDoesNotInvalidateLibrarySettingsOrQueueContent() async {

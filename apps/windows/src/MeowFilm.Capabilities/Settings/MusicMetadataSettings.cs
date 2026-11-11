@@ -45,9 +45,11 @@ public sealed partial class MusicCapability
     {
         metadataRevision = MusicDto.Integer(settings, "revision");
         var enabled = settings.GetProperty("enabled").EnumerateArray()
-            .Select(item => item.GetString()).ToHashSet(StringComparer.Ordinal);
+            .Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
         var platforms = settings.GetProperty("platforms").EnumerateArray()
             .Select(value => value.GetString()!).ToArray();
+        bool artworkPolicyChanged = savedArtworkPlatforms.Length > 0 &&
+            (!savedArtworkPlatforms.SequenceEqual(platforms) || !savedArtworkEnabled.SetEquals(enabled));
         var existing = MetadataPlatforms.ToDictionary(row => row.Platform, StringComparer.Ordinal);
         for (var index = 0; index < platforms.Length; index++)
         {
@@ -67,6 +69,7 @@ public sealed partial class MusicCapability
             .Select(row => row.Platform).ToHashSet(StringComparer.Ordinal);
         artworkPolicyKnown = true;
         metadataLoaded = true;
+        RefreshCurrentArtwork(force: artworkPolicyChanged);
         Changed(nameof(CurrentArtwork));
         Changed(nameof(CanEditMetadata));
     }

@@ -61,6 +61,13 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         let tap = UITapGestureRecognizer(target: self, action: #selector(presentPlayer))
         tap.delegate = self
         addGestureRecognizer(tap)
+        for direction in [UISwipeGestureRecognizer.Direction.left, .right] {
+            let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swipeTrack(_:)))
+            swipe.direction = direction
+            swipe.delegate = self
+            addGestureRecognizer(swipe)
+            tap.require(toFail: swipe)
+        }
         subscriptions = [
             content.dockChanges.sink { [weak self] in self?.updateForm(); self?.updateRendering() },
             content.artworkChanges.sink { [weak self] in self?.cover.setImage(self?.content.artwork, for: .normal) },
@@ -99,6 +106,15 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
     @objc func presentPlayer() {
         collapse()
         onPresent?(.player)
+    }
+
+    @objc func swipeTrack(_ gesture: UISwipeGestureRecognizer) {
+        guard gesture.state == .ended else { return }
+        switch gesture.direction {
+        case .left: content.navigate(.next)
+        case .right: content.navigate(.previous)
+        default: break
+        }
     }
 
     func isPlayerBody(_ touchedView: UIView?) -> Bool {

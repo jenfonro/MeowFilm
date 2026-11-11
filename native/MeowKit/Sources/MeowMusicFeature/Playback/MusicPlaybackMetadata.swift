@@ -30,6 +30,8 @@ import Combine
     private var identity: MusicPlaybackDisplayIdentity?
     private var candidates: [MusicMetadataCandidate] = []
     private var coverIndex = 0
+    private var coverURL: URL?
+    private var failedArtwork: Set<URL> = []
     private var state = "idle"
     private var lines: [MusicLyricLine] = []
     private var coverData: Data?
@@ -49,17 +51,21 @@ import Combine
         self.available = available; self.generation = generation
         lyrics.setAccess(available: available, generation: generation)
     }
-    private func invalidate() {
+    private func cancelLoad() {
         session = UUID(); task?.cancel(); task = nil
         request?.cancel(); request = nil; revocations?.cancel(); revocations = nil
         authorization?.revoke(); authorization = nil
-        entry = nil; identity = nil; candidates = []; coverIndex = 0; coverData = nil
+        identity = nil
+    }
+    private func invalidate() {
+        cancelLoad()
+        entry = nil; candidates = []; coverIndex = 0; coverData = nil; coverURL = nil
+        failedArtwork.removeAll()
         state = "idle"; lines = []; publish()
     }
     private func publish() {
         apply?(.init(occurrenceID: entry?.id, lyricState: state, lines: lines,
-            artwork: candidates.indices.contains(coverIndex) ? candidates[coverIndex].artwork : nil,
-            cachedArtwork: coverData))
+            artwork: coverURL, cachedArtwork: coverData))
     }
     private func check(_ id: UUID, access: UUID) throws {
         try Task.checkCancellation()
@@ -74,20 +80,33 @@ import Combine
         guard available, !closed else { return }
         if !force, self.entry == entry, enabled == lyricsEnabled, authorization?.isActive != false,
            self.restoreOnly == restoreOnly || !self.restoreOnly { return }
+        let sameRecording = self.entry?.id == entry.id && self.entry?.track.songId == entry.track.songId
         if force { lyrics.removeAll() }
-        invalidate()
+        cancelLoad()
+        // Candidate discovery enriches the same occurrence. Rebind its work
+        // without publishing an empty cover or choosing a different platform.
+        if !sameRecording {
+            candidates = []; coverIndex = 0; coverData = nil
+            coverURL = entry.track.artwork
+            failedArtwork.removeAll()
+            lines = []
+        } else if force {
+            failedArtwork.removeAll()
+        }
         self.entry = entry; enabled = lyricsEnabled; self.restoreOnly = restoreOnly
+        if !lyricsEnabled { lines = [] }
         state = lyricsEnabled ? "loading" : "disabled"; publish()
         let id = session, access = generation
         task = Task { [weak self] in
             guard let self else { return }
-            await self.load(entry, session: id, access: access)
+            await self.load(entry, session: id, access: access, preferCurrentArtwork: !force)
             if self.session == id { self.task = nil }
         }
     }
     func flush() async { await task?.value }
 
-    private func load(_ entry: MusicQueueEntry, session id: UUID, access: UUID) async {
+    private func load(_ entry: MusicQueueEntry, session id: UUID, access: UUID,
+                      preferCurrentArtwork: Bool) async {
         do {
             guard let service else { throw MusicServiceError.unavailable }
             let metadata = try await service.metadataCandidates(occurrenceID: entry.id)
@@ -123,14 +142,29 @@ import Combine
             else { saved = nil }
             try check(id, access: access)
             if let scope { try await accounts?.checkNativeCacheScope(scope); try check(id, access: access) }
-            if let key = saved?.artworkSourceKey,
+            var retainedArtwork = false
+            if preferCurrentArtwork, let coverURL,
+               let index = candidates.firstIndex(where: { $0.artwork == coverURL }),
+               !failedArtwork.contains(coverURL) {
+                coverIndex = index
+                retainedArtwork = coverData != nil
+                if coverData == nil, saved?.artworkSourceKey == candidates[index].source.sourceKey {
+                    coverData = saved?.artwork
+                }
+            } else if preferCurrentArtwork, let key = saved?.artworkSourceKey,
                let index = candidates.firstIndex(where: { $0.source.sourceKey == key }),
+               let url = candidates[index].artwork, !failedArtwork.contains(url),
                let data = saved?.artwork {
                 coverIndex = index; coverData = data
             } else {
-                coverIndex = candidates.firstIndex(where: { $0.artwork != nil }) ?? candidates.count
+                coverIndex = candidates.firstIndex(where: {
+                    $0.artwork.map { !failedArtwork.contains($0) } == true
+                }) ?? candidates.count
+                coverData = nil
             }
+            coverURL = candidates.indices.contains(coverIndex) ? candidates[coverIndex].artwork : nil
             publish()
+            if retainedArtwork { storeArtwork() }
             guard enabled else { state = "disabled"; publish(); return }
             if restoreOnly {
                 if let saved, let key = saved.lyricSourceKey,
@@ -182,19 +216,27 @@ import Combine
 
     /// Called only for the current image's failure, not its loading placeholder.
     func artworkFailed(_ url: URL?) {
-        guard available, !closed, authorization?.isActive == true,
-              candidates.indices.contains(coverIndex), candidates[coverIndex].artwork == url else { return }
+        guard available, !closed, let url, coverURL == url else { return }
+        failedArtwork.insert(url)
         coverData = nil
-        repeat { coverIndex += 1 }
-        while candidates.indices.contains(coverIndex) && candidates[coverIndex].artwork == nil
+        coverIndex = candidates.firstIndex(where: {
+            $0.artwork.map { !failedArtwork.contains($0) } == true
+        }) ?? candidates.count
+        coverURL = candidates.indices.contains(coverIndex) ? candidates[coverIndex].artwork : nil
         publish()
     }
     func capturedArtwork(_ data: Data, url: URL?) {
         guard available, !closed, data.count <= 8 * 1024 * 1024, !data.isEmpty,
-              let authorization, authorization.isActive, let identity, let display,
-              candidates.indices.contains(coverIndex), candidates[coverIndex].artwork == url else { return }
-        let sourceKey = candidates[coverIndex].source.sourceKey
+              let url, coverURL == url else { return }
+        // A warm entry image can arrive before metadata/cache admission.
+        // Retain its bytes locally; only the admitted source may persist them.
         coverData = data; publish()
+        storeArtwork()
+    }
+    private func storeArtwork() {
+        guard let authorization, authorization.isActive, let identity, let display, let data = coverData,
+              candidates.indices.contains(coverIndex), candidates[coverIndex].artwork == coverURL else { return }
+        let sourceKey = candidates[coverIndex].source.sourceKey
         Task { await display.storeArtwork(data, sourceKey: sourceKey, identity: identity, authorization: authorization) }
     }
     func close() {

@@ -48,11 +48,13 @@ public partial class MusicCatalogView : UserControl
         Loaded += (_, _) =>
         {
             Observe();
+            SystemParameters.StaticPropertyChanged += HomeAnimationSettingsChanged;
             RefreshSearchPlaylistHost(restoreOffset: true);
             RefreshSearchPlaylistRows();
         };
         DataContextChanged += (_, _) =>
         {
+            ClearHomeTransition();
             SearchPlaylistList.ItemsSource = null;
             ResetSearchPlaylistProjection();
             if (IsLoaded) { Observe(); RefreshSearchPlaylistHost(); }
@@ -68,12 +70,20 @@ public partial class MusicCatalogView : UserControl
             else { RefreshSearchPlaylistHost(); RefreshSearchPlaylistRows(); }
         };
         SearchPlaylistList.SizeChanged += (_, _) => RefreshSearchPlaylistRows();
+        HomeContent.SizeChanged += (_, _) => ClearHomeTransition();
+        HomeContent.IsVisibleChanged += (_, _) => { if (!HomeContent.IsVisible) ClearHomeTransition(); };
         Unloaded += (_, _) =>
         {
+            SystemParameters.StaticPropertyChanged -= HomeAnimationSettingsChanged;
+            ClearHomeTransition();
             ChannelMorePopup.IsOpen = false;
             ResetChannelMoreReveal();
             scrollIntent.Clear();
-            if (observed is not null) observed.PropertyChanged -= OnOwnerChanged;
+            if (observed is not null)
+            {
+                observed.PropertyChanged -= OnOwnerChanged;
+                observed.HomeContentReplacing -= OnHomeContentReplacing;
+            }
             observed = null;
             SuspendSearchPlaylistList();
             if (Owner is not { HasSearchSession: true }) ResetSearchPlaylistProjection();
@@ -81,9 +91,51 @@ public partial class MusicCatalogView : UserControl
     }
     private void Observe()
     {
-        if (observed is not null) observed.PropertyChanged -= OnOwnerChanged;
+        if (observed is not null)
+        {
+            observed.PropertyChanged -= OnOwnerChanged;
+            observed.HomeContentReplacing -= OnHomeContentReplacing;
+        }
         observed = Owner;
-        if (observed is not null) observed.PropertyChanged += OnOwnerChanged;
+        if (observed is not null)
+        {
+            observed.PropertyChanged += OnOwnerChanged;
+            observed.HomeContentReplacing += OnHomeContentReplacing;
+        }
+    }
+    private void OnHomeContentReplacing(object? sender, EventArgs e)
+    {
+        if (!IsLoaded || !HomeContent.IsVisible || HomeContent.ActualWidth <= 0 || HomeContent.ActualHeight <= 0 ||
+            !SystemParameters.ClientAreaAnimation || SystemParameters.HighContrast) return;
+        var dpi = VisualTreeHelper.GetDpi(HomeContent);
+        var image = new RenderTargetBitmap((int)Math.Ceiling(HomeContent.ActualWidth * dpi.DpiScaleX),
+            (int)Math.Ceiling(HomeContent.ActualHeight * dpi.DpiScaleY), dpi.PixelsPerInchX, dpi.PixelsPerInchY,
+            PixelFormats.Pbgra32);
+        image.Render(HomeContent);
+        image.Freeze();
+        ClearHomeTransition();
+        HomeRefreshOverlay.Source = image;
+        HomeRefreshOverlay.Visibility = Visibility.Visible;
+        var duration = TimeSpan.FromMilliseconds(220);
+        HomeScroll.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, duration)
+        { FillBehavior = FillBehavior.Stop });
+        var fade = new DoubleAnimation(1, 0, duration) { FillBehavior = FillBehavior.Stop };
+        fade.Completed += (_, _) =>
+        {
+            if (ReferenceEquals(HomeRefreshOverlay.Source, image)) ClearHomeTransition();
+        };
+        HomeRefreshOverlay.BeginAnimation(OpacityProperty, fade, HandoffBehavior.SnapshotAndReplace);
+    }
+    private void HomeAnimationSettingsChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (!SystemParameters.ClientAreaAnimation || SystemParameters.HighContrast) ClearHomeTransition();
+    }
+    private void ClearHomeTransition()
+    {
+        HomeScroll.BeginAnimation(OpacityProperty, null);
+        HomeRefreshOverlay.BeginAnimation(OpacityProperty, null);
+        HomeRefreshOverlay.Source = null;
+        HomeRefreshOverlay.Visibility = Visibility.Collapsed;
     }
     private void OnOwnerChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {

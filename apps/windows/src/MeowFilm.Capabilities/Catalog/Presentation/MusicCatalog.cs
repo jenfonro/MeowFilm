@@ -20,6 +20,7 @@ public sealed partial class MusicCapability
     public ObservableCollection<MusicCatalogSection> CatalogSections => IsSearchPage ? searchSections[searchView] :
         IsCatalogHome ? homeSections : IsChannelLanding ? channelSections : utilitySections;
     public ObservableCollection<MusicCatalogSection> HomeSections => homeDisplaySections;
+    internal event EventHandler? HomeContentReplacing;
     public ObservableCollection<MusicCatalogSection> ChannelSections => channelSections;
     public ObservableCollection<MusicCatalogSection> SearchOverviewSections => searchSections[SearchOverview];
     public ObservableCollection<MusicCatalogSection> UtilitySections => utilitySections;
@@ -805,6 +806,8 @@ public sealed partial class MusicCapability
             SelectedCatalogPlatform = CatalogPlatforms.Single(p => p.Key == platform);
             if (!CatalogSections.SequenceEqual(state.Sections, ReferenceEqualityComparer.Instance))
             {
+                if (IsCatalogHome && !append && homeDisplaySections.Count > 0)
+                    HomeContentReplacing?.Invoke(this, EventArgs.Empty);
                 ReconcileSections(CatalogSections, state.Sections);
                 if (IsCatalogHome)
                 {

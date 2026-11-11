@@ -19,6 +19,7 @@ public sealed partial class MusicCapability
         officialSongSnapshots.Remove(song.Id);
         officialSongSnapshots[song.Id] = (song.Raw.GetRawText(), expanded.Clone());
         while (officialSongSnapshots.Count > 24) officialSongSnapshots.Remove(officialSongSnapshots.Keys.First());
+        if (current?.EntryId == song.EntryId && current?.Id == song.Id) RefreshCurrentArtwork();
     }
     // The stable queue song is never replaced by a cross-platform search result.
     // All refresh, chorus and feedback consumers use this accepted recording snapshot.

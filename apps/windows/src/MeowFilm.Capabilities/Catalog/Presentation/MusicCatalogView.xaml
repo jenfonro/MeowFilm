@@ -550,9 +550,12 @@
     </DataTemplate></ItemsControl.ItemTemplate>
   </ItemsControl>
   <Grid>
-   <ScrollViewer x:Name="HomeScroll" local:MusicCatalogSurface.IsHome="True" local:MusicCatalogSurface.IsLanding="True" Visibility="{Binding IsCatalogHome,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}">
-    <ItemsControl ItemsSource="{Binding HomeSections}" ItemTemplate="{StaticResource Catalog.SectionsTemplate}" Margin="40,0,40,24" MaxWidth="1490"/>
-   </ScrollViewer>
+   <Grid x:Name="HomeContent" Visibility="{Binding IsCatalogHome,Converter={StaticResource Visible}}">
+    <ScrollViewer x:Name="HomeScroll" local:MusicCatalogSurface.IsHome="True" local:MusicCatalogSurface.IsLanding="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}">
+     <ItemsControl ItemsSource="{Binding HomeSections}" ItemTemplate="{StaticResource Catalog.SectionsTemplate}" Margin="40,0,40,24" MaxWidth="1490"/>
+    </ScrollViewer>
+    <Image x:Name="HomeRefreshOverlay" IsHitTestVisible="False" Focusable="False" Stretch="Fill" Visibility="Collapsed"/>
+   </Grid>
    <ScrollViewer x:Name="SearchOverviewScroll" local:MusicCatalogSurface.IsOverview="True" Visibility="{Binding IsSearchOverview,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}" ScrollChanged="CatalogScroll_Changed" PreviewMouseWheel="CatalogScroll_Wheel" PreviewKeyDown="CatalogScroll_Key">
     <ItemsControl ItemsSource="{Binding SearchOverviewSections}" ItemTemplate="{StaticResource Catalog.SectionsTemplate}" Margin="0,0,0,24" MaxWidth="1490"/>
    </ScrollViewer>
