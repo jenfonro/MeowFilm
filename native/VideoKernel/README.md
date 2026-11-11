@@ -23,8 +23,10 @@ python3 -I -B scripts/prepare-ios-video-kernel.py --verify --target ios-arm64
 
 没有默认全量或 `all`；`--target` 可重复，普通 mac 单测仅传 `macos-$(uname -m)`。
 `--verify` 不构建，拒绝缺少请求 slice、旧脚本/锁/target recipe 或产物变动。
-每次只构建请求的平台／架构，复用 `.cache/ios-video-kernel` 中源码与增量
-make 产物。静态 XCFramework 位于本包被忽略的 `.cache/Artifacts`，不会从
+每次只准备请求的平台／架构，按[构建依赖缓存](../../docs/common/dependency-cache.md)
+复用共享下载及已验证完整的依赖库。同配方命中跳过 configure／make，未命中时
+在本副本 `.cache/ios-video-kernel` 中准备源码与增量 make 产物。
+静态 XCFramework 位于本包被忽略的 `.cache/Artifacts`，不会从
 SPM URL 下载二进制。缺少目标产物时必须运行准备入口，不能回退为假内核。
 
 来源、原文许可哈希及改编记录见 `Provenance`；唯一许可正文和 App 资源清单

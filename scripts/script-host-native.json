@@ -109,6 +109,7 @@
   "mandatoryInputs": [
     "packages/script-host/binding.gyp",
     "scripts/quickjs/build-native.mjs",
+    "scripts/dependency-download.mjs",
     "scripts/script-host-native.json"
   ],
   "inputDirectories": [

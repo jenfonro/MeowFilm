@@ -350,6 +350,7 @@ for (const change of ['omitted', 'reordered', 'unreviewed']) {
 }
 
 for (const path of ['packages/script-host/binding.gyp', 'scripts/quickjs/build-native.mjs',
+  'scripts/dependency-download.mjs',
   'scripts/quickjs/build-source-sdk.mjs', 'packages/script-host/native/task-context.patch',
   'native/JavaScript/patches/regexp-compile-interrupt.patch',
   'packages/script-host/native/arraybuffer-ownership.patch']) {

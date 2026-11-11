@@ -1,15 +1,20 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFile, writeFile, mkdir, readdir, rm, copyFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative, resolve } from 'node:path';
+import { dependencyCacheRoot, downloadDependency } from '../dependency-download.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const kernelSource = join(root, 'apps/windows/native/VideoKernel');
 export const kernelCache = join(root, '.cache/windows-video-kernel');
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 export const fileHash = async path => sha256(await readFile(path));
+const downloadRecipe = {
+  path: 'scripts/dependency-download.mjs',
+  sha256: await fileHash(new URL('../dependency-download.mjs', import.meta.url)),
+};
 
 // Fixed source patch, exact context only: no fuzz, omitted hunk or foreign path.
 export function applySourcePatch(files, patch) {
@@ -69,25 +74,6 @@ export async function treeHash(directory) {
   return hash.digest('hex');
 }
 
-async function archive(name, specification, localCopy) {
-  const path = join(kernelCache, 'downloads', name);
-  await mkdir(dirname(path), { recursive: true });
-  if (!existsSync(path)) {
-    if (localCopy && existsSync(localCopy)) await copyFile(localCopy, path);
-    else {
-      const response = await fetch(specification.url);
-      if (!response.ok) throw new Error(`Locked ${name} download failed: HTTP ${response.status}`);
-      const temporary = `${path}.partial`;
-      try {
-        await writeFile(temporary, new Uint8Array(await response.arrayBuffer()));
-        if (await fileHash(temporary) !== specification.sha256) throw new Error(`Locked ${name} hash mismatch`);
-        await copyFile(temporary, path);
-      } finally { await rm(temporary, { force: true }); }
-    }
-  }
-  if (await fileHash(path) !== specification.sha256) throw new Error(`Locked ${name} hash mismatch`);
-  return path;
-}
 async function extract(path, output) {
   await mkdir(output, { recursive: true });
   execFileSync('tar', ['-xf', path, '--strip-components=1', '-C', output], { windowsHide: true, stdio: 'pipe' });
@@ -105,9 +91,11 @@ export async function prepareVideoKernel(sevenZip) {
   const sdkRoot = join(kernelCache, 'sdk/vlc-3.0.24');
   const marker = join(kernelCache, 'prepared.json');
   const archives = {
-    ffmpeg: await archive('ffmpeg.tar.gz', lock.sources.ffmpeg, join(root, '.cache/ios-video-kernel/downloads/ffmpeg.tar.gz')),
-    xml: await archive('libxml2-2.14.6.tar.xz', lock.sources.libxml2),
-    sdk: await archive('vlc-3.0.24-win64.7z', lock.sources.vlcSdk)
+    ffmpeg: await downloadDependency(lock.sources.ffmpeg, {
+      directory: join(dependencyCacheRoot(), 'ffmpeg/downloads'), suffix: '.tar.gz',
+    }),
+    xml: await downloadDependency(lock.sources.libxml2),
+    sdk: await downloadDependency(lock.sources.vlcSdk)
   };
   let prepared = existsSync(marker) ? JSON.parse(await readFile(marker, 'utf8')) : null;
   if (!prepared || prepared.preparation !== preparation) {
@@ -135,7 +123,10 @@ export async function prepareVideoKernel(sevenZip) {
   if (!pluginPc.includes('Version: 3.0.24') || await fileHash(core) !== lock.vlcCoreSha256 ||
       !existsSync(join(sdk, 'include/vlc/plugins/vlc_plugin.h')))
     throw new Error('Pinned VLC SDK/core identity mismatch');
-  return { lock, prepared, source: kernelSource, cache: kernelCache, ffmpeg, xml, sdk, core };
+  if (await fileHash(join(root, downloadRecipe.path)) !== downloadRecipe.sha256)
+    throw new Error('Dependency download recipe changed during preparation');
+  // build-video-kernel.ps1 includes prepared in its build receipt and identity.
+  return { lock, prepared: { ...prepared, downloadRecipe }, source: kernelSource, cache: kernelCache, ffmpeg, xml, sdk, core };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

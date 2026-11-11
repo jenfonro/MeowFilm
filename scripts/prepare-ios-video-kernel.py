@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the locked FFmpeg source closure, not a downloaded player binary."""
 import argparse
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -17,6 +18,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / ".cache/ios-video-kernel"
+SHARED_CACHE = Path.home() / "Developer/cache/ffmpeg"
 PACKAGE = ROOT / "native/VideoKernel/.cache"
 LOCK_PATH = ROOT / "scripts/ios-video-kernel.json"
 
@@ -47,28 +49,38 @@ def run(command, cwd=None, env=None, log=None):
         return subprocess.check_output(command, cwd=cwd, env=env, text=True).strip()
 
 
-def archive_for(name, source):
-    path = CACHE / "downloads" / (name + ".tar.gz")
+@contextmanager
+def shared_lock(identity):
+    path = SHARED_CACHE / "locks" / (identity + ".lock")
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        partial = path.with_suffix(".partial")
-        try:
-            request = urllib.request.Request(source["url"], headers={"User-Agent": "Meowfilm-source-prepare"})
-            with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
-                # Source archives only. The lock must not be repointed to a binary.
-                length = 0
-                for block in iter(lambda: response.read(1024 * 1024), b""):
-                    length += len(block)
-                    if length > 64 * 1024 * 1024:
-                        raise ValueError("source archive exceeds the download boundary")
-                    output.write(block)
-            if digest(partial) != source["sha256"]:
-                raise ValueError(name + " archive hash mismatch")
-            partial.replace(path)
-        finally:
-            partial.unlink(missing_ok=True)
-    if digest(path) != source["sha256"]:
-        raise ValueError(name + " archive hash mismatch")
+    with path.open("a") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        yield
+
+
+def archive_for(name, source):
+    path = SHARED_CACHE / "downloads" / (source["sha256"] + ".tar.gz")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with shared_lock("download-" + source["sha256"]):
+        if not path.exists():
+            partial = path.with_suffix(".partial")
+            try:
+                request = urllib.request.Request(source["url"], headers={"User-Agent": "Meowfilm-source-prepare"})
+                with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
+                    # Source archives only. The lock must not be repointed to a binary.
+                    length = 0
+                    for block in iter(lambda: response.read(1024 * 1024), b""):
+                        length += len(block)
+                        if length > 64 * 1024 * 1024:
+                            raise ValueError("source archive exceeds the download boundary")
+                        output.write(block)
+                if digest(partial) != source["sha256"]:
+                    raise ValueError(name + " archive hash mismatch")
+                partial.replace(path)
+            finally:
+                partial.unlink(missing_ok=True)
+        if path.is_symlink() or digest(path) != source["sha256"]:
+            raise ValueError(name + " archive hash mismatch")
     return path
 
 
@@ -146,20 +158,11 @@ def build_target(name, target, lock, sources):
     compiler_version = run([clang, "--version"])
     build = CACHE / "build" / name
     prefix = CACHE / "install" / name
-    build.mkdir(parents=True, exist_ok=True)
     # DASH requires libxml2; use the SDK's system implementation. This adapter
     # deliberately answers only the one explicit pkg-config dependency.
     pkg_config = build / "sdk-pkg-config"
     xml_header = Path(sdk) / "usr/include/libxml2/libxml/xmlversion.h"
     xml_version = re.search(r'#define LIBXML_DOTTED_VERSION\s+"([^"]+)"', xml_header.read_text()).group(1)
-    pkg_config.write_text(
-        "#!/bin/sh\ncase \"$*\" in\n"
-        "  *--version*) echo 1.0 ;;\n"
-        "  *--cflags*) echo '-I" + sdk + "/usr/include/libxml2' ;;\n"
-        "  *--libs*) echo '-lxml2' ;;\n"
-        "  *--modversion*) echo " + xml_version + " ;;\n"
-        "  *libxml-2.0*) exit 0 ;;\n  *) exit 1 ;;\nesac\n")
-    pkg_config.chmod(0o755)
     flags = "-target " + target["triple"] + " -isysroot " + sdk
     configure = [str(CACHE / "sources/ffmpeg/configure"), *lock["configure"],
                  "--prefix=" + str(prefix), "--target-os=darwin", "--arch=" + target["arch"],
@@ -173,30 +176,104 @@ def build_target(name, target, lock, sources):
         configure += ["--disable-x86asm"]
     inputs = {"lockSHA256": digest(LOCK_PATH), "prepareSHA256": digest(Path(__file__)),
               "sources": sources, "target": target, "sdkVersion": sdk_version, "sdkPath": sdk,
-              "compiler": compiler_version, "configure": configure}
+              "compiler": compiler_version, "xmlHeaderSHA256": digest(xml_header),
+              "environment": {key: os.environ[key] for key in (
+                  "CFLAGS", "CPPFLAGS", "CXXFLAGS", "ASFLAGS", "LDFLAGS", "ARFLAGS",
+                  "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH", "MACOSX_DEPLOYMENT_TARGET",
+                  "IPHONEOS_DEPLOYMENT_TARGET", "SOURCE_DATE_EPOCH", "ZERO_AR_DATE") if key in os.environ},
+              "configure": [argument.replace(str(CACHE), "${work-cache}") for argument in configure]}
     fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
     receipt_path = build / "receipt.json"
-    old = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
-    log = CACHE / "logs" / (name + ".log")
-    if old.get("fingerprint") != fingerprint or not (build / "config.h").exists():
-        run(configure, cwd=build, log=log)
-    configuration = (build / "config_components.h").read_text() + (build / "config.h").read_text()
-    for component in lock["requiredComponents"]:
-        if "#define CONFIG_" + component + " 1" not in configuration:
-            raise ValueError(name + " missing required component " + component)
-    run(["make", "-j2"], cwd=build, log=log)
-    run(["make", "install"], cwd=build, log=log)
-    artifacts = {}
-    for library in lock["libraries"]:
-        path = prefix / "lib" / ("lib" + library + ".a")
-        if target["arch"] not in run(["xcrun", "lipo", "-archs", str(path)]).split():
-            raise ValueError("incorrect archive architecture")
-        artifacts[library] = digest(path)
-    headers = {str(path.relative_to(prefix / "include")): digest(path)
-               for path in (prefix / "include").rglob("*") if path.is_file()}
-    receipt = {"fingerprint": fingerprint, "inputs": inputs, "libraries": artifacts, "headers": headers}
-    write_json(receipt_path, receipt)
+    shared = SHARED_CACHE / "artifacts" / fingerprint
+    with shared_lock("build-" + fingerprint):
+        if shared.exists():
+            receipt = json.loads((shared / "receipt.json").read_text())
+            if receipt.get("inputs") != inputs or receipt.get("fingerprint") != fingerprint:
+                raise ValueError("shared FFmpeg recipe mismatch")
+            verify_install(shared / "install", receipt, lock, complete=True)
+            prefix.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=name + "-", dir=prefix.parent) as temporary:
+                staged = Path(temporary) / "install"
+                shutil.copytree(shared / "install", staged)
+                verify_install(staged, receipt, lock, complete=True)
+                if prefix.exists():
+                    shutil.rmtree(prefix)
+                staged.rename(prefix)
+            write_json(receipt_path, receipt)
+            print(json.dumps({"phase": "cache-hit", "target": name, "fingerprint": fingerprint}), flush=True)
+            return receipt
+        configuration_path = build / "configuration.json"
+        configured = json.loads(configuration_path.read_text()) if configuration_path.exists() else {}
+        configuration_identity = {"fingerprint": fingerprint, "command": configure}
+        if configured != configuration_identity:
+            # Only this target's private generated inputs are replaced. Old
+            # object files must not survive a changed source/toolchain recipe.
+            for path in (build, prefix):
+                if path.exists():
+                    shutil.rmtree(path)
+        build.mkdir(parents=True, exist_ok=True)
+        receipt_path.unlink(missing_ok=True)
+        pkg_config.write_text(
+            "#!/bin/sh\ncase \"$*\" in\n"
+            "  *--version*) echo 1.0 ;;\n"
+            "  *--cflags*) echo '-I" + sdk + "/usr/include/libxml2' ;;\n"
+            "  *--libs*) echo '-lxml2' ;;\n"
+            "  *--modversion*) echo " + xml_version + " ;;\n"
+            "  *libxml-2.0*) exit 0 ;;\n  *) exit 1 ;;\nesac\n")
+        pkg_config.chmod(0o755)
+        log = CACHE / "logs" / (name + ".log")
+        if configured != configuration_identity or not (build / "config.h").exists():
+            run(configure, cwd=build, log=log)
+        configuration = (build / "config_components.h").read_text() + (build / "config.h").read_text()
+        for component in lock["requiredComponents"]:
+            if "#define CONFIG_" + component + " 1" not in configuration:
+                raise ValueError(name + " missing required component " + component)
+        write_json(configuration_path, configuration_identity)
+        run(["make", "-j2"], cwd=build, log=log)
+        run(["make", "install"], cwd=build, log=log)
+        artifacts = {}
+        for library in lock["libraries"]:
+            path = prefix / "lib" / ("lib" + library + ".a")
+            if target["arch"] not in run(["xcrun", "lipo", "-archs", str(path)]).split():
+                raise ValueError("incorrect archive architecture")
+            artifacts[library] = digest(path)
+        headers = {str(path.relative_to(prefix / "include")): digest(path)
+                   for path in (prefix / "include").rglob("*") if path.is_file()}
+        receipt = {"fingerprint": fingerprint, "inputs": inputs, "libraries": artifacts, "headers": headers}
+        verify_install(prefix, receipt, lock)
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="publish-", dir=shared.parent) as temporary:
+            staged = Path(temporary) / "artifact"
+            shutil.copytree(prefix / "include", staged / "install/include")
+            (staged / "install/lib").mkdir()
+            for library in lock["libraries"]:
+                filename = "lib" + library + ".a"
+                shutil.copyfile(prefix / "lib" / filename, staged / "install/lib" / filename)
+            verify_install(staged / "install", receipt, lock, complete=True)
+            write_json(staged / "receipt.json", receipt)
+            staged.rename(shared)
+        write_json(receipt_path, receipt)
     return receipt
+
+
+def verify_install(prefix, receipt, lock, complete=False):
+    if set(receipt["libraries"]) != set(lock["libraries"]) or not receipt["headers"]:
+        raise ValueError("incomplete built library or header inventory")
+    expected = {"lib/lib" + name + ".a": checksum for name, checksum in receipt["libraries"].items()}
+    expected.update({"include/" + name: checksum for name, checksum in receipt["headers"].items()})
+    for relative, checksum in expected.items():
+        path = prefix / relative
+        if (PurePosixPath(relative).is_absolute() or ".." in PurePosixPath(relative).parts
+                or path.is_symlink() or not path.is_file() or digest(path) != checksum):
+            kind = "header" if relative.startswith("include/") else "library"
+            raise ValueError("modified built " + kind)
+    entries = list(prefix.rglob("*")) if complete else list((prefix / "include").rglob("*"))
+    if any(path.is_symlink() for path in entries):
+        raise ValueError("linked built input")
+    actual = {path.relative_to(prefix).as_posix() for path in entries if path.is_file()}
+    wanted = set(expected) if complete else {path for path in expected if path.startswith("include/")}
+    if actual != wanted:
+        raise ValueError("unexpected built file inventory")
 
 
 def current_recipe(name, receipt, lock):
@@ -217,12 +294,7 @@ def package_artifacts(lock):
             if not current_recipe(name, value, lock):
                 continue
             prefix = CACHE / "install" / name
-            for library, checksum in value["libraries"].items():
-                if digest(prefix / "lib" / ("lib" + library + ".a")) != checksum:
-                    raise ValueError("modified built library")
-            for header, checksum in value["headers"].items():
-                if digest(prefix / "include" / header) != checksum:
-                    raise ValueError("modified built header")
+            verify_install(prefix, value, lock)
             available[name] = value
     if not available:
         raise ValueError("no source-built target to package")

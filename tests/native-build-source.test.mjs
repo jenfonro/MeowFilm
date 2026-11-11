@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 import { buildSourceSDK } from '../scripts/quickjs/build-source-sdk.mjs';
 import { sdkDependencyInputs } from '../scripts/quickjs/build-native.mjs';
+import { dependencyCacheRoot } from '../scripts/dependency-download.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const require = createRequire(import.meta.url);
@@ -20,14 +21,13 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
 test('native header verification follows node-gyp default and configured shared caches', () => {
   const gypPackage = require.resolve('node-gyp/package.json');
-  const gypRequire = createRequire(gypPackage);
   const version = JSON.parse(readFileSync(join(repository, 'scripts/script-host-native.json'))).nodeHeaders.version;
   const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
     !/^npm_(?:package_config_node_gyp_|config_)devdir$/i.test(name)));
   const configured = join(repository, 'tmp/test-results/native-build-source/shared headers');
   const preferred = join(repository, 'tmp/test-results/native-build-source/preferred headers');
   for (const [settings, expected] of [
-    [{}, join(gypRequire('env-paths')('node-gyp', { suffix: '' }).cache, version)],
+    [{}, join(dependencyCacheRoot(), 'node-gyp', version)],
     [{ npm_config_devdir: configured }, join(configured, version)],
     [{ npm_config_devdir: configured, npm_package_config_node_gyp_devdir: preferred }, join(preferred, version)],
     [{ npm_package_config_node_gyp_devdir: '~/Developer/cache/node-gyp' }, join(homedir(), 'Developer/cache/node-gyp', version)],
@@ -35,8 +35,9 @@ test('native header verification follows node-gyp default and configured shared 
       resolve(repository, 'tmp/test-results/native-build-source/relative headers', version)],
   ]) {
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
-      import { nodeHeaderRoot } from './scripts/quickjs/build-native.mjs';
-      console.log(nodeHeaderRoot(${JSON.stringify(gypPackage)}));
+      import { resolve } from 'node:path';
+      import { nodeGypCache, policy } from './scripts/quickjs/build-native.mjs';
+      console.log(resolve(nodeGypCache(${JSON.stringify(gypPackage)}).directory, policy.nodeHeaders.version));
     `], { cwd: repository, env: { ...environment, ...settings }, encoding: 'utf8' });
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
@@ -54,7 +55,8 @@ async function fixture(t, recorded = true, shared = false) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), bytes);
   };
-  for (const path of ['scripts/quickjs/build-native.mjs', 'scripts/script-host-native.json']) {
+  for (const path of ['scripts/quickjs/build-native.mjs', 'scripts/dependency-download.mjs',
+    'scripts/script-host-native.json']) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     cpSync(join(repository, path), join(root, path));
   }
