@@ -25,7 +25,8 @@ function fixture(t) {
   };
   const policy = { schemaVersion: 1, abi: 1, napi: 8,
     build: { node: process.versions.node, nodeGyp: '11.5.0', esbuild: '0.28.1' },
-    mandatoryInputs: ['packages/script-host/binding.gyp', 'scripts/quickjs/build-native.mjs'],
+    mandatoryInputs: ['packages/script-host/binding.gyp', 'scripts/quickjs/build-native.mjs',
+      'scripts/dependency-download.mjs'],
     inputDirectories: ['packages/script-host/native'],
     patches: [{ path: 'packages/script-host/native/fixture.patch' }],
     nodeHeaders: { archivePath: 'tmp/build/runtime-native/node-headers.tar.gz' },
@@ -33,6 +34,7 @@ function fixture(t) {
       license: { path: 'LICENSES/quickjs-ng-LICENSE.txt' } } } };
   write(policyPath, policy);
   for (const path of ['package.json', 'package-lock.json', 'packages/script-host/binding.gyp',
+    'scripts/dependency-download.mjs',
     'scripts/quickjs/build-source-sdk.mjs', 'packages/script-host/native/binding.cc',
     'packages/script-host/native/fixture.patch', policy.nodeHeaders.archivePath,
     policy.sources.quickjs.archivePath, policy.sources.quickjs.license.path])
@@ -68,6 +70,7 @@ test('native preparation reuses current build inputs and artifacts without invok
 for (const [name, mutate] of [
   ['missing receipt', f => rmSync(join(f.root, receiptPath))],
   ['changed input', f => f.write('packages/script-host/native/binding.cc', 'changed input')],
+  ['changed download helper', f => f.write('scripts/dependency-download.mjs', 'changed helper')],
   ['added native input', f => f.write('packages/script-host/native/new.cc', 'new source')],
   ['damaged artifact', f => f.write(artifactPath, 'damaged')],
   ['damaged SDK', f => f.write(sdkPath, 'damaged')],
@@ -84,6 +87,8 @@ for (const [name, mutate] of [
     inputs: f.receipt.inputs.filter(input => input.path !== 'LICENSES/quickjs-ng-LICENSE.txt') })],
   ['missing required headers record', f => f.write(receiptPath, { ...f.receipt,
     inputs: f.receipt.inputs.filter(input => input.path !== 'tmp/build/runtime-native/node-headers.tar.gz') })],
+  ['missing required download helper record', f => f.write(receiptPath, { ...f.receipt,
+    inputs: f.receipt.inputs.filter(input => input.path !== 'scripts/dependency-download.mjs') })],
   ['duplicate input', f => f.write(receiptPath, { ...f.receipt, inputs: [...f.receipt.inputs, f.receipt.inputs[0]] })],
   ['unsafe input', f => f.write(receiptPath, { ...f.receipt, inputs: [...f.receipt.inputs,
     { path: '../outside-input', sha256: hash('synthetic') }] })],

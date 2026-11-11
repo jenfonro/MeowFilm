@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { availableParallelism } from 'node:os';
+import { availableParallelism, homedir } from 'node:os';
 import { createRequire } from 'node:module';
 import {
-  access, mkdir, readFile, writeFile, readdir, lstat, realpath, rename, rm, appendFile,
+  access, mkdir, readFile, writeFile, readdir, lstat, realpath, rm, appendFile,
 } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { dependencyCacheRoot, downloadDependency } from '../dependency-download.mjs';
 
 export const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(import.meta.url);
@@ -17,6 +18,8 @@ export const loadedBuildInputs = [
   { path: policyPath, sha256: createHash('sha256').update(policyBytes).digest('hex') },
   { path: 'scripts/quickjs/build-native.mjs',
     sha256: createHash('sha256').update(await readFile(fileURLToPath(import.meta.url))).digest('hex') },
+  { path: 'scripts/dependency-download.mjs',
+    sha256: createHash('sha256').update(await readFile(new URL('../dependency-download.mjs', import.meta.url))).digest('hex') },
 ];
 const cache = resolve(root, policy.build.cache);
 const sha256 = data => createHash('sha256').update(data).digest('hex');
@@ -99,18 +102,6 @@ export async function hashInputs(paths) {
   }
   return result;
 }
-async function download(url, path, expected) {
-  if (await exists(path)) {
-    if (sha256(await readFile(path)) !== expected) throw new Error(`Cached source hash mismatch: ${pathOf(path)}`);
-    return;
-  }
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Source download failed: ${response.status} ${url}`);
-  const data = Buffer.from(await response.arrayBuffer());
-  if (sha256(data) !== expected) throw new Error(`Source archive hash mismatch: ${url}`);
-  await writeFile(`${path}.download`, data);
-  await rename(`${path}.download`, path);
-}
 async function applyPatch(source, patch) {
   if (await fileHash(patch.path) !== patch.sha256) throw new Error(`Patch hash mismatch: ${patch.path}`);
   // A small strict unified-diff reader avoids requiring Git or a platform patch utility.
@@ -156,7 +147,7 @@ export async function prepareSource(name, source) {
   const recordPath = resolve(cache, `${name}-source.json`);
   const patches = policy.patches.filter(patch => patch.source === name);
   const identity = { version: source.version, commit: source.commit, sha256: source.sha256, patches };
-  await download(source.url, archive, source.sha256);
+  await downloadDependency(source, { snapshot: archive });
   if (await exists(recordPath)) {
     const record = JSON.parse(await readFile(recordPath, 'utf8'));
     const paths = record.files.map(input => input.path);
@@ -252,9 +243,22 @@ export async function sdkDependencyInputs() {
   }
   return [...new Set(paths)].sort();
 }
-async function verifyHeaders(gypPackage, archive) {
+export function nodeGypCache(gypPackage) {
+  const gyp = createRequire(gypPackage)('./')();
+  gyp.parseArgv([process.execPath, 'node-gyp']);
+  const directory = gyp.opts.devdir
+    ? resolve(root, gyp.opts.devdir.replace(/^~/, homedir()))
+    : resolve(dependencyCacheRoot(), 'node-gyp');
+  // node-gyp lets environment options override CLI arguments. Remove only devdir
+  // aliases in its child environment so the resolved absolute --devdir wins in every cwd.
+  const environment = Object.fromEntries(Object.keys(process.env)
+    .filter(key => /^npm_(?:config_devdir|package_config_node_gyp_devdir)$/i.test(key))
+    .map(key => [key, undefined]));
+  return { directory, environment };
+}
+
+export async function verifyHeaders(gypPackage, archive, headerRoot) {
   const gypRequire = createRequire(gypPackage);
-  const headerRoot = resolve(gypRequire('env-paths')('node-gyp', { suffix: '' }).cache, policy.nodeHeaders.version);
   const inputs = [], pending = [];
   await gypRequire('tar').t({
     file: archive,
@@ -306,13 +310,17 @@ async function buildNative() {
   await unchanged(loadedBuildInputs);
   const { buildSourceSDK } = await import('./build-source-sdk.mjs');
   const nodeArchive = resolve(root, policy.nodeHeaders.archivePath);
-  await download(policy.nodeHeaders.url, nodeArchive, policy.nodeHeaders.sha256);
+  await downloadDependency(policy.nodeHeaders, { snapshot: nodeArchive });
   const headerArchiveInput = await hashInputs([policy.nodeHeaders.archivePath]);
   const gyp = resolve(dirname(gypPackage), 'bin/node-gyp.js');
-  // node-gyp owns and reuses its normal header cache; --tarball pins the exact input.
-  await run(process.execPath, [gyp, 'install', '--ensure', `--tarball=${nodeArchive}`]);
-  const headers = await verifyHeaders(gypPackage, nodeArchive);
-  headerCache = headers.root;
+  const gypCache = nodeGypCache(gypPackage);
+  headerCache = gypCache.directory;
+  const headerRoot = resolve(gypCache.directory, policy.nodeHeaders.version);
+  const devdir = `--devdir=${gypCache.directory}`;
+  // node-gyp owns its version/architecture layout; --tarball pins the exact input.
+  await run(process.execPath, [gyp, 'install', '--ensure', devdir, `--tarball=${nodeArchive}`],
+    root, false, gypCache.environment);
+  const headers = await verifyHeaders(gypPackage, nodeArchive, headerRoot);
   const opensslSource = resolve(root, policy.sources.openssl.sourcePath);
   const opensslBuild = resolve(cache, 'openssl-build');
   await mkdir(opensslBuild, { recursive: true });
@@ -340,9 +348,9 @@ async function buildNative() {
   // Windows node-gyp's normal cache uses <arch>/node.lib. --nodedir instead
   // means a Node source build and incorrectly selects Release/node.lib.
   const headerArguments = process.platform === 'win32' ? [] : [`--nodedir=${headers.root}`];
-  await run(process.execPath, [gyp, 'configure', ...headerArguments,
-    '--', `-Dopenssl_library=${library}`], packageRoot);
-  await run(process.execPath, [gyp, 'build', '--jobs', parallel], packageRoot);
+  await run(process.execPath, [gyp, 'configure', devdir, ...headerArguments,
+    '--', `-Dopenssl_library=${library}`], packageRoot, false, gypCache.environment);
+  await run(process.execPath, [gyp, 'build', devdir, '--jobs', parallel], packageRoot, false, gypCache.environment);
   const sdkResult = await buildSourceSDK();
   const sdk = await artifact(pathOf(sdkResult.path));
   if (sdk.path !== 'packages/script-host/build/Release/source-sdk.js') throw new Error('Unexpected source SDK output');
@@ -368,7 +376,7 @@ async function buildNative() {
   if (JSON.stringify(finalSDKCandidates) !== JSON.stringify(sdkCandidates)) throw new Error('SDK source membership changed during build');
   await unchanged(before);
   await unchanged(headerArchiveInput);
-  const finalHeaders = await verifyHeaders(gypPackage, nodeArchive);
+  const finalHeaders = await verifyHeaders(gypPackage, nodeArchive, headerRoot);
   if (JSON.stringify(headers.inputs) !== JSON.stringify(finalHeaders.inputs)) throw new Error('Node headers changed during build');
   const paths = [
     'package.json', 'package-lock.json', ...policy.mandatoryInputs,

@@ -26,7 +26,8 @@ async function fixture(t, recorded = true) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), bytes);
   };
-  for (const path of ['scripts/quickjs/build-native.mjs', 'scripts/script-host-native.json']) {
+  for (const path of ['scripts/quickjs/build-native.mjs', 'scripts/dependency-download.mjs',
+    'scripts/script-host-native.json']) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     cpSync(join(repository, path), join(root, path));
   }
